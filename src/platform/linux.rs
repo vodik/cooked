@@ -1,0 +1,32 @@
+//! Linux. Everything cooked wants, Linux has a first-class version of.
+
+use nix::fcntl::OFlag;
+use nix::pty::PtyMaster;
+use std::ffi::CString;
+use std::io;
+use std::os::fd::OwnedFd;
+
+pub const TIOCSCTTY: libc::c_ulong = libc::TIOCSCTTY;
+pub const TIOCSWINSZ: libc::c_ulong = libc::TIOCSWINSZ;
+pub const TIOCGWINSZ: libc::c_ulong = libc::TIOCGWINSZ;
+
+/// `_POSIX_VDISABLE` — the `c_cc` value meaning "this character is turned off".
+pub const POSIX_VDISABLE: libc::cc_t = 0;
+
+/// Path of the slave belonging to `master`.
+///
+/// `ptsname_r` writes into a caller-supplied buffer, so unlike `ptsname` there is no
+/// shared static to race over and no window to copy out of.
+pub fn slave_name(master: &PtyMaster) -> crate::error::Result<CString> {
+    let name = nix::pty::ptsname_r(master)?;
+    Ok(CString::new(name)?)
+}
+
+/// A pipe neither end of which survives an exec.
+///
+/// `pipe2` applies the flags as part of creating the descriptors, so there is no
+/// instant in which they exist without `FD_CLOEXEC` — which matters in Emacs, where
+/// another thread may fork at any moment and would otherwise inherit both ends.
+pub fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    Ok(nix::unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)?)
+}

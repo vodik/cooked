@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # 28.1 is the floor Package-Requires declares; the module ABI check in
+        # emacs_module_init is written against it. `release-snapshot' catches a
+        # break against what users on master will actually have.
+        emacs: ['28.1', '29.4', 'release-snapshot']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The end-to-end suite drives real children: zsh for the OSC 133 path, and
+      # `stty -echo' for secrets. Without zsh those tests skip, which reads as
+      # passing.
+      - name: Install zsh
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y zsh
+          else
+            command -v zsh
+          fi
+
+      - run: make rust-test
+      - run: make lisp-test
+      - run: make lint
