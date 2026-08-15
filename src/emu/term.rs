@@ -1068,4 +1068,23 @@ mod tests {
         assert_eq!(glyphs.len(), 4, "one descriptor per character");
         assert_eq!(runs[0].text, "\u{250C}\u{2500}\u{2500}\u{2510}");
     }
+
+    #[test]
+    fn diagonal_and_stub_bytes_also_produce_glyphs() {
+        let mut t = term(2, 10, "\u{2571}\u{2572}\u{2573}\u{2574}".as_bytes());
+        let delta = t.drain();
+        let (_, runs) = delta
+            .rows
+            .iter()
+            .find(|(i, _)| *i == 0)
+            .expect("row 0 is damaged");
+        assert_eq!(runs.len(), 1);
+        let glyphs = runs[0].glyphs.as_ref().expect("box-glyph run");
+        assert_eq!(glyphs.len(), 4);
+        assert!(glyphs[0].is_diagonal());
+        assert!(
+            !glyphs[3].is_diagonal(),
+            "the stub is edge-based, not a diagonal"
+        );
+    }
 }

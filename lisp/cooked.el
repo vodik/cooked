@@ -92,10 +92,13 @@ XBM image support or bitmap generation fails for a glyph."
 ;; Mirrors the bit layout of `BoxGlyph' in src/emu/glyph.rs — kept in sync by hand,
 ;; the same way `cooked--attr-*' above mirrors `Attrs'. Line glyphs: four 2-bit
 ;; edge-weight fields (up/down/left/right, 0=none 1=light 2=heavy 3=double) packed
-;; into bits 0-7, plus an arc flag at bit 8. Block glyphs: bit 15 set, a 3-bit
-;; direction in bits 0-2, an 4-bit fill amount in bits 3-6.
+;; into bits 0-7, an arc flag at bit 8, and forward/backward diagonal flags at bits
+;; 9-10 (mutually exclusive with the edge fields on any real codepoint). Block
+;; glyphs: bit 15 set, a 3-bit direction in bits 0-2, a 4-bit fill amount in bits 3-6.
 (defconst cooked--box-kind-block (ash 1 15))
 (defconst cooked--box-arc (ash 1 8))
+(defconst cooked--box-diag-forward (ash 1 9))
+(defconst cooked--box-diag-backward (ash 1 10))
 (defconst cooked--box-direction-up 0)
 (defconst cooked--box-direction-down 1)
 (defconst cooked--box-direction-left 2)
@@ -420,6 +423,28 @@ the arc between the two tangent edge midpoints, with no extra clipping needed."
           (when (<= (abs (- dist r)) half)
             (aset (aref grid y) x t)))))))
 
+(defun cooked--box-draw-diagonal (grid width height thickness forward backward)
+  "A straight stroke corner-to-corner: FORWARD is ╱, BACKWARD is ╲, both is ╳.
+
+Same distance-based technique as `cooked--box-draw-arc': for each candidate
+diagonal, test every pixel's perpendicular distance to the infinite line
+through the two opposite corners rather than walking the line itself, which
+sidesteps rounding gaps a naive per-column plot would leave at steep aspect
+ratios."
+  (let ((half (/ thickness 2.0))
+        (norm (sqrt (+ (* (float height) height) (* (float width) width)))))
+    (dotimes (y height)
+      (dotimes (x width)
+        (when (and forward
+                   ;; Line through (0,height) and (width,0): height*x + width*y -
+                   ;; width*height = 0.
+                   (<= (/ (abs (- (+ (* height x) (* width y)) (* width height))) norm) half))
+          (aset (aref grid y) x t))
+        (when (and backward
+                   ;; Line through (0,0) and (width,height): height*x - width*y = 0.
+                   (<= (/ (abs (- (* height x) (* width y))) norm) half))
+          (aset (aref grid y) x t))))))
+
 (defun cooked--box-draw-line (grid width height bits)
   (let* ((up (cooked--box-weight bits 0))
          (down (cooked--box-weight bits 2))
@@ -429,13 +454,18 @@ the arc between the two tangent edge midpoints, with no extra clipping needed."
          (cy (/ height 2))
          (light-t (max 1 (/ (min width height) 8)))
          (heavy-t (max 2 (/ (min width height) 4))))
-    (if (/= 0 (logand bits cooked--box-arc))
-        (cooked--box-draw-arc grid width height cx cy light-t (/= down 0) (/= right 0))
-      (progn
-        (cooked--box-draw-edge grid width height cx cy 'up up light-t heavy-t)
-        (cooked--box-draw-edge grid width height cx cy 'down down light-t heavy-t)
-        (cooked--box-draw-edge grid width height cx cy 'left left light-t heavy-t)
-        (cooked--box-draw-edge grid width height cx cy 'right right light-t heavy-t)))))
+    (cond
+     ((/= 0 (logand bits cooked--box-arc))
+      (cooked--box-draw-arc grid width height cx cy light-t (/= down 0) (/= right 0)))
+     ((/= 0 (logand bits (logior cooked--box-diag-forward cooked--box-diag-backward)))
+      (cooked--box-draw-diagonal grid width height light-t
+                                 (/= 0 (logand bits cooked--box-diag-forward))
+                                 (/= 0 (logand bits cooked--box-diag-backward))))
+     (t
+      (cooked--box-draw-edge grid width height cx cy 'up up light-t heavy-t)
+      (cooked--box-draw-edge grid width height cx cy 'down down light-t heavy-t)
+      (cooked--box-draw-edge grid width height cx cy 'left left light-t heavy-t)
+      (cooked--box-draw-edge grid width height cx cy 'right right light-t heavy-t)))))
 
 (defun cooked--box-draw-shade (grid width height level)
   "An ordered-dither approximation of the three shade densities (░▒▓)."

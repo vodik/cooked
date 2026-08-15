@@ -6,10 +6,9 @@
 //! connecting exactly.
 //!
 //! Scope: light/heavy/double lines and their junctions (U+2500-U+254B, U+2550-U+256C),
-//! rounded corners (U+256D-U+2570), and block elements/shades/quadrants (U+2580-U+259F).
-//! Diagonals and half-length "stub" lines (U+2571-U+257F) are deliberately unclassified —
-//! outside the agreed scope, and rare in practice — so they fall back to plain font
-//! rendering exactly like any other character.
+//! rounded corners (U+256D-U+2570), true diagonals and half-length "stub" lines
+//! (U+2571-U+257F), and block elements/shades/quadrants (U+2580-U+259F) — every
+//! assigned codepoint in the Box Drawing and Block Elements blocks.
 
 use Weight::{Double as D, Heavy as H, Light as L, None as Z};
 
@@ -55,6 +54,10 @@ pub enum Kind {
 
 const KIND_BLOCK: u16 = 1 << 15;
 const ARC: u16 = 1 << 8;
+/// U+2571 ╱: a straight line from the bottom-left corner to the top-right.
+const DIAG_FORWARD: u16 = 1 << 9;
+/// U+2572 ╲: a straight line from the top-left corner to the bottom-right.
+const DIAG_BACKWARD: u16 = 1 << 10;
 
 /// Compact classification of a box-drawing or block-element glyph, packed into 16
 /// bits so a `Run` can carry one per character without a large side allocation.
@@ -81,6 +84,10 @@ impl BoxGlyph {
         Self(KIND_BLOCK | direction_bits(direction) | (u16::from(fraction) << 3))
     }
 
+    fn slash(forward: bool, backward: bool) -> Self {
+        Self((if forward { DIAG_FORWARD } else { 0 }) | (if backward { DIAG_BACKWARD } else { 0 }))
+    }
+
     pub const fn bits(self) -> u16 {
         self.0
     }
@@ -98,6 +105,20 @@ impl BoxGlyph {
     /// would otherwise be bit-identical to their square-corner counterparts.
     pub fn is_arc(self) -> bool {
         self.kind() == Kind::Line && self.0 & ARC != 0
+    }
+
+    /// Whether a `Line`-kind glyph is a true corner-to-corner diagonal (U+2571-2573)
+    /// rather than an edge-based shape. `edge`/`is_arc` are meaningless when this is
+    /// true — the two representations don't overlap on any real codepoint.
+    pub fn is_diagonal(self) -> bool {
+        self.kind() == Kind::Line && self.0 & (DIAG_FORWARD | DIAG_BACKWARD) != 0
+    }
+
+    /// `(forward, backward)`: which of the two diagonal strokes (╱ and ╲) a
+    /// `Line`-kind glyph draws. Both true only for U+2573 ╳. Meaningless unless
+    /// `is_diagonal` is true.
+    pub fn diagonal(self) -> (bool, bool) {
+        (self.0 & DIAG_FORWARD != 0, self.0 & DIAG_BACKWARD != 0)
     }
 
     /// Weight of one edge of a `Line`-kind glyph. Meaningless (always `None`) for
@@ -175,6 +196,8 @@ pub fn classify(ch: char) -> Option<BoxGlyph> {
         '\u{2500}'..='\u{254B}' => classify_line(ch),
         '\u{2550}'..='\u{256C}' => classify_double_line(ch),
         '\u{256D}'..='\u{2570}' => classify_arc(ch),
+        '\u{2571}'..='\u{2573}' => classify_diagonal(ch),
+        '\u{2574}'..='\u{257F}' => classify_stub(ch),
         '\u{2580}'..='\u{259F}' => classify_block(ch),
         _ => None,
     }
@@ -320,6 +343,41 @@ fn classify_arc(ch: char) -> Option<BoxGlyph> {
     Some(BoxGlyph::arc(up, down, left, right))
 }
 
+/// U+2571-U+2573: true corner-to-corner diagonals — not expressible as edges, so
+/// these are the only codepoints using the `DIAG_FORWARD`/`DIAG_BACKWARD` bits
+/// rather than the four edge-weight fields.
+fn classify_diagonal(ch: char) -> Option<BoxGlyph> {
+    let (forward, backward) = match ch {
+        '\u{2571}' => (true, false), // ╱
+        '\u{2572}' => (false, true), // ╲
+        '\u{2573}' => (true, true),  // ╳
+        _ => return None,
+    };
+    Some(BoxGlyph::slash(forward, backward))
+}
+
+/// U+2574-U+257F: half-length "stub" lines — plain `Line` glyphs, exactly like
+/// `classify_line`, just with only one or two of the four edges set. Unicode never
+/// pairs a stub with `Weight::Double`, so only light/heavy appear here.
+fn classify_stub(ch: char) -> Option<BoxGlyph> {
+    let (up, down, left, right) = match ch {
+        '\u{2574}' => (Z, Z, L, Z), // ╴ light left
+        '\u{2575}' => (L, Z, Z, Z), // ╵ light up
+        '\u{2576}' => (Z, Z, Z, L), // ╶ light right
+        '\u{2577}' => (Z, L, Z, Z), // ╷ light down
+        '\u{2578}' => (Z, Z, H, Z), // ╸ heavy left
+        '\u{2579}' => (H, Z, Z, Z), // ╹ heavy up
+        '\u{257A}' => (Z, Z, Z, H), // ╺ heavy right
+        '\u{257B}' => (Z, H, Z, Z), // ╻ heavy down
+        '\u{257C}' => (Z, Z, L, H), // ╼ light left, heavy right
+        '\u{257D}' => (L, H, Z, Z), // ╽ light up, heavy down
+        '\u{257E}' => (Z, Z, H, L), // ╾ heavy left, light right
+        '\u{257F}' => (H, L, Z, Z), // ╿ heavy up, light down
+        _ => return None,
+    };
+    Some(BoxGlyph::line(up, down, left, right))
+}
+
 /// U+2580-U+259F: half/eighth blocks, full block, the three shade densities, and the
 /// ten 2x2 quadrant glyphs.
 fn classify_block(ch: char) -> Option<BoxGlyph> {
@@ -459,9 +517,35 @@ mod tests {
     }
 
     #[test]
-    fn stub_and_diagonal_lines_are_out_of_scope() {
-        // U+2571-U+257F: diagonals and half-length stubs — deliberately unclassified.
-        assert_eq!(classify('\u{2571}'), None);
-        assert_eq!(classify('\u{257F}'), None);
+    fn classifies_diagonals() {
+        let forward = classify('\u{2571}').unwrap(); // ╱
+        assert!(forward.is_diagonal());
+        assert_eq!(forward.diagonal(), (true, false));
+
+        let backward = classify('\u{2572}').unwrap(); // ╲
+        assert_eq!(backward.diagonal(), (false, true));
+
+        let cross = classify('\u{2573}').unwrap(); // ╳
+        assert_eq!(cross.diagonal(), (true, true));
+
+        // A diagonal has no edges at all — the two representations never overlap.
+        for edge in [Edge::Up, Edge::Down, Edge::Left, Edge::Right] {
+            assert_eq!(forward.edge(edge), Weight::None);
+        }
+        assert!(!forward.is_arc());
+    }
+
+    #[test]
+    fn classifies_stub_lines_as_single_edge_lines() {
+        let left = classify('\u{2574}').unwrap(); // ╴ light left
+        assert!(!left.is_diagonal());
+        assert_eq!(left.edge(Edge::Left), Weight::Light);
+        assert_eq!(left.edge(Edge::Right), Weight::None);
+        assert_eq!(left.edge(Edge::Up), Weight::None);
+        assert_eq!(left.edge(Edge::Down), Weight::None);
+
+        let mixed = classify('\u{257C}').unwrap(); // ╼ light left, heavy right
+        assert_eq!(mixed.edge(Edge::Left), Weight::Light);
+        assert_eq!(mixed.edge(Edge::Right), Weight::Heavy);
     }
 }
