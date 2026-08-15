@@ -11,8 +11,8 @@
 
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::marker::PhantomData;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::os::fd::RawFd;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::slice;
 
 #[repr(C)]
@@ -127,7 +127,10 @@ impl<'e> Env<'e> {
     /// # Safety
     /// `raw` must be a live environment for the current module call.
     pub unsafe fn from_raw(raw: *mut Raw) -> Self {
-        Self { raw, _life: PhantomData }
+        Self {
+            raw,
+            _life: PhantomData,
+        }
     }
 
     fn check(&self) -> Result<()> {
@@ -211,7 +214,10 @@ impl<'e> Env<'e> {
 
     pub fn signal(&self, symbol: &str, message: &str) -> Error {
         let build = || -> Result<(Value, Value)> {
-            Ok((self.intern(symbol)?, self.list(&[message.into_lisp(self)?])?))
+            Ok((
+                self.intern(symbol)?,
+                self.list(&[message.into_lisp(self)?])?,
+            ))
         };
         if let Ok((sym, data)) = build() {
             unsafe { ((*self.raw).non_local_exit_signal)(self.raw, sym, data) };
@@ -222,7 +228,10 @@ impl<'e> Env<'e> {
     /// `wrong-type-argument`, whose conventional data is `(PREDICATE VALUE)`.
     pub fn signal_wrong_type(&self, predicate: &str, value: Value) -> Error {
         let build = || -> Result<(Value, Value)> {
-            Ok((self.intern("wrong-type-argument")?, self.list(&[self.intern(predicate)?, value])?))
+            Ok((
+                self.intern("wrong-type-argument")?,
+                self.list(&[self.intern(predicate)?, value])?,
+            ))
         };
         if let Ok((sym, data)) = build() {
             unsafe { ((*self.raw).non_local_exit_signal)(self.raw, sym, data) };
@@ -251,7 +260,13 @@ impl<'e> Env<'e> {
     }
 
     /// Register `f` as the Lisp function `name`.
-    pub fn defun(&self, name: &str, arity: std::ops::RangeInclusive<isize>, doc: &str, f: Defun) -> Result<()> {
+    pub fn defun(
+        &self,
+        name: &str,
+        arity: std::ops::RangeInclusive<isize>,
+        doc: &str,
+        f: Defun,
+    ) -> Result<()> {
         let doc = CString::new(doc).map_err(|_| Error)?;
         let func = ffi!(
             self,
@@ -285,7 +300,12 @@ const fn finalizer_of<T>() -> Finalizer {
     finalize::<T>
 }
 
-unsafe extern "C" fn trampoline(raw: *mut Raw, n: isize, args: *mut Value, data: *mut c_void) -> Value {
+unsafe extern "C" fn trampoline(
+    raw: *mut Raw,
+    n: isize,
+    args: *mut Value,
+    data: *mut c_void,
+) -> Value {
     let env = unsafe { Env::from_raw(raw) };
     let f: Defun = unsafe { std::mem::transmute(data) };
     let args = match n {
@@ -360,7 +380,12 @@ impl IntoLisp for String {
 /// Byte strings become unibyte Lisp strings — no decoding, no corruption.
 impl IntoLisp for &[u8] {
     fn into_lisp(self, env: &Env) -> Result<Value> {
-        ffi!(env, make_unibyte_string, self.as_ptr().cast(), self.len() as isize)
+        ffi!(
+            env,
+            make_unibyte_string,
+            self.as_ptr().cast(),
+            self.len() as isize
+        )
     }
 }
 
@@ -372,7 +397,10 @@ impl<T: IntoLisp> IntoLisp for Option<T> {
 
 impl<T: IntoLisp> IntoLisp for Vec<T> {
     fn into_lisp(self, env: &Env) -> Result<Value> {
-        let items = self.into_iter().map(|v| v.into_lisp(env)).collect::<Result<Vec<_>>>()?;
+        let items = self
+            .into_iter()
+            .map(|v| v.into_lisp(env))
+            .collect::<Result<Vec<_>>>()?;
         env.list(&items)
     }
 }
@@ -391,13 +419,17 @@ impl FromLisp for i64 {
 
 impl FromLisp for usize {
     fn from_lisp(env: &Env, v: Value) -> Result<Self> {
-        i64::from_lisp(env, v)?.try_into().map_err(|_| env.signal("args-out-of-range", "negative"))
+        i64::from_lisp(env, v)?
+            .try_into()
+            .map_err(|_| env.signal("args-out-of-range", "negative"))
     }
 }
 
 impl FromLisp for u16 {
     fn from_lisp(env: &Env, v: Value) -> Result<Self> {
-        i64::from_lisp(env, v)?.try_into().map_err(|_| env.signal("args-out-of-range", "not a u16"))
+        i64::from_lisp(env, v)?
+            .try_into()
+            .map_err(|_| env.signal("args-out-of-range", "not a u16"))
     }
 }
 
@@ -410,9 +442,21 @@ impl FromLisp for bool {
 impl FromLisp for Vec<u8> {
     fn from_lisp(env: &Env, v: Value) -> Result<Self> {
         let mut len = 0isize;
-        ffi!(env, copy_string_contents, v, std::ptr::null_mut(), &raw mut len)?;
+        ffi!(
+            env,
+            copy_string_contents,
+            v,
+            std::ptr::null_mut(),
+            &raw mut len
+        )?;
         let mut buf = vec![0u8; len as usize];
-        ffi!(env, copy_string_contents, v, buf.as_mut_ptr().cast(), &raw mut len)?;
+        ffi!(
+            env,
+            copy_string_contents,
+            v,
+            buf.as_mut_ptr().cast(),
+            &raw mut len
+        )?;
         buf.pop();
         Ok(buf)
     }
@@ -420,13 +464,18 @@ impl FromLisp for Vec<u8> {
 
 impl FromLisp for String {
     fn from_lisp(env: &Env, v: Value) -> Result<Self> {
-        String::from_utf8(Vec::from_lisp(env, v)?).map_err(|_| env.signal("wrong-type-argument", "invalid utf-8"))
+        String::from_utf8(Vec::from_lisp(env, v)?)
+            .map_err(|_| env.signal("wrong-type-argument", "invalid utf-8"))
     }
 }
 
 impl<T: FromLisp> FromLisp for Option<T> {
     fn from_lisp(env: &Env, v: Value) -> Result<Self> {
-        if env.is_nil(v) { Ok(None) } else { T::from_lisp(env, v).map(Some) }
+        if env.is_nil(v) {
+            Ok(None)
+        } else {
+            T::from_lisp(env, v).map(Some)
+        }
     }
 }
 
@@ -450,8 +499,14 @@ mod tests {
         // The whole user-pointer type check rests on this. Two `Drop`-free types are
         // exactly the case identical-code-folding would merge, so assert it under the
         // release profile too — that is where it would bite.
-        assert!(!std::ptr::fn_addr_eq(finalizer_of::<Dummy>(), finalizer_of::<u64>()));
-        assert!(std::ptr::fn_addr_eq(finalizer_of::<Dummy>(), finalizer_of::<Dummy>()));
+        assert!(!std::ptr::fn_addr_eq(
+            finalizer_of::<Dummy>(),
+            finalizer_of::<u64>()
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            finalizer_of::<Dummy>(),
+            finalizer_of::<Dummy>()
+        ));
     }
 
     #[test]

@@ -84,7 +84,10 @@ pub const BLANK: char = ' ';
 
 impl Default for Cell {
     fn default() -> Self {
-        Self { ch: BLANK, style: Style::default() }
+        Self {
+            ch: BLANK,
+            style: Style::default(),
+        }
     }
 }
 
@@ -120,7 +123,11 @@ pub struct Row {
 
 impl Row {
     pub fn new(cols: usize) -> Self {
-        Self { cells: vec![Cell::default(); cols], marks: Vec::new(), wrapped: false }
+        Self {
+            cells: vec![Cell::default(); cols],
+            marks: Vec::new(),
+            wrapped: false,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -144,8 +151,13 @@ impl Row {
 
     /// Attach a zero-width character (combining mark, variation selector) to `col`.
     pub fn combine(&mut self, col: usize, mark: char) {
-        let Some(existing) = self.marks.iter_mut().find(|(at, _)| usize::from(*at) == col) else {
-            self.marks.push((col as u16, String::from(mark).into_boxed_str()));
+        let Some(existing) = self
+            .marks
+            .iter_mut()
+            .find(|(at, _)| usize::from(*at) == col)
+        else {
+            self.marks
+                .push((col as u16, String::from(mark).into_boxed_str()));
             return;
         };
         let mut s = String::from(&*existing.1);
@@ -154,7 +166,10 @@ impl Row {
     }
 
     fn marks_at(&self, col: usize) -> Option<&str> {
-        self.marks.iter().find(|(at, _)| usize::from(*at) == col).map(|(_, s)| &**s)
+        self.marks
+            .iter()
+            .find(|(at, _)| usize::from(*at) == col)
+            .map(|(_, s)| &**s)
     }
 
     pub fn fill(&mut self, range: impl IntoIterator<Item = usize>, style: Style) {
@@ -166,7 +181,10 @@ impl Row {
     /// Whether the row holds nothing a resize would need to preserve.
     pub fn is_blank(&self) -> bool {
         self.marks.is_empty()
-            && self.cells.iter().all(|c| c.ch == BLANK && c.style == Style::default())
+            && self
+                .cells
+                .iter()
+                .all(|c| c.ch == BLANK && c.style == Style::default())
     }
 
     pub fn clear(&mut self, style: Style) {
@@ -185,7 +203,10 @@ impl Row {
         if col >= cols {
             return;
         }
-        self.cells.splice(col..col, std::iter::repeat_n(Cell::blank(style), count.min(cols - col)));
+        self.cells.splice(
+            col..col,
+            std::iter::repeat_n(Cell::blank(style), count.min(cols - col)),
+        );
         self.cells.truncate(cols);
         self.marks.retain(|(at, _)| usize::from(*at) < col);
     }
@@ -215,7 +236,10 @@ impl Row {
             .fold(Vec::<Run>::new(), |mut runs, (col, cell)| {
                 match runs.last_mut() {
                     Some(run) if run.style == cell.style => run.text.push(cell.ch),
-                    _ => runs.push(Run { text: String::from(cell.ch), style: cell.style }),
+                    _ => runs.push(Run {
+                        text: String::from(cell.ch),
+                        style: cell.style,
+                    }),
                 }
                 if let (Some(marks), Some(run)) = (self.marks_at(col), runs.last_mut()) {
                     run.text.push_str(marks);
@@ -236,22 +260,43 @@ mod tests {
     #[test]
     fn runs_merge_by_style_and_trim_trailing_blanks() {
         let mut row = Row::new(10);
-        let red = Style { fg: Color::Indexed(1), ..Style::default() };
+        let red = Style {
+            fg: Color::Indexed(1),
+            ..Style::default()
+        };
         for (i, c) in "hi".chars().enumerate() {
             row.set(i, Cell { ch: c, style: red });
         }
-        row.set(2, Cell { ch: '!', style: Style::default() });
+        row.set(
+            2,
+            Cell {
+                ch: '!',
+                style: Style::default(),
+            },
+        );
 
         let runs = row.runs();
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0], Run { text: "hi".into(), style: red });
+        assert_eq!(
+            runs[0],
+            Run {
+                text: "hi".into(),
+                style: red
+            }
+        );
         assert_eq!(runs[1].text, "!");
     }
 
     #[test]
     fn combining_marks_ride_along_with_their_base() {
         let mut row = Row::new(4);
-        row.set(0, Cell { ch: 'e', style: Style::default() });
+        row.set(
+            0,
+            Cell {
+                ch: 'e',
+                style: Style::default(),
+            },
+        );
         row.combine(0, '\u{301}');
         assert_eq!(row.to_text(), "e\u{301}");
     }
@@ -259,17 +304,41 @@ mod tests {
     #[test]
     fn overwriting_a_cell_drops_its_marks() {
         let mut row = Row::new(4);
-        row.set(0, Cell { ch: 'e', style: Style::default() });
+        row.set(
+            0,
+            Cell {
+                ch: 'e',
+                style: Style::default(),
+            },
+        );
         row.combine(0, '\u{301}');
-        row.set(0, Cell { ch: 'x', style: Style::default() });
+        row.set(
+            0,
+            Cell {
+                ch: 'x',
+                style: Style::default(),
+            },
+        );
         assert_eq!(row.to_text(), "x");
     }
 
     #[test]
     fn wide_cells_skip_their_continuation() {
         let mut row = Row::new(4);
-        row.set(0, Cell { ch: '漢', style: Style::default() });
-        row.set(1, Cell { ch: CONTINUATION, style: Style::default() });
+        row.set(
+            0,
+            Cell {
+                ch: '漢',
+                style: Style::default(),
+            },
+        );
+        row.set(
+            1,
+            Cell {
+                ch: CONTINUATION,
+                style: Style::default(),
+            },
+        );
         assert_eq!(row.to_text(), "漢");
     }
 
@@ -277,7 +346,13 @@ mod tests {
     fn delete_shifts_left_and_backfills() {
         let mut row = Row::new(4);
         for (i, c) in "abcd".chars().enumerate() {
-            row.set(i, Cell { ch: c, style: Style::default() });
+            row.set(
+                i,
+                Cell {
+                    ch: c,
+                    style: Style::default(),
+                },
+            );
         }
         row.delete(1, 2, Style::default());
         assert_eq!(row.to_text(), "ad");

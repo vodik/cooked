@@ -19,7 +19,10 @@ pub struct Region {
 
 impl Region {
     fn full(rows: usize) -> Self {
-        Self { top: 0, bottom: rows.saturating_sub(1) }
+        Self {
+            top: 0,
+            bottom: rows.saturating_sub(1),
+        }
     }
 
     fn contains(self, row: usize) -> bool {
@@ -109,7 +112,13 @@ impl Screen {
 
     /// Indices of rows changed since the last drain.
     pub fn drain_damage(&mut self) -> Vec<usize> {
-        let changed = self.dirty.iter().enumerate().filter(|(_, d)| **d).map(|(i, _)| i).collect();
+        let changed = self
+            .dirty
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d)
+            .map(|(i, _)| i)
+            .collect();
         self.dirty.fill(false);
         changed
     }
@@ -139,7 +148,13 @@ impl Screen {
         if let Some(r) = self.touch(row) {
             r.set(col, Cell { ch, style });
             for offset in 1..width {
-                r.set(col + offset, Cell { ch: CONTINUATION, style });
+                r.set(
+                    col + offset,
+                    Cell {
+                        ch: CONTINUATION,
+                        style,
+                    },
+                );
             }
         }
 
@@ -194,7 +209,11 @@ impl Screen {
         if n == 0 {
             return Vec::new();
         }
-        let evicted = if self.archives() { self.rows[top..top + n].to_vec() } else { Vec::new() };
+        let evicted = if self.archives() {
+            self.rows[top..top + n].to_vec()
+        } else {
+            Vec::new()
+        };
         self.rows[top..=bottom].rotate_left(n);
         for row in &mut self.rows[bottom + 1 - n..=bottom] {
             row.clear(Style::default());
@@ -310,7 +329,10 @@ impl Screen {
             return;
         }
         let saved = self.region;
-        self.region = Region { top: self.cursor.row, bottom: saved.bottom };
+        self.region = Region {
+            top: self.cursor.row,
+            bottom: saved.bottom,
+        };
         self.scroll_down(n);
         self.region = saved;
     }
@@ -320,7 +342,10 @@ impl Screen {
             return;
         }
         let saved = self.region;
-        self.region = Region { top: self.cursor.row, bottom: saved.bottom };
+        self.region = Region {
+            top: self.cursor.row,
+            bottom: saved.bottom,
+        };
         drop(self.scroll_up(n));
         self.region = saved;
     }
@@ -362,7 +387,10 @@ impl Screen {
 
     /// Index of the last row holding anything, or 0.
     fn last_used_row(&self) -> usize {
-        self.rows.iter().rposition(|row| !row.is_blank()).unwrap_or(0)
+        self.rows
+            .iter()
+            .rposition(|row| !row.is_blank())
+            .unwrap_or(0)
     }
 
     /// Resize, returning rows that became scrollback.
@@ -395,7 +423,11 @@ impl Screen {
             std::cmp::Ordering::Equal => Vec::new(),
         };
 
-        self.cursor.row = self.cursor.row.saturating_sub(evicted.len()).min(rows.saturating_sub(1));
+        self.cursor.row = self
+            .cursor
+            .row
+            .saturating_sub(evicted.len())
+            .min(rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         self.dirty = vec![true; rows];
         self.reset_region();
@@ -468,7 +500,10 @@ mod tests {
         screen.goto(2, 0);
         let evicted = screen.linefeed();
 
-        assert!(evicted.is_empty(), "region scroll must not reach scrollback");
+        assert!(
+            evicted.is_empty(),
+            "region scroll must not reach scrollback"
+        );
         assert_eq!(screen.row(0).unwrap().to_text(), "a");
         assert_eq!(screen.row(1).unwrap().to_text(), "c");
         assert_eq!(screen.row(3).unwrap().to_text(), "d");
@@ -520,7 +555,10 @@ mod tests {
 
         let evicted = screen.resize(10, 10);
 
-        assert!(evicted.is_empty(), "blank rows should absorb the shrink, not the prompt");
+        assert!(
+            evicted.is_empty(),
+            "blank rows should absorb the shrink, not the prompt"
+        );
         assert_eq!(screen.row(0).unwrap().to_text(), "one");
         assert_eq!(screen.row(2).unwrap().to_text(), "three");
         assert_eq!(screen.cursor.row, 3);

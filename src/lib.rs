@@ -25,7 +25,9 @@ use session::{Session, Update};
 /// `runtime` must be the pointer Emacs passes to `emacs_module_init`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c_int {
-    let Some(runtime) = (unsafe { runtime.as_mut() }) else { return 1 };
+    let Some(runtime) = (unsafe { runtime.as_mut() }) else {
+        return 1;
+    };
     // Before touching any slot: our `Raw` hardcodes the Emacs 28 layout, and calling
     // through a pointer past the end of a shorter struct is how this crashes rather than
     // complains.
@@ -35,7 +37,10 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
     let env = unsafe { runtime.env() };
     if env.abi_size() < Env::REQUIRED_ABI {
         if env.abi_size() >= Env::MINIMAL_ABI {
-            env.signal("error", "cooked requires Emacs 28 or newer (module ABI too old)");
+            env.signal(
+                "error",
+                "cooked requires Emacs 28 or newer (module ABI too old)",
+            );
         }
         return 2;
     }
@@ -43,19 +48,48 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
     let registered = [
         env.defun("cooked--spawn", 5..=7, DOC_SPAWN, spawn),
         env.defun("cooked--drain", 1..=2, DOC_DRAIN, drain),
-        env.defun("cooked--send", 2..=2, "Write STRING to the pty of SESSION.", send),
+        env.defun(
+            "cooked--send",
+            2..=2,
+            "Write STRING to the pty of SESSION.",
+            send,
+        ),
         env.defun("cooked--reply-osc", 4..=4, DOC_REPLY_OSC, reply_osc),
-        env.defun("cooked--resize", 3..=3, "Resize SESSION to ROWS by COLS.", resize),
+        env.defun(
+            "cooked--resize",
+            3..=3,
+            "Resize SESSION to ROWS by COLS.",
+            resize,
+        ),
         env.defun("cooked--mode", 1..=1, DOC_MODE, mode),
         env.defun("cooked--prompt-text", 1..=1, DOC_PROMPT, prompt_text),
-        env.defun("cooked--signal", 2..=2, "Send signal NUMBER to SESSION's foreground group.", signal),
+        env.defun(
+            "cooked--signal",
+            2..=2,
+            "Send signal NUMBER to SESSION's foreground group.",
+            signal,
+        ),
         env.defun("cooked--pid", 1..=1, "Process id of SESSION's child.", pid),
-        env.defun("cooked--live-p", 1..=1, "Whether SESSION's child is still running.", live_p),
-        env.defun("cooked--bracketed-paste-p", 1..=1, "Whether SESSION requested bracketed paste.", bracketed),
+        env.defun(
+            "cooked--live-p",
+            1..=1,
+            "Whether SESSION's child is still running.",
+            live_p,
+        ),
+        env.defun(
+            "cooked--bracketed-paste-p",
+            1..=1,
+            "Whether SESSION requested bracketed paste.",
+            bracketed,
+        ),
         env.defun("cooked--kill", 1..=1, DOC_KILL, kill),
     ];
 
-    match registered.into_iter().collect::<Result<Vec<_>>>().and_then(|_| env::provide(&env, "cooked-core")) {
+    match registered
+        .into_iter()
+        .collect::<Result<Vec<_>>>()
+        .and_then(|_| env::provide(&env, "cooked-core"))
+    {
         Ok(()) => 0,
         Err(Error) => 1,
     }
@@ -130,9 +164,20 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
         cols: env.from_lisp::<u16>(args[3])?.max(1),
     };
     let wake = env.open_channel(args[4])?;
-    let cwd = args.get(5).copied().map(|v| env.from_lisp::<Option<String>>(v)).transpose()?.flatten();
-    let min_redisplay_interval_ms =
-        args.get(6).copied().map(|v| env.from_lisp::<Option<i64>>(v)).transpose()?.flatten().unwrap_or(8).max(0) as u64;
+    let cwd = args
+        .get(5)
+        .copied()
+        .map(|v| env.from_lisp::<Option<String>>(v))
+        .transpose()?
+        .flatten();
+    let min_redisplay_interval_ms = args
+        .get(6)
+        .copied()
+        .map(|v| env.from_lisp::<Option<i64>>(v))
+        .transpose()?
+        .flatten()
+        .unwrap_or(8)
+        .max(0) as u64;
 
     let session = Session::spawn(
         &argv,
@@ -177,7 +222,9 @@ fn reply_osc(env: Env, args: &[Value]) -> Result<Value> {
             "cooked: refusing to frame an OSC reply containing control characters",
         ));
     };
-    handle(&env, args[0])?.send(&bytes).map_err(|e| io_error(&env, e))?;
+    handle(&env, args[0])?
+        .send(&bytes)
+        .map_err(|e| io_error(&env, e))?;
     Ok(env.nil())
 }
 
@@ -186,7 +233,9 @@ fn resize(env: Env, args: &[Value]) -> Result<Value> {
         rows: env.from_lisp::<u16>(args[1])?.max(1),
         cols: env.from_lisp::<u16>(args[2])?.max(1),
     };
-    handle(&env, args[0])?.resize(size).map_err(|e| io_error(&env, e))?;
+    handle(&env, args[0])?
+        .resize(size)
+        .map_err(|e| io_error(&env, e))?;
     Ok(env.nil())
 }
 
@@ -200,7 +249,9 @@ fn prompt_text(env: Env, args: &[Value]) -> Result<Value> {
 
 fn signal(env: Env, args: &[Value]) -> Result<Value> {
     let sig = env.from_lisp::<i64>(args[1])? as i32;
-    handle(&env, args[0])?.signal(sig).map_err(|e| io_error(&env, e))?;
+    handle(&env, args[0])?
+        .signal(sig)
+        .map_err(|e| io_error(&env, e))?;
     Ok(env.nil())
 }
 
@@ -232,7 +283,10 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
         .rows
         .iter()
         .map(|(index, runs)| {
-            let runs = runs.iter().map(|r| run_to_lisp(env, r)).collect::<Result<Vec<_>>>()?;
+            let runs = runs
+                .iter()
+                .map(|r| run_to_lisp(env, r))
+                .collect::<Result<Vec<_>>>()?;
             env.cons(env.into_lisp(*index)?, env.list(&runs)?)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -241,7 +295,12 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
         env.into_lisp(update.delta.cursor.col)?,
         env.into_lisp(update.delta.cursor_visible)?,
     ])?;
-    let events = update.delta.events.iter().map(|e| event_to_lisp(env, e)).collect::<Result<Vec<_>>>()?;
+    let events = update
+        .delta
+        .events
+        .iter()
+        .map(|e| event_to_lisp(env, e))
+        .collect::<Result<Vec<_>>>()?;
 
     env.list(&[
         keyword(env, ":scrolled")?,
@@ -310,7 +369,6 @@ impl Update {
     }
 }
 
-
 /// `(TEXT FG BG ATTRS)` — colors are nil, an index, or `(R G B)`.
 fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
     let Style { fg, bg, attrs } = run.style;
@@ -327,7 +385,11 @@ fn color_to_lisp(env: &Env, color: Color) -> Result<Value> {
         Color::Default => Ok(env.nil()),
         Color::Indexed(i) => env.into_lisp(i64::from(i)),
         Color::Rgb(r, g, b) => {
-            let parts = [r, g, b].map(i64::from).map(|c| env.into_lisp(c)).into_iter().collect::<Result<Vec<_>>>()?;
+            let parts = [r, g, b]
+                .map(i64::from)
+                .map(|c| env.into_lisp(c))
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
             env.list(&parts)
         }
     }

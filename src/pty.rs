@@ -46,7 +46,10 @@ pub enum Mode {
 impl Mode {
     fn of(t: &Termios) -> Self {
         let flags = t.local_flags;
-        match (flags.contains(LocalFlags::ICANON), flags.contains(LocalFlags::ECHO)) {
+        match (
+            flags.contains(LocalFlags::ICANON),
+            flags.contains(LocalFlags::ECHO),
+        ) {
             (true, true) => Self::Cooked,
             (true, false) => Self::Secret,
             (false, _) => Self::Raw,
@@ -84,7 +87,12 @@ pub struct Winsize {
 
 impl From<Winsize> for libc::winsize {
     fn from(w: Winsize) -> Self {
-        Self { ws_row: w.rows, ws_col: w.cols, ws_xpixel: 0, ws_ypixel: 0 }
+        Self {
+            ws_row: w.rows,
+            ws_col: w.cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        }
     }
 }
 
@@ -99,25 +107,46 @@ pub struct Pty {
 }
 
 fn check(ret: libc::c_int) -> io::Result<libc::c_int> {
-    (ret != -1).then_some(ret).ok_or_else(io::Error::last_os_error)
+    (ret != -1)
+        .then_some(ret)
+        .ok_or_else(io::Error::last_os_error)
 }
 
 impl Pty {
     /// Fork `argv` on a fresh pty in its own session, with `size` and `env` applied.
-    pub fn spawn(argv: &[impl AsRef<OsStr>], env: &[(impl AsRef<str>, impl AsRef<str>)], size: Winsize, cwd: Option<&Path>) -> io::Result<Self> {
+    pub fn spawn(
+        argv: &[impl AsRef<OsStr>],
+        env: &[(impl AsRef<str>, impl AsRef<str>)],
+        size: Winsize,
+        cwd: Option<&Path>,
+    ) -> io::Result<Self> {
         if argv.is_empty() {
             return Err(io::Error::other("empty argv"));
         }
-        let cargs = argv.iter().map(|a| cstring(a.as_ref().as_bytes())).collect::<io::Result<Vec<_>>>()?;
-        let cargv = cargs.iter().map(|c| c.as_ptr()).chain(std::iter::once(std::ptr::null())).collect::<Vec<_>>();
+        let cargs = argv
+            .iter()
+            .map(|a| cstring(a.as_ref().as_bytes()))
+            .collect::<io::Result<Vec<_>>>()?;
+        let cargv = cargs
+            .iter()
+            .map(|c| c.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect::<Vec<_>>();
         let cenv = env
             .iter()
             .map(|(k, v)| cstring(format!("{}={}", k.as_ref(), v.as_ref()).as_bytes()))
             .collect::<io::Result<Vec<_>>>()?;
-        let cenvp = cenv.iter().map(|c| c.as_ptr()).chain(std::iter::once(std::ptr::null())).collect::<Vec<_>>();
+        let cenvp = cenv
+            .iter()
+            .map(|c| c.as_ptr())
+            .chain(std::iter::once(std::ptr::null()))
+            .collect::<Vec<_>>();
         let ccwd = cwd.map(|p| cstring(p.as_os_str().as_bytes())).transpose()?;
         // argv[0] stays whatever the caller wrote; only the path we exec is resolved.
-        let path = env.iter().find(|(k, _)| k.as_ref() == "PATH").map(|(_, v)| v.as_ref());
+        let path = env
+            .iter()
+            .find(|(k, _)| k.as_ref() == "PATH")
+            .map(|(_, v)| v.as_ref());
         let program = resolve(argv[0].as_ref(), path)?;
 
         let master = open_master()?;
@@ -144,10 +173,24 @@ impl Pty {
         let master_fd = master.as_raw_fd();
         let child = check(unsafe { libc::fork() })?;
         if child == 0 {
-            unsafe { child_exec(name.as_ptr(), master_fd, size, program.as_ptr(), &cargv, &cenvp, ccwd.as_deref()) }
+            unsafe {
+                child_exec(
+                    name.as_ptr(),
+                    master_fd,
+                    size,
+                    program.as_ptr(),
+                    &cargv,
+                    &cenvp,
+                    ccwd.as_deref(),
+                )
+            }
         }
 
-        Ok(Self { master, child: Pid(child), reaped: std::sync::atomic::AtomicBool::new(false) })
+        Ok(Self {
+            master,
+            child: Pid(child),
+            reaped: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     pub fn as_fd(&self) -> BorrowedFd<'_> {
@@ -160,7 +203,9 @@ impl Pty {
 
     /// The child's current line-discipline state.
     pub fn mode(&self) -> io::Result<Mode> {
-        tcgetattr(self.master.as_fd()).map(|t| Mode::of(&t)).map_err(nixerr)
+        tcgetattr(self.master.as_fd())
+            .map(|t| Mode::of(&t))
+            .map_err(nixerr)
     }
 
     /// Process group in the foreground of the tty — i.e. what is actually running.
@@ -254,13 +299,14 @@ impl Pty {
         if self.reaped() {
             return Ok(None);
         }
-        let collected = match waitpid(NixPid::from_raw(self.child.0), Some(flags)).map_err(nixerr)? {
-            WaitStatus::Exited(_, code) => code,
-            // The shell convention, and what `cooked-last-exit-code' renders.
-            WaitStatus::Signaled(_, sig, _) => 128 + sig as i32,
-            // Still alive, or merely stopped or continued: the child is still ours.
-            _ => return Ok(None),
-        };
+        let collected =
+            match waitpid(NixPid::from_raw(self.child.0), Some(flags)).map_err(nixerr)? {
+                WaitStatus::Exited(_, code) => code,
+                // The shell convention, and what `cooked-last-exit-code' renders.
+                WaitStatus::Signaled(_, sig, _) => 128 + sig as i32,
+                // Still alive, or merely stopped or continued: the child is still ours.
+                _ => return Ok(None),
+            };
         self.reaped.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(Some(collected))
     }
@@ -392,7 +438,16 @@ unsafe fn child_exec(
         }
 
         // Emacs ignores SIGPIPE and blocks signals; a child inheriting that is subtly broken.
-        for sig in [libc::SIGPIPE, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGCHLD, libc::SIGTTIN, libc::SIGTTOU] {
+        for sig in [
+            libc::SIGPIPE,
+            libc::SIGHUP,
+            libc::SIGINT,
+            libc::SIGQUIT,
+            libc::SIGTERM,
+            libc::SIGCHLD,
+            libc::SIGTTIN,
+            libc::SIGTTOU,
+        ] {
             libc::signal(sig, libc::SIG_DFL);
         }
         let mut empty = std::mem::zeroed::<libc::sigset_t>();
@@ -423,7 +478,10 @@ mod tests {
 
     #[test]
     fn mode_discriminates_the_three_states() {
-        assert_eq!(Mode::of(&termios_with(LocalFlags::ICANON | LocalFlags::ECHO)), Mode::Cooked);
+        assert_eq!(
+            Mode::of(&termios_with(LocalFlags::ICANON | LocalFlags::ECHO)),
+            Mode::Cooked
+        );
         assert_eq!(Mode::of(&termios_with(LocalFlags::ICANON)), Mode::Secret);
         assert_eq!(Mode::of(&termios_with(LocalFlags::empty())), Mode::Raw);
         assert_eq!(Mode::of(&termios_with(LocalFlags::ECHO)), Mode::Raw);
@@ -432,27 +490,52 @@ mod tests {
     #[test]
     fn signalling_never_targets_our_own_process_group() {
         // tcgetpgrp reporting 0 would make kill(-0, ...) hit the Emacs that loaded us.
-        let pty = Pty::spawn(&["/bin/sh", "-c", "exit 0"], &[("TERM", "dumb")], Winsize { rows: 24, cols: 80 }, None).unwrap();
+        let pty = Pty::spawn(
+            &["/bin/sh", "-c", "exit 0"],
+            &[("TERM", "dumb")],
+            Winsize { rows: 24, cols: 80 },
+            None,
+        )
+        .unwrap();
         assert!(pty.reap(std::time::Duration::from_secs(2)).is_some());
         for _ in 0..3 {
-            assert!(pty.signal(libc::SIGHUP).is_err(), "must refuse to signal a dead session");
+            assert!(
+                pty.signal(libc::SIGHUP).is_err(),
+                "must refuse to signal a dead session"
+            );
         }
     }
 
     #[test]
     fn resolve_searches_path_only_for_bare_names() {
         // A name with a slash is taken literally, exactly as a shell would.
-        assert_eq!(resolve(OsStr::new("/bin/sh"), Some("/nowhere")).unwrap().to_str().unwrap(), "/bin/sh");
-        assert_eq!(resolve(OsStr::new("./x"), Some("/nowhere")).unwrap().to_str().unwrap(), "./x");
+        assert_eq!(
+            resolve(OsStr::new("/bin/sh"), Some("/nowhere"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "/bin/sh"
+        );
+        assert_eq!(
+            resolve(OsStr::new("./x"), Some("/nowhere"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "./x"
+        );
 
         // A bare name is searched, and the first hit in order wins.
         let found = resolve(OsStr::new("sh"), Some("/nowhere:/bin:/usr/bin")).unwrap();
         assert!(found.to_str().unwrap().ends_with("/sh"), "{found:?}");
 
         // A directory on PATH named like the program is not the program.
-        assert!(resolve(OsStr::new("bin"), Some("/usr")).is_err(), "a directory is not executable");
+        assert!(
+            resolve(OsStr::new("bin"), Some("/usr")).is_err(),
+            "a directory is not executable"
+        );
 
-        let missing = resolve(OsStr::new("cooked-does-not-exist"), Some("/bin:/usr/bin")).unwrap_err();
+        let missing =
+            resolve(OsStr::new("cooked-does-not-exist"), Some("/bin:/usr/bin")).unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound);
     }
 
@@ -489,10 +572,20 @@ mod tests {
 
     #[test]
     fn the_master_is_close_on_exec() {
-        let pty = Pty::spawn(&["/bin/sh", "-c", "exit 0"], &[("TERM", "dumb")], Winsize { rows: 24, cols: 80 }, None).unwrap();
+        let pty = Pty::spawn(
+            &["/bin/sh", "-c", "exit 0"],
+            &[("TERM", "dumb")],
+            Winsize { rows: 24, cols: 80 },
+            None,
+        )
+        .unwrap();
         let flags = unsafe { libc::fcntl(pty.as_fd().as_raw_fd(), libc::F_GETFD) };
         assert_ne!(flags, -1);
-        assert_ne!(flags & libc::FD_CLOEXEC, 0, "the master would be inherited by every child");
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "the master would be inherited by every child"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -506,7 +599,11 @@ mod tests {
             None,
         )
         .expect("spawn");
-        assert_eq!(pty.reap(std::time::Duration::from_secs(2)), Some(0), "an fd leaked past exec");
+        assert_eq!(
+            pty.reap(std::time::Duration::from_secs(2)),
+            Some(0),
+            "an fd leaked past exec"
+        );
     }
 
     #[test]
@@ -528,7 +625,13 @@ mod tests {
     #[test]
     fn secret_mode_is_detected() {
         let size = Winsize { rows: 24, cols: 80 };
-        let pty = Pty::spawn(&["/bin/sh", "-c", "stty -echo; read x"], &[("TERM", "dumb")], size, None).expect("spawn");
+        let pty = Pty::spawn(
+            &["/bin/sh", "-c", "stty -echo; read x"],
+            &[("TERM", "dumb")],
+            size,
+            None,
+        )
+        .expect("spawn");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
             // `mode()` can transiently fail immediately after spawn, before the child has

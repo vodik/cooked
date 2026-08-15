@@ -19,7 +19,9 @@ fn timed(label: &str, bytes: usize, work: impl FnOnce()) {
 /// Plain text, the `cat a big file` case.
 fn plain(lines: usize) -> Vec<u8> {
     (0..lines)
-        .flat_map(|i| format!("line {i:06} the quick brown fox jumps over the lazy dog\r\n").into_bytes())
+        .flat_map(|i| {
+            format!("line {i:06} the quick brown fox jumps over the lazy dog\r\n").into_bytes()
+        })
         .collect()
 }
 
@@ -27,7 +29,11 @@ fn plain(lines: usize) -> Vec<u8> {
 fn styled(lines: usize) -> Vec<u8> {
     (0..lines)
         .flat_map(|i| {
-            format!("\x1b[1;3{}mword\x1b[0m \x1b[38;2;10;20;30mrgb\x1b[0m plain {i}\r\n", i % 8).into_bytes()
+            format!(
+                "\x1b[1;3{}mword\x1b[0m \x1b[38;2;10;20;30mrgb\x1b[0m plain {i}\r\n",
+                i % 8
+            )
+            .into_bytes()
         })
         .collect()
 }
@@ -56,7 +62,10 @@ fn repaint(frames: usize, rows: usize, cols: usize) -> Vec<u8> {
 #[test]
 #[ignore = "benchmark"]
 fn feed_only() {
-    for (label, data) in [("plain, parse only", plain(200_000)), ("styled, parse only", styled(200_000))] {
+    for (label, data) in [
+        ("plain, parse only", plain(200_000)),
+        ("styled, parse only", styled(200_000)),
+    ] {
         let mut term = Term::new(50, 200);
         timed(label, data.len(), || term.feed(&data));
         let delta = term.drain();
@@ -94,7 +103,11 @@ fn full_screen_repaint() {
     let mut term = Term::new(50, 200);
     let mut rows = 0usize;
     timed("repaint, drain every frame", data.len(), || {
-        for frame in data.split_inclusive(|b| *b == b'H').collect::<Vec<_>>().chunks(51) {
+        for frame in data
+            .split_inclusive(|b| *b == b'H')
+            .collect::<Vec<_>>()
+            .chunks(51)
+        {
             for piece in frame {
                 term.feed(piece);
             }
@@ -110,7 +123,8 @@ fn full_screen_repaint() {
 fn osc_dispatch() {
     let data: Vec<u8> = (0..200_000)
         .flat_map(|i| {
-            format!("\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07out{i}\r\n\x1b]133;D;0\x07").into_bytes()
+            format!("\x1b]133;A\x07$ \x1b]133;B\x07cmd\x1b]133;C\x07out{i}\r\n\x1b]133;D;0\x07")
+                .into_bytes()
         })
         .collect();
     let mut term = Term::new(50, 200);

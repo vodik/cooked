@@ -4,8 +4,8 @@
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
 use super::cell::{Attrs, Color, Row, Run, Style};
-use std::collections::VecDeque;
 use super::screen::{Cursor, Erase, Screen};
+use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 
 /// Something the Lisp side must react to, beyond redrawing cells.
@@ -148,7 +148,10 @@ pub struct Term {
 
 impl Term {
     pub fn new(rows: usize, cols: usize) -> Self {
-        Self { parser: Parser::new(), state: State::new(rows, cols) }
+        Self {
+            parser: Parser::new(),
+            state: State::new(rows, cols),
+        }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -242,7 +245,10 @@ impl State {
     /// Kitty wins when both are on: a child that pushed kitty flags is speaking the newer
     /// protocol deliberately, and libraries that enable both expect kitty to take effect.
     fn key_encoding(&self) -> KeyEncoding {
-        match (self.kitty_keys.last().copied().unwrap_or(0), self.modify_other_keys) {
+        match (
+            self.kitty_keys.last().copied().unwrap_or(0),
+            self.modify_other_keys,
+        ) {
             (flags, _) if flags & 1 != 0 => KeyEncoding::Kitty,
             (_, 2) => KeyEncoding::ModifyOtherKeys,
             _ => KeyEncoding::Legacy,
@@ -250,11 +256,19 @@ impl State {
     }
 
     fn screen(&self) -> &Screen {
-        if self.on_alt { &self.alt } else { &self.primary }
+        if self.on_alt {
+            &self.alt
+        } else {
+            &self.primary
+        }
     }
 
     fn screen_mut(&mut self) -> &mut Screen {
-        if self.on_alt { &mut self.alt } else { &mut self.primary }
+        if self.on_alt {
+            &mut self.alt
+        } else {
+            &mut self.primary
+        }
     }
 
     /// Rows leaving the primary screen become buffer text; on the alt screen they vanish.
@@ -271,7 +285,10 @@ impl State {
         // column, so retaining thousands of them keeps megabytes of mostly-blank grid
         // alive. Runs are trimmed to content, and the work has to happen regardless.
         self.pending_scrollback
-            .extend(rows.iter().map(|row| Scrolled { runs: row.runs(), wrapped: row.wrapped }));
+            .extend(rows.iter().map(|row| Scrolled {
+                runs: row.runs(),
+                wrapped: row.wrapped,
+            }));
     }
 
     fn linefeed(&mut self) {
@@ -364,7 +381,9 @@ impl State {
     }
 
     fn semantic(&mut self, params: &[&[u8]]) {
-        let Some(kind) = params.get(1).and_then(|p| p.first()) else { return };
+        let Some(kind) = params.get(1).and_then(|p| p.first()) else {
+            return;
+        };
         self.events.push(match kind {
             b'A' => Event::PromptStart,
             b'B' => Event::PromptEnd,
@@ -421,7 +440,10 @@ impl State {
 /// `38;5;n` / `38;2;r;g;b` and their colon-subparameter spellings.
 fn extended(param: &[u16], iter: &mut vte::ParamsIter<'_>) -> Option<Color> {
     let mut subs = param[1..].iter().copied();
-    let mut next = || subs.next().or_else(|| iter.next().and_then(|p| p.first().copied()));
+    let mut next = || {
+        subs.next()
+            .or_else(|| iter.next().and_then(|p| p.first().copied()))
+    };
     match next()? {
         5 => Some(Color::Indexed(next()? as u8)),
         // The colon form permits an empty color-space id: 38:2::R:G:B
@@ -504,7 +526,11 @@ impl Perform for State {
                 self.screen_mut().goto(row, arg(params, 0, 1) - 1);
             }
             (None, 'H' | 'f') => {
-                let top = if self.origin_mode { self.screen().region.top } else { 0 };
+                let top = if self.origin_mode {
+                    self.screen().region.top
+                } else {
+                    0
+                };
                 let (row, col) = (arg(params, 0, 1) - 1 + top, arg(params, 1, 1) - 1);
                 self.screen_mut().goto(row, col);
             }
@@ -537,13 +563,18 @@ impl Perform for State {
             (None, 'm') => self.sgr(params),
             (None, 'r') => {
                 let bottom = arg(params, 1, self.screen().height());
-                self.screen_mut().set_region(arg(params, 0, 1) - 1, bottom - 1);
+                self.screen_mut()
+                    .set_region(arg(params, 0, 1) - 1, bottom - 1);
             }
             // XTMODKEYS, `CSI > 4 ; Ps m`. Bare `CSI > 4 m` means "back to the default",
             // which is level 0 for our purposes.
             (Some(b'>'), 'm') => {
                 if arg(params, 0, 4) == 4 {
-                    self.modify_other_keys = params.iter().nth(1).and_then(|p| p.first().copied()).unwrap_or(0) as u8;
+                    self.modify_other_keys = params
+                        .iter()
+                        .nth(1)
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(0) as u8;
                 }
             }
             // Kitty keyboard protocol: push, pop, and set.
@@ -563,7 +594,8 @@ impl Perform for State {
             // A child that probes and gets no answer may wait for one.
             (Some(b'?'), 'u') => {
                 let flags = self.kitty_keys.last().copied().unwrap_or(0);
-                self.events.push(Event::Reply(format!("\x1b[?{flags}u").into_bytes()));
+                self.events
+                    .push(Event::Reply(format!("\x1b[?{flags}u").into_bytes()));
             }
             (None, 'c') => self.events.push(Event::Reply(b"\x1b[?62;c".to_vec())),
             (None, 'n') if arg(params, 0, 0) == 5 => {
@@ -571,7 +603,9 @@ impl Perform for State {
             }
             (None, 'n') if arg(params, 0, 0) == 6 => {
                 let Cursor { row, col, .. } = self.screen().cursor;
-                self.events.push(Event::Reply(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes()));
+                self.events.push(Event::Reply(
+                    format!("\x1b[{};{}R", row + 1, col + 1).into_bytes(),
+                ));
             }
             (None, 'I') => self.screen_mut().tab(arg(params, 0, 1)),
             (None, 's') => self.save_restore(true),
@@ -607,12 +641,16 @@ impl Perform for State {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        let Some(code) = params.first().and_then(|p| std::str::from_utf8(p).ok()) else { return };
+        let Some(code) = params.first().and_then(|p| std::str::from_utf8(p).ok()) else {
+            return;
+        };
         if code == "133" {
             self.semantic(params);
             return;
         }
-        let Ok(code) = code.parse::<u16>() else { return };
+        let Ok(code) = code.parse::<u16>() else {
+            return;
+        };
         // A hostile stream should not get to size our heap for us, and nothing
         // legitimate — title, working directory, hyperlink, clipboard — comes close.
         if params[1..].iter().map(|p| p.len()).sum::<usize>() > OSC_PAYLOAD_LIMIT {
@@ -673,16 +711,25 @@ mod tests {
     #[test]
     fn truecolor_arrives_in_both_spellings() {
         let semi = term(2, 20, b"\x1b[38;2;10;20;30mx");
-        assert_eq!(semi.screen().row(0).unwrap().runs()[0].style.fg, Color::Rgb(10, 20, 30));
+        assert_eq!(
+            semi.screen().row(0).unwrap().runs()[0].style.fg,
+            Color::Rgb(10, 20, 30)
+        );
 
         let colon = term(2, 20, b"\x1b[38:2::10:20:30mx");
-        assert_eq!(colon.screen().row(0).unwrap().runs()[0].style.fg, Color::Rgb(10, 20, 30));
+        assert_eq!(
+            colon.screen().row(0).unwrap().runs()[0].style.fg,
+            Color::Rgb(10, 20, 30)
+        );
     }
 
     #[test]
     fn indexed_256_color() {
         let t = term(2, 20, b"\x1b[38;5;200mx");
-        assert_eq!(t.screen().row(0).unwrap().runs()[0].style.fg, Color::Indexed(200));
+        assert_eq!(
+            t.screen().row(0).unwrap().runs()[0].style.fg,
+            Color::Indexed(200)
+        );
     }
 
     #[test]
@@ -701,7 +748,10 @@ mod tests {
         let delta = t.drain();
 
         assert_eq!(delta.scrolled.len(), 2);
-        assert!(delta.scrolled[0].wrapped, "the overflowing row continues below");
+        assert!(
+            delta.scrolled[0].wrapped,
+            "the overflowing row continues below"
+        );
         assert_eq!(runs_text(&delta.scrolled[0]), "abcdefgh");
         assert!(!delta.scrolled[1].wrapped, "a real newline ends the line");
         assert_eq!(runs_text(&delta.scrolled[1]), "ij");
@@ -714,7 +764,10 @@ mod tests {
         t.feed(b"\x1b[?1049h");
         t.feed(b"a\r\nb\r\nc\r\nd\r\n");
         let delta = t.drain();
-        assert!(delta.scrolled.is_empty(), "alt screen must not pollute history");
+        assert!(
+            delta.scrolled.is_empty(),
+            "alt screen must not pollute history"
+        );
         assert!(delta.alt);
 
         t.feed(b"\x1b[?1049l");
@@ -725,7 +778,11 @@ mod tests {
 
     #[test]
     fn osc_133_becomes_semantic_events() {
-        let mut t = term(4, 20, b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07out\x1b]133;D;3\x07");
+        let mut t = term(
+            4,
+            20,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07out\x1b]133;D;3\x07",
+        );
         let events = t.drain().events;
         assert_eq!(
             events,
@@ -762,14 +819,21 @@ mod tests {
         let mut t = term(4, 20, b"\x1b]51;E\"find-file\" \"/tmp/a;b\"\x1b\\");
         assert_eq!(
             t.drain().events,
-            vec![Event::Osc(51, vec!["E\"find-file\" \"/tmp/a".into(), "b\"".into()], false)]
+            vec![Event::Osc(
+                51,
+                vec!["E\"find-file\" \"/tmp/a".into(), "b\"".into()],
+                false
+            )]
         );
     }
 
     #[test]
     fn osc_52_clipboard_is_passed_through() {
         let mut t = term(4, 20, b"\x1b]52;c;aGVsbG8=\x07");
-        assert_eq!(t.drain().events, vec![Event::Osc(52, vec!["c".into(), "aGVsbG8=".into()], true)]);
+        assert_eq!(
+            t.drain().events,
+            vec![Event::Osc(52, vec!["c".into(), "aGVsbG8=".into()], true)]
+        );
     }
 
     #[test]
@@ -783,7 +847,12 @@ mod tests {
         let mut t = term(4, 20, b"\x1b[?1002h\x1b[?1006h");
         let mouse = t.mouse();
         assert!(mouse.click && mouse.drag && mouse.sgr);
-        assert!(t.drain().events.iter().any(|e| matches!(e, Event::Mouse(_))));
+        assert!(
+            t.drain()
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::Mouse(_)))
+        );
 
         t.feed(b"\x1b[?1002l\x1b[?1006l");
         assert!(!t.mouse().enabled());
@@ -792,13 +861,21 @@ mod tests {
     #[test]
     fn cursor_position_report_is_answered() {
         let mut t = term(4, 20, b"\x1b[3;5H\x1b[6n");
-        assert!(t.drain().events.contains(&Event::Reply(b"\x1b[3;5R".to_vec())));
+        assert!(
+            t.drain()
+                .events
+                .contains(&Event::Reply(b"\x1b[3;5R".to_vec()))
+        );
     }
 
     #[test]
     fn status_report_is_answered() {
         let mut t = term(4, 20, b"\x1b[5n");
-        assert!(t.drain().events.contains(&Event::Reply(b"\x1b[0n".to_vec())));
+        assert!(
+            t.drain()
+                .events
+                .contains(&Event::Reply(b"\x1b[0n".to_vec()))
+        );
     }
 
     /// The terminator has to survive the trip to Lisp: a client that queried with BEL
@@ -817,8 +894,14 @@ mod tests {
 
     #[test]
     fn osc_reply_echoes_the_terminator_it_was_asked_with() {
-        assert_eq!(osc_reply(11, "rgb:0000/0000/0000", true).unwrap(), b"\x1b]11;rgb:0000/0000/0000\x07");
-        assert_eq!(osc_reply(11, "rgb:ffff/ffff/ffff", false).unwrap(), b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\");
+        assert_eq!(
+            osc_reply(11, "rgb:0000/0000/0000", true).unwrap(),
+            b"\x1b]11;rgb:0000/0000/0000\x07"
+        );
+        assert_eq!(
+            osc_reply(11, "rgb:ffff/ffff/ffff", false).unwrap(),
+            b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"
+        );
     }
 
     /// A colour name can arrive from the child in a set request and come straight back
@@ -869,7 +952,11 @@ mod tests {
     #[test]
     fn modify_other_keys_is_negotiated() {
         let mut t = term(4, 20, b"");
-        assert_eq!(t.keys(), KeyEncoding::Legacy, "nothing is on until the child asks");
+        assert_eq!(
+            t.keys(),
+            KeyEncoding::Legacy,
+            "nothing is on until the child asks"
+        );
 
         t.feed(b"\x1b[>4;2m");
         assert_eq!(t.keys(), KeyEncoding::ModifyOtherKeys);
@@ -880,7 +967,11 @@ mod tests {
         assert_eq!(t.keys(), KeyEncoding::Legacy);
 
         t.feed(b"\x1b[>4;2m\x1b[>4m");
-        assert_eq!(t.keys(), KeyEncoding::Legacy, "a bare reset turns it back off");
+        assert_eq!(
+            t.keys(),
+            KeyEncoding::Legacy,
+            "a bare reset turns it back off"
+        );
     }
 
     #[test]
@@ -889,20 +980,36 @@ mod tests {
         assert_eq!(t.keys(), KeyEncoding::Kitty);
 
         t.feed(b"\x1b[>0u");
-        assert_eq!(t.keys(), KeyEncoding::Legacy, "the pushed level is what counts");
+        assert_eq!(
+            t.keys(),
+            KeyEncoding::Legacy,
+            "the pushed level is what counts"
+        );
 
         t.feed(b"\x1b[<u");
-        assert_eq!(t.keys(), KeyEncoding::Kitty, "popping restores what was underneath");
+        assert_eq!(
+            t.keys(),
+            KeyEncoding::Kitty,
+            "popping restores what was underneath"
+        );
 
         t.feed(b"\x1b[=0u");
-        assert_eq!(t.keys(), KeyEncoding::Legacy, "set replaces the top of the stack");
+        assert_eq!(
+            t.keys(),
+            KeyEncoding::Legacy,
+            "set replaces the top of the stack"
+        );
     }
 
     #[test]
     fn a_kitty_query_is_answered() {
         // A child that probes and hears nothing back may sit there waiting.
         let mut t = term(4, 20, b"\x1b[>5u\x1b[?u");
-        assert!(t.drain().events.contains(&Event::Reply(b"\x1b[?5u".to_vec())));
+        assert!(
+            t.drain()
+                .events
+                .contains(&Event::Reply(b"\x1b[?5u".to_vec()))
+        );
     }
 
     #[test]

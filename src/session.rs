@@ -127,8 +127,11 @@ impl Session {
         // of the pipe Emacs watches — free to poke our redisplay, and keeping the pipe
         // from ever reaching EOF.
         let wake = unsafe { OwnedFd::from_raw_fd(wake) };
-        nix::fcntl::fcntl(wake.as_fd(), nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC))
-            .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+        nix::fcntl::fcntl(
+            wake.as_fd(),
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        )
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
 
         let pty = Pty::spawn(argv, env, size, cwd)?;
         let mode = pty.mode().unwrap_or_default();
@@ -154,7 +157,11 @@ impl Session {
                 move || read_loop(&shared, wake.as_fd())
             })?;
 
-        Ok(Self { shared, reader: Mutex::new(Some(reader)), wake: Mutex::new(Some(wake)) })
+        Ok(Self {
+            shared,
+            reader: Mutex::new(Some(reader)),
+            wake: Mutex::new(Some(wake)),
+        })
     }
 
     /// Tear the child down now and reap it, reporting whether this call was the one that
@@ -191,7 +198,12 @@ impl Session {
     pub fn drain(&self) -> Update {
         self.shared.notified.store(false, Ordering::SeqCst);
         Update {
-            delta: self.shared.term.lock().unwrap_or_else(|e| e.into_inner()).drain(),
+            delta: self
+                .shared
+                .term
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain(),
             mode: self.shared.load_mode(),
             exit: *self.shared.exited.lock().unwrap_or_else(|e| e.into_inner()),
         }
@@ -218,7 +230,11 @@ impl Session {
             .resize(size.rows.into(), size.cols.into());
         match self.shared.pty.resize(size) {
             Err(e) if e.raw_os_error() == Some(libc::ENOTTY) => {
-                *self.shared.pending_resize.lock().unwrap_or_else(|e| e.into_inner()) = Some(size);
+                *self
+                    .shared
+                    .pending_resize
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(size);
                 Ok(())
             }
             result => result,
@@ -305,7 +321,11 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         // Backpressure: with a full backlog, leave the bytes in the pty. Its buffer
         // fills and the child blocks in `write`, so output waits instead of being
         // dropped or piling up in memory faster than Emacs can render it.
-        if shared.term.lock().is_ok_and(|term| term.backlog() >= emu::BACKLOG_HIGH_WATER) {
+        if shared
+            .term
+            .lock()
+            .is_ok_and(|term| term.backlog() >= emu::BACKLOG_HIGH_WATER)
+        {
             announce(shared, wake);
             std::thread::sleep(std::time::Duration::from_millis(2));
             continue;
@@ -314,14 +334,20 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         match shared.pty.read(&mut buf) {
             Ok([]) => return finish(shared, wake, Ended::ChildGone),
             Ok(data) => {
-                shared.term.lock().unwrap_or_else(|e| e.into_inner()).feed(data);
+                shared
+                    .term
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .feed(data);
                 // A child that changes mode almost always writes at the same moment, so
                 // re-sampling here is what makes the common case feel instantaneous.
                 sample_mode(shared);
                 announce(shared, wake);
             }
             // EIO is how Linux reports the last slave closing.
-            Err(e) if e.raw_os_error() == Some(libc::EIO) => return finish(shared, wake, Ended::ChildGone),
+            Err(e) if e.raw_os_error() == Some(libc::EIO) => {
+                return finish(shared, wake, Ended::ChildGone);
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => return finish(shared, wake, Ended::Aborted),
         }
@@ -342,7 +368,9 @@ fn finish(shared: &Arc<Shared>, wake: BorrowedFd<'_>, why: Ended) {
         Ended::ChildGone => REAP_PATIENCE,
         Ended::Aborted => std::time::Duration::ZERO,
     };
-    let Some(status) = shared.pty.reap(patience) else { return };
+    let Some(status) = shared.pty.reap(patience) else {
+        return;
+    };
     *shared.exited.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
     shared.notified.store(false, Ordering::SeqCst);
     notify(shared, wake);
@@ -368,7 +396,10 @@ fn sample_mode(shared: &Arc<Shared>) -> bool {
 
 /// Retry a `resize` stashed by `Session::resize`, clearing it once it lands.
 fn apply_pending_resize(shared: &Arc<Shared>) {
-    let mut pending = shared.pending_resize.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pending = shared
+        .pending_resize
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(size) = *pending
         && shared.pty.resize(size).is_ok()
     {
@@ -404,7 +435,10 @@ fn flush_pending(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
     if shared.notified.load(Ordering::SeqCst) || !shared.dirty.load(Ordering::SeqCst) {
         return;
     }
-    let mut last = shared.last_notified.lock().unwrap_or_else(|e| e.into_inner());
+    let mut last = shared
+        .last_notified
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if last.is_some_and(|t| t.elapsed() < shared.min_redisplay_interval) {
         return;
     }
@@ -435,7 +469,15 @@ mod tests {
         let size = Winsize { rows: 24, cols: 80 };
         let fd = std::os::fd::IntoRawFd::into_raw_fd(write);
         (
-            Session::spawn(argv, &[("TERM", "xterm-256color")], size, None, fd, Duration::from_millis(8)).expect("spawn"),
+            Session::spawn(
+                argv,
+                &[("TERM", "xterm-256color")],
+                size,
+                None,
+                fd,
+                Duration::from_millis(8),
+            )
+            .expect("spawn"),
             read,
         )
     }
@@ -485,7 +527,11 @@ mod tests {
 
     #[test]
     fn wakeups_coalesce_into_one_byte_per_drain() {
-        let (session, read) = session(&["/bin/sh", "-c", "for i in $(seq 200); do printf 'line %s\\n' $i; done; sleep 5"]);
+        let (session, read) = session(&[
+            "/bin/sh",
+            "-c",
+            "for i in $(seq 200); do printf 'line %s\\n' $i; done; sleep 5",
+        ]);
         std::thread::sleep(Duration::from_millis(300));
 
         let mut buf = [0u8; 256];
@@ -549,8 +595,14 @@ mod tests {
 
         let update = wait_for(&session, |u| rendered(u).contains("checked"));
         let text = rendered(&update);
-        assert!(!text.contains("WAKE-LEAKED"), "the wake pipe reached the child:\n{text}");
-        assert!(!text.contains("PTMX-LEAKED"), "the pty master reached the child:\n{text}");
+        assert!(
+            !text.contains("WAKE-LEAKED"),
+            "the wake pipe reached the child:\n{text}"
+        );
+        assert!(
+            !text.contains("PTMX-LEAKED"),
+            "the pty master reached the child:\n{text}"
+        );
         drop(read.0);
     }
 
@@ -558,10 +610,17 @@ mod tests {
     fn shutdown_is_idempotent_and_kills_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 300"]);
         let pid = session.pid().get();
-        assert!(session.shutdown(), "the first call should be the one that tears down");
+        assert!(
+            session.shutdown(),
+            "the first call should be the one that tears down"
+        );
         assert!(!session.shutdown(), "a second call must be a no-op");
         assert!(!session.alive());
-        assert_eq!(alive(pid), Err(Errno::ESRCH), "the child outlived an explicit shutdown");
+        assert_eq!(
+            alive(pid),
+            Err(Errno::ESRCH),
+            "the child outlived an explicit shutdown"
+        );
     }
 
     #[test]
@@ -570,7 +629,11 @@ mod tests {
         let pid = session.pid().get();
         std::thread::sleep(Duration::from_millis(150));
         assert!(session.shutdown());
-        assert_eq!(alive(pid), Err(Errno::ESRCH), "SIGHUP alone is not enough here");
+        assert_eq!(
+            alive(pid),
+            Err(Errno::ESRCH),
+            "SIGHUP alone is not enough here"
+        );
     }
 
     #[test]
@@ -579,7 +642,11 @@ mod tests {
         let start = Instant::now();
         session.shutdown();
         // Without the quit pipe this waits out the reader's poll timeout every time.
-        assert!(start.elapsed() < Duration::from_millis(150), "took {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_millis(150),
+            "took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
@@ -592,7 +659,8 @@ mod tests {
 
     #[test]
     fn osc_133_survives_the_round_trip() {
-        let (session, _read) = session(&["/bin/sh", "-c", r"printf '\033]133;A\007$ \033]133;B\007'"]);
+        let (session, _read) =
+            session(&["/bin/sh", "-c", r"printf '\033]133;A\007$ \033]133;B\007'"]);
         let update = wait_for(&session, |u| u.delta.events.contains(&Event::PromptStart));
         assert!(update.delta.events.contains(&Event::PromptEnd));
     }
@@ -600,7 +668,9 @@ mod tests {
     #[test]
     fn resize_reaches_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.3; stty size"]);
-        session.resize(Winsize { rows: 12, cols: 40 }).expect("resize");
+        session
+            .resize(Winsize { rows: 12, cols: 40 })
+            .expect("resize");
         let update = wait_for(&session, |u| rendered(u).contains("12 40"));
         assert!(rendered(&update).contains("12 40"));
     }
