@@ -1,0 +1,23 @@
+lisp/cooked.el
+  s_8a86176f057752::t_0f973a8d3b53c9 444-459,479-480,549-554
+src/lib.rs
+  s_8a86176f057752::t_6564edf3976195 44,65-69,134-145
+src/session.rs
+  s_8a86176f057752::t_9b606a0649620c 41-45,49-59,122,140,142-143,287,296-300,309,321,379-383,394-416,437-440
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "99561772c4169fe8477e36bb9d6c488ad8f10874",
+  "prompts": {},
+  "sessions": {
+    "s_8a86176f057752": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b1f564b6-f936-4951-a46c-8824d7df13db",
+        "model": "unknown"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
