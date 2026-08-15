@@ -1,0 +1,393 @@
+#+title: cooked
+
+I wanted to write a quick introduction to this project because I've been a bit nervous to share this. It is almost 100% vibe coded, which isn't really my taste. It's been a consequence of wanting to test out a design while being very short on time to actually try and do it by hand. Having build and worked on terminal emulators before I didn't feel I stood as much to lose using an llm and felt I'd be comfortable adopting the project afterwards as I've built terminal emulators in the past (and it felt good that even using strong models, I was able to better identify and diagnose performance bottlenecks despite the llm literally being able to script emacs).
+
+I've been really happy with how this project turned out - so much so that I feel comfortable sharing it despite it's vibe coded origins - and I plan to transition to maintaining it much more by hand - starting by removing the [[https://mckayla.blog/posts/yap.html][yap]]. It's legitimately gotten to the point that emacs-with-cooked is becoming my _daily driver_ as I like it that much.
+
+There are three main design goals of this take on an emacs terminal emulator:
+
+First, split a terminal emulation into two parts. A rust component which handles the pts, process communication, and offloads as much terminal state as possible. It tries to be as fast as possible (it's not going to win any awards for being as fast as possible, but it's magnitudes of order faster than the elisp part) and pace the emacs side so that it refreshes at a slower, more fixed framerate. This gets us close to eat's architecture while having the performance characteristics of vterm.
+
+Second, the terminal emulator is built around exposing the kernel line discipline and, when present, OSC 133 semantic prompt markers so we can thoughtfully determine what the terminal is doing. That allows the whole thing to be deeply integrated into =comint-mode=
+
+Third, I'm an =evil-mode= user and I've never been happy with how either vterm/eat integrate. Between OSC 133 and the line discipline, we can also intelligently and automatically switch between normal/insert/emacs modes automatically as needed. Visual mode automatically pauses redrawing to help support yanking.
+
+Then with some additional vanity features (for example, support for box-drawing characters as bitmaps) we end up with a visually beautiful, performant, and ergonomic terminal emulator inside emacs.
+
+* cooked
+
+A terminal emulator for Emacs that knows who should own the keyboard, and hands it back
+when the program you're running wants a line of text rather than keystrokes.
+
+Type a command at a shell prompt and you're editing a line: Emacs owns it, with your
+keybindings, your kill ring, your ~undo~, your completion UI. Run =htop= and every key
+goes straight through, because that's what =htop= needs. Run =ssh= and get a password
+prompt, and cooked asks for it in the minibuffer — where it can be answered from
+auth-source instead of typed.
+
+Nobody toggles a mode to make that happen. cooked works it out.
+
+* Why
+
+Every other terminal in Emacs treats the child as an opaque rectangle of characters and
+has to ask /you/ which mode you're in. cooked reads two signals the terminal already
+carries and answers the question itself:
+
+1. *The kernel's line discipline.* cooked allocates the pty itself, so it can read the
+   child's own termios: canonical mode with echo on is a shell prompt or a =read= loop
+   (Emacs should own the line); canonical with echo off is =getpass(3)= (a secret, answer
+   in the minibuffer); neither is a full-screen program (=vim=, =htop= — keys pass
+   straight through).
+2. *OSC 133 semantic prompts.* Any interactive shell can be made to mark where a prompt
+   starts, where input ends and output begins, and how the command exited. An explicit
+   mark always beats the inferred termios state.
+
+Between the two, cooked knows which program is reading, in what mode, and where each
+command began and ended. That knowledge pays for itself in the everyday stuff:
+
+- *The input line is a buffer* — your keybindings, kill ring and completion, with no
+  forwarding involved.
+- *Passwords land in the minibuffer*, answerable from auth-source or =pass=. No ordinary
+  terminal can do this, because it never learns a password was being asked for.
+- *~next-error~ over one command's output* ([[*Compile integration][more below]]). =M-g
+  M-n= after a failed build walks that build's errors, not the whole scrollback — =make=
+  run as an ordinary command, without ever needing =M-x compile=.
+- *Per-command records* — rerun, copy the command, copy just its output, jump between
+  commands, a fringe marker coloured by exit code.
+- *Real completion from your shell*, so =git checkout <TAB>= offers branches and
+  =kill <TAB>= offers processes with their command lines.
+- *Scrollback that rewraps* when you resize the window, because cooked knows which rows
+  were wrapped rather than newline-terminated.
+
+~cooked-mode~ derives from ~comint-mode~ rather than inventing its own keymap from
+scratch, so the =C-c= bindings you already have from =M-x shell= — =C-c C-c=, =C-c C-d=,
+=C-c C-\=, =C-c M-o= and the rest — mean the same thing here, aimed at the pty instead of
+an Emacs process. Where comint's own idea of a command didn't fit a terminal, cooked kept
+the key and gave it a terminal-shaped implementation instead of picking a new one; see
+[[file:docs/KEYBOARD.md#the-c-c-map-is-comint-shaped-cooked-implemented][docs/KEYBOARD.md]]
+for the full comparison against comint.
+
+* Comparison with other terminal emulators
+
+** Eat
+
+Eat is the most portable of the three: pure Emacs Lisp, nothing to compile, and it works
+wherever Emacs does. It's also a rectangle of characters like any other terminal, with no
+idea where one command ends and the next begins, and it runs on Emacs' own thread, so
+heavy output competes with redisplay. If portability matters more than throughput, or you
+just don't want to touch a compiler, eat is the right choice.
+
+** Vterm
+
+Vterm is powered by =libvterm=, a C library, so it handles large bursts of output that
+would make eat or Emacs' own Term crawl. Like eat, it treats the child as an opaque
+rectangle of characters — no idea where a command starts or ends, so ~vterm-copy-mode~,
+prompt regexps and directory tracking are all guesses at structure the terminal was never
+told — and getting an editable line back means leaving the terminal for a separate,
+read-only mode. If you need raw throughput and don't need cooked's structure, vterm is
+mature and fast.
+
+** cooked
+
+cooked is fast, like vterm, but also knows what eat and vterm structurally can't, because
+it reads the pty instead of treating it as a wire: who's typing, where a command started,
+and how it ended. The common case — type a command, read its output — needs no mode
+switch at all, and a manual peek (=C-c C-v=) covers the one case the signal can't, a
+full-screen program with the whole keyboard. The cost is a Rust toolchain and a build
+step (automatic, but real). If you want that structure and don't mind the toolchain,
+cooked is the pick.
+
+* Installing
+
+You need *Emacs 29.1+* built with dynamic module support, and a *Rust toolchain*
+(1.85+, for edition 2024). Linux and macOS.
+
+The native core is built with =cargo= on first use and rebuilt whenever the Rust sources
+are newer than the artifact, so there's no separate build step to remember. The first
+=M-x cooked= after installing will take a minute and say so.
+
+#+begin_src emacs-lisp
+;; straight.el
+(use-package cooked
+  :straight (cooked :type git :host github :repo "vodik/cooked"
+                    :files ("lisp/*.el"))
+  :commands (cooked cooked-other-window))
+
+;; elpaca
+(use-package cooked
+  :ensure (cooked :host github :repo "vodik/cooked" :files ("lisp/*.el"))
+  :commands (cooked cooked-other-window))
+
+;; package-vc (Emacs 29+)
+(use-package cooked
+  :vc (:url "https://github.com/vodik/cooked" :lisp-dir "lisp" :rev :newest)
+  :commands (cooked cooked-other-window))
+
+;; from a checkout
+(use-package cooked
+  :load-path "/path/to/cooked/lisp"
+  :commands (cooked cooked-other-window))
+#+end_src
+
+Every one of these keeps the whole repository on disk, which matters: the Lisp finds
+=Cargo.toml=, =terminfo/= and =shell-integration/= by walking up from its own resolved
+location, so a =:files= clause that ships only the Lisp is fine, but a hand-rolled
+install that copies the =.el= files somewhere on their own is not. Point
+~cooked-native-module~ at a prebuilt artifact if you package cooked that way.
+
+To try it without installing anything:
+
+#+begin_src sh
+cargo build --release
+emacs -Q -L lisp -l cooked-mode -f cooked
+#+end_src
+
+* Usage
+
+To start cooked, run =M-x cooked= (or =cooked-other-window=). Unlike other Emacs
+terminals, there are no input modes to switch between by hand — cooked has two states
+and moves you between them itself:
+
+- At a shell prompt, Emacs owns the input line, and the usual editing keys work:
+
+  - =RET=: submit the line.
+  - =S-<return>= or =M-RET=: insert a newline instead of submitting, for a multi-line command.
+  - =TAB=: ~completion-at-point~ — your shell's own completion, if ~cooked-shell-completion~ is loaded.
+  - =M-p= / =M-n=: previous/next input, like Comint.
+  - =C-a=: first non-blank column, then column 0 on a second press.
+  - =C-d=: delete a character, or send EOF on an empty line.
+  - =C-r=: forwarded to the shell's own history search.
+
+- Once a full-screen program or a raw =read= loop takes over, every key is sent straight
+  through, =ESC= included, so =M-x= reaches a shell-side Emacs just as it would in a real
+  terminal. =C-c= is the one prefix cooked never forwards, and it's Comint's own — if
+  you've used =M-x shell=, most of this is already muscle memory:
+
+  - =C-c C-c= / =C-c C-\= / =C-c C-d=: interrupt / quit / EOF.
+  - =C-c C-y=: paste the kill ring as typed input.
+  - =C-c C-z=: suspend (=C-z=, as a real terminal sends it).
+  - =C-c C-v=: peek — freeze the display to read back over a program without stalling it.
+  - =C-c C-p= / =C-c C-n=: jump to the previous/next command.
+  - =C-c M-o=: clear the scrollback.
+  - =C-c TAB=: fold a command's output to one line.
+  - =C-c C-q=: send the next key exactly as typed, even =C-c= itself.
+  - =C-c M-x=: run whatever you have =M-x= bound to — the way out, whatever the child is doing.
+
+- A password prompt (=getpass=, no echo) is its own case: cooked asks in the minibuffer
+  instead, so ~cooked-password-function~ can answer it from auth-source or =pass=.
+
+With =(require 'cooked-evil)=, evil's own states decide how much of the keyboard the
+child gets instead: =emacs= hands over everything but =C-c=, =insert= forwards typing but
+keeps =ESC= and =M-x= for Emacs, =normal=/=motion=/=operator= are read-only while the
+child keeps running, and =visual= freezes the display. cooked switches to =emacs= state
+on its own the moment a full-screen program takes the keyboard. =[[=/=]]= move between
+prompts; =vic=/=vac= select a command's output.
+
+See [[file:docs/KEYBOARD.md][docs/KEYBOARD.md]] for the rest.
+
+* Configuration
+
+Most of what cooked can do is off until you ask for it, because a setting that gates code
+already loaded and running is a switch in name only — these are separate files you
+=require=:
+
+#+begin_src emacs-lisp
+(use-package cooked
+  :straight (cooked :type git :host github :repo "vodik/cooked"
+                    :files ("lisp/*.el"))
+  :commands (cooked cooked-other-window
+             cooked-project cooked-project-other-window
+             cooked-here cooked-here-other-window)
+  :config
+  (require 'cooked-evil)
+  (require 'cooked-osc-eval)
+  (require 'cooked-shell-completion)
+  (require 'cooked-file-link)
+  (require 'cooked-next-error)
+  (require 'cooked-command-decorations)
+  (require 'cooked-project)
+  (require 'cooked-process)
+  (cooked-process-mode 1))
+#+end_src
+
+** cooked-evil
+
+Syncs evil's states to who owns the keyboard — see [[*Usage][Usage]] above — and adds the
+=vic=/=vac= text objects and =[[=/=]]= prompt motions.
+
+** cooked-osc-eval
+
+Lets the child ask Emacs to do things: visit a file, open Dired, clear the scrollback.
+Read this one before enabling it — a terminal prints whatever it's given, so a hostile
+=cat= or a compromised host over =ssh= can reach this channel too. What it grants is a
+closed set of verbs cooked implements itself and checks the arguments to, not an open
+name lookup; arbitrary named commands need a second, explicit entry in
+~cooked-eval-commands~. See [[file:docs/FEATURES.md][docs/FEATURES.md]].
+
+** cooked-shell-completion
+
+Answers =TAB= from zsh's or bash's own completion system, over a side channel, instead
+of from Emacs' own completion table — so =git checkout <TAB>= offers branches and
+=kill <TAB>= offers processes with their command lines.
+
+** cooked-file-link
+
+Turns file names that appear in a command's output into clickable links, the way
+=compilation-mode= does for error output.
+
+** cooked-next-error
+
+Wires up [[*Compile integration][compile integration]] inside a cooked buffer — see below.
+
+** cooked-process
+
+Wires up [[*Compile integration][compile integration]] for =M-x compile=, =grep= and the
+rest, outside any cooked buffer at all — see below.
+
+** cooked-command-decorations
+
+A fringe marker per command, coloured by exit status — running, succeeded, failed — so
+you can see how a scrollback full of commands went without reading any of it.
+
+** cooked-project
+
+Scopes a session to the current project root: =cooked-project= reuses one terminal per
+project the way ~project-shell~ does, rather than one per invocation.
+
+** Shell integration
+
+cooked injects its snippet into the zsh and bash shells it starts, so a local session
+needs no setup. =ssh=, =sudo -i=, =docker exec= and anything else that starts a shell
+elsewhere lands outside that injection — the fix is one line in the rc on the far end:
+
+#+begin_src sh
+[[ $TERM_PROGRAM == cooked ]] && source /path/to/cooked/shell-integration/cooked.zsh
+#+end_src
+
+That line works over =ssh= too, which is the reason it exists at all — sourcing it twice
+is a no-op, so having it in your rc /and/ getting injected locally is the normal
+arrangement, not a conflict. Where a shell stays unmarked, cooked says =bare= in the mode
+line.
+
+Set ~cooked-shell-integration~ to =none= to turn injection off, or name a shell to force
+a scheme the basename guess would miss. [[file:docs/SHELL.md][docs/SHELL.md]] has the
+OSC 133 marks in full for anyone writing their own prompt integration, and the wire
+format for the optional command channel.
+
+* Terminal coverage
+
+*Text and rendition.* SGR including truecolor, styled and coloured underlines, insert
+mode, autowrap control, background colour erase, DEC line-drawing, wide characters,
+combining marks, scroll regions, the alternate screen.
+
+*Input.* modifyOtherKeys and the kitty keyboard protocol, bracketed paste, focus
+reporting, mouse press/release/wheel with SGR encoding, alternate scroll.
+
+*OSC.* Title (with the title stack), working directory, hyperlinks, foreground/
+background/cursor colour (queried and set), clipboard, desktop notifications, semantic
+prompts, iTerm2 images, and the optional command/completion channels.
+~cooked-osc-handlers~ is a documented extension point, so teaching cooked a new sequence
+is an entry in an alist, not a change to the native core.
+
+*Links.* OSC 8 hyperlinks are first-class — the core attaches a link id to the covered
+cells and carries it through wraps, rewraps and scrollback eviction. Text that merely
+/looks/ like a URL is linkified by ~goto-address~. With =cooked-file-link= loaded, file
+names in output become links too.
+
+*Box drawing.* Box-drawing and block characters are rasterized to XBM at the current
+cell size rather than left to the font, so borders in =htop=, =ranger= or =fzf= tile
+exactly instead of showing font-dependent seams.
+
+*Images.* The kitty graphics protocol, sixel, and iTerm2 inline images all become real
+Emacs images, one slice per cell, so text can overwrite them and they survive scrolling
+and rewrap.
+
+*Reflow.* Narrowing the window rewraps rather than truncates, on the live screen and in
+scrollback both — narrow and widen back and you get the original layout, because cooked
+records which rows were continuations rather than discarding that.
+
+*Terminfo.* Shipped and compiled on first use, no root needed; =TERM= defaults to
+=cooked-256color= and describes what cooked actually implements rather than borrowing
+xterm's. =M-x cooked-install-terminfo-remote= gets it onto a host you =ssh= into. See
+[[file:docs/TERMINFO.md][docs/TERMINFO.md]].
+
+*Not implemented.* Mouse drag/motion reporting, and vttest-level conformance beyond the
+common paths — vim, htop, tmux and less all work, the long tail is untested. Full list
+in [[file:docs/ROADMAP.md][docs/ROADMAP.md]].
+
+* Compile integration
+
+cooked improves two separate things that both happen to be called "running a build."
+
+*Inside a cooked buffer*, run =make=, a linter, =cargo build= — anything — as an
+ordinary command at the prompt, no =M-x compile= required. The moment it finishes,
+=M-g M-n= / =M-g M-p= (~next-error~) walk its errors and warnings exactly the way they'd
+walk a =*compilation*= buffer, using the same =compilation-error-regexp-alist= patterns.
+It isn't =compilation-mode= wearing a terminal's clothes, either — that assumes a buffer
+that only grows at the end, and this one's live screen gets rewritten in place on every
+drain, which would leave its caches pointing at text that has since changed. Instead each
+=next-error= reparses just the finished command's own output from scratch, scoped to it
+by its OSC 133 record rather than by guessing where the build starts in a wall of
+scrollback. Opt in with =(require 'cooked-next-error)=.
+
+*In =M-x compile= itself* — and =grep=, =rgrep=, =project-find-regexp=, anything built on
+=compilation-start= — ~cooked-process-mode~ gives the child a real pty instead of Emacs'
+default one. That default pty has no size (=stty size= reports =0 0=) and no name Emacs
+sets, which most programs read as "no terminal here": cargo draws no progress bar, a
+child that checks =isatty= before colouring its output stays plain. cooked's emulator
+gives the process a real, sized pty, so it draws what it would draw for a human, and then
+hands `compilation-filter` the *resolved* text rather than raw bytes — carriage returns
+have already overwritten instead of being left for Emacs to delete, escape sequences that
+addressed the screen are spent, and a diagnostic the child wrapped at the pty's width
+arrives rejoined onto one line so =compilation-error-regexp-alist= can still match it. A
+progress bar that keeps rewriting itself is shown as an overlay below the real output
+rather than becoming buffer text, so it can't confuse =next-error= or get left behind as
+scrollback. Enable it globally with =M-x cooked-process-mode= (after
+=(require 'cooked-process)=); it changes nothing about how you invoke =compile= or
+=grep=, only what the child sees and what lands in the buffer afterward.
+
+Neither vterm nor eat has an equivalent to either half: both would need to know where a
+command's output begins and ends to scope a =next-error= search, and neither hooks
+=compilation-start= to fix what stock Emacs hands a build.
+
+* On passwords
+
+The secret never reaches the buffer: it goes out as two writes rather than one
+concatenation, and the native core zeroes its copy afterwards. That's the honest limit,
+though — ~read-passwd~ still builds the string in Emacs' own heap, where the garbage
+collector can leave copies behind that ~clear-string~ never sees. cooked can't promise a
+password leaves no trace in Emacs' address space, and doesn't claim to.
+
+* Documentation
+
+- [[file:docs/KEYBOARD.md][Keyboard]] — what stays with Emacs, how modified keys are spelled, per-program overrides, the evil state discipline
+- [[file:docs/FEATURES.md][Features]] — completion, the OSC 51 command channel, images, box drawing, links, the UI conventions
+- [[file:docs/SHELL.md][Shell]] — the OSC 133 marks, the shipped helpers, and writing your own on top of them
+- [[file:docs/TERMINFO.md][Terminfo]] — why we ship an entry, and every capability in it
+- [[file:docs/IMAGES.md][Images]] — kitty graphics, sixel, iTerm2 inline images
+- [[file:docs/DESIGN.md][Design]] — the grid/buffer seam, the source layout, and the reasoning behind both
+- [[file:docs/ROADMAP.md][Roadmap]] — what is missing, and where this could go
+
+* Contributing
+
+#+begin_src sh
+make test          # cargo test, the ERT suite, clippy, byte-compilation
+make lisp-test     # just the Emacs half
+make bench         # the acceptance gate for the render and write paths
+#+end_src
+
+The suite drives real children — =cat= for the cooked path, =stty -echo= for secrets, a
+real zsh for the OSC 133 path — and each subject file also loads on its own, which is
+what you want while working on one. It runs =-Q=, so packages it tests against (evil,
+for instance) have to actually be installed to be picked up, and it points the shells it
+starts at a scratch =ZDOTDIR= rather than yours, so the tests don't run your prompt.
+
+Linux and macOS are both supported; a new platform is usually one short file under
+=src/platform/=. See [[file:docs/DESIGN.md][docs/DESIGN.md]] for how the pieces fit
+together.
+
+* Licence
+
+GPL-3.0-or-later. =src/emu/parser/= is vte 0.15, vendored from
+[[https://github.com/alacritty/vte][alacritty/vte]] under Apache-2.0 OR MIT; both
+licences sit beside it, and =src/emu/parser/mod.rs= records what was changed and why.
