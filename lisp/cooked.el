@@ -549,13 +549,20 @@ size from font size — the very misalignment this feature exists to remove."
         (puthash key (cooked--render-box-glyph bits width height) cooked--box-glyph-cache))))
 
 (defun cooked--box-glyph-image (bits fg bg attrs &optional window)
-  "Image spec for glyph BITS, colored like `cooked--face' from FG/BG/ATTRS."
+  "Image spec for glyph BITS, colored like `cooked--face' from FG/BG/ATTRS.
+
+`:scale 1' is load-bearing, not a default being restated.  `image-scaling-factor'
+is `auto', which scales every image by cell-width/10 once a cell is wider than
+10 pixels — true of most GUI font sizes.  These bitmaps are already generated at
+exactly the cell size, so letting that apply would resample a pixel-exact 10x20
+stroke up to 12x24 inside a 10x20 cell: borders stop meeting at the cell edge and
+the strokes blur into something no better than the font glyphs this replaces."
   (let* ((window (or window (get-buffer-window (current-buffer)) (selected-window)))
          (reverse (/= 0 (logand attrs cooked--attr-reverse)))
          (fg* (or (cooked--color (if reverse bg fg)) (face-foreground 'default nil t)))
          (bg* (or (cooked--color (if reverse fg bg)) (face-background 'default nil t))))
     (create-image (cooked--box-glyph-bits bits window) 'xbm t
-                 :foreground fg* :background bg* :ascent 'center)))
+                 :foreground fg* :background bg* :ascent 'center :scale 1)))
 
 (defun cooked--overlay-box-glyphs (start glyphs fg bg attrs)
   "Overlay a generated bitmap `display' property on each glyph in GLYPHS.
@@ -579,21 +586,28 @@ level without asking the native core for anything."
   "Regenerate on-screen box-glyph bitmaps for the buffer's current zoom level.
 Reuses the `cooked-box-glyph' property `cooked--overlay-box-glyphs' stashed, so
 this never needs the native core — the classified shape and its colors already
-survive in the buffer."
+survive in the buffer.
+
+Widens first: `cooked-alt-screen-pin' confines the buffer to the screen region
+while a full-screen program is up, and a zoom during that would otherwise
+rescale only the alt frame — leaving every glyph in the scrollback above it
+stuck at the previous font size, visibly mismatched once the pin is released."
   (when (derived-mode-p 'cooked-mode)
     (save-excursion
-      (goto-char (point-min))
-      (let ((window (selected-window))
-            (inhibit-read-only t)) ; the live screen (and scrollback) are read-only text
-        (while (< (point) (point-max))
-          (let ((spec (get-text-property (point) 'cooked-box-glyph))
-                (next (or (next-single-property-change (point) 'cooked-box-glyph)
-                          (point-max))))
-            (when spec
-              (pcase-let ((`(,bits ,fg ,bg ,attrs) spec))
-                (put-text-property (point) (1+ (point)) 'display
-                                   (cooked--box-glyph-image bits fg bg attrs window))))
-            (goto-char next)))))))
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (let ((window (selected-window))
+              (inhibit-read-only t)) ; the live screen (and scrollback) are read-only text
+          (while (< (point) (point-max))
+            (let ((spec (get-text-property (point) 'cooked-box-glyph))
+                  (next (or (next-single-property-change (point) 'cooked-box-glyph)
+                            (point-max))))
+              (when spec
+                (pcase-let ((`(,bits ,fg ,bg ,attrs) spec))
+                  (put-text-property (point) (1+ (point)) 'display
+                                     (cooked--box-glyph-image bits fg bg attrs window))))
+              (goto-char next))))))))
 
 (defun cooked--rescale-box-glyphs-on-zoom (_symbol _newval operation where)
   "React to `text-scale-mode-amount' changing so bitmaps track the zoom level.

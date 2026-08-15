@@ -1572,5 +1572,45 @@ must not take the binding away."
       (text-scale-increase 1)
       (should-not (eq before (get-text-property (point-min) 'display))))))
 
+;; `image-scaling-factor' defaults to `auto', which scales images by cell-width/10
+;; on most GUI font sizes.  These bitmaps are generated at exactly the cell size, so
+;; any scaling breaks the pixel-exactness the whole feature exists for — the glyphs
+;; stop meeting at cell boundaries and blur back into looking like font characters.
+(ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((image (get-text-property (point-min) 'display)))
+      (should (eq (car image) 'image))
+      (should (equal (plist-get (cdr image) :scale) 1)))))
+
+;; The two features meet here: box glyphs live in the scrollback, and the alt pin
+;; narrows the buffer away from it.  A zoom while a full-screen program is up must
+;; still reach the glyphs above the restriction, or they stay at the old pixel size
+;; and only reveal it — mismatched against their neighbours — once the pin lifts.
+(ert-deftest cooked-box-drawing-rescales-above-the-alt-screen-pin ()
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((glyph (point-min))
+          (before (get-text-property (point-min) 'display)))
+      ;; Pin the buffer to a screen region starting below the glyph, as entering the
+      ;; alt screen does.
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert "\n"))
+      (setq cooked--screen-start (copy-marker (point-max)))
+      (setq cooked--alt t)
+      (let ((cooked-alt-screen-pin 'narrow))
+        (cooked--apply-alt-pin))
+      (should cooked--narrowed)
+      (should (< glyph (point-min)))
+      (text-scale-increase 1)
+      (save-restriction
+        (widen)
+        (should-not (eq before (get-text-property glyph 'display)))))))
+
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here
