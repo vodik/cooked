@@ -1,0 +1,27 @@
+# terminfo for cooked, the Emacs terminal emulator.
+#
+# Compile with:  tic -x -o ~/.terminfo terminfo/cooked.ti
+#
+# Derived from xterm-256color, then corrected: the point of shipping an entry is
+# to describe what we actually implement, so applications stop reaching for
+# capabilities we quietly ignore.
+#
+# Removed:
+#   ccc, initc  palette redefinition via OSC 4, which we do not parse
+#   flash       visual bell via DECSCNM (private mode 5), which we do not implement
+#
+# Added:
+#   Tc, setrgbf, setrgbb  direct colour, which xterm-256color does not advertise
+#   even though we support it (COLORTERM=truecolor is a convention, not a capability)
+
+cooked-256color|cooked terminal emulator for Emacs,
+	Tc,
+	ccc@,
+	initc@,
+	flash@,
+	setrgbf=\E[38:2::%p1%d:%p2%d:%p3%dm,
+	setrgbb=\E[48:2::%p1%d:%p2%d:%p3%dm,
+	use=xterm-256color,
+
+cooked|cooked terminal emulator for Emacs,
+	use=cooked-256color,

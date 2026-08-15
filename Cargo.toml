@@ -1,0 +1,22 @@
+[package]
+name = "cooked"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+description = "Terminal emulator core for Emacs, with termios and OSC 133 awareness"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc = "0.2"
+nix = { version = "0.31", features = ["fs", "poll", "process", "pthread", "signal", "term"] }
+unicode-width = "0.2"
+vte = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
