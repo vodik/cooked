@@ -123,6 +123,11 @@ see `cooked--literal-codes' for why this cannot simply be assumed.")
 (declare-function cooked--bracketed-paste-p "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
+;; `signal' refuses a symbol with no `error-conditions' property, so the native
+;; core's `io_error' would otherwise itself fail with "Invalid error symbol"
+;; the first time a pty operation errors.
+(define-error 'cooked-error "cooked: I/O error")
+
 (defun cooked-session-p (object)
   "Whether OBJECT is a session handle made by the native core.
 

@@ -125,8 +125,18 @@ impl Pty {
         unlockpt(&master).map_err(nixerr)?;
         let name = compat::slave_name(&master)?;
 
-        set_winsize(master.as_fd(), size)?;
-
+        // The child sets its own initial size, on its own slave fd, in `child_exec`. Not
+        // done here on the parent side first: macOS's ptmx master refuses every
+        // termios/winsize ioctl — `TIOCSWINSZ`, even `tcgetattr` — with `ENOTTY` until some
+        // process has opened the slave and kept it open, and the child is the process that
+        // does that; a parent-side `open`, transient or not, is at best redundant and at
+        // worst races the child's own for that same "first" slot in ways this crate no
+        // longer tries to guess at (see `resize`). It would also sit right before `fork`,
+        // which on its own reliably deadlocked a child inside its own `open` on macOS in a
+        // real, multithreaded session — almost certainly a lock some other thread held at
+        // fork time with nobody left in the child to release it. A single isolated fork
+        // never reproduced it; it took the accumulated threads of a real session to see it.
+        //
         // Everything the child needs is allocated above; between fork and exec we touch
         // only async-signal-safe calls. `libc::fork` rather than `nix::unistd::fork` for
         // the same reason `child_exec` is raw: nix's wrapper runs registered `atfork`
@@ -134,7 +144,7 @@ impl Pty {
         let master_fd = master.as_raw_fd();
         let child = check(unsafe { libc::fork() })?;
         if child == 0 {
-            unsafe { child_exec(name.as_ptr(), master_fd, program.as_ptr(), &cargv, &cenvp, ccwd.as_deref()) }
+            unsafe { child_exec(name.as_ptr(), master_fd, size, program.as_ptr(), &cargv, &cenvp, ccwd.as_deref()) }
         }
 
         Ok(Self { master, child: Pid(child), reaped: std::sync::atomic::AtomicBool::new(false) })
@@ -161,6 +171,14 @@ impl Pty {
         }
     }
 
+    /// Match the emulator's idea of the terminal size to `size`.
+    ///
+    /// A single attempt, deliberately: this can be called synchronously from Lisp, and a
+    /// native module function must never block the thread holding the `emacs_env` on a
+    /// retry loop. Immediately after `spawn`, before the child has opened its slave,
+    /// macOS's ptmx master answers no termios/winsize ioctl at all — `session::Session`
+    /// is the layer that knows what to do with that `ENOTTY`, by way of its already-running
+    /// reader thread; see `Session::resize`.
     pub fn resize(&self, size: Winsize) -> io::Result<()> {
         set_winsize(self.master.as_fd(), size)
     }
@@ -316,9 +334,8 @@ fn open_master() -> io::Result<PtyMaster> {
     }
 }
 
-// The one ioctl left on the parent side. nix's `ioctl_write_ptr_bad!` would generate an
-// equivalent `unsafe fn` returning `Result`, which is a lateral move for a single call
-// that already goes through `check`.
+// nix's `ioctl_write_ptr_bad!` would generate an equivalent `unsafe fn` returning
+// `Result`, which is a lateral move for a single call that already goes through `check`.
 fn set_winsize(fd: BorrowedFd<'_>, size: Winsize) -> io::Result<()> {
     let ws = libc::winsize::from(size);
     check(unsafe { libc::ioctl(fd.as_raw_fd(), compat::TIOCSWINSZ, &raw const ws) }).map(drop)
@@ -337,6 +354,7 @@ fn set_winsize(fd: BorrowedFd<'_>, size: Winsize) -> io::Result<()> {
 unsafe fn child_exec(
     slave: *const libc::c_char,
     master: libc::c_int,
+    size: Winsize,
     program: *const libc::c_char,
     argv: &[*const libc::c_char],
     envp: &[*const libc::c_char],
@@ -358,6 +376,12 @@ unsafe fn child_exec(
         if fd == -1 || libc::ioctl(fd, compat::TIOCSCTTY, 0) == -1 {
             die();
         }
+        // Best-effort: this is the first slave open, which is also the first moment any
+        // termios/winsize ioctl is legal on macOS (see `Pty::resize`), so it happens here
+        // rather than being left to race the parent's own attempt at it. A wrong initial
+        // size self-heals at the caller's next `resize`, so it is not worth `die`-ing over.
+        let ws = libc::winsize::from(size);
+        libc::ioctl(fd, compat::TIOCSWINSZ, &raw const ws);
         for target in 0..=2 {
             if libc::dup2(fd, target) == -1 {
                 die();
@@ -507,7 +531,10 @@ mod tests {
         let pty = Pty::spawn(&["/bin/sh", "-c", "stty -echo; read x"], &[("TERM", "dumb")], size, None).expect("spawn");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
-            if pty.mode().unwrap() == Mode::Secret {
+            // `mode()` can transiently fail immediately after spawn, before the child has
+            // opened its slave (see `Pty::resize`'s doc comment) — tolerated the same way
+            // `session::sample_mode` tolerates it: an `Err` this cycle just means try again.
+            if pty.mode().is_ok_and(|mode| mode == Mode::Secret) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));

@@ -35,6 +35,9 @@ struct Shared {
     pty: Pty,
     term: Mutex<Term>,
     mode: AtomicU8,
+    /// A `resize` that arrived before the child had opened its slave, for the reader
+    /// thread to retry. See `Session::resize`.
+    pending_resize: Mutex<Option<Winsize>>,
     /// Set when a wakeup byte is in flight; cleared by the drain, so a burst of output
     /// costs one write and one Lisp callback rather than thousands.
     notified: AtomicBool,
@@ -116,6 +119,7 @@ impl Session {
             pty,
             term: Mutex::new(Term::new(size.rows.into(), size.cols.into())),
             mode: AtomicU8::new(mode as u8),
+            pending_resize: Mutex::new(None),
             notified: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             quit: Quit::new()?,
@@ -177,13 +181,28 @@ impl Session {
         self.shared.pty.write(bytes)
     }
 
+    /// Resize the emulator and, if the child is already attached, the pty itself.
+    ///
+    /// `Pty::resize` is a single, non-blocking attempt — this runs on the thread holding
+    /// the `emacs_env`, so it must never wait out a retry. Immediately after `spawn`, before
+    /// the child has opened its slave, that attempt fails with `ENOTTY`; rather than
+    /// surface that to the caller (or block until it clears), the requested size is stashed
+    /// for the reader thread's already-running loop to apply once the pty is ready — the
+    /// same "not yet, try again soon" shape `sample_mode` already uses for the same
+    /// underlying transient.
     pub fn resize(&self, size: Winsize) -> io::Result<()> {
         self.shared
             .term
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .resize(size.rows.into(), size.cols.into());
-        self.shared.pty.resize(size)
+        match self.shared.pty.resize(size) {
+            Err(e) if e.raw_os_error() == Some(libc::ENOTTY) => {
+                *self.shared.pending_resize.lock().unwrap_or_else(|e| e.into_inner()) = Some(size);
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     pub fn mode(&self) -> Mode {
@@ -247,6 +266,12 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         if sample_mode(shared) {
             notify(shared, wake);
         }
+
+        // A `resize` that arrived before the child opened its slave (see `Session::resize`)
+        // is retried here, on the same cadence as `sample_mode` above and for the same
+        // reason: this transient clears within microseconds of `spawn` returning, so the
+        // next tick of a loop that is already running is enough — no dedicated wait needed.
+        apply_pending_resize(shared);
 
         if !ready {
             continue;
@@ -314,6 +339,16 @@ fn sample_mode(shared: &Arc<Shared>) -> bool {
         shared.store_mode(mode);
         changed
     })
+}
+
+/// Retry a `resize` stashed by `Session::resize`, clearing it once it lands.
+fn apply_pending_resize(shared: &Arc<Shared>) {
+    let mut pending = shared.pending_resize.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(size) = *pending
+        && shared.pty.resize(size).is_ok()
+    {
+        *pending = None;
+    }
 }
 
 fn notify(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
