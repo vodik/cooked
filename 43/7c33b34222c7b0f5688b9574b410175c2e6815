@@ -1,0 +1,23 @@
+src/emu/glyph.rs
+  s_0eb5d38d914af3::t_0a2573344c87f0 9-11,57-60,87-90,110-123,199-200,346-380,520-549
+src/emu/term.rs
+  s_0eb5d38d914af3::t_95de851e0af70e 1071-1089
+lisp/cooked.el
+  s_0eb5d38d914af3::t_526e227799aaf0 95-97,100-101,426-447,457-468
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "437c33b34222c7b0f5688b9574b410175c2e6815",
+  "prompts": {},
+  "sessions": {
+    "s_0eb5d38d914af3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6634bbe2-de82-45e7-a551-e7712bf23bca",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
