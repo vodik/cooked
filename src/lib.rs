@@ -9,7 +9,7 @@ pub mod env;
 pub mod pty;
 pub mod session;
 
-use emu::{Color, Event, Run, Style};
+use emu::{BoxGlyph, Color, Event, Run, Style};
 use env::{Env, Error, Result, Runtime, Value};
 use pty::Winsize;
 use session::{Session, Update};
@@ -331,6 +331,12 @@ impl Update {
     /// `insert`, and a flood is tens of thousands of rows: one insert of one string
     /// plus spans only where styling exists beats N inserts and N property calls,
     /// and it keeps roughly a million cons cells from crossing the boundary.
+    ///
+    /// Deliberately does not carry `run.glyphs`: box-drawing UIs are overwhelmingly
+    /// alt-screen programs, and `on_alt` already skips eviction into scrollback
+    /// entirely (see `State::evicted`), so scrolled box-glyph content is rare enough
+    /// that it isn't worth this path's cost discipline. It renders as plain styled
+    /// text, exactly as before this feature existed.
     fn scrolled_rows(&self, env: &Env, rejoin: bool) -> Result<Value> {
         if self.delta.scrolled.is_empty() {
             return Ok(env.nil());
@@ -369,7 +375,9 @@ impl Update {
     }
 }
 
-/// `(TEXT FG BG ATTRS)` — colors are nil, an index, or `(R G B)`.
+/// `(TEXT FG BG ATTRS GLYPHS)` — colors are nil, an index, or `(R G B)`; GLYPHS is nil
+/// for a plain-text run or a list of raw `BoxGlyph` bit patterns, one per character in
+/// TEXT, for a run of classified box-drawing/block-element glyphs.
 fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
     let Style { fg, bg, attrs } = run.style;
     env.list(&[
@@ -377,7 +385,25 @@ fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
         color_to_lisp(env, fg)?,
         color_to_lisp(env, bg)?,
         env.into_lisp(u32::from(attrs.bits()))?,
+        glyphs_to_lisp(env, run.glyphs.as_deref())?,
     ])
+}
+
+/// `nil`, or a list of raw `BoxGlyph` bit patterns, one per character. A dedicated
+/// helper rather than a blanket conversion so this can take a borrowed slice —
+/// `run_to_lisp` only borrows `run`, and cloning `Vec<BoxGlyph>` per drained row is
+/// needless allocation on a path this codebase is otherwise careful about (see
+/// `scrolled_rows`'s doc comment on avoiding exactly this class of cost).
+fn glyphs_to_lisp(env: &Env, glyphs: Option<&[BoxGlyph]>) -> Result<Value> {
+    match glyphs {
+        None => Ok(env.nil()),
+        Some(glyphs) => env.list(
+            &glyphs
+                .iter()
+                .map(|g| env.into_lisp(u32::from(g.bits())))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+    }
 }
 
 fn color_to_lisp(env: &Env, color: Color) -> Result<Value> {

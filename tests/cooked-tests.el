@@ -1240,5 +1240,32 @@ must not take the binding away."
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
 
+(ert-deftest cooked-box-drawing-gets-a-display-property ()
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))))
+
+(ert-deftest cooked-box-drawing-images-disabled-falls-back-to-plain-text ()
+  (let ((cooked-box-drawing-images nil))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "┌" (cooked-tests--text)))))
+      (should-not (get-text-property (point-min) 'display)))))
+
+(ert-deftest cooked-box-drawing-rescales-on-zoom ()
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    ;; Zoom regenerates the image in place, purely from the `cooked-box-glyph'
+    ;; property already in the buffer — no round-trip to the native core, so this
+    ;; holds regardless of whether batch Emacs' font backend reports a different
+    ;; pixel size than the one it started with.
+    (let ((before (get-text-property (point-min) 'display)))
+      (text-scale-increase 1)
+      (should-not (eq before (get-text-property (point-min) 'display))))))
+
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here

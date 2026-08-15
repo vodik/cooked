@@ -3,6 +3,8 @@
 use std::ops::{BitAnd, BitOr, BitOrAssign, Not};
 use unicode_width::UnicodeWidthChar;
 
+use super::glyph::{self, BoxGlyph};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum Color {
     #[default]
@@ -107,10 +109,14 @@ impl Cell {
 }
 
 /// A styled run of text — the unit the Lisp side turns into propertized buffer text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Run {
     pub text: String,
     pub style: Style,
+    /// One classified shape per character in `text`, index-aligned with
+    /// `text.chars()`; `None` for an ordinary text run. Never mixed with a `None`
+    /// run even when `style` matches — see `Row::runs`.
+    pub glyphs: Option<Vec<BoxGlyph>>,
 }
 
 /// A single line of the terminal, with combining marks held in a rare-path side table.
@@ -234,13 +240,24 @@ impl Row {
             .enumerate()
             .filter(|(_, c)| !c.is_continuation())
             .fold(Vec::<Run>::new(), |mut runs, (col, cell)| {
+                let shape = glyph::classify(cell.ch);
                 match runs.last_mut() {
-                    Some(run) if run.style == cell.style => run.text.push(cell.ch),
+                    Some(run)
+                        if run.style == cell.style && run.glyphs.is_some() == shape.is_some() =>
+                    {
+                        run.text.push(cell.ch);
+                        if let Some(glyphs) = &mut run.glyphs {
+                            glyphs.push(shape.expect("glyphs.is_some() == shape.is_some()"));
+                        }
+                    }
                     _ => runs.push(Run {
                         text: String::from(cell.ch),
                         style: cell.style,
+                        glyphs: shape.map(|g| vec![g]),
                     }),
                 }
+                // Combining marks never legitimately attach to a box-drawing base
+                // character, so no glyph padding is needed to keep `glyphs` aligned.
                 if let (Some(marks), Some(run)) = (self.marks_at(col), runs.last_mut()) {
                     run.text.push_str(marks);
                 }
@@ -281,10 +298,87 @@ mod tests {
             runs[0],
             Run {
                 text: "hi".into(),
-                style: red
+                style: red,
+                ..Default::default()
             }
         );
         assert_eq!(runs[1].text, "!");
+    }
+
+    #[test]
+    fn box_glyphs_do_not_merge_with_adjacent_plain_text() {
+        let mut row = Row::new(4);
+        let style = Style::default();
+        row.set(0, Cell { ch: 'a', style });
+        row.set(
+            1,
+            Cell {
+                ch: '\u{2500}',
+                style,
+            },
+        ); // ─, same style as its neighbors
+        row.set(2, Cell { ch: 'b', style });
+
+        let runs = row.runs();
+        assert_eq!(
+            runs.len(),
+            3,
+            "box-glyph run must split even though style matches"
+        );
+        assert!(runs[0].glyphs.is_none());
+        assert!(runs[1].glyphs.is_some());
+        assert!(runs[2].glyphs.is_none());
+    }
+
+    #[test]
+    fn adjacent_box_glyphs_of_the_same_style_merge_into_one_run() {
+        let mut row = Row::new(4);
+        let style = Style::default();
+        for (i, c) in "\u{250C}\u{2500}\u{2510}".chars().enumerate() {
+            row.set(i, Cell { ch: c, style });
+        }
+
+        let runs = row.runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "\u{250C}\u{2500}\u{2510}");
+        let glyphs = runs[0].glyphs.as_ref().expect("box-glyph run");
+        assert_eq!(
+            glyphs.len(),
+            3,
+            "one descriptor per character, index-aligned"
+        );
+        assert_eq!(glyphs[0].kind(), glyph::Kind::Line);
+        assert!(!glyphs[0].is_arc());
+    }
+
+    #[test]
+    fn box_glyph_run_splits_on_style_change() {
+        let mut row = Row::new(4);
+        let red = Style {
+            fg: Color::Indexed(1),
+            ..Style::default()
+        };
+        row.set(
+            0,
+            Cell {
+                ch: '\u{2500}',
+                style: Style::default(),
+            },
+        );
+        row.set(
+            1,
+            Cell {
+                ch: '\u{2500}',
+                style: red,
+            },
+        );
+
+        let runs = row.runs();
+        assert_eq!(
+            runs.len(),
+            2,
+            "style change still splits runs within box-glyph content"
+        );
     }
 
     #[test]

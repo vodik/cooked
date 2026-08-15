@@ -73,6 +73,37 @@ so a theme that styles those faces wins."
    ansi-color-bright-cyan ansi-color-bright-white]
   "Faces the theme is expected to style, indexed by ANSI color number.")
 
+(defcustom cooked-box-drawing-images t
+  "Whether to render box-drawing and block-element characters as generated bitmaps.
+
+On by default: most monospace fonts draw ─│┌┐└┘├┤┬┴┼ and the block-shade
+characters (▀▄█▌▐░▒▓ etc.) with glyph-to-glyph inconsistencies, highly visible
+in full-screen programs like htop, ranger and fzf that rely on these
+characters forming continuous borders.  Cooked classifies these characters in
+its native core and renders them as small generated bitmaps sized to the
+current font and colored from the active theme — the same approach VTE, Kitty
+and Alacritty take.
+
+Falls back to plain colored text, exactly as when this is nil, if Emacs lacks
+XBM image support or bitmap generation fails for a glyph."
+  :type 'boolean
+  :group 'cooked)
+
+;; Mirrors the bit layout of `BoxGlyph' in src/emu/glyph.rs — kept in sync by hand,
+;; the same way `cooked--attr-*' above mirrors `Attrs'. Line glyphs: four 2-bit
+;; edge-weight fields (up/down/left/right, 0=none 1=light 2=heavy 3=double) packed
+;; into bits 0-7, plus an arc flag at bit 8. Block glyphs: bit 15 set, a 3-bit
+;; direction in bits 0-2, an 4-bit fill amount in bits 3-6.
+(defconst cooked--box-kind-block (ash 1 15))
+(defconst cooked--box-arc (ash 1 8))
+(defconst cooked--box-direction-up 0)
+(defconst cooked--box-direction-down 1)
+(defconst cooked--box-direction-left 2)
+(defconst cooked--box-direction-right 3)
+(defconst cooked--box-direction-full 4)
+(defconst cooked--box-direction-shade 5)
+(defconst cooked--box-direction-quadrant 6)
+
 (defvar-local cooked--session nil "Handle returned by `cooked--spawn'.")
 (defvar-local cooked--wake nil "Pipe process Rust pokes when output is pending.")
 (defvar-local cooked--rows 24)
@@ -96,6 +127,14 @@ see `cooked--literal-codes' for why this cannot simply be assumed.")
 (defvar-local cooked--mode 'cooked)
 (defvar-local cooked--exit nil)
 (defvar-local cooked--face-cache nil)
+(defvar-local cooked--box-glyph-cache nil
+  "Descriptor+pixel-size -> raw XBM bitmap, memoized per buffer.
+
+Colorless by construction: the cached value is a shape only, colorized live
+via :foreground/:background at `create-image' time, so unlike
+`cooked--face-cache' this needs no theme-change invalidation — only pixel-size
+changes (zoom, font change) miss the cache key, naturally, with no extra
+plumbing.")
 
 ;; Rendering lives here, interaction in cooked-mode.el, and redisplay has to call
 ;; into it: applying an update needs to know who owns the keyboard.
@@ -238,7 +277,11 @@ the Lisp — a system package, or a build directory somewhere else."
         (t (cooked--xterm-256 spec))))
 
 (defun cooked--flush-face-cache (&rest _)
-  "Forget resolved colors so a new theme applies to subsequent output."
+  "Forget resolved colors so a new theme applies to subsequent output.
+
+Deliberately does not touch `cooked--box-glyph-cache': that cache holds
+colorless shape bitmaps, colorized live at display time, so it has nothing a
+theme change could make stale."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (and (derived-mode-p 'cooked-mode) (hash-table-p cooked--face-cache))
@@ -279,18 +322,267 @@ the Lisp — a system package, or a build directory somewhere else."
                    face)
                  cooked--face-cache))))
 
+;;;; Box-drawing / block-element bitmaps
+;;
+;; The native core classifies U+2500-U+259F characters into a compact shape
+;; descriptor (see BoxGlyph in src/emu/glyph.rs) instead of handing them over as
+;; opaque text, so fonts are never trusted for these characters — the same reason
+;; VTE, Kitty and Alacritty stopped trusting the font for this range: glyph-to-glyph
+;; inconsistency breaks continuous borders in full-screen programs like htop/ranger.
+;;
+;; Rendering is a themed XBM mask: the bitmap itself is colorless shape data,
+;; colorized live via :foreground/:background at `create-image' time, so
+;; `cooked--box-glyph-cache' never needs the theme-flush treatment `cooked--face-cache'
+;; gets — only pixel-size (zoom, font change) is part of its cache key.
+
+(defun cooked--box-bitmap-make (width height)
+  "A HEIGHT x WIDTH grid of booleans, all initially nil."
+  (let ((grid (make-vector height nil)))
+    (dotimes (y height)
+      (aset grid y (make-vector width nil)))
+    grid))
+
+(defun cooked--box-bitmap-fill-rect (grid width height x0 y0 x1 y1)
+  "Set every pixel of GRID in [X0,X1) x [Y0,Y1), clamped to WIDTH x HEIGHT."
+  (let ((x0 (max 0 x0)) (y0 (max 0 y0)) (x1 (min width x1)) (y1 (min height y1)))
+    (let ((y y0))
+      (while (< y y1)
+        (let ((row (aref grid y)) (x x0))
+          (while (< x x1)
+            (aset row x t)
+            (setq x (1+ x))))
+        (setq y (1+ y))))))
+
+(defun cooked--box-bitmap-pack (grid width height)
+  "Pack boolean GRID into the (WIDTH HEIGHT DATA) shape `create-image' wants for
+an inline `xbm', DATA a unibyte string with each row byte-aligned, LSB first."
+  (let* ((row-bytes (ceiling width 8))
+         (data (make-string (* row-bytes height) 0)))
+    (dotimes (y height)
+      (let ((row (aref grid y)))
+        (dotimes (x width)
+          (when (aref row x)
+            (let ((i (+ (* y row-bytes) (/ x 8))))
+              (aset data i (logior (aref data i) (ash 1 (mod x 8)))))))))
+    (list width height data)))
+
+(defun cooked--box-weight (bits shift)
+  (logand (ash bits (- shift)) 3))
+
+(defun cooked--box-draw-edge (grid width height cx cy edge weight light-t heavy-t)
+  "Draw one edge of a line glyph from the cell center outward."
+  (cond
+   ((= weight 0) nil) ; no edge
+   ((= weight 3) (cooked--box-draw-double-edge grid width height cx cy edge))
+   (t (let* ((thickness (if (= weight 2) heavy-t light-t))
+             (half (/ thickness 2)))
+        (pcase edge
+          ('up (cooked--box-bitmap-fill-rect grid width height
+                                             (- cx half) 0 (+ cx (- thickness half)) (1+ cy)))
+          ('down (cooked--box-bitmap-fill-rect grid width height
+                                               (- cx half) cy (+ cx (- thickness half)) height))
+          ('left (cooked--box-bitmap-fill-rect grid width height
+                                               0 (- cy half) (1+ cx) (+ cy (- thickness half))))
+          ('right (cooked--box-bitmap-fill-rect grid width height
+                                                cx (- cy half) width (+ cy (- thickness half)))))))))
+
+(defun cooked--box-draw-double-edge (grid width height cx cy edge)
+  "Two parallel 1px strokes with a 1px gap, for `Weight::Double' edges."
+  (pcase edge
+    ('up (progn
+           (cooked--box-bitmap-fill-rect grid width height (- cx 2) 0 (1- cx) (1+ cy))
+           (cooked--box-bitmap-fill-rect grid width height (1+ cx) 0 (+ cx 2) (1+ cy))))
+    ('down (progn
+             (cooked--box-bitmap-fill-rect grid width height (- cx 2) cy (1- cx) height)
+             (cooked--box-bitmap-fill-rect grid width height (1+ cx) cy (+ cx 2) height)))
+    ('left (progn
+             (cooked--box-bitmap-fill-rect grid width height 0 (- cy 2) (1+ cx) (1- cy))
+             (cooked--box-bitmap-fill-rect grid width height 0 (1+ cy) (1+ cx) (+ cy 2))))
+    ('right (progn
+              (cooked--box-bitmap-fill-rect grid width height cx (- cy 2) width (1- cy))
+              (cooked--box-bitmap-fill-rect grid width height cx (1+ cy) width (+ cy 2))))))
+
+(defun cooked--box-draw-arc (grid width height cx cy thickness down-p right-p)
+  "A quarter-circle connecting the two present edges of a rounded corner.
+
+The circle's center sits at whichever cell corner combines the two connected
+directions (e.g. down+right puts it at the bottom-right corner) — the only
+points within the cell rectangle that are within its radius then form exactly
+the arc between the two tangent edge midpoints, with no extra clipping needed."
+  (let* ((ccx (if right-p width 0))
+         (ccy (if down-p height 0))
+         (r (float (min cx cy)))
+         (half (/ thickness 2.0)))
+    (dotimes (y height)
+      (dotimes (x width)
+        (let* ((dx (- x ccx)) (dy (- y ccy))
+               (dist (sqrt (+ (* dx dx) (* dy dy) 0.0))))
+          (when (<= (abs (- dist r)) half)
+            (aset (aref grid y) x t)))))))
+
+(defun cooked--box-draw-line (grid width height bits)
+  (let* ((up (cooked--box-weight bits 0))
+         (down (cooked--box-weight bits 2))
+         (left (cooked--box-weight bits 4))
+         (right (cooked--box-weight bits 6))
+         (cx (/ width 2))
+         (cy (/ height 2))
+         (light-t (max 1 (/ (min width height) 8)))
+         (heavy-t (max 2 (/ (min width height) 4))))
+    (if (/= 0 (logand bits cooked--box-arc))
+        (cooked--box-draw-arc grid width height cx cy light-t (/= down 0) (/= right 0))
+      (progn
+        (cooked--box-draw-edge grid width height cx cy 'up up light-t heavy-t)
+        (cooked--box-draw-edge grid width height cx cy 'down down light-t heavy-t)
+        (cooked--box-draw-edge grid width height cx cy 'left left light-t heavy-t)
+        (cooked--box-draw-edge grid width height cx cy 'right right light-t heavy-t)))))
+
+(defun cooked--box-draw-shade (grid width height level)
+  "An ordered-dither approximation of the three shade densities (░▒▓)."
+  (dotimes (y height)
+    (dotimes (x width)
+      (when (pcase level
+              (1 (and (evenp x) (evenp y)))
+              (2 (evenp (+ x y)))
+              (_ (not (and (evenp x) (evenp y)))))
+        (aset (aref grid y) x t)))))
+
+(defun cooked--box-draw-quadrant (grid width height mask)
+  "Fill whichever quarters of the cell MASK selects (upper-left=1, upper-right=2,
+lower-left=4, lower-right=8), for the ten 2x2 quadrant glyphs."
+  (let ((hw (/ (1+ width) 2)) (hh (/ (1+ height) 2)))
+    (when (/= 0 (logand mask 1)) (cooked--box-bitmap-fill-rect grid width height 0 0 hw hh))
+    (when (/= 0 (logand mask 2)) (cooked--box-bitmap-fill-rect grid width height hw 0 width hh))
+    (when (/= 0 (logand mask 4)) (cooked--box-bitmap-fill-rect grid width height 0 hh hw height))
+    (when (/= 0 (logand mask 8)) (cooked--box-bitmap-fill-rect grid width height hw hh width height))))
+
+(defun cooked--box-draw-block (grid width height bits)
+  (let* ((direction (logand bits 7))
+         (fraction (logand (ash bits -3) 15)))
+    (cond
+     ((= direction cooked--box-direction-full)
+      (cooked--box-bitmap-fill-rect grid width height 0 0 width height))
+     ((= direction cooked--box-direction-up)
+      (cooked--box-bitmap-fill-rect grid width height 0 0 width (round (* height (/ fraction 8.0)))))
+     ((= direction cooked--box-direction-down)
+      (let ((h (round (* height (/ fraction 8.0)))))
+        (cooked--box-bitmap-fill-rect grid width height 0 (- height h) width height)))
+     ((= direction cooked--box-direction-left)
+      (cooked--box-bitmap-fill-rect grid width height 0 0 (round (* width (/ fraction 8.0))) height))
+     ((= direction cooked--box-direction-right)
+      (let ((w (round (* width (/ fraction 8.0)))))
+        (cooked--box-bitmap-fill-rect grid width height (- width w) 0 width height)))
+     ((= direction cooked--box-direction-shade)
+      (cooked--box-draw-shade grid width height fraction))
+     ((= direction cooked--box-direction-quadrant)
+      (cooked--box-draw-quadrant grid width height fraction)))))
+
+(defun cooked--render-box-glyph (bits width height)
+  "Raw XBM bitmap for glyph descriptor BITS at WIDTH x HEIGHT pixels."
+  (let ((grid (cooked--box-bitmap-make width height)))
+    (if (/= 0 (logand bits cooked--box-kind-block))
+        (cooked--box-draw-block grid width height bits)
+      (cooked--box-draw-line grid width height bits))
+    (cooked--box-bitmap-pack grid width height)))
+
+(defun cooked--box-glyph-bits (bits window)
+  "Cached raw bitmap for glyph descriptor BITS at WINDOW's current font size.
+
+Sized from `window-font-width'/`window-font-height' rather than
+`frame-char-width'/`frame-char-height': the latter ignore `text-scale-mode's
+per-buffer face remapping, so zooming just this buffer would desync bitmap
+size from font size — the very misalignment this feature exists to remove."
+  (let* ((width (window-font-width window 'default))
+         (height (window-font-height window 'default))
+         (key (list bits width height)))
+    (or (gethash key cooked--box-glyph-cache)
+        (puthash key (cooked--render-box-glyph bits width height) cooked--box-glyph-cache))))
+
+(defun cooked--box-glyph-image (bits fg bg attrs &optional window)
+  "Image spec for glyph BITS, colored like `cooked--face' from FG/BG/ATTRS."
+  (let* ((window (or window (get-buffer-window (current-buffer)) (selected-window)))
+         (reverse (/= 0 (logand attrs cooked--attr-reverse)))
+         (fg* (or (cooked--color (if reverse bg fg)) (face-foreground 'default nil t)))
+         (bg* (or (cooked--color (if reverse fg bg)) (face-background 'default nil t))))
+    (create-image (cooked--box-glyph-bits bits window) 'xbm t
+                 :foreground fg* :background bg* :ascent 'center)))
+
+(defun cooked--overlay-box-glyphs (start glyphs fg bg attrs)
+  "Overlay a generated bitmap `display' property on each glyph in GLYPHS.
+
+Box-drawing characters are always single-column and a merged run can mix
+shapes, so this is one `display' property per character rather than one
+spanning the whole run.  Also stashes `cooked-box-glyph', the raw descriptor
+plus its colors, so `cooked--rescale-box-glyphs' can regenerate at a new zoom
+level without asking the native core for anything."
+  (condition-case nil
+      (let ((pos start))
+        (dolist (bits glyphs)
+          (put-text-property pos (1+ pos) 'cooked-box-glyph (list bits fg bg attrs))
+          (put-text-property pos (1+ pos) 'display (cooked--box-glyph-image bits fg bg attrs))
+          (setq pos (1+ pos))))
+    ;; A cosmetic feature must never break rendering: any failure here leaves the
+    ;; plain face-only text `cooked--insert-runs' already inserted.
+    (error nil)))
+
+(defun cooked--rescale-box-glyphs ()
+  "Regenerate on-screen box-glyph bitmaps for the buffer's current zoom level.
+Reuses the `cooked-box-glyph' property `cooked--overlay-box-glyphs' stashed, so
+this never needs the native core — the classified shape and its colors already
+survive in the buffer."
+  (when (derived-mode-p 'cooked-mode)
+    (save-excursion
+      (goto-char (point-min))
+      (let ((window (selected-window))
+            (inhibit-read-only t)) ; the live screen (and scrollback) are read-only text
+        (while (< (point) (point-max))
+          (let ((spec (get-text-property (point) 'cooked-box-glyph))
+                (next (or (next-single-property-change (point) 'cooked-box-glyph)
+                          (point-max))))
+            (when spec
+              (pcase-let ((`(,bits ,fg ,bg ,attrs) spec))
+                (put-text-property (point) (1+ (point)) 'display
+                                   (cooked--box-glyph-image bits fg bg attrs window))))
+            (goto-char next)))))))
+
+(defun cooked--rescale-box-glyphs-on-zoom (_symbol _newval operation where)
+  "React to `text-scale-mode-amount' changing so bitmaps track the zoom level.
+
+A variable watcher rather than advice on `text-scale-set' or
+`text-scale-mode-hook': in current Emacs, `text-scale-increase'/`-decrease' are
+native subrs that do not reliably dispatch back through the Lisp-visible
+`text-scale-set' symbol, so advice on it can silently never fire, and a
+define-minor-mode body is not guaranteed to re-run its hook on every amount
+change once the mode is already active. The buffer-local amount variable
+itself is the one thing every zoom entry point actually sets."
+  (when (eq operation 'set)
+    (with-current-buffer (or where (current-buffer))
+      (when (derived-mode-p 'cooked-mode)
+        (cooked--rescale-box-glyphs)))))
+
+(add-variable-watcher 'text-scale-mode-amount #'cooked--rescale-box-glyphs-on-zoom)
+
 (defun cooked--insert-runs (runs)
-  "Insert RUNS, each (TEXT FG BG ATTRS), with faces applied.
+  "Insert RUNS, each (TEXT FG BG ATTRS GLYPHS), with faces applied.
 
 Both `face' and `font-lock-face' are set.  comint leaves `font-lock-defaults'
 at (nil t), so any fontification of this buffer unfontifies it first and would
-strip a bare `face' property — taking every colour with it."
+strip a bare `face' property — taking every colour with it.
+
+GLYPHS is nil for a plain-text run, or a list of raw box-glyph descriptors (one
+per character, see src/emu/glyph.rs) classified by the native core.  When
+present, and `cooked-box-drawing-images' allows it, each character additionally
+gets a generated bitmap `display' property so it renders as a pixel-exact
+shape instead of whatever the font happens to draw for that codepoint."
   (dolist (run runs)
-    (pcase-let ((`(,text ,fg ,bg ,attrs) run))
-      (let ((start (point)))
+    (pcase-let ((`(,text ,fg ,bg ,attrs ,glyphs) run))
+      (let ((start (point))
+            (face (cooked--face fg bg attrs)))
         (insert text)
-        (when-let* ((face (cooked--face fg bg attrs)))
-          (add-text-properties start (point) (list 'face face 'font-lock-face face)))))))
+        (when face
+          (add-text-properties start (point) (list 'face face 'font-lock-face face)))
+        (when (and glyphs cooked-box-drawing-images (image-type-available-p 'xbm))
+          (cooked--overlay-box-glyphs start glyphs fg bg attrs))))))
 
 ;;;; Rendering
 
@@ -462,6 +754,7 @@ it still flickers.  Takes effect for sessions started after it is set."
 EXTRA-ENV is an alist prepended to the child's environment."
   (cooked--load-module)
   (setq cooked--face-cache (make-hash-table :test #'equal))
+  (setq cooked--box-glyph-cache (make-hash-table :test #'equal))
   (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
     (setq cooked--rows rows cooked--cols cols))
   (let ((inhibit-read-only t))
