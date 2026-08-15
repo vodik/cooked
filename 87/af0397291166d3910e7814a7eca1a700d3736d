@@ -1,0 +1,19 @@
+lisp/cooked-evil.el
+  s_8a86176f057752::t_684ec75f2e9b68 23-32,34-42,72-101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "87af0397291166d3910e7814a7eca1a700d3736d",
+  "prompts": {},
+  "sessions": {
+    "s_8a86176f057752": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b1f564b6-f936-4951-a46c-8824d7df13db",
+        "model": "unknown"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
