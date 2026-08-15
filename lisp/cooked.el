@@ -441,6 +441,22 @@ gets both, and floors, so a row that is only half visible is not a row we
 claim to have."
   (floor (window-body-height window t) (window-default-line-height window)))
 
+(defcustom cooked-min-redisplay-interval 0.008
+  "Floor, in seconds, on how often a session triggers a redisplay.
+
+Without one, a child that rewrites the same line rapidly -- a spinner, a
+progress meter -- drives one full Emacs redisplay per write, far more than
+any of them are actually meant to be seen at, which shows up as flicker.
+Modelled on `eat-minimum-latency', though a matching ceiling on the other
+end is not needed: the native core always holds the latest terminal state
+regardless of whether a redisplay was requested for it, and retries a
+throttled one on every read cycle, so nothing is ever stranded behind this.
+
+Lower it if the terminal feels less responsive than it should; raise it if
+it still flickers.  Takes effect for sessions started after it is set."
+  :type 'number
+  :group 'cooked)
+
 (defun cooked--start (argv &optional directory extra-env)
   "Spawn ARGV in the current buffer, optionally in DIRECTORY.
 EXTRA-ENV is an alist prepended to the child's environment."
@@ -460,7 +476,8 @@ EXTRA-ENV is an alist prepended to the child's environment."
                                      (lambda (_proc _string) (cooked--on-wake buffer)))))
   (setq cooked--session
         (cooked--spawn argv (cooked--child-environment extra-env) cooked--rows cooked--cols cooked--wake
-                      (and directory (expand-file-name directory))))
+                      (and directory (expand-file-name directory))
+                      (round (* 1000 cooked-min-redisplay-interval))))
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)
@@ -529,7 +546,12 @@ jumped somewhere absurd.  Name it instead."
       (cooked--handle-event event))
     (cooked--fit-screen)
     (cooked--pad-to-cursor)
-    (setq-local cursor-type (if (nth 2 cooked--cursor) t nil))
+    ;; Written only on an actual change: reassigning it to the same value on every
+    ;; drain was perturbing the cursor's blink phase on each redraw, one more small
+    ;; contributor to flicker on a line the child rewrites rapidly.
+    (let ((visible (and (nth 2 cooked--cursor) t)))
+      (unless (eq cursor-type visible)
+        (setq-local cursor-type visible)))
     (cooked--restore-pending-input pending)
     (cooked--protect (if (and (cooked--input-state-p) cooked--input-start)
                         (marker-position cooked--input-start)

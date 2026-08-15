@@ -41,7 +41,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
     }
 
     let registered = [
-        env.defun("cooked--spawn", 5..=6, DOC_SPAWN, spawn),
+        env.defun("cooked--spawn", 5..=7, DOC_SPAWN, spawn),
         env.defun("cooked--drain", 1..=2, DOC_DRAIN, drain),
         env.defun("cooked--send", 2..=2, "Write STRING to the pty of SESSION.", send),
         env.defun("cooked--reply-osc", 4..=4, DOC_REPLY_OSC, reply_osc),
@@ -62,8 +62,11 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 }
 
 const DOC_SPAWN: &str = "Spawn ARGV on a new pty and return a session handle.
-Arguments are ARGV, ENV, ROWS, COLS, WAKE and optional DIRECTORY. ENV is an alist of
-strings. WAKE is a pipe process whose filter runs when output is pending.";
+Arguments are ARGV, ENV, ROWS, COLS, WAKE, optional DIRECTORY, and optional
+MIN-REDISPLAY-INTERVAL. ENV is an alist of strings. WAKE is a pipe process whose filter
+runs when output is pending. MIN-REDISPLAY-INTERVAL, in milliseconds, floors how often a
+rapidly-rewriting child (a spinner, a progress meter) triggers a redisplay; it defaults to
+8 when omitted or nil.";
 
 const DOC_DRAIN: &str = "Collect everything that changed in SESSION since the last call.
 Returns a plist with :scrolled, :rows, :cursor, :alt, :keys, :mode, :events and :exit.
@@ -128,9 +131,18 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
     };
     let wake = env.open_channel(args[4])?;
     let cwd = args.get(5).copied().map(|v| env.from_lisp::<Option<String>>(v)).transpose()?.flatten();
+    let min_redisplay_interval_ms =
+        args.get(6).copied().map(|v| env.from_lisp::<Option<i64>>(v)).transpose()?.flatten().unwrap_or(8).max(0) as u64;
 
-    let session = Session::spawn(&argv, &vars, size, cwd.as_ref().map(std::path::Path::new), wake)
-        .map_err(|e| io_error(&env, e))?;
+    let session = Session::spawn(
+        &argv,
+        &vars,
+        size,
+        cwd.as_ref().map(std::path::Path::new),
+        wake,
+        std::time::Duration::from_millis(min_redisplay_interval_ms),
+    )
+    .map_err(|e| io_error(&env, e))?;
     env.user_ptr(session)
 }
 

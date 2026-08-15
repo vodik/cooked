@@ -38,9 +38,25 @@ struct Shared {
     /// A `resize` that arrived before the child had opened its slave, for the reader
     /// thread to retry. See `Session::resize`.
     pending_resize: Mutex<Option<Winsize>>,
+    /// Set when output or a mode change has not yet been announced over the wake pipe;
+    /// cleared once `flush_notify` actually writes. Distinct from `notified`: this tracks
+    /// whether there is anything new to say, that one tracks whether we have already said
+    /// it and Emacs has not yet drained.
+    dirty: AtomicBool,
     /// Set when a wakeup byte is in flight; cleared by the drain, so a burst of output
     /// costs one write and one Lisp callback rather than thousands.
     notified: AtomicBool,
+    /// When the wake pipe was last actually written to, for `min_redisplay_interval`.
+    last_notified: Mutex<Option<std::time::Instant>>,
+    /// Floor on how often the wake pipe is written to, regardless of how fast output
+    /// arrives. Without one, a program that rewrites the same line rapidly — a spinner, a
+    /// progress meter — drives one full Emacs redisplay per write, which is a lot more
+    /// redraws than any of them are actually meant to be seen at and shows up as flicker.
+    /// No matching ceiling is needed the way `eat-maximum-latency` provides one: `Term`
+    /// always holds the latest state regardless of whether a wakeup was sent for it, and
+    /// `flush_notify` is retried every reader-thread tick (bounded by `POLL_TIMEOUT_MS`
+    /// even when no new output arrives), so a throttled notification is never stranded.
+    min_redisplay_interval: std::time::Duration,
     shutdown: AtomicBool,
     quit: Quit,
     exited: Mutex<Option<i32>>,
@@ -103,6 +119,7 @@ impl Session {
         size: Winsize,
         cwd: Option<&Path>,
         wake: RawFd,
+        min_redisplay_interval: std::time::Duration,
     ) -> io::Result<Self> {
         // Take ownership of the wake descriptor and mark it close-on-exec *before*
         // forking. `open_channel` hands it over without FD_CLOEXEC (verified: children
@@ -120,7 +137,10 @@ impl Session {
             term: Mutex::new(Term::new(size.rows.into(), size.cols.into())),
             mode: AtomicU8::new(mode as u8),
             pending_resize: Mutex::new(None),
+            dirty: AtomicBool::new(false),
             notified: AtomicBool::new(false),
+            last_notified: Mutex::new(None),
+            min_redisplay_interval,
             shutdown: AtomicBool::new(false),
             quit: Quit::new()?,
             exited: Mutex::new(None),
@@ -264,7 +284,7 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         // Sampled rather than pushed: Linux does not report ICANON/ECHO changes. The poll
         // timeout bounds the latency, and an unchanged mode costs nothing.
         if sample_mode(shared) {
-            notify(shared, wake);
+            announce(shared, wake);
         }
 
         // A `resize` that arrived before the child opened its slave (see `Session::resize`)
@@ -272,6 +292,11 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         // reason: this transient clears within microseconds of `spawn` returning, so the
         // next tick of a loop that is already running is enough — no dedicated wait needed.
         apply_pending_resize(shared);
+
+        // Retries a notification `min_redisplay_interval` throttled earlier. Unconditional
+        // so a quiet period still gets the last bit of output flushed within one more poll
+        // cycle, rather than waiting on the next read that may never come.
+        flush_pending(shared, wake);
 
         if !ready {
             continue;
@@ -281,7 +306,7 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         // fills and the child blocks in `write`, so output waits instead of being
         // dropped or piling up in memory faster than Emacs can render it.
         if shared.term.lock().is_ok_and(|term| term.backlog() >= emu::BACKLOG_HIGH_WATER) {
-            notify(shared, wake);
+            announce(shared, wake);
             std::thread::sleep(std::time::Duration::from_millis(2));
             continue;
         }
@@ -293,7 +318,7 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
                 // A child that changes mode almost always writes at the same moment, so
                 // re-sampling here is what makes the common case feel instantaneous.
                 sample_mode(shared);
-                notify(shared, wake);
+                announce(shared, wake);
             }
             // EIO is how Linux reports the last slave closing.
             Err(e) if e.raw_os_error() == Some(libc::EIO) => return finish(shared, wake, Ended::ChildGone),
@@ -351,6 +376,11 @@ fn apply_pending_resize(shared: &Arc<Shared>) {
     }
 }
 
+/// Unconditionally sends the wake byte if none is already in flight.
+///
+/// Used directly only by `finish`: a session ending must reach Emacs right away, and
+/// `min_redisplay_interval` is about redraw cadence, not about delaying "the child is
+/// gone." Everywhere else goes through `announce`.
 fn notify(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
     if shared.notified.swap(true, Ordering::SeqCst) {
         return;
@@ -359,6 +389,29 @@ fn notify(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
     if nix::unistd::write(wake, b"\x01").is_err() {
         shared.shutdown.store(true, Ordering::SeqCst);
     }
+}
+
+/// Marks output or a mode change as pending and flushes it if `min_redisplay_interval`
+/// allows. See `Shared`'s docs on `dirty` and `min_redisplay_interval`.
+fn announce(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
+    shared.dirty.store(true, Ordering::SeqCst);
+    flush_pending(shared, wake);
+}
+
+/// Sends the wake byte if something is pending, nothing is already in flight, and
+/// `min_redisplay_interval` has elapsed since the last send.
+fn flush_pending(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
+    if shared.notified.load(Ordering::SeqCst) || !shared.dirty.load(Ordering::SeqCst) {
+        return;
+    }
+    let mut last = shared.last_notified.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|t| t.elapsed() < shared.min_redisplay_interval) {
+        return;
+    }
+    *last = Some(std::time::Instant::now());
+    drop(last);
+    shared.dirty.store(false, Ordering::SeqCst);
+    notify(shared, wake);
 }
 
 #[cfg(test)]
@@ -381,7 +434,10 @@ mod tests {
         let (read, write) = pipe();
         let size = Winsize { rows: 24, cols: 80 };
         let fd = std::os::fd::IntoRawFd::into_raw_fd(write);
-        (Session::spawn(argv, &[("TERM", "xterm-256color")], size, None, fd).expect("spawn"), read)
+        (
+            Session::spawn(argv, &[("TERM", "xterm-256color")], size, None, fd, Duration::from_millis(8)).expect("spawn"),
+            read,
+        )
     }
 
     fn wait_for(session: &Session, mut done: impl FnMut(&Update) -> bool) -> Update {
