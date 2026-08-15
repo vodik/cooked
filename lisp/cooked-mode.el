@@ -206,15 +206,40 @@ every capital into a lowercase letter."
                         (t basic))))
         (if (memq 'meta mods) (concat "\e" (string char)) (string char)))))))
 
+(defun cooked--track-wandering ()
+  "Notice a command moving point off the child's cursor, or back onto it.
+
+Runs from `post-command-hook' because Emacs' own motions produce no output:
+nothing is drained, so a redraw cannot be what discovers that point has moved."
+  (setq cooked--wandered
+        (and (memq (cooked--policy) '(alt raw))
+             ;; Scrollback is the reading case, already handled by `follow'.
+             (cooked--screen-cell)
+             (not (cooked--at-child-cursor-p))))
+  (cooked--update-ghost-cursor))
+
+(defun cooked--snap-to-cursor ()
+  "Return point to the child's cursor before handing it a key.
+
+Typing is the moment the keyboard goes back, so it is the moment to stop
+pretending point is anywhere else — the child will act at its own cursor
+whatever Emacs is showing, and the ghost has been marking that spot."
+  (when (and cooked--wandered (memq (cooked--policy) '(alt raw)))
+    (goto-char (cooked--cursor-position))
+    (setq cooked--wandered nil)
+    (cooked--update-ghost-cursor)))
+
 (defun cooked-send-key ()
   "Send the key that invoked this command straight to the child."
   (interactive)
   (when-let* ((bytes (cooked--encode-event last-command-event)))
+    (cooked--snap-to-cursor)
     (cooked--send cooked--session bytes)))
 
 (defun cooked-send-string (string)
   "Send STRING to the child."
   (interactive "sSend: ")
+  (cooked--snap-to-cursor)
   (cooked--send cooked--session string))
 
 (defconst cooked--escape-key ?\C-c
@@ -244,8 +269,48 @@ and the rest keep working."
 
 (defconst cooked--mouse-buttons
   '((mouse-1 . 0) (mouse-2 . 1) (mouse-3 . 2)
-    (wheel-up . 64) (wheel-down . 65) (mouse-4 . 64) (mouse-5 . 65))
+    ;; A GUI frame spells the wheel `wheel-up'; a terminal spells the same notch
+    ;; `mouse-4', because that is what X10 numbered it.  Both reach here.
+    (wheel-up . 64) (wheel-down . 65) (mouse-4 . 64) (mouse-5 . 65)
+    (wheel-left . 66) (wheel-right . 67) (mouse-6 . 66) (mouse-7 . 67))
   "Terminal button numbers for Emacs mouse events.")
+
+(defconst cooked--wheel-events
+  '(wheel-up wheel-down wheel-left wheel-right mouse-4 mouse-5 mouse-6 mouse-7)
+  "Events carrying a wheel notch rather than a button that can be held.")
+
+(defconst cooked--mouse-map
+  (let ((map (make-sparse-keymap)))
+    (dolist (event (append '(down-mouse-1 mouse-1 down-mouse-2 mouse-2
+                             down-mouse-3 mouse-3)
+                           cooked--wheel-events))
+      (define-key map (vector event) #'cooked-mouse-event))
+    map)
+  "Mouse bindings for when the child has asked to receive them.
+
+Lives in `emulation-mode-map-alists' rather than in `cooked-raw-map' because a
+major mode's local map is near the bottom of Emacs' lookup order, under every
+enabled minor mode.  `pixel-scroll-precision-mode' binds `wheel-up' and
+`wheel-down' in its own minor-mode map, so on a GUI frame it took the wheel
+before the local map was ever consulted — and scrolled the buffer out from
+under a program that had asked for those notches.  A terminal frame did not
+show this, because there the wheel arrives as `mouse-4'/`mouse-5', which
+pixel-scroll does not bind.
+
+Modified variants are deliberately absent: `C-wheel-up' should keep scaling
+text, and shift-scrolling should keep working, as they do in any other buffer.")
+
+(defvar-local cooked--mouse-grab nil
+  "Whether the child both wants the mouse and owns the keyboard.
+Gates `cooked--mouse-map'; nil everywhere else, so the entry in
+`emulation-mode-map-alists' is inert outside a session that asked for it.")
+
+(defvar cooked--mouse-map-alist `((cooked--mouse-grab . ,cooked--mouse-map))
+  "The `emulation-mode-map-alists' entry activating `cooked--mouse-map'.")
+
+(defun cooked--update-mouse-grab ()
+  "Recompute whether `cooked--mouse-map' should be in force."
+  (setq cooked--mouse-grab (and cooked--mouse (not (cooked--input-state-p)))))
 
 (defun cooked--mouse-cell (event)
   "Screen row and column of EVENT, or nil if it is outside the screen."
@@ -257,6 +322,10 @@ and the rest keep working."
         (cons (count-lines (marker-position cooked--screen-start) (line-beginning-position))
               (current-column))))))
 
+(defun cooked--cursor-cell ()
+  "The cursor's own screen cell, as a fallback position for a wheel notch."
+  (cons (nth 0 cooked--cursor) (nth 1 cooked--cursor)))
+
 (defun cooked--mouse-report (button row col pressed)
   "Encode a mouse report, preferring SGR because X10 cannot count past 223."
   (if cooked--mouse-sgr
@@ -267,11 +336,23 @@ and the rest keep working."
   "Forward the mouse to the child, or fall back to Emacs' own behaviour."
   (interactive)
   (let* ((event last-input-event)
-         (button (cdr (assq (event-basic-type event) cooked--mouse-buttons)))
-         (cell (and cooked--mouse button (cooked--mouse-cell event))))
+         (basic (event-basic-type event))
+         (button (cdr (assq basic cooked--mouse-buttons)))
+         (wheel (memq basic cooked--wheel-events))
+         ;; A notch has nowhere to land when the pointer is over a part of the
+         ;; window with no text under it.  Scrolling Emacs instead would move the
+         ;; buffer out from under a program that asked to receive the wheel, so
+         ;; the cursor's cell stands in — the child cares about the direction.
+         (cell (and cooked--mouse button
+                    (or (cooked--mouse-cell event)
+                        (and wheel (cooked--cursor-cell))))))
     (if (null cell)
         (cooked--mouse-fallback event)
-      (let ((pressed (not (memq 'click (event-modifiers event)))))
+      ;; A wheel notch is always a press.  Emacs reports it as a click, which the
+      ;; usual `click' test would encode as a release — and a release of buttons
+      ;; 64/65 is a report every application discards, so the scroll would vanish
+      ;; on the way to a child that had asked for it.
+      (let ((pressed (or wheel (not (memq 'click (event-modifiers event))))))
         (cooked--send cooked--session
                       (cooked--mouse-report button (car cell) (cdr cell) pressed))))))
 
@@ -335,9 +416,36 @@ and the rest keep working."
 
 ;;;; Pending input
 
+(defun cooked--policy ()
+  "How the buffer should behave right now: `cooked', `raw' or `alt'.
+
+Derived rather than reported, because no single source knows the answer.  The
+alt screen comes from the child's own output, the line discipline is sampled
+from termios, and the prompt state comes from OSC 133 -- and the three
+disagree routinely.  A shell sits in termios raw mode at every prompt, because
+readline does its own editing; a full-screen program can start while the last
+OSC 133 mark still says `prompt-end'.
+
+Alt wins over everything.  It is the one state in which the child has taken the
+screen over completely, so Emacs owns neither the keyboard nor the viewport --
+and it is in-band, arriving at an exact position in the byte stream, where the
+termios mode is sampled on a poll and is only approximately timed."
+  (cond (cooked--alt 'alt)
+        ;; A password read forwards keys too; the minibuffer collects them.
+        ((eq cooked--mode 'secret) 'raw)
+        ((eq cooked--mode 'cooked) 'cooked)
+        ((eq cooked--semantic 'input) 'cooked)
+        (t 'raw)))
+
+(defun cooked--secret-p ()
+  "Whether the child is reading with echo off.
+An overlay on the policy rather than one of its values: it says how input is
+collected, not who owns the screen."
+  (eq cooked--mode 'secret))
+
 (defun cooked--input-state-p ()
   "Whether Emacs should be editing rather than passing keys through."
-  (or (eq cooked--mode 'cooked) (eq cooked--semantic 'input)))
+  (eq (cooked--policy) 'cooked))
 
 (defun cooked--pending-input ()
   "The text the user has typed but not yet submitted."
@@ -580,6 +688,7 @@ to follow the input/raw switch can use it without cooked knowing about it.")
   (use-local-map (if (cooked--input-state-p) cooked-input-map cooked-raw-map))
   (unless (cooked--input-state-p)
     (setq cooked--input-start nil cooked--input-end nil))
+  (cooked--update-mouse-grab)
   (run-hooks 'cooked-state-change-hook))
 
 (defun cooked--semantic (event)
@@ -745,15 +854,51 @@ which it usually is not.  Walk the frame's windows instead."
   "Install the hooks that cannot be buffer-local."
   (add-hook 'window-size-change-functions #'cooked--frame-size-changed))
 
+(defcustom cooked-kill-buffer-on-exit nil
+  "Whether the session buffer is killed when the child exits.
+
+nil keeps the buffer, exit status and all, which is the point of running the
+terminal inside Emacs: the transcript outlives the command.  t kills it,
+`on-success' kills it only for a zero status — the shell-in-a-window habit,
+where a failure is the one case you still want to read.  A function is called
+with the exit code and kills the buffer when it returns non-nil.
+
+The buffer is killed from a timer rather than mid-redraw, so `kill-buffer-hook'
+and anything watching the buffer list see an ordinary kill."
+  :type '(choice (const :tag "Keep the buffer" nil)
+                 (const :tag "Always kill it" t)
+                 (const :tag "Kill it only on a zero exit status" on-success)
+                 (function :tag "Function of the exit code"))
+  :group 'cooked)
+
+(defun cooked--kill-buffer-on-exit-p (code)
+  "Whether `cooked-kill-buffer-on-exit' wants the buffer killed for CODE."
+  (pcase cooked-kill-buffer-on-exit
+    ('nil nil)
+    ('on-success (eql code 0))
+    ((and (pred functionp) f) (funcall f code))
+    (_ t)))
+
 (defun cooked--on-exit (code)
   "Report that the child exited with CODE and stop the session."
+  ;; A child can die while still on the alt screen — killed from outside, or
+  ;; crashed mid-redraw — and nothing later would widen the buffer for it.
+  (setq cooked--alt nil)
+  (cooked--release-alt-pin)
   (let ((inhibit-read-only t))
     (save-excursion
       (goto-char (point-max))
       (insert (format "\n[exited %s]\n" code))))
   (when cooked--session (ignore-errors (cooked--kill cooked--session)))
   (when cooked--wake (delete-process cooked--wake))
-  (setq cooked--session nil cooked--wake nil))
+  (setq cooked--session nil cooked--wake nil)
+  ;; Deferred: this runs from inside the drain, which keeps working with the
+  ;; buffer and its locals after we return.  Killing here would pull them out
+  ;; from under it, and would run `kill-buffer-hook' — arbitrary user code —
+  ;; halfway through a redraw.
+  (when (cooked--kill-buffer-on-exit-p code)
+    (let ((buffer (current-buffer)))
+      (run-at-time 0 nil (lambda () (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (defface cooked-failure '((t :inherit error))
   "Face for a non-zero exit status in the mode line."
@@ -767,10 +912,15 @@ which it usually is not.  Walk the frame's windows instead."
   "Compact indicator: what is running, who owns the keyboard, how it went."
   (let ((code (cooked-last-exit-code)))
     (concat
-     (pcase cooked--mode
-       ('cooked " edit")
-       ('secret " secret")
-       (_ (if (eq cooked--semantic 'input) " edit" " raw")))
+     ;; Echo state is an overlay on the policy, but it subsumes it in the indicator:
+     ;; a password read always forwards keys, so " raw secret" says nothing " secret"
+     ;; does not already imply.
+     (if (cooked--secret-p)
+         " secret"
+       (pcase (cooked--policy)
+         ('cooked " edit")
+         ('alt " alt")
+         (_ " raw")))
      ;; The title is the shell's own summary of the running command.
      (when (and cooked--title (not (string-empty-p cooked--title)))
        (propertize (format " %s" (truncate-string-to-width cooked--title 24 nil nil t))
@@ -790,8 +940,12 @@ to the child verbatim."
               comint-input-ring-size 500
               truncate-lines (not cooked-rejoin-wrapped-lines)
               mode-line-process '(:eval (cooked--mode-line)))
+  ;; Above every minor mode, so a program that asked for the wheel gets it even
+  ;; where `pixel-scroll-precision-mode' has claimed the same events.
+  (add-to-list 'emulation-mode-map-alists 'cooked--mouse-map-alist)
   (cooked--install-global-hooks)
   (add-hook 'pre-command-hook #'cooked--snap-to-input nil t)
+  (add-hook 'post-command-hook #'cooked--track-wandering nil t)
   (add-hook 'completion-at-point-functions #'cooked-completion-at-point nil t)
   (add-hook 'window-configuration-change-hook #'cooked--sync-size nil t)
   (add-hook 'kill-buffer-hook #'cooked--cleanup nil t))

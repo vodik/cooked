@@ -34,6 +34,18 @@ impl Region {
     }
 }
 
+/// What a width change does to the rows already on the grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resize {
+    /// Rewrap the logical lines to the new width, which is what the primary screen needs:
+    /// its rows are a transcript, and cutting them destroys text Emacs has never seen.
+    Rewrap,
+    /// Leave the grid a plain rectangle, which is all the alternate screen can be. It holds
+    /// one program's drawing rather than a history, that program redraws on SIGWINCH, and
+    /// rewrapping a half-finished frame would only garble what it is about to replace.
+    Clamp,
+}
+
 /// How much of a line or the display an erase touches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Erase {
@@ -278,18 +290,38 @@ impl Screen {
         }
     }
 
-    pub fn erase_display(&mut self, how: Erase) {
+    /// Erase, returning rows that became scrollback.
+    ///
+    /// Only `All` yields any, and only off an unpartitioned screen. Clearing the whole
+    /// display is the child discarding a screen it has finished with — `clear` and the
+    /// shell's `C-l` both arrive here — and blanking those rows in place deleted a
+    /// screenful of transcript from the Emacs buffer with them. xterm loses it too, which
+    /// is why `clear -x` exists; but history here belongs to Emacs, not to the grid, so
+    /// the grid has no business dropping it.
+    ///
+    /// A partial erase archives nothing: the child is rewriting part of a screen it is
+    /// still drawing on, not finishing with one.
+    pub fn erase_display(&mut self, how: Erase) -> Vec<Row> {
         let (row, last) = (self.cursor.row, self.rows.len());
         match how {
             Erase::ToEnd => {
                 self.erase_line(Erase::ToEnd);
                 self.clear_rows(row + 1..last);
+                Vec::new()
             }
             Erase::ToStart => {
                 self.clear_rows(0..row);
                 self.erase_line(Erase::ToStart);
+                Vec::new()
             }
-            Erase::All => self.clear_rows(0..last),
+            Erase::All => {
+                let history = match self.archives() && self.rows.iter().any(|r| !r.is_blank()) {
+                    true => self.rows[..=self.last_used_row()].to_vec(),
+                    false => Vec::new(),
+                };
+                self.clear_rows(0..last);
+                history
+            }
         }
     }
 
@@ -399,7 +431,16 @@ impl Screen {
     /// instead — the obvious implementation — pushes the visible prompt into scrollback
     /// while keeping the empty rows underneath it, so the transcript gains a duplicate of
     /// whatever was on screen.
-    pub fn resize(&mut self, rows: usize, cols: usize) -> Vec<Row> {
+    ///
+    /// A width change under [`Resize::Rewrap`] re-lays the grid out instead of cutting it;
+    /// see [`Screen::reflow`]. Not when a scroll region is set: the rows either side of the
+    /// margins belong to different drawings, so there are no logical lines spanning the
+    /// screen to recover, and `archives` already names exactly that condition.
+    pub fn resize(&mut self, rows: usize, cols: usize, mode: Resize) -> Vec<Row> {
+        if mode == Resize::Rewrap && cols != self.cols && self.archives() {
+            return self.reflow(rows, cols);
+        }
+
         if cols != self.cols {
             self.cols = cols;
             self.tabs = default_tabs(cols);
@@ -434,6 +475,87 @@ impl Screen {
         evicted
     }
 
+    /// Rewrap the grid to `rows` by `cols`, returning rows pushed off the top as history.
+    ///
+    /// The live grid is a transcript Emacs has not been given yet, so cutting it to a
+    /// narrower width destroys text outright — which is what running `ps` and then
+    /// narrowing the frame used to do. `Row::wrapped` records which rows are continuations
+    /// rather than lines of their own, and that is enough to recover the lines the child
+    /// actually printed and chunk them again at the new width.
+    ///
+    /// Scrollback has always worked this way: it keeps one buffer line per logical line and
+    /// lets Emacs re-wrap it for display. This gives the live screen the same property, and
+    /// with it the round trip — narrowing and widening back returns the original layout,
+    /// because the wrap provenance is preserved rather than destroyed.
+    fn reflow(&mut self, rows: usize, cols: usize) -> Vec<Row> {
+        // The same bound the shrink path uses, so the blank rows below the content are
+        // still absorbed first rather than being rewrapped into a screenful of nothing.
+        let keep = self.last_used_row().max(self.cursor.row) + 1;
+
+        let mut lines: Vec<Logical> = Vec::new();
+        let (mut cursor_line, mut cursor_offset) = (0, 0);
+        let mut continuing = false;
+        for (index, row) in self.rows[..keep].iter().enumerate() {
+            if !continuing {
+                lines.push(Logical::default());
+            }
+            let line = lines
+                .last_mut()
+                .expect("a line is opened before a row is pushed");
+            let base = line.push_row(row);
+            if index == self.cursor.row {
+                cursor_line = lines.len() - 1;
+                // A pending wrap is the cursor standing one past the last column, which is
+                // exactly one past the last cell of the line so far.
+                cursor_offset = base + self.cursor.col + usize::from(self.cursor.wrap_pending);
+            }
+            continuing = row.wrapped;
+        }
+
+        // The cursor is free to sit past the end of its line's text — on a blank row, or in
+        // the gap a `goto` left. Chunking has to produce a row for wherever it is.
+        if let Some(line) = lines.get_mut(cursor_line) {
+            if line.cells.len() < cursor_offset {
+                line.cells.resize(cursor_offset, Cell::default());
+            }
+        }
+
+        let mut grid: Vec<Row> = Vec::new();
+        let mut cursor = Cursor::default();
+        for (index, line) in lines.iter().enumerate() {
+            let chunks = line.chunk(cols);
+            if index == cursor_line {
+                let (row, col, wrap_pending) = place(cursor_offset, cols, chunks.len());
+                cursor = Cursor {
+                    row: grid.len() + row,
+                    col,
+                    wrap_pending,
+                };
+            }
+            grid.extend(chunks);
+        }
+
+        // Rewrapping narrower makes more rows than it consumed; the ones that no longer fit
+        // leave the top, which is where history goes from.
+        let overflow = grid.len().saturating_sub(rows);
+        let history: Vec<Row> = grid.drain(..overflow).collect();
+        grid.resize(rows, Row::new(cols));
+
+        self.rows = grid;
+        self.cols = cols;
+        self.tabs = default_tabs(cols);
+        self.cursor = Cursor {
+            row: cursor
+                .row
+                .saturating_sub(overflow)
+                .min(rows.saturating_sub(1)),
+            ..cursor
+        };
+        self.dirty = vec![true; rows];
+        self.reset_region();
+        history
+    }
+
     /// Text of the current line up to the cursor — the password prompt lives here.
     pub fn line_text(&self, row: usize) -> Option<String> {
         self.rows.get(row).map(Row::to_text)
@@ -450,6 +572,91 @@ impl Screen {
 
 fn default_tabs(cols: usize) -> Vec<bool> {
     (0..cols).map(|i| i % 8 == 0 && i != 0).collect()
+}
+
+/// Where an offset into a chunked logical line lands: row within the chunks, column, and
+/// whether the cursor is holding a deferred wrap there.
+fn place(offset: usize, cols: usize, chunks: usize) -> (usize, usize, bool) {
+    match (offset / cols, offset % cols) {
+        // Exactly at the end of the last chunk. Rather than invent a row below it, express
+        // it as `Screen::write` does: parked on the last column with the wrap deferred.
+        (row, 0) if row > 0 && row >= chunks => (row - 1, cols - 1, true),
+        (row, col) => (row.min(chunks.saturating_sub(1)), col, false),
+    }
+}
+
+/// A line as the child printed it, before the grid cut it into rows.
+///
+/// The unit a rewrap preserves, reassembled from the rows a `wrapped` chain covers. Marks
+/// are keyed by offset within `cells` rather than by screen column, since the column a
+/// cell will end up in is not known until it is chunked again.
+#[derive(Debug, Default)]
+struct Logical {
+    cells: Vec<Cell>,
+    marks: Vec<(usize, Box<str>)>,
+}
+
+impl Logical {
+    /// Append ROW's content, returning the offset its first cell landed at.
+    ///
+    /// A wrapped row contributes every column it has. Its trailing blanks are interior to
+    /// the line — the text continues on the next row — so trimming them the way a line's
+    /// final row is trimmed would pull the continuation forward by however many columns
+    /// the child happened to leave blank.
+    fn push_row(&mut self, row: &Row) -> usize {
+        let base = self.cells.len();
+        let len = if row.wrapped {
+            row.len()
+        } else {
+            row.content_len()
+        };
+        self.cells.extend_from_slice(&row.cells()[..len]);
+        self.marks.extend(
+            row.marks()
+                .iter()
+                .filter(|(at, _)| usize::from(*at) < len)
+                .map(|(at, text)| (base + usize::from(*at), text.clone())),
+        );
+        base
+    }
+
+    /// Cut the line into rows of exactly `cols`, never splitting a wide character.
+    fn chunk(&self, cols: usize) -> Vec<Row> {
+        let mut rows = Vec::new();
+        let (mut start, mut at) = (0, 0);
+        while at < self.cells.len() {
+            // The whole character: its lead cell plus the continuation cells it claims.
+            let mut next = at + 1;
+            while next < self.cells.len() && self.cells[next].is_continuation() {
+                next += 1;
+            }
+            if next - start > cols {
+                // A character wider than the entire screen fits nowhere; place what there
+                // is room for and carry on, rather than looping without progress.
+                let (end, resume) = if at == start { (next, next) } else { (at, at) };
+                rows.push(self.row(start, end, cols, true));
+                start = resume;
+            }
+            at = next;
+        }
+        if start < self.cells.len() || rows.is_empty() {
+            rows.push(self.row(start, self.cells.len(), cols, false));
+        }
+        rows
+    }
+
+    /// One row from `cells[start..end]`, blank-padded out to `cols`.
+    fn row(&self, start: usize, end: usize, cols: usize, wrapped: bool) -> Row {
+        let mut cells = self.cells[start..end.min(start + cols)].to_vec();
+        cells.resize(cols, Cell::default());
+        let marks = self
+            .marks
+            .iter()
+            .filter(|(at, _)| (start..end).contains(at))
+            .map(|(at, text)| ((at - start) as u16, text.clone()))
+            .collect();
+        Row::from_parts(cells, marks, wrapped)
+    }
 }
 
 #[cfg(test)]
@@ -553,7 +760,7 @@ mod tests {
         }
         screen.goto(3, 0);
 
-        let evicted = screen.resize(10, 10);
+        let evicted = screen.resize(10, 10, Resize::Rewrap);
 
         assert!(
             evicted.is_empty(),
@@ -573,7 +780,7 @@ mod tests {
         }
         screen.goto(5, 0);
 
-        let evicted = screen.resize(4, 10);
+        let evicted = screen.resize(4, 10, Resize::Rewrap);
 
         assert_eq!(evicted.len(), 2);
         assert_eq!(evicted[0].to_text(), "r0");
@@ -588,10 +795,131 @@ mod tests {
         write(&mut screen, "top");
         screen.goto(1, 0);
 
-        assert!(screen.resize(20, 10).is_empty());
+        assert!(screen.resize(20, 10, Resize::Rewrap).is_empty());
         assert_eq!(screen.height(), 20);
         assert_eq!(screen.row(0).unwrap().to_text(), "top");
         assert_eq!(screen.cursor.row, 1);
+    }
+
+    #[test]
+    fn narrowing_rewraps_the_grid_instead_of_cutting_it() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcdefghijklmno");
+
+        assert!(screen.resize(4, 5, Resize::Rewrap).is_empty());
+        assert_eq!(screen.row(0).unwrap().to_text(), "abcde");
+        assert_eq!(screen.row(1).unwrap().to_text(), "fghij");
+        assert_eq!(screen.row(2).unwrap().to_text(), "klmno");
+    }
+
+    /// The point of rewrapping rather than cutting: the wrap provenance survives, so the
+    /// old layout is still derivable. Truncation is one-way; this is not.
+    #[test]
+    fn a_width_round_trip_restores_the_original_layout() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcdefghijklmno");
+
+        screen.resize(4, 5, Resize::Rewrap);
+        screen.resize(4, 10, Resize::Rewrap);
+
+        assert_eq!(screen.row(0).unwrap().to_text(), "abcdefghij");
+        assert_eq!(screen.row(1).unwrap().to_text(), "klmno");
+        assert!(screen.row(0).unwrap().wrapped);
+        assert!(!screen.row(1).unwrap().wrapped);
+    }
+
+    #[test]
+    fn a_rewrap_never_splits_a_wide_character() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcd漢");
+
+        screen.resize(4, 5, Resize::Rewrap);
+
+        assert_eq!(screen.row(0).unwrap().to_text(), "abcd");
+        assert_eq!(
+            screen.row(1).unwrap().to_text(),
+            "漢",
+            "the pair must move down whole rather than straddle the edge"
+        );
+    }
+
+    #[test]
+    fn combining_marks_ride_along_with_their_cell() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcde\u{301}");
+
+        screen.resize(4, 3, Resize::Rewrap);
+
+        assert_eq!(screen.row(0).unwrap().to_text(), "abc");
+        assert_eq!(screen.row(1).unwrap().to_text(), "de\u{301}");
+    }
+
+    #[test]
+    fn a_rewrap_that_outgrows_the_screen_evicts_from_the_top() {
+        let mut screen = Screen::new(2, 10);
+        write(&mut screen, "abcdefghijklmno");
+
+        let evicted = screen.resize(2, 5, Resize::Rewrap);
+
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].to_text(), "abcde");
+        assert_eq!(screen.row(0).unwrap().to_text(), "fghij");
+        assert_eq!(screen.row(1).unwrap().to_text(), "klmno");
+    }
+
+    #[test]
+    fn the_cursor_keeps_its_place_in_the_text_across_a_rewrap() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "hello world");
+        assert_eq!((screen.cursor.row, screen.cursor.col), (1, 1));
+
+        screen.resize(4, 6, Resize::Rewrap);
+
+        assert_eq!(screen.row(1).unwrap().to_text(), "world");
+        assert_eq!(
+            (screen.cursor.row, screen.cursor.col),
+            (1, 5),
+            "still one past the `d` it was one past before"
+        );
+    }
+
+    /// A rewrap that lands the cursor exactly on the edge must express it the way `write`
+    /// does — parked on the last column with the wrap deferred — not by inventing a row.
+    #[test]
+    fn a_rewrap_onto_the_edge_leaves_the_wrap_deferred() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcdef");
+
+        screen.resize(4, 3, Resize::Rewrap);
+
+        assert_eq!((screen.cursor.row, screen.cursor.col), (1, 2));
+        assert!(screen.cursor.wrap_pending);
+    }
+
+    #[test]
+    fn a_scroll_region_suppresses_the_rewrap() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcdefghij");
+        screen.set_region(1, 2);
+
+        screen.resize(4, 5, Resize::Rewrap);
+
+        assert_eq!(
+            screen.row(0).unwrap().to_text(),
+            "abcde",
+            "rows either side of the margins are different drawings, not one line"
+        );
+    }
+
+    #[test]
+    fn the_alt_screen_is_clamped_rather_than_rewrapped() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, "abcdefghijklmno");
+
+        screen.resize(4, 5, Resize::Clamp);
+
+        assert_eq!(screen.row(0).unwrap().to_text(), "abcde");
+        assert_eq!(screen.row(1).unwrap().to_text(), "klmno");
     }
 
     #[test]

@@ -115,6 +115,8 @@ XBM image support or bitmap generation fails for a glyph."
   "Marker at the first line of the live screen; everything before is scrollback.")
 (defvar-local cooked--cursor '(0 0 t))
 (defvar-local cooked--alt nil)
+(defvar-local cooked--narrowed nil
+  "Whether the restriction in force is ours, from `cooked-alt-screen-pin'.")
 (defvar-local cooked--app-cursor nil
   "DECCKM: send cursor keys as SS3, which is what `smkx' asks for.")
 (defvar-local cooked--keys 'legacy
@@ -146,6 +148,9 @@ plumbing.")
 (declare-function cooked--restore-pending-input "cooked-mode")
 (declare-function cooked--point-after-input "cooked-mode")
 (declare-function cooked--input-state-p "cooked-mode")
+(declare-function cooked--refresh-keymap "cooked-mode")
+(declare-function cooked--update-mouse-grab "cooked-mode")
+(declare-function cooked--policy "cooked-mode")
 (declare-function cooked--set-mode "cooked-mode")
 (declare-function cooked--semantic "cooked-mode")
 (declare-function cooked--on-exit "cooked-mode")
@@ -182,6 +187,21 @@ module's user-pointer from another's."
 (defconst cooked--source-directory
   (file-name-directory (or load-file-name buffer-file-name default-directory))
   "Directory holding this file, captured at load time.")
+
+(defcustom cooked-alt-screen-pin 'narrow
+  "What the buffer does while a full-screen program owns the alternate screen.
+
+`narrow' confines the buffer to the screen region, which is how a terminal
+behaves: scrollback is unreachable until the program exits.  `follow' leaves
+the whole buffer accessible, so you can scroll up and read the transcript
+behind a running program -- possible only because Emacs, not the emulator,
+owns the history.
+
+Under `narrow' a deliberate \\[widen] is undone by the next redraw; quit the
+program to get the transcript back."
+  :type '(choice (const :tag "Narrow to the alt screen" narrow)
+                 (const :tag "Allow scrolling into scrollback" follow))
+  :group 'cooked)
 
 (defcustom cooked-term-name "cooked-256color"
   "Value of TERM for the child, or nil to present as xterm-256color.
@@ -653,28 +673,123 @@ what was displayed."
   "Append ROWS to the scrollback above the live screen.
 The marker is advanced explicitly rather than by insertion type:
 rendering screen row 0 also inserts at this position, and an
-auto-advancing marker would drift into the screen region."
-  (save-excursion
-    (goto-char cooked--screen-start)
-    ;; ROWS arrives pre-assembled as (TEXT SPAN...), so this is one insert of plain
-    ;; text plus a property call only where styling exists.  Note that building a
-    ;; propertized string in Lisp and inserting that instead measures three times
-    ;; slower: `concat' on propertized strings makes Emacs copy and merge property
-    ;; intervals over and over.
-    (pcase-let ((`(,text . ,spans) rows))
-      (let ((start (point)))
-        (insert text)
-        (dolist (span spans)
-          (pcase-let ((`(,from ,to ,fg ,bg ,attrs) span))
-            (when-let* ((face (cooked--face fg bg attrs)))
-              (add-text-properties (+ start from) (+ start to)
-                                   (list 'face face 'font-lock-face face)))))
-        ;; Scrollback never changes again, so it is protected once, here, rather
-        ;; than re-swept on every redisplay.
-        (add-text-properties start (point)
-                             '(cooked-scrollback t read-only t
-                               front-sticky (read-only) rear-nonsticky (read-only)))))
-    (set-marker cooked--screen-start (point))))
+auto-advancing marker would drift into the screen region.
+
+Widens first: history can arrive while the alt screen is up — a resize evicts
+rows from the primary even when a full-screen program is showing — and the
+insertion point is above the region `cooked-alt-screen-pin' confines us to."
+  (save-restriction
+    (widen)
+    (save-excursion
+      (goto-char cooked--screen-start)
+      ;; ROWS arrives pre-assembled as (TEXT SPAN...), so this is one insert of plain
+      ;; text plus a property call only where styling exists.  Note that building a
+      ;; propertized string in Lisp and inserting that instead measures three times
+      ;; slower: `concat' on propertized strings makes Emacs copy and merge property
+      ;; intervals over and over.
+      (pcase-let ((`(,text . ,spans) rows))
+        (let ((start (point)))
+          (insert text)
+          (dolist (span spans)
+            (pcase-let ((`(,from ,to ,fg ,bg ,attrs) span))
+              (when-let* ((face (cooked--face fg bg attrs)))
+                (add-text-properties (+ start from) (+ start to)
+                                     (list 'face face 'font-lock-face face)))))
+          ;; Scrollback never changes again, so it is protected once, here, rather
+          ;; than re-swept on every redisplay.
+          (add-text-properties start (point)
+                               '(cooked-scrollback t read-only t
+                                 front-sticky (read-only) rear-nonsticky (read-only)))))
+      (set-marker cooked--screen-start (point)))))
+
+;;;; The child's cursor, while Emacs has wandered off it
+
+(defface cooked-ghost-cursor
+  '((t :box (:line-width (-1 . -1))))
+  "Face marking where the child's cursor is while point is somewhere else.
+
+Drawn hollow on purpose.  A terminal draws its cursor hollow when the window
+is unfocused, so the shape already reads as \"this cursor is not receiving
+your keystrokes\" — which is exactly what is true of the child's cursor while
+you are navigating with Emacs' own motions."
+  :group 'cooked)
+
+(defvar-local cooked--ghost-cursor nil
+  "Overlay drawing the child's cursor, or nil when it is not being drawn.")
+
+(defvar-local cooked--wandered nil
+  "Whether a command has moved point off the child's cursor.
+
+Tracked as a state set by commands rather than inferred by comparing point to
+the cursor on each drain.  The comparison is order-dependent — streaming output
+lets the cursor overtake point for a single drain — and inferring from it would
+strand point for every drain after that.  See `cooked--apply'.")
+
+(defun cooked--ghost-cursor-visible-p ()
+  "Whether the child's cursor should be drawn separately from point."
+  (and cooked--wandered
+       ;; Only where the child owns the keyboard and the screen is its drawing.
+       ;; At a prompt, point being elsewhere is ordinary editing, not a divergence.
+       (memq (cooked--policy) '(alt raw))
+       ;; A hidden cursor stays hidden; nvim hides it during some redraws, and a
+       ;; box left behind would be a cursor the child does not think it has.
+       (nth 2 cooked--cursor)))
+
+(defun cooked--update-ghost-cursor ()
+  "Draw, move, or remove the overlay marking the child's cursor."
+  (if (not (cooked--ghost-cursor-visible-p))
+      (when cooked--ghost-cursor
+        (delete-overlay cooked--ghost-cursor)
+        (setq cooked--ghost-cursor nil))
+    (let* ((beg (cooked--cursor-position))
+           (eol (save-excursion (goto-char beg) (line-end-position)))
+           ;; Past the last character of its row the cursor has nothing to cover,
+           ;; so the box rides on a stand-in space instead.
+           (empty (>= beg eol)))
+      (unless cooked--ghost-cursor
+        (setq cooked--ghost-cursor (make-overlay beg beg nil t nil))
+        ;; Above `hl-line-mode' and the region, which would otherwise paint over
+        ;; the one thing on screen the user is aiming at.
+        (overlay-put cooked--ghost-cursor 'priority 100))
+      (move-overlay cooked--ghost-cursor beg (if empty beg (1+ beg)))
+      (overlay-put cooked--ghost-cursor 'face (unless empty 'cooked-ghost-cursor))
+      (overlay-put cooked--ghost-cursor 'after-string
+                   (when empty (propertize " " 'face 'cooked-ghost-cursor))))))
+
+(defun cooked--set-alt (on)
+  "Adopt alternate-screen state ON, refreshing ownership when it changes.
+
+The keymap has to follow this and not only the line discipline: a program can
+take the screen while the shell's last OSC 133 mark still says `prompt-end',
+and Emacs would otherwise keep editing an input region that no longer exists
+and swallow the keys the program was waiting for."
+  (let ((on (and on t)))
+    (unless (eq on cooked--alt)
+      (setq cooked--alt on)
+      (cooked--refresh-keymap))))
+
+(defun cooked--apply-alt-pin ()
+  "Confine the buffer to the screen region while the alt screen is up.
+
+Re-applied on every redraw rather than only on the transition: the accessible
+end behaves like a marker that insertions push past, so rows appended at the
+end of one redraw would fall outside the region by the next.
+
+Only ever undoes its own restriction.  A narrowing the user made themselves is
+none of our business, and widening it on the next drain would make `\\[narrow-to-region]'
+unusable in a terminal buffer."
+  (if (and cooked--alt (eq cooked-alt-screen-pin 'narrow)
+           cooked--screen-start (marker-position cooked--screen-start))
+      (progn
+        (narrow-to-region (marker-position cooked--screen-start) (point-max))
+        (setq cooked--narrowed t))
+    (cooked--release-alt-pin)))
+
+(defun cooked--release-alt-pin ()
+  "Undo the restriction `cooked--apply-alt-pin' put on the buffer, if any."
+  (when cooked--narrowed
+    (setq cooked--narrowed nil)
+    (widen)))
 
 (defun cooked--fit-screen ()
   "Shape the screen region to the emulator.
@@ -732,6 +847,31 @@ A pure query: it never extends the buffer, so it is safe to call before
     (cooked--goto-screen-row (nth 0 cooked--cursor))
     (min (+ (point) (nth 1 cooked--cursor)) (line-end-position))))
 
+(defun cooked--screen-cell (&optional pos)
+  "Screen row and column of POS, or nil if it is not on the screen.
+
+The grid outlives the text: a redraw deletes and reinserts whole rows, so a
+buffer position is not a stable way to remember where the user was looking,
+while a cell is."
+  (let ((pos (or pos (point))))
+    (when (and cooked--screen-start (marker-position cooked--screen-start)
+               (>= pos (marker-position cooked--screen-start)))
+      (save-excursion
+        (goto-char pos)
+        (cons (count-lines (marker-position cooked--screen-start)
+                           (line-beginning-position))
+              (current-column))))))
+
+(defun cooked--goto-screen-cell (cell)
+  "Move point to CELL, a (ROW . COL) pair, clamped to what the row holds."
+  (cooked--goto-screen-row (car cell))
+  (forward-char (min (cdr cell) (- (line-end-position) (point)))))
+
+(defun cooked--at-child-cursor-p ()
+  "Whether point is sitting where the child's cursor is."
+  (and cooked--screen-start (marker-position cooked--screen-start)
+       (= (point) (cooked--cursor-position))))
+
 ;;;; Session lifecycle
 
 (defun cooked--window-size ()
@@ -779,6 +919,26 @@ it still flickers.  Takes effect for sessions started after it is set."
   :type 'number
   :group 'cooked)
 
+(defcustom cooked-backlog-limit 8000
+  "Items awaiting collection before the child is left to block on its writes.
+
+Counts scrolled-off lines plus undelivered events.  Raising it does not make
+output render faster: throughput is bounded by how fast Emacs can insert text,
+not by this queue.  What it changes is who waits.  Below the limit the child
+runs ahead and finishes sooner while Emacs catches up; at the limit the reader
+stops draining the pty, the pty's buffer fills, and the child blocks in `write'
+exactly as it would against a slow terminal.  Nothing is ever dropped.
+
+The cost of raising it is memory, and a larger worst-case pause when a big
+backlog finally lands in one redisplay.  Tuned together with
+`cooked-min-redisplay-interval': a longer interval leaves more to accumulate
+between drains, so this fills sooner.
+
+Takes effect for sessions started after it is set."
+  :type 'natnum
+  :group 'cooked)
+
+
 (defun cooked--start (argv &optional directory extra-env)
   "Spawn ARGV in the current buffer, optionally in DIRECTORY.
 EXTRA-ENV is an alist prepended to the child's environment."
@@ -800,7 +960,8 @@ EXTRA-ENV is an alist prepended to the child's environment."
   (setq cooked--session
         (cooked--spawn argv (cooked--child-environment extra-env) cooked--rows cooked--cols cooked--wake
                       (and directory (expand-file-name directory))
-                      (round (* 1000 cooked-min-redisplay-interval))))
+                      (round (* 1000 cooked-min-redisplay-interval))
+                      cooked-backlog-limit))
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)
@@ -845,9 +1006,6 @@ jumped somewhere absurd.  Name it instead."
   ;; `let*', emphatically: these initialisers delete and insert, and under plain
   ;; `let' they would run before `inhibit-read-only' took effect, so a protected
   ;; buffer aborts the redisplay half-done from inside the process filter.
-  ;; `let*', emphatically: these initialisers delete and insert, and under plain
-  ;; `let' they would run before `inhibit-read-only' took effect, so a protected
-  ;; buffer aborts the redisplay half-done from inside the process filter.
   (let* ((inhibit-read-only t)
          (pending (cooked--take-pending-input))
          ;; Follow the cursor unless the user has gone up into the scrollback to
@@ -855,15 +1013,19 @@ jumped somewhere absurd.  Name it instead."
          ;; output arriving in chunks lets the cursor overtake point for a single
          ;; drain, and point is then stranded for every drain after it — landing
          ;; at column 0 of whichever line it was on.
-         (follow (>= (point) (marker-position cooked--screen-start))))
+         (follow (>= (point) (marker-position cooked--screen-start)))
+         ;; A redraw deletes and reinserts whole rows, so a wandered point would
+         ;; be dragged to the start of whatever was rebuilt underneath it.  The
+         ;; cell survives that; the buffer position does not.
+         (wandered (and cooked--wandered (cooked--screen-cell))))
     (when-let* ((scrolled (plist-get update :scrolled)))
       (cooked--render-scrolled scrolled))
     (cooked--render-rows (plist-get update :rows))
     (setq cooked--cursor (plist-get update :cursor)
-          cooked--alt (plist-get update :alt)
           cooked--app-cursor (plist-get update :app-cursor)
           cooked--keys (plist-get update :keys)
           cooked--exit (plist-get update :exit))
+    (cooked--set-alt (plist-get update :alt))
     (cooked--set-mode (plist-get update :mode))
     (dolist (event (plist-get update :events))
       (cooked--handle-event event))
@@ -879,7 +1041,15 @@ jumped somewhere absurd.  Name it instead."
     (cooked--protect (if (and (cooked--input-state-p) cooked--input-start)
                         (marker-position cooked--input-start)
                       (point-max)))
-    (when follow (goto-char (cooked--point-after-input)))
+    ;; After the region has settled, so the bounds match what was just drawn.
+    (cooked--apply-alt-pin)
+    ;; Staying put beats following the cursor once the user has taken the
+    ;; keyboard back: the child keeps redrawing under them, and being yanked to
+    ;; its cursor mid-motion is the behaviour this exists to stop.  The ghost
+    ;; keeps the way back visible; `cooked--snap-to-cursor' takes it.
+    (cond (wandered (cooked--goto-screen-cell wandered))
+          (follow (goto-char (cooked--point-after-input))))
+    (cooked--update-ghost-cursor)
     (when cooked--exit (cooked--on-exit cooked--exit))))
 
 (defun cooked--handle-event (event)
@@ -888,8 +1058,15 @@ jumped somewhere absurd.  Name it instead."
     (`(bell) (ding))
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
     (`(reply . ,bytes) (cooked--send cooked--session bytes))
-    (`(alt-screen . ,on) (setq cooked--alt on))
-    (`(mouse ,enabled ,sgr) (setq cooked--mouse enabled cooked--mouse-sgr sgr))
+    ;; The drain's `:alt' field has usually settled this already; the event matters
+    ;; when a program enters and leaves within one drain.  `cooked--set-alt' is
+    ;; idempotent, so the two cannot fight.
+    (`(alt-screen . ,on) (cooked--set-alt on))
+    (`(mouse ,enabled ,sgr)
+     (setq cooked--mouse enabled cooked--mouse-sgr sgr)
+     ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this,
+     ;; so it has to move when the child changes its mind about the mouse.
+     (cooked--update-mouse-grab))
     ((or `(prompt-start) `(prompt-end) `(command-start) `(command-end . ,_))
      (cooked--semantic event))
     (_ nil)))
@@ -1104,10 +1281,15 @@ rather than inherit.")
         (_ nil)))))
 
 (defun cooked-clear-scrollback ()
-  "Delete everything above the live screen."
+  "Delete everything above the live screen.
+Widens first, so it still clears while a full-screen program has the buffer
+narrowed to the alt screen — where `point-min' is the top of the screen and
+this would otherwise quietly do nothing."
   (interactive)
-  (let ((inhibit-read-only t))
-    (delete-region (point-min) (marker-position cooked--screen-start))))
+  (save-restriction
+    (widen)
+    (let ((inhibit-read-only t))
+      (delete-region (point-min) (marker-position cooked--screen-start)))))
 
 ;;;; OSC 52 — clipboard
 

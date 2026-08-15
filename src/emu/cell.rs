@@ -136,6 +136,27 @@ impl Row {
         }
     }
 
+    /// Assemble a row from cells already laid out, for the reflow in `Screen::resize`.
+    ///
+    /// MARKS are keyed by column within CELLS, which is what a rewrap produces once a
+    /// logical line has been re-chunked: the offsets are recomputed per chunk rather than
+    /// carried from the row the cells came off.
+    pub fn from_parts(cells: Vec<Cell>, marks: Vec<(u16, Box<str>)>, wrapped: bool) -> Self {
+        Self {
+            cells,
+            marks,
+            wrapped,
+        }
+    }
+
+    pub fn cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
+    pub fn marks(&self) -> &[(u16, Box<str>)] {
+        &self.marks
+    }
+
     pub fn len(&self) -> usize {
         self.cells.len()
     }
@@ -227,13 +248,22 @@ impl Row {
         self.marks.retain(|(at, _)| usize::from(*at) < col);
     }
 
-    /// Style-grouped runs with trailing default-styled blanks trimmed.
-    pub fn runs(&self) -> Vec<Run> {
-        let end = self
-            .cells
+    /// Columns up to the last one holding something, trailing default-styled blanks cut.
+    ///
+    /// The one definition of "trailing blank" in the crate: `runs` renders by it and
+    /// `Screen::resize` measures logical lines by it, so a rewrap cannot disagree with
+    /// what was on screen. A blank whose style is not the default is content — it is a
+    /// coloured bar drawn to the edge, and trimming it would erase the drawing.
+    pub fn content_len(&self) -> usize {
+        self.cells
             .iter()
             .rposition(|c| c.ch != BLANK || c.style != Style::default())
-            .map_or(0, |i| i + 1);
+            .map_or(0, |i| i + 1)
+    }
+
+    /// Style-grouped runs with trailing default-styled blanks trimmed.
+    pub fn runs(&self) -> Vec<Run> {
+        let end = self.content_len();
 
         self.cells[..end]
             .iter()

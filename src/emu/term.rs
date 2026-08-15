@@ -4,7 +4,7 @@
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
 use super::cell::{Attrs, Color, Row, Run, Style};
-use super::screen::{Cursor, Erase, Screen};
+use super::screen::{Cursor, Erase, Resize, Screen};
 use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 
@@ -120,6 +120,10 @@ pub const BACKLOG_HIGH_WATER: usize = 8_000;
 /// hyperlink, and short of letting a single escape sequence allocate without bound.
 pub const OSC_PAYLOAD_LIMIT: usize = 1 << 20;
 
+/// Depth of the kitty keyboard flag stack. Real clients push once around a full-screen
+/// session; anything deeper is a child that never pops.
+const KITTY_STACK_LIMIT: usize = 16;
+
 /// Frame `ESC ] CODE ; PAYLOAD` with the terminator the query used.
 ///
 /// Queries whose answer only Emacs knows — the default colours, which resolve against
@@ -187,9 +191,13 @@ impl Term {
         self.state.key_encoding()
     }
 
-    /// Scrolled-off lines waiting for Emacs to collect them.
+    /// Items waiting for Emacs to collect: scrolled-off lines plus pending events.
+    ///
+    /// Events are counted because they are the other path that grows without bound while
+    /// Emacs is behind — a child spraying OSC titles or DA/CPR queries never scrolls a row,
+    /// so a scrollback-only measure would let it allocate freely.
     pub fn backlog(&self) -> usize {
-        self.state.pending_scrollback.len()
+        self.state.pending_scrollback.len() + self.state.events.len()
     }
 
     /// Text of the last non-blank line — the prompt a `getpass` child just printed.
@@ -271,16 +279,29 @@ impl State {
         }
     }
 
-    /// Rows leaving the primary screen become buffer text; on the alt screen they vanish.
+    /// Rows leaving the *current* screen: buffer text on the primary, discarded on the alt.
+    ///
+    /// The guard is about which screen produced the rows, so callers that already know the
+    /// rows came from the primary must use [`State::archive`] instead — see `resize`.
     ///
     /// Growth is bounded by backpressure rather than by discarding: the reader stops
     /// reading once [`Term::backlog`] is high, the pty's own buffer fills, and the
     /// child blocks in `write` exactly as it would against a slow terminal. Dropping
     /// would be lossy, and losing the middle of a build log is worse than waiting.
+    ///
+    /// The alt screen is exempt from that measure by design. It contributes no scrollback,
+    /// its grid is a fixed size, and `min_redisplay_interval` already bounds how often its
+    /// frames are drawn — so intermediate frames of a repaint are genuinely discardable in
+    /// a way log lines are not, and there is nothing to apply backpressure against.
     fn evicted(&mut self, rows: Vec<Row>) {
         if self.on_alt {
             return;
         }
+        self.archive(rows);
+    }
+
+    /// Send rows to scrollback unconditionally, for callers holding primary rows.
+    fn archive(&mut self, rows: Vec<Row>) {
         // Reduced to runs here rather than at drain time: a Row owns a cell for every
         // column, so retaining thousands of them keeps megabytes of mostly-blank grid
         // alive. Runs are trimmed to content, and the work has to happen regardless.
@@ -297,9 +318,12 @@ impl State {
     }
 
     fn resize(&mut self, rows: usize, cols: usize) {
-        let evicted = self.primary.resize(rows, cols);
-        self.alt.resize(rows, cols);
-        self.evicted(evicted);
+        let evicted = self.primary.resize(rows, cols, Resize::Rewrap);
+        self.alt.resize(rows, cols, Resize::Clamp);
+        // These rows came off the primary whichever screen is showing, so they are history
+        // even mid-alt. Routing them through `evicted` would drop the top of the transcript
+        // whenever the frame was resized with a full-screen program open.
+        self.archive(evicted);
     }
 
     fn drain(&mut self) -> Delta {
@@ -330,7 +354,9 @@ impl State {
         }
         self.on_alt = on;
         if on {
-            self.alt.erase_display(Erase::All);
+            // Dropped rather than archived: this is the previous full-screen program's
+            // leftover frame, which was never history to begin with.
+            drop(self.alt.erase_display(Erase::All));
             self.alt.goto(0, 0);
         }
         self.screen_mut().touch_all();
@@ -536,7 +562,8 @@ impl Perform for State {
             }
             (None, 'J') => {
                 if let Some(how) = Erase::from_param(arg(params, 0, 0) as u16) {
-                    self.screen_mut().erase_display(how);
+                    let evicted = self.screen_mut().erase_display(how);
+                    self.evicted(evicted);
                 }
             }
             (None, 'K') => {
@@ -577,8 +604,13 @@ impl Perform for State {
                         .unwrap_or(0) as u8;
                 }
             }
-            // Kitty keyboard protocol: push, pop, and set.
-            (Some(b'>'), 'u') => self.kitty_keys.push(arg(params, 0, 0) as u8),
+            // Kitty keyboard protocol: push, pop, and set. The stack is capped because a
+            // child can push without ever popping, and only the top is ever read.
+            (Some(b'>'), 'u') => {
+                if self.kitty_keys.len() < KITTY_STACK_LIMIT {
+                    self.kitty_keys.push(arg(params, 0, 0) as u8);
+                }
+            }
             (Some(b'<'), 'u') => {
                 for _ in 0..arg(params, 0, 1).max(1) {
                     self.kitty_keys.pop();
@@ -630,7 +662,8 @@ impl Perform for State {
             (None, b'c') => {
                 self.pen = Style::default();
                 self.screen_mut().reset_region();
-                self.screen_mut().erase_display(Erase::All);
+                let evicted = self.screen_mut().erase_display(Erase::All);
+                self.evicted(evicted);
                 self.screen_mut().goto(0, 0);
                 // RIS means everything the child negotiated is off, keyboard included.
                 self.modify_other_keys = 0;
@@ -1086,5 +1119,96 @@ mod tests {
             !glyphs[3].is_diagonal(),
             "the stub is edge-based, not a diagonal"
         );
+    }
+
+    /// The alt screen produces no history of its own, but the primary's rows are still
+    /// history — a resize while a full-screen program is up must not discard them.
+    #[test]
+    fn resize_on_the_alt_screen_still_archives_primary_rows() {
+        let mut t = term(3, 10, b"one\r\ntwo\r\nthree");
+        t.feed(b"\x1b[?1049h");
+        t.drain();
+
+        t.resize(2, 10);
+        let delta = t.drain();
+
+        assert_eq!(delta.scrolled.len(), 1, "primary history lost during alt");
+        assert_eq!(runs_text(&delta.scrolled[0]), "one");
+    }
+
+    /// `clear` and the shell's `C-l` both end up here, and the screen they wipe is
+    /// transcript Emacs is holding — the grid does not get to drop it on their behalf.
+    #[test]
+    fn clearing_the_display_keeps_the_screen_as_history() {
+        let mut t = term(4, 10, b"one\r\ntwo");
+        t.drain();
+
+        t.feed(b"\x1b[2J");
+        let delta = t.drain();
+
+        assert_eq!(delta.scrolled.len(), 2);
+        assert_eq!(runs_text(&delta.scrolled[0]), "one");
+        assert_eq!(runs_text(&delta.scrolled[1]), "two");
+        assert_eq!(text(&t, 0), "");
+    }
+
+    #[test]
+    fn clearing_the_alt_screen_archives_nothing() {
+        let mut t = term(4, 10, b"\x1b[?1049hframe");
+        t.drain();
+
+        t.feed(b"\x1b[2J");
+
+        assert!(
+            t.drain().scrolled.is_empty(),
+            "the alt screen has no history to keep"
+        );
+    }
+
+    #[test]
+    fn a_partial_erase_is_not_a_finished_screen() {
+        let mut t = term(4, 10, b"one\r\ntwo");
+        t.drain();
+
+        t.feed(b"\x1b[J");
+
+        assert!(
+            t.drain().scrolled.is_empty(),
+            "a partial erase is a redraw, not a screen being finished with"
+        );
+    }
+
+    /// The primary is rewrapped even while a full-screen program is up, because its rows
+    /// are the transcript that program will hand back on exit.
+    #[test]
+    fn narrowing_mid_alt_rewraps_the_primary_underneath() {
+        let mut t = term(4, 10, b"abcdefghijklmno");
+        t.feed(b"\x1b[?1049h");
+        t.drain();
+
+        t.resize(4, 5);
+        t.feed(b"\x1b[?1049l");
+        let delta = t.drain();
+
+        assert!(delta.scrolled.is_empty());
+        assert_eq!(text(&t, 0), "abcde");
+        assert_eq!(text(&t, 1), "fghij");
+        assert_eq!(text(&t, 2), "klmno");
+    }
+
+    #[test]
+    fn backlog_counts_pending_events_as_well_as_scrollback() {
+        let mut t = term(4, 10, b"");
+        assert_eq!(t.backlog(), 0);
+
+        t.feed(b"\x1b]0;a\x07\x1b]0;b\x07\x1b]0;c\x07");
+        assert_eq!(
+            t.backlog(),
+            3,
+            "OSC-only output scrolls nothing, so a scrollback-only measure misses it"
+        );
+
+        t.drain();
+        assert_eq!(t.backlog(), 0, "draining clears the measure");
     }
 }

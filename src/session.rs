@@ -4,7 +4,7 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{self, Delta, Term};
+use crate::emu::{Delta, Term};
 use crate::pty::{Mode, Pid, Pty, Winsize};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{SigSet, Signal};
@@ -57,6 +57,14 @@ struct Shared {
     /// `flush_notify` is retried every reader-thread tick (bounded by `POLL_TIMEOUT_MS`
     /// even when no new output arrives), so a throttled notification is never stranded.
     min_redisplay_interval: std::time::Duration,
+    /// Pending items — scrolled-off lines plus undelivered events — at which the reader
+    /// stops pulling from the pty and lets the child block. Raising it does not make
+    /// rendering faster, since throughput is bounded by Emacs rather than by this queue;
+    /// it lets a child run ahead and exit sooner instead of blocking in `write`, at the
+    /// cost of memory and a larger worst-case redisplay when one drain finally lands.
+    /// Tuned together with `min_redisplay_interval`: a longer interval leaves more to
+    /// accumulate between drains, so this fills sooner.
+    backlog_limit: usize,
     shutdown: AtomicBool,
     quit: Quit,
     exited: Mutex<Option<i32>>,
@@ -120,6 +128,7 @@ impl Session {
         cwd: Option<&Path>,
         wake: RawFd,
         min_redisplay_interval: std::time::Duration,
+        backlog_limit: usize,
     ) -> io::Result<Self> {
         // Take ownership of the wake descriptor and mark it close-on-exec *before*
         // forking. `open_channel` hands it over without FD_CLOEXEC (verified: children
@@ -144,6 +153,7 @@ impl Session {
             notified: AtomicBool::new(false),
             last_notified: Mutex::new(None),
             min_redisplay_interval,
+            backlog_limit,
             shutdown: AtomicBool::new(false),
             quit: Quit::new()?,
             exited: Mutex::new(None),
@@ -324,7 +334,7 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         if shared
             .term
             .lock()
-            .is_ok_and(|term| term.backlog() >= emu::BACKLOG_HIGH_WATER)
+            .is_ok_and(|term| term.backlog() >= shared.backlog_limit)
         {
             announce(shared, wake);
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -451,7 +461,7 @@ fn flush_pending(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emu::Event;
+    use crate::emu::{self, Event};
     use nix::errno::Errno;
     use std::time::{Duration, Instant};
 
@@ -465,6 +475,10 @@ mod tests {
     }
 
     fn session(argv: &[&str]) -> (Session, OwnedFd) {
+        session_with_backlog(argv, emu::BACKLOG_HIGH_WATER)
+    }
+
+    fn session_with_backlog(argv: &[&str], backlog_limit: usize) -> (Session, OwnedFd) {
         let (read, write) = pipe();
         let size = Winsize { rows: 24, cols: 80 };
         let fd = std::os::fd::IntoRawFd::into_raw_fd(write);
@@ -476,6 +490,7 @@ mod tests {
                 None,
                 fd,
                 Duration::from_millis(8),
+                backlog_limit,
             )
             .expect("spawn"),
             read,
@@ -507,6 +522,52 @@ mod tests {
             .iter()
             .flat_map(|(_, runs)| runs.iter().map(|r| r.text.clone()))
             .collect()
+    }
+
+    /// Backpressure must throttle the child, never drop its output. A limit of 1 keeps the
+    /// reader stalled almost continuously, which is the harshest version of that promise.
+    #[test]
+    fn a_tiny_backlog_limit_throttles_without_losing_output() {
+        const LINES: usize = 200;
+        // The trailing blank lines push the numbered ones off the live screen, so every
+        // line this asserts on has actually travelled through the backlog.
+        let (session, _read) = session_with_backlog(
+            &[
+                "/bin/sh",
+                "-c",
+                &format!("seq 1 {LINES}; i=0; while [ $i -lt 40 ]; do echo; i=$((i+1)); done"),
+            ],
+            1,
+        );
+
+        let mut collected: Vec<String> = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let update = session.drain();
+            collected.extend(update.delta.scrolled.iter().map(|line| {
+                line.runs
+                    .iter()
+                    .map(|r| r.text.as_str())
+                    .collect::<String>()
+            }));
+            if collected.len() >= LINES {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let numbers: Vec<&str> = collected
+            .iter()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(
+            numbers.len(),
+            LINES,
+            "backpressure dropped lines instead of stalling the child"
+        );
+        assert_eq!(numbers[0], "1");
+        assert_eq!(numbers[LINES - 1], LINES.to_string());
     }
 
     #[test]
@@ -590,6 +651,8 @@ mod tests {
             Winsize { rows: 24, cols: 80 },
             None,
             wake,
+            Duration::from_millis(8),
+            emu::BACKLOG_HIGH_WATER,
         )
         .expect("spawn");
 

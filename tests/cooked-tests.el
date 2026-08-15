@@ -240,10 +240,273 @@ a foreign handle would be reinterpreted as a session."
              (lambda () (string-match-p "keepme" (cooked-tests--text)))))
     (should-not (string-match-p "inalt" (cooked-tests--text)))))
 
+(ert-deftest cooked-wheel-notches-are-reported-as-presses ()
+  "Emacs calls a notch a click; encoding that as a release loses the scroll.
+Applications discard a release of buttons 64/65, so a wheel report that goes out
+as `m' rather than `M' reaches the child and is thrown away."
+  (let ((cooked--mouse-sgr t))
+    (should (equal (cooked--mouse-report 64 3 5 t) "\e[<64;6;4M")))
+  ;; X10 is worse than merely ignored: a release cannot say which way the wheel
+  ;; turned, because it reports button 3 for every button.
+  (let ((cooked--mouse-sgr nil))
+    (should-not (equal (cooked--mouse-report 64 3 5 t)
+                       (cooked--mouse-report 65 3 5 t)))
+    (should (equal (cooked--mouse-report 64 3 5 nil)
+                   (cooked--mouse-report 65 3 5 nil)))))
+
+(ert-deftest cooked-wheel-reaches-a-child-that-asked-for-the-mouse ()
+  "The whole path: alt screen, mouse tracking on, wheel event in, report out."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw; cat -v")
+    (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
+    (should (eq (cooked--policy) 'alt))
+    ;; The raw map owns the wheel while the child does; otherwise Emacs would
+    ;; scroll the buffer out from under a full-screen program.
+    (should (eq (current-local-map) cooked-raw-map))
+    (should (eq (key-binding (vector 'wheel-up)) #'cooked-mouse-event))
+    (should (eq (key-binding (vector 'mouse-5)) #'cooked-mouse-event))
+    ;; With no cell under the pointer the notch still goes out, at the cursor,
+    ;; rather than falling through to `mwheel-scroll'.
+    (let ((last-input-event '(wheel-up nil 1)))
+      (cooked-mouse-event))
+    ;; Case matters and nothing else here distinguishes press from release:
+    ;; `case-fold-search' is t by default, which would let "M" match the "m"
+    ;; this test exists to rule out.
+    (let ((case-fold-search nil))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "\\[<64;[0-9]+;[0-9]+M" (cooked-tests--text)))))
+      (should-not (string-match-p "\\[<64;[0-9]+;[0-9]+m" (cooked-tests--text))))))
+
+(ert-deftest cooked-wheel-outranks-a-minor-mode-that-claims-it ()
+  "The GUI failure: `pixel-scroll-precision-mode' binds `wheel-up' in a
+minor-mode map, which sits above the major mode's local map in Emacs' lookup
+order.  A terminal frame never showed this because there the wheel arrives as
+`mouse-4', which pixel-scroll does not bind."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw; cat -v")
+    (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
+    (should cooked--mouse-grab)
+    ;; Stand in for pixel-scroll rather than loading it: what matters is that
+    ;; *some* enabled minor mode claims the same event, which is the position in
+    ;; the lookup order that beat us.
+    (defvar cooked-tests--greedy-mode)
+    (let* ((greedy (let ((m (make-sparse-keymap)))
+                     (define-key m (vector 'wheel-up) #'ignore)
+                     (define-key m (vector 'wheel-down) #'ignore)
+                     m))
+           (cooked-tests--greedy-mode t)
+           (minor-mode-map-alist
+            (cons (cons 'cooked-tests--greedy-mode greedy) minor-mode-map-alist)))
+      ;; Sanity: the stand-in really does outrank the major mode's local map.
+      (should (eq (lookup-key cooked-raw-map (vector 'wheel-up)) #'cooked-mouse-event))
+      (should (eq (key-binding (vector 'wheel-up)) #'cooked-mouse-event))
+      (should (eq (key-binding (vector 'mouse-4)) #'cooked-mouse-event)))
+    ;; And it stands down the moment the child stops asking for the mouse, so a
+    ;; plain prompt scrolls the transcript as any buffer would.
+    (setq cooked--mouse nil)
+    (cooked--update-mouse-grab)
+    (should-not cooked--mouse-grab)))
+
+(ert-deftest cooked-wandering-off-the-cursor-shows-a-ghost-and-snaps-back ()
+  "Emacs motions in alt mode leave the child's cursor where it was.
+The ghost marks the way back, the redraw stops yanking point around, and the
+next keystroke sent to the child is what takes it."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'alpha\\r\\nbravo\\r\\ncharlie'; \
+                        stty raw; cat -v")
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "charlie" (cooked-tests--text)))))
+    ;; Point starts on the child's cursor, so there is nothing to disambiguate.
+    (should (cooked--at-child-cursor-p))
+    (cooked--track-wandering)
+    (should-not cooked--wandered)
+    (should-not cooked--ghost-cursor)
+
+    ;; Wander, as an evil motion would.
+    (goto-char (point-min))
+    (cooked--track-wandering)
+    (should cooked--wandered)
+    (should cooked--ghost-cursor)
+    ;; The ghost marks the child's cursor, not point.
+    (should (= (overlay-start cooked--ghost-cursor) (cooked--cursor-position)))
+    (should-not (= (point) (cooked--cursor-position)))
+
+    ;; A redraw must leave a wandered point alone rather than following the cursor.
+    (let ((cell (cooked--screen-cell)))
+      (cooked--apply (cooked--drain cooked--session))
+      (should cooked--wandered)
+      (should (equal (cooked--screen-cell) cell)))
+
+    ;; Typing hands the keyboard back, and point goes with it.
+    (let ((last-command-event ?x))
+      (cooked-send-key))
+    (should-not cooked--wandered)
+    (should (cooked--at-child-cursor-p))
+    (should-not cooked--ghost-cursor)))
+
+(ert-deftest cooked-no-ghost-cursor-at-a-prompt ()
+  "Point off the cursor is ordinary editing in the cooked state, not a divergence."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
+    (should (eq (cooked--policy) 'cooked))
+    (goto-char (point-min))
+    (cooked--track-wandering)
+    (should-not cooked--wandered)
+    (should-not cooked--ghost-cursor)))
+
+(ert-deftest cooked-policy-derives-ownership-from-all-three-signals ()
+  "The alt screen outranks the line discipline and the OSC 133 prompt state."
+  (with-temp-buffer
+    (pcase-dolist (`(,mode ,alt ,semantic ,policy ,owns ,indicator)
+                   ;; mode      alt  semantic   policy    owns   mode line
+                   '((cooked    nil  nil        cooked    t      " edit")
+                     (cooked    nil  output     cooked    t      " edit")
+                     (raw       nil  nil        raw       nil    " raw")
+                     (raw       nil  output     raw       nil    " raw")
+                     ;; A shell prompt: termios says raw, OSC 133 says otherwise.
+                     (raw       nil  input      cooked    t      " edit")
+                     (secret    nil  nil        raw       nil    " secret")
+                     ;; The case that used to strand the keyboard in Emacs: a
+                     ;; full-screen program starting straight from a prompt.
+                     (raw       t    input      alt       nil    " alt")
+                     (cooked    t    input      alt       nil    " alt")
+                     (raw       t    nil        alt       nil    " alt")))
+      (setq-local cooked--mode mode
+                  cooked--alt alt
+                  cooked--semantic semantic
+                  cooked--title nil
+                  cooked--exit nil)
+      (should (eq (cooked--policy) policy))
+      (should (eq (and (cooked--input-state-p) t) owns))
+      (should (equal (cooked--mode-line) indicator)))))
+
+(ert-deftest cooked-alt-screen-takes-the-keyboard-from-a-prompt ()
+  "Entering the alt screen must swap the keymap even mid-prompt."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--mode 'raw cooked--semantic 'input cooked--alt nil)
+    (cooked--refresh-keymap)
+    (should (eq (current-local-map) cooked-input-map))
+    (cooked--set-alt t)
+    (should (eq (current-local-map) cooked-raw-map))
+    (cooked--set-alt nil)
+    (should (eq (current-local-map) cooked-input-map))))
+
+;; MARKER is pushed into real scrollback by the lines that follow it — the point
+;; being that it is history, not screen content, which the alt screen hides anyway.
+(defconst cooked-tests--scrollback-then-alt
+  "printf 'MARKER\\n'; seq 1 60; printf '\\033[?1049h'; printf 'inalt\\n'; ")
+
+(ert-deftest cooked-alt-screen-narrows-away-the-scrollback ()
+  (cooked-tests--with-session
+      (list "/bin/sh" "-c"
+            (concat cooked-tests--scrollback-then-alt
+                    "sleep 0.3; printf '\\033[?1049l'; sleep 5"))
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (should (buffer-narrowed-p))
+    ;; The transcript is out of reach while the program owns the screen, which is
+    ;; what every other terminal does.
+    (should-not (string-match-p "MARKER" (cooked-tests--text)))
+    (should (string-match-p "inalt" (cooked-tests--text)))
+    (save-restriction
+      (widen)
+      (should (string-match-p "MARKER" (buffer-substring-no-properties
+                                        (point-min) (point-max)))))
+    (should (cooked-tests--settle (lambda () (not cooked--alt))))
+    (should-not (buffer-narrowed-p))
+    (should (string-match-p "MARKER" (cooked-tests--text)))))
+
+(ert-deftest cooked-clear-scrollback-reaches-past-the-alt-screen-restriction ()
+  (cooked-tests--with-session
+      (list "/bin/sh" "-c" (concat cooked-tests--scrollback-then-alt "sleep 5"))
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (should (buffer-narrowed-p))
+    (cooked-clear-scrollback)
+    (save-restriction
+      (widen)
+      (should-not (string-match-p "MARKER" (buffer-substring-no-properties
+                                            (point-min) (point-max)))))))
+
+(ert-deftest cooked-alt-pin-leaves-a-users-own-narrowing-alone ()
+  "Redraws may only undo the restriction they themselves imposed."
+  (with-temp-buffer
+    (cooked-mode)
+    (insert "history\nSCREEN\n")
+    (setq-local cooked--alt nil
+                cooked-alt-screen-pin 'narrow
+                cooked--screen-start (copy-marker 9 nil))
+    (narrow-to-region 1 9)
+    (cooked--apply-alt-pin)
+    (should (buffer-narrowed-p))
+    (widen)
+    (setq-local cooked--alt t)
+    (cooked--apply-alt-pin)
+    (should (buffer-narrowed-p))
+    (setq-local cooked--alt nil)
+    (cooked--apply-alt-pin)
+    (should-not (buffer-narrowed-p))))
+
+(ert-deftest cooked-alt-screen-pin-can-be-turned-off ()
+  (let ((cooked-alt-screen-pin 'follow))
+    (cooked-tests--with-session
+        (list "/bin/sh" "-c" (concat cooked-tests--scrollback-then-alt "sleep 5"))
+      (should (cooked-tests--settle (lambda () cooked--alt)))
+      (should-not (buffer-narrowed-p))
+      (should (string-match-p "MARKER" (cooked-tests--text))))))
+
+(ert-deftest cooked-a-child-dying-on-the-alt-screen-leaves-the-buffer-widened ()
+  (cooked-tests--with-session
+      (list "/bin/sh" "-c" (concat cooked-tests--scrollback-then-alt "exit 3"))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "\\[exited 3\\]" (cooked-tests--text)))))
+    (should-not (buffer-narrowed-p))
+    (should (string-match-p "MARKER" (cooked-tests--text)))))
+
 (ert-deftest cooked-exit-status-is-reported ()
   (cooked-tests--with-session '("/bin/sh" "-c" "exit 9")
     (should (cooked-tests--settle
              (lambda () (string-match-p "\\[exited 9\\]" (cooked-tests--text)))))))
+
+(defun cooked-tests--run-until-dead (argv seconds)
+  "Run ARGV in a cooked buffer and pump for up to SECONDS, killing it if alive.
+Returns non-nil when the buffer killed itself along the way."
+  (let ((buffer (generate-new-buffer "*cooked-test*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (cooked-mode)
+            (cooked--start argv))
+          (let ((deadline (+ (float-time) seconds)))
+            (while (and (< (float-time) deadline) (buffer-live-p buffer))
+              (accept-process-output nil 0.05)
+              ;; Timers, so the deferred kill actually fires.
+              (sit-for 0)
+              (when (buffer-live-p buffer)
+                (with-current-buffer buffer
+                  (when cooked--session
+                    (cooked--apply (cooked--drain cooked--session)))))))
+          (not (buffer-live-p buffer)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (cooked--cleanup))
+        (kill-buffer buffer)))))
+
+(ert-deftest cooked-buffer-is-kept-on-exit-by-default ()
+  (should-not (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 0") 1)))
+
+(ert-deftest cooked-buffer-can-close-itself-on-exit ()
+  (let ((cooked-kill-buffer-on-exit t))
+    (should (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 3") 5))))
+
+(ert-deftest cooked-buffer-can-close-itself-only-on-success ()
+  (let ((cooked-kill-buffer-on-exit 'on-success))
+    (should (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 0") 5))
+    (should-not (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 3") 1))))
+
+(ert-deftest cooked-buffer-close-can-be-decided-by-a-function ()
+  (let ((cooked-kill-buffer-on-exit (lambda (code) (eql code 7))))
+    (should (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 7") 5))
+    (should-not (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 8") 1))))
 
 (ert-deftest cooked-real-bash-reaches-input-state-at-its-prompt ()
   "The headline case: a real interactive shell, whose prompt is raw-mode."
@@ -526,6 +789,48 @@ so a drain touching protected text aborted the redisplay from inside the filter.
         (should (string-match-p "beta" text))
         (should (= 1 (cl-count "alpha" (split-string text "\n") :test #'string-search)))
         (should (equal (string-trim original) (string-trim text)))))))
+
+(ert-deftest cooked-narrowing-keeps-lines-that-are-still-on-screen ()
+  "The `ps' case: long lines that have not scrolled off yet live on the grid, not
+in the buffer, and narrowing used to cut every one of them to the new width.  The
+grid rewraps them instead, so the text is all still there — across more rows."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '%s\\n' aaaaaaaaaabbbbbbbbbbcccccccccc; exec cat")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "cccccccccc" (cooked-tests--text)))))
+    (setq cooked--last-size nil cooked--rows 24 cooked--cols 10)
+    (cooked--resize cooked--session 24 10)
+    (cooked-tests--settle (lambda () nil) 0.3)
+    ;; Each grid row is its own buffer line, so the wrapped line reads back whole
+    ;; only once the row boundaries are taken out.
+    (should (string-match-p
+             "aaaaaaaaaabbbbbbbbbbcccccccccc"
+             (string-replace "\n" "" (cooked-tests--text))))))
+
+(ert-deftest cooked-a-width-round-trip-restores-the-original-rows ()
+  "Rewrapping keeps the wrap provenance, so widening back is not a lossy guess."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '%s\\n' aaaaaaaaaabbbbbbbbbbcccccccccc; exec cat")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "cccccccccc" (cooked-tests--text)))))
+    (dolist (cols '(10 80))
+      (setq cooked--last-size nil cooked--rows 24 cooked--cols cols)
+      (cooked--resize cooked--session 24 cols)
+      (cooked-tests--settle (lambda () nil) 0.3))
+    (should (member "aaaaaaaaaabbbbbbbbbbcccccccccc"
+                    (split-string (cooked-tests--text) "\n")))))
+
+(ert-deftest cooked-clearing-the-screen-keeps-the-transcript ()
+  "`clear' and C-l wipe the grid, but the screen they wipe is history Emacs is
+holding: blanking those rows in place used to delete it from the buffer too."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\nbeta\\n'; exec cat")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "beta" (cooked-tests--text)))))
+    (cooked--send cooked--session "\e[2J")
+    (cooked-tests--settle (lambda () nil) 0.3)
+    (let ((text (cooked-tests--text)))
+      (should (string-match-p "alpha" text))
+      (should (string-match-p "beta" text)))))
 
 (ert-deftest cooked-rows-do-not-merge-into-one-line ()
   "Regression: `forward-line' reports success at an unterminated final line,

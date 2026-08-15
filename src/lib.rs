@@ -46,7 +46,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
     }
 
     let registered = [
-        env.defun("cooked--spawn", 5..=7, DOC_SPAWN, spawn),
+        env.defun("cooked--spawn", 5..=8, DOC_SPAWN, spawn),
         env.defun("cooked--drain", 1..=2, DOC_DRAIN, drain),
         env.defun(
             "cooked--send",
@@ -96,14 +96,17 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 }
 
 const DOC_SPAWN: &str = "Spawn ARGV on a new pty and return a session handle.
-Arguments are ARGV, ENV, ROWS, COLS, WAKE, optional DIRECTORY, and optional
-MIN-REDISPLAY-INTERVAL. ENV is an alist of strings. WAKE is a pipe process whose filter
-runs when output is pending. MIN-REDISPLAY-INTERVAL, in milliseconds, floors how often a
-rapidly-rewriting child (a spinner, a progress meter) triggers a redisplay; it defaults to
-8 when omitted or nil.";
+Arguments are ARGV, ENV, ROWS, COLS, WAKE, optional DIRECTORY, optional
+MIN-REDISPLAY-INTERVAL and optional BACKLOG-LIMIT. ENV is an alist of strings. WAKE is a
+pipe process whose filter runs when output is pending. MIN-REDISPLAY-INTERVAL, in
+milliseconds, floors how often a rapidly-rewriting child (a spinner, a progress meter)
+triggers a redisplay; it defaults to 8 when omitted or nil. BACKLOG-LIMIT caps the items
+awaiting collection before the child is left to block on its own writes; it defaults to
+8000 when omitted or nil.";
 
 const DOC_DRAIN: &str = "Collect everything that changed in SESSION since the last call.
-Returns a plist with :scrolled, :rows, :cursor, :alt, :keys, :mode, :events and :exit.
+Returns a plist with :scrolled, :rows, :cursor, :alt, :app-cursor, :keys, :mode, :events
+and :exit.
 With REJOIN non-nil (the default), a line the terminal wrapped is emitted as one
 line rather than one per screen row.";
 
@@ -178,6 +181,14 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
         .flatten()
         .unwrap_or(8)
         .max(0) as u64;
+    let backlog_limit = args
+        .get(7)
+        .copied()
+        .map(|v| env.from_lisp::<Option<i64>>(v))
+        .transpose()?
+        .flatten()
+        .unwrap_or(emu::BACKLOG_HIGH_WATER as i64)
+        .max(1) as usize;
 
     let session = Session::spawn(
         &argv,
@@ -186,6 +197,7 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
         cwd.as_ref().map(std::path::Path::new),
         wake,
         std::time::Duration::from_millis(min_redisplay_interval_ms),
+        backlog_limit,
     )
     .map_err(|e| io_error(&env, e))?;
     env.user_ptr(session)
