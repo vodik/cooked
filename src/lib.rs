@@ -345,10 +345,16 @@ impl Update {
     /// and it keeps roughly a million cons cells from crossing the boundary.
     ///
     /// Deliberately does not carry `run.glyphs`: box-drawing UIs are overwhelmingly
-    /// alt-screen programs, and `on_alt` already skips eviction into scrollback
-    /// entirely (see `State::evicted`), so scrolled box-glyph content is rare enough
-    /// that it isn't worth this path's cost discipline. It renders as plain styled
-    /// text, exactly as before this feature existed.
+    /// alt-screen programs, and the alt screen contributes nothing here — `State::evicted`
+    /// drops its rows rather than buffering them. Only primary rows reach scrollback, so
+    /// scrolled box-glyph content is rare enough that it isn't worth this path's cost
+    /// discipline. It renders as plain styled text, exactly as before this feature existed.
+    ///
+    /// Note this is a rarity argument, not a guarantee. `State::archive` bypasses the
+    /// `on_alt` guard for callers holding primary rows, so a primary-screen program that
+    /// draws box characters and then clears the display or gets resized will land glyph
+    /// content here and see it flattened. Accepted: that is a narrow case, and the
+    /// alternative is paying per-character glyph conversion on the flood path.
     fn scrolled_rows(&self, env: &Env, rejoin: bool) -> Result<Value> {
         if self.delta.scrolled.is_empty() {
             return Ok(env.nil());
