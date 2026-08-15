@@ -20,19 +20,26 @@
 ;; state does not bind `C-c' and so already falls through to the local map.
 ;;
 ;; `evil-collection' is the exception, and it needs one binding of our own.
-;; `evil-collection-comint' binds RET for every comint buffer, and because
-;; `cooked-mode' derives from `comint-mode' that reaches us through the keymap
-;; parent chain, where it outranks the plain local map.  Its default,
-;; `evil-collection-repl-submit-state' = `normal', hands insert-state RET to
-;; `newline' — so Enter stops submitting and starts inserting a line break.
+;; `evil-collection-comint' binds RET for every comint buffer via `evil-define-key',
+;; which does not edit `comint-mode-map' in place — it registers an auxiliary
+;; keymap that evil consults *ahead of* every buffer's ordinary local map,
+;; `cooked-input-map' included.  A plain `(define-key cooked-input-map ...)`
+;; therefore never gets a look at RET at all; verified directly against a real
+;; evil-collection install, an evil-collection auxiliary keymap shadowing
+;; `cooked-input-map' in `current-active-maps' before it is ever reached.  And
+;; `evil-collection-repl-submit-state' defaults to `normal', which hands
+;; insert-state RET to `newline' — so Enter stops submitting and starts
+;; inserting a line break.
 ;;
-;; Rather than ask everyone to set a global variable, or to turn
-;; `evil-collection-comint' off and lose the rest of it, `cooked-evil' binds RET
-;; on `cooked-input-map' itself.  Evil layers auxiliary keymaps rather than
-;; letting the nearest one shadow the rest, so this overrides exactly RET and
-;; leaves the rest of `evil-collection-comint' — history on the arrow keys,
-;; prompt navigation — working.  Those all route through comint commands, which
-;; `cooked-mode-map' already remaps onto cooked's own.
+;; The fix has to answer evil on its own terms: register our own override the
+;; same way, via `evil-collection-define-key' on `cooked-mode-map' rather than
+;; `comint-mode-map'.  Evil resolves which auxiliary keymap wins by walking the
+;; buffer's own local-map chain, most specific first, so the override tied to
+;; `cooked-mode-map' — the derived, more specific mode — outranks the one tied
+;; to `comint-mode-map', while everything else `evil-collection-comint' set up
+;; — history on the arrow keys, prompt navigation — keeps working, since those
+;; route through comint commands that `cooked-mode-map' already remaps onto
+;; cooked's own.
 ;;
 ;; See `cooked-evil-insert-state-submits' to turn that off.
 
@@ -61,6 +68,36 @@ evil should behave as in any other buffer."
         (unless (eq state 'emacs) (evil-emacs-state))))))
 
 (add-hook 'cooked-state-change-hook #'cooked-evil-sync)
+
+(defcustom cooked-evil-insert-state-submits t
+  "Whether Enter submits input even under `evil-collection'.
+
+`evil-collection-comint' registers RET, <return> and C-m -- the spellings a
+terminal, a GUI frame, and a literal control character each produce for the
+same key -- on an evil auxiliary keymap tied to `comint-mode-map', which evil
+consults ahead of any buffer's ordinary local map; a plain `define-key' on
+`cooked-mode-map' or `cooked-input-map' cannot outrank it.  Its default state
+for that binding is `normal', which hands insert-state Enter to `newline'
+instead of submitting.
+
+Non-nil answers on the same terms, via `evil-collection-define-key' on
+`cooked-mode-map' rather than `comint-mode-map'.  Evil resolves competing
+auxiliary keymaps by walking the buffer's own local-map chain most specific
+first, so the override tied to `cooked-mode-map' -- the derived mode -- wins,
+and everything else `evil-collection-comint' set up keeps working."
+  :type 'boolean :group 'cooked)
+
+(declare-function evil-collection-define-key "evil-collection")
+
+(with-eval-after-load 'evil-collection
+  (when cooked-evil-insert-state-submits
+    ;; All three spellings, matching `evil-collection's own `repl-newline'
+    ;; binding: a GUI frame's Enter key is `<return>', not `RET' -- binding
+    ;; only `RET' leaves `<return>' still resolving to `newline'.
+    (evil-collection-define-key 'insert 'cooked-mode-map
+      (kbd "RET") #'cooked-send-input
+      (kbd "<return>") #'cooked-send-input
+      (kbd "C-m") #'cooked-send-input)))
 
 (provide 'cooked-evil)
 ;;; cooked-evil.el ends here
