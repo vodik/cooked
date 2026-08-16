@@ -1331,6 +1331,40 @@ so a terminal that never answers costs them their whole timeout on startup."
     (should-not (string-match-p "line1\n" (cooked-tests--text)))
     (should (string-match-p "line60" (cooked-tests--text)))))
 
+(defconst cooked-tests--erase-scrollback-script
+  "for i in $(seq 60); do printf 'line%s\\n' $i; done; sleep 1; printf '\\033[3J'; exec cat"
+  "Print enough to fill scrollback, settle, then the child erases it.
+
+The `sleep' matters: it lets a test observe the buffer in its pre-erase state
+before the `CSI 3 J' this is testing for ever arrives, rather than racing to
+read output that a fast child overwrites before the test gets a look at it.")
+
+(ert-deftest cooked-child-erase-scrollback-is-ignored-by-default ()
+  "`CSI 3 J' is xterm's `clear -x'; a program should not be able to wipe
+history just because it can write to the terminal.  Unlike `2 J', real
+xterm's `3 J' never touches the visible screen either, only scrollback."
+  (should-not cooked-honor-erase-scrollback)
+  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--erase-scrollback-script)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line60" (cooked-tests--text)))))
+    (should (string-match-p "line1\n" (cooked-tests--text)))
+    ;; Give the child's `3 J', sent after its sleep, time to arrive and be ignored.
+    (cooked-tests--settle #'ignore 1.5)
+    (should (string-match-p "line1\n" (cooked-tests--text)))
+    (should (string-match-p "line60" (cooked-tests--text)))))
+
+(ert-deftest cooked-child-erase-scrollback-can-be-honored ()
+  (let ((cooked-honor-erase-scrollback t))
+    (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--erase-scrollback-script)
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "line60" (cooked-tests--text)))))
+      (should (string-match-p "line1\n" (cooked-tests--text)))
+      (should (cooked-tests--settle
+               (lambda () (not (string-match-p "line1\n" (cooked-tests--text))))
+               3))
+      ;; The live screen is untouched: real xterm's `3 J' never erases it.
+      (should (string-match-p "line60" (cooked-tests--text))))))
+
 ;;;; Packaging
 
 (ert-deftest cooked-buffer-names-are-configurable-and-unique ()
@@ -1563,6 +1597,92 @@ command runs, flattening the event past recovery.  The binding is the fix."
                                                (get-buffer-window-list buffer nil t))))))
         (delete-window other)))))
 
+(defconst cooked-tests--two-stage-output-script
+  "for i in $(seq 40); do printf 'line%s\\n' $i; done; sleep 1; printf 'AFTER\\n'; exec cat"
+  "Enough lines to build real scrollback, then more output after a pause a
+test can settle across — see `cooked-tests--erase-scrollback-script'.")
+
+(ert-deftest cooked-second-window-follows-new-output ()
+  "Emacs never re-syncs a window's point to the buffer's on its own, so a
+second, non-selected window on a busy cooked buffer must be moved explicitly
+to keep tracking new output the way the selected window already does."
+  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    (let ((main (selected-window))
+          (buffer (current-buffer)))
+      (delete-other-windows)
+      (set-window-buffer main buffer)
+      (let ((other (split-window main nil 'below)))
+        (set-window-buffer other buffer)
+        (should (= (length (get-buffer-window-list buffer nil t)) 2))
+        ;; A freshly split window starts at the buffer's point: already following.
+        (should (>= (window-point other) (marker-position cooked--screen-start)))
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "AFTER" (cooked-tests--text)))))
+        ;; It tracked the new cursor without ever being the selected window.
+        (should (= (window-point other) (point)))
+        (delete-window other)))))
+
+(ert-deftest cooked-second-window-reading-history-is-left-alone ()
+  "A window scrolled up into history is the user choosing to look elsewhere,
+not a window that fell behind -- later output must not yank it back to the
+cursor, the same restraint `follow' already shows for the buffer's own point."
+  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    (should (> (marker-position cooked--screen-start) (point-min)))
+    (let ((main (selected-window))
+          (buffer (current-buffer))
+          (reading (point-min)))
+      (delete-other-windows)
+      (set-window-buffer main buffer)
+      (let ((other (split-window main nil 'below)))
+        (set-window-buffer other buffer)
+        (set-window-point other reading)
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "AFTER" (cooked-tests--text)))))
+        (should (= (window-point other) reading))
+        (delete-window other)))))
+
+(ert-deftest cooked-new-output-recenters-a-following-window ()
+  "`scroll-conservatively' is not a redisplay guarantee when output arrives
+from a process filter rather than a command -- `comint-postoutput-scroll-
+to-bottom' recenters explicitly for the same reason, which is the pattern
+`cooked--apply' mirrors.  Batch Emacs has no real display for `pos-visible-
+in-window-p' to check against, so this asserts the mechanism fires rather
+than its rendered effect."
+  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    (should-not cooked--alt)
+    ;; The selected window only counts if it is actually showing this buffer —
+    ;; without this, `cooked--apply' correctly declines to recenter a window
+    ;; that has nothing to do with this session.
+    (set-window-buffer (selected-window) (current-buffer))
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'recenter)
+                 (lambda (&rest _) (cl-incf calls))))
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "AFTER" (cooked-tests--text))))))
+      (should (> calls 0)))))
+
+(ert-deftest cooked-recenter-never-touches-an-unrelated-selected-window ()
+  "Output can arrive from a process filter for a session that is not on
+screen anywhere -- whatever window happens to be selected at that moment is
+almost certainly showing something else, and recentering it would scroll the
+user's actual work out from under them."
+  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    (should-not (eq (window-buffer (selected-window)) (current-buffer)))
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'recenter)
+                 (lambda (&rest _) (cl-incf calls))))
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "AFTER" (cooked-tests--text))))))
+      (should (= calls 0)))))
+
 (ert-deftest cooked-completion-is-a-normal-capf ()
   "So corfu, cape and friends work without knowing about cooked."
   (cooked-tests--with-session '("/bin/cat")
@@ -1702,6 +1822,75 @@ emulator must be told, so the next rewrap does not resume a line that is gone."
           (should (looking-at-p "AAAAAAAAAABBBBBBBBBB$")))
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
+
+;; `cooked--guard-row-width' exists to catch a live row Emacs softwraps despite
+;; every such row being meant as one hard-newlined buffer line -- the symptom of
+;; a character's real rendered width disagreeing with what `cooked--cols'
+;; assumed for it. Batch Emacs has no real display, so `vertical-motion' never
+;; actually simulates a softwrap here regardless of window width or content
+;; (confirmed empirically: even a 27-character line in a 4-column window lands
+;; `vertical-motion' at the true end of the line, not partway through) -- the
+;; same limitation `cooked-new-output-recenters-a-following-window' documents
+;; for `recenter'. These tests mock `vertical-motion' to report a wrap after a
+;; fixed number of characters, which exercises the trim-and-mark mechanics
+;; `cooked--guard-row-width' actually owns, in place of the wrap detection
+;; itself, which is just a direct call to Emacs' own primitive.
+
+(defmacro cooked-tests--with-mocked-wrap (limit &rest body)
+  "Run BODY with `vertical-motion' reporting a wrap after LIMIT characters."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'vertical-motion)
+              (lambda (&rest _) (goto-char (min (point-max) (+ (point) ,limit))))))
+     ,@body))
+
+(ert-deftest cooked-guard-row-width-trims-a-row-that-would-softwrap ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t))
+      (insert (make-string 5 ?x) "é" (make-string 20 ?y) "\n")
+      (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min)))
+      (goto-char (point-min))
+      (should (= (- (line-end-position) (point-min)) 10))
+      (should (equal (get-text-property (1- (line-end-position)) 'display)
+                      '(right-fringe right-truncation))))))
+
+(ert-deftest cooked-guard-row-width-leaves-a-row-that-fits-alone ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t))
+      (insert "é\n")
+      (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min)))
+      (should (equal (buffer-string) "é\n"))
+      (should-not (get-text-property (point-min) 'display)))))
+
+(ert-deftest cooked-guard-row-width-skips-pure-ascii-rows ()
+  "A misclassified width has to come from a character cooked and Emacs could
+ever disagree about, which a plain ASCII row cannot be -- skipped as a cheap
+fast path, exercised here by leaving a row Emacs would (per the mock) report
+as wrapped untouched, since it never contains anything but ASCII."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (text (concat (make-string 40 ?x) "\n")))
+      (insert text)
+      (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min)))
+      (should (equal (buffer-string) text)))))
+
+(ert-deftest cooked-guard-row-width-does-nothing-without-rejoin ()
+  "When `cooked-rejoin-wrapped-lines' is nil, `truncate-lines' is already t
+buffer-wide (see `cooked-mode'), so a softwrap is already structurally
+impossible and this guard would only be redundant work."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines nil)
+          (inhibit-read-only t)
+          (text (concat (make-string 5 ?x) "é" (make-string 20 ?y) "\n")))
+      (insert text)
+      (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min)))
+      (should (equal (buffer-string) text)))))
 
 (ert-deftest cooked-transcript-navigation-works-in-both-states ()
   "Jumping between commands sends nothing to the child, so a running program
@@ -1935,6 +2124,25 @@ resync went and got it."
       (save-restriction
         (widen)
         (should-not (eq before (get-text-property glyph 'display)))))))
+
+;; Distinct from the alt-pin test above: there, the glyph reaches "scrollback" by
+;; the marker moving past it in place, never leaving the buffer.  Here it genuinely
+;; scrolls off the top of the screen and round-trips through `scrolled_rows', the
+;; flood path that used to flatten glyphs to plain styled text for cost reasons.
+(ert-deftest cooked-box-drawing-survives-scrolling-into-history ()
+  (cooked-tests--with-session
+      (list "/bin/sh" "-c"
+            (concat "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'" ; ┌─┐
+                    "; for i in $(seq 40); do printf 'line%s\\n' $i; done; exec cat"))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    ;; More lines were printed than fit on screen, so the box-drawing row has
+    ;; actually scrolled away rather than merely being relabeled in place.
+    (should (< (point-min) (marker-position cooked--screen-start)))
+    (save-excursion
+      (goto-char (point-min))
+      (should (search-forward "┌" (marker-position cooked--screen-start) t))
+      (should (get-text-property (match-beginning 0) 'display)))))
 
 ;; The one test that crosses the boundary: the dash field is a hand-kept mirror
 ;; between `BoxGlyph' in src/emu/glyph.rs and the `cooked--box-dash-*' constants, and

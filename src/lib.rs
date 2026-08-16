@@ -379,30 +379,26 @@ struct RowSpan {
 }
 
 impl Update {
-    /// Scrollback as `(TEXT (START END FG BG ATTRS)...)`, offsets in characters.
+    /// Scrollback as `(TEXT STYLE-SPANS GLYPH-SPANS)`, offsets in characters.
+    ///
+    /// STYLE-SPANS is `(START END FG BG ATTRS)...`, only where styling departs from the
+    /// default. GLYPH-SPANS is `(START END FG BG ATTRS GLYPHS)...`, only where the run
+    /// carried classified box-drawing glyphs — the same packed form [`glyphs_to_lisp`]
+    /// produces for a live row, so `cooked--overlay-box-glyphs` handles both.
     ///
     /// Assembled here rather than handed over run by run. Emacs pays for every
     /// `insert`, and a flood is tens of thousands of rows: one insert of one string
-    /// plus spans only where styling exists beats N inserts and N property calls,
-    /// and it keeps roughly a million cons cells from crossing the boundary.
-    ///
-    /// Deliberately does not carry `run.glyphs`: box-drawing UIs are overwhelmingly
-    /// alt-screen programs, and the alt screen contributes nothing here — `State::evicted`
-    /// drops its rows rather than buffering them. Only primary rows reach scrollback, so
-    /// scrolled box-glyph content is rare enough that it isn't worth this path's cost
-    /// discipline. It renders as plain styled text, exactly as before this feature existed.
-    ///
-    /// Note this is a rarity argument, not a guarantee. `State::archive` bypasses the
-    /// `on_alt` guard for callers holding primary rows, so a primary-screen program that
-    /// draws box characters and then clears the display or gets resized will land glyph
-    /// content here and see it flattened. Accepted: that is a narrow case, and the
-    /// alternative is paying per-character glyph conversion on the flood path.
+    /// plus spans only where styling or glyphs exist beats N inserts and N property
+    /// calls, and it keeps roughly a million cons cells from crossing the boundary. A
+    /// plain-text run — the overwhelming majority on the primary screen, where
+    /// box-drawing UIs rarely live — pays for neither list.
     fn scrolled_rows(&self, env: &Env, rejoin: bool) -> Result<(Value, Vec<RowSpan>)> {
         if self.delta.scrolled.is_empty() {
             return Ok((env.nil(), Vec::new()));
         }
         let mut text = String::new();
         let mut spans: Vec<Value> = Vec::new();
+        let mut glyph_spans: Vec<Value> = Vec::new();
         let mut rows: Vec<RowSpan> = Vec::with_capacity(self.delta.scrolled.len());
         let mut offset = 0usize;
 
@@ -410,14 +406,24 @@ impl Update {
             let start = offset;
             for run in &line.runs {
                 let chars = run.text.chars().count();
+                let Style { fg, bg, attrs } = run.style;
                 if run.style != Style::default() {
-                    let Style { fg, bg, attrs } = run.style;
                     spans.push(env.list(&[
                         env.into_lisp(offset)?,
                         env.into_lisp(offset + chars)?,
                         color_to_lisp(env, fg)?,
                         color_to_lisp(env, bg)?,
                         env.into_lisp(u32::from(attrs.bits()))?,
+                    ])?);
+                }
+                if let Some(glyphs) = run.glyphs.as_deref() {
+                    glyph_spans.push(env.list(&[
+                        env.into_lisp(offset)?,
+                        env.into_lisp(offset + chars)?,
+                        color_to_lisp(env, fg)?,
+                        color_to_lisp(env, bg)?,
+                        env.into_lisp(u32::from(attrs.bits()))?,
+                        glyphs_to_lisp(env, Some(glyphs))?,
                     ])?);
                 }
                 text.push_str(&run.text);
@@ -435,9 +441,14 @@ impl Update {
             }
         }
 
-        let mut items = vec![env.into_lisp(text.as_str())?];
-        items.extend(spans);
-        Ok((env.list(&items)?, rows))
+        Ok((
+            env.list(&[
+                env.into_lisp(text.as_str())?,
+                env.list(&spans)?,
+                env.list(&glyph_spans)?,
+            ])?,
+            rows,
+        ))
     }
 
     /// Spell an [`Anchor`] in whichever coordinate system Emacs can address it in.
@@ -562,5 +573,6 @@ fn event_to_lisp(env: &Env, event: &Event, update: &Update, rows: &[RowSpan]) ->
             env.into_lisp(m.sgr)?,
         ]),
         Event::Reply(bytes) => tagged("reply", env.into_lisp(bytes.as_slice())?),
+        Event::EraseScrollback => env.list(&[env.intern("erase-scrollback")?]),
     }
 }

@@ -955,12 +955,12 @@ insertion point is above the region `cooked-alt-screen-pin' confines us to."
     (widen)
     (save-excursion
       (goto-char cooked--screen-start)
-      ;; ROWS arrives pre-assembled as (TEXT SPAN...), so this is one insert of plain
-      ;; text plus a property call only where styling exists.  Note that building a
-      ;; propertized string in Lisp and inserting that instead measures three times
-      ;; slower: `concat' on propertized strings makes Emacs copy and merge property
-      ;; intervals over and over.
-      (pcase-let ((`(,text . ,spans) rows))
+      ;; ROWS arrives pre-assembled as (TEXT STYLE-SPANS GLYPH-SPANS), so this is one
+      ;; insert of plain text plus property calls only where styling or glyphs exist.
+      ;; Note that building a propertized string in Lisp and inserting that instead
+      ;; measures three times slower: `concat' on propertized strings makes Emacs copy
+      ;; and merge property intervals over and over.
+      (pcase-let ((`(,text ,spans ,glyph-spans) rows))
         (let ((start (point)))
           (insert text)
           (dolist (span spans)
@@ -968,6 +968,15 @@ insertion point is above the region `cooked-alt-screen-pin' confines us to."
               (when-let* ((face (cooked--face fg bg attrs)))
                 (add-text-properties (+ start from) (+ start to)
                                      (list 'face face 'font-lock-face face)))))
+          ;; Box-drawing that scrolled into history is rasterized exactly as it would
+          ;; be live, via the same `cooked--overlay-box-glyphs' the screen region uses
+          ;; — there is no screen column here to phase a shade glyph's dither against,
+          ;; which costs at most a seam on that one glyph kind, same as a live row
+          ;; rendered without a known origin.
+          (when (and glyph-spans cooked-box-drawing-images (image-type-available-p 'xbm))
+            (dolist (span glyph-spans)
+              (pcase-let ((`(,from ,_to ,fg ,bg ,attrs ,glyphs) span))
+                (cooked--overlay-box-glyphs (+ start from) glyphs fg bg attrs))))
           ;; Scrollback never changes again, so it is protected once, here, rather
           ;; than re-swept on every redisplay.
           (add-text-properties start (point)
@@ -1105,13 +1114,57 @@ transcript."
       (when (< limit (point-max))
         (remove-text-properties limit (point-max) '(read-only nil))))))
 
+(defun cooked--guard-row-width (start)
+  "Keep the screen row beginning at START to one screen line.
+
+Every live row is its own hard-newlined buffer line — `cooked--render-rows'
+always starts one at `cooked--goto-screen-row' and never joins it to its
+neighbours — so Emacs softwrapping one is never legitimate output. It only
+happens when some character's real rendered width disagreed with what
+`cooked--cols' assumed for it: an ambiguous East-Asian-width character, a
+ligature, a composed grapheme, a font substitution, anything. Rust's width
+model is not the place to chase that — it has to stay the plain narrow
+classification curses programs expect it to report — so this catches
+whatever gets through on the one side that can actually observe the truth:
+Emacs' own layout.
+
+`vertical-motion' is that layout decision, reused rather than re-derived
+from pixel widths, so this is correct regardless of cause. A row found to
+wrap is trimmed from the end, one character at a time — rarely more than
+one or two, since the mismatch is usually a column or so — until it no
+longer does, and the cut is marked with the same right-fringe truncation
+bitmap plain `truncate-lines' would show. That has to be done by hand:
+`cooked-rejoin-wrapped-lines' (which see) keeps `truncate-lines' off
+buffer-wide precisely so a *genuinely* wrapped scrollback line can still
+softwrap and reflow for free, and this must not fight that.
+
+Trimming by character rather than by grapheme cluster is an accepted gap: a
+cut that lands between a base character and a combining mark is possible in
+principle and vanishingly unlikely in practice, since the trigger is a
+character whose own width was already mismeasured, not an adjacent one."
+  (when (and cooked-rejoin-wrapped-lines (< start (line-end-position)))
+    (goto-char start)
+    (when (string-match-p (rx (not ascii)) (buffer-substring-no-properties start (line-end-position)))
+      (let (trimmed)
+        (while (progn (goto-char start) (vertical-motion 1) (< (point) (line-end-position)))
+          (setq trimmed t)
+          (goto-char start)
+          (end-of-line)
+          (delete-region (1- (point)) (point)))
+        (when trimmed
+          (goto-char start)
+          (let ((cut (1- (line-end-position))))
+            (put-text-property cut (1+ cut) 'display '(right-fringe right-truncation))))))))
+
 (defun cooked--render-rows (rows)
   "Rewrite damaged ROWS, an alist of (INDEX . RUNS)."
   (save-excursion
     (pcase-dolist (`(,index . ,runs) rows)
       (cooked--goto-screen-row index 'extend)
       (delete-region (point) (line-end-position))
-      (cooked--insert-runs runs index))))
+      (let ((start (point)))
+        (cooked--insert-runs runs index)
+        (cooked--guard-row-width start)))))
 
 (defun cooked--cursor-position ()
   "Buffer position of the emulator cursor.
@@ -1331,6 +1384,27 @@ not once per session."
                      (cooked-refresh)
                    (error (message "cooked: resync failed too: %S" again))))))))))))
 
+(defun cooked--following-windows ()
+  "Other windows on this buffer whose point should track the child's cursor.
+
+The selected window's point *is* the buffer's point for as long as it stays
+selected — Emacs keeps the two in sync on its own, which is what `follow' and
+`wandered' below ride on.  No such thing happens for any other window
+showing the same buffer: its `window-point' is a value Emacs stores and
+redisplays from independently, touched only by `set-window-point', so a
+second window on a busy cooked buffer would otherwise freeze wherever it
+last happened to be pointed, deaf to every later drain.
+
+A window's own point, not the buffer's, decides whether it is still
+following, mirroring `follow' one level down: scrolling that window with the
+wheel or a scrollbar does not move its point, so such a window is left alone
+here for the same reason `follow' would leave the buffer's point alone for
+the same case — it reads as the user choosing to look elsewhere, not as a
+window that fell behind."
+  (when-let* ((start (and cooked--screen-start (marker-position cooked--screen-start))))
+    (seq-filter (lambda (w) (>= (window-point w) start))
+                (delq (selected-window) (get-buffer-window-list nil nil t)))))
+
 (defun cooked--apply (update)
   "Apply UPDATE, the plist returned by `cooked--drain'."
   ;; `let*', emphatically: these initialisers delete and insert, and under plain
@@ -1348,6 +1422,12 @@ not once per session."
          ;; be dragged to the start of whatever was rebuilt underneath it.  The
          ;; cell survives that; the buffer position does not.
          (wandered (and cooked--wandered (cooked--screen-cell)))
+         ;; Captured before the redraw for the same reason `follow' is: once the
+         ;; screen region is rewritten, every window's old point either points at
+         ;; text that no longer means what it did or has already been dragged
+         ;; along by the deletion, so which windows counted as "following" has to
+         ;; be decided now, not after.
+         (other-follows (cooked--following-windows))
          ;; Where this drain's scrollback landed, for resolving a `scrolled' anchor
          ;; against.  nil when the drain evicted nothing, in which case no anchor can
          ;; refer to it either.
@@ -1384,6 +1464,36 @@ not once per session."
     ;; keeps the way back visible; `cooked--snap-to-cursor' takes it.
     (cond (wandered (cooked--goto-screen-cell wandered))
           (follow (goto-char (cooked--point-after-input))))
+    ;; Explicit rather than left to redisplay, for two separate reasons: a
+    ;; non-selected window is never the one `goto-char' above just moved, so
+    ;; nothing else here would touch it; and even the selected window's
+    ;; `scroll-conservatively' is not a redisplay guarantee once output arrives
+    ;; from a process filter rather than a command. `comint-postoutput-scroll-
+    ;; to-bottom' recenters explicitly for exactly that reason — this mirrors
+    ;; it, in place of the `comint-output-filter-functions' hook cooked cannot
+    ;; use, having replaced comint's own insertion with `cooked--apply' outright.
+    ;;
+    ;; Skipped on the alt screen: that region is sized to the window exactly
+    ;; (`cooked--fit-screen'), so a full-screen program's own cursor position
+    ;; is never an "end of output" to scroll toward — the whole screen is
+    ;; already on screen by construction.
+    (unless cooked--alt
+      (let* ((target (cooked--point-after-input))
+             ;; A rendered row always ends with a newline, even the cursor's own —
+             ;; see `cooked--insert-runs' — so the cursor at the true end of output
+             ;; sits one short of `point-max', not on it.
+             (at-end (>= target (1- (point-max))))
+             ;; The selected window only belongs here if it is actually showing
+             ;; this buffer — output can arrive from a process filter while the
+             ;; user's focus is on an entirely different window, and recentering
+             ;; that one would be a bug, not a courtesy.
+             (recenter-too (and follow (eq (window-buffer (selected-window)) (current-buffer))
+                                 (list (selected-window)))))
+        (dolist (w other-follows)
+          (when (window-live-p w) (set-window-point w target)))
+        (when at-end
+          (dolist (w (append recenter-too other-follows))
+            (when (window-live-p w) (with-selected-window w (recenter (- -1 scroll-margin))))))))
     (cooked--update-ghost-cursor)
     (when cooked--exit (cooked--on-exit cooked--exit))))
 
@@ -1400,6 +1510,9 @@ two chances to disagree."
     (`(bell) (ding))
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
     (`(reply . ,bytes) (cooked--send cooked--session bytes))
+    (`(erase-scrollback)
+     (when cooked-honor-erase-scrollback
+       (cooked--discard-scrollback (marker-position cooked--screen-start))))
     (`(mouse ,enabled ,sgr)
      (setq cooked--mouse enabled cooked--mouse-sgr sgr)
      ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this,
@@ -1484,6 +1597,18 @@ Queries are always answered; this is about OSC 10/11/12 requests that *set* a
 color.  Anything that can write to the terminal can send one — a `cat' of a
 hostile file, output from a compromised host — so it is off by default, for the
 same reason the OSC 51 command channel is a separate file you have to require."
+  :type 'boolean
+  :group 'cooked)
+
+(defcustom cooked-honor-erase-scrollback nil
+  "Whether the child may delete this buffer's scrollback with `CSI 3 J'.
+
+That is xterm's `clear -x' sequence.  Scrollback lives in the Emacs buffer,
+not the emulator's grid, on the principle that history is Emacs' to keep or
+discard — never the child's; anything that can write to the terminal can send
+this sequence, a `cat' of a hostile file included, so honoring it is off by
+default, for the same reason `cooked-allow-color-set' is.  `M-x
+cooked-clear-scrollback' remains available either way."
   :type 'boolean
   :group 'cooked)
 

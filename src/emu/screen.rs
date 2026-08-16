@@ -55,11 +55,14 @@ pub enum Erase {
 }
 
 impl Erase {
+    /// `3` (xterm's "erase saved lines") is deliberately absent: unlike every other
+    /// value here, it does not touch the grid at all, only the scrollback Emacs holds.
+    /// See [`Event::EraseScrollback`](super::term::Event::EraseScrollback).
     pub fn from_param(n: u16) -> Option<Self> {
         match n {
             0 => Some(Self::ToEnd),
             1 => Some(Self::ToStart),
-            2 | 3 => Some(Self::All),
+            2 => Some(Self::All),
             _ => None,
         }
     }

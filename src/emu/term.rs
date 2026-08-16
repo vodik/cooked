@@ -68,6 +68,15 @@ pub enum Event {
     Mouse(Mouse),
     /// Bytes the terminal owes the child (device attributes, cursor reports).
     Reply(Vec<u8>),
+    /// `CSI 3 J` — the child asked to erase saved lines, xterm's `clear -x`.
+    ///
+    /// Unlike `CSI 2 J`, real xterm's `3 J` touches only the scrollback, leaving the
+    /// visible screen exactly as it was — so the grid does nothing here at all. And
+    /// scrollback lives in the Emacs buffer, not the grid (see the module comment), so
+    /// the grid could not honour this itself even if it wanted to: erasing it is Emacs'
+    /// call, not the child's, since anything that can write to the terminal can send
+    /// this sequence. This event is the whole of the response; Emacs acts on it or not.
+    EraseScrollback,
 }
 
 /// How the child wants keys that have no classical encoding — modified Return, Tab,
@@ -628,9 +637,13 @@ impl Perform for State {
                 self.screen_mut().goto(row, col);
             }
             (None, 'J') => {
-                if let Some(how) = Erase::from_param(arg(params, 0, 0) as u16) {
+                let param = arg(params, 0, 0) as u16;
+                if let Some(how) = Erase::from_param(param) {
                     let evicted = self.screen_mut().erase_display(how);
                     self.evicted(evicted);
+                }
+                if param == 3 {
+                    self.events.push(Event::EraseScrollback);
                 }
             }
             (None, 'K') => {
@@ -1071,6 +1084,29 @@ mod tests {
         assert_eq!(text(&t, 0), "aaa");
         assert_eq!(text(&t, 1), "");
         assert_eq!(text(&t, 2), "");
+    }
+
+    #[test]
+    fn erase_scrollback_is_flagged_as_an_event_and_leaves_the_screen_alone() {
+        // Unlike `CSI 2 J`, real xterm's `3 J` never touches the visible screen — only
+        // the scrollback, which the grid does not hold, so it does nothing at all here.
+        let mut t = term(3, 8, b"aaa\r\nbbb\r\nccc");
+        t.drain();
+        t.feed(b"\x1b[3J");
+        let delta = t.drain();
+        assert_eq!(delta.events, vec![Event::EraseScrollback]);
+        assert!(delta.rows.is_empty(), "nothing on the grid changed");
+        assert_eq!(text(&t, 0), "aaa");
+        assert_eq!(text(&t, 1), "bbb");
+        assert_eq!(text(&t, 2), "ccc");
+    }
+
+    #[test]
+    fn plain_erase_display_never_raises_the_scrollback_event() {
+        let mut t = term(3, 8, b"aaa\r\nbbb\r\nccc");
+        t.drain();
+        t.feed(b"\x1b[2J");
+        assert!(t.drain().events.is_empty());
     }
 
     #[test]
