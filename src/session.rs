@@ -48,6 +48,10 @@ struct Shared {
     notified: AtomicBool,
     /// When the wake pipe was last actually written to, for `min_redisplay_interval`.
     last_notified: Mutex<Option<std::time::Instant>>,
+    /// While set and unexpired, the child is mid-frame under DEC mode 2026 and has asked
+    /// not to be drawn yet. Refreshed from `Term` under the lock the reader already holds,
+    /// so no path takes an extra one. See [`flush_pending`] and [`poll_timeout`].
+    sync_until: Mutex<Option<std::time::Instant>>,
     /// Floor on how often the wake pipe is written to, regardless of how fast output
     /// arrives. Without one, a program that rewrites the same line rapidly — a spinner, a
     /// progress meter — drives one full Emacs redisplay per write, which is a lot more
@@ -153,6 +157,7 @@ impl Session {
             dirty: AtomicBool::new(false),
             notified: AtomicBool::new(false),
             last_notified: Mutex::new(None),
+            sync_until: Mutex::new(None),
             min_redisplay_interval,
             backlog_limit,
             shutdown: AtomicBool::new(false),
@@ -344,6 +349,11 @@ fn poll_timeout(shared: &Shared) -> PollTimeout {
     let remaining = last
         .map(|t| shared.min_redisplay_interval.saturating_sub(t.elapsed()))
         .unwrap_or(std::time::Duration::ZERO);
+    // A frame held by DEC mode 2026 keeps `dirty` set with nothing to flush, so the
+    // throttle's own remainder is typically zero — polling on that would spin this thread
+    // hot for the length of every frame. Taking the later of the two deadlines both fixes
+    // that and retires the sync timeout at the timeout rather than up to a poll late.
+    let remaining = remaining.max(sync_remaining(shared).unwrap_or_default());
     PollTimeout::try_from(remaining).unwrap_or(PollTimeout::from(POLL_TIMEOUT_MS))
 }
 
@@ -397,6 +407,10 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
             .lock()
             .is_ok_and(|term| term.backlog() >= shared.backlog_limit)
         {
+            // A child that filled the backlog inside one frame has forfeited atomicity:
+            // holding the wakeup here would deadlock the backlog against its own blocked
+            // write, waiting on a frame it cannot finish because we are not reading.
+            *shared.sync_until.lock().unwrap_or_else(|e| e.into_inner()) = None;
             announce(shared, wake);
             std::thread::sleep(std::time::Duration::from_millis(2));
             continue;
@@ -413,6 +427,7 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
                 // A child that changes mode almost always writes at the same moment, so
                 // re-sampling here is what makes the common case feel instantaneous.
                 sample_mode(shared);
+                refresh_sync(shared);
                 announce(shared, wake);
             }
             // EIO is how Linux reports the last slave closing.
@@ -493,6 +508,22 @@ fn notify(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
     }
 }
 
+/// Copy the emulator's synchronized-output deadline where the notify path can see it.
+fn refresh_sync(shared: &Arc<Shared>) {
+    let deadline = shared
+        .term
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .sync_deadline();
+    *shared.sync_until.lock().unwrap_or_else(|e| e.into_inner()) = deadline;
+}
+
+/// How much longer the child may suppress a redisplay, or `None` if it may not.
+fn sync_remaining(shared: &Shared) -> Option<std::time::Duration> {
+    let deadline = *shared.sync_until.lock().unwrap_or_else(|e| e.into_inner());
+    deadline.and_then(|t| t.checked_duration_since(std::time::Instant::now()))
+}
+
 /// Marks output or a mode change as pending and flushes it if `min_redisplay_interval`
 /// allows. See `Shared`'s docs on `dirty` and `min_redisplay_interval`.
 fn announce(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
@@ -504,6 +535,12 @@ fn announce(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
 /// `min_redisplay_interval` has elapsed since the last send.
 fn flush_pending(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
     if shared.notified.load(Ordering::SeqCst) || !shared.dirty.load(Ordering::SeqCst) {
+        return;
+    }
+    // Before `dirty` is cleared, deliberately: leaving it set is what hands the frame to
+    // the retry machinery, so the held output is drawn the moment the frame ends or the
+    // timeout expires rather than waiting on the child's next write.
+    if sync_remaining(shared).is_some() {
         return;
     }
     let mut last = shared
@@ -531,8 +568,12 @@ mod tests {
         nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
     }
 
+    /// Close-on-exec, because these tests fork children concurrently: a plain `pipe`
+    /// leaves the read end inheritable, and `the_child_inherits_only_stdio` then sees
+    /// *this* fd surviving someone else's exec and reports a leak that is the test
+    /// harness' own.
     fn pipe() -> (OwnedFd, OwnedFd) {
-        nix::unistd::pipe().expect("pipe")
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).expect("pipe")
     }
 
     fn session(argv: &[&str]) -> (Session, OwnedFd) {
@@ -644,6 +685,51 @@ mod tests {
         let mut byte = [0u8; 1];
         assert_eq!(nix::unistd::read(read.as_fd(), &mut byte), Ok(1));
         assert_eq!(byte[0], 1);
+        drop(session);
+    }
+
+    #[test]
+    fn synchronized_output_holds_the_wakeup_until_the_frame_ends() {
+        // BSU, then output, then a pause well inside the 150ms cap: nothing must wake
+        // Emacs, because the child has said the frame is not worth drawing yet.
+        let (session, read) = session(&[
+            "/bin/sh",
+            "-c",
+            "printf '\x1b[?2026h'; printf 'half a frame'; sleep 5",
+        ]);
+        std::thread::sleep(Duration::from_millis(60));
+
+        let mut buf = [0u8; 256];
+        nix::fcntl::fcntl(
+            read.as_fd(),
+            nix::fcntl::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .expect("nonblock");
+        assert_eq!(
+            nix::unistd::read(read.as_fd(), &mut buf).err(),
+            Some(Errno::EAGAIN),
+            "a frame in progress must not wake Emacs"
+        );
+        drop(session);
+    }
+
+    #[test]
+    fn an_unterminated_frame_is_drawn_when_the_timeout_expires() {
+        // BSU and then silence — the child died mid-frame, or simply never finished it.
+        // The buffer must not stay stale for longer than the cap.
+        let (session, read) = session(&[
+            "/bin/sh",
+            "-c",
+            "printf '\x1b[?2026h'; printf 'half a frame'; sleep 5",
+        ]);
+        std::thread::sleep(emu::SYNC_TIMEOUT + Duration::from_millis(120));
+
+        let mut buf = [0u8; 256];
+        assert_eq!(
+            nix::unistd::read(read.as_fd(), &mut buf).expect("read"),
+            1,
+            "the held frame must be drawn once the cap expires"
+        );
         drop(session);
     }
 

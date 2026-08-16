@@ -191,6 +191,14 @@ pub struct Delta {
 }
 
 /// Backlog at which the reader stops pulling from the pty, letting the child block.
+/// How long a child may hold back a redisplay with DEC mode 2026 before we draw anyway.
+///
+/// Synchronized output exists so a half-drawn frame is never shown; it is not a licence
+/// to freeze the buffer. A child killed mid-frame never sends the end marker, so without
+/// a cap the last thing the user sees is a partial screen. xterm and contour use 150ms,
+/// kitty 100; the longer of the two is the safer choice on a loaded machine.
+pub const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+
 pub const BACKLOG_HIGH_WATER: usize = 8_000;
 
 /// Largest OSC payload forwarded to Lisp, in bytes. Well past any real title or
@@ -275,6 +283,13 @@ impl Term {
         self.state.focus_events
     }
 
+    /// How long this frame may still suppress a redisplay, if it may at all.
+    pub fn sync_deadline(&self) -> Option<std::time::Instant> {
+        self.state
+            .sync_until
+            .filter(|t| std::time::Instant::now() < *t)
+    }
+
     /// Whether a wheel notch should become cursor keys: the child asked for alternate
     /// scroll, the alternate screen is up, and it did not ask for the mouse itself —
     /// a program that wants mouse reports gets mouse reports, as in xterm.
@@ -326,6 +341,12 @@ struct State {
     /// DEC mode 1007: on the alternate screen, a wheel notch becomes cursor keys. This
     /// is what makes the wheel scroll in `less`, `man` and `git log`.
     alt_scroll: bool,
+    /// DEC mode 2026: the deadline until which this frame may suppress redisplay.
+    ///
+    /// A deadline captured at the transition rather than a bare flag, so the safety
+    /// timeout needs no extra bookkeeping: a child that opens a frame and then dies
+    /// cannot hold Emacs past it, because the hold expires on its own.
+    sync_until: Option<std::time::Instant>,
     mouse: Mouse,
     origin_mode: bool,
     dec_graphics: bool,
@@ -367,6 +388,7 @@ impl State {
             bracketed_paste: false,
             focus_events: false,
             alt_scroll: false,
+            sync_until: None,
             mouse: Mouse::default(),
             origin_mode: false,
             dec_graphics: false,
@@ -545,6 +567,9 @@ impl State {
             // by `Term::bracketed_paste` as a multi-line submission is being framed.
             1004 => self.focus_events = on,
             1007 => self.alt_scroll = on,
+            2026 => {
+                self.sync_until = on.then(|| std::time::Instant::now() + SYNC_TIMEOUT);
+            }
             2004 => self.bracketed_paste = on,
             _ => return,
         }
@@ -569,6 +594,7 @@ impl State {
             1006 => set(self.mouse.sgr),
             1004 => set(self.focus_events),
             1007 => set(self.alt_scroll),
+            2026 => set(self.sync_until.is_some_and(|t| std::time::Instant::now() < t)),
             47 | 1047 | 1049 => set(self.on_alt),
             2004 => set(self.bracketed_paste),
             // Dropped from our terminfo, and this is where a child finds that out
@@ -610,6 +636,7 @@ impl State {
         self.bracketed_paste = false;
         self.focus_events = false;
         self.alt_scroll = false;
+        self.sync_until = None;
         self.newline_mode = false;
         self.last_print = None;
         self.modify_other_keys = 0;
@@ -1273,7 +1300,7 @@ mod tests {
 
     #[test]
     fn a_soft_reset_stops_focus_reporting() {
-        let mut t = term(2, 8, b"\x1b[?1004h\x1b[!p");
+        let t = term(2, 8, b"\x1b[?1004h\x1b[!p");
         assert!(!t.focus_events());
     }
 
