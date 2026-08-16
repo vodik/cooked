@@ -74,6 +74,37 @@ pub struct Style {
     pub attrs: Attrs,
 }
 
+impl Style {
+    /// What an erase leaves behind: the background bar, and nothing else.
+    ///
+    /// This is `bce`, which terminfo advertises and which ncurses optimises on the
+    /// strength of — it sets a background and erases rather than writing spaces, so
+    /// dropping the pen here loses every coloured panel and status bar.
+    ///
+    /// Deliberately *not* the whole pen. `Row::content_len` counts a styled blank as
+    /// content, so filling with a pen that merely has a foreground or an attribute set
+    /// would make `SGR 31` followed by `EL` append trailing cells to the row — trailing
+    /// whitespace in the scrollback of essentially every coloured shell prompt. Reducing
+    /// to the background means that when no background is set the result is
+    /// `Style::default()`, and the common case stays exactly as it was.
+    ///
+    /// Reverse video survives because it is resolved in `cooked--build-face`, where the
+    /// bar's colour is then the foreground; dropping the flag would erase the drawing.
+    pub fn erase(self) -> Self {
+        match self.attrs.contains(Attrs::REVERSE) {
+            true => Self {
+                fg: self.fg,
+                bg: self.bg,
+                attrs: Attrs::REVERSE,
+            },
+            false => Self {
+                bg: self.bg,
+                ..Self::default()
+            },
+        }
+    }
+}
+
 /// One screen position. `ch == CONTINUATION` marks the second half of a wide character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
@@ -205,7 +236,20 @@ impl Row {
         }
     }
 
+    /// Whether the row holds any text, as opposed to only a background wash.
+    ///
+    /// Distinct from `is_blank`, and the distinction only exists because of `bce`: a row a
+    /// full-screen program painted and then cleared is no longer blank — every cell
+    /// carries a background — but it is not transcript either, and archiving it would push
+    /// a screenful of pure colour into the scrollback.
+    pub fn has_text(&self) -> bool {
+        !self.marks.is_empty() || self.cells.iter().any(|c| c.ch != BLANK)
+    }
+
     /// Whether the row holds nothing a resize would need to preserve.
+    ///
+    /// Stricter than [`Row::has_text`] on purpose: a resize must keep a background wash,
+    /// so a washed row is not blank even though it holds no text.
     pub fn is_blank(&self) -> bool {
         self.marks.is_empty()
             && self

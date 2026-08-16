@@ -192,7 +192,7 @@ impl Screen {
                 r.wrapped = true;
             }
             self.cursor.col = 0;
-            evicted = self.linefeed();
+            evicted = self.linefeed(style);
         }
 
         let (row, col) = (self.cursor.row, self.cursor.col);
@@ -226,10 +226,10 @@ impl Screen {
     }
 
     /// LF/IND: down one, scrolling the region if already at its bottom.
-    pub fn linefeed(&mut self) -> Vec<Row> {
+    pub fn linefeed(&mut self, pen: Style) -> Vec<Row> {
         self.cursor.wrap_pending = false;
         match self.cursor.row {
-            row if row == self.region.bottom => self.scroll_up(1),
+            row if row == self.region.bottom => self.scroll_up(1, pen),
             row if row + 1 < self.rows.len() => {
                 self.cursor.row = row + 1;
                 Vec::new()
@@ -239,10 +239,10 @@ impl Screen {
     }
 
     /// RI: up one, scrolling the region down if already at its top.
-    pub fn reverse_index(&mut self) {
+    pub fn reverse_index(&mut self, pen: Style) {
         self.cursor.wrap_pending = false;
         match self.cursor.row {
-            row if row == self.region.top => self.scroll_down(1),
+            row if row == self.region.top => self.scroll_down(1, pen),
             0 => {}
             row => self.cursor.row = row - 1,
         }
@@ -255,7 +255,7 @@ impl Screen {
     }
 
     /// Shift the region up by `n`, returning rows that became scrollback.
-    pub fn scroll_up(&mut self, n: usize) -> Vec<Row> {
+    pub fn scroll_up(&mut self, n: usize, pen: Style) -> Vec<Row> {
         let Region { top, bottom } = self.region;
         let n = n.min(self.region.height());
         if n == 0 {
@@ -268,14 +268,14 @@ impl Screen {
         };
         self.rows[top..=bottom].rotate_left(n);
         for row in &mut self.rows[bottom + 1 - n..=bottom] {
-            row.clear(Style::default());
+            row.clear(pen.erase());
         }
         self.touch_range(top..=bottom);
         self.carry(&evicted);
         evicted
     }
 
-    pub fn scroll_down(&mut self, n: usize) {
+    pub fn scroll_down(&mut self, n: usize, pen: Style) {
         let Region { top, bottom } = self.region;
         let n = n.min(self.region.height());
         if n == 0 {
@@ -283,7 +283,7 @@ impl Screen {
         }
         self.rows[top..=bottom].rotate_right(n);
         for row in &mut self.rows[top..top + n] {
-            row.clear(Style::default());
+            row.clear(pen.erase());
         }
         self.touch_range(top..=bottom);
     }
@@ -318,10 +318,10 @@ impl Screen {
         self.goto(row, col);
     }
 
-    pub fn erase_line(&mut self, how: Erase) {
+    pub fn erase_line(&mut self, how: Erase, pen: Style) {
         let (col, cols) = (self.cursor.col, self.cols);
         let row = self.cursor.row;
-        let style = Style::default();
+        let style = pen.erase();
         if let Some(r) = self.touch(row) {
             match how {
                 Erase::ToEnd => r.fill(col..cols, style),
@@ -342,25 +342,28 @@ impl Screen {
     ///
     /// A partial erase archives nothing: the child is rewriting part of a screen it is
     /// still drawing on, not finishing with one.
-    pub fn erase_display(&mut self, how: Erase) -> Vec<Row> {
+    pub fn erase_display(&mut self, how: Erase, pen: Style) -> Vec<Row> {
         let (row, last) = (self.cursor.row, self.rows.len());
         match how {
             Erase::ToEnd => {
-                self.erase_line(Erase::ToEnd);
-                self.clear_rows(row + 1..last);
+                self.erase_line(Erase::ToEnd, pen);
+                self.clear_rows(row + 1..last, pen);
                 Vec::new()
             }
             Erase::ToStart => {
-                self.clear_rows(0..row);
-                self.erase_line(Erase::ToStart);
+                self.clear_rows(0..row, pen);
+                self.erase_line(Erase::ToStart, pen);
                 Vec::new()
             }
             Erase::All => {
-                let history = match self.archives() && self.rows.iter().any(|r| !r.is_blank()) {
+                // `has_text`, not `!is_blank`: with `bce` a screen the child painted and
+                // then cleared has a background on every cell, and archiving that would
+                // hand Emacs a screenful of pure colour with nothing written on it.
+                let history = match self.archives() && self.rows.iter().any(|r| r.has_text()) {
                     true => self.rows[..=self.last_used_row()].to_vec(),
                     false => Vec::new(),
                 };
-                self.clear_rows(0..last);
+                self.clear_rows(0..last, pen);
                 // Whatever was on screen has gone to history whole, so the next row 0
                 // starts a line rather than continuing one.
                 self.carried = 0;
@@ -369,38 +372,38 @@ impl Screen {
         }
     }
 
-    fn clear_rows(&mut self, range: std::ops::Range<usize>) {
+    fn clear_rows(&mut self, range: std::ops::Range<usize>, pen: Style) {
         for i in range {
             if let Some(r) = self.touch(i) {
-                r.clear(Style::default());
+                r.clear(pen.erase());
             }
         }
     }
 
-    pub fn erase_chars(&mut self, n: usize) {
+    pub fn erase_chars(&mut self, n: usize, pen: Style) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
         if let Some(r) = self.touch(row) {
-            r.fill(col..(col + n).min(cols), Style::default());
+            r.fill(col..(col + n).min(cols), pen.erase());
         }
     }
 
-    pub fn insert_chars(&mut self, n: usize) {
+    pub fn insert_chars(&mut self, n: usize, pen: Style) {
         let (row, col) = (self.cursor.row, self.cursor.col);
         if let Some(r) = self.touch(row) {
-            r.insert_blank(col, n, Style::default());
+            r.insert_blank(col, n, pen.erase());
         }
     }
 
-    pub fn delete_chars(&mut self, n: usize) {
+    pub fn delete_chars(&mut self, n: usize, pen: Style) {
         let (row, col) = (self.cursor.row, self.cursor.col);
         if let Some(r) = self.touch(row) {
-            r.delete(col, n, Style::default());
+            r.delete(col, n, pen.erase());
         }
     }
 
     /// IL/DL operate on a temporary region starting at the cursor row. Lines deleted this
     /// way are destroyed, never archived.
-    pub fn insert_lines(&mut self, n: usize) {
+    pub fn insert_lines(&mut self, n: usize, pen: Style) {
         if !self.region.contains(self.cursor.row) {
             return;
         }
@@ -409,11 +412,11 @@ impl Screen {
             top: self.cursor.row,
             bottom: saved.bottom,
         };
-        self.scroll_down(n);
+        self.scroll_down(n, pen);
         self.region = saved;
     }
 
-    pub fn delete_lines(&mut self, n: usize) {
+    pub fn delete_lines(&mut self, n: usize, pen: Style) {
         if !self.region.contains(self.cursor.row) {
             return;
         }
@@ -428,7 +431,7 @@ impl Screen {
         // changed. Letting the carry advance here would have a later rewrap hand over
         // cells to complete a row that was already complete.
         let carried = self.carried;
-        drop(self.scroll_up(n));
+        drop(self.scroll_up(n, pen));
         self.carried = carried;
         self.region = saved;
     }
@@ -469,10 +472,12 @@ impl Screen {
     }
 
     /// Index of the last row holding anything, or 0.
+    /// The last row worth archiving. Keyed on text, not on styling: a `bce` background
+    /// wash below the last written line is not transcript.
     fn last_used_row(&self) -> usize {
         self.rows
             .iter()
-            .rposition(|row| !row.is_blank())
+            .rposition(|row| row.has_text())
             .unwrap_or(0)
     }
 
@@ -788,9 +793,9 @@ mod tests {
         let mut screen = Screen::new(2, 4);
         write(&mut screen, "aa");
         screen.carriage_return();
-        screen.linefeed();
+        screen.linefeed(Style::default());
         write(&mut screen, "bb");
-        let evicted = screen.linefeed();
+        let evicted = screen.linefeed(Style::default());
 
         assert_eq!(evicted.len(), 1);
         assert_eq!(evicted[0].to_text(), "aa");
@@ -806,7 +811,7 @@ mod tests {
         }
         screen.set_region(1, 2);
         screen.goto(2, 0);
-        let evicted = screen.linefeed();
+        let evicted = screen.linefeed(Style::default());
 
         assert!(
             evicted.is_empty(),
@@ -838,7 +843,7 @@ mod tests {
         let mut screen = Screen::new(2, 6);
         write(&mut screen, "abcdef");
         screen.goto(0, 3);
-        screen.erase_line(Erase::ToEnd);
+        screen.erase_line(Erase::ToEnd, Style::default());
         assert_eq!(screen.row(0).unwrap().to_text(), "abc");
     }
 
@@ -1012,12 +1017,12 @@ mod tests {
         let mut screen = Screen::new(2, 5);
         write(&mut screen, "aaaaabbbbbccccc");
         screen.carriage_return();
-        screen.linefeed();
+        screen.linefeed(Style::default());
         assert_eq!(screen.carried, 2);
 
         write(&mut screen, "new");
         screen.carriage_return();
-        screen.linefeed();
+        screen.linefeed(Style::default());
 
         assert_eq!(
             screen.carried, 0,
@@ -1032,7 +1037,7 @@ mod tests {
         assert_eq!(screen.carried, 1);
 
         screen.goto(0, 0);
-        screen.delete_lines(1);
+        screen.delete_lines(1, Style::default());
 
         assert_eq!(
             screen.carried, 1,
@@ -1046,7 +1051,7 @@ mod tests {
         write(&mut screen, "aaaaabbbbbccccc");
         assert_eq!(screen.carried, 1);
 
-        screen.erase_display(Erase::All);
+        screen.erase_display(Erase::All, Style::default());
 
         assert_eq!(screen.carried, 0);
     }
@@ -1147,10 +1152,10 @@ mod tests {
         for line in ["a", "b"] {
             write(&mut screen, line);
             screen.carriage_return();
-            screen.linefeed();
+            screen.linefeed(Style::default());
         }
         screen.goto(0, 0);
-        screen.insert_lines(1);
+        screen.insert_lines(1, Style::default());
         assert_eq!(screen.row(0).unwrap().to_text(), "");
         assert_eq!(screen.row(1).unwrap().to_text(), "a");
         assert_eq!(screen.row(2).unwrap().to_text(), "b");

@@ -383,7 +383,8 @@ impl State {
     }
 
     fn linefeed(&mut self) {
-        let evicted = self.screen_mut().linefeed();
+        let pen = self.pen;
+        let evicted = self.screen_mut().linefeed(pen);
         self.evicted(evicted);
     }
 
@@ -429,7 +430,9 @@ impl State {
         if on {
             // Dropped rather than archived: this is the previous full-screen program's
             // leftover frame, which was never history to begin with.
-            drop(self.alt.erase_display(Erase::All));
+            // `Style::default()`, not the pen: a freshly entered alt screen is not the
+            // outgoing program's background wash.
+            drop(self.alt.erase_display(Erase::All, Style::default()));
             self.alt.goto(0, 0);
         }
         // No event to match: `Delta::alt` is the level, and Lisp acts on that. See the
@@ -604,6 +607,8 @@ impl Perform for State {
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         let private = intermediates.first().copied();
+        // `bce`: erases and scrolls leave the pen's background behind. See `Style::erase`.
+        let pen = self.pen;
         match (private, action) {
             (Some(b'?'), 'h' | 'l') => {
                 let on = action == 'h';
@@ -639,7 +644,7 @@ impl Perform for State {
             (None, 'J') => {
                 let param = arg(params, 0, 0) as u16;
                 if let Some(how) = Erase::from_param(param) {
-                    let evicted = self.screen_mut().erase_display(how);
+                    let evicted = self.screen_mut().erase_display(how, pen);
                     self.evicted(evicted);
                 }
                 if param == 3 {
@@ -648,20 +653,20 @@ impl Perform for State {
             }
             (None, 'K') => {
                 if let Some(how) = Erase::from_param(arg(params, 0, 0) as u16) {
-                    self.screen_mut().erase_line(how);
+                    self.screen_mut().erase_line(how, pen);
                 }
             }
-            (None, 'L') => self.screen_mut().insert_lines(arg(params, 0, 1)),
-            (None, 'M') => self.screen_mut().delete_lines(arg(params, 0, 1)),
-            (None, 'P') => self.screen_mut().delete_chars(arg(params, 0, 1)),
+            (None, 'L') => self.screen_mut().insert_lines(arg(params, 0, 1), pen),
+            (None, 'M') => self.screen_mut().delete_lines(arg(params, 0, 1), pen),
+            (None, 'P') => self.screen_mut().delete_chars(arg(params, 0, 1), pen),
             (None, 'S') => {
                 let n = arg(params, 0, 1);
-                let evicted = self.screen_mut().scroll_up(n);
+                let evicted = self.screen_mut().scroll_up(n, pen);
                 self.evicted(evicted);
             }
-            (None, 'T') => self.screen_mut().scroll_down(arg(params, 0, 1)),
-            (None, 'X') => self.screen_mut().erase_chars(arg(params, 0, 1)),
-            (None, '@') => self.screen_mut().insert_chars(arg(params, 0, 1)),
+            (None, 'T') => self.screen_mut().scroll_down(arg(params, 0, 1), pen),
+            (None, 'X') => self.screen_mut().erase_chars(arg(params, 0, 1), pen),
+            (None, '@') => self.screen_mut().insert_chars(arg(params, 0, 1), pen),
             (None, 'd') => {
                 let col = self.screen().cursor.col;
                 self.screen_mut().goto(arg(params, 0, 1) - 1, col);
@@ -735,14 +740,19 @@ impl Perform for State {
                 self.screen_mut().carriage_return();
                 self.linefeed();
             }
-            (None, b'M') => self.screen_mut().reverse_index(),
+            (None, b'M') => {
+                let pen = self.pen;
+                self.screen_mut().reverse_index(pen);
+            }
             (None, b'H') => self.screen_mut().set_tab(),
             (None, b'7') => self.save_restore(true),
             (None, b'8') => self.save_restore(false),
             (None, b'c') => {
                 self.pen = Style::default();
                 self.screen_mut().reset_region();
-                let evicted = self.screen_mut().erase_display(Erase::All);
+                // The pen is default by the line above, so this is `bce` with nothing to
+                // carry — spelled out rather than read back, since RIS means default.
+                let evicted = self.screen_mut().erase_display(Erase::All, Style::default());
                 self.evicted(evicted);
                 self.screen_mut().goto(0, 0);
                 // RIS means everything the child negotiated is off, keyboard included.
@@ -843,6 +853,88 @@ mod tests {
             t.screen().row(0).unwrap().runs()[0].style.fg,
             Color::Indexed(200)
         );
+    }
+
+    /// The style of the last cell of a row, which is where an erase-to-end lands.
+    fn last_style(t: &Term, row: usize) -> Style {
+        let r = t.screen().row(row).unwrap();
+        r.runs().last().map(|run| run.style).unwrap_or_default()
+    }
+
+    #[test]
+    fn bce_fills_an_erase_with_the_pens_background() {
+        // Red background, then erase to end of line: the bar reaches the right margin.
+        let t = term(2, 8, b"\x1b[41mab\x1b[K");
+        assert_eq!(last_style(&t, 0).bg, Color::Indexed(1));
+        assert_eq!(
+            t.screen().row(0).unwrap().to_text(),
+            "ab      ",
+            "the wash is blanks, not text"
+        );
+    }
+
+    #[test]
+    fn bce_ignores_the_foreground_and_the_attributes() {
+        // The regression guard for `Row::content_len`, which counts a styled blank as
+        // content: a coloured *foreground* must not turn an erase into trailing cells.
+        let plain = term(2, 8, b"ab\x1b[K");
+        let fg = term(2, 8, b"\x1b[31;4mab\x1b[K");
+        assert_eq!(
+            fg.screen().row(0).unwrap().runs().len(),
+            plain.screen().row(0).unwrap().runs().len(),
+            "SGR 31 then EL must not append a run"
+        );
+        assert_eq!(last_style(&fg, 0).bg, Color::Default);
+    }
+
+    #[test]
+    fn bce_keeps_reverse_video() {
+        // Reverse is resolved into a face by Lisp, so the bar's colour is the foreground.
+        let t = term(2, 8, b"\x1b[7;31mab\x1b[K");
+        let style = last_style(&t, 0);
+        assert!(style.attrs.contains(Attrs::REVERSE));
+        assert_eq!(style.fg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn bce_applies_to_ech_ich_and_scrolls() {
+        let t = term(3, 8, b"abcdef\r\x1b[41m\x1b[3X");
+        assert_eq!(
+            t.screen().row(0).unwrap().runs()[0].style.bg,
+            Color::Indexed(1),
+            "ECH erases with the pen"
+        );
+
+        // A scroll exposes a fresh row, which is an erase too.
+        let t = term(2, 8, b"\x1b[41m\x1b[2Sx");
+        assert_eq!(t.screen().row(1).unwrap().runs()[0].style.bg, Color::Indexed(1));
+    }
+
+    #[test]
+    fn a_background_wash_is_not_transcript() {
+        // Paint the screen and clear it. Without `has_text` this hands Emacs a screenful
+        // of pure colour with nothing written on it.
+        let mut t = term(3, 8, b"\x1b[41m\x1b[2J");
+        assert!(
+            t.drain().scrolled.is_empty(),
+            "an erased wash must not become scrollback"
+        );
+    }
+
+    #[test]
+    fn a_washed_screen_still_archives_its_text() {
+        let mut t = term(3, 8, b"\x1b[41mhello\x1b[2J");
+        let scrolled = t.drain().scrolled;
+        assert_eq!(scrolled.len(), 1, "the written row is still history");
+        assert_eq!(runs_text(&scrolled[0]), "hello");
+    }
+
+    #[test]
+    fn an_erase_with_no_background_is_unchanged() {
+        // The common case must stay byte-identical to life before `bce`.
+        let mut t = term(2, 8, b"one\x1b[K\r\ntwo\r\nthree");
+        let delta = t.drain();
+        assert_eq!(runs_text(&delta.scrolled[0]), "one");
     }
 
     #[test]
