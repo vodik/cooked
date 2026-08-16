@@ -929,6 +929,62 @@ grid rewraps them instead, so the text is all still there — across more rows."
     (should (member "aaaaaaaaaabbbbbbbbbbcccccccccc"
                     (split-string (cooked-tests--text) "\n")))))
 
+;; Twelve rows of exactly twelve columns, `ps'-like: padded out to the right edge and
+;; hard-newlined there rather than wrapped, with interior runs of spaces wide enough that
+;; a narrower width has to break inside one.  Each row is tagged, so a duplicate is
+;; countable rather than a judgement call.
+(defconst cooked-tests--filled-screen
+  "i=1; while [ $i -le 12 ]; do printf 'r%02d  aaa    bb  cc  \\n' $i; i=$((i+1)); done; exec cat"
+  "Fill a 12x20 screen with space-padded lines that reach the right edge.")
+
+(defmacro cooked-tests--with-filled-screen (&rest body)
+  "Run BODY with a 12x20 session whose screen `cooked-tests--filled-screen' has filled."
+  (declare (indent 0))
+  `(let ((buffer (generate-new-buffer "*cooked-filled*")))
+     (unwind-protect
+         (with-current-buffer buffer
+           (cooked-mode)
+           (setq cooked--rows 12 cooked--cols 20 cooked--last-size '(12 . 20))
+           (cooked--start (list "/bin/sh" "-c" cooked-tests--filled-screen))
+           (cooked--refresh-keymap)
+           (should (cooked-tests--settle
+                    (lambda () (string-match-p "r12" (cooked-tests--text)))))
+           ,@body)
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer))))
+
+(ert-deftest cooked-a-two-dimensional-resize-round-trips ()
+  "Shrinking in both directions at once puts the two halves of a resize in each
+other's way: the rewrap makes more rows than the shorter screen can hold, so rows
+leave for scrollback in their rewrapped form while the buffer still holds them in
+their old one.  Going back to the original size must give the original transcript
+back — the same text, and each row exactly once."
+  (cooked-tests--with-filled-screen
+    (let ((original (cooked-tests--unwrapped)))
+      (cooked-tests--resize 6 12)
+      (cooked-tests--resize 12 20)
+      (let ((text (cooked-tests--text)))
+        (dotimes (i 12)
+          (let ((tag (format "r%02d" (1+ i))))
+            ;; Every row still there, and there exactly once.
+            (should (= 1 (cl-count tag (split-string text "\n") :test #'string-search))))))
+      ;; And the padding survived, so the columns still line up.
+      (should (equal original (cooked-tests--unwrapped)))
+      (cooked--check-seam))))
+
+(ert-deftest cooked-a-height-shrink-does-not-leave-the-old-rows-below-the-screen ()
+  "The rows a shrink evicts are inserted above the screen as scrollback, and the
+survivors are re-rendered from row 0 down.  Nothing was removing the buffer lines
+below the new last row, so the live screen was left with a stale copy of itself
+underneath it — invisible until you scrolled, and duplicated text when you did."
+  (cooked-tests--with-filled-screen
+    (cooked-tests--resize 6 20)
+    (should (<= (count-lines (marker-position cooked--screen-start) (point-max)) 6))
+    (let ((text (cooked-tests--text)))
+      (dotimes (i 12)
+        (let ((tag (format "r%02d" (1+ i))))
+          (should (>= 1 (cl-count tag (split-string text "\n") :test #'string-search))))))))
+
 (ert-deftest cooked-clearing-the-screen-keeps-the-transcript ()
   "`clear' and C-l wipe the grid, but the screen they wipe is history Emacs is
 holding: blanking those rows in place used to delete it from the buffer too."
@@ -1815,6 +1871,199 @@ command runs, flattening the event past recovery.  The binding is the fix."
                                 (directory-file-name cooked--source-directory))))
         (should (member "README.md" (all-completions "REA" table)))))))
 
+(defun cooked-tests--completion-reply (serial prefix records &optional truncated)
+  "The OSC 51;C payload a shell would send for RECORDS, as the handler sees it."
+  (concat (format "R;%d;%d;0;%d;" serial prefix (if truncated 1 0))
+          (base64-encode-string
+           (encode-coding-string
+            (mapconcat (lambda (record) (concat (string-join record "\x1f") "\x1e"))
+                       records "")
+            'utf-8)
+           t)))
+
+(ert-deftest cooked-completion-reply-becomes-candidates ()
+  "The shell's answer, decoded: candidates, their descriptions, their groups."
+  (with-temp-buffer
+    (cooked--completion-handle
+     (cooked-tests--completion-reply
+      3 4 '(("checkout" "checkout   -- switch branches" "%B%F{cyan}>> command%f%b")
+            ("check-attr" "check-attr -- gitattributes" "-default-"))))
+    (pcase-let ((`(,serial ,prefix ,_suffix ,truncated . ,records)
+                 cooked--completion-reply))
+      (should-not truncated)
+      (should (= serial 3))
+      (should (= prefix 4))
+      (pcase-let ((`(,matches ,annotate ,group)
+                   (cooked--shell-completion-table records)))
+        (should (equal matches '("checkout" "check-attr")))
+        (should (equal (funcall annotate "checkout") " switch branches"))
+        ;; The heading is what compsys would have printed, prompt escapes and all.
+        (should (equal (funcall group "checkout" nil) "command"))
+        ;; zsh's name for "no group": a heading of "-default-" is worse than none.
+        (should-not (funcall group "check-attr" nil))))))
+
+(ert-deftest cooked-completion-keeps-the-annotated-half-of-a-duplicate ()
+  "zsh offers a branch under both `heads' and `commits'; only one is worth showing."
+  (with-temp-buffer
+    (cooked--completion-handle
+     (cooked-tests--completion-reply
+      1 2 '(("main" "main" "-default-")
+            ("main" "main -- [76165fd] the tip" "branch"))))
+    (pcase-let* ((`(,_serial ,_prefix ,_suffix ,_truncated . ,records)
+                  cooked--completion-reply)
+                 (`(,matches ,annotate ,_group) (cooked--shell-completion-table records)))
+      (should (equal matches '("main")))
+      (should (equal (funcall annotate "main") " [76165fd] the tip")))))
+
+(defmacro cooked-tests--with-stub-shell (answers count &rest body)
+  "Run BODY with `cooked--shell-completions' answering from ANSWERS.
+
+ANSWERS is an alist of LINE to the reply it produces; COUNT is a symbol bound to
+the number of queries made, which is the point of the exercise: a round trip the
+shell did not need is a stutter while typing."
+  (declare (indent 2))
+  `(let ((,count 0))
+     (cl-letf (((symbol-function 'cooked--shell-completions)
+                (lambda (line _offset)
+                  (cl-incf ,count)
+                  (cdr (assoc line ,answers)))))
+       ,@body)))
+
+(ert-deftest cooked-completion-filters-a-complete-answer-in-emacs ()
+  "A list the shell sent whole needs no second query as the word grows."
+  (cooked-tests--with-stub-shell
+      '(("git chec" . (4 0 nil ("checkout" "" "") ("check-attr" "" ""))))
+      queries
+    (let* ((table (cooked--completion-dynamic
+                   "git " "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                   '("chec" nil ("checkout" "" "") ("check-attr" "" ""))))
+           (grown (all-completions "checko" table)))
+      (should (equal grown '("checkout")))
+      (should (= queries 0)))))
+
+(ert-deftest cooked-completion-asks-again-when-the-answer-was-truncated ()
+  "The reported bug: `pacman' is past the cap at `p', and no filtering finds it."
+  (cooked-tests--with-stub-shell
+      '(("pacman" . (6 0 nil ("pacman" "" "") ("pacman-key" "" ""))))
+      queries
+    (let ((table (cooked--completion-dynamic
+                  "" "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                  ;; What the shell sent for `p': cut off before `pacman'.
+                  '("p" t ("pacman-key" "" "")))))
+      (should (equal (all-completions "pacman" table) '("pacman" "pacman-key")))
+      (should (= queries 1)))))
+
+(ert-deftest cooked-completion-asks-again-when-the-completion-changed-kind ()
+  "`git checkout ' offers branches; a `-' makes it flags, which no branch matches."
+  (cooked-tests--with-stub-shell
+      '(("git checkout -" . (1 0 nil ("--track" "" "") ("--detach" "" ""))))
+      queries
+    (let ((table (cooked--completion-dynamic
+                  "git checkout " "" (make-hash-table :test #'equal)
+                  (make-hash-table :test #'equal)
+                  '("" nil ("main" "" "") ("cache" "" "")))))
+      (should (equal (all-completions "-" table) '("--track" "--detach")))
+      (should (= queries 1)))))
+
+(ert-deftest cooked-completion-keeps-the-last-answer-when-a-query-fails ()
+  "A completer past the timeout must not empty the popup under the user."
+  (cooked-tests--with-stub-shell '() queries
+    (let ((table (cooked--completion-dynamic
+                  "" "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                  '("p" t ("pacman-key" "" "")))))
+      (should (equal (all-completions "pacman-k" table) '("pacman-key")))
+      (should (= queries 1)))))
+
+(ert-deftest cooked-completion-drops-a-reply-to-a-request-it-did-not-make ()
+  "A completer slower than the timeout answers eventually; by then it is stale."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (setq cooked--completion-nonce "1234" cooked--completion-serial 6)
+    (let ((cooked-completion-timeout 0.05))
+      ;; The reply that lands is for the previous request, not this one.
+      (cooked--completion-handle (cooked-tests--completion-reply 6 0 '(("stale" "" ""))))
+      (should-not (cooked--shell-completions "wha" 3)))))
+
+(ert-deftest cooked-completion-asks-nobody-without-an-announcement ()
+  "The trigger is only a keystroke: to a shell with no widget bound to it, the
+request is a line of input.  Nothing is sent until the shell says it is listening."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (should-not cooked--completion-nonce)
+    (should-not (cooked--shell-completions "git chec" 8))
+    ;; And the CAPF still completes, in Emacs.
+    (goto-char cooked--input-end)
+    (insert "ls")
+    (pcase-let ((`(,_start ,_end ,table . ,_) (cooked-completion-at-point)))
+      (should (member "ls" (all-completions "ls" table))))))
+
+(ert-deftest cooked-completion-forgets-the-nonce-when-the-shell-runs-something ()
+  "Once a command is running, those bytes would land in it rather than in ZLE."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (setq cooked--completion-nonce "abcd")
+    (cooked--semantic '(command-start (screen 0 . 0)) nil)
+    (should-not cooked--completion-nonce)
+    (should-not (cooked--shell-completions "git chec" 8))))
+
+(ert-deftest cooked-completion-comes-from-zsh-itself ()
+  "The whole exchange against a real shell: zsh's own completion system, run in
+the shell you are typing at, over a line it has never seen."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-fake-zdotdir
+      '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
+    (let ((buffer (generate-new-buffer "*cooked-complete*"))
+          (root (file-name-directory (directory-file-name cooked--source-directory))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (cooked-mode)
+            (pcase-let ((`(,argv ,env ,scratch)
+                         (cooked--shell-invocation (executable-find "zsh"))))
+              (setq cooked--scratch scratch)
+              (cooked--start argv root env))
+            (cooked--refresh-keymap)
+            ;; The nonce is the shell saying its widget is bound and ZLE is reading.
+            (should (cooked-tests--settle
+                     (lambda () (and cooked--input-start cooked--completion-nonce))))
+            (goto-char cooked--input-end)
+            (insert "cd shell-int")
+            (let ((before (cooked-tests--text))
+                  (cooked-completion-timeout 5))
+              (cooked-completion-at-point)
+              ;; The line briefly lives in ZLE, which redraws from it when the widget
+              ;; returns.  Putting it back byte for byte is what keeps that redraw a
+              ;; no-op; anything else shows up here as the screen having changed.
+              (cooked-tests--settle (lambda () nil) 0.3)
+              (should (equal (cooked-tests--text) before)))
+            (let ((cooked-completion-timeout 5))
+              (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
+                ;; Only the word is replaced, and only the directory is offered.
+                ;; Emacs would have offered the files too: knowing that `cd' takes a
+                ;; directory is the shell's knowledge, not ours.
+                (should (equal (buffer-substring-no-properties start end) "shell-int"))
+                (should (equal (all-completions "shell-int" table) '("shell-integration")))))
+            ;; A path is completed against its own directory, and the candidate comes
+            ;; back carrying the components compsys walked past to reach it.
+            (delete-region cooked--input-start (point))
+            (insert "cat shell-integration/cooked.z")
+            (let ((cooked-completion-timeout 5))
+              (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
+                (should (equal (buffer-substring-no-properties start end)
+                               "shell-integration/cooked.z"))
+                (should (equal (all-completions "shell-integration/cooked.z" table)
+                               '("shell-integration/cooked.zsh")))))
+            ;; The table is asked again for each word typed into it, rather than
+            ;; filtered in Emacs.  Nothing else can pass this: the first answer is a
+            ;; list of file names, and no amount of filtering turns that into flags.
+            (let ((cooked-completion-timeout 5))
+              (delete-region cooked--input-start (point))
+              (insert "ls ")
+              (pcase-let ((`(,_start ,_end ,table . ,_) (cooked-completion-at-point)))
+                (should (member "README.md" (all-completions "" table)))
+                (should (equal (all-completions "--colo" table) '("--color"))))))
+        (with-current-buffer buffer (cooked--cleanup))
+        (kill-buffer buffer)))))
+
 (ert-deftest cooked-size-follows-the-smallest-window ()
   "One child, possibly several windows: the largest would wrap in the smallest."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -2024,7 +2273,63 @@ back unchanged."
       (should (member whole (split-string (cooked-tests--text) "\n")))
 
       (cooked-tests--resize 4 10)
-      (should (string-match-p whole (cooked-tests--unwrapped))))))
+      (should (string-match-p whole (cooked-tests--unwrapped)))
+      (cooked--check-seam))))
+
+;; The same arrangement with a padded line rather than a solid one.  Digits cannot catch a
+;; trimming bug, because there is nothing about them to trim: every row of the solid line
+;; is full to its last column whatever width it is chunked at.  Real column-aligned output
+;; is padded with spaces at every boundary, so a wrap landing inside a run of them is the
+;; ordinary case, and a continuation row that loses them shortens the buffer's copy of the
+;; line — which is the seam drifting, silently, until the next rewrap resumes it a few
+;; columns out.
+(defconst cooked-tests--padded-seam-line
+  "aa        bb        cc        dd        ee        ff       "
+  "Fifty-nine characters, padded so that a chunk boundary lands inside the spaces.")
+
+(defmacro cooked-tests--with-padded-straddling-line (&rest body)
+  "Run BODY with a 4x10 session holding `cooked-tests--padded-seam-line'."
+  (declare (indent 0))
+  `(let ((buffer (generate-new-buffer "*cooked-padded-seam*")))
+     (unwind-protect
+         (with-current-buffer buffer
+           (cooked-mode)
+           (setq cooked--rows 4 cooked--cols 10 cooked--last-size '(4 . 10))
+           (cooked--start (list "/bin/sh" "-c"
+                                (format "printf '%%s' '%s'; sleep 5"
+                                        cooked-tests--padded-seam-line)))
+           (cooked--refresh-keymap)
+           (should (cooked-tests--settle
+                    (lambda () (string-match-p "ff" (cooked-tests--text)))))
+           ,@body)
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer))))
+
+(ert-deftest cooked-a-padded-line-across-the-seam-keeps-its-padding ()
+  "A continuation row's trailing blanks are interior to its line, so they have to
+survive the trip into the buffer.  Trimming them as though they ended the line
+pulled the text after them forward, both losing the alignment and leaving the
+buffer holding fewer characters of the line than the emulator believes it handed
+over — which is the offset seam a later rewrap turns into a visible one."
+  (let ((whole (string-trim-right cooked-tests--padded-seam-line)))
+    (cooked-tests--with-padded-straddling-line
+      (cooked--check-seam)
+      ;; Wide enough that the whole line is one buffer line: the part in scrollback plus
+      ;; the row that continues it.  Checked here rather than at 10 because a *live* row
+      ;; is rendered with its trailing blanks trimmed, each on its own buffer line — it is
+      ;; still a rectangle on a grid, and only on the way into scrollback does a row
+      ;; become part of a logical line that has to keep its interior padding.
+      (cooked-tests--resize 4 30)
+      (should (string-match-p whole (cooked-tests--unwrapped)))
+      (cooked--check-seam)
+
+      ;; Back down and up again: the padding has now been through the seam twice, in both
+      ;; directions, which is where a lost column compounds rather than cancelling out.
+      (cooked-tests--resize 4 10)
+      (cooked--check-seam)
+      (cooked-tests--resize 4 30)
+      (should (string-match-p whole (cooked-tests--unwrapped)))
+      (cooked--check-seam))))
 
 (ert-deftest cooked-clearing-scrollback-across-the-seam-keeps-the-screen ()
   "`cooked-clear-scrollback' can cut a line in half: its head is scrollback and
@@ -2033,6 +2338,10 @@ emulator must be told, so the next rewrap does not resume a line that is gone."
   (cooked-tests--with-straddling-line
     (cooked-clear-scrollback)
     (should (string-prefix-p "2222222222" (cooked-tests--text)))
+    ;; The one place state flows Emacs -> Rust: cutting the head has to reach the
+    ;; emulator's carry, or it resumes a line that is no longer there.  Now checkable
+    ;; from the other side rather than only visible in the next rewrap's output.
+    (cooked--check-seam)
 
     (cooked-tests--resize 4 30)
     (should (string-match-p "222222222233333333334444444444555555555"

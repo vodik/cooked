@@ -3,8 +3,9 @@
 ;;; Commentary:
 
 ;; The interactive half of cooked: keymaps, key encoding, input submission,
-;; history, completion, secrets, and starting a shell.  See cooked.el, the main
-;; file, for what this is and how to install it.
+;; history, secrets, and starting a shell.  Completion is its own file,
+;; cooked-completion.el.  See cooked.el, the main file, for what this is and how
+;; to install it.
 
 ;; Two signals decide who owns the keyboard.  The kernel's line discipline
 ;; (`cooked--mode') identifies programs doing canonical reads, and OSC 133 marks
@@ -16,6 +17,7 @@
 ;;; Code:
 
 (require 'cooked)
+(require 'cooked-completion)
 (require 'comint)
 
 ;; Defined by the native core at `module-load' time, so the byte-compiler cannot
@@ -732,55 +734,6 @@ deletes forward unless the line is already empty."
   (setq cooked--input-start nil cooked--input-end nil)
   (cooked--signal cooked--session 2))
 
-;;;; Completion
-;;
-;; The shell cannot complete for us: the line being edited lives in Emacs and the
-;; shell's line editor has never seen it, so forwarding TAB would complete against
-;; an empty buffer.  Completing in Emacs is the honest option and the better one —
-;; it is an ordinary `completion-at-point-functions' entry, so corfu, cape,
-;; consult and friends work here exactly as they do anywhere else.
-
-(defvar cooked--executables nil "Cached PATH lookup, see `cooked--executable-table'.")
-
-(defun cooked--executable-table ()
-  "Names of programs on PATH, cached for the session."
-  (or cooked--executables
-      (setq cooked--executables
-            (delete-dups
-             (mapcan (lambda (dir)
-                       (when (file-accessible-directory-p dir)
-                         (ignore-errors (directory-files dir nil "\\`[^.]" t))))
-                     exec-path)))))
-
-(defun cooked-flush-executables ()
-  "Forget the cached list of programs on PATH."
-  (interactive)
-  (setq cooked--executables nil))
-
-(defun cooked--completion-bounds ()
-  "Bounds of the word before point, clamped to the pending input."
-  (let ((limit (marker-position cooked--input-start)))
-    (save-excursion
-      (let ((end (point)))
-        (skip-chars-backward "^ \t" limit)
-        (cons (point) end)))))
-
-(defun cooked-completion-at-point ()
-  "Complete the pending input: a program name first, file names after it."
-  (when (and (cooked--input-state-p)
-             cooked--input-start
-             (marker-position cooked--input-start)
-             (>= (point) (marker-position cooked--input-start)))
-    (pcase-let ((`(,start . ,end) (cooked--completion-bounds)))
-      (list start end
-            (if (= start (marker-position cooked--input-start))
-                (completion-table-in-turn (cooked--executable-table)
-                                          #'completion-file-name-table)
-              #'completion-file-name-table)
-            :exclusive 'no
-            :annotation-function
-            (lambda (_) (when (= start (marker-position cooked--input-start)) " program"))))))
-
 ;;;; State transitions
 
 (defun cooked--set-mode (mode)
@@ -824,6 +777,11 @@ would file all of their output under one region ending wherever it stopped."
     (`(command-start ,at)
      (setq cooked--semantic 'output
            cooked--command-start (copy-marker (cooked--anchor-position at batch-start)))
+     ;; The shell has left the prompt, so its completion widget is not reading and
+     ;; the nonce it announced is spent.  The shell would refuse a request built on
+     ;; it anyway; not sending one is better, since those bytes would land in
+     ;; whatever is now running.
+     (cooked--completion-forget-nonce)
      (cooked--refresh-keymap))
     (`(command-end ,code ,at)
      (setq cooked--semantic nil)

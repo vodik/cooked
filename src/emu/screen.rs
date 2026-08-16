@@ -85,9 +85,13 @@ pub struct Screen {
     /// began a line, and its hard breaks would land `cols` from the fragment's start
     /// rather than from the line's. The buffer then shows a row wider than the window.
     ///
-    /// Counted in rows rather than cells because every row that leaves is exactly `cols`
-    /// wide, making `carried * cols` the head's exact width. [`Screen::reflow`] restores
-    /// that property at the new width before it returns, so it holds unconditionally.
+    /// Counted in rows rather than cells because a row that leaves mid-line is exactly
+    /// `cols` wide — [`Row::line_runs`] keeps the trailing blanks that would otherwise cut
+    /// it short — making `carried * cols` the head's exact width. The one row handed over
+    /// narrower is the seam fragment [`Logical::take_front`] cuts, and that exists
+    /// precisely to top the head up to a whole number of rows at the new width, so
+    /// [`Screen::reflow`] restores the property before it returns and it holds
+    /// unconditionally. [`Screen::head`] is the same quantity in characters.
     carried: usize,
     /// DECAWM, on by default as every terminal starts. See [`Screen::set_autowrap`].
     autowrap: bool,
@@ -580,6 +584,25 @@ impl Screen {
             .unwrap_or(0)
     }
 
+    /// Rows the screen occupies: everything down to the last one holding something, and
+    /// never fewer than the cursor's own row.
+    ///
+    /// The bound a shrink may not eat into, and the same number Emacs shapes the buffer's
+    /// screen region by — reported on the drain rather than re-derived there, since a
+    /// buffer that disagrees keeps rendering rows the grid has stopped having.
+    pub fn used(&self) -> usize {
+        self.last_used_row().max(self.cursor.row) + 1
+    }
+
+    /// Characters of row 0's logical line that are already in Emacs.
+    ///
+    /// See [`Screen::carried`](Self#structfield.carried). Reported in characters rather
+    /// than rows so the other end never has to reconstruct it from a width, and so it
+    /// stays meaningful if a departed row is ever not exactly `cols` wide.
+    pub fn head(&self) -> usize {
+        self.carried * self.cols
+    }
+
     /// Resize, returning rows that became scrollback.
     ///
     /// Shrinking absorbs the blank rows below the content first. Evicting from the top
@@ -607,7 +630,7 @@ impl Screen {
         let evicted = match rows.cmp(&self.rows.len()) {
             std::cmp::Ordering::Less => {
                 let excess = self.rows.len() - rows;
-                let keep = self.last_used_row().max(self.cursor.row) + 1;
+                let keep = self.used();
                 let spare = self.rows.len().saturating_sub(keep).min(excess);
                 self.rows.truncate(self.rows.len() - spare);
                 self.rows.drain(..excess - spare).collect()
@@ -650,7 +673,7 @@ impl Screen {
 
         // The same bound the shrink path uses, so the blank rows below the content are
         // still absorbed first rather than being rewrapped into a screenful of nothing.
-        let keep = self.last_used_row().max(self.cursor.row) + 1;
+        let keep = self.used();
 
         let mut lines: Vec<Logical> = Vec::new();
         let (mut cursor_line, mut cursor_offset) = (0, 0);
@@ -688,7 +711,7 @@ impl Screen {
         if head % cols != 0 && !lines.is_empty() {
             let split = (cols - head % cols).min(lines[0].cells.len());
             let ends_here = split == lines[0].cells.len();
-            history.push(lines[0].take_front(split, cols, !ends_here));
+            history.push(lines[0].take_front(split, !ends_here));
             head += split;
             if cursor_line == 0 {
                 // Inside the fragment the cursor has left the grid; the nearest cell it
@@ -843,9 +866,15 @@ impl Logical {
         rows
     }
 
-    /// Split the first `n` cells off the front as a row of `cols`, keeping their marks.
-    fn take_front(&mut self, n: usize, cols: usize, wrapped: bool) -> Row {
-        let row = self.row(0, n, cols, wrapped);
+    /// Split the first `n` cells off the front as a row of their own, keeping their marks.
+    ///
+    /// Its width is `n` rather than the screen's, because this row is the *tail* of a
+    /// visual row whose leading columns are already in Emacs — it completes one, it is not
+    /// one. Padding it out to `cols` would hand over blanks belonging to no column and
+    /// push the seam a whole row along, since `Row::line_runs` keeps a continuation row's
+    /// trailing blanks on purpose.
+    fn take_front(&mut self, n: usize, wrapped: bool) -> Row {
+        let row = self.row(0, n, n, wrapped);
         self.cells.drain(..n);
         self.marks.retain_mut(|(at, _)| {
             let keep = *at >= n;

@@ -29,12 +29,20 @@
 ;; and `cooked-osc-eval' are separate because you should choose them.
 
 ;; The buffer is the scrollback.  Rows that scroll off the emulator's screen are
-;; handed over once and become ordinary buffer text; the last `cooked--rows' lines
-;; are the live screen, rewritten from damage reports.
+;; handed over once and become ordinary buffer text; the lines after
+;; `cooked--screen-start' are the live screen, rewritten from damage reports.
 ;;
 ;; Invariant: buffer text equals the grid, plus any pending input rendered at the
 ;; cursor.  Every redisplay lifts the pending input out, applies the grid, and puts
 ;; it back.
+;;
+;; The two ends therefore hold one structure between them, and the boundary is the
+;; only place they can disagree.  So the geometry of it is reported rather than
+;; re-derived: `cooked--grid' carries the emulator's own account of how tall the
+;; grid is, how much of it is occupied, and how much of the line straddling the
+;; boundary has already been handed over.  Emacs owns the buffer and makes every
+;; edit; it just does not get a second opinion about the shape it is editing to.
+;; `cooked--check-seam' is that boundary stated as an assertion.
 
 ;;; Code:
 
@@ -120,10 +128,26 @@ the same table on the Rust side.")
 
 (defvar-local cooked--session nil "Handle returned by `cooked--spawn'.")
 (defvar-local cooked--wake nil "Pipe process Rust pokes when output is pending.")
-(defvar-local cooked--rows 24)
-(defvar-local cooked--cols 80)
+(defvar-local cooked--rows 24
+  "Rows Emacs last asked the child for.  The grid's own height is in `cooked--grid'.")
+(defvar-local cooked--cols 80
+  "Columns Emacs last asked the child for.  Not a measurement of the grid.")
 (defvar-local cooked--screen-start nil
   "Marker at the first line of the live screen; everything before is scrollback.")
+(defvar-local cooked--grid '(:height 24 :used 1 :head 0)
+  "The emulator's own account of its grid, as of the last drain.
+
+`cooked--rows' and `cooked--cols' are what Emacs *asked* the child for, which is a
+different thing and can differ for as long as it takes a resize to land.  This is
+what the grid actually is, so the buffer is shaped by the emulator rather than by a
+second opinion of it:
+
+  :height  rows the grid has.
+  :used    rows of it that are occupied — see `cooked--fit-screen'.
+  :head    characters of screen row 0's logical line that are already in the
+           buffer, above `cooked--screen-start'.  Non-zero exactly when the last
+           row handed to scrollback was wrapped and row 0 continues it, which is
+           why the marker then sits mid-line.  See `cooked--check-seam'.")
 (defvar-local cooked--cursor '(0 0 t block)
   "The child's cursor as (ROW COL VISIBLE SHAPE).
 SHAPE is `block', `underline' or `bar', from DECSCUSR.")
@@ -1123,30 +1147,63 @@ unusable in a terminal buffer."
     (widen)))
 
 (defun cooked--fit-screen ()
-  "Shape the screen region to the emulator.
+  "Shape the screen region to the number of rows the emulator says it has.
 
-On the alternate screen a terminal is a fixed rectangle, so the region must hold
-exactly `cooked--rows' lines — trimming to content would fight a full-screen
-program, and leaving the old lines in place is why a shrunk window kept showing
-stale rows."
-  (if cooked--alt
-      (save-excursion
-        (cooked--goto-screen-row cooked--rows 'extend)
-        (delete-region (point) (point-max)))
-    (cooked--trim-screen)))
+One number, and the emulator's rather than ours.  Which number differs by screen:
 
-(defun cooked--trim-screen ()
-  "Drop blank lines below the cursor so the buffer reads as a transcript.
-A terminal shows a fixed rectangle; a buffer should not carry two dozen empty
-lines under the prompt.  Only wholly blank tails are removed, so full-screen
-programs that draw below the cursor keep their layout."
-  (unless cooked--alt
-    (save-excursion
-      (cooked--goto-screen-row (1+ (nth 0 cooked--cursor)))
-      (let ((start (point)))
-        (when (and (< start (point-max))
-                   (string-blank-p (buffer-substring-no-properties start (point-max))))
-          (delete-region start (point-max)))))))
+On the alternate screen a terminal is a fixed rectangle, so the region holds the
+grid's full height — trimming to content would fight a full-screen program, and
+leaving the old lines in place is why a shrunk window kept showing stale rows.
+
+On the primary it holds `:used' rows, which is where the emulator's own content
+ends: everything down to the last row holding something, and never above the
+cursor.  A terminal shows a fixed rectangle but a buffer should not carry two
+dozen empty lines under the prompt, and a program drawing below the cursor is
+inside `:used' by construction, so its layout survives.
+
+Unconditional in both cases.  This used to delete only a *wholly blank* tail on
+the primary, which is a question about the buffer's text rather than about the
+grid, and the two stop agreeing the moment a height shrink evicts rows: the rows
+that left were inserted above as scrollback and the survivors re-rendered from
+row 0 down, but the old lines below the new last row are not blank — they are a
+stale copy of the live screen — so nothing removed them and the screen appeared
+twice."
+  (save-excursion
+    (let ((rows (if cooked--alt
+                    (plist-get cooked--grid :height)
+                  (plist-get cooked--grid :used))))
+      ;; `extend' on the alt screen only: the rectangle must be exactly that tall even
+      ;; where the program has drawn nothing, while the primary is trimmed to content
+      ;; and has no business growing here.  Without `extend' a region already short
+      ;; enough reports the shortfall and is left alone.
+      (when (zerop (cooked--goto-screen-row rows (and cooked--alt 'extend)))
+        (delete-region (point) (point-max))))))
+
+(defun cooked--check-seam ()
+  "Signal if the buffer disagrees with the emulator about the seam.
+
+`:head' is how many characters of screen row 0's logical line are already in the
+buffer, so `cooked--screen-start' must sit exactly that far into its line: the two
+ends each hold half of one wrapped line and nothing else ties them together.  A
+drift here is silent — the text reads fine until the next rewrap resumes the line
+in the wrong column — which is what this exists to make loud.
+
+Only meaningful while wrapped rows are being rejoined.  With
+`cooked-rejoin-wrapped-lines' off every row handed over gets a newline of its own
+and the marker is always at a line start, whatever the emulator carries.
+
+Called under `cooked-debug' only.  It is a whole-line measurement on every drain,
+and the invariant it guards is maintained in the native core rather than here, so
+there is nothing for it to repair — see `Row::line_runs' in src/emu/cell.rs."
+  (when (and cooked-rejoin-wrapped-lines cooked--screen-start
+             (marker-position cooked--screen-start))
+    (let* ((start (marker-position cooked--screen-start))
+           (head (save-excursion (goto-char start)
+                                 (- start (line-beginning-position))))
+           (want (plist-get cooked--grid :head)))
+      (unless (= head want)
+        (error "cooked: seam desync: buffer holds %d characters of row 0's line, emulator says %d"
+               head want)))))
 
 (defun cooked--protect (limit)
   "Make the screen read-only up to LIMIT, leaving anything after it editable.
@@ -1502,6 +1559,10 @@ window that fell behind."
                         (cooked--render-scrolled scrolled))))
     (cooked--render-rows (plist-get update :rows))
     (setq cooked--cursor (plist-get update :cursor)
+          ;; Before `cooked--fit-screen' below, which is shaped by it.
+          cooked--grid (list :height (plist-get update :height)
+                             :used (plist-get update :used)
+                             :head (plist-get update :head))
           cooked--app-cursor (plist-get update :app-cursor)
           cooked--keys (plist-get update :keys)
           cooked--exit (plist-get update :exit))
@@ -1513,6 +1574,8 @@ window that fell behind."
       (cooked--handle-event event batch-start))
     (cooked--fit-screen)
     (cooked--pad-to-cursor)
+    ;; After the region has been shaped, so it measures what was actually drawn.
+    (when cooked-debug (cooked--check-seam))
     ;; Written only on an actual change: reassigning it to the same value on every
     ;; drain was perturbing the cursor's blink phase on each redraw, one more small
     ;; contributor to flicker on a line the child rewrites rapidly.
@@ -1922,11 +1985,16 @@ not every window in the Emacs running it."
 
 ;;;; OSC 51 — the child asking Emacs to do something
 ;;
-;; Only the harmless half lives here.  `A' annotates the prompt and is inert, so it
-;; costs nothing to support.  `E' is a command channel driven by bytes on the
-;; terminal — anything that can write there can pull the trigger: `cat' of a hostile
-;; file, output from a compromised host over ssh, a build log quoting text somebody
-;; else chose — so it is off until you load `cooked-osc-eval' and say you want it.
+;; Only the harmless half lives here.  `A' annotates the prompt and `C' carries
+;; completion candidates; both are inert data, so they cost nothing to support.  `E'
+;; is a command channel driven by bytes on the terminal — anything that can write
+;; there can pull the trigger: `cat' of a hostile file, output from a compromised host
+;; over ssh, a build log quoting text somebody else chose — so it is off until you
+;; load `cooked-osc-eval' and say you want it.
+
+;; Not opt-in, unlike the eval channel: candidates are a list of strings that only
+;; ever reach a completion table.  `cooked-completion' is loaded with the mode.
+(declare-function cooked--completion-handle "cooked-completion")
 
 (defvar cooked-osc-eval-function nil
   "Function handling the OSC 51;E command channel, called with the payload.
@@ -1953,6 +2021,7 @@ rather than inherit.")
               (setq cooked--eval-refused t)
               (message "cooked: ignoring an OSC 51 command; (require 'cooked-osc-eval) to enable"))))
         (?A (setq cooked--annotation (substring payload 1)))
+        (?C (cooked--completion-handle (substring payload 1)))
         (_ nil)))))
 
 (defun cooked--discard-scrollback (end)
@@ -1974,7 +2043,13 @@ this would otherwise quietly do nothing."
     (widen)
     (let ((inhibit-read-only t))
       (delete-region (point-min) end)))
-  (when cooked--session (cooked--forget-history cooked--session)))
+  (when cooked--session
+    (cooked--forget-history cooked--session)
+    ;; `cooked--grid' is a snapshot of the last drain, and this is the one thing that
+    ;; changes the emulator's seam without one.  Left stale it describes a head that was
+    ;; just deleted, which `cooked--check-seam' would rightly call a desync — and which
+    ;; anything else reading the seam before the next drain would believe.
+    (setq cooked--grid (plist-put (copy-sequence cooked--grid) :head 0))))
 
 (defun cooked-clear-scrollback ()
   "Delete everything above the live screen."

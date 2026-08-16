@@ -402,6 +402,10 @@ impl Row {
     /// `Screen::resize` measures logical lines by it, so a rewrap cannot disagree with
     /// what was on screen. A blank whose style is not the default is content — it is a
     /// coloured bar drawn to the edge, and trimming it would erase the drawing.
+    ///
+    /// It answers "where does this *line* end", which is why a continuation row is exempt:
+    /// its trailing blanks are interior to a line that ends somewhere below. See
+    /// [`Row::line_runs`].
     pub fn content_len(&self) -> usize {
         self.cells
             .iter()
@@ -418,15 +422,36 @@ impl Row {
     /// copy of the merge rules while letting the ordinary row compile down to a version
     /// with no side table in it at all.
     pub fn runs(&self) -> Vec<Run> {
-        match self.underlines.is_some() {
-            true => self.build_runs(|row, col| row.underline_at(col)),
-            false => self.build_runs(|_, _| Color::Default),
+        self.runs_to(self.content_len())
+    }
+
+    /// Runs for a row on its way into the buffer as part of a logical line.
+    ///
+    /// A continuation row contributes every column it has. Its trailing blanks are interior
+    /// to the line — the text goes on below — and Emacs joins a wrapped row onto the line
+    /// above without a newline, so trimming them would pull the continuation forward by
+    /// however many columns the child left blank. [`Logical::push_row`](super::screen)
+    /// measures the same rows the same way when a rewrap reassembles them; the two have to
+    /// agree or a resize stops round-tripping.
+    ///
+    /// It also keeps every departed row exactly `cols` wide, which is the invariant
+    /// [`Screen::carried`](super::screen::Screen) rests on to measure the head of the line
+    /// straddling the seam.
+    pub fn line_runs(&self) -> Vec<Run> {
+        match self.wrapped {
+            true => self.runs_to(self.len()),
+            false => self.runs(),
         }
     }
 
-    fn build_runs(&self, underline_at: impl Fn(&Self, usize) -> Color) -> Vec<Run> {
-        let end = self.content_len();
+    fn runs_to(&self, end: usize) -> Vec<Run> {
+        match self.underlines.is_some() {
+            true => self.build_runs(end, |row, col| row.underline_at(col)),
+            false => self.build_runs(end, |_, _| Color::Default),
+        }
+    }
 
+    fn build_runs(&self, end: usize, underline_at: impl Fn(&Self, usize) -> Color) -> Vec<Run> {
         self.cells[..end]
             .iter()
             .enumerate()

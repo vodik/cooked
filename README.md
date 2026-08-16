@@ -219,6 +219,41 @@ exit codes, read-only transcript, output folding, evil integration.
 Not yet: sixel/kitty graphics, comint history integration, and `vttest`-level conformance
 beyond the common paths.
 
+## Completion
+
+TAB at a prompt is `completion-at-point`, so corfu, cape, consult and friends work
+here as they do anywhere else. What they are offered comes from zsh itself:
+
+```sh
+git checkout <TAB>      # branches, with their tip commits
+ssh <TAB>               # hosts from your config and known_hosts
+kill <TAB>              # processes, with their command lines
+ls --<TAB>              # flags, with descriptions
+```
+
+The line being edited lives in Emacs and ZLE's buffer is empty, so this cannot work
+by forwarding TAB. The shell integration binds a widget to a private key sequence;
+Emacs sends the pending line with it, the widget runs the real completion system over
+that line with `compadd` shadowed to capture what it would have offered, and answers
+over OSC 51;C. Nothing is inserted and nothing is listed in the shell, and the ZLE
+buffer is restored before the widget returns, so the prompt does not flicker.
+
+The table is dynamic: each word typed into it asks the shell again rather than
+filtering the first answer, because what the shell offers *changes* as the line grows
+— `git checkout ` offers branches, and a `-` turns that into flags — and because a
+long list arrives truncated, so a candidate can be past the end of it until you narrow
+it. A query costs on the order of 20 ms.
+
+Emacs sends a request only after the shell has announced — at every new ZLE line —
+that its widget is bound and reading. A shell without the integration is never sent
+anything, which matters: to bash, a nested `zsh -f`, or the far end of an ssh, the
+request would just be a line of input.
+
+Everything else falls back to completing in Emacs — programs on `PATH` for the first
+word, file names after it — which is also what happens when a completer is slower than
+`cooked-completion-timeout`. `cooked-completion-backend` picks between them: `shell`
+(the default, falling back), `native`, or `both`.
+
 ## Talking back to Emacs
 
 The shell can ask the Emacs that is running it to do things:

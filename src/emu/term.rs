@@ -178,6 +178,15 @@ pub struct Delta {
     /// into "in this batch of scrollback" and "still on the grid".
     pub scrolled_base: usize,
     pub rows: Vec<(usize, Vec<Run>)>,
+    /// The grid's shape as of this drain, so the buffer never has to hold a second opinion
+    /// of it: how tall it is, how many rows of it are occupied ([`Screen::used`]), and how
+    /// many characters of row 0's logical line are already in Emacs ([`Screen::head`]).
+    ///
+    /// The last is the seam, and the only one of the three Emacs cannot see for itself —
+    /// the marker sitting mid-line is the *consequence* of the head, not a measure of it.
+    pub height: usize,
+    pub used: usize,
+    pub head: usize,
     pub cursor: Cursor,
     pub cursor_visible: bool,
     pub cursor_shape: CursorShape,
@@ -461,9 +470,12 @@ impl State {
         // Reduced to runs here rather than at drain time: a Row owns a cell for every
         // column, so retaining thousands of them keeps megabytes of mostly-blank grid
         // alive. Runs are trimmed to content, and the work has to happen regardless.
+        // `line_runs` rather than `runs`: these rows are becoming buffer text as part of a
+        // logical line, and a continuation row has to keep the blanks that are interior to
+        // it. See `Row::line_runs`.
         self.pending_scrollback
             .extend(rows.iter().map(|row| Scrolled {
-                runs: row.runs(),
+                runs: row.line_runs(),
                 wrapped: row.wrapped,
             }));
     }
@@ -509,6 +521,11 @@ impl State {
                 .into_iter()
                 .filter_map(|i| screen.row(i).map(|r| (i, r.runs())))
                 .collect(),
+            height: screen.height(),
+            used: screen.used(),
+            // The seam is a property of the primary: the alt screen contributes no
+            // scrollback, and its row 0 begins a buffer line of its own.
+            head: if alt { 0 } else { screen.head() },
             cursor: screen.cursor,
             cursor_visible,
             cursor_shape,
@@ -594,7 +611,9 @@ impl State {
             1006 => set(self.mouse.sgr),
             1004 => set(self.focus_events),
             1007 => set(self.alt_scroll),
-            2026 => set(self.sync_until.is_some_and(|t| std::time::Instant::now() < t)),
+            2026 => set(self
+                .sync_until
+                .is_some_and(|t| std::time::Instant::now() < t)),
             47 | 1047 | 1049 => set(self.on_alt),
             // Implemented, but stateless — it saves and restores rather than turning
             // anything on — so "set" is the only honest answer that is not "unknown".
@@ -961,9 +980,8 @@ impl Perform for State {
                     20 => 2 - u8::from(self.newline_mode),
                     _ => 0,
                 };
-                self.events.push(Event::Reply(
-                    format!("\x1b[{mode};{status}$y").into_bytes(),
-                ));
+                self.events
+                    .push(Event::Reply(format!("\x1b[{mode};{status}$y").into_bytes()));
             }
             // XTWINOPS, read-only. The reporting and geometry operations are refused
             // rather than merely unimplemented: `21t` answers with the window title *on
@@ -1048,7 +1066,9 @@ impl Perform for State {
                 // RIS is a soft reset that also clears the screen. The pen is default by
                 // the time the erase runs, so this is `bce` with nothing to carry.
                 self.soft_reset();
-                let evicted = self.screen_mut().erase_display(Erase::All, Style::default());
+                let evicted = self
+                    .screen_mut()
+                    .erase_display(Erase::All, Style::default());
                 self.evicted(evicted);
                 self.screen_mut().goto(0, 0);
             }
@@ -1548,7 +1568,10 @@ mod tests {
 
         // A scroll exposes a fresh row, which is an erase too.
         let t = term(2, 8, b"\x1b[41m\x1b[2Sx");
-        assert_eq!(t.screen().row(1).unwrap().runs()[0].style.bg, Color::Indexed(1));
+        assert_eq!(
+            t.screen().row(1).unwrap().runs()[0].style.bg,
+            Color::Indexed(1)
+        );
     }
 
     #[test]
@@ -1601,6 +1624,53 @@ mod tests {
         assert_eq!(runs_text(&delta.scrolled[0]), "abcdefgh");
         assert!(!delta.scrolled[1].wrapped, "a real newline ends the line");
         assert_eq!(runs_text(&delta.scrolled[1]), "ij");
+    }
+
+    /// A continuation row's trailing blanks are interior to the line, not the end of it.
+    /// Emacs rejoins a wrapped row onto the line above without a newline, so cutting them
+    /// pulls the continuation forward — and column-aligned output like `ps` is padded with
+    /// spaces at every boundary, so a wrap landing inside a run of them is the common case.
+    #[test]
+    fn a_wrapped_row_keeps_the_blanks_that_are_interior_to_its_line() {
+        // Eight columns. "abc     def" wraps with the row boundary inside the spaces.
+        let mut t = term(2, 8, b"abc     def\r\nsecond\r\nthird");
+        let delta = t.drain();
+
+        assert_eq!(delta.scrolled.len(), 2);
+        assert!(delta.scrolled[0].wrapped);
+        assert_eq!(
+            runs_text(&delta.scrolled[0]),
+            "abc     ",
+            "all eight columns, or the line reassembles as `abcdef`"
+        );
+        assert_eq!(runs_text(&delta.scrolled[1]), "def");
+    }
+
+    /// The invariant [`Screen::carried`] rests on: every row that leaves for Emacs while
+    /// its line continues is exactly `cols` characters, so `carried * cols` measures the
+    /// head. A rewrap blank-pads its chunks out to the full width, so this is what keeps
+    /// the seam from drifting once a resize has evicted padded rows.
+    #[test]
+    fn every_wrapped_row_handed_over_is_exactly_a_full_row_wide() {
+        let mut t = Term::new(4, 10);
+        // Four space-padded lines, each reaching the right edge, filling the grid.
+        for _ in 0..4 {
+            t.feed(b"aa   bb   \r\n");
+        }
+        t.drain();
+        t.resize(2, 4);
+        let delta = t.drain();
+
+        for line in &delta.scrolled {
+            if line.wrapped {
+                assert_eq!(
+                    runs_text(line).chars().count(),
+                    4,
+                    "a continuation row must fill its width: {:?}",
+                    runs_text(line)
+                );
+            }
+        }
     }
 
     #[test]

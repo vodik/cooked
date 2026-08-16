@@ -128,10 +128,16 @@ awaiting collection before the child is left to block on its own writes; it defa
 8000 when omitted or nil.";
 
 const DOC_DRAIN: &str = "Collect everything that changed in SESSION since the last call.
-Returns a plist with :scrolled, :rows, :cursor, :alt, :app-cursor, :keys, :mode, :events
-and :exit.
+Returns a plist with :scrolled, :rows, :height, :used, :head, :cursor, :alt,
+:app-cursor, :keys, :mode, :events and :exit.
 With REJOIN non-nil (the default), a line the terminal wrapped is emitted as one
 line rather than one per screen row.
+
+:height, :used and :head describe the grid's shape, so the buffer is shaped by what
+the emulator has rather than by a second opinion of it: the grid's row count, how many
+of those rows are occupied, and how many characters of screen row 0's logical line are
+already in the buffer above the screen. The last is the seam — 0 unless the last row
+handed to scrollback was a wrapped one that row 0 continues.
 
 The fields are levels — the state as of this drain — and carry everything redisplay
 needs. :events are occurrences, for what Emacs must react to that redisplay does not
@@ -335,7 +341,8 @@ fn keyword(env: &Env, name: &str) -> Result<Value> {
     env.intern(name)
 }
 
-/// `(:scrolled ROWS :rows ((INDEX . RUNS)...) :cursor (ROW COL VISIBLE) ...)`
+/// `(:scrolled ROWS :rows ((INDEX . RUNS)...) :height N :used N :head N
+/// :cursor (ROW COL VISIBLE) ...)`
 fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
     // The scrollback is assembled first because the events are resolved against it: a
     // mark on a row that scrolled away during this very drain is spelled as an offset
@@ -371,6 +378,12 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
         scrolled,
         keyword(env, ":rows")?,
         env.list(&rows)?,
+        keyword(env, ":height")?,
+        env.into_lisp(update.delta.height)?,
+        keyword(env, ":used")?,
+        env.into_lisp(update.delta.used)?,
+        keyword(env, ":head")?,
+        env.into_lisp(update.delta.head)?,
         keyword(env, ":cursor")?,
         cursor,
         keyword(env, ":alt")?,
@@ -603,8 +616,6 @@ fn event_to_lisp(env: &Env, event: &Event, update: &Update, rows: &[RowSpan]) ->
         Event::Reply(bytes) => tagged("reply", env.into_lisp(bytes.as_slice())?),
         Event::EraseScrollback => env.list(&[env.intern("erase-scrollback")?]),
         // (title-stack PUSH-P)
-        Event::TitleStack(push) => {
-            env.list(&[env.intern("title-stack")?, env.into_lisp(*push)?])
-        }
+        Event::TitleStack(push) => env.list(&[env.intern("title-stack")?, env.into_lisp(*push)?]),
     }
 }
