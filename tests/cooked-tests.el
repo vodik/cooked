@@ -1250,6 +1250,22 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
       (cooked--update-mouse-grab)
       (should-not cooked--mouse-grab))))
 
+(ert-deftest cooked-focus-install-survives-other-packages-advice ()
+  "`after-focus-change-function\=' holds one function, not a hook.
+
+`add-hook\=' on it conses onto whatever is already there — doom-modeline puts
+advice on it — leaving a list where Emacs expects something callable, and the
+next focus change signals `invalid-function\='."
+  (let ((after-focus-change-function after-focus-change-function))
+    (add-function :after after-focus-change-function #'ignore)
+    ;; Twice, as a second session in the same Emacs would.
+    (cooked--install-global-hooks)
+    (cooked--install-global-hooks)
+    (should (functionp after-focus-change-function))
+    (should-not (proper-list-p after-focus-change-function))
+    ;; The real check: it can actually be called.
+    (funcall after-focus-change-function)))
+
 (ert-deftest cooked-focus-is-not-reported-until-the-child-asks ()
   (cooked-tests--with-session '("/bin/cat")
     (should-not (cooked--focus-events-p cooked--session))

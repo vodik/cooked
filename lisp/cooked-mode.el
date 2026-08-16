@@ -980,9 +980,16 @@ which it usually is not.  Walk the frame's windows instead."
 (defun cooked--install-global-hooks ()
   "Install the hooks that cannot be buffer-local."
   (add-hook 'window-size-change-functions #'cooked--frame-size-changed)
-  ;; Frame focus is not a per-buffer event, so this one walks live sessions.  Both
-  ;; hooks are idempotent: `add-hook' will not add the same function twice.
-  (add-hook 'after-focus-change-function #'cooked--frame-focus-changed))
+  ;; Frame focus is not a per-buffer event, so this one walks live sessions.
+  ;;
+  ;; `after-focus-change-function' holds a *single function*, defaulting to `ignore',
+  ;; and is not a hook despite reading like one.  `add-hook' on it conses onto
+  ;; whatever is there — including another package's advice — and leaves a list where
+  ;; Emacs expects something callable, so the next focus change signals
+  ;; `Invalid function'.  `add-function' is the documented way in, and the name
+  ;; property is what keeps installing it once per session idempotent.
+  (add-function :after after-focus-change-function #'cooked--frame-focus-changed
+                '((name . cooked--focus))))
 
 ;;;; Focus reporting — DEC mode 1004
 ;;
