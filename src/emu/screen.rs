@@ -275,6 +275,14 @@ impl Screen {
     /// Separate from [`Screen::write`] rather than a parameter to it: this is the rare
     /// path, and `write` is the hottest call in the emulator. Called after the write, so
     /// the column is the one the write settled on after any wrap.
+    pub fn autowrap(&self) -> bool {
+        self.autowrap
+    }
+
+    pub fn insert_mode(&self) -> bool {
+        self.insert_mode
+    }
+
     pub fn underlined(&self) -> bool {
         self.underlined
     }

@@ -553,6 +553,32 @@ impl State {
         }
     }
 
+    /// DECRQM's answer for a private mode: 1 set, 2 reset, 3 permanently set, 4
+    /// permanently reset, 0 not recognised.
+    fn dec_mode_state(&self, mode: u16) -> u8 {
+        let set = |on: bool| 2 - u8::from(on);
+        match mode {
+            1 => set(self.app_cursor),
+            6 => set(self.origin_mode),
+            7 => set(self.screen().autowrap()),
+            25 => set(self.cursor_visible),
+            66 => set(self.app_keypad),
+            1000 => set(self.mouse.click && !self.mouse.drag && !self.mouse.motion),
+            1002 => set(self.mouse.drag),
+            1003 => set(self.mouse.motion),
+            1006 => set(self.mouse.sgr),
+            1004 => set(self.focus_events),
+            1007 => set(self.alt_scroll),
+            47 | 1047 | 1049 => set(self.on_alt),
+            2004 => set(self.bracketed_paste),
+            // Dropped from our terminfo, and this is where a child finds that out
+            // without having to guess: 12 is cursor blink (`blink-cursor-mode' is the
+            // user's), 69 left-right margins, 1034 meta-sends-escape.
+            12 | 69 | 1034 => 4,
+            _ => 0,
+        }
+    }
+
     /// ANSI (non-private) modes. Only two of these are real: everything else a child
     /// sends here is a mode we neither implement nor advertise.
     fn ansi_mode(&mut self, mode: u16, on: bool) {
@@ -882,6 +908,30 @@ impl Perform for State {
                 self.events
                     .push(Event::Reply(format!("\x1b[?{flags}u").into_bytes()));
             }
+            // DECRQM. The machine-readable half of the terminfo audit: a mode we
+            // implement answers 1 or 2, one we deliberately do not answers 4
+            // ("permanently reset"), and one we have never heard of answers 0. A child
+            // can therefore stop inferring our capabilities from TERM and just ask.
+            (Some(b'?'), 'p') if intermediates.contains(&b'$') => {
+                let mode = arg(params, 0, 0) as u16;
+                let status = self.dec_mode_state(mode);
+                self.events.push(Event::Reply(
+                    format!("\x1b[?{mode};{status}$y").into_bytes(),
+                ));
+            }
+            // The ANSI form has `$` as its only intermediate, so it arrives here as the
+            // "private" byte rather than alongside one.
+            (Some(b'$'), 'p') => {
+                let mode = arg(params, 0, 0) as u16;
+                let status = match mode {
+                    4 => 2 - u8::from(self.screen().insert_mode()),
+                    20 => 2 - u8::from(self.newline_mode),
+                    _ => 0,
+                };
+                self.events.push(Event::Reply(
+                    format!("\x1b[{mode};{status}$y").into_bytes(),
+                ));
+            }
             // XTWINOPS, read-only. The reporting and geometry operations are refused
             // rather than merely unimplemented: `21t` answers with the window title *on
             // the child's input stream*, which turns a title the child set itself into
@@ -1154,6 +1204,43 @@ mod tests {
         assert_eq!(
             t.screen().row(0).unwrap().runs()[0].underline,
             Color::Default
+        );
+    }
+
+    #[test]
+    fn decrqm_answers_honestly_about_every_mode() {
+        for (setup, mode, want) in [
+            // Implemented and off, implemented and on.
+            (&b""[..], 2004u16, 2u8),
+            (&b"\x1b[?2004h"[..], 2004, 1),
+            (&b""[..], 7, 1),
+            (&b"\x1b[?7l"[..], 7, 2),
+            (&b"\x1b[?1004h"[..], 1004, 1),
+            (&b"\x1b[?1049h"[..], 1049, 1),
+            // Deliberately not implemented — the drop list, machine readable.
+            (&b""[..], 12, 4),
+            (&b""[..], 69, 4),
+            (&b""[..], 1034, 4),
+            // Never heard of it.
+            (&b""[..], 9999, 0),
+        ] {
+            let mut t = term(4, 8, setup);
+            t.feed(format!("\x1b[?{mode}$p").as_bytes());
+            let want = Event::Reply(format!("\x1b[?{mode};{want}$y").into_bytes());
+            assert!(
+                t.drain().events.contains(&want),
+                "mode {mode} after {setup:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decrqm_answers_for_ansi_modes_too() {
+        let mut t = term(2, 8, b"\x1b[4h\x1b[4$p");
+        assert!(
+            t.drain()
+                .events
+                .contains(&Event::Reply(b"\x1b[4;1$y".to_vec()))
         );
     }
 
