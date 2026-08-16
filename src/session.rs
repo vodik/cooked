@@ -654,6 +654,40 @@ mod tests {
         drop(session);
     }
 
+    /// A write that lands inside `min_redisplay_interval' of the previous one gets its
+    /// notification throttled; `poll_timeout` exists so the retry happens at that
+    /// interval's own cadence rather than waiting out the coarser `POLL_TIMEOUT_MS`
+    /// (100ms). `session`/`session_with_backlog` fix the interval at 8ms for every test.
+    ///
+    /// Reads the wake pipe directly rather than going through `drain`, which reflects
+    /// `Term`'s live state regardless of whether a wakeup was ever sent for it — exactly
+    /// the property that makes throttling safe (see `min_redisplay_interval`'s docs) but
+    /// also the reason `drain` cannot observe a throttled *notification* being retried
+    /// late. The wake pipe is the one thing actually gated by `poll_timeout`.
+    #[test]
+    fn a_throttled_notification_is_retried_near_min_redisplay_interval_not_poll_timeout() {
+        let (session, read) = session(&[
+            "/bin/sh",
+            "-c",
+            "printf 'first\n'; sleep 0.003; printf 'second\n'; sleep 5",
+        ]);
+        let mut byte = [0u8; 1];
+        nix::unistd::read(read.as_fd(), &mut byte).expect("first wake");
+        // Clears `notified`, the same way Emacs' filter does before draining — without
+        // this the second wake has nothing to do with the second write; it would just be
+        // the first notification's own byte, since none can follow while it is in flight.
+        session.drain();
+
+        let start = Instant::now();
+        nix::unistd::read(read.as_fd(), &mut byte).expect("second wake");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "took {elapsed:?} for a throttled notification to retry; \
+             expected well under POLL_TIMEOUT_MS (100ms)"
+        );
+    }
+
     #[test]
     fn input_round_trips_through_the_pty() {
         let (session, _read) = session(&["/bin/cat"]);

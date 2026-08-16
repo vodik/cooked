@@ -1804,6 +1804,53 @@ emulator must be told, so the next rewrap does not resume a line that is gone."
                             (cooked-tests--unwrapped)))
     (should-not (string-match-p "0000000000" (cooked-tests--text)))))
 
+(ert-deftest cooked-a-resize-mid-alt-does-not-weld-history-onto-the-live-row ()
+  "A resize can evict primary rows into scrollback while a full-screen program
+owns the alt screen — the primary keeps running underneath, and its history is
+still history.  When the evicted row was itself a wrapped continuation, the
+text that used to follow it on the primary grid is not what comes next in the
+buffer any more: alt's own row 0 is.  That row 0 must still start its own
+buffer line rather than being welded, without a newline, to the tail of
+scrollback that just arrived — the seam only closes correctly when whatever
+follows really is the continuation."
+  (let ((buffer (generate-new-buffer "*cooked-seam-alt*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (setq cooked--rows 4 cooked--cols 10 cooked--last-size '(4 . 10))
+          ;; The child waits on its own stdin between the straddling write and the
+          ;; alt switch, so the test can settle on each stage instead of racing a
+          ;; handful of printfs that would otherwise land in one drain together.
+          (cooked--start '("/bin/sh" "-c"
+                           "printf '%s' 00000000001111111111222222222233333333334444444444555555555; \
+                            read -r _; \
+                            printf '\\033[?1049h'; printf 'inalt\\n'; \
+                            sleep 5"))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "555555555" (cooked-tests--text)))))
+
+          (cooked--send cooked--session "\n")
+          (should (cooked-tests--settle (lambda () cooked--alt)))
+          (should (cooked-tests--settle
+                   (lambda ()
+                     (save-restriction
+                       (widen)
+                       (string-match-p "inalt" (buffer-substring-no-properties
+                                                (point-min) (point-max)))))))
+
+          ;; Same width, fewer rows: the plain truncate-from-top path, which
+          ;; evicts "2222222222" — a wrapped row — off the still-live primary grid.
+          (cooked-tests--resize 3 10)
+
+          (save-restriction
+            (widen)
+            (should (eq (char-before (marker-position cooked--screen-start)) ?\n))
+            (should (string-match-p "inalt" (buffer-substring-no-properties
+                                             (point-min) (point-max))))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
 (ert-deftest cooked-wrapped-lines-stay-split-when-asked ()
   (let ((buffer (generate-new-buffer "*cooked-wrap2*")))
     (unwind-protect

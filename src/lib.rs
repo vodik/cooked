@@ -401,8 +401,9 @@ impl Update {
         let mut glyph_spans: Vec<Value> = Vec::new();
         let mut rows: Vec<RowSpan> = Vec::with_capacity(self.delta.scrolled.len());
         let mut offset = 0usize;
+        let last = self.delta.scrolled.len() - 1;
 
-        for line in &self.delta.scrolled {
+        for (i, line) in self.delta.scrolled.iter().enumerate() {
             let start = offset;
             for run in &line.runs {
                 let chars = run.text.chars().count();
@@ -434,8 +435,12 @@ impl Update {
                 chars: offset - start,
             });
             // A wrapped row is a continuation, so it joins the line above rather
-            // than starting a new one.
-            if !(rejoin && line.wrapped) {
+            // than starting a new one — except when it is the batch's last row and
+            // the alt screen is up. Then what follows at screen-start is the alt
+            // grid's own row 0, not this row's continuation on the primary grid, and
+            // joining onto it would permanently weld this frozen scrollback text to
+            // the front of a live row that gets rewritten every redraw.
+            if !(rejoin && line.wrapped && !(i == last && self.delta.alt)) {
                 text.push('\n');
                 offset += 1;
             }
