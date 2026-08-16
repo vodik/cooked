@@ -1152,6 +1152,77 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
     (should (cooked-tests--settle (lambda () (equal cooked--title "my-title"))))
     (should (string-match-p "my-title" (cooked--mode-line)))))
 
+(defmacro cooked-tests--capturing-notifications (&rest body)
+  "Run BODY with notifications captured into `seen\=' instead of raised."
+  (declare (indent 0))
+  `(let ((seen nil))
+     (cl-letf (((symbol-function 'cooked--notify)
+                (lambda (title body) (push (cons title body) seen))))
+       ,@body
+       (nreverse seen))))
+
+(ert-deftest cooked-notifications-are-closed-until-opted-in ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-allow-notifications nil))
+      (should (null (cooked-tests--capturing-notifications
+                      (cooked--osc-notify '("i=1" "hello"))
+                      (cooked--osc-notify-777 '("notify" "t" "b"))))))))
+
+(ert-deftest cooked-notification-arrives-once-opted-in ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-allow-notifications t))
+      (should (equal (cooked-tests--capturing-notifications
+                       (cooked--osc-notify '("i=1" "build done")))
+                     '(("build done" . "")))))))
+
+(ert-deftest cooked-notification-assembles-chunks ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-allow-notifications t))
+      (should (equal (cooked-tests--capturing-notifications
+                       (cooked--osc-notify '("i=7:d=0:p=title" "Build "))
+                       (cooked--osc-notify '("i=7:d=0:p=title" "failed"))
+                       (cooked--osc-notify '("i=7:p=body" "3 errors")))
+                     '(("Build failed" . "3 errors"))))
+      ;; The assembled notification is forgotten, not left to accumulate.
+      (should (null cooked--notification-chunks)))))
+
+(ert-deftest cooked-notifications-are-rate-limited ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-allow-notifications t)
+          (cooked-notification-rate '(2 . 10)))
+      ;; A `cat\=' of a hostile file must not be able to flood the desktop.  Driven
+      ;; through the real `cooked--notify\=', since that is where the limit lives.
+      (let ((raised 0))
+        (cl-letf (((symbol-function 'message) (lambda (&rest _) (cl-incf raised)))
+                  ((symbol-function 'notifications-notify)
+                   (lambda (&rest _) (cl-incf raised))))
+          (dotimes (i 5) (cooked--osc-notify (list "i=1" (format "n%d" i)))))
+        (should (= raised 2)))
+      (setq cooked--notification-times nil)
+      (should (cooked--notification-allowed-p))
+      (push (float-time) cooked--notification-times)
+      (should (cooked--notification-allowed-p))
+      (push (float-time) cooked--notification-times)
+      (should-not (cooked--notification-allowed-p)))))
+
+(ert-deftest cooked-notification-strips-control-characters ()
+  (should (equal (cooked--notification-clean "a\e]0;evil\007b" 100) "a]0;evilb"))
+  (should (equal (cooked--notification-clean "abcdef" 3) "abc")))
+
+(ert-deftest cooked-notification-chunks-are-bounded ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-allow-notifications t))
+      ;; A child that opens chunks and never closes them must not grow this forever.
+      (dotimes (i 30)
+        (cooked--osc-notify (list (format "i=%d:d=0" i) "x")))
+      (should (<= (length cooked--notification-chunks)
+                  (car cooked--notification-chunk-limits))))))
+
 (ert-deftest cooked-alternate-scroll-sends-cursor-keys ()
   "A pager that never asked for the mouse still gets the wheel."
   (with-temp-buffer

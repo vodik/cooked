@@ -1622,7 +1622,9 @@ two chances to disagree."
     (111 . cooked--osc-color-reset)
     (112 . cooked--osc-color-reset)
     (51 . cooked--osc-emacs)
-    (52 . cooked--osc-clipboard))
+    (52 . cooked--osc-clipboard)
+    (99 . cooked--osc-notify)
+    (777 . cooked--osc-notify-777))
   "Alist of OSC code to a function taking the remaining payload parts.
 Add to this to teach cooked a new escape sequence without touching Rust.
 
@@ -1706,6 +1708,109 @@ hostile file, output from a compromised host — so it is off by default, for th
 same reason the OSC 51 command channel is a separate file you have to require."
   :type 'boolean
   :group 'cooked)
+
+(defcustom cooked-allow-notifications nil
+  "Whether the child may raise desktop notifications, via OSC 99 or OSC 777.
+
+Off by default, for the same reason `cooked-allow-color-set\=' is: anything that
+can write to the terminal can send one.  A `cat\=' of a hostile file, a build log
+quoting attacker-controlled text, or output from a compromised host all reach
+your desktop if this is on."
+  :type 'boolean
+  :group 'cooked)
+
+(defcustom cooked-notification-rate '(3 . 10)
+  "Cap on notifications as a cons of COUNT and SECONDS.
+Notifications past the cap are dropped silently.  A child that means well
+sends one when a long build finishes; a child that does not sends thousands."
+  :type '(cons natnum natnum)
+  :group 'cooked)
+
+(defconst cooked--notification-limits '(120 . 500)
+  "Maximum title and body length, in characters.")
+
+(defvar-local cooked--notification-times nil
+  "Timestamps of recent notifications, newest first.  See `cooked-notification-rate\='.")
+
+(defvar-local cooked--notification-chunks nil
+  "Partial OSC 99 notifications, as an alist of id to (TITLE . BODY).")
+
+(defconst cooked--notification-chunk-limits '(8 . 4096)
+  "How many partial notifications to hold, and the most text each may accumulate.
+
+A child can open a chunked notification and never close it, so both are
+bounded: without that, `cooked--notification-chunks\=' is a buffer-local leak the
+child controls.")
+
+(defun cooked--notification-clean (text limit)
+  "TEXT with control characters removed, truncated to LIMIT characters."
+  (truncate-string-to-width
+   (replace-regexp-in-string "[[:cntrl:]]" "" (or text ""))
+   limit))
+
+(defun cooked--notification-allowed-p ()
+  "Whether another notification is within `cooked-notification-rate\='."
+  (pcase-let* ((`(,count . ,seconds) cooked-notification-rate)
+               (cutoff (- (float-time) seconds)))
+    (setq cooked--notification-times
+          (seq-take (seq-filter (lambda (at) (> at cutoff))
+                                cooked--notification-times)
+                    count))
+    (< (length cooked--notification-times) count)))
+
+(defun cooked--notify (title body)
+  "Raise a desktop notification with TITLE and BODY, subject to the rate limit."
+  (when (cooked--notification-allowed-p)
+    (push (float-time) cooked--notification-times)
+    (let ((title (cooked--notification-clean
+                  title (car cooked--notification-limits)))
+          (body (cooked--notification-clean
+                 body (cdr cooked--notification-limits))))
+      ;; `notifications-notify\=' needs D-Bus, which a terminal Emacs may not have.
+      (if (and (fboundp 'notifications-notify) (featurep 'dbusbind))
+          (notifications-notify :title (if (string-empty-p title) "cooked" title)
+                                :body body)
+        ;; Never as a format string: the text is the child's.
+        (message "%s" (string-trim (concat title " " body)))))))
+
+(defun cooked--osc-notify (parts)
+  "Raise a desktop notification from OSC 99 PARTS.
+
+kitty's protocol: `ESC ] 99 ; METADATA ; PAYLOAD ST\=', where METADATA is a set of
+KEY=VALUE pairs.  `i\=' identifies a notification, `p\=' says whether the payload is
+its title or its body, and `d=0\=' means more chunks follow."
+  (when cooked-allow-notifications
+    (pcase-let* ((`(,meta . ,payload) (cons (car parts) (cdr parts)))
+                 (payload (string-join payload ";"))
+                 (fields (split-string (or meta "") ":" t))
+                 (get (lambda (key)
+                        (cadr (assoc key (mapcar (lambda (f)
+                                                   (split-string f "=" t))
+                                                 fields)))))
+                 (id (or (funcall get "i") ""))
+                 (part (or (funcall get "p") "title"))
+                 (more (equal (funcall get "d") "0"))
+                 (cell (or (assoc id cooked--notification-chunks)
+                           (car (push (cons id (cons "" "")) cooked--notification-chunks)))))
+      ;; Bound both the number of open notifications and the text each accumulates.
+      (setq cooked--notification-chunks
+            (seq-take cooked--notification-chunks
+                      (car cooked--notification-chunk-limits)))
+      (pcase-let ((`(,_ . (,title . ,body)) cell)
+                  (cap (cdr cooked--notification-chunk-limits)))
+        (setcdr cell (if (equal part "body")
+                         (cons title (truncate-string-to-width (concat body payload) cap))
+                       (cons (truncate-string-to-width (concat title payload) cap) body))))
+      (unless more
+        (setq cooked--notification-chunks
+              (assoc-delete-all id cooked--notification-chunks))
+        (cooked--notify (cadr cell) (cddr cell))))))
+
+(defun cooked--osc-notify-777 (parts)
+  "Raise a notification from the older OSC 777 form, `777;notify;TITLE;BODY\='."
+  (when (equal (car parts) "notify")
+    (when cooked-allow-notifications
+      (cooked--notify (nth 1 parts) (string-join (nthcdr 2 parts) ";")))))
 
 (defcustom cooked-honor-erase-scrollback nil
   "Whether the child may delete this buffer's scrollback with `CSI 3 J'.
