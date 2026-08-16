@@ -1122,11 +1122,18 @@ always starts one at `cooked--goto-screen-row' and never joins it to its
 neighbours — so Emacs softwrapping one is never legitimate output. It only
 happens when some character's real rendered width disagreed with what
 `cooked--cols' assumed for it: an ambiguous East-Asian-width character, a
-ligature, a composed grapheme, a font substitution, anything. Rust's width
+composed grapheme, a font substitution, a ligature, anything. Rust's width
 model is not the place to chase that — it has to stay the plain narrow
 classification curses programs expect it to report — so this catches
 whatever gets through on the one side that can actually observe the truth:
 Emacs' own layout.
+
+Only checked when a mismatch is even possible, as a cheap fast path: a plain
+ASCII row can still disagree on a graphical frame, where font shaping can turn
+`->' or `!=' into a single ligature glyph no narrower-font metric predicts —
+but never in a terminal frame, which has no shaping engine to disagree with
+Rust in the first place. Non-ASCII content is checked on both, since an
+ambiguous-width or composed character can mismatch either way.
 
 `vertical-motion' is that layout decision, reused rather than re-derived
 from pixel widths, so this is correct regardless of cause. A row found to
@@ -1144,7 +1151,8 @@ principle and vanishingly unlikely in practice, since the trigger is a
 character whose own width was already mismeasured, not an adjacent one."
   (when (and cooked-rejoin-wrapped-lines (< start (line-end-position)))
     (goto-char start)
-    (when (string-match-p (rx (not ascii)) (buffer-substring-no-properties start (line-end-position)))
+    (when (or (display-graphic-p)
+              (string-match-p (rx (not ascii)) (buffer-substring-no-properties start (line-end-position))))
       (let (trimmed)
         ;; `line-end-position' has to be captured before `vertical-motion' moves
         ;; point, not after: taken after, it measures the end of whatever line

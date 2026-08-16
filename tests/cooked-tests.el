@@ -1912,19 +1912,36 @@ follows really is the continuation."
       (should (equal (buffer-string) "é\n"))
       (should-not (get-text-property (point-min) 'display)))))
 
-(ert-deftest cooked-guard-row-width-skips-pure-ascii-rows ()
-  "A misclassified width has to come from a character cooked and Emacs could
-ever disagree about, which a plain ASCII row cannot be -- skipped as a cheap
-fast path, exercised here by leaving a row Emacs would (per the mock) report
-as wrapped untouched, since it never contains anything but ASCII."
+(ert-deftest cooked-guard-row-width-skips-pure-ascii-rows-on-a-terminal-frame ()
+  "A terminal frame has no font-shaping engine, so a plain ASCII row cannot
+disagree with cooked's width model there -- skipped as a cheap fast path,
+exercised here by leaving a row Emacs would (per the mock) report as wrapped
+untouched, since it never contains anything but ASCII."
   (with-temp-buffer
     (cooked-mode)
     (let ((cooked-rejoin-wrapped-lines t)
           (inhibit-read-only t)
           (text (concat (make-string 40 ?x) "\n")))
       (insert text)
-      (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min)))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+        (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min))))
       (should (equal (buffer-string) text)))))
+
+(ert-deftest cooked-guard-row-width-checks-pure-ascii-rows-on-a-graphical-frame ()
+  "On a graphical frame, font shaping can turn a run of plain ASCII (a `->' or
+`!=' ligature, say) into a glyph no narrower-font metric predicts, so the
+fast path above must not apply -- a pure-ASCII row still gets trimmed there."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t))
+      (insert (make-string 40 ?x) "\n")
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+        (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min))))
+      (goto-char (point-min))
+      (should (= (- (line-end-position) (point-min)) 10))
+      (should (equal (get-text-property (1- (line-end-position)) 'display)
+                      '(right-fringe right-truncation))))))
 
 (ert-deftest cooked-guard-row-width-does-nothing-without-rejoin ()
   "When `cooked-rejoin-wrapped-lines' is nil, `truncate-lines' is already t
