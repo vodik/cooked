@@ -1155,13 +1155,13 @@ character whose own width was already mismeasured, not an adjacent one."
         ;; mismeasured one. The loop then deletes real characters, and once the
         ;; row is empty keeps going: `end-of-line' at START stops moving, so the
         ;; delete starts eating the newline above START and then the row below.
-        (while (let ((eol (progn (goto-char start) (line-end-position))))
-                 (vertical-motion 1)
-                 (< (point) eol))
-          (setq trimmed t)
-          (goto-char start)
-          (end-of-line)
-          (delete-region (1- (point)) (point)))
+        (let (eol)
+          (while (progn (goto-char start)
+                        (setq eol (line-end-position))
+                        (vertical-motion 1)
+                        (< (point) eol))
+            (setq trimmed t)
+            (delete-region (1- eol) eol)))
         (when trimmed
           (goto-char start)
           (let ((cut (1- (line-end-position))))

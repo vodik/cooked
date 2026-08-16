@@ -1954,23 +1954,9 @@ moves point, not after: read after, on a row that does not wrap at all,
 line's own end -- almost always past a one-line hop -- was being mistaken for
 how far the trimmed row was allowed to extend. That false positive doesn't
 just fail to trim: it deletes real characters, one per iteration, until this
-row is gone (see the tests below for what happens next)."
-  (with-temp-buffer
-    (cooked-mode)
-    (let ((cooked-rejoin-wrapped-lines t)
-          (inhibit-read-only t)
-          (text "é\nNEXT\n"))
-      (insert text)
-      (cooked--guard-row-width (point-min))
-      (should (equal (buffer-string) text)))))
-
-(ert-deftest cooked-guard-row-width-does-not-crash-when-the-false-positive-hits-row-0 ()
-  "Reproduces the exact crash this bug caused live: once the falsely-flagged
-row is emptied out, `end-of-line' from START stops moving, so the next
-\"trim\" instead deletes the character *before* START. When START is
-`point-min' -- the ordinary case for screen row 0 -- there is no character
-before it, and Emacs refuses with `args-out-of-range', surfacing as
-\"cooked: redisplay failed: (args-out-of-range ... 0 1)\"."
+row is gone. At `point-min' that emptying is also what used to crash
+redisplay with `args-out-of-range' (see the test below for what happens to a
+row that isn't at `point-min')."
   (with-temp-buffer
     (cooked-mode)
     (let ((cooked-rejoin-wrapped-lines t)
