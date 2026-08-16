@@ -89,6 +89,10 @@ pub struct Screen {
     /// wide, making `carried * cols` the head's exact width. [`Screen::reflow`] restores
     /// that property at the new width before it returns, so it holds unconditionally.
     carried: usize,
+    /// DECAWM, on by default as every terminal starts. See [`Screen::set_autowrap`].
+    autowrap: bool,
+    /// IRM. See [`Screen::set_insert_mode`].
+    insert_mode: bool,
 }
 
 impl Screen {
@@ -102,12 +106,33 @@ impl Screen {
             dirty: vec![true; rows],
             tabs: default_tabs(cols),
             carried: 0,
+            autowrap: true,
+            insert_mode: false,
         }
     }
 
     /// Drop the carry: nothing of the top row's line is in Emacs any more.
     pub fn forget_carry(&mut self) {
         self.carried = 0;
+    }
+
+    /// DECAWM. Off means the cursor pins to the last column and overwrites in place,
+    /// which is how a program paints the bottom-right cell without scrolling the screen.
+    pub fn set_autowrap(&mut self, on: bool) {
+        self.autowrap = on;
+        if !on {
+            // A pending wrap is a wrap already decided on. Disarm it, or the next write
+            // would honour a mode that is no longer set.
+            self.cursor.wrap_pending = false;
+        }
+    }
+
+    /// IRM. Held here rather than passed to [`Screen::write`] per character: the shift has
+    /// to happen between the margin decision and the cell store, where the row and column
+    /// invariants live, and threading a flag through the hottest call in the emulator to
+    /// reach the same place would cost more than it explains.
+    pub fn set_insert_mode(&mut self, on: bool) {
+        self.insert_mode = on;
     }
 
     /// Account for `evicted` rows being handed to Emacs off the top of the grid.
@@ -186,17 +211,32 @@ impl Screen {
             return Vec::new();
         }
 
+        let cols = self.cols;
         let mut evicted = Vec::new();
-        if self.cursor.wrap_pending || self.cursor.col + width > self.cols {
-            if let Some(r) = self.touch(self.cursor.row) {
-                r.wrapped = true;
+        // The margin decision, made once. Both new modes live inside the branch that was
+        // already taken only at the edge of a row, so the common path is untouched.
+        if self.cursor.wrap_pending || self.cursor.col + width > cols {
+            if self.autowrap {
+                if let Some(r) = self.touch(self.cursor.row) {
+                    r.wrapped = true;
+                }
+                self.cursor.col = 0;
+                evicted = self.linefeed(style);
+            } else {
+                // DECAWM off: the cursor never leaves the row. Back up far enough that a
+                // wide character lands whole rather than half over the edge.
+                self.cursor.col = cols.saturating_sub(width);
             }
-            self.cursor.col = 0;
-            evicted = self.linefeed(style);
         }
 
         let (row, col) = (self.cursor.row, self.cursor.col);
-        let cols = self.cols;
+        if self.insert_mode {
+            // IRM shifts the rest of the row right by the character's full width, so a
+            // wide character does not tear the cell it displaces.
+            if let Some(r) = self.touch(row) {
+                r.insert_blank(col, width, style);
+            }
+        }
         if let Some(r) = self.touch(row) {
             r.set(col, Cell { ch, style });
             for offset in 1..width {
@@ -213,7 +253,8 @@ impl Screen {
         match col + width {
             next if next >= cols => {
                 self.cursor.col = cols - 1;
-                self.cursor.wrap_pending = true;
+                // Only arm the deferred wrap when there is a wrap to defer.
+                self.cursor.wrap_pending = self.autowrap;
             }
             next => self.cursor.col = next,
         }
@@ -446,6 +487,21 @@ impl Screen {
                 .unwrap_or(self.cols - 1)
         });
         self.cursor.col = col.min(self.cols - 1);
+        self.cursor.wrap_pending = false;
+    }
+
+    /// CBT: back `count` tab stops, floored at column 0.
+    pub fn back_tab(&mut self, count: usize) {
+        let col = (0..count).fold(self.cursor.col, |col, _| {
+            self.tabs
+                .iter()
+                .enumerate()
+                .take(col)
+                .rev()
+                .find_map(|(i, stop)| stop.then_some(i))
+                .unwrap_or(0)
+        });
+        self.cursor.col = col;
         self.cursor.wrap_pending = false;
     }
 

@@ -6,6 +6,7 @@
 use super::cell::{Attrs, Color, Row, Run, Style};
 use super::screen::{Cursor, Erase, Resize, Screen};
 use std::collections::VecDeque;
+use unicode_width::UnicodeWidthChar;
 use vte::{Params, Parser, Perform};
 
 /// Where in the output stream a mark landed.
@@ -283,6 +284,15 @@ struct State {
     /// value is enough here — nothing we support cares about the alternate screen's
     /// keyboard mode differing from the primary's.
     kitty_keys: Vec<u8>,
+    /// LNM (ANSI mode 20): LF also returns the carriage.
+    newline_mode: bool,
+    /// The last graphic character printed, for REP. Held after `dec_graphic` translation,
+    /// so repeating a box-drawing character repeats what was actually drawn.
+    ///
+    /// Zero-width characters never land here. REP is defined for the last *graphic*
+    /// character, and repeating a combining mark would fold it onto the cell to the left
+    /// over and over rather than printing anything.
+    last_print: Option<char>,
 }
 
 impl State {
@@ -304,6 +314,8 @@ impl State {
             app_keypad: false,
             modify_other_keys: 0,
             kitty_keys: Vec::new(),
+            newline_mode: false,
+            last_print: None,
         }
     }
 
@@ -448,7 +460,13 @@ impl State {
                 self.origin_mode = on;
                 self.screen_mut().goto(0, 0);
             }
-            7 => {}
+            7 => {
+                self.primary.set_autowrap(on);
+                self.alt.set_autowrap(on);
+            }
+            // Cursor *blink*, deliberately ignored: that is `blink-cursor-mode', which is
+            // the user's setting and not the child's to drive. Visibility is mode 25.
+            12 => {}
             25 => self.cursor_visible = on,
             1000 => self.mouse.click = on,
             1002 => (self.mouse.click, self.mouse.drag) = (on, on),
@@ -466,6 +484,49 @@ impl State {
             _ => return,
         }
         if matches!(mode, 1000 | 1002 | 1003 | 1006) {
+            self.events.push(Event::Mouse(self.mouse));
+        }
+    }
+
+    /// ANSI (non-private) modes. Only two of these are real: everything else a child
+    /// sends here is a mode we neither implement nor advertise.
+    fn ansi_mode(&mut self, mode: u16, on: bool) {
+        match mode {
+            4 => {
+                self.primary.set_insert_mode(on);
+                self.alt.set_insert_mode(on);
+            }
+            20 => self.newline_mode = on,
+            _ => {}
+        }
+    }
+
+    /// DECSTR, and the mode half of RIS.
+    ///
+    /// Everything the child negotiated goes back to its power-on value. The screen and
+    /// the scrollback are deliberately not touched — that is the whole difference between
+    /// a soft reset and RIS, and it is why `rs2` can be sent without losing the session's
+    /// transcript.
+    fn soft_reset(&mut self) {
+        self.pen = Style::default();
+        self.origin_mode = false;
+        self.dec_graphics = false;
+        self.app_cursor = false;
+        self.app_keypad = false;
+        self.cursor_visible = true;
+        self.bracketed_paste = false;
+        self.newline_mode = false;
+        self.last_print = None;
+        self.modify_other_keys = 0;
+        self.kitty_keys.clear();
+        for screen in [&mut self.primary, &mut self.alt] {
+            screen.reset_region();
+            screen.set_autowrap(true);
+            screen.set_insert_mode(false);
+            screen.saved = None;
+        }
+        if self.mouse != Mouse::default() {
+            self.mouse = Mouse::default();
             self.events.push(Event::Mouse(self.mouse));
         }
     }
@@ -590,6 +651,9 @@ impl Perform for State {
         let pen = self.pen;
         let evicted = self.screen_mut().write(c, pen);
         self.evicted(evicted);
+        if c.width().unwrap_or(0) > 0 {
+            self.last_print = Some(c);
+        }
     }
 
     fn execute(&mut self, byte: u8) {
@@ -597,7 +661,13 @@ impl Perform for State {
             0x07 => self.events.push(Event::Bell),
             0x08 => self.screen_mut().backspace(),
             0x09 => self.screen_mut().tab(1),
-            0x0A..=0x0C => self.linefeed(),
+            0x0A..=0x0C => {
+                self.linefeed();
+                // LNM: the child asked for LF to imply CR.
+                if self.newline_mode {
+                    self.screen_mut().carriage_return();
+                }
+            }
             0x0D => self.screen_mut().carriage_return(),
             0x0E => self.dec_graphics = true,
             0x0F => self.dec_graphics = false,
@@ -614,6 +684,12 @@ impl Perform for State {
                 let on = action == 'h';
                 for mode in params.iter().filter_map(|p| p.first().copied()) {
                     self.dec_mode(mode, on);
+                }
+            }
+            (None, 'h' | 'l') => {
+                let on = action == 'h';
+                for mode in params.iter().filter_map(|p| p.first().copied()) {
+                    self.ansi_mode(mode, on);
                 }
             }
             (None, 'A') => self.screen_mut().move_by(-(arg(params, 0, 1) as isize), 0),
@@ -714,7 +790,27 @@ impl Perform for State {
                 self.events
                     .push(Event::Reply(format!("\x1b[?{flags}u").into_bytes()));
             }
-            (None, 'c') => self.events.push(Event::Reply(b"\x1b[?62;c".to_vec())),
+            // REP. Bounded by the screen: a child should not turn three bytes into an
+            // arbitrarily long print loop.
+            (None, 'b') => {
+                if let Some(ch) = self.last_print {
+                    let cap = self.screen().width() * self.screen().height();
+                    let pen = self.pen;
+                    for _ in 0..arg(params, 0, 1).min(cap) {
+                        let evicted = self.screen_mut().write(ch, pen);
+                        self.evicted(evicted);
+                    }
+                }
+            }
+            (None, 'Z') => self.screen_mut().back_tab(arg(params, 0, 1)),
+            // DECSTR. Unlike RIS this keeps the screen and the scrollback.
+            (Some(b'!'), 'p') => self.soft_reset(),
+            // Primary DA. We answer for what we implement and nothing else: VT220 level
+            // (62) with ANSI colour (22). Not 1/132-column, not 4/sixel, not 6/selective
+            // erase, not 2/printer — see the printer capabilities dropped from terminfo.
+            (None, 'c') => self.events.push(Event::Reply(b"\x1b[?62;22c".to_vec())),
+            // Secondary DA. Unanswered, a child that queries and waits hangs.
+            (Some(b'>'), 'c') => self.events.push(Event::Reply(b"\x1b[>0;0;0c".to_vec())),
             (None, 'n') if arg(params, 0, 0) == 5 => {
                 self.events.push(Event::Reply(b"\x1b[0n".to_vec()));
             }
@@ -745,19 +841,19 @@ impl Perform for State {
                 self.screen_mut().reverse_index(pen);
             }
             (None, b'H') => self.screen_mut().set_tab(),
+            // DECKPAM/DECKPNM. `rs2` and `is2` both end in `ESC >`, so ignoring these
+            // meant a reset left the keypad wherever the last program put it.
+            (None, b'=') => self.app_keypad = true,
+            (None, b'>') => self.app_keypad = false,
             (None, b'7') => self.save_restore(true),
             (None, b'8') => self.save_restore(false),
             (None, b'c') => {
-                self.pen = Style::default();
-                self.screen_mut().reset_region();
-                // The pen is default by the line above, so this is `bce` with nothing to
-                // carry — spelled out rather than read back, since RIS means default.
+                // RIS is a soft reset that also clears the screen. The pen is default by
+                // the time the erase runs, so this is `bce` with nothing to carry.
+                self.soft_reset();
                 let evicted = self.screen_mut().erase_display(Erase::All, Style::default());
                 self.evicted(evicted);
                 self.screen_mut().goto(0, 0);
-                // RIS means everything the child negotiated is off, keyboard included.
-                self.modify_other_keys = 0;
-                self.kitty_keys.clear();
             }
             _ => {}
         }
@@ -853,6 +949,111 @@ mod tests {
             t.screen().row(0).unwrap().runs()[0].style.fg,
             Color::Indexed(200)
         );
+    }
+
+    #[test]
+    fn rep_repeats_the_last_graphic_character() {
+        let t = term(2, 10, b"-\x1b[4b");
+        assert_eq!(text(&t, 0), "-----");
+    }
+
+    #[test]
+    fn rep_repeats_what_dec_graphics_drew() {
+        // `q` in the DEC graphics set is a horizontal rule; REP must repeat the rule,
+        // not the letter that was on the wire.
+        let t = term(2, 10, b"\x1b(0q\x1b[2b");
+        assert_eq!(text(&t, 0), "───");
+    }
+
+    #[test]
+    fn rep_without_a_preceding_print_does_nothing() {
+        let t = term(2, 10, b"\x1b[5b");
+        assert_eq!(text(&t, 0), "");
+    }
+
+    #[test]
+    fn rep_ignores_a_combining_mark() {
+        // The mark folds onto the `e`; REP then repeats the `e`, not the accent.
+        let t = term(2, 10, b"e\xcc\x81\x1b[2b");
+        assert_eq!(t.screen().row(0).unwrap().to_text().chars().count(), 4);
+    }
+
+    #[test]
+    fn rep_is_bounded_by_the_screen() {
+        let mut t = term(2, 10, b"x\x1b[65535b");
+        // Twenty cells exist; the count is capped rather than looped 65535 times.
+        assert!(t.drain().scrolled.len() <= 2);
+    }
+
+    #[test]
+    fn back_tab_walks_to_the_previous_stop() {
+        let t = term(2, 24, b"\x1b[20G\x1b[Z");
+        assert_eq!(t.screen().cursor.col, 16);
+        let t = term(2, 24, b"\x1b[20G\x1b[3Z");
+        assert_eq!(t.screen().cursor.col, 0, "floors at column zero");
+    }
+
+    #[test]
+    fn autowrap_off_pins_the_cursor_to_the_last_column() {
+        let t = term(2, 5, b"\x1b[?7labcdefgh");
+        assert_eq!(text(&t, 0), "abcdh", "the last column keeps overwriting");
+        assert_eq!(text(&t, 1), "", "and nothing wrapped below");
+    }
+
+    #[test]
+    fn autowrap_back_on_resumes_wrapping() {
+        let t = term(2, 5, b"\x1b[?7labcde\x1b[?7hfg");
+        assert_eq!(text(&t, 0), "abcdf");
+        assert_eq!(text(&t, 1), "g");
+    }
+
+    #[test]
+    fn turning_autowrap_off_disarms_a_pending_wrap() {
+        // "abcde" leaves the cursor on the last column with a wrap already decided on.
+        // Clearing DECAWM has to withdraw that decision, not honour it on the next write.
+        let t = term(2, 5, b"abcde\x1b[?7lX");
+        assert_eq!(text(&t, 0), "abcdX");
+        assert_eq!(text(&t, 1), "");
+    }
+
+    #[test]
+    fn insert_mode_shifts_the_rest_of_the_row() {
+        let t = term(2, 10, b"abcd\x1b[3G\x1b[4hXY");
+        assert_eq!(text(&t, 0), "abXYcd");
+    }
+
+    #[test]
+    fn insert_mode_shifts_by_a_wide_characters_full_width() {
+        let t = term(2, 10, b"abcd\x1b[3G\x1b[4h\xe5\xb9\xb8");
+        assert_eq!(text(&t, 0), "ab\u{5e78}cd");
+    }
+
+    #[test]
+    fn soft_reset_keeps_the_screen_but_clears_the_modes() {
+        let mut t = term(2, 10, b"hello\x1b[?7l\x1b[4h\x1b[31m\x1b[?25l\x1b[!p");
+        assert_eq!(text(&t, 0), "hello", "DECSTR is not RIS");
+        assert!(t.drain().cursor_visible, "mode 25 is back on");
+
+        // Autowrap and insert mode are back to their power-on values.
+        t.feed(b"\x1b[6Gabcdefg");
+        assert_eq!(text(&t, 1), "fg", "autowrap was restored");
+    }
+
+    #[test]
+    fn the_init_string_is_understood_end_to_end() {
+        // `is2`/`rs2` verbatim: DECSTR, private 3 and 4 off, ANSI 4 off, normal keypad.
+        let mut t = term(2, 10, b"\x1b[4h\x1b=");
+        t.feed(b"\x1b[!p\x1b[?3;4l\x1b[4l\x1b>");
+        t.feed(b"ab\x1b[1GX");
+        assert_eq!(text(&t, 0), "Xb", "insert mode is off, so X overwrites");
+    }
+
+    #[test]
+    fn device_attributes_name_only_what_we_implement() {
+        let mut t = term(2, 10, b"\x1b[c\x1b[>c");
+        let events = t.drain().events;
+        assert!(events.contains(&Event::Reply(b"\x1b[?62;22c".to_vec())));
+        assert!(events.contains(&Event::Reply(b"\x1b[>0;0;0c".to_vec())));
     }
 
     /// The style of the last cell of a row, which is where an erase-to-end lands.
