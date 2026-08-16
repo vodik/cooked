@@ -1277,8 +1277,44 @@ character whose own width was already mismeasured, not an adjacent one."
             (delete-region (1- eol) eol)))
         (when trimmed
           (goto-char start)
-          (let ((cut (1- (line-end-position))))
-            (put-text-property cut (1+ cut) 'display '(right-fringe right-truncation))))))))
+          (cooked--mark-truncation (1- (line-end-position))))))))
+
+(defun cooked--mark-truncation (cut)
+  "Mark the row ending at CUT as having had characters trimmed off it.
+
+Where the marker goes depends on whether there is a fringe to put it in, and the
+difference is a column of the user's text:
+
+On a graphical frame it rides an overlay's `after-string' rather than a `display'
+property on CUT itself.  A fringe `display' spec shows its bitmap \"instead of the
+characters that have the display specification\" (see Other Display Specs in the
+Elisp manual), so putting one on a real character silently costs the row one more
+character than the trim already did — while the point of using the fringe is that
+it sits outside the text area and costs nothing, which is how `truncate-lines'
+draws its own arrow.  The overlay evaporates on its own: `cooked--render-rows'
+deletes the row before rewriting it, which empties it.
+
+On a terminal frame there is no fringe, so the bitmap could never be drawn and the
+character was disappearing with nothing shown in its place.  There a marker has to
+cost a column, exactly as `truncate-lines' spends the last one on `$', so the
+`display' property on CUT is right — it just has to name something visible."
+  (if (display-graphic-p)
+      (let ((overlay (make-overlay cut (1+ cut))))
+        (overlay-put overlay 'evaporate t)
+        (overlay-put overlay 'cooked-truncation t)
+        (overlay-put overlay 'after-string
+                     (propertize " " 'display '(right-fringe right-truncation))))
+    (put-text-property cut (1+ cut) 'display
+                       (string (cooked--truncation-glyph)))))
+
+(defun cooked--truncation-glyph ()
+  "The character a terminal frame marks a truncated line with.
+Whatever the display table says, so a user who has rebound it sees their own
+choice here too, and `$' — which is what Emacs itself falls back to — otherwise."
+  (or (when-let* ((table (or buffer-display-table standard-display-table))
+                  (glyph (display-table-slot table 'truncation)))
+        (glyph-char glyph))
+      ?$))
 
 (defun cooked--render-rows (rows)
   "Rewrite damaged ROWS, an alist of (INDEX . RUNS)."

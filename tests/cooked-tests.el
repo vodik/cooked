@@ -2443,8 +2443,8 @@ follows really is the continuation."
       (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min)))
       (goto-char (point-min))
       (should (= (- (line-end-position) (point-min)) 10))
-      (should (equal (get-text-property (1- (line-end-position)) 'display)
-                      '(right-fringe right-truncation))))))
+      ;; A terminal frame, so the marker spends the last column rather than the fringe.
+      (should (equal (get-text-property (1- (line-end-position)) 'display) "$")))))
 
 (ert-deftest cooked-guard-row-width-leaves-a-row-that-fits-alone ()
   (with-temp-buffer
@@ -2484,8 +2484,13 @@ fast path above must not apply -- a pure-ASCII row still gets trimmed there."
         (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min))))
       (goto-char (point-min))
       (should (= (- (line-end-position) (point-min)) 10))
-      (should (equal (get-text-property (1- (line-end-position)) 'display)
-                      '(right-fringe right-truncation))))))
+      ;; The fringe is outside the text area, so the marker costs no column: it rides an
+      ;; overlay string, and the character it is anchored to is still the row's own.
+      (should-not (get-text-property (1- (line-end-position)) 'display))
+      (let ((overlay (car (overlays-in (1- (line-end-position)) (line-end-position)))))
+        (should (overlay-get overlay 'cooked-truncation))
+        (should (equal (get-text-property 0 'display (overlay-get overlay 'after-string))
+                       '(right-fringe right-truncation)))))))
 
 (ert-deftest cooked-guard-row-width-does-nothing-without-rejoin ()
   "When `cooked-rejoin-wrapped-lines' is nil, `truncate-lines' is already t
