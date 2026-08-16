@@ -188,7 +188,7 @@ pub struct Row {
     /// an editor drawing LSP diagnostics — and a `Color` in [`Style`] would grow [`Cell`]
     /// from 16 bytes to 20, which measured as an 8-13% throughput loss across the whole
     /// grid for a feature almost nothing uses. Empty is the overwhelming case, and
-    /// [`Row::runs`] checks that once.
+    /// [`Row::runs`] specialises on that once rather than asking per cell.
     ///
     /// Only non-default colours are stored, and the table is boxed: `None` is the
     /// overwhelming case, and an inline `Vec` put 24 bytes on every `Row` — rows are
@@ -411,20 +411,20 @@ impl Row {
 
     /// Style-grouped runs with trailing default-styled blanks trimmed.
     ///
-    /// Two implementations on purpose. Underline colours are rare and live in a side
-    /// table, and folding a per-cell lookup and comparison into the common path measured
-    /// as a 17% loss on the full-screen repaint benchmark — this is the hottest read in
-    /// the emulator, run over every damaged row of every frame. So the ordinary row takes
-    /// a path with no knowledge of underlines at all, and only a row that actually
-    /// carries one pays for it.
+    /// Dispatches to two specialisations of [`Row::build_runs`]. Underline colours live
+    /// in a side table and are rare, and looking one up per cell measured as ~2% of the
+    /// full-screen repaint benchmark — this is the hottest read in the emulator, run
+    /// over every damaged row of every frame. Passing the lookup as a closure keeps one
+    /// copy of the merge rules while letting the ordinary row compile down to a version
+    /// with no side table in it at all.
     pub fn runs(&self) -> Vec<Run> {
-        match self.underlines.is_none() {
-            true => self.runs_plain(),
-            false => self.runs_underlined(),
+        match self.underlines.is_some() {
+            true => self.build_runs(|row, col| row.underline_at(col)),
+            false => self.build_runs(|_, _| Color::Default),
         }
     }
 
-    fn runs_plain(&self) -> Vec<Run> {
+    fn build_runs(&self, underline_at: impl Fn(&Self, usize) -> Color) -> Vec<Run> {
         let end = self.content_len();
 
         self.cells[..end]
@@ -433,41 +433,7 @@ impl Row {
             .filter(|(_, c)| !c.is_continuation())
             .fold(Vec::<Run>::new(), |mut runs, (col, cell)| {
                 let shape = glyph::classify(cell.ch);
-                match runs.last_mut() {
-                    Some(run)
-                        if run.style == cell.style && run.glyphs.is_some() == shape.is_some() =>
-                    {
-                        run.text.push(cell.ch);
-                        if let Some(glyphs) = &mut run.glyphs {
-                            glyphs.push(shape.expect("glyphs.is_some() == shape.is_some()"));
-                        }
-                    }
-                    _ => runs.push(Run {
-                        text: String::from(cell.ch),
-                        style: cell.style,
-                        glyphs: shape.map(|g| vec![g]),
-                        underline: Color::Default,
-                    }),
-                }
-                // Combining marks never legitimately attach to a box-drawing base
-                // character, so no glyph padding is needed to keep `glyphs` aligned.
-                if let (Some(marks), Some(run)) = (self.marks_at(col), runs.last_mut()) {
-                    run.text.push_str(marks);
-                }
-                runs
-            })
-    }
-
-    fn runs_underlined(&self) -> Vec<Run> {
-        let end = self.content_len();
-
-        self.cells[..end]
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| !c.is_continuation())
-            .fold(Vec::<Run>::new(), |mut runs, (col, cell)| {
-                let shape = glyph::classify(cell.ch);
-                let underline = self.underline_at(col);
+                let underline = underline_at(self, col);
                 match runs.last_mut() {
                     Some(run)
                         if run.style == cell.style
@@ -486,6 +452,8 @@ impl Row {
                         underline,
                     }),
                 }
+                // Combining marks never legitimately attach to a box-drawing base
+                // character, so no glyph padding is needed to keep `glyphs` aligned.
                 if let (Some(marks), Some(run)) = (self.marks_at(col), runs.last_mut()) {
                     run.text.push_str(marks);
                 }
