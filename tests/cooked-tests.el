@@ -1047,6 +1047,26 @@ when the window shrinks — which looked like resize doing nothing."
       (cooked--resize cooked--session 30 40)
       (should (cooked-tests--settle (lambda () (= (funcall screen-lines) 30)))))))
 
+(ert-deftest cooked-alt-screen-resize-does-not-leave-window-start-adrift ()
+  "Regression: a shrink reaches `cooked--apply' in two steps rather than one --
+the window changes height the instant Emacs notices (`cooked--sync-size'),
+while the buffer is not trimmed to match until this drain's `cooked--fit-screen'
+runs.  Ordinary redisplay can spend that gap pushing `window-start' down to
+keep point on screen, and nothing used to undo that once the buffer caught
+up: the window kept showing the scroll a now-stale redisplay had chosen,
+clipping the top of the screen even though the buffer content was correct."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'top\\n'; sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (set-window-buffer (selected-window) (current-buffer))
+    (goto-char (point-max))
+    ;; Simulate the drift a shrink leaves behind, without depending on real
+    ;; redisplay timing: window-start pushed away from the top of the screen
+    ;; region, as if a resize had shrunk the window before the buffer caught up.
+    (set-window-start (selected-window) (point-max) t)
+    (should-not (= (window-start (selected-window)) (marker-position cooked--screen-start)))
+    (cooked--apply (cooked--drain cooked--session))
+    (should (= (window-start (selected-window)) (marker-position cooked--screen-start)))))
+
 (ert-deftest cooked-mouse-reports-reach-the-child ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; exec cat")
     (should (cooked-tests--settle (lambda () cooked--mouse)))

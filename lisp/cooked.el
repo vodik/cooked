@@ -1492,11 +1492,26 @@ window that fell behind."
     ;; it, in place of the `comint-output-filter-functions' hook cooked cannot
     ;; use, having replaced comint's own insertion with `cooked--apply' outright.
     ;;
-    ;; Skipped on the alt screen: that region is sized to the window exactly
-    ;; (`cooked--fit-screen'), so a full-screen program's own cursor position
-    ;; is never an "end of output" to scroll toward — the whole screen is
-    ;; already on screen by construction.
-    (unless cooked--alt
+    ;; The alt screen takes a different path: that region is sized to the window
+    ;; exactly (`cooked--fit-screen'), so a full-screen program's own cursor
+    ;; position is never an "end of output" to scroll toward — the whole screen
+    ;; is meant to be on screen by construction, but a resize reaches here in two
+    ;; steps rather than one. The window changes height the instant Emacs notices
+    ;; (`cooked--sync-size'), while the buffer is not re-fitted to match until this
+    ;; drain's `cooked--fit-screen' above runs. Ordinary redisplay fills that gap
+    ;; on its own terms, pushing `window-start' down to keep point on screen in
+    ;; the meantime — and nothing corrected that once the buffer caught up, so the
+    ;; window kept the scroll a now-irrelevant redisplay had chosen, clipping the
+    ;; top of the screen. Pin it back to the region's start on every drain, not
+    ;; only the transition, the same way `cooked--apply-alt-pin' re-narrows on
+    ;; every drain rather than only when `cooked--alt' flips.
+    (if cooked--alt
+        (when follow
+          (let ((top (marker-position cooked--screen-start))
+                (here (and (eq (window-buffer (selected-window)) (current-buffer))
+                           (selected-window))))
+            (dolist (w (if here (cons here other-follows) other-follows))
+              (when (window-live-p w) (set-window-start w top t)))))
       (let* ((target (cooked--point-after-input))
              ;; A rendered row always ends with a newline, even the cursor's own —
              ;; see `cooked--insert-runs' — so the cursor at the true end of output
