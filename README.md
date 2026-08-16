@@ -88,13 +88,59 @@ We ship `terminfo/cooked.ti` and default `TERM` to `cooked-256color` — what al
 wezterm, foot and Emacs' own `term.el` all do. Claiming to be xterm is a lie with
 consequences in both directions: xterm-256color does not advertise direct colour, so
 applications drop to 256 unless they happen to honour the `COLORTERM` convention, and it
-*does* advertise capabilities we ignore. Our entry corrects both:
+*does* advertise capabilities we ignore. Our entry corrects both.
 
-| Capability | Change | Why |
+Inheriting `use=xterm-256color` and cancelling a few entries turned out to be the wrong
+shape for that promise: it claims everything xterm has, and everything ncurses ever adds to
+it, so the entry drifts out of true every time nobody looks. The entry is now written out
+in full, and every capability in it has been checked against the code. `bce` is the one
+that mattered — ncurses *optimises* on the strength of it, setting a background and erasing
+rather than writing spaces, so ignoring it mis-drew every coloured panel and status bar.
+
+**Was claimed, is now implemented:**
+
+| Capability | Sequence | What was wrong |
 |---|---|---|
-| `Tc`, `setrgbf`, `setrgbb` | added | we support direct colour; xterm-256color does not declare it |
-| `ccc`, `initc` | removed | palette redefinition via OSC 4, which we do not parse |
-| `flash` | removed | visual bell via DECSCNM, which we do not implement |
+| `bce` | — | erases filled with the default style, losing every background |
+| `rep` | `CSI Ps b` | ncurses emits it for repeated characters; rules came out short |
+| `smam`, `rmam` | `CSI ?7h/l` | autowrap could not be turned off, so painting the last column scrolled |
+| `cbt`, `kcbt` | `CSI Z` | no back-tab |
+| `smir`, `rmir` | `CSI 4h/l` | no insert mode — in fact no ANSI mode handling at all |
+| `is2`, `rs2` | `CSI !p`, `ESC >` | the init string was mostly no-op, so a reset only looked like one |
+| `smcup`, `rmcup` | `CSI 22;0;0t`, `CSI 23;0;0t` | the title stack was ignored, so vim left its title behind |
+| `u8` | `CSI c` | the reply was malformed, and `CSI > c` went unanswered |
+| `Ss`, `Se` | `CSI Ps SP q` | cursor shape, now mapped onto `cursor-type` |
+| `fe`, `fd` | `CSI ?1004h/l` | focus reporting, now sending `CSI I`/`CSI O` |
+| `Cr`, `Cs` | OSC 12, OSC 112 | cursor colour, which Lisp had handled all along |
+
+**Added, being things xterm-256color does not declare:**
+
+| Capability | Why |
+|---|---|
+| `Tc`, `setrgbf`, `setrgbb` | direct colour; `COLORTERM=truecolor` is a convention, not a capability |
+| `Smulx`, `Setulc` | styled and coloured underlines, onto Emacs\' `:underline` |
+| `Sync` | synchronized output, which suppresses the Emacs wakeup for a frame |
+
+**Removed, being things we do not implement and do not intend to:**
+
+| Capability | Why |
+|---|---|
+| `ccc`, `initc` | palette redefinition via OSC 4. Emacs owns colour; a per-buffer 256-entry palette is the wrong seam |
+| `flash` | visual bell via DECSCNM |
+| `mc0`, `mc4`, `mc5`, `mc5i` | printer control. There is no printer behind an Emacs buffer, and `mc5` is a child-driven exfiltration channel with nothing to show for it |
+| `mgc`, `smglp`, `smglr`, `smgrp` | left/right margins. The grid, the reflow and the transcript model are all row-oriented — and `CSI s` is already save-cursor, so honouring these would corrupt it |
+| `meml`, `memu` | HP-era memory lock |
+| `smm`, `rmm`, `km` | meta-sends-escape. How Meta is spelled is negotiated through modifyOtherKeys or the kitty protocol, which is the mechanism that should own it |
+| `cvvis` | cursor *blink* is `blink-cursor-mode`, yours to set and not the child\'s. `cnorm` covers visibility |
+
+A child does not have to take our word for any of it. DECRQM (`CSI ? Ps $ p`) answers 1 or
+2 for a mode we implement, 4 — "permanently reset" — for every one in that last table, and
+0 for one we have never heard of.
+
+Some requests are refused rather than merely unimplemented. `CSI 21t` reports the window
+title *on the child\'s input stream*, which turns a title the child set itself into typed
+input at your next prompt; `CSI 3t`, `4t` and `8t` move and resize the window, which is
+Emacs\' business. The read-only `CSI 18t` is answered.
 
 The entry installs itself into `~/.terminfo` on first use — no root needed — and falls
 back to `xterm-256color` when `tic` is unavailable. Set `cooked-term-name` to nil to always
@@ -163,10 +209,12 @@ secrets, and a real interactive `bash` for the OSC 133 path.
 
 ## Status
 
-Working: emulator core (SGR/truecolor, scroll regions, alt screen, wide chars, combining
-marks, DEC graphics, mouse mode tracking, OSC 0/2/7/8/10/11/12/133, modifyOtherKeys and the kitty
-keyboard protocol), termios state machine, secret prompts, scrollback, resize,
-per-command exit codes, read-only transcript, output folding, evil integration.
+Working: emulator core (SGR/truecolor, styled and coloured underlines, scroll regions, alt
+screen, wide chars, combining marks, DEC graphics, background colour erase, insert mode,
+autowrap control, mouse mode tracking, alternate scroll, focus reporting, synchronized
+output, cursor shape, OSC 0/2/7/8/10/11/12/99/133, modifyOtherKeys and the kitty keyboard
+protocol, DECRQM), termios state machine, secret prompts, scrollback, resize, per-command
+exit codes, read-only transcript, output folding, evil integration.
 
 Not yet: sixel/kitty graphics, comint history integration, and `vttest`-level conformance
 beyond the common paths.
