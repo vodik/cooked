@@ -1152,6 +1152,44 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
     (should (cooked-tests--settle (lambda () (equal cooked--title "my-title"))))
     (should (string-match-p "my-title" (cooked--mode-line)))))
 
+(ert-deftest cooked-underline-face-keeps-its-old-shape-when-plain ()
+  "A plain underline must still produce `:underline t', not a plist."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--face-cache (make-hash-table :test #'equal))
+    (should (eq (plist-get (cooked--face nil nil cooked--attr-underline nil)
+                           :underline)
+                t))
+    ;; SGR 4:1 is single, which Emacs renders the same way.
+    (let ((single (logior cooked--attr-underline
+                          (ash 1 cooked--attr-underline-shift))))
+      (should (eq (plist-get (cooked--face nil nil single nil) :underline) t)))))
+
+(ert-deftest cooked-underline-face-carries-style-and-color ()
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--face-cache (make-hash-table :test #'equal))
+    (let* ((curly (logior cooked--attr-underline
+                          (ash 3 cooked--attr-underline-shift)))
+           (spec (plist-get (cooked--face nil nil curly 1) :underline)))
+      (should (eq (plist-get spec :style) 'wave))
+      (should (stringp (plist-get spec :color))))
+    ;; Dotted and dashed have no Emacs rendering, so they fall back to a line —
+    ;; but the color still has to survive.
+    (let* ((dotted (logior cooked--attr-underline
+                           (ash 4 cooked--attr-underline-shift)))
+           (spec (plist-get (cooked--face nil nil dotted 1) :underline)))
+      (should (null (plist-get spec :style)))
+      (should (stringp (plist-get spec :color))))))
+
+(ert-deftest cooked-underline-color-does-not-collide-in-the-face-cache ()
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--face-cache (make-hash-table :test #'equal))
+    (let ((a (cooked--face nil nil cooked--attr-underline 1))
+          (b (cooked--face nil nil cooked--attr-underline 2)))
+      (should-not (equal a b)))))
+
 (ert-deftest cooked-title-stack-restores-on-pop ()
   "XTWINOPS 22/23, which `smcup'/`rmcup' send around the alternate screen."
   (cooked-tests--with-session

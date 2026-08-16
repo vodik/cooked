@@ -55,6 +55,9 @@
 (defconst cooked--attr-reverse 32)
 (defconst cooked--attr-conceal 64)
 (defconst cooked--attr-strike 128)
+(defconst cooked--attr-underline-shift 8
+  "Bit position of the underline-style field.  See `Attrs' in src/emu/cell.rs.")
+(defconst cooked--attr-underline-style (ash 7 cooked--attr-underline-shift))
 
 (defcustom cooked-color-names
   ["black" "red3" "green3" "yellow3" "blue2" "magenta3" "cyan3" "gray90"
@@ -338,9 +341,30 @@ theme change could make stale."
   (advice-add 'enable-theme :after #'cooked--flush-face-cache)
   (advice-add 'disable-theme :after #'cooked--flush-face-cache))
 
-(defun cooked--face (fg bg attrs)
-  "Face plist for FG, BG and the ATTRS bitmask, memoized per buffer."
-  (let ((key (list fg bg attrs)))
+(defconst cooked--underline-styles
+  [nil line line wave line line]
+  "Emacs `:underline' styles, indexed by the SGR 4:x subparameter.
+
+Emacs renders only `line' and `wave', so double, dotted and dashed all fall
+back to a plain line rather than being approximated with overlays.")
+
+(defun cooked--underline-spec (attrs ul)
+  "The `:underline' value for the ATTRS bitmask with underline colour UL.
+
+Plain t whenever there is nothing to say beyond \='underlined\=', so the common
+case produces exactly the face plist it did before styled underlines existed."
+  (let ((style (aref cooked--underline-styles
+                     (min 5 (ash (logand attrs cooked--attr-underline-style)
+                                 (- cooked--attr-underline-shift)))))
+        (color (and ul (cooked--color ul))))
+    (cond ((and (null color) (memq style '(nil line))) t)
+          (t (append (and color (list :color color))
+                     (and (eq style 'wave) (list :style 'wave)))))))
+
+(defun cooked--face (fg bg attrs &optional ul)
+  "Face plist for FG, BG, the ATTRS bitmask and underline colour UL.
+Memoized per buffer."
+  (let ((key (list fg bg attrs ul)))
     (or (gethash key cooked--face-cache)
         (puthash key
                  (let* ((reverse (/= 0 (logand attrs cooked--attr-reverse)))
@@ -356,7 +380,8 @@ theme change could make stale."
                    (when (/= 0 (logand attrs cooked--attr-italic))
                      (setq face (plist-put face :slant 'italic)))
                    (when (/= 0 (logand attrs cooked--attr-underline))
-                     (setq face (plist-put face :underline t)))
+                     (setq face (plist-put face :underline
+                                           (cooked--underline-spec attrs ul))))
                    (when (/= 0 (logand attrs cooked--attr-strike))
                      (setq face (plist-put face :strike-through t)))
                    (when (/= 0 (logand attrs cooked--attr-conceal))
@@ -886,9 +911,9 @@ is phased against — and is not the same as the row's line beginning, since row
 can continue a wrapped line."
   (let ((origin (point)))
     (dolist (run runs)
-      (pcase-let ((`(,text ,fg ,bg ,attrs ,glyphs) run))
+      (pcase-let ((`(,text ,fg ,bg ,attrs ,glyphs ,ul) run))
         (let ((start (point))
-              (face (cooked--face fg bg attrs)))
+              (face (cooked--face fg bg attrs ul)))
           (insert text)
           (when face
             (add-text-properties start (point) (list 'face face 'font-lock-face face)))
@@ -966,8 +991,8 @@ insertion point is above the region `cooked-alt-screen-pin' confines us to."
         (let ((start (point)))
           (insert text)
           (dolist (span spans)
-            (pcase-let ((`(,from ,to ,fg ,bg ,attrs) span))
-              (when-let* ((face (cooked--face fg bg attrs)))
+            (pcase-let ((`(,from ,to ,fg ,bg ,attrs ,ul) span))
+              (when-let* ((face (cooked--face fg bg attrs ul)))
                 (add-text-properties (+ start from) (+ start to)
                                      (list 'face face 'font-lock-face face)))))
           ;; Box-drawing that scrolled into history is rasterized exactly as it would

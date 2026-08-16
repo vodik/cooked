@@ -408,13 +408,14 @@ impl Update {
             for run in &line.runs {
                 let chars = run.text.chars().count();
                 let Style { fg, bg, attrs } = run.style;
-                if run.style != Style::default() {
+                if run.style != Style::default() || run.underline != Color::Default {
                     spans.push(env.list(&[
                         env.into_lisp(offset)?,
                         env.into_lisp(offset + chars)?,
                         color_to_lisp(env, fg)?,
                         color_to_lisp(env, bg)?,
                         env.into_lisp(u32::from(attrs.bits()))?,
+                        color_to_lisp(env, run.underline)?,
                     ])?);
                 }
                 if let Some(glyphs) = run.glyphs.as_deref() {
@@ -499,6 +500,7 @@ fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
         color_to_lisp(env, bg)?,
         env.into_lisp(u32::from(attrs.bits()))?,
         glyphs_to_lisp(env, run.glyphs.as_deref())?,
+        color_to_lisp(env, run.underline)?,
     ])
 }
 

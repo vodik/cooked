@@ -1,6 +1,6 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
-use super::cell::{CONTINUATION, Cell, Row, Style};
+use super::cell::{CONTINUATION, Cell, Color, Row, Style};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -93,6 +93,14 @@ pub struct Screen {
     autowrap: bool,
     /// IRM. See [`Screen::set_insert_mode`].
     insert_mode: bool,
+    /// Whether any row here may carry an underline colour.
+    ///
+    /// A screen-level over-approximation on purpose. The alternative — asking the row on
+    /// every cell written — put a branch inside [`Row::set`], which is the per-character
+    /// write path, and measured as 5% of the repaint benchmark on its own. Read once per
+    /// printed character from a struct already in cache, and never cleared short of a
+    /// reset, so it is wrong only in the harmless direction.
+    underlined: bool,
 }
 
 impl Screen {
@@ -108,6 +116,7 @@ impl Screen {
             carried: 0,
             autowrap: true,
             insert_mode: false,
+            underlined: false,
         }
     }
 
@@ -259,6 +268,29 @@ impl Screen {
             next => self.cursor.col = next,
         }
         evicted
+    }
+
+    /// Record the pen's underline colour on the cell the cursor just wrote.
+    ///
+    /// Separate from [`Screen::write`] rather than a parameter to it: this is the rare
+    /// path, and `write` is the hottest call in the emulator. Called after the write, so
+    /// the column is the one the write settled on after any wrap.
+    pub fn underlined(&self) -> bool {
+        self.underlined
+    }
+
+    pub fn mark_underline(&mut self, color: Color) {
+        self.underlined |= color != Color::Default;
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        // The cursor has already advanced past the character it wrote, except where it
+        // pinned at the last column.
+        let col = match self.cursor.wrap_pending {
+            true => col,
+            false => col.saturating_sub(1),
+        };
+        if let Some(r) = self.touch(row) {
+            r.set_underline(col, color);
+        }
     }
 
     pub fn carriage_return(&mut self) {
@@ -742,6 +774,7 @@ fn place(offset: usize, cols: usize, chunks: usize) -> (usize, usize, bool) {
 struct Logical {
     cells: Vec<Cell>,
     marks: Vec<(usize, Box<str>)>,
+    underlines: Vec<(usize, Color)>,
 }
 
 impl Logical {
@@ -764,6 +797,12 @@ impl Logical {
                 .iter()
                 .filter(|(at, _)| usize::from(*at) < len)
                 .map(|(at, text)| (base + usize::from(*at), text.clone())),
+        );
+        self.underlines.extend(
+            row.underlines()
+                .iter()
+                .filter(|(at, _)| usize::from(*at) < len)
+                .map(|(at, color)| (base + usize::from(*at), *color)),
         );
         base
     }
@@ -804,6 +843,13 @@ impl Logical {
             }
             keep
         });
+        self.underlines.retain_mut(|(at, _)| {
+            let keep = *at >= n;
+            if keep {
+                *at -= n;
+            }
+            keep
+        });
         row
     }
 
@@ -817,7 +863,13 @@ impl Logical {
             .filter(|(at, _)| (start..end).contains(at))
             .map(|(at, text)| ((at - start) as u16, text.clone()))
             .collect();
-        Row::from_parts(cells, marks, wrapped)
+        let underlines = self
+            .underlines
+            .iter()
+            .filter(|(at, _)| (start..end).contains(at))
+            .map(|(at, color)| ((at - start) as u16, *color))
+            .collect();
+        Row::from_parts(cells, marks, underlines, wrapped)
     }
 }
 

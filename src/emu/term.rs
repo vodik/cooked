@@ -296,6 +296,9 @@ struct State {
     /// character, and repeating a combining mark would fold it onto the cell to the left
     /// over and over rather than printing anything.
     last_print: Option<char>,
+    /// The pen's underline colour (`SGR 58`). Not part of [`Style`]: it is stored per row
+    /// in a side table, so that a rare feature does not grow every cell on the grid.
+    underline: Color,
 }
 
 impl State {
@@ -319,6 +322,7 @@ impl State {
             kitty_keys: Vec::new(),
             newline_mode: false,
             last_print: None,
+            underline: Color::Default,
         }
     }
 
@@ -512,6 +516,7 @@ impl State {
     /// transcript.
     fn soft_reset(&mut self) {
         self.pen = Style::default();
+        self.underline = Color::Default;
         self.origin_mode = false;
         self.dec_graphics = false;
         self.app_cursor = false;
@@ -570,24 +575,33 @@ impl State {
     fn sgr(&mut self, params: &Params) {
         if params.is_empty() {
             self.pen = Style::default();
+            self.underline = Color::Default;
             return;
         }
         let mut iter = params.iter();
         while let Some(param) = iter.next() {
             let Some(&code) = param.first() else { continue };
             match code {
-                0 => self.pen = Style::default(),
+                0 => {
+                    self.pen = Style::default();
+                    self.underline = Color::Default;
+                }
                 1 => self.pen.attrs |= Attrs::BOLD,
                 2 => self.pen.attrs |= Attrs::FAINT,
                 3 => self.pen.attrs |= Attrs::ITALIC,
-                4 => self.pen.attrs |= Attrs::UNDERLINE,
+                // `SGR 4` is single; `4:0`-`4:5` name a style. Only the first
+                // subparameter is read, which is all the protocol defines.
+                4 => match param.get(1) {
+                    None => self.pen.attrs.set_underline_style(1),
+                    Some(&style) => self.pen.attrs.set_underline_style(style.min(5) as u8),
+                },
                 5 | 6 => self.pen.attrs |= Attrs::BLINK,
                 7 => self.pen.attrs |= Attrs::REVERSE,
                 8 => self.pen.attrs |= Attrs::CONCEAL,
                 9 => self.pen.attrs |= Attrs::STRIKE,
                 21 | 22 => self.pen.attrs.remove(Attrs::BOLD | Attrs::FAINT),
                 23 => self.pen.attrs.remove(Attrs::ITALIC),
-                24 => self.pen.attrs.remove(Attrs::UNDERLINE),
+                24 => self.pen.attrs.set_underline_style(0),
                 25 => self.pen.attrs.remove(Attrs::BLINK),
                 27 => self.pen.attrs.remove(Attrs::REVERSE),
                 28 => self.pen.attrs.remove(Attrs::CONCEAL),
@@ -598,6 +612,10 @@ impl State {
                 40..=47 => self.pen.bg = Color::Indexed((code - 40) as u8),
                 48 => self.pen.bg = extended(param, &mut iter).unwrap_or(self.pen.bg),
                 49 => self.pen.bg = Color::Default,
+                // `SGR 58`/`59`: the underline's own colour, parsed by the same
+                // `extended` as 38 and 48, so `58:2::r:g:b` and `58:5:n` come free.
+                58 => self.underline = extended(param, &mut iter).unwrap_or(self.underline),
+                59 => self.underline = Color::Default,
                 90..=97 => self.pen.fg = Color::Indexed((code - 90 + 8) as u8),
                 100..=107 => self.pen.bg = Color::Indexed((code - 100 + 8) as u8),
                 _ => {}
@@ -652,7 +670,17 @@ impl Perform for State {
     fn print(&mut self, c: char) {
         let c = if self.dec_graphics { dec_graphic(c) } else { c };
         let pen = self.pen;
-        let evicted = self.screen_mut().write(c, pen);
+        let underline = self.underline;
+        let screen = self.screen_mut();
+        let evicted = screen.write(c, pen);
+        // After the write, so it lands on the cell the write actually chose — which a
+        // wrap or DECAWM may have moved. The second test is what retires a stale colour
+        // when a cell that had one is overwritten by a cell that does not: `Row::set`
+        // deliberately knows nothing about underlines, because a branch there is a branch
+        // per character written.
+        if underline != Color::Default || screen.underlined() {
+            screen.mark_underline(underline);
+        }
         self.evicted(evicted);
         if c.width().unwrap_or(0) > 0 {
             self.last_print = Some(c);
@@ -966,6 +994,98 @@ mod tests {
         assert_eq!(
             t.screen().row(0).unwrap().runs()[0].style.fg,
             Color::Indexed(200)
+        );
+    }
+
+    #[test]
+    fn underline_styles_arrive_from_the_subparameter() {
+        for (input, want) in [
+            (&b"\x1b[4mx"[..], 1u8),
+            (&b"\x1b[4:1mx"[..], 1),
+            (&b"\x1b[4:3mx"[..], 3),
+            (&b"\x1b[4:5mx"[..], 5),
+        ] {
+            let t = term(2, 8, input);
+            let style = t.screen().row(0).unwrap().runs()[0].style;
+            assert!(style.attrs.contains(Attrs::UNDERLINE), "{input:?}");
+            assert_eq!(style.attrs.underline_style(), want, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn underline_is_removed_by_both_spellings() {
+        for input in [&b"\x1b[4:3m\x1b[4:0mx"[..], &b"\x1b[4:3m\x1b[24mx"[..]] {
+            let style = term(2, 8, input).screen().row(0).unwrap().runs()[0].style;
+            assert!(!style.attrs.contains(Attrs::UNDERLINE), "{input:?}");
+            assert_eq!(style.attrs.underline_style(), 0, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn underline_colour_parses_both_spellings() {
+        let indexed = term(2, 8, b"\x1b[4m\x1b[58;5;196mx");
+        assert_eq!(
+            indexed.screen().row(0).unwrap().runs()[0].underline,
+            Color::Indexed(196)
+        );
+        let rgb = term(2, 8, b"\x1b[4m\x1b[58:2::255:0:0mx");
+        assert_eq!(
+            rgb.screen().row(0).unwrap().runs()[0].underline,
+            Color::Rgb(255, 0, 0)
+        );
+        let reset = term(2, 8, b"\x1b[4m\x1b[58;5;196m\x1b[59mx");
+        assert_eq!(
+            reset.screen().row(0).unwrap().runs()[0].underline,
+            Color::Default
+        );
+    }
+
+    #[test]
+    fn an_underline_colour_splits_a_run() {
+        // Two cells differing only in underline colour are not the same style.
+        let t = term(2, 8, b"\x1b[4ma\x1b[58;5;196mb");
+        assert_eq!(t.screen().row(0).unwrap().runs().len(), 2);
+    }
+
+    #[test]
+    fn an_erase_drops_the_underline_colour() {
+        let t = term(2, 8, b"\x1b[4;58;5;196m\x1b[41mab\x1b[K");
+        let runs = t.screen().row(0).unwrap().runs();
+        let last = runs.last().unwrap();
+        assert_eq!(last.underline, Color::Default);
+        assert!(!last.style.attrs.contains(Attrs::UNDERLINE));
+    }
+
+    #[test]
+    fn an_underline_colour_survives_a_rewrap() {
+        // The side table is keyed by column, so a reflow has to rebase it the way the
+        // combining-mark table is rebased or the colour lands on the wrong character.
+        let mut t = term(2, 4, b"ab\x1b[4;58;5;196mcd");
+        t.resize(2, 8);
+        let runs = t.screen().row(0).unwrap().runs();
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert_eq!(runs[0].text, "ab");
+        assert_eq!(runs[1].text, "cd");
+        assert_eq!(runs[1].underline, Color::Indexed(196));
+    }
+
+    #[test]
+    fn overwriting_a_cell_retires_its_underline_colour() {
+        // `Row::set` knows nothing about underlines, so this is what proves the screen
+        // level flag actually retires a stale entry rather than leaving it on the cell.
+        let t = term(2, 8, b"\x1b[4;58;5;196mab\x1b[1G\x1b[mxy");
+        let runs = t.screen().row(0).unwrap().runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].text, "xy");
+        assert_eq!(runs[0].underline, Color::Default);
+    }
+
+    #[test]
+    fn an_erased_row_forgets_its_underline_colours() {
+        let t = term(2, 8, b"\x1b[4;58;5;196mab\x1b[1G\x1b[K\x1b[mxy");
+        assert_eq!(
+            t.screen().row(0).unwrap().runs()[0].underline,
+            Color::Default
         );
     }
 
