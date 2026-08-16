@@ -1,0 +1,21 @@
+lisp/cooked.el
+  s_389472e612bc35::t_eb479b60224074 1158-1164
+tests/cooked-tests.el
+  s_389472e612bc35::t_47090059fa18a4 1957-1959
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "04ed13c36de707e9173cba01c4a40310a21b0932",
+  "prompts": {},
+  "sessions": {
+    "s_389472e612bc35": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fce9b177-00e8-4d75-af0e-6c0e6662df05",
+        "model": "unknown"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
