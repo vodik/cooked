@@ -1,0 +1,21 @@
+lisp/cooked.el
+  s_ff7458a8ffb70a::t_f1735ca69d64a2 1125,1131-1137,1154-1155
+tests/cooked-tests.el
+  s_ff7458a8ffb70a::t_f5d81ad7e2290d 1915-1919,1926-1927,1930-1945
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "de52245ff69ac811724dbdc4a054f2c8f8a45103",
+  "prompts": {},
+  "sessions": {
+    "s_ff7458a8ffb70a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d8e5764f-7a6c-4d28-b430-fabf55f333c5",
+        "model": "unknown"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
