@@ -1,0 +1,35 @@
+lisp/cooked.el
+  s_7183b696e12cee::t_a0cb6bfc60f061 958-963,971-979,1117-1158,1165-1167,1387-1407,1425-1430,1467-1496,1513-1515,1603-1614
+src/emu/screen.rs
+  s_7183b696e12cee::t_07ef663f5435e3 58-60,65
+src/emu/term.rs
+  s_7183b696e12cee::t_ca0130773d92f7 71-79,640-641,645-647,1089-1111
+src/lib.rs
+  s_7183b696e12cee::t_be7c4d9f87d974 382-387,391-394,401,409,419-428,444-451,576
+tests/cooked-tests.el
+  s_86a8552b776c18::t_f16a09b69b8248 1334-1367,1600-1685,1826-1894,2128-2146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "3019e2a8c424370055d8564aa7797d5dc54b9484",
+  "prompts": {},
+  "sessions": {
+    "s_7183b696e12cee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0083641a-4f18-4b01-bfcd-7d2e774f80b3",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    },
+    "s_86a8552b776c18": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_ff73698ebffegGDYPGdgTaIj2O",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
