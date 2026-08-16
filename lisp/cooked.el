@@ -1146,7 +1146,18 @@ character whose own width was already mismeasured, not an adjacent one."
     (goto-char start)
     (when (string-match-p (rx (not ascii)) (buffer-substring-no-properties start (line-end-position)))
       (let (trimmed)
-        (while (progn (goto-char start) (vertical-motion 1) (< (point) (line-end-position)))
+        ;; `line-end-position' has to be captured before `vertical-motion' moves
+        ;; point, not after: taken after, it measures the end of whatever line
+        ;; `vertical-motion' landed on rather than the row's own end, so a row that
+        ;; does not wrap at all still reads as short of it (that next buffer line's
+        ;; end is almost always past a one-line hop) — a false positive on every
+        ;; non-ASCII row followed by a non-blank one, not just a genuinely
+        ;; mismeasured one. The loop then deletes real characters, and once the
+        ;; row is empty keeps going: `end-of-line' at START stops moving, so the
+        ;; delete starts eating the newline above START and then the row below.
+        (while (let ((eol (progn (goto-char start) (line-end-position))))
+                 (vertical-motion 1)
+                 (< (point) eol))
           (setq trimmed t)
           (goto-char start)
           (end-of-line)

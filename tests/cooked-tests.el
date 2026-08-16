@@ -1939,6 +1939,64 @@ impossible and this guard would only be redundant work."
       (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min)))
       (should (equal (buffer-string) text)))))
 
+;; The tests below use real, unmocked `vertical-motion' rather than
+;; `cooked-tests--with-mocked-wrap': that mock only ever moves point within the
+;; same buffer line (`(goto-char (+ (point) limit))'), so it can never land on
+;; a following buffer line the way a real non-wrapping row's `vertical-motion'
+;; call does in batch Emacs -- and landing there is exactly what the bug below
+;; needs to reproduce.
+
+(ert-deftest cooked-guard-row-width-leaves-a-non-wrapping-row-with-a-nonblank-neighbor-alone ()
+  "A row that does not actually wrap must be left alone even when the row below
+it is non-blank. `(line-end-position)' has to be read before `vertical-motion'
+moves point, not after: read after, on a row that does not wrap at all,
+`vertical-motion' lands at the start of the next buffer line, and that next
+line's own end -- almost always past a one-line hop -- was being mistaken for
+how far the trimmed row was allowed to extend. That false positive doesn't
+just fail to trim: it deletes real characters, one per iteration, until this
+row is gone (see the tests below for what happens next)."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (text "é\nNEXT\n"))
+      (insert text)
+      (cooked--guard-row-width (point-min))
+      (should (equal (buffer-string) text)))))
+
+(ert-deftest cooked-guard-row-width-does-not-crash-when-the-false-positive-hits-row-0 ()
+  "Reproduces the exact crash this bug caused live: once the falsely-flagged
+row is emptied out, `end-of-line' from START stops moving, so the next
+\"trim\" instead deletes the character *before* START. When START is
+`point-min' -- the ordinary case for screen row 0 -- there is no character
+before it, and Emacs refuses with `args-out-of-range', surfacing as
+\"cooked: redisplay failed: (args-out-of-range ... 0 1)\"."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (text "é\nNEXT\n"))
+      (insert text)
+      (cooked--guard-row-width (point-min))
+      (should (equal (buffer-string) text)))))
+
+(ert-deftest cooked-guard-row-width-does-not-eat-into-neighbouring-rows ()
+  "The same false positive away from row 0 does not crash -- `end-of-line'
+from START still has somewhere to go, the row above -- but before the fix it
+ran on regardless: once START's row was emptied, deleting \"the character
+before START\" ate the newline above it, merging START into the row above,
+and the same broken check then chewed through the entire row below too."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (text "PREVROW\né\nNEXTROW\nTAILROW\n"))
+      (insert text)
+      (goto-char (point-min))
+      (forward-line 1)
+      (cooked--guard-row-width (point))
+      (should (equal (buffer-string) text)))))
+
 (ert-deftest cooked-transcript-navigation-works-in-both-states ()
   "Jumping between commands sends nothing to the child, so a running program
 must not take the binding away."
