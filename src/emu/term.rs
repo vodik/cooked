@@ -596,6 +596,9 @@ impl State {
             1007 => set(self.alt_scroll),
             2026 => set(self.sync_until.is_some_and(|t| std::time::Instant::now() < t)),
             47 | 1047 | 1049 => set(self.on_alt),
+            // Implemented, but stateless — it saves and restores rather than turning
+            // anything on — so "set" is the only honest answer that is not "unknown".
+            1048 => 1,
             2004 => set(self.bracketed_paste),
             // Dropped from our terminfo, and this is where a child finds that out
             // without having to guess: 12 is cursor blink (`blink-cursor-mode' is the
@@ -785,6 +788,7 @@ impl Perform for State {
         let c = if self.dec_graphics { dec_graphic(c) } else { c };
         let pen = self.pen;
         let underline = self.underline;
+        let width = c.width().unwrap_or(0);
         let screen = self.screen_mut();
         let evicted = screen.write(c, pen);
         // After the write, so it lands on the cell the write actually chose — which a
@@ -792,11 +796,13 @@ impl Perform for State {
         // when a cell that had one is overwritten by a cell that does not: `Row::set`
         // deliberately knows nothing about underlines, because a branch there is a branch
         // per character written.
-        if underline != Color::Default || screen.underlined() {
-            screen.mark_underline(underline);
+        // Zero-width characters fold onto the cell to their left and never own one, so
+        // they must not move an underline colour either.
+        if width > 0 && (underline != Color::Default || screen.underlined()) {
+            screen.mark_underline(underline, width);
         }
         self.evicted(evicted);
-        if c.width().unwrap_or(0) > 0 {
+        if width > 0 {
             self.last_print = Some(c);
         }
     }
@@ -1186,6 +1192,26 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_character_keeps_its_underline_colour() {
+        // The colour has to land on the lead cell. `Row::runs` skips continuation cells,
+        // so a colour recorded one column to the right disappears entirely.
+        let t = term(2, 8, b"\x1b[4;58;5;196m\xe5\xb9\xb8");
+        let runs = t.screen().row(0).unwrap().runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert_eq!(runs[0].underline, Color::Indexed(196));
+    }
+
+    #[test]
+    fn a_combining_mark_does_not_move_an_underline_colour() {
+        let t = term(2, 8, b"\x1b[4;58;5;196me\xcc\x81x");
+        let runs = t.screen().row(0).unwrap().runs();
+        assert!(
+            runs.iter().all(|r| r.underline == Color::Indexed(196)),
+            "{runs:?}"
+        );
+    }
+
+    #[test]
     fn an_underline_colour_splits_a_run() {
         // Two cells differing only in underline colour are not the same style.
         let t = term(2, 8, b"\x1b[4ma\x1b[58;5;196mb");
@@ -1250,6 +1276,8 @@ mod tests {
             (&b""[..], 1034, 4),
             // Never heard of it.
             (&b""[..], 9999, 0),
+            // Implemented, and must not answer "never heard of it".
+            (&b""[..], 1048, 1),
         ] {
             let mut t = term(4, 8, setup);
             t.feed(format!("\x1b[?{mode}$p").as_bytes());

@@ -287,14 +287,17 @@ impl Screen {
         self.underlined
     }
 
-    pub fn mark_underline(&mut self, color: Color) {
+    pub fn mark_underline(&mut self, color: Color, width: usize) {
         self.underlined |= color != Color::Default;
-        let (row, col) = (self.cursor.row, self.cursor.col);
-        // The cursor has already advanced past the character it wrote, except where it
-        // pinned at the last column.
+        let (row, cols) = (self.cursor.row, self.cols);
+        // The lead column of the character just written. The cursor has advanced past it
+        // by its full width — or pinned at the last column, where the character ends
+        // rather than begins. Taking the width into account is what keeps a colour off
+        // the continuation cell of a wide character, which `Row::runs` skips, and where
+        // it would therefore vanish.
         let col = match self.cursor.wrap_pending {
-            true => col,
-            false => col.saturating_sub(1),
+            true => cols.saturating_sub(width),
+            false => self.cursor.col.saturating_sub(width),
         };
         if let Some(r) = self.touch(row) {
             r.set_underline(col, color);
