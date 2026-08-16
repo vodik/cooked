@@ -579,5 +579,9 @@ fn event_to_lisp(env: &Env, event: &Event, update: &Update, rows: &[RowSpan]) ->
         ]),
         Event::Reply(bytes) => tagged("reply", env.into_lisp(bytes.as_slice())?),
         Event::EraseScrollback => env.list(&[env.intern("erase-scrollback")?]),
+        // (title-stack PUSH-P)
+        Event::TitleStack(push) => {
+            env.list(&[env.intern("title-stack")?, env.into_lisp(*push)?])
+        }
     }
 }

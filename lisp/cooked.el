@@ -133,6 +133,8 @@ the same table on the Rust side.")
 One of `legacy', `modify-other' or `kitty', as negotiated by the child itself —
 see `cooked--literal-codes' for why this cannot simply be assumed.")
 (defvar-local cooked--title nil "Title the child last set, via OSC 0 or 2.")
+(defvar-local cooked--title-stack nil
+  "Titles saved by XTWINOPS 22, newest first.  See `cooked--handle-title-stack'.")
 (defvar-local cooked--hyperlink nil "Current OSC 8 hyperlink target, if any.")
 (defvar-local cooked--annotation nil "Prompt annotation from OSC 51;A.")
 (defvar-local cooked--mouse nil "Whether the child asked for mouse reports.")
@@ -1544,6 +1546,7 @@ two chances to disagree."
     (`(bell) (ding))
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
     (`(reply . ,bytes) (cooked--send cooked--session bytes))
+    (`(title-stack ,push) (cooked--handle-title-stack push))
     (`(erase-scrollback)
      (when cooked-honor-erase-scrollback
        (cooked--discard-scrollback (marker-position cooked--screen-start))))
@@ -1603,9 +1606,33 @@ which of them they were called for.")
 
 (defun cooked--osc-title (parts)
   "Show the child's title, from OSC 0 or 2."
-  (setq cooked--title (string-join parts ";"))
+  (cooked--set-title (string-join parts ";")))
+
+(defun cooked--set-title (title)
+  "Set the child's title to TITLE and show it."
+  (setq cooked--title title)
   (cooked--rename-to-title)
   (force-mode-line-update))
+
+(defconst cooked--title-stack-limit 8
+  "How many titles `cooked--title-stack' will hold.
+
+A child can push without ever popping — `smcup' pushes on every entry to the
+alternate screen — so the stack is bounded and drops from the bottom.  Eight is
+past any real nesting of full-screen programs.")
+
+(defun cooked--handle-title-stack (push)
+  "Push the current title when PUSH, otherwise pop and restore one.
+
+XTWINOPS 22 and 23, which `smcup' and `rmcup' send around the alternate screen:
+without them a full-screen program that sets a title leaves it behind on exit."
+  (if push
+      (setq cooked--title-stack
+            (last (cons cooked--title cooked--title-stack)
+                  cooked--title-stack-limit))
+    ;; An underflowing pop is the child's bug, not ours; leave the title alone.
+    (when cooked--title-stack
+      (cooked--set-title (pop cooked--title-stack)))))
 
 (defun cooked--osc-cwd (parts)
   "Track the child's directory, from OSC 7."

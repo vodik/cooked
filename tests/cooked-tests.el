@@ -1152,6 +1152,28 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
     (should (cooked-tests--settle (lambda () (equal cooked--title "my-title"))))
     (should (string-match-p "my-title" (cooked--mode-line)))))
 
+(ert-deftest cooked-title-stack-restores-on-pop ()
+  "XTWINOPS 22/23, which `smcup'/`rmcup' send around the alternate screen."
+  (cooked-tests--with-session
+   '("/bin/sh" "-c"
+     "printf '\\033]2;shell\\007\\033[22;0;0t\\033]2;vim\\007'; sleep 5")
+   (should (cooked-tests--settle (lambda () (equal cooked--title "vim"))))
+   (cooked--handle-title-stack nil)
+   (should (equal cooked--title "shell"))))
+
+(ert-deftest cooked-title-stack-is-bounded-and-survives-underflow ()
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--title-stack nil cooked--title "last")
+    ;; A child that pushes and never pops must not grow the list without bound.
+    (dotimes (i 20)
+      (setq-local cooked--title (number-to-string i))
+      (cooked--handle-title-stack t))
+    (should (= (length cooked--title-stack) cooked--title-stack-limit))
+    ;; Popping past the bottom leaves the title alone rather than clearing it.
+    (dotimes (_ 20) (cooked--handle-title-stack nil))
+    (should cooked--title)))
+
 (ert-deftest cooked-osc-handler-errors-do-not-break-redisplay ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;boom\\007'; printf 'after\\n'; sleep 5")
     (let ((cooked-osc-handlers '((2 . (lambda (_parts) (error "deliberate"))))))

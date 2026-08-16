@@ -78,6 +78,9 @@ pub enum Event {
     /// call, not the child's, since anything that can write to the terminal can send
     /// this sequence. This event is the whole of the response; Emacs acts on it or not.
     EraseScrollback,
+    /// XTWINOPS 22/23: push or pop the window title. `smcup`/`rmcup` end in these, so a
+    /// full-screen program that sets a title expects it restored when it leaves.
+    TitleStack(bool),
 }
 
 /// How the child wants keys that have no classical encoding — modified Return, Tab,
@@ -790,6 +793,21 @@ impl Perform for State {
                 self.events
                     .push(Event::Reply(format!("\x1b[?{flags}u").into_bytes()));
             }
+            // XTWINOPS, read-only. The reporting and geometry operations are refused
+            // rather than merely unimplemented: `21t` answers with the window title *on
+            // the child's input stream*, which turns a title the child set itself into
+            // typed input at the next prompt, and `3t`/`4t`/`8t` move and resize the
+            // window, which is Emacs' business and not the child's.
+            (None, 't') => match arg(params, 0, 0) {
+                18 => {
+                    let (h, w) = (self.screen().height(), self.screen().width());
+                    self.events
+                        .push(Event::Reply(format!("\x1b[8;{h};{w}t").into_bytes()));
+                }
+                22 => self.events.push(Event::TitleStack(true)),
+                23 => self.events.push(Event::TitleStack(false)),
+                _ => {}
+            },
             // REP. Bounded by the screen: a child should not turn three bytes into an
             // arbitrarily long print loop.
             (None, 'b') => {
@@ -948,6 +966,38 @@ mod tests {
         assert_eq!(
             t.screen().row(0).unwrap().runs()[0].style.fg,
             Color::Indexed(200)
+        );
+    }
+
+    #[test]
+    fn xtwinops_reports_the_text_area_in_cells() {
+        let mut t = term(24, 80, b"\x1b[18t");
+        assert!(
+            t.drain()
+                .events
+                .contains(&Event::Reply(b"\x1b[8;24;80t".to_vec()))
+        );
+    }
+
+    #[test]
+    fn xtwinops_pushes_and_pops_the_title() {
+        let mut t = term(2, 10, b"\x1b[22;0;0t\x1b[23;0;0t");
+        let events = t.drain().events;
+        assert!(events.contains(&Event::TitleStack(true)));
+        assert!(events.contains(&Event::TitleStack(false)));
+    }
+
+    #[test]
+    fn xtwinops_refuses_to_report_the_title_or_move_the_window() {
+        // `21t` would put the child's own title back on its input stream. `3t`/`4t`/`8t`
+        // are Emacs' geometry. All four answer with silence, not with a reply.
+        let mut t = term(2, 10, b"\x1b[21t\x1b[3;0;0t\x1b[4;0;0t\x1b[8;9;9t");
+        assert!(
+            t.drain()
+                .events
+                .iter()
+                .all(|e| !matches!(e, Event::Reply(_))),
+            "no window operation may answer the child"
         );
     }
 
