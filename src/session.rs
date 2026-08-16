@@ -54,8 +54,9 @@ struct Shared {
     /// redraws than any of them are actually meant to be seen at and shows up as flicker.
     /// No matching ceiling is needed the way `eat-maximum-latency` provides one: `Term`
     /// always holds the latest state regardless of whether a wakeup was sent for it, and
-    /// `flush_notify` is retried every reader-thread tick (bounded by `POLL_TIMEOUT_MS`
-    /// even when no new output arrives), so a throttled notification is never stranded.
+    /// `flush_pending` is retried every reader-thread tick — see [`poll_timeout`], which
+    /// shortens that tick to this interval's own remaining window rather than leaving a
+    /// throttled notification to wait out the coarser `POLL_TIMEOUT_MS`.
     min_redisplay_interval: std::time::Duration,
     /// Pending items — scrolled-off lines plus undelivered events — at which the reader
     /// stops pulling from the pty and lets the child block. Raising it does not make
@@ -311,6 +312,33 @@ impl Drop for Session {
     }
 }
 
+/// How long the reader thread may block in `poll` before its next tick.
+///
+/// Ordinarily this is [`POLL_TIMEOUT_MS`] — plenty coarse, since real pty data wakes
+/// `poll` immediately regardless of the timeout, and nothing else queued behind it
+/// (`quit`, a stashed resize, a termios change) needs finer granularity. But when
+/// `flush_pending` has already deferred a notification to `min_redisplay_interval`'s
+/// throttle and the child then falls quiet, nothing else will wake the loop before that
+/// window elapses — so waiting out the rest of `POLL_TIMEOUT_MS` instead adds up to a
+/// hundred extra milliseconds onto the tail of every burst of output. Invisible on a
+/// spinner, which is what the throttle exists for; felt as a stutter on the last frame of
+/// output a mouse wheel just asked a full-screen program to draw. Shortening the poll to
+/// exactly that remaining window, only while it applies, retires the notification at
+/// `min_redisplay_interval`'s own cadence instead.
+fn poll_timeout(shared: &Shared) -> PollTimeout {
+    if shared.notified.load(Ordering::SeqCst) || !shared.dirty.load(Ordering::SeqCst) {
+        return PollTimeout::from(POLL_TIMEOUT_MS);
+    }
+    let last = *shared
+        .last_notified
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let remaining = last
+        .map(|t| shared.min_redisplay_interval.saturating_sub(t.elapsed()))
+        .unwrap_or(std::time::Duration::ZERO);
+    PollTimeout::try_from(remaining).unwrap_or(PollTimeout::from(POLL_TIMEOUT_MS))
+}
+
 fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
     block_sigpipe();
     let mut buf = vec![0u8; READ_CHUNK];
@@ -320,7 +348,7 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
             PollFd::new(shared.pty.as_fd(), PollFlags::POLLIN),
             PollFd::new(shared.quit.read.as_fd(), PollFlags::POLLIN),
         ];
-        match poll(&mut fds, PollTimeout::from(POLL_TIMEOUT_MS)) {
+        match poll(&mut fds, poll_timeout(shared)) {
             Err(nix::errno::Errno::EINTR) => continue,
             Err(_) => break,
             Ok(_) => {}
