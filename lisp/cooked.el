@@ -440,21 +440,35 @@ feature looking switched off rather than broken."
               (cooked--box-bitmap-fill-rect grid width height cx (1+ cy) width (+ cy 2))))))
 
 (defun cooked--box-draw-arc (grid width height cx cy thickness down-p right-p)
-  "A quarter-circle connecting the two present edges of a rounded corner.
+  "A quarter-ellipse connecting the two present edges of a rounded corner.
 
-The circle's center sits at whichever cell corner combines the two connected
-directions (e.g. down+right puts it at the bottom-right corner) — the only
-points within the cell rectangle that are within its radius then form exactly
-the arc between the two tangent edge midpoints, with no extra clipping needed."
+The center sits at whichever cell corner combines the two connected directions
+(e.g. down+right puts it at the bottom-right corner), and the two radii are the
+distances from that corner to the strokes this arc has to meet: horizontally to
+the vertical stroke's column CX, vertically to the horizontal stroke's row CY.
+
+Deliberately not a circle.  A single radius can satisfy only one axis unless the
+cell is square, and terminal cells are roughly half as wide as they are tall — a
+circle of radius (min CX CY) leaves the arc meeting the horizontal edge far from
+CY, so a rounded corner fails to line up with the ─ beside it.
+
+Thickness is applied by dividing the ellipse's implicit function by the gradient
+magnitude, which approximates true distance to the curve; the naive |d - 1| on
+the normalized radius would vary the stroke width around the sweep."
   (let* ((ccx (if right-p width 0))
          (ccy (if down-p height 0))
-         (r (float (min cx cy)))
+         (rx (float (max 1 (if right-p (- width cx) cx))))
+         (ry (float (max 1 (if down-p (- height cy) cy))))
          (half (/ thickness 2.0)))
     (dotimes (y height)
       (dotimes (x width)
-        (let* ((dx (- x ccx)) (dy (- y ccy))
-               (dist (sqrt (+ (* dx dx) (* dy dy) 0.0))))
-          (when (<= (abs (- dist r)) half)
+        (let* ((dx (/ (- x ccx) rx))
+               (dy (/ (- y ccy) ry))
+               (f (- (+ (* dx dx) (* dy dy)) 1.0))
+               (gx (/ (* 2.0 dx) rx))
+               (gy (/ (* 2.0 dy) ry))
+               (g (sqrt (+ (* gx gx) (* gy gy)))))
+          (when (and (> g 0.0) (<= (/ (abs f) g) half))
             (aset (aref grid y) x t)))))))
 
 (defun cooked--box-draw-diagonal (grid width height thickness forward backward)
@@ -616,6 +630,11 @@ the strokes blur into something no better than the font glyphs this replaces."
                     :data-width width :data-height height
                     :stride (* 8 (ceiling width 8)) ; bits per row, byte-aligned
                     :foreground fg* :background bg* :scale 1
+                    ;; `image-transform-smoothing' defaults on, which interpolates
+                    ;; edge pixels.  These bitmaps are pixel art meant to butt up
+                    ;; against their neighbours, and a smoothed edge column reads as
+                    ;; a faint seam between adjacent glyphs rather than a join.
+                    :transform-smoothing nil
                     :ascent (cooked--box-glyph-ascent window height)))))
 
 (defun cooked--overlay-box-glyphs (start glyphs fg bg attrs)
