@@ -1,0 +1,21 @@
+lisp/cooked.el
+  s_978e65ce92dab8::t_5b0335c23e1983 1495-1514
+tests/cooked-tests.el
+  s_978e65ce92dab8::t_d1c0fa5f15106d 1050-1069
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "8c8339eaeba0f47d06f0baa6956f6bb9268f89a5",
+  "prompts": {},
+  "sessions": {
+    "s_978e65ce92dab8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e893f541-3da6-410b-8eb2-019a13c31d10",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
