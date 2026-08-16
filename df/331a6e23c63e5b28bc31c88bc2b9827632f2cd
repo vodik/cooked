@@ -1,0 +1,19 @@
+src/session.rs
+  s_7183b696e12cee::t_b91bb3b80e2f85 57-59,315-341,351
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "df331a6e23c63e5b28bc31c88bc2b9827632f2cd",
+  "prompts": {},
+  "sessions": {
+    "s_7183b696e12cee": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0083641a-4f18-4b01-bfcd-7d2e774f80b3",
+        "model": "unknown"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
