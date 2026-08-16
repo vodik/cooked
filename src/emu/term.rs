@@ -271,6 +271,10 @@ impl Term {
         self.state.bracketed_paste
     }
 
+    pub fn focus_events(&self) -> bool {
+        self.state.focus_events
+    }
+
     pub fn app_cursor(&self) -> bool {
         self.state.app_cursor
     }
@@ -309,6 +313,9 @@ struct State {
     cursor_visible: bool,
     cursor_shape: CursorShape,
     bracketed_paste: bool,
+    /// DEC mode 1004: the child wants `CSI I`/`CSI O` when the window gains or loses
+    /// focus. Read at the moment focus changes, so it is state rather than a level.
+    focus_events: bool,
     mouse: Mouse,
     origin_mode: bool,
     dec_graphics: bool,
@@ -348,6 +355,7 @@ impl State {
             cursor_visible: true,
             cursor_shape: CursorShape::default(),
             bracketed_paste: false,
+            focus_events: false,
             mouse: Mouse::default(),
             origin_mode: false,
             dec_graphics: false,
@@ -524,6 +532,7 @@ impl State {
             }
             // No event: nothing reacts to this. It is read at the one moment it matters,
             // by `Term::bracketed_paste` as a multi-line submission is being framed.
+            1004 => self.focus_events = on,
             2004 => self.bracketed_paste = on,
             _ => return,
         }
@@ -561,6 +570,7 @@ impl State {
         self.cursor_visible = true;
         self.cursor_shape = CursorShape::default();
         self.bracketed_paste = false;
+        self.focus_events = false;
         self.newline_mode = false;
         self.last_print = None;
         self.modify_other_keys = 0;
@@ -1132,6 +1142,22 @@ mod tests {
             t.screen().row(0).unwrap().runs()[0].underline,
             Color::Default
         );
+    }
+
+    #[test]
+    fn focus_reporting_is_off_until_asked_for() {
+        let mut t = term(2, 8, b"");
+        assert!(!t.focus_events());
+        t.feed(b"\x1b[?1004h");
+        assert!(t.focus_events());
+        t.feed(b"\x1b[?1004l");
+        assert!(!t.focus_events());
+    }
+
+    #[test]
+    fn a_soft_reset_stops_focus_reporting() {
+        let mut t = term(2, 8, b"\x1b[?1004h\x1b[!p");
+        assert!(!t.focus_events());
     }
 
     #[test]

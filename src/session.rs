@@ -301,6 +301,10 @@ impl Session {
     pub fn bracketed_paste(&self) -> bool {
         self.shared.term.lock().is_ok_and(|t| t.bracketed_paste())
     }
+
+    pub fn focus_events(&self) -> bool {
+        self.shared.term.lock().is_ok_and(|t| t.focus_events())
+    }
 }
 
 impl Drop for Session {

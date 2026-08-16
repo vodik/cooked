@@ -25,6 +25,7 @@
 (declare-function cooked--signal "cooked-core")
 (declare-function cooked--prompt-text "cooked-core")
 (declare-function cooked--bracketed-paste-p "cooked-core")
+(declare-function cooked--focus-events-p "cooked-core")
 (declare-function cooked--live-p "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
@@ -938,9 +939,54 @@ which it usually is not.  Walk the frame's windows instead."
 ;; Added when the first session starts rather than at load time, so requiring the
 ;; package changes nothing about Emacs until you actually use it.  `add-hook' dedupes,
 ;; so calling this once per buffer is free.
+(defun cooked--window-selection-changed (_frame)
+  "Report focus when this buffer's window gains or loses selection."
+  (cooked--report-focus))
+
 (defun cooked--install-global-hooks ()
   "Install the hooks that cannot be buffer-local."
-  (add-hook 'window-size-change-functions #'cooked--frame-size-changed))
+  (add-hook 'window-size-change-functions #'cooked--frame-size-changed)
+  ;; Frame focus is not a per-buffer event, so this one walks live sessions.  Both
+  ;; hooks are idempotent: `add-hook' will not add the same function twice.
+  (add-hook 'after-focus-change-function #'cooked--frame-focus-changed))
+
+;;;; Focus reporting — DEC mode 1004
+;;
+;; A child that asked for it is told when the window it is displayed in gains or
+;; loses the keyboard: nvim's FocusGained/FocusLost autocmds, tmux's redraw, and
+;; shells that re-check for externally modified files all hang off this.
+;;
+;; "Focused" here means this buffer's window is the selected one in a focused
+;; frame.  That is stricter than frame focus alone and is the honest answer: a
+;; cooked buffer in a background window is not receiving your keystrokes.
+
+(defvar-local cooked--focused t
+  "Whether the child last believed it had the keyboard.
+
+Starts t so a session that begins focused sends nothing — the child's own
+assumption on startup is that it has focus, and telling it so again is noise.")
+
+(defun cooked--focused-p ()
+  "Whether this buffer's window is selected in a frame that has focus."
+  (and (eq (current-buffer) (window-buffer (selected-window)))
+       (frame-focus-state (window-frame (selected-window)))
+       t))
+
+(defun cooked--report-focus ()
+  "Tell the child about a focus change, when it asked to be told."
+  (let ((focused (cooked--focused-p)))
+    (unless (eq focused cooked--focused)
+      (setq cooked--focused focused)
+      (when (and cooked--session (cooked--focus-events-p cooked--session))
+        (cooked--send cooked--session (if focused "\e[I" "\e[O"))))))
+
+(defun cooked--frame-focus-changed (&rest _)
+  "Report focus for every live session, from `after-focus-change-function'."
+  (dolist (buffer (buffer-list))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (and (derived-mode-p 'cooked-mode) cooked--session)
+          (cooked--report-focus))))))
 
 (defcustom cooked-kill-buffer-on-exit nil
   "Whether the session buffer is killed when the child exits.
@@ -1036,6 +1082,7 @@ to the child verbatim."
   (add-hook 'post-command-hook #'cooked--track-wandering nil t)
   (add-hook 'completion-at-point-functions #'cooked-completion-at-point nil t)
   (add-hook 'window-configuration-change-hook #'cooked--sync-size nil t)
+  (add-hook 'window-selection-change-functions #'cooked--window-selection-changed nil t)
   (add-hook 'kill-buffer-hook #'cooked--cleanup nil t))
 
 ;; The state maps are installed with `use-local-map', which replaces the local map

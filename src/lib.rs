@@ -93,6 +93,12 @@ begins a line again, and saying so is what keeps the two ends agreeing.",
             "Whether SESSION requested bracketed paste.",
             bracketed,
         ),
+        env.defun(
+            "cooked--focus-events-p",
+            1..=1,
+            "Whether SESSION asked to be told when the window gains or loses focus.",
+            focus_events,
+        ),
         env.defun("cooked--kill", 1..=1, DOC_KILL, kill),
     ];
 
@@ -305,6 +311,10 @@ fn live_p(env: Env, args: &[Value]) -> Result<Value> {
 
 fn bracketed(env: Env, args: &[Value]) -> Result<Value> {
     env.into_lisp(handle(&env, args[0])?.bracketed_paste())
+}
+
+fn focus_events(env: Env, args: &[Value]) -> Result<Value> {
+    env.into_lisp(handle(&env, args[0])?.focus_events())
 }
 
 fn kill(env: Env, args: &[Value]) -> Result<Value> {

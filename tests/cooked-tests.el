@@ -1152,6 +1152,32 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
     (should (cooked-tests--settle (lambda () (equal cooked--title "my-title"))))
     (should (string-match-p "my-title" (cooked--mode-line)))))
 
+(ert-deftest cooked-focus-is-not-reported-until-the-child-asks ()
+  (cooked-tests--with-session '("/bin/cat")
+    (should-not (cooked--focus-events-p cooked--session))
+    ;; No mode set, so a focus change must put nothing on the child's input.
+    (setq-local cooked--focused nil)
+    (cooked--report-focus)
+    (should (cooked-tests--settle (lambda () (equal (cooked-tests--text) ""))))))
+
+(ert-deftest cooked-focus-reports-once-per-change ()
+  (cooked-tests--with-session
+   '("/bin/sh" "-c" "printf '\\033[?1004h'; exec cat")
+   (should (cooked-tests--settle
+            (lambda () (cooked--focus-events-p cooked--session))))
+   (let ((sent nil))
+     (cl-letf (((symbol-function 'cooked--send)
+                (lambda (_s text) (push text sent))))
+       ;; Losing focus reports once; asking again while still unfocused is silent.
+       (setq-local cooked--focused t)
+       (cl-letf (((symbol-function 'cooked--focused-p) (lambda () nil)))
+         (cooked--report-focus)
+         (cooked--report-focus))
+       (should (equal sent (list "\e[O")))
+       (cl-letf (((symbol-function 'cooked--focused-p) (lambda () t)))
+         (cooked--report-focus))
+       (should (equal sent (list "\e[I" "\e[O")))))))
+
 (ert-deftest cooked-cursor-shape-follows-decscusr ()
   "vim and fish vi-mode signal their mode with `CSI Ps SP q'."
   (cooked-tests--with-session
