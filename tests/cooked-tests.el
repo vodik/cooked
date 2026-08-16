@@ -1152,6 +1152,33 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
     (should (cooked-tests--settle (lambda () (equal cooked--title "my-title"))))
     (should (string-match-p "my-title" (cooked--mode-line)))))
 
+(ert-deftest cooked-alternate-scroll-sends-cursor-keys ()
+  "A pager that never asked for the mouse still gets the wheel."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--app-cursor nil)
+    (let ((cooked-alternate-scroll-lines 3))
+      (should (equal (cooked--alt-scroll-keys 64) "\e[A\e[A\e[A"))
+      (should (equal (cooked--alt-scroll-keys 65) "\e[B\e[B\e[B")))
+    ;; Application cursor mode changes the spelling, as it does for the arrow keys.
+    (setq-local cooked--app-cursor t)
+    (let ((cooked-alternate-scroll-lines 1))
+      (should (equal (cooked--alt-scroll-keys 64) "\eOA")))
+    ;; Horizontal notches have no cursor-key spelling and send nothing.
+    (should (equal (cooked--alt-scroll-keys 66) ""))))
+
+(ert-deftest cooked-alternate-scroll-grabs-the-wheel-without-mouse-mode ()
+  "The keymap gate must widen, or the whole feature is unreachable."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--mouse nil cooked--semantic nil cooked--mode 'raw)
+    (cl-letf (((symbol-function 'cooked--alt-scroll-active-p) (lambda () t)))
+      (cooked--update-mouse-grab)
+      (should cooked--mouse-grab))
+    (cl-letf (((symbol-function 'cooked--alt-scroll-active-p) (lambda () nil)))
+      (cooked--update-mouse-grab)
+      (should-not cooked--mouse-grab))))
+
 (ert-deftest cooked-focus-is-not-reported-until-the-child-asks ()
   (cooked-tests--with-session '("/bin/cat")
     (should-not (cooked--focus-events-p cooked--session))

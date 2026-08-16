@@ -26,6 +26,7 @@
 (declare-function cooked--prompt-text "cooked-core")
 (declare-function cooked--bracketed-paste-p "cooked-core")
 (declare-function cooked--focus-events-p "cooked-core")
+(declare-function cooked--alt-scroll-p "cooked-core")
 (declare-function cooked--live-p "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
@@ -378,9 +379,26 @@ Gates `cooked--mouse-map'; nil everywhere else, so the entry in
 (defvar cooked--mouse-map-alist `((cooked--mouse-grab . ,cooked--mouse-map))
   "The `emulation-mode-map-alists' entry activating `cooked--mouse-map'.")
 
+(defcustom cooked-alternate-scroll-lines 3
+  "Cursor keys sent per wheel notch under alternate scroll (DEC mode 1007).
+Three is xterm's figure."
+  :type 'natnum
+  :group 'cooked)
+
+(defun cooked--alt-scroll-active-p ()
+  "Whether a wheel notch should be sent to the child as cursor keys.
+
+DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
+`git log' — programs that never ask for the mouse."
+  (and cooked--session (cooked--alt-scroll-p cooked--session)))
+
 (defun cooked--update-mouse-grab ()
   "Recompute whether `cooked--mouse-map' should be in force."
-  (setq cooked--mouse-grab (and cooked--mouse (not (cooked--input-state-p)))))
+  ;; Alternate scroll has to be here as well as `cooked--mouse': it exists precisely
+  ;; for children that did *not* ask for the mouse, so gating the keymap on
+  ;; `cooked--mouse' alone would leave the whole feature unreachable.
+  (setq cooked--mouse-grab (and (or cooked--mouse (cooked--alt-scroll-active-p))
+                                (not (cooked--input-state-p)))))
 
 (defun cooked--mouse-cell (event)
   "Screen row and column of EVENT, or nil if it is outside the screen."
@@ -402,6 +420,16 @@ Gates `cooked--mouse-map'; nil everywhere else, so the entry in
       (format "\e[<%d;%d;%d%s" button (1+ col) (1+ row) (if pressed "M" "m"))
     (format "\e[M%c%c%c" (+ 32 (if pressed button 3)) (+ 33 col) (+ 33 row))))
 
+(defun cooked--alt-scroll-keys (button)
+  "Cursor keys standing in for a wheel notch of BUTTON.
+
+Only the vertical notches translate; a horizontal one has no cursor-key
+spelling a pager would understand, so it sends nothing."
+  (if-let* ((final (cond ((= button 64) "A") ((= button 65) "B"))))
+      (let ((key (if cooked--app-cursor (concat "\eO" final) (concat "\e[" final))))
+        (mapconcat #'identity (make-list cooked-alternate-scroll-lines key)))
+    ""))
+
 (defun cooked-mouse-event ()
   "Forward the mouse to the child, or fall back to Emacs' own behaviour."
   (interactive)
@@ -416,15 +444,21 @@ Gates `cooked--mouse-map'; nil everywhere else, so the entry in
          (cell (and cooked--mouse button
                     (or (cooked--mouse-cell event)
                         (and wheel (cooked--cursor-cell))))))
-    (if (null cell)
-        (cooked--mouse-fallback event)
+    (cond
+     ;; Checked before the mouse report: `cooked--alt-scroll-p' is already false
+     ;; when the child asked for the mouse, so the two can never both apply.
+     ((and wheel button (cooked--alt-scroll-active-p))
+      (cooked--send cooked--session (cooked--alt-scroll-keys button)))
+     ((null cell)
+      (cooked--mouse-fallback event))
       ;; A wheel notch is always a press.  Emacs reports it as a click, which the
       ;; usual `click' test would encode as a release — and a release of buttons
       ;; 64/65 is a report every application discards, so the scroll would vanish
       ;; on the way to a child that had asked for it.
+     (t
       (let ((pressed (or wheel (not (memq 'click (event-modifiers event))))))
         (cooked--send cooked--session
-                      (cooked--mouse-report button (car cell) (cdr cell) pressed))))))
+                      (cooked--mouse-report button (car cell) (cdr cell) pressed)))))))
 
 (defun cooked--mouse-fallback (event)
   "Run whatever EVENT would do without eterm's binding."

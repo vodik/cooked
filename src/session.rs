@@ -305,6 +305,10 @@ impl Session {
     pub fn focus_events(&self) -> bool {
         self.shared.term.lock().is_ok_and(|t| t.focus_events())
     }
+
+    pub fn alt_scroll(&self) -> bool {
+        self.shared.term.lock().is_ok_and(|t| t.alt_scroll())
+    }
 }
 
 impl Drop for Session {

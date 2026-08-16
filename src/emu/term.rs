@@ -275,6 +275,13 @@ impl Term {
         self.state.focus_events
     }
 
+    /// Whether a wheel notch should become cursor keys: the child asked for alternate
+    /// scroll, the alternate screen is up, and it did not ask for the mouse itself —
+    /// a program that wants mouse reports gets mouse reports, as in xterm.
+    pub fn alt_scroll(&self) -> bool {
+        self.state.alt_scroll && self.state.on_alt && !self.state.mouse.enabled()
+    }
+
     pub fn app_cursor(&self) -> bool {
         self.state.app_cursor
     }
@@ -316,6 +323,9 @@ struct State {
     /// DEC mode 1004: the child wants `CSI I`/`CSI O` when the window gains or loses
     /// focus. Read at the moment focus changes, so it is state rather than a level.
     focus_events: bool,
+    /// DEC mode 1007: on the alternate screen, a wheel notch becomes cursor keys. This
+    /// is what makes the wheel scroll in `less`, `man` and `git log`.
+    alt_scroll: bool,
     mouse: Mouse,
     origin_mode: bool,
     dec_graphics: bool,
@@ -356,6 +366,7 @@ impl State {
             cursor_shape: CursorShape::default(),
             bracketed_paste: false,
             focus_events: false,
+            alt_scroll: false,
             mouse: Mouse::default(),
             origin_mode: false,
             dec_graphics: false,
@@ -533,6 +544,7 @@ impl State {
             // No event: nothing reacts to this. It is read at the one moment it matters,
             // by `Term::bracketed_paste` as a multi-line submission is being framed.
             1004 => self.focus_events = on,
+            1007 => self.alt_scroll = on,
             2004 => self.bracketed_paste = on,
             _ => return,
         }
@@ -571,6 +583,7 @@ impl State {
         self.cursor_shape = CursorShape::default();
         self.bracketed_paste = false;
         self.focus_events = false;
+        self.alt_scroll = false;
         self.newline_mode = false;
         self.last_print = None;
         self.modify_other_keys = 0;
@@ -1142,6 +1155,23 @@ mod tests {
             t.screen().row(0).unwrap().runs()[0].underline,
             Color::Default
         );
+    }
+
+    #[test]
+    fn alternate_scroll_needs_the_alt_screen() {
+        let mut t = term(2, 8, b"\x1b[?1007h");
+        assert!(!t.alt_scroll(), "not while the primary screen is up");
+        t.feed(b"\x1b[?1049h");
+        assert!(t.alt_scroll());
+    }
+
+    #[test]
+    fn mouse_reporting_outranks_alternate_scroll() {
+        // xterm's precedence: a program that asked for the wheel receives the wheel.
+        let mut t = term(2, 8, b"\x1b[?1007h\x1b[?1049h\x1b[?1000h");
+        assert!(!t.alt_scroll());
+        t.feed(b"\x1b[?1000l");
+        assert!(t.alt_scroll());
     }
 
     #[test]

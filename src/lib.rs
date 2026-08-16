@@ -99,6 +99,12 @@ begins a line again, and saying so is what keeps the two ends agreeing.",
             "Whether SESSION asked to be told when the window gains or loses focus.",
             focus_events,
         ),
+        env.defun(
+            "cooked--alt-scroll-p",
+            1..=1,
+            "Whether a wheel notch on SESSION should be sent as cursor keys.",
+            alt_scroll,
+        ),
         env.defun("cooked--kill", 1..=1, DOC_KILL, kill),
     ];
 
@@ -315,6 +321,10 @@ fn bracketed(env: Env, args: &[Value]) -> Result<Value> {
 
 fn focus_events(env: Env, args: &[Value]) -> Result<Value> {
     env.into_lisp(handle(&env, args[0])?.focus_events())
+}
+
+fn alt_scroll(env: Env, args: &[Value]) -> Result<Value> {
+    env.into_lisp(handle(&env, args[0])?.alt_scroll())
 }
 
 fn kill(env: Env, args: &[Value]) -> Result<Value> {
