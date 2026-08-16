@@ -34,7 +34,7 @@
 (ert-deftest cooked-module-loads-and-defines-its-api ()
   (cooked--load-module)
   (should (featurep 'cooked-core))
-  (dolist (fn '(cooked--spawn cooked--drain cooked--send cooked--resize cooked--mode))
+  (dolist (fn '(cooked--spawn cooked--drain cooked--send cooked--resize cooked--redraw))
     (should (fboundp fn))))
 
 (ert-deftest cooked-child-output-reaches-the-buffer ()
@@ -182,6 +182,115 @@ a foreign handle would be reinterpreted as a session."
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
     (should-not (cooked--input-state-p))
     (should (eq (current-local-map) cooked-raw-map))))
+
+(defmacro cooked-tests--with-echoing-child (setup &rest body)
+  "Run BODY against a raw child that echoes what it receives, visibly.
+SETUP is shell run before it, for turning bracketed paste on.  `cat -v' spells
+control characters out, so what the child was actually sent can be read straight
+off the buffer."
+  (declare (indent 1))
+  `(cooked-tests--with-session
+       (list "/bin/sh" "-c" (concat ,setup "stty raw -echo; cat -v"))
+     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+     (should-not (cooked--input-state-p))
+     ,@body))
+
+(defmacro cooked-tests--with-kill (text &rest body)
+  "Run BODY with TEXT as the most recent kill and no clipboard in the way."
+  (declare (indent 1))
+  `(let* ((interprogram-paste-function nil)
+          (kill-ring (list ,text))
+          (kill-ring-yank-pointer kill-ring))
+     ,@body))
+
+(ert-deftest cooked-paste-brackets-when-the-child-asked-for-it ()
+  "A child that turned bracketed paste on is told where the paste begins and
+ends, so its line editor takes the whole thing as one insertion."
+  (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
+    (should (cooked--bracketed-paste-p cooked--session))
+    (cooked-tests--with-kill "hello" (cooked-paste))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-search "^[[200~hello^[[201~" (cooked-tests--text)))))))
+
+(ert-deftest cooked-paste-sends-plain-text-when-it-did-not ()
+  (cooked-tests--with-echoing-child ""
+    (should-not (cooked--bracketed-paste-p cooked--session))
+    (cooked-tests--with-kill "hello" (cooked-paste))
+    (should (cooked-tests--settle
+             (lambda () (string-search "hello" (cooked-tests--text)))))))
+
+(ert-deftest cooked-paste-cannot-be-made-to-close-its-own-bracket ()
+  "An end marker inside the pasted text would close the bracket early and hand
+what followed to the child as if it had been typed — how a copied line runs
+something nobody read.  It is dropped."
+  (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
+    (cooked-tests--with-kill "a\e[201~; rm -rf /" (cooked-paste))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-search "^[[200~a; rm -rf /^[[201~" (cooked-tests--text)))))
+    (should-not (string-search "^[[201~; rm" (cooked-tests--text)))))
+
+(ert-deftest cooked-paste-confirms-lines-the-child-would-run ()
+  "Without bracketed paste an embedded newline is Enter, so a refused
+confirmation must send nothing at all."
+  (cooked-tests--with-echoing-child ""
+    (cooked-tests--with-kill "one\ntwo"
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+        (cooked-paste))
+      (cooked-tests--settle (lambda () nil) 0.2)
+      (should-not (string-search "one" (cooked-tests--text)))
+
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (cooked-paste))
+      ;; Carriage return, which is what Enter transmits and what `cat -v' shows
+      ;; as ^M — the newline was translated rather than sent as a line feed.
+      (should (cooked-tests--settle
+               (lambda () (string-search "one^Mtwo" (cooked-tests--text))))))))
+
+(ert-deftest cooked-paste-at-a-prompt-yanks-into-the-pending-line ()
+  "At a prompt the line is being edited in the buffer, so a paste belongs there
+— where it can be corrected before it is submitted — not at the child."
+  ;; A prompt of its own, so a redisplay lands and the input markers exist; a
+  ;; child that prints nothing never gives Emacs a reason to place them.
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
+    (should (cooked-tests--settle
+             (lambda () (and (cooked--input-state-p) cooked--input-start))))
+    (cooked--refresh-keymap)
+    (cooked-tests--with-kill "echo hi" (cooked-paste))
+    (should (equal (cooked--pending-input) "echo hi"))))
+
+(ert-deftest cooked-evil-normal-state-pastes-into-the-child ()
+  "`p' is the key a vim user's hand reaches for, and inside a full-screen program
+it is the only route to the kill ring: the program's own `p' pastes its own
+registers and has never heard of Emacs'."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
+    ;; What `C-z' out of emacs state gets you, which is when `p' is reachable.
+    (evil-normal-state)
+    (should (eq (key-binding (kbd "p")) #'cooked-evil-paste))
+    (cooked-tests--with-kill "hello"
+      (call-interactively (key-binding (kbd "p"))))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-search "^[[200~hello^[[201~" (cooked-tests--text)))))))
+
+(ert-deftest cooked-evil-normal-state-paste-stays-evils-own-at-a-prompt ()
+  "The pending line is ordinary editable text, so `p' keeps evil's semantics
+there rather than shipping the kill off to a child that is not reading."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
+    (should (cooked-tests--settle
+             (lambda () (and (cooked--input-state-p) cooked--input-start))))
+    (cooked--refresh-keymap)
+    (evil-normal-state)
+    (cooked-tests--with-kill "echo hi"
+      (call-interactively #'cooked-evil-paste))
+    (should (equal (cooked--pending-input) "echo hi"))))
 
 (ert-deftest cooked-secret-mode-is-detected-and-prompts ()
   (cooked-tests--with-session
@@ -1489,6 +1598,92 @@ pick up newlines nobody typed, and a wider window re-wraps it for free."
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
 
+(ert-deftest cooked-a-line-straddling-the-scrollback-seam-keeps-its-head ()
+  "A wrapped row that scrolls off is the start of a line whose rest is still on
+the grid, so it is handed over without a newline and screen row 0 continues it.
+Rendering row 0 at the start of that buffer line instead of at `cooked--screen-start'
+deleted the head it was supposed to continue, losing a row per eviction."
+  (let ((buffer (generate-new-buffer "*cooked-seam*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (setq cooked--rows 4 cooked--cols 10 cooked--last-size '(4 . 10))
+          ;; 59 characters of one line through a 4x10 terminal: six rows, so the
+          ;; first two scroll off while the line they belong to is still on screen.
+          (cooked--start '("/bin/sh" "-c"
+                           "printf '%s' 00000000001111111111222222222233333333334444444444555555555; \
+                            sleep 5"))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "555555555" (cooked-tests--text)))))
+          (should (string-match-p
+                   "00000000001111111111"
+                   (string-replace "\n" "" (cooked-tests--text)))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
+(defmacro cooked-tests--with-straddling-line (&rest body)
+  "Run BODY with a 4x10 session holding one 59-character line.
+Six rows of one logical line through a four-row screen: two rows have gone to
+Emacs while the rest is still on the grid, so the line spans the seam between
+them — the arrangement every seam bug needs."
+  (declare (indent 0))
+  `(let ((buffer (generate-new-buffer "*cooked-seam*")))
+     (unwind-protect
+         (with-current-buffer buffer
+           (cooked-mode)
+           (setq cooked--rows 4 cooked--cols 10 cooked--last-size '(4 . 10))
+           (cooked--start '("/bin/sh" "-c"
+                            "printf '%s' 00000000001111111111222222222233333333334444444444555555555; \
+                             sleep 5"))
+           (cooked--refresh-keymap)
+           (should (cooked-tests--settle
+                    (lambda () (string-match-p "555555555" (cooked-tests--text)))))
+           ,@body)
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer))))
+
+(defun cooked-tests--resize (rows cols)
+  "Resize the session to ROWS by COLS and let the redraw land."
+  (setq cooked--last-size nil cooked--rows rows cooked--cols cols)
+  (cooked--resize cooked--session rows cols)
+  (cooked-tests--settle (lambda () nil) 0.3))
+
+(defun cooked-tests--unwrapped ()
+  "Buffer text with the line structure taken out."
+  (string-replace "\n" "" (cooked-tests--text)))
+
+(ert-deftest cooked-a-line-across-the-seam-rewraps-as-one-line ()
+  "The head is in the buffer and the tail on the grid, so a rewrap has to resume
+the line where the buffer wraps it rather than starting a fresh one.  Widening
+to 30 must leave all 59 characters on a single buffer line — one logical line,
+which Emacs then wraps into two visual rows — and narrowing must give the text
+back unchanged."
+  (let ((whole (concat "00000000001111111111222222222233333333334444444444"
+                       "555555555")))
+    (cooked-tests--with-straddling-line
+      (should (string-match-p whole (cooked-tests--unwrapped)))
+
+      (cooked-tests--resize 4 30)
+      (should (string-match-p whole (cooked-tests--unwrapped)))
+      (should (member whole (split-string (cooked-tests--text) "\n")))
+
+      (cooked-tests--resize 4 10)
+      (should (string-match-p whole (cooked-tests--unwrapped))))))
+
+(ert-deftest cooked-clearing-scrollback-across-the-seam-keeps-the-screen ()
+  "`cooked-clear-scrollback' can cut a line in half: its head is scrollback and
+its tail is the top of the screen.  The screen must survive intact, and the
+emulator must be told, so the next rewrap does not resume a line that is gone."
+  (cooked-tests--with-straddling-line
+    (cooked-clear-scrollback)
+    (should (string-prefix-p "2222222222" (cooked-tests--text)))
+
+    (cooked-tests--resize 4 30)
+    (should (string-match-p "222222222233333333334444444444555555555"
+                            (cooked-tests--unwrapped)))
+    (should-not (string-match-p "0000000000" (cooked-tests--text)))))
+
 (ert-deftest cooked-wrapped-lines-stay-split-when-asked ()
   (let ((buffer (generate-new-buffer "*cooked-wrap2*")))
     (unwind-protect
@@ -1544,6 +1739,112 @@ must not take the binding away."
             (should (= (point) newest))))
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
+
+(ert-deftest cooked-two-commands-in-one-drain-keep-separate-regions ()
+  "The case anchors exist for.
+
+A child fast enough to finish two commands between redisplays lands both sets of
+OSC 133 marks in a single drain.  Before the marks carried anchors, every one of
+them resolved to the same place — the cursor as of the end of that drain — so the
+two commands were recorded as regions ending in the same spot, and navigation
+could not tell them apart.  Driven by a bare printf rather than a real shell so
+that the whole burst is one write, and so lands in one drain deterministically."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\033]133;C\\007first\\n\\033]133;D;0\\007\
+\\033]133;C\\007second\\n\\033]133;D;0\\007'; sleep 5")
+    (should (cooked-tests--settle (lambda () (= (length cooked--commands) 2))))
+    (pcase-let ((`(,newer ,older) cooked--commands))
+      ;; Each command's output is where it actually was, not where the drain ended.
+      (should (string-match-p
+               "first"
+               (buffer-substring-no-properties (marker-position (plist-get older :start))
+                                               (marker-position (plist-get older :end)))))
+      (should (string-match-p
+               "second"
+               (buffer-substring-no-properties (marker-position (plist-get newer :start))
+                                               (marker-position (plist-get newer :end)))))
+      ;; And the regions are distinct rather than collapsed onto one another.
+      (should (< (marker-position (plist-get older :start))
+                 (marker-position (plist-get newer :start))))
+      (should (<= (marker-position (plist-get older :end))
+                  (marker-position (plist-get newer :start)))))))
+
+(ert-deftest cooked-a-mark-on-a-scrolled-row-lands-in-the-scrollback ()
+  "An anchor outlives the row it was taken from.
+
+The command starts, then prints enough to push its own first row off the screen
+before Emacs ever sees it.  The mark has to resolve into the scrollback text
+this drain inserted, not to some row still on the grid."
+  (let ((buffer (generate-new-buffer "*cooked-anchor*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (setq cooked--rows 4 cooked--cols 20 cooked--last-size '(4 . 20))
+          (cooked--start '("/bin/sh" "-c"
+                           "printf '\\033]133;C\\007marked\\n'; \
+                            for i in 1 2 3 4 5 6 7 8; do echo pad$i; done; \
+                            printf '\\033]133;D;0\\007'; sleep 5"))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle (lambda () (= (length cooked--commands) 1))))
+          (let* ((record (car cooked--commands))
+                 (start (marker-position (plist-get record :start))))
+            ;; It landed above the live screen, on the row that said "marked".
+            (should (< start (marker-position cooked--screen-start)))
+            (should (string-match-p
+                     "\\`marked"
+                     (buffer-substring-no-properties
+                      start (min (point-max) (+ start 6)))))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
+(ert-deftest cooked-refresh-rebuilds-a-corrupted-screen ()
+  "Resync throws the screen region away and has the emulator re-send it."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\nbeta\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "beta" (cooked-tests--text)))))
+    ;; Vandalise the screen region the way a half-applied redisplay would.
+    (let ((inhibit-read-only t))
+      (delete-region (marker-position cooked--screen-start) (point-max))
+      (goto-char (point-max))
+      (insert "wreckage"))
+    (should (string-match-p "wreckage" (cooked-tests--text)))
+    (cooked-refresh)
+    (should-not (string-match-p "wreckage" (cooked-tests--text)))
+    (should (string-match-p "alpha" (cooked-tests--text)))
+    (should (string-match-p "beta" (cooked-tests--text)))))
+
+(ert-deftest cooked-a-failed-redisplay-resyncs-rather-than-freezing ()
+  "A drain that signals part-way through must not cost the buffer its content.
+
+Damage is cleared by the drain that reports it, so rows dropped by a redisplay
+that failed are never offered again: nothing short of asking the core to re-send
+the screen brings them back.  The test turns on that — the text carried by the
+failed drain has to be on screen afterwards, and it is only there because the
+resync went and got it."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    ;; Fail exactly one `cooked--apply', from inside the filter where Emacs would
+    ;; otherwise swallow the error entirely.
+    (let* ((failed nil)
+           (advice (lambda (orig &rest args)
+                     (if failed
+                         (apply orig args)
+                       (setq failed t)
+                       (error "cooked-tests: deliberate redisplay failure")))))
+      (advice-add 'cooked--apply :around advice)
+      (unwind-protect
+          (progn
+            (cooked--send cooked--session "hello\n")
+            (should (cooked-tests--settle (lambda () failed))))
+        (advice-remove 'cooked--apply advice)))
+    ;; The echo the failed drain was carrying is on screen regardless.
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "hello" (cooked-tests--text)))))
+    ;; And the session keeps rendering rather than being wedged.
+    (cooked--send cooked--session "afterwards\n")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "afterwards" (cooked-tests--text)))))))
 
 (ert-deftest cooked-box-drawing-gets-a-display-property ()
   (cooked-tests--with-session
@@ -1634,6 +1935,164 @@ must not take the binding away."
       (save-restriction
         (widen)
         (should-not (eq before (get-text-property glyph 'display)))))))
+
+;; The one test that crosses the boundary: the dash field is a hand-kept mirror
+;; between `BoxGlyph' in src/emu/glyph.rs and the `cooked--box-dash-*' constants, and
+;; nothing else here would notice the two drifting apart.  ┄ is U+2504, whose only
+;; difference from a solid ─ is the dash count — exactly what used to be dropped.
+(ert-deftest cooked-box-dash-descriptors-survive-the-round-trip ()
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\204\\n'") ; ┄
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'cooked-box-glyph))))
+    (let ((bits (car (get-text-property (point-min) 'cooked-box-glyph))))
+      (should (= 3 (cooked--box-dashes bits)))
+      ;; ...and it is still a light horizontal line underneath.
+      (should (= 1 (cooked--box-weight bits 4)))
+      (should (= 1 (cooked--box-weight bits 6)))
+      (should (= 0 (cooked--box-weight bits 0))))))
+
+;; The rasterizer is a pure function of a descriptor and a pixel size, so these
+;; assert on the bitmap itself rather than going through a session and a display
+;; property.  That is the only way to see any of this in batch: the defects below —
+;; a dash that is not dashed, a dither that steps at the cell boundary, a diagonal
+;; that misses the corner its neighbour has to meet — are all invisible to a test
+;; that only checks a `display' property exists.
+
+(defun cooked-tests--glyph-grid (bits width height &optional phase)
+  "The boolean pixel grid `cooked--render-box-glyph' would pack, for BITS."
+  (let ((grid (cooked--box-bitmap-make width height)))
+    (if (/= 0 (logand bits cooked--box-kind-block))
+        (cooked--box-draw-block grid width height bits (or phase 0))
+      (cooked--box-draw-line grid width height bits))
+    grid))
+
+(defun cooked-tests--line-bits (up down left right &optional dash)
+  "A line descriptor, mirroring `BoxGlyph::line' in src/emu/glyph.rs.
+DASH is the raw 2-bit code, not a dash count."
+  (logior up (ash down 2) (ash left 4) (ash right 6)
+          (ash (or dash 0) cooked--box-dash-shift)))
+
+(defun cooked-tests--row-runs (grid y width)
+  "Lengths of the set runs in row Y of GRID, left to right."
+  (let ((runs nil) (run 0))
+    (dotimes (x width)
+      (if (aref (aref grid y) x)
+          (setq run (1+ run))
+        (when (> run 0) (push run runs))
+        (setq run 0)))
+    (when (> run 0) (push run runs))
+    (nreverse runs)))
+
+;; Before this, every dashed codepoint was classified as its solid counterpart, so
+;; ┄ and ─ produced byte-identical bitmaps and no amount of drawing could have told
+;; them apart.
+(ert-deftest cooked-box-dashed-lines-break-into-the-right-number-of-dashes ()
+  (let ((width 9) (height 20))
+    (let ((solid (cooked-tests--glyph-grid
+                  (cooked-tests--line-bits 0 0 1 1) width height)))
+      (should (equal (cooked-tests--row-runs solid (/ height 2) width) (list width))))
+    ;; Dash codes 1/2/3 are 2, 3 and 4 dashes.
+    (dolist (case '((1 . 2) (2 . 3) (3 . 4)))
+      (let* ((grid (cooked-tests--glyph-grid
+                    (cooked-tests--line-bits 0 0 1 1 (car case)) width height))
+             (runs (cooked-tests--row-runs grid (/ height 2) width)))
+        (should (equal (length runs) (cdr case)))
+        ;; Every dash has to survive as at least one pixel.
+        (should (cl-every (lambda (run) (>= run 1)) runs))))))
+
+(ert-deftest cooked-box-dashed-lines-follow-the-stroke-axis ()
+  (let* ((width 9) (height 20)
+         (vertical (cooked-tests--glyph-grid
+                    (cooked-tests--line-bits 1 1 0 0 2) width height))
+         (column (/ width 2))
+         (rows (let ((n 0))
+                 (dotimes (y height) (when (aref (aref vertical y) column) (setq n (1+ n))))
+                 n)))
+    ;; Gaps came out of the column, not out of nothing and not out of a row.
+    (should (< rows height))
+    (should (> rows 0))))
+
+;; The gap has to straddle the cell boundary, or two dashed cells side by side fuse
+;; their edge dashes into one double-length dash at every seam.
+(ert-deftest cooked-box-dashes-tile-across-the-cell-boundary ()
+  (let* ((width 9) (height 20)
+         (grid (cooked-tests--glyph-grid
+                (cooked-tests--line-bits 0 0 1 1 2) width height))
+         (row (/ height 2)))
+    ;; A cell that ends set and starts set would join across the seam.
+    (should-not (and (aref (aref grid row) 0)
+                     (aref (aref grid row) (1- width))))))
+
+;; A 9-pixel cell is odd, so a dither phased from cell-local coordinates repeats a
+;; column at every seam: the last column of one cell and the first of the next are
+;; both set, drawing a doubled line down the join between two ▒ cells.
+(ert-deftest cooked-box-shade-dither-tiles-across-an-odd-cell-width ()
+  (let* ((width 9) (height 8)
+         (medium (logior cooked--box-kind-block cooked--box-direction-shade (ash 2 3)))
+         (unphased (cooked-tests--glyph-grid medium width height 0))
+         ;; The phase the next cell along gets at this width.
+         (phase (logand width 1))
+         (phased (cooked-tests--glyph-grid medium width height phase)))
+    (should (= phase 1))
+    (should-not (equal unphased phased))
+    ;; Walking off the right edge of one cell into the left edge of the next must
+    ;; alternate exactly as it does inside a cell.
+    (dotimes (y height)
+      (should-not (eq (aref (aref unphased y) (1- width))
+                      (aref (aref phased y) 0))))))
+
+(ert-deftest cooked-box-shade-phase-is-zero-unless-it-can-matter ()
+  (let ((window (selected-window))
+        (medium (logior cooked--box-kind-block cooked--box-direction-shade (ash 2 3)))
+        (solid (cooked-tests--line-bits 0 0 1 1)))
+    ;; Nothing but a shade is phase-sensitive, so nothing else doubles its cache.
+    (should (= 0 (cooked--box-phase solid window 3 5)))
+    ;; Nor is a shade whose column is unknown.
+    (should (= 0 (cooked--box-phase medium window nil 5)))))
+
+;; A diagonal has to reach the two corners it shares with its neighbours, or a run
+;; of ╱ breaks at every cell join — and it has to put a pixel on every scanline, or
+;; the stroke itself comes apart at a cell's aspect ratio.
+(ert-deftest cooked-box-diagonals-are-connected-and-reach-their-corners ()
+  (let* ((width 9) (height 20)
+         (forward (cooked-tests--glyph-grid cooked--box-diag-forward width height))
+         (backward (cooked-tests--glyph-grid cooked--box-diag-backward width height)))
+    (dotimes (y height)
+      (should (cooked-tests--row-runs forward y width))
+      (should (cooked-tests--row-runs backward y width)))
+    ;; ╱ runs bottom-left to top-right, ╲ top-left to bottom-right.
+    (should (aref (aref forward 0) (1- width)))
+    (should (aref (aref forward (1- height)) 0))
+    (should (aref (aref backward 0) 0))
+    (should (aref (aref backward (1- height)) (1- width)))))
+
+(ert-deftest cooked-box-cross-is-the-union-of-both-diagonals ()
+  (let* ((width 9) (height 20)
+         (forward (cooked-tests--glyph-grid cooked--box-diag-forward width height))
+         (backward (cooked-tests--glyph-grid cooked--box-diag-backward width height))
+         (cross (cooked-tests--glyph-grid
+                 (logior cooked--box-diag-forward cooked--box-diag-backward)
+                 width height)))
+    (dotimes (y height)
+      (dotimes (x width)
+        (should (eq (and (aref (aref cross y) x) t)
+                    (and (or (aref (aref forward y) x)
+                             (aref (aref backward y) x))
+                         t)))))))
+
+;; Cells are not square and the font size moves, so the stroke has to stay connected
+;; at any geometry, not just the one that happened to be tested.
+(ert-deftest cooked-box-diagonals-stay-connected-at-any-cell-size ()
+  (dolist (size '((4 . 3) (5 . 20) (9 . 20) (20 . 5) (16 . 32)))
+    (let* ((width (car size)) (height (cdr size))
+           (grid (cooked-tests--glyph-grid cooked--box-diag-forward width height)))
+      (dotimes (y height)
+        (should (cooked-tests--row-runs grid y width)))
+      (dotimes (x width)
+        (should (let ((set nil))
+                  (dotimes (y height) (when (aref (aref grid y) x) (setq set t)))
+                  set))))))
 
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here

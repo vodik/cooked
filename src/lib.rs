@@ -9,7 +9,7 @@ pub mod env;
 pub mod pty;
 pub mod session;
 
-use emu::{BoxGlyph, Color, Event, Run, Style};
+use emu::{Anchor, BoxGlyph, Color, Event, Run, Style};
 use env::{Env, Error, Result, Runtime, Value};
 use pty::Winsize;
 use session::{Session, Update};
@@ -61,7 +61,18 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
             "Resize SESSION to ROWS by COLS.",
             resize,
         ),
-        env.defun("cooked--mode", 1..=1, DOC_MODE, mode),
+        env.defun(
+            "cooked--forget-history",
+            1..=1,
+            "Tell SESSION that Emacs no longer holds any of its scrollback.
+
+Call after discarding the buffer text above the live screen: the emulator tracks
+how much of its top row's line already left for Emacs, so that a rewrap resumes
+that line where the buffer actually wraps it.  Once the text is gone the top row
+begins a line again, and saying so is what keeps the two ends agreeing.",
+            forget_history,
+        ),
+        env.defun("cooked--redraw", 1..=1, DOC_REDRAW, redraw),
         env.defun("cooked--prompt-text", 1..=1, DOC_PROMPT, prompt_text),
         env.defun(
             "cooked--signal",
@@ -108,7 +119,11 @@ const DOC_DRAIN: &str = "Collect everything that changed in SESSION since the la
 Returns a plist with :scrolled, :rows, :cursor, :alt, :app-cursor, :keys, :mode, :events
 and :exit.
 With REJOIN non-nil (the default), a line the terminal wrapped is emitted as one
-line rather than one per screen row.";
+line rather than one per screen row.
+
+The fields are levels — the state as of this drain — and carry everything redisplay
+needs. :events are occurrences, for what Emacs must react to that redisplay does not
+cover. Nothing is sent both ways.";
 
 const DOC_REPLY_OSC: &str = "Answer an OSC query on SESSION with CODE, PAYLOAD and BELL.
 Writes `ESC ] CODE ; PAYLOAD' terminated by BEL when BELL is non-nil and by ST
@@ -116,8 +131,10 @@ otherwise; pass the BELL-P the `osc' event carried, since a client that queried 
 BEL will not recognise an ST-terminated answer. Signals if PAYLOAD contains control
 characters, which could close the sequence early.";
 
-const DOC_MODE: &str = "Line discipline of SESSION: `cooked', `raw' or `secret'.
-`cooked' means Emacs should own the input region; `secret' means a password is being read.";
+const DOC_REDRAW: &str = "Mark SESSION's whole screen damaged, so the next drain re-sends it.
+For recovering from a redisplay that failed part-way: an ordinary drain only reports
+what changed since the last one, so it cannot repair a buffer that is missing rows of
+a drain that signalled halfway through applying them.";
 
 const DOC_PROMPT: &str = "Text of the last non-blank line written by SESSION's child.
 Used as the minibuffer prompt when SESSION enters `secret' mode.";
@@ -132,27 +149,32 @@ fn handle<'e>(env: &Env<'e>, value: Value) -> Result<&'e Session> {
     env.get_user_ptr::<Session>(value)
 }
 
+/// Walk a proper list, handing each element to `f`.
+///
+/// `car`/`cdr` rather than `nth` per index: `nth` restarts at the head every time, which
+/// makes reading a list off the boundary quadratic in its length. Nothing we are handed
+/// is long enough today for that to matter, but the environment alist is the child's to
+/// grow, and this is not the place to let it decide how much work we do.
+fn each<T>(env: &Env, mut list: Value, mut f: impl FnMut(Value) -> Result<T>) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    while !env.is_nil(list) {
+        out.push(f(env.call("car", &[list])?)?);
+        list = env.call("cdr", &[list])?;
+    }
+    Ok(out)
+}
+
 fn strings(env: &Env, list: Value) -> Result<Vec<String>> {
-    let len = env.from_lisp::<usize>(env.call("length", &[list])?)?;
-    (0..len)
-        .map(|i| {
-            let item = env.call("nth", &[env.into_lisp(i)?, list])?;
-            env.from_lisp::<String>(item)
-        })
-        .collect()
+    each(env, list, |item| env.from_lisp::<String>(item))
 }
 
 fn pairs(env: &Env, alist: Value) -> Result<Vec<(String, String)>> {
-    let len = env.from_lisp::<usize>(env.call("length", &[alist])?)?;
-    (0..len)
-        .map(|i| {
-            let cell = env.call("nth", &[env.into_lisp(i)?, alist])?;
-            Ok((
-                env.from_lisp::<String>(env.call("car", &[cell])?)?,
-                env.from_lisp::<String>(env.call("cdr", &[cell])?)?,
-            ))
-        })
-        .collect()
+    each(env, alist, |cell| {
+        Ok((
+            env.from_lisp::<String>(env.call("car", &[cell])?)?,
+            env.from_lisp::<String>(env.call("cdr", &[cell])?)?,
+        ))
+    })
 }
 
 fn io_error(env: &Env, e: std::io::Error) -> Error {
@@ -251,8 +273,14 @@ fn resize(env: Env, args: &[Value]) -> Result<Value> {
     Ok(env.nil())
 }
 
-fn mode(env: Env, args: &[Value]) -> Result<Value> {
-    env.intern(handle(&env, args[0])?.mode().as_str())
+fn forget_history(env: Env, args: &[Value]) -> Result<Value> {
+    handle(&env, args[0])?.forget_history();
+    Ok(env.nil())
+}
+
+fn redraw(env: Env, args: &[Value]) -> Result<Value> {
+    handle(&env, args[0])?.redraw();
+    Ok(env.nil())
 }
 
 fn prompt_text(env: Env, args: &[Value]) -> Result<Value> {
@@ -289,7 +317,10 @@ fn keyword(env: &Env, name: &str) -> Result<Value> {
 
 /// `(:scrolled ROWS :rows ((INDEX . RUNS)...) :cursor (ROW COL VISIBLE) ...)`
 fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
-    let scrolled = update.scrolled_rows(env, rejoin)?;
+    // The scrollback is assembled first because the events are resolved against it: a
+    // mark on a row that scrolled away during this very drain is spelled as an offset
+    // into the text about to be inserted, which only exists once that text is built.
+    let (scrolled, spans) = update.scrolled_rows(env, rejoin)?;
     let rows = update
         .delta
         .rows
@@ -311,7 +342,7 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
         .delta
         .events
         .iter()
-        .map(|e| event_to_lisp(env, e))
+        .map(|e| event_to_lisp(env, e, update, &spans))
         .collect::<Result<Vec<_>>>()?;
 
     env.list(&[
@@ -336,6 +367,17 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
     ])
 }
 
+/// Where one scrolled row's text ended up in the assembled scrollback string: its start
+/// offset in characters, and how many characters it contributed.
+///
+/// Per *row* rather than per line, so it stays right under `rejoin`, which appends a
+/// wrapped row to the line above instead of starting a new one.
+#[derive(Clone, Copy, Default)]
+struct RowSpan {
+    start: usize,
+    chars: usize,
+}
+
 impl Update {
     /// Scrollback as `(TEXT (START END FG BG ATTRS)...)`, offsets in characters.
     ///
@@ -355,15 +397,17 @@ impl Update {
     /// draws box characters and then clears the display or gets resized will land glyph
     /// content here and see it flattened. Accepted: that is a narrow case, and the
     /// alternative is paying per-character glyph conversion on the flood path.
-    fn scrolled_rows(&self, env: &Env, rejoin: bool) -> Result<Value> {
+    fn scrolled_rows(&self, env: &Env, rejoin: bool) -> Result<(Value, Vec<RowSpan>)> {
         if self.delta.scrolled.is_empty() {
-            return Ok(env.nil());
+            return Ok((env.nil(), Vec::new()));
         }
         let mut text = String::new();
         let mut spans: Vec<Value> = Vec::new();
+        let mut rows: Vec<RowSpan> = Vec::with_capacity(self.delta.scrolled.len());
         let mut offset = 0usize;
 
         for line in &self.delta.scrolled {
+            let start = offset;
             for run in &line.runs {
                 let chars = run.text.chars().count();
                 if run.style != Style::default() {
@@ -379,6 +423,10 @@ impl Update {
                 text.push_str(&run.text);
                 offset += chars;
             }
+            rows.push(RowSpan {
+                start,
+                chars: offset - start,
+            });
             // A wrapped row is a continuation, so it joins the line above rather
             // than starting a new one.
             if !(rejoin && line.wrapped) {
@@ -389,13 +437,44 @@ impl Update {
 
         let mut items = vec![env.into_lisp(text.as_str())?];
         items.extend(spans);
-        env.list(&items)
+        Ok((env.list(&items)?, rows))
+    }
+
+    /// Spell an [`Anchor`] in whichever coordinate system Emacs can address it in.
+    ///
+    /// `(scrolled . OFFSET)` — a character offset into this drain's scrollback text, for
+    /// a row that scrolled away while this drain was accumulating. `(screen ROW . COL)`
+    /// — a cell on the live grid, for one that did not. Resolved here rather than in
+    /// Lisp because the arithmetic is over Rust's absolute row numbering, which is not
+    /// something the Lisp side should have to hold a copy of.
+    ///
+    /// `nil` when neither applies. Unreachable as things stand — events and scrollback
+    /// are taken by the same drain, so nothing can be older than the batch it arrives
+    /// with — and Lisp falls back to the cursor, which is what it used before anchors.
+    fn anchor_to_lisp(&self, env: &Env, at: Anchor, rows: &[RowSpan]) -> Result<Value> {
+        let base = self.delta.scrolled_base;
+        let on_grid = base + self.delta.scrolled.len();
+        if at.row >= on_grid {
+            return env.cons(
+                env.intern("screen")?,
+                env.cons(env.into_lisp(at.row - on_grid)?, env.into_lisp(at.col)?)?,
+            );
+        }
+        match at.row.checked_sub(base).and_then(|i| rows.get(i)) {
+            // Trailing blanks are trimmed out of the runs, so a column past the end of
+            // what the row actually kept is clamped rather than run off the line.
+            Some(row) => env.cons(
+                env.intern("scrolled")?,
+                env.into_lisp(row.start + at.col.min(row.chars))?,
+            ),
+            None => Ok(env.nil()),
+        }
     }
 }
 
 /// `(TEXT FG BG ATTRS GLYPHS)` — colors are nil, an index, or `(R G B)`; GLYPHS is nil
-/// for a plain-text run or a list of raw `BoxGlyph` bit patterns, one per character in
-/// TEXT, for a run of classified box-drawing/block-element glyphs.
+/// for a plain-text run, or raw `BoxGlyph` bit patterns packed two bytes per character
+/// of TEXT, for a run of classified box-drawing/block-element glyphs.
 fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
     let Style { fg, bg, attrs } = run.style;
     env.list(&[
@@ -407,20 +486,23 @@ fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
     ])
 }
 
-/// `nil`, or a list of raw `BoxGlyph` bit patterns, one per character. A dedicated
-/// helper rather than a blanket conversion so this can take a borrowed slice —
-/// `run_to_lisp` only borrows `run`, and cloning `Vec<BoxGlyph>` per drained row is
-/// needless allocation on a path this codebase is otherwise careful about (see
-/// `scrolled_rows`'s doc comment on avoiding exactly this class of cost).
+/// `nil`, or the glyphs' 16-bit patterns packed little-endian into a unibyte string.
+///
+/// A string rather than a list of integers because this is the live-row path: box
+/// drawing is what full-screen programs are made of, so a list would cons per character
+/// of every damaged row of every frame — the same cost `scrolled_rows` goes out of its
+/// way to avoid on the flood path, paid on the one that redraws continuously. One
+/// allocation per run instead, unibyte so Emacs neither decodes nor copies it again.
 fn glyphs_to_lisp(env: &Env, glyphs: Option<&[BoxGlyph]>) -> Result<Value> {
     match glyphs {
         None => Ok(env.nil()),
-        Some(glyphs) => env.list(
-            &glyphs
-                .iter()
-                .map(|g| env.into_lisp(u32::from(g.bits())))
-                .collect::<Result<Vec<_>>>()?,
-        ),
+        Some(glyphs) => {
+            let mut packed = Vec::with_capacity(glyphs.len() * 2);
+            for glyph in glyphs {
+                packed.extend_from_slice(&glyph.bits().to_le_bytes());
+            }
+            env.into_lisp(packed.as_slice())
+        }
     }
 }
 
@@ -439,8 +521,17 @@ fn color_to_lisp(env: &Env, color: Color) -> Result<Value> {
     }
 }
 
-fn event_to_lisp(env: &Env, event: &Event) -> Result<Value> {
+/// A single event, with any anchor it carries already resolved against `update`.
+///
+/// The semantic marks are lists of a uniform shape — `(prompt-start ANCHOR)`,
+/// `(command-end CODE ANCHOR)` — rather than the dotted pairs the payload-carrying
+/// events used to be, so that adding the anchor did not leave two spellings in one
+/// family. `(osc CODE BELL-P PART...)` stays variadic and untouched.
+fn event_to_lisp(env: &Env, event: &Event, update: &Update, rows: &[RowSpan]) -> Result<Value> {
     let tagged = |name: &str, payload: Value| env.cons(env.intern(name)?, payload);
+    let mark = |name: &str, at: Anchor| {
+        env.list(&[env.intern(name)?, update.anchor_to_lisp(env, at, rows)?])
+    };
     match event {
         Event::Bell => env.list(&[env.intern("bell")?]),
         // (osc CODE BELL-P PART...) — Lisp decides what the code means. BELL-P is
@@ -456,12 +547,14 @@ fn event_to_lisp(env: &Env, event: &Event) -> Result<Value> {
             }
             env.list(&items)
         }
-        Event::PromptStart => env.list(&[env.intern("prompt-start")?]),
-        Event::PromptEnd => env.list(&[env.intern("prompt-end")?]),
-        Event::CommandStart => env.list(&[env.intern("command-start")?]),
-        Event::CommandEnd(code) => tagged("command-end", env.into_lisp(code.map(i64::from))?),
-        Event::AltScreen(on) => tagged("alt-screen", env.into_lisp(*on)?),
-        Event::BracketedPaste(on) => tagged("bracketed-paste", env.into_lisp(*on)?),
+        Event::PromptStart(at) => mark("prompt-start", *at),
+        Event::PromptEnd(at) => mark("prompt-end", *at),
+        Event::CommandStart(at) => mark("command-start", *at),
+        Event::CommandEnd(code, at) => env.list(&[
+            env.intern("command-end")?,
+            env.into_lisp(code.map(i64::from))?,
+            update.anchor_to_lisp(env, *at, rows)?,
+        ]),
         // (mouse ENABLED SGR): the sender needs the encoding, not just the fact.
         Event::Mouse(m) => env.list(&[
             env.intern("mouse")?,

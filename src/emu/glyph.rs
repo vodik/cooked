@@ -58,6 +58,11 @@ const ARC: u16 = 1 << 8;
 const DIAG_FORWARD: u16 = 1 << 9;
 /// U+2572 ╲: a straight line from the top-left corner to the bottom-right.
 const DIAG_BACKWARD: u16 = 1 << 10;
+/// How many dashes the stroke breaks into: 0 solid, 1 double, 2 triple, 3 quadruple.
+/// Stored as a code rather than the count so it fits the two bits the layout has left;
+/// `BoxGlyph::dashes` hands out the count so no caller has to know that.
+const DASH_SHIFT: u16 = 11;
+const DASH_MASK: u16 = 0b11 << DASH_SHIFT;
 
 /// Compact classification of a box-drawing or block-element glyph, packed into 16
 /// bits so a `Run` can carry one per character without a large side allocation.
@@ -78,6 +83,20 @@ impl BoxGlyph {
 
     fn arc(up: Weight, down: Weight, left: Weight, right: Weight) -> Self {
         Self(Self::line(up, down, left, right).0 | ARC)
+    }
+
+    /// A line broken into `dashes` segments — 2, 3 or 4, the only counts Unicode
+    /// defines. Any other value would be a caller bug, so it is asserted rather than
+    /// silently clamped: a wrong code here is a wrong glyph on screen, not a panic the
+    /// emulator could recover from.
+    fn dashed(up: Weight, down: Weight, left: Weight, right: Weight, dashes: u8) -> Self {
+        let code = match dashes {
+            2 => 1,
+            3 => 2,
+            4 => 3,
+            _ => unreachable!("Unicode defines only 2-, 3- and 4-dash lines"),
+        };
+        Self(Self::line(up, down, left, right).0 | (code << DASH_SHIFT))
     }
 
     fn block(direction: Direction, fraction: u8) -> Self {
@@ -131,6 +150,19 @@ impl BoxGlyph {
             Edge::Right => 6,
         };
         weight_from_bits((self.0 >> shift) & 0b11)
+    }
+
+    /// How many dashes a `Line`-kind glyph's stroke breaks into: 0 for a solid line,
+    /// otherwise 2, 3 or 4. Unicode only ever dashes a plain horizontal or vertical
+    /// line, never a junction, corner or arc. Meaningless (always 0) for `Block`-kind
+    /// glyphs.
+    pub fn dashes(self) -> u8 {
+        match (self.0 & DASH_MASK) >> DASH_SHIFT {
+            1 => 2,
+            2 => 3,
+            3 => 4,
+            _ => 0,
+        }
     }
 
     /// Fill direction of a `Block`-kind glyph. Meaningless (always `Up`) for
@@ -193,7 +225,7 @@ fn direction_from_bits(bits: u16) -> Direction {
 /// anything the emulator renders as plain glyph-shaped text.
 pub fn classify(ch: char) -> Option<BoxGlyph> {
     match ch {
-        '\u{2500}'..='\u{254B}' => classify_line(ch),
+        '\u{2500}'..='\u{254F}' => classify_line(ch),
         '\u{2550}'..='\u{256C}' => classify_double_line(ch),
         '\u{256D}'..='\u{2570}' => classify_arc(ch),
         '\u{2571}'..='\u{2573}' => classify_diagonal(ch),
@@ -203,24 +235,27 @@ pub fn classify(ch: char) -> Option<BoxGlyph> {
     }
 }
 
-/// U+2500-U+254B: light/heavy horizontal & vertical lines (including the dash
-/// variants, drawn identically to their solid counterparts — cooked does not model
-/// dash patterns), corners, T-junctions and crosses, in every light/heavy combination
-/// the block defines. Verified against the Unicode Box Drawing chart.
+/// U+2500-U+254F: light/heavy horizontal & vertical lines, corners, T-junctions and
+/// crosses, in every light/heavy combination the block defines. Verified against the
+/// Unicode Box Drawing chart.
+///
+/// The dashed variants carry a dash count alongside their weight rather than
+/// collapsing onto the solid line they otherwise match. The dashed codepoints are not
+/// contiguous — the triple/quadruple families sit at U+2504-250B, but the double-dash
+/// family was appended later at U+254C-254F, past the junctions — which is why this
+/// arm runs to 254F while the double-line block still starts at 2550.
 fn classify_line(ch: char) -> Option<BoxGlyph> {
+    // Handled first: these are the only codepoints here that are not a plain
+    // (up, down, left, right) tuple.
+    if let Some(glyph) = classify_dashed_line(ch) {
+        return Some(glyph);
+    }
     let (up, down, left, right) = match ch {
         '\u{2500}' => (Z, Z, L, L),
         '\u{2501}' => (Z, Z, H, H),
         '\u{2502}' => (L, L, Z, Z),
         '\u{2503}' => (H, H, Z, Z),
-        '\u{2504}' => (Z, Z, L, L),
-        '\u{2505}' => (Z, Z, H, H),
-        '\u{2506}' => (L, L, Z, Z),
-        '\u{2507}' => (H, H, Z, Z),
-        '\u{2508}' => (Z, Z, L, L),
-        '\u{2509}' => (Z, Z, H, H),
-        '\u{250A}' => (L, L, Z, Z),
-        '\u{250B}' => (H, H, Z, Z),
+        // U+2504-250B are the triple/quadruple dashes — see `classify_dashed_line`.
         '\u{250C}' => (Z, L, Z, L),
         '\u{250D}' => (Z, L, Z, H),
         '\u{250E}' => (Z, H, Z, L),
@@ -288,6 +323,28 @@ fn classify_line(ch: char) -> Option<BoxGlyph> {
         _ => return None,
     };
     Some(BoxGlyph::line(up, down, left, right))
+}
+
+/// The twelve dashed lines: three dash counts x two weights x two orientations. Each
+/// is otherwise identical to the solid line of the same weight and orientation, so the
+/// dash count is the only thing distinguishing (say) U+2504 ┄ from U+2500 ─.
+fn classify_dashed_line(ch: char) -> Option<BoxGlyph> {
+    let (up, down, left, right, dashes) = match ch {
+        '\u{2504}' => (Z, Z, L, L, 3), // ┄
+        '\u{2505}' => (Z, Z, H, H, 3), // ┅
+        '\u{2506}' => (L, L, Z, Z, 3), // ┆
+        '\u{2507}' => (H, H, Z, Z, 3), // ┇
+        '\u{2508}' => (Z, Z, L, L, 4), // ┈
+        '\u{2509}' => (Z, Z, H, H, 4), // ┉
+        '\u{250A}' => (L, L, Z, Z, 4), // ┊
+        '\u{250B}' => (H, H, Z, Z, 4), // ┋
+        '\u{254C}' => (Z, Z, L, L, 2), // ╌
+        '\u{254D}' => (Z, Z, H, H, 2), // ╍
+        '\u{254E}' => (L, L, Z, Z, 2), // ╎
+        '\u{254F}' => (H, H, Z, Z, 2), // ╏
+        _ => return None,
+    };
+    Some(BoxGlyph::dashed(up, down, left, right, dashes))
 }
 
 /// U+2550-U+256C: the double-line block, and its single/double mixed corners,
@@ -451,6 +508,59 @@ mod tests {
         for edge in [Edge::Up, Edge::Down, Edge::Left, Edge::Right] {
             assert_eq!(cross.edge(edge), Weight::Heavy);
         }
+    }
+
+    #[test]
+    fn dashed_lines_keep_their_weight_and_carry_a_dash_count() {
+        for (ch, dashes) in [
+            ('\u{254C}', 2), // ╌
+            ('\u{2504}', 3), // ┄
+            ('\u{2508}', 4), // ┈
+        ] {
+            let glyph = classify(ch).unwrap();
+            assert_eq!(glyph.dashes(), dashes, "{ch:?}");
+            assert_eq!(glyph.edge(Edge::Left), Weight::Light, "{ch:?}");
+            assert_eq!(glyph.edge(Edge::Right), Weight::Light, "{ch:?}");
+            assert_eq!(glyph.edge(Edge::Up), Weight::None, "{ch:?}");
+        }
+
+        // The heavy and vertical members of each family differ only as expected.
+        let heavy = classify('\u{2505}').unwrap(); // ┅
+        assert_eq!(heavy.dashes(), 3);
+        assert_eq!(heavy.edge(Edge::Left), Weight::Heavy);
+
+        let vertical = classify('\u{254F}').unwrap(); // ╏
+        assert_eq!(vertical.dashes(), 2);
+        assert_eq!(vertical.edge(Edge::Up), Weight::Heavy);
+        assert_eq!(vertical.edge(Edge::Left), Weight::None);
+    }
+
+    // The bug this field exists to fix: every dashed line used to be bit-identical to
+    // the solid line of the same weight, so the distinction was lost in the emulator
+    // and the renderer could not have drawn a dash even in principle.
+    #[test]
+    fn dashed_lines_are_distinct_from_their_solid_counterpart_and_each_other() {
+        let solid = classify('\u{2500}').unwrap(); // ─
+        let double = classify('\u{254C}').unwrap(); // ╌
+        let triple = classify('\u{2504}').unwrap(); // ┄
+        let quadruple = classify('\u{2508}').unwrap(); // ┈
+        assert_eq!(solid.dashes(), 0);
+        assert_ne!(solid, double);
+        assert_ne!(double, triple);
+        assert_ne!(triple, quadruple);
+    }
+
+    // U+254C-254F sit past the junctions rather than beside the other dashes, and used
+    // to fall in the gap between this block's two classified ranges — unclassified, so
+    // rendered with the font while everything around them was a generated bitmap.
+    #[test]
+    fn the_double_dash_family_past_the_junctions_is_classified() {
+        for ch in ['\u{254C}', '\u{254D}', '\u{254E}', '\u{254F}'] {
+            assert!(classify(ch).is_some(), "{ch:?} must classify");
+        }
+        // ...without swallowing the double-line block that starts immediately after.
+        assert_eq!(classify('\u{2550}').unwrap().edge(Edge::Left), Weight::Double);
+        assert_eq!(classify('\u{2550}').unwrap().dashes(), 0);
     }
 
     #[test]

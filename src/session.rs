@@ -232,6 +232,17 @@ impl Session {
     /// for the reader thread's already-running loop to apply once the pty is ready — the
     /// same "not yet, try again soon" shape `sample_mode` already uses for the same
     /// underlying transient.
+    /// Forget that any of the top row's line is already in Emacs.
+    ///
+    /// Emacs holds the scrollback, so only Emacs knows when it has thrown it away.
+    pub fn forget_history(&self) {
+        self.shared
+            .term
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget_history();
+    }
+
     pub fn resize(&self, size: Winsize) -> io::Result<()> {
         self.shared
             .term
@@ -249,6 +260,20 @@ impl Session {
             }
             result => result,
         }
+    }
+
+    /// Mark the whole screen damaged, so the next drain re-sends it.
+    ///
+    /// Emacs asks for this when its own idea of the screen region can no longer be
+    /// trusted — a redisplay that signalled part-way through leaves the buffer holding
+    /// some rows of a drain and not others, and no amount of further deltas repairs
+    /// that, because a delta only describes what changed since.
+    pub fn redraw(&self) {
+        self.shared
+            .term
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .touch_all();
     }
 
     pub fn mode(&self) -> Mode {
@@ -724,8 +749,21 @@ mod tests {
     fn osc_133_survives_the_round_trip() {
         let (session, _read) =
             session(&["/bin/sh", "-c", r"printf '\033]133;A\007$ \033]133;B\007'"]);
-        let update = wait_for(&session, |u| u.delta.events.contains(&Event::PromptStart));
-        assert!(update.delta.events.contains(&Event::PromptEnd));
+        // `matches!` rather than equality: the marks carry an anchor, and where the
+        // prompt lands is this test's least interesting property.
+        let update = wait_for(&session, |u| {
+            u.delta
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::PromptStart(_)))
+        });
+        assert!(
+            update
+                .delta
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::PromptEnd(_)))
+        );
     }
 
     #[test]

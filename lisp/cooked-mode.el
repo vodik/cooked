@@ -25,6 +25,7 @@
 (declare-function cooked--signal "cooked-core")
 (declare-function cooked--prompt-text "cooked-core")
 (declare-function cooked--bracketed-paste-p "cooked-core")
+(declare-function cooked--live-p "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
 (defcustom cooked-buffer-name "*cooked: %s*"
@@ -242,6 +243,74 @@ whatever Emacs is showing, and the ghost has been marking that spot."
   (cooked--snap-to-cursor)
   (cooked--send cooked--session string))
 
+(defcustom cooked-paste-confirm-lines t
+  "Whether to confirm a multi-line paste the child cannot tell is a paste.
+
+A line editor reads an embedded newline as Enter, so several lines pasted into a
+child that has not asked for bracketed paste run one after another, immediately,
+with no chance to read them first.  Terminals have warned about this for years
+and the hazard here is the same one.
+
+A child that *has* asked for bracketed paste is never confirmed: it is told
+where the paste begins and ends and inserts it as one edit, which is the whole
+point of the protocol."
+  :type 'boolean
+  :group 'cooked)
+
+(defun cooked--bracketed-paste (text)
+  "TEXT wrapped in the bracketed-paste markers, made safe to wrap.
+
+Any end marker inside TEXT is dropped.  One left in would close the bracket
+early and hand whatever followed it to the child as if it had been typed —
+which is how a copied line runs something you never read.  The child is told
+where the paste ends; nothing in the middle gets to say otherwise."
+  (concat "\e[200~" (string-replace "\e[201~" "" text) "\e[201~"))
+
+(defun cooked--send-paste (text)
+  "Hand TEXT to the child as a paste."
+  (cond
+   ((cooked--bracketed-paste-p cooked--session)
+    (cooked--snap-to-cursor)
+    (cooked--send cooked--session (cooked--bracketed-paste text)))
+   ((and cooked-paste-confirm-lines
+         (string-search "\n" text)
+         (not (y-or-n-p
+               (format "Paste %d lines?  %s will run each as it arrives: "
+                       (1+ (cl-count ?\n text))
+                       (or cooked--title "The child")))))
+    (message "Paste cancelled"))
+   (t
+    (cooked--snap-to-cursor)
+    ;; Newlines go as carriage returns because that is what the Return key
+    ;; transmits, and a line editor bound to CR is what is reading them.
+    (cooked--send cooked--session (string-replace "\n" "\r" text)))))
+
+(defun cooked-paste ()
+  "Paste the most recent kill.
+
+At an input prompt this is `yank', because the pending line is being edited in
+the buffer: the text lands there and can be corrected before it is submitted.
+
+While the child owns the keyboard there is no buffer to yank into — the text is
+the child's to receive, and goes to it directly.  Bracketed when the child asked
+for bracketed paste, so its line editor treats the whole thing as one insertion
+rather than as very fast typing; see `cooked-paste-confirm-lines' for what
+happens when it did not ask.
+
+This is the way to get Emacs' kill ring — and so the system clipboard, which
+`current-kill' consults exactly as `yank' does — into a full-screen program.  A
+program's own paste key pastes its own registers, which is a different thing
+entirely and cannot reach anything Emacs copied."
+  (interactive)
+  (unless (and cooked--session (cooked--live-p cooked--session))
+    (user-error "No live session"))
+  (if (cooked--input-state-p)
+      (call-interactively #'yank)
+    (let ((text (current-kill 0)))
+      (if (string-empty-p text)
+          (message "Nothing to paste")
+        (cooked--send-paste text)))))
+
 (defconst cooked--escape-key ?\C-c
   "Prefix reserved for cooked's own commands while the child owns the keyboard.
 Everything else, ESC included, is forwarded verbatim, so \\`M-x' reaches the
@@ -383,11 +452,18 @@ Gates `cooked--mouse-map'; nil everywhere else, so the entry in
     (define-key map (kbd "C-c C-e") #'cooked-send-string)
     (define-key map (kbd "C-c M-x") #'cooked-meta-x)
     (define-key map (kbd "C-c C-z") #'cooked-suspend)
+    ;; Under the escape prefix because plain `C-y' belongs to the child: emacs-mode
+    ;; readline and vim's own C-y are both real bindings that must keep working.
+    (define-key map (kbd "C-c C-y") #'cooked-paste)
     ;; Navigating and folding the transcript sends nothing to the child, so it
     ;; belongs here too: you want it most while a command is still running.
     (define-key map (kbd "C-c C-p") #'cooked-previous-command)
     (define-key map (kbd "C-c C-n") #'cooked-next-command)
     (define-key map (kbd "C-c TAB") #'cooked-toggle-fold)
+    ;; Reachable while a full-screen program holds the keyboard on purpose: that is
+    ;; where a screen that has drifted out of step is most obvious and least fixable
+    ;; by any other means.
+    (define-key map (kbd "C-c C-l") #'cooked-refresh)
     (dolist (event '(down-mouse-1 mouse-1 down-mouse-2 mouse-2 down-mouse-3 mouse-3
                      wheel-up wheel-down mouse-4 mouse-5))
       (define-key map (vector event) #'cooked-mouse-event))
@@ -408,9 +484,14 @@ Gates `cooked--mouse-map'; nil everywhere else, so the entry in
     (define-key map (kbd "C-c C-p") #'cooked-previous-command)
     (define-key map (kbd "C-c C-n") #'cooked-next-command)
     (define-key map (kbd "C-c TAB") #'cooked-toggle-fold)
+    (define-key map (kbd "C-c C-l") #'cooked-refresh)
     (define-key map (kbd "TAB") #'completion-at-point)
     (define-key map (kbd "M-p") #'cooked-previous-input)
     (define-key map (kbd "M-n") #'cooked-next-input)
+    ;; The same key as in the raw map, so it does not matter what the child happens
+    ;; to be doing when you reach for it.  Here it is `yank' with extra steps, which
+    ;; is the point: one key that always pastes.
+    (define-key map (kbd "C-c C-y") #'cooked-paste)
     map)
   "Keymap while Emacs owns the input line.")
 
@@ -456,7 +537,7 @@ collected, not who owns the screen."
 
 (defvar cooked-snap-commands
   '(self-insert-command cooked-newline newline newline-and-indent
-    yank yank-pop
+    yank yank-pop cooked-paste cooked-evil-paste
     evil-paste-before evil-paste-after evil-paste-from-register)
   "Commands that should act on the input region even if point drifted out of it.
 See `cooked--snap-to-input'.
@@ -691,30 +772,37 @@ to follow the input/raw switch can use it without cooked knowing about it.")
   (cooked--update-mouse-grab)
   (run-hooks 'cooked-state-change-hook))
 
-(defun cooked--semantic (event)
-  "Track OSC 133 EVENT and the buffer markers that come with it."
+(defun cooked--semantic (event batch-start)
+  "Track OSC 133 EVENT and the buffer markers that come with it.
+
+Each mark carries an anchor saying where in the output it actually fell, which
+`cooked--anchor-position' turns into a buffer position given BATCH-START, this
+drain's scrollback insertion point.  The cursor is emphatically not a
+substitute: by the time a drain is applied it is where the *last* thing in that
+drain left it, so a script running several commands between two redisplays
+would file all of their output under one region ending wherever it stopped."
   (pcase event
-    (`(prompt-start) (setq cooked--semantic 'prompt))
-    (`(prompt-end)
+    (`(prompt-start ,_) (setq cooked--semantic 'prompt))
+    (`(prompt-end ,_)
      (setq cooked--semantic 'input)
      (cooked--refresh-keymap))
-    (`(command-start)
+    (`(command-start ,at)
      (setq cooked--semantic 'output
-           cooked--command-start (copy-marker (cooked--cursor-position)))
+           cooked--command-start (copy-marker (cooked--anchor-position at batch-start)))
      (cooked--refresh-keymap))
-    (`(command-end . ,code)
+    (`(command-end ,code ,at)
      (setq cooked--semantic nil)
-     (cooked--mark-command-end code))))
+     (cooked--mark-command-end code (cooked--anchor-position at batch-start)))))
 
-(defun cooked--mark-command-end (code)
-  "Record exit CODE for the command that just finished.
+(defun cooked--mark-command-end (code end)
+  "Record exit CODE for the command that just finished, whose output ends at END.
 
 Kept as a record rather than only a text property: a command that printed
 nothing spans an empty region, which no text property can describe, and the
 records are what folding and navigation walk."
   (when (and cooked--command-start (marker-position cooked--command-start))
     (let ((beg (marker-position cooked--command-start))
-          (end (min (point-max) (cooked--cursor-position)))
+          (end (min (point-max) end))
           (code (or code 0)))
       (when (< beg end)
         (put-text-property beg end 'cooked-exit-code code))

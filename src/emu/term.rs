@@ -8,7 +8,35 @@ use super::screen::{Cursor, Erase, Resize, Screen};
 use std::collections::VecDeque;
 use vte::{Params, Parser, Perform};
 
+/// Where in the output stream a mark landed.
+///
+/// `row` is *absolute*: screen row 0 is row [`State::evicted_total`], so the coordinate
+/// stays meaningful after the marked row scrolls away, which a screen row does not.
+///
+/// Recorded when the mark is parsed rather than read off the drain, because the drain
+/// carries the *end-of-drain* cursor — a different place entirely once more than one
+/// command lands in a single drain, which is exactly what a fast script does.
+///
+/// Best-effort by construction: a resize between the mark and the drain rewraps the
+/// scrollback and can shift where the anchor resolves. The fallback in that case is the
+/// end-of-drain cursor, which is what this replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Anchor {
+    pub row: usize,
+    pub col: usize,
+}
+
 /// Something the Lisp side must react to, beyond redrawing cells.
+///
+/// The division of labour with [`Delta`]'s fields is deliberate, and worth keeping to:
+/// the drain's fields carry everything *redisplay* needs, so they are levels — the state
+/// as of the end of the drain. Events carry what Emacs must *react* to and redisplay does
+/// not cover, so they are occurrences. State consulted only when sending to the child —
+/// bracketed paste — is neither, and is queried live at that moment, which is fresher
+/// than any drain snapshot.
+///
+/// Sending the same state both ways is what this rules out. An `alt-screen` event
+/// alongside [`Delta::alt`] could only ever restate the field, and did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Bell,
@@ -28,15 +56,15 @@ pub enum Event {
     /// answer the wrong query. See [`osc_reply`].
     Osc(u16, Vec<String>, bool),
     /// OSC 133;A — a shell prompt begins.
-    PromptStart,
+    PromptStart(Anchor),
     /// OSC 133;B — user input begins; this is where comint takes over.
-    PromptEnd,
+    PromptEnd(Anchor),
     /// OSC 133;C — the command is running and owns the output region.
-    CommandStart,
+    CommandStart(Anchor),
     /// OSC 133;D — the command finished, with its exit status when reported.
-    CommandEnd(Option<i32>),
-    AltScreen(bool),
-    BracketedPaste(bool),
+    CommandEnd(Option<i32>, Anchor),
+    /// The child changed its mind about mouse reporting. An occurrence rather than a
+    /// field because nothing in redisplay depends on it: its one consumer swaps a keymap.
     Mouse(Mouse),
     /// Bytes the terminal owes the child (device attributes, cursor reports).
     Reply(Vec<u8>),
@@ -101,6 +129,9 @@ pub struct Scrolled {
 pub struct Delta {
     /// Scrolled-off lines, already reduced to styled runs.
     pub scrolled: Vec<Scrolled>,
+    /// Absolute index of `scrolled`'s first line, so an [`Anchor`] can be told apart
+    /// into "in this batch of scrollback" and "still on the grid".
+    pub scrolled_base: usize,
     pub rows: Vec<(usize, Vec<Run>)>,
     pub cursor: Cursor,
     pub cursor_visible: bool,
@@ -170,6 +201,18 @@ impl Term {
         self.state.resize(rows, cols);
     }
 
+    /// Emacs has discarded the scrollback, so the top row continues nothing.
+    pub fn forget_history(&mut self) {
+        self.state.primary.forget_carry();
+    }
+
+    /// Mark every row of the current screen damaged, so the next drain re-sends all of
+    /// it. The way back from a redisplay that failed part-way and left Emacs' idea of
+    /// the screen region disagreeing with ours.
+    pub fn touch_all(&mut self) {
+        self.state.screen_mut().touch_all();
+    }
+
     pub fn screen(&self) -> &Screen {
         self.state.screen()
     }
@@ -212,6 +255,10 @@ struct State {
     on_alt: bool,
     pen: Style,
     pending_scrollback: VecDeque<Scrolled>,
+    /// Rows that have ever left the top of the primary screen. Screen row 0 is this row,
+    /// counting from the beginning of the session, which is what makes an [`Anchor`]
+    /// outlive the grid position it was taken from.
+    evicted_total: usize,
     events: Vec<Event>,
     cursor_visible: bool,
     bracketed_paste: bool,
@@ -237,6 +284,7 @@ impl State {
             on_alt: false,
             pen: Style::default(),
             pending_scrollback: VecDeque::new(),
+            evicted_total: 0,
             events: Vec::new(),
             cursor_visible: true,
             bracketed_paste: false,
@@ -301,7 +349,11 @@ impl State {
     }
 
     /// Send rows to scrollback unconditionally, for callers holding primary rows.
+    ///
+    /// The single funnel for rows leaving the primary screen, which is why the absolute
+    /// row counter is kept here rather than at each of its callers.
     fn archive(&mut self, rows: Vec<Row>) {
+        self.evicted_total += rows.len();
         // Reduced to runs here rather than at drain time: a Row owns a cell for every
         // column, so retaining thousands of them keeps megabytes of mostly-blank grid
         // alive. Runs are trimmed to content, and the work has to happen regardless.
@@ -310,6 +362,15 @@ impl State {
                 runs: row.runs(),
                 wrapped: row.wrapped,
             }));
+    }
+
+    /// Where the cursor is now, in the coordinates an [`Anchor`] keeps.
+    fn anchor(&self) -> Anchor {
+        let cursor = self.screen().cursor;
+        Anchor {
+            row: self.evicted_total + cursor.row,
+            col: cursor.col,
+        }
     }
 
     fn linefeed(&mut self) {
@@ -329,12 +390,15 @@ impl State {
     fn drain(&mut self) -> Delta {
         let damaged = self.screen_mut().drain_damage();
         let scrolled = Vec::from(std::mem::take(&mut self.pending_scrollback));
+        // Taken before the batch is handed over, so it names the first line *in* it.
+        let scrolled_base = self.evicted_total - scrolled.len();
         let events = std::mem::take(&mut self.events);
         let (cursor_visible, alt, app_cursor) = (self.cursor_visible, self.on_alt, self.app_cursor);
         let keys = self.key_encoding();
         let screen = self.screen();
         Delta {
             scrolled,
+            scrolled_base,
             rows: damaged
                 .into_iter()
                 .filter_map(|i| screen.row(i).map(|r| (i, r.runs())))
@@ -359,8 +423,9 @@ impl State {
             drop(self.alt.erase_display(Erase::All));
             self.alt.goto(0, 0);
         }
+        // No event to match: `Delta::alt` is the level, and Lisp acts on that. See the
+        // note on `Event` about not sending the same state two ways.
         self.screen_mut().touch_all();
-        self.events.push(Event::AltScreen(on));
     }
 
     fn dec_mode(&mut self, mode: u16, on: bool) {
@@ -383,10 +448,9 @@ impl State {
                 self.save_restore(on);
                 self.set_alt(on);
             }
-            2004 => {
-                self.bracketed_paste = on;
-                self.events.push(Event::BracketedPaste(on));
-            }
+            // No event: nothing reacts to this. It is read at the one moment it matters,
+            // by `Term::bracketed_paste` as a multi-line submission is being framed.
+            2004 => self.bracketed_paste = on,
             _ => return,
         }
         if matches!(mode, 1000 | 1002 | 1003 | 1006) {
@@ -410,15 +474,18 @@ impl State {
         let Some(kind) = params.get(1).and_then(|p| p.first()) else {
             return;
         };
+        // Anchored here, where the mark actually is in the stream. See [`Anchor`].
+        let at = self.anchor();
         self.events.push(match kind {
-            b'A' => Event::PromptStart,
-            b'B' => Event::PromptEnd,
-            b'C' => Event::CommandStart,
+            b'A' => Event::PromptStart(at),
+            b'B' => Event::PromptEnd(at),
+            b'C' => Event::CommandStart(at),
             b'D' => Event::CommandEnd(
                 params
                     .get(2)
                     .and_then(|p| std::str::from_utf8(p).ok())
                     .and_then(|s| s.parse().ok()),
+                at,
             ),
             _ => return,
         });
@@ -817,13 +884,16 @@ mod tests {
             b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07out\x1b]133;D;3\x07",
         );
         let events = t.drain().events;
+        let at = |row, col| Anchor { row, col };
         assert_eq!(
             events,
             vec![
-                Event::PromptStart,
-                Event::PromptEnd,
-                Event::CommandStart,
-                Event::CommandEnd(Some(3)),
+                // Anchored where each mark actually fell on the one row this writes:
+                // column 0, then after "$ ", then after "ls", then after "out".
+                Event::PromptStart(at(0, 0)),
+                Event::PromptEnd(at(0, 2)),
+                Event::CommandStart(at(0, 4)),
+                Event::CommandEnd(Some(3), at(0, 7)),
             ]
         );
     }
@@ -831,7 +901,10 @@ mod tests {
     #[test]
     fn osc_133_d_without_a_status() {
         let mut t = term(4, 20, b"\x1b]133;D\x07");
-        assert_eq!(t.drain().events, vec![Event::CommandEnd(None)]);
+        assert_eq!(
+            t.drain().events,
+            vec![Event::CommandEnd(None, Anchor { row: 0, col: 0 })]
+        );
     }
 
     #[test]
@@ -872,7 +945,52 @@ mod tests {
     #[test]
     fn osc_133_stays_typed() {
         let mut t = term(4, 20, b"\x1b]133;A\x07");
-        assert_eq!(t.drain().events, vec![Event::PromptStart]);
+        assert_eq!(
+            t.drain().events,
+            vec![Event::PromptStart(Anchor { row: 0, col: 0 })]
+        );
+    }
+
+    /// The bug anchors exist for: two commands inside one drain must not collapse onto
+    /// the end-of-drain cursor, which is where the *second* one ended.
+    #[test]
+    fn marks_in_one_drain_keep_their_own_positions() {
+        let mut t = term(
+            8,
+            20,
+            b"\x1b]133;C\x07one\r\n\x1b]133;D;0\x07\x1b]133;C\x07two\r\n\x1b]133;D;0\x07",
+        );
+        let starts: Vec<Anchor> = t
+            .drain()
+            .events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::CommandStart(at) => Some(at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            starts,
+            vec![Anchor { row: 0, col: 0 }, Anchor { row: 1, col: 0 }]
+        );
+    }
+
+    /// An anchor outlives the row it was taken from: once the marked row has scrolled
+    /// away, its absolute row is below the base of the batch still on the grid.
+    #[test]
+    fn an_anchor_survives_the_row_scrolling_off() {
+        let mut t = term(3, 20, b"\x1b]133;C\x07start\r\n");
+        t.feed(b"a\r\nb\r\nc\r\nd\r\n");
+        let delta = t.drain();
+        let Some(&Event::CommandStart(at)) = delta.events.first() else {
+            panic!("no command-start: {:?}", delta.events);
+        };
+        assert_eq!(at.row, 0, "the mark fell on the first row written");
+        assert!(
+            at.row < delta.scrolled_base + delta.scrolled.len(),
+            "the marked row is in this batch of scrollback, not on the grid"
+        );
+        assert_eq!(delta.scrolled_base, 0, "nothing scrolled before this drain");
     }
 
     #[test]
@@ -1053,11 +1171,15 @@ mod tests {
         assert_eq!(t.keys(), KeyEncoding::Legacy);
     }
 
+    /// Queried, never announced: the state is read as a submission is framed, which is
+    /// later — and so more accurate — than any drain that preceded it.
     #[test]
     fn bracketed_paste_toggles() {
         let mut t = term(2, 8, b"\x1b[?2004h");
         assert!(t.bracketed_paste());
-        assert!(t.drain().events.contains(&Event::BracketedPaste(true)));
+        assert!(t.drain().events.is_empty());
+        t.feed(b"\x1b[?2004l");
+        assert!(!t.bracketed_paste());
     }
 
     #[test]

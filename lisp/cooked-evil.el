@@ -13,11 +13,17 @@
 ;; normal state swallowing them; at a prompt evil should behave as it does in any
 ;; other buffer.  Following that one distinction is the whole of the integration.
 ;;
-;; Deliberately absent: state-specific key bindings.  RET reaches
+;; Almost no state-specific key bindings, and for a reason.  RET reaches
 ;; `cooked-send-input' through `cooked-input-map' in insert state, and in normal
 ;; state RET stays `evil-ret' — a normal-state RET that submitted was more
 ;; surprising than useful.  `C-c C-c' needs nothing either, since evil's normal
 ;; state does not bind `C-c' and so already falls through to the local map.
+;;
+;; One binding earns its place: `p'.  A full-screen program's own paste key
+;; pastes its own registers — `p' inside vim never sees anything Emacs copied —
+;; so reaching the kill ring needs a key Emacs still owns, and normal state is
+;; where one is going spare.  At a prompt it stays evil's own paste; see
+;; `cooked-evil-normal-state-pastes'.
 ;;
 ;; `evil-collection' is the exception, and it needs one binding of our own.
 ;; `evil-collection-comint' binds RET for every comint buffer via `evil-define-key',
@@ -87,7 +93,47 @@ first, so the override tied to `cooked-mode-map' -- the derived mode -- wins,
 and everything else `evil-collection-comint' set up keeps working."
   :type 'boolean :group 'cooked)
 
+(defcustom cooked-evil-normal-state-pastes t
+  "Whether normal-state \\`p' and \\`P' paste into a full-screen program.
+
+A program's own paste key pastes its own registers: `p' inside vim reaches vim's
+clipboard, and nothing Emacs copied is in it.  Getting the kill ring — and so
+the system clipboard — into that program needs a key Emacs still owns, and `p'
+is the one a vim user's hand already reaches for.
+
+Only while the child owns the keyboard.  At an input prompt the pending line is
+being edited in the buffer like any other text, so `p' stays evil's own paste
+and keeps its own semantics; the difference matters because `evil-paste-after'
+pastes after the character under the cursor, which is what you want on a line
+you are editing and meaningless on one you are not."
+  :type 'boolean
+  :group 'cooked)
+
+(declare-function evil-paste-after "evil-commands")
+(declare-function evil-paste-before "evil-commands")
+(declare-function evil-define-key* "evil-core")
+
+(defun cooked-evil-paste ()
+  "Paste, as normal state should here.
+While the child owns the keyboard this is `cooked-paste', which hands the kill
+ring to the child.  At a prompt it is evil's own paste, since the pending line
+is ordinary editable text.  See `cooked-evil-normal-state-pastes'."
+  (interactive)
+  (if (cooked--input-state-p)
+      (call-interactively
+       (if (eq last-command-event ?P) #'evil-paste-before #'evil-paste-after))
+    (cooked-paste)))
+
 (declare-function evil-collection-define-key "evil-collection")
+
+(with-eval-after-load 'evil
+  (when cooked-evil-normal-state-pastes
+    ;; On `cooked-mode-map' for the reason RET is, below: an override registered
+    ;; against the derived mode outranks anything `evil-collection' tied to
+    ;; `comint-mode-map', and a plain `define-key' would not be consulted at all.
+    (evil-define-key* 'normal cooked-mode-map
+                      (kbd "p") #'cooked-evil-paste
+                      (kbd "P") #'cooked-evil-paste)))
 
 (with-eval-after-load 'evil-collection
   (when cooked-evil-insert-state-submits

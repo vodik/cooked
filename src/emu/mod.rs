@@ -8,4 +8,6 @@ pub mod term;
 pub use cell::{Attrs, Cell, Color, Row, Run, Style};
 pub use glyph::BoxGlyph;
 pub use screen::{Cursor, Erase, Screen};
-pub use term::{BACKLOG_HIGH_WATER, Delta, Event, KeyEncoding, Mouse, Scrolled, Term, osc_reply};
+pub use term::{
+    Anchor, BACKLOG_HIGH_WATER, Delta, Event, KeyEncoding, Mouse, Scrolled, Term, osc_reply,
+};

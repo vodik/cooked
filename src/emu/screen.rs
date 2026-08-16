@@ -74,6 +74,18 @@ pub struct Screen {
     pub saved: Option<Cursor>,
     dirty: Vec<bool>,
     tabs: Vec<bool>,
+    /// Rows of row 0's logical line that have already left the grid for Emacs.
+    ///
+    /// [`Row::wrapped`] says a row is continued *below*. Nothing says a row is continued
+    /// from *above*, and once the rows above have been handed over there is nothing left
+    /// on the grid to ask — so a rewrap would chunk that leading fragment as though it
+    /// began a line, and its hard breaks would land `cols` from the fragment's start
+    /// rather than from the line's. The buffer then shows a row wider than the window.
+    ///
+    /// Counted in rows rather than cells because every row that leaves is exactly `cols`
+    /// wide, making `carried * cols` the head's exact width. [`Screen::reflow`] restores
+    /// that property at the new width before it returns, so it holds unconditionally.
+    carried: usize,
 }
 
 impl Screen {
@@ -86,7 +98,32 @@ impl Screen {
             saved: None,
             dirty: vec![true; rows],
             tabs: default_tabs(cols),
+            carried: 0,
         }
+    }
+
+    /// Drop the carry: nothing of the top row's line is in Emacs any more.
+    pub fn forget_carry(&mut self) {
+        self.carried = 0;
+    }
+
+    /// Account for `evicted` rows being handed to Emacs off the top of the grid.
+    ///
+    /// Only for rows that actually reached Emacs: a scroll region discards rows instead,
+    /// and `reflow` refuses to run under one, so the carry is never read in that state.
+    fn carry(&mut self, evicted: &[Row]) {
+        let Some(last) = evicted.last() else { return };
+        if !last.wrapped {
+            // The line ended with the rows that left, so row 0 starts a fresh one.
+            self.carried = 0;
+            return;
+        }
+        let run = evicted.iter().rev().take_while(|row| row.wrapped).count();
+        self.carried = if run == evicted.len() {
+            self.carried + run
+        } else {
+            run
+        };
     }
 
     pub fn height(&self) -> usize {
@@ -231,6 +268,7 @@ impl Screen {
             row.clear(Style::default());
         }
         self.touch_range(top..=bottom);
+        self.carry(&evicted);
         evicted
     }
 
@@ -320,6 +358,9 @@ impl Screen {
                     false => Vec::new(),
                 };
                 self.clear_rows(0..last);
+                // Whatever was on screen has gone to history whole, so the next row 0
+                // starts a line rather than continuing one.
+                self.carried = 0;
                 history
             }
         }
@@ -378,7 +419,14 @@ impl Screen {
             top: self.cursor.row,
             bottom: saved.bottom,
         };
+        // Deleting at row 0 of an unpartitioned screen looks to `scroll_up` exactly like
+        // rows leaving the top, but these are discarded rather than handed to Emacs, so
+        // what Emacs holds — and therefore where the buffer wraps the top line — has not
+        // changed. Letting the carry advance here would have a later rewrap hand over
+        // cells to complete a row that was already complete.
+        let carried = self.carried;
         drop(self.scroll_up(n));
+        self.carried = carried;
         self.region = saved;
     }
 
@@ -464,6 +512,7 @@ impl Screen {
             std::cmp::Ordering::Equal => Vec::new(),
         };
 
+        self.carry(&evicted);
         self.cursor.row = self
             .cursor
             .row
@@ -488,6 +537,10 @@ impl Screen {
     /// with it the round trip — narrowing and widening back returns the original layout,
     /// because the wrap provenance is preserved rather than destroyed.
     fn reflow(&mut self, rows: usize, cols: usize) -> Vec<Row> {
+        // Cells of the first line that are already in Emacs, measured at the width they
+        // were chunked at — which is the one still in force as the grid is read.
+        let mut head = self.carried * self.cols;
+
         // The same bound the shrink path uses, so the blank rows below the content are
         // still absorbed first rather than being rewrapped into a screenful of nothing.
         let keep = self.last_used_row().max(self.cursor.row) + 1;
@@ -520,6 +573,31 @@ impl Screen {
             }
         }
 
+        // Re-align the seam. The head occupies whole visual rows at the old width but
+        // seldom at the new one, and the cells completing its last row belong to the
+        // buffer rather than the grid: left here they would start row 0 partway along a
+        // visual row, putting every hard break below it in the wrong column.
+        let mut history = Vec::new();
+        if head % cols != 0 && !lines.is_empty() {
+            let split = (cols - head % cols).min(lines[0].cells.len());
+            let ends_here = split == lines[0].cells.len();
+            history.push(lines[0].take_front(split, cols, !ends_here));
+            head += split;
+            if cursor_line == 0 {
+                // Inside the fragment the cursor has left the grid; the nearest cell it
+                // can still have is the start of what remains. Less than a row's travel,
+                // and the child redraws on SIGWINCH anyway.
+                cursor_offset = cursor_offset.saturating_sub(split);
+            }
+            if ends_here {
+                lines.remove(0);
+                cursor_line = cursor_line.saturating_sub(1);
+                // The line ended inside the fragment, so a newline follows it and row 0
+                // starts a buffer line of its own.
+                head = 0;
+            }
+        }
+
         let mut grid: Vec<Row> = Vec::new();
         let mut cursor = Cursor::default();
         for (index, line) in lines.iter().enumerate() {
@@ -538,8 +616,14 @@ impl Screen {
         // Rewrapping narrower makes more rows than it consumed; the ones that no longer fit
         // leave the top, which is where history goes from.
         let overflow = grid.len().saturating_sub(rows);
-        let history: Vec<Row> = grid.drain(..overflow).collect();
+        let evicted: Vec<Row> = grid.drain(..overflow).collect();
         grid.resize(rows, Row::new(cols));
+
+        // Set from the re-aligned head first, so the eviction extends it rather than
+        // measuring against the width the head was chunked at.
+        self.carried = head / cols;
+        self.carry(&evicted);
+        history.extend(evicted);
 
         self.rows = grid;
         self.cols = cols;
@@ -643,6 +727,20 @@ impl Logical {
             rows.push(self.row(start, self.cells.len(), cols, false));
         }
         rows
+    }
+
+    /// Split the first `n` cells off the front as a row of `cols`, keeping their marks.
+    fn take_front(&mut self, n: usize, cols: usize, wrapped: bool) -> Row {
+        let row = self.row(0, n, cols, wrapped);
+        self.cells.drain(..n);
+        self.marks.retain_mut(|(at, _)| {
+            let keep = *at >= n;
+            if keep {
+                *at -= n;
+            }
+            keep
+        });
+        row
     }
 
     /// One row from `cells[start..end]`, blank-padded out to `cols`.
@@ -894,6 +992,115 @@ mod tests {
 
         assert_eq!((screen.cursor.row, screen.cursor.col), (1, 2));
         assert!(screen.cursor.wrap_pending);
+    }
+
+    #[test]
+    fn the_carry_counts_the_rows_of_the_top_line_already_in_emacs() {
+        let mut screen = Screen::new(2, 5);
+        write(&mut screen, "aaaaabbbbbccccc");
+        assert_eq!(screen.carried, 1, "one wrapped row has left for Emacs");
+
+        write(&mut screen, "ddddd");
+        assert_eq!(screen.carried, 2);
+    }
+
+    #[test]
+    fn the_carry_resets_when_the_line_that_left_had_ended() {
+        let mut screen = Screen::new(2, 5);
+        write(&mut screen, "aaaaabbbbbccccc");
+        screen.carriage_return();
+        screen.linefeed();
+        assert_eq!(screen.carried, 2);
+
+        write(&mut screen, "new");
+        screen.carriage_return();
+        screen.linefeed();
+
+        assert_eq!(
+            screen.carried, 0,
+            "the row that left ended its line, so the top row begins one"
+        );
+    }
+
+    #[test]
+    fn deleting_lines_at_the_top_leaves_the_carry_alone() {
+        let mut screen = Screen::new(2, 5);
+        write(&mut screen, "aaaaabbbbbccccc");
+        assert_eq!(screen.carried, 1);
+
+        screen.goto(0, 0);
+        screen.delete_lines(1);
+
+        assert_eq!(
+            screen.carried, 1,
+            "deleted rows are discarded, so Emacs still holds just the one"
+        );
+    }
+
+    #[test]
+    fn clearing_the_display_drops_the_carry() {
+        let mut screen = Screen::new(2, 5);
+        write(&mut screen, "aaaaabbbbbccccc");
+        assert_eq!(screen.carried, 1);
+
+        screen.erase_display(Erase::All);
+
+        assert_eq!(screen.carried, 0);
+    }
+
+    /// The head occupies whole visual rows at the old width and seldom at the new one.
+    /// The cells that finish its last row belong to the buffer, so they leave — otherwise
+    /// row 0 would begin partway along a visual row and every break below it would be
+    /// a column out.
+    #[test]
+    fn a_rewrap_hands_over_the_cells_that_complete_the_head() {
+        let mut screen = Screen::new(4, 10);
+        // 59 cells of one line through a 4x10 grid: two rows have left for Emacs.
+        write(&mut screen, &"0".repeat(10));
+        write(&mut screen, &"1".repeat(10));
+        write(&mut screen, &"2".repeat(10));
+        write(&mut screen, &"3".repeat(10));
+        write(&mut screen, &"4".repeat(10));
+        write(&mut screen, &"5".repeat(9));
+        assert_eq!(screen.carried, 2);
+
+        let history = screen.resize(4, 30, Resize::Rewrap);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].to_text(), "2".repeat(10));
+        assert!(history[0].wrapped, "the line goes on below it");
+        assert_eq!(
+            screen.carried, 1,
+            "the head is now exactly one visual row at the new width"
+        );
+        assert_eq!(
+            screen.row(0).unwrap().to_text(),
+            format!("{}{}{}", "3".repeat(10), "4".repeat(10), "5".repeat(9)),
+            "row 0 begins a visual row of its own"
+        );
+    }
+
+    #[test]
+    fn a_rewrap_hands_over_nothing_when_the_head_already_fits_the_new_width() {
+        let mut screen = Screen::new(4, 10);
+        write(&mut screen, &"0".repeat(10));
+        write(&mut screen, &"1".repeat(10));
+        write(&mut screen, &"2".repeat(10));
+        write(&mut screen, &"3".repeat(10));
+        write(&mut screen, &"4".repeat(10));
+        write(&mut screen, &"5".repeat(9));
+        assert_eq!(screen.carried, 2);
+
+        // Tall enough that the rewrap does not also have to evict for want of room, so
+        // an empty history means no re-alignment rather than nothing having happened.
+        let history = screen.resize(8, 5, Resize::Rewrap);
+
+        assert!(
+            history.is_empty(),
+            "20 cells of head divide evenly into 5-column rows"
+        );
+        assert_eq!(screen.carried, 4);
+        assert_eq!(screen.row(0).unwrap().to_text(), "22222");
     }
 
     #[test]
