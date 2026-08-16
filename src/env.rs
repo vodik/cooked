@@ -511,8 +511,11 @@ mod tests {
 
     #[test]
     fn the_abi_prefix_is_ordered() {
-        assert!(Env::MINIMAL_ABI > 0);
-        assert!(Env::MINIMAL_ABI < Env::REQUIRED_ABI);
+        // `const` blocks: both sides are constants, so this is a property of the source
+        // rather than of a run, and it should fail the build rather than wait for someone
+        // to run the tests. The third cannot join them — `assert_eq!` is not const.
+        const { assert!(Env::MINIMAL_ABI > 0) };
+        const { assert!(Env::MINIMAL_ABI < Env::REQUIRED_ABI) };
         assert_eq!(Env::REQUIRED_ABI as usize, size_of::<Raw>());
     }
 }

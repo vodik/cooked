@@ -1297,15 +1297,36 @@ deletes the row before rewriting it, which empties it.
 On a terminal frame there is no fringe, so the bitmap could never be drawn and the
 character was disappearing with nothing shown in its place.  There a marker has to
 cost a column, exactly as `truncate-lines' spends the last one on `$', so the
-`display' property on CUT is right — it just has to name something visible."
+`display' property on CUT is right — it just has to name something visible.
+
+Known gap: a graphical frame whose window has no right fringe (`fringe-mode' 0,
+or a side window that gave it up) has nowhere to draw the bitmap, so the marker is
+invisible there.  Emacs has the same problem with its own indicators and solves it
+per-window; this runs per row during a drain, for a buffer that can be in several
+windows at once with different fringes, so there is no one answer to give."
   (if (display-graphic-p)
       (let ((overlay (make-overlay cut (1+ cut))))
         (overlay-put overlay 'evaporate t)
         (overlay-put overlay 'cooked-truncation t)
         (overlay-put overlay 'after-string
-                     (propertize " " 'display '(right-fringe right-truncation))))
+                     (propertize " " 'display
+                                 (list 'right-fringe (cooked--truncation-bitmap)))))
     (put-text-property cut (1+ cut) 'display
                        (string (cooked--truncation-glyph)))))
+
+(defun cooked--truncation-bitmap ()
+  "The fringe bitmap Emacs marks a line truncated on the right with.
+
+Taken from `fringe-indicator-alist' rather than named outright, so a user who has
+rebound the indicator sees their own choice here too.  Its entry is (LEFT RIGHT)
+and we are always the right-hand end.
+
+This was `right-truncation' for a long time, which is not a fringe bitmap and
+never was — `truncation' is the name of the *indicator*, `right-arrow' the bitmap
+it resolves to — so the marker silently drew nothing at all."
+  (let ((indicator (cdr (assq 'truncation fringe-indicator-alist))))
+    (or (if (consp indicator) (nth 1 indicator) indicator)
+        'right-arrow)))
 
 (defun cooked--truncation-glyph ()
   "The character a terminal frame marks a truncated line with.

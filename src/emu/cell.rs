@@ -115,11 +115,13 @@ impl Style {
     /// bar's colour is then the foreground; dropping the flag would erase the drawing.
     pub fn erase(self) -> Self {
         match self.attrs.contains(Attrs::REVERSE) {
+            // Every field named, so no `..Self::default()` tail: `Style` has exactly these
+            // three, and a tail that updates nothing is a lint rather than a hedge against
+            // a fourth arriving later.
             true => Self {
                 fg: self.fg,
                 bg: self.bg,
                 attrs: Attrs::REVERSE,
-                ..Self::default()
             },
             false => Self {
                 bg: self.bg,
@@ -194,6 +196,17 @@ pub struct Row {
     /// overwhelming case, and an inline `Vec` put 24 bytes on every `Row` — rows are
     /// cloned on every scroll, and that alone measured as a 12% loss on the repaint
     /// benchmark before it was boxed away.
+    ///
+    /// `clippy::box_collection` reads this as a pointless second allocation, which it
+    /// would be if the point were the heap. It is not: the point is the *inline* size of
+    /// every `Row`, and only `Box` gets there. `Option<Vec<_>>` is 24 bytes and
+    /// `Option<Box<[_]>>` 16, while `Option<Box<Vec<_>>>` is 8 — one null-optimised
+    /// pointer — and the allocation the lint objects to only happens on the rare row that
+    /// has an underline colour at all.
+    #[allow(
+        clippy::box_collection,
+        reason = "8-byte niche beats one rare allocation"
+    )]
     underlines: Option<Box<Vec<(u16, Color)>>>,
     pub wrapped: bool,
 }

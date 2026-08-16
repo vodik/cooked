@@ -2489,8 +2489,11 @@ fast path above must not apply -- a pure-ASCII row still gets trimmed there."
       (should-not (get-text-property (1- (line-end-position)) 'display))
       (let ((overlay (car (overlays-in (1- (line-end-position)) (line-end-position)))))
         (should (overlay-get overlay 'cooked-truncation))
-        (should (equal (get-text-property 0 'display (overlay-get overlay 'after-string))
-                       '(right-fringe right-truncation)))))))
+        (let ((spec (get-text-property 0 'display (overlay-get overlay 'after-string))))
+          (should (eq (car spec) 'right-fringe))
+          ;; A real bitmap, not just a plausible-looking name: `right-truncation' was
+          ;; not one, so the marker drew nothing for as long as it was spelled that way.
+          (should (memq (cadr spec) fringe-bitmaps)))))))
 
 (ert-deftest cooked-guard-row-width-does-nothing-without-rejoin ()
   "When `cooked-rejoin-wrapped-lines' is nil, `truncate-lines' is already t

@@ -559,7 +559,10 @@ mod tests {
             assert!(classify(ch).is_some(), "{ch:?} must classify");
         }
         // ...without swallowing the double-line block that starts immediately after.
-        assert_eq!(classify('\u{2550}').unwrap().edge(Edge::Left), Weight::Double);
+        assert_eq!(
+            classify('\u{2550}').unwrap().edge(Edge::Left),
+            Weight::Double
+        );
         assert_eq!(classify('\u{2550}').unwrap().dashes(), 0);
     }
 

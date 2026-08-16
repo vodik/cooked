@@ -9,6 +9,6 @@ pub use cell::{Attrs, Cell, Color, Row, Run, Style};
 pub use glyph::BoxGlyph;
 pub use screen::{Cursor, Erase, Screen};
 pub use term::{
-    Anchor, BACKLOG_HIGH_WATER, CursorShape, SYNC_TIMEOUT, Delta, Event, KeyEncoding, Mouse, Scrolled, Term,
-    osc_reply,
+    Anchor, BACKLOG_HIGH_WATER, CursorShape, Delta, Event, KeyEncoding, Mouse, SYNC_TIMEOUT,
+    Scrolled, Term, osc_reply,
 };
