@@ -124,7 +124,9 @@ the same table on the Rust side.")
 (defvar-local cooked--cols 80)
 (defvar-local cooked--screen-start nil
   "Marker at the first line of the live screen; everything before is scrollback.")
-(defvar-local cooked--cursor '(0 0 t))
+(defvar-local cooked--cursor '(0 0 t block)
+  "The child's cursor as (ROW COL VISIBLE SHAPE).
+SHAPE is `block', `underline' or `bar', from DECSCUSR.")
 (defvar-local cooked--alt nil)
 (defvar-local cooked--narrowed nil
   "Whether the restriction in force is ours, from `cooked-alt-screen-pin'.")
@@ -1014,6 +1016,25 @@ insertion point is above the region `cooked-alt-screen-pin' confines us to."
 
 ;;;; The child's cursor, while Emacs has wandered off it
 
+(defcustom cooked-cursor-shapes
+  '((block . t) (underline . hbar) (bar . (bar . 2)))
+  "How DECSCUSR shapes map onto `cursor-type'.
+
+The child names a shape with `CSI Ps SP q'; vim and fish's vi-mode use it to
+show which mode they are in.  Only the shape is honoured — DECSCUSR also
+distinguishes blinking from steady, and whether your cursor blinks is
+`blink-cursor-mode', which is yours to set and not the child's."
+  :type '(alist :key-type symbol :value-type sexp)
+  :group 'cooked)
+
+(defun cooked--cursor-type ()
+  "The `cursor-type' for the shape the child last asked for."
+  (alist-get (or (nth 3 cooked--cursor) 'block) cooked-cursor-shapes t))
+
+;; The ghost cursor below deliberately does not follow the shape.  It is hollow to
+;; say "not receiving your keystrokes", and that reading comes from the hollowness
+;; rather than from the outline — Emacs has no meaningful hollow bar to draw anyway.
+
 (defface cooked-ghost-cursor
   '((t :box (:line-width (-1 . -1))))
   "Face marking where the child's cursor is while point is somewhere else.
@@ -1495,9 +1516,9 @@ window that fell behind."
     ;; Written only on an actual change: reassigning it to the same value on every
     ;; drain was perturbing the cursor's blink phase on each redraw, one more small
     ;; contributor to flicker on a line the child rewrites rapidly.
-    (let ((visible (and (nth 2 cooked--cursor) t)))
-      (unless (eq cursor-type visible)
-        (setq-local cursor-type visible)))
+    (let ((shape (and (nth 2 cooked--cursor) (cooked--cursor-type))))
+      (unless (equal cursor-type shape)
+        (setq-local cursor-type shape)))
     (cooked--restore-pending-input pending)
     (cooked--protect (if (and (cooked--input-state-p) cooked--input-start)
                         (marker-position cooked--input-start)

@@ -337,6 +337,7 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
         env.into_lisp(update.delta.cursor.row)?,
         env.into_lisp(update.delta.cursor.col)?,
         env.into_lisp(update.delta.cursor_visible)?,
+        env.intern(update.delta.cursor_shape.as_str())?,
     ])?;
     let events = update
         .delta

@@ -14,6 +14,38 @@ use vte::{Params, Parser, Perform};
 /// `row` is *absolute*: screen row 0 is row [`State::evicted_total`], so the coordinate
 /// stays meaningful after the marked row scrolls away, which a screen row does not.
 ///
+/// The cursor shape a child asked for with DECSCUSR (`CSI Ps SP q`).
+///
+/// The blinking and steady spellings collapse into one value each: whether a cursor
+/// blinks is `blink-cursor-mode', which belongs to the user and not to the child — the
+/// same reasoning that keeps DEC mode 12 unimplemented and `cvvis' out of our terminfo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Underline,
+    Bar,
+}
+
+impl CursorShape {
+    fn from_param(n: usize) -> Option<Self> {
+        match n {
+            0..=2 => Some(Self::Block),
+            3 | 4 => Some(Self::Underline),
+            5 | 6 => Some(Self::Bar),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Underline => "underline",
+            Self::Bar => "bar",
+        }
+    }
+}
+
 /// Recorded when the mark is parsed rather than read off the drain, because the drain
 /// carries the *end-of-drain* cursor — a different place entirely once more than one
 /// command lands in a single drain, which is exactly what a fast script does.
@@ -148,6 +180,7 @@ pub struct Delta {
     pub rows: Vec<(usize, Vec<Run>)>,
     pub cursor: Cursor,
     pub cursor_visible: bool,
+    pub cursor_shape: CursorShape,
     pub alt: bool,
     /// DECCKM: cursor keys must be sent as SS3 (`ESC O A`), not CSI (`ESC [ A`).
     /// ncurses turns this on via `smkx`, and terminfo's `kcuu1` assumes it.
@@ -274,6 +307,7 @@ struct State {
     evicted_total: usize,
     events: Vec<Event>,
     cursor_visible: bool,
+    cursor_shape: CursorShape,
     bracketed_paste: bool,
     mouse: Mouse,
     origin_mode: bool,
@@ -312,6 +346,7 @@ impl State {
             evicted_total: 0,
             events: Vec::new(),
             cursor_visible: true,
+            cursor_shape: CursorShape::default(),
             bracketed_paste: false,
             mouse: Mouse::default(),
             origin_mode: false,
@@ -423,6 +458,7 @@ impl State {
         let scrolled_base = self.evicted_total - scrolled.len();
         let events = std::mem::take(&mut self.events);
         let (cursor_visible, alt, app_cursor) = (self.cursor_visible, self.on_alt, self.app_cursor);
+        let cursor_shape = self.cursor_shape;
         let keys = self.key_encoding();
         let screen = self.screen();
         Delta {
@@ -434,6 +470,7 @@ impl State {
                 .collect(),
             cursor: screen.cursor,
             cursor_visible,
+            cursor_shape,
             alt,
             app_cursor,
             keys,
@@ -522,6 +559,7 @@ impl State {
         self.app_cursor = false;
         self.app_keypad = false;
         self.cursor_visible = true;
+        self.cursor_shape = CursorShape::default();
         self.bracketed_paste = false;
         self.newline_mode = false;
         self.last_print = None;
@@ -849,6 +887,13 @@ impl Perform for State {
                 }
             }
             (None, 'Z') => self.screen_mut().back_tab(arg(params, 0, 1)),
+            // DECSCUSR. A level, not an event: the shape is state Emacs renders from,
+            // so it rides the drain rather than arriving twice.
+            (Some(b' '), 'q') => {
+                if let Some(shape) = CursorShape::from_param(arg(params, 0, 1)) {
+                    self.cursor_shape = shape;
+                }
+            }
             // DECSTR. Unlike RIS this keeps the screen and the scrollback.
             (Some(b'!'), 'p') => self.soft_reset(),
             // Primary DA. We answer for what we implement and nothing else: VT220 level
@@ -1087,6 +1132,33 @@ mod tests {
             t.screen().row(0).unwrap().runs()[0].underline,
             Color::Default
         );
+    }
+
+    #[test]
+    fn decscusr_names_a_shape() {
+        for (input, want) in [
+            (&b"\x1b[ q"[..], CursorShape::Block),
+            (&b"\x1b[2 q"[..], CursorShape::Block),
+            (&b"\x1b[3 q"[..], CursorShape::Underline),
+            (&b"\x1b[4 q"[..], CursorShape::Underline),
+            (&b"\x1b[5 q"[..], CursorShape::Bar),
+            (&b"\x1b[6 q"[..], CursorShape::Bar),
+        ] {
+            let mut t = term(2, 8, input);
+            assert_eq!(t.drain().cursor_shape, want, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_cursor_shape_is_left_alone() {
+        let mut t = term(2, 8, b"\x1b[5 q\x1b[9 q");
+        assert_eq!(t.drain().cursor_shape, CursorShape::Bar);
+    }
+
+    #[test]
+    fn a_soft_reset_returns_the_cursor_to_a_block() {
+        let mut t = term(2, 8, b"\x1b[5 q\x1b[!p");
+        assert_eq!(t.drain().cursor_shape, CursorShape::Block);
     }
 
     #[test]

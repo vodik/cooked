@@ -1152,6 +1152,21 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
     (should (cooked-tests--settle (lambda () (equal cooked--title "my-title"))))
     (should (string-match-p "my-title" (cooked--mode-line)))))
 
+(ert-deftest cooked-cursor-shape-follows-decscusr ()
+  "vim and fish vi-mode signal their mode with `CSI Ps SP q'."
+  (cooked-tests--with-session
+   '("/bin/sh" "-c" "printf '\\033[5 q'; sleep 5")
+   (should (cooked-tests--settle (lambda () (eq (nth 3 cooked--cursor) 'bar))))
+   (should (equal cursor-type '(bar . 2)))))
+
+(ert-deftest cooked-cursor-shape-does-not-fight-an-invisible-cursor ()
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--cursor '(0 0 nil bar))
+    (should (null (and (nth 2 cooked--cursor) (cooked--cursor-type))))
+    (setq-local cooked--cursor '(0 0 t underline))
+    (should (eq (cooked--cursor-type) 'hbar))))
+
 (ert-deftest cooked-underline-face-keeps-its-old-shape-when-plain ()
   "A plain underline must still produce `:underline t', not a plist."
   (with-temp-buffer
