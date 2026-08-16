@@ -132,6 +132,14 @@ see `cooked--literal-codes' for why this cannot simply be assumed.")
 (defvar-local cooked--mode 'cooked)
 (defvar-local cooked--exit nil)
 (defvar-local cooked--face-cache nil)
+(defvar-local cooked--box-ascent-cache nil
+  "Line-box height -> the `:ascent' that lands a bitmap on it, per buffer.
+
+Separate from `cooked--box-glyph-cache' because it memoizes a `font-info' call
+rather than a bitmap, and that call is far too costly to repeat per character
+on a full-screen repaint.  Keyed by height alone: the answer depends only on
+the font's ascent relative to the line box.")
+
 (defvar-local cooked--box-glyph-cache nil
   "Descriptor+pixel-size -> raw XBM bitmap, memoized per buffer.
 
@@ -377,8 +385,14 @@ theme change could make stale."
         (setq y (1+ y))))))
 
 (defun cooked--box-bitmap-pack (grid width height)
-  "Pack boolean GRID into the (WIDTH HEIGHT DATA) shape `create-image' wants for
-an inline `xbm', DATA a unibyte string with each row byte-aligned, LSB first."
+  "Pack boolean GRID into (WIDTH HEIGHT DATA) for `cooked--box-glyph-image'.
+
+DATA is a unibyte string with each row byte-aligned, LSB first.  This triple is
+this file's own shape, not an image spec: `create-image' takes DATA as `:data'
+and needs WIDTH and HEIGHT restated as `:data-width'/`:data-height' alongside a
+`:stride'.  Handing it the triple instead yields an invalid spec, which Emacs
+resolves by drawing the underlying character with the font — leaving the
+feature looking switched off rather than broken."
   (let* ((row-bytes (ceiling width 8))
          (data (make-string (* row-bytes height) 0)))
     (dotimes (y height)
@@ -536,20 +550,50 @@ lower-left=4, lower-right=8), for the ten 2x2 quadrant glyphs."
     (cooked--box-bitmap-pack grid width height)))
 
 (defun cooked--box-glyph-bits (bits window)
-  "Cached raw bitmap for glyph descriptor BITS at WINDOW's current font size.
+  "Cached raw bitmap for glyph descriptor BITS at WINDOW's current cell size.
 
-Sized from `window-font-width'/`window-font-height' rather than
+Sized from `window-font-width'/`window-default-line-height' rather than
 `frame-char-width'/`frame-char-height': the latter ignore `text-scale-mode's
 per-buffer face remapping, so zooming just this buffer would desync bitmap
-size from font size — the very misalignment this feature exists to remove."
+size from font size — the very misalignment this feature exists to remove.
+
+Height comes from `window-default-line-height', not `window-font-height', for
+the reason `cooked--window-rows' already gives: the line box is what a row
+actually occupies and includes `line-spacing', while the font height does not.
+A bitmap sized to the font leaves exactly `line-spacing' pixels of background
+beneath every glyph, breaking the continuous vertical borders this exists to
+produce — the same defect `indent-bars' documents for box characters."
   (let* ((width (window-font-width window 'default))
-         (height (window-font-height window 'default))
+         (height (window-default-line-height window))
          (key (list bits width height)))
     (or (gethash key cooked--box-glyph-cache)
         (puthash key (cooked--render-box-glyph bits width height) cooked--box-glyph-cache))))
 
+(defun cooked--box-glyph-ascent (window height)
+  "`:ascent' placing a HEIGHT-pixel bitmap exactly on WINDOW's line box.
+
+A percentage rather than `center' now that the bitmap spans the whole line box:
+`center' balances the image around the text's midline, which splits any
+`line-spacing' evenly above and below and lifts the glyph off the box it was
+sized to fill.  Anchoring the font's own ascent instead keeps the extra space
+where Emacs actually puts it — below the baseline.
+
+Falls back to `center' if the font reports no metrics, which is the previous
+behaviour and still correct whenever `line-spacing' is nil."
+  (unless cooked--box-ascent-cache ; `cooked--rescale-box-glyphs' is not error-guarded
+    (setq cooked--box-ascent-cache (make-hash-table :test #'equal)))
+  (let ((key (list 'ascent height)))
+    (or (gethash key cooked--box-ascent-cache)
+        (puthash key
+                 (let ((base (ignore-errors
+                               (aref (font-info (face-font 'default nil window)) 8))))
+                   (if (and (natnump base) (> height 0) (<= base height))
+                       (round (* 100 base) height)
+                     'center))
+                 cooked--box-ascent-cache))))
+
 (defun cooked--box-glyph-image (bits fg bg attrs &optional window)
-  "Image spec for glyph BITS, colored like `cooked--face' from FG/BG/ATTRS.
+  "Image spec for glyph BITS, colored from FG/BG/ATTRS like `cooked--face'.
 
 `:scale 1' is load-bearing, not a default being restated.  `image-scaling-factor'
 is `auto', which scales every image by cell-width/10 once a cell is wider than
@@ -561,8 +605,18 @@ the strokes blur into something no better than the font glyphs this replaces."
          (reverse (/= 0 (logand attrs cooked--attr-reverse)))
          (fg* (or (cooked--color (if reverse bg fg)) (face-foreground 'default nil t)))
          (bg* (or (cooked--color (if reverse fg bg)) (face-background 'default nil t))))
-    (create-image (cooked--box-glyph-bits bits window) 'xbm t
-                 :foreground fg* :background bg* :ascent 'center :scale 1)))
+    ;; `:data-width'/`:data-height'/`:stride' are what an inline `xbm' actually
+    ;; requires when `:data' is raw bits, per (elisp) XBM Images -- and they are not
+    ;; interchangeable with `:width'/`:height', which scale an already-decoded image
+    ;; rather than describe the bit layout.  Emacs accepts only three `:data' shapes:
+    ;; a vector of per-row strings, a whole XBM *file* in a string, or bare bits with
+    ;; these three properties.  A packed (WIDTH HEIGHT DATA) list is none of them.
+    (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits bits window)))
+      (create-image data 'xbm t
+                    :data-width width :data-height height
+                    :stride (* 8 (ceiling width 8)) ; bits per row, byte-aligned
+                    :foreground fg* :background bg* :scale 1
+                    :ascent (cooked--box-glyph-ascent window height)))))
 
 (defun cooked--overlay-box-glyphs (start glyphs fg bg attrs)
   "Overlay a generated bitmap `display' property on each glyph in GLYPHS.
@@ -959,6 +1013,7 @@ EXTRA-ENV is an alist prepended to the child's environment."
   (cooked--load-module)
   (setq cooked--face-cache (make-hash-table :test #'equal))
   (setq cooked--box-glyph-cache (make-hash-table :test #'equal))
+  (setq cooked--box-ascent-cache (make-hash-table :test #'equal))
   (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
     (setq cooked--rows rows cooked--cols cols))
   (let ((inhibit-read-only t))

@@ -1576,6 +1576,29 @@ must not take the binding away."
 ;; on most GUI font sizes.  These bitmaps are generated at exactly the cell size, so
 ;; any scaling breaks the pixel-exactness the whole feature exists for — the glyphs
 ;; stop meeting at cell boundaries and blur back into looking like font characters.
+;; An inline `xbm' whose `:data' is raw bits is only a valid spec with
+;; `:data-width', `:data-height' and `:stride' (see (elisp) XBM Images).  Get that
+;; wrong and Emacs rejects the whole spec and silently falls back to drawing the
+;; character with the font, so every other box-drawing test here still passes while
+;; nothing renders.  Asserted on the spec rather than via `image-size' because that
+;; needs a graphic display and this suite runs in batch.
+(ert-deftest cooked-box-drawing-image-spec-is-a-valid-inline-xbm ()
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let* ((image (get-text-property (point-min) 'display))
+           (plist (cdr image))
+           (width (plist-get plist :data-width)))
+      (should (stringp (plist-get plist :data)))
+      (should (natnump width))
+      (should (natnump (plist-get plist :data-height)))
+      ;; Stride is bits per row, rounded up to a whole number of bytes.
+      (should (equal (plist-get plist :stride) (* 8 (ceiling width 8))))
+      ;; The data must hold at least stride*height bits.
+      (should (>= (* 8 (length (plist-get plist :data)))
+                  (* (plist-get plist :stride) (plist-get plist :data-height)))))))
+
 (ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
