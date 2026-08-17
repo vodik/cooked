@@ -167,12 +167,25 @@ src/pty.rs       pty ownership via nix, setsid/TIOCSCTTY, termios -> Mode, bound
 src/emu/         cell/row/style, grid with damage tracking, vte-driven VT parser
 src/session.rs   reader thread, coalesced wakeups, explicit idempotent shutdown
 src/lib.rs       the Lisp-facing surface
-lisp/            cooked.el          core and rendering
-                 cooked-mode.el     interaction
-                 cooked-evil.el     opt-in
-                 cooked-osc-eval.el opt-in
+lisp/            cooked-glyph.el      box-drawing rasterizer; no terminal in it
+                 cooked.el            state, rendering, the drain, OSC handlers
+                 cooked-completion.el both completion backends
+                 cooked-mode.el       keymaps, commands, starting a shell
+                 cooked-evil.el       opt-in
+                 cooked-osc-eval.el   opt-in
 shell-integration/  bash, zsh, fish
+tests/           cooked-tests.el loads the suite; the rest are split by subject
 ```
+
+The Lisp files stack in that order, and the direction is load-bearing: `cooked.el`
+owns the state and the policy derived from it — including who owns the keyboard,
+which rendering has to ask on every drain — while `cooked-mode.el` binds keys to
+it. Everything `cooked.el` calls upward is a notification that something changed,
+never a question, and the list of those is at the top of the file.
+
+`cooked-glyph.el` sits below all of it and knows nothing about terminals: a shape
+descriptor and a pixel size in, raw XBM bits out, which is why the pixel-level
+tests can assert against it without starting a session.
 
 Scrollback lives in the Emacs buffer, not in Rust: rows leaving the emulator's screen are
 handed over once and become ordinary buffer text.
@@ -205,7 +218,10 @@ emacs -Q --batch -L lisp -L tests -l ert \
 ```
 
 The end-to-end suite drives real children: `cat` for the cooked path, `stty -echo` for
-secrets, and a real interactive `bash` for the OSC 133 path.
+secrets, and a real interactive `bash` for the OSC 133 path. Each subject also loads
+on its own, which is what you want while working on one — swap `cooked-tests.el` for
+`cooked-tests-glyph.el`, `-render.el`, `-input.el`, `-osc.el`, `-completion.el` or
+`-session.el`.
 
 ## Status
 

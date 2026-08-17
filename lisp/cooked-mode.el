@@ -97,13 +97,7 @@ Programs differ on whether they clear ECHO before or after printing the prompt;
 this lets the prompt text arrive first."
   :type 'number :group 'cooked)
 
-(defvar-local cooked--input-start nil "Marker before the pending input.")
-(defvar-local cooked--input-end nil "Marker after the pending input.")
-(defvar-local cooked--semantic nil "OSC 133 state: nil, `prompt', `input' or `output'.")
 (defvar-local cooked--secret-timer nil)
-(defvar-local cooked--command-start nil "Marker where the running command's output began.")
-(defvar-local cooked--commands nil
-  "Finished command records, newest first: (:start MARKER :end MARKER :code N).")
 (defvar-local cooked--history nil "Submitted input lines, newest first.")
 (defvar-local cooked--history-index nil "Position in `cooked--history', or nil.")
 (defvar-local cooked--history-stash nil "Input set aside while browsing history.")
@@ -184,27 +178,28 @@ every capital into a lowercase letter."
   ;; such as `S-up' it is what parses and caches `event-symbol-elements', which
   ;; `event-basic-type' only reads.  Ask the other way round and the first press of
   ;; every modified key decodes as nil.
+  ;; Each table is consulted once, through `if-let*', rather than being asked
+  ;; whether it has the key and then asked again for the value.  The tables are
+  ;; tried in order of how specific their spelling is, ending at a plain
+  ;; character; a key in none of them encodes as nil and is not forwarded.
   (let* ((mods (event-modifiers event))
          (basic (event-basic-type event))
-         (param (cooked--modifier-param mods)))
+         (param (cooked--modifier-param mods))
+         (modified (> param 1)))
     (cond
-     ((assq basic cooked--csi-finals)
-      (let ((final (cdr (assq basic cooked--csi-finals))))
-        (cond ((> param 1) (format "\e[1;%d%s" param final))
-              (cooked--app-cursor (concat "\eO" final))
-              (t (concat "\e[" final)))))
+     ((if-let* ((final (alist-get basic cooked--csi-finals)))
+          (cond (modified (format "\e[1;%d%s" param final))
+                (cooked--app-cursor (concat "\eO" final))
+                (t (concat "\e[" final)))))
      ;; F1-F4 leave SS3 behind the moment they are modified.
-     ((assq basic cooked--ss3-finals)
-      (let ((final (cdr (assq basic cooked--ss3-finals))))
-        (if (> param 1) (format "\e[1;%d%s" param final) (concat "\eO" final))))
-     ((assq basic cooked--tilde-numbers)
-      (let ((n (cdr (assq basic cooked--tilde-numbers))))
-        (if (> param 1) (format "\e[%d;%d~" n param) (format "\e[%d~" n))))
-     ((assq basic cooked--literal-codes)
-      (cooked--encode-literal basic (cdr (assq basic cooked--literal-codes)) param mods))
-     ((assq basic cooked--special-keys)
-      (let ((seq (cdr (assq basic cooked--special-keys))))
-        (if (memq 'meta mods) (concat "\e" seq) seq)))
+     ((if-let* ((final (alist-get basic cooked--ss3-finals)))
+          (if modified (format "\e[1;%d%s" param final) (concat "\eO" final))))
+     ((if-let* ((n (alist-get basic cooked--tilde-numbers)))
+          (if modified (format "\e[%d;%d~" n param) (format "\e[%d~" n))))
+     ((if-let* ((code (alist-get basic cooked--literal-codes)))
+          (cooked--encode-literal basic code param mods)))
+     ((if-let* ((seq (alist-get basic cooked--special-keys)))
+          (if (memq 'meta mods) (concat "\e" seq) seq)))
      ((characterp basic)
       (let ((char (cond ((memq 'control mods) (logand (upcase basic) #x1f))
                         ((memq 'shift mods) (upcase basic))
@@ -239,13 +234,13 @@ whatever Emacs is showing, and the ghost has been marking that spot."
   (interactive)
   (when-let* ((bytes (cooked--encode-event last-command-event)))
     (cooked--snap-to-cursor)
-    (cooked--send cooked--session bytes)))
+    (cooked--send-to-child bytes)))
 
 (defun cooked-send-string (string)
   "Send STRING to the child."
   (interactive "sSend: ")
   (cooked--snap-to-cursor)
-  (cooked--send cooked--session string))
+  (cooked--send-to-child string))
 
 (defcustom cooked-paste-confirm-lines t
   "Whether to confirm a multi-line paste the child cannot tell is a paste.
@@ -275,7 +270,7 @@ where the paste ends; nothing in the middle gets to say otherwise."
   (cond
    ((cooked--bracketed-paste-p cooked--session)
     (cooked--snap-to-cursor)
-    (cooked--send cooked--session (cooked--bracketed-paste text)))
+    (cooked--send-to-child (cooked--bracketed-paste text)))
    ((and cooked-paste-confirm-lines
          (string-search "\n" text)
          (not (y-or-n-p
@@ -287,7 +282,7 @@ where the paste ends; nothing in the middle gets to say otherwise."
     (cooked--snap-to-cursor)
     ;; Newlines go as carriage returns because that is what the Return key
     ;; transmits, and a line editor bound to CR is what is reading them.
-    (cooked--send cooked--session (string-replace "\n" "\r" text)))))
+    (cooked--send-to-child (string-replace "\n" "\r" text)))))
 
 (defun cooked-paste ()
   "Paste the most recent kill.
@@ -306,7 +301,7 @@ This is the way to get Emacs' kill ring — and so the system clipboard, which
 program's own paste key pastes its own registers, which is a different thing
 entirely and cannot reach anything Emacs copied."
   (interactive)
-  (unless (and cooked--session (cooked--live-p cooked--session))
+  (unless (cooked--live-session)
     (user-error "No live session"))
   (if (cooked--input-state-p)
       (call-interactively #'yank)
@@ -403,18 +398,17 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
                                 (not (cooked--input-state-p)))))
 
 (defun cooked--mouse-cell (event)
-  "Screen row and column of EVENT, or nil if it is outside the screen."
+  "Screen row and column of EVENT, or nil if it is outside the screen.
+
+`cooked--screen-cell' rather than a count of lines and columns from the marker:
+row 0 does not always begin its buffer line — when the row handed to scrollback
+last was wrapped, `cooked--screen-start' sits mid-line — and a plain
+`current-column' there counts the characters ahead of the marker, which are
+scrollback and not on the screen at all.  Reporting those to the child puts
+every click on row 0 to the right of where it was made."
   (when-let* ((posn (event-start event))
               (pos (posn-point posn)))
-    (when (and cooked--screen-start (>= pos (marker-position cooked--screen-start)))
-      (save-excursion
-        (goto-char pos)
-        (cons (count-lines (marker-position cooked--screen-start) (line-beginning-position))
-              (current-column))))))
-
-(defun cooked--cursor-cell ()
-  "The cursor's own screen cell, as a fallback position for a wheel notch."
-  (cons (nth 0 cooked--cursor) (nth 1 cooked--cursor)))
+    (cooked--screen-cell pos)))
 
 (defun cooked--mouse-report (button row col pressed)
   "Encode a mouse report, preferring SGR because X10 cannot count past 223."
@@ -450,7 +444,7 @@ spelling a pager would understand, so it sends nothing."
      ;; Checked before the mouse report: `cooked--alt-scroll-p' is already false
      ;; when the child asked for the mouse, so the two can never both apply.
      ((and wheel button (cooked--alt-scroll-active-p))
-      (cooked--send cooked--session (cooked--alt-scroll-keys button)))
+      (cooked--send-to-child (cooked--alt-scroll-keys button)))
      ((null cell)
       (cooked--mouse-fallback event))
       ;; A wheel notch is always a press.  Emacs reports it as a click, which the
@@ -459,11 +453,11 @@ spelling a pager would understand, so it sends nothing."
       ;; on the way to a child that had asked for it.
      (t
       (let ((pressed (or wheel (not (memq 'click (event-modifiers event))))))
-        (cooked--send cooked--session
+        (cooked--send-to-child
                       (cooked--mouse-report button (car cell) (cdr cell) pressed)))))))
 
 (defun cooked--mouse-fallback (event)
-  "Run whatever EVENT would do without eterm's binding."
+  "Run whatever EVENT would do without cooked's binding."
   (let ((command (lookup-key global-map (this-command-keys-vector))))
     (when (commandp command)
       (setq last-command-event event
@@ -532,98 +526,6 @@ spelling a pager would understand, so it sends nothing."
     map)
   "Keymap while Emacs owns the input line.")
 
-;;;; Pending input
-
-(defun cooked--policy ()
-  "How the buffer should behave right now: `cooked', `raw' or `alt'.
-
-Derived rather than reported, because no single source knows the answer.  The
-alt screen comes from the child's own output, the line discipline is sampled
-from termios, and the prompt state comes from OSC 133 -- and the three
-disagree routinely.  A shell sits in termios raw mode at every prompt, because
-readline does its own editing; a full-screen program can start while the last
-OSC 133 mark still says `prompt-end'.
-
-Alt wins over everything.  It is the one state in which the child has taken the
-screen over completely, so Emacs owns neither the keyboard nor the viewport --
-and it is in-band, arriving at an exact position in the byte stream, where the
-termios mode is sampled on a poll and is only approximately timed."
-  (cond (cooked--alt 'alt)
-        ;; A password read forwards keys too; the minibuffer collects them.
-        ((eq cooked--mode 'secret) 'raw)
-        ((eq cooked--mode 'cooked) 'cooked)
-        ((eq cooked--semantic 'input) 'cooked)
-        (t 'raw)))
-
-(defun cooked--secret-p ()
-  "Whether the child is reading with echo off.
-An overlay on the policy rather than one of its values: it says how input is
-collected, not who owns the screen."
-  (eq cooked--mode 'secret))
-
-(defun cooked--input-state-p ()
-  "Whether Emacs should be editing rather than passing keys through."
-  (eq (cooked--policy) 'cooked))
-
-(defun cooked--pending-input ()
-  "The text the user has typed but not yet submitted."
-  (when (and cooked--input-start cooked--input-end
-             (marker-position cooked--input-start)
-             (marker-position cooked--input-end))
-    (buffer-substring-no-properties cooked--input-start cooked--input-end)))
-
-(defvar cooked-snap-commands
-  '(self-insert-command cooked-newline newline newline-and-indent
-    yank yank-pop cooked-paste cooked-evil-paste
-    evil-paste-before evil-paste-after evil-paste-from-register)
-  "Commands that should act on the input region even if point drifted out of it.
-See `cooked--snap-to-input'.
-
-Plain `newline' is here because `evil-collection' binds S-RET to it directly
-rather than to `cooked-newline', so it needs the same protection.")
-
-(defun cooked--snap-to-input ()
-  "Move point into the pending-input region before an insertion command.
-
-Point leaves the input line far more easily than it looks.  The screen is
-rendered with a newline after the last row, so there is a blank line below the
-prompt to sit on; and evil's normal state pulls the cursor back off the end of a
-line, which at an empty prompt lands it on the last character of the prompt
-itself.  Both are one keystroke away from the prompt at all times.
-
-Typing from either place goes wrong quietly.  Before the region the prompt is
-read-only, so the insert signals \"Text is read-only\"; after it the text lands
-outside the markers `cooked-send-input' reads, so it sits in the buffer looking
-submitted while the child is sent an empty line."
-  (when (and (memq this-command cooked-snap-commands)
-             (cooked--input-state-p)
-             cooked--input-start
-             (marker-position cooked--input-start))
-    (let ((start (marker-position cooked--input-start))
-          (end (and cooked--input-end (marker-position cooked--input-end))))
-      (cond ((< (point) start) (goto-char start))
-            ((and end (> (point) end)) (goto-char end))))))
-
-(defun cooked--take-pending-input ()
-  "Remove the pending input from the buffer and return it."
-  (when-let* ((text (cooked--pending-input)))
-    (delete-region cooked--input-start cooked--input-end)
-    text))
-
-(defun cooked--restore-pending-input (text)
-  "Re-insert TEXT at the cursor, re-establishing the input markers."
-  (when (cooked--input-state-p)
-    (save-excursion
-      (goto-char (cooked--cursor-position))
-      (setq cooked--input-start (copy-marker (point) nil))
-      (when text (insert text))
-      (setq cooked--input-end (copy-marker (point) t)))))
-
-(defun cooked--point-after-input ()
-  "Where point belongs after a redisplay."
-  (or (and cooked--input-end (marker-position cooked--input-end))
-      (cooked--cursor-position)))
-
 (defun cooked-send-input ()
   "Submit the pending input to the child.
 The kernel echoes it back, so the emulator renders the line, not us.
@@ -638,7 +540,7 @@ for ZLE."
     (unless (string-blank-p text)
       (setq cooked--history (cons text (delete text cooked--history))))
     (setq cooked--history-index nil cooked--history-stash nil)
-    (cooked--send cooked--session
+    (cooked--send-to-child
                   ;; A multi-line submission has to arrive as a paste, or the shell's
                   ;; line editor treats every embedded newline as its own Enter and runs
                   ;; the fragments one at a time.
@@ -710,7 +612,7 @@ newline survives until you submit."
   "Delete forward, or send EOF when the input line is empty."
   (interactive)
   (if (string-empty-p (or (cooked--pending-input) ""))
-      (cooked--send cooked--session "\C-d")
+      (cooked--send-to-child "\C-d")
     (delete-char 1)))
 
 (defun cooked-send-eof ()
@@ -721,18 +623,22 @@ line discipline turns it into end-of-input, and a raw-mode program reads it as
 ^D.  Bound explicitly because at a prompt plain \\[cooked-delete-char-or-eof]
 deletes forward unless the line is already empty."
   (interactive)
-  (cooked--send cooked--session "\C-d"))
+  (cooked--send-to-child "\C-d"))
 
 (defun cooked-suspend ()
   "Suspend the foreground command."
   (interactive)
-  (cooked--signal cooked--session 20))
+  (cooked--signal (cooked--require-session) 20))
 
 (defun cooked-interrupt ()
-  "Interrupt the foreground command."
+  "Interrupt the foreground command.
+
+The session is checked before the pending input is abandoned, so a C-c that
+cannot be delivered leaves the line you were typing where it was."
   (interactive)
-  (setq cooked--input-start nil cooked--input-end nil)
-  (cooked--signal cooked--session 2))
+  (let ((session (cooked--require-session)))
+    (setq cooked--input-start nil cooked--input-end nil)
+    (cooked--signal session 2)))
 
 ;;;; State transitions
 
@@ -760,86 +666,56 @@ to follow the input/raw switch can use it without cooked knowing about it.")
   (cooked--update-mouse-grab)
   (run-hooks 'cooked-state-change-hook))
 
-(defun cooked--semantic (event batch-start)
-  "Track OSC 133 EVENT and the buffer markers that come with it.
-
-Each mark carries an anchor saying where in the output it actually fell, which
-`cooked--anchor-position' turns into a buffer position given BATCH-START, this
-drain's scrollback insertion point.  The cursor is emphatically not a
-substitute: by the time a drain is applied it is where the *last* thing in that
-drain left it, so a script running several commands between two redisplays
-would file all of their output under one region ending wherever it stopped."
-  (pcase event
-    (`(prompt-start ,_) (setq cooked--semantic 'prompt))
-    (`(prompt-end ,_)
-     (setq cooked--semantic 'input)
-     (cooked--refresh-keymap))
-    (`(command-start ,at)
-     (setq cooked--semantic 'output
-           cooked--command-start (copy-marker (cooked--anchor-position at batch-start)))
-     ;; The shell has left the prompt, so its completion widget is not reading and
-     ;; the nonce it announced is spent.  The shell would refuse a request built on
-     ;; it anyway; not sending one is better, since those bytes would land in
-     ;; whatever is now running.
-     (cooked--completion-forget-nonce)
-     (cooked--refresh-keymap))
-    (`(command-end ,code ,at)
-     (setq cooked--semantic nil)
-     (cooked--mark-command-end code (cooked--anchor-position at batch-start)))))
-
-(defun cooked--mark-command-end (code end)
-  "Record exit CODE for the command that just finished, whose output ends at END.
-
-Kept as a record rather than only a text property: a command that printed
-nothing spans an empty region, which no text property can describe, and the
-records are what folding and navigation walk."
-  (when (and cooked--command-start (marker-position cooked--command-start))
-    (let ((beg (marker-position cooked--command-start))
-          (end (min (point-max) end))
-          (code (or code 0)))
-      (when (< beg end)
-        (put-text-property beg end 'cooked-exit-code code))
-      (push (list :start (copy-marker beg) :end (copy-marker end) :code code)
-            cooked--commands)))
-  (setq cooked--command-start nil))
-
 (defun cooked-last-exit-code ()
   "Exit status of the most recently finished command, if any."
-  (plist-get (car cooked--commands) :code))
+  (when-let* ((command (car cooked--commands)))
+    (cooked-command-code command)))
 
 (defun cooked--command-at (point)
   "The command record whose output contains POINT."
-  (seq-find (lambda (record)
-              (<= (marker-position (plist-get record :start))
+  (seq-find (lambda (command)
+              (<= (cooked--command-start-position command)
                   point
-                  (marker-position (plist-get record :end))))
+                  (cooked--command-end-position command)))
             cooked--commands))
+
+(defun cooked--command-starts ()
+  "Where each recorded command's output begins, in buffer order.
+
+`cooked--commands' is newest first, which is the order the records are pushed
+in and the order `cooked-last-exit-code' wants; moving through the transcript
+wants the other one."
+  (nreverse (mapcar #'cooked--command-start-position cooked--commands)))
+
+(defun cooked--goto-nth-command (n direction)
+  "Move to the Nth command start in DIRECTION, `forward' or `backward'.
+
+Stops at the far end of the buffer rather than erroring, so holding the key
+down walks to the top or bottom and settles there."
+  (let* ((starts (cooked--command-starts))
+         (before (seq-filter (lambda (p) (< p (point))) starts))
+         (after (seq-filter (lambda (p) (> p (point))) starts)))
+    (goto-char (or (if (eq direction 'backward)
+                       (car (last before n))
+                     (nth (1- n) after))
+                   (if (eq direction 'backward) (point-min) (point-max))))))
 
 (defun cooked-previous-command (&optional n)
   "Move to the start of the Nth previous command's output."
   (interactive "p")
-  (let ((starts (sort (mapcar (lambda (r) (marker-position (plist-get r :start)))
-                              cooked--commands)
-                      #'<)))
-    (goto-char (or (car (last (seq-filter (lambda (p) (< p (point))) starts) (or n 1)))
-                   (point-min)))))
+  (cooked--goto-nth-command (or n 1) 'backward))
 
 (defun cooked-next-command (&optional n)
   "Move to the start of the Nth next command's output."
   (interactive "p")
-  (let ((starts (sort (mapcar (lambda (r) (marker-position (plist-get r :start)))
-                              cooked--commands)
-                      #'<)))
-    (goto-char (or (nth (1- (or n 1)) (seq-filter (lambda (p) (> p (point))) starts))
-                   (point-max)))))
+  (cooked--goto-nth-command (or n 1) 'forward))
 
 (defun cooked-toggle-fold ()
   "Hide or reveal the output of the command at point."
   (interactive)
-  (let* ((record (or (cooked--command-at (point)) (car cooked--commands))
-                 )
-         (beg (and record (marker-position (plist-get record :start))))
-         (end (and record (marker-position (plist-get record :end)))))
+  (let* ((command (or (cooked--command-at (point)) (car cooked--commands)))
+         (beg (and command (cooked--command-start-position command)))
+         (end (and command (cooked--command-end-position command))))
     (unless (and beg end (< beg end))
       (user-error "No command output here"))
     (if-let* ((existing (seq-find (lambda (o) (overlay-get o 'cooked-fold))
@@ -894,13 +770,13 @@ space, and does not."
                                      (funcall cooked-password-function prompt))
                                 (read-passwd prompt))))
                 (unwind-protect
-                    (progn (cooked--send cooked--session secret)
-                           (cooked--send cooked--session "\n"))
+                    (progn (cooked--send-to-child secret)
+                           (cooked--send-to-child "\n"))
                   (clear-string secret)))
             ;; C-g at the prompt should interrupt the child's read rather than leave
             ;; it blocked on a `getpass' nobody is going to answer.
             (quit
-             (cooked--send cooked--session "\C-c")
+             (cooked--send-if-live "\C-c")
              (signal 'quit nil))))))))
 
 ;;;; Size and lifecycle
@@ -976,16 +852,15 @@ assumption on startup is that it has focus, and telling it so again is noise.")
   (let ((focused (cooked--focused-p)))
     (unless (eq focused cooked--focused)
       (setq cooked--focused focused)
-      (when (and cooked--session (cooked--focus-events-p cooked--session))
-        (cooked--send cooked--session (if focused "\e[I" "\e[O"))))))
+      (when-let* ((session (cooked--live-session)))
+        (when (cooked--focus-events-p session)
+          (cooked--send-if-live (if focused "\e[I" "\e[O")))))))
 
 (defun cooked--frame-focus-changed (&rest _)
   "Report focus for every live session, from `after-focus-change-function'."
-  (dolist (buffer (buffer-list))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when (and (derived-mode-p 'cooked-mode) cooked--session)
-          (cooked--report-focus))))))
+  (cooked--dolist-buffers
+    (when cooked--session
+      (cooked--report-focus))))
 
 (defcustom cooked-kill-buffer-on-exit nil
   "Whether the session buffer is killed when the child exits.
@@ -1241,10 +1116,10 @@ nil when none were generated."
 
 (defun cooked--live-buffers ()
   "Session buffers with a running child, most recent first."
-  (seq-filter (lambda (buffer)
-                (with-current-buffer buffer
-                  (and (derived-mode-p 'cooked-mode) cooked--session)))
-              (buffer-list)))
+  (let (found)
+    (cooked--dolist-buffers
+      (when cooked--session (push (current-buffer) found)))
+    (nreverse found)))
 
 ;;;###autoload
 (defun cooked (&optional new command)

@@ -49,6 +49,7 @@
 (require 'cl-lib)
 (require 'face-remap)
 (require 'url-util)
+(require 'cooked-glyph)
 
 (defgroup cooked nil
   "A terminal emulator that yields to Emacs when the child wants a line."
@@ -100,57 +101,89 @@ XBM image support or bitmap generation fails for a glyph."
   :type 'boolean
   :group 'cooked)
 
-;; Mirrors the bit layout of `BoxGlyph' in src/emu/glyph.rs — kept in sync by hand,
-;; the same way `cooked--attr-*' above mirrors `Attrs'. Line glyphs: four 2-bit
-;; edge-weight fields (up/down/left/right, 0=none 1=light 2=heavy 3=double) packed
-;; into bits 0-7, an arc flag at bit 8, forward/backward diagonal flags at bits 9-10
-;; (mutually exclusive with the edge fields on any real codepoint), and a 2-bit dash
-;; code in bits 11-12. Block glyphs: bit 15 set, a 3-bit direction in bits 0-2, a
-;; 4-bit fill amount in bits 3-6.
-(defconst cooked--box-kind-block (ash 1 15))
-(defconst cooked--box-arc (ash 1 8))
-(defconst cooked--box-diag-forward (ash 1 9))
-(defconst cooked--box-diag-backward (ash 1 10))
-(defconst cooked--box-dash-shift 11)
-(defconst cooked--box-dash-mask (ash 3 11))
-(defconst cooked--box-dash-counts [0 2 3 4]
-  "Dash code (bits 11-12 of a line descriptor) to the number of dashes it means.
-Unicode defines only 2-, 3- and 4-dash lines, so the count does not fit the
-two bits the layout has left; `BoxGlyph::dashes' in src/emu/glyph.rs decodes
-the same table on the Rust side.")
-(defconst cooked--box-direction-up 0)
-(defconst cooked--box-direction-down 1)
-(defconst cooked--box-direction-left 2)
-(defconst cooked--box-direction-right 3)
-(defconst cooked--box-direction-full 4)
-(defconst cooked--box-direction-shade 5)
-(defconst cooked--box-direction-quadrant 6)
+
+;;;; What the two ends exchange
+;;
+;; The native core reports its cursor as a four-element list and its geometry as
+;; three keys of the drain's plist, both of which are the cheapest thing to build
+;; across the module boundary.  Neither is a good thing to *read*: `(nth 3
+;; cooked--cursor)' says nothing about what it holds, and a positional decode
+;; repeated at twenty call sites is twenty chances to count wrong.  So the shapes
+;; are decoded once, at the boundary in `cooked--apply', and everything above it
+;; works in terms the reader can check.
+
+(cl-defstruct (cooked-cursor (:constructor cooked--cursor-make) (:copier nil))
+  "The child's cursor: where it is, and what it should look like."
+  (row 0 :documentation "Screen row, zero-based.")
+  (col 0 :documentation "Screen column, zero-based.")
+  (visible t :documentation "Whether the child has asked for it to be shown.")
+  (shape 'block :documentation "`block', `underline' or `bar', from DECSCUSR."))
+
+(defun cooked--cursor-decode (spec)
+  "Decode SPEC, the (ROW COL VISIBLE SHAPE) list the native core reports."
+  (pcase-let ((`(,row ,col ,visible ,shape) spec))
+    (cooked--cursor-make :row (or row 0) :col (or col 0)
+                         :visible visible :shape (or shape 'block))))
+
+(defun cooked--cursor-cell ()
+  "The child's cursor as a (ROW . COL) screen cell."
+  (cons (cooked-cursor-row cooked--cursor) (cooked-cursor-col cooked--cursor)))
+
+(cl-defstruct (cooked-grid (:constructor cooked--grid-make) (:copier nil))
+  "The emulator's own account of its grid, as of the last drain.
+
+`cooked--rows' and `cooked--cols' are what Emacs *asked* the child for, which is
+a different thing and can differ for as long as it takes a resize to land.  This
+is what the grid actually is, so the buffer is shaped by the emulator rather
+than by a second opinion of it."
+  (height 24 :documentation "Rows the grid has.")
+  (used 1 :documentation "Rows of it that are occupied — see `cooked--fit-screen'.")
+  (head 0 :documentation "\
+Characters of screen row 0's logical line that are already in the buffer, above
+`cooked--screen-start'.  Non-zero exactly when the last row handed to scrollback
+was wrapped and row 0 continues it, which is why the marker then sits mid-line.
+See `cooked--check-seam'."))
+
+(cl-defstruct (cooked-command (:constructor cooked--command-make) (:copier nil))
+  "One command the shell ran, as delimited by its OSC 133 marks.
+
+A record rather than only text properties: a command that printed nothing spans
+an empty region, which no text property can describe, and the records are what
+folding and navigation walk."
+  (start nil :documentation "Marker where the command's output began.")
+  (end nil :documentation "Marker where it ended.")
+  (code 0 :documentation "Exit status."))
+
+(defun cooked--command-start-position (command)
+  "Buffer position where COMMAND's output begins."
+  (marker-position (cooked-command-start command)))
+
+(defun cooked--command-end-position (command)
+  "Buffer position where COMMAND's output ends."
+  (marker-position (cooked-command-end command)))
 
 (defvar-local cooked--session nil "Handle returned by `cooked--spawn'.")
 (defvar-local cooked--wake nil "Pipe process Rust pokes when output is pending.")
 (defvar-local cooked--rows 24
-  "Rows Emacs last asked the child for.  The grid's own height is in `cooked--grid'.")
+  "Rows Emacs last asked the child for.
+The grid's own height is in `cooked--grid'.")
 (defvar-local cooked--cols 80
   "Columns Emacs last asked the child for.  Not a measurement of the grid.")
 (defvar-local cooked--screen-start nil
   "Marker at the first line of the live screen; everything before is scrollback.")
-(defvar-local cooked--grid '(:height 24 :used 1 :head 0)
-  "The emulator's own account of its grid, as of the last drain.
 
-`cooked--rows' and `cooked--cols' are what Emacs *asked* the child for, which is a
-different thing and can differ for as long as it takes a resize to land.  This is
-what the grid actually is, so the buffer is shaped by the emulator rather than by a
-second opinion of it:
+(defun cooked--screen-start-position ()
+  "Where the live screen begins, or nil before a session has started one.
 
-  :height  rows the grid has.
-  :used    rows of it that are occupied — see `cooked--fit-screen'.
-  :head    characters of screen row 0's logical line that are already in the
-           buffer, above `cooked--screen-start'.  Non-zero exactly when the last
-           row handed to scrollback was wrapped and row 0 continues it, which is
-           why the marker then sits mid-line.  See `cooked--check-seam'.")
-(defvar-local cooked--cursor '(0 0 t block)
-  "The child's cursor as (ROW COL VISIBLE SHAPE).
-SHAPE is `block', `underline' or `bar', from DECSCUSR.")
+The marker is nil until `cooked--start' makes it and can outlive its buffer
+text, so every reader has to check both; doing that in one place keeps the
+check from being the loudest thing at each call site."
+  (and cooked--screen-start (marker-position cooked--screen-start)))
+
+(defvar-local cooked--grid (cooked--grid-make)
+  "The grid as the emulator last described it, a `cooked-grid'.")
+(defvar-local cooked--cursor (cooked--cursor-make)
+  "The child's cursor as of the last drain, a `cooked-cursor'.")
 (defvar-local cooked--alt nil)
 (defvar-local cooked--narrowed nil
   "Whether the restriction in force is ours, from `cooked-alt-screen-pin'.")
@@ -188,21 +221,18 @@ via :foreground/:background at `create-image' time, so unlike
 changes (zoom, font change) miss the cache key, naturally, with no extra
 plumbing.")
 
-;; Rendering lives here, interaction in cooked-mode.el, and redisplay has to call
-;; into it: applying an update needs to know who owns the keyboard.
-(defvar cooked--input-start)
-(defvar cooked--input-end)
-(declare-function cooked--take-pending-input "cooked-mode")
-(declare-function cooked--restore-pending-input "cooked-mode")
-(declare-function cooked--point-after-input "cooked-mode")
-(declare-function cooked--input-state-p "cooked-mode")
+;; Everything this file calls in cooked-mode.el, which is to say everything it
+;; calls upward.  Each one is a notification that something changed and the layer
+;; that owns keymaps, buffer names or the buffer's own life should react — never a
+;; question asked of that layer, which is why the list is short and stays short.
+;; Anything cooked.el needs an *answer* to belongs at this level instead; see
+;; "Who owns the keyboard" below, which is where that rule moved the policy.
 (declare-function cooked--refresh-keymap "cooked-mode")
 (declare-function cooked--update-mouse-grab "cooked-mode")
-(declare-function cooked--policy "cooked-mode")
 (declare-function cooked--set-mode "cooked-mode")
-(declare-function cooked--semantic "cooked-mode")
 (declare-function cooked--on-exit "cooked-mode")
 (declare-function cooked--rename-to-title "cooked-mode")
+(declare-function cooked--completion-forget-nonce "cooked-completion")
 (defvar cooked-rejoin-wrapped-lines)
 
 (declare-function cooked--spawn "cooked-core")
@@ -216,6 +246,7 @@ plumbing.")
 (declare-function cooked--signal "cooked-core")
 (declare-function cooked--pid "cooked-core")
 (declare-function cooked--bracketed-paste-p "cooked-core")
+(declare-function cooked--live-p "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
 ;; `signal' refuses a symbol with no `error-conditions' property, so the native
@@ -231,6 +262,63 @@ predicate that resolves.  The core does the real check, comparing the
 user-pointer's finalizer against its own; Emacs itself cannot tell one
 module's user-pointer from another's."
   (and (user-ptrp object) (ignore-errors (integerp (cooked--pid object)))))
+
+(defmacro cooked--dolist-buffers (&rest body)
+  "Run BODY once in each live cooked buffer, with that buffer current.
+
+Several things have to reach every session at once — a theme change invalidating
+the face caches, a frame focus change, the list of sessions to switch to — and
+each of them was walking `buffer-list' and testing the major mode itself.  BODY
+that needs the buffer as a value can say `current-buffer'."
+  (declare (indent 0) (debug body))
+  `(dolist (buffer (buffer-list))
+     (when (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (when (derived-mode-p 'cooked-mode)
+           ,@body)))))
+
+(defmacro cooked--dolist-windows (var windows &rest body)
+  "Run BODY with VAR bound to each still-live window of WINDOWS.
+
+The list is always captured before a redraw and used after it, so a window
+being gone by the time it is reached is ordinary rather than exceptional."
+  (declare (indent 2) (debug (symbolp form body)))
+  `(dolist (,var ,windows)
+     (when (window-live-p ,var)
+       ,@body)))
+
+(defun cooked--live-session ()
+  "This buffer's session while there is still a child on the other end.
+
+Nil once the child has exited, which is a state the buffer outlives: the
+transcript stays, and `cooked--on-exit' clears `cooked--session' without
+touching the keymap, so the raw map is still installed and every key still
+resolves to a command that wants to write to the pty."
+  (and cooked--session (cooked--live-p cooked--session) cooked--session))
+
+(defun cooked--require-session ()
+  "This buffer's live session, refusing rather than erroring when it is gone.
+
+Every command that reaches into the native core goes through here.  Handing
+nil to a function that expects a user-pointer shows the user
+`wrong-type-argument user-ptrp nil' — a backtrace where the honest answer is
+that the session is over."
+  (or (cooked--live-session) (user-error "No live session")))
+
+(defun cooked--send-to-child (bytes)
+  "Send BYTES to the child, refusing if the session is over."
+  (cooked--send (cooked--require-session) bytes))
+
+(defun cooked--send-if-live (bytes)
+  "Send BYTES if there is still a child, and do nothing if there is not.
+
+For the writes that are not a keystroke: a device-status reply resolved
+mid-drain, a focus notification from a global hook, a completion request.  There
+the child having just exited is an ordinary race rather than something the user
+asked for and should be told about — and signalling from inside a process filter
+would abort the rest of the redisplay."
+  (when-let* ((session (cooked--live-session)))
+    (cooked--send session bytes)))
 
 (defconst cooked--source-directory
   (file-name-directory (or load-file-name buffer-file-name default-directory))
@@ -353,10 +441,9 @@ the Lisp — a system package, or a build directory somewhere else."
 Deliberately does not touch `cooked--box-glyph-cache': that cache holds
 colorless shape bitmaps, colorized live at display time, so it has nothing a
 theme change could make stale."
-  (dolist (buffer (buffer-list))
-    (with-current-buffer buffer
-      (when (and (derived-mode-p 'cooked-mode) (hash-table-p cooked--face-cache))
-        (clrhash cooked--face-cache)))))
+  (cooked--dolist-buffers
+    (when (hash-table-p cooked--face-cache)
+      (clrhash cooked--face-cache))))
 
 ;; `enable-theme-functions' arrived in Emacs 29, and `add-hook' on an unbound variable
 ;; quietly defines it rather than failing — so on 28 this looked fine and did nothing.
@@ -387,344 +474,61 @@ case produces exactly the face plist it did before styled underlines existed."
           (t (append (and color (list :color color))
                      (and (eq style 'wave) (list :style 'wave)))))))
 
+(defconst cooked--attr-face-properties
+  `((,cooked--attr-bold :weight bold)
+    (,cooked--attr-faint :weight light)
+    (,cooked--attr-italic :slant italic)
+    (,cooked--attr-strike :strike-through t))
+  "SGR attribute bits that map straight onto a face property and a constant value.
+
+The attributes needing more than a constant — underline, whose style and colour
+are a whole sub-protocol, and conceal, which resolves against the background
+that was just computed — are handled separately in `cooked--face'.")
+
+(defsubst cooked--attr-p (attrs bit)
+  "Whether BIT is set in the ATTRS bitmask."
+  (/= 0 (logand attrs bit)))
+
 (defun cooked--face (fg bg attrs &optional ul)
   "Face plist for FG, BG, the ATTRS bitmask and underline colour UL.
 Memoized per buffer."
   (let ((key (list fg bg attrs ul)))
     (or (gethash key cooked--face-cache)
-        (puthash key
-                 (let* ((reverse (/= 0 (logand attrs cooked--attr-reverse)))
-                        (fg* (cooked--color (if reverse bg fg)))
-                        (bg* (cooked--color (if reverse fg bg)))
-                        (face nil))
-                   (when fg* (setq face (plist-put face :foreground fg*)))
-                   (when bg* (setq face (plist-put face :background bg*)))
-                   (when (/= 0 (logand attrs cooked--attr-bold))
-                     (setq face (plist-put face :weight 'bold)))
-                   (when (/= 0 (logand attrs cooked--attr-faint))
-                     (setq face (plist-put face :weight 'light)))
-                   (when (/= 0 (logand attrs cooked--attr-italic))
-                     (setq face (plist-put face :slant 'italic)))
-                   (when (/= 0 (logand attrs cooked--attr-underline))
-                     (setq face (plist-put face :underline
-                                           (cooked--underline-spec attrs ul))))
-                   (when (/= 0 (logand attrs cooked--attr-strike))
-                     (setq face (plist-put face :strike-through t)))
-                   (when (/= 0 (logand attrs cooked--attr-conceal))
-                     (setq face (plist-put face :foreground (or bg* (face-background 'default)))))
-                   face)
-                 cooked--face-cache))))
+        (puthash key (cooked--face-build fg bg attrs ul) cooked--face-cache))))
+
+(defun cooked--face-build (fg bg attrs ul)
+  "The face plist `cooked--face' memoizes.  See it for the arguments."
+  (let* ((reverse (cooked--attr-p attrs cooked--attr-reverse))
+         (fg* (cooked--color (if reverse bg fg)))
+         (bg* (cooked--color (if reverse fg bg)))
+         (face nil))
+    (when fg* (setq face (plist-put face :foreground fg*)))
+    (when bg* (setq face (plist-put face :background bg*)))
+    (pcase-dolist (`(,bit ,property ,value) cooked--attr-face-properties)
+      (when (cooked--attr-p attrs bit)
+        (setq face (plist-put face property value))))
+    (when (cooked--attr-p attrs cooked--attr-underline)
+      (setq face (plist-put face :underline (cooked--underline-spec attrs ul))))
+    ;; Last, and after the foreground it overrides: concealed text is drawn in the
+    ;; background colour, which is only known once reverse video has been settled.
+    (when (cooked--attr-p attrs cooked--attr-conceal)
+      (setq face (plist-put face :foreground (or bg* (face-background 'default)))))
+    face))
 
 ;;;; Box-drawing / block-element bitmaps
 ;;
-;; The native core classifies U+2500-U+259F characters into a compact shape
-;; descriptor (see BoxGlyph in src/emu/glyph.rs) instead of handing them over as
-;; opaque text, so fonts are never trusted for these characters — the same reason
-;; VTE, Kitty and Alacritty stopped trusting the font for this range: glyph-to-glyph
-;; inconsistency breaks continuous borders in full-screen programs like htop/ranger.
+;; The rasterizer itself is cooked-glyph.el, which knows nothing about terminals:
+;; it turns a shape descriptor and a pixel size into raw XBM bits.  What is left
+;; here is everything that depends on this buffer — caching a bitmap against the
+;; window's current cell size, colouring it from the cell's own attributes, and
+;; hanging the result on buffer text.
 ;;
 ;; Rendering is a themed XBM mask: the bitmap itself is colorless shape data,
 ;; colorized live via :foreground/:background at `create-image' time, so
-;; `cooked--box-glyph-cache' never needs the theme-flush treatment `cooked--face-cache'
-;; gets — only pixel-size (zoom, font change) is part of its cache key.
+;; `cooked--box-glyph-cache' never needs the theme-flush treatment
+;; `cooked--face-cache' gets — only pixel-size (zoom, font change) is part of its
+;; cache key.
 
-(defun cooked--box-bitmap-make (width height)
-  "A HEIGHT x WIDTH grid of booleans, all initially nil."
-  (let ((grid (make-vector height nil)))
-    (dotimes (y height)
-      (aset grid y (make-vector width nil)))
-    grid))
-
-(defun cooked--box-bitmap-fill-rect (grid width height x0 y0 x1 y1 &optional value)
-  "Set every pixel of GRID in [X0,X1) x [Y0,Y1), clamped to WIDTH x HEIGHT.
-
-VALUE defaults to t; pass the symbol `clear' to unset the span instead, which is
-how `cooked--box-draw-dashes' punches gaps out of an already-drawn stroke."
-  (let ((x0 (max 0 x0)) (y0 (max 0 y0)) (x1 (min width x1)) (y1 (min height y1))
-        (value (if (eq value 'clear) nil t)))
-    (let ((y y0))
-      (while (< y y1)
-        (let ((row (aref grid y)) (x x0))
-          (while (< x x1)
-            (aset row x value)
-            (setq x (1+ x))))
-        (setq y (1+ y))))))
-
-(defun cooked--box-bitmap-pack (grid width height)
-  "Pack boolean GRID into (WIDTH HEIGHT DATA) for `cooked--box-glyph-image'.
-
-DATA is a unibyte string with each row byte-aligned, LSB first.  This triple is
-this file's own shape, not an image spec: `create-image' takes DATA as `:data'
-and needs WIDTH and HEIGHT restated as `:data-width'/`:data-height' alongside a
-`:stride'.  Handing it the triple instead yields an invalid spec, which Emacs
-resolves by drawing the underlying character with the font — leaving the
-feature looking switched off rather than broken."
-  (let* ((row-bytes (ceiling width 8))
-         (data (make-string (* row-bytes height) 0)))
-    (dotimes (y height)
-      (let ((row (aref grid y)))
-        (dotimes (x width)
-          (when (aref row x)
-            (let ((i (+ (* y row-bytes) (/ x 8))))
-              (aset data i (logior (aref data i) (ash 1 (mod x 8)))))))))
-    (list width height data)))
-
-(defun cooked--box-weight (bits shift)
-  (logand (ash bits (- shift)) 3))
-
-(defun cooked--box-draw-edge (grid width height cx cy edge weight light-t heavy-t)
-  "Draw one edge of a line glyph from the cell center outward."
-  (cond
-   ((= weight 0) nil) ; no edge
-   ((= weight 3) (cooked--box-draw-double-edge grid width height cx cy edge))
-   (t (let* ((thickness (if (= weight 2) heavy-t light-t))
-             (half (/ thickness 2)))
-        (pcase edge
-          ('up (cooked--box-bitmap-fill-rect grid width height
-                                             (- cx half) 0 (+ cx (- thickness half)) (1+ cy)))
-          ('down (cooked--box-bitmap-fill-rect grid width height
-                                               (- cx half) cy (+ cx (- thickness half)) height))
-          ('left (cooked--box-bitmap-fill-rect grid width height
-                                               0 (- cy half) (1+ cx) (+ cy (- thickness half))))
-          ('right (cooked--box-bitmap-fill-rect grid width height
-                                                cx (- cy half) width (+ cy (- thickness half)))))))))
-
-(defun cooked--box-draw-double-edge (grid width height cx cy edge)
-  "Two parallel 1px strokes with a 1px gap, for `Weight::Double' edges."
-  (pcase edge
-    ('up (progn
-           (cooked--box-bitmap-fill-rect grid width height (- cx 2) 0 (1- cx) (1+ cy))
-           (cooked--box-bitmap-fill-rect grid width height (1+ cx) 0 (+ cx 2) (1+ cy))))
-    ('down (progn
-             (cooked--box-bitmap-fill-rect grid width height (- cx 2) cy (1- cx) height)
-             (cooked--box-bitmap-fill-rect grid width height (1+ cx) cy (+ cx 2) height)))
-    ('left (progn
-             (cooked--box-bitmap-fill-rect grid width height 0 (- cy 2) (1+ cx) (1- cy))
-             (cooked--box-bitmap-fill-rect grid width height 0 (1+ cy) (1+ cx) (+ cy 2))))
-    ('right (progn
-              (cooked--box-bitmap-fill-rect grid width height cx (- cy 2) width (1- cy))
-              (cooked--box-bitmap-fill-rect grid width height cx (1+ cy) width (+ cy 2))))))
-
-(defun cooked--box-draw-arc (grid width height cx cy thickness down-p right-p)
-  "A quarter-ellipse connecting the two present edges of a rounded corner.
-
-The center sits at whichever cell corner combines the two connected directions
-(e.g. down+right puts it at the bottom-right corner), and the two radii are the
-distances from that corner to the strokes this arc has to meet: horizontally to
-the vertical stroke's column CX, vertically to the horizontal stroke's row CY.
-
-Deliberately not a circle.  A single radius can satisfy only one axis unless the
-cell is square, and terminal cells are roughly half as wide as they are tall — a
-circle of radius (min CX CY) leaves the arc meeting the horizontal edge far from
-CY, so a rounded corner fails to line up with the ─ beside it.
-
-Thickness is applied by dividing the ellipse's implicit function by the gradient
-magnitude, which approximates true distance to the curve; the naive |d - 1| on
-the normalized radius would vary the stroke width around the sweep."
-  (let* ((ccx (if right-p width 0))
-         (ccy (if down-p height 0))
-         (rx (float (max 1 (if right-p (- width cx) cx))))
-         (ry (float (max 1 (if down-p (- height cy) cy))))
-         (half (/ thickness 2.0)))
-    (dotimes (y height)
-      (dotimes (x width)
-        (let* ((dx (/ (- x ccx) rx))
-               (dy (/ (- y ccy) ry))
-               (f (- (+ (* dx dx) (* dy dy)) 1.0))
-               (gx (/ (* 2.0 dx) rx))
-               (gy (/ (* 2.0 dy) ry))
-               (g (sqrt (+ (* gx gx) (* gy gy)))))
-          (when (and (> g 0.0) (<= (/ (abs f) g) half))
-            (aset (aref grid y) x t)))))))
-
-(defun cooked--box-draw-diagonal (grid width height thickness forward backward)
-  "A straight stroke corner-to-corner: FORWARD is ╱, BACKWARD is ╲, both is ╳.
-
-Scans the longer axis and fills a span across the shorter one, rather than
-testing every pixel's perpendicular distance to the line.  The distance test is
-right for a curve, where `cooked--box-draw-arc' still uses it, but wrong here
-for two reasons that both show up at the aspect ratio of a cell (about 9x20).
-
-A perpendicular half-width of half a pixel spans barely one pixel horizontally
-on a stroke that steep, so whether a row got one pixel or none came down to
-rounding, and the stroke came out ragged and broken.  Scanning rows instead
-guarantees exactly one span per row, so the line is connected by construction at
-any aspect ratio.
-
-The stroke also has to reach the cell's corner pixels, or a run of ╱ breaks at
-every cell join — the same continuity requirement the arc has against the ─
-beside it.  Pixel (X,Y) covers [X,X+1) x [Y,Y+1), so its center is at
-\(X+0.5, Y+0.5); measuring from centers is what puts a pixel in the corner,
-where measuring from integer coordinates against a line drawn to (WIDTH,0) —
-one column past the last pixel — left the top-right corner permanently unset.
-
-THICKNESS is still perpendicular to the stroke, converted to a span along the
-scanned axis by the ratio of the diagonal's length to that axis'."
-  (let* ((w (float width))
-         (h (float height))
-         (norm (sqrt (+ (* w w) (* h h))))
-         (half (/ thickness 2.0))
-         ;; Scan whichever axis is longer, so the span is always across the
-         ;; shorter one and every step of the scan advances the stroke.
-         (rows (>= height width))
-         (steps (if rows height width))
-         (span (if rows width height))
-         ;; Perpendicular half-thickness, projected onto the scanned axis.
-         (reach (/ (* half norm) (if rows h w))))
-    (dotimes (i steps)
-      (let ((at (/ (+ i 0.5) steps)))
-        (dolist (center (delq nil
-                              (list (and forward (* span (- 1.0 at)))
-                                    (and backward (* span at)))))
-          (let ((lo (max 0 (floor (- center reach))))
-                (hi (min span (ceiling (+ center reach))))
-                ;; The span can round to nothing on a very thin stroke; the pixel
-                ;; the center falls in always belongs to the line, so it anchors
-                ;; the row and keeps the stroke connected.
-                (anchor (min (1- span) (max 0 (floor center)))))
-            (if rows
-                (cooked--box-bitmap-fill-rect grid width height lo i hi (1+ i))
-              (cooked--box-bitmap-fill-rect grid width height i lo (1+ i) hi))
-            (if rows
-                (aset (aref grid i) anchor t)
-              (aset (aref grid anchor) i t))))))))
-
-(defun cooked--box-dashes (bits)
-  "Number of dashes line descriptor BITS asks for, or 0 for a solid stroke."
-  (aref cooked--box-dash-counts (ash (logand bits cooked--box-dash-mask)
-                                     (- cooked--box-dash-shift))))
-
-(defun cooked--box-draw-dashes (grid width height horizontal count)
-  "Break an already-drawn stroke into COUNT dashes by clearing the gaps.
-
-HORIZONTAL selects the axis.  Runs as a post-pass over the solid line rather
-than drawing the segments directly: Unicode only ever dashes a plain horizontal
-or vertical stroke, never a junction or corner, so nothing else is in the cell
-for a full-width clear to damage — and the stroke keeps the exact thickness and
-centering `cooked--box-draw-edge' gave it.
-
-Every measurement comes from the cell, never a fixed pixel count, or the dashes
-drift out of phase with the solid lines they join as the font size changes.
-
-The gap straddles the period boundary rather than sitting inside it, which is
-what makes the pattern tile: a cell loses part of a gap off its leading edge and
-the rest off its trailing one, so the gap that appears at a seam between two
-dashed cells is exactly the gap that appears inside one.  Anchoring the gaps
-inside the cell instead would leave the two half-dashes either side of a seam
-fusing into a double-length dash.  That is also why the loop runs to COUNT
-inclusive: the last iteration is the half-gap the next cell continues.
-
-Each gap is positioned by its low edge and then given a fixed width, rather than
-rounding both edges independently.  `round' breaks ties to even on some builds
-and towards zero on others, and every gap here lands on an exact half whenever
-the period is a whole number of pixels — rounding both ends turned a run of
-three even dashes into one 2px gap and two that vanished."
-  (let* ((length (if horizontal width height))
-         (period (/ (float length) count))
-         ;; Enough gap to read as a gap, but never so much that the dash it
-         ;; leaves behind rounds away to nothing.
-         (gap (max 1 (min (floor (1- period)) (round (* period 0.35))))))
-    (dotimes (i (1+ count))
-      (let* ((lo (floor (- (* i period) (/ gap 2.0))))
-             (hi (+ lo gap)))
-        (if horizontal
-            (cooked--box-bitmap-fill-rect grid width height lo 0 hi height 'clear)
-          (cooked--box-bitmap-fill-rect grid width height 0 lo width hi 'clear))))))
-
-(defun cooked--box-draw-line (grid width height bits)
-  (let* ((up (cooked--box-weight bits 0))
-         (down (cooked--box-weight bits 2))
-         (left (cooked--box-weight bits 4))
-         (right (cooked--box-weight bits 6))
-         (cx (/ width 2))
-         (cy (/ height 2))
-         (light-t (max 1 (/ (min width height) 8)))
-         (heavy-t (max 2 (/ (min width height) 4))))
-    (cond
-     ((/= 0 (logand bits cooked--box-arc))
-      (cooked--box-draw-arc grid width height cx cy light-t (/= down 0) (/= right 0)))
-     ((/= 0 (logand bits (logior cooked--box-diag-forward cooked--box-diag-backward)))
-      (cooked--box-draw-diagonal grid width height light-t
-                                 (/= 0 (logand bits cooked--box-diag-forward))
-                                 (/= 0 (logand bits cooked--box-diag-backward))))
-     (t
-      (cooked--box-draw-edge grid width height cx cy 'up up light-t heavy-t)
-      (cooked--box-draw-edge grid width height cx cy 'down down light-t heavy-t)
-      (cooked--box-draw-edge grid width height cx cy 'left left light-t heavy-t)
-      (cooked--box-draw-edge grid width height cx cy 'right right light-t heavy-t)
-      ;; Dashes only ever appear on a plain horizontal or vertical line, so which
-      ;; edges are set is enough to name the axis.
-      (let ((dashes (cooked--box-dashes bits)))
-        (when (/= 0 dashes)
-          (cooked--box-draw-dashes grid width height
-                                   (or (/= left 0) (/= right 0)) dashes)))))))
-
-(defun cooked--box-draw-shade (grid width height level phase)
-  "An ordered-dither approximation of the three shade densities (░▒▓).
-
-PHASE positions the pattern in absolute screen space: bit 0 offsets the columns,
-bit 1 the rows, as `cooked--box-shade-phase' computes them.  Without it the
-dither restarts at every cell, which tiles only when the cell is even-sized —
-and a cell is very often 9 pixels wide.  At an odd width the last column of one
-cell and the first of the next are both set, drawing a doubled column down every
-seam between adjacent shade cells; an odd line-box height (which `line-spacing'
-can easily produce) does the same horizontally.
-
-All three patterns have period 2 on both axes, so one bit per axis is the whole
-phase — there is no third alignment to represent."
-  (let ((dx (logand phase 1))
-        (dy (logand (ash phase -1) 1)))
-    (dotimes (y height)
-      (dotimes (x width)
-        ;; The shifted coordinates choose the pattern; the plain ones address the
-        ;; grid, which is always cell-local.
-        (let ((px (+ x dx)) (py (+ y dy)))
-          (when (pcase level
-                  (1 (and (evenp px) (evenp py)))
-                  (2 (evenp (+ px py)))
-                  (_ (not (and (evenp px) (evenp py)))))
-            (aset (aref grid y) x t)))))))
-
-(defun cooked--box-draw-quadrant (grid width height mask)
-  "Fill whichever quarters of the cell MASK selects (upper-left=1, upper-right=2,
-lower-left=4, lower-right=8), for the ten 2x2 quadrant glyphs."
-  (let ((hw (/ (1+ width) 2)) (hh (/ (1+ height) 2)))
-    (when (/= 0 (logand mask 1)) (cooked--box-bitmap-fill-rect grid width height 0 0 hw hh))
-    (when (/= 0 (logand mask 2)) (cooked--box-bitmap-fill-rect grid width height hw 0 width hh))
-    (when (/= 0 (logand mask 4)) (cooked--box-bitmap-fill-rect grid width height 0 hh hw height))
-    (when (/= 0 (logand mask 8)) (cooked--box-bitmap-fill-rect grid width height hw hh width height))))
-
-(defun cooked--box-draw-block (grid width height bits phase)
-  (let* ((direction (logand bits 7))
-         (fraction (logand (ash bits -3) 15)))
-    (cond
-     ((= direction cooked--box-direction-full)
-      (cooked--box-bitmap-fill-rect grid width height 0 0 width height))
-     ((= direction cooked--box-direction-up)
-      (cooked--box-bitmap-fill-rect grid width height 0 0 width (round (* height (/ fraction 8.0)))))
-     ((= direction cooked--box-direction-down)
-      (let ((h (round (* height (/ fraction 8.0)))))
-        (cooked--box-bitmap-fill-rect grid width height 0 (- height h) width height)))
-     ((= direction cooked--box-direction-left)
-      (cooked--box-bitmap-fill-rect grid width height 0 0 (round (* width (/ fraction 8.0))) height))
-     ((= direction cooked--box-direction-right)
-      (let ((w (round (* width (/ fraction 8.0)))))
-        (cooked--box-bitmap-fill-rect grid width height (- width w) 0 width height)))
-     ((= direction cooked--box-direction-shade)
-      (cooked--box-draw-shade grid width height fraction phase))
-     ((= direction cooked--box-direction-quadrant)
-      (cooked--box-draw-quadrant grid width height fraction)))))
-
-(defun cooked--render-box-glyph (bits width height &optional phase)
-  "Raw XBM bitmap for glyph descriptor BITS at WIDTH x HEIGHT pixels.
-
-PHASE, defaulting to 0, positions patterns that have to line up with the
-neighbouring cell rather than with this one — see `cooked--box-draw-shade'."
-  (let ((grid (cooked--box-bitmap-make width height)))
-    (if (/= 0 (logand bits cooked--box-kind-block))
-        (cooked--box-draw-block grid width height bits (or phase 0))
-      (cooked--box-draw-line grid width height bits))
-    (cooked--box-bitmap-pack grid width height)))
 
 (defun cooked--box-glyph-bits (bits window &optional phase)
   "Cached raw bitmap for glyph descriptor BITS at WINDOW's current cell size.
@@ -790,9 +594,7 @@ has no row index, which costs at most a horizontal seam on an odd line height.
 Derived from the cell size at every call rather than remembered: the phase of a
 given cell changes when the font does, so a value cached alongside the glyph
 would be stale the moment the buffer is zoomed."
-  (if (not (and column
-                (/= 0 (logand bits cooked--box-kind-block))
-                (= (logand bits 7) cooked--box-direction-shade)))
+  (if (not (and column (cooked--box-shade-p bits)))
       0
     (logior (logand (* column (window-font-width window 'default)) 1)
             (ash (logand (* (or row 0) (window-default-line-height window)) 1) 1))))
@@ -800,14 +602,16 @@ would be stale the moment the buffer is zoomed."
 (defun cooked--box-glyph-image (bits fg bg attrs &optional window phase)
   "Image spec for glyph BITS, colored from FG/BG/ATTRS like `cooked--face'.
 
-`:scale 1' is load-bearing, not a default being restated.  `image-scaling-factor'
-is `auto', which scales every image by cell-width/10 once a cell is wider than
-10 pixels — true of most GUI font sizes.  These bitmaps are already generated at
-exactly the cell size, so letting that apply would resample a pixel-exact 10x20
-stroke up to 12x24 inside a 10x20 cell: borders stop meeting at the cell edge and
-the strokes blur into something no better than the font glyphs this replaces."
+`:scale 1' is load-bearing, not a default being restated.
+`image-scaling-factor' is `auto', which scales every image by cell-width/10
+once a cell is wider than
+10 pixels — true of most GUI font sizes.  These bitmaps are already generated
+at exactly the cell size, so letting that apply would resample a pixel-exact
+10x20 stroke up to 12x24 inside a 10x20 cell: borders stop meeting at the cell
+edge and the strokes blur into something no better than the font glyphs this
+replaces."
   (let* ((window (or window (get-buffer-window (current-buffer)) (selected-window)))
-         (reverse (/= 0 (logand attrs cooked--attr-reverse)))
+         (reverse (cooked--attr-p attrs cooked--attr-reverse))
          (fg* (or (cooked--color (if reverse bg fg)) (face-foreground 'default nil t)))
          (bg* (or (cooked--color (if reverse fg bg)) (face-background 'default nil t))))
     ;; `:data-width'/`:data-height'/`:stride' are what an inline `xbm' actually
@@ -917,6 +721,8 @@ itself is the one thing every zoom entry point actually sets."
 
 (add-variable-watcher 'text-scale-mode-amount #'cooked--rescale-box-glyphs-on-zoom)
 
+;;;; Putting styled text in the buffer
+
 (defun cooked--insert-runs (runs &optional row)
   "Insert RUNS, each (TEXT FG BG ATTRS GLYPHS), with faces applied.
 
@@ -946,20 +752,193 @@ can continue a wrapped line."
           (when (and glyphs cooked-box-drawing-images (image-type-available-p 'xbm))
             (cooked--overlay-box-glyphs start glyphs fg bg attrs origin row)))))))
 
-;;;; Rendering
+;;;; Who owns the keyboard
+;;
+;; The question the whole package turns on, and the reason this is here rather than
+;; in cooked-mode.el with the keymaps it selects: rendering has to ask it.  Applying
+;; a drain means lifting the pending input out of the buffer, rewriting the screen
+;; underneath it and putting it back — which is a question about ownership, asked
+;; from inside the process filter, long before any key is pressed.
+;;
+;; So the state and the policy derived from it live at this level, and the layer
+;; above binds keys to them.  What cooked.el still calls upward is only ever a
+;; notification that something changed; `cooked--refresh-keymap' is the one that
+;; matters, and it is the seam `cooked-state-change-hook' hangs off.
+
+(defvar-local cooked--input-start nil
+  "Marker before the pending input.")
+(defvar-local cooked--input-end nil
+  "Marker after the pending input.")
+(defvar-local cooked--semantic nil
+  "OSC 133 state: nil, `prompt', `input' or `output'.")
+(defvar-local cooked--command-start nil
+  "Marker where the running command's output began.")
+(defvar-local cooked--commands nil
+  "Finished `cooked-command' records, newest first.")
+
+(defun cooked--policy ()
+  "How the buffer should behave right now: `cooked', `raw' or `alt'.
+
+Derived rather than reported, because no single source knows the answer.  The
+alt screen comes from the child's own output, the line discipline is sampled
+from termios, and the prompt state comes from OSC 133 -- and the three
+disagree routinely.  A shell sits in termios raw mode at every prompt, because
+readline does its own editing; a full-screen program can start while the last
+OSC 133 mark still says `prompt-end'.
+
+Alt wins over everything.  It is the one state in which the child has taken the
+screen over completely, so Emacs owns neither the keyboard nor the viewport --
+and it is in-band, arriving at an exact position in the byte stream, where the
+termios mode is sampled on a poll and is only approximately timed."
+  (cond (cooked--alt 'alt)
+        ;; A password read forwards keys too; the minibuffer collects them.
+        ((eq cooked--mode 'secret) 'raw)
+        ((eq cooked--mode 'cooked) 'cooked)
+        ((eq cooked--semantic 'input) 'cooked)
+        (t 'raw)))
+
+(defun cooked--secret-p ()
+  "Whether the child is reading with echo off.
+An overlay on the policy rather than one of its values: it says how input is
+collected, not who owns the screen."
+  (eq cooked--mode 'secret))
+
+(defun cooked--input-state-p ()
+  "Whether Emacs should be editing rather than passing keys through."
+  (eq (cooked--policy) 'cooked))
+
+(defun cooked--input-region ()
+  "The pending input's bounds as (START . END), or nil when there is no region.
+
+Both markers are set together by `cooked--restore-pending-input' and cleared
+together by `cooked--refresh-keymap', but either can also be left pointing
+nowhere when its buffer text goes, so both have to be checked.  Callers that
+want one end of a region that exists should take it from here rather than
+repeating the pair of nil tests."
+  (when-let* ((start (and cooked--input-start (marker-position cooked--input-start)))
+              (end (and cooked--input-end (marker-position cooked--input-end))))
+    (cons start end)))
+
+(defun cooked--input-start-position ()
+  "Where the pending input begins, or nil if there is no input region."
+  (car (cooked--input-region)))
+
+(defun cooked--pending-input ()
+  "The text the user has typed but not yet submitted."
+  (when-let* ((region (cooked--input-region)))
+    (buffer-substring-no-properties (car region) (cdr region))))
+
+(defvar cooked-snap-commands
+  '(self-insert-command cooked-newline newline newline-and-indent
+    yank yank-pop cooked-paste cooked-evil-paste
+    evil-paste-before evil-paste-after evil-paste-from-register)
+  "Commands that should act on the input region even if point drifted out of it.
+See `cooked--snap-to-input'.
+
+Plain `newline' is here because `evil-collection' binds S-RET to it directly
+rather than to `cooked-newline', so it needs the same protection.")
+
+(defun cooked--snap-to-input ()
+  "Move point into the pending-input region before an insertion command.
+
+Point leaves the input line far more easily than it looks.  The screen is
+rendered with a newline after the last row, so there is a blank line below the
+prompt to sit on; and evil's normal state pulls the cursor back off the end of a
+line, which at an empty prompt lands it on the last character of the prompt
+itself.  Both are one keystroke away from the prompt at all times.
+
+Typing from either place goes wrong quietly.  Before the region the prompt is
+read-only, so the insert signals \"Text is read-only\"; after it the text lands
+outside the markers `cooked-send-input' reads, so it sits in the buffer looking
+submitted while the child is sent an empty line."
+  (when (and (memq this-command cooked-snap-commands)
+             (cooked--input-state-p))
+    (when-let* ((region (cooked--input-region)))
+      (cond ((< (point) (car region)) (goto-char (car region)))
+            ((> (point) (cdr region)) (goto-char (cdr region)))))))
+
+(defun cooked--take-pending-input ()
+  "Remove the pending input from the buffer and return it."
+  (when-let* ((text (cooked--pending-input)))
+    (delete-region cooked--input-start cooked--input-end)
+    text))
+
+(defun cooked--restore-pending-input (text)
+  "Re-insert TEXT at the cursor, re-establishing the input markers."
+  (when (cooked--input-state-p)
+    (save-excursion
+      (goto-char (cooked--cursor-position))
+      (setq cooked--input-start (copy-marker (point) nil))
+      (when text (insert text))
+      (setq cooked--input-end (copy-marker (point) t)))))
+
+(defun cooked--point-after-input ()
+  "Where point belongs after a redisplay."
+  (or (and cooked--input-end (marker-position cooked--input-end))
+      (cooked--cursor-position)))
+
+(defun cooked--handle-semantic (event batch-start)
+  "Track OSC 133 EVENT and the buffer markers that come with it.
+
+Each mark carries an anchor saying where in the output it actually fell, which
+`cooked--anchor-position' turns into a buffer position given BATCH-START, this
+drain's scrollback insertion point.  The cursor is emphatically not a
+substitute: by the time a drain is applied it is where the *last* thing in that
+drain left it, so a script running several commands between two redisplays
+would file all of their output under one region ending wherever it stopped."
+  (pcase event
+    (`(prompt-start ,_) (setq cooked--semantic 'prompt))
+    (`(prompt-end ,_)
+     (setq cooked--semantic 'input)
+     (cooked--refresh-keymap))
+    (`(command-start ,at)
+     (setq cooked--semantic 'output
+           cooked--command-start (copy-marker (cooked--anchor-position at batch-start)))
+     ;; The shell has left the prompt, so its completion widget is not reading and
+     ;; the nonce it announced is spent.  The shell would refuse a request built on
+     ;; it anyway; not sending one is better, since those bytes would land in
+     ;; whatever is now running.
+     (cooked--completion-forget-nonce)
+     (cooked--refresh-keymap))
+    (`(command-end ,code ,at)
+     (setq cooked--semantic nil)
+     (cooked--mark-command-end code (cooked--anchor-position at batch-start)))))
+
+(defun cooked--mark-command-end (code end)
+  "Record exit CODE for the command that just finished, whose output ends at END."
+  (when (and cooked--command-start (marker-position cooked--command-start))
+    (let ((beg (marker-position cooked--command-start))
+          (end (min (point-max) end))
+          (code (or code 0)))
+      (when (< beg end)
+        (put-text-property beg end 'cooked-exit-code code))
+      (push (cooked--command-make :start (copy-marker beg) :end (copy-marker end)
+                                  :code code)
+            cooked--commands)))
+  (setq cooked--command-start nil))
+
+;;;; Locating a cell in the buffer
+;;
+;; The grid outlives the text.  A redraw deletes and reinserts whole rows, so a
+;; buffer position is not a stable way to say where something on the screen is,
+;; while a (ROW . COL) cell is — and the two have to be converted into each other
+;; constantly.  `cooked--goto-screen-row' is the primitive both directions rest
+;; on, and row 0 is the awkward case in each of them.
 
 (defun cooked--goto-screen-row (index &optional extend)
   "Move point to the start of screen row INDEX.
-With EXTEND, add the lines needed to reach it; the screen region is trimmed to
-its content, so a row below the cursor may not have a line yet.  Without EXTEND
-this only moves point, which keeps queries free of side effects.
+
+With EXTEND, add the lines needed to reach it; the screen region is trimmed
+to its content, so a row below the cursor may not have a line yet.  Without
+EXTEND this only moves point, which keeps queries free of side effects.
 
 Row 0 begins at `cooked--screen-start' itself, which is not always the start of
 a buffer line: when the last row handed to scrollback was wrapped it was written
-without a newline, because row 0 continues it.  `forward-line' would snap back to
-that line's beginning, and the caller would then delete the head it was meant to
-continue — a whole row lost per eviction.  Rows below it are unaffected: moving
-forward from a mid-line start lands on the next buffer line, which is right,
+without a newline, because row 0 continues it.  `forward-line' would snap back
+to that line's beginning, and the caller would then delete the head it was
+meant to continue — a whole row lost per eviction.  Rows below it are
+unaffected: moving forward from a mid-line start lands on the next buffer
+line, which is right,
 because row 0 owns the remainder of the shared one."
   (goto-char cooked--screen-start)
   (let ((missing (if (zerop index) 0 (forward-line index))))
@@ -983,8 +962,8 @@ end of a prompt like \"$ \".  The input region would then begin one column
 early, and the shell's echo of the submitted line would disagree with
 what was displayed."
   (save-excursion
-    (cooked--goto-screen-row (nth 0 cooked--cursor) 'extend)
-    (let ((short (- (nth 1 cooked--cursor) (- (line-end-position) (point)))))
+    (cooked--goto-screen-row (cooked-cursor-row cooked--cursor) 'extend)
+    (let ((short (- (cooked-cursor-col cooked--cursor) (- (line-end-position) (point)))))
       (when (> short 0)
         (goto-char (line-end-position))
         (insert (make-string short ?\s))))))
@@ -1053,7 +1032,7 @@ distinguishes blinking from steady, and whether your cursor blinks is
 
 (defun cooked--cursor-type ()
   "The `cursor-type' for the shape the child last asked for."
-  (alist-get (or (nth 3 cooked--cursor) 'block) cooked-cursor-shapes t))
+  (alist-get (cooked-cursor-shape cooked--cursor) cooked-cursor-shapes t))
 
 ;; The ghost cursor below deliberately does not follow the shape.  It is hollow to
 ;; say "not receiving your keystrokes", and that reading comes from the hollowness
@@ -1088,7 +1067,7 @@ strand point for every drain after that.  See `cooked--apply'.")
        (memq (cooked--policy) '(alt raw))
        ;; A hidden cursor stays hidden; nvim hides it during some redraws, and a
        ;; box left behind would be a cursor the child does not think it has.
-       (nth 2 cooked--cursor)))
+       (cooked-cursor-visible cooked--cursor)))
 
 (defun cooked--update-ghost-cursor ()
   "Draw, move, or remove the overlay marking the child's cursor."
@@ -1110,6 +1089,13 @@ strand point for every drain after that.  See `cooked--apply'.")
       (overlay-put cooked--ghost-cursor 'face (unless empty 'cooked-ghost-cursor))
       (overlay-put cooked--ghost-cursor 'after-string
                    (when empty (propertize " " 'face 'cooked-ghost-cursor))))))
+
+;;;; Shaping the screen region
+;;
+;; What the buffer looks like between drains: how tall the live region is, what
+;; the alternate screen does to the rest of the buffer, where the read-only text
+;; ends, and the one place a row is allowed to disagree with the emulator about
+;; its own width.
 
 (defun cooked--set-alt (on)
   "Adopt alternate-screen state ON, refreshing ownership when it changes.
@@ -1134,9 +1120,9 @@ Only ever undoes its own restriction.  A narrowing the user made themselves is
 none of our business, and widening it on the next drain would make `\\[narrow-to-region]'
 unusable in a terminal buffer."
   (if (and cooked--alt (eq cooked-alt-screen-pin 'narrow)
-           cooked--screen-start (marker-position cooked--screen-start))
+           (cooked--screen-start-position))
       (progn
-        (narrow-to-region (marker-position cooked--screen-start) (point-max))
+        (narrow-to-region (cooked--screen-start-position) (point-max))
         (setq cooked--narrowed t))
     (cooked--release-alt-pin)))
 
@@ -1149,7 +1135,7 @@ unusable in a terminal buffer."
 (defun cooked--fit-screen ()
   "Shape the screen region to the number of rows the emulator says it has.
 
-One number, and the emulator's rather than ours.  Which number differs by screen:
+One number, and the emulator's rather than ours.  Which one differs by screen:
 
 On the alternate screen a terminal is a fixed rectangle, so the region holds the
 grid's full height — trimming to content would fight a full-screen program, and
@@ -1170,8 +1156,8 @@ stale copy of the live screen — so nothing removed them and the screen appeare
 twice."
   (save-excursion
     (let ((rows (if cooked--alt
-                    (plist-get cooked--grid :height)
-                  (plist-get cooked--grid :used))))
+                    (cooked-grid-height cooked--grid)
+                  (cooked-grid-used cooked--grid))))
       ;; `extend' on the alt screen only: the rectangle must be exactly that tall even
       ;; where the program has drawn nothing, while the primary is trimmed to content
       ;; and has no business growing here.  Without `extend' a region already short
@@ -1183,24 +1169,24 @@ twice."
   "Signal if the buffer disagrees with the emulator about the seam.
 
 `:head' is how many characters of screen row 0's logical line are already in the
-buffer, so `cooked--screen-start' must sit exactly that far into its line: the two
-ends each hold half of one wrapped line and nothing else ties them together.  A
-drift here is silent — the text reads fine until the next rewrap resumes the line
-in the wrong column — which is what this exists to make loud.
+buffer, so `cooked--screen-start' must sit exactly that far into its line: the
+two ends each hold half of one wrapped line and nothing else ties them
+together.  A drift here is silent — the text reads fine until the next rewrap
+resumes the line in the wrong column — which is what this exists to make loud.
 
 Only meaningful while wrapped rows are being rejoined.  With
-`cooked-rejoin-wrapped-lines' off every row handed over gets a newline of its own
-and the marker is always at a line start, whatever the emulator carries.
+`cooked-rejoin-wrapped-lines' off every row handed over gets a newline of its
+own and the marker is always at a line start, whatever the emulator carries.
 
-Called under `cooked-debug' only.  It is a whole-line measurement on every drain,
-and the invariant it guards is maintained in the native core rather than here, so
-there is nothing for it to repair — see `Row::line_runs' in src/emu/cell.rs."
-  (when (and cooked-rejoin-wrapped-lines cooked--screen-start
-             (marker-position cooked--screen-start))
-    (let* ((start (marker-position cooked--screen-start))
-           (head (save-excursion (goto-char start)
+Called under `cooked-debug' only.  It is a whole-line measurement on every
+drain, and the invariant it guards is maintained in the native core rather than
+here, so there is nothing for it to repair — see `Row::line_runs' in
+src/emu/cell.rs."
+  (when-let* ((start (and cooked-rejoin-wrapped-lines
+                          (cooked--screen-start-position))))
+    (let* ((head (save-excursion (goto-char start)
                                  (- start (line-beginning-position))))
-           (want (plist-get cooked--grid :head)))
+           (want (cooked-grid-head cooked--grid)))
       (unless (= head want)
         (error "cooked: seam desync: buffer holds %d characters of row 0's line, emulator says %d"
                head want)))))
@@ -1212,8 +1198,8 @@ Stickiness carries the whole design: `rear-nonsticky' leaves the far edge
 open so typing at the start of the input region is accepted, while
 `front-sticky' closes the near edge so nothing can be wedged in above the
 transcript."
-  (when (and cooked--screen-start (marker-position cooked--screen-start))
-    (let ((beg (min (marker-position cooked--screen-start) limit)))
+  (when (cooked--screen-start-position)
+    (let ((beg (min (cooked--screen-start-position) limit)))
       (add-text-properties beg limit
                            '(read-only t front-sticky (read-only) rear-nonsticky (read-only)))
       (when (< limit (point-max))
@@ -1285,25 +1271,25 @@ character whose own width was already mismeasured, not an adjacent one."
 Where the marker goes depends on whether there is a fringe to put it in, and the
 difference is a column of the user's text:
 
-On a graphical frame it rides an overlay's `after-string' rather than a `display'
-property on CUT itself.  A fringe `display' spec shows its bitmap \"instead of the
-characters that have the display specification\" (see Other Display Specs in the
-Elisp manual), so putting one on a real character silently costs the row one more
-character than the trim already did — while the point of using the fringe is that
-it sits outside the text area and costs nothing, which is how `truncate-lines'
-draws its own arrow.  The overlay evaporates on its own: `cooked--render-rows'
-deletes the row before rewriting it, which empties it.
+On a graphical frame it rides an overlay's `after-string' rather than a
+`display' property on CUT itself.  A fringe `display' spec shows its bitmap
+\"instead of the characters that have the display specification\" (see Other
+Display Specs in the Elisp manual), so putting one on a real character silently
+costs the row one more character than the trim already did — while the point of
+using the fringe is that it sits outside the text area and costs nothing, which
+is how `truncate-lines' draws its own arrow.  The overlay evaporates on its own:
+`cooked--render-rows' deletes the row before rewriting it, which empties it.
 
-On a terminal frame there is no fringe, so the bitmap could never be drawn and the
-character was disappearing with nothing shown in its place.  There a marker has to
-cost a column, exactly as `truncate-lines' spends the last one on `$', so the
-`display' property on CUT is right — it just has to name something visible.
+On a terminal frame there is no fringe, so the bitmap could never be drawn and
+the character was disappearing with nothing shown in its place.  There a marker
+has to cost a column, exactly as `truncate-lines' spends the last one on `$', so
+the `display' property on CUT is right — it just has to name something visible.
 
 Known gap: a graphical frame whose window has no right fringe (`fringe-mode' 0,
-or a side window that gave it up) has nowhere to draw the bitmap, so the marker is
-invisible there.  Emacs has the same problem with its own indicators and solves it
-per-window; this runs per row during a drain, for a buffer that can be in several
-windows at once with different fringes, so there is no one answer to give."
+or a side window that gave it up) has nowhere to draw the bitmap, so the marker
+is invisible there.  Emacs has the same problem with its own indicators and
+solves it per-window; this runs per row during a drain, for a buffer that can be
+in several windows at once with different fringes, so there is no one answer."
   (if (display-graphic-p)
       (let ((overlay (make-overlay cut (1+ cut))))
         (overlay-put overlay 'evaporate t)
@@ -1317,13 +1303,13 @@ windows at once with different fringes, so there is no one answer to give."
 (defun cooked--truncation-bitmap ()
   "The fringe bitmap Emacs marks a line truncated on the right with.
 
-Taken from `fringe-indicator-alist' rather than named outright, so a user who has
-rebound the indicator sees their own choice here too.  Its entry is (LEFT RIGHT)
-and we are always the right-hand end.
+Taken from `fringe-indicator-alist' rather than named outright, so a user who
+has rebound the indicator sees their own choice here too.  Its entry is
+\(LEFT RIGHT) and we are always the right-hand end.
 
 This was `right-truncation' for a long time, which is not a fringe bitmap and
-never was — `truncation' is the name of the *indicator*, `right-arrow' the bitmap
-it resolves to — so the marker silently drew nothing at all."
+never was — `truncation' names the *indicator*, `right-arrow' the bitmap it
+resolves to — so the marker silently drew nothing at all."
   (let ((indicator (cdr (assq 'truncation fringe-indicator-alist))))
     (or (if (consp indicator) (nth 1 indicator) indicator)
         'right-arrow)))
@@ -1347,13 +1333,15 @@ choice here too, and `$' — which is what Emacs itself falls back to — otherw
         (cooked--insert-runs runs index)
         (cooked--guard-row-width start)))))
 
+;;;; Cells, anchors and positions
+
 (defun cooked--cursor-position ()
   "Buffer position of the emulator cursor.
 A pure query: it never extends the buffer, so it is safe to call before
 `inhibit-read-only' is in effect."
   (save-excursion
-    (cooked--goto-screen-row (nth 0 cooked--cursor))
-    (min (+ (point) (nth 1 cooked--cursor)) (line-end-position))))
+    (cooked--goto-screen-row (cooked-cursor-row cooked--cursor))
+    (min (+ (point) (cooked-cursor-col cooked--cursor)) (line-end-position))))
 
 (defun cooked--anchor-position (anchor batch-start)
   "Buffer position ANCHOR names, or the cursor if it names nothing we can place.
@@ -1398,7 +1386,7 @@ scrollback, so the column is measured from the marker rather than from the
 line's beginning, which would count characters that are not on the screen
 at all."
   (let ((pos (or pos (point)))
-        (start (and cooked--screen-start (marker-position cooked--screen-start))))
+        (start (cooked--screen-start-position)))
     (when (and start (>= pos start))
       (save-excursion
         (goto-char pos)
@@ -1557,7 +1545,7 @@ not once per session."
             (error
              (message "cooked: redisplay failed: %S (point %s, cursor %S, screen-start %s)%s"
                       err (point) cooked--cursor
-                      (and cooked--screen-start (marker-position cooked--screen-start))
+                      (cooked--screen-start-position)
                       (if cooked--resyncing "" "; resyncing"))
              (unless cooked--resyncing
                (let ((cooked--resyncing t))
@@ -1582,7 +1570,7 @@ wheel or a scrollbar does not move its point, so such a window is left alone
 here for the same reason `follow' would leave the buffer's point alone for
 the same case — it reads as the user choosing to look elsewhere, not as a
 window that fell behind."
-  (when-let* ((start (and cooked--screen-start (marker-position cooked--screen-start))))
+  (when-let* ((start (cooked--screen-start-position)))
     (seq-filter (lambda (w) (>= (window-point w) start))
                 (delq (selected-window) (get-buffer-window-list nil nil t)))))
 
@@ -1598,7 +1586,7 @@ window that fell behind."
          ;; output arriving in chunks lets the cursor overtake point for a single
          ;; drain, and point is then stranded for every drain after it — landing
          ;; at column 0 of whichever line it was on.
-         (follow (>= (point) (marker-position cooked--screen-start)))
+         (follow (>= (point) (cooked--screen-start-position)))
          ;; A redraw deletes and reinserts whole rows, so a wandered point would
          ;; be dragged to the start of whatever was rebuilt underneath it.  The
          ;; cell survives that; the buffer position does not.
@@ -1615,11 +1603,11 @@ window that fell behind."
          (batch-start (when-let* ((scrolled (plist-get update :scrolled)))
                         (cooked--render-scrolled scrolled))))
     (cooked--render-rows (plist-get update :rows))
-    (setq cooked--cursor (plist-get update :cursor)
+    (setq cooked--cursor (cooked--cursor-decode (plist-get update :cursor))
           ;; Before `cooked--fit-screen' below, which is shaped by it.
-          cooked--grid (list :height (plist-get update :height)
-                             :used (plist-get update :used)
-                             :head (plist-get update :head))
+          cooked--grid (cooked--grid-make :height (plist-get update :height)
+                                          :used (plist-get update :used)
+                                          :head (plist-get update :head))
           cooked--app-cursor (plist-get update :app-cursor)
           cooked--keys (plist-get update :keys)
           cooked--exit (plist-get update :exit))
@@ -1636,13 +1624,12 @@ window that fell behind."
     ;; Written only on an actual change: reassigning it to the same value on every
     ;; drain was perturbing the cursor's blink phase on each redraw, one more small
     ;; contributor to flicker on a line the child rewrites rapidly.
-    (let ((shape (and (nth 2 cooked--cursor) (cooked--cursor-type))))
+    (let ((shape (and (cooked-cursor-visible cooked--cursor) (cooked--cursor-type))))
       (unless (equal cursor-type shape)
         (setq-local cursor-type shape)))
     (cooked--restore-pending-input pending)
-    (cooked--protect (if (and (cooked--input-state-p) cooked--input-start)
-                        (marker-position cooked--input-start)
-                      (point-max)))
+    (cooked--protect (or (and (cooked--input-state-p) (cooked--input-start-position))
+                         (point-max)))
     ;; After the region has settled, so the bounds match what was just drawn.
     (cooked--apply-alt-pin)
     ;; Staying put beats following the cursor once the user has taken the
@@ -1673,29 +1660,28 @@ window that fell behind."
     ;; top of the screen. Pin it back to the region's start on every drain, not
     ;; only the transition, the same way `cooked--apply-alt-pin' re-narrows on
     ;; every drain rather than only when `cooked--alt' flips.
-    (if cooked--alt
-        (when follow
-          (let ((top (marker-position cooked--screen-start))
-                (here (and (eq (window-buffer (selected-window)) (current-buffer))
-                           (selected-window))))
-            (dolist (w (if here (cons here other-follows) other-follows))
-              (when (window-live-p w) (set-window-start w top t)))))
-      (let* ((target (cooked--point-after-input))
-             ;; A rendered row always ends with a newline, even the cursor's own —
-             ;; see `cooked--insert-runs' — so the cursor at the true end of output
-             ;; sits one short of `point-max', not on it.
-             (at-end (>= target (1- (point-max))))
-             ;; The selected window only belongs here if it is actually showing
-             ;; this buffer — output can arrive from a process filter while the
-             ;; user's focus is on an entirely different window, and recentering
-             ;; that one would be a bug, not a courtesy.
-             (recenter-too (and follow (eq (window-buffer (selected-window)) (current-buffer))
-                                 (list (selected-window)))))
-        (dolist (w other-follows)
-          (when (window-live-p w) (set-window-point w target)))
-        (when at-end
-          (dolist (w (append recenter-too other-follows))
-            (when (window-live-p w) (with-selected-window w (recenter (- -1 scroll-margin))))))))
+    ;; The selected window only belongs in any of these lists if it is actually
+    ;; showing this buffer — output can arrive from a process filter while the
+    ;; user's focus is on an entirely different window, and scrolling that one
+    ;; would be a bug, not a courtesy.
+    (let ((here (and follow
+                     (eq (window-buffer (selected-window)) (current-buffer))
+                     (list (selected-window)))))
+      (if cooked--alt
+          (when follow
+            (let ((top (cooked--screen-start-position)))
+              (cooked--dolist-windows w (append here other-follows)
+                (set-window-start w top t))))
+        (let* ((target (cooked--point-after-input))
+               ;; A rendered row always ends with a newline, even the cursor's own
+               ;; — see `cooked--insert-runs' — so the cursor at the true end of
+               ;; output sits one short of `point-max', not on it.
+               (at-end (>= target (1- (point-max)))))
+          (cooked--dolist-windows w other-follows
+            (set-window-point w target))
+          (when at-end
+            (cooked--dolist-windows w (append here other-follows)
+              (with-selected-window w (recenter (- -1 scroll-margin))))))))
     (cooked--update-ghost-cursor)
     (when cooked--exit (cooked--on-exit cooked--exit))))
 
@@ -1711,18 +1697,18 @@ two chances to disagree."
   (pcase event
     (`(bell) (ding))
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
-    (`(reply . ,bytes) (cooked--send cooked--session bytes))
+    (`(reply . ,bytes) (cooked--send-if-live bytes))
     (`(title-stack ,push) (cooked--handle-title-stack push))
     (`(erase-scrollback)
      (when cooked-honor-erase-scrollback
-       (cooked--discard-scrollback (marker-position cooked--screen-start))))
+       (cooked--discard-scrollback (cooked--screen-start-position))))
     (`(mouse ,enabled ,sgr)
      (setq cooked--mouse enabled cooked--mouse-sgr sgr)
      ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this,
      ;; so it has to move when the child changes its mind about the mouse.
      (cooked--update-mouse-grab))
     ((or `(prompt-start ,_) `(prompt-end ,_) `(command-start ,_) `(command-end ,_ ,_))
-     (cooked--semantic event batch-start))
+     (cooked--handle-semantic event batch-start))
     (_ nil)))
 
 ;;;; OSC dispatch
@@ -1850,7 +1836,8 @@ sends one when a long build finishes; a child that does not sends thousands."
   "Maximum title and body length, in characters.")
 
 (defvar-local cooked--notification-times nil
-  "Timestamps of recent notifications, newest first.  See `cooked-notification-rate\='.")
+  "Timestamps of recent notifications, newest first.
+See `cooked-notification-rate\='.")
 
 (defvar-local cooked--notification-chunks nil
   "Partial OSC 99 notifications, as an alist of id to (TITLE . BODY).")
@@ -1893,32 +1880,39 @@ child controls.")
         ;; Never as a format string: the text is the child's.
         (message "%s" (string-trim (concat title " " body)))))))
 
+(defun cooked--osc-99-metadata (meta)
+  "Parse META, OSC 99's colon-separated KEY=VALUE list, into an alist.
+
+Built once per notification rather than re-split per key looked up, which is
+what asking it four questions used to cost."
+  (mapcar (lambda (field)
+            (let ((split (string-search "=" field)))
+              (if split
+                  (cons (substring field 0 split) (substring field (1+ split)))
+                (cons field ""))))
+          (split-string (or meta "") ":" t)))
+
 (defun cooked--osc-notify (parts)
   "Raise a desktop notification from OSC 99 PARTS.
 
-kitty's protocol: `ESC ] 99 ; METADATA ; PAYLOAD ST\=', where METADATA is a set of
-KEY=VALUE pairs.  `i\=' identifies a notification, `p\=' says whether the payload is
-its title or its body, and `d=0\=' means more chunks follow."
+kitty's protocol: `ESC ] 99 ; METADATA ; PAYLOAD ST\=', where METADATA is a
+set of KEY=VALUE pairs.  `i\=' identifies a notification, `p\=' says whether
+the payload is its title or its body, and `d=0\=' means more chunks follow."
   (when cooked-allow-notifications
-    (pcase-let* ((`(,meta . ,payload) (cons (car parts) (cdr parts)))
-                 (payload (string-join payload ";"))
-                 (fields (split-string (or meta "") ":" t))
-                 (get (lambda (key)
-                        (cadr (assoc key (mapcar (lambda (f)
-                                                   (split-string f "=" t))
-                                                 fields)))))
-                 (id (or (funcall get "i") ""))
-                 (part (or (funcall get "p") "title"))
-                 (more (equal (funcall get "d") "0"))
+    (pcase-let* ((meta (cooked--osc-99-metadata (car parts)))
+                 (payload (string-join (cdr parts) ";"))
+                 (id (or (alist-get "i" meta nil nil #'equal) ""))
+                 (body-p (equal (alist-get "p" meta nil nil #'equal) "body"))
+                 (more (equal (alist-get "d" meta nil nil #'equal) "0"))
+                 (cap (cdr cooked--notification-chunk-limits))
                  (cell (or (assoc id cooked--notification-chunks)
                            (car (push (cons id (cons "" "")) cooked--notification-chunks)))))
       ;; Bound both the number of open notifications and the text each accumulates.
       (setq cooked--notification-chunks
             (seq-take cooked--notification-chunks
                       (car cooked--notification-chunk-limits)))
-      (pcase-let ((`(,_ . (,title . ,body)) cell)
-                  (cap (cdr cooked--notification-chunk-limits)))
-        (setcdr cell (if (equal part "body")
+      (pcase-let ((`(,title . ,body) (cdr cell)))
+        (setcdr cell (if body-p
                          (cons title (truncate-string-to-width (concat body payload) cap))
                        (cons (truncate-string-to-width (concat title payload) cap) body))))
       (unless more
@@ -2106,12 +2100,12 @@ this would otherwise quietly do nothing."
     ;; changes the emulator's seam without one.  Left stale it describes a head that was
     ;; just deleted, which `cooked--check-seam' would rightly call a desync — and which
     ;; anything else reading the seam before the next drain would believe.
-    (setq cooked--grid (plist-put (copy-sequence cooked--grid) :head 0))))
+    (setf (cooked-grid-head cooked--grid) 0)))
 
 (defun cooked-clear-scrollback ()
   "Delete everything above the live screen."
   (interactive)
-  (cooked--discard-scrollback (marker-position cooked--screen-start)))
+  (cooked--discard-scrollback (cooked--screen-start-position)))
 
 (defun cooked-refresh ()
   "Rebuild the live screen from the emulator.
@@ -2131,7 +2125,7 @@ only the region below `cooked--screen-start' is rebuilt."
       (widen)
       (let ((inhibit-read-only t))
         (cooked--release-alt-pin)
-        (delete-region (marker-position cooked--screen-start) (point-max))
+        (delete-region (cooked--screen-start-position) (point-max))
         ;; They pointed into the text just deleted; `cooked--restore-pending-input'
         ;; puts them back at the cursor on the drain below.
         (setq cooked--input-start nil cooked--input-end nil)))

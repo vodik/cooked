@@ -26,10 +26,6 @@
 (require 'seq)
 
 (declare-function cooked--send "cooked-core")
-(declare-function cooked--input-state-p "cooked-mode")
-
-(defvar cooked--input-start)
-(defvar cooked--input-end)
 
 (defgroup cooked-completion nil
   "Completing at a cooked prompt."
@@ -80,7 +76,7 @@ which the reply has to wait for."
 
 (defun cooked--completion-bounds ()
   "Bounds of the word before point, clamped to the pending input."
-  (let ((limit (marker-position cooked--input-start)))
+  (let ((limit (cooked--input-start-position)))
     (save-excursion
       (let ((end (point)))
         (skip-chars-backward "^ \t" limit)
@@ -88,15 +84,18 @@ which the reply has to wait for."
 
 (defun cooked--native-completion ()
   "Completion in Emacs: a program name first, file names after it."
-  (pcase-let ((`(,start . ,end) (cooked--completion-bounds)))
+  (pcase-let* ((`(,start . ,end) (cooked--completion-bounds))
+               ;; The first word of the line is the command; everything after it
+               ;; is an argument, and arguments are file names far more often
+               ;; than not.
+               (first-word (eql start (cooked--input-start-position))))
     (list start end
-          (if (= start (marker-position cooked--input-start))
+          (if first-word
               (completion-table-in-turn (cooked--executable-table)
                                         #'completion-file-name-table)
             #'completion-file-name-table)
           :exclusive 'no
-          :annotation-function
-          (lambda (_) (when (= start (marker-position cooked--input-start)) " program")))))
+          :annotation-function (lambda (_) (when first-word " program")))))
 
 ;;;; Asking the shell
 ;;
@@ -178,13 +177,13 @@ Returns (PREFIX SUFFIX TRUNCATED . RECORDS), or nil if the shell cannot
 or does not answer.  Blocks for at most `cooked-completion-timeout': the
 reply arrives through the wake pipe like every other byte the child
 writes, so pumping that process is what lets it in."
-  (when (and cooked--completion-nonce cooked--session)
+  (when (and cooked--completion-nonce (cooked--live-session))
     (let ((serial (cl-incf cooked--completion-serial)))
       (setq cooked--completion-reply nil)
-      (cooked--send cooked--session
-                    (format "\e[>99u%s;%d;%d;%s\n"
-                            cooked--completion-nonce serial point
-                            (cooked--completion-encode line)))
+      (cooked--send-if-live
+       (format "\e[>99u%s;%d;%d;%s\n"
+               cooked--completion-nonce serial point
+               (cooked--completion-encode line)))
       (let ((deadline (+ (float-time) cooked-completion-timeout)))
         ;; `with-local-quit' rather than nothing: this is the one place cooked
         ;; blocks, and C-g has to get the user out of a shell that stopped talking.
@@ -327,13 +326,11 @@ on every letter."
   "Complete the pending input.
 
 From the shell where it can answer, and from Emacs where it cannot."
-  (when (and (cooked--input-state-p)
-             cooked--input-start
-             (marker-position cooked--input-start)
-             (>= (point) (marker-position cooked--input-start)))
-    (let* ((start (marker-position cooked--input-start))
-           (end (or (and cooked--input-end (marker-position cooked--input-end)) (point)))
-           (end (max start end))
+  (when-let* (((cooked--input-state-p))
+              (region (cooked--input-region))
+              ((>= (point) (car region))))
+    (let* ((start (car region))
+           (end (max start (cdr region)))
            (line (buffer-substring-no-properties start end))
            (offset (- (point) start))
            (reply (unless (eq cooked-completion-backend 'native)
