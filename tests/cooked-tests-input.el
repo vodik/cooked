@@ -16,6 +16,110 @@
     (should-not (cooked--input-state-p))
     (should (eq (current-local-map) cooked-raw-map))))
 
+(ert-deftest cooked-alt-mode-installs-the-alt-map-and-still-forwards-everything ()
+  "The alternate screen means a full-screen program has taken over completely,
+so nothing beyond `C-c' is reserved there -- unlike plain `raw', it has no
+customizable exceptions at all."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h'; stty raw -echo; cat -v")
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (should (eq (current-local-map) cooked-alt-map))
+    (dolist (key '("C-g" "C-x" "C-h" "C-u" "C-l"))
+      (should (eq (lookup-key cooked-alt-map (kbd key)) #'cooked-send-key)))))
+
+(ert-deftest cooked-raw-exceptions-are-not-bound-to-forward ()
+  "The default `cooked-raw-exceptions' leave a handful of keys for Emacs even
+though the child is reading raw, unlike the alternate screen (see the test
+above), which has none."
+  (dolist (key '("C-g" "C-x" "C-h" "C-u" "C-l"))
+    (should-not (eq (lookup-key cooked-raw-map (kbd key)) #'cooked-send-key))))
+
+(ert-deftest cooked-raw-exceptions-can-be-customized ()
+  "Rebuilds `cooked-raw-map' in place -- in place because the map already has
+`cooked-mode-map' as its keymap parent, set once when the major mode is
+defined, and a fresh keymap object handed to `setq' would lose it."
+  (let ((original cooked-raw-exceptions))
+    (unwind-protect
+        (progn
+          (customize-set-variable 'cooked-raw-exceptions '("C-w"))
+          (should-not (eq (lookup-key cooked-raw-map (kbd "C-w")) #'cooked-send-key))
+          (should (eq (lookup-key cooked-raw-map (kbd "C-g")) #'cooked-send-key))
+          (should (eq (keymap-parent cooked-raw-map) cooked-mode-map)))
+      (customize-set-variable 'cooked-raw-exceptions original))))
+
+(ert-deftest cooked-yank-key-still-forwards-despite-the-exceptions-list ()
+  "Plain `C-y' is both vim's scroll-up-a-line and readline's own yank -- real
+bindings a user relying on the child is actively using -- so it is kept out
+of `cooked-raw-exceptions' regardless of what the list otherwise contains."
+  (should (eq (lookup-key cooked-raw-map (kbd "C-y")) #'cooked-send-key))
+  (should (eq (lookup-key cooked-alt-map (kbd "C-y")) #'cooked-send-key)))
+
+(ert-deftest cooked-send-literal-key-forces-a-reserved-key-through ()
+  "`C-c C-q' is the way back for a raw program that wants one of
+`cooked-raw-exceptions' for itself, such as readline's own `C-g'."
+  (cooked-tests--with-echoing-child ""
+    (cl-letf (((symbol-function 'read-key) (lambda (&rest _) ?\C-g)))
+      (call-interactively #'cooked-send-literal-key))
+    (should (cooked-tests--settle
+             (lambda () (string-search "^G" (cooked-tests--text)))))))
+
+(ert-deftest cooked-send-literal-key-can-force-a-literal-c-c-through ()
+  "`C-c' is cooked's own permanent prefix, but `cooked-send-literal-key' can
+still put a literal `C-c' byte on the wire for a child that wants it."
+  (cooked-tests--with-echoing-child ""
+    (cl-letf (((symbol-function 'read-key) (lambda (&rest _) ?\C-c)))
+      (call-interactively #'cooked-send-literal-key))
+    (should (cooked-tests--settle
+             (lambda () (string-search "^C" (cooked-tests--text)))))))
+
+(ert-deftest cooked-toggle-peek-freezes-the-render-and-thaws-on-exit ()
+  "Peeking suspends forwarding and drawing; toggling again resumes both and
+catches the buffer up on whatever the child produced meanwhile."
+  (cooked-tests--with-echoing-child ""
+    (call-interactively #'cooked-toggle-peek)
+    (should cooked--peek-active)
+    (should (eq (current-local-map) cooked-mode-map))
+    (cooked--send-to-child "frozen")
+    ;; Give a real drain every chance to land, so the negative assertion means
+    ;; something rather than just being too soon to tell -- `cooked-tests--pump'
+    ;; rather than `cooked-tests--settle', which would force the very drain
+    ;; this is testing is suppressed.
+    (cooked-tests--pump 0.3)
+    (should-not (string-search "frozen" (cooked-tests--text)))
+    (call-interactively #'cooked-toggle-peek)
+    (should-not cooked--peek-active)
+    (should (eq (current-local-map) cooked-raw-map))
+    (should (cooked-tests--settle
+             (lambda () (string-search "frozen" (cooked-tests--text)))))))
+
+(ert-deftest cooked-toggle-peek-refuses-at-a-prompt ()
+  "Peeking is meaningless once Emacs already owns the line."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
+    (should (cooked-tests--settle
+             (lambda () (and (cooked--input-state-p) cooked--input-start))))
+    (cooked--refresh-keymap)
+    (should-error (call-interactively #'cooked-toggle-peek) :type 'user-error)))
+
+(ert-deftest cooked-evil-c-z-freezes-the-render-like-toggle-peek-does ()
+  "`evil' users do not need `cooked-toggle-peek': `C-z' already reaches
+`evil-emacs-state'/`evil-exit-emacs-state' ahead of `cooked-raw-map', because
+evil's state keymaps take priority over a buffer's local map, and
+`cooked-evil.el' hooks the same freeze/thaw around that transition."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-echoing-child ""
+    (should (eq (bound-and-true-p evil-state) 'emacs))
+    (evil-exit-emacs-state)
+    (should cooked--peek-active)
+    (cooked--send-to-child "frozen")
+    (cooked-tests--pump 0.3)
+    (should-not (string-search "frozen" (cooked-tests--text)))
+    (evil-emacs-state)
+    (should-not cooked--peek-active)
+    (should (cooked-tests--settle
+             (lambda () (string-search "frozen" (cooked-tests--text)))))))
+
 (ert-deftest cooked-paste-brackets-when-the-child-asked-for-it ()
   "A child that turned bracketed paste on is told where the paste begins and
 ends, so its line editor takes the whole thing as one insertion."
@@ -144,9 +248,9 @@ as `m' rather than `M' reaches the child and is thrown away."
       '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw; cat -v")
     (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
     (should (eq (cooked--policy) 'alt))
-    ;; The raw map owns the wheel while the child does; otherwise Emacs would
+    ;; The alt map owns the wheel while the child does; otherwise Emacs would
     ;; scroll the buffer out from under a full-screen program.
-    (should (eq (current-local-map) cooked-raw-map))
+    (should (eq (current-local-map) cooked-alt-map))
     (should (eq (key-binding (vector 'wheel-up)) #'cooked-mouse-event))
     (should (eq (key-binding (vector 'mouse-5)) #'cooked-mouse-event))
     ;; With no cell under the pointer the notch still goes out, at the cursor,
@@ -643,7 +747,7 @@ command runs, flattening the event past recovery.  The binding is the fix."
 (ert-deftest cooked-transcript-navigation-works-in-both-states ()
   "Jumping between commands sends nothing to the child, so a running program
 must not take the binding away."
-  (dolist (map (list cooked-input-map cooked-raw-map))
+  (dolist (map (list cooked-input-map cooked-raw-map cooked-alt-map))
     (should (eq (lookup-key map (kbd "C-c C-p")) #'cooked-previous-command))
     (should (eq (lookup-key map (kbd "C-c C-n")) #'cooked-next-command))
     (should (eq (lookup-key map (kbd "C-c TAB")) #'cooked-toggle-fold))))

@@ -48,6 +48,23 @@
 ;; cooked's own.
 ;;
 ;; See `cooked-evil-insert-state-submits' to turn that off.
+;;
+;; One more seam, orthogonal to all of the above: while the child owns the
+;; keyboard there is otherwise almost no way back to an ordinary Emacs command
+;; -- `C-c'-prefixed ones aside -- which is exactly right for a full-screen
+;; program but leaves no way to fire an arbitrary command or navigate with
+;; evil's own normal state.  Nothing special is needed for that, because evil
+;; already ships the door: `evil-toggle-key' (`C-z' by default) reaches
+;; `evil-emacs-state'/`evil-exit-emacs-state' ahead of `cooked-raw-map'/
+;; `cooked-alt-map' regardless, since evil's state keymaps install through
+;; `emulation-mode-map-alists', which Emacs consults before a buffer's local
+;; map.  `cooked-evil-sync' above never fights a manual `C-z', because it only
+;; reacts to `cooked-state-change-hook' -- the child's own state changing --
+;; never to evil's.  All that's missing is freezing the render for as long as
+;; the user is out there looking around, so the child's own output does not
+;; drag the view out from under them; `cooked--enter-peek'/`cooked--exit-peek'
+;; (`cooked-mode.el') do exactly that, and are otherwise the same primitive
+;; behind `cooked-toggle-peek', the explicit door for anyone not running evil.
 
 ;;; Code:
 
@@ -134,6 +151,16 @@ is ordinary editable text.  See `cooked-evil-normal-state-pastes'."
     (evil-define-key* 'normal cooked-mode-map
                       (kbd "p") #'cooked-evil-paste
                       (kbd "P") #'cooked-evil-paste)))
+
+(declare-function cooked--enter-peek "cooked-mode")
+(declare-function cooked--exit-peek "cooked-mode")
+
+(with-eval-after-load 'evil
+  ;; Global hooks, not buffer-local ones: they fire for every buffer that
+  ;; toggles emacs state, cooked or not.  `cooked--enter-peek'/`cooked--exit-peek'
+  ;; guard on `cooked--session' for exactly that reason -- see their docstrings.
+  (add-hook 'evil-emacs-state-exit-hook #'cooked--enter-peek)
+  (add-hook 'evil-emacs-state-entry-hook #'cooked--exit-peek))
 
 (with-eval-after-load 'evil-collection
   (when cooked-evil-insert-state-submits

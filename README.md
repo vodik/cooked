@@ -52,10 +52,12 @@ lone `.zshrc` would silently skip yours. The generated files are deleted with th
 and `ZDOTDIR` is handed back so nested shells and `exec zsh` see the real one. Set
 `cooked-shell-integration` to nil to opt out.
 
-While the child owns the keyboard, `C-c` is the only reserved prefix — everything else,
-ESC included, is forwarded, so `M-x` reaches the child exactly as in any terminal. That is
-what you want inside vim and not at all what you want when you meant Emacs, so `C-c M-x`
-is the way back out; it runs whatever you have bound `M-x` to.
+While the child owns the keyboard, `C-c` is the only prefix cooked always reserves for
+itself — everything else, ESC included, is forwarded, so `M-x` reaches the child exactly
+as in any terminal. `C-c M-x` is the way back out regardless of what the child is doing;
+it runs whatever you have bound `M-x` to. See [Keybindings](#keybindings) for the rest —
+what else stays with Emacs, and how to reach an arbitrary command or `evil` normal state
+without waiting for the child to give the keyboard back.
 
 `cooked-password-function` can answer a password prompt from auth-source or `pass`. No
 ordinary terminal can do that, because it never learns a password was being requested.
@@ -77,6 +79,65 @@ to be negotiated. cooked tracks `CSI > 4 ; 2 m` (modifyOtherKeys) and the kitty 
 protocol, and sends the extended form **only** to a child that asked for it — sending
 `ESC [ 27;2;13 ~` to a program that did not is not a Shift+Return, it is six characters
 of rubbish in its input.
+
+## Keybindings
+
+How much stays with Emacs while the child owns the keyboard depends on what it's doing,
+not just on the one `C-c` prefix cooked always keeps:
+
+| | Reserved for Emacs | Reach it anyway |
+|---|---|---|
+| Plain raw read | `C-c`, plus `cooked-raw-exceptions` (`C-g C-x C-h C-u C-l` by default) | `cooked-send-literal-key` (`C-c C-q`) |
+| Alternate screen | `C-c` only | `cooked-toggle-peek` (`C-c C-v`), or `evil`'s own `C-z` |
+
+The two states get different defaults because they mean different things. A plain raw
+read is often a shell prompt cooked cannot positively tell apart from a program that
+wants the whole keyboard — a bare `ssh`, or a shell without cooked's OSC 133 integration
+— so `cooked-raw-exceptions` keeps a handful of keys most raw programs don't need for
+themselves: the universal quit, the two most common prefix commands, and a prefix
+argument. The alternate screen means a full-screen program has unambiguously taken over,
+possibly `emacs -nw` or `vim` itself, which can plausibly want any of those same keys —
+so nothing beyond `C-c` is reserved there by default. Set `cooked-raw-exceptions` to `nil`
+for `raw` to behave exactly like the alternate screen does; add to it for more of the
+usual Emacs bindings back. `C-y` is deliberately never offered as an exception even
+though it would otherwise be a plausible candidate — plain `C-y` is both vim's
+scroll-up-a-line and readline's own yank. `M-x`/`M-o`/`M-y` are not offerable at all,
+for a different reason: they're Meta-modified letters, and a bare `ESC` byte is forwarded
+the instant it's pressed (so a real terminal's Escape key has no latency), which leaves
+nothing for a Meta chord to land on before the child sees it. `C-c M-x` is unaffected
+either way.
+
+`cooked-send-literal-key` is the escape hatch in the other direction: it sends the very
+next key to the child exactly as typed, regardless of what's reserved — including `C-c`
+itself (`C-c C-q C-c` sends a literal `C-c` byte).
+
+For anything that needs more than one key — an arbitrary command, `isearch`, or just
+moving around with `evil` normal state — `cooked-toggle-peek` freezes the screen (the
+child keeps running; cooked just stops redrawing) and hands the buffer to ordinary Emacs
+keymaps until you toggle it again, at which point the buffer catches up on whatever it
+missed. `evil` users already have their own way in and out and don't need to learn this
+one: `C-z` (`evil-toggle-key`) reaches `evil-emacs-state`/`evil-exit-emacs-state` ahead of
+any binding cooked makes regardless, because evil's state keymaps take priority over a
+buffer's local map — `cooked-evil.el` freezes and thaws the screen around that transition
+the same way `cooked-toggle-peek` does, so the two doors lead to the same place.
+
+This is a different shape than `vterm`/`eat`'s own designs, and worth being explicit
+about why. Both forward almost everything and give you a manually toggled way out —
+`vterm-copy-mode`, `eat`'s four hand-toggled modes — because neither has a way to know
+who owns the keyboard other than the user telling it. cooked does know, from termios and
+OSC 133, so the common case — type a command, read its output — never needs a mode
+switch at all; peeking exists only for the one case that signal can't help with, a
+full-screen program that has taken the whole keyboard.
+
+That same signal is why the evil integration above needs so little code: cooked never
+puts evil in insert state against a program that owns the keyboard, so there is nothing
+to reclaim from evil's insert map and no second ESC-routing toggle to add on top of it —
+`evil-collection`'s own vterm/eat modules need both, because they lack this signal and
+have to guess. The result is a real asymmetry, not just a difference in polish: an evil
+user's "step out to Emacs" is exactly the `C-z` they already know, free. A non-evil user
+still has to learn `C-c C-v` specifically, same as they would `vterm-copy-mode` or
+`eat-emacs-mode` — this design does not make that easier, it only makes the evil case
+free.
 
 At a prompt, where Emacs owns the line, Shift+RET does something more useful: it inserts
 a newline into the pending input so you can compose a multi-line command, which is then
@@ -232,8 +293,11 @@ output, cursor shape, OSC 0/2/7/8/10/11/12/99/133, modifyOtherKeys and the kitty
 protocol, DECRQM), termios state machine, secret prompts, scrollback, resize, per-command
 exit codes, read-only transcript, output folding, evil integration.
 
-Not yet: sixel/kitty graphics, comint history integration, and `vttest`-level conformance
-beyond the common paths.
+Not yet: sixel/kitty graphics, comint history integration, `vttest`-level conformance
+beyond the common paths, and a mode-line indicator for peeking (see
+[Keybindings](#keybindings)) — the ` raw`/` alt`/` edit` tag does not change while
+peeking, so it is presently easy to forget you toggled out and wonder why keys have
+stopped reaching the child.
 
 ## Completion
 
@@ -362,7 +426,8 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
 - **Evil.** With `cooked-evil-integration`, evil is put in Emacs state whenever the child
   owns the keyboard and returns to insert at a prompt; `RET` submits from normal state.
   comint commands are remapped, so `evil-collection`'s `repl-submit` binding reaches
-  `cooked-send-input` without knowing cooked exists.
+  `cooked-send-input` without knowing cooked exists. `C-z` already reaches Emacs from
+  there, same as in any other evil buffer — see [Keybindings](#keybindings).
 - **Commands are records.** `C-c C-p`/`C-c C-n` navigate them and `C-c TAB` folds output.
   A command that printed nothing still gets a record, which text properties alone cannot
   represent.

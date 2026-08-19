@@ -77,7 +77,7 @@
     (cooked--refresh-keymap)
     (should (eq (current-local-map) cooked-input-map))
     (cooked--set-alt t)
-    (should (eq (current-local-map) cooked-raw-map))
+    (should (eq (current-local-map) cooked-alt-map))
     (cooked--set-alt nil)
     (should (eq (current-local-map) cooked-input-map))))
 

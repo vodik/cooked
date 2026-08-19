@@ -185,6 +185,12 @@ check from being the loudest thing at each call site."
 (defvar-local cooked--cursor (cooked--cursor-make)
   "The child's cursor as of the last drain, a `cooked-cursor'.")
 (defvar-local cooked--alt nil)
+(defvar-local cooked--peek-active nil
+  "Whether the user has manually stepped out to Emacs while the child owns
+the keyboard, via `cooked-toggle-peek' or evil's own `C-z'.  See
+`cooked--enter-peek'/`cooked--exit-peek' in cooked-mode.el, and the skip in
+`cooked--on-wake' below: the render is frozen for as long as this is set, so
+navigating the buffer is not disturbed by the child's own repainting.")
 (defvar-local cooked--narrowed nil
   "Whether the restriction in force is ours, from `cooked-alt-screen-pin'.")
 (defvar-local cooked--app-cursor nil
@@ -1522,6 +1528,10 @@ EXTRA-ENV is an alist prepended to the child's environment."
 Bound for the dynamic extent of the repair rather than kept per buffer: it
 answers \"am I inside one right now\", which is not something a buffer holds.")
 
+(defun cooked--drain-and-apply ()
+  "Apply whatever the native core has accumulated since the last drain."
+  (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines)))
+
 (defun cooked--on-wake (buffer)
   "Drain BUFFER's session and apply what changed.
 
@@ -1534,14 +1544,19 @@ and no later delta mends that, because a delta only says what changed.
 `cooked--resyncing' guards the repair rather than the failure: a resync that
 itself fails must report and stop, not recurse a redisplay error into a loop of
 them.  It is cleared once a resync completes, so this is once per failure and
-not once per session."
+not once per session.
+
+Skipped entirely while `cooked--peek-active' is set: the native core keeps
+the authoritative grid state regardless of whether Lisp ever asks for it, so
+nothing is lost by deferring — `cooked--exit-peek' catches the buffer up with
+one more call to `cooked--drain-and-apply' once the user is done navigating."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when cooked--session
+      (when (and cooked--session (not cooked--peek-active))
         (if cooked-debug
-            (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))
+            (cooked--drain-and-apply)
           (condition-case err
-              (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))
+              (cooked--drain-and-apply)
             (error
              (message "cooked: redisplay failed: %S (point %s, cursor %S, screen-start %s)%s"
                       err (point) cooked--cursor
@@ -2130,7 +2145,7 @@ only the region below `cooked--screen-start' is rebuilt."
         ;; puts them back at the cursor on the drain below.
         (setq cooked--input-start nil cooked--input-end nil)))
     (cooked--redraw cooked--session)
-    (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))))
+    (cooked--drain-and-apply)))
 
 ;;;; OSC 52 — clipboard
 

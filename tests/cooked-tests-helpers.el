@@ -39,6 +39,18 @@
       (when cooked--session (cooked--apply (cooked--drain cooked--session))))
     (funcall predicate)))
 
+(defun cooked-tests--pump (seconds)
+  "Pump the event loop for SECONDS without forcing a drain.
+
+Unlike `cooked-tests--settle', which applies `cooked--drain'/`cooked--apply'
+on every iteration regardless of what triggered them: a test asserting that
+draining has been *suppressed* (peek mode) cannot wait with
+`cooked-tests--settle', since the wait itself would apply the very drain
+under test.  `cooked--on-wake', the process filter, is the only thing
+draining here."
+  (let ((deadline (+ (float-time) seconds)))
+    (while (< (float-time) deadline) (accept-process-output nil 0.05))))
+
 (defun cooked-tests--text ()
   "Visible buffer text with trailing blank lines removed."
   (string-trim-right (buffer-substring-no-properties (point-min) (point-max))))

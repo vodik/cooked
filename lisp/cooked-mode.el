@@ -464,11 +464,104 @@ spelling a pager would understand, so it sends nothing."
             this-command command)
       (call-interactively command))))
 
-(defvar cooked-raw-map
+;;;; Peek mode
+;;
+;; While the child owns the keyboard there is, by design, almost no way back to
+;; an ordinary Emacs command -- `C-c'-prefixed ones aside.  That is exactly
+;; right for a full-screen program, which needs every other key for itself, but
+;; it leaves no way to fire an arbitrary command, search the buffer, or just
+;; navigate with `evil' normal state.  Peek mode is that door: it freezes the
+;; render (`cooked--peek-active', and the skip in `cooked--on-wake') and hands
+;; the buffer to `cooked-mode-map', so nothing forwards while the user looks
+;; around; leaving it catches the buffer up on whatever the child produced.
+;;
+;; `evil' users already have their own way in and out: `evil-toggle-key'
+;; (`C-z' by default) reaches `evil-emacs-state'/`evil-exit-emacs-state' ahead
+;; of this map regardless, because evil's state keymaps install through
+;; `emulation-mode-map-alists', the same mechanism `cooked--mouse-map' uses
+;; above to outrank `pixel-scroll-precision-mode'.  `cooked-evil.el' hooks
+;; that transition to this same pair of functions, so the render freezes and
+;; thaws the same way no matter which door was used.  `cooked-toggle-peek' is
+;; the other door, for anyone not running evil.
+
+(defvar cooked-mode-map)                ; `define-derived-mode' below makes it
+
+(defun cooked--enter-peek ()
+  "Freeze the render and hand the buffer to ordinary Emacs keymaps.
+No-op unless this is a live cooked session, the child currently owns the
+keyboard, and peek is not already active -- called from both
+`cooked-toggle-peek' and the `evil' hook, neither of which can assume the
+other has not already gotten here first, and the `evil' hook is global, so it
+runs in every buffer that toggles emacs state, not only cooked ones."
+  (when (and cooked--session (not (cooked--input-state-p)) (not cooked--peek-active))
+    (setq cooked--peek-active t)
+    (use-local-map cooked-mode-map)
+    (cooked--update-mouse-grab)))
+
+(defun cooked--exit-peek ()
+  "Resume forwarding and catch the buffer up on whatever it missed.
+No-op unless peek is active; see `cooked--enter-peek' on why the session
+check matters given the `evil' hook this also runs from is global."
+  (when (and cooked--session cooked--peek-active)
+    (setq cooked--peek-active nil)
+    (cooked--drain-and-apply)
+    (cooked--refresh-keymap)))
+
+(defun cooked-toggle-peek ()
+  "Step out to an ordinary, navigable Emacs buffer, or back to the child.
+
+While the child owns the keyboard, `cooked-raw-map'/`cooked-alt-map' forward
+almost everything to it, which leaves no way to fire an Emacs command, search
+the buffer, or navigate with `evil' normal state.  This suspends forwarding --
+freezing the render so the child's own output does not disturb the view --
+and installs `cooked-mode-map' instead; calling it again resumes forwarding
+and catches the buffer up on anything the child produced meanwhile.
+
+`evil' users do not need this: `C-z' already reaches `evil-emacs-state' ahead
+of any binding here, and `cooked-evil.el' freezes and thaws the render the
+same way around that transition.  This is the door for everyone else."
+  (interactive)
+  (when (cooked--input-state-p)
+    (user-error "Already editable"))
+  (if cooked--peek-active
+      (cooked--exit-peek)
+    (cooked--enter-peek)
+    (message "Peeking -- C-c C-v to resume forwarding")))
+
+(defun cooked-send-literal-key ()
+  "Send the next key to the child exactly, regardless of what it is bound to.
+
+`cooked-raw-exceptions' (and, always, `C-c') keep some keys for Emacs while
+the child owns the keyboard; this is the way back the other direction, for a
+child that wants one of those keys for itself -- a readline-based REPL's own
+`C-u', say.  Reaches `C-c' too: \\`C-c C-q C-c' sends a literal `C-c' byte."
+  (interactive)
+  (when-let* ((bytes (cooked--encode-event (read-key "Send key: "))))
+    (cooked--snap-to-cursor)
+    (cooked--send-to-child bytes)))
+
+(defun cooked--exception-code (key)
+  "The character code KEY names, signalling an error if it does not name one.
+
+Only a single, unmodified control character in the 0-127 range is meaningful
+here: passthrough is a raw-byte forwarding loop over exactly that range, not a
+general keymap, so a modified chord such as `M-x' would silently do nothing
+even if accepted -- see `cooked-raw-exceptions' for why."
+  (let ((keys (kbd key)))
+    (unless (and (stringp keys) (= (length keys) 1) (< (aref keys 0) 128))
+      (error "cooked: %S does not name a single unmodified control character" key))
+    (aref keys 0)))
+
+(defun cooked--build-passthrough-map (exceptions)
+  "A keymap that forwards to the child, except EXCEPTIONS and `C-c'.
+EXCEPTIONS is a list of character codes, as from `cooked--exception-code';
+each is simply left unbound here, so it falls through to whatever
+`cooked-mode-map'/`comint-mode-map'/`global-map' -- or `evil', if it has
+installed a higher-priority keymap of its own -- would otherwise do with it."
   (let ((map (make-sparse-keymap)))
     (define-key map [remap self-insert-command] #'cooked-send-key)
     (dolist (code (number-sequence 0 127))
-      (unless (eq code cooked--escape-key)
+      (unless (or (eq code cooked--escape-key) (memq code exceptions))
         (define-key map (vector code) #'cooked-send-key)))
     ;; Bind the modified variants explicitly, not for completeness but for
     ;; correctness: when `S-return' has no binding Emacs shift-translates it to
@@ -486,6 +579,8 @@ spelling a pager would understand, so it sends nothing."
     ;; Under the escape prefix because plain `C-y' belongs to the child: emacs-mode
     ;; readline and vim's own C-y are both real bindings that must keep working.
     (define-key map (kbd "C-c C-y") #'cooked-paste)
+    (define-key map (kbd "C-c C-q") #'cooked-send-literal-key)
+    (define-key map (kbd "C-c C-v") #'cooked-toggle-peek)
     ;; Navigating and folding the transcript sends nothing to the child, so it
     ;; belongs here too: you want it most while a command is still running.
     (define-key map (kbd "C-c C-p") #'cooked-previous-command)
@@ -498,8 +593,70 @@ spelling a pager would understand, so it sends nothing."
     (dolist (event '(down-mouse-1 mouse-1 down-mouse-2 mouse-2 down-mouse-3 mouse-3
                      wheel-up wheel-down mouse-4 mouse-5))
       (define-key map (vector event) #'cooked-mouse-event))
-    map)
-  "Keymap while the child owns the keyboard.")
+    map))
+
+(defun cooked--set-passthrough-map (map exceptions)
+  "Replace MAP's own bindings with a fresh passthrough map for EXCEPTIONS.
+Keeps MAP's identity, and so the keymap parent `cooked-mode' gives it, intact
+-- used to rebuild `cooked-raw-map' when `cooked-raw-exceptions' changes.
+
+`set-keymap-parent' stores the parent as the list's own terminating cdr
+rather than in a separate slot, so a plain `(setcdr map (cdr fresh))' would
+silently drop it; save and restore it around the replacement."
+  (let ((parent (keymap-parent map)))
+    (setcdr map (cdr (cooked--build-passthrough-map exceptions)))
+    (set-keymap-parent map parent)))
+
+(defcustom cooked-raw-exceptions '("C-g" "C-x" "C-h" "C-u" "C-l")
+  "Keys left bound to their ordinary Emacs command during a raw, non-alt-screen
+read (`cooked--policy' returns `raw'), instead of forwarding to the child.
+
+`raw' is treated less aggressively than `alt' (see `cooked-alt-map', which has
+no equivalent list) because it is a fuzzier state: non-shell REPLs with their
+own raw-mode line editors, single-keypress prompts, and -- the case that
+matters most -- any shell session without cooked's OSC 133 integration wired
+up, where `cooked--policy' cannot tell a raw program from a shell editing its
+own prompt line and must guess `raw'.  In that last case the user is, from
+their own point of view, just sitting at an ordinary prompt, so losing the
+universal quit key outright is a worse trade than reserving a handful of
+control characters most raw programs do not need for themselves.
+
+Each entry names a single control character via `kbd', e.g. \"C-g\".  `C-y' is
+deliberately not offered here even though it would otherwise be a plausible
+candidate: it is both vim's scroll-up-a-line and readline's own yank, real
+bindings a user relying on the child is actively using.  `M-x'/`M-o'/`M-y'
+are not offerable at all, for a different reason -- they are Meta-modified
+letters, which this list has no way to reach in the first place: a bare ESC
+byte is forwarded the instant it is pressed, for the sake of a real
+terminal's Escape key having no latency, so on a terminal frame `ESC' and the
+letter that follows are two independently-forwarded bytes before Emacs' own
+Meta-prefix logic ever runs.  `C-c M-x' remains the one escape hatch
+guaranteed to work regardless of frame type.
+
+`cooked-send-literal-key' (\\`C-c C-q') sends any one key through to the child
+regardless of this list, for a raw program that wants one of these keys back."
+  :type '(repeat string)
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (and (boundp 'cooked-raw-map) (keymapp cooked-raw-map))
+           (cooked--set-passthrough-map
+            cooked-raw-map (mapcar #'cooked--exception-code value))))
+  :group 'cooked)
+
+(defvar cooked-raw-map
+  (cooked--build-passthrough-map (mapcar #'cooked--exception-code cooked-raw-exceptions))
+  "Keymap while the child is doing a raw, non-alt-screen read.")
+
+(defvar cooked-alt-map
+  (cooked--build-passthrough-map nil)
+  "Keymap while the child holds the alternate screen.
+
+Deliberately has no exceptions, customizable or otherwise, beyond `C-c': a
+full-screen program can plausibly want any key for itself, including
+`C-g'/`C-x'/`C-u'/`C-h' if the program happens to be `emacs -nw' or `vim'
+itself.  `cooked-toggle-peek' (or, for `evil' users, the ordinary `C-z' escape
+to `evil-emacs-state') is the way to reach Emacs here, rather than a static
+list that would collide with whatever the program wants those keys for.")
 
 (defvar cooked-input-map
   (let ((map (make-sparse-keymap)))
@@ -659,12 +816,26 @@ the new state.  This is the seam `cooked-evil' hangs off; anything else that has
 to follow the input/raw switch can use it without cooked knowing about it.")
 
 (defun cooked--refresh-keymap ()
-  "Install the keymap matching the current ownership of the keyboard."
-  (use-local-map (if (cooked--input-state-p) cooked-input-map cooked-raw-map))
-  (unless (cooked--input-state-p)
-    (setq cooked--input-start nil cooked--input-end nil))
-  (cooked--update-mouse-grab)
-  (run-hooks 'cooked-state-change-hook))
+  "Install the keymap matching the current ownership of the keyboard.
+
+Leaves a peek in progress alone across a `raw'<->`alt' transition -- the user
+is still legitimately looking at a screen the child owns -- but ends one if
+the policy has moved to `cooked': there is no reason to stay frozen once
+there is a genuine prompt to edit.  See `cooked--enter-peek'/
+`cooked--exit-peek'."
+  (let ((policy (cooked--policy)))
+    (when (and cooked--peek-active (eq policy 'cooked))
+      (setq cooked--peek-active nil)
+      (cooked--drain-and-apply))
+    (unless (and cooked--peek-active (not (eq policy 'cooked)))
+      (use-local-map (pcase policy
+                        ('cooked cooked-input-map)
+                        ('alt cooked-alt-map)
+                        ('raw cooked-raw-map))))
+    (unless (cooked--input-state-p)
+      (setq cooked--input-start nil cooked--input-end nil))
+    (cooked--update-mouse-grab)
+    (run-hooks 'cooked-state-change-hook)))
 
 (defun cooked-last-exit-code ()
   "Exit status of the most recently finished command, if any."
@@ -965,6 +1136,7 @@ to the child verbatim."
 ;; `evil-collection', reachable.
 (set-keymap-parent cooked-input-map cooked-mode-map)
 (set-keymap-parent cooked-raw-map cooked-mode-map)
+(set-keymap-parent cooked-alt-map cooked-mode-map)
 
 ;; Whatever key a user has bound to comint's commands reaches ours, so
 ;; `evil-collection-comint' (which binds `repl-submit' to `comint-send-input')
