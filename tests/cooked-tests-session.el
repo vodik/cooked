@@ -212,6 +212,24 @@ a foreign handle would be reinterpreted as a session."
         (should (= (cdr cooked--last-size)
                    (window-max-chars-per-line (get-buffer-window buffer))))))))
 
+(ert-deftest cooked-text-scale-change-triggers-a-resize ()
+  "`text-scale-increase' rescales the font without resizing any window, so
+`window-configuration-change-hook' and `window-size-change-functions' both
+stay silent -- `text-scale-mode-hook' is the one that has to pick it up."
+  (cooked-tests--with-session '("/bin/sh" "-c" "while true; do sleep 0.1; done")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (set-window-buffer (selected-window) (current-buffer))
+    (setq cooked--last-size nil)
+    (unwind-protect
+        (progn
+          (text-scale-increase 1)
+          (should cooked--last-size)
+          (should (= (car cooked--last-size)
+                     (cooked--window-rows (get-buffer-window (current-buffer)))))
+          (should (= (cdr cooked--last-size)
+                     (window-max-chars-per-line (get-buffer-window (current-buffer))))))
+      (text-scale-set 0))))
+
 (ert-deftest cooked-terminfo-is-installed-and-used ()
   "The child should see a TERM that describes what we actually implement."
   (skip-unless (executable-find "tic"))

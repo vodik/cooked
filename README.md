@@ -113,13 +113,20 @@ itself (`C-c C-q C-c` sends a literal `C-c` byte).
 
 For anything that needs more than one key — an arbitrary command, `isearch`, or just
 moving around with `evil` normal state — `cooked-toggle-peek` freezes the screen (the
-child keeps running; cooked just stops redrawing) and hands the buffer to ordinary Emacs
-keymaps until you toggle it again, at which point the buffer catches up on whatever it
-missed. `evil` users already have their own way in and out and don't need to learn this
-one: `C-z` (`evil-toggle-key`) reaches `evil-emacs-state`/`evil-exit-emacs-state` ahead of
-any binding cooked makes regardless, because evil's state keymaps take priority over a
+child keeps running; cooked just stops redrawing), makes the buffer read-only, and hands
+it to ordinary Emacs keymaps. Peek is look-only, though, so leaving is not a separate step
+to remember: the instant a key means anything other than looking — typing a character,
+`RET`, or any of cooked's own commands that write to the child (`C-c C-c`, `C-c C-y`, and
+the rest) — it ends on its own, forwards whatever was pressed, and the buffer catches up
+on whatever it missed immediately. `cooked-toggle-peek` still works as a manual toggle for
+leaving without acting on anything. `evil` users already have their own way in and don't
+need to learn this one: `C-z` (`evil-toggle-key`) reaches `evil-emacs-state` ahead of any
+binding cooked makes regardless, because evil's state keymaps take priority over a
 buffer's local map — `cooked-evil.el` freezes and thaws the screen around that transition
-the same way `cooked-toggle-peek` does, so the two doors lead to the same place.
+the same way `cooked-toggle-peek` does, so the two doors lead to the same place. Normal-
+and visual-state motions and operators (`d`, `y`, a visual selection, and the rest) never
+trigger the auto-resume, because none of them are `self-insert-command` or `RET` — only
+actually typing is.
 
 This is a different shape than `vterm`/`eat`'s own designs, and worth being explicit
 about why. Both forward almost everything and give you a manually toggled way out —
@@ -137,7 +144,8 @@ have to guess. The result is a real asymmetry, not just a difference in polish: 
 user's "step out to Emacs" is exactly the `C-z` they already know, free. A non-evil user
 still has to learn `C-c C-v` specifically, same as they would `vterm-copy-mode` or
 `eat-emacs-mode` — this design does not make that easier, it only makes the evil case
-free.
+free. Coming back is symmetric either way, and free for both: nobody has to remember a
+resume key, because typing already means "give it back."
 
 At a prompt, where Emacs owns the line, Shift+RET does something more useful: it inserts
 a newline into the pending input so you can compose a multi-line command, which is then
@@ -291,13 +299,11 @@ screen, wide chars, combining marks, DEC graphics, background colour erase, inse
 autowrap control, mouse mode tracking, alternate scroll, focus reporting, synchronized
 output, cursor shape, OSC 0/2/7/8/10/11/12/99/133, modifyOtherKeys and the kitty keyboard
 protocol, DECRQM), termios state machine, secret prompts, scrollback, resize, per-command
-exit codes, read-only transcript, output folding, evil integration.
+exit codes, read-only transcript, output folding, evil integration, mode-line indicator
+for peeking.
 
 Not yet: sixel/kitty graphics, comint history integration, `vttest`-level conformance
-beyond the common paths, and a mode-line indicator for peeking (see
-[Keybindings](#keybindings)) — the ` raw`/` alt`/` edit` tag does not change while
-peeking, so it is presently easy to forget you toggled out and wonder why keys have
-stopped reaching the child.
+beyond the common paths.
 
 ## Completion
 
@@ -424,10 +430,15 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
   `font-lock-face` are set — comint leaves `font-lock-defaults` at `(nil t)`, so a bare
   `face` property is stripped the first time the buffer is fontified.
 - **Evil.** With `cooked-evil-integration`, evil is put in Emacs state whenever the child
-  owns the keyboard and returns to insert at a prompt; `RET` submits from normal state.
-  comint commands are remapped, so `evil-collection`'s `repl-submit` binding reaches
-  `cooked-send-input` without knowing cooked exists. `C-z` already reaches Emacs from
-  there, same as in any other evil buffer — see [Keybindings](#keybindings).
+  owns the keyboard and returns to insert at a prompt; normal-state `RET` stays plain
+  `evil-ret`, exactly as in any other buffer. comint commands are remapped, so
+  `evil-collection`'s `repl-submit` binding reaches `cooked-send-input` without knowing
+  cooked exists. `C-z` already reaches Emacs from there, same as in any other evil
+  buffer — see [Keybindings](#keybindings).
 - **Commands are records.** `C-c C-p`/`C-c C-n` navigate them and `C-c TAB` folds output.
   A command that printed nothing still gets a record, which text properties alone cannot
   represent.
+- **Peeking is read-only and look-only.** The mode line grows a `peek` tag; the buffer is
+  read-only for the duration, so an edit command errors immediately instead of landing on
+  text that goes nowhere; and typing, `RET`, or any of cooked's own commands that write to
+  the child end it and forward what was pressed, rather than requiring a separate step back.

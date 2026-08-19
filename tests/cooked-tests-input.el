@@ -78,7 +78,8 @@ catches the buffer up on whatever the child produced meanwhile."
   (cooked-tests--with-echoing-child ""
     (call-interactively #'cooked-toggle-peek)
     (should cooked--peek-active)
-    (should (eq (current-local-map) cooked-mode-map))
+    (should (eq (current-local-map) cooked-peek-map))
+    (should buffer-read-only)
     (cooked--send-to-child "frozen")
     ;; Give a real drain every chance to land, so the negative assertion means
     ;; something rather than just being too soon to tell -- `cooked-tests--pump'
@@ -89,6 +90,7 @@ catches the buffer up on whatever the child produced meanwhile."
     (call-interactively #'cooked-toggle-peek)
     (should-not cooked--peek-active)
     (should (eq (current-local-map) cooked-raw-map))
+    (should-not buffer-read-only)
     (should (cooked-tests--settle
              (lambda () (string-search "frozen" (cooked-tests--text)))))))
 
@@ -119,6 +121,117 @@ evil's state keymaps take priority over a buffer's local map, and
     (should-not cooked--peek-active)
     (should (cooked-tests--settle
              (lambda () (string-search "frozen" (cooked-tests--text)))))))
+
+(ert-deftest cooked-typing-while-peeking-resumes-forwarding-and-sends-the-key ()
+  "Typing during peek can only mean the child is wanted back: it ends peek and
+forwards the character that was pressed, rather than silently self-inserting
+into a frozen buffer that goes nowhere."
+  (cooked-tests--with-echoing-child ""
+    (switch-to-buffer (current-buffer))
+    (call-interactively #'cooked-toggle-peek)
+    (should cooked--peek-active)
+    (cooked-tests--type "x")
+    (should-not cooked--peek-active)
+    (should (eq (current-local-map) cooked-raw-map))
+    (should (cooked-tests--settle
+             (lambda () (string-search "x" (cooked-tests--text)))))))
+
+(ert-deftest cooked-return-while-peeking-resumes-forwarding-and-sends-cr ()
+  "RET means the same thing as typing while peeking: give the child its
+keyboard back, and send the key that was pressed."
+  (cooked-tests--with-echoing-child ""
+    (switch-to-buffer (current-buffer))
+    (call-interactively #'cooked-toggle-peek)
+    (cooked-tests--type "RET")
+    (should-not cooked--peek-active)
+    (should (cooked-tests--settle
+             (lambda () (string-search "^M" (cooked-tests--text)))))))
+
+(ert-deftest cooked-peeking-is-read-only-even-at-point-max ()
+  "`cooked--protect' deliberately leaves `(point-max)' itself open, for a
+prompt about to accept typed input -- and peek is exactly the state that lets
+point wander there via ordinary navigation with nothing forwarding to stop
+it.  `buffer-read-only' during peek is what closes that gap for anything
+other than the typing/RET case `cooked-peek-map' already handles specially."
+  (cooked-tests--with-echoing-child ""
+    (call-interactively #'cooked-toggle-peek)
+    (goto-char (point-max))
+    (cooked-tests--with-kill "oops"
+      (should-error (call-interactively #'yank) :type 'buffer-read-only))
+    (should cooked--peek-active)))
+
+(ert-deftest cooked-actions-that-write-bytes-end-peek-first ()
+  "Sending anything to the child while peeking would otherwise be invisible
+until a separate step lifted the freeze; ending peek first is what lets the
+result land where it can be seen."
+  (cooked-tests--with-echoing-child ""
+    (dolist (act (list (lambda () (cooked-send-eof))
+                        (lambda () (cooked-tests--with-kill "x" (cooked-paste)))
+                        (lambda () (cooked-send-string "x"))
+                        (lambda ()
+                          (cl-letf (((symbol-function 'read-key) (lambda (&rest _) ?x)))
+                            (call-interactively #'cooked-send-literal-key)))))
+      (call-interactively #'cooked-toggle-peek)
+      (should cooked--peek-active)
+      (funcall act)
+      (should-not cooked--peek-active))))
+
+(ert-deftest cooked-suspend-ends-peek-first ()
+  (cooked-tests--with-echoing-child ""
+    (call-interactively #'cooked-toggle-peek)
+    (should cooked--peek-active)
+    (cooked-suspend)
+    (should-not cooked--peek-active)))
+
+(ert-deftest cooked-interrupt-ends-peek-first ()
+  (cooked-tests--with-echoing-child ""
+    (call-interactively #'cooked-toggle-peek)
+    (should cooked--peek-active)
+    (cooked-interrupt)
+    (should-not cooked--peek-active)))
+
+(ert-deftest cooked-mode-line-shows-peek-while-active ()
+  "Peeking used to have no mode-line indicator at all, which made it easy to
+forget you had toggled out and wonder why keys had stopped reaching the
+child; this is what makes it visible."
+  (cooked-tests--with-echoing-child ""
+    (should-not (string-search "peek" (cooked--mode-line)))
+    (call-interactively #'cooked-toggle-peek)
+    (should (string-search "peek" (cooked--mode-line)))
+    (call-interactively #'cooked-toggle-peek)
+    (should-not (string-search "peek" (cooked--mode-line)))))
+
+(ert-deftest cooked-evil-visual-state-does-not-end-peek ()
+  "Motions and operators like a visual selection are not `self-insert-command'
+or RET, so navigating and selecting frozen text while peeking must not be
+mistaken for wanting to type."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-echoing-child ""
+    (should (eq (bound-and-true-p evil-state) 'emacs))
+    (evil-exit-emacs-state)
+    (should cooked--peek-active)
+    (evil-visual-state)
+    (ignore-errors (evil-next-line))
+    (should cooked--peek-active)
+    (evil-normal-state)
+    (should cooked--peek-active)))
+
+(ert-deftest cooked-evil-replace-state-typing-resumes-forwarding-too ()
+  "Evil's replace state overtypes rather than self-inserting in the usual
+buffers, so this is worth checking explicitly rather than assuming the
+`self-insert-command' remap alone covers it."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-echoing-child ""
+    (switch-to-buffer (current-buffer))
+    (evil-exit-emacs-state)
+    (should cooked--peek-active)
+    (evil-replace-state)
+    (cooked-tests--type "x")
+    (should-not cooked--peek-active)))
 
 (ert-deftest cooked-paste-brackets-when-the-child-asked-for-it ()
   "A child that turned bracketed paste on is told where the paste begins and
@@ -825,6 +938,64 @@ must not take the binding away."
     (should-error (cooked-interrupt) :type 'user-error)
     (should cooked--input-start)
     (should cooked--input-end)))
+
+(ert-deftest cooked-mode-map-carries-cookeds-own-commands ()
+  "Peeking installs `cooked-peek-map', a child of `cooked-mode-map' with none
+of the state maps' forwarding -- so cooked's own commands have to live on the
+parent, not just in `cooked-raw-map'/`cooked-alt-map'/`cooked-input-map', or
+they would evaporate while peeking."
+  (dolist (binding '(("C-c C-c" . cooked-interrupt)
+                      ("C-c C-d" . cooked-send-eof)
+                      ("C-c C-e" . cooked-send-string)
+                      ("C-c M-x" . cooked-meta-x)
+                      ("C-c C-z" . cooked-suspend)
+                      ("C-c C-y" . cooked-paste)
+                      ("C-c C-q" . cooked-send-literal-key)
+                      ("C-c C-v" . cooked-toggle-peek)
+                      ("C-c C-p" . cooked-previous-command)
+                      ("C-c C-n" . cooked-next-command)
+                      ("C-c TAB" . cooked-toggle-fold)
+                      ("C-c C-l" . cooked-refresh)))
+    (should (eq (lookup-key cooked-mode-map (kbd (car binding))) (cdr binding)))))
+
+(ert-deftest cooked-toggle-peek-does-not-lose-cookeds-own-commands ()
+  "Regression: peeking used to install a bare `cooked-mode-map' with none of
+cooked's own C-c-prefixed commands, so `C-c C-c'/`C-c C-v' and the rest were
+unreachable until you left peek again -- including the toggle back out,
+which left non-evil users stuck with no keyboard way out of peek at all."
+  (cooked-tests--with-echoing-child ""
+    (call-interactively #'cooked-toggle-peek)
+    (should (eq (key-binding (kbd "C-c C-c")) #'cooked-interrupt))
+    (should (eq (key-binding (kbd "C-c C-v")) #'cooked-toggle-peek))
+    (should (eq (key-binding (kbd "C-c C-y")) #'cooked-paste))
+    (call-interactively #'cooked-toggle-peek)
+    (should-not cooked--peek-active)))
+
+(ert-deftest cooked-send-string-and-send-literal-key-refuse-at-a-prompt ()
+  "Both write to the child out of band; doing that while Emacs owns the line
+would arrive ahead of whatever pending input is still sitting unsent in the
+buffer, so both refuse there rather than silently confusing the two."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
+    (should (cooked-tests--settle
+             (lambda () (and (cooked--input-state-p) cooked--input-start))))
+    (cooked--refresh-keymap)
+    (should-error (cooked-send-string "ls") :type 'user-error)
+    (cl-letf (((symbol-function 'read-key) (lambda (&rest _) ?a)))
+      (should-error (call-interactively #'cooked-send-literal-key) :type 'user-error))))
+
+(ert-deftest cooked-mouse-grab-is-suspended-while-peeking ()
+  "A click during peek should select text like any other buffer's, not be
+reinterpreted as a mouse report to a child that still owns the keyboard as
+far as `cooked--input-state-p' alone can tell."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; cat -v")
+    (should (cooked-tests--settle
+             (lambda () (and cooked--mouse (not (cooked--input-state-p))))))
+    (should cooked--mouse-grab)
+    (call-interactively #'cooked-toggle-peek)
+    (should-not cooked--mouse-grab)
+    (call-interactively #'cooked-toggle-peek)
+    (should cooked--mouse-grab)))
 
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here
