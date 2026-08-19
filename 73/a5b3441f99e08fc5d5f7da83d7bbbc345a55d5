@@ -1,0 +1,29 @@
+lisp/cooked-evil.el
+  s_200f5522259172::t_51786a6f203ec4 51-67,155-164
+lisp/cooked.el
+  s_200f5522259172::t_c0840b111d215d 188-193,1531-1534,1547-1552,1555,1557,1559,2148
+tests/cooked-tests-helpers.el
+  s_200f5522259172::t_1480719e1b2f27 42-53
+tests/cooked-tests-input.el
+  s_200f5522259172::t_721c119e05ccc6 19-122,251,253,750
+tests/cooked-tests-render.el
+  s_200f5522259172::t_af6af9ee1ce8a3 80
+lisp/cooked-mode.el
+  s_200f5522259172::t_1e535e0d594032 467-560,564,582-583,596-659,819-838,1139
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "73a5b3441f99e08fc5d5f7da83d7bbbc345a55d5",
+  "prompts": {},
+  "sessions": {
+    "s_200f5522259172": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "adfd610c-6164-42c7-96ad-91e4499f3c50",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
