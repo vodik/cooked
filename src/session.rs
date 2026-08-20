@@ -320,6 +320,15 @@ impl Session {
         self.shared.term.take().remove_rows(first, count);
     }
 
+    /// Drop the grid rows above the prompt; see [`Term::clear_to_prompt`].
+    ///
+    /// The other edit the grid accepts from Emacs, and the same bargain as
+    /// [`Session::remove_rows`]: Emacs asks, the emulator moves the rows, and the drain
+    /// that follows is the ordinary one.
+    pub fn clear_to_prompt(&self) -> usize {
+        self.shared.term.take().clear_to_prompt()
+    }
+
     pub fn mode(&self) -> Mode {
         self.shared.load_mode()
     }

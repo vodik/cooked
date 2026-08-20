@@ -110,6 +110,14 @@ pub enum Event {
     /// call, not the child's, since anything that can write to the terminal can send
     /// this sequence. This event is the whole of the response; Emacs acts on it or not.
     EraseScrollback,
+    /// `CSI 2 J` — the child finished with this screen.
+    ///
+    /// The rows themselves are not lost: [`Screen::erase_display`] archives them, because
+    /// history belongs to Emacs. But the child asked for a blank screen and every other
+    /// terminal gives it one, by scrolling what it cleared out of view. Emacs has no
+    /// viewport of its own to scroll — the transcript and the live screen are one buffer
+    /// — so the window is what moves, and this is the event that asks it to.
+    DisplayCleared,
     /// XTWINOPS 22/23: push or pop the window title. `smcup`/`rmcup` end in these, so a
     /// full-screen program that sets a title expects it restored when it leaves.
     TitleStack(bool),
@@ -281,6 +289,21 @@ impl Term {
         self.state.screen_mut().remove_rows(first, count);
     }
 
+    /// Drop every grid row above the current prompt, returning how many went.
+    ///
+    /// The grid's half of clearing the terminal. Emacs owns the scrollback and deletes
+    /// its own text, but which row the prompt is on is grid arithmetic over state only
+    /// the emulator keeps — [`State::prompt_start`] against [`State::evicted_total`] —
+    /// and asking Emacs to rediscover it from buffer positions would get a two-line
+    /// prompt wrong, cutting at the input row and eating the line above it that the
+    /// shell is still drawing on.
+    ///
+    /// Without OSC 133 there is no prompt to find, so the cursor row stands in: whatever
+    /// the child is on now is the line the user is looking at either way.
+    pub fn clear_to_prompt(&mut self) -> usize {
+        self.state.clear_to_prompt()
+    }
+
     pub fn screen(&self) -> &Screen {
         self.state.screen()
     }
@@ -385,6 +408,13 @@ struct State {
     /// The pen's underline colour (`SGR 58`). Not part of [`Style`]: it is stored per row
     /// in a side table, so that a rare feature does not grow every cell on the grid.
     underline: Color,
+    /// Where the shell last said its prompt begins (OSC 133;A), in [`Anchor`] coordinates.
+    ///
+    /// Emacs keeps markers for the *command* regions it renders; this keeps the one row
+    /// the grid itself needs an answer about, for [`Term::clear_to_prompt`]. Absolute, so
+    /// it survives the rows above it scrolling away, and rebased when rows are removed
+    /// from under it — the two ways row 0 can stop meaning what it meant.
+    prompt_start: Option<Anchor>,
 }
 
 impl State {
@@ -413,6 +443,7 @@ impl State {
             newline_mode: false,
             last_print: None,
             underline: Color::Default,
+            prompt_start: None,
         }
     }
 
@@ -466,6 +497,16 @@ impl State {
         self.archive(rows);
     }
 
+    /// The child cleared the whole display; see [`Event::DisplayCleared`].
+    ///
+    /// Silent on the alternate screen, which archives nothing and is pinned to the top of
+    /// the window already: there is no transcript there to scroll out of view.
+    fn cleared_display(&mut self) {
+        if !self.on_alt {
+            self.events.push(Event::DisplayCleared);
+        }
+    }
+
     /// Send rows to scrollback unconditionally, for callers holding primary rows.
     ///
     /// The single funnel for rows leaving the primary screen, which is why the absolute
@@ -483,6 +524,35 @@ impl State {
                 runs: row.line_runs(),
                 wrapped: row.wrapped,
             }));
+    }
+
+    /// See [`Term::clear_to_prompt`].
+    ///
+    /// A no-op on the alternate screen: that grid is a running program's frame, not a
+    /// transcript, and removing rows from under it would corrupt a redisplay we cannot
+    /// repair. The scrollback Emacs deletes alongside is the primary's, and is untouched
+    /// by whatever is on screen.
+    fn clear_to_prompt(&mut self) -> usize {
+        if self.on_alt {
+            return 0;
+        }
+        let cursor = self.primary.cursor.row;
+        let keep = self
+            .prompt_start
+            .and_then(|at| at.row.checked_sub(self.evicted_total))
+            .filter(|row| *row <= cursor)
+            .unwrap_or(cursor);
+        if keep == 0 {
+            return 0;
+        }
+        self.primary.remove_rows(0, keep);
+        // The prompt is on row 0 now, so its absolute row is exactly `evicted_total`.
+        // Rows removed this way are discarded rather than archived, so that count does
+        // not move and the anchor has to come down to meet it.
+        if let Some(at) = &mut self.prompt_start {
+            at.row = at.row.saturating_sub(keep);
+        }
+        keep
     }
 
     /// Where the cursor is now, in the coordinates an [`Anchor`] keeps.
@@ -696,7 +766,10 @@ impl State {
         // Anchored here, where the mark actually is in the stream. See [`Anchor`].
         let at = self.anchor();
         self.events.push(match kind {
-            b'A' => Event::PromptStart(at),
+            b'A' => {
+                self.prompt_start = Some(at);
+                Event::PromptStart(at)
+            }
             b'B' => Event::PromptEnd(at),
             b'C' => Event::CommandStart(at),
             b'D' => Event::CommandEnd(
@@ -894,6 +967,9 @@ impl Perform for State {
                 if let Some(how) = Erase::from_param(param) {
                     let evicted = self.screen_mut().erase_display(how, pen);
                     self.evicted(evicted);
+                    if matches!(how, Erase::All) {
+                        self.cleared_display();
+                    }
                 }
                 if param == 3 {
                     self.events.push(Event::EraseScrollback);
@@ -1072,6 +1148,7 @@ impl Perform for State {
                     .screen_mut()
                     .erase_display(Erase::All, Style::default());
                 self.evicted(evicted);
+                self.cleared_display();
                 self.screen_mut().goto(0, 0);
             }
             _ => {}
@@ -1907,11 +1984,86 @@ mod tests {
     }
 
     #[test]
-    fn plain_erase_display_never_raises_the_scrollback_event() {
+    fn a_partial_erase_raises_neither_clearing_event() {
+        // `0 J` and `1 J` are a child rewriting part of a screen it is still drawing on,
+        // not finishing with one: no scrollback goes, and no viewport moves.
+        let mut t = term(3, 8, b"aaa\r\nbbb\r\nccc");
+        t.drain();
+        t.feed(b"\x1b[0J\x1b[1J");
+        assert!(t.drain().events.is_empty());
+    }
+
+    #[test]
+    fn clearing_the_display_asks_emacs_to_show_the_blank_screen() {
+        // The rows are archived rather than lost, so nothing scrolls out of view on its
+        // own: `2 J` looks like nothing happened unless Emacs moves the window, and this
+        // event is what tells it to.
         let mut t = term(3, 8, b"aaa\r\nbbb\r\nccc");
         t.drain();
         t.feed(b"\x1b[2J");
+        assert_eq!(t.drain().events, vec![Event::DisplayCleared]);
+    }
+
+    #[test]
+    fn a_reset_clears_the_display_like_any_other() {
+        let mut t = term(3, 8, b"aaa\r\nbbb\r\nccc");
+        t.drain();
+        t.feed(b"\x1bc");
+        assert!(t.drain().events.contains(&Event::DisplayCleared));
+    }
+
+    #[test]
+    fn the_alt_screen_never_reports_a_cleared_display() {
+        // It archives nothing and is pinned to the top of the window already, so there is
+        // no transcript for a window to scroll away from.
+        let mut t = term(3, 8, b"aaa\r\nbbb");
+        t.feed(b"\x1b[?1049h");
+        t.drain();
+        t.feed(b"\x1b[2J");
         assert!(t.drain().events.is_empty());
+    }
+
+    #[test]
+    fn clearing_to_the_prompt_keeps_the_prompt_and_drops_what_is_above_it() {
+        let mut t = term(4, 8, b"one\r\ntwo\r\n\x1b]133;A\x1b\\$ ls");
+        t.drain();
+        assert_eq!(t.clear_to_prompt(), 2);
+        assert_eq!(text(&t, 0), "$ ls");
+        assert_eq!(text(&t, 1), "");
+        assert_eq!(t.screen().cursor.row, 0, "the cursor rides up with its row");
+    }
+
+    #[test]
+    fn clearing_to_the_prompt_falls_back_to_the_cursor_row() {
+        // No OSC 133 to go on: whatever the child is on now is the line being looked at.
+        let mut t = term(4, 8, b"one\r\ntwo\r\nthree");
+        t.drain();
+        assert_eq!(t.clear_to_prompt(), 2);
+        assert_eq!(text(&t, 0), "three");
+    }
+
+    #[test]
+    fn clearing_to_the_prompt_twice_still_knows_where_the_prompt_is() {
+        // The mark is absolute, and rows removed this way are discarded rather than
+        // archived, so the count they are absolute against does not move: the anchor has
+        // to come down instead, or the second call cuts at the cursor and eats the prompt.
+        let mut t = term(4, 8, b"one\r\ntwo\r\n\x1b]133;A\x1b\\$ ls");
+        t.drain();
+        t.clear_to_prompt();
+        t.feed(b"\r\nout");
+        t.drain();
+        assert_eq!(t.clear_to_prompt(), 0, "the prompt is already on row 0");
+        assert_eq!(text(&t, 0), "$ ls");
+        assert_eq!(text(&t, 1), "out");
+    }
+
+    #[test]
+    fn clearing_to_the_prompt_leaves_the_alt_screen_alone() {
+        let mut t = term(3, 8, b"aaa");
+        t.feed(b"\x1b[?1049h\x1b[2;1Hbbb");
+        t.drain();
+        assert_eq!(t.clear_to_prompt(), 0);
+        assert_eq!(text(&t, 1), "bbb");
     }
 
     #[test]

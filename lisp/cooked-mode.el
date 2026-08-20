@@ -330,9 +330,13 @@ behind the freeze."
 
 (defconst cooked--escape-key ?\C-c
   "Prefix reserved for cooked's own commands while the child owns the keyboard.
-Everything else, ESC included, is forwarded verbatim, so \\`M-x' reaches the
-child as ESC x — exactly as in any other terminal.  \\`C-c M-x' is the way back
-out; see `cooked-meta-x'.")
+Everything `cooked-raw-map' and `cooked-alt-map' cover is otherwise forwarded
+verbatim, ESC included, so \\`M-x' reaches the child as ESC x — exactly as in
+any other terminal.  \\`C-c M-x' is the way back out; see `cooked-meta-x'.
+
+`cooked-semi-map' is the exception, and deliberately so: it keeps ESC and the
+whole Meta space for Emacs, which is what makes evil's insert state a state you
+can leave.  See `cooked-semi-exceptions'.")
 
 (defun cooked-meta-x ()
   "Run \\`M-x' in Emacs rather than sending it to the child.
@@ -574,7 +578,10 @@ forwarding they did not ask to resume.  A drain is forced in that case, since
 nothing else would deliver it.
 
 Not gated on a live session: one that ended while suspended must not strand
-the buffer read-only with no way back."
+the buffer read-only with no way back.  `cooked--refresh-keymap' now answers
+that at the source -- a buffer with no session has no input mode at all, and
+`cooked--on-exit' refreshes on the way out -- so this is the second lock on the
+same door rather than the only one."
   (let ((was cooked--input-mode))
     (setq cooked--peek-explicit nil)
     (when cooked--input-mode
@@ -1083,6 +1090,11 @@ The answer for anyone not driving this from somewhere else."
          ('command cooked-command-map)
          ('raw cooked-raw-map)))))
 
+(defvar cooked--quiet-refresh nil
+  "Whether the refresh under way was asked for quietly.
+Bound for the dynamic extent by `cooked--refresh-keymap', so a nested refresh
+inherits it; see the QUIET argument there.")
+
 (defun cooked--refresh-keymap (&optional quiet)
   "Install the keymap and render mode the current state asks for.
 
@@ -1098,20 +1110,31 @@ With QUIET, `cooked-state-change-hook' is not run.  That hook means \"who owns
 the keyboard changed\", and `cooked-evil-sync' acts on it by putting evil into
 the state the child's ownership calls for -- so running it from a refresh that
 evil itself triggered would have evil immediately undo the user's own `C-z'.
+QUIET holds for the dynamic extent rather than for this frame alone: a refresh
+nested inside a quiet one -- reached through the catch-up drain below and its
+own `cooked--set-mode' -- was otherwise loud, and ran the hook on news of the
+child that predates the keystroke being answered.
 
 The hook runs last, after everything here has settled, so that a handler which
 changes state and refreshes again nests cleanly: the inner refresh's decisions
 are the ones left standing."
-  (when (eq (cooked--policy) 'cooked)
-    (setq cooked--peek-explicit nil))
   (let* ((policy (cooked--policy))
+         ;; A dead session counts with the prompt: there is no child to keep
+         ;; keys from and nothing to defer, so a buffer left suspended when the
+         ;; child exited must not stay read-only with no way back.
+         (ordinary (or (eq policy 'cooked) (not cooked--session)))
          (was cooked--input-mode)
-         (mode (unless (eq policy 'cooked)
-                 (funcall cooked-input-mode-function))))
+         (cooked--quiet-refresh (or quiet cooked--quiet-refresh))
+         (mode (unless ordinary (funcall cooked-input-mode-function))))
+    (when ordinary (setq cooked--peek-explicit nil))
     (setq cooked--input-mode mode)
-    (let ((read-only (and (cooked--suspended-p) t)))
-      (unless (eq buffer-read-only read-only)
-        (setq buffer-read-only read-only)))
+    ;; Only ever undoes its own protection; see `cooked--read-only'.
+    (cond ((cooked--suspended-p)
+           (setq cooked--read-only t
+                 buffer-read-only t))
+          (cooked--read-only
+           (setq cooked--read-only nil
+                 buffer-read-only nil)))
     (use-local-map (cooked--state-keymap mode policy))
     ;; After the mode is already set, so the drain's own `cooked--set-mode' does
     ;; not find a freeze still in force and recurse back into here.
@@ -1120,7 +1143,7 @@ are the ones left standing."
     (unless (cooked--input-state-p)
       (cooked--clear-input-region))
     (cooked--update-mouse-grab)
-    (unless quiet
+    (unless cooked--quiet-refresh
       (run-hooks 'cooked-state-change-hook))))
 
 (defun cooked-last-exit-code ()
@@ -1319,6 +1342,29 @@ which it usually is not.  Walk the frame's windows instead."
   "Report focus when this buffer's window gains or loses selection."
   (cooked--report-focus))
 
+(defun cooked--user-window ()
+  "The window the user is working in, looking past an active minibuffer.
+
+Reading the minibuffer as \"the user has left\" is wrong in both directions:
+it ends a deliberate peek the moment they reach for `M-x', `C-x b' or evil's
+`:', and it tells a child that asked for focus events that it lost the
+keyboard to a prompt that is about to hand it straight back."
+  (or (and (window-minibuffer-p (selected-window))
+           (minibuffer-selected-window))
+      (selected-window)))
+
+(defun cooked--defer (function)
+  "Call FUNCTION with no arguments, later, in the current buffer if it lives.
+
+The window hooks run during redisplay, and a drain is not a redisplay-safe
+thing to do from one: it inserts text, swaps the local map, recenters windows
+and runs `cooked-state-change-hook', which is arbitrary user code."
+  (let ((buffer (current-buffer)))
+    (run-at-time 0 nil
+                 (lambda ()
+                   (when (buffer-live-p buffer)
+                     (with-current-buffer buffer (funcall function)))))))
+
 (defun cooked--update-attention (&rest _)
   "Track, for every live session, whether the user is looking at it.
 
@@ -1334,7 +1380,7 @@ arrived while frozen were skipped, so without this the buffer would sit at
 whatever it showed when the freeze began until something else asked."
   (cooked--dolist-buffers
     (when cooked--session
-      (let ((state (cond ((eq (current-buffer) (window-buffer (selected-window)))
+      (let ((state (cond ((eq (current-buffer) (window-buffer (cooked--user-window)))
                           'here)
                          ;; Displayed elsewhere, or displayed nowhere having
                          ;; been somewhere a moment ago -- both are the user
@@ -1345,7 +1391,9 @@ whatever it showed when the freeze began until something else asked."
         (unless (or (null state) (eq state cooked--attention))
           (setq cooked--attention state)
           (when (and (eq state 'away) (eq cooked--input-mode 'frozen))
-            (cooked--drain-and-apply)))))))
+            (cooked--defer
+             (lambda ()
+               (when cooked--session (cooked--drain-and-apply))))))))))
 
 (defun cooked--install-global-hooks ()
   "Install the hooks that cannot be buffer-local."
@@ -1384,9 +1432,10 @@ assumption on startup is that it has focus, and telling it so again is noise.")
 
 (defun cooked--focused-p ()
   "Whether this buffer's window is selected in a frame that has focus."
-  (and (eq (current-buffer) (window-buffer (selected-window)))
-       (frame-focus-state (window-frame (selected-window)))
-       t))
+  (let ((window (cooked--user-window)))
+    (and (eq (current-buffer) (window-buffer window))
+         (frame-focus-state (window-frame window))
+         t)))
 
 (defun cooked--report-focus ()
   "Tell the child about a focus change, when it asked to be told."
@@ -1441,6 +1490,11 @@ and anything watching the buffer list see an ordinary kill."
   (when cooked--session (ignore-errors (cooked--kill cooked--session)))
   (when cooked--wake (delete-process cooked--wake))
   (setq cooked--session nil cooked--wake nil)
+  ;; After the session is gone, so the mode is recomputed as nil: a child that
+  ;; exited while the buffer was suspended -- evil in normal state, or a
+  ;; deliberate peek -- would otherwise leave it read-only under `cooked-peek-map'
+  ;; with nothing left to thaw it.
+  (cooked--refresh-keymap)
   ;; Deferred: this runs from inside the drain, which keeps working with the
   ;; buffer and its locals after we return.  Killing here would pull them out
   ;; from under it, and would run `kill-buffer-hook' — arbitrary user code —

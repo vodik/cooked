@@ -173,15 +173,24 @@ cooked-mode.el above `cooked-toggle-peek' for the bug latching it caused."
           ((or 'insert 'replace) (and cooked-evil-hybrid-insert 'semi))
           (_ nil)))))
 
-(setq cooked-input-mode-function #'cooked-evil--input-mode)
+;; Only if nobody else has claimed the seam: `cooked-input-mode-function' is a
+;; public hook point, and a user who set their own answer before loading this
+;; meant it.
+(when (eq cooked-input-mode-function #'cooked--default-input-mode)
+  (setq cooked-input-mode-function #'cooked-evil--input-mode))
 
 (defun cooked-evil--state-changed ()
   "Recompute cooked's input mode for the state evil has just entered.
 
 Quiet, because `cooked-state-change-hook' means the *child's* ownership
 changed; running it here would call `cooked-evil-sync', which would put evil
-straight back into `cooked-evil-child-state' and make `C-z' unusable."
-  (when (bound-and-true-p cooked--session)
+straight back into `cooked-evil-child-state' and make `C-z' unusable.
+
+Guarded on the mode rather than on `cooked--session', this being on evil's
+global state hooks and so running in every buffer there is: a session that has
+ended is exactly the buffer that still needs its keymap recomputed, since it is
+the one left read-only when the child died under a freeze."
+  (when (derived-mode-p 'cooked-mode)
     (cooked--refresh-keymap t)))
 
 (dolist (state '(normal insert visual emacs motion operator replace))

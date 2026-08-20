@@ -1270,5 +1270,172 @@ far as `cooked--input-state-p' alone can tell."
     (call-interactively #'cooked-toggle-peek)
     (should cooked--mouse-grab)))
 
+;;;; Re-entrancy, attention and the state that outlives the child
+;;
+;; What 0b288bc opened up by decoupling `cooked--frozen-p' from
+;; `cooked--input-mode': drains that could nest inside `cooked--apply', a
+;; minibuffer that read as walking away, and a suspended buffer whose child
+;; exited under it.
+
+(ert-deftest cooked-a-drain-inside-a-drain-is-folded-into-the-outer-one ()
+  "`cooked--apply' decides what is following, and where point has wandered to,
+before it rewrites the screen; a drain that starts in the middle of one leaves
+it finishing against an update two drains stale.  It can: `cooked--set-alt',
+`cooked--set-mode' and an OSC 133 mark all refresh the keymap from inside the
+apply, and a refresh that lifts a freeze drains to catch up.
+
+The nested request is made here rather than waited for, so the assertion is
+about the guard and not about a race: what a refresh does mid-apply is exactly
+this call."
+  (cooked-tests--with-echoing-child ""
+    (let ((depth 0) (deepest 0) (applies 0) (nested nil))
+      (cl-letf* ((apply-fn (symbol-function 'cooked--apply))
+                 ((symbol-function 'cooked--apply)
+                  (lambda (update)
+                    (setq depth (1+ depth)
+                          applies (1+ applies)
+                          deepest (max deepest depth))
+                    (unwind-protect
+                        (progn
+                          (unless nested
+                            (setq nested t)
+                            (cooked--drain-and-apply))
+                          (funcall apply-fn update))
+                      (setq depth (1- depth))))))
+        (cooked--drain-and-apply))
+      (should (= deepest 1))
+      ;; Folded, not dropped: the request is honoured once the outer drain is
+      ;; done with the buffer.
+      (should (= applies 2)))))
+
+(ert-deftest cooked-reaching-for-the-minibuffer-is-not-walking-away ()
+  "A freeze lifts when the user stops looking, and `M-x' is not that.  The
+mini-window being the selected one made every command prompt -- `M-x', `C-x b',
+evil's `:' -- thaw a peek out from under someone still reading it."
+  (cooked-tests--with-echoing-child ""
+    (switch-to-buffer (current-buffer))
+    ;; Nothing in the way: with no minibuffer active this is the ordinary answer.
+    (should (eq (cooked--user-window) (selected-window)))
+    (call-interactively #'cooked-toggle-peek)
+    (setq cooked--attention 'here)
+    (should (cooked--frozen-p))
+    (let ((buffer (current-buffer))
+          (mini (minibuffer-window)))
+      (cl-letf (((symbol-function 'selected-window) (lambda () mini))
+                ((symbol-function 'minibuffer-selected-window)
+                 (lambda () (get-buffer-window buffer t))))
+        (cooked--update-attention)))
+    (should (eq cooked--attention 'here))
+    (should (cooked--frozen-p))))
+
+(ert-deftest cooked-a-child-that-exits-while-suspended-hands-the-buffer-back ()
+  "`cooked--on-exit' used to clear the session without touching the keymap, so a
+child that died while the buffer was peeked left it read-only under
+`cooked-peek-map' -- and nothing was left that could thaw it."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; sleep 0.2; exit 3")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+    (call-interactively #'cooked-toggle-peek)
+    (should buffer-read-only)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "\\[exited 3\\]" (cooked-tests--text)))))
+    (should-not cooked--session)
+    (should-not cooked--input-mode)
+    (should-not cooked--peek-explicit)
+    (should-not buffer-read-only)))
+
+(ert-deftest cooked-evil-normal-state-does-not-outlive-the-child ()
+  "The same for the state an evil user is actually in: normal state is
+read-only while the child owns the keyboard, and there is no child to own it
+once it has exited."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; sleep 0.2; exit 0")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+    (evil-normal-state)
+    (should buffer-read-only)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "\\[exited 0\\]" (cooked-tests--text)))))
+    (should-not cooked--input-mode)
+    (should-not buffer-read-only)))
+
+(ert-deftest cooked-a-quiet-refresh-stays-quiet-through-a-nested-one ()
+  "QUIET says \"evil asked for this, do not tell evil about it\".  It used to
+hold for one frame only, so a refresh nested inside it -- a drain's own
+`cooked--set-mode' -- ran `cooked-state-change-hook' after all, and
+`cooked-evil-sync' put the user back into emacs state a keystroke after they
+left it."
+  (cooked-tests--with-echoing-child ""
+    (let* ((runs 0)
+           (nested nil)
+           (cooked-state-change-hook (list (lambda () (setq runs (1+ runs)))))
+           (cooked-input-mode-function
+            (lambda ()
+              ;; Where a nested refresh comes from in the real thing.
+              (unless nested
+                (setq nested t)
+                (cooked--refresh-keymap))
+              nil)))
+      (cooked--refresh-keymap t)
+      (should nested)
+      (should (= runs 0))
+      ;; And a loud one is still loud.
+      (setq nested t)
+      (cooked--refresh-keymap)
+      (should (= runs 1)))))
+
+(ert-deftest cooked-a-refresh-only-clears-the-read-only-it-set-itself ()
+  "Suspending makes the buffer read-only; `read-only-mode' makes it read-only
+for reasons of its own, and a refresh that wrote the flag unconditionally
+threw the second away on the next state change."
+  (cooked-tests--with-echoing-child ""
+    (should-not buffer-read-only)
+    (read-only-mode 1)
+    (cooked--refresh-keymap)
+    (should buffer-read-only)
+    (read-only-mode -1)
+    ;; Ours is still ours, and still lifts.
+    (call-interactively #'cooked-toggle-peek)
+    (should buffer-read-only)
+    (call-interactively #'cooked-toggle-peek)
+    (should-not buffer-read-only)))
+
+(ert-deftest cooked-a-second-window-is-not-caught-up-while-suspended ()
+  "A window other than the selected one is caught up by `set-window-point' on
+every drain, which is what keeps it from freezing where it last pointed.  While
+the buffer is suspended that is the one thing it must not do: the user is
+reading, and the render carrying on underneath them is precisely what
+suspending exists to hold still.  Asserted on the call rather than on the
+resulting position, which a redraw moves on its own by rewriting the rows the
+marker sits in."
+  (cooked-tests--with-echoing-child ""
+    (switch-to-buffer (current-buffer))
+    (let ((other (split-window))
+          (caught 0))
+      (unwind-protect
+          (cl-letf* ((set-point (symbol-function 'set-window-point))
+                     ((symbol-function 'set-window-point)
+                      (lambda (window position)
+                        (when (eq window other) (setq caught (1+ caught)))
+                        (funcall set-point window position))))
+            (set-window-buffer other (current-buffer))
+            (set-window-point other (point-max))
+            (setq caught 0)
+            (call-interactively #'cooked-toggle-peek)
+            ;; Suspended, but still drawing: the freeze lifts for a buffer the
+            ;; user is not looking at, which is what makes the drain below land.
+            (setq cooked--attention 'away)
+            (cooked--send-to-child "one")
+            (should (cooked-tests--settle
+                     (lambda () (string-search "one" (cooked-tests--text)))))
+            (should (= caught 0))
+            ;; And it is caught up again the moment forwarding resumes.
+            (call-interactively #'cooked-toggle-peek)
+            (cooked--send-to-child "two")
+            (should (cooked-tests--settle
+                     (lambda () (string-search "two" (cooked-tests--text)))))
+            (should (> caught 0)))
+        (delete-window other)))))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

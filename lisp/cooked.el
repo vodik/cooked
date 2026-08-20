@@ -196,6 +196,12 @@ check from being the loudest thing at each call site."
 (defvar-local cooked--cursor (cooked--cursor-make)
   "The child's cursor as of the last drain, a `cooked-cursor'.")
 (defvar-local cooked--alt nil)
+(defvar-local cooked--pin-screen-top nil
+  "Non-nil when this drain should put the live screen at the top of the window.
+
+Set by the child clearing the display and cleared as soon as the window block at
+the end of `cooked--apply\=' has acted on it: it says something about this drain,
+not about the buffer.")
 (defvar-local cooked--input-mode nil
   "How this buffer is treating the keyboard and the render right now.
 
@@ -224,6 +230,14 @@ what the rest of the code asks.")
 Kept apart from `cooked--input-mode' because the mode is recomputed from
 scratch on every state change: a deliberate peek has to survive a `raw'<->`alt'
 transition, and nothing else about the mode does.")
+
+(defvar-local cooked--read-only nil
+  "Whether the `buffer-read-only' in force is ours, from a suspended state.
+
+Kept for the same reason `cooked--narrowed' is: a refresh that finds the buffer
+no longer suspended should undo its own protection and nothing else.  Without
+it, a `read-only-mode' the user turned on themselves was cleared by the next
+state change that happened along.")
 
 (defun cooked--suspended-p ()
   "Whether keys are being kept from the child rather than forwarded."
@@ -1718,9 +1732,46 @@ EXTRA-ENV is an alist prepended to the child's environment."
 Bound for the dynamic extent of the repair rather than kept per buffer: it
 answers \"am I inside one right now\", which is not something a buffer holds.")
 
+(defvar-local cooked--draining nil
+  "Whether a drain is already running in this buffer.
+See `cooked--drain-and-apply', which is where re-entry is folded away.")
+
+(defvar-local cooked--drain-pending nil
+  "Whether a drain was asked for while one was already running.")
+
 (defun cooked--drain-and-apply ()
-  "Apply whatever the native core has accumulated since the last drain."
-  (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines)))
+  "Apply whatever the native core has accumulated since the last drain.
+
+Re-entrant calls are folded into the drain already under way rather than
+nested inside it.  `cooked--apply' decides `follow', `wandered' and the
+windows that count as following *before* it rewrites the screen, and then
+calls three things that can refresh the keymap -- `cooked--set-alt',
+`cooked--set-mode' and `cooked--handle-event' for an OSC 133 mark.  A
+refresh that lifts a freeze asks for a catch-up drain, so nesting there would
+leave the outer `cooked--apply' finishing against an update, and a set of
+captured positions, two drains stale.
+
+Nothing is dropped by refusing: the request is remembered and honoured once
+the outer drain has returned, which is also the only point at which draining
+again is safe."
+  (if cooked--draining
+      (setq cooked--drain-pending t)
+    ;; `unwind-protect' and `setq' rather than `let': `cooked--apply' selects
+    ;; other windows to recenter them, which changes the current buffer, and a
+    ;; `let' on a buffer-local restores into whichever buffer is current when
+    ;; the binding unwinds.
+    (unwind-protect
+        (progn
+          (setq cooked--draining t
+                cooked--drain-pending nil)
+          (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))
+          ;; Bounded in practice: the pending flag is set by a freeze lifting,
+          ;; and a freeze that has lifted does not lift again.
+          (while (and cooked--drain-pending cooked--session)
+            (setq cooked--drain-pending nil)
+            (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))))
+      (setq cooked--draining nil
+            cooked--drain-pending nil))))
 
 (defun cooked--on-wake (buffer)
   "Drain BUFFER's session and apply what changed.
@@ -1885,8 +1936,12 @@ window that fell behind."
                ;; — see `cooked--insert-runs' — so the cursor at the true end of
                ;; output sits one short of `point-max', not on it.
                (at-end (>= target (1- (point-max)))))
-          (cooked--dolist-windows w other-follows
-            (set-window-point w target))
+          ;; Only while the view is following at all: suspending exists to stop
+          ;; the child's own output moving what is being read, and a second
+          ;; window on the same buffer is being read on the same terms.
+          (when (cooked--follow-p)
+            (cooked--dolist-windows w other-follows
+              (set-window-point w target)))
           (when (and follow at-end)
             (cooked--dolist-windows w (append here other-follows)
               (with-selected-window w (recenter (- -1 scroll-margin))))))))
@@ -1910,8 +1965,8 @@ two chances to disagree."
     (`(reply . ,bytes) (cooked--send-if-live bytes))
     (`(title-stack ,push) (cooked--handle-title-stack push))
     (`(erase-scrollback)
-     (when cooked-honor-erase-scrollback
-       (cooked--discard-scrollback (cooked--screen-start-position))))
+     (cooked--discard-scrollback (cooked--screen-start-position)))
+    (`(display-cleared) (setq cooked--pin-screen-top t))
     (`(mouse ,enabled ,sgr)
      (setq cooked--mouse enabled cooked--mouse-sgr sgr)
      ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this,
@@ -2135,18 +2190,6 @@ the payload is its title or its body, and `d=0\=' means more chunks follow."
   (when (equal (car parts) "notify")
     (when cooked-allow-notifications
       (cooked--notify (nth 1 parts) (string-join (nthcdr 2 parts) ";")))))
-
-(defcustom cooked-honor-erase-scrollback nil
-  "Whether the child may delete this buffer's scrollback with `CSI 3 J'.
-
-That is xterm's `clear -x' sequence.  Scrollback lives in the Emacs buffer,
-not the emulator's grid, on the principle that history is Emacs' to keep or
-discard — never the child's; anything that can write to the terminal can send
-this sequence, a `cat' of a hostile file included, so honoring it is off by
-default, for the same reason `cooked-allow-color-set' is.  `M-x
-cooked-clear-scrollback' remains available either way."
-  :type 'boolean
-  :group 'cooked)
 
 (defvar-local cooked--color-remaps nil
   "Alist of color kind to face remapping cookie, so OSC 110/111/112 can undo a set.")

@@ -88,6 +88,20 @@ The rows are discarded, not archived: they are a finished command's output being
 deleted, and archiving would return them to the buffer as scrollback.",
             remove_rows,
         ),
+        env.defun(
+            "cooked--clear-to-prompt",
+            1..=1,
+            "Remove the rows above SESSION's current prompt, returning how many went.
+
+The emulator's half of clearing the terminal.  Emacs deletes the scrollback,
+which is its own buffer text; the rows still on the grid are the emulator's, and
+which of them are above the prompt is a question only it can answer -- from the
+last OSC 133;A mark, falling back to the cursor's row when the shell never said.
+
+Returns 0 and does nothing on the alternate screen: that grid belongs to a
+running program, not to a transcript.",
+            clear_to_prompt,
+        ),
         env.defun("cooked--prompt-text", 1..=1, DOC_PROMPT, prompt_text),
         env.defun(
             "cooked--signal",
@@ -336,6 +350,11 @@ fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
     let count = env.from_lisp::<i64>(args[2])?.max(0) as usize;
     handle(&env, args[0])?.remove_rows(first, count);
     Ok(env.nil())
+}
+
+fn clear_to_prompt(env: Env, args: &[Value]) -> Result<Value> {
+    let removed = handle(&env, args[0])?.clear_to_prompt();
+    env.into_lisp(removed as i64)
 }
 
 fn prompt_text(env: Env, args: &[Value]) -> Result<Value> {
@@ -674,6 +693,7 @@ fn event_to_lisp(env: &Env, event: &Event, update: &Update, rows: &[RowSpan]) ->
         ]),
         Event::Reply(bytes) => tagged("reply", env.into_lisp(bytes.as_slice())?),
         Event::EraseScrollback => env.list(&[env.intern("erase-scrollback")?]),
+        Event::DisplayCleared => env.list(&[env.intern("display-cleared")?]),
         // (title-stack PUSH-P)
         Event::TitleStack(push) => env.list(&[env.intern("title-stack")?, env.into_lisp(*push)?]),
     }
