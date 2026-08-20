@@ -791,6 +791,13 @@ comint's input runs to `point-max', while cooked's has rendered screen rows
 below it.")
 (defvar-local cooked--semantic nil
   "OSC 133 state: nil, `prompt', `input' or `output'.")
+(defvar-local cooked--semantic-seen nil
+  "Whether any OSC 133 mark has arrived in this session.
+
+Latched, because `cooked--semantic' goes back to nil between `command-end' and
+the next `prompt-start' and so cannot answer \"is the integration working?\".
+Once a shell has spoken at all, it will keep speaking, and everything it does
+not say becomes informative -- see `cooked--policy'.")
 (defvar-local cooked--command-start nil
   "Marker where the running command's output began.")
 (defvar-local cooked--command-input nil
@@ -801,7 +808,7 @@ below it.")
   "Finished `cooked-command' records, newest first.")
 
 (defun cooked--policy ()
-  "How the buffer should behave right now: `cooked', `raw' or `alt'.
+  "How the buffer should behave right now: `cooked', `command', `raw' or `alt'.
 
 Derived rather than reported, because no single source knows the answer.  The
 alt screen comes from the child's own output, the line discipline is sampled
@@ -813,12 +820,23 @@ OSC 133 mark still says `prompt-end'.
 Alt wins over everything.  It is the one state in which the child has taken the
 screen over completely, so Emacs owns neither the keyboard nor the viewport --
 and it is in-band, arriving at an exact position in the byte stream, where the
-termios mode is sampled on a poll and is only approximately timed."
+termios mode is sampled on a poll and is only approximately timed.
+
+`command' and `raw' are the same situation -- the child owns the keyboard --
+told apart by how well we know it.  With the OSC 133 integration working, a raw
+read that is not a prompt means the shell is running something, and it said so;
+that is as positive a signal as the alt screen, so `command' keeps nothing back.
+Without it, `raw' is a guess covering both a real full-screen program and a
+shell editing its own prompt line, and `cooked-raw-exceptions' hedges against
+the second.  Making that hedge conditional is the point: it costs the shell
+`C-u' and `C-l', and there is no reason to pay when the shell is telling us
+exactly what is going on."
   (cond (cooked--alt 'alt)
         ;; A password read forwards keys too; the minibuffer collects them.
         ((eq cooked--mode 'secret) 'raw)
         ((eq cooked--mode 'cooked) 'cooked)
         ((eq cooked--semantic 'input) 'cooked)
+        (cooked--semantic-seen 'command)
         (t 'raw)))
 
 (defun cooked--secret-p ()
@@ -948,6 +966,7 @@ drain's scrollback insertion point.  The cursor is emphatically not a
 substitute: by the time a drain is applied it is where the *last* thing in that
 drain left it, so a script running several commands between two redisplays
 would file all of their output under one region ending wherever it stopped."
+  (setq cooked--semantic-seen t)
   (pcase event
     (`(prompt-start ,_) (setq cooked--semantic 'prompt))
     (`(prompt-end ,_)

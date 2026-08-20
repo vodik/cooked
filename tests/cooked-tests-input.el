@@ -27,6 +27,33 @@ customizable exceptions at all."
     (dolist (key '("C-g" "C-x" "C-h" "C-u" "C-l"))
       (should (eq (lookup-key cooked-alt-map (kbd key)) #'cooked-send-key)))))
 
+(ert-deftest cooked-policy-keeps-nothing-back-once-the-shell-has-spoken ()
+  "`cooked-raw-exceptions\=' hedges a state cooked cannot read: a raw program and
+a shell editing its own prompt line look alike.  OSC 133 removes the doubt, so
+once any mark has arrived the hedge is off and `C-u\='/`C-l\=' -- readline\='s
+kill-line and every shell\='s clear-screen -- go to the child like anything else."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; exec cat")
+    (should (cooked-tests--settle (lambda () (eq (cooked--policy) 'raw))))
+    ;; No mark has arrived, so the exceptions still apply.
+    (should (eq (lookup-key cooked-raw-map (kbd "C-u")) nil))
+    (should-not (eq (key-binding (kbd "C-u")) #'cooked-send-key))
+
+    ;; One mark is enough: the shell is talking, so its silence is informative.
+    (cooked--handle-semantic '(command-start nil) nil)
+    (should cooked--semantic-seen)
+    (should (eq (cooked--policy) 'command))
+    (cooked--refresh-keymap)
+    (should (eq (key-binding (kbd "C-u")) #'cooked-send-key))
+    (should (eq (key-binding (kbd "C-l")) #'cooked-send-key))
+    ;; C-c is still ours, in every state.
+    (should-not (eq (key-binding (kbd "C-c C-c")) #'cooked-send-key))))
+
+(ert-deftest cooked-command-state-still-reaches-cookeds-own-commands ()
+  "`cooked-command-map\=' is a child of `cooked-mode-map\=' like the others, or
+stepping out would be impossible from the one state that forwards the most."
+  (should (eq (keymap-parent cooked-command-map) cooked-mode-map))
+  (should (eq (lookup-key cooked-command-map (kbd "C-c C-v")) #'cooked-toggle-peek)))
+
 (ert-deftest cooked-raw-exceptions-are-not-bound-to-forward ()
   "The default `cooked-raw-exceptions' leave a handful of keys for Emacs even
 though the child is reading raw, unlike the alternate screen (see the test

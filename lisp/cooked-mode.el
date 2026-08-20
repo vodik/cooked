@@ -688,6 +688,11 @@ silently drop it; save and restore it around the replacement."
   "Keys left bound to their ordinary Emacs command during a raw, non-alt-screen
 read (`cooked--policy' returns `raw'), instead of forwarding to the child.
 
+Only in `raw', which is now the degraded state: with the OSC 133 integration
+working the policy is `command' instead, and that keeps nothing back -- see
+`cooked-command-map'.  This list is the hedge for a session where the shell
+never spoke.
+
 `raw' is treated less aggressively than `alt' (see `cooked-alt-map', which has
 no equivalent list) because it is a fuzzier state: non-shell REPLs with their
 own raw-mode line editors, single-keypress prompts, and -- the case that
@@ -723,6 +728,17 @@ regardless of this list, for a raw program that wants one of these keys back."
 (defvar cooked-raw-map
   (cooked--build-passthrough-map (mapcar #'cooked--exception-code cooked-raw-exceptions))
   "Keymap while the child is doing a raw, non-alt-screen read.")
+
+(defvar cooked-command-map
+  (cooked--build-passthrough-map nil)
+  "Keymap while the shell has told us a command is running.
+
+No exceptions, for the same reason `cooked-alt-map' has none: this is a
+positive signal rather than a guess.  `cooked-raw-exceptions' exists to hedge
+the case where cooked cannot tell a raw program from a shell editing its own
+prompt line, and OSC 133 removes that doubt -- so `C-u' and `C-l' go to the
+program that asked for them, as they would in any other terminal.  See
+`cooked--policy'.")
 
 (defvar cooked-alt-map
   (cooked--build-passthrough-map nil)
@@ -976,6 +992,7 @@ there is a genuine prompt to edit.  See `cooked--enter-peek'/
       (use-local-map (pcase policy
                         ('cooked cooked-input-map)
                         ('alt cooked-alt-map)
+                        ('command cooked-command-map)
                         ('raw cooked-raw-map))))
     (unless (cooked--input-state-p)
       (cooked--clear-input-region))
@@ -1358,6 +1375,7 @@ to the child verbatim."
 ;; `evil-collection', reachable.
 (set-keymap-parent cooked-input-map cooked-mode-map)
 (set-keymap-parent cooked-raw-map cooked-mode-map)
+(set-keymap-parent cooked-command-map cooked-mode-map)
 (set-keymap-parent cooked-alt-map cooked-mode-map)
 (set-keymap-parent cooked-peek-map cooked-mode-map)
 

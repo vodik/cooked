@@ -87,13 +87,22 @@ not just on the one `C-c` prefix cooked always keeps:
 
 | | Reserved for Emacs | Reach it anyway |
 |---|---|---|
-| Plain raw read | `C-c`, plus `cooked-raw-exceptions` (`C-g C-x C-h C-u C-l` by default) | `cooked-send-literal-key` (`C-c C-q`) |
+| Shell ran a command (OSC 133 live) | `C-c` only | `cooked-toggle-peek` (`C-c C-v`), or `evil`'s own `C-z` |
+| Raw read, no OSC 133 seen | `C-c`, plus `cooked-raw-exceptions` (`C-g C-x C-h C-u C-l` by default) | `cooked-send-literal-key` (`C-c C-q`) |
 | Alternate screen | `C-c` only | `cooked-toggle-peek` (`C-c C-v`), or `evil`'s own `C-z` |
 
-The two states get different defaults because they mean different things. A plain raw
-read is often a shell prompt cooked cannot positively tell apart from a program that
-wants the whole keyboard — a bare `ssh`, or a shell without cooked's OSC 133 integration
-— so `cooked-raw-exceptions` keeps a handful of keys most raw programs don't need for
+The first row is the common case, and it keeps nothing back. `cooked-raw-exceptions`
+hedges a state cooked cannot read — a raw program and a shell editing its own prompt line
+look identical — and OSC 133 removes that doubt: once the shell has spoken at all, a raw
+read that isn't a prompt means it is running something, and it said so. That is as
+positive a signal as the alternate screen. So with the shipped integration `C-u` and `C-l`
+— readline's kill-line and every shell's clear-screen — reach the child, as they would in
+any other terminal. The hedge applies only to a session where the shell never spoke.
+
+The states get different defaults because they mean different things. A raw read with no
+OSC 133 in evidence is often a shell prompt cooked cannot positively tell apart from a
+program that wants the whole keyboard — a bare `ssh`, or a shell without cooked's
+integration — so `cooked-raw-exceptions` keeps a handful of keys most raw programs don't need for
 themselves: the universal quit, the two most common prefix commands, and a prefix
 argument. The alternate screen means a full-screen program has unambiguously taken over,
 possibly `emacs -nw` or `vim` itself, which can plausibly want any of those same keys —
