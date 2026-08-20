@@ -904,6 +904,16 @@ collected, not who owns the screen."
   "Whether Emacs should be editing rather than passing keys through."
   (eq (cooked--policy) 'cooked))
 
+(defun cooked--child-owns-keyboard-p ()
+  "Whether the child, rather than Emacs, is the one being typed at.
+
+Every policy but `cooked', which is to say `alt', `command' and `raw' -- said
+that way round on purpose.  Spelling it as a list of the states that qualify is
+what left `command' out of three separate checks when it was added: the answer
+is a property of not being at a prompt, so asking that directly cannot go stale
+when another state arrives."
+  (not (cooked--input-state-p)))
+
 (defun cooked--input-mark ()
   "The marker where the pending input begins, or nil before a session.
 
@@ -1211,12 +1221,33 @@ the cursor on each drain.  The comparison is order-dependent — streaming outpu
 lets the cursor overtake point for a single drain — and inferring from it would
 strand point for every drain after that.  See `cooked--apply'.")
 
+(defun cooked--sync-cursor-type ()
+  "Make `cursor-type' say what the child last asked for.
+
+Written only on an actual change: reassigning the same value on every drain
+perturbs the cursor's blink phase, one more contributor to flicker on a line the
+child rewrites rapidly.
+
+Called at the *end* of a drain, after the block that scrolls windows, and again
+from `post-command-hook'.  `evil' advises `select-window' to refresh its own
+cursor, and refreshes it again from `window-configuration-change-hook' and on
+every state change; the render selects windows in order to `recenter' them.  Set
+any earlier and evil gets the last word inside the very drain that hid the
+cursor -- and because this writes only on a change, the next drain computes the
+same value, skips the write, and never repairs it.  The visible result was a
+cursor jumping around a progress bar the child had asked to draw without one."
+  (let ((shape (and cooked--cursor
+                    (cooked-cursor-visible cooked--cursor)
+                    (cooked--cursor-type))))
+    (unless (equal cursor-type shape)
+      (setq-local cursor-type shape))))
+
 (defun cooked--ghost-cursor-visible-p ()
   "Whether the child's cursor should be drawn separately from point."
   (and cooked--wandered
        ;; Only where the child owns the keyboard and the screen is its drawing.
        ;; At a prompt, point being elsewhere is ordinary editing, not a divergence.
-       (memq (cooked--policy) '(alt raw))
+       (cooked--child-owns-keyboard-p)
        ;; A hidden cursor stays hidden; nvim hides it during some redraws, and a
        ;; box left behind would be a cursor the child does not think it has.
        (cooked-cursor-visible cooked--cursor)))
@@ -1805,12 +1836,6 @@ window that fell behind."
     (cooked--pad-to-cursor)
     ;; After the region has been shaped, so it measures what was actually drawn.
     (when cooked-debug (cooked--check-seam))
-    ;; Written only on an actual change: reassigning it to the same value on every
-    ;; drain was perturbing the cursor's blink phase on each redraw, one more small
-    ;; contributor to flicker on a line the child rewrites rapidly.
-    (let ((shape (and (cooked-cursor-visible cooked--cursor) (cooked--cursor-type))))
-      (unless (equal cursor-type shape)
-        (setq-local cursor-type shape)))
     (cooked--restore-pending-input pending)
     (cooked--protect (or (and (cooked--input-state-p) (cooked--input-start-position))
                          (point-max)))
@@ -1865,6 +1890,8 @@ window that fell behind."
           (when (and follow at-end)
             (cooked--dolist-windows w (append here other-follows)
               (with-selected-window w (recenter (- -1 scroll-margin))))))))
+    ;; After the window block, not before it: see `cooked--sync-cursor-type'.
+    (cooked--sync-cursor-type)
     (cooked--update-ghost-cursor)
     (when cooked--exit (cooked--on-exit cooked--exit))))
 
@@ -2284,6 +2311,32 @@ this would otherwise quietly do nothing."
     ;; just deleted, which `cooked--check-seam' would rightly call a desync — and which
     ;; anything else reading the seam before the next drain would believe.
     (setf (cooked-grid-head cooked--grid) 0)))
+
+(defun cooked--discard-scrollback-region (beg end)
+  "Delete scrollback between BEG and END, telling the emulator only if it must.
+
+The narrower sibling of `cooked--discard-scrollback\=', for deleting one
+command\='s output out of the middle rather than everything above a point.
+
+What the two ends co-own is exactly one number: how much of the emulator\='s top
+row\='s line has already left for Emacs.  A cut that finishes short of
+`cooked--screen-start\=' cannot change it -- the text row 0 continues is still
+there, still ending where it did -- so it needs no bookkeeping at all, and
+saying so is what makes deleting scrolled-off output possible.  A cut that
+reaches the seam does remove that head, and then this owes the emulator the same
+news `cooked--discard-scrollback\=' gives it."
+  (when-let* ((screen (cooked--screen-start-position))
+              ((< beg end)))
+    (let ((end (min end screen)))
+      (when (< beg end)
+        (let ((at-seam (= end screen)))
+          (save-restriction
+            (widen)
+            (let ((inhibit-read-only t))
+              (delete-region beg end)))
+          (when (and at-seam cooked--session)
+            (cooked--forget-history cooked--session)
+            (setf (cooked-grid-head cooked--grid) 0)))))))
 
 (defun cooked-clear-scrollback ()
   "Delete everything above the live screen."

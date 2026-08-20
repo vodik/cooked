@@ -379,6 +379,12 @@ impl Screen {
     /// Removing from the very top clears [`Screen::carried`]. That count says how much of
     /// row 0's logical line has already been handed to Emacs, and once row 0 itself is
     /// gone the new top row continues nothing.
+    ///
+    /// The scroll region is deliberately left alone. The row count is unchanged, so its
+    /// bounds stay valid, and resetting it here would clear a child's `DECSTBM` as a side
+    /// effect of an unrelated edit — [`Screen::delete_lines`] saves and restores it around
+    /// its own temporary change for the same reason, and [`Screen::reset_region`] exists
+    /// for the callers that mean it.
     pub fn remove_rows(&mut self, first: usize, count: usize) {
         let height = self.rows.len();
         let first = first.min(height);
@@ -404,7 +410,6 @@ impl Screen {
             self.cursor.row
         };
         self.cursor.wrap_pending = false;
-        self.region = Region::full(height);
         self.touch_range(first..=height - 1);
     }
 
@@ -1063,6 +1068,19 @@ mod tests {
 
         screen.remove_rows(0, 1);
         assert_eq!(screen.head(), 0);
+    }
+
+    #[test]
+    fn removing_rows_leaves_the_scroll_region_alone() {
+        // Deleting a command's output must not clear a child's DECSTBM behind its back.
+        let mut screen = Screen::new(4, 4);
+        lines(&mut screen, &["a", "b", "c", "d"]);
+        screen.set_region(1, 2);
+        let region = screen.region;
+
+        screen.remove_rows(2, 1);
+
+        assert_eq!(screen.region, region);
     }
 
     #[test]

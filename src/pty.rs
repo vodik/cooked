@@ -58,6 +58,11 @@ pub struct JobControl {
     pub intr: Option<u8>,
     pub quit: Option<u8>,
     pub susp: Option<u8>,
+    /// End-of-file. Unlike the three above this is not a signal character and `isig` says
+    /// nothing about it: `ICANON` is what decides whether the line discipline turns it
+    /// into end-of-input, and a raw-mode program simply reads the byte. So there is
+    /// nothing to fall back to — send it or send nothing.
+    pub eof: Option<u8>,
     pub isig: bool,
 }
 
@@ -71,6 +76,7 @@ impl JobControl {
             intr: cc(SpecialCharacterIndices::VINTR),
             quit: cc(SpecialCharacterIndices::VQUIT),
             susp: cc(SpecialCharacterIndices::VSUSP),
+            eof: cc(SpecialCharacterIndices::VEOF),
             isig: t.local_flags.contains(LocalFlags::ISIG),
         }
     }
@@ -551,12 +557,14 @@ mod tests {
         t.control_chars[SpecialCharacterIndices::VINTR as usize] = 0x18; // ^X, as `stty intr ^X`
         t.control_chars[SpecialCharacterIndices::VQUIT as usize] = 0x1c; // ^\
         t.control_chars[SpecialCharacterIndices::VSUSP as usize] = 0x1a; // ^Z
+        t.control_chars[SpecialCharacterIndices::VEOF as usize] = 0x04; // ^D
         assert_eq!(
             JobControl::of(&t),
             JobControl {
                 intr: Some(0x18),
                 quit: Some(0x1c),
                 susp: Some(0x1a),
+                eof: Some(0x04),
                 isig: true,
             },
             "a reconfigured intr must be reported, not assumed to be ^C"

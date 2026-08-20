@@ -841,6 +841,40 @@ next focus change signals `invalid-function\='."
    (should (cooked-tests--settle (lambda () (eq (cooked-cursor-shape cooked--cursor) 'bar))))
    (should (equal cursor-type '(bar . 2)))))
 
+(ert-deftest cooked-hidden-cursor-survives-the-render-selecting-a-window ()
+  "A child that hid its cursor must still have none after a drain that scrolls.
+
+The render `recenter\='s through `with-selected-window\=', and `evil\=' advises
+`select-window\=' to refresh its own cursor -- so setting `cursor-type\=' before
+that block let evil overwrite it inside the very same drain.  Because the write
+is skipped when the value has not changed, no later drain repaired it either,
+and a progress bar drawn without a cursor got one anyway, jumping about.
+
+The buffer has to be shown in a window for any of that to run, which is why the
+older visibility test never saw it."
+  (skip-unless (require 'evil nil t))
+  (let ((buffer (generate-new-buffer "*cooked-cursor*")))
+    (unwind-protect
+        (progn
+          (set-window-buffer (selected-window) buffer)
+          (with-current-buffer buffer
+            (cooked-mode)
+            (evil-local-mode 1)
+            (cooked--start '("/bin/sh" "-c" "printf 'working\033[?25l'; exec cat"))
+            (cooked--refresh-keymap)
+            (should (cooked-tests--settle
+                     (lambda () (string-match-p "working" (cooked-tests--text)))))
+            (should-not (cooked-cursor-visible cooked--cursor))
+            (should-not cursor-type)
+            ;; And it stays gone across further drains, which is where the
+            ;; write-only-on-change guard used to make the damage permanent.
+            (cooked--send-to-child "x")
+            (should (cooked-tests--settle
+                     (lambda () (string-match-p "x" (cooked-tests--text)))))
+            (should-not cursor-type)))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
 (ert-deftest cooked-cursor-shape-does-not-fight-an-invisible-cursor ()
   (with-temp-buffer
     (cooked-mode)
@@ -1160,6 +1194,23 @@ than merely non-erroring."
       (goto-char cooked--input-end)
       (insert "echo hi")
       (should (= (cooked--input-start-position) (marker-position (process-mark proc)))))))
+
+(ert-deftest cooked-eof-follows-the-tty-too ()
+  "`stty eof ^X\=' is as real as `stty intr ^X\='.  EOF is not a signal, so it has
+no ISIG half and nothing to fall back to -- but which byte to send is still the
+tty\='s to say, not ours to assume."
+  (cooked-tests--with-session '("/bin/sh" "-c" "exec cat")
+    (cooked-tests--pump 0.4)
+    (should (= (cooked--eof-byte) ?\C-d)))
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty eof ^X; exec cat")
+    (cooked-tests--pump 0.6)
+    (should (= (plist-get (cooked--job-control cooked--session) :eof) ?\C-x))
+    (should (= (cooked--eof-byte) ?\C-x)))
+  ;; Disabled: nothing to read, so the conventional byte beats sending nothing.
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty eof undef; exec cat")
+    (cooked-tests--pump 0.6)
+    (should-not (plist-get (cooked--job-control cooked--session) :eof))
+    (should (= (cooked--eof-byte) ?\C-d))))
 
 (ert-deftest cooked-job-control-follows-the-tty-not-a-hardcoded-signal ()
   "A terminal writes the character in `c_cc' and lets the line discipline

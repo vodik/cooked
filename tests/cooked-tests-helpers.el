@@ -15,6 +15,50 @@
 ;;; Code:
 
 (require 'ert)
+
+;; Optional packages the suite tests against have to be found before the tests
+;; that need them run, or `skip-unless' quietly turns a whole feature's coverage
+;; off.  That is not hypothetical: the documented `emacs -Q --batch -L lisp -L
+;; tests' invocation leaves `evil' off `load-path' even where it is installed, so
+;; every evil test skipped and a broken one read as green.
+;;
+;; `-Q' is deliberate -- the suite must not inherit a user's configuration -- so
+;; the answer is to look in the standard install locations ourselves rather than
+;; to ask each person to remember a `-L'.
+
+(defconst cooked-tests--package-roots
+  (list (expand-file-name "straight/build" user-emacs-directory)
+        (expand-file-name "~/.config/emacs/straight/build")
+        (expand-file-name "~/.emacs.d/straight/build")
+        (expand-file-name "elpa" user-emacs-directory)
+        (bound-and-true-p package-user-dir))
+  "Where an optional package might already be installed.")
+
+(defun cooked-tests--add-package (name)
+  "Put package NAME on `load-path' if it can be found, and say whether it was.
+Matches a bare directory (straight) or a versioned one (package.el)."
+  (or (locate-library name)
+      (catch 'found
+        (dolist (root cooked-tests--package-roots)
+          (dolist (dir (and root (file-directory-p root)
+                            (directory-files root t (concat "\\`" (regexp-quote name)
+                                                           "\\(-[0-9.]+\\)?\\'"))))
+            (when (file-directory-p dir)
+              (add-to-list 'load-path dir)
+              (throw 'found dir)))))))
+
+(defun cooked-tests--evil-available-p ()
+  "Whether `evil' can be loaded, having gone looking for it first.
+`goto-chg' comes along because evil requires it."
+  (cooked-tests--add-package "goto-chg")
+  (cooked-tests--add-package "evil")
+  (require 'evil nil t))
+
+;; Announced at load, not left to the summary: a skipped suite is the failure
+;; mode this exists to prevent, so it should be the first thing on the screen.
+(unless (cooked-tests--evil-available-p)
+  (message "cooked-tests: evil not found -- its tests will skip"))
+
 (require 'cooked)
 (require 'cooked-mode)
 

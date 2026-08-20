@@ -102,7 +102,9 @@ deleted, and archiving would return them to the buffer as scrollback.",
 
 Keys are :intr, :quit and :susp -- each the character code the tty currently
 turns into a signal, or nil where the character is disabled -- and :isig, which
-is non-nil while the line discipline still acts on them.  A terminal writes one
+is non-nil while the line discipline still acts on them.  :eof is the
+end-of-file character, which :isig says nothing about: ICANON decides whether
+the line discipline acts on it, and a raw-mode program just reads the byte.  A terminal writes one
 of these bytes rather than sending a signal, so honouring them is what makes
 `stty intr ^X' work; with :isig nil the byte reaches the child verbatim, which
 is what a program that cleared ISIG asked for.",
@@ -363,6 +365,8 @@ fn job_control(env: Env, args: &[Value]) -> Result<Value> {
         ch(&env, jc.quit)?,
         keyword(&env, ":susp")?,
         ch(&env, jc.susp)?,
+        keyword(&env, ":eof")?,
+        ch(&env, jc.eof)?,
         keyword(&env, ":isig")?,
         if jc.isig { env.intern("t")? } else { env.nil() },
     ])

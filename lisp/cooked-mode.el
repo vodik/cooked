@@ -213,10 +213,14 @@ every capital into a lowercase letter."
 Runs from `post-command-hook' because Emacs' own motions produce no output:
 nothing is drained, so a redraw cannot be what discovers that point has moved."
   (setq cooked--wandered
-        (and (memq (cooked--policy) '(alt raw))
+        (and (cooked--child-owns-keyboard-p)
              ;; Scrollback is the reading case, already handled by `follow'.
              (cooked--screen-cell)
              (not (cooked--at-child-cursor-p))))
+  ;; Not only on a drain: `evil' refreshes its cursor from
+  ;; `window-configuration-change-hook' and on every state change, neither of
+  ;; which produces output, so there would be no drain to put it back.
+  (cooked--sync-cursor-type)
   (cooked--update-ghost-cursor))
 
 (defun cooked--snap-to-cursor ()
@@ -225,7 +229,7 @@ nothing is drained, so a redraw cannot be what discovers that point has moved."
 Typing is the moment the keyboard goes back, so it is the moment to stop
 pretending point is anywhere else — the child will act at its own cursor
 whatever Emacs is showing, and the ghost has been marking that spot."
-  (when (and cooked--wandered (memq (cooked--policy) '(alt raw)))
+  (when (and cooked--wandered (cooked--child-owns-keyboard-p))
     (goto-char (cooked--cursor-position))
     (setq cooked--wandered nil)
     (cooked--update-ghost-cursor)))
@@ -939,11 +943,27 @@ Positive DELTA moves towards older entries, as \[cooked-previous-input] does."
   (interactive "p")
   (cooked--history-move (- (or n 1))))
 
+(defun cooked--eof-byte ()
+  "The character this tty means by end-of-file.
+
+Read rather than assumed, for the reason `cooked--send-job-control\=' reads the
+others: `stty eof ^X\=' is a thing people do.  Deliberately not routed through
+that function, whose shape is \"the character if ISIG, else the signal\" --
+neither half applies here.  EOF is not a signal, so there is nothing to fall
+back to, and `ISIG\=' does not govern it: `ICANON\=' decides whether the line
+discipline turns the byte into end-of-input, and a raw-mode program just reads
+it.  Either way the byte is what a terminal sends.
+
+`?\\C-d\=' when the character is disabled (`_POSIX_VDISABLE\='), which is the one
+case with nothing to read -- the conventional value beats sending nothing."
+  (or (and cooked--session (plist-get (cooked--job-control cooked--session) :eof))
+      ?\C-d))
+
 (defun cooked-delete-char-or-eof ()
   "Delete forward, or send EOF when the input line is empty."
   (interactive)
   (if (string-empty-p (or (cooked--pending-input) ""))
-      (cooked--send-to-child "\C-d")
+      (cooked--send-to-child (string (cooked--eof-byte)))
     (delete-char 1)))
 
 (defun cooked-send-eof ()
@@ -953,10 +973,12 @@ Unlike \\[cooked-interrupt] this is a byte, not a signal: in canonical mode the
 line discipline turns it into end-of-input, and a raw-mode program reads it as
 ^D.  Bound explicitly because at a prompt plain \\[cooked-delete-char-or-eof]
 deletes forward unless the line is already empty.  Ends peek first when
-peeking, so the effect is seen right away."
+peeking, so the effect is seen right away.
+
+Which byte that is comes from the tty -- see `cooked--eof-byte'."
   (interactive)
   (cooked--resume-forwarding)
-  (cooked--send-to-child "\C-d"))
+  (cooked--send-to-child (string (cooked--eof-byte))))
 
 (declare-function cooked--job-control "cooked-core")
 (declare-function cooked--remove-rows "cooked-core")
@@ -1158,15 +1180,17 @@ exactly what was run rather than whatever a regexp happened to match."
 (defun cooked-delete-output ()
   "Delete the output of the command at point, keeping the command line.
 
-Bound where comint puts `comint-delete-output\=', which cannot be reused: it puts
-its \"*** output flushed ***\" notice back through `comint-output-filter\=', the
-insertion path cooked replaced with the drain outright.
+Bound where comint puts `comint-delete-output\=', which cannot be reused: it
+puts its \"*** output flushed ***\" notice back through `comint-output-filter\=',
+the insertion path cooked replaced with the drain outright.
 
-Nothing is deleted here.  The rows belong to the emulator, so this asks it to
-remove them and lets the ordinary drain repaint what moved -- the same shape as
-sending input, which also changes rows, and by the same rule: the grid has one
-owner.  Deleting the buffer text instead would leave the two ends disagreeing
-about what the screen is, since the grid would still hold every row.
+Output can be in two places at once, and each half has one owner.  Whatever is
+still on the grid belongs to the emulator, so this asks it to remove those rows
+and lets the ordinary drain repaint what moved -- the same shape as sending
+input, which also changes rows.  Deleting that text directly would leave the two
+ends disagreeing about what the screen is, since the grid would still hold every
+row.  Whatever has scrolled off is ordinary buffer text that Emacs owns
+outright, and goes through `cooked--discard-scrollback-region'.
 
 Refuses when the output reaches the row the child is on.  Below that the shell
 is editing its own prompt line and tracking where it sits, and moving it would
@@ -1177,16 +1201,21 @@ corrupt a redisplay cooked cannot see, let alone repair."
          (end (and command (cooked--command-end-position command))))
     (unless (and beg end (< beg end))
       (user-error "No command output here"))
-    (pcase-let ((`(,first . ,_) (or (cooked--screen-cell beg)
-                                    (user-error "That output has left the screen")))
-                ;; END is one past the output, so it lands on whatever the child drew
-                ;; next -- usually the following prompt.  The last row actually holding
-                ;; output is the one the final character sits on.
-                (`(,last . ,_) (or (cooked--screen-cell (max beg (1- end)))
-                                   (user-error "That output has left the screen"))))
-      (unless (< last (cooked-cursor-row cooked--cursor))
+    ;; END is one past the output, so it lands on whatever the child drew next --
+    ;; usually the following prompt.  The last character of the output is the one
+    ;; whose row should go.
+    (let* ((last-char (max beg (1- end)))
+           (screen (cooked--screen-start-position))
+           ;; Rows first, while positions still mean what they say: deleting the
+           ;; scrollback half shifts everything after it.
+           (first-row (car (cooked--screen-cell (max beg (or screen beg)))))
+           (last-row (car (cooked--screen-cell last-char))))
+      (when (and last-row (not (< last-row (cooked-cursor-row cooked--cursor))))
         (user-error "The child is still on that row"))
-      (cooked--remove-rows (cooked--require-session) first (1+ (- last first)))
+      (cooked--discard-scrollback-region beg end)
+      (when (and first-row last-row (<= first-row last-row))
+        (cooked--remove-rows (cooked--require-session)
+                             first-row (1+ (- last-row first-row))))
       (cooked--drain-and-apply))))
 
 (defun cooked-toggle-fold ()

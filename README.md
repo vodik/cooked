@@ -344,6 +344,14 @@ on its own, which is what you want while working on one — swap `cooked-tests.e
 `cooked-tests-glyph.el`, `-render.el`, `-input.el`, `-osc.el`, `-completion.el` or
 `-session.el`.
 
+`-Q` is deliberate — the suite must not inherit your configuration — but that also means
+an optional package it tests against is not on `load-path` just because you have it
+installed. The helpers go looking in the usual install locations themselves, so the
+command above covers the `evil` tests too rather than skipping them. If evil genuinely
+cannot be found the run says so on the first line, because a suite that quietly tests
+less than you think is worse than one that fails: these tests skipped silently for long
+enough to let a broken one read as passing.
+
 ## Status
 
 Working: emulator core (SGR/truecolor, styled and coloured underlines, scroll regions, alt

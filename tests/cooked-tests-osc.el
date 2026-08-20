@@ -279,6 +279,50 @@ rebuilds the buffer from the grid alone, must not bring the output back."
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
 
+(ert-deftest cooked-delete-output-reaches-output-that-has-scrolled-off ()
+  "The case worth having it for: a long build log is exactly the output you want
+gone, and exactly the output that has left the grid.  Each half has one owner --
+the emulator removes the rows it still holds, Emacs deletes the scrollback it
+owns outright -- and the seam bookkeeping is only owed when the cut reaches it."
+  (skip-unless (executable-find "zsh"))
+  (let ((buffer (generate-new-buffer "*cooked-zsh*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
+            (cooked--start argv nil env))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle
+                   (lambda () (and (eq cooked--semantic 'input)
+                                   (cooked--input-start-position)))
+                   8))
+          ;; More lines than the grid is tall, so most of it scrolls into scrollback.
+          (cooked--replace-input "seq 1 60")
+          (cooked-send-input)
+          (should (cooked-tests--settle
+                   (lambda () (and cooked--commands
+                                   (eq cooked--semantic 'input)
+                                   (cooked--input-start-position)))
+                   10))
+          (should (string-match-p "^42$" (cooked-tests--text)))
+          ;; It really did straddle: some of it is above the live screen.
+          (let ((command (car cooked--commands)))
+            (should (< (cooked--command-start-position command)
+                       (cooked--screen-start-position)))
+            (goto-char (cooked--command-start-position command))
+            (cooked-delete-output))
+          (should-not (string-match-p "^42$" (cooked-tests--text)))
+          ;; The two ends still agree: this rebuilds the screen from the grid alone,
+          ;; and the emulator is still told how much of its top row Emacs holds.
+          (cooked-refresh)
+          (should (cooked-tests--settle
+                   (lambda () (not (string-match-p "^42$" (cooked-tests--text)))) 8))
+          (let ((cooked-debug t))
+            (should (cooked-tests--settle
+                     (lambda () (progn (cooked--drain-and-apply) t)) 4))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
 (ert-deftest cooked-delete-output-refuses-the-row-the-child-is-on ()
   "Below the child\='s cursor the shell is editing its own prompt line and
 tracking where it sits; moving it would corrupt a redisplay cooked cannot see."
