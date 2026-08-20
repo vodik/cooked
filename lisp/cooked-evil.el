@@ -8,63 +8,66 @@
 ;;     :commands (cooked cooked-other-window)
 ;;     :config (require 'cooked-evil))
 ;;
-;; What it does is narrow, because it turns out very little is needed.  A
-;; full-screen program wants every keystroke, so evil must not be sitting in
-;; normal state swallowing them; at a prompt evil should behave as it does in any
-;; other buffer.  Following that one distinction is the whole of the integration.
+;; What it does is decide, from evil's own state, how much of the keyboard the
+;; child gets.  That is the whole integration, and it is more than it used to
+;; be for one reason: evil's states already mean exactly this.  Normal state
+;; means "I am navigating"; insert state means "I am typing, but I still expect
+;; to be able to leave"; emacs state means "get out of the way entirely".  A
+;; terminal wants all three, and used to offer only the last.
 ;;
-;; Almost no state-specific key bindings, and for a reason.  RET reaches
-;; `cooked-send-input' through `cooked-input-map' in insert state, and in normal
-;; state RET stays `evil-ret' — a normal-state RET that submitted was more
-;; surprising than useful.  `C-c C-c' needs nothing either, since evil's normal
-;; state does not bind `C-c' and so already falls through to the local map.
+;;   emacs state   Everything but `C-c' forwards -- `cooked-alt-map' and the
+;;                 rest, unchanged.  This is what a full-screen program needs,
+;;                 ESC included, and it is where `cooked-evil-sync' puts you
+;;                 when the child takes the keyboard.
+;;   insert state  `cooked-semi-map': forwards, but keeps ESC, the Meta space
+;;                 and `cooked-semi-exceptions' for Emacs, so `M-x', a
+;;                 non-normal leader on `M-SPC', and ESC-to-normal-state all
+;;                 still work while typing at the child.
+;;   normal state  `cooked-evil-normal-state-render', `still' by default: no
+;;                 forwarding, read-only, and the child keeps drawing while the
+;;                 view stays put.
+;;   visual state  `cooked-evil-visual-state-render', `frozen' by default: a
+;;                 selection means nothing against text being rewritten
+;;                 underneath it.
 ;;
-;; One binding earns its place: `p'.  A full-screen program's own paste key
-;; pastes its own registers — `p' inside vim never sees anything Emacs copied —
-;; so reaching the kill ring needs a key Emacs still owns, and normal state is
-;; where one is going spare.  At a prompt it stays evil's own paste; see
-;; `cooked-evil-normal-state-pastes'.
+;; The predecessor of all this was a single pair of hooks that froze the buffer
+;; on the way out of emacs state and thawed it on the way back.  It made `C-z'
+;; -- the key an evil user presses to do anything at all -- stop the terminal
+;; dead, kept it stopped while they were off in another window, and had a hole
+;; besides: nothing thawed a buffer left in insert state, because the thaw hung
+;; on entering emacs state and the auto-resume needed `self-insert-command',
+;; which is not what a letter runs in normal state.  Deriving the mode from the
+;; state on every transition has no such hole, and costs one function.
 ;;
-;; `evil-collection' is the exception, and it needs one binding of our own.
+;; Two bindings still earn their place.  `p' in normal state: a full-screen
+;; program's own paste key pastes its own registers -- `p' inside vim never
+;; sees anything Emacs copied -- so reaching the kill ring needs a key Emacs
+;; still owns, and normal state is where one is going spare.  At a prompt it
+;; stays evil's own paste; see `cooked-evil-normal-state-pastes'.
+;;
+;; `evil-collection' is the other, and it needs one binding of our own.
 ;; `evil-collection-comint' binds RET for every comint buffer via `evil-define-key',
-;; which does not edit `comint-mode-map' in place — it registers an auxiliary
+;; which does not edit `comint-mode-map' in place -- it registers an auxiliary
 ;; keymap that evil consults *ahead of* every buffer's ordinary local map,
 ;; `cooked-input-map' included.  A plain `(define-key cooked-input-map ...)`
 ;; therefore never gets a look at RET at all; verified directly against a real
 ;; evil-collection install, an evil-collection auxiliary keymap shadowing
 ;; `cooked-input-map' in `current-active-maps' before it is ever reached.  And
 ;; `evil-collection-repl-submit-state' defaults to `normal', which hands
-;; insert-state RET to `newline' — so Enter stops submitting and starts
+;; insert-state RET to `newline' -- so Enter stops submitting and starts
 ;; inserting a line break.
 ;;
 ;; The fix has to answer evil on its own terms: register our own override the
 ;; same way, via `evil-collection-define-key' on `cooked-mode-map' rather than
 ;; `comint-mode-map'.  Evil resolves which auxiliary keymap wins by walking the
 ;; buffer's own local-map chain, most specific first, so the override tied to
-;; `cooked-mode-map' — the derived, more specific mode — outranks the one tied
+;; `cooked-mode-map' -- the derived, more specific mode -- outranks the one tied
 ;; to `comint-mode-map', while everything else `evil-collection-comint' set up
-;; — history on the arrow keys, prompt navigation — keeps working, since those
+;; -- history on the arrow keys, prompt navigation -- keeps working, since those
 ;; route through comint commands that `cooked-mode-map' already remaps onto
 ;; cooked's own.
 ;;
 ;; See `cooked-evil-insert-state-submits' to turn that off.
-;;
-;; One more seam, orthogonal to all of the above: while the child owns the
-;; keyboard there is otherwise almost no way back to an ordinary Emacs command
-;; -- `C-c'-prefixed ones aside -- which is exactly right for a full-screen
-;; program but leaves no way to fire an arbitrary command or navigate with
-;; evil's own normal state.  Nothing special is needed for that, because evil
-;; already ships the door: `evil-toggle-key' (`C-z' by default) reaches
-;; `evil-emacs-state'/`evil-exit-emacs-state' ahead of `cooked-raw-map'/
-;; `cooked-alt-map' regardless, since evil's state keymaps install through
-;; `emulation-mode-map-alists', which Emacs consults before a buffer's local
-;; map.  `cooked-evil-sync' above never fights a manual `C-z', because it only
-;; reacts to `cooked-state-change-hook' -- the child's own state changing --
-;; never to evil's.  All that's missing is freezing the render for as long as
-;; the user is out there looking around, so the child's own output does not
-;; drag the view out from under them; `cooked--enter-peek'/`cooked--exit-peek'
-;; (`cooked-mode.el') do exactly that, and are otherwise the same primitive
-;; behind `cooked-toggle-peek', the explicit door for anyone not running evil.
 
 ;;; Code:
 
@@ -76,21 +79,114 @@
 
 (defcustom cooked-evil-integration t
   "Whether to drive evil's state from who owns the keyboard.
-While the child owns it, evil is put in Emacs state so keys are not intercepted;
-in the input state evil returns to normal editing."
+While the child owns it, evil is put in `cooked-evil-child-state' so keys are
+not intercepted; in the input state evil returns to normal editing."
+  :type 'boolean :group 'cooked)
+
+(defcustom cooked-evil-child-state 'emacs
+  "The evil state to adopt when the child takes the keyboard.
+
+`emacs' is the default because it is the only state that gives a full-screen
+program literally every key, ESC included, which is what one needs and what a
+terminal has always done.
+
+`insert' hands it `cooked-semi-map' instead, keeping ESC, the Meta space and
+`cooked-semi-exceptions' for Emacs.  That is a friendlier default at a shell
+than in vim -- ESC leaving insert state costs nothing at a prompt and costs
+everything inside a modal editor -- so it is offered rather than chosen.
+
+nil leaves evil's state alone entirely; whatever state you are in is the one
+that decides, and cooked never moves you."
+  :type '(choice (const :tag "Emacs state: forward everything" emacs)
+                 (const :tag "Insert state: forward, but keep Emacs reachable" insert)
+                 (const :tag "Leave evil alone" nil))
+  :group 'cooked)
+
+(defcustom cooked-evil-normal-state-render 'still
+  "What the render does while evil is in normal, motion or operator state.
+
+`still' keeps the child drawing while nothing moves the view: point stays
+where it was put, and `cooked--wandered' pins it to its screen cell across
+each redraw.  This is the default because normal state is somewhere an evil
+user passes through constantly -- to reach a leader key, to scroll, to get to
+another window -- and none of that is a reason to stop the terminal.
+
+`frozen' defers the render as well, for reading a screen that will not hold
+still on its own.  nil keeps following the cursor, so the view chases output
+as it always does; navigation still works, it just may not stay put."
+  :type '(choice (const :tag "Live, but the view stays put" still)
+                 (const :tag "Defer the render" frozen)
+                 (const :tag "Keep following the cursor" nil))
+  :group 'cooked)
+
+(defcustom cooked-evil-visual-state-render 'frozen
+  "What the render does while evil is in visual state.
+
+`frozen' by default, where `cooked-evil-normal-state-render' is not: a
+selection is a claim about a region of text, and text being rewritten
+underneath it makes the claim into a lie.  The freeze lifts as soon as the
+window stops being the selected one, so this cannot strand a buffer."
+  :type '(choice (const :tag "Defer the render" frozen)
+                 (const :tag "Live, but the view stays put" still)
+                 (const :tag "Keep following the cursor" nil))
+  :group 'cooked)
+
+(defcustom cooked-evil-hybrid-insert t
+  "Whether insert state forwards through `cooked-semi-map'.
+
+Non-nil is the point of the integration: typing reaches the child, while ESC,
+`M-x' and a non-normal leader still reach Emacs.  nil forwards everything the
+policy's own map does, making insert state indistinguishable from emacs state."
   :type 'boolean :group 'cooked)
 
 (defun cooked-evil-sync ()
   "Match evil's state to who owns the keyboard.
 A TUI needs every keystroke, so evil must not be interpreting them; at a prompt
-evil should behave as in any other buffer."
+evil should behave as in any other buffer.
+
+Only ever called for the child's own state changing -- `cooked--refresh-keymap'
+suppresses `cooked-state-change-hook' for a refresh evil itself triggered, so
+this cannot end up undoing a deliberate `C-z' a keystroke after it was pressed."
   (when (and cooked-evil-integration (bound-and-true-p evil-local-mode))
     (let ((state (bound-and-true-p evil-state)))
-      (if (cooked--input-state-p)
-          (when (eq state 'emacs) (evil-insert-state))
-        (unless (eq state 'emacs) (evil-emacs-state))))))
+      (cond ((cooked--input-state-p)
+             (when (eq state 'emacs) (evil-insert-state)))
+            ((null cooked-evil-child-state))
+            ((eq cooked-evil-child-state 'insert)
+             (unless (memq state '(insert emacs)) (evil-insert-state)))
+            (t (unless (eq state 'emacs) (evil-emacs-state)))))))
 
 (add-hook 'cooked-state-change-hook #'cooked-evil-sync)
+
+(defun cooked-evil--input-mode ()
+  "The `cooked--input-mode' evil's current state asks for.
+
+Derived on every transition rather than latched by a hook, which is what makes
+`i' out of normal state resume forwarding on its own -- see the commentary in
+cooked-mode.el above `cooked-toggle-peek' for the bug latching it caused."
+  (if (not (and cooked-evil-integration (bound-and-true-p evil-local-mode)))
+      (cooked--default-input-mode)
+    (or (and cooked--peek-explicit 'frozen)
+        (pcase (bound-and-true-p evil-state)
+          ((or 'normal 'motion 'operator) cooked-evil-normal-state-render)
+          ('visual cooked-evil-visual-state-render)
+          ((or 'insert 'replace) (and cooked-evil-hybrid-insert 'semi))
+          (_ nil)))))
+
+(setq cooked-input-mode-function #'cooked-evil--input-mode)
+
+(defun cooked-evil--state-changed ()
+  "Recompute cooked's input mode for the state evil has just entered.
+
+Quiet, because `cooked-state-change-hook' means the *child's* ownership
+changed; running it here would call `cooked-evil-sync', which would put evil
+straight back into `cooked-evil-child-state' and make `C-z' unusable."
+  (when (bound-and-true-p cooked--session)
+    (cooked--refresh-keymap t)))
+
+(dolist (state '(normal insert visual emacs motion operator replace))
+  (add-hook (intern (format "evil-%s-state-entry-hook" state))
+            #'cooked-evil--state-changed))
 
 (defcustom cooked-evil-insert-state-submits t
   "Whether Enter submits input even under `evil-collection'.
@@ -151,16 +247,6 @@ is ordinary editable text.  See `cooked-evil-normal-state-pastes'."
     (evil-define-key* 'normal cooked-mode-map
                       (kbd "p") #'cooked-evil-paste
                       (kbd "P") #'cooked-evil-paste)))
-
-(declare-function cooked--enter-peek "cooked-mode")
-(declare-function cooked--exit-peek "cooked-mode")
-
-(with-eval-after-load 'evil
-  ;; Global hooks, not buffer-local ones: they fire for every buffer that
-  ;; toggles emacs state, cooked or not.  `cooked--enter-peek'/`cooked--exit-peek'
-  ;; guard on `cooked--session' for exactly that reason -- see their docstrings.
-  (add-hook 'evil-emacs-state-exit-hook #'cooked--enter-peek)
-  (add-hook 'evil-emacs-state-entry-hook #'cooked--exit-peek))
 
 (with-eval-after-load 'evil-collection
   (when cooked-evil-insert-state-submits

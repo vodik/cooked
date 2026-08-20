@@ -23,6 +23,19 @@
 ;;
 ;;   emacs -Q --batch -L lisp -L tests -l ert \
 ;;         -l cooked-tests-glyph.el -f ert-run-tests-batch-and-exit
+;;
+;; The `evil' tests guard themselves with `(skip-unless (require \='evil nil t))',
+;; and `-Q' means they will skip: nothing is on the load path but what is passed
+;; in.  Skipping is silent enough to be mistaken for passing, and the evil
+;; integration is where most of the keyboard-ownership logic actually shows, so
+;; point the run at an installed copy to exercise it:
+;;
+;;   E=~/.config/emacs/straight/build      # or ~/.emacs.d/elpa/evil-*
+;;   emacs -Q --batch -L lisp -L tests -L $E/evil -L $E/goto-chg -l ert \
+;;         -l cooked-tests.el -f ert-run-tests-batch-and-exit
+;;
+;; `goto-chg' is evil\='s one hard dependency.  Check the tail of the run for a
+;; SKIPPED list: with evil found there should be none.
 
 ;;; Code:
 

@@ -246,7 +246,7 @@ seen immediately rather than held behind the freeze -- but refuses once Emacs
 owns the line: a string sent out of band would arrive at the child ahead of
 whatever pending input is still sitting unsent in the buffer."
   (interactive "sSend: ")
-  (cooked--exit-peek)
+  (cooked--resume-forwarding)
   (when (cooked--input-state-p)
     (user-error "Emacs already owns the line; type directly instead"))
   (cooked--snap-to-cursor)
@@ -314,7 +314,7 @@ entirely and cannot reach anything Emacs copied.
 Ends peek first when peeking, so the paste is seen landing rather than held
 behind the freeze."
   (interactive)
-  (cooked--exit-peek)
+  (cooked--resume-forwarding)
   (unless (cooked--live-session)
     (user-error "No live session"))
   (if (cooked--input-state-p)
@@ -409,13 +409,15 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
   ;; for children that did *not* ask for the mouse, so gating the keymap on
   ;; `cooked--mouse' alone would leave the whole feature unreachable.
   ;;
-  ;; `cooked--peek-active' has to be here too: peeking hands the buffer back to
+  ;; Suspended forwarding has to be here too: it hands the buffer back to
   ;; ordinary Emacs commands, and a click should select text like any other
   ;; buffer's, not get reinterpreted as a mouse report to a child that still
-  ;; owns the keyboard as far as `cooked--input-state-p' alone can tell.
+  ;; owns the keyboard as far as `cooked--input-state-p' alone can tell.  Both
+  ;; `still' and `frozen' count -- the render being live in `still' says nothing
+  ;; about who a click belongs to.
   (setq cooked--mouse-grab (and (or cooked--mouse (cooked--alt-scroll-active-p))
                                 (not (cooked--input-state-p))
-                                (not cooked--peek-active))))
+                                (not (cooked--suspended-p)))))
 
 (defun cooked--mouse-cell (event)
   "Screen row and column of EVENT, or nil if it is outside the screen.
@@ -484,17 +486,26 @@ spelling a pager would understand, so it sends nothing."
             this-command command)
       (call-interactively command))))
 
-;;;; Peek mode
+;;;; Suspending: peek, and what evil's states ask for
 ;;
 ;; While the child owns the keyboard there is, by design, almost no way back to
 ;; an ordinary Emacs command -- `C-c'-prefixed ones aside.  That is exactly
 ;; right for a full-screen program, which needs every other key for itself, but
 ;; it leaves no way to fire an arbitrary command, search the buffer, or just
-;; navigate with `evil' normal state.  Peek mode is that door: it freezes the
-;; render (`cooked--peek-active', and the skip in `cooked--on-wake'), makes the
-;; buffer read-only, and hands it to `cooked-peek-map', so nothing forwards and
-;; nothing can be edited into text that goes nowhere while the user looks
-;; around.
+;; navigate with `evil' normal state.  Suspending forwarding is that door: the
+;; buffer goes read-only and is handed to `cooked-peek-map', so nothing
+;; forwards and nothing can be edited into text that goes nowhere while the
+;; user looks around.
+;;
+;; Whether the render *also* stops is a separate question, and used to be the
+;; same one.  `cooked--input-mode' is `still' when the child should keep
+;; drawing while the view stays put, and `frozen' when even that is too much
+;; movement -- a visual selection, say, which means something only against text
+;; that is not being rewritten underneath it.  `still' is what makes stepping
+;; out cheap: `C-z' to look at something no longer stops the terminal, and
+;; walking away to another window certainly does not.  `cooked--wandered' and
+;; the ghost cursor already pin point to its screen cell across a redraw, which
+;; is the machinery that makes a live render survivable to navigate.
 ;;
 ;; Leaving is not a separate step to remember: peek is look-only, so the
 ;; instant a key means anything other than looking -- typing a character, RET,
@@ -506,16 +517,14 @@ spelling a pager would understand, so it sends nothing."
 ;; `cooked-interrupt'/`cooked-suspend' cover the rest.  `cooked-toggle-peek'
 ;; remains the way to leave without acting on anything.
 ;;
-;; `evil' users already have their own way in: `evil-toggle-key' (`C-z' by
-;; default) reaches `evil-emacs-state'/`evil-exit-emacs-state' ahead of this
-;; map regardless, because evil's state keymaps install through
-;; `emulation-mode-map-alists', the same mechanism `cooked--mouse-map' uses
-;; above to outrank `pixel-scroll-precision-mode'.  `cooked-evil.el' hooks that
-;; transition to this same pair of functions, so the render freezes and thaws
-;; the same way no matter which door got you here -- and normal/visual-state
-;; motions and operators (`d', `y', a visual selection, and the rest) never
-;; trigger the auto-resume above, because none of them are
-;; `self-insert-command' or RET; only actually typing is.
+;; That auto-resume is the half `evil' cannot use, and the reason the mode is
+;; recomputed from evil's state rather than latched by a hook on it: in normal
+;; state a letter is a motion, not `self-insert-command', so nothing here would
+;; ever fire -- a buffer suspended on the way out of emacs state and then put
+;; into insert state stayed suspended forever.  Deriving the mode instead means
+;; insert state selects `cooked-semi-map' and resumes on its own, whatever
+;; route got you into normal state.  See `cooked-input-mode-function', which is
+;; the seam `cooked-evil.el' fills in.
 
 (defvar cooked-mode-map)                ; `define-derived-mode' below makes it
 
@@ -528,7 +537,7 @@ reason to make resuming forwarding a separate step from it.  `cooked-send-key'
 already snaps point to the child's cursor before sending, which is also
 exactly where the ghost cursor was pointing the whole time peek was frozen."
   (interactive)
-  (cooked--exit-peek)
+  (cooked--resume-forwarding)
   (cooked-send-key))
 
 (defvar cooked-peek-map
@@ -537,7 +546,7 @@ exactly where the ghost cursor was pointing the whole time peek was frozen."
     (define-key map (kbd "RET") #'cooked--peek-resume-and-send)
     (define-key map (kbd "<return>") #'cooked--peek-resume-and-send)
     map)
-  "Keymap while peeking.
+  "Keymap while forwarding is suspended, in `still' or `frozen'.
 
 A child of `cooked-mode-map', not `cooked-mode-map' itself: binding the
 `self-insert-command' remap there would also reach `cooked-input-map', which
@@ -549,42 +558,25 @@ forwards the key that was pressed instead, same as `cooked-raw-map'/
 selection as a copy, `cooked-toggle-fold' -- falls through to `cooked-mode-map'
 and `comint-mode-map' beneath it exactly as it always did.")
 
-(defun cooked--enter-peek ()
-  "Freeze the render and hand the buffer, now read-only, to `cooked-peek-map'.
-No-op unless this is a live cooked session, the child currently owns the
-keyboard, and peek is not already active -- called from both
-`cooked-toggle-peek' and the `evil' hook, neither of which can assume the
-other has not already gotten here first, and the `evil' hook is global, so it
-runs in every buffer that toggles emacs state, not only cooked ones.
+(defun cooked--resume-forwarding ()
+  "Hand the keyboard back to the child, and catch the buffer up.
 
-Read-only closes a real gap, not just a cosmetic one: `cooked--protect'
-deliberately leaves `(point-max)' itself open, for a prompt about to accept
-typed input, and peek is exactly the state that lets point wander there via
-ordinary navigation with nothing forwarding to stop it.
+Called by every command that writes to the child out of band -- an interrupt,
+a paste, a signal -- so the result is seen landing rather than held behind a
+freeze.  Clears a deliberate `cooked-toggle-peek' and recomputes the mode,
+which for an `evil' user in normal state may well be `still' again: the point
+is that the effect becomes visible, not that the user is dragged back into
+forwarding they did not ask to resume.  A drain is forced in that case, since
+nothing else would deliver it.
 
-Cooked's own `C-c'-prefixed commands (interrupt, EOF, paste,
-`cooked-toggle-peek' itself, and the rest) live on `cooked-mode-map',
-`cooked-peek-map''s parent, rather than being repeated in each state map,
-precisely so none of them evaporate here."
-  (when (and cooked--session (not (cooked--input-state-p)) (not cooked--peek-active))
-    (setq cooked--peek-active t)
-    (setq buffer-read-only t)
-    (use-local-map cooked-peek-map)
-    (cooked--update-mouse-grab)))
-
-(defun cooked--exit-peek ()
-  "Resume forwarding and catch the buffer up on whatever it missed.
-No-op unless peek is active.  Not additionally gated on a live session the way
-`cooked--enter-peek' is: a session that has since ended while peeked at must
-not strand the buffer read-only with no way back, and `cooked--peek-active'
-being set at all already proves this was a real cooked buffer, which is the
-only thing the session check in `cooked--enter-peek' exists to rule out."
-  (when cooked--peek-active
-    (setq cooked--peek-active nil)
-    (setq buffer-read-only nil)
-    (when cooked--session
-      (cooked--drain-and-apply))
-    (cooked--refresh-keymap)))
+Not gated on a live session: one that ended while suspended must not strand
+the buffer read-only with no way back."
+  (let ((was cooked--input-mode))
+    (setq cooked--peek-explicit nil)
+    (when cooked--input-mode
+      (cooked--refresh-keymap))
+    (when (and cooked--session (eq was 'frozen) (cooked--frozen-p))
+      (cooked--drain-and-apply))))
 
 (defun cooked-toggle-peek ()
   "Step out to a read-only, navigable Emacs buffer, or back to the child.
@@ -602,15 +594,22 @@ that write to the child (`C-c C-c', `C-c C-y', and the rest).  Calling this
 again leaves without acting on anything, and either way the buffer catches up
 on whatever the child produced meanwhile.
 
-`evil' users do not need this: `C-z' already reaches `evil-emacs-state' ahead
-of any binding here, and `cooked-evil.el' freezes and thaws the render the
-same way around that transition.  This is the door for everyone else."
+The freeze lifts on its own when this buffer's window stops being the selected
+one -- see `cooked--frozen-p'.  Holding a picture still is only worth anything
+while someone is looking at it, and a terminal that stopped because its window
+lost focus is a bug wearing a feature's clothes.
+
+`evil' users reach the same place through their own states, and do not need
+this: `C-z' to emacs state and back, or simply normal state, which is `still'
+by default -- read-only and navigable, with the render still live.  This is the
+door for everyone else."
   (interactive)
   (when (cooked--input-state-p)
     (user-error "Already editable"))
-  (if cooked--peek-active
-      (cooked--exit-peek)
-    (cooked--enter-peek)
+  (if cooked--peek-explicit
+      (cooked--resume-forwarding)
+    (setq cooked--peek-explicit t)
+    (cooked--refresh-keymap)
     (message "Peeking (read-only) -- type, RET, or C-c C-v to resume")))
 
 (defun cooked-send-literal-key ()
@@ -625,7 +624,7 @@ Bound on `cooked-mode-map', so it also reaches the child while peeking -- ending
 peek first, so the result is seen immediately -- but refuses once Emacs owns
 the line -- see `cooked-send-string', which shares the reasoning."
   (interactive)
-  (cooked--exit-peek)
+  (cooked--resume-forwarding)
   (when (cooked--input-state-p)
     (user-error "Emacs already owns the line; type directly instead"))
   (when-let* ((bytes (cooked--encode-event (read-key "Send key: "))))
@@ -644,16 +643,27 @@ even if accepted -- see `cooked-raw-exceptions' for why."
       (error "cooked: %S does not name a single unmodified control character" key))
     (aref keys 0)))
 
-(defun cooked--build-passthrough-map (exceptions)
+(defun cooked--build-passthrough-map (exceptions &optional reserve-meta)
   "A keymap that forwards to the child, except EXCEPTIONS and `C-c'.
 EXCEPTIONS is a list of character codes, as from `cooked--exception-code';
 each is simply left unbound here, so it falls through to whatever
 `cooked-mode-map'/`comint-mode-map'/`global-map' -- or `evil', if it has
-installed a higher-priority keymap of its own -- would otherwise do with it."
+installed a higher-priority keymap of its own -- would otherwise do with it.
+
+With RESERVE-META, ESC and every Meta-modified key are left unbound too.  That
+is one exception expressed as a rule rather than a list, and it has to be:
+`kbd' spells Meta as a modifier bit on a GUI frame and as a leading ESC on a
+terminal, so no list of character codes can name `M-x' in both -- while leaving
+ESC itself unbound makes Emacs' own `meta-prefix-char' handling the thing that
+answers, in whichever spelling the frame produces.  The cost is the one thing
+ESC is otherwise good for here: a forwarded ESC has no latency, and a prefix
+key waits.  See `cooked-semi-map', which is where that trade is worth making."
   (let ((map (make-sparse-keymap)))
     (define-key map [remap self-insert-command] #'cooked-send-key)
     (dolist (code (number-sequence 0 127))
-      (unless (or (eq code cooked--escape-key) (memq code exceptions))
+      (unless (or (eq code cooked--escape-key)
+                  (and reserve-meta (eq code meta-prefix-char))
+                  (memq code exceptions))
         (define-key map (vector code) #'cooked-send-key)))
     ;; Bind the modified variants explicitly, not for completeness but for
     ;; correctness: when `S-return' has no binding Emacs shift-translates it to
@@ -661,8 +671,9 @@ installed a higher-priority keymap of its own -- would otherwise do with it."
     ;; By the time `cooked-send-key' looks, the shift is gone and unrecoverable.
     (dolist (entry cooked--special-keys)
       (dolist (prefix '("" "S-" "C-" "M-" "C-S-" "M-S-" "C-M-"))
-        (define-key map (vector (intern (concat prefix (symbol-name (car entry)))))
-                    #'cooked-send-key)))
+        (unless (and reserve-meta (string-search "M-" prefix))
+          (define-key map (vector (intern (concat prefix (symbol-name (car entry)))))
+                      #'cooked-send-key))))
     ;; Everything else cooked binds under `C-c' -- its own commands, and the
     ;; ones that write to the child out of band -- lives on `cooked-mode-map'
     ;; instead of here, so it survives peeking too; see the `set-keymap-parent'
@@ -672,7 +683,7 @@ installed a higher-priority keymap of its own -- would otherwise do with it."
       (define-key map (vector event) #'cooked-mouse-event))
     map))
 
-(defun cooked--set-passthrough-map (map exceptions)
+(defun cooked--set-passthrough-map (map exceptions &optional reserve-meta)
   "Replace MAP's own bindings with a fresh passthrough map for EXCEPTIONS.
 Keeps MAP's identity, and so the keymap parent `cooked-mode' gives it, intact
 -- used to rebuild `cooked-raw-map' when `cooked-raw-exceptions' changes.
@@ -681,7 +692,7 @@ Keeps MAP's identity, and so the keymap parent `cooked-mode' gives it, intact
 rather than in a separate slot, so a plain `(setcdr map (cdr fresh))' would
 silently drop it; save and restore it around the replacement."
   (let ((parent (keymap-parent map)))
-    (setcdr map (cdr (cooked--build-passthrough-map exceptions)))
+    (setcdr map (cdr (cooked--build-passthrough-map exceptions reserve-meta)))
     (set-keymap-parent map parent)))
 
 (defcustom cooked-raw-exceptions '("C-g" "C-x" "C-h" "C-u" "C-l")
@@ -750,6 +761,50 @@ full-screen program can plausibly want any key for itself, including
 itself.  `cooked-toggle-peek' (or, for `evil' users, the ordinary `C-z' escape
 to `evil-emacs-state') is the way to reach Emacs here, rather than a static
 list that would collide with whatever the program wants those keys for.")
+
+(defcustom cooked-semi-exceptions '("C-g" "C-x" "C-h" "C-u" "C-l")
+  "Control characters `cooked-semi-map' keeps for Emacs.
+
+The same idea as `cooked-raw-exceptions', asked in a different place: that
+list hedges a state cooked is unsure about, this one describes a state the
+user has chosen.  ESC and the whole Meta space are held back as well, and are
+not listed here -- see `cooked-semi-map'.
+
+`cooked-send-literal-key' (\\`C-c C-q') sends any one of these through to the
+child anyway, for the program that wants it back."
+  :type '(repeat string)
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (and (boundp 'cooked-semi-map) (keymapp cooked-semi-map))
+           (cooked--set-passthrough-map
+            cooked-semi-map (mapcar #'cooked--exception-code value) t)))
+  :group 'cooked)
+
+(defvar cooked-semi-map
+  (cooked--build-passthrough-map
+   (mapcar #'cooked--exception-code cooked-semi-exceptions) t)
+  "Keymap for forwarding that stops short of taking Emacs away.
+
+The other passthrough maps answer \"the child needs every key\" and reserve `C-c'
+only, which is right for a full-screen program and wrong for the state an
+`evil' user spends most of their time in.  Insert state is supposed to be a
+state you can leave: if ESC forwards, the way out is gone, and if every Meta
+chord forwards, so is `M-x' and so is the non-normal leader most `evil'
+configurations put on `M-SPC'.
+
+So this map holds back three things: `cooked-semi-exceptions', ESC, and --
+because ESC unbound is what makes Emacs treat it as `meta-prefix-char' again
+-- the entire Meta space, without naming a key of it.  Everything else still
+goes to the child, `C-a'/`C-e'/`C-k'/`C-r' included, which is the half that
+matters: those are readline's and vim's, and a rule of \"Emacs wins wherever
+Emacs has a binding\" would have taken all of them, `global-map' binding
+almost every control character.  That is the same conclusion `vterm' and
+`eat' reached -- `vterm-keymap-exceptions' and `eat-semi-char-non-bound-keys'
+are both explicit lists over an otherwise total map, for this reason.
+
+The cost is ESC's latency: unbound here, it waits to see whether a Meta chord
+follows.  That is why the full maps keep forwarding it instead, and why this
+map is not the default anywhere.")
 
 (defvar cooked-input-map
   (let ((map (make-sparse-keymap)))
@@ -900,7 +955,7 @@ line discipline turns it into end-of-input, and a raw-mode program reads it as
 deletes forward unless the line is already empty.  Ends peek first when
 peeking, so the effect is seen right away."
   (interactive)
-  (cooked--exit-peek)
+  (cooked--resume-forwarding)
   (cooked--send-to-child "\C-d"))
 
 (declare-function cooked--job-control "cooked-core")
@@ -930,7 +985,7 @@ ISIG is off, so no byte would be turned into one; or the character is disabled
 Ends peek first when peeking, so the effect is seen right away rather than
 held behind the freeze."
   (interactive)
-  (cooked--exit-peek)
+  (cooked--resume-forwarding)
   (cooked--send-job-control (cooked--require-session) :susp 20))
 
 (defun cooked-quit ()
@@ -941,7 +996,7 @@ comint puts it, on \\`C-c C-\\\\', whose own `comint-quit-subjob\=' would
 `quit-process\=' the wakeup pipe -- the only process this buffer has, and not the
 child."
   (interactive)
-  (cooked--exit-peek)
+  (cooked--resume-forwarding)
   (let ((session (cooked--require-session)))
     (cooked--clear-input-region)
     (cooked--send-job-control session :quit 3)))
@@ -953,7 +1008,7 @@ The session is checked before the pending input is abandoned, so a C-c that
 cannot be delivered leaves the line you were typing where it was.  Ends peek
 first when peeking: a signal you cannot see land is not worth sending blind."
   (interactive)
-  (cooked--exit-peek)
+  (cooked--resume-forwarding)
   (let ((session (cooked--require-session)))
     (cooked--clear-input-region)
     (cooked--send-job-control session :intr 2)))
@@ -976,28 +1031,75 @@ Run once the keymap has been swapped, so `cooked--input-state-p' already reports
 the new state.  This is the seam `cooked-evil' hangs off; anything else that has
 to follow the input/raw switch can use it without cooked knowing about it.")
 
-(defun cooked--refresh-keymap ()
-  "Install the keymap matching the current ownership of the keyboard.
+(defvar cooked-input-mode-function #'cooked--default-input-mode
+  "Function returning the `cooked--input-mode' for a buffer, or nil for none.
 
-Leaves a peek in progress alone across a `raw'<->`alt' transition -- the user
-is still legitimately looking at a screen the child owns -- but ends one if
-the policy has moved to `cooked': there is no reason to stay frozen once
-there is a genuine prompt to edit.  See `cooked--enter-peek'/
-`cooked--exit-peek'."
-  (let ((policy (cooked--policy)))
-    (when (and cooked--peek-active (eq policy 'cooked))
-      (setq cooked--peek-active nil)
+Called with no arguments, in the session's buffer, whenever the state is
+recomputed.  It is asked only while the child owns the keyboard: at a real
+prompt Emacs owns the line outright and there is nothing to suspend, so the
+answer is forced to nil rather than requested.
+
+This is the seam that lets `cooked-evil.el' make the mode a function of evil's
+state without cooked knowing evil exists.  A function, not a variable, because
+the mode has to be *derived* on every state change rather than latched by a
+hook -- see the commentary above `cooked-toggle-peek' for what latching it
+cost.")
+
+(defun cooked--default-input-mode ()
+  "Suspend only when `cooked-toggle-peek' says so.
+The answer for anyone not driving this from somewhere else."
+  (and cooked--peek-explicit 'frozen))
+
+(defun cooked--state-keymap (mode policy)
+  "The local map for input mode MODE under policy POLICY."
+  (pcase mode
+    ((or 'still 'frozen) cooked-peek-map)
+    ('semi cooked-semi-map)
+    (_ (pcase policy
+         ('cooked cooked-input-map)
+         ('alt cooked-alt-map)
+         ('command cooked-command-map)
+         ('raw cooked-raw-map)))))
+
+(defun cooked--refresh-keymap (&optional quiet)
+  "Install the keymap and render mode the current state asks for.
+
+Two axes meet here: `cooked--policy', which is what the child is doing, and
+`cooked-input-mode-function', which is what the user is doing.  The child wins
+where it must -- at a prompt Emacs owns the line, so no mode suspends anything
+and a deliberate peek ends, there being no reason to stay frozen once there is
+a genuine prompt to edit.  Everywhere else the mode decides, which is how a
+peek survives a `raw'<->`alt' transition: it is recomputed to the same answer
+rather than preserved.
+
+With QUIET, `cooked-state-change-hook' is not run.  That hook means \"who owns
+the keyboard changed\", and `cooked-evil-sync' acts on it by putting evil into
+the state the child's ownership calls for -- so running it from a refresh that
+evil itself triggered would have evil immediately undo the user's own `C-z'.
+
+The hook runs last, after everything here has settled, so that a handler which
+changes state and refreshes again nests cleanly: the inner refresh's decisions
+are the ones left standing."
+  (when (eq (cooked--policy) 'cooked)
+    (setq cooked--peek-explicit nil))
+  (let* ((policy (cooked--policy))
+         (was cooked--input-mode)
+         (mode (unless (eq policy 'cooked)
+                 (funcall cooked-input-mode-function))))
+    (setq cooked--input-mode mode)
+    (let ((read-only (and (cooked--suspended-p) t)))
+      (unless (eq buffer-read-only read-only)
+        (setq buffer-read-only read-only)))
+    (use-local-map (cooked--state-keymap mode policy))
+    ;; After the mode is already set, so the drain's own `cooked--set-mode' does
+    ;; not find a freeze still in force and recurse back into here.
+    (when (and cooked--session (eq was 'frozen) (not (eq mode 'frozen)))
       (cooked--drain-and-apply))
-    (unless (and cooked--peek-active (not (eq policy 'cooked)))
-      (use-local-map (pcase policy
-                        ('cooked cooked-input-map)
-                        ('alt cooked-alt-map)
-                        ('command cooked-command-map)
-                        ('raw cooked-raw-map))))
     (unless (cooked--input-state-p)
       (cooked--clear-input-region))
     (cooked--update-mouse-grab)
-    (run-hooks 'cooked-state-change-hook)))
+    (unless quiet
+      (run-hooks 'cooked-state-change-hook))))
 
 (defun cooked-last-exit-code ()
   "Exit status of the most recently finished command, if any."
@@ -1188,9 +1290,42 @@ which it usually is not.  Walk the frame's windows instead."
   "Report focus when this buffer's window gains or loses selection."
   (cooked--report-focus))
 
+(defun cooked--update-attention (&rest _)
+  "Track, for every live session, whether the user is looking at it.
+
+A freeze is only worth anything while someone is reading the picture it holds
+still, so it lifts for as long as the buffer is not the selected window's --
+see `cooked--frozen-p'.  Walking every session rather than running
+buffer-locally is what catches the case a buffer-local hook cannot: switching
+to another buffer *in the same window* leaves the cooked buffer displayed
+nowhere, and nothing buffer-local runs in a buffer that is no longer shown.
+
+Draining on the way out matters as much as the flag does: the wakes that
+arrived while frozen were skipped, so without this the buffer would sit at
+whatever it showed when the freeze began until something else asked."
+  (cooked--dolist-buffers
+    (when cooked--session
+      (let ((state (cond ((eq (current-buffer) (window-buffer (selected-window)))
+                          'here)
+                         ;; Displayed elsewhere, or displayed nowhere having
+                         ;; been somewhere a moment ago -- both are the user
+                         ;; being elsewhere.  A buffer that has never been on
+                         ;; screen stays nil and keeps its freeze.
+                         ((or cooked--attention (get-buffer-window nil t))
+                          'away))))
+        (unless (or (null state) (eq state cooked--attention))
+          (setq cooked--attention state)
+          (when (and (eq state 'away) (eq cooked--input-mode 'frozen))
+            (cooked--drain-and-apply)))))))
+
 (defun cooked--install-global-hooks ()
   "Install the hooks that cannot be buffer-local."
   (add-hook 'window-size-change-functions #'cooked--frame-size-changed)
+  ;; Both, because they answer different halves of "is the user looking at it":
+  ;; selection moving to another window, and the window they are in showing
+  ;; something else.
+  (add-hook 'window-selection-change-functions #'cooked--update-attention)
+  (add-hook 'window-buffer-change-functions #'cooked--update-attention)
   ;; Frame focus is not a per-buffer event, so this one walks live sessions.
   ;;
   ;; `after-focus-change-function' holds a *single function*, defaulting to `ignore',
@@ -1293,8 +1428,16 @@ and anything watching the buffer list see an ordinary kill."
   "Face for a zero exit status in the mode line."
   :group 'cooked)
 
+(defface cooked-still '((t :inherit shadow))
+  "Face for the `still' indicator in the mode line.
+
+Quieter than `cooked-peek', and deliberately: nothing is being held back in
+`still' -- the child is drawing, the buffer is current, only the view is
+staying where it was put.  It is worth saying, not worth warning about."
+  :group 'cooked)
+
 (defface cooked-peek '((t :inherit warning))
-  "Face for the peek indicator in the mode line.
+  "Face for the `frozen' indicator in the mode line.
 
 Peeking used to have no mode-line indicator at all, which made it easy to
 forget you had toggled out and wonder why keys had stopped reaching the
@@ -1314,8 +1457,10 @@ child; this is what makes it visible."
          ('cooked " edit")
          ('alt " alt")
          (_ " raw")))
-     (when cooked--peek-active
-       (propertize " peek" 'face 'cooked-peek))
+     (pcase cooked--input-mode
+       ('semi (propertize " semi" 'face 'shadow))
+       ('still (propertize " still" 'face 'cooked-still))
+       ('frozen (propertize " frozen" 'face 'cooked-peek)))
      ;; The title is the shell's own summary of the running command.
      (when (and cooked--title (not (string-empty-p cooked--title)))
        (propertize (format " %s" (truncate-string-to-width cooked--title 24 nil nil t))
@@ -1374,6 +1519,7 @@ to the child verbatim."
 ;; `comint-mode-map' — keeps comint's bindings, and anything layered on them by
 ;; `evil-collection', reachable.
 (set-keymap-parent cooked-input-map cooked-mode-map)
+(set-keymap-parent cooked-semi-map cooked-mode-map)
 (set-keymap-parent cooked-raw-map cooked-mode-map)
 (set-keymap-parent cooked-command-map cooked-mode-map)
 (set-keymap-parent cooked-alt-map cooked-mode-map)

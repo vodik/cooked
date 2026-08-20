@@ -196,12 +196,67 @@ check from being the loudest thing at each call site."
 (defvar-local cooked--cursor (cooked--cursor-make)
   "The child's cursor as of the last drain, a `cooked-cursor'.")
 (defvar-local cooked--alt nil)
-(defvar-local cooked--peek-active nil
-  "Whether the user has manually stepped out to Emacs while the child owns
-the keyboard, via `cooked-toggle-peek' or evil's own `C-z'.  See
-`cooked--enter-peek'/`cooked--exit-peek' in cooked-mode.el, and the skip in
-`cooked--on-wake' below: the render is frozen for as long as this is set, so
-navigating the buffer is not disturbed by the child's own repainting.")
+(defvar-local cooked--input-mode nil
+  "How this buffer is treating the keyboard and the render right now.
+
+One of:
+
+  nil      Forward everything the policy's map forwards, render live, follow
+           the child's cursor.  The ordinary case, and the only one a
+           non-`evil' user reaches without asking.
+  `semi'   Forward, but hold back the keys that change what Emacs is doing --
+           see `cooked-semi-map'.  Render live, follow the cursor.
+  `still'  Forward nothing; the buffer is read-only and ordinary Emacs
+           commands reach it.  The render stays live, but nothing moves the
+           view: the child keeps drawing under a point that stays where the
+           user put it.
+  `frozen' As `still', and the render is deferred as well, so the picture
+           being navigated cannot change at all.
+
+These are three independent questions -- does a key forward, does the buffer
+render, does the view follow -- that used to be answered by one flag, which is
+why stepping out to `evil' normal state stopped the terminal dead.  See
+`cooked--suspended-p', `cooked--frozen-p' and `cooked--follow-p', which are
+what the rest of the code asks.")
+
+(defvar-local cooked--peek-explicit nil
+  "Whether `cooked-toggle-peek' was used to step out deliberately.
+Kept apart from `cooked--input-mode' because the mode is recomputed from
+scratch on every state change: a deliberate peek has to survive a `raw'<->`alt'
+transition, and nothing else about the mode does.")
+
+(defun cooked--suspended-p ()
+  "Whether keys are being kept from the child rather than forwarded."
+  (memq cooked--input-mode '(still frozen)))
+
+(defvar-local cooked--attention nil
+  "Whether the user is looking at this buffer: nil, `here' or `away'.
+
+nil until it has been on screen at all.  A buffer that has never been
+displayed has no attention to lose -- one driven from Lisp, or a test -- and
+counting it as abandoned would freeze nothing and thaw everything.
+
+Maintained by `cooked--update-attention' from the window hooks rather than
+computed on demand, because the interesting case cannot be seen from the
+buffer afterwards: once another buffer takes over its window, a cooked buffer
+is displayed nowhere, which is indistinguishable from never having been shown
+except by having watched it happen.")
+
+(defun cooked--frozen-p ()
+  "Whether the render is being deferred.
+
+Only while this buffer is the one under the user's eyes.  Freezing exists to
+keep a picture still while it is being read; a buffer the user has left is not
+being read, and a terminal that stopped updating because its window lost
+selection is the complaint this whole distinction exists to answer.  The child
+never stopped running either way -- the freeze only ever deferred the drain."
+  (and (eq cooked--input-mode 'frozen)
+       (not (eq cooked--attention 'away))))
+
+(defun cooked--follow-p ()
+  "Whether point and the window should track the child's cursor."
+  (not (cooked--suspended-p)))
+
 (defvar-local cooked--narrowed nil
   "Whether the restriction in force is ours, from `cooked-alt-screen-pin'.")
 (defvar-local cooked--app-cursor nil
@@ -944,10 +999,18 @@ pushing it along."
     (save-excursion
       (goto-char (cooked--cursor-position))
       (cooked--set-input-mark (point))
-      ;; comint brackets the last input with `comint-last-input-start'/`-end', and its
-      ;; whole output family measures from them.  The near edge is this same position:
-      ;; the OSC 133 `prompt-end' anchor names the row, but only the input mark knows
-      ;; the column the prompt actually ended at.
+      ;; comint brackets the last input with `comint-last-input-start'/`-end'.  The near
+      ;; edge is this same position -- the OSC 133 `prompt-end' anchor names the row, but
+      ;; only the input mark knows the column the prompt actually ended at.
+      ;;
+      ;; Re-set on every drain, and it has to be: this marker sits mid-row, and
+      ;; `cooked--render-rows' deletes a damaged row from its start to end of line, so
+      ;; anything inside collapses to the row's beginning.  `comint-last-input-end' does
+      ;; not have the problem, sitting at the start of the output row -- a row boundary,
+      ;; which survives -- and it is the one comint's output family actually measures
+      ;; from.  `comint-last-input-start' is read only by `comint-output-filter's
+      ;; echo suppression, which is comint's insertion path and never runs here.  If that
+      ;; ever changes, this marker needs a cell rather than a position behind it.
       (set-marker comint-last-input-start (point))
       (when text (insert text))
       (setq cooked--input-end (copy-marker (point) t)))))
@@ -1642,13 +1705,15 @@ itself fails must report and stop, not recurse a redisplay error into a loop of
 them.  It is cleared once a resync completes, so this is once per failure and
 not once per session.
 
-Skipped entirely while `cooked--peek-active' is set: the native core keeps
-the authoritative grid state regardless of whether Lisp ever asks for it, so
-nothing is lost by deferring — `cooked--exit-peek' catches the buffer up with
-one more call to `cooked--drain-and-apply' once the user is done navigating."
+Skipped entirely while `cooked--frozen-p': the native core keeps the
+authoritative grid state regardless of whether Lisp ever asks for it, so
+nothing is lost by deferring — `cooked--refresh-keymap' catches the buffer up
+with one more call to `cooked--drain-and-apply' the moment the freeze lifts.
+Note that `cooked--frozen-p' is false for a buffer whose window is not the
+selected one, so leaving a frozen buffer resumes it rather than stranding it."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (and cooked--session (not cooked--peek-active))
+      (when (and cooked--session (not (cooked--frozen-p)))
         (if cooked-debug
             (cooked--drain-and-apply)
           (condition-case err
@@ -1697,7 +1762,15 @@ window that fell behind."
          ;; output arriving in chunks lets the cursor overtake point for a single
          ;; drain, and point is then stranded for every drain after it — landing
          ;; at column 0 of whichever line it was on.
-         (follow (>= (point) (cooked--screen-start-position)))
+         (follow (and (cooked--follow-p)
+                      (>= (point) (cooked--screen-start-position))))
+         ;; Keeping the alt screen's top row pinned to the window is not
+         ;; following: the region is sized to the window, so it is the whole
+         ;; picture rather than an end of output to chase.  A suspended buffer
+         ;; still wants that pin -- the user is reading the screen, and a redraw
+         ;; that let the window scroll off it would be the same disturbance
+         ;; suspending the follow exists to prevent.
+         (anchor (or follow (cooked--suspended-p)))
          ;; A redraw deletes and reinserts whole rows, so a wandered point would
          ;; be dragged to the start of whatever was rebuilt underneath it.  The
          ;; cell survives that; the buffer position does not.
@@ -1775,11 +1848,10 @@ window that fell behind."
     ;; showing this buffer — output can arrive from a process filter while the
     ;; user's focus is on an entirely different window, and scrolling that one
     ;; would be a bug, not a courtesy.
-    (let ((here (and follow
-                     (eq (window-buffer (selected-window)) (current-buffer))
+    (let ((here (and (eq (window-buffer (selected-window)) (current-buffer))
                      (list (selected-window)))))
       (if cooked--alt
-          (when follow
+          (when anchor
             (let ((top (cooked--screen-start-position)))
               (cooked--dolist-windows w (append here other-follows)
                 (set-window-start w top t))))
@@ -1790,7 +1862,7 @@ window that fell behind."
                (at-end (>= target (1- (point-max)))))
           (cooked--dolist-windows w other-follows
             (set-window-point w target))
-          (when at-end
+          (when (and follow at-end)
             (cooked--dolist-windows w (append here other-follows)
               (with-selected-window w (recenter (- -1 scroll-margin))))))))
     (cooked--update-ghost-cursor)

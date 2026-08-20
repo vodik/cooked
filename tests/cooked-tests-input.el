@@ -104,7 +104,7 @@ still put a literal `C-c' byte on the wire for a child that wants it."
 catches the buffer up on whatever the child produced meanwhile."
   (cooked-tests--with-echoing-child ""
     (call-interactively #'cooked-toggle-peek)
-    (should cooked--peek-active)
+    (should (cooked--suspended-p))
     (should (eq (current-local-map) cooked-peek-map))
     (should buffer-read-only)
     (cooked--send-to-child "frozen")
@@ -115,7 +115,7 @@ catches the buffer up on whatever the child produced meanwhile."
     (cooked-tests--pump 0.3)
     (should-not (string-search "frozen" (cooked-tests--text)))
     (call-interactively #'cooked-toggle-peek)
-    (should-not cooked--peek-active)
+    (should-not (cooked--suspended-p))
     (should (eq (current-local-map) cooked-raw-map))
     (should-not buffer-read-only)
     (should (cooked-tests--settle
@@ -129,25 +129,87 @@ catches the buffer up on whatever the child produced meanwhile."
     (cooked--refresh-keymap)
     (should-error (call-interactively #'cooked-toggle-peek) :type 'user-error)))
 
-(ert-deftest cooked-evil-c-z-freezes-the-render-like-toggle-peek-does ()
-  "`evil' users do not need `cooked-toggle-peek': `C-z' already reaches
-`evil-emacs-state'/`evil-exit-emacs-state' ahead of `cooked-raw-map', because
-evil's state keymaps take priority over a buffer's local map, and
-`cooked-evil.el' hooks the same freeze/thaw around that transition."
+(ert-deftest cooked-semi-map-forwards-what-the-child-needs-and-keeps-the-rest ()
+  "The hybrid's whole point is where it draws the line.  Readline's and vim's
+control keys still forward -- a rule of \"Emacs wins wherever Emacs has a
+binding\" would have taken all of them, `global-map' binding almost every
+control character.  ESC, the Meta space and `cooked-semi-exceptions' do not,
+so insert state stays a state you can leave."
+  (dolist (key '("C-a" "C-e" "C-k" "C-r" "C-w" "C-d" "TAB" "<up>"))
+    (should (eq (lookup-key cooked-semi-map (kbd key)) #'cooked-send-key)))
+  ;; Left unbound here, so they fall through to Emacs.  ESC unbound is what
+  ;; makes Emacs treat it as `meta-prefix-char' again, which is how the whole
+  ;; Meta space comes back without naming a key of it.
+  ;; Not `cooked-send-key' rather than not bound at all: these maps are
+  ;; parented onto `cooked-mode-map', so `lookup-key' answers for the whole
+  ;; chain, and what matters is that nothing here forwards them.
+  (dolist (key '("C-g" "C-x" "C-h" "C-u" "C-l" "ESC" "M-x" "M-SPC" "M-<up>"))
+    (should-not (eq (lookup-key cooked-semi-map (kbd key)) #'cooked-send-key)))
+  ;; The full maps keep forwarding ESC: a TUI needs it, and forwarding it the
+  ;; instant it is pressed is what keeps a real Escape key from waiting.
+  (dolist (map (list cooked-raw-map cooked-alt-map))
+    (should (eq (lookup-key map (kbd "ESC")) #'cooked-send-key)))
+  ;; `C-c' is reserved in every one of them, hybrid included.
+  (dolist (map (list cooked-raw-map cooked-alt-map cooked-semi-map))
+    (should-not (eq (lookup-key map (kbd "C-c")) #'cooked-send-key)))
+  ;; And cooked's own commands are still reachable, being on the shared parent.
+  (should (eq (lookup-key cooked-semi-map (kbd "C-c C-c")) #'cooked-interrupt)))
+
+(ert-deftest cooked-evil-normal-state-keeps-the-render-live ()
+  "`C-z' into normal state is the key an evil user presses to do anything at
+all -- reach a leader, scroll, get to another window -- and it used to stop
+the terminal dead until they came back.  Normal state suspends forwarding and
+stops the view chasing the cursor; the child keeps drawing throughout."
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
   (cooked-tests--with-echoing-child ""
     (should (eq (bound-and-true-p evil-state) 'emacs))
-    (evil-exit-emacs-state)
-    (should cooked--peek-active)
-    (cooked--send-to-child "frozen")
-    (cooked-tests--pump 0.3)
-    (should-not (string-search "frozen" (cooked-tests--text)))
-    (evil-emacs-state)
-    (should-not cooked--peek-active)
+    (evil-normal-state)
+    (should (eq cooked--input-mode 'still))
+    (should (cooked--suspended-p))
+    (should-not (cooked--frozen-p))
+    (should (eq (current-local-map) cooked-peek-map))
+    (should buffer-read-only)
+    (cooked--send-to-child "live")
     (should (cooked-tests--settle
-             (lambda () (string-search "frozen" (cooked-tests--text)))))))
+             (lambda () (string-search "live" (cooked-tests--text)))))
+    ;; And back: emacs state hands the keyboard over again.
+    (evil-emacs-state)
+    (should-not (cooked--suspended-p))
+    (should (eq (current-local-map) cooked-raw-map))
+    (should-not buffer-read-only)))
+
+(ert-deftest cooked-evil-insert-state-resumes-forwarding-from-normal-state ()
+  "The hole in latching the freeze onto emacs state: nothing thawed a buffer
+left in insert state, because the thaw hung on *entering* emacs state and the
+auto-resume needs `self-insert-command', which is not what a letter runs in
+normal state.  Deriving the mode from evil's state has no such hole."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-echoing-child ""
+    (evil-normal-state)
+    (should (cooked--suspended-p))
+    (evil-insert-state)
+    (should (eq cooked--input-mode 'semi))
+    (should-not (cooked--suspended-p))
+    (should (eq (current-local-map) cooked-semi-map))
+    (should-not buffer-read-only)))
+
+(ert-deftest cooked-frozen-render-resumes-when-the-user-looks-away ()
+  "Holding a picture still is worth something only while someone is looking at
+it.  A terminal that stayed stopped because its window lost selection is the
+complaint the whole distinction exists to answer."
+  (cooked-tests--with-echoing-child ""
+    (call-interactively #'cooked-toggle-peek)
+    (should (cooked--frozen-p))
+    (setq cooked--attention 'away)
+    (should-not (cooked--frozen-p))
+    (should (eq cooked--input-mode 'frozen))
+    (cooked--send-to-child "away")
+    (should (cooked-tests--settle
+             (lambda () (string-search "away" (cooked-tests--text)))))))
 
 (ert-deftest cooked-typing-while-peeking-resumes-forwarding-and-sends-the-key ()
   "Typing during peek can only mean the child is wanted back: it ends peek and
@@ -156,9 +218,9 @@ into a frozen buffer that goes nowhere."
   (cooked-tests--with-echoing-child ""
     (switch-to-buffer (current-buffer))
     (call-interactively #'cooked-toggle-peek)
-    (should cooked--peek-active)
+    (should (cooked--suspended-p))
     (cooked-tests--type "x")
-    (should-not cooked--peek-active)
+    (should-not (cooked--suspended-p))
     (should (eq (current-local-map) cooked-raw-map))
     (should (cooked-tests--settle
              (lambda () (string-search "x" (cooked-tests--text)))))))
@@ -170,7 +232,7 @@ keyboard back, and send the key that was pressed."
     (switch-to-buffer (current-buffer))
     (call-interactively #'cooked-toggle-peek)
     (cooked-tests--type "RET")
-    (should-not cooked--peek-active)
+    (should-not (cooked--suspended-p))
     (should (cooked-tests--settle
              (lambda () (string-search "^M" (cooked-tests--text)))))))
 
@@ -185,7 +247,7 @@ other than the typing/RET case `cooked-peek-map' already handles specially."
     (goto-char (point-max))
     (cooked-tests--with-kill "oops"
       (should-error (call-interactively #'yank) :type 'buffer-read-only))
-    (should cooked--peek-active)))
+    (should (cooked--suspended-p))))
 
 (ert-deftest cooked-actions-that-write-bytes-end-peek-first ()
   "Sending anything to the child while peeking would otherwise be invisible
@@ -199,66 +261,82 @@ result land where it can be seen."
                           (cl-letf (((symbol-function 'read-key) (lambda (&rest _) ?x)))
                             (call-interactively #'cooked-send-literal-key)))))
       (call-interactively #'cooked-toggle-peek)
-      (should cooked--peek-active)
+      (should (cooked--suspended-p))
       (funcall act)
-      (should-not cooked--peek-active))))
+      (should-not (cooked--suspended-p)))))
 
 (ert-deftest cooked-suspend-ends-peek-first ()
   (cooked-tests--with-echoing-child ""
     (call-interactively #'cooked-toggle-peek)
-    (should cooked--peek-active)
+    (should (cooked--suspended-p))
     (cooked-suspend)
-    (should-not cooked--peek-active)))
+    (should-not (cooked--suspended-p))))
 
 (ert-deftest cooked-interrupt-ends-peek-first ()
   (cooked-tests--with-echoing-child ""
     (call-interactively #'cooked-toggle-peek)
-    (should cooked--peek-active)
+    (should (cooked--suspended-p))
     (cooked-interrupt)
-    (should-not cooked--peek-active)))
+    (should-not (cooked--suspended-p))))
 
-(ert-deftest cooked-mode-line-shows-peek-while-active ()
-  "Peeking used to have no mode-line indicator at all, which made it easy to
-forget you had toggled out and wonder why keys had stopped reaching the
-child; this is what makes it visible."
+(ert-deftest cooked-mode-line-names-the-input-mode ()
+  "Stepping out used to have no mode-line indicator at all, which made it easy
+to forget you had done it and wonder why keys had stopped reaching the child.
+Now that stepping out has degrees, the indicator has to say which one: a
+deferred render and a live one that simply is not being followed are very
+different things to be looking at."
   (cooked-tests--with-echoing-child ""
-    (should-not (string-search "peek" (cooked--mode-line)))
+    (should-not (string-search "frozen" (cooked--mode-line)))
     (call-interactively #'cooked-toggle-peek)
-    (should (string-search "peek" (cooked--mode-line)))
+    (should (string-search "frozen" (cooked--mode-line)))
     (call-interactively #'cooked-toggle-peek)
-    (should-not (string-search "peek" (cooked--mode-line)))))
+    (should-not (string-search "frozen" (cooked--mode-line)))
+    (dolist (case '((still . " still") (semi . " semi") (nil . nil)))
+      (let ((cooked--input-mode (car case)))
+        (if (cdr case)
+            (should (string-search (cdr case) (cooked--mode-line)))
+          (should-not (string-match-p "still\\|semi\\|frozen" (cooked--mode-line))))))))
 
-(ert-deftest cooked-evil-visual-state-does-not-end-peek ()
-  "Motions and operators like a visual selection are not `self-insert-command'
-or RET, so navigating and selecting frozen text while peeking must not be
-mistaken for wanting to type."
+(ert-deftest cooked-evil-visual-state-freezes-the-render ()
+  "A selection is a claim about a region of text, and text rewritten
+underneath it makes the claim a lie -- so visual state defers the render where
+normal state does not."
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
   (cooked-tests--with-echoing-child ""
-    (should (eq (bound-and-true-p evil-state) 'emacs))
-    (evil-exit-emacs-state)
-    (should cooked--peek-active)
     (evil-visual-state)
+    (should (eq cooked--input-mode 'frozen))
+    (should (cooked--frozen-p))
+    (cooked--send-to-child "frozen")
+    (cooked-tests--pump 0.3)
+    (should-not (string-search "frozen" (cooked-tests--text)))
+    ;; Motions and operators are not `self-insert-command' or RET, so
+    ;; navigating and selecting must not be mistaken for wanting to type.
     (ignore-errors (evil-next-line))
-    (should cooked--peek-active)
+    (should (cooked--suspended-p))
     (evil-normal-state)
-    (should cooked--peek-active)))
+    (should (cooked--suspended-p))
+    ;; ...and the freeze it leaves behind catches up the moment it lifts.
+    (should (cooked-tests--settle
+             (lambda () (string-search "frozen" (cooked-tests--text)))))))
 
-(ert-deftest cooked-evil-replace-state-typing-resumes-forwarding-too ()
+(ert-deftest cooked-evil-replace-state-forwards-like-insert-state ()
   "Evil's replace state overtypes rather than self-inserting in the usual
-buffers, so this is worth checking explicitly rather than assuming the
-`self-insert-command' remap alone covers it."
+buffers, so it is worth checking explicitly rather than assuming insert
+state's handling covers it."
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
   (cooked-tests--with-echoing-child ""
     (switch-to-buffer (current-buffer))
-    (evil-exit-emacs-state)
-    (should cooked--peek-active)
+    (evil-normal-state)
+    (should (cooked--suspended-p))
     (evil-replace-state)
+    (should-not (cooked--suspended-p))
     (cooked-tests--type "x")
-    (should-not cooked--peek-active)))
+    (should (cooked-tests--settle
+             (lambda () (string-search "x" (cooked-tests--text)))))))
 
 (ert-deftest cooked-paste-brackets-when-the-child-asked-for-it ()
   "A child that turned bracketed paste on is told where the paste begins and
@@ -547,9 +625,11 @@ has no handler and nothing drives evil at all."
           ;; The shell restores canonical mode before exec'ing, so this is briefly
           ;; still an input state; wait for the program itself to go raw.
           (cooked--send cooked--session "stty raw -echo; sleep 1; stty sane\r")
+          ;; With the shell's integration working this is `command' rather than
+          ;; `raw' -- a positive signal, so nothing is held back.
           (should (cooked-tests--settle
                    (lambda () (and (eq cooked--semantic 'output)
-                                   (eq (current-local-map) cooked-raw-map)))))
+                                   (eq (current-local-map) cooked-command-map)))))
           (should (eq evil-state 'emacs))
 
           ;; ...and hands it back at the next prompt.
@@ -1111,7 +1191,7 @@ which left non-evil users stuck with no keyboard way out of peek at all."
     (should (eq (key-binding (kbd "C-c C-v")) #'cooked-toggle-peek))
     (should (eq (key-binding (kbd "C-c C-y")) #'cooked-paste))
     (call-interactively #'cooked-toggle-peek)
-    (should-not cooked--peek-active)))
+    (should-not (cooked--suspended-p))))
 
 (ert-deftest cooked-send-string-and-send-literal-key-refuse-at-a-prompt ()
   "Both write to the child out of band; doing that while Emacs owns the line
