@@ -10,12 +10,20 @@ use std::os::fd::{AsFd, OwnedFd};
 /// Terminal ioctls the kernel has but neither `libc` nor `nix` defines for Apple.
 ///
 /// BSD encodes the direction and payload size into the request number:
-/// `TIOCSCTTY` is `_IO('t', 97)` and `TIOCSWINSZ` is `_IOW('t', 103, struct winsize)`,
-/// with `IOC_VOID = 0x20000000`, `IOC_IN = 0x80000000` and the 8-byte `winsize` landing
-/// in bits 16..29. Written out rather than computed so they can be checked against
+/// `TIOCSCTTY` is `_IO('t', 97)`, `TIOCSWINSZ` is `_IOW('t', 103, struct winsize)` and
+/// `TIOCGWINSZ` is `_IOR('t', 104, struct winsize)`, with `IOC_VOID = 0x20000000`,
+/// `IOC_IN = 0x80000000`, `IOC_OUT = 0x40000000` and the 8-byte `winsize` landing in
+/// bits 16..29. Written out rather than computed so they can be checked against
 /// `sys/ttycom.h` by eye.
 pub const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
 pub const TIOCSWINSZ: libc::c_ulong = 0x8008_7467;
+pub const TIOCGWINSZ: libc::c_ulong = 0x4008_7468;
+
+/// `_POSIX_VDISABLE` — the `c_cc` value meaning "this character is turned off".
+///
+/// Not zero here, unlike Linux: the BSDs spell it `0xff`, and NUL is a perfectly ordinary
+/// character a `c_cc` slot may legitimately hold.
+pub const POSIX_VDISABLE: libc::cc_t = 0xff;
 
 /// Path of the slave belonging to `master`.
 ///

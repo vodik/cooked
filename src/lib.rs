@@ -73,12 +73,40 @@ begins a line again, and saying so is what keeps the two ends agreeing.",
             forget_history,
         ),
         env.defun("cooked--redraw", 1..=1, DOC_REDRAW, redraw),
+        env.defun(
+            "cooked--remove-rows",
+            3..=3,
+            "Remove COUNT rows from SESSION's grid, starting at screen row FIRST.
+
+Rows below close the gap and blanks come in at the bottom, exactly as if the
+child had done it.  The emulator is the only thing that edits rows -- Emacs asks
+and then renders the result on the next drain, rather than deleting buffer text
+the grid still holds, which would leave the two ends disagreeing about what the
+screen is.
+
+The rows are discarded, not archived: they are a finished command's output being
+deleted, and archiving would return them to the buffer as scrollback.",
+            remove_rows,
+        ),
         env.defun("cooked--prompt-text", 1..=1, DOC_PROMPT, prompt_text),
         env.defun(
             "cooked--signal",
             2..=2,
             "Send signal NUMBER to SESSION's foreground group.",
             signal,
+        ),
+        env.defun(
+            "cooked--job-control",
+            1..=1,
+            "SESSION's job-control characters, as a plist.
+
+Keys are :intr, :quit and :susp -- each the character code the tty currently
+turns into a signal, or nil where the character is disabled -- and :isig, which
+is non-nil while the line discipline still acts on them.  A terminal writes one
+of these bytes rather than sending a signal, so honouring them is what makes
+`stty intr ^X' work; with :isig nil the byte reaches the child verbatim, which
+is what a program that cleared ISIG asked for.",
+            job_control,
         ),
         env.defun("cooked--pid", 1..=1, "Process id of SESSION's child.", pid),
         env.defun(
@@ -301,6 +329,13 @@ fn redraw(env: Env, args: &[Value]) -> Result<Value> {
     Ok(env.nil())
 }
 
+fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
+    let first = env.from_lisp::<i64>(args[1])?.max(0) as usize;
+    let count = env.from_lisp::<i64>(args[2])?.max(0) as usize;
+    handle(&env, args[0])?.remove_rows(first, count);
+    Ok(env.nil())
+}
+
 fn prompt_text(env: Env, args: &[Value]) -> Result<Value> {
     env.into_lisp(handle(&env, args[0])?.trailing_text())
 }
@@ -311,6 +346,26 @@ fn signal(env: Env, args: &[Value]) -> Result<Value> {
         .signal(sig)
         .map_err(|e| io_error(&env, e))?;
     Ok(env.nil())
+}
+
+fn job_control(env: Env, args: &[Value]) -> Result<Value> {
+    let jc = handle(&env, args[0])?
+        .job_control()
+        .map_err(|e| io_error(&env, e))?;
+    let ch = |env: &Env, c: Option<u8>| match c {
+        Some(b) => env.into_lisp(i64::from(b)),
+        None => Ok(env.nil()),
+    };
+    env.list(&[
+        keyword(&env, ":intr")?,
+        ch(&env, jc.intr)?,
+        keyword(&env, ":quit")?,
+        ch(&env, jc.quit)?,
+        keyword(&env, ":susp")?,
+        ch(&env, jc.susp)?,
+        keyword(&env, ":isig")?,
+        if jc.isig { env.intern("t")? } else { env.nil() },
+    ])
 }
 
 fn pid(env: Env, args: &[Value]) -> Result<Value> {

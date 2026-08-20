@@ -5,7 +5,7 @@
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
 use crate::emu::{Delta, Term};
-use crate::pty::{Mode, Pid, Pty, Winsize};
+use crate::pty::{JobControl, Mode, Pid, Pty, Winsize};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{SigSet, Signal};
 use std::ffi::OsStr;
@@ -13,8 +13,34 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+
+/// Take a lock, treating poisoning as nothing to refuse over.
+///
+/// Every mutex in this file is taken this way, and the uniformity is the point. A
+/// poisoned mutex here means a panic unwound out of the emulator while it held the
+/// lock — which `env::trampoline` has already caught and reported to the user as a
+/// Lisp signal. What is left is a `Term` that may be missing an update, and the two
+/// available responses are to carry on with it or to refuse the lock forever.
+/// Refusing means the buffer freezes: no drain, no resize, no teardown, and a
+/// terminal that has stopped repainting with no way back short of killing the
+/// buffer. Carrying on means at worst a stale cell until the next write.
+///
+/// This used to be split. Thirteen call sites recovered the guard while six others
+/// spelled the same lock `.lock().is_ok_and(..)` or `.lock().ok()?`, which silently
+/// answers "no" rather than recovering — so after a poisoning `drain` kept working
+/// while `bracketed_paste` reported false forever and `alive` reported the session
+/// dead. One policy, stated once, is the whole reason this trait exists.
+trait LockExt<T> {
+    fn take(&self) -> MutexGuard<'_, T>;
+}
+
+impl<T> LockExt<T> for Mutex<T> {
+    fn take(&self) -> MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
 
 const READ_CHUNK: usize = 64 * 1024;
 const POLL_TIMEOUT_MS: u8 = 100;
@@ -35,8 +61,8 @@ struct Shared {
     pty: Pty,
     term: Mutex<Term>,
     mode: AtomicU8,
-    /// A `resize` that arrived before the child had opened its slave, for the reader
-    /// thread to retry. See `Session::resize`.
+    /// A size the child is not yet known to have, for the reader thread to keep applying
+    /// until it sticks. `None` once the tty agrees. See `Session::resize`.
     pending_resize: Mutex<Option<Winsize>>,
     /// Set when output or a mode change has not yet been announced over the wake pipe;
     /// cleared once `flush_notify` actually writes. Distinct from `notified`: this tracks
@@ -145,7 +171,7 @@ impl Session {
             wake.as_fd(),
             nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
         )
-        .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+        .map_err(crate::compat::nixerr)?;
 
         let pty = Pty::spawn(argv, env, size, cwd)?;
         let mode = pty.mode().unwrap_or_default();
@@ -193,14 +219,14 @@ impl Session {
         }
         let _ = self.shared.pty.signal(libc::SIGHUP);
         self.shared.quit.wake();
-        drop(self.wake.lock().unwrap_or_else(|e| e.into_inner()).take());
-        if let Some(reader) = self.reader.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        drop(self.wake.take().take());
+        if let Some(reader) = self.reader.take().take() {
             let _ = reader.join();
         }
 
         // The reader is joined, so this sees its final word on the matter. `Some` means it
         // already reaped and the pid is no longer ours to signal.
-        let mut exited = self.shared.exited.lock().unwrap_or_else(|e| e.into_inner());
+        let mut exited = self.shared.exited.take();
         if exited.is_none() {
             *exited = self.shared.pty.reap(KILL_GRACE).or_else(|| {
                 let _ = self.shared.pty.signal(libc::SIGKILL);
@@ -217,11 +243,10 @@ impl Session {
             delta: self
                 .shared
                 .term
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .take()
                 .drain(),
             mode: self.shared.load_mode(),
-            exit: *self.shared.exited.lock().unwrap_or_else(|e| e.into_inner()),
+            exit: *self.shared.exited.take(),
         }
     }
 
@@ -229,41 +254,46 @@ impl Session {
         self.shared.pty.write(bytes)
     }
 
-    /// Resize the emulator and, if the child is already attached, the pty itself.
-    ///
-    /// `Pty::resize` is a single, non-blocking attempt — this runs on the thread holding
-    /// the `emacs_env`, so it must never wait out a retry. Immediately after `spawn`, before
-    /// the child has opened its slave, that attempt fails with `ENOTTY`; rather than
-    /// surface that to the caller (or block until it clears), the requested size is stashed
-    /// for the reader thread's already-running loop to apply once the pty is ready — the
-    /// same "not yet, try again soon" shape `sample_mode` already uses for the same
-    /// underlying transient.
     /// Forget that any of the top row's line is already in Emacs.
     ///
     /// Emacs holds the scrollback, so only Emacs knows when it has thrown it away.
     pub fn forget_history(&self) {
         self.shared
             .term
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .take()
             .forget_history();
     }
 
+    /// Resize the emulator and the pty, and keep asking until the child agrees.
+    ///
+    /// One attempt from here, deliberately: this runs on the thread holding the
+    /// `emacs_env`, so it must never wait out a retry. But one attempt is not enough to
+    /// be sure it took, for two separate reasons that both bite in the moments after
+    /// `spawn` and both look like success from here:
+    ///
+    /// On macOS the ptmx master answers no winsize ioctl at all — `ENOTTY` — until some
+    /// process has opened the slave, and the child is the process that does that.
+    ///
+    /// And everywhere, `child_exec` sets the initial winsize itself, on its own slave fd,
+    /// after the fork. A resize applied to the master in that window succeeds and is then
+    /// overwritten by the child's own initialisation, leaving the tty at the size `spawn`
+    /// was given. Emacs walks into this every time it starts a session: the buffer has no
+    /// window yet, so it spawns at the default 24x80 and `cooked--display` resizes
+    /// milliseconds later — exactly the window in question.
+    ///
+    /// So the size is recorded as pending either way, and the reader thread re-applies it
+    /// until the tty reads back with it. That converges within one poll tick, subsumes
+    /// the `ENOTTY` case instead of special-casing it, and stops as soon as the two
+    /// agree — so a child that later sets its own size is left alone.
     pub fn resize(&self, size: Winsize) -> io::Result<()> {
         self.shared
             .term
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .take()
             .resize(size.rows.into(), size.cols.into());
+        *self.shared.pending_resize.take() = Some(size);
         match self.shared.pty.resize(size) {
-            Err(e) if e.raw_os_error() == Some(libc::ENOTTY) => {
-                *self
-                    .shared
-                    .pending_resize
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some(size);
-                Ok(())
-            }
+            // Not ours to set yet; the reader thread keeps trying.
+            Err(e) if e.raw_os_error() == Some(libc::ENOTTY) => Ok(()),
             result => result,
         }
     }
@@ -277,9 +307,17 @@ impl Session {
     pub fn redraw(&self) {
         self.shared
             .term
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .take()
             .touch_all();
+    }
+
+    /// Remove `count` grid rows starting at `first`, and repaint what moved.
+    ///
+    /// The one edit the grid accepts from Emacs. It goes through the emulator rather than
+    /// Emacs deleting the buffer text itself for the same reason input does: the rows have
+    /// one owner, and the drain that follows is the ordinary one.
+    pub fn remove_rows(&self, first: usize, count: usize) {
+        self.shared.term.take().remove_rows(first, count);
     }
 
     pub fn mode(&self) -> Mode {
@@ -294,25 +332,29 @@ impl Session {
         self.shared.pty.signal(sig)
     }
 
+    pub fn job_control(&self) -> io::Result<JobControl> {
+        self.shared.pty.job_control()
+    }
+
     pub fn alive(&self) -> bool {
-        self.shared.exited.lock().is_ok_and(|e| e.is_none())
+        self.shared.exited.take().is_none()
     }
 
     /// The last non-blank line — the prompt text for a [`Mode::Secret`] read.
     pub fn trailing_text(&self) -> Option<String> {
-        self.shared.term.lock().ok()?.trailing_text()
+        self.shared.term.take().trailing_text()
     }
 
     pub fn bracketed_paste(&self) -> bool {
-        self.shared.term.lock().is_ok_and(|t| t.bracketed_paste())
+        self.shared.term.take().bracketed_paste()
     }
 
     pub fn focus_events(&self) -> bool {
-        self.shared.term.lock().is_ok_and(|t| t.focus_events())
+        self.shared.term.take().focus_events()
     }
 
     pub fn alt_scroll(&self) -> bool {
-        self.shared.term.lock().is_ok_and(|t| t.alt_scroll())
+        self.shared.term.take().alt_scroll()
     }
 }
 
@@ -344,8 +386,7 @@ fn poll_timeout(shared: &Shared) -> PollTimeout {
     }
     let last = *shared
         .last_notified
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .take();
     let remaining = last
         .map(|t| shared.min_redisplay_interval.saturating_sub(t.elapsed()))
         .unwrap_or(std::time::Duration::ZERO);
@@ -402,15 +443,11 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         // Backpressure: with a full backlog, leave the bytes in the pty. Its buffer
         // fills and the child blocks in `write`, so output waits instead of being
         // dropped or piling up in memory faster than Emacs can render it.
-        if shared
-            .term
-            .lock()
-            .is_ok_and(|term| term.backlog() >= shared.backlog_limit)
-        {
+        if shared.term.take().backlog() >= shared.backlog_limit {
             // A child that filled the backlog inside one frame has forfeited atomicity:
             // holding the wakeup here would deadlock the backlog against its own blocked
             // write, waiting on a frame it cannot finish because we are not reading.
-            *shared.sync_until.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *shared.sync_until.take() = None;
             announce(shared, wake);
             std::thread::sleep(std::time::Duration::from_millis(2));
             continue;
@@ -421,8 +458,7 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
             Ok(data) => {
                 shared
                     .term
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
                     .feed(data);
                 // A child that changes mode almost always writes at the same moment, so
                 // re-sampling here is what makes the common case feel instantaneous.
@@ -457,7 +493,7 @@ fn finish(shared: &Arc<Shared>, wake: BorrowedFd<'_>, why: Ended) {
     let Some(status) = shared.pty.reap(patience) else {
         return;
     };
-    *shared.exited.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
+    *shared.exited.take() = Some(status);
     shared.notified.store(false, Ordering::SeqCst);
     notify(shared, wake);
 }
@@ -480,17 +516,20 @@ fn sample_mode(shared: &Arc<Shared>) -> bool {
     })
 }
 
-/// Retry a `resize` stashed by `Session::resize`, clearing it once it lands.
+/// Drive the pty to the size `Session::resize` last asked for.
+///
+/// Cleared only once the tty *reads back* with that size, not merely once the ioctl
+/// succeeds: the child's own initialisation can overwrite a successful set, and the
+/// difference between those two is invisible without reading it back. See
+/// `Session::resize`.
 fn apply_pending_resize(shared: &Arc<Shared>) {
-    let mut pending = shared
-        .pending_resize
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(size) = *pending
-        && shared.pty.resize(size).is_ok()
-    {
+    let mut pending = shared.pending_resize.take();
+    let Some(size) = *pending else { return };
+    if shared.pty.winsize().is_ok_and(|current| current == size) {
         *pending = None;
+        return;
     }
+    let _ = shared.pty.resize(size);
 }
 
 /// Unconditionally sends the wake byte if none is already in flight.
@@ -512,15 +551,14 @@ fn notify(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
 fn refresh_sync(shared: &Arc<Shared>) {
     let deadline = shared
         .term
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .take()
         .sync_deadline();
-    *shared.sync_until.lock().unwrap_or_else(|e| e.into_inner()) = deadline;
+    *shared.sync_until.take() = deadline;
 }
 
 /// How much longer the child may suppress a redisplay, or `None` if it may not.
 fn sync_remaining(shared: &Shared) -> Option<std::time::Duration> {
-    let deadline = *shared.sync_until.lock().unwrap_or_else(|e| e.into_inner());
+    let deadline = *shared.sync_until.take();
     deadline.and_then(|t| t.checked_duration_since(std::time::Instant::now()))
 }
 
@@ -545,8 +583,7 @@ fn flush_pending(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
     }
     let mut last = shared
         .last_notified
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .take();
     if last.is_some_and(|t| t.elapsed() < shared.min_redisplay_interval) {
         return;
     }

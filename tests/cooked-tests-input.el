@@ -561,6 +561,44 @@ has no handler and nothing drives evil at all."
     (cooked-next-input)
     (should (equal (cooked--pending-input) ""))))
 
+(ert-deftest cooked-history-lives-in-comints-ring ()
+  "The ring is the storage, not a private list kept beside it -- which is what
+makes `comint-input-ignoredups\=', the ring size, and the history isearch
+`comint-mode\=' installs all along apply to cooked too."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--mode 'cooked) (cooked--input-start-position)))))
+    (should (ring-empty-p comint-input-ring))
+    (cooked--replace-input "echo one")
+    (cooked-send-input)
+    (should (equal (ring-ref comint-input-ring 0) "echo one"))
+    ;; Repeats do not stack up.
+    (cooked--replace-input "echo one")
+    (cooked-send-input)
+    (should (= (ring-length comint-input-ring) 1))
+    ;; Blank submissions are not history.
+    (cooked-send-input)
+    (should (= (ring-length comint-input-ring) 1))))
+
+(ert-deftest cooked-history-recall-leaves-the-rendered-rows-alone ()
+  "comint\='s own `comint-goto-input\=' deletes from the process mark to `point-max\=',
+assuming input is the last thing in the buffer.  cooked has rendered screen rows
+below the prompt, so recall has to work between the two ends of the input region
+instead -- this is the regression guard for using comint\='s version by mistake."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--mode 'cooked) (cooked--input-start-position)))))
+    (cooked--replace-input "echo one")
+    (cooked-send-input)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "echo one" (cooked-tests--text)))))
+    (let ((before (cooked-tests--text)))
+      (cooked-previous-input 1)
+      (should (equal (cooked--pending-input) "echo one"))
+      ;; Everything above the input region is still there.
+      (should (string-prefix-p (string-trim-right before)
+                               (string-trim-right (cooked-tests--text)))))))
+
 (ert-deftest cooked-history-preserves-work-in-progress ()
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle

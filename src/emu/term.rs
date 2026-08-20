@@ -9,11 +9,6 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 use vte::{Params, Parser, Perform};
 
-/// Where in the output stream a mark landed.
-///
-/// `row` is *absolute*: screen row 0 is row [`State::evicted_total`], so the coordinate
-/// stays meaningful after the marked row scrolls away, which a screen row does not.
-///
 /// The cursor shape a child asked for with DECSCUSR (`CSI Ps SP q`).
 ///
 /// The blinking and steady spellings collapse into one value each: whether a cursor
@@ -46,6 +41,11 @@ impl CursorShape {
     }
 }
 
+/// Where in the output stream a mark landed.
+///
+/// `row` is *absolute*: screen row 0 is row [`State::evicted_total`], so the coordinate
+/// stays meaningful after the marked row scrolls away, which a screen row does not.
+///
 /// Recorded when the mark is parsed rather than read off the drain, because the drain
 /// carries the *end-of-drain* cursor — a different place entirely once more than one
 /// command lands in a single drain, which is exactly what a fast script does.
@@ -274,6 +274,11 @@ impl Term {
     /// the screen region disagreeing with ours.
     pub fn touch_all(&mut self) {
         self.state.screen_mut().touch_all();
+    }
+
+    /// Remove `count` grid rows starting at `first`; see [`Screen::remove_rows`].
+    pub fn remove_rows(&mut self, first: usize, count: usize) {
+        self.state.screen_mut().remove_rows(first, count);
     }
 
     pub fn screen(&self) -> &Screen {
@@ -677,13 +682,10 @@ impl State {
 
     fn save_restore(&mut self, save: bool) {
         let screen = self.screen_mut();
-        match save {
-            true => screen.saved = Some(screen.cursor),
-            false => {
-                if let Some(cursor) = screen.saved.take() {
-                    screen.goto(cursor.row, cursor.col);
-                }
-            }
+        if save {
+            screen.saved = Some(screen.cursor);
+        } else if let Some(cursor) = screen.saved.take() {
+            screen.goto(cursor.row, cursor.col);
         }
     }
 

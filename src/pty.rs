@@ -17,7 +17,7 @@ use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::pty::{PtyMaster, grantpt, posix_openpt, unlockpt};
 use nix::sys::signal::{Signal, killpg};
-use nix::sys::termios::{LocalFlags, Termios, tcgetattr};
+use nix::sys::termios::{LocalFlags, SpecialCharacterIndices, Termios, tcgetattr};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{AccessFlags, Pid as NixPid, access, tcgetpgrp};
 use std::ffi::{CStr, CString, OsStr};
@@ -41,6 +41,39 @@ pub enum Mode {
     Raw,
     /// `ICANON & !ECHO` — `getpass(3)` and friends. Prompt in the minibuffer.
     Secret,
+}
+
+/// The tty's job-control characters, and whether the line discipline still acts on them.
+///
+/// A terminal does not send signals. It writes one of these bytes and lets the line
+/// discipline decide what that means — which is why `stty intr ^X` works at all, and why
+/// assuming `^C`/`^\`/`^Z` is a guess about state we can simply read. `isig` is the other
+/// half: with `ISIG` cleared the byte reaches the child verbatim instead of becoming a
+/// signal, and a program that cleared it did so precisely to read the byte itself.
+///
+/// `None` means the character is disabled (`_POSIX_VDISABLE`), so there is nothing to send
+/// and a caller with a signal to fall back on should use it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobControl {
+    pub intr: Option<u8>,
+    pub quit: Option<u8>,
+    pub susp: Option<u8>,
+    pub isig: bool,
+}
+
+impl JobControl {
+    fn of(t: &Termios) -> Self {
+        let cc = |i: SpecialCharacterIndices| match t.control_chars[i as usize] {
+            compat::POSIX_VDISABLE => None,
+            byte => Some(byte),
+        };
+        Self {
+            intr: cc(SpecialCharacterIndices::VINTR),
+            quit: cc(SpecialCharacterIndices::VQUIT),
+            susp: cc(SpecialCharacterIndices::VSUSP),
+            isig: t.local_flags.contains(LocalFlags::ISIG),
+        }
+    }
 }
 
 impl Mode {
@@ -208,6 +241,16 @@ impl Pty {
             .map_err(nixerr)
     }
 
+    /// The child's job-control characters, as the tty currently defines them.
+    ///
+    /// Sampled on demand rather than carried in [`Mode`]: these change when someone runs
+    /// `stty`, not on every read, and the one caller asks only when about to send one.
+    pub fn job_control(&self) -> io::Result<JobControl> {
+        tcgetattr(self.master.as_fd())
+            .map(|t| JobControl::of(&t))
+            .map_err(nixerr)
+    }
+
     /// Process group in the foreground of the tty — i.e. what is actually running.
     pub fn foreground(&self) -> io::Result<Pid> {
         match tcgetpgrp(self.master.as_fd()).map_err(nixerr)?.as_raw() {
@@ -226,6 +269,32 @@ impl Pty {
     /// reader thread; see `Session::resize`.
     pub fn resize(&self, size: Winsize) -> io::Result<()> {
         set_winsize(self.master.as_fd(), size)
+    }
+
+    /// The size the tty currently reports, which is not always the size we last set.
+    ///
+    /// `child_exec` sets the initial winsize on its own slave fd, and that runs after the
+    /// fork — so a `resize` issued in the moments after `spawn` can be applied to the
+    /// master, return success, and then be overwritten by the child's own initialisation.
+    /// Reading it back is what lets `session` tell "applied" from "applied and lost".
+    pub fn winsize(&self) -> io::Result<Winsize> {
+        let mut ws = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        check(unsafe {
+            libc::ioctl(
+                self.master.as_raw_fd(),
+                compat::TIOCGWINSZ,
+                &raw mut ws,
+            )
+        })?;
+        Ok(Winsize {
+            rows: ws.ws_row,
+            cols: ws.ws_col,
+        })
     }
 
     pub fn write(&self, mut buf: &[u8]) -> io::Result<()> {
@@ -474,6 +543,43 @@ mod tests {
         let mut t = Termios::from(unsafe { std::mem::zeroed::<libc::termios>() });
         t.local_flags = lflag;
         t
+    }
+
+    #[test]
+    fn job_control_reads_the_characters_the_tty_actually_holds() {
+        let mut t = termios_with(LocalFlags::ISIG);
+        t.control_chars[SpecialCharacterIndices::VINTR as usize] = 0x18; // ^X, as `stty intr ^X`
+        t.control_chars[SpecialCharacterIndices::VQUIT as usize] = 0x1c; // ^\
+        t.control_chars[SpecialCharacterIndices::VSUSP as usize] = 0x1a; // ^Z
+        assert_eq!(
+            JobControl::of(&t),
+            JobControl {
+                intr: Some(0x18),
+                quit: Some(0x1c),
+                susp: Some(0x1a),
+                isig: true,
+            },
+            "a reconfigured intr must be reported, not assumed to be ^C"
+        );
+    }
+
+    #[test]
+    fn job_control_reports_a_disabled_character_as_none() {
+        let mut t = termios_with(LocalFlags::ISIG);
+        t.control_chars[SpecialCharacterIndices::VINTR as usize] = compat::POSIX_VDISABLE;
+        t.control_chars[SpecialCharacterIndices::VQUIT as usize] = 0x1c;
+        // There is no byte to write for a disabled character, so the caller needs to know
+        // to fall back on the signal rather than sending `_POSIX_VDISABLE` itself.
+        assert_eq!(JobControl::of(&t).intr, None);
+        assert_eq!(JobControl::of(&t).quit, Some(0x1c));
+    }
+
+    #[test]
+    fn job_control_reports_isig_so_a_raw_reader_gets_the_byte() {
+        // A program that cleared ISIG did so to read ^C itself; writing the byte would be
+        // swallowed into a signal if we got this backwards.
+        assert!(JobControl::of(&termios_with(LocalFlags::ISIG)).isig);
+        assert!(!JobControl::of(&termios_with(LocalFlags::empty())).isig);
     }
 
     #[test]

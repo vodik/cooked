@@ -114,19 +114,20 @@ impl Style {
     /// Reverse video survives because it is resolved in `cooked--build-face`, where the
     /// bar's colour is then the foreground; dropping the flag would erase the drawing.
     pub fn erase(self) -> Self {
-        match self.attrs.contains(Attrs::REVERSE) {
+        if self.attrs.contains(Attrs::REVERSE) {
             // Every field named, so no `..Self::default()` tail: `Style` has exactly these
             // three, and a tail that updates nothing is a lint rather than a hedge against
             // a fourth arriving later.
-            true => Self {
+            Self {
                 fg: self.fg,
                 bg: self.bg,
                 attrs: Attrs::REVERSE,
-            },
-            false => Self {
+            }
+        } else {
+            Self {
                 bg: self.bg,
                 ..Self::default()
-            },
+            }
         }
     }
 }
@@ -451,16 +452,18 @@ impl Row {
     /// [`Screen::carried`](super::screen::Screen) rests on to measure the head of the line
     /// straddling the seam.
     pub fn line_runs(&self) -> Vec<Run> {
-        match self.wrapped {
-            true => self.runs_to(self.len()),
-            false => self.runs(),
+        if self.wrapped {
+            self.runs_to(self.len())
+        } else {
+            self.runs()
         }
     }
 
     fn runs_to(&self, end: usize) -> Vec<Run> {
-        match self.underlines.is_some() {
-            true => self.build_runs(end, |row, col| row.underline_at(col)),
-            false => self.build_runs(end, |_, _| Color::Default),
+        if self.underlines.is_some() {
+            self.build_runs(end, |row, col| row.underline_at(col))
+        } else {
+            self.build_runs(end, |_, _| Color::Default)
         }
     }
 

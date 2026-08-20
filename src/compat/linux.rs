@@ -9,6 +9,10 @@ use std::os::fd::OwnedFd;
 
 pub const TIOCSCTTY: libc::c_ulong = libc::TIOCSCTTY;
 pub const TIOCSWINSZ: libc::c_ulong = libc::TIOCSWINSZ;
+pub const TIOCGWINSZ: libc::c_ulong = libc::TIOCGWINSZ;
+
+/// `_POSIX_VDISABLE` — the `c_cc` value meaning "this character is turned off".
+pub const POSIX_VDISABLE: libc::cc_t = 0;
 
 /// Path of the slave belonging to `master`.
 ///

@@ -274,11 +274,6 @@ impl Screen {
         evicted
     }
 
-    /// Record the pen's underline colour on the cell the cursor just wrote.
-    ///
-    /// Separate from [`Screen::write`] rather than a parameter to it: this is the rare
-    /// path, and `write` is the hottest call in the emulator. Called after the write, so
-    /// the column is the one the write settled on after any wrap.
     pub fn autowrap(&self) -> bool {
         self.autowrap
     }
@@ -291,6 +286,11 @@ impl Screen {
         self.underlined
     }
 
+    /// Record the pen's underline colour on the cell the cursor just wrote.
+    ///
+    /// Separate from [`Screen::write`] rather than a parameter to it: this is the rare
+    /// path, and `write` is the hottest call in the emulator. Called after the write, so
+    /// the column is the one the write settled on after any wrap.
     pub fn mark_underline(&mut self, color: Color, width: usize) {
         self.underlined |= color != Color::Default;
         let (row, cols) = (self.cursor.row, self.cols);
@@ -299,9 +299,10 @@ impl Screen {
         // rather than begins. Taking the width into account is what keeps a colour off
         // the continuation cell of a wide character, which `Row::runs` skips, and where
         // it would therefore vanish.
-        let col = match self.cursor.wrap_pending {
-            true => cols.saturating_sub(width),
-            false => self.cursor.col.saturating_sub(width),
+        let col = if self.cursor.wrap_pending {
+            cols.saturating_sub(width)
+        } else {
+            self.cursor.col.saturating_sub(width)
         };
         if let Some(r) = self.touch(row) {
             r.set_underline(col, color);
@@ -363,6 +364,50 @@ impl Screen {
         evicted
     }
 
+    /// Remove `count` rows starting at `first`, closing the gap from below.
+    ///
+    /// Not a scroll: the rows are discarded rather than archived, because the caller is
+    /// deleting a finished command's output and archiving it would put it straight back
+    /// into the buffer as scrollback. Rows below shift up, blanks come in at the bottom,
+    /// and the whole affected span is marked damaged so the next drain repaints it.
+    ///
+    /// This is the only way the grid may be edited from outside, and it goes through the
+    /// emulator for the same reason input does: rows have exactly one owner. Emacs asks;
+    /// nothing above ever deletes buffer text the grid still holds, or the two ends stop
+    /// agreeing about what the screen is.
+    ///
+    /// Removing from the very top clears [`Screen::carried`]. That count says how much of
+    /// row 0's logical line has already been handed to Emacs, and once row 0 itself is
+    /// gone the new top row continues nothing.
+    pub fn remove_rows(&mut self, first: usize, count: usize) {
+        let height = self.rows.len();
+        let first = first.min(height);
+        let count = count.min(height - first);
+        if count == 0 {
+            return;
+        }
+        self.rows.drain(first..first + count);
+        let pen = Style::default();
+        self.rows.resize(height, Row::new(self.cols));
+        for row in &mut self.rows[height - count..] {
+            row.clear(pen.erase());
+        }
+        if first == 0 {
+            self.carried = 0;
+        }
+        // The cursor rides with the text it was sitting on or below.
+        self.cursor.row = if self.cursor.row >= first + count {
+            self.cursor.row - count
+        } else if self.cursor.row >= first {
+            first
+        } else {
+            self.cursor.row
+        };
+        self.cursor.wrap_pending = false;
+        self.region = Region::full(height);
+        self.touch_range(first..=height - 1);
+    }
+
     pub fn scroll_down(&mut self, n: usize, pen: Style) {
         let Region { top, bottom } = self.region;
         let n = n.min(self.region.height());
@@ -399,9 +444,10 @@ impl Screen {
         let row = self.cursor.row.saturating_add_signed(rows);
         let col = self.cursor.col.saturating_add_signed(cols);
         // Vertical motion stays inside the scroll region when the cursor starts there.
-        let row = match self.region.contains(self.cursor.row) {
-            true => row.clamp(self.region.top, self.region.bottom),
-            false => row,
+        let row = if self.region.contains(self.cursor.row) {
+            row.clamp(self.region.top, self.region.bottom)
+        } else {
+            row
         };
         self.goto(row, col);
     }
@@ -447,9 +493,10 @@ impl Screen {
                 // `has_text`, not `!is_blank`: with `bce` a screen the child painted and
                 // then cleared has a background on every cell, and archiving that would
                 // hand Emacs a screenful of pure colour with nothing written on it.
-                let history = match self.archives() && self.rows.iter().any(|r| r.has_text()) {
-                    true => self.rows[..=self.last_used_row()].to_vec(),
-                    false => Vec::new(),
+                let history = if self.archives() && self.rows.iter().any(Row::has_text) {
+                    self.rows[..=self.last_used_row()].to_vec()
+                } else {
+                    Vec::new()
                 };
                 self.clear_rows(0..last, pen);
                 // Whatever was on screen has gone to history whole, so the next row 0
@@ -559,13 +606,10 @@ impl Screen {
     }
 
     pub fn clear_tabs(&mut self, all: bool) {
-        match all {
-            true => self.tabs.fill(false),
-            false => {
-                if let Some(stop) = self.tabs.get_mut(self.cursor.col) {
-                    *stop = false;
-                }
-            }
+        if all {
+            self.tabs.fill(false);
+        } else if let Some(stop) = self.tabs.get_mut(self.cursor.col) {
+            *stop = false;
         }
     }
 
@@ -948,6 +992,88 @@ mod tests {
         assert_eq!(evicted.len(), 1);
         assert_eq!(evicted[0].to_text(), "aa");
         assert_eq!(screen.row(0).unwrap().to_text(), "bb");
+    }
+
+    fn lines(screen: &mut Screen, texts: &[&str]) {
+        for (i, line) in texts.iter().enumerate() {
+            screen.goto(i, 0);
+            write(screen, line);
+        }
+    }
+
+    #[test]
+    fn removing_rows_closes_the_gap_from_below() {
+        let mut screen = Screen::new(4, 4);
+        lines(&mut screen, &["a", "b", "c", "d"]);
+
+        screen.remove_rows(1, 2);
+
+        assert_eq!(screen.row(0).unwrap().to_text(), "a");
+        assert_eq!(screen.row(1).unwrap().to_text(), "d");
+        assert_eq!(screen.row(2).unwrap().to_text(), "");
+        assert_eq!(screen.row(3).unwrap().to_text(), "");
+    }
+
+    #[test]
+    fn removed_rows_are_discarded_not_archived() {
+        // Archiving would hand them straight back to Emacs as scrollback, which is the
+        // opposite of deleting them.
+        let mut screen = Screen::new(3, 4);
+        lines(&mut screen, &["a", "b", "c"]);
+        screen.drain_damage();
+
+        screen.remove_rows(0, 1);
+
+        assert_eq!(screen.row(0).unwrap().to_text(), "b");
+        assert_eq!(screen.drain_damage(), vec![0, 1, 2], "everything below must repaint");
+    }
+
+    #[test]
+    fn removing_rows_carries_the_cursor_with_its_text() {
+        let mut screen = Screen::new(4, 4);
+        lines(&mut screen, &["a", "b", "c", "d"]);
+
+        screen.goto(3, 1);
+        screen.remove_rows(1, 2);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (1, 1), "row 3 became row 1");
+
+        // A cursor inside the removed span has nothing left to sit on; it lands on the
+        // first row that survived.
+        lines(&mut screen, &["a", "b", "c", "d"]);
+        screen.goto(2, 0);
+        screen.remove_rows(1, 2);
+        assert_eq!(screen.cursor.row, 1);
+
+        // Above the removal, nothing moved.
+        lines(&mut screen, &["a", "b", "c", "d"]);
+        screen.goto(0, 0);
+        screen.remove_rows(1, 2);
+        assert_eq!(screen.cursor.row, 0);
+    }
+
+    #[test]
+    fn removing_the_top_row_forgets_the_carried_head() {
+        // `carried` says how much of row 0's logical line Emacs already holds; once row 0
+        // is gone the new top row continues nothing.
+        let mut screen = Screen::new(2, 4);
+        write(&mut screen, "aaaa");
+        write(&mut screen, "bb");
+        screen.scroll_up(1, Style::default());
+        assert_ne!(screen.head(), 0, "precondition: something was carried");
+
+        screen.remove_rows(0, 1);
+        assert_eq!(screen.head(), 0);
+    }
+
+    #[test]
+    fn removing_more_rows_than_there_are_is_clamped() {
+        let mut screen = Screen::new(2, 4);
+        lines(&mut screen, &["a", "b"]);
+        screen.remove_rows(1, 99);
+        assert_eq!(screen.row(0).unwrap().to_text(), "a");
+        assert_eq!(screen.row(1).unwrap().to_text(), "");
+        screen.remove_rows(9, 1); // entirely past the end
+        assert_eq!(screen.row(0).unwrap().to_text(), "a");
     }
 
     #[test]

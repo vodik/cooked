@@ -10,7 +10,8 @@
 //!
 //! | item | why it is here |
 //! |---|---|
-//! | [`TIOCSCTTY`], [`TIOCSWINSZ`] | libc and nix do not define these for every target |
+//! | [`TIOCSCTTY`], [`TIOCSWINSZ`], [`TIOCGWINSZ`] | libc and nix do not define these for every target |
+//! | [`POSIX_VDISABLE`] | zero on Linux, `0xff` on the BSDs |
 //! | [`slave_name`] | reentrant where possible, careful where not |
 //! | [`cloexec_pipe`] | atomic where possible, two-step where not |
 //!

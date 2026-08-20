@@ -98,9 +98,10 @@ this lets the prompt text arrive first."
   :type 'number :group 'cooked)
 
 (defvar-local cooked--secret-timer nil)
-(defvar-local cooked--history nil "Submitted input lines, newest first.")
-(defvar-local cooked--history-index nil "Position in `cooked--history', or nil.")
-(defvar-local cooked--history-stash nil "Input set aside while browsing history.")
+(defvar-local cooked--history-stash nil
+  "Input set aside while browsing history.
+The one piece of history state that is cooked's: the ring, and the position in
+it, are `comint-input-ring' and `comint-input-ring-index'.")
 (defvar-local cooked--last-size nil)
 
 ;;;; Key encoding
@@ -761,9 +762,7 @@ for ZLE."
   (interactive)
   (let ((text (or (cooked--take-pending-input) "")))
     (cooked--clear-input-region)
-    (unless (string-blank-p text)
-      (setq cooked--history (cons text (delete text cooked--history))))
-    (setq cooked--history-index nil cooked--history-stash nil)
+    (cooked--history-record text)
     (cooked--send-input-string text)))
 
 (defun cooked--send-input-string (text)
@@ -801,11 +800,21 @@ newline survives until you submit."
 ;; history is Emacs' own; the shell still records the same commands, since it
 ;; receives each one whole.
 ;;
-;; This used to be a private list because comint's ring navigates relative to a
-;; process mark cooked did not maintain -- `comint-previous-input' answering
-;; "Not at command line" was the symptom.  The mark is `cooked--input-mark' now,
-;; so that reason is gone and this list is on its way out in favour of
-;; `comint-input-ring'.
+;; `comint-input-ring' holds it -- not a private list.  It used to be private
+;; because comint's ring navigates relative to a process mark cooked did not
+;; maintain (`comint-previous-input' answering "Not at command line" was the
+;; symptom), and `cooked--input-mark' settled that.  Everything hung off the
+;; ring comes with it: `comint-input-ignoredups', `comint-input-ring-size',
+;; ring persistence, and the isearch that `comint-mode' has been installing all
+;; along and that had nothing to search until now.
+;;
+;; The *editing* stays cooked's, and that asymmetry is deliberate.
+;; `comint-goto-input' deletes from the process mark to `point-max' on the
+;; assumption that input is the last thing in the buffer, which is exactly the
+;; assumption cooked breaks: there are rendered screen rows below the prompt, so
+;; comint's own recall would take them with it.  `cooked--replace-input' works
+;; between the two ends of the region instead -- see `cooked--input-end', which
+;; is the half comint has no counterpart for.
 
 (defun cooked--replace-input (text)
   "Replace the pending input with TEXT."
@@ -817,21 +826,36 @@ newline survives until you submit."
         (insert text)))
     (goto-char cooked--input-end)))
 
+(defun cooked--history-record (text)
+  "Add TEXT to the input history, unless it is blank.
+`comint-input-ignoredups' is honoured, so a repeated command does not stack up."
+  (unless (string-blank-p text)
+    (when (or (not comint-input-ignoredups)
+              (ring-empty-p comint-input-ring)
+              (not (equal (ring-ref comint-input-ring 0) text)))
+      (ring-insert comint-input-ring text)))
+  (setq comint-input-ring-index nil
+        cooked--history-stash nil))
+
 (defun cooked--history-move (delta)
-  "Step DELTA entries through the input history."
+  "Step DELTA entries through the input history.
+Positive DELTA moves towards older entries, as \[cooked-previous-input] does."
   (unless (cooked--input-state-p)
     (user-error "Not at an input prompt"))
-  (unless cooked--history
+  (when (ring-empty-p comint-input-ring)
     (user-error "No input history yet"))
   (unless (cooked--input-region)
     (cooked--restore-pending-input nil))
-  (when (null cooked--history-index)
+  ;; What was half-typed is put aside on the way out and handed back on the way
+  ;; past the newest entry, so browsing history never costs you the line you were
+  ;; writing.  comint has no equivalent; it simply loses it.
+  (when (null comint-input-ring-index)
     (setq cooked--history-stash (or (cooked--pending-input) "")))
-  (let ((next (max -1 (min (+ (or cooked--history-index -1) delta)
-                           (1- (length cooked--history))))))
-    (setq cooked--history-index (and (>= next 0) next))
-    (cooked--replace-input (if cooked--history-index
-                               (nth cooked--history-index cooked--history)
+  (let ((next (max -1 (min (+ (or comint-input-ring-index -1) delta)
+                           (1- (ring-length comint-input-ring))))))
+    (setq comint-input-ring-index (and (>= next 0) next))
+    (cooked--replace-input (if comint-input-ring-index
+                               (ring-ref comint-input-ring comint-input-ring-index)
                              (or cooked--history-stash "")))))
 
 (defun cooked-previous-input (&optional n)
@@ -1298,6 +1322,10 @@ to the child verbatim."
   ;; is a working command rather than something to be remapped around -- and nothing
   ;; can reach the pipe by accident.
   (setq-local comint-input-sender (lambda (_proc input) (cooked--send-input-string input)))
+  ;; The ring `comint-mode' just built is the history; it is at the default 500,
+  ;; which is what cooked kept anyway.  Repeats are dropped, as a shell's own
+  ;; history does by default and as cooked's private list used to.
+  (setq-local comint-input-ignoredups t)
   ;; The OSC 133 records know where each command line began; comint would otherwise
   ;; scan backwards for a prompt regexp cooked deliberately never sets.
   (setq-local comint-get-old-input #'cooked--get-old-input)
