@@ -240,11 +240,7 @@ impl Session {
     pub fn drain(&self) -> Update {
         self.shared.notified.store(false, Ordering::SeqCst);
         Update {
-            delta: self
-                .shared
-                .term
-                .take()
-                .drain(),
+            delta: self.shared.term.take().drain(),
             mode: self.shared.load_mode(),
             exit: *self.shared.exited.take(),
         }
@@ -258,10 +254,7 @@ impl Session {
     ///
     /// Emacs holds the scrollback, so only Emacs knows when it has thrown it away.
     pub fn forget_history(&self) {
-        self.shared
-            .term
-            .take()
-            .forget_history();
+        self.shared.term.take().forget_history();
     }
 
     /// Resize the emulator and the pty, and keep asking until the child agrees.
@@ -305,10 +298,7 @@ impl Session {
     /// some rows of a drain and not others, and no amount of further deltas repairs
     /// that, because a delta only describes what changed since.
     pub fn redraw(&self) {
-        self.shared
-            .term
-            .take()
-            .touch_all();
+        self.shared.term.take().touch_all();
     }
 
     /// Remove `count` grid rows starting at `first`, and repaint what moved.
@@ -393,9 +383,7 @@ fn poll_timeout(shared: &Shared) -> PollTimeout {
     if shared.notified.load(Ordering::SeqCst) || !shared.dirty.load(Ordering::SeqCst) {
         return PollTimeout::from(POLL_TIMEOUT_MS);
     }
-    let last = *shared
-        .last_notified
-        .take();
+    let last = *shared.last_notified.take();
     let remaining = last
         .map(|t| shared.min_redisplay_interval.saturating_sub(t.elapsed()))
         .unwrap_or(std::time::Duration::ZERO);
@@ -465,10 +453,7 @@ fn read_loop(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
         match shared.pty.read(&mut buf) {
             Ok([]) => return finish(shared, wake, Ended::ChildGone),
             Ok(data) => {
-                shared
-                    .term
-                    .take()
-                    .feed(data);
+                shared.term.take().feed(data);
                 // A child that changes mode almost always writes at the same moment, so
                 // re-sampling here is what makes the common case feel instantaneous.
                 sample_mode(shared);
@@ -558,10 +543,7 @@ fn notify(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
 
 /// Copy the emulator's synchronized-output deadline where the notify path can see it.
 fn refresh_sync(shared: &Arc<Shared>) {
-    let deadline = shared
-        .term
-        .take()
-        .sync_deadline();
+    let deadline = shared.term.take().sync_deadline();
     *shared.sync_until.take() = deadline;
 }
 
@@ -590,9 +572,7 @@ fn flush_pending(shared: &Arc<Shared>, wake: BorrowedFd<'_>) {
     if sync_remaining(shared).is_some() {
         return;
     }
-    let mut last = shared
-        .last_notified
-        .take();
+    let mut last = shared.last_notified.take();
     if last.is_some_and(|t| t.elapsed() < shared.min_redisplay_interval) {
         return;
     }

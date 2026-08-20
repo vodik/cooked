@@ -290,13 +290,7 @@ impl Pty {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        check(unsafe {
-            libc::ioctl(
-                self.master.as_raw_fd(),
-                compat::TIOCGWINSZ,
-                &raw mut ws,
-            )
-        })?;
+        check(unsafe { libc::ioctl(self.master.as_raw_fd(), compat::TIOCGWINSZ, &raw mut ws) })?;
         Ok(Winsize {
             rows: ws.ws_row,
             cols: ws.ws_col,

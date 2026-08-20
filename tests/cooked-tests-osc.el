@@ -418,31 +418,20 @@ so a terminal that never answers costs them their whole timeout on startup."
   (should-not (cooked--parse-osc-color "rgb:fffff/0/0"))
   (should-not (cooked--parse-osc-color "not-a-color")))
 
-(ert-deftest cooked-child-erase-scrollback-is-ignored-by-default ()
-  "`CSI 3 J' is xterm's `clear -x'; a program should not be able to wipe
-history just because it can write to the terminal.  Unlike `2 J', real
-xterm's `3 J' never touches the visible screen either, only scrollback."
-  (should-not cooked-honor-erase-scrollback)
+(ert-deftest cooked-child-erase-scrollback-is-honored ()
+  "`CSI 3 J' is the tail of what `clear' sends, and it is the half that actually
+empties the buffer -- the `2 J' before it archives the screen rather than losing
+it.  Unlike `2 J', real xterm's `3 J' never touches the visible screen either,
+only the scrollback."
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--erase-scrollback-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line60" (cooked-tests--text)))))
     (should (string-match-p "line1\n" (cooked-tests--text)))
-    ;; Give the child's `3 J', sent after its sleep, time to arrive and be ignored.
-    (cooked-tests--settle #'ignore 1.5)
-    (should (string-match-p "line1\n" (cooked-tests--text)))
+    (should (cooked-tests--settle
+             (lambda () (not (string-match-p "line1\n" (cooked-tests--text))))
+             3))
+    ;; The live screen is untouched: real xterm's `3 J' never erases it.
     (should (string-match-p "line60" (cooked-tests--text)))))
-
-(ert-deftest cooked-child-erase-scrollback-can-be-honored ()
-  (let ((cooked-honor-erase-scrollback t))
-    (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--erase-scrollback-script)
-      (should (cooked-tests--settle
-               (lambda () (string-match-p "line60" (cooked-tests--text)))))
-      (should (string-match-p "line1\n" (cooked-tests--text)))
-      (should (cooked-tests--settle
-               (lambda () (not (string-match-p "line1\n" (cooked-tests--text))))
-               3))
-      ;; The live screen is untouched: real xterm's `3 J' never erases it.
-      (should (string-match-p "line60" (cooked-tests--text))))))
 
 (provide 'cooked-tests-osc)
 ;;; cooked-tests-osc.el ends here

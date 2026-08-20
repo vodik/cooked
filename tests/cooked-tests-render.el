@@ -464,15 +464,38 @@ clipping the top of the screen even though the buffer content was correct."
           (b (cooked--face nil nil cooked--attr-underline 2)))
       (should-not (equal a b)))))
 
-(ert-deftest cooked-clear-scrollback-keeps-the-live-screen ()
+(ert-deftest cooked-clear-scrollback-keeps-the-line-the-child-is-on ()
+  "Everything above the child's line goes, on both sides of the seam: the output
+that scrolled off into the buffer and the rows the grid is still holding.  Only
+the scrollback went before, which left the whole screen in place -- and a few
+commands into a session that is all of it, so the command looked inert."
   (cooked-tests--with-session
-      '("/bin/sh" "-c" "for i in $(seq 60); do printf 'line%s\\n' $i; done; exec cat")
+      '("/bin/sh" "-c" "for i in $(seq 60); do printf 'line%s\\n' $i; done; \
+                        printf 'PROMPT> '; exec cat")
     (should (cooked-tests--settle
-             (lambda () (string-match-p "line60" (cooked-tests--text)))))
+             (lambda () (string-match-p "PROMPT>" (cooked-tests--text)))))
     (should (string-match-p "line1\n" (cooked-tests--text)))
+    (should (string-match-p "line60" (cooked-tests--text)))
     (cooked-clear-scrollback)
     (should-not (string-match-p "line1\n" (cooked-tests--text)))
-    (should (string-match-p "line60" (cooked-tests--text)))))
+    (should-not (string-match-p "line60" (cooked-tests--text)))
+    (should (string-match-p "PROMPT>" (cooked-tests--text)))))
+
+(ert-deftest cooked-clear-scrollback-keeps-a-two-line-prompt-whole ()
+  "With OSC 133 the cut is at the prompt's own mark, not at the cursor's row, so
+a prompt that draws more than one line survives entire.  Cutting at the cursor
+would eat the line above it, which the shell believes it is still drawing on.
+
+Nothing here has scrolled off at all -- the whole transcript is on the grid,
+which is the state the old scrollback-only command could not touch."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "for i in $(seq 5); do printf 'line%s\\n' $i; done; \
+                        printf '\\033]133;A\\033\\\\top-of-prompt\\n$ '; exec cat")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "top-of-prompt" (cooked-tests--text)))))
+    (cooked-clear-scrollback)
+    (should-not (string-match-p "line5" (cooked-tests--text)))
+    (should (string-prefix-p "top-of-prompt\n$" (cooked-tests--text)))))
 
 (ert-deftest cooked-title-renames-the-buffer-only-when-asked ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;running-thing\\007'; sleep 5")
@@ -654,11 +677,16 @@ over — which is the offset seam a later rewrap turns into a visible one."
       (cooked--check-seam))))
 
 (ert-deftest cooked-clearing-scrollback-across-the-seam-keeps-the-screen ()
-  "`cooked-clear-scrollback' can cut a line in half: its head is scrollback and
-its tail is the top of the screen.  The screen must survive intact, and the
-emulator must be told, so the next rewrap does not resume a line that is gone."
+  "Discarding scrollback can cut a line in half: its head is scrollback and its
+tail is the top of the screen.  The screen must survive intact, and the emulator
+must be told, so the next rewrap does not resume a line that is gone.
+
+Driven through `cooked--discard-scrollback' rather than through
+`cooked-clear-scrollback', which is about the seam bookkeeping alone: the
+command also drops the rows above the prompt, so it would take the screen this
+is watching with it.  The child's own `CSI 3 J' arrives here by the same route."
   (cooked-tests--with-straddling-line
-    (cooked-clear-scrollback)
+    (cooked--discard-scrollback (cooked--screen-start-position))
     (should (string-prefix-p "2222222222" (cooked-tests--text)))
     ;; The one place state flows Emacs -> Rust: cutting the head has to reach the
     ;; emulator's carry, or it resumes a line that is no longer there.  Now checkable
@@ -669,6 +697,23 @@ emulator must be told, so the next rewrap does not resume a line that is gone."
     (should (string-match-p "222222222233333333334444444444555555555"
                             (cooked-tests--unwrapped)))
     (should-not (string-match-p "0000000000" (cooked-tests--text)))))
+
+(ert-deftest cooked-clearing-to-the-prompt-across-the-seam-keeps-the-seam-honest ()
+  "The command cuts on both sides of the seam in one go, and the emulator has to
+be told about both halves: Emacs' text through `cooked--discard-scrollback', and
+its own rows through `cooked--clear-to-prompt', which drops the carry with them.
+
+No OSC 133 here, so the cut is at the cursor's row -- and the line straddling
+the seam is above it in every part but its tail."
+  (cooked-tests--with-straddling-line
+    (cooked-clear-scrollback)
+    (should (equal (string-trim (cooked-tests--text)) "555555555"))
+    (cooked--check-seam)
+
+    (cooked-tests--resize 4 30)
+    (should-not (string-match-p "0000000000" (cooked-tests--text)))
+    (should (equal (string-trim (cooked-tests--text)) "555555555"))
+    (cooked--check-seam)))
 
 (ert-deftest cooked-a-resize-mid-alt-does-not-weld-history-onto-the-live-row ()
   "A resize can evict primary rows into scrollback while a full-screen program

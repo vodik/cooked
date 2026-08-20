@@ -1030,7 +1030,11 @@ mod tests {
         screen.remove_rows(0, 1);
 
         assert_eq!(screen.row(0).unwrap().to_text(), "b");
-        assert_eq!(screen.drain_damage(), vec![0, 1, 2], "everything below must repaint");
+        assert_eq!(
+            screen.drain_damage(),
+            vec![0, 1, 2],
+            "everything below must repaint"
+        );
     }
 
     #[test]
@@ -1040,7 +1044,11 @@ mod tests {
 
         screen.goto(3, 1);
         screen.remove_rows(1, 2);
-        assert_eq!((screen.cursor.row, screen.cursor.col), (1, 1), "row 3 became row 1");
+        assert_eq!(
+            (screen.cursor.row, screen.cursor.col),
+            (1, 1),
+            "row 3 became row 1"
+        );
 
         // A cursor inside the removed span has nothing left to sit on; it lands on the
         // first row that survived.

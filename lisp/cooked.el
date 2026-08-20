@@ -329,6 +329,7 @@ plumbing.")
 (declare-function cooked--forget-history "cooked-core")
 (declare-function cooked--redraw "cooked-core")
 (declare-function cooked--prompt-text "cooked-core")
+(declare-function cooked--clear-to-prompt "cooked-core")
 (declare-function cooked--signal "cooked-core")
 (declare-function cooked--pid "cooked-core")
 (declare-function cooked--bracketed-paste-p "cooked-core")
@@ -1942,9 +1943,24 @@ window that fell behind."
           (when (cooked--follow-p)
             (cooked--dolist-windows w other-follows
               (set-window-point w target)))
-          (when (and follow at-end)
+          (cond
+           ;; The child cleared the display.  Its rows were archived rather than
+           ;; dropped -- history is Emacs' -- so nothing scrolls out of view on its
+           ;; own, and recentring on the cursor would leave the transcript filling
+           ;; the window above a blank screen, which is `clear' looking like it did
+           ;; nothing.  Putting the screen at the top of the window is what every
+           ;; other terminal's viewport does here; the transcript is still above,
+           ;; one scroll away.
+           ((and follow cooked--pin-screen-top)
+            (let ((top (cooked--screen-start-position)))
+              (cooked--dolist-windows w (append here other-follows)
+                (set-window-start w top t))))
+           ((and follow at-end)
             (cooked--dolist-windows w (append here other-follows)
               (with-selected-window w (recenter (- -1 scroll-margin))))))))
+      ;; Cleared whether or not it was acted on: it describes this drain, and a
+      ;; suspended buffer that later resumes should not jump on an old one.
+      (setq cooked--pin-screen-top nil))
     ;; After the window block, not before it: see `cooked--sync-cursor-type'.
     (cooked--sync-cursor-type)
     (cooked--update-ghost-cursor)
@@ -1964,6 +1980,10 @@ two chances to disagree."
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
     (`(reply . ,bytes) (cooked--send-if-live bytes))
     (`(title-stack ,push) (cooked--handle-title-stack push))
+    ;; `CSI 3 J', the tail of what `clear' sends.  Honoured unconditionally: it is
+    ;; only reachable by something already holding the terminal, every other terminal
+    ;; honours it, and it is precisely what the user typed `clear' to get.  The
+    ;; command history it used to take with it now lives in comint's ring instead.
     (`(erase-scrollback)
      (cooked--discard-scrollback (cooked--screen-start-position)))
     (`(display-cleared) (setq cooked--pin-screen-top t))
@@ -2343,6 +2363,14 @@ no longer there — and the desync is silent until the next resize.
 Widens first, so it still clears while a full-screen program has the buffer
 narrowed to the alt screen — where `point-min' is the top of the screen and
 this would otherwise quietly do nothing."
+  ;; Before the deletion, while the positions still mean something.  A record whose
+  ;; whole region is in the text being cut would survive as an empty region sitting
+  ;; at the cut -- indistinguishable from a command that genuinely printed nothing,
+  ;; which is exactly what the records exist to describe -- and `\[cooked-previous-command]'
+  ;; and folding walk them.
+  (setq cooked--commands
+        (seq-filter (lambda (command) (> (cooked--command-end-position command) end))
+                    cooked--commands))
   (save-restriction
     (widen)
     (let ((inhibit-read-only t))
@@ -2382,9 +2410,32 @@ news `cooked--discard-scrollback\=' gives it."
             (setf (cooked-grid-head cooked--grid) 0)))))))
 
 (defun cooked-clear-scrollback ()
-  "Delete everything above the live screen."
+  "Delete everything above the current prompt.
+
+comint's `C-c M-o\=' read literally, and the seam between the emulator's grid and
+Emacs\=' scrollback is not the user's business: whether what is above the prompt
+has scrolled off the grid yet or is still sitting on it, it goes.  Scrollback
+alone was the old behaviour and looked inert at exactly the moment it is reached
+for -- a few commands into a session nothing has scrolled off at all, and every
+line on screen is a row the emulator still holds.
+
+Each side is asked for its own half.  `cooked--clear-to-prompt\=' removes the rows,
+because rows have one owner and only the emulator knows which of them are above
+the prompt; the scrollback is buffer text, so Emacs deletes that itself; and the
+ordinary drain repaints what moved -- the same shape as `cooked-delete-output\='.
+
+The prompt line and anything typed at it stay, and end up at the top.  comint
+deletes its prompt because there it is only text; here it is a row the shell is
+still drawing on, and taking it would corrupt a redisplay cooked cannot repair.
+
+On the alternate screen the grid belongs to a running program rather than to a
+transcript, so only the scrollback goes -- see `cooked--clear-to-prompt\='."
   (interactive)
-  (cooked--discard-scrollback (cooked--screen-start-position)))
+  (when cooked--session
+    (cooked--clear-to-prompt cooked--session))
+  (cooked--discard-scrollback (cooked--screen-start-position))
+  (when cooked--session
+    (cooked--drain-and-apply)))
 
 (defun cooked-refresh ()
   "Rebuild the live screen from the emulator.
