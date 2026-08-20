@@ -157,8 +157,8 @@ which strips a bare `face' property and with it every colour."
     (let ((pos (- (point) 2)))
       (should (get-text-property pos 'face))
       (font-lock-ensure)
-      (should (get-text-property pos 'font-lock-face))
-      (should (equal (plist-get (get-text-property pos 'font-lock-face) :foreground)
+      (should (get-text-property pos 'face))
+      (should (equal (plist-get (get-text-property pos 'face) :foreground)
                      (cooked--color 2))))))
 
 (ert-deftest cooked-colors-follow-the-theme ()
@@ -173,7 +173,7 @@ which strips a bare `face' property and with it every colour."
     (should (cooked-tests--settle
              (lambda () (string-match-p "banner" (cooked-tests--text)))))
     (should (eq cooked--mode 'cooked))
-    (should (marker-position cooked--input-start))
+    (should (cooked--input-start-position))
     ;; The transcript above the input line refuses edits.
     (goto-char (point-min))
     (should-error (insert "nope") :type 'text-read-only)
@@ -196,11 +196,11 @@ which strips a bare `face' property and with it every colour."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'ready$ '; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "ready" (cooked-tests--text)))))
-    (should (marker-position cooked--input-start))
-    (goto-char cooked--input-start)
+    (should (cooked--input-start-position))
+    (goto-char (cooked--input-start-position))
     (should (equal (char-before) ?\s))
     (should (equal (buffer-substring-no-properties (line-beginning-position)
-                                                   cooked--input-start)
+                                                   (cooked--input-start-position))
                    "ready$ "))))
 
 (ert-deftest cooked-redisplay-survives-a-protected-buffer ()
@@ -215,11 +215,11 @@ so a drain touching protected text aborted the redisplay from inside the filter.
     ;; A drain must not signal, and must leave the input intact.
     (cooked--apply (cooked--drain cooked--session))
     (should (equal (cooked--pending-input) "typed"))
-    (should (marker-position cooked--input-start))))
+    (should (cooked--input-start-position))))
 
 (ert-deftest cooked-cursor-position-does-not-mutate ()
   (cooked-tests--with-session '("/bin/cat")
-    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (should (cooked-tests--settle #'cooked--input-start-position))
     ;; Ask for a row far below the trimmed screen; it must not extend the buffer.
     (let ((cooked--cursor (cooked--cursor-make :row (+ 5 cooked--rows) :col 0))
           (before (buffer-string)))

@@ -101,7 +101,6 @@ XBM image support or bitmap generation fails for a glyph."
   :type 'boolean
   :group 'cooked)
 
-
 ;;;; What the two ends exchange
 ;;
 ;; The native core reports its cursor as a four-element list and its geometry as
@@ -152,7 +151,15 @@ an empty region, which no text property can describe, and the records are what
 folding and navigation walk."
   (start nil :documentation "Marker where the command's output began.")
   (end nil :documentation "Marker where it ended.")
-  (code 0 :documentation "Exit status."))
+  (code 0 :documentation "Exit status.")
+  (input nil :documentation "The command line itself, or nil if we never saw it.
+
+The text cooked submitted, not a position recovered afterwards.  A marker would
+not survive: the input row is repainted on every keystroke and again when the
+shell echoes the line, and `cooked--render-rows' deletes a damaged row whole, so
+any marker inside it collapses to the row's start -- taking the prompt with it.
+Nil for a command Emacs did not submit, such as one typed while the child owned
+the keyboard, or one the shell ran itself."))
 
 (defun cooked--command-start-position (command)
   "Buffer position where COMMAND's output begins."
@@ -161,6 +168,10 @@ folding and navigation walk."
 (defun cooked--command-end-position (command)
   "Buffer position where COMMAND's output ends."
   (marker-position (cooked-command-end command)))
+
+(defun cooked--command-input (command)
+  "The line COMMAND was invoked with, or nil if cooked did not submit it."
+  (cooked-command-input command))
 
 (defvar-local cooked--session nil "Handle returned by `cooked--spawn'.")
 (defvar-local cooked--wake nil "Pipe process Rust pokes when output is pending.")
@@ -535,7 +546,6 @@ Memoized per buffer."
 ;; `cooked--face-cache' gets — only pixel-size (zoom, font change) is part of its
 ;; cache key.
 
-
 (defun cooked--box-glyph-bits (bits window &optional phase)
   "Cached raw bitmap for glyph descriptor BITS at WINDOW's current cell size.
 
@@ -732,9 +742,10 @@ itself is the one thing every zoom entry point actually sets."
 (defun cooked--insert-runs (runs &optional row)
   "Insert RUNS, each (TEXT FG BG ATTRS GLYPHS), with faces applied.
 
-Both `face' and `font-lock-face' are set.  comint leaves `font-lock-defaults'
-at (nil t), so any fontification of this buffer unfontifies it first and would
-strip a bare `face' property — taking every colour with it.
+Colour rides on `face' alone.  `cooked-mode' clears `font-lock-defaults',
+which comint leaves at (nil t) — under that setting any fontification of the
+buffer unfontifies it first and strips a bare `face', which is why this used to
+set `font-lock-face' alongside it.
 
 GLYPHS is nil for a plain-text run, or a unibyte string of raw box-glyph
 descriptors (see src/emu/glyph.rs) classified by the native core, packed
@@ -754,7 +765,7 @@ can continue a wrapped line."
               (face (cooked--face fg bg attrs ul)))
           (insert text)
           (when face
-            (add-text-properties start (point) (list 'face face 'font-lock-face face)))
+            (put-text-property start (point) 'face face))
           (when (and glyphs cooked-box-drawing-images (image-type-available-p 'xbm))
             (cooked--overlay-box-glyphs start glyphs fg bg attrs origin row)))))))
 
@@ -771,14 +782,21 @@ can continue a wrapped line."
 ;; notification that something changed; `cooked--refresh-keymap' is the one that
 ;; matters, and it is the seam `cooked-state-change-hook' hangs off.
 
-(defvar-local cooked--input-start nil
-  "Marker before the pending input.")
 (defvar-local cooked--input-end nil
-  "Marker after the pending input.")
+  "Marker after the pending input.
+
+The far edge only.  The near edge is the buffer's process mark -- see
+`cooked--input-mark' -- and this is the half comint has no counterpart for:
+comint's input runs to `point-max', while cooked's has rendered screen rows
+below it.")
 (defvar-local cooked--semantic nil
   "OSC 133 state: nil, `prompt', `input' or `output'.")
 (defvar-local cooked--command-start nil
   "Marker where the running command's output began.")
+(defvar-local cooked--command-input nil
+  "The running command's own line, as cooked submitted it.")
+(defvar-local cooked--submitted-input nil
+  "The last line submitted, waiting for the OSC 133 mark that says it started.")
 (defvar-local cooked--commands nil
   "Finished `cooked-command' records, newest first.")
 
@@ -813,15 +831,43 @@ collected, not who owns the screen."
   "Whether Emacs should be editing rather than passing keys through."
   (eq (cooked--policy) 'cooked))
 
+(defun cooked--input-mark ()
+  "The marker where the pending input begins, or nil before a session.
+
+This is the buffer's process mark, not a variable of our own.  comint's entire
+command set navigates relative to `process-mark', so keeping the near edge of
+the input region anywhere else is what made `comint-previous-input' answer
+\"Not at command line\" -- the mark it consults was one cooked never maintained.
+Storing it here rather than copying it into a private marker means there is no
+second opinion to drift: one concept, one marker.
+
+`cooked--wake' carries it.  The pipe is a doorbell the child rings, and it owns
+no text, so its mark is free for this; attaching it to the buffer is what makes
+`get-buffer-process' answer at all.  The mark points nowhere whenever the child
+owns the keyboard, so `marker-position' is nil then and `cooked--input-region'
+is the guard callers should go through."
+  (and cooked--wake (process-mark cooked--wake)))
+
+(defun cooked--set-input-mark (position)
+  "Point the input mark at POSITION, or nowhere when POSITION is nil."
+  (when-let* ((mark (cooked--input-mark)))
+    (set-marker mark position)))
+
+(defun cooked--clear-input-region ()
+  "Forget the pending input region, leaving its text alone."
+  (cooked--set-input-mark nil)
+  (setq cooked--input-end nil))
+
 (defun cooked--input-region ()
   "The pending input's bounds as (START . END), or nil when there is no region.
 
-Both markers are set together by `cooked--restore-pending-input' and cleared
-together by `cooked--refresh-keymap', but either can also be left pointing
+Both ends are set together by `cooked--restore-pending-input' and cleared
+together by `cooked--clear-input-region', but either can also be left pointing
 nowhere when its buffer text goes, so both have to be checked.  Callers that
 want one end of a region that exists should take it from here rather than
 repeating the pair of nil tests."
-  (when-let* ((start (and cooked--input-start (marker-position cooked--input-start)))
+  (when-let* ((mark (cooked--input-mark))
+              (start (marker-position mark))
               (end (and cooked--input-end (marker-position cooked--input-end))))
     (cons start end)))
 
@@ -865,16 +911,26 @@ submitted while the child is sent an empty line."
 
 (defun cooked--take-pending-input ()
   "Remove the pending input from the buffer and return it."
-  (when-let* ((text (cooked--pending-input)))
-    (delete-region cooked--input-start cooked--input-end)
+  (when-let* ((region (cooked--input-region))
+              (text (buffer-substring-no-properties (car region) (cdr region))))
+    (delete-region (car region) (cdr region))
     text))
 
 (defun cooked--restore-pending-input (text)
-  "Re-insert TEXT at the cursor, re-establishing the input markers."
+  "Re-insert TEXT at the cursor, re-establishing the input region.
+
+The near edge goes on the process mark, whose insertion type stays nil so that
+typing at the very start of the prompt lands inside the region rather than
+pushing it along."
   (when (cooked--input-state-p)
     (save-excursion
       (goto-char (cooked--cursor-position))
-      (setq cooked--input-start (copy-marker (point) nil))
+      (cooked--set-input-mark (point))
+      ;; comint brackets the last input with `comint-last-input-start'/`-end', and its
+      ;; whole output family measures from them.  The near edge is this same position:
+      ;; the OSC 133 `prompt-end' anchor names the row, but only the input mark knows
+      ;; the column the prompt actually ended at.
+      (set-marker comint-last-input-start (point))
       (when text (insert text))
       (setq cooked--input-end (copy-marker (point) t)))))
 
@@ -898,8 +954,17 @@ would file all of their output under one region ending wherever it stopped."
      (setq cooked--semantic 'input)
      (cooked--refresh-keymap))
     (`(command-start ,at)
-     (setq cooked--semantic 'output
-           cooked--command-start (copy-marker (cooked--anchor-position at batch-start)))
+     (let ((start (cooked--anchor-position at batch-start)))
+       (setq cooked--semantic 'output
+             cooked--command-start (copy-marker start)
+             ;; Whatever we last submitted is what is now running.
+             cooked--command-input (prog1 cooked--submitted-input
+                                     (setq cooked--submitted-input nil)))
+       ;; Output begins here, so this is where the input ended.  `comint-delete-output',
+       ;; `comint-show-output' and `comint-write-output' all measure from it; it sat at
+       ;; `point-min' until now, which is why deleting output flushed the whole buffer.
+       (set-marker comint-last-input-end start)
+       (set-marker comint-last-output-start start))
      ;; The shell has left the prompt, so its completion widget is not reading and
      ;; the nonce it announced is spent.  The shell would refuse a request built on
      ;; it anyway; not sending one is better, since those bytes would land in
@@ -919,9 +984,9 @@ would file all of their output under one region ending wherever it stopped."
       (when (< beg end)
         (put-text-property beg end 'cooked-exit-code code))
       (push (cooked--command-make :start (copy-marker beg) :end (copy-marker end)
-                                  :code code)
+                                  :code code :input cooked--command-input)
             cooked--commands)))
-  (setq cooked--command-start nil))
+  (setq cooked--command-start nil cooked--command-input nil))
 
 ;;;; Locating a cell in the buffer
 ;;
@@ -1004,8 +1069,7 @@ insertion point is above the region `cooked-alt-screen-pin' confines us to."
           (dolist (span spans)
             (pcase-let ((`(,from ,to ,fg ,bg ,attrs ,ul) span))
               (when-let* ((face (cooked--face fg bg attrs ul)))
-                (add-text-properties (+ start from) (+ start to)
-                                     (list 'face face 'font-lock-face face)))))
+                (put-text-property (+ start from) (+ start to) 'face face))))
           ;; Box-drawing that scrolled into history is rasterized exactly as it would
           ;; be live, via the same `cooked--overlay-box-glyphs' the screen region uses
           ;; — there is no screen column here to phase a shade glyph's dither against,
@@ -1477,7 +1541,6 @@ Takes effect for sessions started after it is set."
   :type 'natnum
   :group 'cooked)
 
-
 (defun cooked--start (argv &optional directory extra-env)
   "Spawn ARGV in the current buffer, optionally in DIRECTORY.
 EXTRA-ENV is an alist prepended to the child's environment."
@@ -1491,12 +1554,26 @@ EXTRA-ENV is an alist prepended to the child's environment."
     (erase-buffer)
     (insert (make-string cooked--rows ?\n))
     (setq cooked--screen-start (copy-marker (point-min) nil)))
+  ;; Attached to the buffer, unlike a plain doorbell would be: `get-buffer-process'
+  ;; answering is the whole of what comint needs from a process, since every one of
+  ;; its commands works through `process-mark' and none of them through the process
+  ;; itself.  `shell-maker' buys the same thing by spawning a `hexl' it never speaks
+  ;; to; we already had a process object and were only withholding it.
+  ;;
+  ;; Nothing may ever write here: the read end belongs to Rust, and a stray
+  ;; `process-send-string' would land in the wakeup channel.  `comint-input-sender'
+  ;; is overridden in `cooked-mode' so comint's own submission path cannot.  The
+  ;; sentinel is silenced because the default one inserts "Process ... finished"
+  ;; into the buffer it is attached to, which is now the terminal.
   (setq cooked--wake
         (make-pipe-process :name (format "cooked-wake<%s>" (buffer-name))
-                           :buffer nil
+                           :buffer (current-buffer)
                            :noquery t
+                           :sentinel #'ignore
                            :filter (let ((buffer (current-buffer)))
                                      (lambda (_proc _string) (cooked--on-wake buffer)))))
+  (set-marker-insertion-type (process-mark cooked--wake) nil)
+  (cooked--set-input-mark nil)
   (setq cooked--session
         (cooked--spawn argv (cooked--child-environment extra-env) cooked--rows cooked--cols cooked--wake
                       (and directory (expand-file-name directory))
@@ -2143,7 +2220,7 @@ only the region below `cooked--screen-start' is rebuilt."
         (delete-region (cooked--screen-start-position) (point-max))
         ;; They pointed into the text just deleted; `cooked--restore-pending-input'
         ;; puts them back at the cursor on the drain below.
-        (setq cooked--input-start nil cooked--input-end nil)))
+        (cooked--clear-input-region)))
     (cooked--redraw cooked--session)
     (cooked--drain-and-apply)))
 

@@ -201,6 +201,97 @@ must do nothing at all until the user has loaded `cooked-osc-eval' on purpose."
       (kill-buffer buffer)
       (delete-file target))))
 
+(ert-deftest cooked-comint-markers-follow-the-osc-133-marks ()
+  "comint brackets the last input with `comint-last-input-start\='/`-end\=', and
+its whole output family measures from them.  They sat at `point-min\=' until the
+shell\='s own marks started feeding them -- which is why `comint-delete-output\='
+used to flush the entire buffer."
+  (skip-unless (executable-find "zsh"))
+  (let ((buffer (generate-new-buffer "*cooked-zsh*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
+            (cooked--start argv nil env))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle
+                   (lambda () (and (eq cooked--semantic 'input)
+                                   (cooked--input-start-position)))
+                   8))
+          (cooked--replace-input "echo alpha")
+          (cooked-send-input)
+          (should (cooked-tests--settle (lambda () cooked--commands) 8))
+          (let ((command (car cooked--commands)))
+            ;; The command line is recovered from the marks, not from a prompt regexp.
+            (should (equal (cooked--command-input command) "echo alpha"))
+            (goto-char (cooked--command-start-position command))
+            (should (equal (cooked--get-old-input) "echo alpha"))
+            ;; ...and the output really is bracketed, rather than starting at point-min.
+            (should (> (cooked--command-start-position command) (point-min)))
+            (should (string-match-p
+                     "alpha"
+                     (buffer-substring-no-properties
+                      (cooked--command-start-position command)
+                      (cooked--command-end-position command))))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
+(ert-deftest cooked-delete-output-removes-rows-through-the-emulator ()
+  "The grid owns the rows, so deleting output asks the emulator and repaints,
+rather than cutting buffer text the grid would still hold.  The check that
+matters is that both ends still agree afterwards: a `cooked-refresh\=', which
+rebuilds the buffer from the grid alone, must not bring the output back."
+  (skip-unless (executable-find "zsh"))
+  (let ((buffer (generate-new-buffer "*cooked-zsh*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
+            (cooked--start argv nil env))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle
+                   (lambda () (and (eq cooked--semantic 'input)
+                                   (cooked--input-start-position)))
+                   8))
+          (cooked--replace-input "echo alpha")
+          (cooked-send-input)
+          (should (cooked-tests--settle
+                   (lambda () (and cooked--commands
+                                   (string-match-p "alpha" (cooked-tests--text))))
+                   8))
+          ;; Wait for the next prompt, so the output is no longer the child's row.
+          (should (cooked-tests--settle
+                   (lambda () (and (eq cooked--semantic 'input)
+                                   (cooked--input-start-position)))
+                   8))
+          ;; The echoed command line stays; only the output row goes.
+          (should (string-match-p "^alpha$" (cooked-tests--text)))
+          (goto-char (cooked--command-start-position (car cooked--commands)))
+          (cooked-delete-output)
+          (should-not (string-match-p "^alpha$" (cooked-tests--text)))
+          (should (string-match-p "echo alpha" (cooked-tests--text)))
+          ;; The emulator really let go of the row, rather than Emacs hiding it:
+          ;; `cooked-refresh' rebuilds the buffer from the grid and nothing else.
+          (cooked-refresh)
+          (should (cooked-tests--settle
+                   (lambda () (not (string-match-p "^alpha$" (cooked-tests--text)))) 8))
+          (should (string-match-p "echo alpha" (cooked-tests--text))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
+(ert-deftest cooked-delete-output-refuses-the-row-the-child-is-on ()
+  "Below the child\='s cursor the shell is editing its own prompt line and
+tracking where it sits; moving it would corrupt a redisplay cooked cannot see."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'ready$ '; exec cat")
+    (should (cooked-tests--settle #'cooked--input-start-position))
+    (setq cooked--commands
+          (list (cooked--command-make
+                 :start (copy-marker (point-min))
+                 :end (copy-marker (point-max))
+                 :code 0)))
+    (goto-char (point-min))
+    (should-error (cooked-delete-output) :type 'user-error)))
+
 (ert-deftest cooked-osc-52-copies-to-the-kill-ring ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]52;c;aGVsbG8gd29ybGQ=\\007'; sleep 5")
     (let ((kill-ring nil))

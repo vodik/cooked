@@ -14,18 +14,18 @@
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'ready$ '; exec cat")
     (should (cooked-tests--settle
              (lambda () (and (string-match-p "ready" (cooked-tests--text))
-                             cooked--input-start))))
+                             (cooked--input-start-position)))))
     ;; First word: programs on PATH.
     (goto-char cooked--input-end)
     (insert "ls")
     (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
-      (should (= start (marker-position cooked--input-start)))
+      (should (= start (cooked--input-start-position)))
       (should (= end (point)))
       (should (member "ls" (all-completions "ls" table))))
     ;; Later words complete as file names, relative to the child's directory.
     (insert " REA")
     (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
-      (should (> start (marker-position cooked--input-start)))
+      (should (> start (cooked--input-start-position)))
       (should (= end (point)))
       (let ((default-directory (file-name-directory
                                 (directory-file-name cooked--source-directory))))
@@ -113,7 +113,7 @@
 (ert-deftest cooked-completion-drops-a-reply-to-a-request-it-did-not-make ()
   "A completer slower than the timeout answers eventually; by then it is stale."
   (cooked-tests--with-session '("/bin/cat")
-    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (should (cooked-tests--settle #'cooked--input-start-position))
     (setq cooked--completion-nonce "1234" cooked--completion-serial 6)
     (let ((cooked-completion-timeout 0.05))
       ;; The reply that lands is for the previous request, not this one.
@@ -124,7 +124,7 @@
   "The trigger is only a keystroke: to a shell with no widget bound to it, the
 request is a line of input.  Nothing is sent until the shell says it is listening."
   (cooked-tests--with-session '("/bin/cat")
-    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (should (cooked-tests--settle #'cooked--input-start-position))
     (should-not cooked--completion-nonce)
     (should-not (cooked--shell-completions "git chec" 8))
     ;; And the CAPF still completes, in Emacs.
@@ -136,7 +136,7 @@ request is a line of input.  Nothing is sent until the shell says it is listenin
 (ert-deftest cooked-completion-forgets-the-nonce-when-the-shell-runs-something ()
   "Once a command is running, those bytes would land in it rather than in ZLE."
   (cooked-tests--with-session '("/bin/cat")
-    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (should (cooked-tests--settle #'cooked--input-start-position))
     (setq cooked--completion-nonce "abcd")
     (cooked--handle-semantic '(command-start (screen 0 . 0)) nil)
     (should-not cooked--completion-nonce)
@@ -160,7 +160,7 @@ the shell you are typing at, over a line it has never seen."
             (cooked--refresh-keymap)
             ;; The nonce is the shell saying its widget is bound and ZLE is reading.
             (should (cooked-tests--settle
-                     (lambda () (and cooked--input-start cooked--completion-nonce))))
+                     (lambda () (and (cooked--input-start-position) cooked--completion-nonce))))
             (goto-char cooked--input-end)
             (insert "cd shell-int")
             (let ((before (cooked-tests--text))
@@ -180,7 +180,7 @@ the shell you are typing at, over a line it has never seen."
                 (should (equal (all-completions "shell-int" table) '("shell-integration")))))
             ;; A path is completed against its own directory, and the candidate comes
             ;; back carrying the components compsys walked past to reach it.
-            (delete-region cooked--input-start (point))
+            (delete-region (cooked--input-start-position) (point))
             (insert "cat shell-integration/cooked.z")
             (let ((cooked-completion-timeout 5))
               (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
@@ -192,7 +192,7 @@ the shell you are typing at, over a line it has never seen."
             ;; filtered in Emacs.  Nothing else can pass this: the first answer is a
             ;; list of file names, and no amount of filtering turns that into flags.
             (let ((cooked-completion-timeout 5))
-              (delete-region cooked--input-start (point))
+              (delete-region (cooked--input-start-position) (point))
               (insert "ls ")
               (pcase-let ((`(,_start ,_end ,table . ,_) (cooked-completion-at-point)))
                 (should (member "README.md" (all-completions "" table)))
@@ -203,7 +203,7 @@ the shell you are typing at, over a line it has never seen."
 (ert-deftest cooked-completion-is-a-normal-capf ()
   "So corfu, cape and friends work without knowing about cooked."
   (cooked-tests--with-session '("/bin/cat")
-    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (should (cooked-tests--settle #'cooked--input-start-position))
     (should (memq #'cooked-completion-at-point completion-at-point-functions))
     (should (eq (lookup-key cooked-input-map (kbd "TAB")) #'completion-at-point))))
 

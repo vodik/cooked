@@ -98,7 +98,7 @@ catches the buffer up on whatever the child produced meanwhile."
   "Peeking is meaningless once Emacs already owns the line."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
     (should (cooked-tests--settle
-             (lambda () (and (cooked--input-state-p) cooked--input-start))))
+             (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
     (cooked--refresh-keymap)
     (should-error (call-interactively #'cooked-toggle-peek) :type 'user-error)))
 
@@ -285,7 +285,7 @@ confirmation must send nothing at all."
   ;; child that prints nothing never gives Emacs a reason to place them.
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
     (should (cooked-tests--settle
-             (lambda () (and (cooked--input-state-p) cooked--input-start))))
+             (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
     (cooked--refresh-keymap)
     (cooked-tests--with-kill "echo hi" (cooked-paste))
     (should (equal (cooked--pending-input) "echo hi"))))
@@ -315,7 +315,7 @@ there rather than shipping the kill off to a child that is not reading."
   (evil-mode 1)
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
     (should (cooked-tests--settle
-             (lambda () (and (cooked--input-state-p) cooked--input-start))))
+             (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
     (cooked--refresh-keymap)
     (evil-normal-state)
     (cooked-tests--with-kill "echo hi"
@@ -541,7 +541,7 @@ has no handler and nothing drives evil at all."
 (ert-deftest cooked-input-history-recalls-submissions ()
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle
-             (lambda () (and (eq cooked--mode 'cooked) cooked--input-start))))
+             (lambda () (and (eq cooked--mode 'cooked) (cooked--input-start-position)))))
     (dolist (line '("first" "second"))
       (cooked--replace-input line)
       (cooked-send-input)
@@ -564,7 +564,7 @@ has no handler and nothing drives evil at all."
 (ert-deftest cooked-history-preserves-work-in-progress ()
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle
-             (lambda () (and (eq cooked--mode 'cooked) cooked--input-start))))
+             (lambda () (and (eq cooked--mode 'cooked) (cooked--input-start-position)))))
     (cooked--replace-input "remembered")
     (cooked-send-input)
     (should (cooked-tests--settle
@@ -614,7 +614,7 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
 (ert-deftest cooked-mouse-is-left-to-emacs-when-unrequested ()
   "A child that never asked for mouse reports must not steal the click."
   (cooked-tests--with-session '("/bin/cat")
-    (should (cooked-tests--settle (lambda () cooked--input-start)))
+    (should (cooked-tests--settle #'cooked--input-start-position))
     ;; The child never enabled reporting, so `cooked-mouse-event' takes the
     ;; fallback branch and the click behaves as it would in any buffer.
     (should-not cooked--mouse)
@@ -808,7 +808,7 @@ leaves the cursor at an empty prompt, since it pulls back off the end of a line.
 
           ;; Before it: inside the read-only prompt, where evil parks the cursor.
           (cooked-kill-input)
-          (goto-char (1- (marker-position cooked--input-start)))
+          (goto-char (1- (cooked--input-start-position)))
           (cooked-tests--type "h i")
           (should (equal (cooked--pending-input) "hi")))
       (with-current-buffer buffer (cooked--cleanup))
@@ -932,12 +932,22 @@ must not take the binding away."
 (ert-deftest cooked-a-refused-interrupt-keeps-the-pending-input ()
   (with-temp-buffer
     (cooked-mode)
+    ;; No session, so no wake pipe and no process mark to put the near edge on;
+    ;; stand one in, since what is under test is that a refused interrupt leaves
+    ;; the region alone rather than where the region happens to live.
     (setq cooked--session nil
-          cooked--input-start (copy-marker (point-min))
+          cooked--wake (make-pipe-process :name "cooked-test-mark"
+                                          :buffer (current-buffer)
+                                          :noquery t
+                                          :sentinel #'ignore :filter #'ignore)
           cooked--input-end (copy-marker (point-min)))
-    (should-error (cooked-interrupt) :type 'user-error)
-    (should cooked--input-start)
-    (should cooked--input-end)))
+    (cooked--set-input-mark (point-min))
+    (unwind-protect
+        (progn
+          (should-error (cooked-interrupt) :type 'user-error)
+          (should (cooked--input-start-position))
+          (should cooked--input-end))
+      (delete-process cooked--wake))))
 
 (ert-deftest cooked-mode-map-carries-cookeds-own-commands ()
   "Peeking installs `cooked-peek-map', a child of `cooked-mode-map' with none
@@ -955,8 +965,75 @@ they would evaporate while peeking."
                       ("C-c C-p" . cooked-previous-command)
                       ("C-c C-n" . cooked-next-command)
                       ("C-c TAB" . cooked-toggle-fold)
-                      ("C-c C-l" . cooked-refresh)))
+                      ("C-c C-l" . cooked-refresh)
+                      ("C-c C-\\" . cooked-quit)
+                      ("C-c M-o" . cooked-clear-scrollback)
+                      ("C-c SPC" . cooked-newline)))
     (should (eq (lookup-key cooked-mode-map (kbd (car binding))) (cdr binding)))))
+
+(defun cooked-tests--comint-c-c-keys ()
+  "Every key sequence `comint-mode-map' binds under the `C-c' prefix."
+  (let (keys)
+    (letrec ((walk (lambda (map prefix)
+                     (map-keymap
+                      (lambda (event def)
+                        (let ((key (vconcat prefix (vector event))))
+                          (if (keymapp def)
+                              (funcall walk def key)
+                            (push key keys))))
+                      map))))
+      (funcall walk (lookup-key comint-mode-map (kbd "C-c")) (kbd "C-c")))
+    keys))
+
+(ert-deftest cooked-no-c-c-key-reaches-a-comint-command-that-needs-a-process ()
+  "cooked has no Emacs process object for the child, so every comint command
+that works through `process-mark' is either meaningless here or actively
+destructive -- `comint-clear-buffer' erases the live screen region, and
+`comint-quit-subjob' would `quit-process' the wakeup pipe.
+
+Walking `comint-mode-map' rather than a fixed list is deliberate: a future
+Emacs that adds a `C-c' binding to comint fails here on upgrade, instead of
+shipping a key that silently does the wrong thing."
+  (dolist (map (list cooked-raw-map cooked-alt-map cooked-input-map cooked-peek-map))
+    (dolist (key (cooked-tests--comint-c-c-keys))
+      (let ((binding (lookup-key map key)))
+        (when (and binding (symbolp binding))
+          (should-not
+           (memq binding '(comint-quit-subjob comint-clear-buffer comint-accumulate))))))))
+
+(ert-deftest cooked-the-input-mark-is-the-process-mark ()
+  "One marker, not two kept in step: the near edge of the input region *is*
+`process-mark', which is what makes comint's own commands correct here rather
+than merely non-erroring."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'ready$ '; exec cat")
+    (should (cooked-tests--settle #'cooked--input-start-position))
+    (let ((proc (get-buffer-process (current-buffer))))
+      (should proc)
+      (should (comint-after-pmark-p))
+      (should (= (cooked--input-start-position) (marker-position (process-mark proc))))
+      ;; and still agreeing after the region has moved under typing
+      (goto-char cooked--input-end)
+      (insert "echo hi")
+      (should (= (cooked--input-start-position) (marker-position (process-mark proc)))))))
+
+(ert-deftest cooked-job-control-follows-the-tty-not-a-hardcoded-signal ()
+  "A terminal writes the character in `c_cc' and lets the line discipline
+decide; it does not send a signal.  Reading that character is what makes
+`stty intr ^X' work at all."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty intr ^X; exec cat")
+    (cooked-tests--pump 0.6)
+    (let ((jc (cooked--job-control cooked--session)))
+      (should (plist-get jc :isig))
+      (should (= (plist-get jc :intr) ?\C-x))))
+  ;; ISIG cleared: the byte would reach the child verbatim, so there is nothing to
+  ;; write that means "interrupt" and the signal is the honest fallback.
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty -isig; exec cat")
+    (cooked-tests--pump 0.6)
+    (should-not (plist-get (cooked--job-control cooked--session) :isig)))
+  ;; A disabled character has no byte at all.
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty intr undef; exec cat")
+    (cooked-tests--pump 0.6)
+    (should-not (plist-get (cooked--job-control cooked--session) :intr))))
 
 (ert-deftest cooked-toggle-peek-does-not-lose-cookeds-own-commands ()
   "Regression: peeking used to install a bare `cooked-mode-map' with none of
@@ -977,7 +1054,7 @@ would arrive ahead of whatever pending input is still sitting unsent in the
 buffer, so both refuse there rather than silently confusing the two."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
     (should (cooked-tests--settle
-             (lambda () (and (cooked--input-state-p) cooked--input-start))))
+             (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
     (cooked--refresh-keymap)
     (should-error (cooked-send-string "ls") :type 'user-error)
     (cl-letf (((symbol-function 'read-key) (lambda (&rest _) ?a)))

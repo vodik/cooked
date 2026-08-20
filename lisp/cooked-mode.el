@@ -760,18 +760,26 @@ what a shell's line editor is bound to.  Sending LF works for readline but not
 for ZLE."
   (interactive)
   (let ((text (or (cooked--take-pending-input) "")))
-    (setq cooked--input-start nil cooked--input-end nil)
+    (cooked--clear-input-region)
     (unless (string-blank-p text)
       (setq cooked--history (cons text (delete text cooked--history))))
     (setq cooked--history-index nil cooked--history-stash nil)
-    (cooked--send-to-child
-                  ;; A multi-line submission has to arrive as a paste, or the shell's
-                  ;; line editor treats every embedded newline as its own Enter and runs
-                  ;; the fragments one at a time.
-                  (if (and (string-search "\n" text)
-                           (cooked--bracketed-paste-p cooked--session))
-                      (concat "\e[200~" text "\e[201~\r")
-                    (concat text "\r")))))
+    (cooked--send-input-string text)))
+
+(defun cooked--send-input-string (text)
+  "Submit TEXT to the child as one line of input.
+
+Split out from `cooked-send-input' because `comint-input-sender' hands us the
+string rather than the buffer region, and both must submit the same way."
+  (setq cooked--submitted-input (and (not (string-blank-p text)) text))
+  (cooked--send-to-child
+   ;; A multi-line submission has to arrive as a paste, or the shell's line editor
+   ;; treats every embedded newline as its own Enter and runs the fragments one at
+   ;; a time.
+   (if (and (string-search "\n" text)
+            (cooked--bracketed-paste-p cooked--session))
+       (concat "\e[200~" text "\e[201~\r")
+     (concat text "\r"))))
 
 (defun cooked-newline ()
   "Insert a newline in the pending input without submitting it.
@@ -782,26 +790,30 @@ newline survives until you submit."
   (interactive)
   (unless (cooked--input-state-p)
     (user-error "Not at an input prompt"))
-  (unless cooked--input-start
+  (unless (cooked--input-region)
     (cooked--restore-pending-input nil))
   (insert "\n"))
 
 ;;;; History
 ;;
-;; comint's ring is unusable here: it navigates relative to a process mark we do
-;; not maintain, which is what makes `comint-previous-input' report "Not at
-;; command line".  Forwarding the arrow keys to the shell instead would desync,
-;; because the line being edited lives in Emacs and the shell's line editor has
-;; never seen it.  So we keep our own ring; the shell still records the same
-;; commands, since it receives each one whole.
+;; Forwarding the arrow keys to the shell would desync, because the line being
+;; edited lives in Emacs and the shell's line editor has never seen it.  So the
+;; history is Emacs' own; the shell still records the same commands, since it
+;; receives each one whole.
+;;
+;; This used to be a private list because comint's ring navigates relative to a
+;; process mark cooked did not maintain -- `comint-previous-input' answering
+;; "Not at command line" was the symptom.  The mark is `cooked--input-mark' now,
+;; so that reason is gone and this list is on its way out in favour of
+;; `comint-input-ring'.
 
 (defun cooked--replace-input (text)
   "Replace the pending input with TEXT."
-  (when (and cooked--input-start cooked--input-end)
+  (when-let* ((region (cooked--input-region)))
     (let ((inhibit-read-only t))
-      (delete-region cooked--input-start cooked--input-end)
+      (delete-region (car region) (cdr region))
       (save-excursion
-        (goto-char cooked--input-start)
+        (goto-char (car region))
         (insert text)))
     (goto-char cooked--input-end)))
 
@@ -811,7 +823,7 @@ newline survives until you submit."
     (user-error "Not at an input prompt"))
   (unless cooked--history
     (user-error "No input history yet"))
-  (unless cooked--input-start
+  (unless (cooked--input-region)
     (cooked--restore-pending-input nil))
   (when (null cooked--history-index)
     (setq cooked--history-stash (or (cooked--pending-input) "")))
@@ -851,13 +863,48 @@ peeking, so the effect is seen right away."
   (cooked--exit-peek)
   (cooked--send-to-child "\C-d"))
 
+(declare-function cooked--job-control "cooked-core")
+(declare-function cooked--remove-rows "cooked-core")
+
+(defun cooked--send-job-control (session key signal)
+  "Ask SESSION for job control the way a terminal does.
+
+KEY is `:intr\=', `:quit\=' or `:susp\=', and SIGNAL the signal the line discipline
+would raise for it.  A terminal sends no signal of its own: it writes the
+character the tty has in `c_cc\=' and lets the line discipline decide.  Reading
+that character rather than assuming ^C/^\\/^Z is what makes `stty intr ^X\='
+work, and honouring ISIG is what keeps a program that deliberately cleared it
+-- so as to read the byte itself -- from being signalled behind its own back.
+
+SIGNAL is the fallback, for the two cases where writing cannot mean anything:
+ISIG is off, so no byte would be turned into one; or the character is disabled
+\=(`_POSIX_VDISABLE\='), so there is no byte to write."
+  (let* ((jc (cooked--job-control session))
+         (char (plist-get jc key)))
+    (if (and (plist-get jc :isig) char)
+        (cooked--send-to-child (string char))
+      (cooked--signal session signal))))
+
 (defun cooked-suspend ()
   "Suspend the foreground command.
 Ends peek first when peeking, so the effect is seen right away rather than
 held behind the freeze."
   (interactive)
   (cooked--exit-peek)
-  (cooked--signal (cooked--require-session) 20))
+  (cooked--send-job-control (cooked--require-session) :susp 20))
+
+(defun cooked-quit ()
+  "Quit the foreground command -- SIGQUIT, the harder sibling of \\[cooked-interrupt].
+
+Sent the way a terminal sends it; see `cooked--send-job-control\='.  Bound where
+comint puts it, on \\`C-c C-\\\\', whose own `comint-quit-subjob\=' would
+`quit-process\=' the wakeup pipe -- the only process this buffer has, and not the
+child."
+  (interactive)
+  (cooked--exit-peek)
+  (let ((session (cooked--require-session)))
+    (cooked--clear-input-region)
+    (cooked--send-job-control session :quit 3)))
 
 (defun cooked-interrupt ()
   "Interrupt the foreground command.
@@ -868,8 +915,8 @@ first when peeking: a signal you cannot see land is not worth sending blind."
   (interactive)
   (cooked--exit-peek)
   (let ((session (cooked--require-session)))
-    (setq cooked--input-start nil cooked--input-end nil)
-    (cooked--signal session 2)))
+    (cooked--clear-input-region)
+    (cooked--send-job-control session :intr 2)))
 
 ;;;; State transitions
 
@@ -907,7 +954,7 @@ there is a genuine prompt to edit.  See `cooked--enter-peek'/
                         ('alt cooked-alt-map)
                         ('raw cooked-raw-map))))
     (unless (cooked--input-state-p)
-      (setq cooked--input-start nil cooked--input-end nil))
+      (cooked--clear-input-region))
     (cooked--update-mouse-grab)
     (run-hooks 'cooked-state-change-hook)))
 
@@ -954,6 +1001,50 @@ down walks to the top or bottom and settles there."
   "Move to the start of the Nth next command's output."
   (interactive "p")
   (cooked--goto-nth-command (or n 1) 'forward))
+
+(defun cooked--get-old-input ()
+  "The command line at point, for `comint-get-old-input\='.
+
+comint\='s default scans backwards for a prompt it can recognise.  The OSC 133
+records already know where the line began, so \\[comint-copy-old-input] recovers
+exactly what was run rather than whatever a regexp happened to match."
+  (or (when-let* ((command (cooked--command-at (point))))
+        (cooked--command-input command))
+      ""))
+
+(defun cooked-delete-output ()
+  "Delete the output of the command at point, keeping the command line.
+
+Bound where comint puts `comint-delete-output\=', which cannot be reused: it puts
+its \"*** output flushed ***\" notice back through `comint-output-filter\=', the
+insertion path cooked replaced with the drain outright.
+
+Nothing is deleted here.  The rows belong to the emulator, so this asks it to
+remove them and lets the ordinary drain repaint what moved -- the same shape as
+sending input, which also changes rows, and by the same rule: the grid has one
+owner.  Deleting the buffer text instead would leave the two ends disagreeing
+about what the screen is, since the grid would still hold every row.
+
+Refuses when the output reaches the row the child is on.  Below that the shell
+is editing its own prompt line and tracking where it sits, and moving it would
+corrupt a redisplay cooked cannot see, let alone repair."
+  (interactive)
+  (let* ((command (or (cooked--command-at (point)) (car cooked--commands)))
+         (beg (and command (cooked--command-start-position command)))
+         (end (and command (cooked--command-end-position command))))
+    (unless (and beg end (< beg end))
+      (user-error "No command output here"))
+    (pcase-let ((`(,first . ,_) (or (cooked--screen-cell beg)
+                                    (user-error "That output has left the screen")))
+                ;; END is one past the output, so it lands on whatever the child drew
+                ;; next -- usually the following prompt.  The last row actually holding
+                ;; output is the one the final character sits on.
+                (`(,last . ,_) (or (cooked--screen-cell (max beg (1- end)))
+                                   (user-error "That output has left the screen"))))
+      (unless (< last (cooked-cursor-row cooked--cursor))
+        (user-error "The child is still on that row"))
+      (cooked--remove-rows (cooked--require-session) first (1+ (- last first)))
+      (cooked--drain-and-apply))))
 
 (defun cooked-toggle-fold ()
   "Hide or reveal the output of the command at point."
@@ -1200,9 +1291,20 @@ buffer and \\[cooked-send-input] submits the line.  Otherwise keys are forwarded
 to the child verbatim."
   :interactive nil
   (setq-local scroll-conservatively 101
-              comint-input-ring-size 500
               truncate-lines (not cooked-rejoin-wrapped-lines)
               mode-line-process '(:eval (cooked--mode-line)))
+  ;; comint would send the line to the process behind the buffer, which here is the
+  ;; wakeup pipe.  Every submission goes to the child instead, so `comint-send-input'
+  ;; is a working command rather than something to be remapped around -- and nothing
+  ;; can reach the pipe by accident.
+  (setq-local comint-input-sender (lambda (_proc input) (cooked--send-input-string input)))
+  ;; The OSC 133 records know where each command line began; comint would otherwise
+  ;; scan backwards for a prompt regexp cooked deliberately never sets.
+  (setq-local comint-get-old-input #'cooked--get-old-input)
+  ;; comint leaves this at `(nil t)', under which the first fontification strips a
+  ;; bare `face' property -- the reason the renderer used to set `font-lock-face'
+  ;; alongside every `face' it applied.  Clearing it lets one property carry a run.
+  (setq-local font-lock-defaults nil)
   ;; Above every minor mode, so a program that asked for the wheel gets it even
   ;; where `pixel-scroll-precision-mode' has claimed the same events.
   (add-to-list 'emulation-mode-map-alists 'cooked--mouse-map-alist)
@@ -1210,6 +1312,9 @@ to the child verbatim."
   (add-hook 'pre-command-hook #'cooked--snap-to-input nil t)
   (add-hook 'post-command-hook #'cooked--track-wandering nil t)
   (add-hook 'completion-at-point-functions #'cooked-completion-at-point nil t)
+  ;; comint's own completion asks a process that is not the child.  Removed rather
+  ;; than left sitting behind ours as a fallback that can only ever be wrong.
+  (remove-hook 'completion-at-point-functions #'comint-completion-at-point t)
   (add-hook 'window-configuration-change-hook #'cooked--sync-size nil t)
   ;; `text-scale-increase' et al rescale the buffer's font without touching any
   ;; window's pixel dimensions, so neither `window-configuration-change-hook' nor
@@ -1246,11 +1351,22 @@ to the child verbatim."
 (define-key cooked-mode-map (kbd "C-c TAB") #'cooked-toggle-fold)
 (define-key cooked-mode-map (kbd "C-c C-l") #'cooked-refresh)
 
+;; comint-shaped, cooked-implemented.  These keep comint's own positions, because
+;; the concept behind each is one a terminal genuinely has -- it is only comint's
+;; implementation, which reaches for a process that here is a wakeup pipe, that
+;; cannot be used.  See `cooked--input-mark' for why the rest of comint's C-c map
+;; needs nothing.
+(define-key cooked-mode-map (kbd "C-c C-\\") #'cooked-quit)
+(define-key cooked-mode-map (kbd "C-c M-o") #'cooked-clear-scrollback)
+(define-key cooked-mode-map (kbd "C-c SPC") #'cooked-newline)
+
 ;; Whatever key a user has bound to comint's commands reaches ours, so
 ;; `evil-collection-comint' (which binds `repl-submit' to `comint-send-input')
 ;; works without knowing cooked exists.
 (dolist (remap '((comint-send-input . cooked-send-input)
                  (comint-interrupt-subjob . cooked-interrupt)
+                 (comint-quit-subjob . cooked-quit)
+                 (comint-delete-output . cooked-delete-output)
                  (comint-stop-subjob . cooked-suspend)
                  (comint-delchar-or-maybe-eof . cooked-delete-char-or-eof)
                  (comint-kill-input . cooked-kill-input)
@@ -1263,8 +1379,8 @@ to the child verbatim."
 (defun cooked-kill-input ()
   "Delete the pending input."
   (interactive)
-  (when (cooked--pending-input)
-    (delete-region cooked--input-start cooked--input-end)))
+  (when-let* ((region (cooked--input-region)))
+    (delete-region (car region) (cdr region))))
 
 ;; No evil state bindings here on purpose.
 ;;

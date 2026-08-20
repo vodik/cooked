@@ -111,6 +111,49 @@ either way.
 next key to the child exactly as typed, regardless of what's reserved — including `C-c`
 itself (`C-c C-q C-c` sends a literal `C-c` byte).
 
+### The `C-c` map is comint-shaped, cooked-implemented
+
+`cooked-mode` derives from `comint-mode`, but the buffer has no Emacs process object for
+the child — it belongs to a Rust session handle. Comint's entire command set navigates by
+`process-mark`, so for a long time none of it worked here: `C-c SPC` inserted a stray
+newline into the terminal, `C-c C-o` raised `wrong-type-argument`, `C-c C-\` reported
+"Current buffer has no process".
+
+The fix was not to unbind them. `cooked--wake` — the pipe the child rings when output is
+pending — is now attached to the buffer, so `get-buffer-process` answers and its mark is
+the near edge of the input region. There is no second marker kept in step with it; the
+process mark *is* where pending input begins. (`shell-maker` buys the same thing by
+spawning a `hexl` it never speaks to; we already had a process object and were only
+withholding it.)
+
+So comint's own commands work, and where a concept needed cooked's implementation it kept
+comint's key:
+
+| Key | comint | cooked does |
+|---|---|---|
+| `C-c C-\` | `comint-quit-subjob` | SIGQUIT to the child, not `quit-process` on the wakeup pipe |
+| `C-c M-o` | `comint-clear-buffer` | discards scrollback only — the same path the child's own `CSI 3J` takes |
+| `C-c C-o` | `comint-delete-output` | asks the *emulator* to drop those rows; see below |
+| `C-c SPC` | `comint-accumulate` | `cooked-newline`, which is also how a TTY frame composes multi-line input |
+
+`C-c C-o` is the interesting one. The rows belong to the emulator, so cooked deletes no
+buffer text: it asks the core to remove the rows and lets the ordinary drain repaint what
+moved — the same shape as sending input, which also changes rows, and by the same rule
+that the grid has exactly one owner. Deleting the text instead would leave the buffer and
+the grid disagreeing about what the screen is, and the next repaint would put it back. It
+refuses when the output reaches the row the child is on, because the shell is editing its
+own prompt line there and tracking where it sits.
+
+### Job control comes from the tty
+
+`C-c C-c`, `C-c C-z` and `C-c C-\` do not send a hardcoded signal. A terminal writes the
+character in the tty's `c_cc` and lets the line discipline decide what it means, so cooked
+reads it — which is what makes `stty intr ^X` work. `ISIG` is the other half: a program
+that cleared it did so to read the byte itself, and signalling it behind its own back
+would be wrong. The signal is the fallback for the two cases where writing cannot mean
+anything: `ISIG` off, or the character disabled (`_POSIX_VDISABLE` — zero on Linux,
+`0xff` on the BSDs, which is why it lives in `src/compat/`).
+
 For anything that needs more than one key — an arbitrary command, `isearch`, or just
 moving around with `evil` normal state — `cooked-toggle-peek` freezes the screen (the
 child keeps running; cooked just stops redrawing), makes the buffer read-only, and hands
@@ -426,9 +469,9 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
   `front-sticky`/`rear-nonsticky` chosen so the transcript refuses edits while typing at
   the start of the input line is still accepted.
 - **Colours follow your theme.** ANSI 0–15 resolve through the `ansi-color-*` faces, so a
-  theme that styles those wins; `cooked-color-names` is only a fallback. Both `face` and
-  `font-lock-face` are set — comint leaves `font-lock-defaults` at `(nil t)`, so a bare
-  `face` property is stripped the first time the buffer is fontified.
+  theme that styles those wins; `cooked-color-names` is only a fallback. One `face`
+  property carries a run: comint leaves `font-lock-defaults` at `(nil t)`, under which the
+  first fontification strips a bare `face`, so `cooked-mode` clears it.
 - **Evil.** With `cooked-evil-integration`, evil is put in Emacs state whenever the child
   owns the keyboard and returns to insert at a prompt; normal-state `RET` stays plain
   `evil-ret`, exactly as in any other buffer. comint commands are remapped, so
