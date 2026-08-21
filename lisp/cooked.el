@@ -790,6 +790,24 @@ would be stale the moment the buffer is zoomed."
     (logior (logand (* column (car size)) 1)
             (ash (logand (* (or row 0) (cdr size)) 1) 1))))
 
+(defun cooked--deco-display (image)
+  "Wrap IMAGE as a `display\=' value that stands for exactly one character.
+
+Emacs merges a run of characters whose `display\=' properties are `eq\=' into a
+single displayed image -- that is what makes (propertize \"xx\" \='display IMG)
+show one image rather than two.  So sharing one memoized spec across adjacent
+cells, which is otherwise exactly what you want, collapses a run of box drawing
+to a single glyph.
+
+A fresh one-element list per character is enough to keep them distinct, and is
+a list of display specifications, which is a shape `display\=' already accepts.
+One cons per character against rebuilding the spec: `create-image\=' allocates a
+fourteen-element plist and searches Emacs\=' image cache, and skipping that is
+worth roughly half the box-drawing frame time.
+
+The image itself stays shared, so Emacs still decodes it once."
+  (list image))
+
 (defun cooked--box-glyph-image (bits fg bg attrs window size phase)
   "Image spec for glyph BITS at cell SIZE, colored from FG/BG/ATTRS.
 
@@ -982,7 +1000,8 @@ that."
         (put-text-property pos (1+ pos) 'cooked-deco
                            (list 'glyph bits fg bg attrs column row))
         (put-text-property pos (1+ pos) 'display
-                           (cooked--box-glyph-image bits fg bg attrs window size phase)))
+                           (cooked--deco-display
+                            (cooked--box-glyph-image bits fg bg attrs window size phase))))
       (setq pos (1+ pos)))))
 
 (defun cooked--rescale-deco ()
@@ -1011,8 +1030,9 @@ stuck at the previous font size, visibly mismatched once the pin is released."
                 (`(glyph ,bits ,fg ,bg ,attrs . ,where)
                  (let ((phase (cooked--box-phase bits size (car where) (cadr where))))
                    (put-text-property (point) (1+ (point)) 'display
-                                      (cooked--box-glyph-image
-                                       bits fg bg attrs window size phase))))
+                                      (cooked--deco-display
+                                       (cooked--box-glyph-image
+                                        bits fg bg attrs window size phase)))))
                 (`(image ,id ,crow ,ccol)
                  ;; The slice geometry is in cells, so a new cell size moves every
                  ;; slice as well as resizing the spec they cut from.

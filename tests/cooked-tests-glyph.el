@@ -13,6 +13,37 @@
 
 (require 'cooked-tests-helpers)
 
+(defun cooked-tests--glyph-image (pos)
+  "The image spec inside the `display' property at POS.
+
+A decorated character's `display' is a one-element list holding the image, not
+the image itself -- see `cooked--deco-display' for why it has to be a fresh list
+per character."
+  (car-safe (get-text-property pos 'display)))
+
+(ert-deftest cooked-adjacent-box-glyphs-do-not-share-a-display-property ()
+  "Emacs merges a run of characters whose `display' properties are `eq' into one
+displayed image.  Sharing a memoized spec across cells is otherwise exactly what
+is wanted -- it is why the picture is decoded once -- but it made a run of box
+drawing render as a single glyph.  The image may be shared; the property may not.
+
+Not observable in batch, where nothing is drawn, which is how it got through:
+every character still had a correct `display' property, and only the display
+engine merged them."
+  (cooked-tests--with-session
+      ;; Four of the same character in a row, which is what a border is.
+      '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'")
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((first (get-text-property (point-min) 'display))
+          (second (get-text-property (1+ (point-min)) 'display)))
+      (should first)
+      (should second)
+      (should-not (eq first second))
+      ;; ...while the image underneath is shared, so it is rasterized once.
+      (should (eq (cooked-tests--glyph-image (point-min))
+                  (cooked-tests--glyph-image (1+ (point-min))))))))
+
 (ert-deftest cooked-box-drawing-gets-a-display-property ()
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
@@ -44,7 +75,7 @@
     (let ((inhibit-read-only t))
       (put-text-property (point-min) (1+ (point-min)) 'display 'clobbered))
     (text-scale-increase 1)
-    (should (eq (car-safe (get-text-property (point-min) 'display)) 'image))))
+    (should (eq (car-safe (cooked-tests--glyph-image (point-min))) 'image))))
 
 ;; `image-scaling-factor' defaults to `auto', which scales images by cell-width/10
 ;; on most GUI font sizes.  These bitmaps are generated at exactly the cell size, so
@@ -61,7 +92,7 @@
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (should (cooked-tests--settle
              (lambda () (get-text-property (point-min) 'display))))
-    (let* ((image (get-text-property (point-min) 'display))
+    (let* ((image (cooked-tests--glyph-image (point-min)))
            (plist (cdr image))
            (width (plist-get plist :data-width)))
       (should (stringp (plist-get plist :data)))
@@ -78,7 +109,7 @@
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (should (cooked-tests--settle
              (lambda () (get-text-property (point-min) 'display))))
-    (let ((image (get-text-property (point-min) 'display)))
+    (let ((image (cooked-tests--glyph-image (point-min))))
       (should (eq (car image) 'image))
       (should (equal (plist-get (cdr image) :scale) 1)))))
 
@@ -110,7 +141,7 @@
       (text-scale-increase 1)
       (save-restriction
         (widen)
-        (should (eq (car-safe (get-text-property glyph 'display)) 'image))))))
+        (should (eq (car-safe (cooked-tests--glyph-image glyph)) 'image))))))
 
 ;; Distinct from the alt-pin test above: there, the glyph reaches "scrollback" by
 ;; the marker moving past it in place, never leaving the buffer.  Here it genuinely
