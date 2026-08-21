@@ -1,6 +1,6 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
-use super::cell::{CONTINUATION, Cell, Color, Row, Style};
+use super::cell::{CONTINUATION, Cell, Color, Extra, Row, Style};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -97,14 +97,6 @@ pub struct Screen {
     autowrap: bool,
     /// IRM. See [`Screen::set_insert_mode`].
     insert_mode: bool,
-    /// Whether any row here may carry an underline colour.
-    ///
-    /// A screen-level over-approximation on purpose. The alternative — asking the row on
-    /// every cell written — put a branch inside [`Row::set`], which is the per-character
-    /// write path, and measured as 5% of the repaint benchmark on its own. Read once per
-    /// printed character from a struct already in cache, and never cleared short of a
-    /// reset, so it is wrong only in the harmless direction.
-    underlined: bool,
 }
 
 impl Screen {
@@ -120,7 +112,6 @@ impl Screen {
             carried: 0,
             autowrap: true,
             insert_mode: false,
-            underlined: false,
         }
     }
 
@@ -282,17 +273,12 @@ impl Screen {
         self.insert_mode
     }
 
-    pub fn underlined(&self) -> bool {
-        self.underlined
-    }
-
     /// Record the pen's underline colour on the cell the cursor just wrote.
     ///
     /// Separate from [`Screen::write`] rather than a parameter to it: this is the rare
     /// path, and `write` is the hottest call in the emulator. Called after the write, so
     /// the column is the one the write settled on after any wrap.
     pub fn mark_underline(&mut self, color: Color, width: usize) {
-        self.underlined |= color != Color::Default;
         let (row, cols) = (self.cursor.row, self.cols);
         // The lead column of the character just written. The cursor has advanced past it
         // by its full width — or pinned at the last column, where the character ends
@@ -850,14 +836,13 @@ fn place(offset: usize, cols: usize, chunks: usize) -> (usize, usize, bool) {
 
 /// A line as the child printed it, before the grid cut it into rows.
 ///
-/// The unit a rewrap preserves, reassembled from the rows a `wrapped` chain covers. Marks
-/// are keyed by offset within `cells` rather than by screen column, since the column a
-/// cell will end up in is not known until it is chunked again.
+/// The unit a rewrap preserves, reassembled from the rows a `wrapped` chain covers.
+/// Attachments are keyed by offset within `cells` rather than by screen column, since the
+/// column a cell will end up in is not known until it is chunked again.
 #[derive(Debug, Default)]
 struct Logical {
     cells: Vec<Cell>,
-    marks: Vec<(usize, Box<str>)>,
-    underlines: Vec<(usize, Color)>,
+    extras: Vec<(usize, Extra)>,
 }
 
 impl Logical {
@@ -875,17 +860,11 @@ impl Logical {
             row.content_len()
         };
         self.cells.extend_from_slice(&row.cells()[..len]);
-        self.marks.extend(
-            row.marks()
+        self.extras.extend(
+            row.extras()
                 .iter()
                 .filter(|(at, _)| usize::from(*at) < len)
-                .map(|(at, text)| (base + usize::from(*at), text.clone())),
-        );
-        self.underlines.extend(
-            row.underlines()
-                .iter()
-                .filter(|(at, _)| usize::from(*at) < len)
-                .map(|(at, color)| (base + usize::from(*at), *color)),
+                .map(|(at, extra)| (base + usize::from(*at), extra.clone())),
         );
         base
     }
@@ -925,14 +904,7 @@ impl Logical {
     fn take_front(&mut self, n: usize, wrapped: bool) -> Row {
         let row = self.row(0, n, n, wrapped);
         self.cells.drain(..n);
-        self.marks.retain_mut(|(at, _)| {
-            let keep = *at >= n;
-            if keep {
-                *at -= n;
-            }
-            keep
-        });
-        self.underlines.retain_mut(|(at, _)| {
+        self.extras.retain_mut(|(at, _)| {
             let keep = *at >= n;
             if keep {
                 *at -= n;
@@ -944,21 +916,19 @@ impl Logical {
 
     /// One row from `cells[start..end]`, blank-padded out to `cols`.
     fn row(&self, start: usize, end: usize, cols: usize, wrapped: bool) -> Row {
-        let mut cells = self.cells[start..end.min(start + cols)].to_vec();
+        let taken = end.min(start + cols);
+        let mut cells = self.cells[start..taken].to_vec();
         cells.resize(cols, Cell::default());
-        let marks = self
-            .marks
+        // Bounded by `taken`, not by `end`: `chunk` hands this a range wider than the
+        // screen for a character that fits nowhere, and filtering against the unclamped
+        // range then built a row whose attachments indexed past its own cells.
+        let extras = self
+            .extras
             .iter()
-            .filter(|(at, _)| (start..end).contains(at))
-            .map(|(at, text)| ((at - start) as u16, text.clone()))
+            .filter(|(at, _)| (start..taken).contains(at))
+            .map(|(at, extra)| ((at - start) as u16, extra.clone()))
             .collect();
-        let underlines = self
-            .underlines
-            .iter()
-            .filter(|(at, _)| (start..end).contains(at))
-            .map(|(at, color)| ((at - start) as u16, *color))
-            .collect();
-        Row::from_parts(cells, marks, underlines, wrapped)
+        Row::from_parts(cells, extras, wrapped)
     }
 }
 

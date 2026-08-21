@@ -180,35 +180,120 @@ pub struct Run {
     pub underline: Color,
 }
 
-/// A single line of the terminal, with combining marks held in a rare-path side table.
+/// Something attached to one column that is too rare to live in a [`Cell`].
+///
+/// One enum rather than a side table per feature. The tables it replaces had drifted
+/// apart — marks were pruned by [`Row::set`] while underline colours were repaired a
+/// layer up, ICH and DCH dropped one and shifted neither, and the rewrap carried both
+/// through four near-identical rebase loops. Every such divergence was a place a third
+/// kind could be maintained wrongly without any test noticing, and images are that third
+/// kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Extra {
+    /// Zero-width characters — combining marks, variation selectors — riding the cell.
+    Marks(Box<str>),
+    /// `SGR 58`, the underline's own colour.
+    Underline(Color),
+}
+
+/// Per-column attachments for one row, in column order.
+///
+/// Sorted because every consumer walks columns in order: [`Row::build_runs`] reads left
+/// to right, a rewrap rebases a contiguous range, and an erase prunes one. A sorted
+/// vector answers all three in a single pass, which an unsorted one cannot, and keeps
+/// insertion an append for the common case of a row being filled left to right.
+///
+/// Empty is not representable: [`Row`] holds `Option<Box<Extras>>` and drops back to
+/// `None` the moment the last entry goes, so "has this row any attachments at all" stays
+/// a null check on a pointer already in cache.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Extras {
+    entries: Vec<(u16, Extra)>,
+}
+
+impl Extra {
+    /// Whether this makes its cell content, as opposed to decoration of a cell that
+    /// would otherwise be blank.
+    ///
+    /// The distinction `content_len`, [`Row::has_text`] and [`Row::is_blank`] turn on.
+    /// A combining mark is text — dropping it loses a character. An underline colour is
+    /// not, and must not be: [`Row::runs`] cannot see one either, and the two have to
+    /// agree or a rewrap stops round-tripping what was on screen.
+    pub fn is_content(&self) -> bool {
+        match self {
+            Self::Marks(_) => true,
+            Self::Underline(_) => false,
+        }
+    }
+}
+
+impl Extras {
+    pub fn entries(&self) -> &[(u16, Extra)] {
+        &self.entries
+    }
+
+    fn insert(&mut self, col: usize, extra: Extra) {
+        let at = self.entries.partition_point(|(c, _)| usize::from(*c) <= col);
+        self.entries.insert(at, (col as u16, extra));
+    }
+
+    /// Drop every attachment on the columns in `range`.
+    fn prune(&mut self, range: impl std::ops::RangeBounds<usize>) {
+        self.entries.retain(|(at, _)| !range.contains(&usize::from(*at)));
+    }
+
+    /// Drop the attachments on `col` that `which` selects, keeping the rest.
+    fn prune_kind(&mut self, col: usize, which: impl Fn(&Extra) -> bool) {
+        self.entries
+            .retain(|(at, extra)| usize::from(*at) != col || !which(extra));
+    }
+
+    /// Move every attachment from `col` onward by `by`, dropping what falls off `cols`.
+    ///
+    /// The arithmetic ICH and DCH used to skip. They dropped the tables instead — DCH
+    /// losing colours on columns it never touched — while the rewrap had implemented the
+    /// shift correctly all along, in `Logical::take_front`.
+    fn shift(&mut self, from: usize, by: isize, cols: usize) {
+        self.entries.retain_mut(|(at, _)| {
+            let here = usize::from(*at);
+            if here < from {
+                return true;
+            }
+            match here.checked_add_signed(by) {
+                Some(moved) if moved < cols => {
+                    *at = moved as u16;
+                    true
+                }
+                // Off the end of the row, or off the front of it.
+                _ => false,
+            }
+        });
+        // No re-sort: every entry from `col` on moves by the same amount and everything
+        // below it stays put, so a sorted table comes out sorted.
+    }
+}
+
+/// A single line of the terminal, with per-column rarities held in a side table.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Row {
     cells: Vec<Cell>,
-    marks: Vec<(u16, Box<str>)>,
-    /// Underline colours (`SGR 58`) by column.
+    /// Marks, underline colours and anything else attached to a single column.
     ///
-    /// A side table for the same reason `marks` is one: this is rare — essentially only
-    /// an editor drawing LSP diagnostics — and a `Color` in [`Style`] would grow [`Cell`]
-    /// from 16 bytes to 20, which measured as an 8-13% throughput loss across the whole
-    /// grid for a feature almost nothing uses. Empty is the overwhelming case, and
-    /// [`Row::runs`] specialises on that once rather than asking per cell.
+    /// All of it is rare — combining marks are, and an underline colour is essentially
+    /// only an editor drawing LSP diagnostics — and none of it can go in [`Cell`]: a
+    /// `Color` in [`Style`] would grow it from 16 bytes to 20, which measured as an
+    /// 8-13% throughput loss across the whole grid for a feature almost nothing uses.
     ///
-    /// Only non-default colours are stored, and the table is boxed: `None` is the
-    /// overwhelming case, and an inline `Vec` put 24 bytes on every `Row` — rows are
-    /// cloned on every scroll, and that alone measured as a 12% loss on the repaint
-    /// benchmark before it was boxed away.
+    /// Boxed, and one field rather than two, because the *inline* size of `Row` is what
+    /// matters: rows are cloned on every scroll, and an inline `Vec` here measured as a
+    /// 12% loss on the repaint benchmark before it was boxed away. `Option<Vec<_>>` is
+    /// 24 bytes and `Option<Box<[_]>>` 16, while `Option<Box<Extras>>` is 8 — one
+    /// null-optimised pointer. Collapsing the two tables into one took `Row` from 32
+    /// bytes of side-table to 8.
     ///
-    /// `clippy::box_collection` reads this as a pointless second allocation, which it
-    /// would be if the point were the heap. It is not: the point is the *inline* size of
-    /// every `Row`, and only `Box` gets there. `Option<Vec<_>>` is 24 bytes and
-    /// `Option<Box<[_]>>` 16, while `Option<Box<Vec<_>>>` is 8 — one null-optimised
-    /// pointer — and the allocation the lint objects to only happens on the rare row that
-    /// has an underline colour at all.
-    #[allow(
-        clippy::box_collection,
-        reason = "8-byte niche beats one rare allocation"
-    )]
-    underlines: Option<Box<Vec<(u16, Color)>>>,
+    /// `None` whenever there is nothing attached, which is almost always, so
+    /// [`Row::runs`] can specialise on a null check instead of asking per cell.
+    extras: Option<Box<Extras>>,
     pub wrapped: bool,
 }
 
@@ -216,65 +301,86 @@ impl Row {
     pub fn new(cols: usize) -> Self {
         Self {
             cells: vec![Cell::default(); cols],
-            marks: Vec::new(),
-            underlines: None,
+            extras: None,
             wrapped: false,
         }
     }
 
     /// Assemble a row from cells already laid out, for the reflow in `Screen::resize`.
     ///
-    /// MARKS are keyed by column within CELLS, which is what a rewrap produces once a
+    /// EXTRAS are keyed by column within CELLS, which is what a rewrap produces once a
     /// logical line has been re-chunked: the offsets are recomputed per chunk rather than
-    /// carried from the row the cells came off.
-    pub fn from_parts(
-        cells: Vec<Cell>,
-        marks: Vec<(u16, Box<str>)>,
-        underlines: Vec<(u16, Color)>,
-        wrapped: bool,
-    ) -> Self {
+    /// carried from the row the cells came off. They must arrive in column order.
+    pub fn from_parts(cells: Vec<Cell>, extras: Vec<(u16, Extra)>, wrapped: bool) -> Self {
         Self {
             cells,
-            marks,
-            underlines: (!underlines.is_empty()).then(|| Box::new(underlines)),
+            extras: (!extras.is_empty()).then(|| Box::new(Extras { entries: extras })),
             wrapped,
         }
     }
 
-    pub fn underlines(&self) -> &[(u16, Color)] {
-        self.underlines.as_deref().map_or(&[], Vec::as_slice)
+    pub fn extras(&self) -> &[(u16, Extra)] {
+        self.extras.as_deref().map_or(&[], Extras::entries)
     }
 
-    /// Set or clear the underline colour at `col`. `Color::Default` removes the entry, so
-    /// the table stays empty for the rows — almost all of them — that never carry one.
+    /// Attach EXTRA to COL, in addition to whatever is already there.
+    fn attach(&mut self, col: usize, extra: Extra) {
+        self.extras
+            .get_or_insert_with(Default::default)
+            .insert(col, extra);
+    }
+
+    /// Drop the attachments on the columns in RANGE, and the table itself if it empties.
+    ///
+    /// The single maintenance path. Every mutator routes here, which is what stops the
+    /// kinds drifting apart the way `marks` and `underlines` had.
+    fn prune(&mut self, range: impl std::ops::RangeBounds<usize>) {
+        if let Some(extras) = &mut self.extras {
+            extras.prune(range);
+            if extras.entries.is_empty() {
+                self.extras = None;
+            }
+        }
+    }
+
+    /// [`Row::prune`] for exactly one column, out of line and marked cold.
+    ///
+    /// Both of those matter, and neither is fussiness. `Row::set` is the per-character
+    /// write path — one `movups` per cell, and the whole benchmark lives in it — so it
+    /// has to stay straight-line code. Calling `prune` with a `RangeInclusive` instead
+    /// cost ~4% of the full-screen repaint benchmark: the range is three words with an
+    /// exhausted flag, and the optimiser built it on the stack *before* testing whether
+    /// the row had any attachments at all, so every character written paid for it.
+    #[cold]
+    #[inline(never)]
+    fn retire(&mut self, col: usize) {
+        if let Some(extras) = &mut self.extras {
+            extras.entries.retain(|(at, _)| usize::from(*at) != col);
+            if extras.entries.is_empty() {
+                self.extras = None;
+            }
+        }
+    }
+
+    /// Set or clear the underline colour at `col`.
+    ///
+    /// `Color::Default` only removes, so a row that has stopped being underlined returns
+    /// to having no table at all rather than carrying an empty one for as long as it
+    /// lives — which is what keeps [`Row::runs`] on its plain path.
     pub fn set_underline(&mut self, col: usize, color: Color) {
-        if let Some(table) = &mut self.underlines {
-            table.retain(|(at, _)| usize::from(*at) != col);
+        if let Some(extras) = &mut self.extras {
+            extras.prune_kind(col, |e| matches!(e, Extra::Underline(_)));
+            if extras.entries.is_empty() {
+                self.extras = None;
+            }
         }
         if color != Color::Default && col < self.cells.len() {
-            self.underlines
-                .get_or_insert_with(Default::default)
-                .push((col as u16, color));
-        } else if self.underlines.as_ref().is_some_and(|t| t.is_empty()) {
-            // Back to `None`, so `runs` returns to the plain path once an editor stops
-            // underlining rather than staying off it for as long as the row lives.
-            self.underlines = None;
+            self.attach(col, Extra::Underline(color));
         }
-    }
-
-    fn underline_at(&self, col: usize) -> Color {
-        self.underlines()
-            .iter()
-            .find(|(at, _)| usize::from(*at) == col)
-            .map_or(Color::Default, |(_, c)| *c)
     }
 
     pub fn cells(&self) -> &[Cell] {
         &self.cells
-    }
-
-    pub fn marks(&self) -> &[(u16, Box<str>)] {
-        &self.marks
     }
 
     pub fn len(&self) -> usize {
@@ -289,34 +395,37 @@ impl Row {
         self.cells.get(col)
     }
 
+    /// Write CELL at COL, retiring everything the old occupant had attached to it.
+    ///
+    /// One `Option` check on the write path, where there used to be an unconditional
+    /// `Vec::retain` for marks and, for underline colours, nothing at all — those were
+    /// repaired a layer up by `Screen::mark_underline` behind a latch, because a branch
+    /// here measured as 5% of the repaint benchmark. The latch is gone: this branch is a
+    /// null test on a pointer the row already has in cache, and it replaces a call that
+    /// every write was paying regardless.
     pub fn set(&mut self, col: usize, cell: Cell) {
         if let Some(slot) = self.cells.get_mut(col) {
             *slot = cell;
-            self.marks.retain(|(at, _)| usize::from(*at) != col);
+            if self.extras.is_some() {
+                self.retire(col);
+            }
         }
     }
 
     /// Attach a zero-width character (combining mark, variation selector) to `col`.
     pub fn combine(&mut self, col: usize, mark: char) {
-        let Some(existing) = self
-            .marks
-            .iter_mut()
-            .find(|(at, _)| usize::from(*at) == col)
-        else {
-            self.marks
-                .push((col as u16, String::from(mark).into_boxed_str()));
+        if let Some(extras) = &mut self.extras
+            && let Some((_, Extra::Marks(text))) = extras
+                .entries
+                .iter_mut()
+                .find(|(at, extra)| usize::from(*at) == col && matches!(extra, Extra::Marks(_)))
+        {
+            let mut s = String::from(&**text);
+            s.push(mark);
+            *text = s.into_boxed_str();
             return;
-        };
-        let mut s = String::from(&*existing.1);
-        s.push(mark);
-        existing.1 = s.into_boxed_str();
-    }
-
-    fn marks_at(&self, col: usize) -> Option<&str> {
-        self.marks
-            .iter()
-            .find(|(at, _)| usize::from(*at) == col)
-            .map(|(_, s)| &**s)
+        }
+        self.attach(col, Extra::Marks(String::from(mark).into_boxed_str()));
     }
 
     pub fn fill(&mut self, range: impl IntoIterator<Item = usize>, style: Style) {
@@ -335,14 +444,7 @@ impl Row {
         if lo > hi {
             return;
         }
-        self.marks
-            .retain(|(at, _)| !(lo..=hi).contains(&usize::from(*at)));
-        if let Some(table) = &mut self.underlines {
-            table.retain(|(at, _)| !(lo..=hi).contains(&usize::from(*at)));
-            if table.is_empty() {
-                self.underlines = None;
-            }
-        }
+        self.prune(lo..hi + 1);
     }
 
     /// Whether the row holds any text, as opposed to only a background wash.
@@ -352,7 +454,8 @@ impl Row {
     /// carries a background — but it is not transcript either, and archiving it would push
     /// a screenful of pure colour into the scrollback.
     pub fn has_text(&self) -> bool {
-        !self.marks.is_empty() || self.cells.iter().any(|c| c.ch != BLANK)
+        self.extras().iter().any(|(_, e)| e.is_content())
+            || self.cells.iter().any(|c| c.ch != BLANK)
     }
 
     /// Whether the row holds nothing a resize would need to preserve.
@@ -360,7 +463,7 @@ impl Row {
     /// Stricter than [`Row::has_text`] on purpose: a resize must keep a background wash,
     /// so a washed row is not blank even though it holds no text.
     pub fn is_blank(&self) -> bool {
-        self.marks.is_empty()
+        !self.extras().iter().any(|(_, e)| e.is_content())
             && self
                 .cells
                 .iter()
@@ -369,20 +472,13 @@ impl Row {
 
     pub fn clear(&mut self, style: Style) {
         self.cells.fill(Cell::blank(style));
-        self.marks.clear();
-        self.underlines = None;
+        self.extras = None;
         self.wrapped = false;
     }
 
     pub fn resize(&mut self, cols: usize, style: Style) {
         self.cells.resize(cols, Cell::blank(style));
-        self.marks.retain(|(at, _)| usize::from(*at) < cols);
-        if let Some(table) = &mut self.underlines {
-            table.retain(|(at, _)| usize::from(*at) < cols);
-            if table.is_empty() {
-                self.underlines = None;
-            }
-        }
+        self.prune(cols..);
     }
 
     pub fn insert_blank(&mut self, col: usize, count: usize, style: Style) {
@@ -395,8 +491,14 @@ impl Row {
             std::iter::repeat_n(Cell::blank(style), count.min(cols - col)),
         );
         self.cells.truncate(cols);
-        self.marks.retain(|(at, _)| usize::from(*at) < col);
-        self.underlines = None;
+        // The cells from `col` on moved right; their attachments move with them, and
+        // whatever was pushed off the end goes. Both used to be dropped wholesale here.
+        if let Some(extras) = &mut self.extras {
+            extras.shift(col, count.min(cols - col) as isize, cols);
+            if extras.entries.is_empty() {
+                self.extras = None;
+            }
+        }
     }
 
     pub fn delete(&mut self, col: usize, count: usize, style: Style) {
@@ -404,10 +506,19 @@ impl Row {
         if col >= cols {
             return;
         }
+        let gone = (col + count).min(cols) - col;
         self.cells.drain(col..(col + count).min(cols));
         self.cells.resize(cols, Cell::blank(style));
-        self.marks.retain(|(at, _)| usize::from(*at) < col);
-        self.underlines = None;
+        // The deleted columns take their attachments with them; everything to their
+        // right closes the gap. DCH used to drop the whole table, losing colours on
+        // columns it never touched.
+        self.prune(col..col + gone);
+        if let Some(extras) = &mut self.extras {
+            extras.shift(col + gone, -(gone as isize), cols);
+            if extras.entries.is_empty() {
+                self.extras = None;
+            }
+        }
     }
 
     /// Columns up to the last one holding something, trailing default-styled blanks cut.
@@ -421,10 +532,22 @@ impl Row {
     /// its trailing blanks are interior to a line that ends somewhere below. See
     /// [`Row::line_runs`].
     pub fn content_len(&self) -> usize {
-        self.cells
+        let cells = self
+            .cells
             .iter()
             .rposition(|c| c.ch != BLANK || c.style != Style::default())
-            .map_or(0, |i| i + 1)
+            .map_or(0, |i| i + 1);
+        // An attachment can be the last content on the row while its cell is a blank in
+        // the default style — a combining mark on a space, and later an image cell, which
+        // is *always* one. Guarded, so the ordinary row keeps the `rposition` alone.
+        if self.extras.is_none() {
+            return cells;
+        }
+        self.extras()
+            .iter()
+            .rev()
+            .find(|(_, e)| e.is_content())
+            .map_or(cells, |(at, _)| cells.max(usize::from(*at) + 1))
     }
 
     /// Style-grouped runs with trailing default-styled blanks trimmed.
@@ -460,46 +583,74 @@ impl Row {
     }
 
     fn runs_to(&self, end: usize) -> Vec<Run> {
-        if self.underlines.is_some() {
-            self.build_runs(end, |row, col| row.underline_at(col))
-        } else {
-            self.build_runs(end, |_, _| Color::Default)
+        match self.extras.as_deref() {
+            Some(extras) => self.build_runs::<true>(end, &extras.entries),
+            None => self.build_runs::<false>(end, &[]),
         }
     }
 
-    fn build_runs(&self, end: usize, underline_at: impl Fn(&Self, usize) -> Color) -> Vec<Run> {
-        self.cells[..end]
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| !c.is_continuation())
-            .fold(Vec::<Run>::new(), |mut runs, (col, cell)| {
-                let shape = glyph::classify(cell.ch);
-                let underline = underline_at(self, col);
-                match runs.last_mut() {
-                    Some(run)
-                        if run.style == cell.style
-                            && run.underline == underline
-                            && run.glyphs.is_some() == shape.is_some() =>
-                    {
-                        run.text.push(cell.ch);
-                        if let Some(glyphs) = &mut run.glyphs {
-                            glyphs.push(shape.expect("glyphs.is_some() == shape.is_some()"));
-                        }
+    /// The row's cells as runs, reading attachments only when there are any.
+    ///
+    /// `EXTRAS` is a const parameter rather than a runtime test because this is the
+    /// hottest read in the emulator — every cell of every damaged row of every frame —
+    /// and the row with no attachments is the overwhelming case. At `false` the whole
+    /// lookup is compiled out, so that row pays literally nothing for a feature it is
+    /// not using; a closure returning an empty slice was not enough, and measured ~4% of
+    /// the full-screen repaint benchmark.
+    ///
+    /// ENTRIES is walked with a cursor rather than searched per column. Both sides
+    /// advance through columns in order, so the whole row costs one pass over the table
+    /// instead of one pass per cell — which is what `Row::marks_at` used to do, for every
+    /// character, whether or not the row had a single mark on it.
+    fn build_runs<const EXTRAS: bool>(&self, end: usize, entries: &[(u16, Extra)]) -> Vec<Run> {
+        let mut runs = Vec::<Run>::new();
+        let mut at = 0;
+        for (col, cell) in self.cells[..end].iter().enumerate() {
+            if cell.is_continuation() {
+                continue;
+            }
+            let shape = glyph::classify(cell.ch);
+            let mut underline = Color::Default;
+            let mut marks = None;
+            if EXTRAS {
+                while at < entries.len() && usize::from(entries[at].0) < col {
+                    at += 1;
+                }
+                for (_, extra) in entries[at..]
+                    .iter()
+                    .take_while(|(c, _)| usize::from(*c) == col)
+                {
+                    match extra {
+                        Extra::Underline(color) => underline = *color,
+                        Extra::Marks(text) => marks = Some(&**text),
                     }
-                    _ => runs.push(Run {
-                        text: String::from(cell.ch),
-                        style: cell.style,
-                        glyphs: shape.map(|g| vec![g]),
-                        underline,
-                    }),
                 }
-                // Combining marks never legitimately attach to a box-drawing base
-                // character, so no glyph padding is needed to keep `glyphs` aligned.
-                if let (Some(marks), Some(run)) = (self.marks_at(col), runs.last_mut()) {
-                    run.text.push_str(marks);
+            }
+            match runs.last_mut() {
+                Some(run)
+                    if run.style == cell.style
+                        && run.underline == underline
+                        && run.glyphs.is_some() == shape.is_some() =>
+                {
+                    run.text.push(cell.ch);
+                    if let Some(glyphs) = &mut run.glyphs {
+                        glyphs.push(shape.expect("glyphs.is_some() == shape.is_some()"));
+                    }
                 }
-                runs
-            })
+                _ => runs.push(Run {
+                    text: String::from(cell.ch),
+                    style: cell.style,
+                    glyphs: shape.map(|g| vec![g]),
+                    underline,
+                }),
+            }
+            // Combining marks never legitimately attach to a box-drawing base
+            // character, so no glyph padding is needed to keep `glyphs` aligned.
+            if let (Some(marks), Some(run)) = (marks, runs.last_mut()) {
+                run.text.push_str(marks);
+            }
+        }
+        runs
     }
 
     pub fn to_text(&self) -> String {
@@ -696,5 +847,110 @@ mod tests {
         a.remove(Attrs::BOLD);
         assert!(!a.contains(Attrs::BOLD));
         assert!(a.contains(Attrs::ITALIC));
+    }
+
+    #[test]
+    fn a_mark_on_a_blank_cell_counts_as_content() {
+        // Otherwise `content_len` trims the column the mark is keyed to, and the mark
+        // goes with it. The cell under a combining mark is very often a blank.
+        let mut row = Row::new(4);
+        row.combine(1, '\u{0301}');
+        assert_eq!(row.content_len(), 2);
+        assert!(row.has_text());
+        assert!(!row.is_blank());
+    }
+
+    #[test]
+    fn an_underline_colour_alone_is_not_content() {
+        // The invariant `content_len`'s contract rests on: it and `runs` must agree about
+        // where a line ends, and `runs` cannot see a colour on a cell with nothing in it.
+        let mut row = Row::new(4);
+        row.set_underline(1, Color::Indexed(196));
+        assert_eq!(row.content_len(), 0);
+        assert!(!row.has_text());
+        assert!(row.is_blank());
+    }
+
+    #[test]
+    fn ich_shifts_attachments_with_their_cells() {
+        let mut row = Row::new(6);
+        row.set(0, Cell { ch: 'a', style: Style::default() });
+        row.set_underline(0, Color::Indexed(196));
+        row.combine(0, '\u{0301}');
+
+        row.insert_blank(0, 2, Style::default());
+
+        assert_eq!(
+            row.extras(),
+            [
+                (2, Extra::Underline(Color::Indexed(196))),
+                (2, Extra::Marks("\u{0301}".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn ich_drops_only_what_it_pushes_off_the_end() {
+        let mut row = Row::new(4);
+        row.set_underline(0, Color::Indexed(1));
+        row.set_underline(3, Color::Indexed(2));
+
+        row.insert_blank(0, 2, Style::default());
+
+        // Column 0 moved to 2; column 3 went off the end at 5.
+        assert_eq!(row.extras(), [(2, Extra::Underline(Color::Indexed(1)))]);
+        assert!(row.extras().iter().all(|(at, _)| usize::from(*at) < row.len()));
+    }
+
+    #[test]
+    fn dch_closes_the_gap_and_spares_the_columns_before_it() {
+        let mut row = Row::new(6);
+        row.set_underline(0, Color::Indexed(1));
+        row.set_underline(3, Color::Indexed(2));
+        row.set_underline(5, Color::Indexed(3));
+
+        // Delete columns 3 and 4. Column 0 is untouched; column 5 closes up to 3.
+        row.delete(3, 2, Style::default());
+
+        assert_eq!(
+            row.extras(),
+            [
+                (0, Extra::Underline(Color::Indexed(1))),
+                (3, Extra::Underline(Color::Indexed(3))),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_row_that_loses_its_last_attachment_loses_its_table() {
+        // The `None` is what keeps `runs` on the specialisation with no side table in it,
+        // so returning to it matters as much as getting off it.
+        let mut row = Row::new(4);
+        row.set_underline(1, Color::Indexed(196));
+        assert!(row.extras.is_some());
+        row.set_underline(1, Color::Default);
+        assert!(row.extras.is_none());
+    }
+
+    #[test]
+    fn overwriting_a_cell_retires_everything_attached_to_it() {
+        let mut row = Row::new(4);
+        row.set(1, Cell { ch: 'a', style: Style::default() });
+        row.set_underline(1, Color::Indexed(196));
+        row.combine(1, '\u{0301}');
+
+        row.set(1, Cell { ch: 'b', style: Style::default() });
+
+        assert!(row.extras().is_empty());
+        assert!(row.extras.is_none());
+    }
+
+    #[test]
+    fn attachments_on_other_columns_survive_a_write() {
+        let mut row = Row::new(4);
+        row.set_underline(1, Color::Indexed(1));
+        row.set_underline(2, Color::Indexed(2));
+        row.set(1, Cell { ch: 'x', style: Style::default() });
+        assert_eq!(row.extras(), [(2, Extra::Underline(Color::Indexed(2)))]);
     }
 }

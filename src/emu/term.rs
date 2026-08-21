@@ -936,13 +936,14 @@ impl Perform for State {
         let screen = self.screen_mut();
         let evicted = screen.write(c, pen);
         // After the write, so it lands on the cell the write actually chose — which a
-        // wrap or DECAWM may have moved. The second test is what retires a stale colour
-        // when a cell that had one is overwritten by a cell that does not: `Row::set`
-        // deliberately knows nothing about underlines, because a branch there is a branch
-        // per character written.
+        // wrap or DECAWM may have moved. Only when there is a colour to record: retiring
+        // the *previous* occupant's colour is `Row::set`'s job now, which is why the
+        // screen-wide "has anything ever been underlined" latch this used to consult is
+        // gone. That latch was never cleared, so one `SGR 58` anywhere in a session made
+        // every subsequent character pay for this call forever.
         // Zero-width characters fold onto the cell to their left and never own one, so
         // they must not move an underline colour either.
-        if width > 0 && (underline != Color::Default || screen.underlined()) {
+        if width > 0 && underline != Color::Default {
             screen.mark_underline(underline, width);
         }
         self.evicted(evicted);
@@ -1391,8 +1392,8 @@ mod tests {
 
     #[test]
     fn overwriting_a_cell_retires_its_underline_colour() {
-        // `Row::set` knows nothing about underlines, so this is what proves the screen
-        // level flag actually retires a stale entry rather than leaving it on the cell.
+        // `Row::set` retires whatever the old occupant had attached to the cell, which
+        // is what this proves: the colour goes with the character it belonged to.
         let t = term(2, 8, b"\x1b[4;58;5;196mab\x1b[1G\x1b[mxy");
         let runs = t.screen().row(0).unwrap().runs();
         assert_eq!(runs.len(), 1, "{runs:?}");
@@ -1407,6 +1408,28 @@ mod tests {
             t.screen().row(0).unwrap().runs()[0].underline,
             Color::Default
         );
+    }
+
+    #[test]
+    fn dch_spares_an_underline_colour_on_a_column_it_never_touched() {
+        // DCH used to drop the row's whole table, so deleting a character anywhere took
+        // every colour on the row with it — including ones to the left of the cut.
+        let t = term(2, 8, b"\x1b[58;5;196ma\x1b[mbcdef\x1b[5G\x1b[1P");
+        let runs = t.screen().row(0).unwrap().runs();
+        assert_eq!(runs[0].text, "a");
+        assert_eq!(runs[0].underline, Color::Indexed(196));
+        assert_eq!(runs[1].text, "bcdf");
+        assert_eq!(runs[1].underline, Color::Default);
+    }
+
+    #[test]
+    fn ich_carries_an_underline_colour_along_with_its_character() {
+        let t = term(2, 8, b"\x1b[58;5;196mab\x1b[m\x1b[1G\x1b[2@");
+        let runs = t.screen().row(0).unwrap().runs();
+        assert_eq!(runs[0].text, "  ");
+        assert_eq!(runs[0].underline, Color::Default);
+        assert_eq!(runs[1].text, "ab");
+        assert_eq!(runs[1].underline, Color::Indexed(196));
     }
 
     #[test]
