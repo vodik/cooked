@@ -264,16 +264,29 @@ impl Kitty {
         } else {
             raw
         };
+        // Raw pixels carry no dimensions of their own, so a transmission that omits them
+        // cannot be laid out, and one whose geometry outruns what actually arrived is not
+        // describing the bytes it sent. Both are checked *before* converting, because the
+        // conversion sizes its buffer from the geometry: `s=65535,v=65535` with a
+        // four-byte payload is a 13GB allocation asked for by anything that can write to
+        // the terminal, which `cat` of a hostile file is. Bounding it against the payload
+        // needs no arbitrary maximum — `MAX_PAYLOAD` already bounds that.
+        let bytes_per_pixel = match cmd.format {
+            Payload::Png => 0,
+            Payload::Rgb => 3,
+            Payload::Rgba => 4,
+        };
+        if bytes_per_pixel != 0 {
+            let needed = u64::from(cmd.px.0) * u64::from(cmd.px.1) * bytes_per_pixel;
+            if needed == 0 || needed > raw.len() as u64 {
+                return (Outcome::Nothing, response(&cmd, Some("EINVAL:dimensions")));
+            }
+        }
         let (format, bytes) = match cmd.format {
             Payload::Png => (ImageFormat::Png, raw),
             Payload::Rgb => (ImageFormat::Ppm, ppm_from_rgb(cmd.px, &raw)),
             Payload::Rgba => (ImageFormat::Png, png_from_rgba(cmd.px, &raw)),
         };
-        // Raw pixels carry no dimensions of their own, so a transmission that omits them
-        // cannot be laid out. PNG brings its own, and Emacs reads them.
-        if cmd.px == (0, 0) && cmd.format != Payload::Png {
-            return (Outcome::Nothing, response(&cmd, Some("EINVAL:dimensions")));
-        }
         (
             Outcome::Image {
                 format,
@@ -539,6 +552,39 @@ mod tests {
         let (outcome, reply) = k.feed(format!("Ga=T,f=32,i=4;{}", b64(&[0; 4])).as_bytes());
         assert_eq!(outcome, Outcome::Nothing);
         assert_eq!(reply.unwrap(), b"\x1b_Gi=4;EINVAL:dimensions\x1b\\");
+    }
+
+    #[test]
+    fn geometry_that_outruns_the_payload_is_refused_before_it_is_allocated() {
+        // Four bytes claiming to be a 65535x65535 picture. Sizing the conversion buffer
+        // from the geometry would ask for 13GB on behalf of anything that can write to
+        // the terminal; the transmission has to account for the pixels it declares.
+        let mut k = Kitty::default();
+        for format in ["f=24", "f=32"] {
+            let apc = format!("Ga=T,{format},s=65535,v=65535,i=4;{}", b64(&[0; 4]));
+            let (outcome, reply) = k.feed(apc.as_bytes());
+            assert_eq!(outcome, Outcome::Nothing, "{format}");
+            assert_eq!(reply.unwrap(), b"\x1b_Gi=4;EINVAL:dimensions\x1b\\");
+        }
+        // One pixel short is still short.
+        let apc = format!("Ga=T,f=32,s=2,v=1,i=4;{}", b64(&[0; 7]));
+        assert_eq!(k.feed(apc.as_bytes()).0, Outcome::Nothing);
+        // Exactly enough is enough, and trailing slack is the client's business.
+        let apc = format!("Ga=T,f=32,s=2,v=1,i=4;{}", b64(&[0; 8]));
+        assert!(matches!(k.feed(apc.as_bytes()).0, Outcome::Image { .. }));
+        let apc = format!("Ga=T,f=32,s=2,v=1,i=5;{}", b64(&[0; 12]));
+        assert!(matches!(k.feed(apc.as_bytes()).0, Outcome::Image { .. }));
+    }
+
+    #[test]
+    fn a_compressed_transmission_cannot_outrun_its_geometry_either() {
+        // The cheapest way to ask for a large allocation is a small compressed payload,
+        // so the check has to sit after the inflate rather than before it.
+        let mut k = Kitty::default();
+        let apc = format!("Ga=T,f=32,o=z,s=65535,v=65535,i=7;{}", b64(DEFLATED));
+        let (outcome, reply) = k.feed(apc.as_bytes());
+        assert_eq!(outcome, Outcome::Nothing);
+        assert_eq!(reply.unwrap(), b"\x1b_Gi=7;EINVAL:dimensions\x1b\\");
     }
 
     #[test]
