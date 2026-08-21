@@ -85,6 +85,20 @@ so a theme that styles those faces wins."
    ansi-color-bright-cyan ansi-color-bright-white]
   "Faces the theme is expected to style, indexed by ANSI color number.")
 
+(defcustom cooked-inline-images t
+  "Whether to display images the child transmits.
+
+Images arrive through a terminal graphics protocol, are held for as long as the
+buffer text showing them lives, and are rendered as one `display\=' slice per
+cell they cover.  Setting this to nil leaves those cells as the blanks they
+already are on the grid, so the layout is unchanged and only the picture is
+missing.
+
+Distinct from `cooked-box-drawing-images\=', which is about substituting a
+generated bitmap for a character the font could draw itself."
+  :type 'boolean
+  :group 'cooked)
+
 (defcustom cooked-box-drawing-images t
   "Whether to render box-drawing and block-element characters as generated bitmaps.
 
@@ -324,6 +338,32 @@ via :foreground/:background at `create-image' time, so unlike
 `cooked--face-cache' this needs no theme-change invalidation — only pixel-size
 changes (zoom, font change) miss the cache key, naturally, with no extra
 plumbing.")
+
+(defvar-local cooked--image-data nil
+  "Image id -> (FORMAT DATA PX-WIDTH PX-HEIGHT COLS ROWS), as transmitted.
+
+The resource itself, and the only copy of it: `cooked--drain' hands each
+distinct image over exactly once -- ids are content-addressed, so a child
+redrawing the same picture every frame transmits it every frame and the module
+sends it once -- and will not send it again on request.  So this is a strong
+table.  It is buffer-local, and dies with the buffer.
+
+Deliberately not weak.  A placement is a reference to an id, and rows are
+re-rendered constantly, so a collected entry would leave cells naming an image
+nothing could rebuild.  `cooked--image-specs' is the weak half.")
+
+(defvar-local cooked--image-specs nil
+  "(ID CELL-WIDTH CELL-HEIGHT) -> the `create-image' spec, weakly.
+
+Weak on the value, which is safe precisely because it is rebuildable: a spec is
+a pure function of `cooked--image-data' and the cell size, so losing one costs a
+rebuild and nothing else.
+
+What keeps a spec alive is the buffer text displaying it -- Emacs holds the spec
+in the `display' property, so the text is the strong reference and the collector
+frees only specs nothing is showing.  That is the whole lifetime story for
+images, and the reason there is no release protocol between the module and this
+file: Emacs already owns the question.")
 
 (defvar-local cooked--deco-image-cache nil
   "Decoration + colors + cell size -> the `create-image' spec, per buffer.
@@ -827,6 +867,16 @@ cell it stands in.  The underline colour is deliberately not passed, because
 nothing here renders from it."
   (condition-case nil
       (pcase deco
+        (`(image . ,packed)
+         ;; Its own preference, not `cooked-box-drawing-images': whether to
+         ;; substitute a pixel-exact shape for a character the font can already
+         ;; draw is a different question from whether to show a picture the child
+         ;; sent.  Whether the *format* can be displayed is asked per image, in
+         ;; `cooked--image-spec', since the answer differs between them.
+         (when cooked-inline-images
+           (cooked--apply-image-deco
+            start packed
+            (cooked--cell-size (or (cooked--layout-window) (selected-window))))))
         (`(glyph . ,packed)
          ;; Each kind checks its own preconditions rather than the caller checking
          ;; for all of them: what a decoration needs in order to render is the
@@ -840,6 +890,86 @@ nothing here renders from it."
     ;; A cosmetic feature must never break rendering: any failure here leaves the
     ;; plain face-only text `cooked--render-block' already inserted.
     (error nil)))
+
+(defun cooked--install-images (images)
+  "Record IMAGES, a drain's `:images\=', before anything referring to them renders.
+
+Each entry is (ID FORMAT DATA PX-WIDTH PX-HEIGHT COLS ROWS).  The module sends
+one exactly once per distinct picture however often the child transmits or
+places it, so this is where the only copy of the bytes lands -- and why the
+table holding them is not weak.
+
+Called ahead of both render passes, not from the event loop: an image is a
+resource the rows of this very drain refer to by id, so it has to be here before
+they are rendered.  Events are dispatched after rendering, so an image arriving
+as one would arrive too late for the row that needed it."
+  (dolist (image images)
+    (pcase-let ((`(,id ,format ,data ,px-w ,px-h ,cols ,rows) image))
+      (puthash id (list format data px-w px-h cols rows) cooked--image-data))))
+
+(defun cooked--image-spec (id size)
+  "The `create-image\=' spec for image ID at cell SIZE, built once.
+
+Shared deliberately: every cell of the picture displays a slice of one spec, so
+Emacs decodes the image once rather than once per cell.  Nil when ID names
+nothing this buffer has been told about, which is what a placement left over
+from a session whose data has gone looks like.
+
+Nil too when this Emacs cannot decode the format, which is asked here rather
+than at the call site because the answer differs from image to image: a build
+without libjpeg still shows PNGs.
+
+Sized to the cell rectangle the emulator committed to, so the slices below tile
+it exactly.  `:scale 1\=' for the same reason it is on a box glyph:
+`image-scaling-factor\=' is `auto\=' and would resample what has already been
+scaled to fit."
+  (when-let* ((entry (gethash id cooked--image-data))
+              ((image-type-available-p (car entry))))
+    (let ((key (list id (car size) (cdr size))))
+      (or (gethash key cooked--image-specs)
+          (puthash key
+                   (pcase-let ((`(,format ,data ,_px-w ,_px-h ,cols ,rows) entry))
+                     (create-image data format t
+                                   :width (* cols (car size))
+                                   :height (* rows (cdr size))
+                                   :scale 1
+                                   :ascent (cooked--box-glyph-ascent
+                                            (or (cooked--layout-window)
+                                                (selected-window))
+                                            (cdr size))))
+                   cooked--image-specs)))))
+
+(defun cooked--apply-image-deco (start packed size)
+  "Apply image decoration PACKED from START: eight bytes per character.
+
+A `u32\=' image id, then the cell\='s row and column within that image as two
+`u16\='s, all little-endian.  One `display\=' property per character, each a
+slice of the shared spec, which is what makes the picture survive everything
+the grid does to it: text written over one cell replaces that cell\='s slice and
+leaves the rest, a scroll carries each row\='s slices into the scrollback
+independently, and a rewrap moves them with their columns.  A single image
+spanning the whole rectangle would have to be torn down and rebuilt for any of
+that."
+  (let ((pos start)
+        (cw (car size))
+        (ch (cdr size)))
+    (dotimes (i (/ (length packed) 8))
+      (let* ((base (* 8 i))
+             (id (logior (aref packed base)
+                         (ash (aref packed (+ base 1)) 8)
+                         (ash (aref packed (+ base 2)) 16)
+                         (ash (aref packed (+ base 3)) 24)))
+             (crow (logior (aref packed (+ base 4))
+                           (ash (aref packed (+ base 5)) 8)))
+             (ccol (logior (aref packed (+ base 6))
+                           (ash (aref packed (+ base 7)) 8)))
+             (spec (cooked--image-spec id size)))
+        (put-text-property pos (1+ pos) 'cooked-deco (list 'image id crow ccol))
+        (when spec
+          (put-text-property pos (1+ pos) 'display
+                             (list (list 'slice (* ccol cw) (* crow ch) cw ch)
+                                   spec))))
+      (setq pos (1+ pos)))))
 
 (defun cooked--apply-glyph-deco (start packed fg bg attrs window size origin row)
   "Apply box-glyph decoration PACKED, two little-endian bytes per character."
@@ -882,7 +1012,17 @@ stuck at the previous font size, visibly mismatched once the pin is released."
                  (let ((phase (cooked--box-phase bits size (car where) (cadr where))))
                    (put-text-property (point) (1+ (point)) 'display
                                       (cooked--box-glyph-image
-                                       bits fg bg attrs window size phase)))))
+                                       bits fg bg attrs window size phase))))
+                (`(image ,id ,crow ,ccol)
+                 ;; The slice geometry is in cells, so a new cell size moves every
+                 ;; slice as well as resizing the spec they cut from.
+                 (when-let* ((image (cooked--image-spec id size)))
+                   (put-text-property (point) (1+ (point)) 'display
+                                      (list (list 'slice
+                                                  (* ccol (car size))
+                                                  (* crow (cdr size))
+                                                  (car size) (cdr size))
+                                            image)))))
               (goto-char next))))))))
 
 (defun cooked--rescale-deco-on-zoom (_symbol _newval operation where)
@@ -1837,6 +1977,8 @@ EXTRA-ENV is an alist prepended to the child's environment."
   (setq cooked--box-glyph-cache (make-hash-table :test #'equal))
   (setq cooked--box-ascent-cache (make-hash-table :test #'equal))
   (setq cooked--deco-image-cache (make-hash-table :test #'equal))
+  (setq cooked--image-data (make-hash-table :test #'eq))
+  (setq cooked--image-specs (make-hash-table :test #'equal :weakness 'value))
   (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
     (setq cooked--rows rows cooked--cols cols))
   (let ((inhibit-read-only t))
@@ -1996,6 +2138,12 @@ window that fell behind."
 
 (defun cooked--apply (update)
   "Apply UPDATE, the plist returned by `cooked--drain'."
+  ;; Before everything, and outside the `let*' below because both render passes are
+  ;; inside it: the rows of this update refer to these images by id, so they have to
+  ;; be recorded before anything renders.  This is the drain's third category --
+  ;; neither a level redisplay reads nor an occurrence to react to, but a resource
+  ;; the rows depend on.  Touches no buffer text, so it needs no `inhibit-read-only'.
+  (cooked--install-images (plist-get update :images))
   ;; `let*', emphatically: these initialisers delete and insert, and under plain
   ;; `let' they would run before `inhibit-read-only' took effect, so a protected
   ;; buffer aborts the redisplay half-done from inside the process filter.

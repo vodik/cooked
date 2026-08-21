@@ -1090,3 +1090,127 @@ resync went and got it."
 
 (provide 'cooked-tests-render)
 ;;; cooked-tests-render.el ends here
+
+;;;; Inline images
+;;
+;; Driven through `cooked--apply' with a synthetic update rather than through a
+;; child, because the protocol that would produce one does not exist yet -- the
+;; resource layer is what is under test, and it is reachable from the drain's
+;; shape alone.  `cooked-bench.el' builds updates the same way.
+
+(defun cooked-tests--png ()
+  "A tiny valid PNG, built here so the suite needs no fixture file."
+  (let* ((ihdr (apply #'unibyte-string
+                      (append '(0 0 0 1 0 0 0 1 8 2 0 0 0) nil)))
+         (idat (string-to-unibyte
+                (base64-decode-string "eJxjZGBg+A8AAQQBAHAgZQU="))))
+    (concat (unibyte-string #x89 ?P ?N ?G 13 10 26 10)
+            (cooked-tests--png-chunk "IHDR" ihdr)
+            (cooked-tests--png-chunk "IDAT" idat)
+            (cooked-tests--png-chunk "IEND" ""))))
+
+(defun cooked-tests--png-chunk (tag data)
+  "One PNG chunk: length, TAG, DATA, CRC."
+  (let* ((body (concat (string-to-unibyte tag) (string-to-unibyte data)))
+         (len (length (string-to-unibyte data)))
+         (crc (cooked-tests--crc32 body)))
+    (concat (unibyte-string (logand (ash len -24) 255) (logand (ash len -16) 255)
+                            (logand (ash len -8) 255) (logand len 255))
+            body
+            (unibyte-string (logand (ash crc -24) 255) (logand (ash crc -16) 255)
+                            (logand (ash crc -8) 255) (logand crc 255)))))
+
+(defun cooked-tests--crc32 (bytes)
+  "CRC-32 of BYTES, the polynomial PNG uses."
+  (let ((crc #xFFFFFFFF))
+    (dolist (byte (append (string-to-unibyte bytes) nil))
+      (setq crc (logxor crc byte))
+      (dotimes (_ 8)
+        (setq crc (if (zerop (logand crc 1))
+                      (ash crc -1)
+                    (logxor (ash crc -1) #xEDB88320)))))
+    (logxor crc #xFFFFFFFF)))
+
+(defun cooked-tests--image-update (id cols rows &optional data)
+  "An update placing image ID as a COLS by ROWS rectangle on screen row 0."
+  (let ((packed (apply #'unibyte-string
+                       (cl-loop for c below cols
+                                append (list (logand id 255)
+                                             (logand (ash id -8) 255)
+                                             (logand (ash id -16) 255)
+                                             (logand (ash id -24) 255)
+                                             0 0
+                                             (logand c 255) (logand (ash c -8) 255))))))
+    (list :scrolled nil
+          :rows (list (cons 0 (list (make-string cols ?\s)
+                                    nil
+                                    (list (list 0 cols nil nil 0 (cons 'image packed))))))
+          :images (and data
+                       (list (list id 'png data (* cols 10) (* rows 20) cols rows)))
+          :height 12 :used 1 :head 0
+          :cursor '(0 0 t block) :alt nil
+          :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
+
+(ert-deftest cooked-image-cells-each-get-their-own-slice ()
+  "Per cell rather than one spec over the rectangle: that is what lets text
+overwrite part of a picture, and a scroll split it, without special-casing."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
+    (goto-char (point-min))
+    (dotimes (col 3)
+      (let ((display (get-text-property (+ (point-min) col) 'display)))
+        (should (eq (car-safe (car-safe display)) 'slice))
+        ;; (slice X Y W H) -- X advances a cell per column, Y stays on row 0.
+        (should (= (nth 1 (car display)) (* col (car (cooked--cell-size (selected-window))))))
+        (should (= (nth 2 (car display)) 0))
+        (should (eq (car-safe (cadr display)) 'image))))))
+
+(ert-deftest cooked-image-cells-share-one-decoded-spec ()
+  "Every cell slices the same spec, so Emacs decodes the picture once."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
+    (let ((first (cadr (get-text-property (point-min) 'display)))
+          (last (cadr (get-text-property (+ (point-min) 2) 'display))))
+      (should (eq first last)))))
+
+(ert-deftest cooked-image-bytes-cross-once-and-are-kept ()
+  "The module sends a picture once however often it is placed, so a later
+placement naming the same id has to find the bytes still here."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
+    ;; A second drain places the same id and carries no `:images' at all.
+    (cooked--apply (cooked-tests--image-update 7 3 1 nil))
+    (should (eq (car-safe (car-safe (get-text-property (point-min) 'display))) 'slice))))
+
+(ert-deftest cooked-image-placement-without-data-renders-as-blanks ()
+  "An id this buffer was never told about must not break the row: the cells are
+blanks on the grid, and they stay blanks here."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked--apply (cooked-tests--image-update 99 3 1 nil))
+    (should-not (get-text-property (point-min) 'display))
+    ;; Read from the buffer, not `cooked-tests--text', which trims trailing
+    ;; whitespace -- and a row that is only image cells is nothing but that.
+    (should (equal (buffer-substring-no-properties (point-min) (+ (point-min) 3))
+                   "   "))))
+
+(ert-deftest cooked-inline-images-disabled-leaves-the-cells-alone ()
+  (let ((cooked-inline-images nil))
+    (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+      (should (cooked-tests--settle (lambda () cooked--session)))
+      (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
+      (should-not (get-text-property (point-min) 'display)))))
+
+(ert-deftest cooked-image-slices-are-rebuilt-on-zoom ()
+  "The slice geometry is in cells, so a new cell size moves every slice as well
+as resizing the spec they cut from."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
+    (let ((inhibit-read-only t))
+      (put-text-property (point-min) (1+ (point-min)) 'display 'clobbered))
+    (text-scale-increase 1)
+    (should (eq (car-safe (car-safe (get-text-property (point-min) 'display))) 'slice))))
