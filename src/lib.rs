@@ -126,6 +126,17 @@ is what a program that cleared ISIG asked for.",
         ),
         env.defun("cooked--pid", 1..=1, "Process id of SESSION's child.", pid),
         env.defun(
+            "cooked--foreground-pid",
+            1..=1,
+            "Process id of SESSION's foreground process group, or nil.
+
+Not the same as `cooked--pid': that is the process cooked spawned, which is
+usually a shell, while this is the program the user is actually looking at --
+what the shell put in the foreground.  nil when the tty has no answer, which is
+ordinary between jobs and once the session is over.",
+            foreground_pid,
+        ),
+        env.defun(
             "cooked--live-p",
             1..=1,
             "Whether SESSION's child is still running.",
@@ -393,6 +404,16 @@ fn job_control(env: Env, args: &[Value]) -> Result<Value> {
 
 fn pid(env: Env, args: &[Value]) -> Result<Value> {
     env.into_lisp(i64::from(handle(&env, args[0])?.pid().get()))
+}
+
+fn foreground_pid(env: Env, args: &[Value]) -> Result<Value> {
+    // nil rather than an error: `tcgetpgrp' has nothing to report between a shell putting
+    // one job down and the next taking over, and once the session is gone it can answer 0.
+    // Neither is a fault the caller can do anything about, and both are ordinary.
+    match handle(&env, args[0])?.foreground() {
+        Ok(pid) => env.into_lisp(i64::from(pid.get())),
+        Err(_) => Ok(env.intern("nil")?),
+    }
 }
 
 fn live_p(env: Env, args: &[Value]) -> Result<Value> {

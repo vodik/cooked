@@ -988,6 +988,91 @@ unmodified selves, and Shift+TAB produced nothing at all."
     (should (equal (cooked--encode-event 'C-return) "\e[13;5u"))
     (should (equal (cooked--encode-event 'return) "\r"))))
 
+(ert-deftest cooked-key-override-actions-encode-to-their-bytes ()
+  "Every `cooked-key-overrides' action form, and the reason each one exists:
+nobody should have to write `ESC [ 13;2 u' out by hand to bind Shift+Return."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    ;; Named bytes.
+    (should (equal (cooked--override-bytes-for :newline 'S-return) "\n"))
+    (should (equal (cooked--override-bytes-for :return 'S-return) "\r"))
+    (should (equal (cooked--override-bytes-for :meta-return 'S-return) "\e\r"))
+    (should (equal (cooked--override-bytes-for :tab 'S-return) "\t"))
+    (should (equal (cooked--override-bytes-for :escape 'S-return) "\e"))
+    ;; Protocol keywords re-spell the key that was pressed.
+    (should (equal (cooked--override-bytes-for :kitty 'S-return) "\e[13;2u"))
+    (should (equal (cooked--override-bytes-for :modify-other 'S-return)
+                   "\e[27;2;13~"))
+    (should (equal (cooked--override-bytes-for :kitty 'C-return) "\e[13;5u"))
+    ;; A literal string is the escape hatch.
+    (should (equal (cooked--override-bytes-for "\e[200~" 'S-return) "\e[200~"))))
+
+(ert-deftest cooked-key-override-does-not-become-the-negotiated-encoding ()
+  "Regression guard on the whole design: an override is a statement about one
+program, not a discovery about what the child asked for.  If it leaked into
+`cooked--keys', every *other* modified key would start being spelled in a
+protocol the child never negotiated -- which is the rubbish-in-the-input case
+cooked exists to avoid."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (setq cooked--keys 'legacy)
+    (should (equal (cooked--override-bytes-for :kitty 'S-return) "\e[13;2u"))
+    (should (eq cooked--keys 'legacy))
+    ;; And the ordinary path is still spelling keys the legacy way.
+    (should (equal (cooked--encode-event 'S-return) "\r"))))
+
+(ert-deftest cooked-key-override-matches-the-foreground-program ()
+  "The child cooked spawned is a shell; the program an override names is
+whatever that shell put in the foreground.  Matching the session's own argv
+would miss every `claude' typed at a cooked prompt, which is the case this
+feature is for."
+  (let ((cooked-key-overrides '(("\\`cat\\'" . (("<S-return>" . :newline))))))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "stty raw -echo; printf '\033[?1049h'; exec cat -v")
+      (should (cooked-tests--settle (lambda () (eq (cooked--policy) 'alt))))
+      (cooked--refresh-keymap)
+      (should (equal (cooked--foreground-program) "cat"))
+      (should (eq (key-binding (kbd "<S-return>")) #'cooked-send-override))
+      ;; Above the state map, which still has its own binding for the key.
+      (should (eq (lookup-key cooked-alt-map (kbd "<S-return>")) #'cooked-send-key)))))
+
+(ert-deftest cooked-key-override-is-inert-when-emacs-owns-the-line ()
+  "Overrides take keys away from Emacs, so they may only apply while the child
+owns the keyboard.  Regression: an override on `<S-return>' that followed the
+buffer to its own prompt would displace `cooked-newline', and Shift+Return would
+stop composing a multi-line command."
+  (let ((cooked-key-overrides '(("." . (("<S-return>" . :newline))))))
+    (cooked-tests--with-session '("/bin/sh" "-c" "exec cat")
+      ;; A canonical read: Emacs owns the line.
+      (should (cooked-tests--settle (lambda () (cooked--input-state-p))))
+      (cooked--refresh-keymap)
+      (should-not cooked--override-map-alist)
+      (should (eq (key-binding (kbd "<S-return>")) #'cooked-newline))))
+  ;; And while peeking, which hands the buffer back to ordinary Emacs commands.
+  (let ((cooked-key-overrides '(("." . (("<S-return>" . :newline))))))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "stty raw -echo; printf '\033[?1049h'; exec cat -v")
+      (should (cooked-tests--settle (lambda () (eq (cooked--policy) 'alt))))
+      (cooked--refresh-keymap)
+      (should cooked--override-map-alist)
+      (call-interactively #'cooked-toggle-peek)
+      (should (cooked--suspended-p))
+      (should-not cooked--override-map-alist))))
+
+(ert-deftest cooked-key-override-default-covers-claude-code ()
+  "The default is deliberately one program wide.
+
+Shift+Return needs the kitty keyboard protocol or `modifyOtherKeys', and cooked
+sends either only to a child that negotiated it.  Claude Code never negotiates:
+it enables the kitty protocol from a list of terminal names it recognises in the
+environment, and never sends the `CSI ? u' query cooked answers.  Cooked will not
+claim to be one of those terminals, so the override is the honest way through --
+see `cooked-key-overrides'."
+  (let ((bindings (alist-get "\\`claude\\'" cooked-key-overrides
+                             nil nil #'equal)))
+    (should bindings)
+    (should (equal (alist-get "<S-return>" bindings nil nil #'equal) :newline))
+    ;; Nothing else is claimed by default.
+    (should (= 1 (length cooked-key-overrides)))))
+
 (ert-deftest cooked-typing-snaps-into-the-input-region ()
   "Regression, from two directions.
 

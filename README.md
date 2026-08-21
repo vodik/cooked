@@ -80,6 +80,33 @@ protocol, and sends the extended form **only** to a child that asked for it — 
 `ESC [ 27;2;13 ~` to a program that did not is not a Shift+Return, it is six characters
 of rubbish in its input.
 
+Some programs never ask. Claude Code enables the kitty protocol from a list of terminal
+*names* it recognises in the environment — `iTerm.app`, `kitty`, `WezTerm`, `ghostty`,
+`tmux`, `windows-terminal`, `WarpTerminal` — and never sends the `CSI ? u` query cooked
+stands ready to answer. Cooked will not claim to be one of them: it reports what it
+actually implements, which is the whole point of shipping a terminfo entry.
+
+So the way through is `cooked-key-overrides`, where it is your keyboard being configured
+rather than cooked's identity being misreported — the equivalent of kitty's
+`map --when-focus-on title:claude shift+enter send_text`:
+
+```elisp
+(setq cooked-key-overrides
+      '(("\\`claude\\'" . (("<S-return>" . :newline)))))
+```
+
+That is the default, and it is one program wide. The condition matches the name of the
+program in the child's **foreground process group**, so it catches a `claude` typed at a
+cooked shell, not just one started as the session's command; a function of no arguments
+works too, for a test the process name cannot express. The action is a named byte
+(`:newline`, `:return`, `:meta-return`, `:tab`, `:escape`), a protocol to re-spell the key
+in (`:kitty`, `:modify-other` — so nobody writes `ESC [ 13;2 u` by hand), a literal string,
+or a command.
+
+Overrides apply only while the child owns the keyboard, and none of this touches
+`cooked--keys`: what cooked sends of its own accord still follows the negotiation and
+nothing else.
+
 ## Keybindings
 
 How much stays with Emacs while the child owns the keyboard depends on what it's doing,

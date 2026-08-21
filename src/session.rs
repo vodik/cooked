@@ -331,6 +331,13 @@ impl Session {
         self.shared.pty.signal(sig)
     }
 
+    /// What is actually running on the tty right now, which is not the same question as
+    /// [`Session::pid`]: the child is usually a shell, and the program the user is looking
+    /// at is whatever that shell put in the foreground.
+    pub fn foreground(&self) -> io::Result<Pid> {
+        self.shared.pty.foreground()
+    }
+
     pub fn job_control(&self) -> io::Result<JobControl> {
         self.shared.pty.job_control()
     }

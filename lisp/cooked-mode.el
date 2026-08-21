@@ -30,6 +30,7 @@
 (declare-function cooked--focus-events-p "cooked-core")
 (declare-function cooked--alt-scroll-p "cooked-core")
 (declare-function cooked--live-p "cooked-core")
+(declare-function cooked--foreground-pid "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
 (defcustom cooked-buffer-name "*cooked: %s*"
@@ -327,6 +328,192 @@ behind the freeze."
       (if (string-empty-p text)
           (message "Nothing to paste")
         (cooked--send-paste text)))))
+
+;;;; Per-program key overrides
+
+(defconst cooked--override-bytes
+  '((:newline . "\n") (:return . "\r") (:meta-return . "\e\r")
+    (:tab . "\t") (:escape . "\e"))
+  "Bytes each named `cooked-key-overrides' action stands for.
+Names rather than literals so an override can be written without anyone having
+to know that Meta+Return is spelled ESC CR.")
+
+(defconst cooked--override-encodings
+  '((:kitty . kitty) (:modify-other . modify-other))
+  "Protocols a `cooked-key-overrides' action can name, and the `cooked--keys'
+value each one stands for.
+
+These re-spell the key that was pressed, so `<S-return>' with `:kitty' sends
+`ESC [ 13;2 u' without anyone writing that out.  Unlike everything else cooked
+sends, this is not backed by a negotiation -- see `cooked-key-overrides'.")
+
+(defcustom cooked-key-overrides
+  '(("\\`claude\\'" . (("<S-return>" . :newline))))
+  "Keys that mean something particular to a particular program.
+
+An alist of (CONDITION . BINDINGS), consulted only while the child owns the
+keyboard -- at a prompt Emacs owns the line, and `cooked-newline' already binds
+Shift+Return there.
+
+CONDITION is either a regexp matched against the name of the program in the
+child's foreground process group -- `claude' matches whether it was started as
+the session's command or typed at the session's shell -- or a function of no
+arguments called in the buffer, for a test the process name cannot express
+\(`cooked--title', `cooked--alt', `default-directory').
+
+BINDINGS is an alist of (KEY . ACTION), KEY as `kbd' spells it.  ACTION is:
+
+  a keyword naming bytes  `:newline', `:return', `:meta-return', `:tab',
+                          `:escape' -- see `cooked--override-bytes'
+  a protocol keyword      `:kitty' or `:modify-other', which re-spell the
+                          key that was pressed in that protocol
+  a string                sent to the child verbatim
+  a symbol                run as an ordinary command, e.g. `cooked-newline'
+
+Where several entries match, the first one to bind a key wins.
+
+The default covers Claude Code, whose Shift+Return is the reason this exists.
+Shift+Return has no classical encoding, so a terminal can only send it through
+the kitty keyboard protocol or xterm's `modifyOtherKeys' -- and cooked sends
+either one only to a child that asked for it, since to a child that did not,
+`ESC [ 27;2;13 ~' is six characters of rubbish rather than a keystroke.  Claude
+Code never asks: it turns the kitty protocol on from a list of terminal names it
+recognises in the environment, and never sends the query cooked stands ready to
+answer.  Cooked will not pretend to be one of those terminals -- it reports what
+it actually implements, which is the whole point of shipping a terminfo entry --
+so the honest way through is here, where it is your keyboard being configured
+rather than cooked's identity being misreported.
+
+That distinction is worth keeping in view for the protocol keywords in
+particular.  `:kitty' sends a sequence the child never negotiated, on your
+say-so that it understands one anyway; nothing here changes `cooked--keys', so
+what cooked sends of its own accord still follows the negotiation and nothing
+else."
+  :type '(alist :key-type (choice (regexp :tag "Foreground program matching")
+                                  (function :tag "Predicate"))
+                :value-type
+                (alist :key-type (string :tag "Key")
+                       :value-type (choice (const :tag "Newline (LF)" :newline)
+                                           (const :tag "Return (CR)" :return)
+                                           (const :tag "Meta+Return (ESC CR)" :meta-return)
+                                           (const :tag "Tab" :tab)
+                                           (const :tag "Escape" :escape)
+                                           (const :tag "Re-spell as kitty" :kitty)
+                                           (const :tag "Re-spell as modifyOtherKeys"
+                                                  :modify-other)
+                                           (string :tag "Literal bytes")
+                                           (function :tag "Command"))))
+  :group 'cooked)
+
+(defvar-local cooked--override-map nil
+  "Keymap for the overrides that apply to what is running right now.")
+
+(defvar-local cooked--override-map-alist nil
+  "The `emulation-mode-map-alists' entry activating `cooked--override-map'.
+
+Buffer-local, unlike `cooked--mouse-map-alist': the mouse map is one keymap
+shared by every session and switched on with a variable, while this one is built
+from whatever this buffer's child happens to be running.  nil deactivates it,
+which is also how the whole feature stays inert in a buffer with no overrides.")
+
+(defvar-local cooked--override-actions nil
+  "What `cooked-send-override' should send, keyed by the key that invoked it.
+
+The bindings could have been closures over their own bytes, but a keymap full of
+anonymous functions describes itself badly: \\[describe-key] on an overridden key
+should name a command you can look up.")
+
+(defvar-local cooked--foreground-name nil
+  "Cached (PID . NAME) for the child's foreground process group.
+`process-attributes' is not free, and the pid is what says whether it is stale.")
+
+(defun cooked--foreground-program ()
+  "Name of the program in the child's foreground process group, or nil.
+
+Not the session's own command: that is usually a shell, and what the user is
+looking at is whatever the shell put in the foreground.  So a `claude' typed at
+a cooked shell answers `claude' here, which is the case an override has to be
+able to name."
+  (when-let* ((session (cooked--live-session))
+              (pid (cooked--foreground-pid session)))
+    (if (eq pid (car cooked--foreground-name))
+        (cdr cooked--foreground-name)
+      (cdr (setq cooked--foreground-name
+                 (cons pid (alist-get 'comm (process-attributes pid))))))))
+
+(defun cooked--override-applies-p (condition)
+  "Whether CONDITION selects what the child is running now."
+  (if (functionp condition)
+      (funcall condition)
+    (when-let* ((program (cooked--foreground-program)))
+      (string-match-p condition program))))
+
+(defun cooked--override-bytes-for (action event)
+  "Bytes ACTION sends for EVENT, or nil if it sends none.
+
+A protocol keyword re-spells EVENT itself, which is what saves an override from
+having to write `ESC [ 13;2 u' out by hand.  `cooked--keys' is bound rather than
+consulted: the override is a statement about this one program, and must not
+become cooked's idea of what the child negotiated."
+  (cond
+   ((stringp action) action)
+   ((alist-get action cooked--override-bytes))
+   ((when-let* ((encoding (alist-get action cooked--override-encodings)))
+      (let ((cooked--keys encoding))
+        (cooked--encode-event event))))))
+
+(defun cooked-send-override ()
+  "Send the bytes `cooked-key-overrides' gives for the key that invoked this."
+  (interactive)
+  (when-let* ((action (alist-get (this-command-keys-vector)
+                                 cooked--override-actions nil nil #'equal))
+              (bytes (cooked--override-bytes-for action last-command-event)))
+    (cooked--snap-to-cursor)
+    (cooked--send-to-child bytes)))
+
+(defun cooked--build-override-map ()
+  "Keymap and action table for the overrides matching what is running.
+Returns nil when nothing matches, which is the common case."
+  (let ((map (make-sparse-keymap))
+        (actions nil)
+        (any nil))
+    (dolist (entry cooked-key-overrides)
+      (when (cooked--override-applies-p (car entry))
+        (pcase-dolist (`(,key . ,action) (cdr entry))
+          (let ((keys (kbd key)))
+            ;; An earlier entry wins, so a general rule can be written under a
+            ;; specific one without quietly taking it over.
+            (unless (lookup-key map keys)
+              (setq any t)
+              (if (and (symbolp action) (not (keywordp action)))
+                  (define-key map keys action)
+                ;; `vconcat' because `kbd' answers a string for an ASCII chord and
+                ;; a vector for a symbolic key, while the lookup side is always a
+                ;; vector -- and `key-parse', which would say this directly, is
+                ;; newer than the Emacs this package supports.
+                (push (cons (vconcat keys) action) actions)
+                (define-key map keys #'cooked-send-override)))))))
+    (when any (cons map actions))))
+
+(defun cooked--update-key-overrides ()
+  "Rebuild the override map for what the child is running now.
+
+Gated exactly as `cooked--update-mouse-grab' gates the mouse, and for the same
+reason: these are keys being taken away from Emacs, so they may only apply while
+the child owns the keyboard.  Without that, an override on `<S-return>' would
+follow the buffer to its own prompt and displace `cooked-newline'."
+  (let ((live (and cooked-key-overrides
+                   (not (cooked--input-state-p))
+                   (not (cooked--suspended-p)))))
+    (pcase (and live (cooked--build-override-map))
+      (`(,map . ,actions)
+       (setq cooked--override-map map
+             cooked--override-actions actions
+             cooked--override-map-alist `((cooked--override-map . ,map))))
+      (_
+       (setq cooked--override-map nil
+             cooked--override-actions nil
+             cooked--override-map-alist nil)))))
 
 (defconst cooked--escape-key ?\C-c
   "Prefix reserved for cooked's own commands while the child owns the keyboard.
@@ -1193,6 +1380,10 @@ are the ones left standing."
     (unless (cooked--input-state-p)
       (cooked--clear-input-region))
     (cooked--update-mouse-grab)
+    ;; Here rather than on a drain: this asks what the child is running, and a
+    ;; program starting or exiting is exactly what moves the policy that brought
+    ;; us here.
+    (cooked--update-key-overrides)
     ;; The state that decides whether a hidden cursor is honoured has just
     ;; changed, and a state change produces no output -- so without this nothing
     ;; would put a cursor back until the child next drew something.
@@ -1727,6 +1918,9 @@ to the child verbatim."
   ;; Above every minor mode, so a program that asked for the wheel gets it even
   ;; where `pixel-scroll-precision-mode' has claimed the same events.
   (add-to-list 'emulation-mode-map-alists 'cooked--mouse-map-alist)
+  ;; Above the state maps for the same reason, and above `cooked--mouse-map-alist'
+  ;; only incidentally -- the two never bind the same event.
+  (add-to-list 'emulation-mode-map-alists 'cooked--override-map-alist)
   (cooked--install-global-hooks)
   (add-hook 'pre-command-hook #'cooked--snap-to-input nil t)
   (add-hook 'post-command-hook #'cooked--track-wandering nil t)
