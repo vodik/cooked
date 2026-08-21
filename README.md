@@ -577,6 +577,73 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
   text that goes nowhere; and typing, `RET`, or any of cooked's own commands that write to
   the child end it and forward what was pressed, rather than requiring a separate step back.
 
-## Image test command
+## Showing images
 
+Commands that draw a picture in a cooked buffer. `--passthrough none` matters for chafa:
+it otherwise wraps its output for tmux and screen, and cooked is neither.
+
+```sh
+# kitty graphics, sixel, and whichever chafa detects on its own
 chafa -f kitty --passthrough none -s 60x20 kitty-test.png
+chafa -f sixel --passthrough none -s 60x20 kitty-test.png
+chafa          --passthrough none -s 60x20 kitty-test.png
+
+# iTerm2 inline images -- no encoder needed, just base64
+printf '\033]1337;File=inline=1:%s\a' "$(base64 -w0 kitty-test.png)"
+
+# ...where width= and height= are counted in cells
+printf '\033]1337;File=inline=1;width=20;height=6:%s\a' "$(base64 -w0 kitty-test.png)"
+
+# an animation, one transmission per frame
+chafa -f sixel --passthrough none -s 40x20 something.gif
+
+# video, at whatever frame rate the terminal can keep up with
+mpv --vo=sixel --profile=sw-fast clip.mp4
+mpv --vo=kitty --profile=sw-fast clip.mp4
+```
+
+Running `chafa` with no `-f` is the one worth doing at least once: it asks the terminal
+what it supports and picks. That covers the kitty capability probe (`a=q`) and the primary
+DA, which is the part a terminal can get wrong while rendering perfectly — answer neither
+and every well-behaved producer falls back to ASCII art.
+
+A plot, which is the reason to want any of this:
+
+```sh
+python3 <<'EOF'
+import io, sys, base64
+import matplotlib; matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+fig, ax = plt.subplots(figsize=(6, 3))
+ax.plot([1, 4, 2, 8, 5, 7]); ax.set_title("cooked")
+buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=100)
+sys.stdout.write("\033]1337;File=inline=1:%s\a" % base64.b64encode(buf.getvalue()).decode())
+EOF
+```
+
+`o=z`, the zlib-compressed kitty transmission that kitty's own `icat` sends by default,
+has no producer installable here, so it takes a few lines. The 4096-byte chunking is the
+protocol's rule rather than ours; one unchunked APC works too, up to the parser's 8MB.
+
+```sh
+python3 - kitty-test.png <<'EOF'
+import sys, zlib, base64
+data = base64.b64encode(zlib.compress(open(sys.argv[1], "rb").read(), 9)).decode()
+first = True
+while data:
+    chunk, data = data[:4096], data[4096:]
+    control = "a=T,f=100,o=z,i=1," if first else ""
+    sys.stdout.write("\033_G%sm=%d;%s\033\\" % (control, 1 if data else 0, chunk))
+    first = False
+EOF
+```
+
+**When nothing appears.** These paths draw a whole picture or nothing at all, so the
+useful question is whether the terminal refused *out loud* or dropped the transmission
+silently — and the answer goes to the child, not the screen. Both of these should draw
+nothing, reply, and not hang:
+
+```sh
+printf '\033_Ga=T,f=100,t=f,i=7;L3RtcC9mb28ucG5n\033\\'   # ENOTSUPPORTED:medium
+printf '\033_Ga=T,f=24,s=65535,v=65535,i=8;AAAA\033\\'    # EINVAL:dimensions
+```
