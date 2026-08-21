@@ -45,10 +45,18 @@ const MAX_OSC_PARAMS: usize = 16;
 /// whole base64 image. Consumers cap again on what the payload *means*; this is only the
 /// bound on what the parser will hold on their behalf.
 pub const MAX_APC_RAW: usize = 8 << 20;
-/// Retained as the yardstick `exceed_max_buffer_size` measures against; upstream
-/// used it to size the `no_std` OSC buffer, which is a `Vec` here.
-#[cfg(test)]
-const MAX_OSC_RAW: usize = 1024;
+/// Largest OSC payload the parser will collect before giving up on the string.
+///
+/// Upstream used its own 1024 to size a `no_std` array; the `Vec` that replaced it had no
+/// bound at all, which made an OSC nobody terminates an unbounded allocation driven by
+/// the child. Everything conventional -- a title, a working directory, a hyperlink -- is
+/// a few hundred bytes, but iTerm2's `OSC 1337` carries a whole base64 image, so the
+/// bound has to clear that rather than sit near the conventional traffic.
+///
+/// Consumers cap again on what a payload *means* -- see `OSC_PAYLOAD_LIMIT`, which is
+/// far tighter for every code that is not carrying a picture. This is only the bound on
+/// what the parser will hold on their behalf.
+pub const MAX_OSC_RAW: usize = 8 << 20;
 
 /// Parser for raw _VTE_ protocol which delegates actions to a [`Perform`]
 ///
@@ -64,6 +72,12 @@ pub struct Parser {
     osc_raw: Vec<u8>,
     osc_params: [(usize, usize); MAX_OSC_PARAMS],
     osc_num_params: usize,
+    /// Set when an OSC payload outgrew [`MAX_OSC_RAW`], so its end dispatches nothing.
+    ///
+    /// Dropped rather than truncated, for the same reason an over-long APC is: the
+    /// parameter offsets index into a buffer that stopped growing, so half an OSC is not
+    /// a shorter OSC but a set of slices that no longer mean what they say.
+    osc_overflow: bool,
     apc_raw: Vec<u8>,
     /// Set when an APC payload outgrew [`MAX_APC_RAW`], so its end dispatches nothing.
     ///
@@ -417,6 +431,7 @@ impl Parser {
             0x5D => {
                 self.osc_raw.clear();
                 self.osc_num_params = 0;
+                self.osc_overflow = false;
                 self.state = State::OscString
             }
             0x5E => self.state = State::SosPmApcString,
@@ -639,14 +654,21 @@ impl Parser {
 
     #[inline(always)]
     fn action_osc_put(&mut self, byte: u8) {
+        if self.osc_raw.len() >= MAX_OSC_RAW {
+            self.osc_overflow = true;
+            return;
+        }
         self.osc_raw.push(byte);
     }
 
     fn osc_end<P: Perform>(&mut self, performer: &mut P, byte: u8) {
         self.action_osc_put_param();
-        self.osc_dispatch(performer, byte);
+        if !self.osc_overflow {
+            self.osc_dispatch(performer, byte);
+        }
         self.osc_raw.clear();
         self.osc_num_params = 0;
+        self.osc_overflow = false;
     }
 
     /// Reset escape sequence parameters and intermediates.
@@ -1136,32 +1158,61 @@ mod tests {
     }
 
     #[test]
-    fn exceed_max_buffer_size() {
-        const NUM_BYTES: usize = MAX_OSC_RAW + 100;
-        const INPUT_START: &[u8] = b"\x1b]52;s";
-        const INPUT_END: &[u8] = b"\x07";
-
+    fn an_overlong_osc_is_dropped_rather_than_truncated() {
+        // Upstream let this `Vec` grow without limit, so an OSC nobody terminates was an
+        // allocation the child controlled. Dropped rather than truncated because the
+        // parameter offsets index into the buffer: half an OSC is not a shorter OSC, it
+        // is a set of slices that no longer mean what they say.
         let mut dispatcher = Dispatcher::default();
         let mut parser = Parser::new();
 
-        // Create valid OSC escape
-        parser.advance(&mut dispatcher, INPUT_START);
+        parser.advance(&mut dispatcher, b"\x1b]52;s");
+        parser.advance(&mut dispatcher, &vec![b'a'; MAX_OSC_RAW + 100]);
+        parser.advance(&mut dispatcher, b"\x07");
 
-        // Exceed max buffer size
-        parser.advance(&mut dispatcher, &[b'a'; NUM_BYTES]);
+        assert!(dispatcher.dispatched.is_empty());
+    }
 
-        // Terminate escape for dispatch
-        parser.advance(&mut dispatcher, INPUT_END);
+    #[test]
+    fn an_overlong_osc_does_not_poison_the_next_one() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        parser.advance(&mut dispatcher, b"\x1b]52;s");
+        parser.advance(&mut dispatcher, &vec![b'a'; MAX_OSC_RAW + 100]);
+        parser.advance(&mut dispatcher, b"\x07");
+        parser.advance(&mut dispatcher, b"\x1b]2;title\x07");
 
         assert_eq!(dispatcher.dispatched.len(), 1);
         match &dispatcher.dispatched[0] {
             Sequence::Osc(params, _) => {
-                assert_eq!(params.len(), 2);
-                assert_eq!(params[0], b"52");
-
-                assert_eq!(params[1].len(), NUM_BYTES + INPUT_END.len());
+                assert_eq!(params[0], b"2");
+                assert_eq!(params[1], b"title");
             }
-            _ => panic!("expected osc sequence"),
+            other => panic!("expected osc sequence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_osc_abandoned_midway_does_not_poison_the_next_one() {
+        // An overflow cleared by `osc_end` is the easy case; one abandoned by an ESC
+        // that starts something else has to clear the flag too.
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        parser.advance(&mut dispatcher, b"\x1b]52;s");
+        parser.advance(&mut dispatcher, &vec![b'a'; MAX_OSC_RAW + 100]);
+        parser.advance(&mut dispatcher, b"\x1b]2;title\x07");
+
+        let dispatched: Vec<_> = dispatcher
+            .dispatched
+            .iter()
+            .filter(|s| matches!(s, Sequence::Osc(..)))
+            .collect();
+        assert_eq!(dispatched.len(), 1);
+        match dispatched[0] {
+            Sequence::Osc(params, _) => assert_eq!(params[1], b"title"),
+            other => panic!("expected osc sequence, got {other:?}"),
         }
     }
 
