@@ -697,7 +697,7 @@ produce — the same defect `indent-bars' documents for box characters."
         (window-default-line-height window)))
 
 (defun cooked--box-glyph-bits (bits size &optional phase)
-  "Cached raw bitmap for glyph descriptor BITS at cell SIZE, from `cooked--cell-size'.
+  "Cached raw bitmap for glyph BITS at cell SIZE, from `cooked--cell-size'.
 
 PHASE joins the cache key, since two cells of the same glyph at opposite phases
 are genuinely different bitmaps.  It is non-zero only for shade glyphs at an odd
@@ -751,7 +751,7 @@ would be stale the moment the buffer is zoomed."
             (ash (logand (* (or row 0) (cdr size)) 1) 1))))
 
 (defun cooked--box-glyph-image (bits fg bg attrs window size phase)
-  "Image spec for glyph BITS at cell SIZE, colored from FG/BG/ATTRS like `cooked--face'.
+  "Image spec for glyph BITS at cell SIZE, colored from FG/BG/ATTRS.
 
 Memoized in `cooked--deco-image-cache'.  Not premature: the bits underneath were
 already cached, but the spec was rebuilt for every box character of every
@@ -798,41 +798,47 @@ replaces."
                     :ascent (cooked--box-glyph-ascent window height)))))
 
 (defun cooked--apply-deco (start deco fg bg attrs &optional origin row)
-  "Hang DECO's per-character `display' properties on the text beginning at START.
+  "Hang DECO's per-character `display' properties on the text at START.
 
-DECO is `(KIND . PACKED)\=', what `deco_to_lisp\=' in src/lib.rs hands over: KIND
-names what the run\='s characters display instead of themselves, and PACKED is a
-unibyte string of fixed-width little-endian records, one per character.  Packed
-rather than a list because this runs on every damaged row of every frame, and
-box drawing is what full-screen programs are made of — a list would cons per
-character of each redraw.
+DECO is `(KIND . PACKED)\=', what `deco_to_lisp\=' in src/lib.rs hands over:
+KIND names what the run\='s characters display instead of themselves, and
+PACKED is a unibyte string of fixed-width little-endian records, one per
+character.  Packed rather than a list because this runs on every damaged row
+of every frame, and box drawing is what full-screen programs are made of — a
+list would cons per character of each redraw.
 
 One property per character rather than one spanning the run: a decorated
 character is always single-column, and a merged run can mix shapes.  Also
-stashes `cooked-deco\=', the record plus its colors and its place on the screen,
-so `cooked--rescale-deco\=' can regenerate at a new zoom level without asking the
-native core for anything — and without having to work out where each character
-sat all over again.
+stashes `cooked-deco\=', the record plus its colors and its place on the
+screen, so `cooked--rescale-deco\=' can regenerate at a new zoom level without
+asking the native core for anything — and without having to work out where
+each character sat all over again.
 
-ORIGIN is the buffer position of screen column 0 on this row, and ROW the row\='s
-index; together they place a shade glyph\='s dither in absolute screen space.
-ORIGIN is passed in rather than taken from `line-beginning-position\=' because row
-0 does not always start a buffer line — it continues the wrapped row above it,
-as `cooked--goto-screen-row\=' explains.  A preceding double-width character still
-puts the column out by one, which costs a seam in a rare case and is not worth a
-per-row width scan to avoid.
+ORIGIN is the buffer position of screen column 0 on this row, and ROW the
+row\='s index; together they place a shade glyph\='s dither in absolute screen
+space.  ORIGIN is passed in rather than taken from `line-beginning-position\='
+because row 0 does not always start a buffer line — it continues the wrapped
+row above it, as `cooked--goto-screen-row\=' explains.  A preceding
+double-width character still puts the column out by one, which costs a seam
+in a rare case and is not worth a per-row width scan to avoid.
 
-FG, BG and ATTRS are the run\='s, since a decoration is colored from the cell it
-stands in.  FG/BG/ATTRS are the run\='s own; the underline colour is deliberately
-not passed, because nothing here renders from it."
+FG, BG and ATTRS are the run\='s own, since a decoration is colored from the
+cell it stands in.  The underline colour is deliberately not passed, because
+nothing here renders from it."
   (condition-case nil
-      (let* ((window (or (cooked--layout-window) (selected-window)))
-             (size (cooked--cell-size window)))
-        (pcase deco
-          (`(glyph . ,packed)
-           (cooked--apply-glyph-deco start packed fg bg attrs window size origin row))))
+      (pcase deco
+        (`(glyph . ,packed)
+         ;; Each kind checks its own preconditions rather than the caller checking
+         ;; for all of them: what a decoration needs in order to render is the
+         ;; decoration's business, and the renderer should not have to grow a
+         ;; condition every time a kind is added.
+         (when (and cooked-box-drawing-images (image-type-available-p 'xbm))
+           (let* ((window (or (cooked--layout-window) (selected-window)))
+                  (size (cooked--cell-size window)))
+             (cooked--apply-glyph-deco
+              start packed fg bg attrs window size origin row)))))
     ;; A cosmetic feature must never break rendering: any failure here leaves the
-    ;; plain face-only text `cooked--insert-runs' already inserted.
+    ;; plain face-only text `cooked--render-block' already inserted.
     (error nil)))
 
 (defun cooked--apply-glyph-deco (start packed fg bg attrs window size origin row)
@@ -898,35 +904,45 @@ itself is the one thing every zoom entry point actually sets."
 
 ;;;; Putting styled text in the buffer
 
-(defun cooked--insert-runs (runs &optional row)
-  "Insert RUNS, each (TEXT FG BG ATTRS GLYPHS), with faces applied.
+(defun cooked--render-block (block &optional row)
+  "Insert BLOCK at point, with its styling and decoration applied.
 
-Colour rides on `face' alone.  `cooked-mode' clears `font-lock-defaults',
-which comint leaves at (nil t) — under that setting any fontification of the
-buffer unfontifies it first and strips a bare `face', which is why this used to
-set `font-lock-face' alongside it.
+BLOCK is (TEXT STYLE-SPANS DECO-SPANS), the one shape rendered text crosses the
+module boundary in — see `cooked--drain'.  TEXT is the whole run of characters;
+each span is (START END FG BG ATTRS TAIL) with offsets in characters into TEXT,
+and spans appear only where there is something to say, so a plain unstyled row
+carries neither list.  A style span's TAIL is the underline colour; a decoration
+span's is what its characters display instead of themselves.
 
-DECO is nil for a plain run, or `(KIND . PACKED)\=' — what the run's characters
-display instead of themselves, KIND naming the sort and PACKED holding one
-fixed-width record per character of TEXT.  When present, and
-`cooked-box-drawing-images\=' allows it, each character additionally gets a
-generated `display\=' property so it renders as a pixel-exact shape instead of
-whatever the font happens to draw for that codepoint.  See `cooked--apply-deco\='.
+One insert plus properties, rather than an insert per run: Emacs pays for every
+`insert', and building a propertized string in Lisp and inserting that instead
+measures three times slower, because `concat' on propertized strings makes Emacs
+copy and merge property intervals over and over.
 
-ROW is the screen row these runs make up, where the caller knows it.  Point on
-entry is that row's screen column 0, which is the origin a shade glyph's dither
-is phased against — and is not the same as the row's line beginning, since row 0
-can continue a wrapped line."
-  (let ((origin (point)))
-    (dolist (run runs)
-      (pcase-let ((`(,text ,fg ,bg ,attrs ,deco ,ul) run))
-        (let ((start (point))
-              (face (cooked--face fg bg attrs ul)))
-          (insert text)
-          (when face
-            (put-text-property start (point) 'face face))
-          (when (and deco cooked-box-drawing-images (image-type-available-p 'xbm))
-            (cooked--apply-deco start deco fg bg attrs origin row)))))))
+Colour rides on `face' alone.  `cooked-mode' clears `font-lock-defaults', which
+comint leaves at (nil t) — under that setting any fontification of the buffer
+unfontifies it first and strips a bare `face', which is why this used to set
+`font-lock-face' alongside it.
+
+ROW is the screen row BLOCK makes up, where the caller knows it — the live
+screen does, scrollback does not.  It also stands in for the origin a shade
+glyph's dither is phased against, which is this row's screen column 0 and so is
+where the text was just inserted.  Scrollback passes neither and loses at most a
+seam on that one glyph kind.
+
+Returns the position the text was inserted at."
+  (pcase-let ((`(,text ,styles ,decos) block))
+    (let ((start (point)))
+      (insert text)
+      (dolist (span styles)
+        (pcase-let ((`(,from ,to ,fg ,bg ,attrs ,ul) span))
+          (when-let* ((face (cooked--face fg bg attrs ul)))
+            (put-text-property (+ start from) (+ start to) 'face face))))
+      (dolist (span decos)
+        (pcase-let ((`(,from ,_to ,fg ,bg ,attrs ,deco) span))
+          (cooked--apply-deco (+ start from) deco fg bg attrs
+                              (and row start) row)))
+      start)))
 
 ;;;; Who owns the keyboard
 ;;
@@ -1252,53 +1268,37 @@ what was displayed."
         (goto-char (line-end-position))
         (insert (make-string short ?\s))))))
 
-(defun cooked--render-scrolled (rows)
-  "Append ROWS to the scrollback above the live screen, returning where they went.
+(defun cooked--render-scrolled (block)
+  "Append BLOCK to the scrollback above the live screen, returning where it went.
 
 The return value is the buffer position the batch was inserted at, which is what
 a `scrolled' anchor is an offset from — see `cooked--anchor-position'.  It stays
 valid for the rest of the redisplay: everything rendered afterwards goes below
 it.
 
-The marker is advanced explicitly rather than by insertion type:
-rendering screen row 0 also inserts at this position, and an
-auto-advancing marker would drift into the screen region.
+The marker is advanced explicitly rather than by insertion type: rendering
+screen row 0 also inserts at this position, and an auto-advancing marker would
+drift into the screen region.
 
 Widens first: history can arrive while the alt screen is up — a resize evicts
 rows from the primary even when a full-screen program is showing — and the
-insertion point is above the region `cooked-alt-screen-pin' confines us to."
+insertion point is above the region `cooked-alt-screen-pin' confines us to.
+
+No row index is passed to `cooked--render-block': scrollback has no screen
+column to phase a shade glyph's dither against, which costs at most a seam on
+that one glyph kind, exactly as a live row rendered without a known origin does."
   (save-restriction
     (widen)
     (save-excursion
       (goto-char cooked--screen-start)
-      ;; ROWS arrives pre-assembled as (TEXT STYLE-SPANS DECO-SPANS), so this is one
-      ;; insert of plain text plus property calls only where styling or glyphs exist.
-      ;; Note that building a propertized string in Lisp and inserting that instead
-      ;; measures three times slower: `concat' on propertized strings makes Emacs copy
-      ;; and merge property intervals over and over.
-      (pcase-let ((`(,text ,spans ,deco-spans) rows))
-        (let ((start (point)))
-          (insert text)
-          (dolist (span spans)
-            (pcase-let ((`(,from ,to ,fg ,bg ,attrs ,ul) span))
-              (when-let* ((face (cooked--face fg bg attrs ul)))
-                (put-text-property (+ start from) (+ start to) 'face face))))
-          ;; Decoration that scrolled into history is rendered exactly as it would
-          ;; be live, via the same `cooked--apply-deco' the screen region uses
-          ;; — there is no screen column here to phase a shade glyph's dither against,
-          ;; which costs at most a seam on that one glyph kind, same as a live row
-          ;; rendered without a known origin.
-          (when (and deco-spans cooked-box-drawing-images (image-type-available-p 'xbm))
-            (dolist (span deco-spans)
-              (pcase-let ((`(,from ,_to ,fg ,bg ,attrs ,deco) span))
-                (cooked--apply-deco (+ start from) deco fg bg attrs))))
-          ;; Scrollback never changes again, so it is protected once, here, rather
-          ;; than re-swept on every redisplay.
-          (add-text-properties start (point)
-                               '(cooked-scrollback t read-only t
-                                 front-sticky (read-only) rear-nonsticky (read-only)))
-          (set-marker cooked--screen-start (point))
-          start)))))
+      (let ((start (cooked--render-block block)))
+        ;; Scrollback never changes again, so it is protected once, here, rather
+        ;; than re-swept on every redisplay.
+        (add-text-properties start (point)
+                             '(cooked-scrollback t read-only t
+                               front-sticky (read-only) rear-nonsticky (read-only)))
+        (set-marker cooked--screen-start (point))
+        start))))
 
 ;;;; The child's cursor, while Emacs has wandered off it
 
@@ -1658,13 +1658,13 @@ choice here too, and `$' — which is what Emacs itself falls back to — otherw
       ?$))
 
 (defun cooked--render-rows (rows)
-  "Rewrite damaged ROWS, an alist of (INDEX . RUNS)."
+  "Rewrite damaged ROWS, an alist of (INDEX . BLOCK)."
   (save-excursion
-    (pcase-dolist (`(,index . ,runs) rows)
+    (pcase-dolist (`(,index . ,block) rows)
       (cooked--goto-screen-row index 'extend)
       (delete-region (point) (line-end-position))
       (let ((start (point)))
-        (cooked--insert-runs runs index)
+        (cooked--render-block block index)
         (cooked--guard-row-width start)))))
 
 ;;;; Cells, anchors and positions

@@ -154,18 +154,25 @@ missing here from the moment the drain grew them, which is how
           :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
 
 (defun cooked-bench--plain-rows (count cols)
-  "COUNT damaged rows of unstyled text, the cheapest thing to render."
+  "COUNT damaged rows of unstyled text, the cheapest thing to render.
+
+A row is (INDEX . BLOCK), and a block is (TEXT STYLE-SPANS DECO-SPANS) with
+offsets in characters -- see `cooked--render-block'.  Unstyled text carries
+neither span list, which is the case the sparse shape is built around."
   (let ((text (make-string cols ?x)))
-    (cl-loop for i below count
-             collect (cons i (list (list text nil nil 0 nil nil))))))
+    (cl-loop for i below count collect (cons i (list text nil nil)))))
 
 (defun cooked-bench--styled-rows (count cols)
-  "COUNT damaged rows split into several differently-styled runs."
-  (cl-loop for i below count
-           collect (cons i (cl-loop for r below 8
-                                    collect (list (make-string (/ cols 8) ?x)
-                                                  (mod (+ i r) 8) nil
-                                                  (if (cl-evenp r) 1 0) nil nil)))))
+  "COUNT damaged rows split into eight differently-styled spans."
+  (let ((width (/ cols 8)))
+    (cl-loop for i below count
+             collect (cons i (list (make-string (* 8 width) ?x)
+                                   (cl-loop for r below 8
+                                            collect (list (* r width)
+                                                          (* (1+ r) width)
+                                                          (mod (+ i r) 8) nil
+                                                          (if (cl-evenp r) 1 0) nil))
+                                   nil)))))
 
 (defun cooked-bench--box-rows (count cols)
   "COUNT damaged rows of box drawing, every cell taking the bitmap path.
@@ -173,11 +180,11 @@ missing here from the moment the drain grew them, which is how
 The decoration is `(glyph . PACKED)\=' as the module hands it over, PACKED being
 two little-endian bytes per character.  0x0050 is a plain light horizontal —
 left and right edges at weight 1 — which is what a border is made of."
-  (let ((text (make-string cols ?─))
-        (deco (cons 'glyph (apply #'unibyte-string
-                                  (cl-loop repeat cols append (list #x50 #x00))))))
-    (cl-loop for i below count
-             collect (cons i (list (list text nil nil 0 deco nil))))))
+  (let* ((text (make-string cols ?─))
+         (deco (cons 'glyph (apply #'unibyte-string
+                                   (cl-loop repeat cols append (list #x50 #x00)))))
+         (spans (list (list 0 cols nil nil 0 deco))))
+    (cl-loop for i below count collect (cons i (list text nil spans)))))
 
 (defun cooked-bench--frames (label rows frames)
   "Apply ROWS as a damaged-row update FRAMES times, timing the lot."

@@ -188,6 +188,11 @@ awaiting collection before the child is left to block on its own writes; it defa
 const DOC_DRAIN: &str = "Collect everything that changed in SESSION since the last call.
 Returns a plist with :scrolled, :rows, :height, :used, :head, :cursor, :alt,
 :app-cursor, :keys, :mode, :images, :events and :exit.
+
+:scrolled and :rows are the same shape, so one renderer handles both: a block is
+(TEXT STYLE-SPANS DECO-SPANS), where the spans carry character offsets into TEXT and
+appear only where there is something to say.  :scrolled is one block for the whole
+batch; :rows is an alist of (INDEX . BLOCK), one per damaged screen row.
 With REJOIN non-nil (the default), a line the terminal wrapped is emitted as one
 line rather than one per screen row.
 
@@ -469,16 +474,17 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
     // mark on a row that scrolled away during this very drain is spelled as an offset
     // into the text about to be inserted, which only exists once that text is built.
     let (scrolled, spans) = update.scrolled_rows(env, rejoin)?;
+    // `(INDEX . BLOCK)`, the same [`Block`] scrollback arrives in, so one renderer in
+    // Lisp handles both. A damaged row carries no newline: it is written into a line
+    // that already exists.
     let rows = update
         .delta
         .rows
         .iter()
         .map(|(index, runs)| {
-            let runs = runs
-                .iter()
-                .map(|r| run_to_lisp(env, r))
-                .collect::<Result<Vec<_>>>()?;
-            env.cons(env.into_lisp(*index)?, env.list(&runs)?)
+            let mut block = Block::default();
+            block.push_runs(env, runs)?;
+            env.cons(env.into_lisp(*index)?, block.into_lisp(env)?)
         })
         .collect::<Result<Vec<_>>>()?;
     let cursor = env.list(&[
@@ -524,6 +530,80 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
     ])
 }
 
+/// A run of buffer text with its styling and decoration held off to the side.
+///
+/// The one shape rendered text crosses in, for the live screen and for scrollback alike.
+/// There used to be two — runs handed over one at a time for damaged rows, and this
+/// sparse form for the flood path — which meant two encoders here, two renderers in
+/// Lisp, and every field having to be taught to both. They had already drifted: the
+/// underline colour reached one and not the other.
+///
+/// The sparse form is the one worth keeping, because Emacs pays for every `insert`.
+/// One insert of one string plus properties only where they depart from the default
+/// beats N inserts and N property calls, and it keeps roughly a million cons cells from
+/// crossing the boundary on a flood. A plain unstyled row — the overwhelming majority
+/// on the primary screen — pays for neither span list, and a row of eight styled runs
+/// now costs one insert instead of eight.
+///
+/// STYLE-SPANS and DECO-SPANS share a prefix and diverge in their last element, which is
+/// not an accident worth tidying: a style span's tail is the underline colour, and a
+/// decoration renders from the foreground, background and attributes but never from
+/// that, so giving DECO-SPANS an underline it would ignore would be carrying a field to
+/// look symmetric.
+#[derive(Default)]
+struct Block {
+    text: String,
+    styles: Vec<Value>,
+    decos: Vec<Value>,
+    offset: usize,
+}
+
+impl Block {
+    /// Append RUNS, emitting spans only where there is something to say.
+    fn push_runs(&mut self, env: &Env, runs: &[Run]) -> Result<()> {
+        for run in runs {
+            let chars = run.text.chars().count();
+            let Style { fg, bg, attrs } = run.style;
+            if run.style != Style::default() || run.underline != Color::Default {
+                self.styles.push(env.list(&[
+                    env.into_lisp(self.offset)?,
+                    env.into_lisp(self.offset + chars)?,
+                    color_to_lisp(env, fg)?,
+                    color_to_lisp(env, bg)?,
+                    env.into_lisp(u32::from(attrs.bits()))?,
+                    color_to_lisp(env, run.underline)?,
+                ])?);
+            }
+            if run.deco.is_some() {
+                self.decos.push(env.list(&[
+                    env.into_lisp(self.offset)?,
+                    env.into_lisp(self.offset + chars)?,
+                    color_to_lisp(env, fg)?,
+                    color_to_lisp(env, bg)?,
+                    env.into_lisp(u32::from(attrs.bits()))?,
+                    deco_to_lisp(env, run.deco.as_ref())?,
+                ])?);
+            }
+            self.text.push_str(&run.text);
+            self.offset += chars;
+        }
+        Ok(())
+    }
+
+    fn push_newline(&mut self) {
+        self.text.push('\n');
+        self.offset += 1;
+    }
+
+    fn into_lisp(self, env: &Env) -> Result<Value> {
+        env.list(&[
+            env.into_lisp(self.text.as_str())?,
+            env.list(&self.styles)?,
+            env.list(&self.decos)?,
+        ])
+    }
+}
+
 /// Where one scrolled row's text ended up in the assembled scrollback string: its start
 /// offset in characters, and how many characters it contributed.
 ///
@@ -559,44 +639,16 @@ impl Update {
         if self.delta.scrolled.is_empty() {
             return Ok((env.nil(), Vec::new()));
         }
-        let mut text = String::new();
-        let mut spans: Vec<Value> = Vec::new();
-        let mut deco_spans: Vec<Value> = Vec::new();
+        let mut block = Block::default();
         let mut rows: Vec<RowSpan> = Vec::with_capacity(self.delta.scrolled.len());
-        let mut offset = 0usize;
         let last = self.delta.scrolled.len() - 1;
 
         for (i, line) in self.delta.scrolled.iter().enumerate() {
-            let start = offset;
-            for run in &line.runs {
-                let chars = run.text.chars().count();
-                let Style { fg, bg, attrs } = run.style;
-                if run.style != Style::default() || run.underline != Color::Default {
-                    spans.push(env.list(&[
-                        env.into_lisp(offset)?,
-                        env.into_lisp(offset + chars)?,
-                        color_to_lisp(env, fg)?,
-                        color_to_lisp(env, bg)?,
-                        env.into_lisp(u32::from(attrs.bits()))?,
-                        color_to_lisp(env, run.underline)?,
-                    ])?);
-                }
-                if run.deco.is_some() {
-                    deco_spans.push(env.list(&[
-                        env.into_lisp(offset)?,
-                        env.into_lisp(offset + chars)?,
-                        color_to_lisp(env, fg)?,
-                        color_to_lisp(env, bg)?,
-                        env.into_lisp(u32::from(attrs.bits()))?,
-                        deco_to_lisp(env, run.deco.as_ref())?,
-                    ])?);
-                }
-                text.push_str(&run.text);
-                offset += chars;
-            }
+            let start = block.offset;
+            block.push_runs(env, &line.runs)?;
             rows.push(RowSpan {
                 start,
-                chars: offset - start,
+                chars: block.offset - start,
             });
             // A wrapped row is a continuation, so it joins the line above rather
             // than starting a new one — except when it is the batch's last row and
@@ -605,19 +657,11 @@ impl Update {
             // joining onto it would permanently weld this frozen scrollback text to
             // the front of a live row that gets rewritten every redraw.
             if !(rejoin && line.wrapped && !(i == last && self.delta.alt)) {
-                text.push('\n');
-                offset += 1;
+                block.push_newline();
             }
         }
 
-        Ok((
-            env.list(&[
-                env.into_lisp(text.as_str())?,
-                env.list(&spans)?,
-                env.list(&deco_spans)?,
-            ])?,
-            rows,
-        ))
+        Ok((block.into_lisp(env)?, rows))
     }
 
     /// Spell an [`Anchor`] in whichever coordinate system Emacs can address it in.
@@ -650,20 +694,6 @@ impl Update {
             None => Ok(env.nil()),
         }
     }
-}
-
-/// `(TEXT FG BG ATTRS DECO UNDERLINE)` — colors are nil, an index, or `(R G B)`;
-/// DECO is nil for a plain run, or `(KIND . PACKED)`, for which see [`deco_to_lisp`].
-fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
-    let Style { fg, bg, attrs } = run.style;
-    env.list(&[
-        env.into_lisp(run.text.as_str())?,
-        color_to_lisp(env, fg)?,
-        color_to_lisp(env, bg)?,
-        env.into_lisp(u32::from(attrs.bits()))?,
-        deco_to_lisp(env, run.deco.as_ref())?,
-        color_to_lisp(env, run.underline)?,
-    ])
 }
 
 /// Images transmitted this drain, each as `(ID FORMAT DATA PX-WIDTH PX-HEIGHT COLS ROWS)`.
