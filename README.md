@@ -417,7 +417,14 @@ protocol, DECRQM), termios state machine, secret prompts, scrollback, resize, pe
 exit codes, read-only transcript, output folding, evil integration, mode-line indicator
 for peeking, comint's command set and input ring.
 
-Not yet: sixel/kitty graphics, `vttest`-level conformance beyond the common paths.
+Images: the kitty graphics protocol (including `o=z` compression), sixel, and iTerm2's
+`OSC 1337` inline images. All three land as real Emacs images, one slice per cell, so
+text can overwrite them and they survive scrolling and rewrap. Not implemented, and
+declined out loud so a client can fall back: kitty's transmission by file, temp file or
+shared memory (`t=f`/`t=t`/`t=s` — reading a path a child names is a decision about
+trust, not a decode), unicode placeholders, animation and z-index.
+
+Not yet: `vttest`-level conformance beyond the common paths.
 
 ## Completion
 
