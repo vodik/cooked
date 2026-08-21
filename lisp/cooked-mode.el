@@ -842,7 +842,14 @@ mode `ICRNL' turns it into the newline the child expects, and in raw mode it is
 what a shell's line editor is bound to.  Sending LF works for readline but not
 for ZLE."
   (interactive)
-  (let ((text (or (cooked--take-pending-input) "")))
+  (let ((text (or (cooked--pending-input) "")))
+    ;; The text is left in the buffer rather than deleted, and that is the whole
+    ;; of the fix for a flicker on Enter: deleting it emptied the line here and
+    ;; now, while the echo that puts it back is a round trip through the child
+    ;; away -- one redisplay in between with the prompt bare, which reads as the
+    ;; line vanishing and coming back.  Left where it is, the echo redraws that
+    ;; row over the top of identical text and nothing moves.  Only the region
+    ;; goes, so the text stops being editable the moment it is submitted.
     (cooked--clear-input-region)
     (cooked--history-record text)
     (cooked--send-input-string text)))

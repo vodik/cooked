@@ -200,6 +200,46 @@ the shell you are typing at, over a line it has never seen."
         (with-current-buffer buffer (cooked--cleanup))
         (kill-buffer buffer)))))
 
+(ert-deftest cooked-completion-that-lists-nothing-leaves-no-copy-of-the-line ()
+  "A completer with nothing to offer used to paint the line onto the screen.
+
+compsys refreshes the display itself on the way to a message or a beep, and the
+line it draws is the one the capture put in BUFFER -- so a second copy of the
+command appeared exactly where the completion would have gone, and restoring
+BUFFER did not take it back.  `git commit -am <TAB>' is the everyday case: the
+flags have already said everything, so `_git' offers nothing and explains why."
+  (skip-unless (executable-find "zsh"))
+  (skip-unless (executable-find "git"))
+  (cooked-tests--with-fake-zdotdir
+      '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
+    (let ((buffer (generate-new-buffer "*cooked-complete*"))
+          (root (file-name-directory (directory-file-name cooked--source-directory))))
+      (unwind-protect
+          (with-current-buffer buffer
+            (cooked-mode)
+            (pcase-let ((`(,argv ,env ,scratch)
+                         (cooked--shell-invocation (executable-find "zsh"))))
+              (setq cooked--scratch scratch)
+              (cooked--start argv root env))
+            (cooked--refresh-keymap)
+            (should (cooked-tests--settle
+                     (lambda () (and (cooked--input-start-position) cooked--completion-nonce))))
+            (goto-char cooked--input-end)
+            (insert "git commit -am ")
+            (let ((before (cooked-tests--text))
+                  (cooked-completion-timeout 5))
+              ;; An answer arrived and it is empty -- (PREFIX SUFFIX TRUNCATED),
+              ;; with no records behind it -- which is the case this is about.
+              (should-not (nthcdr 3 (cooked--shell-completions "git commit -am " 15)))
+              ;; Asserted the moment the reply lands, not after the dust settles: the
+              ;; repair travels ahead of the reply, so there is no drain that can see
+              ;; the answer and still be showing the copy.
+              (should (equal (cooked-tests--text) before))
+              (cooked-tests--settle (lambda () nil) 0.3)
+              (should (equal (cooked-tests--text) before))))
+        (with-current-buffer buffer (cooked--cleanup))
+        (kill-buffer buffer)))))
+
 (ert-deftest cooked-completion-is-a-normal-capf ()
   "So corfu, cape and friends work without knowing about cooked."
   (cooked-tests--with-session '("/bin/cat")

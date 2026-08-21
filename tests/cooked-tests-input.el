@@ -652,8 +652,13 @@ has no handler and nothing drives evil at all."
     (dolist (line '("first" "second"))
       (cooked--replace-input line)
       (cooked-send-input)
+      ;; The input region, not the text: a submitted line stays on screen until
+      ;; the echo redraws over it, so its text is there the instant Enter is
+      ;; pressed and says nothing about whether the child has answered.  The
+      ;; region coming back is a drain having been applied.
       (should (cooked-tests--settle
-               (lambda () (string-match-p line (cooked-tests--text))))))
+               (lambda () (and (cooked--input-region)
+                               (string-match-p line (cooked-tests--text)))))))
 
     ;; The binding that used to signal "Not at command line".
     (should (eq (key-binding [remap comint-previous-input]) #'cooked-previous-input))
@@ -667,6 +672,30 @@ has no handler and nothing drives evil at all."
     ;; Stepping past the newest entry restores what was being typed.
     (cooked-next-input)
     (should (equal (cooked--pending-input) ""))))
+
+(ert-deftest cooked-submitting-leaves-the-line-on-screen ()
+  "Regression: Enter used to blank the line for as long as the round trip took.
+
+The pending input is Emacs\' text, and deleting it on submission emptied the
+prompt immediately, while what puts the line back is the child echoing it --
+a round trip away, with at least one redisplay in between.  The line vanished
+and reappeared.  It stays put now, and the echo redraws that row over the top
+of the same characters.  The region goes either way: what has been submitted
+is not editable."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--mode 'cooked) (cooked--input-start-position)))))
+    (cooked--replace-input "echo hi")
+    (cooked-send-input)
+    ;; No pump: this is the state the user is looking at while the child thinks.
+    (should (string-match-p "echo hi" (cooked-tests--text)))
+    (should-not (cooked--input-region))
+    ;; And the echo lands on top of it rather than beside it.  `cat' says the
+    ;; line twice by nature -- the kernel echoes it and the child prints it --
+    ;; so what is being ruled out is two copies on one row.
+    (should (cooked-tests--settle (lambda () (cooked--input-region))))
+    (should (equal (cooked--pending-input) ""))
+    (should-not (string-match-p "echo hi.*echo hi" (cooked-tests--text)))))
 
 (ert-deftest cooked-history-lives-in-comints-ring ()
   "The ring is the storage, not a private list kept beside it -- which is what
@@ -712,8 +741,10 @@ instead -- this is the regression guard for using comint\='s version by mistake.
              (lambda () (and (eq cooked--mode 'cooked) (cooked--input-start-position)))))
     (cooked--replace-input "remembered")
     (cooked-send-input)
+    ;; See `cooked-input-history-recalls-submissions': the region, not the text.
     (should (cooked-tests--settle
-             (lambda () (string-match-p "remembered" (cooked-tests--text)))))
+             (lambda () (and (cooked--input-region)
+                             (string-match-p "remembered" (cooked-tests--text))))))
     (cooked--replace-input "half-typed")
     (cooked-previous-input)
     (should (equal (cooked--pending-input) "remembered"))

@@ -345,8 +345,13 @@ output with the prompt that followed it."
                                       (line-beginning-position) (point-max)))))
             (cooked--replace-input "printf 'one\\ntwo\\n'")
             (cooked-send-input)
+            ;; Waited out on the command record rather than on the text: the
+            ;; submitted line stays on screen until the echo redraws over it, so
+            ;; "two" is in the buffer -- inside the command itself -- before the
+            ;; child has run anything.
             (should (cooked-tests--settle
                      (lambda () (and (eq cooked--semantic 'input)
+                                     cooked--commands
                                      (string-match-p "two" (cooked-tests--text))))))
             (let ((lines (split-string (cooked-tests--text) "\n")))
               (should (member "one" lines))

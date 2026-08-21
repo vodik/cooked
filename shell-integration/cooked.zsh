@@ -280,6 +280,29 @@ __cooked_complete() {
   zle __cooked_complete_capture
   BUFFER=$save_buffer
   CURSOR=$save_cursor
+  # The capture can put the line on the screen despite listing nothing.  compsys
+  # refreshes the display itself on the way to a message or a beep -- `git commit
+  # -am <TAB>' with no matches is the everyday case -- and that refresh draws
+  # BUFFER, which for the duration of the capture is the line Emacs is holding.
+  # Here the shell's own line is empty, so what is drawn is a second copy of the
+  # command, sitting exactly where the completion would have gone.
+  #
+  # Restoring BUFFER does not take it back: the refresh at the end of the widget
+  # compares against what ZLE last recorded, which the capture's own refresh
+  # already updated, so it finds nothing to erase and leaves the copy on screen.
+  # `redisplay' rebuilds the line unconditionally, which is what erases it.  Run
+  # for every request rather than only the ones that dirtied the screen: there is
+  # no flag saying which those were, and a redraw of an undisturbed prompt costs
+  # a repaint of one row that Emacs renders identically.
+  #
+  # `zle -R' after it for the ordering, not for the redraw: ZLE holds its output
+  # until the widget returns, so on its own the repair would arrive *after* the
+  # reply below -- and Emacs, unblocked by the reply, can redisplay in between and
+  # show the copy for as long as a drain interval.  `-R' flushes it now, which
+  # puts the repair ahead of the reply in the byte stream and leaves no drain that
+  # can see one without the other.
+  zle redisplay
+  zle -R
 
   local blob= i=
   for (( i = 1; i <= ${#__cooked_matches}; i++ )); do
