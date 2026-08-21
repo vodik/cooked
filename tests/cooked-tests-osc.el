@@ -236,6 +236,30 @@ used to flush the entire buffer."
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
 
+(ert-deftest cooked-the-prompt-a-command-was-typed-at-is-recorded ()
+  "The OSC 133 `A' mark says where the prompt begins, and used to be thrown
+away for a flag.  It is what `cooked-previous-command' lands on and where the
+outer half of an `evil' command text object starts, and no regexp can recover
+it: a prompt is whatever the user's theme decided to draw."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (cooked--replace-input "echo alpha")
+    (cooked-send-input)
+    (should (cooked-tests--settle (lambda () cooked--commands) 8))
+    (let* ((command (car cooked--commands))
+           (prompt (cooked--command-prompt-position command)))
+      (should prompt)
+      ;; Column 0 of the prompt's own first row, and the line it names is the
+      ;; one the command was typed on.
+      (should (= prompt (save-excursion (goto-char prompt) (line-beginning-position))))
+      (should (string-suffix-p
+               "echo alpha"
+               (buffer-substring-no-properties
+                prompt (save-excursion (goto-char prompt) (line-end-position)))))
+      ;; And it is above the output, which is what makes the outer region a
+      ;; superset of the inner one.
+      (should (< prompt (cooked--command-start-position command))))))
+
 (ert-deftest cooked-delete-output-removes-rows-through-the-emulator ()
   "The grid owns the rows, so deleting output asks the emulator and repaints,
 rather than cutting buffer text the grid would still hold.  The check that

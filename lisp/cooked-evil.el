@@ -144,9 +144,12 @@ policy's own map does, making insert state indistinguishable from emacs state."
 A TUI needs every keystroke, so evil must not be interpreting them; at a prompt
 evil should behave as in any other buffer.
 
-Only ever called for the child's own state changing -- `cooked--refresh-keymap'
-suppresses `cooked-state-change-hook' for a refresh evil itself triggered, so
-this cannot end up undoing a deliberate `C-z' a keystroke after it was pressed."
+Only ever called for the child's own ownership of the keyboard changing, which
+is what makes a deliberate `C-z' survive: `cooked--refresh-keymap' suppresses
+`cooked-state-change-hook' for a refresh evil itself triggered, and runs it at
+all only when `cooked--input-state-p' has actually flipped -- not for the
+`raw'<->`alt' transitions and termios polls a full-screen program produces by
+the dozen, every one of which used to put the user back in emacs state."
   (when (and cooked-evil-integration (bound-and-true-p evil-local-mode))
     (let ((state (bound-and-true-p evil-state)))
       (cond ((cooked--input-state-p)
@@ -234,6 +237,9 @@ you are editing and meaningless on one you are not."
 (declare-function evil-paste-after "evil-commands")
 (declare-function evil-paste-before "evil-commands")
 (declare-function evil-define-key* "evil-core")
+(declare-function evil-range "evil-common")
+(declare-function cooked-evil-inner-command "cooked-evil")
+(declare-function cooked-evil-outer-command "cooked-evil")
 
 (defun cooked-evil-paste ()
   "Paste, as normal state should here.
@@ -246,9 +252,85 @@ is ordinary editable text.  See `cooked-evil-normal-state-pastes'."
        (if (eq last-command-event ?P) #'evil-paste-before #'evil-paste-after))
     (cooked-paste)))
 
+(defcustom cooked-evil-command-text-object "c"
+  "Key for the command text objects, under \\`i' and \\`a', or nil for none.
+
+\\`vic' selects a command's output; \\`vac' takes the prompt and the command
+line above it as well.  Bound only in `cooked-mode' -- through the same
+auxiliary keymap `evil' resolves every other binding here with -- so \\`ic'
+keeps whatever it means elsewhere, and the rest of the family (\\`iw',
+\\`ip', \\`i\"') is untouched in a cooked buffer.
+
+\\`c' for the command, which is what the record is: the prompt it was typed at,
+the line, its output and its exit status."
+  :type '(choice (string :tag "Key") (const :tag "Do not bind" nil))
+  :group 'cooked)
+
+(defcustom cooked-evil-section-motions t
+  "Whether \\`[[' and \\`]]' move between prompts in a cooked buffer.
+
+`evil-collection' already routes them here through `comint-previous-prompt',
+which `cooked-mode-map' remaps -- but only if `evil-collection' is installed.
+Binding them ourselves means a plain `evil' user gets them too, in place of
+`evil-backward-section-begin', which has nothing to find in a transcript."
+  :type 'boolean :group 'cooked)
+
+(defun cooked-evil--command-at-point (outer)
+  "The region of the command around point, as (BEG . END), or nil.
+OUTER takes in the prompt and command line as well as the output."
+  (when-let* ((command (cooked--command-around (point))))
+    (cooked--command-region command outer)))
+
+(defun cooked-evil--command-range (count outer)
+  "An `evil-range' over COUNT commands from the one at point.
+OUTER takes in each command's prompt and command line as well as its output."
+  (let ((region (or (cooked-evil--command-at-point outer)
+                    (user-error "No command here"))))
+    (when (and (> (or count 1) 1) (cdr region))
+      ;; Extend by stepping to each following prompt and taking that command
+      ;; whole, which is what makes `2ac' two commands rather than two screens.
+      (save-excursion
+        (goto-char (cdr region))
+        (dotimes (_ (1- count))
+          (cooked-next-command)
+          (when-let* ((next (cooked-evil--command-at-point outer)))
+            (setcdr region (max (cdr region) (cdr next)))))))
+    (when (= (car region) (cdr region))
+      ;; A command that printed nothing has no inner half.  `ac' still has one --
+      ;; the prompt and the line -- so this can only be reached from `ic'.
+      (user-error "That command printed nothing"))
+    (evil-range (car region) (cdr region) 'line)))
+
 (declare-function evil-collection-define-key "evil-collection")
 
 (with-eval-after-load 'evil
+  ;; `eval' at load time, quoted so the byte-compiler leaves it alone:
+  ;; `evil-define-text-object' is a macro of evil's, and cooked is one package
+  ;; -- package.el compiles this file for a user who has never installed evil,
+  ;; where an unexpanded macro compiles to a call to a function that does not
+  ;; exist.  Expanding here instead means it happens exactly when evil is known
+  ;; to be there.  Each body is one call into compiled code.
+  (eval '(progn
+           (evil-define-text-object cooked-evil-inner-command
+             (count &optional _beg _end _type)
+             "Select the output of the command around point."
+             (cooked-evil--command-range count nil))
+           (evil-define-text-object cooked-evil-outer-command
+             (count &optional _beg _end _type)
+             "Select the command around point: its prompt, its line, and its output."
+             (cooked-evil--command-range count t)))
+        t)
+
+  (when cooked-evil-command-text-object
+    (evil-define-key* '(visual operator) cooked-mode-map
+                      (kbd (concat "i " cooked-evil-command-text-object))
+                      #'cooked-evil-inner-command
+                      (kbd (concat "a " cooked-evil-command-text-object))
+                      #'cooked-evil-outer-command))
+  (when cooked-evil-section-motions
+    (evil-define-key* '(normal visual motion) cooked-mode-map
+                      (kbd "[[") #'cooked-previous-command
+                      (kbd "]]") #'cooked-next-command))
   (when cooked-evil-normal-state-pastes
     ;; On `cooked-mode-map' for the reason RET is, below: an override registered
     ;; against the derived mode outranks anything `evil-collection' tied to

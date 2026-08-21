@@ -83,10 +83,12 @@ find_file()              { osc_emacs_eval find-file "${${1:-.}:a}" }
 find_file_other_window() { osc_emacs_eval find-file-other-window "${${1:-.}:a}" }
 magit()                  { osc_emacs_eval magit-status "${${1:-.}:a}" }
 
-# Note the absence of a `clear' override.  Shadowing a standard command to reach
-# into the editor is surprising and breaks scripts that call it; the scrollback
-# belongs to Emacs, so clear it from Emacs with \\[cooked-clear-scrollback].
-# `clear-scrollback' stays in `cooked-eval-commands' for anyone who disagrees.
+# Note the absence of a `clear' override, and there is nothing left for one to fix:
+# plain `clear' sends `CSI 2 J' and then `CSI 3 J', which cooked answers by scrolling
+# the screen it archived out of view and then dropping it.  Shadowing a standard
+# command to reach into the editor would be surprising and would break scripts that
+# call it.  From Emacs the same thing is \\[cooked-clear-scrollback], which needs no
+# help from the shell at all; `clear-scrollback' stays in `cooked-eval-commands'.
 
 #
 # Completion.

@@ -141,7 +141,7 @@ comint's key:
 | Key | comint | cooked does |
 |---|---|---|
 | `C-c C-\` | `comint-quit-subjob` | SIGQUIT to the child, not `quit-process` on the wakeup pipe |
-| `C-c M-o` | `comint-clear-buffer` | discards scrollback only — the same path the child's own `CSI 3J` takes |
+| `C-c M-o` | `comint-clear-buffer` | everything above the prompt goes, whether it is scrollback or still on the grid |
 | `C-c C-o` | `comint-delete-output` | asks the *emulator* to drop those rows; see below |
 | `C-c SPC` | `comint-accumulate` | `cooked-newline`, which is also how a TTY frame composes multi-line input |
 
@@ -152,6 +152,18 @@ that the grid has exactly one owner. Deleting the text instead would leave the b
 the grid disagreeing about what the screen is, and the next repaint would put it back. It
 refuses when the output reaches the row the child is on, because the shell is editing its
 own prompt line there and tracking where it sits.
+
+Clearing splits along the same seam, and all three ways of asking end where a terminal
+user expects — the prompt at the top, nothing above it. The shell's `C-l` sends `CSI 2J`,
+which cooked *archives* rather than drops, because a screenful of transcript is Emacs' to
+keep; the window then scrolls so the live screen sits at its top, which is exactly what a
+terminal's viewport does with the screen it just cleared, and the transcript is one scroll
+up. `clear` sends `CSI 3J` after that, and that one really does delete the scrollback —
+honoured unconditionally, since it is only reachable by a program already holding the
+terminal and it is what you typed `clear` to get. `C-c M-o` reaches the same state with no
+help from the child: the emulator drops the rows above the prompt (from the OSC 133 mark
+when the shell sends one, from the cursor's row when it does not) and Emacs deletes the
+scrollback, each side asked for the half it owns.
 
 ### Job control comes from the tty
 
@@ -408,7 +420,6 @@ The shell can ask the Emacs that is running it to do things:
 find_file src/main.rs        # opens it in the same Emacs
 magit .                      # magit-status on the repo
 echo hi | osc_copy           # onto the kill ring, works over ssh
-clear                        # clears the scrollback too, not just the screen
 ```
 
 That is OSC 51;E, vterm's protocol, so existing vterm shell configuration mostly
@@ -492,12 +503,23 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
 - **Evil.** With `cooked-evil-integration`, evil is put in Emacs state whenever the child
   owns the keyboard and returns to insert at a prompt; normal-state `RET` stays plain
   `evil-ret`, exactly as in any other buffer. comint commands are remapped, so
-  `evil-collection`'s `repl-submit` binding reaches `cooked-send-input` without knowing
-  cooked exists. `C-z` already reaches Emacs from there, same as in any other evil
+  `evil-collection`'s `repl-submit` and arrow-key history bindings reach
+  `cooked-send-input` and the child's own history without knowing cooked exists. Stepping
+  out of insert state gives point a visible cursor even where the child has hidden its
+  own, since point is then the only cursor there is. `C-z` already reaches Emacs from there, same as in any other evil
   buffer — see [Keybindings](#keybindings).
-- **Commands are records.** `C-c C-p`/`C-c C-n` navigate them and `C-c TAB` folds output.
-  A command that printed nothing still gets a record, which text properties alone cannot
-  represent.
+- **Commands are records.** `C-c C-p`/`C-c C-n` move between prompts and `C-c TAB` folds
+  output. A command that printed nothing still gets a record, which text properties alone
+  cannot represent — and navigation lands on the *prompt* rather than on the output for
+  exactly that reason: a quiet command's output begins where the next prompt does, so
+  walking output starts stepped over every command that printed nothing, failures
+  included.
+- **`evil` command text objects.** In a cooked buffer `vic` selects a command's output and
+  `vac` takes the prompt and the command line with it, both linewise; `[[`/`]]` move
+  between prompts. The regions come from the OSC 133 marks, so `yac` on a build copies
+  exactly what was run and what it printed, and works while it is still running. Scoped to
+  `cooked-mode` through evil's own auxiliary keymaps, so `iw`, `ip` and `i"` keep meaning
+  what they mean — see `cooked-evil-command-text-object` and `cooked-evil-section-motions`.
 - **Peeking is read-only and look-only.** The mode line grows a `peek` tag; the buffer is
   read-only for the duration, so an edit command errors immediately instead of landing on
   text that goes nowhere; and typing, `RET`, or any of cooked's own commands that write to

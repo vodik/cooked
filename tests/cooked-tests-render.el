@@ -426,6 +426,30 @@ clipping the top of the screen even though the buffer content was correct."
     (cooked--apply (cooked--drain cooked--session))
     (should (= (window-start (selected-window)) (marker-position cooked--screen-start)))))
 
+(ert-deftest cooked-clearing-the-screen-scrolls-the-transcript-out-of-view ()
+  "`CSI 2 J' archives the screen rather than losing it, because history is Emacs'
+-- so nothing scrolls out of view on its own, and `clear' or the shell's `C-l'
+looked like it had done nothing at all: the transcript still filled the window.
+A real terminal's viewport moves instead, which here means the window.  The text
+above is untouched and one scroll away, exactly as scrollback is anywhere else."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "for i in $(seq 40); do printf 'line%s\\n' $i; done; \
+                        sleep 1; printf '\\033[H\\033[2Jafter'; exec cat")
+    (set-window-buffer (selected-window) (current-buffer))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "after" (cooked-tests--text)))))
+    (should (string-match-p "line40" (cooked-tests--text)))
+    (should (= (window-start (selected-window)) (marker-position cooked--screen-start)))
+    ;; And it holds.  The cleared screen is one row, so recentring on the cursor
+    ;; would seat that row at the foot of the window and fill the rest with the
+    ;; transcript again -- the clear undone by the next thing the child printed.
+    (cooked-tests--type "x")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "afterx" (cooked-tests--text)))))
+    (should (= (window-start (selected-window)) (marker-position cooked--screen-start)))))
+
 (ert-deftest cooked-underline-face-keeps-its-old-shape-when-plain ()
   "A plain underline must still produce `:underline t', not a plist."
   (with-temp-buffer

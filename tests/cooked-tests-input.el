@@ -1044,34 +1044,179 @@ must not take the binding away."
     (should (eq (lookup-key map (kbd "C-c C-n")) #'cooked-next-command))
     (should (eq (lookup-key map (kbd "C-c TAB")) #'cooked-toggle-fold))))
 
-(ert-deftest cooked-previous-command-lands-on-command-starts ()
+(ert-deftest cooked-navigation-lands-on-prompts-and-skips-nothing ()
+  "Stepping back used to land on each command's *output*, which for a command
+that printed nothing is the beginning of the next prompt -- so a quiet command,
+and every failing one, was stepped straight over and looked as though it had
+never been recorded.  It always was; there was nowhere to stand."
   (skip-unless (executable-find "zsh"))
-  (let ((buffer (generate-new-buffer "*cooked-nav*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-          ;; Settle on the record appearing, not on the text.  Waiting for
-          ;; "first-marker" matched the *echo* of the line being typed, so the second
-          ;; command went out before the first had a record — the assertion below then
-          ;; failed roughly two runs in five.
-          (dolist (line '("echo first-marker" "echo second-marker"))
-            (let ((before (length cooked--commands)))
-              (cooked--replace-input line)
-              (cooked-send-input)
-              (should (cooked-tests--settle
-                       (lambda () (> (length cooked--commands) before))))))
-          (should (= (length cooked--commands) 2))
-          ;; From the end, stepping back reaches the newest command's output.
-          (goto-char (point-max))
-          (cooked-previous-command)
-          (let ((newest (cooked--command-start-position (car cooked--commands))))
-            (should (= (point) newest))))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer))))
+  (cooked-tests--with-zsh
+    (dolist (line '("echo one" "false" "echo two"))
+      (let ((before (length cooked--commands)))
+        (cooked--replace-input line)
+        (cooked-send-input)
+        (should (cooked-tests--settle
+                 (lambda () (> (length cooked--commands) before)) 8))))
+    ;; Back to a prompt, so the last command's own prompt line is complete.
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'input)
+                             (cooked--input-start-position)))
+             8))
+    (goto-char (point-max))
+    (let ((lines nil))
+      (dotimes (_ 4)
+        (cooked-previous-command)
+        (push (buffer-substring-no-properties (line-beginning-position)
+                                              (line-end-position))
+              lines))
+      ;; Four steps back from the bottom: the live prompt, then one landing per
+      ;; command, each on the line the command was typed on.
+      (should (= (length (delete-dups (copy-sequence lines))) 4))
+      (should (seq-some (lambda (l) (string-suffix-p "false" l)) lines))
+      (should (seq-some (lambda (l) (string-suffix-p "echo one" l)) lines))
+      (should (seq-some (lambda (l) (string-suffix-p "echo two" l)) lines)))))
+
+(ert-deftest cooked-navigation-falls-back-to-output-without-an-a-mark ()
+  "A shell that sends `C' and `D' but no `A' has told us where output began and
+nothing about the prompt.  Navigation then means what it always did."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\033]133;C\007first\n\033]133;D;0\007\
+\033]133;C\007second\n\033]133;D;0\007'; sleep 5")
+    (should (cooked-tests--settle (lambda () (= (length cooked--commands) 2))))
+    (should-not (cooked--command-prompt-position (car cooked--commands)))
+    (should (equal (cooked--prompt-starts) (cooked--command-starts)))))
+
+(ert-deftest cooked-evil-command-text-objects-take-the-output-and-the-command ()
+  "`ic' is what the command printed; `ac' adds the prompt it was typed at and
+the line itself.  Neither reaches the following prompt, which a linewise range
+ending one past the output would otherwise swallow."
+  (skip-unless (require 'evil nil t))
+  (skip-unless (executable-find "zsh"))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-zsh
+    (dolist (line '("echo alpha" "false"))
+      (let ((before (length cooked--commands)))
+        (cooked--replace-input line)
+        (cooked-send-input)
+        (should (cooked-tests--settle
+                 (lambda () (> (length cooked--commands) before)) 8))))
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'input)
+                             (cooked--input-start-position)))
+             8))
+    (let* ((record (car (last cooked--commands)))     ; "echo alpha", the oldest
+           (inner (cooked--command-region record))
+           (outer (cooked--command-region record t))
+           (inner-text (buffer-substring-no-properties (car inner) (cdr inner)))
+           (outer-text (buffer-substring-no-properties (car outer) (cdr outer))))
+      (should (equal inner-text "alpha"))
+      (should (string-suffix-p "echo alpha\nalpha" outer-text))
+      (should-not (string-search "false" outer-text)))
+    ;; A command that printed nothing has an outer half and no inner one.
+    (let ((quiet (car cooked--commands)))
+      (goto-char (cooked--command-prompt-position quiet))
+      (should (string-suffix-p "false" (buffer-substring-no-properties
+                                        (line-beginning-position)
+                                        (line-end-position))))
+      (should (eq (cooked--command-around (point)) quiet))
+      (should-error (cooked-evil--command-range 1 nil) :type 'user-error)
+      (should (cooked-evil--command-range 1 t)))))
+
+(ert-deftest cooked-evil-command-text-object-covers-what-is-still-running ()
+  "A build that has not finished has no record yet, only the live markers --
+and `yac' on it is exactly what one wants while it is running."
+  (skip-unless (require 'evil nil t))
+  (skip-unless (executable-find "zsh"))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-zsh
+    (cooked--replace-input "echo running; sleep 5")
+    (cooked-send-input)
+    (should (cooked-tests--settle
+             (lambda () (and cooked--command-start
+                             (string-search "running" (cooked-tests--text))))
+             8))
+    (goto-char (marker-position cooked--command-start))
+    (let* ((range (cooked-evil--command-range 1 t))
+           (text (buffer-substring-no-properties (nth 0 range) (nth 1 range))))
+      (should (string-search "sleep 5" text))
+      (should (string-search "running" text)))))
+
+(ert-deftest cooked-evil-text-objects-are-scoped-to-cooked-buffers ()
+  "Ours in a cooked buffer, and only there: the rest of the family has to keep
+meaning what it means, in this buffer and every other one."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (with-temp-buffer
+    (cooked-mode)
+    (evil-visual-state)
+    (should (eq (key-binding (kbd "ic")) #'cooked-evil-inner-command))
+    (should (eq (key-binding (kbd "ac")) #'cooked-evil-outer-command))
+    ;; Untouched, which a keymap on `i' rather than on `ic' would not have left.
+    (should (eq (key-binding (kbd "iw")) #'evil-inner-word))
+    (should (eq (key-binding (kbd "ip")) #'evil-inner-paragraph))
+    (evil-normal-state)
+    (should (eq (key-binding (kbd "[[")) #'cooked-previous-command))
+    (should (eq (key-binding (kbd "]]")) #'cooked-next-command)))
+  (with-temp-buffer
+    (fundamental-mode)
+    (evil-visual-state)
+    (should-not (eq (key-binding (kbd "ic")) #'cooked-evil-inner-command))
+    (evil-normal-state)))
+
+(ert-deftest cooked-a-hidden-cursor-comes-back-when-forwarding-stops ()
+  "A full-screen program hides the cursor while it draws, and Emacs honours
+that -- rightly, while the child is the one being typed at.  The moment
+forwarding stops, point is the only cursor there is, and navigating a buffer
+whose cursor has been turned off is navigating blind."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "stty raw -echo; printf '\033[?25l'; cat")
+    (should (cooked-tests--settle
+             (lambda () (and cooked--cursor
+                             (not (cooked-cursor-visible cooked--cursor))))))
+    (should-not cursor-type)
+    (call-interactively #'cooked-toggle-peek)
+    (should cursor-type)
+    ;; And the ghost is not drawn for a cursor the child says it does not have,
+    ;; so there is one cursor on screen either way.
+    (should-not (cooked--ghost-cursor-visible-p))
+    (call-interactively #'cooked-toggle-peek)
+    (should-not cursor-type)))
+
+(ert-deftest cooked-evil-normal-state-gives-a-hidden-cursor-back ()
+  "The same, reached the way an evil user reaches it."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "stty raw -echo; printf '\033[?25l'; cat")
+    (should (cooked-tests--settle
+             (lambda () (and cooked--cursor
+                             (not (cooked-cursor-visible cooked--cursor))))))
+    (evil-emacs-state)
+    (should-not cursor-type)
+    (evil-normal-state)
+    (should cursor-type)
+    (evil-emacs-state)
+    (should-not cursor-type)))
+
+(ert-deftest cooked-arrow-keys-reach-the-child-from-evil-insert-state ()
+  "`evil-collection-comint' binds the arrow keys for insert state on an
+auxiliary keymap that evil consults ahead of `cooked-semi-map', so they arrive
+at `cooked-previous-input' rather than being forwarded.  At a shell editing its
+own line that used to be answered with \"Not at an input prompt\"; the history
+being asked for is the child's, and `<up>' is how a terminal asks for it."
+  (cooked-tests--with-echoing-child ""
+    (should-not (cooked--input-state-p))
+    (cooked-previous-input)
+    (should (cooked-tests--settle
+             (lambda () (string-search "^[[A" (cooked-tests--text)))))
+    (cooked-next-input)
+    (should (cooked-tests--settle
+             (lambda () (string-search "^[[B" (cooked-tests--text)))))))
 
 ;; Regression: `cooked--mouse-cell' used to count columns with `current-column',
 ;; which measures from the start of the buffer line.  On screen row 0 that line
@@ -1379,9 +1524,12 @@ left it."
       (cooked--refresh-keymap t)
       (should nested)
       (should (= runs 0))
-      ;; And a loud one is still loud.
+      ;; And a loud one still announces a change of ownership -- which is the
+      ;; only thing the hook has ever claimed to be about; see
+      ;; `cooked-state-change-hook'.
       (setq nested t)
-      (cooked--refresh-keymap)
+      (cooked--set-mode 'cooked)
+      (should (cooked--input-state-p))
       (should (= runs 1)))))
 
 (ert-deftest cooked-a-refresh-only-clears-the-read-only-it-set-itself ()
@@ -1436,6 +1584,58 @@ marker sits in."
                      (lambda () (string-search "two" (cooked-tests--text)))))
             (should (> caught 0)))
         (delete-window other)))))
+
+(ert-deftest cooked-the-state-change-hook-fires-only-when-ownership-changes ()
+  "The hook means \"who owns the keyboard changed\", and used to run for every
+refresh: a `raw'<->`alt' transition, a deliberate peek, and every termios poll
+that moved `cooked--mode' between two states the child owns either way."
+  (cooked-tests--with-echoing-child ""
+    (let* ((runs 0)
+           (cooked-state-change-hook (list (lambda () (setq runs (1+ runs))))))
+      ;; The child owns the keyboard throughout all of this: on the alternate
+      ;; screen the policy is `alt' whatever the line discipline is doing, which
+      ;; is exactly the case a full-screen program spends its life in.
+      (cooked--set-alt t)
+      (cooked--set-mode 'cooked)
+      (cooked--set-mode 'raw)
+      (call-interactively #'cooked-toggle-peek)
+      (call-interactively #'cooked-toggle-peek)
+      (cooked--set-alt nil)
+      (should (= runs 0))
+      ;; A real change is still announced.
+      (cooked--set-mode 'cooked)
+      (setq cooked--semantic 'input)
+      (cooked--refresh-keymap)
+      (should (cooked--input-state-p))
+      (should (= runs 1)))))
+
+(ert-deftest cooked-evil-normal-state-survives-the-child-touching-its-termios ()
+  "`V' in normal state stopped starting a selection on the alternate screen.
+Every refresh ran `cooked-state-change-hook', `cooked-evil-sync' answered it by
+putting evil into `cooked-evil-child-state', and a full-screen program changes
+its termios settings routinely -- so a keystroke after `C-z' the user was back
+in emacs state, where `V' is forwarded to the child like any other key."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "stty raw -echo; printf '\033[?1049h'; cat")
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    ;; The child took the keyboard, so evil is where it belongs for a TUI.
+    (should (eq evil-state 'emacs))
+    (evil-normal-state)
+    (should (eq (key-binding "V") #'evil-visual-line))
+    (cooked--set-mode 'cooked)
+    (cooked--set-mode 'raw)
+    (should (eq evil-state 'normal))
+    (should (eq cooked--input-mode 'still))
+    (should (eq (key-binding "V") #'evil-visual-line))
+    ;; And a selection, once started, is not dropped by the next poll either.
+    (evil-visual-state)
+    (should (eq cooked--input-mode 'frozen))
+    (cooked--set-mode 'cooked)
+    (should (eq evil-state 'visual))
+    (should (eq cooked--input-mode 'frozen))))
 
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

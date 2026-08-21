@@ -152,6 +152,16 @@ folding and navigation walk."
   (start nil :documentation "Marker where the command's output began.")
   (end nil :documentation "Marker where it ended.")
   (code 0 :documentation "Exit status.")
+  (prompt nil :documentation "Marker where the prompt that ran this command began.
+
+From the OSC 133 `A' mark, which every shell integration sends immediately
+before it draws the prompt, so the marker names column 0 of the prompt's first
+row.  That is a position a repaint cannot spoil -- a damaged row is deleted
+whole and its markers collapse to the row's start, which is where this one
+already is -- unlike a marker inside the input row; see `input' below.
+
+Nil for a shell that never sent an `A' mark, in which case the output start is
+the closest thing to a beginning there is.")
   (input nil :documentation "The command line itself, or nil if we never saw it.
 
 The text cooked submitted, not a position recovered afterwards.  A marker would
@@ -168,6 +178,11 @@ the keyboard, or one the shell ran itself."))
 (defun cooked--command-end-position (command)
   "Buffer position where COMMAND's output ends."
   (marker-position (cooked-command-end command)))
+
+(defun cooked--command-prompt-position (command)
+  "Buffer position where the prompt that ran COMMAND begins, if it is known."
+  (when-let* ((marker (cooked-command-prompt command)))
+    (marker-position marker)))
 
 (defun cooked--command-input (command)
   "The line COMMAND was invoked with, or nil if cooked did not submit it."
@@ -197,11 +212,14 @@ check from being the loudest thing at each call site."
   "The child's cursor as of the last drain, a `cooked-cursor'.")
 (defvar-local cooked--alt nil)
 (defvar-local cooked--pin-screen-top nil
-  "Non-nil when this drain should put the live screen at the top of the window.
+  "Non-nil while the live screen belongs at the top of the window.
 
-Set by the child clearing the display and cleared as soon as the window block at
-the end of `cooked--apply\=' has acted on it: it says something about this drain,
-not about the buffer.")
+Set when the child clears the display, and held until the screen scrolls again
+-- which is when the grid has filled the window, and pinning its top is the same
+view as following its bottom.  A single drain would not be enough: the cleared
+screen holds one row, so the very next drain's ordinary recentring would put
+that row at the foot of the window and pull the transcript straight back into
+view, undoing the clear a keystroke later.")
 (defvar-local cooked--input-mode nil
   "How this buffer is treating the keyboard and the render right now.
 
@@ -868,6 +886,12 @@ Latched, because `cooked--semantic' goes back to nil between `command-end' and
 the next `prompt-start' and so cannot answer \"is the integration working?\".
 Once a shell has spoken at all, it will keep speaking, and everything it does
 not say becomes informative -- see `cooked--policy'.")
+(defvar-local cooked--prompt-start nil
+  "Marker where the prompt now on screen began, from the OSC 133 `A' mark.
+Moved into `cooked--command-prompt' when a command starts, the way
+`cooked--submitted-input' is moved into `cooked--command-input'.")
+(defvar-local cooked--command-prompt nil
+  "Marker where the prompt that ran the current command began.")
 (defvar-local cooked--command-start nil
   "Marker where the running command's output began.")
 (defvar-local cooked--command-input nil
@@ -1056,7 +1080,13 @@ drain left it, so a script running several commands between two redisplays
 would file all of their output under one region ending wherever it stopped."
   (setq cooked--semantic-seen t)
   (pcase event
-    (`(prompt-start ,_) (setq cooked--semantic 'prompt))
+    (`(prompt-start ,at)
+     (setq cooked--semantic 'prompt
+           ;; Where the prompt is about to be drawn, which is what
+           ;; `cooked-previous-command' moves between and where the outer half of
+           ;; an `evil' command text object starts.  The mark arrives before the
+           ;; prompt itself, so this is column 0 of its first row.
+           cooked--prompt-start (copy-marker (cooked--anchor-position at batch-start))))
     (`(prompt-end ,_)
      (setq cooked--semantic 'input)
      (cooked--refresh-keymap))
@@ -1066,7 +1096,11 @@ would file all of their output under one region ending wherever it stopped."
              cooked--command-start (copy-marker start)
              ;; Whatever we last submitted is what is now running.
              cooked--command-input (prog1 cooked--submitted-input
-                                     (setq cooked--submitted-input nil)))
+                                     (setq cooked--submitted-input nil))
+             ;; The prompt this was typed at stops being the live one here, and
+             ;; becomes the running command's.
+             cooked--command-prompt (prog1 cooked--prompt-start
+                                      (setq cooked--prompt-start nil)))
        ;; Output begins here, so this is where the input ended.  `comint-delete-output',
        ;; `comint-show-output' and `comint-write-output' all measure from it; it sat at
        ;; `point-min' until now, which is why deleting output flushed the whole buffer.
@@ -1091,9 +1125,10 @@ would file all of their output under one region ending wherever it stopped."
       (when (< beg end)
         (put-text-property beg end 'cooked-exit-code code))
       (push (cooked--command-make :start (copy-marker beg) :end (copy-marker end)
-                                  :code code :input cooked--command-input)
+                                  :code code :input cooked--command-input
+                                  :prompt cooked--command-prompt)
             cooked--commands)))
-  (setq cooked--command-start nil cooked--command-input nil))
+  (setq cooked--command-start nil cooked--command-input nil cooked--command-prompt nil))
 
 ;;;; Locating a cell in the buffer
 ;;
@@ -1250,15 +1285,32 @@ every state change; the render selects windows in order to `recenter' them.  Set
 any earlier and evil gets the last word inside the very drain that hid the
 cursor -- and because this writes only on a change, the next drain computes the
 same value, skips the write, and never repairs it.  The visible result was a
-cursor jumping around a progress bar the child had asked to draw without one."
-  (let ((shape (and cooked--cursor
-                    (cooked-cursor-visible cooked--cursor)
-                    (cooked--cursor-type))))
+cursor jumping around a progress bar the child had asked to draw without one.
+
+A hidden cursor is only honoured while the child is the one being typed at.  A
+program that hid its cursor -- every full-screen program drawing a frame, and
+`less' -- has said nothing about Emacs' point, and once forwarding is suspended
+point is the only cursor there is: navigating a buffer whose cursor has been
+turned off is navigating blind, which is what `evil' normal state in a cooked
+buffer used to be.  See `cooked--suspended-p'."
+  (let ((shape (cond ((and cooked--cursor (cooked-cursor-visible cooked--cursor))
+                      (cooked--cursor-type))
+                     ((cooked--suspended-p) t))))
     (unless (equal cursor-type shape)
       (setq-local cursor-type shape))))
 
 (defun cooked--ghost-cursor-visible-p ()
-  "Whether the child's cursor should be drawn separately from point."
+  "Whether the child's cursor should be drawn separately from point.
+
+Not an alt-screen thing: `raw', `command' and every suspended state -- `evil'
+normal state included -- are all cases where the child owns the keyboard and
+point may be somewhere else, and the ghost is what keeps the way back visible
+in each of them.
+
+Nothing is drawn for a cursor the child has hidden, which is also the case in
+which `cooked--sync-cursor-type' gives point a visible cursor of its own: there
+is exactly one cursor on screen either way, and it is the one that will act on
+the next keystroke."
   (and cooked--wandered
        ;; Only where the child owns the keyboard and the screen is its drawing.
        ;; At a prompt, point being elsewhere is ordinary editing, not a divergence.
@@ -1880,6 +1932,10 @@ window that fell behind."
           cooked--exit (plist-get update :exit))
     (cooked--set-alt (plist-get update :alt))
     (cooked--set-mode (plist-get update :mode))
+    ;; The screen scrolled, so the grid now fills the window and following its
+    ;; bottom says the same thing as pinning its top.  Cleared before the events
+    ;; below, so a drain that both scrolls and then clears stays pinned.
+    (when batch-start (setq cooked--pin-screen-top nil))
     ;; After both render passes: a mark's anchor is resolved against text that has to
     ;; be in the buffer before it can be pointed at.
     (dolist (event (plist-get update :events))
@@ -1957,10 +2013,7 @@ window that fell behind."
                 (set-window-start w top t))))
            ((and follow at-end)
             (cooked--dolist-windows w (append here other-follows)
-              (with-selected-window w (recenter (- -1 scroll-margin))))))))
-      ;; Cleared whether or not it was acted on: it describes this drain, and a
-      ;; suspended buffer that later resumes should not jump on an old one.
-      (setq cooked--pin-screen-top nil))
+              (with-selected-window w (recenter (- -1 scroll-margin)))))))))
     ;; After the window block, not before it: see `cooked--sync-cursor-type'.
     (cooked--sync-cursor-type)
     (cooked--update-ghost-cursor)
@@ -2412,17 +2465,17 @@ news `cooked--discard-scrollback\=' gives it."
 (defun cooked-clear-scrollback ()
   "Delete everything above the current prompt.
 
-comint's `C-c M-o\=' read literally, and the seam between the emulator's grid and
-Emacs\=' scrollback is not the user's business: whether what is above the prompt
-has scrolled off the grid yet or is still sitting on it, it goes.  Scrollback
+comint's `C-c M-o\=' read literally, and the seam between the emulator's grid
+and Emacs\=' scrollback is not the user's business: whether what is above the
+prompt has scrolled off the grid yet or is still on it, it goes.  Scrollback
 alone was the old behaviour and looked inert at exactly the moment it is reached
 for -- a few commands into a session nothing has scrolled off at all, and every
 line on screen is a row the emulator still holds.
 
-Each side is asked for its own half.  `cooked--clear-to-prompt\=' removes the rows,
-because rows have one owner and only the emulator knows which of them are above
-the prompt; the scrollback is buffer text, so Emacs deletes that itself; and the
-ordinary drain repaints what moved -- the same shape as `cooked-delete-output\='.
+Each side is asked for its own half.  `cooked--clear-to-prompt\=' removes the
+rows, because rows have one owner and only the emulator knows which of them are
+above the prompt; the scrollback is buffer text, so Emacs deletes that itself;
+and the drain repaints what moved -- the shape of `cooked-delete-output\='.
 
 The prompt line and anything typed at it stay, and end up at the top.  comint
 deletes its prompt because there it is only text; here it is a row the shell is

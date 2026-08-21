@@ -124,6 +124,30 @@ off the buffer."
      (should-not (cooked--input-state-p))
      ,@body))
 
+(defmacro cooked-tests--with-zsh (&rest body)
+  "Run BODY in a cooked buffer running zsh, settled at its first prompt.
+
+The shape several OSC 133 tests already open with, factored out: the shell
+integration is what makes the marks arrive at all, so anything about prompts,
+command records or their exit codes needs a real shell rather than a printf.
+Callers should `skip-unless\=' zsh themselves -- a macro cannot skip for them."
+  (declare (indent 0))
+  `(let ((buffer (generate-new-buffer "*cooked-zsh*")))
+     (unwind-protect
+         (with-current-buffer buffer
+           (cooked-mode)
+           (pcase-let ((`(,argv ,env ,_scratch)
+                        (cooked--shell-invocation (executable-find "zsh"))))
+             (cooked--start argv nil env))
+           (cooked--refresh-keymap)
+           (should (cooked-tests--settle
+                    (lambda () (and (eq cooked--semantic 'input)
+                                    (cooked--input-start-position)))
+                    8))
+           ,@body)
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer))))
+
 (defmacro cooked-tests--with-kill (text &rest body)
   "Run BODY with TEXT as the most recent kill and no clipboard in the way."
   (declare (indent 1))

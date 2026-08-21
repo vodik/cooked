@@ -106,9 +106,10 @@ pub enum Event {
     /// Unlike `CSI 2 J`, real xterm's `3 J` touches only the scrollback, leaving the
     /// visible screen exactly as it was — so the grid does nothing here at all. And
     /// scrollback lives in the Emacs buffer, not the grid (see the module comment), so
-    /// the grid could not honour this itself even if it wanted to: erasing it is Emacs'
-    /// call, not the child's, since anything that can write to the terminal can send
-    /// this sequence. This event is the whole of the response; Emacs acts on it or not.
+    /// the grid could not honour this itself even if it wanted to: the text is Emacs'
+    /// to delete. This event is the whole of the response, and Emacs does act on it —
+    /// it is the half of `clear` that actually empties the buffer, the `2 J` before it
+    /// having archived the screen rather than lost it.
     EraseScrollback,
     /// `CSI 2 J` — the child finished with this screen.
     ///

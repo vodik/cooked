@@ -940,15 +940,43 @@ Positive DELTA moves towards older entries, as \[cooked-previous-input] does."
                                (ring-ref comint-input-ring comint-input-ring-index)
                              (or cooked--history-stash "")))))
 
+(defun cooked--history-key (key n)
+  "Send KEY, a cursor key symbol, to the child N times.
+
+What \"previous input\" means once the child owns the keyboard: the history is
+the shell's, or readline's, or fzf's, and the way to ask for it is the cursor
+key a terminal would have sent.  Sent as the key rather than as
+`last-command-event', so \\[cooked-previous-input] on `M-p' asks for the same
+thing \\`<up>' does instead of forwarding a Meta chord the child never asked
+for."
+  (cooked--resume-forwarding)
+  (when-let* ((bytes (cooked--encode-event key)))
+    (cooked--snap-to-cursor)
+    (dotimes (_ (max 1 n)) (cooked--send-to-child bytes))))
+
 (defun cooked-previous-input (&optional n)
-  "Recall the Nth previous input."
+  "Recall the Nth previous input.
+
+At a prompt this is Emacs' own history, editing the pending line in the buffer.
+Everywhere else the child is the one with a history, and this forwards \\`<up>'
+to it -- which is what the key would have done in any terminal, and what it has
+to do here: `evil-collection-comint' binds the arrow keys for insert state on
+an auxiliary keymap that outranks `cooked-semi-map', so without this they reach
+`cooked--history-move' at a shell that is editing its own line and are answered
+with \"Not at an input prompt\"."
   (interactive "p")
-  (cooked--history-move (or n 1)))
+  (if (cooked--input-state-p)
+      (cooked--history-move (or n 1))
+    (cooked--history-key 'up (or n 1))))
 
 (defun cooked-next-input (&optional n)
-  "Recall the Nth next input."
+  "Recall the Nth next input.
+Forwards \\`<down>' while the child owns the keyboard; see
+`cooked-previous-input'."
   (interactive "p")
-  (cooked--history-move (- (or n 1))))
+  (if (cooked--input-state-p)
+      (cooked--history-move (- (or n 1)))
+    (cooked--history-key 'down (or n 1))))
 
 (defun cooked--eof-byte ()
   "The character this tty means by end-of-file.
@@ -1058,7 +1086,22 @@ first when peeking: a signal you cannot see land is not worth sending blind."
 
 Run once the keymap has been swapped, so `cooked--input-state-p' already reports
 the new state.  This is the seam `cooked-evil' hangs off; anything else that has
-to follow the input/raw switch can use it without cooked knowing about it.")
+to follow the input/raw switch can use it without cooked knowing about it.
+
+On a change of ownership and on nothing else -- not on every refresh.  The
+distinction is the whole meaning of the hook: `cooked--refresh-keymap' also runs
+for a `raw'<->`alt' transition, for a termios poll that moved `cooked--mode'
+between two states the child owns either way, and for a deliberate peek, none of
+which change whose keyboard it is.  `cooked-evil-sync' answers this hook by
+putting evil into `cooked-evil-child-state', so running it for those was how a
+program that touched its termios settings -- which a full-screen program does
+routinely -- dragged the user out of normal state a keystroke after they pressed
+`C-z', leaving \`V' forwarded to the child instead of starting a selection.")
+
+(defvar-local cooked--ownership 'unset
+  "Who owned the keyboard as of the last `cooked-state-change-hook' decision.
+`unset' until the first refresh, so a session starting against a child that
+already owns the keyboard still counts as a change and is announced.")
 
 (defvar cooked-input-mode-function #'cooked--default-input-mode
   "Function returning the `cooked--input-mode' for a buffer, or nil for none.
@@ -1143,8 +1186,19 @@ are the ones left standing."
     (unless (cooked--input-state-p)
       (cooked--clear-input-region))
     (cooked--update-mouse-grab)
-    (unless cooked--quiet-refresh
-      (run-hooks 'cooked-state-change-hook))))
+    ;; The state that decides whether a hidden cursor is honoured has just
+    ;; changed, and a state change produces no output -- so without this nothing
+    ;; would put a cursor back until the child next drew something.
+    (cooked--sync-cursor-type)
+    (cooked--update-ghost-cursor)
+    (let ((owner (cooked--input-state-p)))
+      ;; Recorded even for a quiet refresh, which is a refresh evil asked for and
+      ;; must not be told about: what it changed is still the state the next
+      ;; comparison is against.
+      (unless (eq owner cooked--ownership)
+        (setq cooked--ownership owner)
+        (unless cooked--quiet-refresh
+          (run-hooks 'cooked-state-change-hook))))))
 
 (defun cooked-last-exit-code ()
   "Exit status of the most recently finished command, if any."
@@ -1167,12 +1221,91 @@ in and the order `cooked-last-exit-code' wants; moving through the transcript
 wants the other one."
   (nreverse (mapcar #'cooked--command-start-position cooked--commands)))
 
+(defun cooked--prompt-starts ()
+  "Where each command's prompt begins, in buffer order.
+
+What navigation moves between, and not the same list as
+`cooked--command-starts': a command that printed nothing has its output start
+and end at the *next* prompt, so walking output starts steps straight over it
+and reads as though the command -- very often a quiet one, or a failing one --
+were never recorded at all.  It was; only the place to stand was missing.
+
+Falls back to the output start for a record with no `A' mark, which is the
+best a session without the full integration can do and is exactly what this
+did before.  The live prompt comes last, so there is somewhere for
+`cooked-next-command' to land at the bottom."
+  (let ((starts (mapcar (lambda (command)
+                          (or (cooked--command-prompt-position command)
+                              (cooked--command-start-position command)))
+                        cooked--commands)))
+    (when-let* ((live (or cooked--command-prompt cooked--prompt-start))
+                (at (marker-position live)))
+      (unless (memql at starts) (push at starts)))
+    (sort starts #'<)))
+
+(defun cooked--command-region (command &optional outer)
+  "The region COMMAND occupies, as a cons of positions.
+
+The output alone, or with OUTER the prompt and the command line above it as
+well.  The end is pulled back off the following prompt's first column, since
+`cooked--command-end-position' is one past the output: without that a linewise
+selection of one command's output reaches down into the next command's prompt
+line."
+  (let* ((beg (if outer
+                  (or (cooked--command-prompt-position command)
+                      (cooked--command-start-position command))
+                (cooked--command-start-position command)))
+         (end (cooked--command-end-position command))
+         (end (if (and (> end beg)
+                       (= end (save-excursion (goto-char end) (line-beginning-position))))
+                  (1- end)
+                end)))
+    (cons beg (max beg end))))
+
+(defun cooked--command-around (position)
+  "The command whose prompt, line and output surround POSITION.
+
+Wider than `cooked--command-at', which answers for the output alone because
+that is what folding and `cooked-delete-output' act on: after
+`cooked-previous-command' point is on the *prompt*, which is outside every
+output region there is, and a text object asked for there still means the
+command being looked at.
+
+Half-open on purpose.  A command that printed nothing ends exactly where the
+next command's prompt begins, so both records claim that position; the later
+one is the honest answer, since that is the prompt the user is looking at.
+
+The command still running has no record yet -- it gets one at `command-end' --
+so it is answered from the live markers, its output reaching as far as has been
+drawn.  The same branch answers for the prompt being typed at, where there is
+no output at all and only the outer half means anything."
+  (or (seq-find (lambda (command)
+                  (let ((beg (or (cooked--command-prompt-position command)
+                                 (cooked--command-start-position command)))
+                        (end (cooked--command-end-position command)))
+                    (and (<= beg position) (< position end))))
+                cooked--commands)
+      (let* ((prompt (or cooked--command-prompt cooked--prompt-start))
+             (start (or cooked--command-start prompt)))
+        (when-let* ((beg (and prompt (marker-position prompt)))
+                    ((<= beg position)))
+          (cooked--command-make
+           ;; No output start means nothing has been printed yet -- the prompt
+           ;; being typed at -- so the inner half is empty and says so.
+           :start (copy-marker (if cooked--command-start
+                                   (marker-position start)
+                                 (point-max)))
+           :end (copy-marker (point-max))
+           :code 0
+           :input cooked--command-input
+           :prompt (copy-marker beg))))))
+
 (defun cooked--goto-nth-command (n direction)
-  "Move to the Nth command start in DIRECTION, `forward' or `backward'.
+  "Move to the Nth prompt in DIRECTION, `forward' or `backward'.
 
 Stops at the far end of the buffer rather than erroring, so holding the key
 down walks to the top or bottom and settles there."
-  (let* ((starts (cooked--command-starts))
+  (let* ((starts (cooked--prompt-starts))
          (before (seq-filter (lambda (p) (< p (point))) starts))
          (after (seq-filter (lambda (p) (> p (point))) starts)))
     (goto-char (or (if (eq direction 'backward)
@@ -1181,12 +1314,18 @@ down walks to the top or bottom and settles there."
                    (if (eq direction 'backward) (point-min) (point-max))))))
 
 (defun cooked-previous-command (&optional n)
-  "Move to the start of the Nth previous command's output."
+  "Move to the prompt of the Nth previous command.
+
+The prompt rather than the output, which is what `comint-previous-prompt' --
+the command this stands in for, and what `evil-collection' binds \`[[' to --
+has always meant, and the only landing place that does not step over a command
+that printed nothing.  See `cooked--prompt-starts'."
   (interactive "p")
   (cooked--goto-nth-command (or n 1) 'backward))
 
 (defun cooked-next-command (&optional n)
-  "Move to the start of the Nth next command's output."
+  "Move to the prompt of the Nth next command.
+See `cooked-previous-command'."
   (interactive "p")
   (cooked--goto-nth-command (or n 1) 'forward))
 
