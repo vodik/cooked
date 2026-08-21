@@ -4,10 +4,13 @@
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
 use super::cell::{Attrs, Color, Row, Run, Style};
-use super::image::{CellMetrics, ImageData, ImageFormat, ImageId, ImageStore, png_dimensions};
+use super::image::{
+    CellMetrics, ImageData, ImageFormat, ImageId, ImageStore, png_dimensions, png_from_rgba,
+};
 use super::kitty::{Kitty, Outcome};
 use super::parser::{Params, Parser, Perform};
 use super::screen::{Cursor, Erase, Resize, Screen};
+use super::sixel;
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
 
@@ -237,6 +240,13 @@ pub const BACKLOG_HIGH_WATER: usize = 8_000;
 /// hyperlink, and short of letting a single escape sequence allocate without bound.
 pub const OSC_PAYLOAD_LIMIT: usize = 1 << 20;
 
+/// Longest sixel body collected from one DCS string.
+///
+/// Sixel is a verbose encoding — one byte per six pixels per colour pass — so this is
+/// smaller than it looks: a full-screen picture is comfortably inside it, and the decoded
+/// result is bounded again, and more tightly, by [`sixel::MAX_PIXELS`].
+pub const SIXEL_BODY_LIMIT: usize = 8 << 20;
+
 /// Depth of the kitty keyboard flag stack. Real clients push once around a full-screen
 /// session; anything deeper is a child that never pops.
 const KITTY_STACK_LIMIT: usize = 16;
@@ -417,6 +427,12 @@ struct State {
     image_cells: std::collections::HashMap<ImageId, (u16, u16)>,
     /// Images transmitted since the last drain, awaiting their one trip to Lisp.
     pending_images: Vec<ImageData>,
+    /// The body of a sixel DCS string being collected, if one is open.
+    ///
+    /// `None` for every other DCS: the parser hands over the payload of whatever string
+    /// is running, and only `q` is ours. Collected rather than decoded incrementally
+    /// because a sixel's size is not known until its last band -- see [`sixel::decode`].
+    sixel: Option<Vec<u8>>,
     /// The cell size Emacs reports, for turning pixels into a cell rectangle.
     metrics: CellMetrics,
     /// Rows that have ever left the top of the primary screen. Screen row 0 is this row,
@@ -482,6 +498,7 @@ impl State {
             pending_scrollback: VecDeque::new(),
             images: ImageStore::default(),
             kitty: Kitty::default(),
+            sixel: None,
             image_cells: std::collections::HashMap::new(),
             pending_images: Vec::new(),
             metrics: CellMetrics::default(),
@@ -1291,9 +1308,11 @@ impl Perform for State {
             // DECSTR. Unlike RIS this keeps the screen and the scrollback.
             (Some(b'!'), 'p') => self.soft_reset(),
             // Primary DA. We answer for what we implement and nothing else: VT220 level
-            // (62) with ANSI colour (22). Not 1/132-column, not 4/sixel, not 6/selective
-            // erase, not 2/printer — see the printer capabilities dropped from terminfo.
-            (None, 'c') => self.events.push(Event::Reply(b"\x1b[?62;22c".to_vec())),
+            // (62) with sixel graphics (4) and ANSI colour (22). Not 1/132-column, not
+            // 6/selective erase, not 2/printer — see the printer capabilities dropped
+            // from terminfo. The 4 is load-bearing rather than decorative: it is how
+            // every sixel producer in circulation decides whether to emit one at all.
+            (None, 'c') => self.events.push(Event::Reply(b"\x1b[?62;4;22c".to_vec())),
             // Secondary DA. Unanswered, a child that queries and waits hangs.
             (Some(b'>'), 'c') => self.events.push(Event::Reply(b"\x1b[>0;0;0c".to_vec())),
             (None, 'n') if arg(params, 0, 0) == 5 => {
@@ -1345,6 +1364,53 @@ impl Perform for State {
             }
             _ => {}
         }
+    }
+
+    /// `ESC P ... q` — the start of a sixel image, and nothing else so far.
+    ///
+    /// Every other DCS is let through untouched: DECRQSS, DECRSPS and the rest are not
+    /// implemented, and collecting a payload we would only discard is worse than not
+    /// collecting it. `ignore` is the parser saying the introducer was malformed.
+    fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        // The intermediates are not incidental: DECRQSS is `DCS $ q ... ST`, so a final
+        // `q` alone would collect every status request a child makes as though it were a
+        // picture. Sixel takes no intermediates.
+        //
+        // P1, P2 and P3 are aspect ratio, background mode and grid size. None of the
+        // three survives the trip: the picture is scaled to a cell rectangle, and what
+        // "background" means here is Emacs' buffer face, which alpha already defers to.
+        self.sixel = (action == 'q' && intermediates.is_empty() && !ignore).then(Vec::new);
+    }
+
+    /// A slice of the running DCS string's payload.
+    ///
+    /// Slices rather than a call per byte is the vendored parser's doing, and it is what
+    /// makes collecting a megabyte of sixel a handful of appends.
+    fn put(&mut self, bytes: &[u8]) {
+        if let Some(body) = &mut self.sixel {
+            // Truncated rather than dropped, unlike an over-long APC: a sixel body is a
+            // sequence of independent bands, so its prefix is a shorter picture and not
+            // a parse error. A child that overruns this gets the top of its image.
+            let room = SIXEL_BODY_LIMIT - body.len().min(SIXEL_BODY_LIMIT);
+            body.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        }
+    }
+
+    /// The DCS string ended: decode what was collected, if it was a sixel.
+    fn unhook(&mut self) {
+        let Some(body) = self.sixel.take() else {
+            return;
+        };
+        let Some(bitmap) = sixel::decode(&body) else {
+            return;
+        };
+        // Into the same `ImageData` a kitty transmission produces, by the same route.
+        // Sixel has transparency and Emacs' pbm reader has no alpha, so this takes the
+        // PNG road for the reason `f=32` does rather than the cheaper P6 one.
+        let px = (bitmap.width, bitmap.height);
+        let bytes = png_from_rgba(px, &bitmap.pixels);
+        let id = self.intern_image(ImageFormat::Png, &bytes, px, (0, 0));
+        self.lay_image(id);
     }
 
     /// `ESC _ ... ST` — the kitty graphics protocol, and nothing else so far.
@@ -1666,6 +1732,90 @@ mod tests {
         let delta = t.drain();
         assert_eq!(delta.images.len(), 1);
         assert!(delta.images[0].bytes.starts_with(b"P6\n20 20\n255\n"));
+    }
+
+    #[test]
+    fn a_sixel_puts_a_picture_on_the_grid() {
+        // The second producer of the same `ImageData`: a sixel arrives as a DCS rather
+        // than an APC, and everything past "here are some pixels" is the kitty path.
+        let mut t = with_metrics(10, 20);
+        // 20 columns of a full band -- two cells wide at 10px a cell, one row tall.
+        t.feed(b"\x1bP0;0;0q#0;2;100;0;0!20~\x1b\\");
+        assert_eq!(placements(&t, 0).len(), 2);
+        let delta = t.drain();
+        assert_eq!(delta.images.len(), 1);
+        // A PNG rather than the cheaper P6, because sixel has transparency and Emacs'
+        // pbm reader has no alpha.
+        assert!(delta.images[0].bytes.starts_with(b"\x89PNG"));
+        assert_eq!(delta.images[0].px, (20, 6));
+    }
+
+    #[test]
+    fn a_sixel_body_split_across_writes_is_one_picture() {
+        // A picture arrives in whatever chunks the pty hands over, which for anything
+        // interesting is more than one, and the split lands mid-body.
+        let mut t = with_metrics(10, 20);
+        t.feed(b"\x1bP0;0;0q#0;2;100;0;0!1");
+        t.feed(b"0~\x1b\\");
+        assert_eq!(placements(&t, 0).len(), 1);
+        assert_eq!(t.drain().images[0].px, (10, 6));
+    }
+
+    #[test]
+    fn a_dcs_that_is_not_a_sixel_is_left_alone() {
+        // DECRQSS and the rest are unimplemented, and collecting a payload only to throw
+        // it away is worse than not collecting it.
+        let mut t = with_metrics(10, 20);
+        t.feed(b"\x1bP$qm\x1b\\");
+        assert!(t.drain().images.is_empty());
+        // ...and the parser is left in a state where the next sixel still works.
+        t.feed(b"\x1bP0;0;0q#0;2;100;0;0~\x1b\\");
+        assert_eq!(t.drain().images.len(), 1);
+    }
+
+    #[test]
+    fn a_sixel_that_decodes_to_nothing_draws_nothing() {
+        let mut t = with_metrics(10, 20);
+        t.feed(b"\x1bP0;0;0q\x1b\\");
+        assert!(t.drain().images.is_empty());
+        assert!(placements(&t, 0).is_empty());
+    }
+
+    #[test]
+    fn an_overlong_sixel_body_is_truncated_to_a_shorter_picture() {
+        // Unlike an over-long APC, which is dropped: a sixel body is a sequence of
+        // independent bands, so its prefix is a real picture rather than a parse error
+        // with a plausible-looking prefix.
+        let mut t = with_metrics(10, 20);
+        t.feed(b"\x1bP0;0;0q#0;2;100;0;0!100~");
+        // `$` is a carriage return: it pads the body without growing the picture, which
+        // is what isolates this from the pixel cap. Overrunning with *data* would
+        // produce something too large to decode, and that is the other test.
+        let filler = vec![b'$'; 4096];
+        for _ in 0..(SIXEL_BODY_LIMIT / filler.len()) + 64 {
+            t.feed(&filler);
+        }
+        t.feed(b"\x1b\\");
+        let delta = t.drain();
+        assert_eq!(delta.images.len(), 1, "a shorter picture, not no picture");
+        assert_eq!(delta.images[0].px, (100, 6));
+    }
+
+    #[test]
+    fn the_primary_da_advertises_sixel() {
+        // How every sixel producer in circulation decides whether to emit one at all.
+        let mut t = with_metrics(10, 20);
+        t.feed(b"\x1b[c");
+        let replies: Vec<_> = t
+            .drain()
+            .events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies, vec!["\x1b[?62;4;22c"]);
     }
 
     #[test]
@@ -2143,7 +2293,7 @@ mod tests {
     fn device_attributes_name_only_what_we_implement() {
         let mut t = term(2, 10, b"\x1b[c\x1b[>c");
         let events = t.drain().events;
-        assert!(events.contains(&Event::Reply(b"\x1b[?62;22c".to_vec())));
+        assert!(events.contains(&Event::Reply(b"\x1b[?62;4;22c".to_vec())));
         assert!(events.contains(&Event::Reply(b"\x1b[>0;0;0c".to_vec())));
     }
 

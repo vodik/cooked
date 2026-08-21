@@ -6,6 +6,7 @@ pub mod image;
 pub mod kitty;
 pub mod parser;
 pub mod screen;
+pub mod sixel;
 pub mod term;
 
 pub use cell::{Attrs, Cell, Color, Deco, DecoCell, Extra, Row, Run, Style};
