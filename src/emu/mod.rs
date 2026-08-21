@@ -2,6 +2,7 @@
 
 pub mod cell;
 pub mod glyph;
+pub mod parser;
 pub mod screen;
 pub mod term;
 

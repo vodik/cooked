@@ -11,9 +11,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libc = "0.2"
+memchr = "2.7"
 nix = { version = "0.31", features = ["fs", "poll", "process", "pthread", "signal", "term"] }
 unicode-width = "0.2"
-vte = "0.15"
 
 [profile.release]
 opt-level = 3

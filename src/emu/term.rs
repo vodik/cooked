@@ -7,7 +7,7 @@ use super::cell::{Attrs, Color, Row, Run, Style};
 use super::screen::{Cursor, Erase, Resize, Screen};
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
-use vte::{Params, Parser, Perform};
+use super::parser::{Params, Parser, Perform};
 
 /// The cursor shape a child asked for with DECSCUSR (`CSI Ps SP q`).
 ///
@@ -886,7 +886,7 @@ impl State {
 }
 
 /// `38;5;n` / `38;2;r;g;b` and their colon-subparameter spellings.
-fn extended(param: &[u16], iter: &mut vte::ParamsIter<'_>) -> Option<Color> {
+fn extended(param: &[u16], iter: &mut super::parser::ParamsIter<'_>) -> Option<Color> {
     let mut subs = param[1..].iter().copied();
     let mut next = || {
         subs.next()
