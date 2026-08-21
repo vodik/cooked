@@ -352,6 +352,20 @@ Deliberately not weak.  A placement is a reference to an id, and rows are
 re-rendered constantly, so a collected entry would leave cells naming an image
 nothing could rebuild.  `cooked--image-specs' is the weak half.")
 
+(defvar-local cooked--image-bytes 0
+  "Total length of the DATA strings in `cooked--image-data\='.
+
+Kept alongside rather than recomputed, because the alternative is walking every
+image on every transmission -- and a child that streams pictures is exactly the
+case the cap exists for.")
+
+(defvar-local cooked--image-order nil
+  "Image ids in `cooked--image-data\=', oldest transmission first.
+
+Insertion order rather than use order.  Emacs never reuses an id -- they are
+content-addressed in the module -- so this is a queue that only ever grows at
+one end, and the far end is what `cooked--evict-images\=' spends.")
+
 (defvar-local cooked--image-specs nil
   "(ID CELL-WIDTH CELL-HEIGHT) -> the `create-image' spec, weakly.
 
@@ -923,7 +937,77 @@ they are rendered.  Events are dispatched after rendering, so an image arriving
 as one would arrive too late for the row that needed it."
   (dolist (image images)
     (pcase-let ((`(,id ,format ,data ,px-w ,px-h ,cols ,rows) image))
-      (puthash id (list format data px-w px-h cols rows) cooked--image-data))))
+      (unless (gethash id cooked--image-data)
+        (setq cooked--image-order (nconc cooked--image-order (list id)))
+        (cl-incf cooked--image-bytes (length data)))
+      (puthash id (list format data px-w px-h cols rows) cooked--image-data)))
+  (cooked--evict-images))
+
+(defcustom cooked-image-cache-size (* 64 1024 1024)
+  "Bytes of transmitted image data one buffer retains, or nil for no limit.
+
+`cooked--image-data\=' is strong and buffer-local, so it dies with the buffer
+and a session that shows a few pictures never approaches this.  What it is for
+is the session that shows thousands: ids are content-addressed, so a child
+redrawing one picture costs nothing however long it runs, but a child drawing a
+*different* picture each time -- a plotting TUI, an image browser paging
+through a directory, a long `icat\=' loop -- adds one entry per frame and
+nothing ever took them away.
+
+64MB matches `MAX_RETAINED_BYTES\=' in the module, deliberately: both ends bound
+the same pictures, and a single figure is easier to reason about than two.
+
+Losing an entry is milder than it sounds, which is why a cap is affordable at
+all.  What Emacs displays is the `create-image\=' spec, and the buffer text
+holding it in a `display\=' property is what keeps it -- and the bytes inside
+it -- alive.  So an evicted picture that is still on screen goes on rendering.
+The entry is what rebuilds the spec at a *new* cell size, so the cost is a
+picture that scrolled away long ago failing to come back after a font change or
+`text-scale-adjust\=', which `cooked--image-spec\=' already renders as the plain
+characters underneath."
+  :type '(choice (const :tag "No limit" nil) integer)
+  :group 'cooked)
+
+(defun cooked--evict-images ()
+  "Drop oldest images until `cooked--image-data\=' fits `cooked-image-cache-size\='.
+
+Two passes, and the order is the whole design.  The first spends only images
+with no live spec, which is a free signal rather than a guess:
+`cooked--image-specs\=' is weak on its values, so an entry survives exactly as
+long as something -- in practice buffer text -- is still displaying it.  An id
+missing from it is one nothing is showing, and evicting that costs nothing
+visible now.
+
+The second pass runs only if the first could not get under the cap, and takes
+the oldest regardless.  Without it the bound is not a bound: a buffer whose
+images are all on screen, or one where no collection has run recently, would
+have nothing the first pass was willing to touch.  Preferring a harmless victim
+is worth a pass; guaranteeing the limit is worth two."
+  (when cooked-image-cache-size
+    (cooked--evict-images-until (lambda (id) (not (cooked--image-displayed-p id))))
+    (cooked--evict-images-until #'always)))
+
+(defun cooked--image-displayed-p (id)
+  "Whether any spec for image ID is still alive, and so still being shown."
+  (catch 'found
+    (maphash (lambda (key _spec)
+               (when (eq (car key) id) (throw 'found t)))
+             cooked--image-specs)
+    nil))
+
+(defun cooked--evict-images-until (evictable-p)
+  "Evict images satisfying EVICTABLE-P, oldest first, until under the cap."
+  (let ((kept nil))
+    (while (and cooked--image-order (> cooked--image-bytes cooked-image-cache-size))
+      (let ((id (pop cooked--image-order)))
+        (if (funcall evictable-p id)
+            (when-let* ((entry (gethash id cooked--image-data)))
+              (cl-decf cooked--image-bytes (length (nth 1 entry)))
+              (remhash id cooked--image-data))
+          (push id kept))))
+    ;; Whatever this pass declined to spend goes back on the front, still oldest
+    ;; first, so the next pass sees the same queue rather than a reversed one.
+    (setq cooked--image-order (nconc (nreverse kept) cooked--image-order))))
 
 (defun cooked--image-spec (id size)
   "The `create-image\=' spec for image ID at cell SIZE, built once.
@@ -1999,6 +2083,8 @@ EXTRA-ENV is an alist prepended to the child's environment."
   (setq cooked--deco-image-cache (make-hash-table :test #'equal))
   (setq cooked--image-data (make-hash-table :test #'eq))
   (setq cooked--image-specs (make-hash-table :test #'equal :weakness 'value))
+  (setq cooked--image-bytes 0)
+  (setq cooked--image-order nil)
   (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
     (setq cooked--rows rows cooked--cols cols))
   (let ((inhibit-read-only t))

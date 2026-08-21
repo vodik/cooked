@@ -1185,6 +1185,93 @@ placement naming the same id has to find the bytes still here."
     (cooked--apply (cooked-tests--image-update 7 3 1 nil))
     (should (eq (car-safe (car-safe (get-text-property (point-min) 'display))) 'slice))))
 
+(defun cooked-tests--install-image (id bytes)
+  "Install image ID with BYTES bytes of stand-in data."
+  (cooked--install-images
+   (list (list id 'png (make-string bytes ?x) 10 20 1 1))))
+
+(ert-deftest cooked-image-data-is-accounted-as-it-arrives ()
+  "The running total has to match the table, or the cap bounds nothing.  Ids are
+content-addressed, so the same id arriving twice is one picture, not two."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((cooked-image-cache-size nil))
+      (cooked-tests--install-image 1 100)
+      (cooked-tests--install-image 2 250)
+      (should (= cooked--image-bytes 350))
+      (should (equal cooked--image-order '(1 2)))
+      ;; The module will not send the same id twice, but a re-render must not be
+      ;; able to make the total drift if it ever did.
+      (cooked-tests--install-image 1 100)
+      (should (= cooked--image-bytes 350))
+      (should (equal cooked--image-order '(1 2))))))
+
+(ert-deftest cooked-image-cache-drops-the-oldest-past-its-cap ()
+  "A session drawing a different picture every frame added an entry per frame and
+nothing ever took them away.  Oldest first, because that is the one that
+scrolled away longest ago."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((cooked-image-cache-size 1000))
+      (dolist (id '(1 2 3 4))
+        (cooked-tests--install-image id 400))
+      ;; Four 400-byte pictures do not fit in 1000 bytes; the two oldest go.
+      (should (= cooked--image-bytes 800))
+      (should (equal cooked--image-order '(3 4)))
+      (should-not (gethash 1 cooked--image-data))
+      (should-not (gethash 2 cooked--image-data))
+      (should (gethash 3 cooked--image-data))
+      (should (gethash 4 cooked--image-data)))))
+
+(ert-deftest cooked-image-cache-is-a-bound-even-when-every-picture-is-live ()
+  "The second pass is what makes the cap a cap.  If only images with no live spec
+could ever be spent, a buffer showing all of them -- or one where no collection
+has run lately -- would grow without limit, which is the whole complaint."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((cooked-image-cache-size 500))
+      (cl-letf (((symbol-function 'cooked--image-displayed-p) (lambda (_id) t)))
+        (dolist (id '(1 2 3))
+          (cooked-tests--install-image id 400)))
+      (should (<= cooked--image-bytes 500))
+      (should (equal cooked--image-order '(3))))))
+
+(ert-deftest cooked-image-cache-spends-what-nothing-is-showing-first ()
+  "Given a choice, evict the picture whose loss is invisible rather than the
+oldest one still on screen."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((cooked-image-cache-size nil))
+      (dolist (id '(1 2 3))
+        (cooked-tests--install-image id 400)))
+    ;; 1 is the oldest, but only 2 is unclaimed, so 2 is what pays.
+    (let ((cooked-image-cache-size 800))
+      (cl-letf (((symbol-function 'cooked--image-displayed-p)
+                 (lambda (id) (memq id '(1 3)))))
+        (cooked--evict-images)))
+    (should (equal cooked--image-order '(1 3)))
+    (should-not (gethash 2 cooked--image-data))))
+
+(ert-deftest cooked-image-cache-size-nil-keeps-everything ()
+  "The opt-out has to actually opt out."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((cooked-image-cache-size nil))
+      (dotimes (id 20)
+        (cooked-tests--install-image id 1000))
+      (should (= cooked--image-bytes 20000))
+      (should (= (hash-table-count cooked--image-data) 20)))))
+
+(ert-deftest cooked-a-displayed-image-is-recognised-as-displayed ()
+  "`cooked--image-displayed-p\=' reads the weak spec table, which is the only free
+signal for \"something is still showing this\".  If it ever stopped answering yes
+for a picture on screen, eviction would quietly start preferring live images."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
+    (should (cooked--image-displayed-p 7))
+    (should-not (cooked--image-displayed-p 8))))
+
 (ert-deftest cooked-image-placement-without-data-renders-as-blanks ()
   "An id this buffer was never told about must not break the row: the cells are
 blanks on the grid, and they stay blanks here."
