@@ -129,6 +129,16 @@ is what a program that cleared ISIG asked for.",
         ),
         env.defun("cooked--pid", 1..=1, "Process id of SESSION's child.", pid),
         env.defun(
+            "cooked--core-version",
+            0..=0,
+            "Version of the native core, as `Cargo.toml' declares it.
+
+Compiled in rather than reported by the Lisp side, so the string always
+describes the artifact actually loaded.  What a stale .so answers is then its
+own version, not the version the Lisp wishes it were.",
+            core_version,
+        ),
+        env.defun(
             "cooked--foreground-pid",
             1..=1,
             "Process id of SESSION's foreground process group, or nil.
@@ -427,6 +437,10 @@ fn job_control(env: Env, args: &[Value]) -> Result<Value> {
         keyword(&env, ":isig")?,
         if jc.isig { env.intern("t")? } else { env.nil() },
     ])
+}
+
+fn core_version(env: Env, _args: &[Value]) -> Result<Value> {
+    env.into_lisp(env!("CARGO_PKG_VERSION"))
 }
 
 fn pid(env: Env, args: &[Value]) -> Result<Value> {

@@ -548,6 +548,19 @@ xterm-256color if that is not possible."
       (message "cooked: could not install terminfo, presenting as xterm-256color")
       "xterm-256color"))))
 
+(defun cooked-version ()
+  "Version of cooked, as `Cargo.toml\=' declares it.
+
+Read from the native core rather than kept here, so there is one place to
+change it and no second copy to drift.  The Version header at the top of this
+file is packaging metadata for `package.el\=' and is not consulted; keep it in
+step by hand, as a package must.
+
+Requires the core, which is loaded by then wherever this is called from --
+`cooked--start\=' loads it before building the child environment."
+  (cooked--load-module)
+  (cooked--core-version))
+
 ;;;###autoload
 (defun cooked-install-terminfo-remote (host)
   "Copy our terminfo entry to HOST so remote programs recognise TERM."
@@ -2119,11 +2132,22 @@ EXTRA-ENV is an alist prepended to the child's environment."
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)
-  "Environment alist for the child, with EXTRA taking precedence."
+  "Environment alist for the child, with EXTRA taking precedence.
+
+Every name this function sets is also stripped from the inherited environment,
+so a value from whatever terminal started Emacs cannot shadow ours.  That is the
+whole point of the exclusion list below: an inherited TERM_PROGRAM=iTerm.app
+sitting beside our own TERM is worse than no answer at all, because the programs
+that branch on it would take a path for a terminal that is not driving this pty."
   `(,@extra
     ("TERM" . ,(cooked--terminfo))
     ("COLORTERM" . "truecolor")
-    ("INSIDE_EMACS" . ,(format "%s,cooked" emacs-version))
+    ;; Identity, not capability -- what we can do is in the terminfo entry and
+    ;; COLORTERM.  Nothing keys off "cooked" yet, so consumers fall through to
+    ;; their defaults, which is the correct behaviour for a terminal they have
+    ;; never heard of.  Set as a pair: they are read as one.
+    ("TERM_PROGRAM" . "cooked")
+    ("TERM_PROGRAM_VERSION" . ,(cooked-version))
     ;; LINES and COLUMNS are deliberately *not* set. ncurses treats them as
     ;; authoritative over the tty's own size (`use_env'), so a program started with
     ;; them pinned keeps its original geometry for life and ignores every SIGWINCH.
@@ -2131,7 +2155,9 @@ EXTRA-ENV is an alist prepended to the child's environment."
     ,@(cl-loop for entry in process-environment
                for split = (string-search "=" entry)
                when (and split (not (member (substring entry 0 split)
-                                            '("TERM" "COLORTERM" "INSIDE_EMACS" "LINES" "COLUMNS"))))
+                                            '("TERM" "COLORTERM" "TERM_PROGRAM"
+                                              "TERM_PROGRAM_VERSION" "LINES"
+					      "COLUMNS"))))
                collect (cons (substring entry 0 split) (substring entry (1+ split))))))
 
 (defvar cooked-debug nil

@@ -472,9 +472,10 @@ echo hi | osc_copy           # onto the kill ring, works over ssh
 ```
 
 That is OSC 51;E, vterm's protocol, so existing vterm shell configuration mostly
-works — change the guard from `[[ "$INSIDE_EMACS" != vterm ]]` to
-`[[ "$INSIDE_EMACS" != *cooked* ]]` and rename `osc_vterm_eval` to
-`osc_emacs_eval`.
+works — guard on `[[ "$TERM_PROGRAM" == cooked ]]`, which is how a shell tells it
+is talking to us, and rename `osc_vterm_eval` to `osc_emacs_eval`. Children are
+also handed `TERM_PROGRAM_VERSION`, straight from the version the native core was
+built with.
 
 **This is a command channel driven by bytes on the terminal**, so it is off until you
 ask for it with `(require 'cooked-osc-eval)`. Anything that can write to the terminal

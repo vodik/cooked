@@ -258,6 +258,22 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
     (should-not (assoc "LINES" env))
     (should-not (assoc "COLUMNS" env))))
 
+(ert-deftest cooked-presents-itself-as-term-program ()
+  "The child is told who is driving the pty, and told it accurately."
+  (let ((env (cooked--child-environment)))
+    (should (equal (cdr (assoc "TERM_PROGRAM" env)) "cooked"))
+    (should (equal (cdr (assoc "TERM_PROGRAM_VERSION" env)) (cooked-version))))
+  ;; A value from the terminal that started Emacs must not shadow ours: programs
+  ;; branch on it, and would take a path for a terminal not driving this pty.
+  (let* ((process-environment (append '("TERM_PROGRAM=iTerm.app"
+                                        "TERM_PROGRAM_VERSION=3.5.0")
+                                      process-environment))
+         (env (cooked--child-environment)))
+    (should (equal (cdr (assoc "TERM_PROGRAM" env)) "cooked"))
+    (should (equal (cdr (assoc "TERM_PROGRAM_VERSION" env)) (cooked-version)))
+    (should-not (rassoc "iTerm.app" env))
+    (should-not (rassoc "3.5.0" env))))
+
 (ert-deftest cooked-full-screen-programs-redraw-after-a-resize ()
   "End to end: htop must move its footer when the terminal grows."
   (skip-unless (executable-find "htop"))
