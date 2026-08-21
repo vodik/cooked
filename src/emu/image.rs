@@ -140,6 +140,72 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     (w != 0 && h != 0).then_some((w, h))
 }
 
+/// What an opaque image file is, and how big, read from its own header.
+///
+/// Needed because iTerm2's `OSC 1337` transmits a *file* with no format field: the
+/// picture is whatever `imgcat` was pointed at. The kitty protocol never needs this --
+/// `f=` says, and `f=100` is the only file format it carries -- so this exists for the
+/// path that has to ask the bytes.
+///
+/// Only the three formats Emacs decodes natively are recognised. Anything else is
+/// declined rather than passed through hopefully: a format Emacs cannot read renders as
+/// nothing, and nothing is indistinguishable from a bug.
+pub fn sniff(bytes: &[u8]) -> Option<(ImageFormat, (u32, u32))> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some((ImageFormat::Png, png_dimensions(bytes)?));
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        // The logical screen descriptor follows the six-byte signature, little-endian.
+        let w = u32::from(u16::from_le_bytes(bytes.get(6..8)?.try_into().ok()?));
+        let h = u32::from(u16::from_le_bytes(bytes.get(8..10)?.try_into().ok()?));
+        return (w != 0 && h != 0).then_some((ImageFormat::Gif, (w, h)));
+    }
+    if bytes.starts_with(b"\xff\xd8") {
+        return Some((ImageFormat::Jpeg, jpeg_dimensions(bytes)?));
+    }
+    None
+}
+
+/// A JPEG's size, from the first start-of-frame segment.
+///
+/// JPEG states its dimensions in a segment rather than a header, so finding them means
+/// walking the segment chain. Only as far as the frame header, which precedes the image
+/// data in every file: this never reads the entropy-coded stream, whose length is not
+/// declared and cannot be skipped.
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut at = 2;
+    loop {
+        // Segments are `FF <marker>`, and any number of extra `FF`s may pad the gap.
+        if *bytes.get(at)? != 0xFF {
+            return None;
+        }
+        while *bytes.get(at)? == 0xFF {
+            at += 1;
+        }
+        let marker = *bytes.get(at)?;
+        at += 1;
+        // The standalone markers carry no length to skip.
+        if matches!(marker, 0x01 | 0xD0..=0xD9) {
+            continue;
+        }
+        let length = usize::from(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
+        // Every SOF but DHT (C4), JPG (C8) and DAC (CC), which share the range.
+        if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            // Length, then one byte of sample precision, then height and width.
+            let h = u32::from(u16::from_be_bytes(
+                bytes.get(at + 3..at + 5)?.try_into().ok()?,
+            ));
+            let w = u32::from(u16::from_be_bytes(
+                bytes.get(at + 5..at + 7)?.try_into().ok()?,
+            ));
+            return (w != 0 && h != 0).then_some((w, h));
+        }
+        // A segment that claims to be shorter than its own length field would not
+        // advance, and a file of those would not terminate.
+        at += length.max(2);
+    }
+}
+
 /// Wrap RGB pixels as binary P6, which Emacs decodes with no image library at all.
 ///
 /// The cheap target for anything arriving as raw pixels: a header and the bytes it
@@ -369,6 +435,63 @@ mod tests {
     fn png_dimensions_are_read_from_the_header() {
         let png = png_from_rgba((7, 3), &[0; 7 * 3 * 4]);
         assert_eq!(png_dimensions(&png), Some((7, 3)));
+    }
+
+    #[test]
+    fn a_file_states_its_own_format_and_size() {
+        let png = png_from_rgba((7, 3), &[0; 7 * 3 * 4]);
+        assert_eq!(sniff(&png), Some((ImageFormat::Png, (7, 3))));
+
+        // A GIF's logical screen descriptor: signature, then width and height, little
+        // endian. 0x0107 is 263, which no byte-order confusion could read as 7.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&[7, 1, 3, 0, 0, 0, 0]);
+        assert_eq!(sniff(&gif), Some((ImageFormat::Gif, (263, 3))));
+        assert_eq!(
+            sniff(b"GIF87a\x07\x00\x03\x00\x00\x00\x00").unwrap().1,
+            (7, 3)
+        );
+    }
+
+    #[test]
+    fn a_jpeg_states_its_size_in_a_segment_rather_than_a_header() {
+        // SOI, a JFIF APP0 to be skipped over, then a baseline SOF0 carrying the size.
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00]);
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0, 3, 0, 7]);
+        assert_eq!(sniff(&jpeg), Some((ImageFormat::Jpeg, (7, 3))));
+
+        // The same, with a progressive SOF2 instead: the marker range matters, and DHT
+        // (C4) sits inside it without being a frame header.
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00]);
+        jpeg.extend_from_slice(&[0xFF, 0xC2, 0x00, 0x11, 0x08, 0, 3, 0, 7]);
+        assert_eq!(sniff(&jpeg), Some((ImageFormat::Jpeg, (7, 3))));
+    }
+
+    #[test]
+    fn a_truncated_or_looping_jpeg_terminates_rather_than_hanging() {
+        // No frame header before the end.
+        assert!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 0x00, 0x00]).is_none());
+        assert!(sniff(&[0xFF, 0xD8]).is_none());
+        // A segment claiming to be shorter than its own length field would not advance,
+        // and a file of those would never end.
+        assert!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00, 0xFF, 0xE0, 0x00, 0x00]).is_none());
+        // A zero size is not a picture.
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0, 0, 0, 7]);
+        assert!(sniff(&jpeg).is_none());
+    }
+
+    #[test]
+    fn a_format_emacs_cannot_read_is_declined_rather_than_passed_through() {
+        // A variant Emacs cannot render is a defect that only shows up on somebody
+        // else's build, so the sniff is the place it is refused.
+        assert!(sniff(b"BM\x00\x00\x00\x00").is_none());
+        assert!(sniff(b"P6\n1 1\n255\n\0\0\0").is_none());
+        assert!(sniff(b"").is_none());
+        // Right signature, but a header too short to carry a size.
+        assert!(sniff(b"GIF89a\x07").is_none());
     }
 
     #[test]

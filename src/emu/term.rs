@@ -7,7 +7,7 @@ use super::cell::{Attrs, Color, Row, Run, Style};
 use super::image::{
     CellMetrics, ImageData, ImageFormat, ImageId, ImageStore, png_dimensions, png_from_rgba,
 };
-use super::kitty::{Kitty, Outcome};
+use super::kitty::{Kitty, Outcome, decode_base64};
 use super::parser::{Params, Parser, Perform};
 use super::screen::{Cursor, Erase, Resize, Screen};
 use super::sixel;
@@ -264,6 +264,19 @@ const KITTY_STACK_LIMIT: usize = 16;
 /// early or inject one of their own. Payloads are attacker-reachable — a colour name can
 /// arrive from the child in a set request and come straight back out in the echo — so
 /// centralising the framing buys nothing unless it also refuses to frame a lie.
+/// A `width=`/`height=` value that is a plain cell count, or 0 for anything else.
+///
+/// iTerm2 spells sizes four ways: bare digits mean cells, `Npx` means pixels, `N%` means
+/// a share of the window, and `auto` means the picture decides. Only the first is a cell
+/// rectangle we can honour directly; every other spelling falls back to what the pixels
+/// imply, which is what a missing key already does.
+fn plain_cells(value: &str) -> u16 {
+    if !value.bytes().all(|b| b.is_ascii_digit()) || value.is_empty() {
+        return 0;
+    }
+    value.parse::<u32>().unwrap_or(0).min(u32::from(u16::MAX)) as u16
+}
+
 pub fn osc_reply(code: u16, payload: &str, bell: bool) -> Option<Vec<u8>> {
     if payload.chars().any(|c| c.is_control() || c == '\u{7f}') {
         return None;
@@ -733,6 +746,72 @@ impl State {
         }
         self.image_cells.insert(id, cells);
         id
+    }
+
+    /// `OSC 1337 ; File=<key>=<value>;... : <base64>` — iTerm2's inline image.
+    ///
+    /// A third producer of the same [`ImageData`], and the least structured of them: the
+    /// payload is a *file*, with no field saying what kind, so the format and size come
+    /// from sniffing the bytes. Only what Emacs decodes natively is accepted.
+    ///
+    /// `inline=1` is required. Without it the sequence means "download this to the
+    /// user's machine", which is a file-writing capability a terminal emulator inside an
+    /// editor has no business growing, and which is refused here by doing nothing.
+    ///
+    /// Semicolons separate the keys, which is also what separates OSC parameters, so the
+    /// arguments arrive already split and are rejoined. That the payload's base64 alphabet
+    /// contains no semicolon is what makes this safe.
+    /// Returns whether this was an inline-image `File=`, handled or refused. `false`
+    /// means it was some other `OSC 1337` and belongs to whoever else is listening.
+    fn iterm_file(&mut self, params: &[&[u8]]) -> bool {
+        let mut joined = Vec::new();
+        for (at, part) in params[1..].iter().enumerate() {
+            if at != 0 {
+                joined.push(b';');
+            }
+            joined.extend_from_slice(part);
+        }
+        // The colon separates the arguments from the payload, and only the first one
+        // does: base64 has no colon in it.
+        let colon = joined.iter().position(|&b| b == b':');
+        let args = String::from_utf8_lossy(&joined[..colon.unwrap_or(joined.len())]).into_owned();
+        let Some(args) = args.strip_prefix("File=") else {
+            return false;
+        };
+
+        let mut inline = false;
+        let mut cells = (0u16, 0u16);
+        for pair in args.split(';') {
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
+            match key {
+                "inline" => inline = value != "0",
+                // Sizes are in cells unless suffixed. `px` and `%` and `auto` are all
+                // spelled here, and all of them mean "work it out from the pixels" —
+                // which is what a missing key means too, so they need no case.
+                "width" => cells.0 = plain_cells(value),
+                "height" => cells.1 = plain_cells(value),
+                _ => {}
+            }
+        }
+        // Past this point it is an inline image or a malformed one, and either way it
+        // is not somebody else's to handle.
+        let Some(colon) = colon else {
+            return true;
+        };
+        if !inline {
+            return true;
+        }
+        let Some(bytes) = decode_base64(&joined[colon + 1..]) else {
+            return true;
+        };
+        let Some((format, px)) = super::image::sniff(&bytes) else {
+            return true;
+        };
+        let id = self.intern_image(format, &bytes, px, cells);
+        self.lay_image(id);
+        true
     }
 
     /// Lay an already-interned image into the grid at the cursor.
@@ -1457,7 +1536,20 @@ impl Perform for State {
         };
         // A hostile stream should not get to size our heap for us, and nothing
         // legitimate — title, working directory, hyperlink, clipboard — comes close.
-        if params[1..].iter().map(|p| p.len()).sum::<usize>() > OSC_PAYLOAD_LIMIT {
+        // 1337 is the exception and needs its own bound, because what it carries is a
+        // whole base64 image; the parser has already capped it at `MAX_OSC_RAW`.
+        let limit = if code == 1337 {
+            super::parser::MAX_OSC_RAW
+        } else {
+            OSC_PAYLOAD_LIMIT
+        };
+        if params[1..].iter().map(|p| p.len()).sum::<usize>() > limit {
+            return;
+        }
+        // Only `File=` is ours. `OSC 1337` is iTerm2's whole private channel —
+        // `SetUserVar`, `CurrentDir`, `ShellIntegrationVersion` — and swallowing all of
+        // it would quietly close a door Lisp can already reach through `Event::Osc`.
+        if code == 1337 && self.iterm_file(params) {
             return;
         }
         // Payloads are handed over lossily rather than dropped: a mangled title is
@@ -1816,6 +1908,100 @@ mod tests {
             })
             .collect();
         assert_eq!(replies, vec!["\x1b[?62;4;22c"]);
+    }
+
+    #[test]
+    fn an_iterm_inline_image_puts_a_picture_on_the_grid() {
+        // The third producer of the same `ImageData`, and the least structured: the
+        // payload is a file with no field saying what kind, so the format and the size
+        // come from the bytes.
+        let png = super::super::image::png_from_rgba((30, 20), &[0; 30 * 20 * 4]);
+        let mut t = with_metrics(10, 20);
+        t.feed(format!("\x1b]1337;File=inline=1:{}\x07", b64(&png)).as_bytes());
+        assert_eq!(placements(&t, 0).len(), 3, "30px at 10px a cell");
+        let delta = t.drain();
+        assert_eq!(delta.images.len(), 1);
+        assert_eq!(delta.images[0].px, (30, 20));
+        // Passed through rather than converted: Emacs decodes PNG better than we would.
+        assert_eq!(delta.images[0].bytes, png);
+    }
+
+    #[test]
+    fn an_iterm_image_without_inline_is_a_download_and_is_declined() {
+        // Without `inline=1` the sequence means "write this to the user's disk", which
+        // is a capability a terminal inside an editor has no business growing.
+        let png = super::super::image::png_from_rgba((10, 20), &[0; 10 * 20 * 4]);
+        let mut t = with_metrics(10, 20);
+        t.feed(format!("\x1b]1337;File=name=Zm9v;size=9:{}\x07", b64(&png)).as_bytes());
+        assert!(t.drain().images.is_empty());
+        // ...and explicitly turning it off is the same answer.
+        t.feed(format!("\x1b]1337;File=inline=0:{}\x07", b64(&png)).as_bytes());
+        assert!(t.drain().images.is_empty());
+    }
+
+    #[test]
+    fn iterm_arguments_survive_being_split_on_semicolons() {
+        // Semicolons separate iTerm2's keys and OSC's parameters alike, so the arguments
+        // arrive already split and have to be rejoined before they can be read.
+        let png = super::super::image::png_from_rgba((10, 20), &[0; 10 * 20 * 4]);
+        let mut t = with_metrics(10, 20);
+        let apc = format!(
+            "\x1b]1337;File=name=Zm9v;size=64;inline=1;width=4;height=2:{}\x07",
+            b64(&png)
+        );
+        t.feed(apc.as_bytes());
+        // `width=4` is four cells, overriding what the 10px picture would imply.
+        assert_eq!(placements(&t, 0).len(), 4);
+    }
+
+    #[test]
+    fn iterm_sizes_in_anything_but_cells_fall_back_to_the_pixels() {
+        // `px`, `%` and `auto` are all spellings we do not honour directly, and all of
+        // them mean the same thing a missing key does.
+        let png = super::super::image::png_from_rgba((30, 20), &[0; 30 * 20 * 4]);
+        for size in ["100px", "50%", "auto", ""] {
+            let mut t = with_metrics(10, 20);
+            let apc = format!("\x1b]1337;File=inline=1;width={size}:{}\x07", b64(&png));
+            t.feed(apc.as_bytes());
+            assert_eq!(placements(&t, 0).len(), 3, "width={size}");
+        }
+    }
+
+    #[test]
+    fn an_iterm_payload_emacs_cannot_decode_is_declined() {
+        // A format Emacs cannot read renders as nothing, and nothing on screen is
+        // indistinguishable from a bug, so it is refused rather than hoped over.
+        let mut t = with_metrics(10, 20);
+        t.feed(format!("\x1b]1337;File=inline=1:{}\x07", b64(b"BMnot-a-bitmap")).as_bytes());
+        assert!(t.drain().images.is_empty());
+        // A payload that is not base64 at all, and one with no payload separator.
+        t.feed(b"\x1b]1337;File=inline=1:not*base64\x07");
+        assert!(t.drain().images.is_empty());
+        t.feed(b"\x1b]1337;File=inline=1\x07");
+        assert!(t.drain().images.is_empty());
+    }
+
+    #[test]
+    fn other_iterm_1337_messages_still_reach_lisp() {
+        // `OSC 1337` is iTerm2's whole private channel — `SetUserVar`, `CurrentDir` and
+        // the rest — so intercepting all of it to find the images would quietly close a
+        // door that is already open.
+        let mut t = with_metrics(10, 20);
+        t.feed(b"\x1b]1337;CurrentDir=/tmp\x07");
+        let events = t.drain().events;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::Osc(1337, parts, _) if parts[0] == "CurrentDir=/tmp"
+            )),
+            "{events:?}"
+        );
+
+        // A `File=` that turned out to be malformed is still ours, and is not passed on
+        // as though somebody else might make sense of it.
+        t.feed(b"\x1b]1337;File=inline=1:not*base64\x07");
+        let events = t.drain().events;
+        assert!(!events.iter().any(|e| matches!(e, Event::Osc(1337, ..))));
     }
 
     #[test]

@@ -332,7 +332,11 @@ fn response(cmd: &Command, error: Option<&str>) -> Option<Vec<u8>> {
 /// Whitespace is skipped because a payload split across chunks can pick up a newline
 /// from a shell that echoed it, and dropping the picture over that would be a worse
 /// answer than ignoring it.
-fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
+///
+/// Shared with the `OSC 1337` path in [`super::term`], which carries its image the same
+/// way. It lives here because this is where it was first needed, and a second copy would
+/// be a second set of edge cases.
+pub(super) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(input.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0u32);
     for &byte in input {
