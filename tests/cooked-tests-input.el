@@ -988,6 +988,36 @@ unmodified selves, and Shift+TAB produced nothing at all."
     (should (equal (cooked--encode-event 'C-return) "\e[13;5u"))
     (should (equal (cooked--encode-event 'return) "\r"))))
 
+(ert-deftest cooked-backtab-follows-negotiation-like-any-other-literal-key ()
+  "Regression: `backtab' carries its shift in the base symbol, not in
+`event-modifiers' -- so a naive param computation saw it as unmodified, and it
+could never be spelled any way but the classical `ESC [ Z', negotiation or
+override notwithstanding.  A program that switched itself to the kitty
+protocol without negotiating (Claude Code) is no longer listening for that."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    ;; Nothing negotiated: the classical spelling, same as before this existed.
+    (setq cooked--keys 'legacy)
+    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
+    ;; Held alongside another modifier, Emacs still hides the shift -- `mods' is
+    ;; `(control)', not `(control shift)' -- but the fallback stays the bare
+    ;; classical sequence either way, same as the other literal keys above.
+    (should (equal (cooked--encode-event 'C-backtab) "\e[Z"))
+    (should (equal (cooked--encode-event 'M-backtab) "\e\e[Z"))
+
+    (setq cooked--keys 'modify-other)
+    (should (equal (cooked--encode-event 'backtab) "\e[27;2;9~"))
+    (should (equal (cooked--encode-event 'C-backtab) "\e[27;6;9~"))
+
+    (setq cooked--keys 'kitty)
+    (should (equal (cooked--encode-event 'backtab) "\e[9;2u"))
+    (should (equal (cooked--encode-event 'C-backtab) "\e[9;6u"))
+    ;; And the override path, which is what this was actually for: forcing the
+    ;; kitty spelling on a `backtab' works now, where it used to be a no-op
+    ;; because `cooked--encode-event' never had a branch that read `cooked--keys'
+    ;; for this key at all.
+    (setq cooked--keys nil)
+    (should (equal (cooked--override-bytes-for :kitty 'backtab) "\e[9;2u"))))
+
 (ert-deftest cooked-key-override-actions-encode-to-their-bytes ()
   "Every `cooked-key-overrides' action form, and the reason each one exists:
 nobody should have to write `ESC [ 13;2 u' out by hand to bind Shift+Return."
@@ -1057,21 +1087,83 @@ stop composing a multi-line command."
       (should (cooked--suspended-p))
       (should-not cooked--override-map-alist))))
 
-(ert-deftest cooked-key-override-default-covers-claude-code ()
+(ert-deftest cooked-key-protocol-override-matches-the-foreground-program ()
+  "The blanket version of `cooked-key-overrides': a program-wide guess at what
+`cooked--keys' would have been, for a child that never negotiates one for real."
+  (let ((cooked-key-protocol-overrides '(("\\`cat\\'" . kitty))))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "stty raw -echo; printf '\033[?1049h'; exec cat -v")
+      (should (cooked-tests--settle (lambda () (eq (cooked--policy) 'alt))))
+      (should (equal (cooked--foreground-program) "cat"))
+      (should (eq (cooked--assumed-key-protocol) 'kitty))
+      ;; It only ever adjusts the ordinary path, not the negotiated state itself.
+      (should (eq cooked--keys 'legacy))
+      (let ((sent nil))
+        (cl-letf (((symbol-function 'cooked--send)
+                   (lambda (_s text) (push text sent))))
+          (let ((last-command-event 'backtab))
+            (cooked-send-key))
+          (should (equal sent '("\e[9;2u"))))))))
+
+(ert-deftest cooked-key-protocol-override-yields-to-a-real-negotiation ()
+  "A guess about what a program probably wants is never trusted over what it
+actually asked for -- if that ever happened, this would be indistinguishable
+from a bug that silently ignored `CSI ? u'."
+  (let ((cooked-key-protocol-overrides '(("\\`cat\\'" . kitty))))
+    (cooked-tests--with-session '("/bin/cat")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
+      (setq cooked--keys 'modify-other)
+      (should-not (cooked--assumed-key-protocol))
+      (let ((sent nil))
+        (cl-letf (((symbol-function 'cooked--send)
+                   (lambda (_s text) (push text sent))))
+          (let ((last-command-event 'backtab))
+            (cooked-send-key))
+          (should (equal sent '("\e[27;2;9~"))))))))
+
+(ert-deftest cooked-key-protocol-override-is-inert-when-emacs-owns-the-line ()
+  "Same gating as `cooked-key-overrides', and for the same reason: this is
+still keys being taken away from Emacs' own idea of what they mean."
+  (let ((cooked-key-protocol-overrides '(("." . kitty))))
+    (cooked-tests--with-session '("/bin/sh" "-c" "exec cat")
+      (should (cooked-tests--settle (lambda () (cooked--input-state-p))))
+      (should-not (cooked--assumed-key-protocol)))))
+
+(ert-deftest cooked-key-override-still-wins-over-the-protocol-override ()
+  "The two mechanisms can coexist: a specific `cooked-key-overrides' entry is
+consulted first, from a keymap above the ordinary passthrough path the
+protocol override adjusts, so it is never shadowed by a blanket guess."
+  (let ((cooked-key-overrides '(("\\`cat\\'" . (("<S-return>" . :newline)))))
+        (cooked-key-protocol-overrides '(("\\`cat\\'" . kitty))))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "stty raw -echo; printf '\033[?1049h'; exec cat -v")
+      (should (cooked-tests--settle (lambda () (eq (cooked--policy) 'alt))))
+      (cooked--refresh-keymap)
+      ;; The named key still resolves to the specific override, not `cooked-send-key'
+      ;; -- so the blanket protocol guess never gets a chance to run for it at all.
+      (should (eq (key-binding (kbd "<S-return>")) #'cooked-send-override))
+      ;; A key the specific override says nothing about still falls through to the
+      ;; ordinary path, where the blanket guess applies.
+      (should (eq (key-binding (kbd "<backtab>")) #'cooked-send-key))
+      (should (eq (cooked--assumed-key-protocol) 'kitty)))))
+
+(ert-deftest cooked-key-protocol-override-default-covers-claude-code ()
   "The default is deliberately one program wide.
 
-Shift+Return needs the kitty keyboard protocol or `modifyOtherKeys', and cooked
-sends either only to a child that negotiated it.  Claude Code never negotiates:
-it enables the kitty protocol from a list of terminal names it recognises in the
-environment, and never sends the `CSI ? u' query cooked answers.  Cooked will not
-claim to be one of those terminals, so the override is the honest way through --
-see `cooked-key-overrides'."
-  (let ((bindings (alist-get "\\`claude\\'" cooked-key-overrides
-                             nil nil #'equal)))
-    (should bindings)
-    (should (equal (alist-get "<S-return>" bindings nil nil #'equal) :newline))
-    ;; Nothing else is claimed by default.
-    (should (= 1 (length cooked-key-overrides)))))
+Claude Code never negotiates a keyboard protocol: it enables the kitty
+protocol for its own use from a list of terminal names it recognises in the
+environment, and never sends the `CSI ? u' query cooked answers, but reads a
+kitty-formatted sequence regardless of that decision.  Cooked will not claim to
+be one of those terminals, so the override is the honest way through -- see
+`cooked-key-protocol-overrides'."
+  (should (equal (alist-get "\\`claude\\'" cooked-key-protocol-overrides
+                            nil nil #'equal)
+                 'kitty))
+  ;; Nothing else is claimed by default, and `cooked-key-overrides' -- the
+  ;; narrower, per-key mechanism -- claims nothing at all: Claude Code's needs
+  ;; are covered by the blanket protocol guess above instead.
+  (should (= 1 (length cooked-key-protocol-overrides)))
+  (should-not cooked-key-overrides))
 
 (ert-deftest cooked-typing-snaps-into-the-input-region ()
   "Regression, from two directions.

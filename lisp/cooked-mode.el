@@ -112,9 +112,10 @@ it, are `comint-input-ring' and `comint-input-ring-index'.")
     (home . "\e[H") (end . "\e[F") (prior . "\e[5~") (next . "\e[6~")
     (insert . "\e[2~") (deletechar . "\e[3~") (backspace . "\C-?")
     (tab . "\t") (return . "\r") (escape . "\e")
-    ;; Shift+TAB is reported by Emacs as `backtab', not as `S-tab', so it needs its
-    ;; own entry rather than falling out of the modifier logic.  Terminfo calls the
-    ;; sequence `kcbt'.
+    ;; Shift+TAB is reported by Emacs as `backtab', not as `S-tab' -- see
+    ;; `cooked--encode-event', which restores the shift `event-modifiers' leaves
+    ;; out so this falls out of the ordinary modifier logic after all.  This entry
+    ;; is the classical, un-negotiated spelling; terminfo calls it `kcbt'.
     (backtab . "\e[Z")
     (f1 . "\eOP") (f2 . "\eOQ") (f3 . "\eOR") (f4 . "\eOS")
     (f5 . "\e[15~") (f6 . "\e[17~") (f7 . "\e[18~") (f8 . "\e[19~")
@@ -138,15 +139,19 @@ Modified, they become \\='ESC [ 1 ; MOD FINAL\\='.")
   "Keys spelled \\='ESC [ N ~\\=', which take a modifier as \\='ESC [ N ; MOD ~\\='.")
 
 (defconst cooked--literal-codes
-  '((return . 13) (tab . 9) (escape . 27) (backspace . 127))
-  "Keys that are a single byte, and the character code standing in for each.
+  '((return . 13) (tab . 9) (escape . 27) (backspace . 127) (backtab . 9))
+  "Keys with a code point for the negotiated encodings, and their fallback.
 
-These are the awkward ones.  There is no classical encoding for
-Shift+Return or Control+Tab: xterm and kitty each invented one, and both
-are negotiated, because a terminal that volunteers \\='ESC [ 27;2;13 ~\\='
-to a program that never asked for it has not sent Shift+Return, it has
-sent six characters of rubbish.  So a modifier here is spelled out only
-when `cooked--keys' says the child opted in.")
+There is no classical encoding for Shift+Return or Control+Tab: xterm and
+kitty each invented one, and both are negotiated, because a terminal that
+volunteers \\='ESC [ 27;2;13 ~\\=' to a program that never asked for it has not
+sent Shift+Return, it has sent six characters of rubbish.  So a modifier here
+is spelled out only when `cooked--keys' says the child opted in; the fallback
+`cooked--encode-literal' reaches for otherwise is `cooked--special-keys', which
+for most of these is a single byte -- except `backtab', whose fallback is the
+three-byte `kcbt' sequence, because unlike the others it already has a
+classical spelling that just doesn't fit the single-byte-plus-negotiation
+shape everything else here follows.")
 
 (defun cooked--modifier-param (mods)
   "xterm's modifier parameter for MODS: 1 plus a bit per held modifier."
@@ -156,11 +161,13 @@ when `cooked--keys' says the child opted in.")
      (if (memq 'control mods) 4 0)))
 
 (defun cooked--encode-literal (basic code param mods)
-  "Encode a single-byte key BASIC, whose character is CODE, with modifiers.
+  "Encode key BASIC, whose kitty/modifyOtherKeys code point is CODE, with modifiers.
 
 PARAM is the xterm modifier parameter and MODS the modifier list.  Falls back to
-the bare byte when the child has negotiated nothing, since that is what every
-terminal has always sent and what every program still understands."
+`cooked--special-keys' when the child has negotiated nothing, since that is
+what every terminal has always sent and what every program still understands
+-- a bare byte for most keys here, but `backtab' falls back to its own
+classical, three-byte spelling instead."
   (let ((seq (cdr (assq basic cooked--special-keys))))
     (cond
      ((= param 1) (if (memq 'meta mods) (concat "\e" seq) seq))
@@ -186,6 +193,13 @@ every capital into a lowercase letter."
   ;; character; a key in none of them encodes as nil and is not forwarded.
   (let* ((mods (event-modifiers event))
          (basic (event-basic-type event))
+         ;; `backtab' is the mirror image of the capital-letter case above: Emacs
+         ;; bakes its shift into the base symbol and reports none in `mods' at
+         ;; all, for `backtab' alone or with other modifiers held alongside it
+         ;; (`C-backtab' still reports only `(control)').  Restore it before
+         ;; `param' is computed, or `cooked--literal-codes' has a code point for
+         ;; `backtab' that no modifier ever reaches.
+         (mods (if (eq basic 'backtab) (cons 'shift mods) mods))
          (param (cooked--modifier-param mods))
          (modified (> param 1)))
     (cond
@@ -236,11 +250,16 @@ whatever Emacs is showing, and the ghost has been marking that spot."
     (cooked--update-ghost-cursor)))
 
 (defun cooked-send-key ()
-  "Send the key that invoked this command straight to the child."
+  "Send the key that invoked this command straight to the child.
+
+Bound under whatever `cooked--keys' says was actually negotiated, unless
+`cooked-key-protocol-overrides' has a program-wide guess to stand in for a
+negotiation that never happened -- see `cooked--assumed-key-protocol'."
   (interactive)
-  (when-let* ((bytes (cooked--encode-event last-command-event)))
-    (cooked--snap-to-cursor)
-    (cooked--send-to-child bytes)))
+  (let ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys)))
+    (when-let* ((bytes (cooked--encode-event last-command-event)))
+      (cooked--snap-to-cursor)
+      (cooked--send-to-child bytes))))
 
 (defun cooked-send-string (string)
   "Send STRING to the child.
@@ -347,8 +366,7 @@ These re-spell the key that was pressed, so `<S-return>' with `:kitty' sends
 `ESC [ 13;2 u' without anyone writing that out.  Unlike everything else cooked
 sends, this is not backed by a negotiation -- see `cooked-key-overrides'.")
 
-(defcustom cooked-key-overrides
-  '(("\\`claude\\'" . (("<S-return>" . :newline))))
+(defcustom cooked-key-overrides nil
   "Keys that mean something particular to a particular program.
 
 An alist of (CONDITION . BINDINGS), consulted only while the child owns the
@@ -372,23 +390,21 @@ BINDINGS is an alist of (KEY . ACTION), KEY as `kbd' spells it.  ACTION is:
 
 Where several entries match, the first one to bind a key wins.
 
-The default covers Claude Code, whose Shift+Return is the reason this exists.
-Shift+Return has no classical encoding, so a terminal can only send it through
-the kitty keyboard protocol or xterm's `modifyOtherKeys' -- and cooked sends
-either one only to a child that asked for it, since to a child that did not,
-`ESC [ 27;2;13 ~' is six characters of rubbish rather than a keystroke.  Claude
-Code never asks: it turns the kitty protocol on from a list of terminal names it
-recognises in the environment, and never sends the query cooked stands ready to
-answer.  Cooked will not pretend to be one of those terminals -- it reports what
-it actually implements, which is the whole point of shipping a terminfo entry --
-so the honest way through is here, where it is your keyboard being configured
-rather than cooked's identity being misreported.
+This exists for a program that never negotiates a keyboard protocol it still
+expects -- see `cooked-key-protocol-overrides' for the reasoning, and for
+Claude Code, whose Shift+Return and Shift+Tab are the reason this and it both
+exist.  Empty by default now that Claude Code's own needs are covered there
+instead: it takes every key it binds through the one protocol it assumes, so
+nothing here has to name them one at a time.  What is left for this alist is
+the narrower case a blanket protocol guess cannot cover -- a specific byte a
+program wants regardless of protocol, or a key with no negotiated encoding at
+all to re-spell in the first place.
 
-That distinction is worth keeping in view for the protocol keywords in
-particular.  `:kitty' sends a sequence the child never negotiated, on your
-say-so that it understands one anyway; nothing here changes `cooked--keys', so
-what cooked sends of its own accord still follows the negotiation and nothing
-else."
+Nothing here changes `cooked--keys': what cooked sends of its own accord still
+follows the negotiation and nothing else, same as `cooked-key-protocol-overrides'
+-- and the same as a real one, a `:kitty' or `:modify-other' action here sends a
+sequence the child never negotiated, on your say-so that it understands one
+anyway."
   :type '(alist :key-type (choice (regexp :tag "Foreground program matching")
                                   (function :tag "Predicate"))
                 :value-type
@@ -514,6 +530,54 @@ follow the buffer to its own prompt and displace `cooked-newline'."
        (setq cooked--override-map nil
              cooked--override-actions nil
              cooked--override-map-alist nil)))))
+
+(defcustom cooked-key-protocol-overrides '(("\\`claude\\'" . kitty))
+  "Protocol to assume a program speaks, for one that never negotiates one.
+
+An alist of (CONDITION . PROTOCOL).  CONDITION is as in `cooked-key-overrides'.
+PROTOCOL is `kitty' or `modify-other' -- one of the values `cooked--keys' takes
+when a child negotiates one of them for real, via `CSI ? u'.
+
+This is the blanket version of `cooked-key-overrides': rather than re-spelling
+one named key, it makes `cooked-send-key' behave, for every key in
+`cooked--literal-codes', exactly as if the child had negotiated PROTOCOL --
+the right tool once a whole program is known to accept a protocol it simply
+never asks for, rather than one specific key found to need nudging around its
+absence.  Consulted only while the child owns the keyboard, and only when
+`cooked--keys' is still `legacy': a real negotiation is always believed over a
+guess about what a program probably wants, never overridden by one.
+
+A `cooked-key-overrides' entry for the same key still wins over this: it is
+consulted first, from a keymap that sits above the ordinary passthrough map
+this only ever adjusts.
+
+The default covers Claude Code, which reads kitty-protocol input regardless of
+whether it decided to rely on it: it enables the protocol for its own use from
+a list of terminal names it recognises in the environment, and never sends the
+`CSI ? u' query cooked stands ready to answer, but it does not require having
+made that decision to understand a sequence that arrives anyway.  Cooked will
+not pretend to be one of those terminals -- it reports what it actually
+implements, which is the whole point of shipping a terminfo entry -- so this is
+the honest way through: it is your keyboard being configured, not cooked's
+identity being misreported."
+  :type '(alist :key-type (choice (regexp :tag "Foreground program matching")
+                                  (function :tag "Predicate"))
+                :value-type (choice (const :tag "Kitty keyboard protocol" kitty)
+                                    (const :tag "xterm modifyOtherKeys" modify-other)))
+  :group 'cooked)
+
+(defun cooked--assumed-key-protocol ()
+  "Protocol `cooked-key-protocol-overrides' assumes for what is running now.
+
+nil when nothing matches, when the child owns nothing right now to assume it
+for, or when `cooked--keys' says a real negotiation already answered the
+question -- see `cooked-key-protocol-overrides'."
+  (and cooked-key-protocol-overrides
+       (eq cooked--keys 'legacy)
+       (not (cooked--input-state-p))
+       (not (cooked--suspended-p))
+       (cdr (seq-find (lambda (entry) (cooked--override-applies-p (car entry)))
+                      cooked-key-protocol-overrides))))
 
 (defconst cooked--escape-key ?\C-c
   "Prefix reserved for cooked's own commands while the child owns the keyboard.
@@ -825,9 +889,11 @@ the line -- see `cooked-send-string', which shares the reasoning."
   (cooked--resume-forwarding)
   (when (cooked--input-state-p)
     (user-error "Emacs already owns the line; type directly instead"))
-  (when-let* ((bytes (cooked--encode-event (read-key "Send key: "))))
-    (cooked--snap-to-cursor)
-    (cooked--send-to-child bytes)))
+  (let* ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys))
+         (bytes (cooked--encode-event (read-key "Send key: "))))
+    (when bytes
+      (cooked--snap-to-cursor)
+      (cooked--send-to-child bytes))))
 
 (defun cooked--exception-code (key)
   "The character code KEY names, signalling an error if it does not name one.
