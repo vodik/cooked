@@ -9,7 +9,7 @@ pub mod env;
 pub mod pty;
 pub mod session;
 
-use emu::{Anchor, Color, Deco, Event, Run, Style};
+use emu::{Anchor, CellMetrics, Color, Deco, Event, ImageData, Run, Style};
 use env::{Env, Error, Result, Runtime, Value};
 use pty::Winsize;
 use session::{Session, Update};
@@ -57,8 +57,11 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         env.defun("cooked--reply-osc", 4..=4, DOC_REPLY_OSC, reply_osc),
         env.defun(
             "cooked--resize",
-            3..=3,
-            "Resize SESSION to ROWS by COLS.",
+            3..=5,
+            "Resize SESSION to ROWS by COLS, each cell CELL-WIDTH by CELL-HEIGHT pixels.\n\
+             The cell size may be nil or omitted, which is what a terminal frame has to\n\
+             say: it reaches the child as a zero `ws_xpixel'/`ws_ypixel', meaning \"not\n\
+             reported\", and leaves image sizing in pixels with nothing to work from.",
             resize,
         ),
         env.defun(
@@ -184,7 +187,7 @@ awaiting collection before the child is left to block on its own writes; it defa
 
 const DOC_DRAIN: &str = "Collect everything that changed in SESSION since the last call.
 Returns a plist with :scrolled, :rows, :height, :used, :head, :cursor, :alt,
-:app-cursor, :keys, :mode, :events and :exit.
+:app-cursor, :keys, :mode, :images, :events and :exit.
 With REJOIN non-nil (the default), a line the terminal wrapped is emitted as one
 line rather than one per screen row.
 
@@ -196,7 +199,11 @@ handed to scrollback was a wrapped one that row 0 continues.
 
 The fields are levels — the state as of this drain — and carry everything redisplay
 needs. :events are occurrences, for what Emacs must react to that redisplay does not
-cover. Nothing is sent both ways.";
+cover. Nothing is sent both ways.
+
+:images is neither, and is the one thing that must be consumed *before* :scrolled and
+:rows are rendered: it carries resources those rows refer to by id. Each image crosses
+once, however often the child sends or places it.";
 
 const DOC_REPLY_OSC: &str = "Answer an OSC query on SESSION with CODE, PAYLOAD and BELL.
 Writes `ESC ] CODE ; PAYLOAD' terminated by BEL when BELL is non-nil and by ST
@@ -260,6 +267,9 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
     let size = Winsize {
         rows: env.from_lisp::<u16>(args[2])?.max(1),
         cols: env.from_lisp::<u16>(args[3])?.max(1),
+        // Reported by the first resize rather than at spawn: the buffer usually has no
+        // window yet here, so there is no font to measure.
+        cell: CellMetrics::default(),
     };
     let wake = env.open_channel(args[4])?;
     let cwd = args
@@ -336,9 +346,21 @@ fn reply_osc(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 fn resize(env: Env, args: &[Value]) -> Result<Value> {
+    let cell = |i: usize| -> Result<u16> {
+        args.get(i)
+            .copied()
+            .map(|v| env.from_lisp::<Option<i64>>(v))
+            .transpose()?
+            .flatten()
+            .map_or(Ok(0), |n| Ok(n.clamp(0, i64::from(u16::MAX)) as u16))
+    };
     let size = Winsize {
         rows: env.from_lisp::<u16>(args[1])?.max(1),
         cols: env.from_lisp::<u16>(args[2])?.max(1),
+        cell: CellMetrics {
+            width: cell(3)?,
+            height: cell(4)?,
+        },
     };
     handle(&env, args[0])?
         .resize(size)
@@ -493,6 +515,8 @@ fn update_to_lisp(env: &Env, update: &Update, rejoin: bool) -> Result<Value> {
         env.intern(update.delta.keys.as_str())?,
         keyword(env, ":mode")?,
         env.intern(update.mode.as_str())?,
+        keyword(env, ":images")?,
+        env.list(&images_to_lisp(env, &update.delta.images)?)?,
         keyword(env, ":events")?,
         env.list(&events)?,
         keyword(env, ":exit")?,
@@ -642,6 +666,33 @@ fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
     ])
 }
 
+/// Images transmitted this drain, each as `(ID FORMAT DATA PX-WIDTH PX-HEIGHT COLS ROWS)`.
+///
+/// The bytes cross exactly once per distinct image, however many times the child sends
+/// them or places them: ids are content-addressed, so a program redrawing one picture
+/// per frame pays for the transfer on the first frame and for placements thereafter.
+/// DATA is unibyte and handed straight to `create-image`; FORMAT is its type symbol.
+///
+/// COLS and ROWS are the cell rectangle the emulator laid the image into, so Lisp can
+/// slice the spec per cell without recomputing a geometry the grid has already committed
+/// to — and without needing the two to agree by coincidence.
+fn images_to_lisp(env: &Env, images: &[ImageData]) -> Result<Vec<Value>> {
+    images
+        .iter()
+        .map(|image| {
+            env.list(&[
+                env.into_lisp(i64::from(image.id.0))?,
+                env.intern(image.format.as_str())?,
+                env.into_lisp(image.bytes.as_slice())?,
+                env.into_lisp(i64::from(image.px.0))?,
+                env.into_lisp(i64::from(image.px.1))?,
+                env.into_lisp(i64::from(image.cells.0))?,
+                env.into_lisp(i64::from(image.cells.1))?,
+            ])
+        })
+        .collect()
+}
+
 /// `nil`, or `(KIND . PACKED)` — what a run's characters display instead of themselves.
 ///
 /// KIND is an interned symbol naming the decoration, and PACKED is a unibyte string of
@@ -650,6 +701,8 @@ fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
 /// it — see [`Deco`] — which is what keeps the record narrow:
 ///
 ///   `glyph`   two bytes, a `BoxGlyph` bit pattern.
+///   `image`   eight bytes: a `u32` image id, then the cell's row and column within
+///             that image as `u16`s.
 ///
 /// A packed string rather than a list because this is the live-row path: box drawing is
 /// what full-screen programs are made of, so a list would cons per character of every
@@ -667,6 +720,15 @@ fn deco_to_lisp(env: &Env, deco: Option<&Deco>) -> Result<Value> {
                 packed.extend_from_slice(&glyph.bits().to_le_bytes());
             }
             env.cons(env.intern("glyph")?, env.into_lisp(packed.as_slice())?)
+        }
+        Deco::Images(places) => {
+            let mut packed = Vec::with_capacity(places.len() * 8);
+            for place in places {
+                packed.extend_from_slice(&place.id.0.to_le_bytes());
+                packed.extend_from_slice(&place.cell_row.to_le_bytes());
+                packed.extend_from_slice(&place.cell_col.to_le_bytes());
+            }
+            env.cons(env.intern("image")?, env.into_lisp(packed.as_slice())?)
         }
     }
 }

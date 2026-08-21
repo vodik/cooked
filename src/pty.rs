@@ -27,6 +27,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::compat::{self, nixerr};
+use crate::emu::CellMetrics;
 
 /// What the child is currently asking the tty for.
 ///
@@ -122,6 +123,17 @@ impl Pid {
 pub struct Winsize {
     pub rows: u16,
     pub cols: u16,
+    /// One cell in pixels, zero when unreported.
+    ///
+    /// A terminal frame has no such thing and leaves this at zero, which is what the
+    /// struct meant before it carried the field at all. On a graphical frame it is the
+    /// font's, and it moves with `text-scale-mode` as well as with the font — so it is
+    /// reported alongside the row and column count rather than sampled once.
+    ///
+    /// The child needs it: an image protocol sizes a transmission in pixels, and tools
+    /// consult `ws_xpixel`/`ws_ypixel` — or the XTWINOPS reports built from them —
+    /// before deciding whether to draw a picture at all.
+    pub cell: CellMetrics,
 }
 
 impl From<Winsize> for libc::winsize {
@@ -129,8 +141,9 @@ impl From<Winsize> for libc::winsize {
         Self {
             ws_row: w.rows,
             ws_col: w.cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
+            // The text area, which is what these fields mean: cells times cell size.
+            ws_xpixel: w.cols.saturating_mul(w.cell.width),
+            ws_ypixel: w.rows.saturating_mul(w.cell.height),
         }
     }
 }
@@ -294,6 +307,10 @@ impl Pty {
         Ok(Winsize {
             rows: ws.ws_row,
             cols: ws.ws_col,
+            cell: CellMetrics {
+                width: ws.ws_xpixel.checked_div(ws.ws_col.max(1)).unwrap_or(0),
+                height: ws.ws_ypixel.checked_div(ws.ws_row.max(1)).unwrap_or(0),
+            },
         })
     }
 
@@ -601,7 +618,11 @@ mod tests {
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "exit 0"],
             &[("TERM", "dumb")],
-            Winsize { rows: 24, cols: 80 },
+            Winsize {
+                rows: 24,
+                cols: 80,
+                cell: CellMetrics::default(),
+            },
             None,
         )
         .unwrap();
@@ -654,7 +675,11 @@ mod tests {
         let err = Pty::spawn(
             &["cooked-does-not-exist"],
             &[("PATH", "/bin:/usr/bin")],
-            Winsize { rows: 24, cols: 80 },
+            Winsize {
+                rows: 24,
+                cols: 80,
+                cell: CellMetrics::default(),
+            },
             None,
         )
         .expect_err("should not have spawned");
@@ -667,7 +692,11 @@ mod tests {
         let pty = Pty::spawn(
             &["sh", "-c", "exit 5"],
             &[("PATH", path.as_str())],
-            Winsize { rows: 24, cols: 80 },
+            Winsize {
+                rows: 24,
+                cols: 80,
+                cell: CellMetrics::default(),
+            },
             None,
         )
         .expect("spawn");
@@ -683,7 +712,11 @@ mod tests {
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "exit 0"],
             &[("TERM", "dumb")],
-            Winsize { rows: 24, cols: 80 },
+            Winsize {
+                rows: 24,
+                cols: 80,
+                cell: CellMetrics::default(),
+            },
             None,
         )
         .unwrap();
@@ -703,7 +736,11 @@ mod tests {
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "[ -e /proc/self/fd/3 ] && exit 1; exit 0"],
             &[("PATH", "/usr/bin:/bin")],
-            Winsize { rows: 24, cols: 80 },
+            Winsize {
+                rows: 24,
+                cols: 80,
+                cell: CellMetrics::default(),
+            },
             None,
         )
         .expect("spawn");
@@ -723,7 +760,11 @@ mod tests {
 
     #[test]
     fn spawn_reports_cooked_then_raw() {
-        let size = Winsize { rows: 24, cols: 80 };
+        let size = Winsize {
+                rows: 24,
+                cols: 80,
+                cell: CellMetrics::default(),
+            };
         let pty = Pty::spawn(&["/bin/cat"], &[("TERM", "dumb")], size, None).expect("spawn");
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(pty.mode().unwrap(), Mode::Cooked);
@@ -732,7 +773,11 @@ mod tests {
 
     #[test]
     fn secret_mode_is_detected() {
-        let size = Winsize { rows: 24, cols: 80 };
+        let size = Winsize {
+                rows: 24,
+                cols: 80,
+                cell: CellMetrics::default(),
+            };
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "stty -echo; read x"],
             &[("TERM", "dumb")],

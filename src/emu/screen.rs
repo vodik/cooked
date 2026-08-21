@@ -1,6 +1,7 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
 use super::cell::{CONTINUATION, Cell, Color, Extra, Row, Style};
+use super::image::{ImageId, Placement};
 use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -301,6 +302,29 @@ impl Screen {
     }
 
     /// LF/IND: down one, scrolling the region if already at its bottom.
+    /// Lay one row of image ID across the grid from the cursor, and say how wide it got.
+    ///
+    /// Clipped to the screen rather than wrapped: an image is a rectangle, and a row of
+    /// it that continued on the next line would not be one. The caller moves down.
+    pub fn place_image_row(&mut self, id: ImageId, cell_row: u16, cols: u16, pen: Style) -> u16 {
+        let (row, start) = (self.cursor.row, self.cursor.col);
+        let width = usize::from(cols).min(self.cols.saturating_sub(start));
+        if let Some(r) = self.touch(row) {
+            for i in 0..width {
+                r.place(
+                    start + i,
+                    Placement {
+                        id,
+                        cell_row,
+                        cell_col: i as u16,
+                    },
+                    pen,
+                );
+            }
+        }
+        width as u16
+    }
+
     pub fn linefeed(&mut self, pen: Style) -> Vec<Row> {
         self.cursor.wrap_pending = false;
         match self.cursor.row {

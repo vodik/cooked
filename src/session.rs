@@ -279,10 +279,13 @@ impl Session {
     /// the `ENOTTY` case instead of special-casing it, and stops as soon as the two
     /// agree — so a child that later sets its own size is left alone.
     pub fn resize(&self, size: Winsize) -> io::Result<()> {
-        self.shared
-            .term
-            .take()
-            .resize(size.rows.into(), size.cols.into());
+        {
+            let mut term = self.shared.term.take();
+            term.resize(size.rows.into(), size.cols.into());
+            // Reported together because they change together: a font change moves the
+            // cell size and the row and column count in one event.
+            term.set_cell_metrics(size.cell);
+        }
         *self.shared.pending_resize.take() = Some(size);
         match self.shared.pty.resize(size) {
             // Not ours to set yet; the reader thread keeps trying.
@@ -615,7 +618,11 @@ mod tests {
 
     fn session_with_backlog(argv: &[&str], backlog_limit: usize) -> (Session, OwnedFd) {
         let (read, write) = pipe();
-        let size = Winsize { rows: 24, cols: 80 };
+        let size = Winsize {
+                rows: 24,
+                cols: 80,
+                cell: Default::default(),
+            };
         let fd = std::os::fd::IntoRawFd::into_raw_fd(write);
         (
             Session::spawn(
@@ -862,7 +869,11 @@ mod tests {
         let session = Session::spawn(
             &["/bin/sh", "-c", &script],
             &[("PATH", "/usr/bin:/bin")],
-            Winsize { rows: 24, cols: 80 },
+            Winsize {
+                rows: 24,
+                cols: 80,
+                cell: Default::default(),
+            },
             None,
             wake,
             Duration::from_millis(8),
@@ -959,7 +970,11 @@ mod tests {
     fn resize_reaches_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.3; stty size"]);
         session
-            .resize(Winsize { rows: 12, cols: 40 })
+            .resize(Winsize {
+                rows: 12,
+                cols: 40,
+                cell: Default::default(),
+            })
             .expect("resize");
         let update = wait_for(&session, |u| rendered(u).contains("12 40"));
         assert!(rendered(&update).contains("12 40"));

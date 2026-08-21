@@ -4,6 +4,7 @@
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
 use super::cell::{Attrs, Color, Row, Run, Style};
+use super::image::{CellMetrics, ImageData, ImageFormat, ImageId, ImageStore};
 use super::screen::{Cursor, Erase, Resize, Screen};
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
@@ -181,6 +182,18 @@ pub struct Scrolled {
 /// Everything that changed since the last drain.
 #[derive(Debug, Clone, Default)]
 pub struct Delta {
+    /// Images transmitted during this drain, in transmission order.
+    ///
+    /// A field rather than an [`Event`], and the drain's third category: the level/
+    /// occurrence division sorts state by *what redisplay needs* against *what Emacs
+    /// must react to*, and this is neither. It is a resource the rows in this very delta
+    /// refer to, so Lisp has to install it before rendering them — and events are
+    /// dispatched after both render passes, so a semantic mark's anchor has text to
+    /// point at. An image arriving as an event would arrive after the row that needed it.
+    ///
+    /// Empty on almost every drain, and each entry crosses exactly once: a placement
+    /// names an id, and rows carry placements.
+    pub images: Vec<ImageData>,
     /// Scrolled-off lines, already reduced to styled runs.
     pub scrolled: Vec<Scrolled>,
     /// Absolute index of `scrolled`'s first line, so an [`Anchor`] can be told apart
@@ -271,6 +284,42 @@ impl Term {
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.state.resize(rows, cols);
+    }
+
+    /// Tell the emulator how big one cell is, in pixels.
+    ///
+    /// Emacs' to measure and ours to answer with. Without it a `width=200px` request
+    /// cannot become a cell count, and the XTWINOPS reports that tools consult before
+    /// deciding whether to draw at all have nothing to say.
+    pub fn set_cell_metrics(&mut self, metrics: CellMetrics) {
+        self.state.metrics = metrics;
+    }
+
+    pub fn cell_metrics(&self) -> CellMetrics {
+        self.state.metrics
+    }
+
+    /// Take BYTES as an image and lay it into the grid at the cursor.
+    ///
+    /// The two halves of what a transmit-and-display does, together because they share
+    /// the geometry. Interning is content-addressed, so a child redrawing the same
+    /// picture every frame hands the bytes over once; the rest of its transmissions cost
+    /// a placement per cell and nothing else.
+    ///
+    /// Rows are laid top to bottom from the cursor, scrolling when the picture runs past
+    /// the bottom of the screen, and each is clipped to the screen width rather than
+    /// wrapped — an image is a rectangle, and a row of it continuing on the next line
+    /// would not be one. The cursor lands at the start of the row below the image, which
+    /// is what makes a bare `printf` of a transmission behave like printing that many
+    /// lines. A protocol with something else to say about the cursor says it in the
+    /// handler, not here.
+    pub fn place_image(
+        &mut self,
+        format: ImageFormat,
+        bytes: &[u8],
+        px: (u32, u32),
+    ) -> ImageId {
+        self.state.place_image(format, bytes, px)
     }
 
     /// Emacs has discarded the scrollback, so the top row continues nothing.
@@ -365,6 +414,11 @@ struct State {
     on_alt: bool,
     pen: Style,
     pending_scrollback: VecDeque<Scrolled>,
+    images: ImageStore,
+    /// Images transmitted since the last drain, awaiting their one trip to Lisp.
+    pending_images: Vec<ImageData>,
+    /// The cell size Emacs reports, for turning pixels into a cell rectangle.
+    metrics: CellMetrics,
     /// Rows that have ever left the top of the primary screen. Screen row 0 is this row,
     /// counting from the beginning of the session, which is what makes an [`Anchor`]
     /// outlive the grid position it was taken from.
@@ -426,6 +480,9 @@ impl State {
             on_alt: false,
             pen: Style::default(),
             pending_scrollback: VecDeque::new(),
+            images: ImageStore::default(),
+            pending_images: Vec::new(),
+            metrics: CellMetrics::default(),
             evicted_total: 0,
             events: Vec::new(),
             cursor_visible: true,
@@ -613,8 +670,39 @@ impl State {
         self.archive(evicted);
     }
 
+    fn place_image(&mut self, format: ImageFormat, bytes: &[u8], px: (u32, u32)) -> ImageId {
+        let metrics = self.metrics;
+        let (id, fresh) = self.images.intern(format, bytes, px, metrics);
+        let cells = self
+            .images
+            .get(id)
+            .map_or((1, 1), |image| image.cells);
+        if fresh {
+            self.pending_images.push(ImageData {
+                id,
+                format,
+                bytes: bytes.to_vec(),
+                px,
+                cells,
+            });
+        }
+
+        let pen = self.pen.erase();
+        let start_col = self.screen().cursor.col;
+        for cell_row in 0..cells.1 {
+            self.screen_mut().cursor.col = start_col;
+            self.screen_mut()
+                .place_image_row(id, cell_row, cells.0, pen);
+            let evicted = self.screen_mut().linefeed(pen);
+            self.evicted(evicted);
+        }
+        self.screen_mut().carriage_return();
+        id
+    }
+
     fn drain(&mut self) -> Delta {
         let damaged = self.screen_mut().drain_damage();
+        let images = std::mem::take(&mut self.pending_images);
         let scrolled = Vec::from(std::mem::take(&mut self.pending_scrollback));
         // Taken before the batch is handed over, so it names the first line *in* it.
         let scrolled_base = self.evicted_total - scrolled.len();
@@ -624,6 +712,7 @@ impl State {
         let keys = self.key_encoding();
         let screen = self.screen();
         Delta {
+            images,
             scrolled,
             scrolled_base,
             rows: damaged
@@ -1118,6 +1207,25 @@ impl Perform for State {
             // typed input at the next prompt, and `3t`/`4t`/`8t` move and resize the
             // window, which is Emacs' business and not the child's.
             (None, 't') => match arg(params, 0, 0) {
+                // 14 is the text area in pixels, 16 one cell. Both were unanswerable
+                // until Emacs began reporting its cell size, and both are what an image
+                // producer asks before deciding whether to draw at all. Silent when
+                // nothing has been reported — a terminal frame has no cell size, and
+                // answering zero would be a claim rather than an absence.
+                14 if self.metrics.height != 0 && self.metrics.width != 0 => {
+                    let (h, w) = (self.screen().height(), self.screen().width());
+                    let (ph, pw) = (
+                        h.saturating_mul(usize::from(self.metrics.height)),
+                        w.saturating_mul(usize::from(self.metrics.width)),
+                    );
+                    self.events
+                        .push(Event::Reply(format!("\x1b[4;{ph};{pw}t").into_bytes()));
+                }
+                16 if self.metrics.height != 0 && self.metrics.width != 0 => {
+                    let (ch, cw) = (self.metrics.height, self.metrics.width);
+                    self.events
+                        .push(Event::Reply(format!("\x1b[6;{ch};{cw}t").into_bytes()));
+                }
                 18 => {
                     let (h, w) = (self.screen().height(), self.screen().width());
                     self.events
@@ -1235,6 +1343,8 @@ impl Perform for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::cell::{Deco, Extra};
+    use super::super::image::Placement;
 
     fn term(rows: usize, cols: usize, input: &[u8]) -> Term {
         let mut t = Term::new(rows, cols);
@@ -1408,6 +1518,154 @@ mod tests {
             t.screen().row(0).unwrap().runs()[0].underline,
             Color::Default
         );
+    }
+
+    fn placements(t: &Term, row: usize) -> Vec<Placement> {
+        t.screen()
+            .row(row)
+            .unwrap()
+            .extras()
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Extra::Image(p) => Some(*p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn with_metrics(rows: usize, cols: usize) -> Term {
+        let mut t = Term::new(rows, cols);
+        t.set_cell_metrics(CellMetrics {
+            width: 10,
+            height: 20,
+        });
+        t
+    }
+
+    #[test]
+    fn xtwinops_reports_pixel_geometry_once_emacs_has_reported_a_cell_size() {
+        let mut t = with_metrics(24, 80);
+        t.feed(b"\x1b[14t\x1b[16t");
+        let replies: Vec<_> = t
+            .drain()
+            .events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+                _ => None,
+            })
+            .collect();
+        // 24 rows x 20px and 80 cols x 10px; then the cell itself.
+        assert_eq!(replies, vec!["\x1b[4;480;800t", "\x1b[6;20;10t"]);
+    }
+
+    #[test]
+    fn xtwinops_pixel_geometry_stays_silent_without_a_cell_size() {
+        // A terminal frame has no cell size, and answering zero would be a claim.
+        let mut t = Term::new(24, 80);
+        t.feed(b"\x1b[14t\x1b[16t");
+        assert!(
+            !t.drain()
+                .events
+                .iter()
+                .any(|e| matches!(e, Event::Reply(_))),
+        );
+    }
+
+    #[test]
+    fn an_image_covers_a_rectangle_of_cells() {
+        let mut t = with_metrics(10, 20);
+        // 30x40 pixels at 10x20 per cell is 3 columns by 2 rows.
+        t.place_image(ImageFormat::Png, b"pixels", (30, 40));
+
+        for row in 0..2 {
+            let placed = placements(&t, row);
+            assert_eq!(placed.len(), 3, "row {row}: {placed:?}");
+            for (col, p) in placed.iter().enumerate() {
+                assert_eq!(p.cell_row, row as u16);
+                assert_eq!(p.cell_col, col as u16);
+            }
+        }
+        assert!(placements(&t, 2).is_empty(), "nothing below the picture");
+    }
+
+    #[test]
+    fn image_cells_reach_lisp_as_one_run_of_their_own() {
+        let mut t = with_metrics(10, 20);
+        t.place_image(ImageFormat::Png, b"pixels", (30, 20));
+        let runs = t.screen().row(0).unwrap().runs();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        // Blanks, so a yank out of the buffer gives the whitespace the picture occupied.
+        assert_eq!(runs[0].text, "   ");
+        assert!(matches!(runs[0].deco, Some(Deco::Images(_))), "{runs:?}");
+    }
+
+    #[test]
+    fn an_image_row_is_not_trimmed_as_trailing_blanks() {
+        // Image cells are default-styled blanks, so without `Extra::is_content` the row
+        // measures as empty and the picture is cut off the end of it.
+        let mut t = with_metrics(10, 4);
+        t.place_image(ImageFormat::Png, b"pixels", (40, 20));
+        assert_eq!(t.screen().row(0).unwrap().content_len(), 4);
+        assert!(t.screen().row(0).unwrap().has_text());
+        assert!(!t.screen().row(0).unwrap().is_blank());
+    }
+
+    #[test]
+    fn the_same_image_twice_crosses_the_boundary_once() {
+        let mut t = with_metrics(10, 20);
+        t.place_image(ImageFormat::Png, b"pixels", (10, 20));
+        t.place_image(ImageFormat::Png, b"pixels", (10, 20));
+        let delta = t.drain();
+        assert_eq!(delta.images.len(), 1, "{:?}", delta.images);
+        // ...but both placements are on the grid, naming the one id.
+        assert_eq!(placements(&t, 0)[0].id, delta.images[0].id);
+        assert_eq!(placements(&t, 1)[0].id, delta.images[0].id);
+    }
+
+    #[test]
+    fn writing_over_an_image_cell_retires_its_placement() {
+        let mut t = with_metrics(10, 20);
+        t.place_image(ImageFormat::Png, b"pixels", (30, 20));
+        t.feed(b"\x1b[1;1Hx");
+        let placed = placements(&t, 0);
+        assert_eq!(placed.len(), 2, "the written cell lets go: {placed:?}");
+        assert_eq!(placed[0].cell_col, 1);
+    }
+
+    #[test]
+    fn an_image_scrolls_into_history_with_its_placements() {
+        let mut t = with_metrics(2, 20);
+        // Four rows of picture on a two-row screen: the top rows have to scroll off.
+        t.place_image(ImageFormat::Png, b"pixels", (20, 80));
+        let delta = t.drain();
+        assert!(!delta.scrolled.is_empty(), "rows should have been evicted");
+        let decorated = delta
+            .scrolled
+            .iter()
+            .flat_map(|line| &line.runs)
+            .filter(|run| matches!(run.deco, Some(Deco::Images(_))))
+            .count();
+        assert!(decorated > 0, "scrollback kept no image cells: {delta:?}");
+    }
+
+    #[test]
+    fn an_image_survives_a_rewrap() {
+        let mut t = with_metrics(4, 20);
+        t.place_image(ImageFormat::Png, b"pixels", (20, 20));
+        let before = placements(&t, 0);
+        t.resize(4, 40);
+        // The rewrap rebases attachments by column; the picture must still be there.
+        assert_eq!(placements(&t, 0), before);
+    }
+
+    #[test]
+    fn without_cell_metrics_an_image_still_lands_somewhere() {
+        // A terminal frame reports no cell size. Nothing will draw this, but the grid
+        // must not end up with a zero-sized or absent placement.
+        let mut t = Term::new(10, 20);
+        t.place_image(ImageFormat::Png, b"pixels", (640, 480));
+        assert_eq!(placements(&t, 0).len(), 1);
     }
 
     #[test]

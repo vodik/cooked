@@ -4,6 +4,7 @@ use std::ops::{BitAnd, BitOr, BitOrAssign, Not};
 use unicode_width::UnicodeWidthChar;
 
 use super::glyph::{self, BoxGlyph};
+use super::image::Placement;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum Color {
@@ -176,6 +177,7 @@ impl Cell {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoCell {
     Glyph(BoxGlyph),
+    Image(Placement),
 }
 
 /// The decoration of a whole run, one entry per character of [`Run::text`].
@@ -187,6 +189,7 @@ pub enum DecoCell {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Deco {
     Glyphs(Vec<BoxGlyph>),
+    Images(Vec<Placement>),
 }
 
 impl DecoCell {
@@ -205,24 +208,32 @@ impl Deco {
     fn start(cell: DecoCell) -> Self {
         match cell {
             DecoCell::Glyph(g) => Self::Glyphs(vec![g]),
+            DecoCell::Image(p) => Self::Images(vec![p]),
         }
     }
 
     /// Whether CELL is of this run's kind, and so may join it.
     fn accepts(&self, cell: DecoCell) -> bool {
-        matches!((self, cell), (Self::Glyphs(_), DecoCell::Glyph(_)))
+        matches!(
+            (self, cell),
+            (Self::Glyphs(_), DecoCell::Glyph(_)) | (Self::Images(_), DecoCell::Image(_))
+        )
     }
 
     /// Append CELL. The caller must have asked [`Deco::accepts`] first.
     fn push(&mut self, cell: DecoCell) {
         match (self, cell) {
             (Self::Glyphs(v), DecoCell::Glyph(g)) => v.push(g),
+            (Self::Images(v), DecoCell::Image(p)) => v.push(p),
+            // `accepts` is the guard; reaching here would mean a caller skipped it.
+            _ => unreachable!("Deco::push without Deco::accepts"),
         }
     }
 
     pub fn len(&self) -> usize {
         match self {
             Self::Glyphs(v) => v.len(),
+            Self::Images(v) => v.len(),
         }
     }
 
@@ -235,6 +246,7 @@ impl Deco {
     pub(crate) fn glyphs(&self) -> &[BoxGlyph] {
         match self {
             Self::Glyphs(v) => v,
+            other => panic!("expected a box-glyph run, got {other:?}"),
         }
     }
 }
@@ -267,6 +279,8 @@ pub enum Extra {
     Marks(Box<str>),
     /// `SGR 58`, the underline's own colour.
     Underline(Color),
+    /// One cell of a transmitted image.
+    Image(Placement),
 }
 
 /// Per-column attachments for one row, in column order.
@@ -296,6 +310,11 @@ impl Extra {
         match self {
             Self::Marks(_) => true,
             Self::Underline(_) => false,
+            // An image cell is a blank in the default style, so without this the row it
+            // sits on measures as empty: trimmed off the end by `Row::content_len`,
+            // judged textless by `Row::has_text`, absorbed by `Row::is_blank`. This is
+            // the case the whole `is_content` distinction exists for.
+            Self::Image(_) => true,
         }
     }
 }
@@ -483,6 +502,22 @@ impl Row {
                 self.retire(col);
             }
         }
+    }
+
+    /// Make COL one cell of an image, blanking whatever was there.
+    ///
+    /// The cell keeps a blank character in the pen's style, so the row still copies,
+    /// rewraps and yanks as text — a picture pasted out of the scrollback comes out as
+    /// the whitespace it occupied, which is the only honest plain-text rendering of it.
+    /// [`Extra::is_content`] is what stops that blank being trimmed away.
+    pub fn place(&mut self, col: usize, placement: Placement, style: Style) {
+        if col >= self.cells.len() {
+            return;
+        }
+        // `set` first, so it retires whatever the old occupant had attached before the
+        // placement goes on; the other order would prune the placement just made.
+        self.set(col, Cell::blank(style));
+        self.attach(col, Extra::Image(placement));
     }
 
     /// Attach a zero-width character (combining mark, variation selector) to `col`.
@@ -682,9 +717,9 @@ impl Row {
             if cell.is_continuation() {
                 continue;
             }
-            let deco = DecoCell::classify(cell.ch);
             let mut underline = Color::Default;
             let mut marks = None;
+            let mut placed = None;
             if EXTRAS {
                 while at < entries.len() && usize::from(entries[at].0) < col {
                     at += 1;
@@ -696,9 +731,18 @@ impl Row {
                     match extra {
                         Extra::Underline(color) => underline = *color,
                         Extra::Marks(text) => marks = Some(&**text),
+                        Extra::Image(p) => placed = Some(*p),
                     }
                 }
             }
+            // A placement wins over the character's own shape: it is state attached to
+            // this cell, while the shape is derived from a character that an image cell
+            // keeps as a blank. In practice they cannot both be here — writing a
+            // character retires whatever was attached — so this is an ordering, not a
+            // conflict resolution.
+            let deco = placed
+                .map(DecoCell::Image)
+                .or_else(|| DecoCell::classify(cell.ch));
             match runs.last_mut() {
                 Some(run)
                     if run.style == cell.style

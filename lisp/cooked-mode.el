@@ -24,6 +24,7 @@
 ;; see them; cooked.el declares the same set for its own use.
 (declare-function cooked--send "cooked-core")
 (declare-function cooked--resize "cooked-core")
+(declare-function cooked--cell-size "cooked")
 (declare-function cooked--signal "cooked-core")
 (declare-function cooked--prompt-text "cooked-core")
 (declare-function cooked--bracketed-paste-p "cooked-core")
@@ -103,7 +104,16 @@ this lets the prompt text arrive first."
   "Input set aside while browsing history.
 The one piece of history state that is cooked's: the ring, and the position in
 it, are `comint-input-ring' and `comint-input-ring-index'.")
-(defvar-local cooked--last-size nil)
+(defvar-local cooked--last-size nil
+  "The (ROWS . COLS) last reported to the emulator, or nil.")
+
+(defvar-local cooked--last-cell nil
+  "The (WIDTH . HEIGHT) cell size in pixels last reported, or nil.
+
+Tracked apart from `cooked--last-size' because it moves independently of it:
+`text-scale-mode' changes the cell size and the row and column count together,
+but a theme or font change can move the cell size while the grid stays put, and
+the child has to hear about that too.")
 
 ;;;; Key encoding
 
@@ -1718,14 +1728,34 @@ space, and does not."
 (defun cooked--sync-size (&optional _frame)
   "Match the emulator and child to the window size.
 The buffer needs no adjustment: a resize marks every row damaged, and rendering
-extends or trims the screen region to suit."
+extends or trims the screen region to suit.
+
+The cell size in pixels goes along with the rows and columns, because it changes
+with them and because the child needs it: an image protocol sizes a transmission
+in pixels, and tools ask XTWINOPS how big a cell is before deciding whether to
+draw a picture at all.  A terminal frame has no such thing and reports nil, which
+reaches the child as \"not reported\" rather than as a claim about zero."
   (when cooked--session
-    (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
-      (unless (equal cooked--last-size (cons rows cols))
+    (pcase-let* ((`(,rows . ,cols) (cooked--window-size))
+                 (cell (cooked--session-cell-size)))
+      (unless (and (equal cooked--last-size (cons rows cols))
+                   (equal cooked--last-cell cell))
         (setq cooked--last-size (cons rows cols)
+              cooked--last-cell cell
               cooked--rows rows
               cooked--cols cols)
-        (cooked--resize cooked--session rows cols)))))
+        (cooked--resize cooked--session rows cols (car cell) (cdr cell))))))
+
+(defun cooked--session-cell-size ()
+  "This buffer's cell size in pixels as (WIDTH . HEIGHT), or (nil . nil).
+
+Nil on a terminal frame, where a cell has no pixel size to report, and nil as
+well when the buffer is displayed nowhere — a guessed cell size would reach the
+child as fact and outlive the guess."
+  (let ((window (cooked--layout-window)))
+    (if (and window (display-graphic-p (window-frame window)))
+        (cooked--cell-size window)
+      (cons nil nil))))
 
 (defun cooked--frame-size-changed (frame)
   "Resync every live session displayed in FRAME.

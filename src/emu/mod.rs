@@ -2,12 +2,14 @@
 
 pub mod cell;
 pub mod glyph;
+pub mod image;
 pub mod parser;
 pub mod screen;
 pub mod term;
 
 pub use cell::{Attrs, Cell, Color, Deco, DecoCell, Extra, Row, Run, Style};
 pub use glyph::BoxGlyph;
+pub use image::{CellMetrics, Image, ImageData, ImageFormat, ImageId, Placement};
 pub use screen::{Cursor, Erase, Screen};
 pub use term::{
     Anchor, BACKLOG_HIGH_WATER, CursorShape, Delta, Event, KeyEncoding, Mouse, SYNC_TIMEOUT,
