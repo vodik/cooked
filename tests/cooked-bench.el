@@ -140,14 +140,24 @@ echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")
 ;; scheduling noise, no coalescing, and reproducible run to run.
 
 (defun cooked-bench--update (rows &optional alt)
-  "An update plist of ROWS, shaped exactly as `cooked--drain' returns one."
-  (list :scrolled nil :rows rows :cursor '(0 0 t) :alt alt
-        :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil))
+  "An update plist of ROWS, shaped exactly as `cooked--drain' returns one.
+
+`:height', `:used' and `:head' are not optional: `cooked--apply' builds a
+`cooked-grid' from them and `cooked--fit-screen' does arithmetic on it, so a
+plist without them fails on a nil rather than benchmarking anything.  They were
+missing here from the moment the drain grew them, which is how
+`cooked-bench-per-frame' came to error out instead of reporting."
+  (let ((height (length rows)))
+    (list :scrolled nil :rows rows
+          :height height :used height :head 0
+          :cursor '(0 0 t block) :alt alt
+          :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
 
 (defun cooked-bench--plain-rows (count cols)
   "COUNT damaged rows of unstyled text, the cheapest thing to render."
   (let ((text (make-string cols ?x)))
-    (cl-loop for i below count collect (cons i (list (list text nil nil 0 nil))))))
+    (cl-loop for i below count
+             collect (cons i (list (list text nil nil 0 nil nil))))))
 
 (defun cooked-bench--styled-rows (count cols)
   "COUNT damaged rows split into several differently-styled runs."
@@ -155,18 +165,19 @@ echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")
            collect (cons i (cl-loop for r below 8
                                     collect (list (make-string (/ cols 8) ?x)
                                                   (mod (+ i r) 8) nil
-                                                  (if (cl-evenp r) 1 0) nil)))))
+                                                  (if (cl-evenp r) 1 0) nil nil)))))
 
 (defun cooked-bench--box-rows (count cols)
   "COUNT damaged rows of box drawing, every cell taking the bitmap path.
 
-GLYPHS is the packed unibyte string the module hands over: two little-endian
-bytes per character.  0x0050 is a plain light horizontal — left and right edges
-at weight 1 — which is what a border is made of."
+The decoration is `(glyph . PACKED)\=' as the module hands it over, PACKED being
+two little-endian bytes per character.  0x0050 is a plain light horizontal —
+left and right edges at weight 1 — which is what a border is made of."
   (let ((text (make-string cols ?─))
-        (glyphs (apply #'unibyte-string
-                       (cl-loop repeat cols append (list #x50 #x00)))))
-    (cl-loop for i below count collect (cons i (list (list text nil nil 0 glyphs))))))
+        (deco (cons 'glyph (apply #'unibyte-string
+                                  (cl-loop repeat cols append (list #x50 #x00))))))
+    (cl-loop for i below count
+             collect (cons i (list (list text nil nil 0 deco nil))))))
 
 (defun cooked-bench--frames (label rows frames)
   "Apply ROWS as a damaged-row update FRAMES times, timing the lot."

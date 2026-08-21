@@ -2364,7 +2364,7 @@ mod tests {
             .find(|(i, _)| *i == 0)
             .expect("row 0 is damaged");
         assert_eq!(runs.len(), 1);
-        let glyphs = runs[0].glyphs.as_ref().expect("box-glyph run");
+        let glyphs = runs[0].deco.as_ref().expect("box-glyph run").glyphs();
         assert_eq!(glyphs.len(), 4, "one descriptor per character");
         assert_eq!(runs[0].text, "\u{250C}\u{2500}\u{2500}\u{2510}");
     }
@@ -2379,7 +2379,7 @@ mod tests {
             .find(|(i, _)| *i == 0)
             .expect("row 0 is damaged");
         assert_eq!(runs.len(), 1);
-        let glyphs = runs[0].glyphs.as_ref().expect("box-glyph run");
+        let glyphs = runs[0].deco.as_ref().expect("box-glyph run").glyphs();
         assert_eq!(glyphs.len(), 4);
         assert!(glyphs[0].is_diagonal());
         assert!(

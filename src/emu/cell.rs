@@ -166,17 +166,90 @@ impl Cell {
     }
 }
 
+/// What one character displays in place of the glyph its font would draw.
+///
+/// The unit before grouping. A box-drawing character resolves to a shape Emacs
+/// rasterizes; an image cell will resolve to a slice of a transmitted image. Both are
+/// the same arrangement — Rust names a thing per character, Emacs renders it, caches it,
+/// and hangs it on the text as a `display` property — which is why they share a type
+/// rather than each growing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecoCell {
+    Glyph(BoxGlyph),
+}
+
+/// The decoration of a whole run, one entry per character of [`Run::text`].
+///
+/// A run is homogeneous in its kind: [`Row::build_runs`] will not merge characters
+/// decorated differently into one run. That is what lets the wire format carry a single
+/// kind tag plus a fixed-width record per character, instead of tagging every character
+/// — and it is why the box-drawing case still crosses at exactly two bytes each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Deco {
+    Glyphs(Vec<BoxGlyph>),
+}
+
+impl DecoCell {
+    /// The shape this character resolves to from the character itself, if any.
+    ///
+    /// Derived rather than stored: a box-drawing character *is* its own descriptor, so
+    /// there is nothing to keep on the row and nothing to maintain when the cell is
+    /// overwritten. Attachments held in [`Extras`] are the other source, and they cannot
+    /// work this way because no character stands for them.
+    fn classify(ch: char) -> Option<Self> {
+        glyph::classify(ch).map(Self::Glyph)
+    }
+}
+
+impl Deco {
+    fn start(cell: DecoCell) -> Self {
+        match cell {
+            DecoCell::Glyph(g) => Self::Glyphs(vec![g]),
+        }
+    }
+
+    /// Whether CELL is of this run's kind, and so may join it.
+    fn accepts(&self, cell: DecoCell) -> bool {
+        matches!((self, cell), (Self::Glyphs(_), DecoCell::Glyph(_)))
+    }
+
+    /// Append CELL. The caller must have asked [`Deco::accepts`] first.
+    fn push(&mut self, cell: DecoCell) {
+        match (self, cell) {
+            (Self::Glyphs(v), DecoCell::Glyph(g)) => v.push(g),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Glyphs(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The shapes, for tests that assert against the classifier's output.
+    #[cfg(test)]
+    pub(crate) fn glyphs(&self) -> &[BoxGlyph] {
+        match self {
+            Self::Glyphs(v) => v,
+        }
+    }
+}
+
 /// A styled run of text — the unit the Lisp side turns into propertized buffer text.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Run {
     pub text: String,
     pub style: Style,
-    /// One classified shape per character in `text`, index-aligned with
-    /// `text.chars()`; `None` for an ordinary text run. Never mixed with a `None`
-    /// run even when `style` matches — see `Row::runs`.
-    pub glyphs: Option<Vec<BoxGlyph>>,
+    /// One decoration per character in `text`, index-aligned with `text.chars()`;
+    /// `None` for an ordinary text run. Never mixed with a `None` run, nor with a run
+    /// of another kind, even when `style` matches — see [`Row::build_runs`].
+    pub deco: Option<Deco>,
     /// `SGR 58`, the underline's own colour. Held on the run rather than in [`Style`]
-    /// because it lives in a side table on the row — see [`Row::underlines`].
+    /// because it lives in a side table on the row — see [`Row::extras`].
     pub underline: Color,
 }
 
@@ -609,7 +682,7 @@ impl Row {
             if cell.is_continuation() {
                 continue;
             }
-            let shape = glyph::classify(cell.ch);
+            let deco = DecoCell::classify(cell.ch);
             let mut underline = Color::Default;
             let mut marks = None;
             if EXTRAS {
@@ -630,22 +703,26 @@ impl Row {
                 Some(run)
                     if run.style == cell.style
                         && run.underline == underline
-                        && run.glyphs.is_some() == shape.is_some() =>
+                        && match (&run.deco, deco) {
+                            (None, None) => true,
+                            (Some(d), Some(c)) => d.accepts(c),
+                            _ => false,
+                        } =>
                 {
                     run.text.push(cell.ch);
-                    if let Some(glyphs) = &mut run.glyphs {
-                        glyphs.push(shape.expect("glyphs.is_some() == shape.is_some()"));
+                    if let (Some(d), Some(c)) = (&mut run.deco, deco) {
+                        d.push(c);
                     }
                 }
                 _ => runs.push(Run {
                     text: String::from(cell.ch),
                     style: cell.style,
-                    glyphs: shape.map(|g| vec![g]),
+                    deco: deco.map(Deco::start),
                     underline,
                 }),
             }
             // Combining marks never legitimately attach to a box-drawing base
-            // character, so no glyph padding is needed to keep `glyphs` aligned.
+            // character, so no padding is needed to keep the decoration aligned.
             if let (Some(marks), Some(run)) = (marks, runs.last_mut()) {
                 run.text.push_str(marks);
             }
@@ -713,9 +790,9 @@ mod tests {
             3,
             "box-glyph run must split even though style matches"
         );
-        assert!(runs[0].glyphs.is_none());
-        assert!(runs[1].glyphs.is_some());
-        assert!(runs[2].glyphs.is_none());
+        assert!(runs[0].deco.is_none());
+        assert!(runs[1].deco.is_some());
+        assert!(runs[2].deco.is_none());
     }
 
     #[test]
@@ -729,7 +806,7 @@ mod tests {
         let runs = row.runs();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].text, "\u{250C}\u{2500}\u{2510}");
-        let glyphs = runs[0].glyphs.as_ref().expect("box-glyph run");
+        let glyphs = runs[0].deco.as_ref().expect("box-glyph run").glyphs();
         assert_eq!(
             glyphs.len(),
             3,

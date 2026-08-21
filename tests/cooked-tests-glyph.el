@@ -32,13 +32,19 @@
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (should (cooked-tests--settle
              (lambda () (get-text-property (point-min) 'display))))
-    ;; Zoom regenerates the image in place, purely from the `cooked-box-glyph'
+    ;; Zoom regenerates the image in place, purely from the `cooked-deco'
     ;; property already in the buffer — no round-trip to the native core, so this
     ;; holds regardless of whether batch Emacs' font backend reports a different
     ;; pixel size than the one it started with.
-    (let ((before (get-text-property (point-min) 'display)))
-      (text-scale-increase 1)
-      (should-not (eq before (get-text-property (point-min) 'display))))))
+    ;;
+    ;; Probed by clobbering the property and watching the sweep put it back, rather
+    ;; than by watching for a fresh object: batch Emacs reports one cell size at
+    ;; every zoom level, so the regenerated spec is `equal' to the one it replaced,
+    ;; and object identity stopped distinguishing them once specs were memoized.
+    (let ((inhibit-read-only t))
+      (put-text-property (point-min) (1+ (point-min)) 'display 'clobbered))
+    (text-scale-increase 1)
+    (should (eq (car-safe (get-text-property (point-min) 'display)) 'image))))
 
 ;; `image-scaling-factor' defaults to `auto', which scales images by cell-width/10
 ;; on most GUI font sizes.  These bitmaps are generated at exactly the cell size, so
@@ -85,8 +91,11 @@
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
     (should (cooked-tests--settle
              (lambda () (get-text-property (point-min) 'display))))
-    (let ((glyph (point-min))
-          (before (get-text-property (point-min) 'display)))
+    (let ((glyph (point-min)))
+      ;; Clobbered so the sweep reaching this position is observable; see
+      ;; `cooked-box-drawing-rescales-on-zoom' for why identity will not do.
+      (let ((inhibit-read-only t))
+        (put-text-property glyph (1+ glyph) 'display 'clobbered))
       ;; Pin the buffer to a screen region starting below the glyph, as entering the
       ;; alt screen does.
       (let ((inhibit-read-only t))
@@ -101,7 +110,7 @@
       (text-scale-increase 1)
       (save-restriction
         (widen)
-        (should-not (eq before (get-text-property glyph 'display)))))))
+        (should (eq (car-safe (get-text-property glyph 'display)) 'image))))))
 
 ;; Distinct from the alt-pin test above: there, the glyph reaches "scrollback" by
 ;; the marker moving past it in place, never leaving the buffer.  Here it genuinely
@@ -130,8 +139,9 @@
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\204\\n'") ; ┄
     (should (cooked-tests--settle
-             (lambda () (get-text-property (point-min) 'cooked-box-glyph))))
-    (let ((bits (car (get-text-property (point-min) 'cooked-box-glyph))))
+             (lambda () (get-text-property (point-min) 'cooked-deco))))
+    ;; `(KIND BITS FG BG ATTRS COLUMN ROW)' -- the descriptor is behind the kind.
+    (let ((bits (cadr (get-text-property (point-min) 'cooked-deco))))
       (should (= 3 (cooked--box-dashes bits)))
       ;; ...and it is still a light horizontal line underneath.
       (should (= 1 (cooked--box-weight bits 'left)))

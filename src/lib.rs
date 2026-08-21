@@ -9,7 +9,7 @@ pub mod env;
 pub mod pty;
 pub mod session;
 
-use emu::{Anchor, BoxGlyph, Color, Event, Run, Style};
+use emu::{Anchor, Color, Deco, Event, Run, Style};
 use env::{Env, Error, Result, Runtime, Value};
 use pty::Winsize;
 use session::{Session, Update};
@@ -512,12 +512,18 @@ struct RowSpan {
 }
 
 impl Update {
-    /// Scrollback as `(TEXT STYLE-SPANS GLYPH-SPANS)`, offsets in characters.
+    /// Scrollback as `(TEXT STYLE-SPANS DECO-SPANS)`, offsets in characters.
     ///
-    /// STYLE-SPANS is `(START END FG BG ATTRS)...`, only where styling departs from the
-    /// default. GLYPH-SPANS is `(START END FG BG ATTRS GLYPHS)...`, only where the run
-    /// carried classified box-drawing glyphs — the same packed form [`glyphs_to_lisp`]
-    /// produces for a live row, so `cooked--overlay-box-glyphs` handles both.
+    /// STYLE-SPANS is `(START END FG BG ATTRS UNDERLINE)...`, only where styling departs
+    /// from the default. DECO-SPANS is `(START END FG BG ATTRS DECO)...`, only where the
+    /// run was decorated — the same `(KIND . PACKED)` [`deco_to_lisp`] produces for a
+    /// live row, so `cooked--apply-deco` handles both.
+    ///
+    /// The two shapes share a prefix and diverge in their last element, which is not an
+    /// accident worth tidying: a style span's tail is the underline colour, and a
+    /// decoration is rendered from the foreground, background and attributes but never
+    /// from that — so giving DECO-SPANS an underline it would ignore would be carrying a
+    /// field to look symmetric.
     ///
     /// Assembled here rather than handed over run by run. Emacs pays for every
     /// `insert`, and a flood is tens of thousands of rows: one insert of one string
@@ -531,7 +537,7 @@ impl Update {
         }
         let mut text = String::new();
         let mut spans: Vec<Value> = Vec::new();
-        let mut glyph_spans: Vec<Value> = Vec::new();
+        let mut deco_spans: Vec<Value> = Vec::new();
         let mut rows: Vec<RowSpan> = Vec::with_capacity(self.delta.scrolled.len());
         let mut offset = 0usize;
         let last = self.delta.scrolled.len() - 1;
@@ -551,14 +557,14 @@ impl Update {
                         color_to_lisp(env, run.underline)?,
                     ])?);
                 }
-                if let Some(glyphs) = run.glyphs.as_deref() {
-                    glyph_spans.push(env.list(&[
+                if run.deco.is_some() {
+                    deco_spans.push(env.list(&[
                         env.into_lisp(offset)?,
                         env.into_lisp(offset + chars)?,
                         color_to_lisp(env, fg)?,
                         color_to_lisp(env, bg)?,
                         env.into_lisp(u32::from(attrs.bits()))?,
-                        glyphs_to_lisp(env, Some(glyphs))?,
+                        deco_to_lisp(env, run.deco.as_ref())?,
                     ])?);
                 }
                 text.push_str(&run.text);
@@ -584,7 +590,7 @@ impl Update {
             env.list(&[
                 env.into_lisp(text.as_str())?,
                 env.list(&spans)?,
-                env.list(&glyph_spans)?,
+                env.list(&deco_spans)?,
             ])?,
             rows,
         ))
@@ -622,9 +628,8 @@ impl Update {
     }
 }
 
-/// `(TEXT FG BG ATTRS GLYPHS)` — colors are nil, an index, or `(R G B)`; GLYPHS is nil
-/// for a plain-text run, or raw `BoxGlyph` bit patterns packed two bytes per character
-/// of TEXT, for a run of classified box-drawing/block-element glyphs.
+/// `(TEXT FG BG ATTRS DECO UNDERLINE)` — colors are nil, an index, or `(R G B)`;
+/// DECO is nil for a plain run, or `(KIND . PACKED)`, for which see [`deco_to_lisp`].
 fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
     let Style { fg, bg, attrs } = run.style;
     env.list(&[
@@ -632,27 +637,36 @@ fn run_to_lisp(env: &Env, run: &Run) -> Result<Value> {
         color_to_lisp(env, fg)?,
         color_to_lisp(env, bg)?,
         env.into_lisp(u32::from(attrs.bits()))?,
-        glyphs_to_lisp(env, run.glyphs.as_deref())?,
+        deco_to_lisp(env, run.deco.as_ref())?,
         color_to_lisp(env, run.underline)?,
     ])
 }
 
-/// `nil`, or the glyphs' 16-bit patterns packed little-endian into a unibyte string.
+/// `nil`, or `(KIND . PACKED)` — what a run's characters display instead of themselves.
 ///
-/// A string rather than a list of integers because this is the live-row path: box
-/// drawing is what full-screen programs are made of, so a list would cons per character
-/// of every damaged row of every frame — the same cost `scrolled_rows` goes out of its
-/// way to avoid on the flood path, paid on the one that redraws continuously. One
-/// allocation per run instead, unibyte so Emacs neither decodes nor copies it again.
-fn glyphs_to_lisp(env: &Env, glyphs: Option<&[BoxGlyph]>) -> Result<Value> {
-    match glyphs {
-        None => Ok(env.nil()),
-        Some(glyphs) => {
+/// KIND is an interned symbol naming the decoration, and PACKED is a unibyte string of
+/// fixed-width records, one per character of the run's text, little-endian. The kind is
+/// carried once for the run rather than per character because a run is homogeneous in
+/// it — see [`Deco`] — which is what keeps the record narrow:
+///
+///   `glyph`   two bytes, a `BoxGlyph` bit pattern.
+///
+/// A packed string rather than a list because this is the live-row path: box drawing is
+/// what full-screen programs are made of, so a list would cons per character of every
+/// damaged row of every frame — the same cost `scrolled_rows` goes out of its way to
+/// avoid on the flood path, paid on the one that redraws continuously. One allocation
+/// per run instead, unibyte so Emacs neither decodes nor copies it again.
+fn deco_to_lisp(env: &Env, deco: Option<&Deco>) -> Result<Value> {
+    let Some(deco) = deco else {
+        return Ok(env.nil());
+    };
+    match deco {
+        Deco::Glyphs(glyphs) => {
             let mut packed = Vec::with_capacity(glyphs.len() * 2);
             for glyph in glyphs {
                 packed.extend_from_slice(&glyph.bits().to_le_bytes());
             }
-            env.into_lisp(packed.as_slice())
+            env.cons(env.intern("glyph")?, env.into_lisp(packed.as_slice())?)
         }
     }
 }

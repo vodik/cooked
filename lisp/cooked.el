@@ -325,6 +325,21 @@ via :foreground/:background at `create-image' time, so unlike
 changes (zoom, font change) miss the cache key, naturally, with no extra
 plumbing.")
 
+(defvar-local cooked--deco-image-cache nil
+  "Decoration + colors + cell size -> the `create-image' spec, per buffer.
+
+A second cache in front of `cooked--box-glyph-cache', which memoizes only the
+colorless bits.  Building the spec was still per character per frame: a fresh
+list and a fresh image object for every box character of every damaged row,
+which on a full-screen TUI is most of the screen many times a second.  Sharing
+one spec across every cell that wants it also means Emacs' own image cache sees
+one image rather than hundreds of identical ones.
+
+Unlike the bits cache this *does* hold resolved colors -- `cooked--face' has
+already turned a default foreground into a concrete one -- so
+`cooked--flush-face-cache' must empty it when the theme changes.  Pixel size is
+part of the key, so a zoom misses it without any help.")
+
 ;; Everything this file calls in cooked-mode.el, which is to say everything it
 ;; calls upward.  Each one is a notification that something changed and the layer
 ;; that owns keymaps, buffer names or the buffer's own life should react — never a
@@ -568,10 +583,13 @@ beside it, let alone to rebuild over the top of it."
 
 Deliberately does not touch `cooked--box-glyph-cache': that cache holds
 colorless shape bitmaps, colorized live at display time, so it has nothing a
-theme change could make stale."
+theme change could make stale.  `cooked--deco-image-cache' is a different
+matter -- its specs carry colors already resolved against the old theme."
   (cooked--dolist-buffers
     (when (hash-table-p cooked--face-cache)
-      (clrhash cooked--face-cache))))
+      (clrhash cooked--face-cache))
+    (when (hash-table-p cooked--deco-image-cache)
+      (clrhash cooked--deco-image-cache))))
 
 ;; `enable-theme-functions' arrived in Emacs 29, and `add-hook' on an unbound variable
 ;; quietly defines it rather than failing — so on 28 this looked fine and did nothing.
@@ -657,12 +675,12 @@ Memoized per buffer."
 ;; `cooked--face-cache' gets — only pixel-size (zoom, font change) is part of its
 ;; cache key.
 
-(defun cooked--box-glyph-bits (bits window &optional phase)
-  "Cached raw bitmap for glyph descriptor BITS at WINDOW's current cell size.
+(defun cooked--cell-size (window)
+  "WINDOW's cell size in pixels, as (WIDTH . HEIGHT).
 
-PHASE joins the cache key, since two cells of the same glyph at opposite phases
-are genuinely different bitmaps.  It is non-zero only for shade glyphs at an odd
-cell size, so in practice nothing else pays for the extra variant.
+Measured once per render pass and passed down, rather than asked per character.
+Both calls are cheap but neither is free, and the callers below run over every
+decorated character of every damaged row of every frame.
 
 Sized from `window-font-width'/`window-default-line-height' rather than
 `frame-char-width'/`frame-char-height': the latter ignore `text-scale-mode's
@@ -675,12 +693,18 @@ actually occupies and includes `line-spacing', while the font height does not.
 A bitmap sized to the font leaves exactly `line-spacing' pixels of background
 beneath every glyph, breaking the continuous vertical borders this exists to
 produce — the same defect `indent-bars' documents for box characters."
-  (let* ((width (window-font-width window 'default))
-         (height (window-default-line-height window))
-         (phase (or phase 0))
-         (key (list bits width height phase)))
+  (cons (window-font-width window 'default)
+        (window-default-line-height window)))
+
+(defun cooked--box-glyph-bits (bits size &optional phase)
+  "Cached raw bitmap for glyph descriptor BITS at cell SIZE, from `cooked--cell-size'.
+
+PHASE joins the cache key, since two cells of the same glyph at opposite phases
+are genuinely different bitmaps.  It is non-zero only for shade glyphs at an odd
+cell size, so in practice nothing else pays for the extra variant."
+  (let ((key (list bits (car size) (cdr size) (or phase 0))))
     (or (gethash key cooked--box-glyph-cache)
-        (puthash key (cooked--render-box-glyph bits width height phase)
+        (puthash key (cooked--render-box-glyph bits (car size) (cdr size) (or phase 0))
                  cooked--box-glyph-cache))))
 
 (defun cooked--box-glyph-ascent (window height)
@@ -694,7 +718,7 @@ where Emacs actually puts it — below the baseline.
 
 Falls back to `center' if the font reports no metrics, which is the previous
 behaviour and still correct whenever `line-spacing' is nil."
-  (unless cooked--box-ascent-cache ; `cooked--rescale-box-glyphs' is not error-guarded
+  (unless cooked--box-ascent-cache ; `cooked--rescale-deco' is not error-guarded
     (setq cooked--box-ascent-cache (make-hash-table :test #'equal)))
   (let ((key (list 'ascent height)))
     (or (gethash key cooked--box-ascent-cache)
@@ -706,8 +730,8 @@ behaviour and still correct whenever `line-spacing' is nil."
                      'center))
                  cooked--box-ascent-cache))))
 
-(defun cooked--box-phase (bits window column row)
-  "Dither phase for glyph BITS drawn at screen COLUMN and ROW of WINDOW.
+(defun cooked--box-phase (bits size column row)
+  "Dither phase for glyph BITS drawn at screen COLUMN and ROW, at cell SIZE.
 
 Bit 0 is the parity of the cell's left edge in pixels, bit 1 the parity of its
 top edge — which is all `cooked--box-draw-shade' needs, its patterns having
@@ -723,11 +747,17 @@ given cell changes when the font does, so a value cached alongside the glyph
 would be stale the moment the buffer is zoomed."
   (if (not (and column (cooked--box-shade-p bits)))
       0
-    (logior (logand (* column (window-font-width window 'default)) 1)
-            (ash (logand (* (or row 0) (window-default-line-height window)) 1) 1))))
+    (logior (logand (* column (car size)) 1)
+            (ash (logand (* (or row 0) (cdr size)) 1) 1))))
 
-(defun cooked--box-glyph-image (bits fg bg attrs &optional window phase)
-  "Image spec for glyph BITS, colored from FG/BG/ATTRS like `cooked--face'.
+(defun cooked--box-glyph-image (bits fg bg attrs window size phase)
+  "Image spec for glyph BITS at cell SIZE, colored from FG/BG/ATTRS like `cooked--face'.
+
+Memoized in `cooked--deco-image-cache'.  Not premature: the bits underneath were
+already cached, but the spec was rebuilt for every box character of every
+damaged row of every frame — and a fresh spec each time also denies Emacs' own
+image cache the chance to notice that a screenful of box drawing is a handful of
+distinct images.  WINDOW is needed only for the ascent's `font-info' lookup.
 
 `:scale 1' is load-bearing, not a default being restated.
 `image-scaling-factor' is `auto', which scales every image by cell-width/10
@@ -737,16 +767,16 @@ at exactly the cell size, so letting that apply would resample a pixel-exact
 10x20 stroke up to 12x24 inside a 10x20 cell: borders stop meeting at the cell
 edge and the strokes blur into something no better than the font glyphs this
 replaces."
-  ;; `cooked--layout-window' is the buffer's own window, which is what the cell
-  ;; size has to come from: `get-buffer-window' looks at the current frame only,
-  ;; and the selected window it fell back to is the minibuffer for the whole of a
-  ;; completion preview -- bitmaps sized to a font this buffer is not displayed
-  ;; in.  Unlike `cooked--guard-row-width', this does fall back to the selected
-  ;; window when the buffer is displayed nowhere: a guessed cell size costs a
-  ;; mis-sized bitmap on a buffer nobody is looking at, which the next render in
-  ;; a real window replaces, while guessing there costs deleted text.
-  (let* ((window (or window (cooked--layout-window) (selected-window)))
-         (reverse (cooked--attr-p attrs cooked--attr-reverse))
+  (unless cooked--deco-image-cache ; `cooked--rescale-deco' is not error-guarded
+    (setq cooked--deco-image-cache (make-hash-table :test #'equal)))
+  (let ((key (list bits fg bg attrs (car size) (cdr size) phase)))
+    (or (gethash key cooked--deco-image-cache)
+        (puthash key (cooked--box-glyph-image-1 bits fg bg attrs window size phase)
+                 cooked--deco-image-cache))))
+
+(defun cooked--box-glyph-image-1 (bits fg bg attrs window size phase)
+  "Build the spec `cooked--box-glyph-image' memoizes."
+  (let* ((reverse (cooked--attr-p attrs cooked--attr-reverse))
          (fg* (or (cooked--color (if reverse bg fg)) (face-foreground 'default nil t)))
          (bg* (or (cooked--color (if reverse fg bg)) (face-background 'default nil t))))
     ;; `:data-width'/`:data-height'/`:stride' are what an inline `xbm' actually
@@ -755,7 +785,7 @@ replaces."
     ;; rather than describe the bit layout.  Emacs accepts only three `:data' shapes:
     ;; a vector of per-row strings, a whole XBM *file* in a string, or bare bits with
     ;; these three properties.  A packed (WIDTH HEIGHT DATA) list is none of them.
-    (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits bits window phase)))
+    (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits bits size phase)))
       (create-image data 'xbm t
                     :data-width width :data-height height
                     :stride (* 8 (ceiling width 8)) ; bits per row, byte-aligned
@@ -767,50 +797,63 @@ replaces."
                     :transform-smoothing nil
                     :ascent (cooked--box-glyph-ascent window height)))))
 
-(defun cooked--overlay-box-glyphs (start glyphs fg bg attrs &optional origin row)
-  "Overlay a generated bitmap `display' property on each glyph in GLYPHS.
+(defun cooked--apply-deco (start deco fg bg attrs &optional origin row)
+  "Hang DECO's per-character `display' properties on the text beginning at START.
 
-GLYPHS is the packed unibyte string `cooked--insert-runs' describes: two
-little-endian bytes per character.  Packed rather than a list because this runs
-on every damaged row of every frame, and box drawing is what full-screen
-programs are made of — a list would cons per character of each redraw.
+DECO is `(KIND . PACKED)\=', what `deco_to_lisp\=' in src/lib.rs hands over: KIND
+names what the run\='s characters display instead of themselves, and PACKED is a
+unibyte string of fixed-width little-endian records, one per character.  Packed
+rather than a list because this runs on every damaged row of every frame, and
+box drawing is what full-screen programs are made of — a list would cons per
+character of each redraw.
 
-Box-drawing characters are always single-column and a merged run can mix
-shapes, so this is one `display' property per character rather than one
-spanning the whole run.  Also stashes `cooked-box-glyph', the raw descriptor
-plus its colors and its place on the screen, so `cooked--rescale-box-glyphs' can
-regenerate at a new zoom level without asking the native core for anything — and
-without having to work out where each glyph sat all over again.
+One property per character rather than one spanning the run: a decorated
+character is always single-column, and a merged run can mix shapes.  Also
+stashes `cooked-deco\=', the record plus its colors and its place on the screen,
+so `cooked--rescale-deco\=' can regenerate at a new zoom level without asking the
+native core for anything — and without having to work out where each character
+sat all over again.
 
-ORIGIN is the buffer position of screen column 0 on this row, and ROW the row's
-index; together they place a shade glyph's dither in absolute screen space.
-ORIGIN is passed in rather than taken from `line-beginning-position' because row
+ORIGIN is the buffer position of screen column 0 on this row, and ROW the row\='s
+index; together they place a shade glyph\='s dither in absolute screen space.
+ORIGIN is passed in rather than taken from `line-beginning-position\=' because row
 0 does not always start a buffer line — it continues the wrapped row above it,
-as `cooked--goto-screen-row' explains.  A preceding double-width character still
+as `cooked--goto-screen-row\=' explains.  A preceding double-width character still
 puts the column out by one, which costs a seam in a rare case and is not worth a
-per-row width scan to avoid."
+per-row width scan to avoid.
+
+FG, BG and ATTRS are the run\='s, since a decoration is colored from the cell it
+stands in.  FG/BG/ATTRS are the run\='s own; the underline colour is deliberately
+not passed, because nothing here renders from it."
   (condition-case nil
-      (let ((pos start)
-            (window (or (cooked--layout-window) (selected-window))))
-        (dotimes (i (/ (length glyphs) 2))
-          (let* ((bits (logior (aref glyphs (* 2 i))
-                               (ash (aref glyphs (1+ (* 2 i))) 8)))
-                 (column (and origin (- pos origin)))
-                 (phase (cooked--box-phase bits window column row)))
-            (put-text-property pos (1+ pos) 'cooked-box-glyph
-                               (list bits fg bg attrs column row))
-            (put-text-property pos (1+ pos) 'display
-                               (cooked--box-glyph-image bits fg bg attrs window phase)))
-          (setq pos (1+ pos))))
+      (let* ((window (or (cooked--layout-window) (selected-window)))
+             (size (cooked--cell-size window)))
+        (pcase deco
+          (`(glyph . ,packed)
+           (cooked--apply-glyph-deco start packed fg bg attrs window size origin row))))
     ;; A cosmetic feature must never break rendering: any failure here leaves the
     ;; plain face-only text `cooked--insert-runs' already inserted.
     (error nil)))
 
-(defun cooked--rescale-box-glyphs ()
-  "Regenerate on-screen box-glyph bitmaps for the buffer's current zoom level.
-Reuses the `cooked-box-glyph' property `cooked--overlay-box-glyphs' stashed, so
-this never needs the native core — the classified shape and its colors already
-survive in the buffer.
+(defun cooked--apply-glyph-deco (start packed fg bg attrs window size origin row)
+  "Apply box-glyph decoration PACKED, two little-endian bytes per character."
+  (let ((pos start))
+    (dotimes (i (/ (length packed) 2))
+      (let* ((bits (logior (aref packed (* 2 i))
+                           (ash (aref packed (1+ (* 2 i))) 8)))
+             (column (and origin (- pos origin)))
+             (phase (cooked--box-phase bits size column row)))
+        (put-text-property pos (1+ pos) 'cooked-deco
+                           (list 'glyph bits fg bg attrs column row))
+        (put-text-property pos (1+ pos) 'display
+                           (cooked--box-glyph-image bits fg bg attrs window size phase)))
+      (setq pos (1+ pos)))))
+
+(defun cooked--rescale-deco ()
+  "Regenerate on-screen decoration bitmaps for the buffer's current zoom level.
+Reuses the `cooked-deco' property `cooked--apply-deco' stashed, so this never
+needs the native core — the classified shape and its colors already survive in
+the buffer.
 
 Widens first: `cooked-alt-screen-pin' confines the buffer to the screen region
 while a full-screen program is up, and a zoom during that would otherwise
@@ -821,25 +864,22 @@ stuck at the previous font size, visibly mismatched once the pin is released."
       (save-restriction
         (widen)
         (goto-char (point-min))
-        (let ((window (or (cooked--layout-window) (selected-window)))
-              (inhibit-read-only t)) ; the live screen (and scrollback) are read-only text
+        (let* ((window (or (cooked--layout-window) (selected-window)))
+               (size (cooked--cell-size window))
+               (inhibit-read-only t)) ; the live screen and scrollback are read-only
           (while (< (point) (point-max))
-            (let ((spec (get-text-property (point) 'cooked-box-glyph))
-                  (next (or (next-single-property-change (point) 'cooked-box-glyph)
+            (let ((spec (get-text-property (point) 'cooked-deco))
+                  (next (or (next-single-property-change (point) 'cooked-deco)
                             (point-max))))
-              (when spec
-                ;; A tail pattern rather than two more elements: a buffer rendered
-                ;; before the screen position was stashed still holds four-element
-                ;; specs, and a zoom must not error on them.
-                (pcase-let* ((`(,bits ,fg ,bg ,attrs . ,where) spec)
-                             (phase (cooked--box-phase
-                                     bits window (car where) (cadr where))))
-                  (put-text-property (point) (1+ (point)) 'display
-                                     (cooked--box-glyph-image
-                                      bits fg bg attrs window phase))))
+              (pcase spec
+                (`(glyph ,bits ,fg ,bg ,attrs . ,where)
+                 (let ((phase (cooked--box-phase bits size (car where) (cadr where))))
+                   (put-text-property (point) (1+ (point)) 'display
+                                      (cooked--box-glyph-image
+                                       bits fg bg attrs window size phase)))))
               (goto-char next))))))))
 
-(defun cooked--rescale-box-glyphs-on-zoom (_symbol _newval operation where)
+(defun cooked--rescale-deco-on-zoom (_symbol _newval operation where)
   "React to `text-scale-mode-amount' changing so bitmaps track the zoom level.
 
 A variable watcher rather than advice on `text-scale-set' or
@@ -852,9 +892,9 @@ itself is the one thing every zoom entry point actually sets."
   (when (eq operation 'set)
     (with-current-buffer (or where (current-buffer))
       (when (derived-mode-p 'cooked-mode)
-        (cooked--rescale-box-glyphs)))))
+        (cooked--rescale-deco)))))
 
-(add-variable-watcher 'text-scale-mode-amount #'cooked--rescale-box-glyphs-on-zoom)
+(add-variable-watcher 'text-scale-mode-amount #'cooked--rescale-deco-on-zoom)
 
 ;;;; Putting styled text in the buffer
 
@@ -866,12 +906,12 @@ which comint leaves at (nil t) — under that setting any fontification of the
 buffer unfontifies it first and strips a bare `face', which is why this used to
 set `font-lock-face' alongside it.
 
-GLYPHS is nil for a plain-text run, or a unibyte string of raw box-glyph
-descriptors (see src/emu/glyph.rs) classified by the native core, packed
-little-endian in two bytes per character of TEXT.  When present, and
-`cooked-box-drawing-images' allows it, each character additionally gets a
-generated bitmap `display' property so it renders as a pixel-exact shape
-instead of whatever the font happens to draw for that codepoint.
+DECO is nil for a plain run, or `(KIND . PACKED)\=' — what the run's characters
+display instead of themselves, KIND naming the sort and PACKED holding one
+fixed-width record per character of TEXT.  When present, and
+`cooked-box-drawing-images\=' allows it, each character additionally gets a
+generated `display\=' property so it renders as a pixel-exact shape instead of
+whatever the font happens to draw for that codepoint.  See `cooked--apply-deco\='.
 
 ROW is the screen row these runs make up, where the caller knows it.  Point on
 entry is that row's screen column 0, which is the origin a shade glyph's dither
@@ -879,14 +919,14 @@ is phased against — and is not the same as the row's line beginning, since row
 can continue a wrapped line."
   (let ((origin (point)))
     (dolist (run runs)
-      (pcase-let ((`(,text ,fg ,bg ,attrs ,glyphs ,ul) run))
+      (pcase-let ((`(,text ,fg ,bg ,attrs ,deco ,ul) run))
         (let ((start (point))
               (face (cooked--face fg bg attrs ul)))
           (insert text)
           (when face
             (put-text-property start (point) 'face face))
-          (when (and glyphs cooked-box-drawing-images (image-type-available-p 'xbm))
-            (cooked--overlay-box-glyphs start glyphs fg bg attrs origin row)))))))
+          (when (and deco cooked-box-drawing-images (image-type-available-p 'xbm))
+            (cooked--apply-deco start deco fg bg attrs origin row)))))))
 
 ;;;; Who owns the keyboard
 ;;
@@ -1231,27 +1271,27 @@ insertion point is above the region `cooked-alt-screen-pin' confines us to."
     (widen)
     (save-excursion
       (goto-char cooked--screen-start)
-      ;; ROWS arrives pre-assembled as (TEXT STYLE-SPANS GLYPH-SPANS), so this is one
+      ;; ROWS arrives pre-assembled as (TEXT STYLE-SPANS DECO-SPANS), so this is one
       ;; insert of plain text plus property calls only where styling or glyphs exist.
       ;; Note that building a propertized string in Lisp and inserting that instead
       ;; measures three times slower: `concat' on propertized strings makes Emacs copy
       ;; and merge property intervals over and over.
-      (pcase-let ((`(,text ,spans ,glyph-spans) rows))
+      (pcase-let ((`(,text ,spans ,deco-spans) rows))
         (let ((start (point)))
           (insert text)
           (dolist (span spans)
             (pcase-let ((`(,from ,to ,fg ,bg ,attrs ,ul) span))
               (when-let* ((face (cooked--face fg bg attrs ul)))
                 (put-text-property (+ start from) (+ start to) 'face face))))
-          ;; Box-drawing that scrolled into history is rasterized exactly as it would
-          ;; be live, via the same `cooked--overlay-box-glyphs' the screen region uses
+          ;; Decoration that scrolled into history is rendered exactly as it would
+          ;; be live, via the same `cooked--apply-deco' the screen region uses
           ;; — there is no screen column here to phase a shade glyph's dither against,
           ;; which costs at most a seam on that one glyph kind, same as a live row
           ;; rendered without a known origin.
-          (when (and glyph-spans cooked-box-drawing-images (image-type-available-p 'xbm))
-            (dolist (span glyph-spans)
-              (pcase-let ((`(,from ,_to ,fg ,bg ,attrs ,glyphs) span))
-                (cooked--overlay-box-glyphs (+ start from) glyphs fg bg attrs))))
+          (when (and deco-spans cooked-box-drawing-images (image-type-available-p 'xbm))
+            (dolist (span deco-spans)
+              (pcase-let ((`(,from ,_to ,fg ,bg ,attrs ,deco) span))
+                (cooked--apply-deco (+ start from) deco fg bg attrs))))
           ;; Scrollback never changes again, so it is protected once, here, rather
           ;; than re-swept on every redisplay.
           (add-text-properties start (point)
@@ -1796,6 +1836,7 @@ EXTRA-ENV is an alist prepended to the child's environment."
   (setq cooked--face-cache (make-hash-table :test #'equal))
   (setq cooked--box-glyph-cache (make-hash-table :test #'equal))
   (setq cooked--box-ascent-cache (make-hash-table :test #'equal))
+  (setq cooked--deco-image-cache (make-hash-table :test #'equal))
   (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
     (setq cooked--rows rows cooked--cols cols))
   (let ((inhibit-read-only t))

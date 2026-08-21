@@ -6,7 +6,7 @@ pub mod parser;
 pub mod screen;
 pub mod term;
 
-pub use cell::{Attrs, Cell, Color, Row, Run, Style};
+pub use cell::{Attrs, Cell, Color, Deco, DecoCell, Extra, Row, Run, Style};
 pub use glyph::BoxGlyph;
 pub use screen::{Cursor, Erase, Screen};
 pub use term::{
