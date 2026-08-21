@@ -1637,5 +1637,34 @@ in emacs state, where `V' is forwarded to the child like any other key."
     (should (eq evil-state 'visual))
     (should (eq cooked--input-mode 'frozen))))
 
+(ert-deftest cooked-c-z-out-of-a-full-screen-program-lands-in-normal-state ()
+  "`C-z' is `evil-exit-emacs-state', which returns to whatever state the user
+was in when the child took the keyboard -- insert state, if they were typing at
+a prompt, which is the ordinary way to start a program.  Insert state forwards
+through `cooked-semi-map', so `C-z' appeared to do nothing at all: every key,
+\\`V' included, still went to the child.  Normal state is where `C-z' has to
+land, and the insert state being remembered belonged to a prompt that is no
+longer on screen."
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "sleep 0.3; stty raw -echo; printf '\033[?1049h'; cat")
+    (should (cooked-tests--settle (lambda () (cooked--input-state-p))))
+    ;; Typing at the prompt, which is where a program gets started from.
+    (evil-insert-state)
+    (should (eq evil-state 'insert))
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    ;; The child took the keyboard, so evil is in emacs state for it.
+    (should (eq evil-state 'emacs))
+    (call-interactively (key-binding (kbd "C-z")))
+    (should (eq evil-state 'normal))
+    (should (eq cooked--input-mode 'still))
+    (should (eq (key-binding "V") #'evil-visual-line))
+    ;; And the way back in is unchanged.
+    (call-interactively (key-binding (kbd "C-z")))
+    (should (eq evil-state 'emacs))
+    (should-not cooked--input-mode)))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

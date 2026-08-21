@@ -506,8 +506,11 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
   `evil-collection`'s `repl-submit` and arrow-key history bindings reach
   `cooked-send-input` and the child's own history without knowing cooked exists. Stepping
   out of insert state gives point a visible cursor even where the child has hidden its
-  own, since point is then the only cursor there is. `C-z` already reaches Emacs from there, same as in any other evil
-  buffer — see [Keybindings](#keybindings).
+  own, since point is then the only cursor there is. `C-z` out of a full-screen program
+  lands in normal state rather than in whatever state you were in when you started it —
+  insert state, usually, which forwards, and so looked as though `C-z` had done nothing.
+  `C-z` reaches Emacs from anywhere, same as in any other evil buffer — see
+  [Keybindings](#keybindings).
 - **Commands are records.** `C-c C-p`/`C-c C-n` move between prompts and `C-c TAB` folds
   output. A command that printed nothing still gets a record, which text properties alone
   cannot represent — and navigation lands on the *prompt* rather than on the output for

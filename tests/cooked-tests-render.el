@@ -808,6 +808,7 @@ follows really is the continuation."
 (ert-deftest cooked-guard-row-width-trims-a-row-that-would-softwrap ()
   (with-temp-buffer
     (cooked-mode)
+    (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines t)
           (inhibit-read-only t))
       (insert (make-string 5 ?x) "é" (make-string 20 ?y) "\n")
@@ -820,6 +821,7 @@ follows really is the continuation."
 (ert-deftest cooked-guard-row-width-leaves-a-row-that-fits-alone ()
   (with-temp-buffer
     (cooked-mode)
+    (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines t)
           (inhibit-read-only t))
       (insert "é\n")
@@ -834,6 +836,7 @@ exercised here by leaving a row Emacs would (per the mock) report as wrapped
 untouched, since it never contains anything but ASCII."
   (with-temp-buffer
     (cooked-mode)
+    (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines t)
           (inhibit-read-only t)
           (text (concat (make-string 40 ?x) "\n")))
@@ -848,6 +851,7 @@ untouched, since it never contains anything but ASCII."
 fast path above must not apply -- a pure-ASCII row still gets trimmed there."
   (with-temp-buffer
     (cooked-mode)
+    (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines t)
           (inhibit-read-only t))
       (insert (make-string 40 ?x) "\n")
@@ -872,6 +876,7 @@ buffer-wide (see `cooked-mode'), so a softwrap is already structurally
 impossible and this guard would only be redundant work."
   (with-temp-buffer
     (cooked-mode)
+    (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines nil)
           (inhibit-read-only t)
           (text (concat (make-string 5 ?x) "é" (make-string 20 ?y) "\n")))
@@ -892,11 +897,66 @@ redisplay with `args-out-of-range' (see the test below for what happens to a
 row that isn't at `point-min')."
   (with-temp-buffer
     (cooked-mode)
+    (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines t)
           (inhibit-read-only t)
           (text "é\nNEXT\n"))
       (insert text)
       (cooked--guard-row-width (point-min))
+      (should (equal (buffer-string) text)))))
+
+(ert-deftest cooked-guard-row-width-measures-in-the-buffer-s-own-window ()
+  "The bug this guard is one wrong window away from causing.
+
+`vertical-motion' measures in the selected window unless told otherwise, and
+the selected window is routinely not one this buffer is in: the minibuffer
+throughout a completion session previewing the buffer beside it, or a
+neighbouring window while the frame is resized.  Measured against a narrower
+foreign window, every row that reaches the right edge reads as wrapped, and the
+guard trims it -- one character at a time, down to what that other window could
+have held.  A full-width row of box drawing loses everything after its first
+cell or two, and stays lost until something damages the row and rewrites it.
+
+Asserted as \"which window was Emacs' layout asked about\", since that is the
+whole of the fix; the mock reports no wrap, so nothing is trimmed and the
+answer is not tangled up with what a trim would have done."
+  (let ((buffer (generate-new-buffer "*cooked-layout-window*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (let* ((elsewhere (selected-window))
+                 (ours (split-window elsewhere)))
+            (set-window-buffer ours buffer)
+            (select-window elsewhere)
+            (with-current-buffer buffer
+              (cooked-mode)
+              (let ((cooked-rejoin-wrapped-lines t)
+                    (inhibit-read-only t)
+                    (asked nil))
+                (insert "é" (make-string 20 ?x) "\n")
+                (cl-letf (((symbol-function 'vertical-motion)
+                           (lambda (_lines &optional window &rest _)
+                             (push window asked)
+                             (goto-char (point-max)))))
+                  (cooked--guard-row-width (point-min)))
+                (should asked)
+                (should-not (memq elsewhere asked))
+                (should (cl-every (lambda (window) (eq window ours)) asked))))))
+      (kill-buffer buffer))))
+
+(ert-deftest cooked-guard-row-width-skips-a-buffer-displayed-nowhere ()
+  "A buffer on no window has no layout to disagree with, so there is nothing to
+measure against and nothing to trim -- and no selected window to be tempted by,
+since that one is showing somebody else's buffer.  A render into a hidden
+buffer therefore keeps its rows whole; displaying it resizes the session, which
+marks every row damaged and rewrites them against the window it now has."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (text (concat "é" (make-string 40 ?x) "\n")))
+      (insert text)
+      (cooked-tests--with-mocked-wrap 10 (cooked--guard-row-width (point-min)))
       (should (equal (buffer-string) text)))))
 
 (ert-deftest cooked-guard-row-width-does-not-eat-into-neighbouring-rows ()
@@ -907,6 +967,7 @@ before START\" ate the newline above it, merging START into the row above,
 and the same broken check then chewed through the entire row below too."
   (with-temp-buffer
     (cooked-mode)
+    (cooked-tests--display-buffer)
     (let ((cooked-rejoin-wrapped-lines t)
           (inhibit-read-only t)
           (text "PREVROW\né\nNEXTROW\nTAILROW\n"))

@@ -74,6 +74,7 @@
 (require 'cooked-mode)
 
 (defvar evil-state)
+(defvar evil-previous-state)
 (declare-function evil-insert-state "evil-states")
 (declare-function evil-emacs-state "evil-states")
 
@@ -157,7 +158,27 @@ the dozen, every one of which used to put the user back in emacs state."
             ((null cooked-evil-child-state))
             ((eq cooked-evil-child-state 'insert)
              (unless (memq state '(insert emacs)) (evil-insert-state)))
-            (t (unless (eq state 'emacs) (evil-emacs-state)))))))
+            (t (unless (eq state 'emacs)
+                 (evil-emacs-state)
+                 (cooked-evil--come-back-to 'normal)))))))
+
+(defun cooked-evil--come-back-to (state)
+  "Make `C-z' out of emacs state land in STATE.
+
+`C-z' is `evil-exit-emacs-state', which returns to `evil-previous-state' -- and
+the previous state is whatever the user was in when the child took the
+keyboard.  At a shell prompt that is insert state, routinely: you are typing,
+you run a full-screen program, cooked hands it the keyboard by putting evil in
+emacs state, and `C-z' then puts you back in *insert*.  Insert state forwards
+through `cooked-semi-map', so every key still goes to the child -- \`V' among
+them, which is why it looked like visual state had stopped working rather than
+like the state had.
+
+Normal state is the honest answer.  The insert state being remembered belonged
+to a prompt that is no longer on screen, and nothing is lost by forgetting it:
+when the child gives the keyboard back, `cooked-evil-sync' puts insert state
+back on its own."
+  (setq evil-previous-state state))
 
 (add-hook 'cooked-state-change-hook #'cooked-evil-sync)
 

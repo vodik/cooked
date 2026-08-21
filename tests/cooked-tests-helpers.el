@@ -336,6 +336,16 @@ them — the arrangement every seam bug needs."
               (lambda (&rest _) (goto-char (min (point-max) (+ (point) ,limit))))))
      ,@body))
 
+(defun cooked-tests--display-buffer ()
+  "Show the current buffer in the selected window, and return that window.
+
+`cooked--guard-row-width' measures a row in `cooked--layout-window' and does
+nothing at all when the buffer is displayed nowhere -- there being no layout
+for a row to disagree with yet -- so a `with-temp-buffer' test has to put the
+buffer on screen before there is any trimming to assert about."
+  (set-window-buffer (selected-window) (current-buffer))
+  (selected-window))
+
 (defun cooked-tests--glyph-grid (bits width height &optional phase)
   "The pixel bitmap `cooked--render-box-glyph' would pack, for BITS."
   (let ((bitmap (cooked--bitmap-make width height)))

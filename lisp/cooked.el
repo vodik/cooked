@@ -714,7 +714,15 @@ at exactly the cell size, so letting that apply would resample a pixel-exact
 10x20 stroke up to 12x24 inside a 10x20 cell: borders stop meeting at the cell
 edge and the strokes blur into something no better than the font glyphs this
 replaces."
-  (let* ((window (or window (get-buffer-window (current-buffer)) (selected-window)))
+  ;; `cooked--layout-window' is the buffer's own window, which is what the cell
+  ;; size has to come from: `get-buffer-window' looks at the current frame only,
+  ;; and the selected window it fell back to is the minibuffer for the whole of a
+  ;; completion preview -- bitmaps sized to a font this buffer is not displayed
+  ;; in.  Unlike `cooked--guard-row-width', this does fall back to the selected
+  ;; window when the buffer is displayed nowhere: a guessed cell size costs a
+  ;; mis-sized bitmap on a buffer nobody is looking at, which the next render in
+  ;; a real window replaces, while guessing there costs deleted text.
+  (let* ((window (or window (cooked--layout-window) (selected-window)))
          (reverse (cooked--attr-p attrs cooked--attr-reverse))
          (fg* (or (cooked--color (if reverse bg fg)) (face-foreground 'default nil t)))
          (bg* (or (cooked--color (if reverse fg bg)) (face-background 'default nil t))))
@@ -760,7 +768,7 @@ puts the column out by one, which costs a seam in a rare case and is not worth a
 per-row width scan to avoid."
   (condition-case nil
       (let ((pos start)
-            (window (or (get-buffer-window (current-buffer)) (selected-window))))
+            (window (or (cooked--layout-window) (selected-window))))
         (dotimes (i (/ (length glyphs) 2))
           (let* ((bits (logior (aref glyphs (* 2 i))
                                (ash (aref glyphs (1+ (* 2 i))) 8)))
@@ -790,7 +798,7 @@ stuck at the previous font size, visibly mismatched once the pin is released."
       (save-restriction
         (widen)
         (goto-char (point-min))
-        (let ((window (selected-window))
+        (let ((window (or (cooked--layout-window) (selected-window)))
               (inhibit-read-only t)) ; the live screen (and scrollback) are read-only text
           (while (< (point) (point-max))
             (let ((spec (get-text-property (point) 'cooked-box-glyph))
@@ -1477,10 +1485,19 @@ Rust in the first place. Non-ASCII content is checked on both, since an
 ambiguous-width or composed character can mismatch either way.
 
 `vertical-motion' is that layout decision, reused rather than re-derived
-from pixel widths, so this is correct regardless of cause. A row found to
-wrap is trimmed from the end, one character at a time — rarely more than
-one or two, since the mismatch is usually a column or so — until it no
-longer does, and the cut is marked with the same right-fringe truncation
+from pixel widths, so this is correct regardless of cause -- but it has to be
+asked of `cooked--layout-window' rather than of the selected window it
+defaults to, which is not necessarily showing this buffer at all.  A row
+measured against a foreign window is trimmed to fit a width it was never
+written for, one character at a time until it does: what that looks like is a
+full-width row of box drawing losing everything after its first cell, and
+staying that way until something damages the row and rewrites it.  A buffer
+displayed nowhere is not measured at all, having no layout to disagree with
+yet -- it gets one when it is displayed, and a resize marks every row damaged.
+
+A row found to wrap is trimmed from the end, one character at a time — rarely
+more than one or two, since the mismatch is usually a column or so — until it
+no longer does, and the cut is marked with the same right-fringe truncation
 bitmap plain `truncate-lines' would show. That has to be done by hand:
 `cooked-rejoin-wrapped-lines' (which see) keeps `truncate-lines' off
 buffer-wide precisely so a *genuinely* wrapped scrollback line can still
@@ -1490,36 +1507,40 @@ Trimming by character rather than by grapheme cluster is an accepted gap: a
 cut that lands between a base character and a combining mark is possible in
 principle and vanishingly unlikely in practice, since the trigger is a
 character whose own width was already mismeasured, not an adjacent one."
-  (when (and cooked-rejoin-wrapped-lines (< start (line-end-position)))
-    (goto-char start)
-    (when (or (display-graphic-p)
-              (string-match-p (rx (not ascii)) (buffer-substring-no-properties start (line-end-position))))
-      (let (trimmed)
-        ;; `line-end-position' has to be captured before `vertical-motion' moves
-        ;; point, not after: taken after, it measures the end of whatever line
-        ;; `vertical-motion' landed on rather than the row's own end, so a row that
-        ;; does not wrap at all still reads as short of it (that next buffer line's
-        ;; end is almost always past a one-line hop) — a false positive on every
-        ;; non-ASCII row followed by a non-blank one, not just a genuinely
-        ;; mismeasured one. The loop then deletes real characters, and once the
-        ;; row is empty keeps going: `end-of-line' at START stops moving, so the
-        ;; delete starts eating the newline above START and then the row below.
-        (let (eol)
-          (while (progn (goto-char start)
-                        (setq eol (line-end-position))
-                        (vertical-motion 1)
-                        (< (point) eol))
-            (setq trimmed t)
-            (delete-region (1- eol) eol)))
-        (when trimmed
-          (goto-char start)
-          (cooked--mark-truncation (1- (line-end-position))))))))
+  (let ((window (cooked--layout-window)))
+    (when (and cooked-rejoin-wrapped-lines window (< start (line-end-position)))
+      (goto-char start)
+      (when (or (display-graphic-p (window-frame window))
+                (string-match-p (rx (not ascii)) (buffer-substring-no-properties start (line-end-position))))
+        (let (trimmed)
+          ;; `line-end-position' has to be captured before `vertical-motion' moves
+          ;; point, not after: taken after, it measures the end of whatever line
+          ;; `vertical-motion' landed on rather than the row's own end, so a row that
+          ;; does not wrap at all still reads as short of it (that next buffer line's
+          ;; end is almost always past a one-line hop) — a false positive on every
+          ;; non-ASCII row followed by a non-blank one, not just a genuinely
+          ;; mismeasured one. The loop then deletes real characters, and once the
+          ;; row is empty keeps going: `end-of-line' at START stops moving, so the
+          ;; delete starts eating the newline above START and then the row below.
+          (let (eol)
+            (while (progn (goto-char start)
+                          (setq eol (line-end-position))
+                          (vertical-motion 1 window)
+                          (< (point) eol))
+              (setq trimmed t)
+              (delete-region (1- eol) eol)))
+          (when trimmed
+            (goto-char start)
+            (cooked--mark-truncation (1- (line-end-position)) window)))))))
 
-(defun cooked--mark-truncation (cut)
+(defun cooked--mark-truncation (cut window)
   "Mark the row ending at CUT as having had characters trimmed off it.
 
-Where the marker goes depends on whether there is a fringe to put it in, and the
-difference is a column of the user's text:
+Where the marker goes depends on whether WINDOW -- the one the trim was
+measured in -- has a fringe to put it in, and the difference is a column of the
+user's text.  WINDOW's frame rather than the selected one answers that: the two
+are the same only when the buffer is displayed where it is being rendered
+from, which is exactly the assumption `cooked--layout-window' exists to drop:
 
 On a graphical frame it rides an overlay's `after-string' rather than a
 `display' property on CUT itself.  A fringe `display' spec shows its bitmap
@@ -1540,7 +1561,7 @@ or a side window that gave it up) has nowhere to draw the bitmap, so the marker
 is invisible there.  Emacs has the same problem with its own indicators and
 solves it per-window; this runs per row during a drain, for a buffer that can be
 in several windows at once with different fringes, so there is no one answer."
-  (if (display-graphic-p)
+  (if (display-graphic-p (window-frame window))
       (let ((overlay (make-overlay cut (1+ cut))))
         (overlay-put overlay 'evaporate t)
         (overlay-put overlay 'cooked-truncation t)
@@ -1685,6 +1706,30 @@ so it disagrees with the buffer whenever the default face is remapped —
 gets both, and floors, so a row that is only half visible is not a row we
 claim to have."
   (floor (window-body-height window t) (window-default-line-height window)))
+
+(defun cooked--layout-window ()
+  "The window this buffer's rows are laid out for, or nil if it has none.
+
+The narrowest window showing the buffer, on any frame: the one
+`cooked--window-size' hands the child, since a child sized to a larger window
+would wrap and clip everything shown in the smaller one.  That makes it the
+layout every rendered row is written for, and so the only window a row is
+worth measuring against.
+
+There is deliberately no `selected-window' fallback.  Everything that measures
+this buffer's text defaults to the selected window -- `vertical-motion' and
+`window-font-width' both do -- and the selected window is very often not one
+of ours: the minibuffer while a completion session previews this buffer in
+another window, or a neighbouring window while the frame is being resized.
+Measuring a row against a window that shows someone else's buffer at someone
+else's width is not a weaker measurement, it is a meaningless one, and
+`cooked--guard-row-width' acts on the answer by deleting text."
+  (let (narrowest)
+    (dolist (window (get-buffer-window-list (current-buffer) nil t) narrowest)
+      (when (or (null narrowest)
+                (< (window-max-chars-per-line window)
+                   (window-max-chars-per-line narrowest)))
+        (setq narrowest window)))))
 
 (defcustom cooked-min-redisplay-interval 0.008
   "Floor, in seconds, on how often a session triggers a redisplay.
