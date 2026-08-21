@@ -2119,12 +2119,12 @@ mod tests {
         // The two output rows above the prompt.
         t.remove_rows(0, 2);
         assert_eq!(text(&t, 0), "user");
-        assert_eq!(text(&t, 1), "$ ");
+        assert_eq!(text(&t, 1), "$");
         // The prompt is two rows tall and now starts at row 0, so there is nothing above
         // it left to clear. Without the rebase this cuts one row, taking `user' with it.
         assert_eq!(t.clear_to_prompt(), 0);
         assert_eq!(text(&t, 0), "user", "the prompt's first line must survive");
-        assert_eq!(text(&t, 1), "$ ");
+        assert_eq!(text(&t, 1), "$");
     }
 
     #[test]
@@ -2168,18 +2168,20 @@ mod tests {
         // `save_restore' acts on whichever screen is showing, so the restore has to run
         // after the switch back. Run before it, it reads the alt screen's saved cursor
         // and leaves the primary's -- the one `1049h' saved -- untouched.
-        let mut t = term(6, 8, b"one\r\ntwo\r\nthree");
-        t.feed(b"\x1b[3;2H");
-        assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (2, 1));
+        // The saved position has to be one something later moves, or a restore that never
+        // ran is indistinguishable from one that did. A rewrap is that something: it is
+        // the one thing which relocates the primary's cursor while the alt screen is up.
+        // So the line here is wrapped, and the resize below re-chunks it.
+        let mut t = term(6, 4, b"aaaabb");
+        assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (1, 2));
         t.feed(b"\x1b[?1049h");
         t.feed(b"\x1b[1;1Hframe");
-        // A resize while the alt screen is up rewraps the primary and moves its cursor,
-        // which is what makes the restore observable rather than a no-op.
-        t.resize(6, 4);
+        // Widening rejoins the two rows into one, putting the primary's cursor at (0, 6).
+        t.resize(6, 8);
         t.feed(b"\x1b[?1049l");
         assert_eq!(
             (t.screen().cursor.row, t.screen().cursor.col),
-            (2, 1),
+            (1, 2),
             "the primary's saved cursor is the one 1049 restores"
         );
     }
