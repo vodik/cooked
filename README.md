@@ -569,3 +569,7 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
   read-only for the duration, so an edit command errors immediately instead of landing on
   text that goes nowhere; and typing, `RET`, or any of cooked's own commands that write to
   the child end it and forward what was pressed, rather than requiring a separate step back.
+
+## Image test command
+
+chafa -f kitty --passthrough none -s 60x20 kitty-test.png
