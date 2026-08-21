@@ -1,0 +1,23 @@
+README.md
+  s_985347d7532b68::t_03686e3f106a47 86-92,94-109,117-124
+lisp/cooked-mode.el
+  s_985347d7532b68::t_e9a47af2dce5fb 115-118,142-154,164,167-170,196-202,253-257,259-262,369,393-407,534-581,892-896
+tests/cooked-tests-input.el
+  s_985347d7532b68::t_162c1cfa80aa03 991-1020,1090-1150,1153-1166
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "a28a78b4ba0775a223b0e8de6adfaef892877e84",
+  "prompts": {},
+  "sessions": {
+    "s_985347d7532b68": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "78900380-2eeb-4390-8466-cc8883ba66da",
+        "model": "unknown"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
