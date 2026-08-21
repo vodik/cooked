@@ -4,7 +4,8 @@
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
 use super::cell::{Attrs, Color, Row, Run, Style};
-use super::image::{CellMetrics, ImageData, ImageFormat, ImageId, ImageStore};
+use super::image::{CellMetrics, ImageData, ImageFormat, ImageId, ImageStore, png_dimensions};
+use super::kitty::{Kitty, Outcome};
 use super::screen::{Cursor, Erase, Resize, Screen};
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
@@ -415,6 +416,10 @@ struct State {
     pen: Style,
     pending_scrollback: VecDeque<Scrolled>,
     images: ImageStore,
+    kitty: Kitty,
+    /// The cell rectangle each image was laid into, which `c=`/`r=` can override and so
+    /// is not always what its pixel size implies.
+    image_cells: std::collections::HashMap<ImageId, (u16, u16)>,
     /// Images transmitted since the last drain, awaiting their one trip to Lisp.
     pending_images: Vec<ImageData>,
     /// The cell size Emacs reports, for turning pixels into a cell rectangle.
@@ -481,6 +486,8 @@ impl State {
             pen: Style::default(),
             pending_scrollback: VecDeque::new(),
             images: ImageStore::default(),
+            kitty: Kitty::default(),
+            image_cells: std::collections::HashMap::new(),
             pending_images: Vec::new(),
             metrics: CellMetrics::default(),
             evicted_total: 0,
@@ -671,12 +678,38 @@ impl State {
     }
 
     fn place_image(&mut self, format: ImageFormat, bytes: &[u8], px: (u32, u32)) -> ImageId {
+        let id = self.intern_image(format, bytes, px, (0, 0));
+        self.lay_image(id);
+        id
+    }
+
+    /// Take BYTES as an image and say what we will call it, without drawing anything.
+    ///
+    /// CELLS is the rectangle the child asked for, `(0, 0)` when it did not say and the
+    /// size should follow from the pixels. A `PX` of `(0, 0)` is read out of the bytes
+    /// where the format states its own size, which clients rely on: the protocol does
+    /// not ask a PNG's sender to repeat dimensions the file already carries.
+    fn intern_image(
+        &mut self,
+        format: ImageFormat,
+        bytes: &[u8],
+        px: (u32, u32),
+        cells: (u16, u16),
+    ) -> ImageId {
+        let px = if px == (0, 0) {
+            png_dimensions(bytes).unwrap_or(px)
+        } else {
+            px
+        };
         let metrics = self.metrics;
         let (id, fresh) = self.images.intern(format, bytes, px, metrics);
-        let cells = self
-            .images
-            .get(id)
-            .map_or((1, 1), |image| image.cells);
+        // An explicit `c=`/`r=` overrides what the pixels imply: the child is saying how
+        // much of the screen the picture should occupy, not how big its source is.
+        let cells = match (cells, self.images.get(id)) {
+            ((0, 0), Some(image)) => image.cells,
+            ((0, 0), None) => (1, 1),
+            (asked, _) => (asked.0.max(1), asked.1.max(1)),
+        };
         if fresh {
             self.pending_images.push(ImageData {
                 id,
@@ -686,7 +719,13 @@ impl State {
                 cells,
             });
         }
+        self.image_cells.insert(id, cells);
+        id
+    }
 
+    /// Lay an already-interned image into the grid at the cursor.
+    fn lay_image(&mut self, id: ImageId) {
+        let cells = self.image_cells.get(&id).copied().unwrap_or((1, 1));
         let pen = self.pen.erase();
         let start_col = self.screen().cursor.col;
         for cell_row in 0..cells.1 {
@@ -697,7 +736,6 @@ impl State {
             self.evicted(evicted);
         }
         self.screen_mut().carriage_return();
-        id
     }
 
     fn drain(&mut self) -> Delta {
@@ -1314,6 +1352,37 @@ impl Perform for State {
         }
     }
 
+    /// `ESC _ ... ST` — the kitty graphics protocol, and nothing else so far.
+    ///
+    /// Reachable only because the parser is vendored: upstream vte consumes APC and
+    /// tells the performer nothing, which is why an image never arrived at all before.
+    fn apc_dispatch(&mut self, bytes: &[u8]) {
+        let (outcome, reply) = self.kitty.feed(bytes);
+        if let Some(reply) = reply {
+            self.events.push(Event::Reply(reply));
+        }
+        match outcome {
+            Outcome::Image {
+                format,
+                bytes,
+                px,
+                cells,
+                client_id,
+                display,
+            } => {
+                let id = self.intern_image(format, &bytes, px, cells);
+                // The child's id space is not ours — ours is content-addressed — so the
+                // mapping is what makes a later `a=p` find this picture again.
+                self.kitty.bind(client_id, id);
+                if display {
+                    self.lay_image(id);
+                }
+            }
+            Outcome::Place(id) => self.lay_image(id),
+            Outcome::Incomplete | Outcome::Nothing => {}
+        }
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         let Some(code) = params.first().and_then(|p| std::str::from_utf8(p).ok()) else {
             return;
@@ -1570,6 +1639,139 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::Reply(_))),
         );
+    }
+
+    /// Base64, so the tests spell a kitty transmission the way a client would.
+    fn b64(bytes: &[u8]) -> String {
+        const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut n = 0u32;
+            for (i, b) in chunk.iter().enumerate() {
+                n |= u32::from(*b) << (16 - 8 * i);
+            }
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(SET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_kitty_transmission_puts_a_picture_on_the_grid() {
+        let mut t = with_metrics(10, 20);
+        // 2x1 cells' worth of RGB at 10x20 per cell.
+        let pixels = vec![0u8; 20 * 20 * 3];
+        t.feed(
+            format!("\x1b_Ga=T,f=24,s=20,v=20,i=1;{}\x1b\\", b64(&pixels)).as_bytes(),
+        );
+        assert_eq!(placements(&t, 0).len(), 2);
+        let delta = t.drain();
+        assert_eq!(delta.images.len(), 1);
+        assert!(delta.images[0].bytes.starts_with(b"P6\n20 20\n255\n"));
+    }
+
+    #[test]
+    fn a_png_transmission_needs_no_dimensions_of_its_own() {
+        // Clients omit `s=`/`v=` for PNG, because the file already says.
+        let png = super::super::image::png_from_rgba((30, 20), &[0; 30 * 20 * 4]);
+        let mut t = with_metrics(10, 20);
+        t.feed(format!("\x1b_Ga=T,f=100,i=1;{}\x1b\\", b64(&png)).as_bytes());
+        assert_eq!(placements(&t, 0).len(), 3, "30px at 10px a cell");
+    }
+
+    #[test]
+    fn an_explicit_cell_rectangle_overrides_the_pixels() {
+        let mut t = with_metrics(10, 20);
+        let pixels = vec![0u8; 20 * 20 * 3];
+        t.feed(
+            format!("\x1b_Ga=T,f=24,s=20,v=20,c=5,r=1,i=1;{}\x1b\\", b64(&pixels)).as_bytes(),
+        );
+        assert_eq!(placements(&t, 0).len(), 5);
+    }
+
+    #[test]
+    fn a_transmission_can_be_placed_again_by_its_client_id() {
+        let mut t = with_metrics(10, 20);
+        let pixels = vec![0u8; 10 * 20 * 3];
+        t.feed(format!("\x1b_Ga=t,f=24,s=10,v=20,i=7;{}\x1b\\", b64(&pixels)).as_bytes());
+        assert!(placements(&t, 0).is_empty(), "a=t transmits without drawing");
+        t.feed(b"\x1b_Ga=p,i=7\x1b\\");
+        assert_eq!(placements(&t, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_chunked_transmission_arrives_whole() {
+        let png = super::super::image::png_from_rgba((10, 20), &[0; 10 * 20 * 4]);
+        let encoded = b64(&png);
+        let mut t = with_metrics(10, 20);
+        let mut chunks = encoded.as_bytes().chunks(64).peekable();
+        let mut first = true;
+        while let Some(chunk) = chunks.next() {
+            let more = u8::from(chunks.peek().is_some());
+            let control = if first {
+                format!("a=T,f=100,i=1,m={more}")
+            } else {
+                format!("m={more}")
+            };
+            first = false;
+            t.feed(
+                format!("\x1b_G{control};{}\x1b\\", String::from_utf8_lossy(chunk)).as_bytes(),
+            );
+        }
+        assert_eq!(placements(&t, 0).len(), 1);
+        assert_eq!(t.drain().images.len(), 1);
+    }
+
+    #[test]
+    fn the_capability_probe_clients_actually_send_is_answered() {
+        // How kitty graphics support is detected: there is no terminfo capability for
+        // it, so a client transmits a 1x1 image with `a=q` and watches for the reply.
+        // Answering this is the whole of advertising the protocol.
+        let mut t = with_metrics(10, 20);
+        t.feed(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
+        let replies: Vec<_> = t
+            .drain()
+            .events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies, vec!["\x1b_Gi=31;OK\x1b\\"]);
+    }
+
+    #[test]
+    fn an_unsupported_capability_is_declined_out_loud() {
+        // A client told ENOTSUPPORTED can fall back; one whose transmission vanishes
+        // shows the user nothing and cannot find out why.
+        let mut t = with_metrics(10, 20);
+        t.feed(b"\x1b_Ga=T,f=100,o=z,i=4;AAAA\x1b\\");
+        let replies: Vec<_> = t
+            .drain()
+            .events
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replies, vec!["\x1b_Gi=4;ENOTSUPPORTED:compression\x1b\\"]);
+    }
+
+    #[test]
+    fn the_same_picture_sent_twice_still_crosses_once() {
+        let mut t = with_metrics(10, 20);
+        let pixels = vec![0u8; 10 * 20 * 3];
+        let cmd = format!("\x1b_Ga=T,f=24,s=10,v=20,i=1;{}\x1b\\", b64(&pixels));
+        t.feed(cmd.as_bytes());
+        t.feed(cmd.as_bytes());
+        assert_eq!(t.drain().images.len(), 1);
     }
 
     #[test]

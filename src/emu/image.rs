@@ -124,6 +124,132 @@ pub struct ImageData {
     pub cells: (u16, u16),
 }
 
+/// A PNG's intrinsic size, read from the IHDR its own header requires.
+///
+/// Clients routinely send `f=100` without `s=`/`v=`, because a PNG carries its size and
+/// the protocol does not ask them to repeat it. The alternative to reading it here is
+/// refusing those transmissions, or guessing — and the cell rectangle has to be settled
+/// before the image is laid into the grid, long before Emacs decodes anything.
+pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    // 8-byte signature, then a chunk header of length and tag, then IHDR's width/height.
+    if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    (w != 0 && h != 0).then_some((w, h))
+}
+
+/// Wrap RGB pixels as binary P6, which Emacs decodes with no image library at all.
+///
+/// The cheap target for anything arriving as raw pixels: a header and the bytes it
+/// already has. No alpha, which is why RGBA takes the longer road below.
+pub fn ppm_from_rgb(px: (u32, u32), rgb: &[u8]) -> Vec<u8> {
+    let header = format!("P6\n{} {}\n255\n", px.0, px.1);
+    let wanted = (px.0 as usize) * (px.1 as usize) * 3;
+    let mut out = Vec::with_capacity(header.len() + wanted);
+    out.extend_from_slice(header.as_bytes());
+    out.extend_from_slice(&rgb[..wanted.min(rgb.len())]);
+    // A short transmission is the child's error, not a reason to hand Emacs a file
+    // whose header lies about its length. Pad rather than truncate the header.
+    out.resize(header.len() + wanted, 0);
+    out
+}
+
+/// Wrap RGBA pixels as a PNG, losslessly and without compressing.
+///
+/// Emacs' pbm reader has no alpha, so RGBA cannot take the cheap road — and a picture
+/// with transparency composited against a guessed background is wrong in a way that
+/// shows. A PNG it is, with deflate's *stored* blocks: no compression, no Huffman
+/// tables, about as much code as the header itself, and the bytes are on their way to
+/// an in-process decoder rather than down a wire.
+pub fn png_from_rgba(px: (u32, u32), rgba: &[u8]) -> Vec<u8> {
+    let (w, h) = (px.0 as usize, px.1 as usize);
+    // PNG scanlines carry a leading filter byte; 0 is "none".
+    let mut raw = Vec::with_capacity(h * (1 + w * 4));
+    for y in 0..h {
+        raw.push(0);
+        let row = y * w * 4;
+        let end = (row + w * 4).min(rgba.len());
+        if row < end {
+            raw.extend_from_slice(&rgba[row..end]);
+        }
+        raw.resize((y + 1) * (1 + w * 4), 0);
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&px.0.to_be_bytes());
+    ihdr.extend_from_slice(&px.1.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit, truecolour with alpha
+    push_chunk(&mut out, b"IHDR", &ihdr);
+    push_chunk(&mut out, b"IDAT", &zlib_stored(&raw));
+    push_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+fn push_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(tag);
+    out.extend_from_slice(data);
+    let mut crc = Crc32::default();
+    crc.push(tag);
+    crc.push(data);
+    out.extend_from_slice(&crc.finish().to_be_bytes());
+}
+
+/// A zlib stream of stored (uncompressed) deflate blocks.
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01]; // deflate, 32K window, no preset dictionary
+    let mut chunks = data.chunks(0xFFFF).peekable();
+    if data.is_empty() {
+        out.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
+    }
+    while let Some(chunk) = chunks.next() {
+        out.push(u8::from(chunks.peek().is_none()));
+        let len = chunk.len() as u16;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(chunk);
+    }
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+#[derive(Default)]
+struct Crc32(Option<u32>);
+
+impl Crc32 {
+    fn push(&mut self, data: &[u8]) {
+        let mut crc = self.0.unwrap_or(0xFFFF_FFFF);
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 0 {
+                    crc >> 1
+                } else {
+                    (crc >> 1) ^ 0xEDB8_8320
+                };
+            }
+        }
+        self.0 = Some(crc);
+    }
+
+    fn finish(self) -> u32 {
+        self.0.unwrap_or(0xFFFF_FFFF) ^ 0xFFFF_FFFF
+    }
+}
+
 /// Total transmitted bytes the store will hold for re-placement before evicting.
 ///
 /// Retained not for lifetime reasons — Emacs owns that — but because kitty's protocol
@@ -238,6 +364,62 @@ mod tests {
         width: 10,
         height: 20,
     };
+
+    #[test]
+    fn png_dimensions_are_read_from_the_header() {
+        let png = png_from_rgba((7, 3), &[0; 7 * 3 * 4]);
+        assert_eq!(png_dimensions(&png), Some((7, 3)));
+    }
+
+    #[test]
+    fn something_that_is_not_a_png_has_no_dimensions() {
+        assert_eq!(png_dimensions(b"P6\n1 1\n255\n\0\0\0"), None);
+        assert_eq!(png_dimensions(b"short"), None);
+    }
+
+    #[test]
+    fn ppm_states_its_own_dimensions() {
+        let ppm = ppm_from_rgb((2, 1), &[1, 2, 3, 4, 5, 6]);
+        assert!(ppm.starts_with(b"P6\n2 1\n255\n"));
+        assert_eq!(&ppm[ppm.len() - 6..], &[1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_short_transmission_is_padded_not_misdeclared() {
+        // Handing Emacs a header that lies about the length is worse than a black band.
+        let ppm = ppm_from_rgb((2, 1), &[1, 2, 3]);
+        assert_eq!(ppm.len(), "P6\n2 1\n255\n".len() + 6);
+    }
+
+    #[test]
+    fn png_is_well_formed_enough_to_decode() {
+        let png = png_from_rgba((2, 2), &[255; 16]);
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(png.ends_with(b"\xaeB`\x82"), "IEND CRC");
+        // Chunk lengths and tags in order, walking the file as a decoder would.
+        let mut at = 8;
+        let mut tags = Vec::new();
+        while at + 8 <= png.len() {
+            let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+            tags.push(String::from_utf8_lossy(&png[at + 4..at + 8]).into_owned());
+            at += 12 + len;
+        }
+        assert_eq!(tags, ["IHDR", "IDAT", "IEND"]);
+        assert_eq!(at, png.len(), "chunks must tile the file exactly");
+    }
+
+    #[test]
+    fn adler_matches_the_reference_value() {
+        // zlib's documented example, so the checksum is not merely self-consistent.
+        assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
+    }
+
+    #[test]
+    fn crc32_matches_the_reference_value() {
+        let mut crc = Crc32::default();
+        crc.push(b"123456789");
+        assert_eq!(crc.finish(), 0xCBF4_3926);
+    }
 
     #[test]
     fn the_same_bytes_intern_to_the_same_id_once() {

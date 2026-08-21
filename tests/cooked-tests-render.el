@@ -1214,3 +1214,33 @@ as resizing the spec they cut from."
       (put-text-property (point-min) (1+ (point-min)) 'display 'clobbered))
     (text-scale-increase 1)
     (should (eq (car-safe (car-safe (get-text-property (point-min) 'display))) 'slice))))
+
+(ert-deftest cooked-kitty-transmission-reaches-the-buffer ()
+  "The whole path, driven by a child through a real pty: APC out of the parser,
+the kitty command, the image store, the drain, and a `display' slice on a cell.
+Every other image test here starts partway along it."
+  (let ((b64 (base64-encode-string (cooked-tests--png) t)))
+    (cooked-tests--with-session
+        (list "/bin/sh" "-c"
+              (format "printf '\\033_Ga=T,f=100,i=1;%%s\\033\\\\' '%s'; sleep 300" b64))
+      (should (cooked-tests--settle
+               (lambda () (get-text-property (point-min) 'display))
+               8))
+      (let ((display (get-text-property (point-min) 'display)))
+        (should (eq (car-safe (car-safe display)) 'slice))
+        (should (eq (car-safe (cadr display)) 'image))))))
+
+(ert-deftest cooked-kitty-capability-probe-is-answered ()
+  "A client detects graphics support by transmitting a 1x1 image with `a=q' and
+watching for a reply; there is no terminfo capability for it, so answering this
+is the whole of advertising the protocol.
+
+The reply is observed via the tty's own echo of it, which in cooked mode renders
+the escape as `^[' rather than sending it back through the parser -- so what the
+buffer shows is the answer having reached the child, which is the claim."
+  (cooked-tests--with-session
+      (list "/bin/sh" "-c"
+            "printf '\\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\033\\\\'; cat")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "_Gi=31;OK" (cooked-tests--text)))
+             8))))

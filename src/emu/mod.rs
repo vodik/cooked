@@ -3,6 +3,7 @@
 pub mod cell;
 pub mod glyph;
 pub mod image;
+pub mod kitty;
 pub mod parser;
 pub mod screen;
 pub mod term;
