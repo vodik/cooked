@@ -499,18 +499,41 @@ the Lisp — a system package, or a build directory somewhere else."
   :type '(choice (const :tag "Find it in the source tree" nil) file)
   :group 'cooked)
 
+(defun cooked--module-stale-p (built root)
+  "Whether BUILT is older than the Rust sources under ROOT that produced it.
+
+Existence is not enough to go on.  The Lisp and the native core are two halves
+of one protocol -- the drain's plist keys, the `BoxGlyph' bit layout, the set of
+defuns `cooked-core' provides -- so a pull that touches src/ and lisp/ together
+leaves a stale .so answering new Lisp.  What surfaces then is a void-function
+or a nil where a row should be, several layers from the cause.
+
+Only consulted when cooked owns the build.  `cooked-native-module' points at an
+artifact somebody else is responsible for -- a system package, a build
+directory elsewhere -- and there is no reason to expect our source tree to sit
+beside it, let alone to rebuild over the top of it."
+  (when-let* ((built-at (file-attribute-modification-time (file-attributes built))))
+    (seq-find (lambda (source)
+                (time-less-p built-at
+                             (file-attribute-modification-time (file-attributes source))))
+              (cons (expand-file-name "Cargo.toml" root)
+                    (directory-files-recursively
+                     (expand-file-name "src" root) (rx ".rs" eos))))))
+
 (defun cooked--load-module ()
   "Load the native core, building it if necessary."
   (unless (featurep 'cooked-core)
     (unless module-file-suffix
       (error "cooked: this Emacs was built without dynamic module support"))
     (let* ((root (cooked--root))
+           (ours (null cooked-native-module))
            ;; Not a hardcoded \".so\": cargo names a cdylib \"libcooked.dylib\" on macOS,
            ;; which is exactly what `module-file-suffix' reports there.
            (built (or cooked-native-module
                       (expand-file-name (concat "target/release/libcooked" module-file-suffix)
                                         root))))
-      (unless (file-exists-p built)
+      (when (or (not (file-exists-p built))
+                (and ours (cooked--module-stale-p built root)))
         (message "cooked: building native core...")
         (let ((default-directory root))
           (unless (zerop (call-process "cargo" nil "*cooked-build*" nil "build" "--release"))

@@ -928,7 +928,7 @@ newline survives until you submit."
 
 (defun cooked--history-move (delta)
   "Step DELTA entries through the input history.
-Positive DELTA moves towards older entries, as \[cooked-previous-input] does."
+Positive DELTA moves towards older entries, as \\[cooked-previous-input] does."
   (unless (cooked--input-state-p)
     (user-error "Not at an input prompt"))
   (when (ring-empty-p comint-input-ring)

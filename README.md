@@ -372,10 +372,9 @@ autowrap control, mouse mode tracking, alternate scroll, focus reporting, synchr
 output, cursor shape, OSC 0/2/7/8/10/11/12/99/133, modifyOtherKeys and the kitty keyboard
 protocol, DECRQM), termios state machine, secret prompts, scrollback, resize, per-command
 exit codes, read-only transcript, output folding, evil integration, mode-line indicator
-for peeking.
+for peeking, comint's command set and input ring.
 
-Not yet: sixel/kitty graphics, comint history integration, `vttest`-level conformance
-beyond the common paths.
+Not yet: sixel/kitty graphics, `vttest`-level conformance beyond the common paths.
 
 ## Completion
 

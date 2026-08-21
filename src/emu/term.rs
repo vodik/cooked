@@ -287,7 +287,7 @@ impl Term {
 
     /// Remove `count` grid rows starting at `first`; see [`Screen::remove_rows`].
     pub fn remove_rows(&mut self, first: usize, count: usize) {
-        self.state.screen_mut().remove_rows(first, count);
+        self.state.remove_rows(first, count);
     }
 
     /// Drop every grid row above the current prompt, returning how many went.
@@ -546,14 +546,47 @@ impl State {
         if keep == 0 {
             return 0;
         }
-        self.primary.remove_rows(0, keep);
-        // The prompt is on row 0 now, so its absolute row is exactly `evicted_total`.
-        // Rows removed this way are discarded rather than archived, so that count does
-        // not move and the anchor has to come down to meet it.
-        if let Some(at) = &mut self.prompt_start {
-            at.row = at.row.saturating_sub(keep);
-        }
+        self.remove_rows(0, keep);
         keep
+    }
+
+    /// The single funnel for rows being removed from the grid, which is what keeps
+    /// [`State::prompt_start`] meaning what it says.
+    ///
+    /// Rows removed this way are discarded rather than archived, so `evicted_total` does
+    /// not move and screen row 0 keeps its absolute number — but every row *below* the
+    /// cut slides up, so an anchor pointing at one of them has to come down to meet it.
+    /// The rebase is the same arithmetic [`Screen::remove_rows`] applies to the cursor,
+    /// and for the same reason: both name a row by where it sits, and the rows moved.
+    ///
+    /// Going through here rather than reaching for [`State::screen_mut`] is not a style
+    /// preference. `clear_to_prompt` rebased and `Term::remove_rows` did not, so
+    /// `cooked-delete-output` — which removes rows above the prompt — left the anchor
+    /// stale by exactly the count it dropped. A later `clear_to_prompt` then measured a
+    /// prompt row past the cursor, failed its own sanity filter, and silently fell back
+    /// to cutting at the cursor: right for a one-line prompt, and wrong for the
+    /// multi-line case the anchor exists to get right.
+    fn remove_rows(&mut self, first: usize, count: usize) {
+        self.screen_mut().remove_rows(first, count);
+        // The alt grid holds a running program's frame, not a transcript; no anchor
+        // points into it, and the primary's rows have not moved.
+        if self.on_alt {
+            return;
+        }
+        if let Some(at) = &mut self.prompt_start {
+            let Some(row) = at.row.checked_sub(self.evicted_total) else {
+                // Already below the screen's top edge, so nothing on the grid moved it.
+                return;
+            };
+            let moved = match row {
+                row if row >= first + count => row - count,
+                // The anchored row itself went. The nearest row it can still name is
+                // the one that closed the gap, exactly as the cursor is clamped.
+                row if row >= first => first,
+                row => row,
+            };
+            at.row = self.evicted_total + moved;
+        }
     }
 
     /// Where the cursor is now, in the coordinates an [`Anchor`] keeps.
@@ -652,9 +685,25 @@ impl State {
             1006 => self.mouse.sgr = on,
             47 | 1047 => self.set_alt(on),
             1048 => self.save_restore(on),
+            // Save, switch, ... switch back, restore. The save and the restore have to
+            // bracket the switch rather than both precede it, because `save_restore`
+            // acts on whichever screen is showing: run before `set_alt(false)` it read
+            // the *alt* screen's saved cursor and left the primary's — the one
+            // `1049 h` actually saved — untouched.
+            //
+            // That was invisible for as long as nothing moved the primary's cursor while
+            // the alt screen was up, since a restore to where it already was is a no-op.
+            // `State::resize` moves it: a rewrap re-chunks the primary and places the
+            // cursor at the new width. So resizing the frame inside a full-screen program
+            // and then leaving it was already the case that lost the position.
             1049 => {
-                self.save_restore(on);
-                self.set_alt(on);
+                if on {
+                    self.save_restore(true);
+                    self.set_alt(true);
+                } else {
+                    self.set_alt(false);
+                    self.save_restore(false);
+                }
             }
             // No event: nothing reacts to this. It is read at the one moment it matters,
             // by `Term::bracketed_paste` as a multi-line submission is being framed.
@@ -2056,6 +2105,83 @@ mod tests {
         assert_eq!(t.clear_to_prompt(), 0, "the prompt is already on row 0");
         assert_eq!(text(&t, 0), "$ ls");
         assert_eq!(text(&t, 1), "out");
+    }
+
+    #[test]
+    fn removing_rows_brings_the_prompt_mark_down_with_them() {
+        // `cooked-delete-output' removes a finished command's rows, which sit above the
+        // prompt. The mark is absolute and these rows are discarded rather than archived,
+        // so nothing else moves it: left alone it names a row past the cursor, fails
+        // `clear_to_prompt's own sanity filter, and silently falls back to cutting at the
+        // cursor -- eating the first line of a two-line prompt.
+        let mut t = term(6, 8, b"out1\r\nout2\r\n\x1b]133;A\x1b\\user\r\n$ ");
+        t.drain();
+        // The two output rows above the prompt.
+        t.remove_rows(0, 2);
+        assert_eq!(text(&t, 0), "user");
+        assert_eq!(text(&t, 1), "$ ");
+        // The prompt is two rows tall and now starts at row 0, so there is nothing above
+        // it left to clear. Without the rebase this cuts one row, taking `user' with it.
+        assert_eq!(t.clear_to_prompt(), 0);
+        assert_eq!(text(&t, 0), "user", "the prompt's first line must survive");
+        assert_eq!(text(&t, 1), "$ ");
+    }
+
+    #[test]
+    fn removing_the_prompts_own_row_clamps_the_mark_rather_than_losing_it() {
+        let mut t = term(6, 8, b"out\r\n\x1b]133;A\x1b\\$ ls");
+        t.drain();
+        // Takes the output row and the prompt row with it.
+        t.remove_rows(0, 2);
+        // The mark clamps to the row that closed the gap, exactly as the cursor does, so
+        // it stays a row on the grid rather than one past the end of it.
+        assert_eq!(t.clear_to_prompt(), 0);
+    }
+
+    #[test]
+    fn removing_rows_below_the_prompt_leaves_the_mark_where_it_is() {
+        let mut t = term(6, 8, b"\x1b]133;A\x1b\\$ ls\r\nout1\r\nout2\r\ntail");
+        t.drain();
+        t.remove_rows(2, 1);
+        assert_eq!(text(&t, 0), "$ ls");
+        assert_eq!(text(&t, 1), "out1");
+        assert_eq!(text(&t, 2), "tail");
+        assert_eq!(t.clear_to_prompt(), 0, "the prompt is still on row 0");
+    }
+
+    #[test]
+    fn removing_alt_screen_rows_does_not_move_the_primarys_prompt_mark() {
+        let mut t = term(6, 8, b"out\r\n\x1b]133;A\x1b\\$ ls");
+        t.drain();
+        t.feed(b"\x1b[?1049h\x1b[1;1Haaa\r\nbbb");
+        t.drain();
+        t.remove_rows(0, 1);
+        t.feed(b"\x1b[?1049l");
+        t.drain();
+        // The primary's rows never moved, so the mark must still name row 1.
+        assert_eq!(t.clear_to_prompt(), 1);
+        assert_eq!(text(&t, 0), "$ ls");
+    }
+
+    #[test]
+    fn leaving_the_alt_screen_restores_the_cursor_the_primary_saved() {
+        // `save_restore' acts on whichever screen is showing, so the restore has to run
+        // after the switch back. Run before it, it reads the alt screen's saved cursor
+        // and leaves the primary's -- the one `1049h' saved -- untouched.
+        let mut t = term(6, 8, b"one\r\ntwo\r\nthree");
+        t.feed(b"\x1b[3;2H");
+        assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (2, 1));
+        t.feed(b"\x1b[?1049h");
+        t.feed(b"\x1b[1;1Hframe");
+        // A resize while the alt screen is up rewraps the primary and moves its cursor,
+        // which is what makes the restore observable rather than a no-op.
+        t.resize(6, 4);
+        t.feed(b"\x1b[?1049l");
+        assert_eq!(
+            (t.screen().cursor.row, t.screen().cursor.col),
+            (2, 1),
+            "the primary's saved cursor is the one 1049 restores"
+        );
     }
 
     #[test]
