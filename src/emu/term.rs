@@ -6,10 +6,10 @@
 use super::cell::{Attrs, Color, Row, Run, Style};
 use super::image::{CellMetrics, ImageData, ImageFormat, ImageId, ImageStore, png_dimensions};
 use super::kitty::{Kitty, Outcome};
+use super::parser::{Params, Parser, Perform};
 use super::screen::{Cursor, Erase, Resize, Screen};
 use std::collections::VecDeque;
 use unicode_width::UnicodeWidthChar;
-use super::parser::{Params, Parser, Perform};
 
 /// The cursor shape a child asked for with DECSCUSR (`CSI Ps SP q`).
 ///
@@ -314,12 +314,7 @@ impl Term {
     /// is what makes a bare `printf` of a transmission behave like printing that many
     /// lines. A protocol with something else to say about the cursor says it in the
     /// handler, not here.
-    pub fn place_image(
-        &mut self,
-        format: ImageFormat,
-        bytes: &[u8],
-        px: (u32, u32),
-    ) -> ImageId {
+    pub fn place_image(&mut self, format: ImageFormat, bytes: &[u8], px: (u32, u32)) -> ImageId {
         self.state.place_image(format, bytes, px)
     }
 
@@ -1411,9 +1406,9 @@ impl Perform for State {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::cell::{Deco, Extra};
     use super::super::image::Placement;
+    use super::*;
 
     fn term(rows: usize, cols: usize, input: &[u8]) -> Term {
         let mut t = Term::new(rows, cols);
@@ -1666,9 +1661,7 @@ mod tests {
         let mut t = with_metrics(10, 20);
         // 2x1 cells' worth of RGB at 10x20 per cell.
         let pixels = vec![0u8; 20 * 20 * 3];
-        t.feed(
-            format!("\x1b_Ga=T,f=24,s=20,v=20,i=1;{}\x1b\\", b64(&pixels)).as_bytes(),
-        );
+        t.feed(format!("\x1b_Ga=T,f=24,s=20,v=20,i=1;{}\x1b\\", b64(&pixels)).as_bytes());
         assert_eq!(placements(&t, 0).len(), 2);
         let delta = t.drain();
         assert_eq!(delta.images.len(), 1);
@@ -1689,7 +1682,11 @@ mod tests {
         let mut t = with_metrics(10, 20);
         let pixels = vec![0u8; 20 * 20 * 3];
         t.feed(
-            format!("\x1b_Ga=T,f=24,s=20,v=20,c=5,r=1,i=1;{}\x1b\\", b64(&pixels)).as_bytes(),
+            format!(
+                "\x1b_Ga=T,f=24,s=20,v=20,c=5,r=1,i=1;{}\x1b\\",
+                b64(&pixels)
+            )
+            .as_bytes(),
         );
         assert_eq!(placements(&t, 0).len(), 5);
     }
@@ -1699,7 +1696,10 @@ mod tests {
         let mut t = with_metrics(10, 20);
         let pixels = vec![0u8; 10 * 20 * 3];
         t.feed(format!("\x1b_Ga=t,f=24,s=10,v=20,i=7;{}\x1b\\", b64(&pixels)).as_bytes());
-        assert!(placements(&t, 0).is_empty(), "a=t transmits without drawing");
+        assert!(
+            placements(&t, 0).is_empty(),
+            "a=t transmits without drawing"
+        );
         t.feed(b"\x1b_Ga=p,i=7\x1b\\");
         assert_eq!(placements(&t, 0).len(), 1);
     }
@@ -1719,9 +1719,7 @@ mod tests {
                 format!("m={more}")
             };
             first = false;
-            t.feed(
-                format!("\x1b_G{control};{}\x1b\\", String::from_utf8_lossy(chunk)).as_bytes(),
-            );
+            t.feed(format!("\x1b_G{control};{}\x1b\\", String::from_utf8_lossy(chunk)).as_bytes());
         }
         assert_eq!(placements(&t, 0).len(), 1);
         assert_eq!(t.drain().images.len(), 1);
@@ -1749,9 +1747,10 @@ mod tests {
     #[test]
     fn an_unsupported_capability_is_declined_out_loud() {
         // A client told ENOTSUPPORTED can fall back; one whose transmission vanishes
-        // shows the user nothing and cannot find out why.
+        // shows the user nothing and cannot find out why. Transmission by file is the
+        // remaining one: reading a path a child names is a decision about trust.
         let mut t = with_metrics(10, 20);
-        t.feed(b"\x1b_Ga=T,f=100,o=z,i=4;AAAA\x1b\\");
+        t.feed(b"\x1b_Ga=T,f=100,t=f,i=4;AAAA\x1b\\");
         let replies: Vec<_> = t
             .drain()
             .events
@@ -1761,7 +1760,27 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(replies, vec!["\x1b_Gi=4;ENOTSUPPORTED:compression\x1b\\"]);
+        assert_eq!(replies, vec!["\x1b_Gi=4;ENOTSUPPORTED:medium\x1b\\"]);
+    }
+
+    #[test]
+    fn a_compressed_transmission_reaches_the_grid() {
+        // End to end, the way `icat` sends it: APC through the vendored parser, base64
+        // off, zlib off, pixels to a PPM, one placement per cell. 20 rows of 10 black
+        // RGB pixels compress to a few dozen bytes, which is the point of `o=z`.
+        // `zlib.compress(bytes(10 * 20 * 3), 9)` — 600 bytes of black in fifteen.
+        const DEFLATED: &[u8] = &[120, 218, 99, 96, 24, 5, 163, 128, 250, 0, 0, 2, 88, 0, 1];
+        let mut t = with_metrics(10, 20);
+        let apc = format!("\x1b_Ga=T,f=24,o=z,s=10,v=20,i=4;{}\x1b\\", b64(DEFLATED));
+        t.feed(apc.as_bytes());
+        let update = t.drain();
+        assert_eq!(update.images.len(), 1);
+        // The PPM the emulator built from the inflated pixels, header and all.
+        assert!(update.images[0].bytes.starts_with(b"P6\n10 20\n255\n"));
+        assert_eq!(
+            update.images[0].bytes.len(),
+            "P6\n10 20\n255\n".len() + 10 * 20 * 3
+        );
     }
 
     #[test]

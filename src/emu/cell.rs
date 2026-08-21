@@ -325,13 +325,16 @@ impl Extras {
     }
 
     fn insert(&mut self, col: usize, extra: Extra) {
-        let at = self.entries.partition_point(|(c, _)| usize::from(*c) <= col);
+        let at = self
+            .entries
+            .partition_point(|(c, _)| usize::from(*c) <= col);
         self.entries.insert(at, (col as u16, extra));
     }
 
     /// Drop every attachment on the columns in `range`.
     fn prune(&mut self, range: impl std::ops::RangeBounds<usize>) {
-        self.entries.retain(|(at, _)| !range.contains(&usize::from(*at)));
+        self.entries
+            .retain(|(at, _)| !range.contains(&usize::from(*at)));
     }
 
     /// Drop the attachments on `col` that `which` selects, keeping the rest.
@@ -995,7 +998,13 @@ mod tests {
     #[test]
     fn ich_shifts_attachments_with_their_cells() {
         let mut row = Row::new(6);
-        row.set(0, Cell { ch: 'a', style: Style::default() });
+        row.set(
+            0,
+            Cell {
+                ch: 'a',
+                style: Style::default(),
+            },
+        );
         row.set_underline(0, Color::Indexed(196));
         row.combine(0, '\u{0301}');
 
@@ -1020,7 +1029,11 @@ mod tests {
 
         // Column 0 moved to 2; column 3 went off the end at 5.
         assert_eq!(row.extras(), [(2, Extra::Underline(Color::Indexed(1)))]);
-        assert!(row.extras().iter().all(|(at, _)| usize::from(*at) < row.len()));
+        assert!(
+            row.extras()
+                .iter()
+                .all(|(at, _)| usize::from(*at) < row.len())
+        );
     }
 
     #[test]
@@ -1056,11 +1069,23 @@ mod tests {
     #[test]
     fn overwriting_a_cell_retires_everything_attached_to_it() {
         let mut row = Row::new(4);
-        row.set(1, Cell { ch: 'a', style: Style::default() });
+        row.set(
+            1,
+            Cell {
+                ch: 'a',
+                style: Style::default(),
+            },
+        );
         row.set_underline(1, Color::Indexed(196));
         row.combine(1, '\u{0301}');
 
-        row.set(1, Cell { ch: 'b', style: Style::default() });
+        row.set(
+            1,
+            Cell {
+                ch: 'b',
+                style: Style::default(),
+            },
+        );
 
         assert!(row.extras().is_empty());
         assert!(row.extras.is_none());
@@ -1071,7 +1096,13 @@ mod tests {
         let mut row = Row::new(4);
         row.set_underline(1, Color::Indexed(1));
         row.set_underline(2, Color::Indexed(2));
-        row.set(1, Cell { ch: 'x', style: Style::default() });
+        row.set(
+            1,
+            Cell {
+                ch: 'x',
+                style: Style::default(),
+            },
+        );
         assert_eq!(row.extras(), [(2, Extra::Underline(Color::Indexed(2)))]);
     }
 }

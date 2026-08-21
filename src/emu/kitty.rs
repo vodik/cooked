@@ -12,8 +12,7 @@
 //!
 //! Declined for now, each with that response: `t=f`/`t=t`/`t=s` (transmission by file,
 //! temporary file or shared memory — reading paths a child names is a decision about
-//! trust, not a decode), `o=z` (zlib, which needs an inflate this crate does not have
-//! yet), and the animation and unicode-placeholder extensions.
+//! trust, not a decode), and the animation and unicode-placeholder extensions.
 
 use std::collections::HashMap;
 
@@ -58,6 +57,8 @@ pub struct Command {
     pub action: Action,
     pub format: Payload,
     pub more: bool,
+    /// `o=z` — the payload is zlib-deflated under its base64.
+    pub compressed: bool,
     pub id: u32,
     pub px: (u32, u32),
     pub cells: (u16, u16),
@@ -73,6 +74,7 @@ impl Default for Command {
             action: Action::default(),
             format: Payload::Rgba,
             more: false,
+            compressed: false,
             id: 0,
             px: (0, 0),
             cells: (0, 0),
@@ -117,7 +119,12 @@ impl Command {
                     }
                 }
                 "t" if value != "d" => cmd.unsupported = Some("ENOTSUPPORTED:medium"),
-                "o" => cmd.unsupported = Some("ENOTSUPPORTED:compression"),
+                // `z` is the only compression the protocol defines. Another letter is a
+                // scheme from a newer spec, and guessing at it would render noise.
+                "o" => match value {
+                    "z" => cmd.compressed = true,
+                    _ => cmd.unsupported = Some("ENOTSUPPORTED:compression"),
+                },
                 "U" => cmd.unsupported = Some("ENOTSUPPORTED:placeholder"),
                 "m" => cmd.more = num() != 0,
                 "i" => cmd.id = num(),
@@ -243,6 +250,19 @@ impl Kitty {
     fn finish(&mut self, cmd: Command, base64: Vec<u8>) -> (Outcome, Option<Vec<u8>>) {
         let Some(raw) = decode_base64(&base64) else {
             return (Outcome::Nothing, response(&cmd, Some("EINVAL:base64")));
+        };
+        // `o=z` wraps the payload *under* its base64, so this is the order it unwinds in.
+        // The limit is the same one that bounds an uncompressed transmission: what a
+        // child may spend of our heap should not depend on how it chose to encode it.
+        let raw = if cmd.compressed {
+            match miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(&raw, MAX_PAYLOAD) {
+                Ok(raw) => raw,
+                Err(_) => {
+                    return (Outcome::Nothing, response(&cmd, Some("EINVAL:compression")));
+                }
+            }
+        } else {
+            raw
         };
         let (format, bytes) = match cmd.format {
             Payload::Png => (ImageFormat::Png, raw),
@@ -379,8 +399,81 @@ mod tests {
         assert_eq!(Command::parse("a=T,zz=9").unsupported, None);
         // A capability is different: silently ignoring it renders nothing and tells the
         // client nothing, so it is declined out loud.
-        assert!(Command::parse("a=T,o=z").unsupported.is_some());
         assert!(Command::parse("a=T,t=f").unsupported.is_some());
+        // ...but a compression we *do* speak is not a refusal.
+        assert_eq!(Command::parse("a=T,o=z").unsupported, None);
+        assert!(Command::parse("a=T,o=z").compressed);
+        // Another letter would be a scheme from a spec we have not read.
+        assert!(Command::parse("a=T,o=q").unsupported.is_some());
+    }
+
+    /// `zlib.compress(b"PNGDATA" * 20, 9)` — 140 bytes into 18, a fixed-Huffman block.
+    const DEFLATED: &[u8] = &[
+        120, 218, 11, 240, 115, 119, 113, 12, 113, 12, 24, 12, 20, 0, 2, 187, 39, 237,
+    ];
+
+    #[test]
+    fn a_compressed_transmission_is_inflated() {
+        // What `icat` sends: kitty's own client compresses by default, so declining this
+        // declined the reference implementation.
+        let mut k = Kitty::default();
+        let (outcome, reply) = k.feed(format!("Ga=T,f=100,o=z,i=3;{}", b64(DEFLATED)).as_bytes());
+        match outcome {
+            Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATA".repeat(20)),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(reply.unwrap(), b"\x1b_Gi=3;OK\x1b\\");
+    }
+
+    #[test]
+    fn compression_unwinds_underneath_the_base64_not_over_it() {
+        // The order matters and only one of the two produces a picture: `o=z` describes
+        // the bytes the base64 *carries*, not the base64 itself.
+        let mut k = Kitty::default();
+        let (outcome, _) =
+            k.feed(format!("Ga=T,f=24,s=2,v=1,o=z,i=1;{}", b64(DEFLATED)).as_bytes());
+        match outcome {
+            // Six bytes of RGB from the inflated 140, not from the 18 compressed ones.
+            Outcome::Image { bytes, .. } => assert_eq!(&bytes[11..17], b"PNGDAT"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_payload_that_is_not_deflate_is_refused_rather_than_rendered() {
+        let mut k = Kitty::default();
+        let (outcome, reply) =
+            k.feed(format!("Ga=T,f=100,o=z,i=8;{}", b64(b"not zlib")).as_bytes());
+        assert_eq!(outcome, Outcome::Nothing);
+        assert_eq!(reply.unwrap(), b"\x1b_Gi=8;EINVAL:compression\x1b\\");
+    }
+
+    #[test]
+    fn a_corrupt_compressed_payload_does_not_become_half_a_picture() {
+        // Truncation is the failure a chunked transmission actually suffers, and the
+        // checksum is what distinguishes it from a complete one.
+        let mut k = Kitty::default();
+        let short = &DEFLATED[..DEFLATED.len() - 3];
+        let (outcome, _) = k.feed(format!("Ga=T,f=100,o=z,i=9;{}", b64(short)).as_bytes());
+        assert_eq!(outcome, Outcome::Nothing);
+    }
+
+    #[test]
+    fn a_compressed_transmission_may_still_be_chunked() {
+        // The two features compose: chunks reassemble into base64, which decodes into a
+        // deflate stream. Nothing inflates until the last chunk has landed.
+        let mut k = Kitty::default();
+        let whole = b64(DEFLATED);
+        let (first, rest) = whole.split_at(12);
+        assert_eq!(
+            k.feed(format!("Ga=T,f=100,o=z,i=2,m=1;{first}").as_bytes())
+                .0,
+            Outcome::Incomplete
+        );
+        match k.feed(format!("Gm=0;{rest}").as_bytes()).0 {
+            Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATA".repeat(20)),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -429,9 +522,8 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
-        let (outcome, _) = k.feed(
-            format!("Ga=T,f=32,s=1,v=1,i=2;{}", b64(&[1, 2, 3, 255])).as_bytes(),
-        );
+        let (outcome, _) =
+            k.feed(format!("Ga=T,f=32,s=1,v=1,i=2;{}", b64(&[1, 2, 3, 255])).as_bytes());
         match outcome {
             Outcome::Image { format, bytes, .. } => {
                 assert_eq!(format, ImageFormat::Png);

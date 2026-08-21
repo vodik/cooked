@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 libc = "0.2"
 memchr = "2.7"
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
 nix = { version = "0.31", features = ["fs", "poll", "process", "pthread", "signal", "term"] }
 unicode-width = "0.2"
 

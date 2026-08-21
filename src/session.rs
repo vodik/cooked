@@ -619,10 +619,10 @@ mod tests {
     fn session_with_backlog(argv: &[&str], backlog_limit: usize) -> (Session, OwnedFd) {
         let (read, write) = pipe();
         let size = Winsize {
-                rows: 24,
-                cols: 80,
-                cell: Default::default(),
-            };
+            rows: 24,
+            cols: 80,
+            cell: Default::default(),
+        };
         let fd = std::os::fd::IntoRawFd::into_raw_fd(write);
         (
             Session::spawn(

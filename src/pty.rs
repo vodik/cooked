@@ -761,10 +761,10 @@ mod tests {
     #[test]
     fn spawn_reports_cooked_then_raw() {
         let size = Winsize {
-                rows: 24,
-                cols: 80,
-                cell: CellMetrics::default(),
-            };
+            rows: 24,
+            cols: 80,
+            cell: CellMetrics::default(),
+        };
         let pty = Pty::spawn(&["/bin/cat"], &[("TERM", "dumb")], size, None).expect("spawn");
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(pty.mode().unwrap(), Mode::Cooked);
@@ -774,10 +774,10 @@ mod tests {
     #[test]
     fn secret_mode_is_detected() {
         let size = Winsize {
-                rows: 24,
-                cols: 80,
-                cell: CellMetrics::default(),
-            };
+            rows: 24,
+            cols: 80,
+            cell: CellMetrics::default(),
+        };
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "stty -echo; read x"],
             &[("TERM", "dumb")],
