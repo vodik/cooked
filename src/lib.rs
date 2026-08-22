@@ -826,11 +826,16 @@ fn event_to_lisp(env: &Env, event: &Event, update: &Update, rows: &[RowSpan]) ->
             env.into_lisp(code.map(i64::from))?,
             update.anchor_to_lisp(env, *at, rows)?,
         ]),
-        // (mouse ENABLED SGR): the sender needs the encoding, not just the fact.
+        // (mouse ENABLED SGR DRAG MOTION). Flattening this to a single "wants the
+        // mouse" bit lost the reach of the request: 1002 and 1003 ask to be told
+        // where the pointer went, not merely which cell it was pressed in, and the
+        // sender cannot manufacture motion reports it was never told to send.
         Event::Mouse(m) => env.list(&[
             env.intern("mouse")?,
             env.into_lisp(m.enabled())?,
             env.into_lisp(m.sgr)?,
+            env.into_lisp(m.drag)?,
+            env.into_lisp(m.motion)?,
         ]),
         Event::Reply(bytes) => tagged("reply", env.into_lisp(bytes.as_slice())?),
         Event::EraseScrollback => env.list(&[env.intern("erase-scrollback")?]),

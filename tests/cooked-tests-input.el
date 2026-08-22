@@ -796,6 +796,125 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
     (should-not cooked--mouse)
     (should (eq (lookup-key cooked-raw-map [mouse-1]) #'cooked-mouse-event))))
 
+(defun cooked-tests--posn (pos)
+  "A mouse position over buffer POS in the selected window, or over no text.
+
+Synthesised rather than recorded because the whole point of these tests is the
+shape of the event: `posn-point\=' is nil for a click past the last row or on the
+fringe, and that nil is the case that used to hand the tail of the child\='s
+gesture back to Emacs."
+  (list (selected-window) (or pos 'text) '(0 . 0) 0 nil pos nil nil nil))
+
+(ert-deftest cooked-drag-reports-its-release-where-the-button-came-up ()
+  "Emacs does not deliver `mouse-1\=' when the pointer moved between press and
+release -- it delivers `drag-mouse-1\=', whose interesting end is `event-end\='.
+Unbound, that fell through to the global `mouse-set-region\=': the child was left
+holding a button forever, and the region it never asked for appeared in one jump."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; \
+                        printf 'alpha\\r\\nbravo'; stty raw; cat -v")
+    (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "bravo" (cooked-tests--text)))))
+    (should (eq (key-binding (vector 'drag-mouse-1)) #'cooked-mouse-event))
+    (let* ((from (save-excursion (goto-char (point-min))
+                                 (search-forward "alpha") (- (point) 5)))
+           (to (save-excursion (goto-char (point-min))
+                               (search-forward "bravo") (- (point) 5)))
+           (a (cooked--screen-cell from))
+           (b (cooked--screen-cell to)))
+      (should a)
+      (should b)
+      (should-not (equal a b))
+      ;; 1000 only, so no tracking loop: the press returns and the release
+      ;; arrives as an ordinary event, which is the path being tested.
+      (let ((last-input-event (list 'down-mouse-1 (cooked-tests--posn from))))
+        (cooked-mouse-event))
+      (let ((last-input-event (list 'drag-mouse-1 (cooked-tests--posn from)
+                                    (cooked-tests--posn to))))
+        (cooked-mouse-event))
+      ;; Case matters: "m" is the release this test exists to demand.
+      (let ((case-fold-search nil))
+        (should (cooked-tests--settle
+                 (lambda ()
+                   (string-match-p (format "\\[<0;%d;%dm" (1+ (cdr b)) (1+ (car b)))
+                                   (cooked-tests--text)))))
+        (should (string-match-p (format "\\[<0;%d;%dM" (1+ (cdr a)) (1+ (car a)))
+                                (cooked-tests--text)))))))
+
+(ert-deftest cooked-a-report-to-the-child-gives-up-the-region ()
+  "A click the child answers is the child\='s click.
+
+Nothing used to clear the mark, so a region set before the child grabbed the
+mouse survived every click inside the window; `cooked--snap-to-cursor\=' then
+walked point away from a mark that stayed put, growing a region the user never
+drew and could only escape by leaving the buffer."
+  (with-temp-buffer
+    (cooked-mode)
+    (insert "alpha bravo\n")
+    (set-mark (point-min))
+    (activate-mark)
+    (should mark-active)
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (text) (push text sent))))
+        (cooked--send-mouse 0 1 2 t))
+      (should sent))
+    (should-not mark-active)))
+
+(ert-deftest cooked-drag-and-any-motion-modes-survive-the-ffi ()
+  "1002 and 1003 are not merely \"the mouse\": they say the child wants to be told
+where the pointer went, and flattening them into one enabled bit left the sender
+unable to know whether motion reports were asked for at all."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1002h\\033[?1006h'; exec cat")
+    (should (cooked-tests--settle (lambda () cooked--mouse-drag)))
+    (should cooked--mouse)
+    (should cooked--mouse-sgr)
+    (should-not cooked--mouse-motion))
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1003h'; exec cat")
+    (should (cooked-tests--settle (lambda () cooked--mouse-motion)))
+    (should cooked--mouse)
+    (should-not cooked--mouse-drag)))
+
+(ert-deftest cooked-motion-reports-carry-the-motion-bit ()
+  "32 added to the button being dragged, and 3 for no button at all."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--mouse-sgr t)
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (text) (push text sent))))
+        (cooked--report-motion 4 9)
+        (should (equal (car sent) "\e[<35;10;5M"))
+        ;; The same cell twice is nothing the child needs to hear: Emacs tracks
+        ;; the pointer by pixel, and this is what keeps that affordable.
+        (cooked--report-motion 4 9)
+        (should (equal (length sent) 1))
+        (cooked--report-button 0 4 9 t)
+        (cooked--report-motion 5 9)
+        (should (equal (car sent) "\e[<32;10;6M"))
+        ;; And the release puts the button down again, so motion goes back to 3.
+        (cooked--report-button 0 5 9 nil)
+        (cooked--report-motion 6 9)
+        (should (equal (car sent) "\e[<35;10;7M"))))))
+
+(ert-deftest cooked-a-release-off-the-screen-still-reaches-the-child ()
+  "Let go past the last row and `posn-point\=' is nil, but the button is still down
+as far as the child knows.  Falling through to Emacs there left it held forever."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--mouse t cooked--mouse-sgr t)
+    (setq cooked--mouse-held '(0) cooked--mouse-last-cell '(4 . 9))
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (text) (push text sent))))
+        (let ((last-input-event (list 'drag-mouse-1 (cooked-tests--posn nil)
+                                      (cooked-tests--posn nil))))
+          (cooked-mouse-event)))
+      (should (equal sent '("\e[<0;10;5m"))))
+    (should-not cooked--mouse-held)))
+
 (ert-deftest cooked-alternate-scroll-sends-cursor-keys ()
   "A pager that never asked for the mouse still gets the wheel."
   (with-temp-buffer
@@ -1329,8 +1448,60 @@ ending one past the output would otherwise swallow."
                                         (line-beginning-position)
                                         (line-end-position))))
       (should (eq (cooked--command-around (point)) quiet))
-      (should-error (cooked-evil--command-range 1 nil) :type 'user-error)
+      ;; Empty, and exclusive so that it stays empty: a linewise range of no
+      ;; width expands to the whole line its ends sit on, which here is the
+      ;; *next* command's prompt.
+      (let ((inner (cooked-evil--command-range 1 nil)))
+        (should inner)
+        (should (= (nth 0 inner) (nth 1 inner)))
+        (should (eq (evil-type inner) 'exclusive)))
       (should (cooked-evil--command-range 1 t)))))
+
+(ert-deftest cooked-evil-inner-command-on-a-silent-command-leaves-visual-state-sane ()
+  "`ic' on a command that printed nothing used to signal, and a signal in a text
+object is not just unidiomatic: Emacs runs no `post-command-hook' after a
+command that signalled, so `evil-visual-post-command' never reconciled the
+selection and evil was left believing in a visual state the user could not see
+-- the terminal being frozen under `cooked-evil-visual-state-render'.  The next
+`v' then *exited* that state instead of entering it, `i' put the buffer in
+insert state, and the `c' went to the shell as a keystroke.  Two `vic' in a row
+have to leave evil in visual state."
+  (skip-unless (require 'evil nil t))
+  (skip-unless (executable-find "zsh"))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  ;; The other half of the same contract: no command at point at all is nil,
+  ;; which evil reads as "no such object" and answers with a silent no-op.
+  (should-not (with-temp-buffer (cooked-mode) (cooked-evil--command-range 1 nil)))
+  (cooked-tests--with-zsh
+    (let ((before (length cooked--commands)))
+      (cooked--replace-input "false")
+      (cooked-send-input)
+      (should (cooked-tests--settle
+               (lambda () (> (length cooked--commands) before)) 8)))
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'input)
+                             (cooked--input-start-position)))
+             8))
+    (let ((quiet (car cooked--commands)))
+      (goto-char (cooked--command-prompt-position quiet))
+      (evil-normal-state)
+      ;; Through the command loop and on screen, since that is the only way the
+      ;; keys reach the buffer's own keymap and the only way `post-command-hook'
+      ;; runs at all -- which is the whole of what went wrong.
+      (cooked-tests--display-buffer)
+      ;; An unexpected signal out of either of these is the bug itself; ert
+      ;; reports it without any `should-not-error' to help it.
+      (dotimes (_ 2)
+        (cooked-tests--type "v i c"))
+      (should (evil-visual-state-p))
+      (should-not (evil-insert-state-p))
+      ;; And nothing of the `c' reached the shell, which is where it went once
+      ;; the second `v' had dropped out of visual state and the `i' had put the
+      ;; buffer in insert state: the pending line is still empty.
+      (should (equal "" (string-trim (buffer-substring-no-properties
+                                      (cooked--input-start-position)
+                                      (point-max))))))))
 
 (ert-deftest cooked-evil-command-text-object-covers-what-is-still-running ()
   "A build that has not finished has no record yet, only the live markers --
@@ -1873,6 +2044,212 @@ longer on screen."
     (call-interactively (key-binding (kbd "C-z")))
     (should (eq evil-state 'emacs))
     (should-not cooked--input-mode)))
+
+(ert-deftest cooked-a-drain-leaves-nothing-of-the-output-in-the-undo-history ()
+  "The bug this whole seam exists for: every drain deletes and reinserts the rows
+it redraws, and recording that used to grow `buffer-undo-list' until Emacs
+warned that `undo-outer-limit' had discarded megabytes of it.  A command that
+prints two hundred lines is two hundred rows of churn, and none of it is the
+user's to undo -- so what is left afterwards is the empty history the anchor
+reset leaves behind, anchored at the new prompt."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (let ((before (length cooked--commands)))
+      (cooked--replace-input "seq 1 200")
+      (cooked-send-input)
+      (should (cooked-tests--settle
+               (lambda () (> (length cooked--commands) before)) 8)))
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'input)
+                             (cooked--input-start-position)))
+             8))
+    (should (string-search "200" (cooked-tests--text)))
+    (should-not (cooked-tests--undo-entries))
+    (should (eql cooked--undo-anchor (cooked--input-start-position)))))
+
+(ert-deftest cooked-a-drain-with-no-input-line-records-nothing-and-discards-nothing ()
+  "A full-screen program has no input region at all, so there is no anchor to
+compare and nothing that could be said to have moved -- and a drain must still
+be silent, which is the half `cooked--check-undo-anchor' cannot demonstrate:
+with the anchor nil at both ends, a history that survived unchanged proves the
+rows were never recorded in the first place.  Twice, because the second drain is
+where an anchor of nil comparing unequal to itself would show up."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\033[?1049h'; stty raw -echo; exec cat")
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (should-not (cooked--input-start-position))
+    (should-not cooked--undo-anchor)
+    (let ((sentinel (list (cons 1 2))))
+      (setq buffer-undo-list sentinel)
+      (cooked--send-to-child (make-string 200 ?x))
+      (should (cooked-tests--settle (lambda () (string-search "xxx" (cooked-tests--text)))))
+      (cooked--drain-and-apply)
+      (cooked--drain-and-apply)
+      (should-not cooked--undo-anchor)
+      ;; `eq', not `equal': nothing was consed onto it and nothing replaced it.
+      (should (eq buffer-undo-list sentinel)))))
+
+(ert-deftest cooked-undo-at-a-prompt-takes-back-the-line-and-nothing-above-it ()
+  "What undo is scoped to, stated from the user's side: the typed line goes and
+the transcript above it -- which no history entry has ever named -- is untouched."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (cooked-tests--display-buffer)
+    (cooked-tests--type "e c h o SPC h i")
+    (should (equal "echo hi" (cooked--pending-input)))
+    (let ((above (buffer-substring-no-properties
+                  (point-min) (cooked--input-start-position))))
+      (undo-boundary)
+      (undo)
+      (should (equal "" (cooked--pending-input)))
+      (should (equal above (buffer-substring-no-properties
+                            (point-min) (cooked--input-start-position)))))))
+
+(ert-deftest cooked-undo-turned-off-by-the-user-stays-off-across-a-drain ()
+  "`t' is a decision, not an empty history: a buffer where undo was turned off
+must come out of a drain -- and out of the anchor reset inside it -- still off,
+since nil there would be switching it back on for them."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (setq buffer-undo-list t)
+    (let ((before (length cooked--commands)))
+      (cooked--replace-input "seq 1 50")
+      (cooked-send-input)
+      (should (cooked-tests--settle
+               (lambda () (> (length cooked--commands) before)) 8)))
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'input)
+                             (cooked--input-start-position)))
+             8))
+    (should (eq buffer-undo-list t))))
+
+(ert-deftest cooked-a-discard-takes-what-was-pointing-into-the-history-with-it ()
+  "Half-undone is the dangerous state: `pending-undo-list' is a cons inside the
+list and `undo-more' walks it without ever consulting the list again, so a drain
+that emptied the list and left the pointer would have the next `C-/' of a run in
+progress undoing entries about text that has moved.  evil's own pointer goes the
+same way and for the same reason."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (cooked--replace-input "hello")
+    (undo-boundary)
+    (should (cooked-tests--undo-entries))
+    (setq pending-undo-list buffer-undo-list)
+    (when (boundp 'evil-undo-list-pointer)
+      (setq evil-undo-list-pointer buffer-undo-list))
+    (cooked--discard-undo)
+    (should-not buffer-undo-list)
+    (should-not pending-undo-list)
+    (when (boundp 'evil-undo-list-pointer)
+      (should-not evil-undo-list-pointer))
+    ;; Locally, so that a drain running from a process filter cannot cut short an
+    ;; undo run in whatever buffer the user was actually in.
+    (should (local-variable-p 'pending-undo-list))
+    (should-not (default-value 'pending-undo-list))))
+
+(ert-deftest cooked-a-restarted-session-does-not-inherit-the-old-ones-history ()
+  "`cooked--start' erases the buffer, and a second session in it puts the new
+prompt at the same position the old one held -- the one movement the anchor
+cannot see, which would leave the previous session's entries vouched for and
+pointing into text that no longer exists."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked--start '("/bin/sh" "-c" "exec sleep 5"))
+    (unwind-protect
+        (progn
+          (setq buffer-undo-list (list (cons 1 2))
+                cooked--undo-anchor 1)
+          (cooked--start '("/bin/sh" "-c" "exec sleep 5"))
+          (should-not cooked--undo-anchor)
+          (should-not (cooked-tests--undo-entries)))
+      (cooked--cleanup))))
+
+(ert-deftest cooked-refresh-does-not-leave-entries-against-the-screen-it-rebuilt ()
+  "`cooked-refresh' throws the whole screen region away and has the child re-send
+it.  The prompt lands back where it was, so the next drain's anchor check sees
+nothing move -- while every entry recorded before it names text that has been
+deleted and rebuilt underneath."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (cooked--replace-input "hello")
+    (should (cooked-tests--undo-entries))
+    (cooked-refresh)
+    (should-not (cooked-tests--undo-entries))
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'input)
+                             (cooked--input-start-position)))
+             8))))
+
+(ert-deftest cooked-evil-u-at-a-prompt-undoes-the-line-and-says-so-elsewhere ()
+  "\\`u' is scoped like the history it drives.  At a prompt it is evil's own undo
+over the line being typed; over a full-screen program there is nothing of the
+user's on screen, and plain `evil-undo' -- `(interactive \"*p\")' -- answers
+\"Buffer is read-only\" there, which is a fact about the buffer and not about the
+undo.  The read-only comes from `cooked-evil-normal-state-render' being `still',
+which is the default, so this is what a user meets."
+  (skip-unless (require 'evil nil t))
+  (skip-unless (executable-find "zsh"))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-zsh
+    (cooked-tests--display-buffer)
+    (cooked-tests--type "e c h o SPC h i")
+    (should (equal "echo hi" (cooked--pending-input)))
+    (evil-normal-state)
+    (should (eq (key-binding "u") #'cooked-evil-undo))
+    (let ((above (buffer-substring-no-properties
+                  (point-min) (cooked--input-start-position))))
+      (undo-boundary)
+      ;; Through the command loop: an unexpected signal out of here is the bug.
+      (cooked-tests--type "u")
+      (should (equal "" (cooked--pending-input)))
+      (should (equal above (buffer-substring-no-properties
+                            (point-min) (cooked--input-start-position))))
+      (should (evil-normal-state-p)))))
+
+(ert-deftest cooked-evil-visual-u-over-the-childs-text-reports-and-stays-put ()
+  "\\`u' in visual state is `evil-downcase', not undo, and `downcase-region' over
+a rendered row signals -- out of visual state, which is the failure
+`cooked-evil--command-range' documents: no `post-command-hook' runs after a
+command that signalled, so evil is left believing in a selection nothing will
+reconcile and the next \\`v' leaves visual state instead of entering it.
+Reporting and returning leaves the selection standing, the text alone, and the
+state something the user can still see out of."
+  (skip-unless (require 'evil nil t))
+  (skip-unless (executable-find "zsh"))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-zsh
+    (let ((before (length cooked--commands)))
+      (cooked--replace-input "echo ALPHA")
+      (cooked-send-input)
+      (should (cooked-tests--settle
+               (lambda () (> (length cooked--commands) before)) 8)))
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'input)
+                             (cooked--input-start-position)))
+             8))
+    (cooked-tests--display-buffer)
+    (let ((record (car cooked--commands))
+          (text (cooked-tests--text)))
+      (goto-char (car (cooked--command-region record)))
+      (should (string-search "ALPHA" (buffer-substring-no-properties
+                                      (line-beginning-position)
+                                      (line-end-position))))
+      (evil-normal-state)
+      (dolist (key '("u" "U" "~"))
+        (cooked-tests--type (concat "v " key))
+        (should (evil-visual-state-p))
+        (should (equal text (cooked-tests--text)))
+        (cooked-tests--type "ESC")))
+    ;; And the line being typed is still ordinary editable text, where the same
+    ;; three keys mean what they mean anywhere else.
+    (goto-char (cooked--input-start-position))
+    (cooked--replace-input "ALPHA")
+    (goto-char (cooked--input-start-position))
+    (evil-normal-state)
+    (cooked-tests--type "v $ u")
+    (should (equal "alpha" (cooked--pending-input)))))
 
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

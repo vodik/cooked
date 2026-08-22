@@ -319,6 +319,14 @@ see `cooked--literal-codes' for why this cannot simply be assumed.")
 (defvar-local cooked--annotation nil "Prompt annotation from OSC 51;A.")
 (defvar-local cooked--mouse nil "Whether the child asked for mouse reports.")
 (defvar-local cooked--mouse-sgr nil "Whether to encode mouse reports as SGR (1006).")
+(defvar-local cooked--mouse-drag nil
+  "DEC mode 1002: report the pointer while a button is held.")
+(defvar-local cooked--mouse-motion nil
+  "DEC mode 1003: report the pointer whether or not a button is held.
+
+Kept apart from `cooked--mouse-drag\=' even though cooked drives both from the
+same tracking loop, because the child asked two different questions and
+`cooked--mouse-track\=' can only honestly answer one of them; see its docstring.")
 (defvar-local cooked--mode 'cooked)
 (defvar-local cooked--exit nil)
 (defvar-local cooked--face-cache nil)
@@ -460,6 +468,39 @@ being gone by the time it is reached is ordinary rather than exceptional."
   `(dolist (,var ,windows)
      (when (window-live-p ,var)
        ,@body)))
+
+(defmacro cooked--with-child-edit (&rest body)
+  "Run BODY as an edit made on the child\='s behalf rather than by the user.
+
+Two bindings, one reason each, and both follow from the same fact: the text
+BODY touches belongs to the emulator, not to whoever is typing.
+
+`inhibit-read-only\=', because the screen and the scrollback are protected
+(`cooked--protect\=') against a keystroke damaging a picture Emacs has no way to
+repair -- and these edits are the writer that protection was never aimed at.
+
+`buffer-undo-list\=', because a redraw deletes and reinserts whole rows on every
+drain, and recording that is useless before it is harmful.  Useless: undoing a
+row the child painted would put back text the emulator\='s grid does not have,
+and every later delta is computed against that grid, so nothing would ever mend
+the disagreement.  Harmful in the plain sense of `undo-outer-limit\=': a busy
+screen turns its whole text over several times a second, and the list grows
+until Emacs warns that it has discarded megabytes of it -- which is the only
+sign a user ever gets that undo has been recording the terminal at all.
+
+What stays recorded is what the user typed at the prompt, the one piece of the
+buffer that is theirs; `cooked--check-undo-anchor\=' keeps those entries honest
+afterwards.
+
+Run `cooked--check-undo-anchor\=' after the macro and never inside it, wherever
+BODY moves the input line -- the two scrollback deletions and `cooked-refresh\='
+do.  Inside, the discard would land on the binding above and be thrown away
+with it while the anchor it records stayed, which leaves the history vouched
+for by an anchor nothing ever cleared: the one state worse than either."
+  (declare (indent 0) (debug body))
+  `(let ((inhibit-read-only t)
+         (buffer-undo-list t))
+     ,@body))
 
 (defun cooked--live-session ()
   "This buffer's session while there is still a child on the other end.
@@ -1118,7 +1159,10 @@ stuck at the previous font size, visibly mismatched once the pin is released."
         (goto-char (point-min))
         (let* ((window (or (cooked--layout-window) (selected-window)))
                (size (cooked--cell-size window))
-               (inhibit-read-only t)) ; the live screen and scrollback are read-only
+               ;; The pair `cooked--with-child-edit' binds, spelled out to keep
+               ;; this in one `let*' with the sizes it needs.
+               (inhibit-read-only t)
+               (buffer-undo-list t))
           (while (< (point) (point-max))
             (let ((spec (get-text-property (point) 'cooked-deco))
                   (next (or (next-single-property-change (point) 'cooked-deco)
@@ -1221,6 +1265,9 @@ The far edge only.  The near edge is the buffer's process mark -- see
 `cooked--input-mark' -- and this is the half comint has no counterpart for:
 comint's input runs to `point-max', while cooked's has rendered screen rows
 below it.")
+(defvar-local cooked--undo-anchor nil
+  "Where the pending input began when the undo history was last known good.
+See `cooked--check-undo-anchor'.")
 (defvar-local cooked--semantic nil
   "OSC 133 state: nil, `prompt', `input' or `output'.")
 (defvar-local cooked--semantic-seen nil
@@ -1336,6 +1383,77 @@ repeating the pair of nil tests."
               (start (marker-position mark))
               (end (and cooked--input-end (marker-position cooked--input-end))))
     (cons start end)))
+
+(defun cooked--check-undo-anchor ()
+  "Discard the undo history if the input line is no longer where it was.
+
+Undo records exactly one thing in a cooked buffer: what the user has typed at
+the prompt.  Everything else the buffer contains is written on the child\='s
+behalf and kept out of the history by `cooked--with-child-edit\=' -- see there
+for why recording a redraw is both meaningless and, at `undo-outer-limit\='
+scale, expensive.
+
+What is left still has to be true, and undo entries name buffer positions.  Any
+output at all rewrites the rows around the prompt and so moves the input line;
+the entries recorded against the old position then describe screen text, which
+undo would damage as readily as it would repair a typo.  The line\='s start is
+therefore the whole validity condition -- while it holds still every entry
+recorded against it is good, and the moment it moves they are worthless
+together.
+
+Which leaves undo scoped to the line being typed and nothing else: the same
+one-entry-at-a-time undo comint ends up with, arrived at from the other side.
+
+Callers are everything that can move the line: the drain (`cooked--apply\='),
+`cooked--drain-and-apply\=' once more on the way out in case the drain signalled
+partway, the two scrollback deletions, and `cooked-refresh\='.  Cheap and
+idempotent by design, so calling it twice for one movement costs a comparison
+and calling it once too often is impossible."
+  (let ((start (cooked--input-start-position)))
+    (unless (eql start cooked--undo-anchor)
+      (setq cooked--undo-anchor start)
+      (cooked--discard-undo))))
+
+;; Read and assigned only under a guard that another package defined them, and
+;; declared here so the byte-compiler reads those references as what they are
+;; rather than as free variables; see `cooked--discard-undo'.
+(defvar evil-undo-list-pointer)
+(defvar undo-tree-mode)
+(defvar buffer-undo-tree)
+
+(defun cooked--discard-undo ()
+  "Throw away the undo history, and everything else holding a piece of it.
+
+`buffer-undo-list\=' is only the half of it, because undo is not a function of
+the list alone.  A run of undos in progress is carried in `pending-undo-list\=',
+a cons *inside* that list, and `undo-more\=' walks it without consulting the list
+again; whether a run is in progress is decided by `last-command\=', which a drain
+does not touch.  So: \\`u\=', a background job prints, and the next \\`u\=' undoes
+conses describing text that has since moved -- in a buffer whose history is
+supposedly empty, which is worse than the stale entries this was called to get
+rid of.  Locally, because that variable is global: a drain runs from a process
+filter, and clearing it outright would cut short an undo run in whatever other
+buffer the user was actually in.
+
+evil holds a cons of the list as well (`evil-undo-list-pointer\=', taken on
+entering insert state so the whole insertion undoes as one step), and undo-tree
+keeps a tree beside the list, treating the list as its staging area.  Neither
+is ours to maintain and both are unreachable once the list they were taken from
+is gone, so each is put back to the value its own package uses for nothing
+recorded yet -- the state both are written to cope with, being the one they
+start in.  Left alone they are a pointer into a list nobody holds any more and
+a tree that goes on growing against positions that have moved.
+
+Nothing at all where the user turned undo off themselves: nil would be
+switching it back on for them, and there is nothing pointing into a list that
+was never built."
+  (unless (eq buffer-undo-list t)
+    (setq buffer-undo-list nil)
+    (setq-local pending-undo-list nil)
+    (when (boundp 'evil-undo-list-pointer)
+      (setq evil-undo-list-pointer nil))
+    (when (bound-and-true-p undo-tree-mode)
+      (setq buffer-undo-tree nil))))
 
 (defun cooked--input-start-position ()
   "Where the pending input begins, or nil if there is no input region."
@@ -1710,6 +1828,60 @@ unusable in a terminal buffer."
     (setq cooked--narrowed nil)
     (widen)))
 
+(defvar cooked--pinning nil
+  "Non-nil while `cooked--pin-alt-windows' is moving a window's start.
+It runs from `window-scroll-functions', which redisplay calls again for the very
+move it makes; without this the two would take turns forever.")
+
+(defun cooked--pin-alt-windows (&optional window _start)
+  "Keep every window on this buffer showing the alt screen from its first row.
+
+WINDOW, when live, is pinned alone -- that is how `window-scroll-functions'
+calls this, naming the window whose start has just moved.  START is ignored:
+the only start this accepts is the screen\='s.
+
+`cooked--apply' already does this at the end of a drain, and that is not enough:
+a drain is the child talking, and nothing the *user* does to the window produces
+one.  A full-screen program sitting idle at its prompt draws nothing, so the
+wheel — which reaches `mwheel-scroll' whenever the child has not asked for mouse
+reports, or has but the keyboard is suspended for a peek — scrolled the picture
+off the window and left it there, with no further output to put it back.  Run
+from `post-command-hook', the pin becomes the continuous invariant it always
+meant to be, which is how eat states it too (`eat--synchronize-scroll').
+
+Only under `narrow'.  `follow' exists precisely so the transcript behind a
+running program can be scrolled up to and read, and undoing that on the very
+next command would leave the option meaning nothing.
+
+Forcing, unlike the drain's pin: the wheel moves point along with the window, so
+NOFORCE would let redisplay honour the point it left behind and scroll straight
+back.  Point is inside the region either way — `narrow' is what makes that
+true — so nothing is dragged anywhere the user cannot already see.
+
+Pixel scrolling does not go through `window-start' at all: it leaves a vertical
+offset on the window that survives being told where to start, so the top row
+would still be shaved by however far the last event scrolled.
+
+Two hooks, because `post-command-hook' alone leaves the wheel two ways out.  It
+runs in the buffer of the *selected* window, and `mouse-wheel-follow-mouse' is
+on by default, so a notch over an unselected terminal is a command that ends
+somewhere else entirely -- in a buffer where this hook is not installed.  And
+`pixel-scroll-precision-mode' finishes a fling on a timer, which is not a
+command at all and so ends no command loop.  `window-scroll-functions' has
+neither hole: redisplay calls it for the window that actually moved, whatever
+moved it."
+  (unless cooked--pinning
+    (let ((cooked--pinning t))
+      (when (and cooked--alt (eq cooked-alt-screen-pin 'narrow))
+        (when-let* ((top (cooked--screen-start-position)))
+          (dolist (w (if (window-live-p window)
+                         (list window)
+                       (get-buffer-window-list nil nil t)))
+            (unless (= (window-start w) top)
+              (set-window-start w top))
+            (unless (zerop (window-vscroll w t))
+              (set-window-vscroll w 0 t))))))))
+
 (defun cooked--fit-screen ()
   "Shape the screen region to the number of rows the emulator says it has.
 
@@ -1736,12 +1908,27 @@ twice."
     (let ((rows (if cooked--alt
                     (cooked-grid-height cooked--grid)
                   (cooked-grid-used cooked--grid))))
-      ;; `extend' on the alt screen only: the rectangle must be exactly that tall even
-      ;; where the program has drawn nothing, while the primary is trimmed to content
-      ;; and has no business growing here.  Without `extend' a region already short
-      ;; enough reports the shortfall and is left alone.
-      (when (zerop (cooked--goto-screen-row rows (and cooked--alt 'extend)))
-        (delete-region (point) (point-max))))))
+      (if (and cooked--alt (> rows 0))
+          ;; `extend' on the alt screen only: the rectangle must be exactly that
+          ;; tall even where the program has drawn nothing, while the primary is
+          ;; trimmed to content and has no business growing here.
+          ;;
+          ;; Extend to the *last* row and trim from its end, rather than
+          ;; walking one row past the last and trimming from its start.  A row
+          ;; is made to exist by inserting the newline that ends the row above
+          ;; it, so asking for row ROWS left the region ROWS newline-terminated
+          ;; lines and then an empty one at `point-max' — a real buffer line
+          ;; below the bottom of the screen, which point can be moved onto and
+          ;; which scrolls the whole picture up by one when it is.  Trimming to
+          ;; `line-end-position' of the last row leaves that row unterminated,
+          ;; exactly as the primary's last row already is, and is stable across
+          ;; drains: the next one lands `bolp' on it and deletes nothing.
+          (progn (cooked--goto-screen-row (1- rows) 'extend)
+                 (delete-region (line-end-position) (point-max)))
+        ;; Without `extend' a region already short enough reports the
+        ;; shortfall and is left alone.
+        (when (zerop (cooked--goto-screen-row rows))
+          (delete-region (point) (point-max)))))))
 
 (defun cooked--check-seam ()
   "Signal if the buffer disagrees with the emulator about the seam.
@@ -2100,10 +2287,18 @@ EXTRA-ENV is an alist prepended to the child's environment."
   (setq cooked--image-order nil)
   (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
     (setq cooked--rows rows cooked--cols cols))
-  (let ((inhibit-read-only t))
+  (cooked--with-child-edit
     (erase-buffer)
     (insert (make-string cooked--rows ?\n))
     (setq cooked--screen-start (copy-marker (point-min) nil)))
+  ;; The previous session's entries describe text `erase-buffer' has just taken
+  ;; away, and the anchor that vouches for them cannot notice: a buffer being
+  ;; reused for a second session puts the new prompt at exactly the position the
+  ;; old one held, which is the one thing `cooked--check-undo-anchor' reads as
+  ;; nothing having moved.  Cleared here rather than inside the macro above, for
+  ;; the reason given there.
+  (setq cooked--undo-anchor nil)
+  (cooked--discard-undo)
   ;; Attached to the buffer, unlike a plain doorbell would be: `get-buffer-process'
   ;; answering is the whole of what comint needs from a process, since every one of
   ;; its commands works through `process-mark' and none of them through the process
@@ -2207,7 +2402,13 @@ again is safe."
             (setq cooked--drain-pending nil)
             (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))))
       (setq cooked--draining nil
-            cooked--drain-pending nil))))
+            cooked--drain-pending nil)
+      ;; Also in the cleanup, though `cooked--apply' ends with it: the drain has
+      ;; assertions in it (`cooked--check-seam', `cooked--guard-row-width') and
+      ;; a signal out of one leaves the screen half-rewritten with the input
+      ;; line moved and the anchor still naming where it used to be.  Idempotent
+      ;; on the ordinary path, the anchor already matching by then.
+      (cooked--check-undo-anchor))))
 
 (defun cooked--on-wake (buffer)
   "Drain BUFFER's session and apply what changed.
@@ -2277,9 +2478,18 @@ window that fell behind."
   ;; the rows depend on.  Touches no buffer text, so it needs no `inhibit-read-only'.
   (cooked--install-images (plist-get update :images))
   ;; `let*', emphatically: these initialisers delete and insert, and under plain
-  ;; `let' they would run before `inhibit-read-only' took effect, so a protected
-  ;; buffer aborts the redisplay half-done from inside the process filter.
+  ;; `let' they would run before the two bindings below took effect, so a
+  ;; protected buffer aborts the redisplay half-done from inside the process
+  ;; filter -- and the lifting of the pending input would land in the undo
+  ;; history.  They are the pair `cooked--with-child-edit' binds, spelled out
+  ;; because a body this long is not worth nesting one level deeper.
+  ;;
+  ;; `buffer-undo-list' survives the buffer switching below -- other windows are
+  ;; selected to recenter them -- because it is permanently buffer-local, so the
+  ;; binding is recorded against this buffer and restored into it rather than
+  ;; into whichever one happens to be current when it unwinds.
   (let* ((inhibit-read-only t)
+         (buffer-undo-list t)
          (pending (cooked--take-pending-input))
          ;; Follow the cursor unless the user has gone up into the scrollback to
          ;; read.  Comparing point against the cursor instead is order-dependent:
@@ -2378,9 +2588,13 @@ window that fell behind."
               (cooked--dolist-windows w (append here other-follows)
                 (set-window-start w top t))))
         (let* ((target (cooked--point-after-input))
-               ;; A rendered row always ends with a newline, even the cursor's own
-               ;; — see `cooked--insert-runs' — so the cursor at the true end of
-               ;; output sits one short of `point-max', not on it.
+               ;; Slack of one, because whether the last rendered row carries a
+               ;; terminating newline depends on how the region was last shaped:
+               ;; rows are made to exist by the newline that ends the row above
+               ;; them (`cooked--goto-screen-row'), so the bottom one has one
+               ;; only when `cooked--fit-screen' trimmed something below it.
+               ;; The cursor at the true end of output therefore sits either on
+               ;; `point-max' or one short of it.
                (at-end (>= target (1- (point-max)))))
           ;; Only while the view is following at all: suspending exists to stop
           ;; the child's own output moving what is being read, and a second
@@ -2406,7 +2620,11 @@ window that fell behind."
     ;; After the window block, not before it: see `cooked--sync-cursor-type'.
     (cooked--sync-cursor-type)
     (cooked--update-ghost-cursor)
-    (when cooked--exit (cooked--on-exit cooked--exit))))
+    (when cooked--exit (cooked--on-exit cooked--exit)))
+  ;; Outside the `let*': the binding above is what kept this drain out of the
+  ;; undo history, and clearing the history has to reach the buffer's own list
+  ;; rather than that binding.
+  (cooked--check-undo-anchor))
 
 (defun cooked--handle-event (event batch-start)
   "Dispatch a single EVENT from the emulator.
@@ -2429,8 +2647,9 @@ two chances to disagree."
     (`(erase-scrollback)
      (cooked--discard-scrollback (cooked--screen-start-position)))
     (`(display-cleared) (setq cooked--pin-screen-top t))
-    (`(mouse ,enabled ,sgr)
-     (setq cooked--mouse enabled cooked--mouse-sgr sgr)
+    (`(mouse ,enabled ,sgr ,drag ,motion)
+     (setq cooked--mouse enabled cooked--mouse-sgr sgr
+           cooked--mouse-drag drag cooked--mouse-motion motion)
      ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this,
      ;; so it has to move when the child changes its mind about the mouse.
      (cooked--update-mouse-grab))
@@ -2815,8 +3034,10 @@ this would otherwise quietly do nothing."
                     cooked--commands))
   (save-restriction
     (widen)
-    (let ((inhibit-read-only t))
+    (cooked--with-child-edit
       (delete-region (point-min) end)))
+  ;; Everything below just moved up by the length of what went.
+  (cooked--check-undo-anchor)
   (when cooked--session
     (cooked--forget-history cooked--session)
     ;; `cooked--grid' is a snapshot of the last drain, and this is the one thing that
@@ -2845,8 +3066,9 @@ news `cooked--discard-scrollback\=' gives it."
         (let ((at-seam (= end screen)))
           (save-restriction
             (widen)
-            (let ((inhibit-read-only t))
+            (cooked--with-child-edit
               (delete-region beg end)))
+          (cooked--check-undo-anchor)
           (when (and at-seam cooked--session)
             (cooked--forget-history cooked--session)
             (setf (cooked-grid-head cooked--grid) 0)))))))
@@ -2895,12 +3117,18 @@ only the region below `cooked--screen-start' is rebuilt."
   (when cooked--session
     (save-restriction
       (widen)
-      (let ((inhibit-read-only t))
+      (cooked--with-child-edit
         (cooked--release-alt-pin)
         (delete-region (cooked--screen-start-position) (point-max))
         ;; They pointed into the text just deleted; `cooked--restore-pending-input'
         ;; puts them back at the cursor on the drain below.
         (cooked--clear-input-region)))
+    ;; Here rather than left to the drain below, which would see the rebuilt
+    ;; input line start where the old one did and conclude that nothing moved --
+    ;; while every entry in the history was recorded against text this has just
+    ;; deleted and the child is about to re-send.  Outside the macro, for the
+    ;; reason given there.
+    (cooked--check-undo-anchor)
     (cooked--redraw cooked--session)
     (cooked--drain-and-apply)))
 

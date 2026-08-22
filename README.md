@@ -163,6 +163,15 @@ either way.
 next key to the child exactly as typed, regardless of what's reserved — including `C-c`
 itself (`C-c C-q C-c` sends a literal `C-c` byte).
 
+The mouse has an escape hatch of its own, and it's the one every terminal uses: hold
+**shift**. A child that asked for mouse reports gets the whole gesture — press, the
+motion between, release — and a click that reaches it clears any Emacs region, because
+the click was the child's and a region left behind it is one nothing can get rid of.
+`S-down-mouse-1` is deliberately not bound, so it falls through to `mouse-drag-region`
+and selects text out of a program that has grabbed the pointer, exactly as it does in
+xterm. Modified wheel notches fall through the same way, so `C-wheel-up` still scales
+text.
+
 ### The `C-c` map is comint-shaped, cooked-implemented
 
 `cooked-mode` derives from `comint-mode`, but the buffer has no Emacs process object for

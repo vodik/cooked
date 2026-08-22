@@ -87,6 +87,18 @@ row, hard-wrapped at whatever width was in force when it was printed."
   "Program run by \\[cooked]."
   :type 'string :group 'cooked)
 
+(defcustom cooked-display-action '(display-buffer-same-window
+                                   display-buffer-pop-up-window)
+  "Action `\\[cooked]' passes to `pop-to-buffer\='.
+
+The selected window first, the way `vterm\=' and `eat\=' do it: a terminal is
+usually what you want to be looking at, whereas the fallback `display-buffer\='
+uses -- reuse a window, else split -- would put it beside the buffer you
+invoked it from as often as not.  Splitting is still the second choice, for
+when the selected window will not take it (a dedicated or side window), and
+`\\[cooked-other-window]\=' remains the way to ask for the split on purpose."
+  :type 'sexp :group 'cooked)
+
 (defcustom cooked-password-function nil
   "Function called with the prompt string to supply a password non-interactively.
 Should return a string, or nil to fall back to `read-passwd'.  Lets auth-source
@@ -632,8 +644,9 @@ and the rest keep working."
 
 (defconst cooked--mouse-map
   (let ((map (make-sparse-keymap)))
-    (dolist (event (append '(down-mouse-1 mouse-1 down-mouse-2 mouse-2
-                             down-mouse-3 mouse-3)
+    (dolist (event (append '(down-mouse-1 mouse-1 drag-mouse-1
+                             down-mouse-2 mouse-2 drag-mouse-2
+                             down-mouse-3 mouse-3 drag-mouse-3)
                            cooked--wheel-events))
       (define-key map (vector event) #'cooked-mouse-event))
     map)
@@ -648,8 +661,20 @@ under a program that had asked for those notches.  A terminal frame did not
 show this, because there the wheel arrives as `mouse-4'/`mouse-5', which
 pixel-scroll does not bind.
 
+The `drag-mouse-N' variants have to be here as well as `down-mouse-N'/`mouse-N',
+and their absence was a bug with two faces.  Emacs does not deliver a plain
+`mouse-1' when the pointer moved between press and release; it delivers
+`drag-mouse-1' instead.  Unbound, that fell through to the global
+`mouse-set-region', so the child never learned the button had come up -- it saw
+a button held forever -- while Emacs set a region behind its back, which is why
+a drag appeared in one jump at the end instead of following the pointer.
+
 Modified variants are deliberately absent: `C-wheel-up' should keep scaling
-text, and shift-scrolling should keep working, as they do in any other buffer.")
+text, and shift-scrolling should keep working, as they do in any other buffer.
+Shift is more than a convenience here: `S-down-mouse-1' reaching
+`mouse-drag-region' is the universal escape hatch for selecting text out of a
+program that has grabbed the mouse, and it works precisely because this map
+never claims it.")
 
 (defvar-local cooked--mouse-grab nil
   "Whether the child both wants the mouse and owns the keyboard.
@@ -658,6 +683,24 @@ Gates `cooked--mouse-map'; nil everywhere else, so the entry in
 
 (defvar cooked--mouse-map-alist `((cooked--mouse-grab . ,cooked--mouse-map))
   "The `emulation-mode-map-alists' entry activating `cooked--mouse-map'.")
+
+(defvar-local cooked--mouse-held nil
+  "Terminal button numbers the child has been told are down, newest first.
+
+A press and its release are one gesture, and only the press is guaranteed to
+land on a cell of ours: let go below the last row, or over the fringe, and
+`posn-point' is nil.  Dropping the release there would leave the child holding a
+button it can never put down, so this is what says a release is owed.  It also
+supplies the button a motion report has to name -- 1002 asks which button is
+being dragged, and the event Emacs hands us for a movement names none.")
+
+(defvar-local cooked--mouse-last-cell nil
+  "Cell of the last report sent, as a (ROW . COL) cons.
+
+Two jobs, both about a report that would otherwise be wrong or wasted: it stands
+in for a release the pointer carried off the screen, and it is what makes motion
+reporting affordable -- Emacs manufactures a `mouse-movement' event per pixel,
+and the child only cares about the ones that changed cell.")
 
 (defcustom cooked-alternate-scroll-lines 3
   "Cursor keys sent per wheel notch under alternate scroll (DEC mode 1007).
@@ -688,8 +731,13 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
                                 (not (cooked--input-state-p))
                                 (not (cooked--suspended-p)))))
 
-(defun cooked--mouse-cell (event)
-  "Screen row and column of EVENT, or nil if it is outside the screen.
+(defun cooked--mouse-cell (posn)
+  "Screen row and column of POSN, or nil if it is outside the screen.
+
+A posn rather than an event because the interesting end of an event is not
+always the same one: `drag-mouse-1' is a release, and where the button came up
+is `event-end'.  Reading `event-start' there reported the release at the cell
+the press was already reported in, which is a gesture with no extent at all.
 
 `cooked--screen-cell' rather than a count of lines and columns from the marker:
 row 0 does not always begin its buffer line — when the row handed to scrollback
@@ -697,8 +745,7 @@ last was wrapped, `cooked--screen-start' sits mid-line — and a plain
 `current-column' there counts the characters ahead of the marker, which are
 scrollback and not on the screen at all.  Reporting those to the child puts
 every click on row 0 to the right of where it was made."
-  (when-let* ((posn (event-start event))
-              (pos (posn-point posn)))
+  (when-let* ((pos (posn-point posn)))
     (cooked--screen-cell pos)))
 
 (defun cooked--mouse-report (button row col pressed)
@@ -706,6 +753,71 @@ every click on row 0 to the right of where it was made."
   (if cooked--mouse-sgr
       (format "\e[<%d;%d;%d%s" button (1+ col) (1+ row) (if pressed "M" "m"))
     (format "\e[M%c%c%c" (+ 32 (if pressed button 3)) (+ 33 col) (+ 33 row))))
+
+(defun cooked--send-mouse (button row col pressed)
+  "Send one report for BUTTON at ROW/COL to the child, and give up the region.
+
+Deactivating the mark is the point of routing every report through here.  A
+click that the child answers is the child\='s click, and leaving a region behind
+it is what made a selection impossible to get rid of: nothing here ever cleared
+one, so a region set before the child grabbed the mouse survived every
+subsequent click, and `cooked--snap-to-cursor\=' then walked point away from a
+mark that stayed put -- growing a region the user never drew and could only
+escape by leaving the buffer."
+  (when mark-active (deactivate-mark))
+  (setq cooked--mouse-last-cell (cons row col))
+  (cooked--send-to-child (cooked--mouse-report button row col pressed)))
+
+(defun cooked--report-button (button row col pressed)
+  "Report BUTTON pressed or released at ROW/COL, remembering that it is held."
+  (cond ((memq button '(64 65 66 67)))   ; a notch is not a button you can hold
+        (pressed (unless (memq button cooked--mouse-held)
+                   (push button cooked--mouse-held)))
+        (t (setq cooked--mouse-held (delq button cooked--mouse-held))))
+  (cooked--send-mouse button row col pressed))
+
+(defun cooked--report-motion (row col)
+  "Report the pointer arriving at ROW/COL, if it is a cell it was not already in.
+
+32 is the motion bit, added to the button being dragged; 3 stands for \"no
+button\", which is what a 1003 child is told when nothing is held.  Suppressing
+a repeat of the last cell is not an optimisation so much as the contract: Emacs
+tracks the pointer by pixel, and a child that asked for cells would otherwise
+receive several dozen identical reports per cell crossed."
+  (unless (equal cooked--mouse-last-cell (cons row col))
+    (cooked--send-mouse (+ 32 (or (car cooked--mouse-held) 3)) row col t)))
+
+(defun cooked--mouse-track (window)
+  "Follow the pointer into the child until the gesture ends, over WINDOW.
+
+Emacs manufactures `mouse-movement\=' events only inside `track-mouse\=', and only
+for as long as that form is running; no keymap can ask for them.  So the press
+that begins a drag runs the rest of the gesture itself, exactly as
+`mouse-drag-region\=' does for Emacs\=' own selection.  Without it the child got a
+press and, whenever the user let go, a release, with nothing in between -- so a
+program that highlights as you drag highlighted nothing until the end.
+
+Whatever ends the loop is pushed back rather than acted on, so the release
+returns through `cooked-mouse-event\=' by its ordinary binding and there is only
+one place that knows how to report a button coming up.
+
+Only the drag half of 1003 is served: any-motion with no button down would mean
+tracking the pointer for as long as the child asks, which costs an event per
+pixel across the whole frame whether or not the user is doing anything.  A
+`track-mouse\=' bounded by a gesture is the affordable part, and it is the part
+every 1003 client also gets from 1002."
+  (track-mouse
+    (let (event)
+      (while (progn (setq event (read-event))
+                    (and (consp event) (eq (event-basic-type event) 'mouse-movement)))
+        (let ((posn (event-start event)))
+          ;; A drag that wanders into another window is still the child\='s drag,
+          ;; but the cells under it are somebody else\='s buffer: report nothing
+          ;; rather than a position translated out of the wrong text.
+          (when (eq (posn-window posn) window)
+            (when-let* ((cell (cooked--mouse-cell posn)))
+              (cooked--report-motion (car cell) (cdr cell))))))
+      (push event unread-command-events))))
 
 (defun cooked--alt-scroll-keys (button)
   "Cursor keys standing in for a wheel notch of BUTTON.
@@ -722,15 +834,33 @@ spelling a pager would understand, so it sends nothing."
   (interactive)
   (let* ((event last-input-event)
          (basic (event-basic-type event))
+         (modifiers (event-modifiers event))
          (button (cdr (assq basic cooked--mouse-buttons)))
          (wheel (memq basic cooked--wheel-events))
-         ;; A notch has nowhere to land when the pointer is over a part of the
-         ;; window with no text under it.  Scrolling Emacs instead would move the
-         ;; buffer out from under a program that asked to receive the wheel, so
-         ;; the cursor's cell stands in — the child cares about the direction.
+         ;; A wheel notch is always a press.  Emacs reports it as a click, which
+         ;; the `down' test alone would encode as a release — and a release of
+         ;; buttons 64/65 is a report every application discards, so the scroll
+         ;; would vanish on the way to a child that had asked for it.
+         (pressed (or wheel (memq 'down modifiers)))
+         ;; `drag-mouse-1' is a release that happens to know where it started;
+         ;; the end is the half that has not been reported yet.
+         (posn (if (memq 'drag modifiers) (event-end event) (event-start event)))
          (cell (and cooked--mouse button
-                    (or (cooked--mouse-cell event)
-                        (and wheel (cooked--cursor-cell))))))
+                    (or (cooked--mouse-cell posn)
+                        ;; A notch has nowhere to land when the pointer is over a
+                        ;; part of the window with no text under it.  Scrolling
+                        ;; Emacs instead would move the buffer out from under a
+                        ;; program that asked to receive the wheel, so the cursor's
+                        ;; cell stands in — the child cares about the direction.
+                        (and wheel (cooked--cursor-cell))
+                        ;; And a release owed to the child is owed wherever the
+                        ;; pointer ended up: let go past the last row and there is
+                        ;; no cell, but the button is still down as far as the
+                        ;; child knows.  Report it where it was last seen rather
+                        ;; than handing the tail of the child's gesture to Emacs.
+                        (and (not pressed) (memq button cooked--mouse-held)
+                             (or cooked--mouse-last-cell (cooked--cursor-cell))))))
+         (window (posn-window posn)))
     (cond
      ;; Checked before the mouse report: `cooked--alt-scroll-p' is already false
      ;; when the child asked for the mouse, so the two can never both apply.
@@ -738,14 +868,14 @@ spelling a pager would understand, so it sends nothing."
       (cooked--send-to-child (cooked--alt-scroll-keys button)))
      ((null cell)
       (cooked--mouse-fallback event))
-      ;; A wheel notch is always a press.  Emacs reports it as a click, which the
-      ;; usual `click' test would encode as a release — and a release of buttons
-      ;; 64/65 is a report every application discards, so the scroll would vanish
-      ;; on the way to a child that had asked for it.
      (t
-      (let ((pressed (or wheel (not (memq 'click (event-modifiers event))))))
-        (cooked--send-to-child
-                      (cooked--mouse-report button (car cell) (cdr cell) pressed)))))))
+      (cooked--report-button button (car cell) (cdr cell) pressed)
+      ;; Take the whole gesture or none of it: having reported a press to a child
+      ;; that asked where the pointer goes, the motion is ours to deliver, and the
+      ;; only way to be given it is to sit in `track-mouse' until the button is up.
+      (when (and pressed (not wheel) (or cooked--mouse-drag cooked--mouse-motion)
+                 (windowp window))
+        (cooked--mouse-track window))))))
 
 (defun cooked--mouse-fallback (event)
   "Run whatever EVENT would do without cooked's binding."
@@ -952,7 +1082,9 @@ key waits.  See `cooked-semi-map', which is where that trade is worth making."
     ;; ones that write to the child out of band -- lives on `cooked-mode-map'
     ;; instead of here, so it survives peeking too; see the `set-keymap-parent'
     ;; block below `define-derived-mode'.
-    (dolist (event '(down-mouse-1 mouse-1 down-mouse-2 mouse-2 down-mouse-3 mouse-3
+    (dolist (event '(down-mouse-1 mouse-1 drag-mouse-1
+                     down-mouse-2 mouse-2 drag-mouse-2
+                     down-mouse-3 mouse-3 drag-mouse-3
                      wheel-up wheel-down mouse-4 mouse-5))
       (define-key map (vector event) #'cooked-mouse-event))
     map))
@@ -1916,7 +2048,7 @@ and anything watching the buffer list see an ordinary kill."
   ;; crashed mid-redraw — and nothing later would widen the buffer for it.
   (setq cooked--alt nil)
   (cooked--release-alt-pin)
-  (let ((inhibit-read-only t))
+  (cooked--with-child-edit
     (save-excursion
       (goto-char (point-max))
       (insert (format "\n[exited %s]\n" code))))
@@ -2020,6 +2152,14 @@ to the child verbatim."
   (cooked--install-global-hooks)
   (add-hook 'pre-command-hook #'cooked--snap-to-input nil t)
   (add-hook 'post-command-hook #'cooked--track-wandering nil t)
+  ;; From the same hook and for the same reason: the user's own commands produce
+  ;; no output, so a drain is never what discovers that one of them scrolled the
+  ;; alt screen out of the window.
+  (add-hook 'post-command-hook #'cooked--pin-alt-windows nil t)
+  ;; And again from redisplay, which is the only one of the two that sees a wheel
+  ;; notch over a window the user has not selected, or the tail of a
+  ;; `pixel-scroll-precision-mode' fling running off a timer.
+  (add-hook 'window-scroll-functions #'cooked--pin-alt-windows nil t)
   (add-hook 'completion-at-point-functions #'cooked-completion-at-point nil t)
   ;; comint's own completion asks a process that is not the child.  Removed rather
   ;; than left sitting behind ours as a fallback that can only ever be wrong.
@@ -2237,7 +2377,7 @@ reusing a live one.  COMMAND overrides `cooked-shell'."
   (interactive "P")
   (cooked--display (or (unless new (car (cooked--live-buffers)))
                        (cooked--start-session command))
-                   nil))
+                   cooked-display-action))
 
 ;;;###autoload
 (defun cooked-other-window (&optional new command)

@@ -399,8 +399,12 @@ drain, after which point was stranded at column 0 of whatever line it was on."
 when the window shrinks — which looked like resize doing nothing."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'top\\n'; sleep 5")
     (should (cooked-tests--settle (lambda () cooked--alt)))
-    (let ((screen-lines (lambda ()
-                          (count-lines (marker-position cooked--screen-start) (point-max)))))
+    ;; The row `point-max' lands on, not a line count: the last row is left
+    ;; unterminated so that nothing sits below it, and `count-lines' then reads
+    ;; one short whenever that row happens to be empty.  This says the thing the
+    ;; test is actually about anyway — the bottom of the region is the bottom row
+    ;; of the grid.
+    (let ((screen-lines (lambda () (1+ (car (cooked--screen-cell (point-max)))))))
       (should (= (funcall screen-lines) cooked--rows))
       ;; Shrink: the region must follow, not keep the old rows.
       (setq cooked--rows 10 cooked--cols 40)
@@ -430,6 +434,76 @@ clipping the top of the screen even though the buffer content was correct."
     (should-not (= (window-start (selected-window)) (marker-position cooked--screen-start)))
     (cooked--apply (cooked--drain cooked--session))
     (should (= (window-start (selected-window)) (marker-position cooked--screen-start)))))
+
+(ert-deftest cooked-alt-screen-has-no-line-below-its-last-row ()
+  "Regression: `cooked--fit-screen' used to shape the alt region by walking to row
+HEIGHT — one past the last — and trimming from there, and a row is made to exist
+by inserting the newline that ends the row above it.  The region was therefore
+HEIGHT newline-terminated lines plus an empty one at `point-max': a buffer line
+below the bottom of the screen, which point could be moved onto and which
+scrolled the whole picture up by one when it was."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'top\\n'; sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (let ((last-row (lambda () (car (cooked--screen-cell (point-max))))))
+      ;; The last position in the region is on the bottom row of the grid rather
+      ;; than one below it, so there is nowhere for point to go that the child
+      ;; does not own and the window has nothing extra to scroll.
+      (should (= (funcall last-row) (1- cooked--rows)))
+      ;; And it is a fixed point: a further drain neither regrows the phantom line
+      ;; nor eats a real row.
+      (cooked--apply (cooked--drain cooked--session))
+      (should (= (funcall last-row) (1- cooked--rows))))))
+
+(ert-deftest cooked-alt-screen-stays-pinned-without-a-drain ()
+  "Regression: the window pin lived only at the end of `cooked--apply', so it
+fired when the child spoke and never when the user did.  An idle full-screen
+program produces no output, so a wheel event reaching `mwheel-scroll' — which is
+what happens while the keyboard is suspended for a peek — scrolled the screen
+off the window with nothing left to put it back."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1049h'; printf 'top\\n'; sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (set-window-buffer (selected-window) (current-buffer))
+    (let ((top (marker-position cooked--screen-start)))
+      ;; The reported case: Emacs owns the keyboard, so `cooked--mouse-grab' is
+      ;; off and the wheel reaches `mwheel-scroll' rather than the child.
+      (setq cooked--input-mode 'still)
+      (should (cooked--suspended-p))
+      ;; Scroll it away, then run the hook the way a command would.  No drain
+      ;; happens in between: that is the whole point.
+      (set-window-start (selected-window) (point-max))
+      (should-not (= (window-start (selected-window)) top))
+      (cooked--pin-alt-windows)
+      (should (= (window-start (selected-window)) top))
+      ;; `follow' is a deliberate choice to be able to read the transcript behind
+      ;; a running program, so the pin has no business undoing it.
+      (let ((cooked-alt-screen-pin 'follow))
+        (set-window-start (selected-window) (point-max))
+        (cooked--pin-alt-windows)
+        (should-not (= (window-start (selected-window)) top))))))
+
+(ert-deftest cooked-alt-screen-is-pinned-from-redisplay-too ()
+  "Regression: pinning from `post-command-hook' alone left the wheel two ways
+out — a notch over an unselected window ends its command in another buffer, and
+`pixel-scroll-precision-mode' finishes a fling on a timer, which ends no command
+at all.  `window-scroll-functions' is the hook that sees both, and it names the
+window that moved rather than leaving the pin to find it."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '\033[?1049h'; printf 'top\n'; sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (set-window-buffer (selected-window) (current-buffer))
+    (let ((top (marker-position cooked--screen-start))
+          (window (selected-window)))
+      (should (memq #'cooked--pin-alt-windows
+                    (buffer-local-value 'window-scroll-functions (current-buffer))))
+      ;; Called the way redisplay calls it: window first, its new start second.
+      (set-window-start window (point-max))
+      (run-hook-with-args 'window-scroll-functions window (window-start window))
+      (should (= (window-start window) top))
+      ;; Redisplay calls the hook again for the move the pin itself just made, so
+      ;; the pin has to decline to answer itself.
+      (set-window-start window (point-max))
+      (let ((cooked--pinning t))
+        (cooked--pin-alt-windows window (window-start window)))
+      (should-not (= (window-start window) top)))))
 
 (ert-deftest cooked-clearing-the-screen-scrolls-the-transcript-out-of-view ()
   "`CSI 2 J' archives the screen rather than losing it, because history is Emacs'

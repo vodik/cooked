@@ -148,6 +148,15 @@ Callers should `skip-unless\=' zsh themselves -- a macro cannot skip for them."
        (with-current-buffer buffer (cooked--cleanup))
        (kill-buffer buffer))))
 
+(defun cooked-tests--undo-entries ()
+  "The real entries in `buffer-undo-list\=', with the boundaries dropped.
+
+Emacs\=' own command loop pushes a nil boundary after any command that modified
+the buffer, so \"the history is empty\" is a claim about what survives once
+those are taken out.  Nil in a buffer where undo is off, which is the same
+answer as nothing recorded and the one every caller here wants."
+  (and (listp buffer-undo-list) (delq nil (copy-sequence buffer-undo-list))))
+
 (defmacro cooked-tests--with-kill (text &rest body)
   "Run BODY with TEXT as the most recent kill and no clipboard in the way."
   (declare (indent 1))
