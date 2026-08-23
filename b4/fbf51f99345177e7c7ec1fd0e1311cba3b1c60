@@ -1,0 +1,18 @@
+lisp/cooked.el
+  h_15d958549f07bf 2458-2467
+tests/cooked-tests-helpers.el
+  h_15d958549f07bf 354-359,361-366
+tests/cooked-tests-render.el
+  h_15d958549f07bf 1063-1067,1095-1116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "b4fbf51f99345177e7c7ec1fd0e1311cba3b1c60",
+  "prompts": {},
+  "humans": {
+    "h_15d958549f07bf": {
+      "author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
