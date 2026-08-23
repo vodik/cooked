@@ -1,0 +1,21 @@
+tests/cooked-tests-render.el
+  h_15d958549f07bf 982-984,990,992,994,1099
+  h_15d958549f07bf 937-939
+tests/cooked-tests-helpers.el
+  h_15d958549f07bf 357-358,361-365
+  h_15d958549f07bf 353-354,356,359
+lisp/cooked.el
+  h_15d958549f07bf 2458-2460,2462-2463
+  h_15d958549f07bf 2461,2464-2468
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "8cb1961abe56483c399febbe9511b85a94c2998a",
+  "prompts": {},
+  "humans": {
+    "h_15d958549f07bf": {
+      "author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
