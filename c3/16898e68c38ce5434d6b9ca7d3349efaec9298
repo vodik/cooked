@@ -1,0 +1,30 @@
+tests/cooked-tests-render.el
+  h_15d958549f07bf 937-939,982-983,1098
+tests/cooked-tests-helpers.el
+  h_15d958549f07bf 353-354,356-359,361-365
+lisp/cooked.el
+  h_15d958549f07bf 2458-2468
+lisp/cooked-mode.el
+  s_3ed8619a718778::t_b66d3d306024e4 1928-1945,1966,1972-1973
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "c316898e68c38ce5434d6b9ca7d3349efaec9298",
+  "prompts": {},
+  "humans": {
+    "h_15d958549f07bf": {
+      "author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  },
+  "sessions": {
+    "s_3ed8619a718778": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "28ca3416-6795-4bc3-9875-c22ebee7dabf",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
