@@ -1,0 +1,41 @@
+README.md
+  s_443c35c36011ca::t_2d6cdc474ddfcd 539-546
+lisp/cooked-mode.el
+  s_443c35c36011ca::t_47b60aa0824a89 244-277
+lisp/cooked-osc-eval.el
+  s_443c35c36011ca::t_f82c5a9aa6c51c 52-59
+src/emu/image.rs
+  s_443c35c36011ca::t_d0331d9bca13f4 26-27,337-339,355-365,373-380,387,438-441,619-650
+src/emu/kitty.rs
+  s_443c35c36011ca::t_01bbbcfd6e740c 280-289
+src/emu/link.rs
+  s_443c35c36011ca::t_08849cd7a86e2c 24-25,60-62,83-89,91-96,103,139-142,189-221
+src/emu/mod.rs
+  s_443c35c36011ca::t_b82e3b00a0cacb 3-28
+src/emu/screen.rs
+  s_443c35c36011ca::t_1a16c88e65c895 105-110,112,716-718
+src/emu/term.rs
+  s_443c35c36011ca::t_e054dc38310a50 285-293,852-862,866-869,1533-1543,1903-1915,2271-2296
+src/lib.rs
+  s_443c35c36011ca::t_259faac5ee623e 253-260,264-266
+src/pty.rs
+  s_443c35c36011ca::t_7518566714655d 18,29,161-169,178-197,276,349-358,360,362-378,381,405-411,452-458,476-484,490-494,630-638
+src/session.rs
+  s_443c35c36011ca::t_f4ac76732a6ea2 536-545,609,621-627,629-633
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "509131eae1916a39d458467325a6fa81b0b6b42f",
+  "prompts": {},
+  "sessions": {
+    "s_443c35c36011ca": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fd06b8760ffe5rZN7TODnOhdn7",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Simon Gomizelj <sgomizelj@movableink.com>"
+    }
+  }
+}
