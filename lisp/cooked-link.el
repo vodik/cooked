@@ -221,8 +221,31 @@ whether cooked's own `C-c' map is reachable at all already decides it."
 
 ;;;; The OSC 8 pass
 
-(defconst cooked--link-help-echo "mouse-2, C-c RET: follow link"
-  "`help-echo' for an OSC 8 span, worded like goto-addr's own.")
+(defconst cooked--link-keys "mouse-2, C-c RET: follow link"
+  "How to follow an OSC 8 span, worded like goto-addr's own.")
+
+(defun cooked--link-help-echo (_window object pos)
+  "`help-echo' for an OSC 8 span: where following it would actually go.
+
+Called by redisplay with the span's OBJECT -- the buffer, or the string it was
+found in -- and POS, the position within it.
+
+OSC 8 is the one link kind whose text and destination are independent -- the
+child chooses both -- so a span can read like one address and point at another,
+and unlike a goto-addr match there is nothing on screen to check it against.
+Showing the target is what kitty, VTE and iTerm2 all do about that, and it is
+the whole of the defence: following is the user\='s own doing, so the thing to
+protect is the decision rather than the act.
+
+A function rather than the string it returns, because the id has to be resolved
+against `cooked--link-uris\=' and doing that per span while rendering would put
+a hash lookup and a `format\=' on the render path for every link in every
+damaged row.  Hover is rare; drains are not."
+  (let ((buffer (if (bufferp object) object (current-buffer))))
+    (if-let* ((uri (and (buffer-live-p buffer)
+                        (with-current-buffer buffer (cooked-link-uri pos)))))
+        (format "%s\n%s" uri cooked--link-keys)
+      cooked--link-keys)))
 
 (defun cooked--render-link-spans (start spans)
   "Apply SPANS, a block's LINK-SPANS, to text inserted at START.
@@ -247,7 +270,7 @@ claim a click the image had a better claim to."
                                  (list 'cooked-link-id id
                                        'mouse-face 'highlight
                                        'follow-link t
-                                       'help-echo cooked--link-help-echo
+                                       'help-echo #'cooked--link-help-echo
                                        'keymap cooked-link-map))
             (unless (get-text-property beg 'face)
               (put-text-property beg end 'face 'cooked-link)))))

@@ -189,5 +189,29 @@ prebuilt artifact instead."
     (or (locate-dominating-file dir "Cargo.toml")
         (file-name-directory (directory-file-name dir)))))
 
+(defun cooked--local-name (name)
+  "Return NAME, or nil having refused it for naming a remote file.
+
+Every path cooked takes from the child is a string somebody else chose: an OSC 7
+working directory, a file named over the command channel, a name parsed out of
+output.  Under TRAMP such a string is not inert.  Visiting
+\"/ssh:host:/etc/motd\" opens a connection to a host the sender picked and runs
+that method\='s own transport program to get there, which is a command executed
+on somebody else\='s say-so wearing the shape of a path.  \"/sudo::/etc/shadow\"
+is the same move without leaving the machine.
+
+The check has to come before anything that so much as looks at the file,
+`file-exists-p\=' and `file-directory-p\=' included: those are the calls that
+dispatch to the TRAMP handler, so asking whether the file is there is already
+the connection this exists to refuse.
+
+Here rather than in one of the layers because two of them need it and neither
+can require the other -- `cooked-osc.el\=' for OSC 7, which is always on, and
+`cooked-osc-eval.el\=' for the command channel, which is not.  That is what this
+file is the floor for."
+  (if (file-remote-p name)
+      (progn (message "cooked: refused `%s' (a remote file name)" name) nil)
+    name))
+
 (provide 'cooked-util)
 ;;; cooked-util.el ends here

@@ -238,5 +238,30 @@
         (should-not (text-property-not-all (point-min) (point-max)
                                            'cooked-file-link nil))))))
 
+(ert-deftest cooked-file-link-prefilter-cannot-assemble-a-remote-name ()
+  "The scan hands everything its prefilter matches to the filesystem, and
+`ffap-file-exists-string\=' on a TRAMP name would connect.  Nothing is caught
+downstream: what keeps a remote name from ever being built is the character set
+in `cooked-file-link--candidate-regexp\=', which admits `:\=' only ahead of the
+digits of a `:LINE:COL\=' suffix.  That is load-bearing and easy to widen by
+accident, so it is pinned here rather than left to be rediscovered.
+
+See `cooked--local-name\=' for what the connection would cost, and
+`cooked--set-directory\=' for the other half -- a `default-directory\=' that has
+gone remote would make even a relative name resolve over the wire."
+  (cooked-tests--with-file-links
+    (dolist (hostile '("/ssh:evil.example:/etc/motd"
+                       "/sudo::/etc/shadow"
+                       "/docker:box:/tmp/x"))
+      (should-not (string-match-p (concat "\\`" cooked-file-link--candidate-regexp "\\'")
+                                  hostile))
+      ;; And what it *does* match out of one is a local prefix, never the whole.
+      (when (string-match cooked-file-link--candidate-regexp hostile)
+        (should-not (file-remote-p (match-string 0 hostile)))))
+    ;; A name with a line and column still matches whole, or the prefilter would
+    ;; have been narrowed into uselessness.
+    (should (string-match-p (concat "\\`" cooked-file-link--candidate-regexp "\\'")
+                            "src/main.rs:12:3"))))
+
 (provide 'cooked-tests-link)
 ;;; cooked-tests-link.el ends here

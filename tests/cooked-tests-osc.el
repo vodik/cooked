@@ -131,8 +131,9 @@
 
 The OSC 51;E arm hands the request to a timer rather than running it inside the
 drain, so a test that asserts on the command must pump the event loop -- and
-must do it *inside* the `let\=' that bound `cooked-eval-commands\=', since the
-binding is dynamic and the timer reads it when it runs."
+must do it *inside* the `let\=' that bound whatever it is asserting on -- those
+bindings are dynamic, and the timer reads them when it runs rather than when the
+request arrived."
   (dotimes (_ 3) (accept-process-output nil 0.02)))
 
 (ert-deftest cooked-osc-51-is-closed-until-opted-in ()
@@ -140,53 +141,145 @@ binding is dynamic and the timer reads it when it runs."
 must do nothing at all until the user has loaded `cooked-osc-eval' on purpose."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((cooked-osc-eval-function nil)
-          (ran nil))
-      (let ((cooked-eval-commands `(("find-file" . ,(lambda (&rest _) (setq ran t))))))
-        (cooked--osc-emacs '("E\"find-file\" \"/tmp/x\""))
+          (visited nil))
+      (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
+        (cooked--osc-emacs '("E1" "F" "/tmp/x"))
         (cooked-tests--run-deferred)
-        (should-not ran))
+        (should-not visited))
       ;; The annotation half is inert, so it keeps working without opting in.
       (cooked--osc-emacs '("Asimon@host:~"))
       (should (equal cooked--annotation "simon@host:~")))))
 
-(ert-deftest cooked-osc-51-runs-allowlisted-commands ()
+(ert-deftest cooked-osc-51-runs-the-fixed-verbs ()
+  "The closed set, each reached the way the emulator delivers it: split on `;'."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (let* ((called nil)
-           (cooked-eval-commands `(("noted" . ,(lambda (&rest args) (setq called args))))))
-      (cooked--osc-emacs '("E\"noted\" \"one\" \"two\""))
-      (cooked-tests--run-deferred)
-      (should (equal called '("one" "two"))))))
+    (let ((visited nil) (other nil) (dir nil) (cleared nil))
+      (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f)))
+                ((symbol-function 'find-file-other-window) (lambda (f) (setq other f)))
+                ((symbol-function 'dired) (lambda (f) (setq dir f)))
+                ((symbol-function 'cooked-clear-scrollback) (lambda () (setq cleared t))))
+        (cooked--osc-emacs '("E1" "F" "/tmp/one"))
+        (cooked--osc-emacs '("E1" "O" "/tmp/two"))
+        (cooked--osc-emacs '("E1" "D" "/tmp/three"))
+        (cooked--osc-emacs '("E1" "K"))
+        (cooked-tests--run-deferred)
+        (should (equal visited "/tmp/one"))
+        (should (equal other "/tmp/two"))
+        (should (equal dir "/tmp/three"))
+        (should cleared)))))
 
-(ert-deftest cooked-osc-51-refuses-anything-not-allowlisted ()
-  "The allowlist is the entire defence: output from a hostile host reaches here."
+(ert-deftest cooked-osc-51-takes-its-argument-verbatim ()
+  "Every fixed verb takes exactly one argument, so there is nothing to quote and
+a path may contain the separator and the quote character alike."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (let ((cooked-eval-commands '(("find-file" . ignore)))
+    (let ((visited nil))
+      (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
+        ;; The emulator split this into three parts; the handler must put it back
+        ;; without treating any of it as syntax.
+        (cooked--osc-emacs '("E1" "F" "/tmp/a" "b" "c\"d"))
+        (cooked-tests--run-deferred)
+        (should (equal visited "/tmp/a;b;c\"d"))))))
+
+(ert-deftest cooked-osc-51-declines-a-protocol-version-it-does-not-speak ()
+  "Version before verb, so a newer shell snippet is declined rather than
+half-understood by an older Emacs."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((visited nil))
+      (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
+        (cooked--osc-emacs '("E2" "F" "/tmp/x"))
+        (cooked-tests--run-deferred)
+        (should-not visited)))))
+
+(ert-deftest cooked-osc-51-ignores-a-verb-it-does-not-have ()
+  "An unknown verb is refused with a message rather than signalled: this runs from
+a timer the drain queued, where an error is a backtrace nobody asked for."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((visited nil))
+      (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
+        (cooked--osc-emacs '("E1" "Z" "/tmp/x"))
+        (cooked-tests--run-deferred)
+        (should-not visited))
+      ;; The channel is still usable afterwards: a bad verb is refused, not fatal.
+      (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
+        (cooked--osc-emacs '("E1" "F" "/tmp/after"))
+        (cooked-tests--run-deferred)
+        (should (equal visited "/tmp/after"))))))
+
+(ert-deftest cooked-osc-51-refuses-a-remote-file-name ()
+  "The path is an argument the sender chose, and under TRAMP visiting one dials
+out to a host of their choosing."
+  (let ((visited nil))
+    (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
+      (cooked-osc-eval-visit-file "/ssh:evil.example:/etc/motd")
+      (should-not visited)
+      (cooked-osc-eval-visit-file "/sudo::/etc/shadow")
+      (should-not visited)
+      ;; A local name still goes through, or the guard would just be a way of
+      ;; doing nothing.
+      (cooked-osc-eval-visit-file "/tmp/local-file")
+      (should (equal visited "/tmp/local-file")))))
+
+(ert-deftest cooked-osc-51-refuses-a-remote-name-through-the-whole-channel ()
+  "End to end, in the shape a hostile file would send it."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((visited nil))
+      (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
+        (cooked--osc-emacs '("E1" "F" "/ssh:evil.example:/etc/motd"))
+        (cooked-tests--run-deferred)
+        (should-not visited)))))
+
+(ert-deftest cooked-osc-7-refuses-a-remote-directory-before-asking-about-it ()
+  "`file-directory-p\=' on a remote name is itself the connection, so the check
+has to come first rather than second -- and OSC 7 is always on, with no `require'
+in front of it, which makes this the one that matters most."
+  ;; Resolving a remote name autoloads TRAMP, which asks about directories of its
+  ;; own while loading.  Do that here, so what the instrumented call below counts
+  ;; is ours.
+  (file-remote-p "/ssh:example:/tmp")
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/tmp/")
+          (asked nil))
+      (cl-letf (((symbol-function 'file-directory-p)
+                 (lambda (&rest _) (setq asked t) t)))
+        (cooked--osc-cwd '("file:///ssh:evil.example:/tmp"))
+        (should-not asked)
+        (should (equal default-directory "/tmp/"))
+        ;; A local one still lands, so the guard is not just a way of doing nothing.
+        (cooked--osc-cwd '("file:///tmp/somewhere"))
+        (should (equal default-directory "/tmp/somewhere/"))))))
+
+(ert-deftest cooked-osc-51-escape-hatch-is-empty-until-filled ()
+  "`cooked-eval-commands' governs the `!' verb alone, and starts empty: the fixed
+verbs need no entry, so deny-by-default costs nothing here."
+  (should-not cooked-eval-commands)
+  (should-not (assoc "compile" cooked-eval-commands))
+  (should-not (assoc "magit-status" cooked-eval-commands)))
+
+(ert-deftest cooked-osc-51-escape-hatch-refuses-what-is-not-allowlisted ()
+  "Output from a hostile host reaches here, and may not intern a name."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((cooked-eval-commands '(("noted" . ignore)))
           (danger nil))
       (cl-letf (((symbol-function 'shell-command)
                  (lambda (&rest _) (setq danger t))))
-        (cooked--osc-emacs '("E\"shell-command\" \"rm -rf /\""))
+        (cooked--osc-emacs '("E1" "!" "\"shell-command\" \"rm -rf /\""))
         (cooked-tests--run-deferred)
         (should-not danger))
-      ;; Nor by interning a name that merely exists as a function.
+      ;; Nor by naming something that merely exists as a function.
       (cl-letf (((symbol-function 'delete-file)
                  (lambda (&rest _) (setq danger t))))
-        (cooked--osc-emacs '("E\"delete-file\" \"/tmp/x\""))
+        (cooked--osc-emacs '("E1" "!" "\"delete-file\" \"/tmp/x\""))
         (cooked-tests--run-deferred)
         (should-not danger)))))
 
-(ert-deftest cooked-osc-51-does-not-run-shell-commands-by-default ()
-  "`compile' would turn any terminal output into arbitrary execution."
-  (should-not (assoc "compile" cooked-eval-commands))
-  (should-not (assoc "recompile" cooked-eval-commands)))
-
-(ert-deftest cooked-osc-51-rejoins-payloads-split-on-semicolons ()
+(ert-deftest cooked-osc-51-escape-hatch-runs-what-is-allowlisted ()
+  "The one verb that still takes many arguments, so the one that still quotes."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (let* ((got nil)
-           (cooked-eval-commands `(("open" . ,(lambda (path) (setq got path))))))
-      ;; The emulator split this into two parts; the handler must put it back.
-      (cooked--osc-emacs '("E\"open\" \"/tmp/a" "b\""))
+    (let* ((called nil)
+           (cooked-eval-commands `(("noted" . ,(lambda (&rest args) (setq called args))))))
+      (cooked--osc-emacs '("E1" "!" "\"noted\" \"one\" \"two\""))
       (cooked-tests--run-deferred)
-      (should (equal got "/tmp/a;b")))))
+      (should (equal called '("one" "two"))))))
 
 (ert-deftest cooked-osc-51-annotation-is-recorded ()
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -220,7 +313,7 @@ it printed afterwards ever appeared again."
     (unwind-protect
         (cooked-tests--with-session
             (list "/bin/sh" "-c"
-                  (format "printf 'BEFORE\\n'; printf '\\033]51;E\"find-file\" \"%s\"\\033\\\\'; \
+                  (format "printf 'BEFORE\\n'; printf '\\033]51;E1;F;%s\\033\\\\'; \
 sleep 0.3; printf 'LATER\\n'; sleep 5"
                           target))
           (setq terminal (current-buffer))
@@ -340,7 +433,10 @@ are called here where Emacs would call them: `cooked--update-attention' from
           (cooked--refresh-keymap)
           (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
           (let ((opened nil))
-            (let ((cooked-eval-commands `(("find-file" . ,(lambda (f) (setq opened f))))))
+            ;; `find_file' is the shell helper emitting the `F' verb, so what this
+            ;; exercises is the whole path: zsh's function, the wire format, the
+            ;; verb table, and the remote-name guard the verb runs first.
+            (cl-letf (((symbol-function 'find-file) (lambda (f) (setq opened f))))
               (cooked--replace-input (format "find_file %s" target))
               (cooked-send-input)
               (should (cooked-tests--settle (lambda () opened) 8))

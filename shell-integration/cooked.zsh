@@ -54,15 +54,24 @@ __cooked_prompt_precmd
 #
 # Talking back to Emacs.
 #
-# osc_emacs_eval names a command from `cooked-eval-commands'.  Anything absent
-# from that list is refused, so defining a helper here is not enough on its own —
-# which is the point: the terminal is a channel anyone's output can write to.
+# The command channel is `OSC 51;E<version>;<verb>[;<arg>]', and the verbs are a
+# closed set on the Emacs side — there is no name to look up, so defining a helper
+# here is what makes one reachable and nothing else has to be allowed.  Emacs still
+# has to have loaded `cooked-osc-eval' at all; the terminal is a channel anyone's
+# output can write to, so it is off until somebody says otherwise.
 
 osc_title()    { print -Pn "\e]2;${1}\a" }
 osc_annotate() { printf '\e]51;A%s\e\\' "${1:-}" }
 
+# One argument, sent verbatim: the verb decides what it means, so there are no
+# quoting rules and a path containing `;' or `"' needs no escaping.
+osc_emacs_verb() { printf '\e]51;E1;%s;%s\e\\' "$1" "${2-}" }
+
+# `!' is the escape hatch — an arbitrary command name, which Emacs looks up in
+# `cooked-eval-commands' and refuses unless the user put it there.  Quoting lives
+# here and only here, because this is the one verb that takes many arguments.
 osc_emacs_eval() {
-    printf '\e]51;E'
+    printf '\e]51;E1;!;'
     local arg
     for arg in "$@"; do
         arg="${arg//\\/\\\\}"
@@ -79,8 +88,13 @@ osc_copy() {
     printf '\e]52;c;%s\a' "$(print -rn -- "$text" | base64 | tr -d '\n')"
 }
 
-find_file()              { osc_emacs_eval find-file "${${1:-.}:a}" }
-find_file_other_window() { osc_emacs_eval find-file-other-window "${${1:-.}:a}" }
+find_file()              { osc_emacs_verb F "${${1:-.}:a}" }
+find_file_other_window() { osc_emacs_verb O "${${1:-.}:a}" }
+dired()                  { osc_emacs_verb D "${${1:-.}:a}" }
+
+# Not a verb: `magit-status' is not one of the closed set, so this goes through the
+# `!' escape hatch and is refused until `cooked-eval-commands' names it.  The helper
+# is here so that opting in is one line in your init file rather than two places.
 magit()                  { osc_emacs_eval magit-status "${${1:-.}:a}" }
 
 # Note the absence of a `clear' override, and there is nothing left for one to fix:
@@ -88,7 +102,8 @@ magit()                  { osc_emacs_eval magit-status "${${1:-.}:a}" }
 # the screen it archived out of view and then dropping it.  Shadowing a standard
 # command to reach into the editor would be surprising and would break scripts that
 # call it.  From Emacs the same thing is \\[cooked-clear-scrollback], which needs no
-# help from the shell at all; `clear-scrollback' stays in `cooked-eval-commands'.
+# help from the shell at all, and the channel spells it `E1;K' for anyone who wants
+# it from a script.
 
 # Title tracking: show the command that is running, minus the words that hide it.
 __cooked_title_preexec() {

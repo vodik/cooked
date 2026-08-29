@@ -357,7 +357,13 @@ not every window in the Emacs running it."
 ;; channel driven by bytes on the terminal — anything that can write there can pull
 ;; the trigger: `cat' of a hostile file, output from a compromised host over ssh, a
 ;; build log quoting text somebody else chose — so it is off until you load
-;; `cooked-osc-eval' and say you want it.  `C' carries completion candidates, which
+;; `cooked-osc-eval' and say you want it.
+;;
+;; What an `E' payload *means* is deliberately not known here.  It is
+;; `E<version>;<verb>[;<arg>]' and the verbs are a closed set, but both facts belong
+;; to the layer that implements them: this arm's whole job is to notice the letter,
+;; refuse it when nobody is listening, and hand the rest over.  A core that parsed
+;; the verbs would have to be taught each new one.  `C' carries completion candidates, which
 ;; are harmless in the same way `A' is, but answering them means asking the shell —
 ;; a blocking round trip here and a `compadd' shadow there — so it too waits to be
 ;; loaded, as `cooked-shell-completion'.
@@ -369,6 +375,10 @@ not every window in the Emacs running it."
 
 (defvar cooked-osc-eval-function nil
   "Function handling the OSC 51;E command channel, called with the payload.
+
+The payload is everything after the `E\=', so `E1;F;/tmp/x\=' arrives as
+\"1;F;/tmp/x\": a version, a verb, and at most one argument.  Parsing it is the
+layer\='s business rather than this file\='s.
 
 Nil means the channel is closed and requests are ignored.
 `cooked-osc-eval' sets it; requiring that file is how you opt in, and the
@@ -451,9 +461,19 @@ much of the kill ring a runaway or hostile stream can take over."
           (message "cooked: copied %d characters" (length text)))))))
 
 (defun cooked--set-directory (url)
-  "Track the child's directory from an OSC 7 URL."
+  "Track the child's directory from an OSC 7 URL.
+
+The name is refused if it is remote, and refused *before* `file-directory-p\='
+rather than after.  That order is the whole point: this handler is always on --
+OSC 7 needs no `require\=', unlike the command channel -- so a `cat\=' of a
+hostile file can put a TRAMP name here, and asking whether that directory exists
+is itself the connection.  A `default-directory\=' that has gone remote is also
+not the end of it: `cooked-file-link\=' resolves the names it finds against it,
+so one poisoned value turns every settled batch of scrollback into remote stats.
+See `cooked--local-name\='."
   (when (string-match "\\`file://[^/]*\\(/.*\\)\\'" url)
-    (let ((dir (file-name-as-directory (url-unhex-string (match-string 1 url)))))
+    (when-let* ((name (cooked--local-name (url-unhex-string (match-string 1 url))))
+                (dir (file-name-as-directory name)))
       (when (file-directory-p dir)
         (setq default-directory dir)))))
 

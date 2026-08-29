@@ -235,6 +235,57 @@ The one coupling that crosses the other way is a cache: `cooked--flush-face-cach
 to drop decoration specs that were coloured against the outgoing theme, and cannot name
 them from below. `cooked-theme-change-hook` is how the upper layer says so instead.
 
+## `cooked-osc-eval-request`: why the verbs are a closed set
+
+The command channel started as vterm's: a name off the wire, looked up in an alist, and
+applied to the arguments that came with it. The allowlist was the whole defence, and it
+was described that way.
+
+It is the wrong shape, and the failure is instructive because the allowlist does exactly
+what it claims. It settles *which* function runs. It says nothing about what that
+function is pointed at, and for the entry everybody wants — `find-file` — the argument is
+the whole of the danger: `/ssh:attacker.example:/etc/motd` is not a file to read, it is a
+connection to a host the sender chose, opened by running that method's transport program.
+`/sudo::` is the same move without leaving the machine. A list of approved *names* cannot
+express "and only local ones", so every entry that takes a path needed a wrapper, and the
+allowlist's own documentation had to warn that adding the obvious thing undoes it.
+
+So the verbs are fixed instead. `F`, `O`, `D`, `K`, each cooked's own code, each checking
+its own argument, and no string the child sends is ever resolved to a function. eat
+arrived at the same answer from the other direction and its verb set is closed too; vterm
+still ships the open one, enabled by default.
+
+Two things fell out of it that were not the goal.
+
+**Quoting disappeared.** Every verb takes at most one argument, so the argument is the
+rest of the payload verbatim — no escaping, no `split-string-and-unquote`, and a path with
+a `;` or a `"` in it just arrives. The old format needed rules for all three.
+
+**Deny-by-default became free.** `cooked-eval-commands` governs only the `!` escape hatch
+now, and defaults to empty. That was unaffordable while it was the mechanism: `find-file`
+was the entire point of the channel, so an empty default meant a feature that did nothing
+until configured, and everyone would have pasted the same list back in. Giving the common
+cases verbs is what let the open-ended part start closed.
+
+The cost is that a new capability is a code change rather than a line of config, which is
+the trade eat makes and vterm does not. `!` is there for when that is the wrong answer.
+
+### The bug class, not the bug
+
+Fixing the channel did not fix the class. Anything that turns terminal bytes into a file
+name has the same exposure, and the worst instance was not in the channel at all:
+`cooked--set-directory` took a TRAMP name out of an OSC 7 URL and called `file-directory-p`
+on it — and OSC 7 is always on, with no `require` in front of it. It was also upstream of
+`cooked-file-link`, which resolves what it finds against `default-directory`, so one
+poisoned value would have turned every settled batch of scrollback into remote stats.
+
+That is why the guard is `cooked--local-name` in `cooked-util.el` rather than a wrapper in
+the layer: two handlers need it, one of them is core, and the check has to happen *before*
+`file-exists-p` or `file-directory-p` rather than after, because those calls are what
+dispatch to the TRAMP handler. Asking whether the file is there is already the connection.
+
+---
+
 ## Vendored parser
 
 `src/emu/parser/` is vte 0.15, vendored rather than depended on, because two things

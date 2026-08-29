@@ -72,6 +72,7 @@ knowledge:
 | Password prompts | minibuffer, answerable from auth-source | inline, like any terminal | inline, like any terminal |
 | Per-command structure | OSC 133 records: extents, exit codes | no | no |
 | Box-drawing glyphs | rasterized to tile the cell exactly | left to the font | left to the font |
+| Letting the child drive Emacs | a closed set of verbs; arbitrary names need a second opt-in | any name in `vterm-eval-cmds`, on by default | a closed set of verbs |
 
 The short version: **eat** is the most portable — pure Lisp, nothing to compile — and pays
 for it in throughput. **vterm** is fast and mature, but is a rectangle of characters with
@@ -169,10 +170,14 @@ code already loaded and running is a switch in name only:
   (require 'cooked-command-decorations)) ; a fringe marker per command, coloured by exit
 ```
 
-`cooked-osc-eval` is the one to read before enabling: it lets the child ask Emacs to run
-an allowlisted command, and a terminal will print whatever it is given — `cat` of a
-hostile file, output from a compromised host over ssh. The allowlist is the entire
-defence. See its commentary and [docs/FEATURES.md](docs/FEATURES.md).
+`cooked-osc-eval` is the one to read before enabling: it lets the child ask Emacs to
+do things, and a terminal will print whatever it is given — `cat` of a hostile file,
+output from a compromised host over ssh. What it grants is a *closed set of verbs*
+cooked implements itself — visit a file, open Dired, clear the scrollback — each of
+which checks its own argument, because `find-file` is a reasonable thing to grant right
+up until the name is `/ssh:attacker.example:/x` and visiting it dials out. Arbitrary
+named commands live behind one further opt-in, `cooked-eval-commands`, which is empty
+until you fill it. See its commentary and [docs/FEATURES.md](docs/FEATURES.md).
 
 ### Shell integration
 
@@ -200,7 +205,8 @@ reporting, mouse press/release/wheel with SGR encoding, alternate scroll.
 10/11/12 (foreground, background and cursor colour, queried and set) with 110/111/112 to
 reset them, 52 (clipboard), 99 and 777 (desktop notifications, both conventions), 133
 (semantic prompts), 1337 (iTerm2, whose `File=` is handled and whose other verbs are
-passed through), and 51 (the command and completion channels, both opt-in).
+passed through), and 51 (the command and completion channels, both opt-in; the command
+half is a closed set of verbs rather than a name to look up).
 
 Everything but OSC 133 and OSC 8 reaches Lisp verbatim, so `cooked-osc-handlers` is a
 documented extension point: teaching cooked a new sequence is an entry in an alist, not a

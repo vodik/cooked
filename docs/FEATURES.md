@@ -81,14 +81,15 @@ The shell can ask the Emacs that is running it to do things:
 
 ```sh
 find_file src/main.rs        # opens it in the same Emacs
+dired .                      # the current directory, in Dired
 echo hi | osc_copy           # onto the kill ring, works over ssh
 ```
 
-That is OSC 51;E, vterm's protocol, so existing vterm shell configuration mostly
-works — guard on `[[ "$TERM_PROGRAM" == cooked ]]`, which is how a shell tells it
-is talking to us, and rename `osc_vterm_eval` to `osc_emacs_eval`. Children are
-also handed `TERM_PROGRAM_VERSION`, straight from the version the native core was
-built with.
+The helpers are in `shell-integration/cooked.zsh`, and today they are zsh's alone:
+the bash and fish snippets carry OSC 133 and nothing else, so nothing in this section
+reaches Emacs from them. Children are handed `TERM_PROGRAM=cooked` and
+`TERM_PROGRAM_VERSION`, straight from the version the native core was built with, which
+is how a shell tells it is talking to us.
 
 **This is a command channel driven by bytes on the terminal**, so it is off until you
 ask for it with `(require 'cooked-osc-eval)`. Anything that can write to the terminal
@@ -96,22 +97,69 @@ can pull the trigger: `cat` of a hostile file, output from a compromised host, a
 log quoting attacker-controlled text. Being a separate file is the point — you should
 buy that risk deliberately rather than inherit it.
 
-Once loaded, `cooked-eval-commands` maps names to functions and nothing outside it
-runs — no `intern` of whatever arrived. `compile` and `recompile` are deliberately
-absent, since they execute arbitrary shell commands; opt in only if you accept that:
+### A closed set of verbs
+
+The wire format is `OSC 51 ; E <version> ; <verb> [ ; <arg> ] ST`, and the verbs are
+fixed:
+
+| Wire | Shell helper | What it does |
+|---|---|---|
+| `51;E1;F;<path>` | `find_file` | visit a file |
+| `51;E1;O;<path>` | `find_file_other_window` | visit it in another window |
+| `51;E1;D;<path>` | `dired` | open Dired |
+| `51;E1;K` | — | clear the scrollback |
+
+There is no name to look up and nothing maps a string the child sent onto a function.
+That is the point, and it is the design eat arrived at rather than vterm's: an
+allowlist of names settles *which* function runs and can say nothing about what it is
+pointed at, which is the half that bites. `find-file` looks like the safe end of the
+range until the name handed to it is `/ssh:attacker.example:/etc/motd` — visiting that
+is not a read, it is TRAMP opening a connection to a host the sender chose and running
+that method's transport program to get there. `/sudo::` is the same move without
+leaving the machine. A closed set has no such gap, because each verb is cooked's own
+code and checks its own argument.
+
+That check runs before anything looks at the file, `file-directory-p` included: asking
+whether a remote file is there is already the connection. The same guard sits on OSC 7,
+which sets `default-directory` and needs no `require` at all.
+
+Every verb takes at most one argument, which is the rest of the payload verbatim. So
+there are no quoting rules and a path containing `;` or `"` needs no escaping — it
+simply arrives.
+
+### The escape hatch
+
+One verb is open-ended. `!` names an arbitrary command from `cooked-eval-commands`,
+which is **empty by default**:
+
+```sh
+osc_emacs_eval compile "make -k"    # refused until you say otherwise
+```
+
+Empty costs nothing now that the fixed verbs cover the ordinary cases, which is what
+makes deny-by-default worth having here. Filling it is a second decision on top of
+loading the layer at all.
+
+`compile` and `recompile` are the obvious candidates and the reason for the caution —
+they execute arbitrary shell commands, so adding them turns any text that reaches your
+terminal into remote code execution:
 
 ```elisp
 (add-to-list 'cooked-eval-commands '("compile" . compile))
 ```
 
-`magit-status` is absent for the same reason, and is not merely a viewer: `git status`
-runs `core.fsmonitor` from the target repository's own `.git/config`, so pointing it at
-a repo somebody else chose is closer to `compile` than it looks. Add it back only having
-read that:
+`magit-status` is worth spelling out separately because it looks like a viewer rather
+than an executor: `git status` runs `core.fsmonitor` from the target repository's own
+`.git/config`, so pointing it at a repo somebody else chose is closer to `compile` than
+it looks. The `magit` shell helper is already there, waiting on the Emacs half:
 
 ```elisp
 (add-to-list 'cooked-eval-commands '("magit-status" . magit-status))
 ```
+
+Whatever goes in that list is called with the strings the child sent and nothing else
+checks them — which the fixed verbs cannot say — so prefer a wrapper of your own over
+the bare command when the argument is a path.
 
 OSC 52 puts text on the kill ring, up to `cooked-clipboard-max-size`. Clipboard *reads*
 are never answered — replying to a query would hand your clipboard to whatever asked.
