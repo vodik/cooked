@@ -28,18 +28,22 @@
 ;;   emacs -Q --batch -L lisp -L tests -l ert \
 ;;         -l cooked-tests-glyph.el -f ert-run-tests-batch-and-exit
 ;;
-;; The `evil' tests guard themselves with `(skip-unless (require \='evil nil t))',
-;; and `-Q' means they will skip: nothing is on the load path but what is passed
-;; in.  Skipping is silent enough to be mistaken for passing, and the evil
-;; integration is where most of the keyboard-ownership logic actually shows, so
-;; point the run at an installed copy to exercise it:
+;; Some tests guard themselves with `skip-unless' on an optional package -- `evil'
+;; and `evil-collection', where most of the keyboard-ownership logic actually
+;; shows.  Skipping is silent enough to be mistaken for passing, so the helpers go
+;; looking for those in the usual install locations and say at load which, if any,
+;; they could not find; `cooked-tests--optional-packages' is the list.  Nothing has
+;; to be passed on the command line for them to run.
+;;
+;; Check the tail of the run for a SKIPPED list all the same: on a machine with
+;; the packages installed there should be none.  For an install somewhere the
+;; search does not reach, name it yourself:
 ;;
 ;;   E=~/.config/emacs/straight/build      # or ~/.emacs.d/elpa/evil-*
 ;;   emacs -Q --batch -L lisp -L tests -L $E/evil -L $E/goto-chg -l ert \
 ;;         -l cooked-tests.el -f ert-run-tests-batch-and-exit
 ;;
-;; `goto-chg' is evil\='s one hard dependency.  Check the tail of the run for a
-;; SKIPPED list: with evil found there should be none.
+;; `goto-chg' is evil\='s one hard dependency.
 
 ;;; Code:
 

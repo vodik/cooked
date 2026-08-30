@@ -55,12 +55,19 @@ than a builtin. Unloaded, none of that exists: `cooked-shell-completion-function
 CAPF goes straight to the Emacs table, and the child is never told to install its half.
 
 That last part is where the two halves come apart, and it is worth knowing. Requiring
-the layer reaches Emacs immediately, but whether the *shell* installs its half is
-decided when the shell starts, from `COOKED_COMPLETION` in its environment, because
-the `compadd` shadow, the widget and its bindkeys cannot be usefully retracted from a
-running zsh. So load it in your init file, or restart the shell after loading it. A
-shell started with its half installed keeps announcing at every prompt whether or not
-Emacs is listening; Emacs ignoring the announcement is the whole of the difference.
+the layer reaches Emacs immediately, but the shell's half is
+`shell-integration/cooked-completion.zsh`, sourced from your rc after the core — and
+whether a running zsh has it is settled for the life of that shell, because the
+`compadd` shadow, the widget and its bindkeys cannot be usefully retracted. So source
+it, or restart the shell.
+
+The *announcement* is not part of that file. It ships in the core, because Emacs reads
+it as two different things and only one of them is about completion: to this layer it
+is the token a request must carry, and to `cooked--policy` it is a license to own the
+input line — the shell asserting, per line, that a line editor is bound and reading.
+Its last field says whether requests can be answered, which is what
+`cooked-completion.zsh` turns on. A shell announcing `replies=0` keeps its editable
+line and is simply never asked.
 
 `cooked-completion-backend` chooses between the sources once the layer is loaded:
 `shell` (the default, falling back to Emacs), `native`, or `both`. `native` is the
@@ -85,11 +92,21 @@ dired .                      # the current directory, in Dired
 echo hi | osc_copy           # onto the kill ring, works over ssh
 ```
 
-The helpers are in `shell-integration/cooked.zsh`, and today they are zsh's alone:
-the bash and fish snippets carry OSC 133 and nothing else, so nothing in this section
-reaches Emacs from them. Children are handed `TERM_PROGRAM=cooked` and
-`TERM_PROGRAM_VERSION`, straight from the version the native core was built with, which
-is how a shell tells it is talking to us.
+The helpers are defined by the zsh snippet when `eval-helpers` is in
+`cooked-shell-integration-features`, which it is not by default — see [SHELL.md](SHELL.md)
+for what they are and how to write your own. Only the closed verbs are shipped: nothing
+is aliased over a real command name for you, because that reads very differently as
+something you wrote than as something cooked put in your shell.
+
+They are also local-only — the verbs carry paths, and Emacs resolves them with no idea
+the shell is on another host, so `find_file ./notes.md` from behind an `ssh` opens
+whatever local file bears that name. All three snippets carry the OSC 133 marks and
+OSC 7; zsh and bash also carry the `51;CH` announcement, and the helpers are zsh's
+alone.
+
+Children are handed `TERM_PROGRAM=cooked` and `TERM_PROGRAM_VERSION`, straight from the
+version the native core was built with, which is how a shell tells it is talking to us —
+and what the one-line rc guard tests.
 
 **This is a command channel driven by bytes on the terminal**, so it is off until you
 ask for it with `(require 'cooked-osc-eval)`. Anything that can write to the terminal
@@ -133,33 +150,42 @@ One verb is open-ended. `!` names an arbitrary command from `cooked-eval-command
 which is **empty by default**:
 
 ```sh
-osc_emacs_eval compile "make -k"    # refused until you say otherwise
+cooked_send compile "make -k"    # refused until you say otherwise
 ```
 
 Empty costs nothing now that the fixed verbs cover the ordinary cases, which is what
 makes deny-by-default worth having here. Filling it is a second decision on top of
 loading the layer at all.
 
-`compile` and `recompile` are the obvious candidates and the reason for the caution —
-they execute arbitrary shell commands, so adding them turns any text that reaches your
+The reason for the caution generalizes, and is worth stating as a rule rather than as a
+list of exploits: naming a command settles *which* function runs and can say nothing
+about *what it is pointed at*, while the argument arrives from the byte stream. So
+anything in this list must treat its argument as attacker-chosen — which the fixed verbs
+can promise about themselves and an allowlisted command cannot.
+
+`compile` and `recompile` are the obvious candidates and the honest example: they
+execute arbitrary shell commands, so adding them turns any text that reaches your
 terminal into remote code execution:
 
 ```elisp
 (add-to-list 'cooked-eval-commands '("compile" . compile))
 ```
 
-`magit-status` is worth spelling out separately because it looks like a viewer rather
-than an executor: `git status` runs `core.fsmonitor` from the target repository's own
-`.git/config`, so pointing it at a repo somebody else chose is closer to `compile` than
-it looks. The `magit` shell helper is already there, waiting on the Emacs half:
+Nothing is shipped aliased over a real command name, so reaching one is two deliberate
+steps rather than one: the allowlist entry, and an alias of your own.
 
 ```elisp
 (add-to-list 'cooked-eval-commands '("magit-status" . magit-status))
 ```
+```zsh
+alias magit='cooked_send magit-status'
+```
 
-Whatever goes in that list is called with the strings the child sent and nothing else
-checks them — which the fixed verbs cannot say — so prefer a wrapper of your own over
-the bare command when the argument is a path.
+`magit-status` is the example because it looks like the safe end of the range and is
+not: `git status` runs `core.fsmonitor` from the target repository's own `.git/config`,
+so pointing it at a repo somebody else chose executes what that repo says to.
+
+Prefer a wrapper of your own over the bare command when the argument is a path.
 
 OSC 52 puts text on the kill ring, up to `cooked-clipboard-max-size`. Clipboard *reads*
 are never answered — replying to a query would hand your clipboard to whatever asked.

@@ -1091,8 +1091,13 @@ fn rep_without_a_preceding_print_does_nothing() {
 #[test]
 fn rep_ignores_a_combining_mark() {
     // The mark folds onto the `e`; REP then repeats the `e`, not the accent.
+    //
+    // Compared as text rather than counted: a REP that repeated the mark would fold both
+    // copies back onto the same first cell, for `e` plus three accents -- four characters
+    // either way, so a count cannot tell the two apart and this passed with `last_print`
+    // capturing zero-width marks.
     let t = term(2, 10, b"e\xcc\x81\x1b[2b");
-    assert_eq!(t.screen().row(0).unwrap().to_text().chars().count(), 4);
+    assert_eq!(t.screen().row(0).unwrap().to_text(), "e\u{301}ee");
 }
 
 #[test]
@@ -1222,6 +1227,18 @@ fn bce_applies_to_ech_ich_and_scrolls() {
         Color::Indexed(1),
         "ECH erases with the pen"
     );
+
+    // ICH, which the name has always claimed and the body never fed: `insert_chars`
+    // passes `pen.erase()` down like the other two, so the blanks it opens up carry the
+    // background as well.
+    let t = term(3, 8, b"abcdef\r\x1b[41m\x1b[2@");
+    let row = t.screen().row(0).unwrap();
+    assert_eq!(
+        row.runs()[0].style.bg,
+        Color::Indexed(1),
+        "ICH opens its gap with the pen"
+    );
+    assert_eq!(row.to_text().trim_end(), "  abcdef");
 
     // A scroll exposes a fresh row, which is an erase too.
     let t = term(2, 8, b"\x1b[41m\x1b[2Sx");

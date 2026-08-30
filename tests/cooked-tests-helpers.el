@@ -47,17 +47,30 @@ Matches a bare directory (straight) or a versioned one (package.el)."
               (add-to-list 'load-path dir)
               (throw 'found dir)))))))
 
-(defun cooked-tests--evil-available-p ()
-  "Whether `evil' can be loaded, having gone looking for it first.
-`goto-chg' comes along because evil requires it."
-  (cooked-tests--add-package "goto-chg")
-  (cooked-tests--add-package "evil")
-  (require 'evil nil t))
+(defconst cooked-tests--optional-packages
+  '("goto-chg" "evil" "evil-collection")
+  "Packages a `skip-unless' asks for, and which therefore have to be found first.
+
+One list rather than a call apiece, because what the tests ask for and what is
+searched for have to be the same set, and the bug this file exists to prevent is
+exactly them drifting apart: a test asking for `evil-collection' was added while
+only `evil' and its dependency `goto-chg' were ever put on `load-path', so that
+test skipped on a machine where the package had been installed all along.  A new
+one goes here.")
+
+(defun cooked-tests--find-optional-packages ()
+  "Put `cooked-tests--optional-packages' on `load-path', naming what is missing.
+Returns the packages that could not be found."
+  (seq-remove #'cooked-tests--add-package cooked-tests--optional-packages))
 
 ;; Announced at load, not left to the summary: a skipped suite is the failure
 ;; mode this exists to prevent, so it should be the first thing on the screen.
-(unless (cooked-tests--evil-available-p)
-  (message "cooked-tests: evil not found -- its tests will skip"))
+;; Named individually, because "evil not found" was printed for a shortfall that
+;; was never evil.
+(when-let* ((missing (cooked-tests--find-optional-packages)))
+  (message "cooked-tests: %s not found -- tests needing %s will skip"
+           (string-join missing ", ")
+           (if (cdr missing) "them" "it")))
 
 (require 'cooked)
 (require 'cooked-mode)
@@ -150,6 +163,10 @@ PROMPT='" cooked-tests--prompt "'
 RPROMPT=''
 HISTFILE=$ZDOTDIR/history
 autoload -U compinit && compinit -u -d $ZDOTDIR/zcompdump
+osc_emacs_verb() { printf '\\e]51;E1;%s;%s\\e\\\\' \"$1\" \"${2-}\" }
+find_file()              { osc_emacs_verb F \"${${1:-.}:a}\" }
+find_file_other_window() { osc_emacs_verb O \"${${1:-.}:a}\" }
+dired()                  { osc_emacs_verb D \"${${1:-.}:a}\" }
 ")
   "The zsh configuration the suite runs against.
 
@@ -158,7 +175,13 @@ the real compsys: without it `_main_complete\=' has nothing to call and those
 tests fail for a reason that has nothing to do with cooked.  The prompt is a
 fixed two characters (`cooked-tests--prompt\='), so that what a test reads out of
 the buffer is the command\='s output and a prompt of known width -- rather than
-a hostname, a working directory and a git branch that vary per machine.")
+a hostname, a working directory and a git branch that vary per machine.
+
+The `find_file\=' helpers are here rather than in the shipped snippet because
+that is where they now live for everyone: they are an example in docs/SHELL.md
+to copy into your own rc, not something cooked puts in your shell.  Being user
+configuration is exactly what makes this file the right place for them, and the
+tests that drive the OSC 51;E channel end to end still need a caller.")
 
 (defvar cooked-tests--zdotdir nil
   "Temporary ZDOTDIR the suite\='s shells are started against.")
@@ -194,6 +217,11 @@ three separate ways, all of them observed here rather than imagined:
 
 HISTFILE points inside the temporary directory for the same reason, so running
 the suite cannot append to the history of the person running it."
+  ;; Named rather than left at the default so the suite keeps generating startup
+  ;; files even if the default changes again: a hermetic shell, built to order,
+  ;; is exactly what injection is good at.  Set for the whole suite rather than
+  ;; per call site, for the same reason ZDOTDIR is.
+  (setq cooked-shell-integration 'detect)
   (unless cooked-tests--zdotdir
     (setq cooked-tests--zdotdir (make-temp-file "cooked-tests-zdotdir-" t))
     (with-temp-file (expand-file-name ".zshrc" cooked-tests--zdotdir)

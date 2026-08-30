@@ -10,6 +10,47 @@
 
 (require 'cooked-tests-helpers)
 
+(ert-deftest cooked-snippet-does-nothing-outside-cooked ()
+  "The snippet guards itself on TERM_PROGRAM, so a shared rc is safe.
+
+Sourcing it is a line in the user\='s own configuration, which means it runs in
+every shell they start -- under alacritty, under tmux, over an ssh from a laptop
+that has never heard of cooked.  Defining hooks and appending to PS1 there would
+be cooked following someone home.
+
+The probe is `precmd_functions\=' rather than any single hook name because setup
+is deferred to the first prompt: immediately after sourcing, the only thing
+registered is the deferred initializer, and under another terminal there must be
+nothing at all."
+  (skip-unless (executable-find "zsh"))
+  (let ((snippet (expand-file-name "cooked.zsh" (cooked--integration-directory))))
+    (dolist (term '("xterm-kitty" "cooked"))
+      (with-temp-buffer
+        (call-process
+         (executable-find "zsh") nil t nil "-f" "-i" "-c"
+         (format "TERM_PROGRAM=%s source %s; print -r -- ${${(M)precmd_functions:#__cooked_*}:-none}"
+                 term (shell-quote-argument snippet)))
+        (should (equal (string-trim (buffer-string))
+                       (if (equal term "cooked") "__cooked_deferred_init" "none")))))))
+
+(ert-deftest cooked-core-snippet-announces-but-cannot-answer ()
+  "The announcement is in the core and the capture is not, so the two fields of
+`OSC 51;CH\=' come apart: the core alone claims a line editor is reading -- which
+is what licenses the Emacs input region behind an ssh -- while saying it can
+answer no requests.  Sourcing the capture is what turns the last field on."
+  (skip-unless (executable-find "zsh"))
+  (skip-unless (executable-find "base64"))
+  (let* ((dir (cooked--integration-directory))
+         (core (shell-quote-argument (expand-file-name "cooked.zsh" dir)))
+         (capture (shell-quote-argument (expand-file-name "cooked-completion.zsh" dir))))
+    (dolist (probe (list (cons (format "source %s" core) "0")
+                         (cons (format "source %s; source %s" core capture) "1")))
+      (with-temp-buffer
+        (call-process (executable-find "zsh") nil t nil "-f" "-i" "-c"
+                      (format "TERM_PROGRAM=cooked; %s; print -r -- $__cooked_complete_replies"
+                              (car probe)))
+        (should (equal (string-trim (buffer-string)) (cdr probe)))))))
+
 (ert-deftest cooked-module-loads-and-defines-its-api ()
   (cooked--load-module)
   (should (featurep 'cooked-core))
@@ -129,6 +170,82 @@ add-zsh-hook precmd __theme_precmd\n"))
         (with-current-buffer buffer (cooked--cleanup))
         (kill-buffer buffer)))))
 
+(ert-deftest cooked-integration-features-reach-the-child-verbatim ()
+  "The feature list is passed as a string the shell can append to.
+
+Verbatim rather than re-encoded, and that is the whole mechanism: the shell
+appends `no-NAME\=' to the value it was handed, so the vocabulary it answers in
+has to be the one it received.  A normalized re-encoding would round-trip to
+something the rc could not extend."
+  (should (equal (cooked--integration-environment)
+                 "marks input-mark cwd announce completion title"))
+  ;; Ordered by the canonical list rather than by however the option was written,
+  ;; so the value a shell sees is stable enough to quote in a bug report.
+  (let ((cooked-shell-integration-features '(cwd marks)))
+    (should (equal (cooked--integration-environment) "marks cwd")))
+  (let ((cooked-shell-integration-features nil))
+    (should (null (cooked--integration-environment)))))
+
+(ert-deftest cooked-integration-scheme-is-detected-or-forced ()
+  "`detect\=' matches the basename; naming a shell overrides the guess both ways."
+  (should (eq (cooked--integration-shell "/bin/zsh") 'zsh))
+  (should (eq (cooked--integration-shell "/usr/local/bin/bash") 'bash))
+  ;; Unknown shells are left alone rather than guessed at.
+  (should (null (cooked--integration-shell "/bin/nu")))
+  (let ((cooked-shell-integration 'none))
+    (should (null (cooked--integration-shell "/bin/zsh"))))
+  (let ((cooked-shell-integration 'bash))
+    (should (eq (cooked--integration-shell "/bin/whatever") 'bash)))
+  ;; This option was a boolean before it was a choice, and a session that refuses
+  ;; to start is a poor way to learn that a setting grew values.
+  (let ((cooked-shell-integration t))
+    (should (eq (cooked--integration-shell "/bin/zsh") 'zsh))))
+
+(ert-deftest cooked-integration-features-travel-without-injection ()
+  "Turning injection off does not turn the features off.
+
+The two are separate questions -- whether cooked put the code there, and what it
+does once it is there -- because the shells that most need the second are the
+ones injection cannot reach.  A hand-sourced snippet in a nested shell reads the
+same list as an injected one."
+  (let ((cooked-shell-integration 'none))
+    (pcase-let ((`(,argv ,env ,scratch) (cooked--shell-invocation "/bin/zsh")))
+      (should (equal argv '("/bin/zsh")))
+      (should (null scratch))
+      (should (equal (cdr (assoc "COOKED_SHELL_INTEGRATION_FEATURES" env))
+                     "marks input-mark cwd announce completion title")))))
+
+(ert-deftest cooked-a-prompt-that-marks-itself-can-stand-cooked-down ()
+  "An rc that already emits OSC 133 appends `no-marks\=' and keeps the rest.
+
+This is the case with no good answer anywhere else: kitty documents the same
+convention, Ghostty cannot express it, and nobody specifies what a terminal does
+with two sets of marks for one prompt.  Here the shell settles it before any
+duplicate reaches the wire -- and settling it must not cost the editable line,
+which is the half a user standing the marks down still wants.
+
+The snippet defers its own setup to the first prompt precisely so that the rc,
+which runs earlier, has somewhere to stand."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-fake-zdotdir
+      '((".zshrc" . "PROMPT='$ '\nCOOKED_SHELL_INTEGRATION_FEATURES=\"${COOKED_SHELL_INTEGRATION_FEATURES-} no-marks\"\n"))
+    (let ((buffer (generate-new-buffer "*cooked-no-marks*")))
+      (unwind-protect
+          (with-current-buffer buffer
+            (cooked-mode)
+            (pcase-let ((`(,argv ,env ,scratch)
+                         (cooked--shell-invocation (executable-find "zsh"))))
+              (setq cooked--scratch scratch)
+              (cooked--start argv nil env))
+            (cooked--refresh-keymap)
+            ;; The `B\=' mark still arrives, so Emacs still owns the line.
+            (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
+            ;; But no `A\=' ever did, so there is no prompt extent to report --
+            ;; which is what the rc asked for by standing the marks down.
+            (should (null cooked--prompt-start)))
+        (with-current-buffer buffer (cooked--cleanup))
+        (kill-buffer buffer)))))
+
 (ert-deftest cooked-cleanup-kills-the-child-without-waiting-for-gc ()
   "Clearing the Lisp variable only drops a reference; nothing guarantees a
 collection ever runs, so the child has to be killed explicitly."
@@ -176,6 +293,181 @@ a foreign handle would be reinterpreted as a session."
   (let ((cooked-kill-buffer-on-exit (lambda (code) (eql code 7))))
     (should (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 7") 5))
     (should-not (cooked-tests--run-until-dead '("/bin/sh" "-c" "exit 8") 1))))
+
+(defun cooked-tests--bash-marks (rc &optional input)
+  "Run bash over RC, feed it INPUT, and return the OSC 133 marks it wrote, in order.
+
+Read off the raw byte stream rather than out of a cooked buffer, because what
+these tests are about is what the *snippet* put on the wire: a mark emitted twice
+is invisible in the buffer -- an OSC occupies no columns -- and reaches Emacs as a
+second claim about the same prompt, which is exactly the kind of bug that hides
+until something downstream quietly disagrees.
+
+bash is the shell this matters most for.  It is the one the author does not use,
+so it has no daily driver to notice a regression, and its hooks are the fragile
+ones: PS1 holds the marks as backslash escapes rather than as bytes, and the
+DEBUG trap fires for every command including the prompt\='s own."
+  (let ((marks nil))
+    (with-temp-buffer
+      (let ((process-environment (cons "TERM_PROGRAM=cooked" process-environment)))
+        (insert (or input "true\nexit\n"))
+        (call-process-region (point-min) (point-max) (executable-find "bash")
+                             t t nil "--rcfile" rc "-i"))
+      (goto-char (point-min))
+      (while (re-search-forward "\e]133;\\([A-D]\\)\\(;[0-9]+\\)?\a" nil t)
+        (push (concat (match-string 1) (or (match-string 2) "")) marks)))
+    (nreverse marks)))
+
+(defun cooked-tests--bash-rc (&rest lines)
+  "Write a bash rc sourcing the core snippet after LINES, and return its name."
+  (let ((rc (make-temp-file "cooked-tests-bashrc-")))
+    (with-temp-file rc
+      (insert "PS1='$ '\n"
+              (mapconcat #'identity lines "\n")
+              (if lines "\n" "")
+              ". " (shell-quote-argument
+                    (expand-file-name "cooked.bash" (cooked--integration-directory)))
+              "\n"))
+    rc))
+
+(ert-deftest cooked-bash-marks-each-prompt-exactly-once ()
+  "Regression: the prompt marks accumulated, one more pair per prompt.
+
+`A\=' and `B\=' live in PS1, which holds them as the backslash escapes bash
+expands when it draws the prompt -- not as bytes.  The guard against
+re-appending tested for a real ESC, so it never matched, and by the tenth prompt
+PS1 was mostly marks.  Nothing was visibly wrong: an OSC occupies no columns."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc)))
+    (unwind-protect
+        (let ((marks (cooked-tests--bash-marks rc "true\ntrue\nexit\n")))
+          ;; Three prompts, one A and one B each, and never two in a row.
+          (should (= 3 (seq-count (lambda (m) (equal m "A")) marks)))
+          (should (= 3 (seq-count (lambda (m) (equal m "B")) marks)))
+          (should-not (seq-find (lambda (pair) (equal (car pair) (cdr pair)))
+                                (seq-mapn #'cons marks (cdr marks)))))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-does-not-mark-its-own-prompt-as-a-command ()
+  "Regression: every prompt emitted a stray `C\='.
+
+The DEBUG trap fires before every command, the prompt\='s own included, so it has
+to know which ones the user typed.  Comparing against PROMPT_COMMAND could not:
+that holds several commands joined by `;\=' while the trap sees one at a time, so
+the test never fired.  A `C\=' says a command started, which is not merely untidy
+-- it clears the announcement nonce, so the next completion request on that
+prompt arrives unlicensed and is refused."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc)))
+    (unwind-protect
+        (let ((marks (cooked-tests--bash-marks rc "true\nexit\n")))
+          ;; A `C' only ever follows the `B' of the prompt the command was typed at.
+          (should (seq-every-p (lambda (pair) (equal (car pair) "B"))
+                               (seq-filter (lambda (pair) (equal (cdr pair) "C"))
+                                           (seq-mapn #'cons marks (cdr marks)))))
+          ;; And the first thing on the wire is a prompt, not a command.
+          (should (equal (car marks) "A")))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-reports-command-exit-codes ()
+  "The `D\=' mark carries the command\='s status, not the prompt hook\='s.
+
+The zsh half of this is covered separately; bash gets its own because the way it
+stays first differs -- a string prepended to PROMPT_COMMAND rather than a
+reordered array -- and because a theme appending to PROMPT_COMMAND is the common
+way to break it."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc "__theme() { :; }"
+                                   "PROMPT_COMMAND='__theme'")))
+    (unwind-protect
+        (let ((marks (cooked-tests--bash-marks rc "(exit 7)\nexit\n")))
+          (should (member "D;7" marks)))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-survives-a-theme-that-rebuilds-the-prompt ()
+  "A theme rebuilding PS1 from PROMPT_COMMAND must not cost the `B\=' mark, which
+is the whole hand-the-keyboard-back feature."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc "__theme() { PS1='theme$ '; }"
+                                   "PROMPT_COMMAND='__theme'")))
+    (unwind-protect
+        (let ((marks (cooked-tests--bash-marks rc "true\ntrue\nexit\n")))
+          (should (= 3 (seq-count (lambda (m) (equal m "B")) marks))))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-honours-the-feature-list ()
+  "The same subtraction zsh honours, on the shell that gets less attention."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc)))
+    (unwind-protect
+        (let* ((process-environment
+                (cons "COOKED_SHELL_INTEGRATION_FEATURES=input-mark cwd announce"
+                      process-environment))
+               (marks (cooked-tests--bash-marks rc "true\nexit\n")))
+          ;; The keyboard still changes hands...
+          (should (member "B" marks))
+          ;; ...and nothing else is claimed.
+          (should-not (seq-find (lambda (m) (member m '("A" "C"))) marks)))
+      (delete-file rc))))
+
+(defun cooked-tests--zsh-osc (code rc &optional input features)
+  "Run zsh over RC and return the payloads of every `OSC CODE\=' it wrote.
+
+FEATURES, when given, is the value of COOKED_SHELL_INTEGRATION_FEATURES.  RC is
+written into a throwaway ZDOTDIR, and deliberately does *not* set options like
+EXTENDED_GLOB: the snippet has to stand on its own in a shell configured by
+somebody who never heard of it."
+  (let ((dir (make-temp-file "cooked-tests-zsh-" t))
+        (payloads nil))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name ".zshrc" dir)
+            (insert "PROMPT='$ '\n" rc "\n"
+                    "source " (shell-quote-argument
+                               (expand-file-name "cooked.zsh"
+                                                 (cooked--integration-directory)))
+                    "\n"))
+          (with-temp-buffer
+            (let ((process-environment
+                   (append (list "TERM_PROGRAM=cooked" (concat "ZDOTDIR=" dir))
+                           (when features
+                             (list (concat "COOKED_SHELL_INTEGRATION_FEATURES="
+                                           features)))
+                           process-environment)))
+              (insert (or input "true\nexit\n"))
+              (call-process-region (point-min) (point-max) (executable-find "zsh")
+                                   t t nil "-i"))
+            (goto-char (point-min))
+            (while (re-search-forward (format "\e]%d;\\([^\a\e]*\\)\a" code) nil t)
+              (push (match-string 1) payloads)))
+          (nreverse payloads))
+      (delete-directory dir t))))
+
+(ert-deftest cooked-zsh-title-names-the-command-and-the-directory ()
+  "Regression: every title came out empty, and nothing said so.
+
+The preexec title picks the first word that is not an assignment or a wrapper
+like `sudo\=', which is spelled with a negated glob -- and `^(...)\=' is a
+negation only under EXTENDED_GLOB.  Without it the subscript matches nothing and
+the title is the empty string rather than an error, so the feature looks
+registered and does nothing.  It reached the snippet by being copied out of an rc
+that set the option globally, which is exactly the difference between an example
+and a shipped file, so the rc here does not set it."
+  (skip-unless (executable-find "zsh"))
+  ;; `command\=' and an assignment stand in for the whole skip list.  Not `sudo\=',
+  ;; which is on it: running one in a test would sit waiting for a password.
+  (let ((titles (cooked-tests--zsh-osc 2 "" "true\ncommand true\nFOO=1 true\nexit\n")))
+    (should (member "true" titles))
+    ;; The wrapper is skipped in favour of what it is wrapping.
+    (should-not (member "command" titles))
+    (should-not (member "FOO=1" titles))
+    (should-not (seq-find #'string-empty-p titles))))
+
+(ert-deftest cooked-zsh-title-can-be-declined ()
+  "`no-title\=' leaves the title to whoever was already writing it."
+  (skip-unless (executable-find "zsh"))
+  (should-not (cooked-tests--zsh-osc 2 "" "true\nexit\n"
+                                     "marks input-mark cwd announce title no-title")))
 
 (ert-deftest cooked-real-bash-reaches-input-state-at-its-prompt ()
   "The headline case: a real interactive shell, whose prompt is raw-mode."

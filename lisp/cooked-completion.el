@@ -78,8 +78,17 @@ Nil when there is no pending input to complete.  `cooked-completion-at-point'
 has already established that there was one, but the shell layer blocks between
 that check and this call, and a drain arriving in the meantime can end the
 prompt -- at which point the word before point is screen text and not a command
-line at all."
-  (when-let* ((limit (cooked--input-start-position)))
+line at all.
+
+Nil, too, once the child has said it is on another host.  Both tables here are
+about *this* machine -- `exec-path' and the local filesystem -- and neither has
+any way to be about the other one, so offering them at a remote prompt is not a
+weaker answer but a wrong one: the names are plausible, they complete, and they
+are not there.  Declining leaves the prompt with no Emacs completion at all,
+which is the honest report; the shell layer is unaffected, because its answers
+come from the shell being typed at and are therefore right by construction."
+  (when-let* (((not (cooked--foreign-host-p)))
+              (limit (cooked--input-start-position)))
     (pcase-let* ((`(,start . ,end) (cooked--completion-bounds))
                  ;; The first word of the line is the command; everything after it
                  ;; is an argument, and arguments are file names far more often

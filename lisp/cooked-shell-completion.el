@@ -98,9 +98,15 @@ which the reply has to wait for."
 ;;
 ;; The exchange, in full:
 ;;
-;;   shell  ESC ] 51 ; C H ; VERSION ; NONCE ST      at every new ZLE line
+;;   shell  ESC ] 51 ; C H ; VERSION ; NONCE ; REPLIES ST   at every new ZLE line
 ;;   Emacs  ESC [ > 99 u NONCE ; SERIAL ; POINT ; LINE LF
 ;;   shell  ESC ] 51 ; C R ; SERIAL ; PREFIX ; SUFFIX ; TRUNCATED ; BASE64 ST
+;;
+;; REPLIES is 1 or 0: whether the shell can frame the third line at all, which
+;; needs `base64' out there and the rest of the exchange does not.  A shell that
+;; answers 0 still announces, because the announcement is also what licenses the
+;; Emacs input region -- see `cooked--completion-nonce' -- and losing an editable
+;; line over a missing encoder would be an unrelated punishment.
 ;;
 ;; The announcement is what makes this safe to send at all.  Without a widget bound
 ;; to that key the request would be read as ordinary input -- by bash, by a nested
@@ -112,9 +118,6 @@ which the reply has to wait for."
 ;; hex digit follow an escape and be swallowed by it.  The reply is base64 because a
 ;; description is arbitrary text and one control byte in it would end the sequence
 ;; carrying it.
-
-(defvar-local cooked--completion-nonce nil
-  "The current prompt's completion nonce, or nil if the shell has not offered one.")
 
 (defvar-local cooked--completion-serial 0
   "Counter distinguishing completion requests, so a late reply can be dropped.")
@@ -138,22 +141,14 @@ which the reply has to wait for."
           (seq-remove #'string-empty-p (split-string blob "\x1e"))))
 
 (defun cooked--completion-handle (payload)
-  "Handle PAYLOAD, an OSC 51;C message from the shell, minus its leading C.
+  "Handle PAYLOAD, an OSC 51;C reply from the shell, minus its leading C.
 
-Two messages arrive here: `H' announces that this prompt can complete, and `R'
-answers a request.  Both are inert -- a nonce and a list of strings -- which is
-why this needs none of the `cooked-osc-eval' opt-in.
-
-Reached only through `cooked-osc-completion-function', which is nil until this
-file is loaded, so a shell announcing at a prompt where the layer is absent is
-talking to nobody -- and it will, since a shell told at startup to install its
-half goes on announcing whatever Emacs later decides."
+Only `R' arrives here.  The `H' announcement is handled in `cooked-osc.el'
+without any opt-in, because the core reads it as a license to own the input
+line and has to keep doing so in sessions that never load this file; see
+`cooked--completion-nonce'.  What is left is the half that is genuinely this
+layer's: an answer to a question only this layer asks."
   (pcase (and (not (string-empty-p payload)) (aref payload 0))
-    (?H (pcase (split-string (substring payload 1) ";")
-          ;; Version first, so a newer shell snippet paired with an older Emacs
-          ;; declines rather than misreading the protocol.
-          (`("" "2" ,nonce . ,_) (setq cooked--completion-nonce nonce))
-          (_ (setq cooked--completion-nonce nil))))
     (?R (pcase (split-string (substring payload 1) ";")
           (`("" ,serial ,prefix ,suffix ,truncated ,blob . ,_)
            ;; The blob is bytes the child chose; a truncated or corrupt one is a
@@ -176,14 +171,15 @@ or does not answer.  Blocks for at most `cooked-completion-timeout': the
 reply arrives through the wake pipe like every other byte the child
 writes, so pumping that process is what lets it in."
   (when (and cooked--completion-nonce
-             ;; ZLE is still the thing reading.  Asked here rather than having the
-             ;; core forget the nonce at `command-start' on this layer's behalf,
-             ;; which it cannot do once the layer is optional -- and this is the
-             ;; better question anyway: policy stays
-             ;; `cooked' for a *command* that reads lines canonically (`zsh'
-             ;; running `cat'), so ownership alone never noticed that case, and a
-             ;; request built on the spent nonce would have been typed into the
-             ;; running command's stdin.
+             ;; The shell announced but cannot frame a reply -- no `base64' out
+             ;; there.  It still owns a license to the input line; it just has
+             ;; nothing to say to this.
+             cooked--completion-reply-capable
+             ;; ZLE is still the thing reading.  The core does forget the nonce at
+             ;; `command-start', which covers the shell being replaced underneath
+             ;; us, but not this: policy stays `cooked' for a *command* that reads
+             ;; lines canonically (`zsh' running `cat'), and a request built on
+             ;; the spent nonce would be typed into that command's stdin.
              (eq cooked--semantic 'input)
              (cooked--live-session))
     (let ((serial (cl-incf cooked--completion-serial)))

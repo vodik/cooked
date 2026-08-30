@@ -386,14 +386,37 @@ point of the split is that opting in is something you do on purpose
 rather than inherit.")
 
 (defvar cooked-osc-completion-function nil
-  "Function handling OSC 51;C, the completion channel, called with the payload.
+  "Function handling an OSC 51;C *reply*, called with the payload.
 
-Nil means the layer is not loaded and the child's announcements and replies
-are dropped unread -- which they will be, and harmlessly: a shell told at
-startup to install its completion widget goes on announcing at every prompt
-whatever Emacs later decides, and this is what makes that mean nothing.
-`cooked-shell-completion' sets it; see `cooked-shell-completion-function' for
-the other half of the same switch.")
+Nil means the completion layer is not loaded, and a reply arriving anyway is
+dropped unread.  Harmless: nothing asked for it, because asking is that layer\='s
+job.
+
+The announcement is deliberately not routed through here.  It is handled below,
+unconditionally, because `cooked--policy\=' reads it as a license to own the
+input line and that reading has to hold in a session that never loads the
+completion layer at all.  `cooked-shell-completion\=' sets this; see
+`cooked-shell-completion-function\=' for the other half of the same switch.")
+
+(defun cooked--osc-announce (payload)
+  "Record the prompt\='s OSC 51;CH announcement from PAYLOAD, minus its leading H.
+
+Inert by construction -- a version number and a nonce -- which is what makes it
+safe to believe with no opt-in in front of it.
+
+Version first, so a newer shell snippet paired with an older Emacs declines
+rather than misreading the protocol.  An unrecognised shape clears the nonce
+instead of leaving the last one standing: a garbled announcement is the shell
+failing to make a claim, and the safe reading of no claim is no license."
+  (pcase (split-string payload ";")
+    (`("" "2" ,nonce . ,rest)
+     (setq cooked--completion-nonce nonce
+           ;; Field 3 is the reply capability, absent in snippets that predate
+           ;; it -- which could only announce when they could also reply, so
+           ;; their silence means capable.
+           cooked--completion-reply-capable (not (equal (car rest) "0"))))
+    (_ (setq cooked--completion-nonce nil
+             cooked--completion-reply-capable nil))))
 
 (defvar-local cooked--eval-refused nil
   "Whether this buffer has already reported an ignored OSC 51;E request.")
@@ -428,8 +451,11 @@ E asks Emacs to run something; A annotates the prompt."
               (setq cooked--eval-refused t)
               (message "cooked: ignoring an OSC 51 command; (require 'cooked-osc-eval) to enable"))))
         (?A (setq cooked--annotation (substring payload 1)))
-        (?C (when cooked-osc-completion-function
-              (funcall cooked-osc-completion-function (substring payload 1))))
+        (?C (let ((rest (substring payload 1)))
+              (if (and (not (string-empty-p rest)) (eq (aref rest 0) ?H))
+                  (cooked--osc-announce (substring rest 1))
+                (when cooked-osc-completion-function
+                  (funcall cooked-osc-completion-function rest)))))
         (_ nil)))))
 
 ;;;; OSC 52 — clipboard
@@ -470,12 +496,22 @@ hostile file can put a TRAMP name here, and asking whether that directory exists
 is itself the connection.  A `default-directory\=' that has gone remote is also
 not the end of it: `cooked-file-link\=' resolves the names it finds against it,
 so one poisoned value turns every settled batch of scrollback into remote stats.
-See `cooked--local-name\='."
-  (when (string-match "\\`file://[^/]*\\(/.*\\)\\'" url)
-    (when-let* ((name (cooked--local-name (url-unhex-string (match-string 1 url))))
-                (dir (file-name-as-directory name)))
-      (when (file-directory-p dir)
-        (setq default-directory dir)))))
+See `cooked--local-name\='.
+
+The URL\='s authority is kept rather than skipped, in `cooked--host\='.  A shell
+on another host reports its directory perfectly honestly and the path it sends
+is perfectly real, which is exactly the problem: resolved here it names a
+different file, or -- worse and more often -- a local file of the same name that
+does exist, on a machine whose tree is kept in step with the one you ssh\='d to.
+So a foreign host updates `cooked--host\=' and stops there, leaving
+`default-directory\=' at the last place we could actually vouch for."
+  (when (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url)
+    (setq cooked--host (url-unhex-string (match-string 1 url)))
+    (unless (cooked--foreign-host-p)
+      (when-let* ((name (cooked--local-name (url-unhex-string (match-string 2 url))))
+                  (dir (file-name-as-directory name)))
+        (when (file-directory-p dir)
+          (setq default-directory dir))))))
 
 (provide 'cooked-osc)
 ;;; cooked-osc.el ends here

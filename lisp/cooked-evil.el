@@ -525,15 +525,37 @@ unchanged.  See `cooked-evil-insert-line' for the other half of the pair."
                       (kbd "p") #'cooked-evil-paste
                       (kbd "P") #'cooked-evil-paste)))
 
+(defconst cooked-evil--submit
+  `(menu-item
+    "" cooked-send-input
+    :filter ,(lambda (submit) (unless completion-in-region-mode submit)))
+  "Enter, except while an in-buffer completion is showing.
+
+The override below has to sit on an evil auxiliary keymap to beat
+`evil-collection-comint\=', and evil consults those through
+`emulation-mode-map-alists\=' -- which Emacs searches *before*
+`minor-mode-overriding-map-alist\=', where `completion-in-region-mode\=' puts the
+UI\='s own keymap.  So corfu\='s `RET\=' never got a look at the key: the popup
+stayed up and the half-completed line was submitted underneath it.
+
+A `:filter\=' returning nil is read as no binding at all, and lookup carries on
+into the lower-precedence maps -- which is exactly the corfu map that wanted the
+key.  Nothing here names corfu: `completion-in-region-mode\=' is the mode every
+in-buffer UI turns on, the default one included, so the same fall-through serves
+all of them.
+
+Only Enter is treated this way.  The rest of the insert-state overrides have no
+competitor at a completion prompt, and a filter on each would be ceremony.")
+
 (with-eval-after-load 'evil-collection
   (when cooked-evil-insert-state-submits
     ;; All three spellings, matching `evil-collection's own `repl-newline'
     ;; binding: a GUI frame's Enter key is `<return>', not `RET' -- binding
     ;; only `RET' leaves `<return>' still resolving to `newline'.
     (evil-collection-define-key 'insert 'cooked-mode-map
-      (kbd "RET") #'cooked-send-input
-      (kbd "<return>") #'cooked-send-input
-      (kbd "C-m") #'cooked-send-input)))
+      (kbd "RET") cooked-evil--submit
+      (kbd "<return>") cooked-evil--submit
+      (kbd "C-m") cooked-evil--submit)))
 
 (provide 'cooked-evil)
 ;;; cooked-evil.el ends here

@@ -633,8 +633,9 @@ as `m' rather than `M' reaches the child and is thrown away."
     (should (eq (key-binding (vector 'mouse-5)) #'cooked-mouse-event))
     ;; With no cell under the pointer the notch still goes out, at the cursor,
     ;; rather than falling through to `mwheel-scroll'.
-    (let ((last-input-event '(wheel-up nil 1)))
-      (cooked-mouse-event))
+    (cooked-tests--displayed
+      (let ((last-input-event (list 'wheel-up (cooked-tests--posn nil) 1)))
+        (cooked-mouse-event)))
     ;; Case matters and nothing else here distinguishes press from release:
     ;; `case-fold-search' is t by default, which would let "M" match the "m"
     ;; this test exists to rule out.
@@ -722,30 +723,173 @@ next keystroke sent to the child is what takes it."
     (should-not cooked--ghost-cursor)))
 
 (ert-deftest cooked-policy-derives-ownership-from-all-three-signals ()
-  "The alt screen outranks the line discipline and the OSC 133 prompt state."
+  "The alt screen outranks the line discipline and the OSC 133 prompt state.
+
+The `seen\=' column is not decoration.  A session that has never had a mark is a
+different situation from one that is merely between them, and the indicator says
+so: everything else here can be inferred afresh each prompt, but \"this host has
+no integration at all\" only exists as a latch."
   (with-temp-buffer
-    (pcase-dolist (`(,mode ,alt ,semantic ,policy ,owns ,indicator)
-                   ;; mode      alt  semantic   policy    owns   mode line
-                   '((cooked    nil  nil        cooked    t      " edit")
-                     (cooked    nil  output     cooked    t      " edit")
-                     (raw       nil  nil        raw       nil    " raw")
-                     (raw       nil  output     raw       nil    " raw")
+    (pcase-dolist (`(,mode ,alt ,semantic ,seen ,policy ,owns ,indicator)
+                   ;; mode      alt  semantic  seen  policy   owns  mode line
+                   '((cooked    nil  nil       nil   cooked   t     " edit bare")
+                     (cooked    nil  output    t     cooked   t     " edit")
+                     (raw       nil  nil       nil   raw      nil   " raw bare")
+                     ;; A mark has arrived and this is not a prompt, so the shell
+                     ;; is running something and said so: `command', not a guess.
+                     (raw       nil  output    t     command  nil   " raw")
                      ;; A shell prompt: termios says raw, OSC 133 says otherwise.
-                     (raw       nil  input      cooked    t      " edit")
-                     (secret    nil  nil        raw       nil    " secret")
+                     (raw       nil  input     t     cooked   t     " edit")
+                     (secret    nil  nil       nil   raw      nil   " secret bare")
                      ;; The case that used to strand the keyboard in Emacs: a
                      ;; full-screen program starting straight from a prompt.
-                     (raw       t    input      alt       nil    " alt")
-                     (cooked    t    input      alt       nil    " alt")
-                     (raw       t    nil        alt       nil    " alt")))
+                     (raw       t    input     t     alt      nil   " alt")
+                     (cooked    t    input     t     alt      nil   " alt")
+                     (raw       t    nil       nil   alt      nil   " alt bare")))
       (setq-local cooked--mode mode
                   cooked--alt alt
                   cooked--semantic semantic
+                  cooked--semantic-seen seen
+                  cooked--host nil
+                  cooked--completion-nonce nil
                   cooked--title nil
                   cooked--exit nil)
       (should (eq (cooked--policy) policy))
       (should (eq (and (cooked--input-state-p) t) owns))
-      (should (equal (cooked--mode-line) indicator)))))
+      (should (equal (substring-no-properties (cooked--mode-line)) indicator)))))
+
+(ert-deftest cooked-a-mark-alone-does-not-buy-the-keyboard ()
+  "A `133;B\=' is a claim, and claims cross an ssh as easily as facts do.
+
+The local case is unchanged and must stay that way: the child is ours, so the
+mark is corroborated by the pty it arrived on and Emacs keeps the line.  What
+changes is the far end -- a bare shell there announces nothing, and handing
+Emacs a line editor it cannot see is how keystrokes get eaten and how a
+completion table ends up offering local paths for a remote filesystem.
+
+The announcement buys it back, deliberately.  Decay keys on what corroborates
+the claim, not on the transport: a remote host running the full snippet reaches
+the same certainty a local one does, by the same bytes."
+  (with-temp-buffer
+    (setq-local cooked--mode 'raw
+                cooked--alt nil
+                cooked--semantic 'input
+                cooked--semantic-seen t
+                cooked--host nil
+                cooked--completion-nonce nil
+                cooked--title nil
+                cooked--exit nil)
+    ;; Local: the child is ours, and nothing about this changes.
+    (should (eq (cooked--policy) 'cooked))
+    (should (cooked--input-state-p))
+    ;; Behind an ssh, with only the core marks.
+    (setq-local cooked--host "other.example")
+    (should (eq (cooked--policy) 'prompt))
+    (should-not (cooked--input-state-p))
+    (should (cooked--child-owns-keyboard-p))
+    ;; And it keeps nothing back, for the reason `command' does not: the shell
+    ;; said where it was, and a shell at its own prompt wants every key.
+    (should (eq (cooked--state-keymap nil 'prompt) cooked-command-map))
+    ;; The same remote host, running the full snippet.
+    (setq-local cooked--completion-nonce "1234")
+    (should (eq (cooked--policy) 'cooked))
+    (should (cooked--input-state-p))))
+
+(ert-deftest cooked-delegation-hands-the-whole-line-to-the-shell ()
+  "The line reaches ZLE, the cursor is put back, and Emacs stops owning it.
+
+The whole line goes, not the part before point: sending the prefix alone would
+silently drop whatever followed the cursor, and the left-arrows that avoid that
+cost one byte each."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (goto-char cooked--input-end)
+    (insert "echo hello")
+    ;; Point between `hell' and `o', so there is a suffix to preserve.
+    (backward-char 1)
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (bytes) (setq sent bytes))))
+        (cooked-delegate-key "\C-r"))
+      ;; The full line, then one left-arrow for the one character after point.
+      (should (equal sent "echo hello\e[D\C-r")))
+    ;; Ownership is gone, and the keys now go where the line did.
+    (should cooked--delegated)
+    (should-not (cooked--input-state-p))
+    (should (eq (cooked--policy) 'prompt))
+    (should (cooked--child-owns-keyboard-p))
+    ;; Refusing twice, because the second call has nothing left to hand over.
+    (should-error (cooked-delegate-key "\C-r") :type 'user-error)))
+
+(ert-deftest cooked-delegation-lasts-exactly-one-line ()
+  "Delegation is a one-way door for the rest of the line and no further.
+A fresh prompt is a fresh line, and Emacs may have it back."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (goto-char cooked--input-end)
+    (insert "true")
+    (cl-letf (((symbol-function 'cooked--send-to-child) #'ignore))
+      (cooked-delegate-key "\C-r"))
+    (should cooked--delegated)
+    (cooked--handle-semantic '(prompt-start (screen 0 . 0)) nil)
+    (should-not cooked--delegated)))
+
+(ert-deftest cooked-delegate-keys-put-back-what-they-replaced ()
+  "`TAB\=' is not delegated by default, and naming it must not be a one-way
+change: taking it out again has to leave `completion-at-point\=' behind rather
+than nothing."
+  (let ((original cooked-delegate-keys))
+    (unwind-protect
+        (progn
+          (should (eq (lookup-key cooked-input-map (kbd "TAB")) #'completion-at-point))
+          (should (eq (lookup-key cooked-input-map (kbd "C-r")) #'cooked-delegate-this-key))
+          (customize-set-variable 'cooked-delegate-keys '("TAB"))
+          (should (eq (lookup-key cooked-input-map (kbd "TAB")) #'cooked-delegate-this-key))
+          (should-not (lookup-key cooked-input-map (kbd "C-r")))
+          ;; The parent survives the rebuild, or `C-c' and every mode-map command
+          ;; would go with it.
+          (should (keymap-parent cooked-input-map)))
+      (customize-set-variable 'cooked-delegate-keys original))
+    (should (eq (lookup-key cooked-input-map (kbd "TAB")) #'completion-at-point))
+    (should (eq (lookup-key cooked-input-map (kbd "C-r")) #'cooked-delegate-this-key))))
+
+(ert-deftest cooked-evil-enter-yields-to-an-open-completion ()
+  "Enter belonged to the completion popup while one was showing, and did not.
+
+The override that makes insert-state Enter submit has to sit on an evil
+auxiliary keymap to outrank `evil-collection-comint\=', and evil reaches those
+through `emulation-mode-map-alists\=' -- which Emacs searches *before*
+`minor-mode-overriding-map-alist\=', where `completion-in-region-mode\=' puts the
+UI\='s keymap.  So corfu\='s `RET\=' never saw the key: the popup stayed up and the
+half-completed line went to the shell underneath it.
+
+No corfu here on purpose.  What is being pinned is the precedence contract --
+an active `completion-in-region-mode\=' keymap wins Enter -- and every in-buffer
+completion UI, the built-in one included, is on the far side of that same test."
+  (skip-unless (require 'evil nil t))
+  (skip-unless (require 'evil-collection nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-echoing-child ""
+    (let ((map (make-sparse-keymap)))
+      ;; Both spellings: a GUI frame's Enter is `<return>', and leaving it out
+      ;; here would let the fall-through run past this map to the passthrough one
+      ;; and test nothing.
+      (define-key map (kbd "RET") #'ignore)
+      (define-key map (kbd "<return>") #'ignore)
+      (evil-insert-state)
+      (should (eq (key-binding (kbd "RET")) #'cooked-send-input))
+      ;; Stand a completion up the way `completion-in-region-mode' does.
+      (setq-local completion-in-region-mode-predicate (lambda () t))
+      (completion-in-region-mode 1)
+      (setq-local minor-mode-overriding-map-alist
+                  (list (cons 'completion-in-region-mode map)))
+      (dolist (key '("RET" "<return>" "C-m"))
+        (should (eq (key-binding (kbd key)) #'ignore)))
+      ;; And Enter comes back the moment the popup is gone, rather than staying
+      ;; surrendered for the rest of the line.
+      (completion-in-region-mode -1)
+      (should (eq (key-binding (kbd "RET")) #'cooked-send-input)))))
 
 (ert-deftest cooked-comint-commands-are-remapped ()
   (cooked-tests--with-session '("/bin/cat")
@@ -1029,6 +1173,16 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
     (should-not cooked--mouse)
     (should (eq (lookup-key cooked-raw-map [mouse-1]) #'cooked-mouse-event))))
 
+(defmacro cooked-tests--displayed (&rest body)
+  "Run BODY with the current buffer showing in the selected window.
+
+`cooked-mouse-event\=' routes an event to the buffer the pointer names, so a test
+that hands it a posn has to put the buffer somewhere a pointer could be."
+  (declare (indent 0))
+  `(save-window-excursion
+     (set-window-buffer (selected-window) (current-buffer))
+     ,@body))
+
 (defun cooked-tests--posn (pos)
   "A mouse position over buffer POS in the selected window, or over no text.
 
@@ -1061,11 +1215,12 @@ holding a button forever, and the region it never asked for appeared in one jump
       (should-not (equal a b))
       ;; 1000 only, so no tracking loop: the press returns and the release
       ;; arrives as an ordinary event, which is the path being tested.
-      (let ((last-input-event (list 'down-mouse-1 (cooked-tests--posn from))))
-        (cooked-mouse-event))
-      (let ((last-input-event (list 'drag-mouse-1 (cooked-tests--posn from)
-                                    (cooked-tests--posn to))))
-        (cooked-mouse-event))
+      (cooked-tests--displayed
+        (let ((last-input-event (list 'down-mouse-1 (cooked-tests--posn from))))
+          (cooked-mouse-event))
+        (let ((last-input-event (list 'drag-mouse-1 (cooked-tests--posn from)
+                                      (cooked-tests--posn to))))
+          (cooked-mouse-event)))
       ;; Case matters: "m" is the release this test exists to demand.
       (let ((case-fold-search nil))
         (should (cooked-tests--settle
@@ -1074,6 +1229,135 @@ holding a button forever, and the region it never asked for appeared in one jump
                                    (cooked-tests--text)))))
         (should (string-match-p (format "\\[<0;%d;%dM" (1+ (cdr a)) (1+ (car a)))
                                 (cooked-tests--text)))))))
+
+(defmacro cooked-tests--with-two-terminals (a b &rest body)
+  "Run BODY with two live cooked buffers bound to A and B, side by side.
+A is the selected window\='s; B is the other\='s.  Both children take the alt
+screen and ask for SGR mouse reporting."
+  (declare (indent 2))
+  `(cooked-tests--with-session
+       '("/bin/sh" "-c" "printf '\033[?1049h\033[?1000h\033[?1006h'; stty raw; cat -v")
+     (let ((,a (current-buffer)))
+       (cooked-tests--with-session
+           '("/bin/sh" "-c" "printf '\033[?1049h\033[?1000h\033[?1006h'; \
+                             stty raw; cat -v")
+         (let ((,b (current-buffer)))
+           (dolist (buffer (list ,a ,b))
+             (with-current-buffer buffer
+               (should (cooked-tests--settle
+                        (lambda () (and cooked--alt cooked--mouse))))
+               (should cooked--mouse-grab)))
+           (save-window-excursion
+             (set-window-buffer (selected-window) ,a)
+             (let ((window (split-window)))
+               (set-window-buffer window ,b)
+               (select-window (get-buffer-window ,a))
+               ,@body)))))))
+
+(defun cooked-tests--other-window-event (window kind pos)
+  "A KIND event over buffer position POS in WINDOW.
+
+Synthesised like `cooked-tests--posn\=', but naming a window the test does not
+have selected: what these tests are about is which buffer such an event ends up
+being handled in."
+  (list kind (list window pos '(0 . 0) 0 nil pos nil nil nil) 1))
+
+(defun cooked-tests--child-heard (buffer)
+  "The first mouse report or cursor key BUFFER\='s child echoed, or nil."
+  (with-current-buffer buffer
+    (cooked-tests--settle (lambda () nil) 0.3)
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward "\\[<[0-9;]+[Mm]\\|\\[[AB]" nil t)
+        (match-string-no-properties 0)))))
+
+(ert-deftest cooked-a-click-on-another-terminal-focuses-and-reaches-it ()
+  "One click on an unfocused terminal both selects it and reaches its child.
+
+Emacs settles a click\='s bindings in the buffer under the pointer but runs the
+command in the buffer that was current all along, so the click on B arrived in
+A: A\='s child was told about a cell A\='s screen made of a position in B\='s buffer,
+and the click that should have selected B was spent doing it.  Routing the event
+to the buffer the pointer names answers both halves -- anything less costs two
+clicks to press a button in an unfocused TUI, where one would do in any other
+Emacs buffer."
+  (cooked-tests--with-two-terminals a b
+    (with-current-buffer a
+      (execute-kbd-macro
+       (vector (cooked-tests--other-window-event window 'down-mouse-1 3)
+               (cooked-tests--other-window-event window 'mouse-1 3))))
+    (should (eq (window-buffer (selected-window)) b))
+    (should-not (cooked-tests--child-heard a))
+    ;; The press, and the release that completes it: a child left holding a
+    ;; button it never saw go down is the other half of getting this wrong.
+    (let ((case-fold-search nil)
+          (heard (with-current-buffer b (cooked-tests--text))))
+      (should (string-match-p "\\[<0;[0-9]+;[0-9]+M" heard))
+      (should (string-match-p "\\[<0;[0-9]+;[0-9]+m" heard)))))
+
+(ert-deftest cooked-the-wheel-reaches-an-unfocused-terminal ()
+  "A notch over an unfocused terminal goes to that terminal\='s child, and
+leaves the focus where it was -- the way scrolling any other Emacs buffer does
+not require selecting it first."
+  (cooked-tests--with-two-terminals a b
+    (with-current-buffer a
+      (execute-kbd-macro
+       (vector (cooked-tests--other-window-event window 'wheel-down 3))))
+    (should (eq (window-buffer (selected-window)) a))
+    (should-not (cooked-tests--child-heard a))
+    (let ((case-fold-search nil))
+      (should (string-match-p "\\[<65;[0-9]+;[0-9]+M"
+                              (with-current-buffer b (cooked-tests--text)))))))
+
+(ert-deftest cooked-a-drag-that-leaves-the-window-releases-where-it-left ()
+  "A drag out of the terminal is still the child\='s drag, and its release is
+still owed -- but `event-end\=' is then a position in somebody else\='s buffer, and
+`cooked--screen-cell\=' measures whatever number it finds against this buffer\='s
+screen.  So letting go over another window reported the button up at a cell
+nobody had dragged to, chosen by how far into the other buffer the pointer
+happened to be."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\033[?1049h\033[?1000h\033[?1006h'; \
+                        printf 'alpha\r\nbravo'; stty raw; cat -v")
+    (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "bravo" (cooked-tests--text)))))
+    (let* ((from (save-excursion (goto-char (point-min))
+                                 (search-forward "alpha") (- (point) 5)))
+           ;; A position in the *other* buffer, chosen to be one this buffer
+           ;; would also read as a cell: that is what makes a stray report
+           ;; visible rather than merely absent.
+           (astray (save-excursion (goto-char (point-min))
+                                   (search-forward "bravo") (- (point) 5)))
+           (a (cooked--screen-cell from))
+           (b (cooked--screen-cell astray))
+           (elsewhere (generate-new-buffer "*cooked-test-elsewhere*")))
+      (should-not (equal a b))
+      (unwind-protect
+          (save-window-excursion
+            (set-window-buffer (selected-window) (current-buffer))
+            (let ((window (split-window)))
+              (set-window-buffer window elsewhere)
+              (with-current-buffer elsewhere (insert (make-string 200 ?x)))
+              (let ((last-input-event
+                     (list 'down-mouse-1 (cooked-tests--posn from))))
+                (cooked-mouse-event))
+              (let ((last-input-event
+                     (list 'drag-mouse-1 (cooked-tests--posn from)
+                           (list window astray '(0 . 0) 0 nil astray
+                                 nil nil nil))))
+                (cooked-mouse-event))))
+        (kill-buffer elsewhere))
+      ;; Case matters: "m" is the release, "M" the press already sent.
+      (let ((case-fold-search nil))
+        (should (cooked-tests--settle
+                 (lambda ()
+                   (string-match-p (format "\\[<0;%d;%dm" (1+ (cdr a)) (1+ (car a)))
+                                   (cooked-tests--text)))))
+        (should-not (string-match-p (format "\\[<0;%d;%d[Mm]" (1+ (cdr b)) (1+ (car b)))
+                                    (cooked-tests--text)))
+        ;; And the child is not left holding a button it can never put down.
+        (should-not cooked--mouse-held)))))
 
 (ert-deftest cooked-a-report-to-the-child-gives-up-the-region ()
   "A click the child answers is the child\='s click.
@@ -1269,9 +1553,23 @@ next focus change signals `invalid-function\='."
   (cooked-tests--with-session '("/bin/cat")
     (should-not (cooked--focus-events-p cooked--session))
     ;; No mode set, so a focus change must put nothing on the child's input.
-    (setq-local cooked--focused nil)
-    (cooked--report-focus)
-    (should (cooked-tests--settle (lambda () (equal (cooked-tests--text) ""))))))
+    ;;
+    ;; Seeded to the opposite of what the frame actually reports, so that
+    ;; `cooked--report-focus' sees a change at all.  Hardcoding nil did not: batch Emacs
+    ;; reports no focus either, `(eq focused cooked--focused)' held, and the function
+    ;; returned at its first guard without ever reaching the mode check this is about --
+    ;; so the test passed with that check deleted outright.
+    (setq-local cooked--focused (not (cooked--focused-p)))
+    ;; Watched at the point the bytes would be written rather than in the buffer.  The
+    ;; buffer cannot see this: `ESC [ I' is a control sequence, so even when it is wrongly
+    ;; sent and `cat' echoes it straight back, the emulator consumes it and renders
+    ;; nothing -- an empty buffer is what both the working and the broken case look like.
+    ;; Waiting longer does not help; there is nothing to wait for.
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--send-if-live)
+                 (lambda (&rest _) (setq sent t))))
+        (cooked--report-focus))
+      (should-not sent))))
 
 (ert-deftest cooked-focus-reports-once-per-change ()
   (cooked-tests--with-session
@@ -1338,10 +1636,18 @@ older visibility test never saw it."
 (ert-deftest cooked-cursor-shape-does-not-fight-an-invisible-cursor ()
   (with-temp-buffer
     (cooked-mode)
+    ;; Through `cooked--sync-cursor-type', which is where visibility and shape actually
+    ;; meet.  Spelling that meeting out here as `(and visible (cooked--cursor-type))'
+    ;; asserted nothing: `and' short-circuits on the nil, so the shape lookup this test
+    ;; is named for never ran, and the `should' restated the fixture the line above set.
     (setq-local cooked--cursor (cooked--cursor-make :visible nil :shape 'bar))
-    (should (null (and (cooked-cursor-visible cooked--cursor) (cooked--cursor-type))))
+    (cooked--sync-cursor-type)
+    ;; Emacs' own cursor (`t'), never the `bar' the child asked for: a cursor the child
+    ;; has hidden contributes no shape, and the line is Emacs' to draw a cursor on.
+    (should (eq cursor-type t))
     (setq-local cooked--cursor (cooked--cursor-make :shape 'underline))
-    (should (eq (cooked--cursor-type) 'hbar))))
+    (cooked--sync-cursor-type)
+    (should (eq cursor-type 'hbar))))
 
 (ert-deftest cooked-send-eof-reaches-the-child ()
   "C-c C-d must end input even when the line is not empty."
@@ -1368,6 +1674,26 @@ turned every capital letter into a lowercase one."
     ;; Control and meta still survive.
     (should (equal (cooked--encode-event ?\C-a) "\C-a"))
     (should (equal (cooked--encode-event ?\M-x) "\ex"))))
+
+(ert-deftest cooked-an-event-in-none-of-the-tables-encodes-as-nil ()
+  "An event no table spells has no encoding, and nil is how that is said.
+
+The contract the fall-through rests on, pinned rather than assumed: nil means
+`cooked--send-key' has nothing to forward, and the tables are searched in order
+on the understanding that the first one holding a key answers for it.  Written
+as a `cond' whose clauses were the lookups themselves, a table that hit but
+produced nil would have carried on to the next one and encoded the key as a
+different key; `cl-block' is what makes a hit terminal instead."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (setq cooked--app-cursor nil)
+    ;; A mouse event is a list, and `event-basic-type' answers with a symbol no
+    ;; table carries -- the shape a key reaches the end of the search in.
+    (should-not (cooked--encode-event '(mouse-1 (nil 1 (0 . 0) 0))))
+    (should-not (cooked--encode-event 'wheel-up))
+    (should-not (cooked--encode-event 'f20))
+    ;; Including with modifiers, which is the case that would otherwise have
+    ;; found a code point in `cooked--literal-codes' on the way past.
+    (should-not (cooked--encode-event 'C-f20))))
 
 (ert-deftest cooked-modified-arrows-use-xterm-parameters ()
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")

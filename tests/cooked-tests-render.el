@@ -44,7 +44,15 @@
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033]133;C\\007'; printf 'out\\n'; printf '\\033]133;D;3\\007'; sleep 5")
     (should (cooked-tests--settle (lambda () (string-match-p "out" (cooked-tests--text)))))
-    (should (cooked-tests--settle (lambda () (null cooked--semantic))))))
+    (should (cooked-tests--settle (lambda () (null cooked--semantic))))
+    ;; The code itself, which is what the name promises and what nothing else in the
+    ;; suite checks: `cooked--semantic' returns to nil for exit code 0 and 3 alike, so
+    ;; asserting only that left the tagging untested on both the record and the text.
+    (should (equal (cooked-command-code (car cooked--commands)) 3))
+    (save-excursion
+      (goto-char (point-min))
+      (should (search-forward "out" nil t))
+      (should (equal (get-text-property (match-beginning 0) 'cooked-exit-code) 3)))))
 
 (ert-deftest cooked-scrollback-accumulates-above-the-screen ()
   (cooked-tests--with-session

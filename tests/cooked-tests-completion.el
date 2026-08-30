@@ -123,11 +123,27 @@
   "A completer slower than the timeout answers eventually; by then it is stale."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
-    (setq cooked--completion-nonce "1234" cooked--completion-serial 6)
+    ;; Through a real announcement, so the shell is reply-capable: setting the nonce
+    ;; alone left `cooked--shell-completions' failing its guard a clause early, and
+    ;; nothing downstream of it -- including the serial comparison this test is about --
+    ;; ever ran.
+    (cooked--osc-emacs '("CH;2;1234;1"))
+    ;; And ZLE has to be the thing reading, or the request stops at that clause instead
+    ;; and the wait below never runs.  A bare `cat' sends no OSC 133, so `cooked--semantic'
+    ;; is nil here until it is told otherwise.
+    (cooked--handle-semantic '(prompt-end (screen 0 . 0)) nil)
+    (should (eq cooked--semantic 'input))
     (let ((cooked-completion-timeout 0.05))
-      ;; The reply that lands is for the previous request, not this one.
-      (cooked--completion-handle (cooked-tests--completion-reply 6 0 '(("stale" "" ""))))
-      (should-not (cooked--shell-completions "wha" 3)))))
+      ;; Injected as the request goes out rather than before it.  A reply seeded ahead of
+      ;; the call was cleared by `cooked--shell-completions' on entry, so the serial was
+      ;; never compared against anything; the stale answer has to be standing while the
+      ;; wait is running, which is also what actually happens to a slow completer.
+      (cl-letf (((symbol-function 'cooked--send-if-live)
+                 (lambda (&rest _)
+                   (cooked--completion-handle
+                    (cooked-tests--completion-reply
+                     (1- cooked--completion-serial) 0 '(("stale" "" "")))))))
+        (should-not (cooked--shell-completions "wha" 3))))))
 
 (ert-deftest cooked-completion-asks-nobody-without-an-announcement ()
   "The trigger is only a keystroke: to a shell with no widget bound to it, the
@@ -145,17 +161,23 @@ request is a line of input.  Nothing is sent until the shell says it is listenin
 (ert-deftest cooked-completion-asks-nothing-once-the-shell-runs-something ()
   "Once a command is running, those bytes would land in it rather than in ZLE.
 
-The nonce is left alone deliberately -- the core used to clear it at
-`command-start\=' on the layer\='s behalf, which an optional layer cannot ask for
--- and the question is asked at the moment of sending instead.  It is also the
-sharper question: with `zsh\=' running a canonical reader like `cat\=', the
-termios mode is `cooked\=' and the policy stays `cooked\=' too, so nothing about
-keyboard ownership notices that ZLE has stopped reading."
+The core forgets the nonce at `command-start\=' -- `cooked-completion-nonce-does-not-outlive-its-prompt\='
+covers that -- so this is the second of the two guards rather than the only one:
+the question is asked again at the moment of sending, against a nonce that is
+somehow still standing.  It is the sharper one.  With `zsh\=' running a canonical
+reader like `cat\=', the termios mode is `cooked\=' and the policy stays `cooked\='
+too, so nothing about keyboard ownership notices that ZLE has stopped reading.
+
+The announcement is therefore replayed *after* the command starts, which is the
+only way to reach that guard now: an announcement made before it is cleared by
+it, and the request then stops for the missing nonce without ever asking the
+question this test is named for."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
-    (setq cooked--completion-nonce "abcd")
     (cooked--handle-semantic '(command-start (screen 0 . 0)) nil)
     (should (eq cooked--semantic 'output))
+    (cooked--osc-emacs '("CH;2;abcd;1"))
+    (should (equal cooked--completion-nonce "abcd"))
     ;; Ownership has *not* changed, which is the case this covers.
     (should (cooked--input-state-p))
     (let (sent)
@@ -267,24 +289,89 @@ after the cursor to make the difference visible."
         (with-current-buffer buffer (cooked--cleanup))
         (kill-buffer buffer)))))
 
-(ert-deftest cooked-completion-without-the-layer-stays-in-emacs ()
-  "Unloaded, the layer is not merely idle: the core has nothing to call.
+(ert-deftest cooked-completion-comes-from-bash-itself ()
+  "The same exchange against bash, over the same wire.
 
-Both seams are nil, which is what the core reads as \"no layer\" -- an
-announcement arriving from a shell that was started with its half installed is
-dropped unread, and the CAPF goes straight to the Emacs table without a byte
-leaving Emacs.  Binding them is exactly what `unload-feature\=' would leave
-behind, and is how `cooked-osc-51-is-closed-until-opted-in\=' tests the same
-shape for the eval channel."
+bash needs none of zsh\='s ZLE gymnastics -- `complete -p\=' names the registered
+function and it can be invoked directly -- so the whole capture is bookkeeping.
+What is worth testing is that it is the *same* bookkeeping: one Emacs-side
+parser, one protocol, and a shell that announces for itself.
+
+The spec here is registered by the test rather than borrowed from
+bash-completion, which is not installed everywhere and would make this a test of
+somebody else\='s package."
+  (skip-unless (executable-find "bash"))
+  (skip-unless (executable-find "base64"))
+  (let ((buffer (generate-new-buffer "*cooked-bash-complete*"))
+        (home (make-temp-file "cooked-bash-home-" t)))
+    (with-temp-file (expand-file-name ".bashrc" home)
+      (insert "PS1='$ '\n"
+              "_mytool() { COMPREPLY=( $(compgen -W \"alpha beta gamma\" -- \"$2\") ); }\n"
+              "complete -F _mytool mytool\n"))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          ;; The real HOME is *removed* rather than shadowed by a second entry:
+          ;; which of two entries for one name reaches the child is not a thing to
+          ;; depend on, and getting it wrong here means the shell reads the
+          ;; developer's own .bashrc and completes against whatever that defines.
+          ;; `default-directory' moves with it, since it is stored abbreviated and a
+          ;; `~/...' would otherwise resolve against the fake home.
+          (let ((default-directory (file-name-as-directory home))
+                (process-environment
+                 (cons (concat "HOME=" home)
+                       (seq-remove (lambda (entry) (string-prefix-p "HOME=" entry))
+                                   process-environment))))
+            (pcase-let ((`(,argv ,env ,scratch)
+                         (cooked--shell-invocation (executable-find "bash"))))
+              (setq cooked--scratch scratch)
+              ;; An explicit directory: HOME is redirected for this shell, and a
+              ;; `default-directory' that abbreviates to ~ would resolve against the
+              ;; fake one.
+              (cooked--start argv home env)))
+          (cooked--refresh-keymap)
+          ;; The announcement is the shell saying a line editor is reading and that
+          ;; this one can also answer.
+          (should (cooked-tests--settle
+                   (lambda () (and (cooked--input-start-position)
+                                   cooked--completion-nonce
+                                   cooked--completion-reply-capable))
+                   10))
+          (let ((cooked-completion-timeout 5))
+            (pcase-let ((`(,prefix ,_suffix ,_truncated . ,records)
+                         (cooked--shell-completions "mytool a" 8)))
+              ;; Only the word being completed is replaced.
+              (should (= prefix 1))
+              (should (equal (mapcar #'car records) '("alpha")))))
+          (let ((cooked-completion-timeout 5))
+            (pcase-let ((`(,prefix ,_suffix ,_truncated . ,records)
+                         (cooked--shell-completions "mytool " 7)))
+              (should (= prefix 0))
+              (should (equal (mapcar #'car records) '("alpha" "beta" "gamma"))))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer)
+      (delete-directory home t))))
+
+(ert-deftest cooked-completion-without-the-layer-stays-in-emacs ()
+  "Unloaded, the layer is idle but the announcement is still heard.
+
+The two halves come apart here.  A request is this layer\='s business, so with
+both seams nil nothing leaves Emacs and the CAPF answers from its own table.
+The *announcement* is not: `cooked--policy\=' reads it as a license to own the
+input line, and a session that never loads this file needs that reading as much
+as one that does -- so the nonce is kept regardless of who is listening for
+replies."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (let ((cooked-osc-completion-function nil)
           (cooked-shell-completion-function nil)
           (sent nil))
-      ;; The announcement reaches a closed arm and leaves no nonce behind.
-      (cooked--osc-emacs '("CH;2;1234"))
-      (should-not cooked--completion-nonce)
-      ;; And the CAPF answers from Emacs without sending anything.
+      ;; Believed with no layer loaded: this is an ownership signal, not a
+      ;; completion one.
+      (cooked--osc-emacs '("CH;2;1234;1"))
+      (should (equal cooked--completion-nonce "1234"))
+      (should cooked--completion-reply-capable)
+      ;; And the CAPF still answers from Emacs without sending anything.
       (cl-letf (((symbol-function 'cooked--send-if-live)
                  (lambda (&rest _) (setq sent t))))
         (goto-char cooked--input-end)
@@ -294,26 +381,66 @@ shape for the eval channel."
           (should (member "ls" (all-completions "ls" table)))))
       (should-not sent))))
 
-(ert-deftest cooked-completion-with-the-layer-believes-the-announcement ()
-  "Loaded, the same OSC reaches the layer through the same arm and is kept."
+(ert-deftest cooked-completion-announcement-carries-a-reply-capability ()
+  "Framing a reply needs `base64\='; owning the input line does not.
+
+A shell without it announces anyway and says so in the last field, so it keeps
+its editable line and merely has nothing to offer `completion-at-point\='.
+Snippets predating the field could only announce when they could also reply, so
+their silence reads as capable."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
-    (cooked--osc-emacs '("CH;2;1234"))
-    (should (equal cooked--completion-nonce "1234"))))
+    (cooked--osc-emacs '("CH;2;1234;1"))
+    (should (equal cooked--completion-nonce "1234"))
+    (should cooked--completion-reply-capable)
+    (cooked--osc-emacs '("CH;2;5678;0"))
+    (should (equal cooked--completion-nonce "5678"))
+    (should-not cooked--completion-reply-capable)
+    (cooked--osc-emacs '("CH;2;9012"))
+    (should (equal cooked--completion-nonce "9012"))
+    (should cooked--completion-reply-capable)
+    ;; A version we do not speak is a shell failing to make a claim, and the safe
+    ;; reading of no claim is no license.
+    (cooked--osc-emacs '("CH;3;3456;1"))
+    (should-not cooked--completion-nonce)))
+
+(ert-deftest cooked-completion-nonce-does-not-outlive-its-prompt ()
+  "`ssh host\=' must not leave the local shell\='s license standing.
+
+The announcement is a claim about the line being read now.  Once a command
+starts, whatever it spawns -- a remote shell, a nested `zsh -f\=', a REPL --
+announces for itself or does not announce at all; inheriting the old nonce would
+hand a bare remote prompt a license nothing on that host ever issued."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle #'cooked--input-start-position))
+    (cooked--osc-emacs '("CH;2;1234;1"))
+    (should (equal cooked--completion-nonce "1234"))
+    (cooked--handle-semantic '(command-start (screen 0 . 0)) nil)
+    (should-not cooked--completion-nonce)
+    (should-not cooked--completion-reply-capable)))
 
 (ert-deftest cooked-completion-layer-decides-what-the-shell-is-told ()
-  "The zsh snippet cannot retract a `compadd' shadow, so whether to install one
-is decided when the child starts, from whether the layer was loaded by then, and
-travels as COOKED_COMPLETION in its environment."
+  "The zsh capture cannot retract a `compadd' shadow, so whether to install one
+is decided when the child starts, from whether the layer was loaded by then.
+
+It used to travel as COOKED_COMPLETION in the environment.  That was only ever a
+longer way of saying this: the startup file is written at spawn too, so writing
+the `source' line or not makes the same decision at the same moment, with one
+fewer variable to explain.  The core snippet is sourced either way -- it is what
+the marks and the announcement come from, and neither is optional."
   (skip-unless (executable-find "zsh"))
   (dolist (loaded '(nil t))
     (let ((cooked-shell-completion-function
            (and loaded #'cooked--shell-completion-at-point)))
-      (pcase-let ((`(,_argv ,env ,scratch)
+      (pcase-let ((`(,_argv ,_env ,scratch)
                    (cooked--shell-invocation (executable-find "zsh"))))
         (unwind-protect
-            (should (equal (cdr (assoc "COOKED_COMPLETION" env))
-                           (if loaded "1" "0")))
+            (let ((rc (with-temp-buffer
+                        (insert-file-contents (expand-file-name ".zshrc" scratch))
+                        (buffer-string))))
+              (should (string-match-p "cooked\\.zsh" rc))
+              (should (eq (and (string-match-p "cooked-completion\\.zsh" rc) t)
+                          loaded)))
           (when scratch (delete-directory scratch t)))))))
 
 (ert-deftest cooked-completion-that-lists-nothing-leaves-no-copy-of-the-line ()

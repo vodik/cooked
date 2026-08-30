@@ -1,5 +1,25 @@
-# OSC 133 semantic prompts for zsh, plus OSC 7 directory reporting.
-# Source from ~/.zshrc, or let cooked inject it with a generated ZDOTDIR.
+# cooked's core shell integration for zsh: OSC 133 semantic prompts, OSC 7 directory
+# reporting, and the per-prompt completion announcement.
+#
+# Source it from ~/.zshrc:
+#
+#     [[ $TERM_PROGRAM == cooked ]] && source /path/to/cooked.zsh
+#
+# cooked also injects this file into the shells it starts itself, so on a local
+# session the line is redundant -- and worth having anyway.  Injection reaches
+# exactly the shell cooked spawned: `exec zsh', `sudo -i', `docker exec', a nested
+# `zsh -f' and the far end of every `ssh' all land outside it.  The line crosses all
+# of them.  Sourcing twice is a no-op, so the two arrangements compose rather than
+# conflict.  Getting TERM_PROGRAM to the far end is `SendEnv'/`AcceptEnv', and is
+# yours to configure.
+#
+# What is turned on comes from COOKED_SHELL_INTEGRATION_FEATURES -- see __cooked_want below,
+# and `cooked-shell-integration-features' on the Emacs side.
+#
+# The completion capture is its own file, cooked-completion.zsh, because it is a
+# wire protocol rather than a preference; source it after this one.
+
+[[ $TERM_PROGRAM == cooked ]] || return
 
 [[ -n "${COOKED_INTEGRATION_LOADED-}" ]] && return
 COOKED_INTEGRATION_LOADED=1
@@ -7,18 +27,43 @@ COOKED_INTEGRATION_LOADED=1
 
 autoload -Uz add-zsh-hook
 
+# The feature list, taken verbatim from the environment so that a shell cooked
+# injected into and one that sourced this by hand agree about what is on.
+#
+# Unset means cooked did not start this shell -- an ssh that does not forward the
+# variable, a container, a shell started before Emacs was.  The fallback is the same
+# default `cooked-shell-integration-features' carries, rather than "everything":
+# arriving somewhere unconfigured is not a reason to start writing window titles.
+typeset -g __cooked_features="${COOKED_SHELL_INTEGRATION_FEATURES-marks input-mark cwd announce completion title}"
+
+# A feature is on if it is named and not un-named.  The `no-NAME' form exists so
+# that a prompt which already does one of these jobs can stand cooked's half down
+# without giving up the rest -- a theme that emits its own OSC 133 appends
+# ` no-marks' and keeps the editable line, the directory tracking and completion.
+# Subtraction wins over naming, so the append is always the last word.
+__cooked_want() {
+  [[ " $__cooked_features " == *" no-$1 "* ]] && return 1
+  [[ " $__cooked_features " == *" $1 "* ]]
+}
+
+#
+# The marks.
+#
+# `A' where the prompt begins, `C' where its command's output begins, `D' with the
+# exit status.  Between them Emacs knows where every command started and ended and
+# how it went, which is what the per-command records, `next-error', rerun and the
+# fringe decorations are all built on.
+#
 __cooked_precmd() {
   # Not `status`: that name is read-only in zsh (it aliases $?).
   local exit_status=$?
-  print -n "\e]133;D;${exit_status}\a"
-  print -n "\e]7;file://${HOST}${PWD}\a"
-  print -n "\e]133;A\a"
+  __cooked_want marks && print -n "\e]133;D;${exit_status}\a"
+  __cooked_want cwd   && print -n "\e]7;file://${HOST}${PWD}\a"
+  __cooked_want marks && print -n "\e]133;A\a"
+  return 0
 }
 
-__cooked_preexec() { print -n "\e]133;C\a" }
-
-add-zsh-hook precmd __cooked_precmd
-add-zsh-hook preexec __cooked_preexec
+__cooked_preexec() { __cooked_want marks && print -n "\e]133;C\a"; return 0 }
 
 # We are sourced after the user's .zshrc, so a theme's precmd is already registered
 # and ours would otherwise run last -- by which point $? is that hook's status and
@@ -28,13 +73,17 @@ __cooked_first_precmd() {
     precmd_functions=(__cooked_precmd ${precmd_functions:#__cooked_precmd})
   fi
 }
-__cooked_first_precmd
 
-# The B mark says "the shell is now reading input", which is what hands the keyboard
-# to Emacs -- so losing it costs the whole feature.  Appending to PS1 once at source
-# time is not enough: powerlevel10k, starship and most oh-my-zsh themes rebuild PS1
-# from their own precmd, silently dropping it.  Re-append every prompt instead, from
-# a hook that keeps itself last so it runs after whoever rebuilt it.
+# The `B' mark says "the shell is now reading input", which is what hands the
+# keyboard to Emacs -- so losing it costs the whole feature.  It is a feature of its
+# own, separately from the other three marks, because it is the only one that
+# changes who owns the keyboard: without it you keep the extents, the exit codes and
+# `next-error', and the shell keeps its own line editor.
+#
+# Appending to PS1 once at source time is not enough: powerlevel10k, starship and
+# most oh-my-zsh themes rebuild PS1 from their own precmd, silently dropping it.
+# Re-append every prompt instead, from a hook that keeps itself last so it runs after
+# whoever rebuilt it.
 #
 # It has to be in PS1 rather than printed from precmd: precmd runs *before* the
 # prompt is drawn, so a printed mark would land ahead of the prompt text and Emacs
@@ -46,358 +95,44 @@ __cooked_prompt_precmd() {
   # Test for the marker itself, not a flag: a theme that rebuilt PS1 needs a fresh
   # append, and one that left it alone must not accumulate copies.
   # %{...%} tells ZLE the marker occupies no columns.
-  [[ $PS1 == *$'\e]133;B\a'* ]] || PS1="${PS1}"$'%{\e]133;B\a%}'
-}
-add-zsh-hook precmd __cooked_prompt_precmd
-__cooked_prompt_precmd
-
-#
-# Talking back to Emacs.
-#
-# The command channel is `OSC 51;E<version>;<verb>[;<arg>]', and the verbs are a
-# closed set on the Emacs side — there is no name to look up, so defining a helper
-# here is what makes one reachable and nothing else has to be allowed.  Emacs still
-# has to have loaded `cooked-osc-eval' at all; the terminal is a channel anyone's
-# output can write to, so it is off until somebody says otherwise.
-
-osc_title()    { print -Pn "\e]2;${1}\a" }
-osc_annotate() { printf '\e]51;A%s\e\\' "${1:-}" }
-
-# One argument, sent verbatim: the verb decides what it means, so there are no
-# quoting rules and a path containing `;' or `"' needs no escaping.
-osc_emacs_verb() { printf '\e]51;E1;%s;%s\e\\' "$1" "${2-}" }
-
-# `!' is the escape hatch — an arbitrary command name, which Emacs looks up in
-# `cooked-eval-commands' and refuses unless the user put it there.  Quoting lives
-# here and only here, because this is the one verb that takes many arguments.
-osc_emacs_eval() {
-    printf '\e]51;E1;!;'
-    local arg
-    for arg in "$@"; do
-        arg="${arg//\\/\\\\}"
-        arg="${arg//\"/\\\"}"
-        printf '"%s" ' "$arg"
-    done
-    printf '\e\\'
+  #
+  # A PS1 ending in a bare `%' would combine with our `%{' into a prompt escape and
+  # eat the mark, so a prompt that ends that way gets a `%%' first.
+  if [[ $PS1 != *$'\e]133;B\a'* ]]; then
+    [[ $PS1 == *'%' && $PS1 != *'%%' ]] && PS1="${PS1}%"
+    PS1="${PS1}"$'%{\e]133;B\a%}'
+  fi
 }
 
-# OSC 52 — reaches Emacs' kill ring even from the far end of an ssh session.
-osc_copy() {
-    local text="${1:-$(</dev/stdin)}"
-    (( $+commands[base64] )) || return
-    printf '\e]52;c;%s\a' "$(print -rn -- "$text" | base64 | tr -d '\n')"
-}
-
-find_file()              { osc_emacs_verb F "${${1:-.}:a}" }
-find_file_other_window() { osc_emacs_verb O "${${1:-.}:a}" }
-dired()                  { osc_emacs_verb D "${${1:-.}:a}" }
-
-# Not a verb: `magit-status' is not one of the closed set, so this goes through the
-# `!' escape hatch and is refused until `cooked-eval-commands' names it.  The helper
-# is here so that opting in is one line in your init file rather than two places.
-magit()                  { osc_emacs_eval magit-status "${${1:-.}:a}" }
-
-# Note the absence of a `clear' override, and there is nothing left for one to fix:
-# plain `clear' sends `CSI 2 J' and then `CSI 3 J', which cooked answers by scrolling
-# the screen it archived out of view and then dropping it.  Shadowing a standard
-# command to reach into the editor would be surprising and would break scripts that
-# call it.  From Emacs the same thing is \\[cooked-clear-scrollback], which needs no
-# help from the shell at all, and the channel spells it `E1;K' for anyone who wants
-# it from a script.
-
-# Title tracking: show the command that is running, minus the words that hide it.
-__cooked_title_preexec() {
-    osc_title "${1[(wr)^(*=*|sudo|command|builtin|-*)]:gs/%/%%}"
-}
-__cooked_title_precmd()  { osc_title "%~" }
-__cooked_annotate()      { osc_annotate "$(print -Pn '%n@%m:%~')" }
-
-add-zsh-hook preexec __cooked_title_preexec
-add-zsh-hook precmd __cooked_title_precmd
-add-zsh-hook precmd __cooked_annotate
-
 #
-# Completion.
+# The completion announcement.
 #
-# The line being edited lives in Emacs, so ZLE's buffer is empty and forwarding TAB
-# would complete against nothing.  Emacs instead sends the line here on a key nobody
-# types, and the widget below runs the real completion system over it with `compadd'
-# shadowed to capture what it would have offered, then answers with OSC 51;C.
+# `OSC 51;CH;<version>;<nonce>;<replies>', emitted afresh at every ZLE line.  It is
+# in the core rather than with the completion capture because Emacs reads it as two
+# different things and only one of them is about completion.
 #
-# Emacs only sends the request after seeing the announcement below, which is emitted
-# afresh at every prompt.  That matters: without a widget bound to the trigger, the
-# sequence and the line after it would be read as literal input.  A shell that never
-# announces — a nested `zsh -f', bash, the far end of an ssh — is never asked.
+# To the completion layer it is the token a request must carry.  To everything else
+# it is a *license to own the input line*: the shell asserting, for this line, that a
+# line editor is bound and reading.  That is the one signal that is both byte-
+# transparent -- so it survives an ssh, where termios does not -- and self-
+# corroborating, because the shell states its own condition rather than being
+# inferred about.  Without it a remote prompt keeps its own line, which is correct
+# but strictly less than this shell can offer.
 #
-# Off unless Emacs asks for it.  On the Emacs side this half of the feature is a
-# separate file you load on purpose -- `(require 'cooked-shell-completion)' -- and
-# whether it was loaded when the session started is what arrives here as
-# COOKED_COMPLETION in the environment.  Read once, at
-# source time, because that is the only moment at which the question can be answered
-# cheaply -- everything below is a `compadd' shadow, a widget and three bindkeys, and
-# zsh has no tidy way to take any of them back afterwards.  Hence a `return' rather
-# than a flag consulted per request: a session started without the feature is a
-# session that never had it, and the shadow every later completion in this shell runs
-# through is the whole of what "on" actually costs.  Loading the Emacs half against a
-# shell already started this way therefore does nothing until the shell is restarted;
-# Emacs simply asks nothing in the meantime.  Everything above this line --
-# the OSC 133 marks, OSC 7, the title, the eval helpers -- is unaffected, which is
-# why this section is last in the file: it makes the guard a plain `return'.
-[[ ${COOKED_COMPLETION:-1} == 1 ]] || return
-
+# The last field says whether a request can be *answered*: that needs the capture in
+# cooked-completion.zsh, which sets it, and a reply needs base64 to frame it.
+# Announcing anyway is the point -- staying quiet for want of an encoder, or because
+# the optional half is not loaded, would cost the editable line for an unrelated
+# reason and cost it silently.
 typeset -g __cooked_complete_nonce=
-typeset -g __cooked_capturing=
-typeset -g __cooked_prefix=0 __cooked_suffix=0 __cooked_truncated=0
-# The text of the span the matches are relative to, kept rather than only its length
-# because re-basing a match onto it needs the characters; see `compadd' below.
-# `__cooked_span' says a span has been captured at all, which its length cannot.
-typeset -g __cooked_prefix_text= __cooked_span=
-typeset -ga __cooked_matches __cooked_display __cooked_groups
+typeset -g __cooked_complete_replies=0
 
-# How many candidates are worth sending.  An empty line completes to every command on
-# PATH, and past a certain point the list is something to filter rather than to read --
-# which Emacs is doing anyway, on a prefix the shell has already applied.
-#
-# Whether the cap was reached goes back with the answer, and Emacs spends it: a
-# complete list is filtered there as the word grows, and only a truncated one is worth
-# another round trip.
-typeset -g __cooked_complete_limit=1000
-
-# `compadd' is shadowed for the duration of one capture only; every other caller in
-# the session — a user's own completion function, a plugin — reaches the builtin
-# unchanged.  The real add happens first and its status is what we return, because
-# completers branch on whether matches landed: swallowing them would change which
-# completer runs and quietly turn off _approximate, _correct and friends.
-compadd() {
-  [[ -n $__cooked_capturing ]] || { builtin compadd "$@"; return }
-
-  builtin compadd "$@"
-  local status_=$?
-
-  if (( ${#__cooked_matches} >= __cooked_complete_limit )); then
-    __cooked_truncated=1
-    return $status_
-  fi
-
-  # Pull out the display strings and the group name.  Options cluster, and an option
-  # that takes an argument has to come last in its cluster — `-ld array' is how
-  # `_describe' passes descriptions — so it is the final letter that decides whether
-  # the next word is a value or the next option.  Skipping by name matters: a value
-  # that happens to look like an option would otherwise be read as one.
-  local -a display=()
-  local group= arg= dspec= probe= apre= hpre=
-  local -i i=1
-  while (( i <= $# )); do
-    arg=${@[i]}
-    case $arg in
-      --) break ;;
-      -*)
-        case ${arg[-1]} in
-          d) dspec=${@[i+1]}; (( i++ )) ;;
-          # A match is assembled from more than its body: -P contributes a visible
-          # prefix and -p a hidden one, which is how `_path_files' offers `cooked.zsh'
-          # for a line reading `shell-integration/coo' -- the directory is on the match
-          # without being in it.  Both are part of what lands on the line.
-          P) apre=${@[i+1]}; (( i++ )) ;;
-          p) hpre=${@[i+1]}; (( i++ )) ;;
-          # -X is the human-readable explanation ("branch", "remote name"); -J and -V
-          # are the internal group names.  Prefer the former, fall back to the latter.
-          X) group=${@[i+1]}; (( i++ )) ;;
-          J|V) [[ -n $group ]] || group=${@[i+1]}; (( i++ )) ;;
-          [FSsiIWxrRDOAEM]) (( i++ )) ;;
-          o) [[ ${@[i+1]} == -* ]] || (( i++ )) ;;
-        esac
-        # -O, -A and -D all mean the caller is asking what *would* match rather than
-        # offering it -- `_git' probes that way before deciding what to add.  Capturing
-        # a probe is how the same candidates arrive twice.
-        [[ ${arg#-} == *[ODA]* ]] && probe=1
-        ;;
-      *) break ;;
-    esac
-    (( i++ ))
-  done
-
-  [[ -n $probe ]] && return $status_
-
-  if [[ -n $dspec ]]; then
-    # -d takes either an array's name or a literal parenthesised list.
-    if [[ $dspec == \(*\) ]]; then
-      display=( ${(Q)${(z)dspec[2,-2]}} )
-    else
-      display=( "${(@P)dspec}" )
-    fi
-  fi
-
-  # -O collects the matches that survive matching against what is already typed, and
-  # -D prunes a parallel array in step with them, which is the only way to keep each
-  # description next to the candidate it belongs to.
-  local -a caught=() kept=("${display[@]}")
-  builtin compadd -O caught -D kept "$@"
-
-  (( ${#caught} )) || return $status_
-
-  # The span the candidates replace, which is not the whitespace-delimited word Emacs
-  # would guess.  PREFIX only: IPREFIX is the part compsys has already decided stays
-  # on the line -- the directory components `_files' walked past, the `--opt=' that
-  # `_arguments' stripped -- and the candidates it hands back are relative to what is
-  # left.  Replacing IPREFIX too would swallow the directory and offer `cooked.zsh'
-  # for `shell-integration/coo'.
-  #
-  # Read from the first call that actually produced a match, not merely the first
-  # call: a completer that offered nothing has no bounds worth having.  An explicit
-  # flag rather than `(( ! __cooked_prefix ))', which does not say that: zero is a
-  # legitimate PREFIX (`ls <TAB>' completes an empty word), so that test reads as
-  # "keep overwriting until one of them is non-empty" and lets a later, unrelated
-  # completer's span win.
-  if [[ -z $__cooked_span ]]; then
-    __cooked_span=1
-    __cooked_prefix_text=$PREFIX
-    # SUFFIX is recorded here and nowhere else.  Emacs replaces only up to the
-    # cursor and ignores it entirely, so there is nothing for a per-call value to be
-    # right *about*; it stays in the protocol as the first matched call's answer.
-    __cooked_suffix=${#SUFFIX}
-  fi
-
-  # One reply carries one span, and the calls that fill it need not agree on it:
-  # compsys moves text from PREFIX to IPREFIX as it descends -- `compset -P', the
-  # `--opt=' `_arguments' strips, the directory components `_path_files' walks --
-  # so a later completer in the same completion legitimately answers relative to
-  # less of the word.  IPREFIX+PREFIX is what stays constant across those calls, so
-  # a shorter PREFIX is a *suffix* of the widest one and the difference is a literal
-  # head that can be glued back onto the match.  Which is what happens: every match
-  # is re-based onto the widest span seen, and if this call is the one that widens
-  # it, the matches already collected are re-based forward instead.  The alternative
-  # -- send the span per record and let Emacs sort it out -- buys nothing here,
-  # since `completion-in-region' gets exactly one span to replace and something has
-  # to pick it.
-  local head=
-  if (( ${#PREFIX} < ${#__cooked_prefix_text} )); then
-    head=${__cooked_prefix_text[1,${#__cooked_prefix_text} - ${#PREFIX}]}
-  elif (( ${#PREFIX} > ${#__cooked_prefix_text} )); then
-    local grew=${PREFIX[1,${#PREFIX} - ${#__cooked_prefix_text}]}
-    __cooked_matches=( "${(@)__cooked_matches/#/$grew}" )
-    __cooked_prefix_text=$PREFIX
-  fi
-
-  local -i n=1
-  for arg in "${caught[@]}"; do
-    __cooked_matches+=( "$head$apre$hpre$arg" )
-    __cooked_display+=( "${kept[n]-}" )
-    __cooked_groups+=( "$group" )
-    (( n++ ))
-    if (( ${#__cooked_matches} >= __cooked_complete_limit )); then
-      __cooked_truncated=1
-      break
-    fi
-  done
-
-  return $status_
+__cooked_complete_announce() {
+  __cooked_complete_nonce=${RANDOM}${RANDOM}
+  # An OSC occupies no columns and moves no cursor, so ZLE's idea of the screen
+  # survives being written to from inside a widget.
+  printf '\e]51;CH;2;%s;%s\e\\' $__cooked_complete_nonce $__cooked_complete_replies
 }
-
-# A completion widget: created with `zle -C' so that calling it sets up the completion
-# special variables and lets `_main_complete' run exactly as TAB would.
-__cooked_complete_capture() {
-  __cooked_matches=() __cooked_display=() __cooked_groups=()
-  __cooked_prefix=0 __cooked_suffix=0 __cooked_truncated=0
-  __cooked_prefix_text= __cooked_span=
-  __cooked_capturing=1
-  # Descriptions are formatted to fit the screen, and truncated to it: at 80 columns
-  # `--dired' loses the second half of its sentence.  Nothing is being listed here, so
-  # widen the imaginary screen and let Emacs decide how much of it to show.
-  local COLUMNS=300
-  # A completer that prints — and some do, when the command they ask goes wrong —
-  # would otherwise write over the screen Emacs is drawing.
-  { _main_complete } >/dev/null 2>&1
-  __cooked_capturing=
-  # Nothing is inserted and nothing is listed: this run exists only for its matches.
-  # After `_main_complete', not before -- it writes both keys itself on the way out,
-  # and a `menu select' style left standing here starts an interactive menu the
-  # moment the widget returns, which eats the next request and answers nothing.
-  compstate[insert]=''
-  compstate[list]=''
-  # Derived rather than assigned alongside the text, so the two cannot disagree.
-  __cooked_prefix=${#__cooked_prefix_text}
-}
-zle -C __cooked_complete_capture .complete-word __cooked_complete_capture
-
-# Every byte is percent-encoded, including the ones that would survive as themselves.
-# Selective encoding would leave a hex digit able to follow an escape and be swallowed
-# by it: `%41BC' is \x41BC, not \x41 then BC.
-__cooked_complete_decode() {
-  printf -v REPLY '%b' "${1//\%/\\x}"
-}
-
-__cooked_complete() {
-  local request= c=
-  # -s or the request is echoed onto the screen a character at a time; -t so a request
-  # that arrives truncated ends the widget rather than leaving ZLE blocked on a
-  # newline that is never coming.
-  while read -k 1 -s -t 2 c; do
-    [[ $c == $'\n' || $c == $'\r' ]] && break
-    request+=$c
-    (( ${#request} > 65536 )) && return
-  done
-
-  # Quoted, or an empty line to complete -- the request's last field -- is dropped by
-  # the split and the request looks malformed.
-  local -a fields=( "${(@s.;.)request}" )
-  (( ${#fields} == 4 )) || return
-  # The nonce is this prompt's.  A request built against an older one raced the line
-  # it was completing and is answering a question that no longer exists.
-  [[ -n $__cooked_complete_nonce && $fields[1] == $__cooked_complete_nonce ]] || return
-
-  local REPLY=
-  __cooked_complete_decode $fields[4]
-
-  # ZLE redraws from BUFFER when the widget returns, so both are put back exactly as
-  # they were: the line is identical, the redraw is a no-op, and nothing flickers.
-  local save_buffer=$BUFFER
-  local -i save_cursor=$CURSOR
-  BUFFER=$REPLY
-  CURSOR=$fields[3]
-  zle __cooked_complete_capture
-  BUFFER=$save_buffer
-  CURSOR=$save_cursor
-  # The capture can put the line on the screen despite listing nothing.  compsys
-  # refreshes the display itself on the way to a message or a beep -- `git commit
-  # -am <TAB>' with no matches is the everyday case -- and that refresh draws
-  # BUFFER, which for the duration of the capture is the line Emacs is holding.
-  # Here the shell's own line is empty, so what is drawn is a second copy of the
-  # command, sitting exactly where the completion would have gone.
-  #
-  # Restoring BUFFER does not take it back: the refresh at the end of the widget
-  # compares against what ZLE last recorded, which the capture's own refresh
-  # already updated, so it finds nothing to erase and leaves the copy on screen.
-  # `redisplay' rebuilds the line unconditionally, which is what erases it.  Run
-  # for every request rather than only the ones that dirtied the screen: there is
-  # no flag saying which those were, and a redraw of an undisturbed prompt costs
-  # a repaint of one row that Emacs renders identically.
-  #
-  # `zle -R' after it for the ordering, not for the redraw: ZLE holds its output
-  # until the widget returns, so on its own the repair would arrive *after* the
-  # reply below -- and Emacs, unblocked by the reply, can redisplay in between and
-  # show the copy for as long as a drain interval.  `-R' flushes it now, which
-  # puts the repair ahead of the reply in the byte stream and leaves no drain that
-  # can see one without the other.
-  zle redisplay
-  zle -R
-
-  local blob= i=
-  for (( i = 1; i <= ${#__cooked_matches}; i++ )); do
-    blob+="${__cooked_matches[i]}"$'\x1f'"${__cooked_display[i]}"$'\x1f'"${__cooked_groups[i]}"$'\x1e'
-  done
-  # base64 because a description is arbitrary text — compsys puts colour in some of
-  # them — and a single control byte would end the sequence carrying it.
-  printf '\e]51;CR;%s;%d;%d;%d;%s\e\\' \
-    $fields[2] $__cooked_prefix $__cooked_suffix $__cooked_truncated \
-    "$(print -rn -- $blob | base64 | tr -d '\n')"
-}
-zle -N __cooked_complete
-
-# A private sequence: no keyboard sends it, and no terminfo entry names it.
-bindkey -M emacs $'\e[>99u' __cooked_complete
-bindkey -M viins $'\e[>99u' __cooked_complete
-bindkey -M vicmd $'\e[>99u' __cooked_complete
 
 # Announced from `zle-line-init' rather than a precmd hook, and the difference is not
 # cosmetic: precmd runs before ZLE has taken the terminal, so a request answering it
@@ -405,21 +140,137 @@ bindkey -M vicmd $'\e[>99u' __cooked_complete
 # on the screen before the widget ever sees it.  By line-init the keyboard is ZLE's,
 # which is exactly the condition the announcement is claiming.  It also means each
 # fresh line rotates the nonce, so a request built against the previous one is refused.
-__cooked_complete_announce() {
-  # The reply cannot be framed without base64, so do not advertise what we could not
-  # answer; Emacs falls back to completing in Emacs.
-  (( $+commands[base64] )) || return
-  __cooked_complete_nonce=${RANDOM}${RANDOM}
-  # An OSC occupies no columns and moves no cursor, so ZLE's idea of the screen
-  # survives being written to from inside a widget.
-  printf '\e]51;CH;2;%s\e\\' $__cooked_complete_nonce
-}
-
+#
 # Whoever already owns `zle-line-init' -- zsh-autosuggestions, a vi-mode plugin, a
 # theme -- keeps working: their widget is aliased aside and called from ours.
-[[ -n ${widgets[zle-line-init]-} ]] && zle -A zle-line-init __cooked_saved_line_init
-__cooked_line_init() {
-  __cooked_complete_announce
-  (( $+widgets[__cooked_saved_line_init] )) && zle __cooked_saved_line_init
+__cooked_install_announce() {
+  [[ -n ${widgets[zle-line-init]-} ]] && zle -A zle-line-init __cooked_saved_line_init
+  __cooked_line_init() {
+    __cooked_complete_announce
+    (( $+widgets[__cooked_saved_line_init] )) && zle __cooked_saved_line_init
+  }
+  zle -N zle-line-init __cooked_line_init
 }
-zle -N zle-line-init __cooked_line_init
+
+#
+# The title.
+#
+# cooked shows this in the mode line, and `cooked-buffer-name-follows-title' can put it
+# in the buffer name.  A prompt that already writes OSC 2 makes this a redundant write
+# rather than a conflict -- last one wins, and ours is registered later, so it does.
+# Append ` no-title' to keep your own wording.
+#
+__cooked_title_preexec() {
+  # `local_options' keeps both of these to this function.  EXTENDED_GLOB is what makes
+  # `^(...)' a negation rather than a literal caret, and without it the subscript
+  # matches nothing and every title comes out empty -- silently, which is how this
+  # survived being copied out of an rc that happened to set the option globally.
+  # NO_NOMATCH stops a command whose first word looks like a failed glob from erroring
+  # here rather than running.
+  setopt local_options extended_glob no_nomatch
+  print -Pn "\e]2;${1[(wr)^(*=*|sudo|command|builtin|-*)]:gs/%/%%}\a"
+}
+__cooked_title_precmd() { print -Pn '\e]2;%~\a' }
+
+#
+# Talking back to Emacs, over OSC 51;E.
+#
+# Off unless asked for, and turning it on here is only half: the Emacs side does
+# nothing with any of this until `cooked-osc-eval' is loaded, so these are inert
+# rather than dangerous in a session that never asked for them.  That split is the
+# point -- the terminal is a channel anything can write to, so what a verb may do is
+# settled where the user can see it and not by whatever printed the bytes.
+#
+# The verbs below are a closed set on the Emacs side: each is cooked's own code and
+# checks its own argument.  That is why they are safe to define for you, and why
+# there is no shipped helper for anything outside the set.
+# Installed from the deferred init, which runs *after* your .zshrc -- so these win over
+# a definition of the same name made there.  That is deliberate, and it is the same
+# bargain kitty makes when it aliases `sudo': asking for a feature is asking for its
+# names, and the way to decline is the feature list rather than a race to define first.
+# Leave `eval-helpers' out, or append ` no-eval-helpers', and none of this exists.
+#
+# What we still never do is `unfunction' a name we did not write.  Filling a gap when
+# asked and taking away something you wrote are different acts, and only the second
+# cannot be undone by turning the feature back off.
+__cooked_install_helpers() {
+  __cooked_verb() { printf '\e]51;E1;%s;%s\e\\' "$1" "${2-}" }
+
+  find_file()              { __cooked_verb F "${${1:-.}:a}" }
+  find_file_other_window() { __cooked_verb O "${${1:-.}:a}" }
+  dired()                  { __cooked_verb D "${${1:-.}:a}" }
+
+  # OSC 52 -- reaches Emacs' kill ring even from the far end of an ssh.
+  osc_copy() {
+    local text="${1:-$(</dev/stdin)}"
+    (( $+commands[base64] )) || return
+    printf '\e]52;c;%s\a' "$(print -rn -- "$text" | base64 | tr -d '\n')"
+  }
+
+  # The escape hatch, and the one place quoting lives, because it is the only form
+  # that takes more than one argument.  `!' names a command Emacs looks up in
+  # `cooked-eval-commands', which is empty until you fill it -- so this is refused by
+  # default and stays refused for every name you did not choose.
+  #
+  # There is deliberately no shipped alias built on this.  Which commands are worth
+  # reaching, and under what name, is yours:
+  #
+  #     alias magit='cooked_send magit-status'
+  #
+  # and the matching (add-to-list 'cooked-eval-commands '("magit-status" . magit-status)).
+  # An alias that shadows a real command reads very differently as something you wrote
+  # than as something cooked put in your shell.
+  cooked_send() {
+    printf '\e]51;E1;!;'
+    local arg
+    for arg in "$@"; do
+      arg="${arg//\\/\\\\}"
+      arg="${arg//\"/\\\"}"
+      printf '"%s" ' "$arg"
+    done
+    printf '\e\\'
+  }
+}
+
+#
+# Deferred setup.
+#
+# Everything above only defines things; nothing is registered until the first prompt.
+# That is what gives a .zshrc somewhere to stand: it is sourced before this runs, so
+# it can append to COOKED_SHELL_INTEGRATION_FEATURES and be heard.  It also means we register
+# after every theme and plugin has, which is the position both hook orderings above
+# are trying to reach anyway.
+__cooked_deferred_init() {
+  precmd_functions=(${precmd_functions:#__cooked_deferred_init})
+  unfunction __cooked_deferred_init
+
+  __cooked_features="${COOKED_SHELL_INTEGRATION_FEATURES-$__cooked_features}"
+
+  # One hook covers both, and each line inside it is gated on its own feature:
+  # directory reporting is not part of the marks and outlives them being turned off.
+  if __cooked_want marks || __cooked_want cwd; then
+    add-zsh-hook precmd __cooked_precmd
+    __cooked_first_precmd
+  fi
+  __cooked_want marks && add-zsh-hook preexec __cooked_preexec
+  if __cooked_want input-mark; then
+    add-zsh-hook precmd __cooked_prompt_precmd
+    __cooked_prompt_precmd
+  fi
+  __cooked_want announce && __cooked_install_announce
+  # Defined only when asked for, never removed when not: these are ordinary names a
+  # user may already have bound to something of their own, and a snippet that
+  # `unfunction'd them would delete a definition it did not write.
+  __cooked_want eval-helpers && __cooked_install_helpers
+  if __cooked_want title; then
+    add-zsh-hook preexec __cooked_title_preexec
+    add-zsh-hook precmd __cooked_title_precmd
+  fi
+
+  # The first prompt is already being drawn, so the hooks registered above have
+  # missed it.  Mark it by hand rather than let the session open unmarked.
+  __cooked_want cwd   && print -n "\e]7;file://${HOST}${PWD}\a"
+  __cooked_want marks && print -n "\e]133;A\a"
+  return 0
+}
+add-zsh-hook precmd __cooked_deferred_init

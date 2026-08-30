@@ -160,8 +160,18 @@ impl Notifier {
     }
 
     /// Emacs has drained, so the next change is worth another byte.
-    fn drained(&self) {
+    ///
+    /// Returns whether a throttled notification is still waiting. Flushing here retires
+    /// the ordinary case, where the drain lands after `min_interval` has already elapsed.
+    /// A drain that lands inside the window leaves the retry to the reader thread — which
+    /// computed its [`Self::poll_timeout`] while the previous wakeup was still in flight,
+    /// and so is asleep for the whole of `POLL_TIMEOUT_MS` rather than for the few
+    /// milliseconds this notification actually has left to wait. That is the caller's cue
+    /// to interrupt the poll so the timeout is computed again.
+    fn drained(&self) -> bool {
         self.notified.store(false, Ordering::SeqCst);
+        self.flush();
+        self.dirty.load(Ordering::SeqCst) && !self.notified.load(Ordering::SeqCst)
     }
 
     /// Copy the emulator's synchronized-output deadline where the notify path can see it.
@@ -172,8 +182,8 @@ impl Notifier {
     /// How long the reader thread may sleep in `poll`.
     ///
     /// Ordinarily [`POLL_TIMEOUT_MS`] — plenty coarse, since real pty data wakes `poll`
-    /// immediately regardless of the timeout, and nothing else queued behind it (`quit`, a
-    /// stashed resize, a termios change) needs finer granularity. But when [`Self::flush`]
+    /// immediately regardless of the timeout, and nothing else queued behind it (teardown,
+    /// a stashed resize, a termios change) needs finer granularity. But when [`Self::flush`]
     /// has already deferred a notification to `min_interval`'s throttle and the child then
     /// falls quiet, nothing else will wake the loop before that window elapses — so waiting
     /// out the rest of `POLL_TIMEOUT_MS` instead adds up to a hundred extra milliseconds
@@ -231,30 +241,43 @@ struct Shared {
     /// accumulate between drains, so this fills sooner.
     backlog_limit: usize,
     shutdown: AtomicBool,
-    quit: Quit,
+    interrupt: Interrupt,
     exited: Mutex<Option<i32>>,
 }
 
-/// A self-pipe the reader polls alongside the pty, so teardown does not have to wait out
-/// the poll timeout. Without it every kill blocks Emacs for up to [`POLL_TIMEOUT_MS`],
+/// A self-pipe the reader polls alongside the pty, so the two things that can happen
+/// while the child is quiet do not have to wait out the poll timeout.
+///
+/// Teardown is one: without this, every kill blocks Emacs for up to [`POLL_TIMEOUT_MS`],
 /// which is the difference between closing a buffer feeling instant and feeling like a
-/// stutter.
-struct Quit {
+/// stutter. A drain that leaves a throttled notification behind is the other; see
+/// [`Notifier::drained`]. Neither carries a payload — [`Shared::shutdown`] tells the two
+/// apart, and it is set before the interrupt is raised — so the reader need only empty the
+/// pipe and look at the flag.
+struct Interrupt {
     read: OwnedFd,
     write: OwnedFd,
 }
 
-impl Quit {
+impl Interrupt {
     fn new() -> Result<Self> {
         // O_CLOEXEC, so this does not reintroduce the inherited fd `Pty::spawn` just went
-        // to the trouble of closing. O_NONBLOCK so a wake can never park teardown behind a
-        // full pipe.
+        // to the trouble of closing. O_NONBLOCK so a raise can never park its caller behind
+        // a full pipe, and so `clear` cannot block on a byte another raise got to first.
         let (read, write) = crate::platform::cloexec_pipe()?;
         Ok(Self { read, write })
     }
 
-    fn wake(&self) {
+    fn raise(&self) {
         let _ = nix::unistd::write(self.write.as_fd(), b"q");
+    }
+
+    /// Empty the pipe, so the next poll blocks again rather than returning at once.
+    fn clear(&self) {
+        // A raise while this runs simply arrives on the next poll; nothing is lost, since
+        // what the reader does on waking is unconditional and idempotent either way.
+        let mut buf = [0u8; 64];
+        while let Ok(1..) = nix::unistd::read(self.read.as_fd(), &mut buf) {}
     }
 }
 
@@ -318,7 +341,7 @@ impl Session {
             notifier: Notifier::new(wake, options.min_redisplay_interval),
             backlog_limit: options.backlog_limit,
             shutdown: AtomicBool::new(false),
-            quit: Quit::new()?,
+            interrupt: Interrupt::new()?,
             exited: Mutex::new(None),
         });
 
@@ -347,7 +370,7 @@ impl Session {
             return false;
         }
         let _ = self.shared.pty.signal(Signal::SIGHUP);
-        self.shared.quit.wake();
+        self.shared.interrupt.raise();
         self.shared.notifier.close();
         if let Some(reader) = self.reader.held().take() {
             let _ = reader.join();
@@ -367,7 +390,9 @@ impl Session {
 
     /// Collect everything that changed, re-arming the wakeup.
     pub fn drain(&self) -> Update {
-        self.shared.notifier.drained();
+        if self.shared.notifier.drained() {
+            self.shared.interrupt.raise();
+        }
         Update {
             delta: self.shared.term.held().drain(),
             mode: self.shared.mode.load(),
@@ -540,18 +565,23 @@ impl Shared {
         while !self.shutdown.load(Ordering::SeqCst) {
             let mut fds = [
                 PollFd::new(self.pty.as_fd(), PollFlags::POLLIN),
-                PollFd::new(self.quit.read.as_fd(), PollFlags::POLLIN),
+                PollFd::new(self.interrupt.read.as_fd(), PollFlags::POLLIN),
             ];
             match poll(&mut fds, self.notifier.poll_timeout()) {
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(_) => break,
                 Ok(_) => {}
             }
-            let quit = fds[1].revents().is_some_and(|r| !r.is_empty());
+            let interrupted = fds[1].revents().is_some_and(|r| !r.is_empty());
             let ready = fds[0].revents().is_some_and(|r| !r.is_empty());
-            // Teardown asked us to stop; do not touch the pty on the way out.
-            if quit {
-                return;
+            // Either teardown asked us to stop -- in which case do not touch the pty on the
+            // way out -- or a drain left a throttled notification for the `flush` below,
+            // and all that was wanted was this iteration itself.
+            if interrupted {
+                self.interrupt.clear();
+                if self.shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
             }
 
             // Sampled rather than pushed: Linux does not report ICANON/ECHO changes. The poll
@@ -619,7 +649,9 @@ impl Shared {
             return;
         };
         *self.exited.held() = Some(status);
-        self.notifier.drained();
+        // Whether anything is left throttled is beside the point here: the byte below goes
+        // out regardless, and this is the reader thread, with nothing to interrupt.
+        let _ = self.notifier.drained();
         self.notify();
     }
 
@@ -693,7 +725,7 @@ mod tests {
     /// harness' own.
     ///
     /// Deliberately not `crate::platform::cloexec_pipe`: that shim also sets
-    /// `O_NONBLOCK` (needed for the real self-pipe quit mechanism, not for a stand-in
+    /// `O_NONBLOCK` (needed for the real self-pipe interrupt mechanism, not for a stand-in
     /// wake channel these tests read blockingly), and plain `nix::unistd::pipe2` is a
     /// Linux-only syscall that does not exist on macOS, one of the two platforms this
     /// crate ships for — so it goes through `nix::unistd::pipe` plus `fcntl`, portable
@@ -711,6 +743,16 @@ mod tests {
     }
 
     fn session_with_backlog(argv: &[&str], backlog_limit: usize) -> (Session, OwnedFd) {
+        session_with(
+            argv,
+            Options {
+                backlog_limit,
+                ..Options::default()
+            },
+        )
+    }
+
+    fn session_with(argv: &[&str], options: Options) -> (Session, OwnedFd) {
         let (read, write) = pipe();
         let size = Winsize {
             rows: 24,
@@ -724,14 +766,39 @@ mod tests {
                 size,
                 None,
                 write,
-                Options {
-                    backlog_limit,
-                    ..Options::default()
-                },
+                options,
             )
             .expect("spawn"),
             read,
         )
+    }
+
+    /// Wait up to `patience` for a wakeup byte, reporting whether one arrived.
+    ///
+    /// Nonblocking, deliberately. A blocking read on this pipe cannot tell the
+    /// notification a test is about from the one [`Shared::finish`] writes
+    /// unconditionally when the child exits: it simply waits, the child's `sleep` ends,
+    /// the byte arrives, and the assertion passes on the wrong byte. Nothing about that
+    /// looks like a failure except the several seconds it took, so tests written that way
+    /// stay green through the removal of the very path they name -- which is exactly what
+    /// `the_wake_pipe_is_poked_on_output` and
+    /// `an_unterminated_frame_is_drawn_when_the_timeout_expires` both used to do.
+    fn woke_within(read: &OwnedFd, patience: Duration) -> bool {
+        nix::fcntl::fcntl(
+            read.as_fd(),
+            nix::fcntl::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .expect("nonblock");
+        let deadline = Instant::now() + patience;
+        let mut byte = [0u8; 1];
+        loop {
+            match nix::unistd::read(read.as_fd(), &mut byte) {
+                Ok(1) => return byte[0] == 1,
+                _ if Instant::now() >= deadline => return false,
+                // Polled rather than blocking on the fd: the point is to give up.
+                _ => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
     }
 
     fn wait_for(session: &Session, mut done: impl FnMut(&Update) -> bool) -> Update {
@@ -816,10 +883,15 @@ mod tests {
 
     #[test]
     fn the_wake_pipe_is_poked_on_output() {
-        let (session, read) = session(&["/bin/sh", "-c", "printf hi"]);
-        let mut byte = [0u8; 1];
-        assert_eq!(nix::unistd::read(read.as_fd(), &mut byte), Ok(1));
-        assert_eq!(byte[0], 1);
+        // The child outlives the assertion on purpose. With `printf hi` alone it exited
+        // immediately, and the byte this waited for was the one `finish` sends for the
+        // exit rather than the one the output was supposed to earn -- so the test passed
+        // with the whole announce path deleted from the read loop.
+        let (session, read) = session(&["/bin/sh", "-c", "printf hi; sleep 5"]);
+        assert!(
+            woke_within(&read, Duration::from_secs(2)),
+            "output must poke the wake pipe while the child is still running"
+        );
         drop(session);
     }
 
@@ -833,16 +905,8 @@ mod tests {
             "printf '\x1b[?2026h'; printf 'half a frame'; sleep 5",
         ]);
         std::thread::sleep(Duration::from_millis(60));
-
-        let mut buf = [0u8; 256];
-        nix::fcntl::fcntl(
-            read.as_fd(),
-            nix::fcntl::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
-        )
-        .expect("nonblock");
-        assert_eq!(
-            nix::unistd::read(read.as_fd(), &mut buf).err(),
-            Some(Errno::EAGAIN),
+        assert!(
+            !woke_within(&read, Duration::ZERO),
             "a frame in progress must not wake Emacs"
         );
         drop(session);
@@ -858,11 +922,11 @@ mod tests {
             "printf '\x1b[?2026h'; printf 'half a frame'; sleep 5",
         ]);
         std::thread::sleep(emu::SYNC_TIMEOUT + Duration::from_millis(120));
-
-        let mut buf = [0u8; 256];
-        assert_eq!(
-            nix::unistd::read(read.as_fd(), &mut buf).expect("read"),
-            1,
+        // A short patience rather than none, for scheduling slop -- but bounded well
+        // under the child's own `sleep 5`, since a blocking read here would have been
+        // satisfied by the byte that the child's *exit* sends and passed regardless.
+        assert!(
+            woke_within(&read, Duration::from_millis(200)),
             "the held frame must be drawn once the cap expires"
         );
         drop(session);
@@ -883,37 +947,112 @@ mod tests {
         drop(session);
     }
 
-    /// A write that lands inside `min_redisplay_interval' of the previous one gets its
-    /// notification throttled; `poll_timeout` exists so the retry happens at that
-    /// interval's own cadence rather than waiting out the coarser `POLL_TIMEOUT_MS`
-    /// (100ms). `session`/`session_with_backlog` fix the interval at 8ms for every test.
+    /// The throttle interval these two tests run at, well above its 8ms default: what has
+    /// to fit inside the window here is a round trip through the test thread rather than a
+    /// gap the child controls, and it still has to sit clearly below `POLL_TIMEOUT_MS`
+    /// (100ms) for the retry to be attributable to the interval rather than to the tick.
+    const THROTTLED: Duration = Duration::from_millis(40);
+
+    /// Which side of the throttled write the drain falls on.
+    ///
+    /// The two orderings retire a held notification by different mechanisms, so each test
+    /// names the one it means. Racing for whichever turns up -- which is what a `sleep`
+    /// between the child's two writes was really doing -- gives a test that passes for
+    /// one reason on an idle machine and another under load, and covers neither on purpose.
+    enum Drain {
+        /// The reader computes its next [`Notifier::poll_timeout`] already knowing the
+        /// notification is Emacs' to hear, and shortens its own tick to the rest of the
+        /// interval.
+        BeforeTheWrite,
+        /// The reader is asleep on a timeout it computed while the previous wakeup was
+        /// still in flight -- a full `POLL_TIMEOUT_MS`, since a notification Emacs has not
+        /// drained is not one the tick can do anything about. Only the interrupt
+        /// [`Notifier::drained`] asks for can cut that short.
+        AfterTheWrite,
+    }
+
+    /// How long a notification throttled by `min_redisplay_interval` takes to reach the
+    /// wake pipe, with the drain placed on the `when` side of the write that was throttled.
+    ///
+    /// The second write is driven by input rather than by a sleep, so it cannot happen
+    /// before the reader has consumed the first one: a `sleep 0.003` between two printfs
+    /// is short enough that a loaded machine reads both in one go, and one read is one
+    /// announcement, with no throttled second notification left to retry.
     ///
     /// Reads the wake pipe directly rather than going through `drain`, which reflects
     /// `Term`'s live state regardless of whether a wakeup was ever sent for it — exactly
     /// the property that makes throttling safe (see `min_redisplay_interval`'s docs) but
     /// also the reason `drain` cannot observe a throttled *notification* being retried
-    /// late. The wake pipe is the one thing actually gated by `poll_timeout`.
-    #[test]
-    fn a_throttled_notification_is_retried_near_min_redisplay_interval_not_poll_timeout() {
-        let (session, read) = session(&[
-            "/bin/sh",
-            "-c",
-            "printf 'first\n'; sleep 0.003; printf 'second\n'; sleep 5",
-        ]);
+    /// late. The wake pipe is the one thing actually gated by the poll timeout.
+    fn throttled_retry(when: Drain) -> Duration {
+        let (session, read) = session_with(
+            &[
+                "/bin/sh",
+                "-c",
+                "printf 'first\n'; read -r _; printf 'second\n'; sleep 5",
+            ],
+            Options {
+                min_redisplay_interval: THROTTLED,
+                ..Options::default()
+            },
+        );
         let mut byte = [0u8; 1];
         nix::unistd::read(read.as_fd(), &mut byte).expect("first wake");
-        // Clears `notified`, the same way Emacs' filter does before draining — without
-        // this the second wake has nothing to do with the second write; it would just be
-        // the first notification's own byte, since none can follow while it is in flight.
-        session.drain();
+
+        // Draining is what clears `notified`, the same way Emacs' filter does before it
+        // drains: no second wakeup can follow while the first is still in flight, so
+        // without this the second wake would just be the first notification's own byte.
+        // Releasing the write is what makes there be something to hold back.
+        match when {
+            Drain::BeforeTheWrite => {
+                session.drain();
+                session.send(b"\n").expect("release the second write");
+            }
+            Drain::AfterTheWrite => {
+                session.send(b"\n").expect("release the second write");
+                // Long enough that the write is certainly in, short enough that the drain
+                // still lands inside the throttle window -- outside it there is nothing
+                // held back, because the drain's own flush sends the byte on the spot.
+                std::thread::sleep(THROTTLED / 4);
+                session.drain();
+            }
+        }
 
         let start = Instant::now();
-        nix::unistd::read(read.as_fd(), &mut byte).expect("second wake");
-        let elapsed = start.elapsed();
+        // Bounded rather than a blocking read: a notification that never comes would
+        // otherwise be answered by the byte the child's own exit sends, several seconds
+        // later, and the assertion would be made against that instead.
         assert!(
-            elapsed < Duration::from_millis(50),
-            "took {elapsed:?} for a throttled notification to retry; \
-             expected well under POLL_TIMEOUT_MS (100ms)"
+            woke_within(&read, Duration::from_secs(1)),
+            "the throttled notification never arrived at all"
+        );
+        start.elapsed()
+    }
+
+    /// A write that lands inside `min_redisplay_interval` of the previous one gets its
+    /// notification throttled, and `poll_timeout` shortens the reader's tick to the rest
+    /// of that interval so the retry happens at the interval's own cadence rather than
+    /// waiting out the coarser `POLL_TIMEOUT_MS`.
+    #[test]
+    fn a_throttled_notification_is_retried_near_min_redisplay_interval_not_poll_timeout() {
+        let elapsed = throttled_retry(Drain::BeforeTheWrite);
+        assert!(
+            elapsed < THROTTLED + THROTTLED / 2,
+            "took {elapsed:?} for a throttled notification to retry; expected it near the \
+             {THROTTLED:?} interval, not on a POLL_TIMEOUT_MS (100ms) tick"
+        );
+    }
+
+    /// The other order, which no shortened tick can help with: the reader is already
+    /// asleep for the full `POLL_TIMEOUT_MS` when Emacs drains, so clearing the flag has
+    /// to interrupt the poll rather than wait for it.
+    #[test]
+    fn a_drain_inside_the_throttle_window_does_not_leave_the_retry_to_the_poll_timeout() {
+        let elapsed = throttled_retry(Drain::AfterTheWrite);
+        assert!(
+            elapsed < THROTTLED + THROTTLED / 2,
+            "took {elapsed:?} to retire a notification the drain found throttled; expected \
+             the rest of the {THROTTLED:?} interval, not a POLL_TIMEOUT_MS (100ms) tick"
         );
     }
 
@@ -1022,12 +1161,31 @@ mod tests {
         );
     }
 
+    /// Teardown returns without waiting on anything of the child's.
+    ///
+    /// What this does *not* cover, despite what it said until recently, is the interrupt
+    /// pipe. Its old comment claimed "without the quit pipe this waits out the reader's
+    /// poll timeout every time", and that is not so for this child: `sh` dies on the
+    /// SIGHUP that `shutdown` sends, its side of the pty closes, and the reader's `poll`
+    /// returns on the pty fd whether or not anything interrupted it. The test passes with
+    /// `Interrupt::raise` deleted from `shutdown` outright -- measured, not reasoned.
+    ///
+    /// A child that ignores SIGHUP is the case the pipe is actually for, and no test here
+    /// covers it, because the win turns out to be a tail rather than a fixed cost: the
+    /// reader waits out whatever is left of its current `POLL_TIMEOUT_MS` tick, which is
+    /// usually little and occasionally all of it. Across twenty teardowns the totals with
+    /// and without the interrupt were 8-69ms against 12-121ms -- overlapping ranges, spawn
+    /// noise dominating, no threshold that separates them without flaking. What is left is
+    /// this: a guard against teardown becoming grossly slow, which is worth having and is
+    /// not what its comment used to say it was.
+    ///
+    /// The interrupt's other caller is covered, deterministically, by
+    /// `a_drain_inside_the_throttle_window_does_not_leave_the_retry_to_the_poll_timeout`.
     #[test]
     fn shutdown_returns_promptly() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 300"]);
         let start = Instant::now();
         session.shutdown();
-        // Without the quit pipe this waits out the reader's poll timeout every time.
         assert!(
             start.elapsed() < Duration::from_millis(150),
             "took {:?}",

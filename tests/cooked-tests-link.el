@@ -184,13 +184,24 @@
 
 (ert-deftest cooked-file-links-are-off-until-the-layer-is-loaded ()
   ;; Not a proxy for absence but the entire mechanism by which the core notices it:
-  ;; with the file unloaded there is no function to name, so nothing can be called.
+  ;; with the file unloaded there is no function to name, so the core has to consult the
+  ;; variable and fall through to goto-addr rather than assume a layer is there.
+  ;;
+  ;; Binding both to nil is still how the unloaded state is reached -- `cooked-file-link'
+  ;; sets them at top level, and five other tests in this file load it, so by then they
+  ;; are set for the rest of the session.  What changed is that the assertion has to
+  ;; survive the binding instead of restating it: this used to `should-not' one of the
+  ;; two variables it had just bound to nil, which holds for any `let' at all.
   (let ((cooked-link-follow-function nil)
-        (cooked-link-scan-function nil))
+        (cooked-link-scan-function nil)
+        (fell-through nil))
     (with-temp-buffer
       (insert "lisp/cooked-link.el:1:1: something\n")
       (goto-char (point-min))
-      (should-not cooked-link-follow-function))))
+      (cl-letf (((symbol-function 'goto-address-at-point)
+                 (lambda (&rest _) (setq fell-through t))))
+        (cooked-follow-link-at-point))
+      (should fell-through))))
 
 (ert-deftest cooked-file-link-follow-resolves-a-path-with-a-line-and-column ()
   (cooked-tests--with-file-links
@@ -208,6 +219,25 @@
                      (lambda (file) (setq visited file) (set-buffer (get-buffer-create " *visit*")))))
             (should (funcall cooked-link-follow-function))
             (should (string-suffix-p "lisp/cooked-link.el" visited))))))))
+
+(ert-deftest cooked-file-link-scan-stops-on-a-foreign-host ()
+  "A build log from a remote tree is full of names that exist here too, at the
+same paths, in a checkout that did not produce the log.  The link would open,
+land in a real file, and be the wrong file."
+  (cooked-tests--with-file-links
+    (let ((root (file-name-directory
+                 (directory-file-name
+                  (file-name-directory (locate-library "cooked-link"))))))
+      (with-temp-buffer
+        (setq-local default-directory root)
+        (should (cooked-file-link--exists "lisp/cooked-link.el"))
+        (setq-local cooked--host "other.example")
+        (should-not (cooked-file-link--exists "lisp/cooked-link.el"))
+        (insert "built lisp/cooked-link.el\n")
+        (funcall cooked-link-scan-function (point-min) (point-max))
+        (goto-char (point-min))
+        (search-forward "lisp/cooked-link.el")
+        (should-not (get-text-property (match-beginning 0) 'cooked-file-link))))))
 
 (ert-deftest cooked-file-link-scan-highlights-only-what-exists ()
   (cooked-tests--with-file-links

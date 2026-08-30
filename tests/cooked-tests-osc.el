@@ -248,6 +248,47 @@ in front of it, which makes this the one that matters most."
         (cooked--osc-cwd '("file:///tmp/somewhere"))
         (should (equal default-directory "/tmp/somewhere/"))))))
 
+(ert-deftest cooked-osc-7-keeps-a-foreign-host-out-of-default-directory ()
+  "The authority half of the OSC 7 URL used to be matched and thrown away.
+
+Throwing it away is what makes the remote case dangerous rather than merely
+useless: after an `ssh\=' the far shell reports its directory perfectly
+honestly, and a tree kept in step with the local one turns that honest report
+into a local path that exists.  So a foreign host has to stop at
+`cooked--host\=', leaving `default-directory\=' where it was."
+  (let* ((here (make-temp-file "cooked-osc7-" t))
+         (there (file-name-as-directory here)))
+    (unwind-protect
+        (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+          (let ((default-directory "/tmp/"))
+            (cooked--osc-cwd (list (format "file://%s%s" (system-name) here)))
+            (should-not (cooked--foreign-host-p))
+            (should (equal default-directory there))
+            ;; The short spelling of this machine is still this machine.
+            (cooked--osc-cwd
+             (list (format "file://%s/tmp" (car (split-string (system-name) "\\.")))))
+            (should-not (cooked--foreign-host-p))
+            (should (equal default-directory "/tmp/"))
+            ;; An empty authority is the conventional `localhost'.
+            (cooked--osc-cwd (list (format "file://%s" here)))
+            (should-not (cooked--foreign-host-p))
+            (should (equal default-directory there))
+            ;; And somewhere else stops at the host, leaving the last directory
+            ;; we could actually vouch for in place.
+            (cooked--osc-cwd '("file://other.example/tmp"))
+            (should (cooked--foreign-host-p))
+            (should (equal default-directory there))))
+      (delete-directory here t))))
+
+(ert-deftest cooked-native-completion-declines-on-a-foreign-host ()
+  "Both tables are about this machine, so at a remote prompt they are not a
+weaker answer but a wrong one.  Declining leaves the prompt with no Emacs
+completion, which is the honest report."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/tmp/"))
+      (cooked--osc-cwd '("file://other.example/tmp"))
+      (should-not (cooked--native-completion)))))
+
 (ert-deftest cooked-osc-51-escape-hatch-is-empty-until-filled ()
   "`cooked-eval-commands' governs the `!' verb alone, and starts empty: the fixed
 verbs need no entry, so deny-by-default costs nothing here."
@@ -727,9 +768,12 @@ owns outright -- and the seam bookkeeping is only owed when the cut reaches it."
     (cooked-refresh)
     (should (cooked-tests--settle
              (lambda () (not (string-match-p "^42$" (cooked-tests--text)))) 8))
-    (let ((cooked-debug t))
-      (should (cooked-tests--settle
-               (lambda () (progn (cooked--drain-and-apply) t)) 4)))))
+    ;; And the emulator is still told how much of its top row Emacs holds -- asserted by
+    ;; `cooked--check-seam', which signals on a drift.  Wrapping a drain in a settle whose
+    ;; predicate ends in `t' only looked like a check: the predicate was true on its first
+    ;; call, so the `should' could not fail whatever the drain did.
+    (cooked--drain-and-apply)
+    (cooked--check-seam)))
 
 (ert-deftest cooked-delete-output-refuses-the-row-the-child-is-on ()
   "Below the child\='s cursor the shell is editing its own prompt line and

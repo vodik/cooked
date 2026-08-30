@@ -45,6 +45,7 @@
 
 ;;; Code:
 
+(require 'cooked)
 (require 'cooked-link)
 (require 'ffap)
 (require 'compile)
@@ -143,8 +144,15 @@ the report asked for, and it is one `let' rather than a mechanism.
 
 `ffap-file-exists-string' rather than `file-exists-p' so that ffap's own
 `ffap-alist'-free notion of a readable name applies, including its handling of
-a remote `default-directory'."
+a remote `default-directory'.
+
+Nothing resolves once the child has said it is on another host.  A build log
+from a remote tree is full of names that exist here too, at the same paths, in
+a checkout that is not the one that produced the log -- so the link would open,
+land in a real file, and be the wrong file.  Highlighting nothing says less
+than cooked knows, and everything it says is true."
   (and (not (string-empty-p name))
+       (not (cooked--foreign-host-p))
        (or (ffap-file-exists-string name)
            (when-let* ((project (project-current nil))
                        (root (project-root project))

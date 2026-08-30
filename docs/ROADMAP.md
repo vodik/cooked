@@ -15,9 +15,9 @@ wrapped rather than newline-terminated. Most of what follows is spending that kn
 
 ## 1. Completion parity with the shell
 
-**zsh is done** — see `lisp/cooked-completion.el` and the completion section of
-`shell-integration/cooked.zsh`. What follows is what the design turned out to be, and
-what is left.
+**Both shells are done** — see `lisp/cooked-shell-completion.el` and
+`shell-integration/cooked-completion.{zsh,bash}`. What follows is what the design turned
+out to be.
 
 **The problem was.** Our `completion-at-point-functions` entry offered programs on `PATH`
 and file names. zsh's compsys knows `git checkout <branch>`, ssh hosts, flags with
@@ -28,7 +28,7 @@ place a user gave something up.
 **The fix is to borrow the shell's completion, not reimplement it.** The two shells need
 different mechanisms, and bash is much the easier.
 
-### bash — largely a solved problem
+### bash — shipped, by asking the live shell
 
 bash's model is introspectable by design. `complete -p CMD` reveals the registered
 function, and it can be invoked directly by setting the environment it expects:
@@ -39,14 +39,25 @@ __git_wrap__git_main            # populates COMPREPLY
 printf '%s\n' "${COMPREPLY[@]}"
 ```
 
-Two routes, both viable:
+Of the two routes considered — reusing `bash-completion.el`, which drives a *subprocess*,
+or asking the live shell over the same channel zsh already uses — the second won, and not
+narrowly. A subprocess has the user's `complete` registrations only if it re-reads their
+rc, and never has the shell state: the variables, the `cd`, the functions defined at the
+prompt five minutes ago. Asking the shell you are typing at has all of it by
+construction. It also meant one wire protocol and one Emacs-side parser for both shells
+rather than two of each.
 
-- **Reuse `bash-completion.el`** (szermatt, MELPA). It already drives a bash process this
-  way and exposes `bash-completion-dynamic-complete-nocomint`, an entry point built for
-  buffers that are not comint-driven — which is exactly our situation. Wiring it into our
-  CAPF is plausibly an afternoon. *Verify the function signature before relying on it.*
-- **Do it ourselves over the OSC eval channel**, asking the *live* shell rather than a
-  subprocess, so the user's actual `complete` registrations and shell state apply.
+`shell-integration/cooked-completion.bash` is the result, and it is bookkeeping rather
+than cleverness — none of zsh's `compadd` shadowing, because `compgen` exists. Three
+cases, in the order bash itself takes them: a registered `-F` function, a registered set
+of `compgen` options, or nothing registered, where the first word is a command and the
+rest are file names.
+
+Two things it does not do, both deliberate. It splits the line on whitespace rather than
+on `COMP_WORDBREAKS`, because Emacs is told the *length* of what the matches replace and
+a finer split would make the two disagree about `host:path`. And it sends no descriptions
+or groups — bash has none; that is compsys's alone — so those fields go back empty rather
+than being collapsed, which keeps one parser reading both shells.
 
 No ZLE-style gymnastics needed either way. If we ship one shell's real completion first,
 it should be bash.

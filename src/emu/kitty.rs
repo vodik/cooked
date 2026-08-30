@@ -78,6 +78,19 @@ pub struct Command {
     pub quiet: u8,
     /// A capability named in the control data that this terminal does not implement.
     pub unsupported: Option<&'static str>,
+    /// The action the control data *named*, as distinct from the one that applies.
+    /// `None` when `a=` was absent, which is what a continuation chunk looks like: the
+    /// protocol says a chunk after the first carries only `m` and perhaps `q`.
+    ///
+    /// Kept apart from `action` because that one has already had the protocol's default
+    /// applied, so it cannot answer "did the child say so, or did we assume it?" — and
+    /// that is the whole question [`Kitty::feed`] has to settle before deciding whether
+    /// a payload continues a transfer or starts something else.
+    pub explicit_action: Option<Action>,
+    /// The id the control data named, `None` when `i=` was absent. Same distinction as
+    /// `explicit_action` and for the same reason: on a chunk, an absent `i=` means "the
+    /// transfer already in flight", while a *different* one means a different picture.
+    pub explicit_id: Option<u32>,
 }
 
 impl Command {
@@ -105,7 +118,11 @@ impl Command {
                         // An action we do not know is not a licence to guess at
                         // drawing something; fall back to the protocol's default.
                         _ => Action::Transmit,
-                    }
+                    };
+                    // Recorded even for the unrecognised case above: the child *named* an
+                    // action, and that it named one is the fact `feed` needs, separately
+                    // from which one we resolved it to.
+                    cmd.explicit_action = Some(cmd.action);
                 }
                 "f" => {
                     cmd.format = match value {
@@ -123,7 +140,10 @@ impl Command {
                 },
                 "U" => cmd.unsupported = Some("ENOTSUPPORTED:placeholder"),
                 "m" => cmd.more = num() != 0,
-                "i" => cmd.id = num(),
+                "i" => {
+                    cmd.id = num();
+                    cmd.explicit_id = Some(cmd.id);
+                }
                 "s" => cmd.px.w = num(),
                 "v" => cmd.px.h = num(),
                 // The protocol puts no upper bound on these, so each pins rather than
@@ -165,7 +185,15 @@ pub struct Kitty {
     /// The transmission being reassembled, if a chunked one is in flight.
     ///
     /// One at a time, which is what the protocol allows: a client must finish a chunked
-    /// transmission before starting another.
+    /// transmission before starting another. A client that starts a second one anyway is
+    /// caught by [`Command::explicit_id`] and told so, rather than having its two
+    /// pictures spliced into one.
+    ///
+    /// Bounded by [`MAX_PAYLOAD`] but not by time: a client that begins a chunked
+    /// transfer and then goes permanently silent holds this buffer until the session
+    /// ends or another transmission displaces it. Reclaiming it sooner would need a
+    /// deadline swept from somewhere that runs while the child is quiet — the reader
+    /// thread's poll tick — since nothing here is called at all in the meantime.
     pending: Option<(Command, Vec<u8>)>,
     /// The child's own image ids, which are not ours — ours are content-addressed, so
     /// two clients reusing the same number cannot collide, and one client reusing a
@@ -195,44 +223,95 @@ impl Kitty {
             None => (payload, &[][..]),
         };
         let control = String::from_utf8_lossy(control);
+        let cmd = Command::parse(&control);
 
-        // A continuation carries only `m=` and perhaps `q=`; the command it continues is
-        // the one already in flight, whose format and geometry still apply.
-        if let Some((cmd, buf)) = self.pending.take() {
-            let more = Command::parse(&control).more;
-            let mut buf = buf;
-            if !append(&mut buf, body) {
-                return (Outcome::Nothing, response(&cmd, Some("EBIG:payload")));
+        // Settled before anything is appended, because a transfer in flight otherwise
+        // swallows whatever arrives next as though it were more of the picture.
+        if self.pending.is_some() {
+            // A probe, a delete and a place carry no payload and are never a chunk, so
+            // they are answered where they stand and the transfer is left alone. Eating
+            // one corrupts the image *and* misanswers the probe -- and `a=q` in
+            // particular is defined to leave no trace, which being spliced into somebody
+            // else's picture is not.
+            if matches!(
+                cmd.explicit_action,
+                Some(Action::Query | Action::Delete | Action::Put)
+            ) {
+                return self.standalone(cmd);
             }
-            if more {
-                self.pending = Some((cmd, buf));
-                return (Outcome::Incomplete, None);
+            // An explicit `i=` naming a *different* picture is a second transmission
+            // rather than a chunk of this one. Told out loud, as the module's rule is,
+            // and addressed to the transfer being abandoned rather than to the one
+            // displacing it -- the client is owed an answer about the picture it will
+            // now never get. A repeated or absent `i=' continues as before, so a sender
+            // that restates its full control data on every chunk is unaffected; two
+            // transfers sharing one id are indistinguishable from a continuation by any
+            // means, and nothing here pretends otherwise.
+            if let Some((stale, _)) = self
+                .pending
+                .take_if(|(pending, _)| cmd.explicit_id.is_some_and(|id| id != pending.id))
+            {
+                let refusal = response(&stale, Some("EINVAL:interleaved"));
+                let (outcome, reply) = self.begin(cmd, body);
+                // Both answers go back, in the order the two commands happened. Each is a
+                // complete APC, so a client reading them apart is reading them the same
+                // way it would have had they arrived in separate writes.
+                return (outcome, join(refusal, reply));
             }
-            return self.finish(cmd, buf);
         }
 
-        let cmd = Command::parse(&control);
+        // A continuation carries only `m=` and perhaps `q=`; the command it continues is
+        // the one already in flight, whose format and geometry still apply. Only `m=` is
+        // read off the chunk itself -- everything else about the picture was settled by
+        // the command that opened the transfer.
+        if let Some((opened, mut buf)) = self.pending.take() {
+            if !append(&mut buf, body) {
+                return (Outcome::Nothing, response(&opened, Some("EBIG:payload")));
+            }
+            if cmd.more {
+                self.pending = Some((opened, buf));
+                return (Outcome::Incomplete, None);
+            }
+            return self.finish(opened, buf);
+        }
+
+        self.begin(cmd, body)
+    }
+
+    /// Answer a command that carries no payload, or `Nothing` if it is not one.
+    ///
+    /// Split out because these three are reachable from two places -- an ordinary
+    /// command, and one arriving while a chunked transfer is in flight -- and the second
+    /// path exists precisely so that they behave identically either way.
+    fn standalone(&mut self, cmd: Command) -> (Outcome, Option<Vec<u8>>) {
         if let Some(why) = cmd.unsupported {
             return (Outcome::Nothing, response(&cmd, Some(why)));
         }
         match cmd.action {
             // A probe must leave no trace: answering is the whole of it.
-            Action::Query => return (Outcome::Nothing, response(&cmd, None)),
+            Action::Query => (Outcome::Nothing, response(&cmd, None)),
             Action::Delete => {
                 // The bytes are not ours to free — Emacs holds them for as long as the
                 // buffer text showing them lives — so this only retires the child's name
                 // for the picture. See the module comment in `image.rs`.
                 self.by_client.remove(&cmd.id);
-                return (Outcome::Nothing, response(&cmd, None));
+                (Outcome::Nothing, response(&cmd, None))
             }
-            Action::Put => {
-                let found = self.by_client.get(&cmd.id).copied();
-                return match found {
-                    Some(id) => (Outcome::Place(id), response(&cmd, None)),
-                    None => (Outcome::Nothing, response(&cmd, Some("ENOENT:image"))),
-                };
-            }
-            Action::Transmit | Action::Display => {}
+            Action::Put => match self.by_client.get(&cmd.id).copied() {
+                Some(id) => (Outcome::Place(id), response(&cmd, None)),
+                None => (Outcome::Nothing, response(&cmd, Some("ENOENT:image"))),
+            },
+            Action::Transmit | Action::Display => (Outcome::Nothing, None),
+        }
+    }
+
+    /// Start a command that was not a continuation of anything.
+    fn begin(&mut self, cmd: Command, body: &[u8]) -> (Outcome, Option<Vec<u8>>) {
+        if let Some(why) = cmd.unsupported {
+            return (Outcome::Nothing, response(&cmd, Some(why)));
+        }
+        if !matches!(cmd.action, Action::Transmit | Action::Display) {
+            return self.standalone(cmd);
         }
 
         let mut buf = Vec::new();
@@ -310,6 +389,21 @@ fn append(buf: &mut Vec<u8>, body: &[u8]) -> bool {
     }
     buf.extend_from_slice(body);
     true
+}
+
+/// Two answers as one, for the one command that produces both.
+///
+/// Concatenated rather than picking a winner: an interleaved transmission owes the child
+/// a refusal for the picture it abandoned *and* an answer for the one that displaced it,
+/// and `q=` may already have silenced either.
+fn join(first: Option<Vec<u8>>, second: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    match (first, second) {
+        (Some(mut a), Some(b)) => {
+            a.extend_from_slice(&b);
+            Some(a)
+        }
+        (a, b) => a.or(b),
+    }
 }
 
 /// The answer owed to the child, honouring `q=`.
@@ -524,6 +618,73 @@ mod tests {
             Outcome::Incomplete
         );
         let (outcome, _) = k.feed(format!("Gm=0;{rest}").as_bytes());
+        match outcome {
+            Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATAPNGDATA"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_probe_arriving_mid_transfer_is_answered_without_eating_the_chunk() {
+        // A capability probe is defined to leave no trace, and a transfer in flight used
+        // to swallow one as though it were more of the picture -- which both corrupted
+        // the image and answered the probe as the wrong command.
+        let mut k = Kitty::default();
+        let whole = b64(b"PNGDATAPNGDATA");
+        let (first, rest) = whole.split_at(8);
+        assert_eq!(
+            k.feed(format!("Ga=T,f=100,i=1,m=1;{first}").as_bytes()).0,
+            Outcome::Incomplete
+        );
+
+        let (outcome, reply) = k.feed(b"Ga=q,i=99;");
+        assert_eq!(outcome, Outcome::Nothing);
+        assert_eq!(reply.unwrap(), b"\x1b_Gi=99;OK\x1b\\");
+
+        // ...and the picture is still exactly the one that was being sent.
+        let (outcome, _) = k.feed(format!("Gm=0;{rest}").as_bytes());
+        match outcome {
+            Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATAPNGDATA"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_second_picture_abandons_the_first_rather_than_splicing_into_it() {
+        let mut k = Kitty::default();
+        assert_eq!(
+            k.feed(format!("Ga=T,f=100,i=1,m=1;{}", b64(b"FIRST")).as_bytes())
+                .0,
+            Outcome::Incomplete
+        );
+
+        // A different `i=` is a different picture, so the transfer in flight is dropped
+        // -- and the client is told about the one it will now never get, addressed to
+        // *that* id, alongside the answer for the one that displaced it.
+        let (outcome, reply) = k.feed(format!("Ga=T,f=100,i=2;{}", b64(b"SECOND")).as_bytes());
+        match outcome {
+            Outcome::Image { bytes, .. } => assert_eq!(bytes, b"SECOND"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            reply.unwrap(),
+            b"\x1b_Gi=1;EINVAL:interleaved\x1b\\\x1b_Gi=2;OK\x1b\\"
+        );
+    }
+
+    #[test]
+    fn a_chunk_restating_its_own_control_data_still_continues_the_transfer() {
+        // The interleave check keys on an id that *differs*, precisely so that a sender
+        // repeating its full control data on every chunk -- which the protocol permits
+        // and some clients do -- is not mistaken for a second picture.
+        let mut k = Kitty::default();
+        let whole = b64(b"PNGDATAPNGDATA");
+        let (first, rest) = whole.split_at(8);
+        assert_eq!(
+            k.feed(format!("Ga=T,f=100,i=4,m=1;{first}").as_bytes()).0,
+            Outcome::Incomplete
+        );
+        let (outcome, _) = k.feed(format!("Ga=T,f=100,i=4,m=0;{rest}").as_bytes());
         match outcome {
             Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATAPNGDATA"),
             other => panic!("{other:?}"),

@@ -16,9 +16,11 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'cooked)
 (require 'cooked-osc)
 (require 'cooked-completion)
+(require 'cooked-mouse)
 (require 'comint)
 
 ;; Defined by the native core at `module-load' time, so the byte-compiler cannot
@@ -30,7 +32,6 @@
 (declare-function cooked--prompt-text "cooked-core")
 (declare-function cooked--bracketed-paste-p "cooked-core")
 (declare-function cooked--focus-events-p "cooked-core")
-(declare-function cooked--alt-scroll-p "cooked-core")
 (declare-function cooked--live-p "cooked-core")
 (declare-function cooked--foreground-pid "cooked-core")
 (declare-function cooked--kill "cooked-core")
@@ -204,10 +205,21 @@ every capital into a lowercase letter."
   ;; such as `S-up' it is what parses and caches `event-symbol-elements', which
   ;; `event-basic-type' only reads.  Ask the other way round and the first press of
   ;; every modified key decodes as nil.
-  ;; Each table is consulted once, through `if-let*', rather than being asked
+  ;; Each table is consulted once, through `when-let*', rather than being asked
   ;; whether it has the key and then asked again for the value.  The tables are
   ;; tried in order of how specific their spelling is, ending at a plain
-  ;; character; a key in none of them encodes as nil and is not forwarded.
+  ;; character; a key in none of them falls off the end and encodes as nil, which
+  ;; is not forwarded.
+  ;;
+  ;; `cl-block' rather than a `cond' whose clauses are the lookups themselves.
+  ;; Written that way the `cond' returns its own test, so a table that *hit* but
+  ;; whose body produced nil would fall through to the next table and encode as
+  ;; something else entirely -- a key spelled as a different key, silently.
+  ;; Nothing reachable does that today, every branch below yielding a non-empty
+  ;; string, but that is a property of the five tables' contents rather than of
+  ;; anything stating it.  Returning on a hit makes "the first table holding this
+  ;; key is the one that answers for it" true by construction, which is the rule
+  ;; the ordering above is only meaningful under.
   (let* ((mods (event-modifiers event))
          (basic (event-basic-type event))
          ;; `backtab' is the mirror image of the capital-letter case above: Emacs
@@ -219,25 +231,26 @@ every capital into a lowercase letter."
          (mods (if (eq basic 'backtab) (cons 'shift mods) mods))
          (param (cooked--modifier-param mods))
          (modified (> param 1)))
-    (cond
-     ((if-let* ((final (alist-get basic cooked--csi-finals)))
-          (cond (modified (format "\e[1;%d%s" param final))
-                (cooked--app-cursor (concat "\eO" final))
-                (t (concat "\e[" final)))))
-     ;; F1-F4 leave SS3 behind the moment they are modified.
-     ((if-let* ((final (alist-get basic cooked--ss3-finals)))
-          (if modified (format "\e[1;%d%s" param final) (concat "\eO" final))))
-     ((if-let* ((n (alist-get basic cooked--tilde-numbers)))
-          (if modified (format "\e[%d;%d~" n param) (format "\e[%d~" n))))
-     ((if-let* ((code (alist-get basic cooked--literal-codes)))
-          (cooked--encode-literal basic code param mods)))
-     ((if-let* ((seq (alist-get basic cooked--special-keys)))
-          (if (memq 'meta mods) (concat "\e" seq) seq)))
-     ((characterp basic)
-      (let ((char (cond ((memq 'control mods) (logand (upcase basic) #x1f))
-                        ((memq 'shift mods) (upcase basic))
-                        (t basic))))
-        (if (memq 'meta mods) (concat "\e" (string char)) (string char)))))))
+    (cl-block nil
+      (when-let* ((final (alist-get basic cooked--csi-finals)))
+        (cl-return (cond (modified (format "\e[1;%d%s" param final))
+                         (cooked--app-cursor (concat "\eO" final))
+                         (t (concat "\e[" final)))))
+      ;; F1-F4 leave SS3 behind the moment they are modified.
+      (when-let* ((final (alist-get basic cooked--ss3-finals)))
+        (cl-return (if modified (format "\e[1;%d%s" param final) (concat "\eO" final))))
+      (when-let* ((n (alist-get basic cooked--tilde-numbers)))
+        (cl-return (if modified (format "\e[%d;%d~" n param) (format "\e[%d~" n))))
+      (when-let* ((code (alist-get basic cooked--literal-codes)))
+        (cl-return (cooked--encode-literal basic code param mods)))
+      (when-let* ((seq (alist-get basic cooked--special-keys)))
+        (cl-return (if (memq 'meta mods) (concat "\e" seq) seq)))
+      (when (characterp basic)
+        (let ((char (cond ((memq 'control mods) (logand (upcase basic) #x1f))
+                          ((memq 'shift mods) (upcase basic))
+                          (t basic))))
+          (cl-return (if (memq 'meta mods) (concat "\e" (string char)) (string char)))))
+      nil)))
 
 (defun cooked--track-wandering ()
   "Notice a command moving point off the child's cursor, or back onto it.
@@ -650,276 +663,6 @@ and the rest keep working."
     (setq this-command command)
     (call-interactively command)))
 
-;;;; Mouse
-;;
-;; Reports are only sent when the child asked for them; otherwise the click does
-;; what it does in any Emacs buffer, so selecting text still works.
-
-(defconst cooked--mouse-buttons
-  '((mouse-1 . 0) (mouse-2 . 1) (mouse-3 . 2)
-    ;; A GUI frame spells the wheel `wheel-up'; a terminal spells the same notch
-    ;; `mouse-4', because that is what X10 numbered it.  Both reach here.
-    (wheel-up . 64) (wheel-down . 65) (mouse-4 . 64) (mouse-5 . 65)
-    (wheel-left . 66) (wheel-right . 67) (mouse-6 . 66) (mouse-7 . 67))
-  "Terminal button numbers for Emacs mouse events.")
-
-(defconst cooked--wheel-events
-  '(wheel-up wheel-down wheel-left wheel-right mouse-4 mouse-5 mouse-6 mouse-7)
-  "Events carrying a wheel notch rather than a button that can be held.")
-
-(defconst cooked--mouse-map
-  (let ((map (make-sparse-keymap)))
-    (dolist (event (append '(down-mouse-1 mouse-1 drag-mouse-1
-                             down-mouse-2 mouse-2 drag-mouse-2
-                             down-mouse-3 mouse-3 drag-mouse-3)
-                           cooked--wheel-events))
-      (define-key map (vector event) #'cooked-mouse-event))
-    map)
-  "Mouse bindings for when the child has asked to receive them.
-
-Lives in `emulation-mode-map-alists' rather than in `cooked-raw-map' because a
-major mode's local map is near the bottom of Emacs' lookup order, under every
-enabled minor mode.  `pixel-scroll-precision-mode' binds `wheel-up' and
-`wheel-down' in its own minor-mode map, so on a GUI frame it took the wheel
-before the local map was ever consulted — and scrolled the buffer out from
-under a program that had asked for those notches.  A terminal frame did not
-show this, because there the wheel arrives as `mouse-4'/`mouse-5', which
-pixel-scroll does not bind.
-
-The `drag-mouse-N' variants have to be here as well as `down-mouse-N'/`mouse-N',
-and their absence was a bug with two faces.  Emacs does not deliver a plain
-`mouse-1' when the pointer moved between press and release; it delivers
-`drag-mouse-1' instead.  Unbound, that fell through to the global
-`mouse-set-region', so the child never learned the button had come up -- it saw
-a button held forever -- while Emacs set a region behind its back, which is why
-a drag appeared in one jump at the end instead of following the pointer.
-
-Modified variants are deliberately absent: `C-wheel-up' should keep scaling
-text, and shift-scrolling should keep working, as they do in any other buffer.
-Shift is more than a convenience here: `S-down-mouse-1' reaching
-`mouse-drag-region' is the universal escape hatch for selecting text out of a
-program that has grabbed the mouse, and it works precisely because this map
-never claims it.")
-
-(defvar-local cooked--mouse-grab nil
-  "Whether the child both wants the mouse and owns the keyboard.
-Gates `cooked--mouse-map'; nil everywhere else, so the entry in
-`emulation-mode-map-alists' is inert outside a session that asked for it.")
-
-(defvar cooked--mouse-map-alist `((cooked--mouse-grab . ,cooked--mouse-map))
-  "The `emulation-mode-map-alists' entry activating `cooked--mouse-map'.")
-
-(defvar-local cooked--mouse-held nil
-  "Terminal button numbers the child has been told are down, newest first.
-
-A press and its release are one gesture, and only the press is guaranteed to
-land on a cell of ours: let go below the last row, or over the fringe, and
-`posn-point' is nil.  Dropping the release there would leave the child holding a
-button it can never put down, so this is what says a release is owed.  It also
-supplies the button a motion report has to name -- 1002 asks which button is
-being dragged, and the event Emacs hands us for a movement names none.")
-
-(defvar-local cooked--mouse-last-cell nil
-  "Cell of the last report sent, as a (ROW . COL) cons.
-
-Two jobs, both about a report that would otherwise be wrong or wasted: it stands
-in for a release the pointer carried off the screen, and it is what makes motion
-reporting affordable -- Emacs manufactures a `mouse-movement' event per pixel,
-and the child only cares about the ones that changed cell.")
-
-(defcustom cooked-alternate-scroll-lines 3
-  "Cursor keys sent per wheel notch under alternate scroll (DEC mode 1007).
-Three is xterm's figure."
-  :type 'natnum
-  :group 'cooked)
-
-(defun cooked--alt-scroll-active-p ()
-  "Whether a wheel notch should be sent to the child as cursor keys.
-
-DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
-`git log' — programs that never ask for the mouse."
-  (and cooked--session (cooked--alt-scroll-p cooked--session)))
-
-(defun cooked--update-mouse-grab ()
-  "Recompute whether `cooked--mouse-map' should be in force."
-  ;; Alternate scroll has to be here as well as `cooked--mouse': it exists precisely
-  ;; for children that did *not* ask for the mouse, so gating the keymap on
-  ;; `cooked--mouse' alone would leave the whole feature unreachable.
-  ;;
-  ;; Suspended forwarding has to be here too: it hands the buffer back to
-  ;; ordinary Emacs commands, and a click should select text like any other
-  ;; buffer's, not get reinterpreted as a mouse report to a child that still
-  ;; owns the keyboard as far as `cooked--input-state-p' alone can tell.  Both
-  ;; `still' and `frozen' count -- the render being live in `still' says nothing
-  ;; about who a click belongs to.
-  (setq cooked--mouse-grab (and (or cooked--mouse (cooked--alt-scroll-active-p))
-                                (not (cooked--input-state-p))
-                                (not (cooked--suspended-p)))))
-
-(defun cooked--mouse-cell (posn)
-  "Screen row and column of POSN, or nil if it is outside the screen.
-
-A posn rather than an event because the interesting end of an event is not
-always the same one: `drag-mouse-1' is a release, and where the button came up
-is `event-end'.  Reading `event-start' there reported the release at the cell
-the press was already reported in, which is a gesture with no extent at all.
-
-`cooked--screen-cell' rather than a count of lines and columns from the marker:
-row 0 does not always begin its buffer line — when the row handed to scrollback
-last was wrapped, `cooked--screen-start' sits mid-line — and a plain
-`current-column' there counts the characters ahead of the marker, which are
-scrollback and not on the screen at all.  Reporting those to the child puts
-every click on row 0 to the right of where it was made."
-  (when-let* ((pos (posn-point posn)))
-    (cooked--screen-cell pos)))
-
-(defun cooked--mouse-report (button row col pressed)
-  "Encode a report for BUTTON at ROW/COL, PRESSED or not.
-
-SGR is preferred wherever the child asked for it, because X10 cannot count
-past column 223."
-  (if cooked--mouse-sgr
-      (format "\e[<%d;%d;%d%s" button (1+ col) (1+ row) (if pressed "M" "m"))
-    (format "\e[M%c%c%c" (+ 32 (if pressed button 3)) (+ 33 col) (+ 33 row))))
-
-(defun cooked--send-mouse (button row col pressed)
-  "Send one report for BUTTON at ROW/COL, PRESSED or not, and drop the region.
-
-Deactivating the mark is the point of routing every report through here.  A
-click that the child answers is the child\='s click, and leaving a region behind
-it is what made a selection impossible to get rid of: nothing here ever cleared
-one, so a region set before the child grabbed the mouse survived every
-subsequent click, and `cooked--snap-to-cursor\=' then walked point away from a
-mark that stayed put -- growing a region the user never drew and could only
-escape by leaving the buffer.
-
-Through `cooked--deactivate-mark\=' rather than `deactivate-mark\=' so that a
-report fired while evil is in visual state says so to evil as well.  A bare
-`deactivate-mark\=' happens to do the right thing from here -- evil reads
-`this-command\=', and there is one -- but only by depending on a fact about the
-caller that the drain, which clears the same selection for the same reason, does
-not share.  One answer for both beats two that agree by accident."
-  (cooked--deactivate-mark)
-  (setq cooked--mouse-last-cell (cons row col))
-  (cooked--send-to-child (cooked--mouse-report button row col pressed)))
-
-(defun cooked--report-button (button row col pressed)
-  "Report BUTTON at ROW/COL as PRESSED or released, remembering that it is held."
-  (cond ((memq button '(64 65 66 67)))   ; a notch is not a button you can hold
-        (pressed (unless (memq button cooked--mouse-held)
-                   (push button cooked--mouse-held)))
-        (t (setq cooked--mouse-held (delq button cooked--mouse-held))))
-  (cooked--send-mouse button row col pressed))
-
-(defun cooked--report-motion (row col)
-  "Report the pointer arriving at ROW/COL, if it is a cell it was not already in.
-
-32 is the motion bit, added to the button being dragged; 3 stands for \"no
-button\", which is what a 1003 child is told when nothing is held.  Suppressing
-a repeat of the last cell is not an optimisation so much as the contract: Emacs
-tracks the pointer by pixel, and a child that asked for cells would otherwise
-receive several dozen identical reports per cell crossed."
-  (unless (equal cooked--mouse-last-cell (cons row col))
-    (cooked--send-mouse (+ 32 (or (car cooked--mouse-held) 3)) row col t)))
-
-(defun cooked--mouse-track (window)
-  "Follow the pointer into the child until the gesture ends, over WINDOW.
-
-Emacs manufactures `mouse-movement\=' events only inside `track-mouse\=', and only
-for as long as that form is running; no keymap can ask for them.  So the press
-that begins a drag runs the rest of the gesture itself, exactly as
-`mouse-drag-region\=' does for Emacs\=' own selection.  Without it the child got a
-press and, whenever the user let go, a release, with nothing in between -- so a
-program that highlights as you drag highlighted nothing until the end.
-
-Whatever ends the loop is pushed back rather than acted on, so the release
-returns through `cooked-mouse-event\=' by its ordinary binding and there is only
-one place that knows how to report a button coming up.
-
-Only the drag half of 1003 is served: any-motion with no button down would mean
-tracking the pointer for as long as the child asks, which costs an event per
-pixel across the whole frame whether or not the user is doing anything.  A
-`track-mouse\=' bounded by a gesture is the affordable part, and it is the part
-every 1003 client also gets from 1002."
-  (track-mouse
-    (let (event)
-      (while (progn (setq event (read-event))
-                    (and (consp event) (eq (event-basic-type event) 'mouse-movement)))
-        (let ((posn (event-start event)))
-          ;; A drag that wanders into another window is still the child\='s drag,
-          ;; but the cells under it are somebody else\='s buffer: report nothing
-          ;; rather than a position translated out of the wrong text.
-          (when (eq (posn-window posn) window)
-            (when-let* ((cell (cooked--mouse-cell posn)))
-              (cooked--report-motion (car cell) (cdr cell))))))
-      (push event unread-command-events))))
-
-(defun cooked--alt-scroll-keys (button)
-  "Cursor keys standing in for a wheel notch of BUTTON.
-
-Only the vertical notches translate; a horizontal one has no cursor-key
-spelling a pager would understand, so it sends nothing."
-  (if-let* ((final (cond ((= button 64) "A") ((= button 65) "B"))))
-      (let ((key (if cooked--app-cursor (concat "\eO" final) (concat "\e[" final))))
-        (mapconcat #'identity (make-list cooked-alternate-scroll-lines key)))
-    ""))
-
-(defun cooked-mouse-event ()
-  "Forward the mouse to the child, or fall back to Emacs' own behaviour."
-  (interactive)
-  (let* ((event last-input-event)
-         (basic (event-basic-type event))
-         (modifiers (event-modifiers event))
-         (button (cdr (assq basic cooked--mouse-buttons)))
-         (wheel (memq basic cooked--wheel-events))
-         ;; A wheel notch is always a press.  Emacs reports it as a click, which
-         ;; the `down' test alone would encode as a release — and a release of
-         ;; buttons 64/65 is a report every application discards, so the scroll
-         ;; would vanish on the way to a child that had asked for it.
-         (pressed (or wheel (memq 'down modifiers)))
-         ;; `drag-mouse-1' is a release that happens to know where it started;
-         ;; the end is the half that has not been reported yet.
-         (posn (if (memq 'drag modifiers) (event-end event) (event-start event)))
-         (cell (and cooked--mouse button
-                    (or (cooked--mouse-cell posn)
-                        ;; A notch has nowhere to land when the pointer is over a
-                        ;; part of the window with no text under it.  Scrolling
-                        ;; Emacs instead would move the buffer out from under a
-                        ;; program that asked to receive the wheel, so the cursor's
-                        ;; cell stands in — the child cares about the direction.
-                        (and wheel (cooked--cursor-cell))
-                        ;; And a release owed to the child is owed wherever the
-                        ;; pointer ended up: let go past the last row and there is
-                        ;; no cell, but the button is still down as far as the
-                        ;; child knows.  Report it where it was last seen rather
-                        ;; than handing the tail of the child's gesture to Emacs.
-                        (and (not pressed) (memq button cooked--mouse-held)
-                             (or cooked--mouse-last-cell (cooked--cursor-cell))))))
-         (window (posn-window posn)))
-    (cond
-     ;; Checked before the mouse report: `cooked--alt-scroll-p' is already false
-     ;; when the child asked for the mouse, so the two can never both apply.
-     ((and wheel button (cooked--alt-scroll-active-p))
-      (cooked--send-to-child (cooked--alt-scroll-keys button)))
-     ((null cell)
-      (cooked--mouse-fallback event))
-     (t
-      (cooked--report-button button (car cell) (cdr cell) pressed)
-      ;; Take the whole gesture or none of it: having reported a press to a child
-      ;; that asked where the pointer goes, the motion is ours to deliver, and the
-      ;; only way to be given it is to sit in `track-mouse' until the button is up.
-      (when (and pressed (not wheel) (or cooked--mouse-drag cooked--mouse-motion)
-                 (windowp window))
-        (cooked--mouse-track window))))))
-
-(defun cooked--mouse-fallback (event)
-  "Run whatever EVENT would do without cooked's binding."
-  (let ((command (lookup-key global-map (this-command-keys-vector))))
-    (when (commandp command)
-      (setq last-command-event event
-            this-command command)
-      (call-interactively command))))
-
 ;;;; Suspending: peek, and what evil's states ask for
 ;;
 ;; While the child owns the keyboard there is, by design, almost no way back to
@@ -1253,7 +996,14 @@ The cost is ESC's latency: unbound here, it waits to see whether a Meta chord
 follows.  That is why the full maps keep forwarding it instead, and why this
 map is not the default anywhere.")
 
-(defvar cooked-input-map
+(defun cooked--build-input-map (delegated)
+  "A fresh input-line keymap, with DELEGATED keys handed to the child.
+
+Spelled as a builder rather than a literal for the same reason
+`cooked--build-passthrough-map\=' is: `cooked-delegate-keys\=' can change at any
+time, and rebuilding is the only way to put a key back that used to be
+delegated.  Unbinding it instead would leave `TAB\=' bound to nothing rather
+than to `completion-at-point\='."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'cooked-send-input)
     (define-key map (kbd "<S-return>") #'cooked-newline)
@@ -1266,13 +1016,98 @@ map is not the default anywhere.")
     ;; the child is being forwarded through -- `C-a' there is readline's own
     ;; start-of-line, or tmux's prefix, and it must arrive untouched.
     (define-key map [remap move-beginning-of-line] #'cooked-beginning-of-line)
-    map)
+    ;; Last, so a delegated key wins over the binding it replaces -- which is the
+    ;; point of naming it.
+    (dolist (key delegated)
+      (define-key map (kbd key) #'cooked-delegate-this-key))
+    map))
+
+(defvar cooked-input-map
+  ;; `cooked-delegate-keys' is defined below and cannot be read here; its `:set'
+  ;; is what keeps the two in step from load onwards.
+  (cooked--build-input-map '("C-r"))
   "Keymap while Emacs owns the input line.
 
 Cooked's own `C-c'-prefixed commands (interrupt, EOF, paste, and the rest)
 are not repeated here -- they live on `cooked-mode-map', this map's parent,
 so the same set reaches `cooked-raw-map'/`cooked-alt-map' and a bare peek
 without being declared three times over.")
+
+(defun cooked-delegate-key (key)
+  "Hand the pending input to the child\='s line editor, then send KEY to it.
+
+The primitive behind `cooked-delegate-keys\=', and deliberately not a completion
+feature: nothing here knows what KEY means.  Send `C-r\=' and you get fzf or
+atuin; send the up arrow and you get the shell\='s own history, with
+`share_history\=', `zsh-histdb\=' and every `bindkey\=' the user has
+accumulated.  That is worth more than any of it could be reimplemented for,
+because `comint-input-ring\=' here is fed only by `cooked--history-record\='
+from what was typed in *this* buffer and so starts empty every session.
+
+Three things have to happen in this order.
+
+Ownership is dropped *first*.  The line is about to be echoed by the shell, and
+a buffer that still believes it owns an input region would render it a second
+time on top.  The text is left in place rather than deleted, for the reason
+`cooked-send-input\=' leaves it: the echo redraws identical characters over the
+same cells and nothing moves, where deleting it would empty the row for the one
+redisplay it takes to come back.
+
+The *whole* line is sent, not the part before point.  Sending the prefix would
+silently drop whatever followed the cursor, and the left-arrows that avoid it
+cost one byte each.
+
+Then KEY, once the shell\='s cursor is back where the user\='s was."
+  (unless (cooked--input-state-p)
+    (user-error "The child already owns the line"))
+  (pcase-let* ((`(,start . ,end) (cooked--input-region))
+               (text (buffer-substring-no-properties start end))
+               (after (- end (max start (min (point) end)))))
+    (cooked--clear-input-region)
+    (setq cooked--delegated t)
+    (cooked--refresh-keymap)
+    (cooked--send-to-child
+     (concat text (apply #'concat (make-list after "\e[D")) key))))
+
+(defun cooked-delegate-this-key ()
+  "Delegate the pending input and send the key that invoked this command.
+See `cooked-delegate-key\=' and `cooked-delegate-keys\='."
+  (interactive)
+  (let ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys)))
+    (when-let* ((bytes (cooked--encode-event last-command-event)))
+      (cooked-delegate-key bytes))))
+
+(defcustom cooked-delegate-keys '("C-r")
+  "Keys that hand the line to the child\='s line editor before being sent.
+
+Each is a `kbd\=' string, bound in `cooked-input-map\=' -- so they apply only
+where Emacs owns the line, which is the only place there is anything to hand
+over.
+
+`C-r\=' is the default because reverse history search is the clearest case for
+delegating: the flow is search, accept, Enter, so the line goes back to the
+shell at a point where Emacs editing was not going to be wanted again anyway,
+and the alternative is a history ring that knows nothing of the shell\='s.
+
+`TAB\=' is deliberately *not* here.  Delegation is a one-way door for the rest
+of the line, and losing the Emacs input region must never be a side effect of a
+key pressed fifty times an hour; `TAB\=' stays `completion-at-point\=' at every
+level, and what answers it changes with the tier while what it means does not.
+Putting it here is supported and reasonable -- it is how a shell with marks but
+no completion channel reaches `git checkout <TAB>\=' -- but it should be chosen."
+  :type '(repeat string)
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (and (boundp 'cooked-input-map) (keymapp cooked-input-map))
+           ;; Rebuilt in place, keeping the map's identity and the parent
+           ;; `cooked-mode' gave it -- `set-keymap-parent' stores that parent as
+           ;; the list's terminating cdr, so a plain `setcdr' would drop it.  The
+           ;; same dance as `cooked--set-passthrough-map', and for the same
+           ;; reason: buffers already showing this map must follow the change.
+           (let ((parent (keymap-parent cooked-input-map)))
+             (setcdr cooked-input-map (cdr (cooked--build-input-map value)))
+             (set-keymap-parent cooked-input-map parent))))
+  :group 'cooked)
 
 (defun cooked-send-input ()
   "Submit the pending input to the child.
@@ -1591,8 +1426,12 @@ render half of the mode, which no keymap carries."
     (_ (pcase policy
          ('cooked cooked-input-map)
          ('alt cooked-alt-map)
-         ('command cooked-command-map)
-         ('raw cooked-raw-map)))))
+         ;; A marked prompt with no license reads exactly like a running command
+         ;; as far as the keyboard is concerned: the shell said where it is, so
+         ;; there is nothing left to hedge and `cooked-raw-exceptions' would only
+         ;; take keys away from a line editor that wants them.
+         ((or 'command 'prompt) cooked-command-map)
+         (_ cooked-raw-map)))))
 
 (defvar cooked--quiet-refresh nil
   "Whether the refresh under way was asked for quietly.
@@ -2138,6 +1977,8 @@ assumption on startup is that it has focus, and telling it so again is noise.")
     (when cooked--session
       (cooked--report-focus))))
 
+;;;; What happens when the child exits
+
 (defcustom cooked-kill-buffer-on-exit nil
   "Whether the session buffer is killed when the child exits.
 
@@ -2189,6 +2030,8 @@ and anything watching the buffer list see an ordinary kill."
     (let ((buffer (current-buffer)))
       (run-at-time 0 nil (lambda () (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
+;;;; Faces for what the mode line reports
+
 (defface cooked-failure '((t :inherit error))
   "Face for a non-zero exit status in the mode line."
   :group 'cooked)
@@ -2213,6 +2056,72 @@ has no way to tell that from a wedged child: keys simply stop reaching it.  This
 is what makes the state visible."
   :group 'cooked)
 
+;;;; The mode line
+;;
+;; What the mode line says about a session: the faces above colour it, and the
+;; hint is the one thing it volunteers rather than reports.
+
+(defcustom cooked-integration-hint t
+  "Whether to say once, per session, that no shell integration is loaded.
+
+The mode line grows a `bare\=' tag the moment a session turns out to be
+unmarked, which is enough for anyone who already knows what it means and
+nothing at all for anyone who does not.  This is the sentence that closes that
+gap, and it fires once: the state is permanent for the life of the child, so
+repeating it would only ever be noise."
+  :type 'boolean :group 'cooked)
+
+(defcustom cooked-integration-hint-delay 3
+  "Seconds to wait for a first OSC 133 mark before saying there is none.
+
+A grace period rather than a guess at what is slow: the marks arrive with the
+first prompt, so the only thing being waited out is the child\='s own startup --
+a `.zshrc\=' that compiles its completion dump, a shell behind an `ssh\=' that
+has not connected yet.  Long enough that a working setup is never accused, short
+enough that a broken one is not left to be discovered."
+  :type 'number :group 'cooked)
+
+(defun cooked--mode-line-bare ()
+  "The `bare\=' tag, when this session has never seen an OSC 133 mark.
+
+Two situations wear `raw\=' in the indicator and they are not the same trouble:
+the child is a full-screen program, or the shell simply never spoke.  Which one
+cannot be told apart by watching -- a shell editing its own line and `htop\='
+hold the tty identically -- but *whether a mark has ever arrived* can, and it is
+the more useful question anyway.  It is a fact about the host rather than a
+guess about the child, and it is the one that explains why the buffer behaves
+differently here than it does at home.
+
+Latched through `cooked--semantic-seen\=', so a marked session that is midway
+through a command does not blink the tag on and off."
+  (unless cooked--semantic-seen
+    (propertize " bare" 'face 'shadow)))
+
+(defun cooked--schedule-integration-hint (buffer)
+  "Say once, in BUFFER, that no OSC 133 mark ever arrived.
+
+On a timer rather than from the mode line, because the mode line is the wrong
+place to learn it from twice over: `:eval\=' runs during redisplay, where a
+`message\=' is a side effect in a function that is supposed to be a rendering,
+and it runs from the first frame -- before the child has started, when every
+session on earth is momentarily unmarked.  Waiting is what makes the answer
+mean anything.
+
+Not rescheduled afterwards.  A shell that sources the snippet later starts being
+believed at once, because everything downstream reads `cooked--semantic-seen\='
+directly; it is only this sentence that does not come back, and a second copy of
+it would be worth less than the silence."
+  (run-at-time
+   cooked-integration-hint-delay nil
+   (lambda ()
+     (when (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (when (and cooked-integration-hint
+                    cooked--session
+                    (not cooked--semantic-seen))
+           (message "cooked: no shell integration in this session; \
+source shell-integration/cooked.zsh from your shell's rc")))))))
+
 (defun cooked--mode-line ()
   "Compact indicator: what is running, who owns the keyboard, how it went."
   (let ((code (cooked-last-exit-code)))
@@ -2226,6 +2135,7 @@ is what makes the state visible."
          ('cooked " edit")
          ('alt " alt")
          (_ " raw")))
+     (cooked--mode-line-bare)
      (pcase cooked--input-mode
        ('semi (propertize " semi" 'face 'shadow))
        ('still (propertize " still" 'face 'cooked-still))
@@ -2571,11 +2481,133 @@ but this order costs nothing."
   (cooked--remove-scratch)
   (setq cooked--session nil cooked--wake nil))
 
-(defcustom cooked-shell-integration t
-  "Whether to inject OSC 133 shell integration when starting a known shell.
-Without it the shell prompt stays raw and only `cooked' programs get an Emacs
-input region, since shells put the tty in raw mode for their own line editor."
-  :type 'boolean :group 'cooked)
+(defcustom cooked-shell-integration 'detect
+  "Which shell to inject the OSC 133 integration into, if any.
+
+  `detect\='  match the basename of `cooked-shell\=' against the shells we know
+  `none\='    never inject; the snippet is yours to source
+  `zsh\=', `bash\='  force that scheme regardless of the name
+
+There is no `fish\=' scheme.  The snippet is shipped and honours the feature
+list like the others, but injecting it would mean being right about `-C\='
+ordering and config.fish sourcing against a shell nothing here has ever run.
+Source it by hand; it is the same one line.
+
+Injection generates startup files that source the user\='s own, so nobody\='s
+configuration is bypassed or edited, and the generated directory is deleted with
+the buffer.
+
+It is on by default, and the honest statement of its limit is that it composes
+with nothing.  A generated ZDOTDIR reaches exactly the shell cooked started:
+every `ssh\=', every `sudo -i\=', every `docker exec\=', every nested `zsh -f\='
+and every `exec zsh\=' lands outside it.  That is not a wart to be fixed but the
+shape of the mechanism, and it is why injection is the convenience rather than
+the contract -- the contract is a line in your own rc:
+
+    [[ $TERM_PROGRAM == cooked ]] && source /path/to/cooked.zsh
+
+The same line works at both ends of an `ssh\=', and sourcing it twice is a
+no-op, so having it *and* injection is the supported arrangement rather than
+a conflict.  Where the shell stays unmarked the mode line says `bare\=', and
+says it once in words -- see `cooked-integration-hint\='.
+
+What gets turned on once loaded is `cooked-shell-integration-features\=', which
+is a separate question from whether cooked put the code there."
+  :type '(choice (const :tag "Detect from the shell's name" detect)
+                 (const :tag "Never inject" none)
+                 (const :tag "Force zsh" zsh)
+                 (const :tag "Force bash" bash))
+  :group 'cooked)
+
+(defconst cooked-shell-integration-all-features
+  '(marks input-mark cwd announce completion title eval-helpers)
+  "Every feature name `cooked-shell-integration-features\=' accepts.")
+
+(defcustom cooked-shell-integration-features
+  '(marks input-mark cwd announce completion title)
+  "Which parts of the shell integration to turn on.
+
+A list of symbols, passed to the shell verbatim in the environment variable
+`COOKED_SHELL_INTEGRATION_FEATURES\=' and read there rather than acted on here,
+so the same list governs a shell cooked injected into and one that sources the
+snippet by hand.
+
+  `marks\='         OSC 133 `A\=', `C\=' and `D\=': where each prompt began,
+                  where its command\='s output began, and how it exited.
+                  Buys the per-command records, `next-error\=', rerun, and
+                  the fringe decorations.
+  `input-mark\='    OSC 133 `B\=', which is separate from the rest because it is
+                  the one mark that changes who owns the keyboard: it is what
+                  lifts the input line into Emacs.  Drop it and the marks above
+                  still work -- the shell keeps its own line editor, and you
+                  keep the extents and the exit codes.
+  `cwd\='           OSC 7, which tracks `default-directory\='.  Also what tells
+                  cooked the shell is on this machine, which is half of
+                  `cooked--ownership-license\='.
+  `announce\='      the per-line OSC 51;CH announcement.  Licenses the editable
+                  line from the far end of an `ssh\=', where termios cannot see,
+                  and carries the token a completion request must quote.
+  `completion\='    source the `compadd\=' capture, so TAB is answered by the
+                  shell\='s own completion system.  Needs the Emacs half loaded
+                  too -- `(require \\='cooked-shell-completion)\=' -- and does
+                  nothing without it.
+  `title\='         report the running command as the title.  cooked shows it in
+                  the mode line, and `cooked-buffer-name-follows-title\=' can
+                  put it in the buffer name.  If your prompt already writes
+                  `OSC 2\=' this is a redundant write rather than a conflict --
+                  last one wins, and ours runs last -- so drop it if you would
+                  rather keep your own wording.
+  `eval-helpers\='  define `find_file\=', `dired\=', `osc_copy\=' and
+                  `cooked_send\='.  Off by default, and the Emacs half
+                  (`(require \\='cooked-osc-eval)\=') gates what they can
+                  actually do -- see `cooked-eval-commands\='.
+
+Your rc may edit `COOKED_SHELL_INTEGRATION_FEATURES\=' before the snippet reads
+it, which is the supported way to stand one part down from the shell side.  A
+prompt that already emits its own OSC 133 marks can append ` no-marks\=' to it
+and keep everything else, rather than choosing between duplicate marks and no
+integration at all.  The snippet defers its own setup to the first prompt so
+that there is a moment in which to do this."
+  :type `(set ,@(mapcar (lambda (feature) `(const ,feature))
+                        cooked-shell-integration-all-features))
+  :group 'cooked)
+
+(defun cooked--integration-shell (shell)
+  "Which injection scheme SHELL should get, or nil for none.
+
+`detect\=' matches on the basename, which is what every terminal that does this
+uses and is wrong in the same ways for all of them: a shell installed under
+another name is missed, and one *named* zsh that is not zsh is mangled.  Naming
+the scheme explicitly overrides the guess in both directions.
+
+A bare `t\=' is honoured as `detect\=', because that is what this option meant
+while it was a boolean and a session that refuses to start is a poor way to
+learn that a setting grew values."
+  (let ((setting (if (eq cooked-shell-integration t) 'detect cooked-shell-integration)))
+    (pcase setting
+      ('detect (let ((name (file-name-nondirectory shell)))
+                (and (member name '("zsh" "bash")) (intern name))))
+      ((or 'zsh 'bash) setting)
+      (_ nil))))
+
+(defun cooked--integration-feature-p (feature)
+  "Whether FEATURE is enabled in `cooked-shell-integration-features\='."
+  (memq feature cooked-shell-integration-features))
+
+(defun cooked--integration-environment ()
+  "The feature-list binding for a child, or nil when nothing is enabled.
+
+Space-separated symbol names, ordered as
+`cooked-shell-integration-all-features\=' lists them rather than as the user
+happened to write them, so the value a shell sees is stable across restarts
+and diffable in a bug report.
+
+Passed verbatim rather than as a normalized re-encoding, which is what makes the
+rc-side edit described in `cooked-shell-integration-features\=' possible: the
+shell appends to the same vocabulary it received."
+  (let ((on (seq-filter #'cooked--integration-feature-p
+                        cooked-shell-integration-all-features)))
+    (and on (mapconcat #'symbol-name on " "))))
 
 (defun cooked--integration-directory ()
   "Directory holding the shell integration snippets."
@@ -2611,14 +2643,21 @@ something you get to undo."
           "  COOKED_USER_ZDOTDIR=$ZDOTDIR\n"
           "fi\n"))
 
-(defun cooked--write-zsh-startup (scratch integration)
-  "Generate zsh startup files in SCRATCH, sourcing INTEGRATION's snippet.
+(defun cooked--write-zsh-startup (scratch integration capture-p)
+  "Generate zsh startup files in SCRATCH, sourcing INTEGRATION's snippets.
+
+CAPTURE-P says whether to source the completion capture beside the core.
 
 zsh reads every startup file from ZDOTDIR, so pointing it at a directory holding
 only a .zshrc means the user's own ~/.zshenv is never read at all — a real and
 silent loss, since .zshenv is where PATH and friends usually live.  Each stub
-therefore hands the user's file the ZDOTDIR it expects and then takes it back."
+therefore hands the user's file the ZDOTDIR it expects and then takes it back.
+
+Turning the completion layer on reaches Emacs at once and this shell not at
+all; restart it, or source the file yourself."
   (let ((snippet (shell-quote-argument (expand-file-name "cooked.zsh" integration)))
+        (capture (shell-quote-argument
+                  (expand-file-name "cooked-completion.zsh" integration)))
         (here (shell-quote-argument scratch)))
     (dolist (file '(".zshenv" ".zprofile" ".zlogin"))
       (with-temp-file (expand-file-name file scratch)
@@ -2630,6 +2669,7 @@ therefore hands the user's file the ZDOTDIR it expects and then takes it back."
               (cooked--zsh-source-user ".zshrc")
               "# After the user's config, so our hooks can order themselves against it.\n"
               "source " snippet "\n"
+              (if capture-p (concat "source " capture "\n") "")
               "# Nested shells and `exec zsh' must not inherit the scratch directory,\n"
               "# which would also break them once it is deleted.\n"
               "if [[ -n ${COOKED_USER_ZDOTDIR_SET-} ]]; then\n"
@@ -2640,58 +2680,55 @@ therefore hands the user's file the ZDOTDIR it expects and then takes it back."
               "unset COOKED_USER_ZDOTDIR_SET\n"))))
 
 (defun cooked--shell-invocation (shell)
-  "Return (ARGV EXTRA-ENV SCRATCH) that starts SHELL with OSC 133 marks enabled.
+  "Return (ARGV EXTRA-ENV SCRATCH) that starts SHELL with integration loaded.
 
-Each shell gets the least invasive hook it offers: generated startup files that
-source the user's own, so nobody's configuration is bypassed or edited.  SCRATCH
-is the directory holding them, for `cooked--remove-scratch' to delete later, or
-nil when none were generated."
-  (let ((dir (cooked--integration-directory))
-        (name (file-name-nondirectory shell)))
-    (if (not cooked-shell-integration)
-        (list (list shell) nil nil)
-      (pcase name
-        ("bash"
-         (let* ((scratch (cooked--scratch-directory))
-                (rc (expand-file-name "bashrc" scratch)))
-           (with-temp-file rc
-             (insert "[ -f ~/.bashrc ] && . ~/.bashrc\n"
-                     ". " (shell-quote-argument (expand-file-name "cooked.bash" dir)) "\n"))
-           (list (list shell "--rcfile" rc "-i") nil scratch)))
-        ("zsh"
-         (let ((scratch (cooked--scratch-directory))
-               (user (or (getenv "ZDOTDIR") (expand-file-name "~"))))
-           (cooked--write-zsh-startup scratch dir)
-           (list (list shell "-i")
-                 `(("ZDOTDIR" . ,scratch)
-                   ("COOKED_USER_ZDOTDIR" . ,user)
-                   ;; Distinguishes "put it back" from "there was none", so we do not
-                   ;; leave every cooked child exporting ZDOTDIR=$HOME for life.
-                   ,@(when (getenv "ZDOTDIR") '(("COOKED_USER_ZDOTDIR_SET" . "1")))
-                   ;; The completion half of the snippet is decided here and only
-                   ;; here: it shadows `compadd' and binds a widget at source time,
-                   ;; which zsh gives no cheap way back from, so it cannot be a
-                   ;; setting the shell rereads.  The question asked is the same one
-                   ;; the CAPF and the OSC 51;C arm ask -- is the layer loaded --
-                   ;; which is why it is that variable and not a setting of its own:
-                   ;; one decision, one place to make it.  Sent as a value rather
-                   ;; than left to the snippet's default, so a session started
-                   ;; without the layer stays without it even where the variable is
-                   ;; exported from the user's own configuration.
-                   ;;
-                   ;; This is where the two halves come apart, and it is worth
-                   ;; knowing: requiring `cooked-shell-completion' reaches Emacs at
-                   ;; once, but a shell already running was told at startup not to
-                   ;; install its half and cannot cheaply be told otherwise.  Load
-                   ;; the layer in your init file, or restart the shell after it.
-                   ("COOKED_COMPLETION"
-                    . ,(if cooked-shell-completion-function "1" "0")))
-                 scratch)))
-        ("fish"
-         (list (list shell "-C" (format "source %s"
-                                        (shell-quote-argument (expand-file-name "cooked.fish" dir))))
-               nil nil))
-        (_ (list (list shell) nil nil))))))
+Each shell gets the least invasive hook it offers: generated startup files
+that source the user\'s own, so nobody\'s configuration is bypassed or edited.
+SCRATCH is the directory holding them, for `cooked--remove-scratch\' to delete
+later, or nil when none were generated.
+
+COOKED_SHELL_INTEGRATION_FEATURES is set whether or not anything was injected,
+and that asymmetry is deliberate: a shell the user sources the snippet in by
+hand -- a nested `zsh\', a `fish\', the far end of an `ssh\' that forwards the
+variable -- should honour the same feature list as one cooked set up itself.
+Injection is how the code gets there; the variable is what it does once it
+arrives."
+  (let* ((dir (cooked--integration-directory))
+         (features (cooked--integration-environment))
+         (env (and features `(("COOKED_SHELL_INTEGRATION_FEATURES" . ,features))))
+         ;; Both halves have to agree before the capture is worth sourcing: the
+         ;; user asked for it, and the Emacs side that answers is loaded.  The
+         ;; decision is made *here*, by writing the line or not, because a
+         ;; generated file is written at spawn and a running shell cannot
+         ;; usefully retract a `compadd\' shadow afterwards.
+         (capture-p (and (cooked--integration-feature-p 'completion)
+                         cooked-shell-completion-function)))
+    (pcase (cooked--integration-shell shell)
+      ('bash
+       (let* ((scratch (cooked--scratch-directory))
+              (rc (expand-file-name "bashrc" scratch)))
+         (with-temp-file rc
+           (insert "[ -f ~/.bashrc ] && . ~/.bashrc\n"
+                   ". " (shell-quote-argument (expand-file-name "cooked.bash" dir)) "\n"
+                   (if capture-p
+                       (concat ". " (shell-quote-argument
+                                     (expand-file-name "cooked-completion.bash" dir))
+                               "\n")
+                     "")))
+         (list (list shell "--rcfile" rc "-i") env scratch)))
+      ('zsh
+       (let ((scratch (cooked--scratch-directory))
+             (user (or (getenv "ZDOTDIR") (expand-file-name "~"))))
+         (cooked--write-zsh-startup scratch dir capture-p)
+         (list (list shell "-i")
+               `(,@env
+                 ("ZDOTDIR" . ,scratch)
+                 ("COOKED_USER_ZDOTDIR" . ,user)
+                 ;; Distinguishes "put it back" from "there was none", so we do not
+                 ;; leave every cooked child exporting ZDOTDIR=$HOME for life.
+                 ,@(when (getenv "ZDOTDIR") '(("COOKED_USER_ZDOTDIR_SET" . "1"))))
+               scratch)))
+      (_ (list (list shell) env nil)))))
 
 (defun cooked--live-buffers ()
   "Session buffers with a running child, most recent first."
@@ -2718,7 +2755,8 @@ size is only knowable once something is displaying it."
       (pcase-let ((`(,argv ,env ,scratch) (cooked--shell-invocation (or command cooked-shell))))
         (setq cooked--scratch scratch)
         (cooked--start argv default-directory env))
-      (cooked--refresh-keymap))
+      (cooked--refresh-keymap)
+      (cooked--schedule-integration-hint buffer))
     buffer))
 
 (provide 'cooked-mode)

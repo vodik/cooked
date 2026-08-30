@@ -154,13 +154,20 @@ fn render(body: &[u8], bitmap: &mut Bitmap) {
                 }
             }
             Token::Data(bits, repeat) => {
-                for _ in 0..repeat {
-                    if x >= bitmap.size.w {
-                        // Still advance, so a run that overruns the canvas does not fold
-                        // the rest of the band back on top of what is already drawn.
-                        x = x.saturating_add(1);
-                        continue;
-                    }
+                // Clipped, though nothing reaching here through [`decode`] is clipped by
+                // it: both passes walk the same tokens with the same arithmetic, and
+                // `measure` takes the width from the widest `x` that walk reaches, so a
+                // run always has canvas under it. The clip is what makes that a
+                // *property* rather than a thing to be careful about -- a future change
+                // to either pass degrades to a short picture instead of an index panic.
+                //
+                // Bounded by the canvas rather than by `repeat`, which is the same point
+                // made about cost: `!` is a compressor, `!9999~` is five bytes naming ten
+                // thousand pixels, and stepping the overrun one column at a time would
+                // tie the work to that count -- safe only while `measure`'s own
+                // `MAX_PIXELS` check holds, which is an invariant two functions away.
+                let drawn = bitmap.size.w.saturating_sub(x).min(repeat);
+                for _ in 0..drawn {
                     for row in 0..6 {
                         if bits & (1 << row) != 0 {
                             let y = 6 * band + row;
@@ -172,6 +179,11 @@ fn render(body: &[u8], bitmap: &mut Bitmap) {
                     }
                     x += 1;
                 }
+                // The rest is still *advanced* rather than clamped, so a run that
+                // overruns the canvas does not fold the remainder of the band back on
+                // top of what is already drawn. `drawn` is a `min` against `repeat`, so
+                // the subtraction cannot go below zero.
+                x = x.saturating_add(repeat - drawn);
             }
             Token::CarriageReturn => x = 0,
             Token::NewLine => {
@@ -428,6 +440,28 @@ mod tests {
         // Declared smaller than the data: the data wins, rather than being cropped.
         let bitmap = decode(b"\"1;1;1;1#0;2;100;0;0~~~").unwrap();
         assert_eq!((bitmap.size.w, bitmap.size.h), (3, 6));
+    }
+
+    #[test]
+    fn a_run_past_the_right_edge_is_clipped_rather_than_folded_back() {
+        // `render` is exercised directly because `decode` cannot produce this: `measure`
+        // sizes the canvas from the same token walk, so a run always has canvas under it.
+        // That is exactly why the clip is worth a test of its own -- it is the thing
+        // keeping an undersized canvas a short picture rather than an index panic.
+        let size = PixelSize::new(2, 6);
+        let mut bitmap = Pixels::new(size, PixelFormat::Rgba, vec![0; 4 * 2 * 6]);
+        render(b"#0;2;100;0;0!5~", &mut bitmap);
+
+        // The two columns that exist are painted, and the run's remaining three neither
+        // panicked nor wrapped back onto the start of the band.
+        assert_eq!(at(&bitmap, 0, 0), RED);
+        assert_eq!(at(&bitmap, 1, 5), RED);
+
+        // And the overrun still *advances*: a `$` would be needed to get back to column
+        // zero, so a second run after it stays off the canvas rather than overwriting.
+        render(b"#0;2;100;0;0!5~#0;2;0;0;100~", &mut bitmap);
+        assert_eq!(at(&bitmap, 0, 0), RED);
+        assert_eq!(at(&bitmap, 1, 0), RED);
     }
 
     #[test]

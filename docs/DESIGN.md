@@ -286,6 +286,280 @@ dispatch to the TRAMP handler. Asking whether the file is there is already the c
 
 ---
 
+## `cooked-shell-integration`: why injection stops being the default
+
+cooked currently generates startup files and points the shell at them —
+`cooked--write-zsh-startup` builds a whole `ZDOTDIR` (all four startup files, because
+zsh reads `.zshenv` from there too and a lone `.zshrc` would silently skip the user's
+own), bash gets `--rcfile`, fish gets `-C`. It works, and it is the reason a fresh
+`M-x cooked` behaves the way the README describes.
+
+It is still the wrong default, and the argument is not about taste.
+
+**The unmarked state is permanent and routine, not a first-run wart.** Every `ssh`,
+every `sudo -i`, every `docker exec`, every nested `zsh -f` lands there, forever,
+regardless of what is configured locally. Injection fixes exactly one host — the one
+where configuring it by hand would have been easiest — and leaves every other one
+degraded. The result is the worst available mental model: cooked is excellent locally
+and inexplicably worse the moment you go remote, with nothing on screen explaining the
+difference.
+
+**Opt-in is composable; injection is not.** A generated `ZDOTDIR` cannot cross an ssh.
+A line in a `.zshrc` can, and the same file works at both ends, which turns "remote
+sessions are degraded" from a property of the design into a thing the user can fix by
+installing the snippet where they want it. That is also the only way level 2 is
+reachable remotely at all.
+
+**Injection hides the path it most needs exercised.** `cooked-raw-exceptions` exists
+precisely for "a shell session without cooked's OSC 133 integration wired up," and its
+docstring says so. Making that path the local default means it is exercised where it can
+be debugged, rather than only where it cannot.
+
+The cost is the first run: a new user gets level 0 until they read far enough. That is
+what vterm does and nobody calls vterm broken — but it is only acceptable if the level
+is visible, which is why the mode-line work is a prerequisite for flipping the default
+rather than a follow-up.
+
+### What stays
+
+The injection machinery does not get deleted; it moves behind the flag. It works, and
+the test suite leans on the generated `ZDOTDIR` to get hermetic shells — without it
+every zsh test would run the developer's own prompt and whatever `vcs_info` precmd came
+with it.
+
+The zsh snippet keeps earning its place even when sourced by hand, because two of the
+things in it are exactly the ones a hand-written config gets wrong and then does not
+notice:
+
+- **`__cooked_first_precmd`.** `$?` in a late `precmd` is the *previous hook's* status,
+  not the command's. A theme registering its own hook first is enough to make every
+  reported exit code zero, and nothing says so.
+- **the `PS1` re-append.** powerlevel10k, starship and most oh-my-zsh themes rebuild
+  `PS1` from their own `precmd`, dropping a marker appended once at source time. Losing
+  `133;B` costs the whole input-region feature, so it is re-appended every prompt from a
+  hook that keeps itself last.
+
+Shipping those is worth more than shipping the `find_file` helpers.
+
+### The split
+
+The snippet divides along the line the levels already draw:
+
+- **Core** (`cooked.zsh`) — `133` A/B/C/D, OSC 7, *and the `OSC 51;CH` announcement*.
+  This is what the tiers are keyed on, and the only thing a remote host is asked to
+  source. The announcement is here rather than with the capture because it is an
+  ownership signal that happens to be reused as a completion token, not the other way
+  round: put it in the optional half and the recommended setup yields level 1, which
+  is worse than the injection it replaced.
+- **The capture** (`cooked-completion.zsh`) — the `compadd` shadow, the widget and its
+  bindkeys. A separate file to source, because of what it costs rather than what it is:
+  every completion in that shell then runs through a shell function, and zsh has no
+  tidy way back. Nothing in it is a *preference*, though — it is the shell half of a
+  wire protocol — so it ships as a file rather than as something to paste.
+- **The helpers** (`docs/SHELL.md`) — `find_file` and the other closed verbs, `osc_copy`,
+  and `cooked_send` for the allowlisted ones. In the snippet but off by default, behind
+  `eval-helpers`, because what they reach is your editor rather than your prompt. What
+  is *not* there is anything aliased over a real command name: which editor client
+  `find_file` should prefer and whether `magit` may shadow a real binary are choices,
+  and `cooked_send` exists so making them is one line in your rc. They are also
+  local-only by construction — the verbs carry paths and Emacs resolves them with no
+  idea the shell is elsewhere — which is a second reason they are not part of what goes
+  on the far end of an ssh.
+
+Two things fall out. `magit` shadowing a real command name, and `osc_copy` reaching the
+kill ring from the far end of an ssh, read very differently as "cooked put this in your
+shell" than as "I put this in my zshrc" — the OSC 51 surface is exactly the part that
+should be chosen rather than inherited. And `COOKED_COMPLETION` disappears: it exists
+only because injection had to decide at spawn time whether to install the capture, could
+not revisit it, and needed a paragraph of apology in `cooked--shell-invocation` saying
+so. When the user sources the extras themselves the decision is theirs at their own
+source time, and the per-prompt announcement is already the entire handshake — Emacs
+asks nothing until it sees one.
+
+`fish` stops being a special case for free, which is the right outcome for a snippet
+that has never been run against a real fish.
+
+### Standing down cleanly
+
+`COOKED_INTEGRATION_LOADED` already makes a second source a no-op, so a user who sources
+the snippet from their own `.zshrc` gets it at their chosen point and the flag-enabled
+stub costs nothing. That is true today and merely undocumented.
+
+No new variable is needed for the guard. `TERM_PROGRAM=cooked` is already exported and
+was already the conventional answer, so the line is
+`[[ $TERM_PROGRAM == cooked ]] && source …` and the snippet repeats the same test as
+its own first line — it now runs in every shell the user starts, including ones cooked
+has never seen. Getting `TERM_PROGRAM` across an ssh is `SendEnv`/`AcceptEnv`. cooked
+deliberately does *not* fall back to sniffing `$TERM`, which would survive by itself:
+inventing a second detection path to paper over a configuration the user can make is
+the same guessing this whole section is removing.
+
+---
+
+## `cooked--policy`: what each signal buys, and what it does not
+
+cooked reads two signals, and the temptation is to treat them as one confidence score —
+more signal, more features. They answer different questions, they are lost under
+different conditions, and conflating them is what produces the failure this section
+exists to rule out: a prompt where Emacs owns the line and cannot complete it.
+
+**The termios state answers "is a line editor reading, right now?"** It is a fact about
+the child, read from the master with `tcgetattr`, and it cannot be forged by output. It
+is also the signal that vanishes first: run `ssh host` and the local ssh client puts
+that pty in raw mode for the whole session, so what the *remote* shell is doing is
+invisible. Not degraded — absent. The same is true of anything else that holds a raw
+tty and speaks a protocol through it.
+
+**The OSC 133 marks answer "where does each command begin and end?"** They are bytes in
+the output stream, so they cross an ssh unchanged, and a remote shell with the snippet
+installed reports its prompts as faithfully as a local one. What they cannot do is
+corroborate themselves: a `133;B` is a claim, and after it arrives nothing says the
+remote is still at a prompt rather than three seconds into a program that emitted no
+mark.
+
+**The completion announcement (`OSC 51;CH`) answers "is a widget bound and ready?"** It
+is re-emitted at every prompt by `__cooked_complete_announce`, which makes it the one
+signal that is both byte-transparent *and* self-corroborating: the shell is asserting
+its own state, per prompt, rather than us inferring it. That combination is why it does
+more work below than its name suggests.
+
+### The levels
+
+The level is derived per prompt, never configured, and it moves under you on purpose —
+`ssh` drops 2 to 1, a nested `zsh -f` drops to 0, coming back restores it.
+
+| Level | Signals | Input line | TAB | Status |
+|---|---|---|---|---|
+| **0** | none | shell | forwarded | works today |
+| **1** | marks only | shell | forwarded | forwarding works; the ownership rule is new |
+| **1.5** | marks + termios | Emacs | `completion-at-point`, native table | to build |
+| **2** | marks + announcement | Emacs | `completion-at-point`, `OSC 51;C` | works today |
+
+Level 1 is the one behaviour change in the table. Today "an explicit mark always beats
+the inferred termios state" is unqualified, so a `133;B` arriving from a remote shell
+hands Emacs the line on the strength of a claim nothing corroborates — which is the
+state that produces a local-filesystem completion table for a remote host. Level 1 is
+that rule given its missing qualifier.
+
+Levels 0 and 1 need no code, and that is the point rather than an accident: `TAB` is not
+in `cooked-raw-exceptions`, so it already forwards, and a shell that owns its own line
+completes it with its own compsys. Level 1 is level 0 plus structure — extents, exit
+codes, `next-error`, rerun, all of which come from A/C/D and none of which need the
+keyboard.
+
+### Two licenses for owning the input line
+
+Emacs may own the line when *either* holds:
+
+- **The child is ours** — the shell is on this machine, so the pty is one Emacs
+  spawned and can sample, termios bounds what a mark can be wrong about, and every
+  local path the line might name is really there. In practice this is the OSC 7 host,
+  which arrives from the same snippet as the mark and is therefore present exactly
+  when the mark is. Reading termios directly does *not* work here and is worth saying
+  plainly: zsh holds the tty raw for ZLE, so a shell prompt never shows a canonical
+  line discipline, and a rule keyed on that would take the editable line away locally
+  too.
+- **a live announcement** — the shell said this prompt has a widget bound, whatever
+  host it is on.
+
+Marks alone are not a license. That is the rule the rest of this section defends, and it
+is what makes level 1 a real tier instead of a broken level 2.
+
+The announcement is deliberately allowed to grant ownership *over ssh*, which looks like
+a loophole and is not. Everything level 2 needs is byte-level — the nonce, the request,
+the `OSC 51;CR` answer — so a remote host running the full snippet genuinely reaches
+level 2, and refusing it on the grounds that "ssh means decay" would leave working
+capability on the floor. What ssh costs is termios, and termios is an ownership signal,
+not a completion one. Keying the decay to the transport confuses the two.
+
+### Why TAB cannot simply be forwarded once Emacs owns the line
+
+This is the constraint that generates everything above. When Emacs owns the line, the
+keystrokes never reached the child, so ZLE's buffer is *empty*: forwarding `TAB` asks
+the shell to complete the empty string, and zsh helpfully offers every command on PATH.
+The shell cannot complete a line it has never seen.
+
+So at any level where Emacs owns the line, completion must either be answered in Emacs
+or the line must be handed over first. There is no third option, and no amount of
+signal-strength reasoning produces one.
+
+### Delegation is one primitive, not a completion feature
+
+Handing the line over is: drop ownership, write the full line into the pty, send `\e[D`
+once per character between point and end-of-line, then send the key. Ownership is
+dropped *first*, or the line renders twice — once from Emacs and once from the shell's
+echo.
+
+Nothing in that is specific to `TAB`. Send `C-r` and you get fzf or atuin; send `\e[A`
+and you get the shell's own history. So the thing to implement is `cooked-delegate-key`
+plus a customizable set of keys that route to it, not a completion fallback that happens
+to be reusable.
+
+The whole line is sent rather than the text up to point. Sending the prefix alone would
+silently truncate whatever followed the cursor, and the left-arrows that avoid it cost
+nothing.
+
+**Delegation is licensed by the same signals as ownership**, which is the reason it is
+safe: writing a user's line into a pty is only defensible if something is known to be
+reading it as a line. At level 1.5 termios bounds that. Remotely, nothing would, which
+is precisely why level 1 does not own the line and therefore never needs to give it
+back.
+
+### Why history matters more here than completion
+
+Completion has a channel; history does not, and no plausible one is designed. The Emacs
+side is `comint-input-ring`, fed only by `cooked--history-record` from what was typed in
+*this buffer*, so it starts empty every session and knows nothing of `share_history`,
+`zsh-histdb`, or atuin's sync.
+
+Owning the line means reimplementing the line editor, and the bill is larger than TAB:
+autosuggestions, syntax highlighting, vi-mode, and every `bindkey` the user has
+accumulated all go quiet. Delegation is the only mechanism that returns any of it, and
+it returns whatever they configured without cooked having to know what that is.
+
+### The one-way door, and what closes it
+
+A delegated line stays with the shell until Enter. It is not frozen — ZLE is a line
+editor, so `C-a`, `C-w` and the arrows all still work — but Emacs editing is gone for
+the remainder of that line, which is exactly vterm's normal state.
+
+For history that barely registers: the flow is search, accept, Enter. For `TAB` it is
+worse, because you are mid-edit. Hence the default split — `TAB` stays
+`completion-at-point` at every level, and delegation gets its own key, so losing the
+input region is never a side effect of the key pressed fifty times an hour. Keeping
+`TAB`'s meaning stable across levels is the same principle as never toggling a mode: the
+tier changes what is available underneath, not what the keys mean.
+
+What closes the door is reading the line back off the grid — cooked is the emulator, so
+after the shell settles the completed line is sitting in its own cells between the
+prompt mark and end of line. That restores ownership and makes the round trip invisible.
+It is deferred rather than dismissed: the hard parts are deciding when the shell has
+settled, wrapped and multi-line prompts, `RPROMPT`, and autosuggestions appending text
+that is not the user's. Building the one-way door first gives it a safe failure mode —
+a scrape that does not converge leaves you in the delegated state rather than with a
+corrupted line.
+
+### Consequences worth stating
+
+- **The Emacs table lies over ssh.** `cooked--native-completion` offers local
+  `exec-path` and local file names, which is honest at level 1.5 (local by construction)
+  and wrong for a shell on another host. OSC 7 already carries `file://${HOST}${PWD}`;
+  when `HOST` is not this machine, the file and PATH tables should decline rather than
+  guess. This is worth fixing independently of everything else here.
+- **The level must be legible.** `cooked--mode-line` currently shows `" raw"` for both
+  "you are in htop" and "you are at an unmarked shell," which are one policy and two
+  situations. A level that moves when you ssh has to say so, or the difference reads as
+  cooked being unreliable across hosts.
+- **bash was the largest level-1.5 population, and it was the shortest-lived.**
+  `cooked-completion.bash` answers over the same `OSC 51;C` framing with none of zsh's
+  ZLE gymnastics — `complete -p` names the registered function and it can be invoked
+  directly — so bash is level 2 as well. The one place bash is weaker: it has no
+  `zle-line-init`, so the announcement goes out from `PROMPT_COMMAND`, before readline
+  has taken the terminal. The gap closes before it matters, since Emacs sends nothing
+  until the user asks to complete, but it is a gap rather than an impossibility.
+
+---
+
 ## Vendored parser
 
 `src/emu/parser/` is vte 0.15, vendored rather than depended on, because two things

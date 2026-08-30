@@ -310,6 +310,19 @@ see `cooked--literal-codes' for why this cannot simply be assumed.")
   "Titles saved by XTWINOPS 22, newest first.  See `cooked--handle-title-stack'.")
 (defvar-local cooked--hyperlink nil "Current OSC 8 hyperlink target, if any.")
 (defvar-local cooked--annotation nil "Prompt annotation from OSC 51;A.")
+(defvar-local cooked--host nil
+  "Host the child last reported over OSC 7, or nil for this machine.
+
+The authority half of `file://HOST/PATH\=', which cooked used to match and throw
+away.  Keeping it is what stops every path-shaped thing in the buffer being
+answered locally: after an `ssh\=', the remote shell goes on reporting its
+directory faithfully and the names it sends are real -- on the other host.  A
+local `/home/you/src/thing\=' that happens to exist here is the failure case,
+and it is the common one, because the layouts people ssh between are the ones
+they keep in step.
+
+Set by `cooked--set-directory\=' and read through `cooked--foreign-host-p\=';
+see it for what declines and why.")
 (defvar-local cooked--mouse nil "Whether the child asked for mouse reports.")
 (defvar-local cooked--mouse-sgr nil "Whether to encode mouse reports as SGR (1006).")
 (defvar-local cooked--mouse-drag nil
@@ -330,13 +343,36 @@ same tracking loop, because the child asked two different questions and
 ;; Anything cooked.el needs an *answer* to belongs at this level instead; see
 ;; "Who owns the keyboard" below, which is where that rule moved the policy.
 (declare-function cooked--refresh-keymap "cooked-mode")
-(declare-function cooked--update-mouse-grab "cooked-mode")
+(declare-function cooked--update-mouse-grab "cooked-mouse")
 (declare-function cooked--set-mode "cooked-mode")
 (declare-function cooked--on-exit "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
 (declare-function cooked--rename-to-title "cooked-mode")
 (defvar cooked-rejoin-wrapped-lines)
 (declare-function cooked--kill "cooked-core")
+
+(defun cooked--foreign-host-p ()
+  "Whether the child last said it was somewhere other than this machine.
+
+Nil until a shell says otherwise, which is the right default twice over: a
+child that never sends OSC 7 is overwhelmingly a local one, and a hostile
+stream cannot reach *more* of the buffer by staying quiet.
+
+The comparison is deliberately generous about spelling -- `HOST\=' from zsh is
+usually short where `system-name\=' is fully qualified, and the two naming the
+same machine must not read as a move.  It is deliberately ungenerous about
+everything else: anything that is not recognisably here is treated as
+elsewhere, because the cost of a false negative is a local file opened in place
+of a remote one, and the cost of a false positive is a completion table that
+declines to guess."
+  (and cooked--host
+       (let ((host (downcase cooked--host))
+             (self (downcase (system-name))))
+         (not (or (member host '("" "localhost" "localhost.localdomain"))
+                  (equal host self)
+                  ;; Either side may carry the domain the other omits.
+                  (equal host (car (split-string self "\\.")))
+                  (equal (car (split-string host "\\.")) self))))))
 
 
 
@@ -528,6 +564,43 @@ Latched, because `cooked--semantic' goes back to nil between `command-end' and
 the next `prompt-start' and so cannot answer \"is the integration working?\".
 Once a shell has spoken at all, it will keep speaking, and everything it does
 not say becomes informative -- see `cooked--policy'.")
+(defvar-local cooked--delegated nil
+  "Whether this line has been handed to the child\='s own line editor.
+
+Set by `cooked-delegate-key\=', and the reason delegation is a state rather than
+a send: once the line is in the pty, the shell is echoing it and editing it, so
+Emacs going on believing it owns an input region would render the line twice and
+edit a copy the child will never see.
+
+Cleared where the line ends -- a command starting or a fresh prompt -- so it
+lasts exactly as long as the line it was about.  There is no way back before
+then, and that is the honest cost: ZLE is still a line editor, so `C-a\=',
+`C-w\=' and the arrows all still work, but they are the shell\='s now.  It is
+vterm\='s ordinary state, entered on purpose and for one line.")
+(defvar-local cooked--completion-nonce nil
+  "Nonce from the prompt\='s OSC 51;CH announcement, or nil if it did not announce.
+
+Kept here, in the always-on core, rather than with the completion layer that
+consumes it, because it is two signals wearing one name.  To
+`cooked-shell-completion\=' it is the token a request must carry.  To
+`cooked--policy\=' it is a *license to own the input line*: the shell asserting,
+for this line, that a widget is bound and reading -- which is the only
+corroboration available once termios has gone dark behind an `ssh\='.  The
+second reading has to work whether or not anyone loaded the first, so the
+announcement is believed unconditionally and only the requests are opt-in.
+
+Cleared at `command-start\=' by `cooked--apply-semantic\=', which is what keeps
+it a claim about the present.  Without that, `ssh host\=' would leave the local
+shell\='s nonce standing and the bare remote prompt would inherit a license
+nothing on that host ever issued -- the precise failure the license exists to
+rule out.")
+(defvar-local cooked--completion-reply-capable nil
+  "Whether the announcing shell can also answer completion requests.
+
+Separate from `cooked--completion-nonce\=' because the two questions came apart:
+framing a reply needs `base64\=', owning the input line does not.  A shell
+without it announces anyway and says so here, so it keeps its editable line and
+merely has nothing to offer `completion-at-point\='.")
 (defvar-local cooked--prompt-start nil
   "Marker where the prompt now on screen began, from the OSC 133 `A' mark.
 Moved into `cooked--command-prompt' when a command starts, the way
@@ -562,7 +635,7 @@ below `cooked--screen-start' is in settled text the emulator will never speak
 about again.")
 
 (defun cooked--policy ()
-  "How the buffer should behave right now: `cooked\=', `command\=', `raw\=' or `alt\='.
+  "How the buffer should behave right now: `cooked\=', `prompt\=', `command\=', `raw\=' or `alt\='.
 
 Derived rather than reported, because no single source knows the answer.  The
 alt screen comes from the child\='s own output, the line discipline is sampled
@@ -576,25 +649,68 @@ screen over completely, so Emacs owns neither the keyboard nor the viewport --
 and it is in-band, arriving at an exact position in the byte stream, where the
 termios mode is sampled on a poll.
 
-`command\=' and `raw\=' are the same situation -- the child owns the keyboard --
-told apart by how well we know it.  With OSC 133 working, a raw read that is not
-a prompt means the shell is running something, and it said so; that is as
-positive a signal as the alt screen, so `command\=' keeps nothing back.  Without
-it, `raw\=' is a guess covering both a real full-screen program and a shell
-editing its own prompt line, and `cooked-raw-exceptions\=' hedges against the
-second."
+`prompt\=', `command\=' and `raw\=' are the same situation -- the child owns the
+keyboard -- told apart by how well we know it.  With OSC 133 working, a raw read
+that is not a prompt means the shell is running something, and it said so; that
+is as positive a signal as the alt screen, so `command\=' keeps nothing back.
+Without it, `raw\=' is a guess covering both a real full-screen program and a
+shell editing its own prompt line, and `cooked-raw-exceptions\=' hedges against
+the second.
+
+`prompt\=' is a marked prompt with nothing corroborating the mark -- see
+`cooked--ownership-license\='.  It keeps nothing back either, for the same reason
+`command\=' does not: the shell said where it was, and a shell at its own prompt
+wants every key.  It is the state a bare shell at the far end of an `ssh\=' sits
+in, and everything the marks buy other than the keyboard -- extents, exit codes,
+`next-error\=', rerun -- works there unchanged."
   (cond (cooked--alt 'alt)
         ;; A password read forwards keys too; the minibuffer collects them.
         ((eq cooked--mode 'secret) 'raw)
         ;; OSC 133 before termios: `cooked--mode' is poll-sampled and
-        ;; approximate, `cooked--semantic' is exact and in-band.  The two agree
-        ;; on `cooked' in every state reachable today, so the order is
-        ;; equivalent in practice -- but a signal that could tell them apart
-        ;; should already resolve to the one meant to win.
-        ((eq cooked--semantic 'input) 'cooked)
+        ;; approximate, `cooked--semantic' is exact and in-band.  But a mark is
+        ;; only a claim, so it takes the keyboard only with a license behind it.
+        ((and (eq cooked--semantic 'input)
+              (not cooked--delegated)
+              (cooked--ownership-license))
+         'cooked)
         ((eq cooked--mode 'cooked) 'cooked)
+        ((eq cooked--semantic 'input) 'prompt)
         (cooked--semantic-seen 'command)
         (t 'raw)))
+
+(defun cooked--ownership-license ()
+  "Whether something corroborates the marked prompt enough to hand Emacs the line.
+
+An OSC 133 `B\=' says a prompt is reading, and it says so in bytes, which is
+what makes it survive an `ssh\=' -- and also what stops it corroborating itself.
+After it arrives nothing says the far end is still at a prompt rather than three
+seconds into a program that emitted no mark, and lifting the line out of a pty
+that no line editor is reading is how keystrokes get eaten.
+
+Two things corroborate it, and they are different in kind:
+
+- *The child is ours.*  When the shell is on this machine, the pty is one Emacs
+  spawned and can sample; termios bounds what a mark can be wrong about, and
+  every local path the line might name is a path that is really there.
+  `cooked--host\=' is how that is known, and it comes from the same snippet as
+  the mark, so it is present exactly when the mark is.
+- *A live announcement.*  `cooked--completion-nonce\=' is re-emitted per ZLE
+  line from `zle-line-init\=' -- after the widget is bound and the keyboard is
+  ZLE\='s, which is precisely the condition being claimed -- and cleared when a
+  command starts.  It is the one signal that is both byte-transparent and
+  self-corroborating, which is why it can license ownership from the far end of
+  an `ssh\=' without the loophole it looks like.
+
+What is deliberately *not* a license is the transport.  Keying decay to \"is
+this remote\" would refuse a remote host running the full snippet, which reaches
+the same certainty a local one does by the same bytes.  What `ssh\=' costs is
+termios, and termios is an ownership signal, not a completion one.
+
+Unlicensed, a marked prompt is not a broken state: the shell keeps its own line,
+its own history and its own completion, and cooked keeps the extents, exit codes
+and rerun that the marks were always the point of."
+  (or (not (cooked--foreign-host-p))
+      (and cooked--completion-nonce t)))
 
 (defun cooked--secret-p ()
   "Whether the child is reading with echo off.
@@ -609,7 +725,7 @@ collected, not who owns the screen."
 (defun cooked--child-owns-keyboard-p ()
   "Whether the child, rather than Emacs, is the one being typed at.
 
-Every policy but `cooked\=', which is to say `alt\=', `command\=' and `raw\=' --
+Every policy but `cooked\=', which is to say `alt\=', `prompt\=', `command\=' and `raw\=' --
 said that way round on purpose.  Spelling it as a list of the states that
 qualify is what left `command\=' out of three separate checks when it was added:
 the answer is a property of not being at a prompt, so asking that directly
@@ -878,6 +994,8 @@ older three-element shape."
   (pcase event
     (`(prompt-start ,at . ,id)
      (setq cooked--semantic 'prompt
+           ;; A fresh prompt is a fresh line, and Emacs may have it back.
+           cooked--delegated nil
            ;; Where the prompt is about to be drawn, which is what
            ;; `cooked-previous-command' moves between and where the outer half of
            ;; an `evil' command text object starts.  The mark arrives before the
@@ -890,6 +1008,14 @@ older three-element shape."
      (let* ((marker (cooked--register-mark (car id) at batch-start))
             (start (marker-position marker)))
        (setq cooked--semantic 'output
+             ;; The announcement covered the line that just ended.  Anything the
+             ;; command spawns -- an `ssh', a nested shell, a REPL -- announces
+             ;; for itself or does not announce at all.
+             cooked--completion-nonce nil
+             cooked--completion-reply-capable nil
+             ;; The delegated line has been submitted; it was the shell's, and
+             ;; now it is neither's.
+             cooked--delegated nil
              cooked--command-start marker
              ;; Whatever we last submitted is what is now running.
              cooked--command-input (prog1 cooked--submitted-input
@@ -1845,7 +1971,23 @@ flag is read at kill time and cannot be computed then -- `process-list' is all
 
 (defun cooked--start (argv &optional directory extra-env)
   "Spawn ARGV in the current buffer, optionally in DIRECTORY.
-EXTRA-ENV is an alist prepended to the child's environment."
+EXTRA-ENV is an alist prepended to the child\\='s environment.
+
+A remote DIRECTORY is refused and the child starts in the home directory
+instead.  The pty is always a local one, so a TRAMP name here is not somewhere
+the child can be put: it reaches the module verbatim, the `chdir\\=' fails, and
+`child_exec\\=' in src/pty.rs is right to treat that as fatal rather than exec
+from wherever Emacs happened to be.  What that left was a buffer reading
+\"[exited 127]\" and nothing else, which is the correct behaviour reported as an
+unexplained number -- and it is reached by nothing more unusual than
+\\[cooked] from a buffer visiting a remote file.
+
+`cooked--local-name\\=' is what refuses it, rather than a `file-remote-p\\=' of
+our own, because that is the chokepoint every other path from a string to the
+filesystem already goes through, and its message is the one the user is told.
+
+Only when DIRECTORY is non-nil: nil keeps its own meaning of leaving the child
+wherever Emacs is, and is not a request to be second-guessed."
   (cooked--load-module)
   (setq cooked--face-cache (make-hash-table :test #'equal))
   (setq cooked--box-glyph-cache (make-hash-table :test #'equal))
@@ -1905,7 +2047,8 @@ EXTRA-ENV is an alist prepended to the child's environment."
   (cooked--set-input-mark nil)
   (setq cooked--session
         (cooked--spawn argv (cooked--child-environment extra-env) cooked--rows cooked--cols cooked--wake
-                      (and directory (expand-file-name directory))
+                      (when directory
+                        (expand-file-name (or (cooked--local-name directory) "~")))
                       (round (* 1000 cooked-min-redisplay-interval))
                       cooked-backlog-limit))
   cooked--session)
@@ -2422,23 +2565,35 @@ cost is paid once for many lines instead of many times for one.")
   "Cut the transcript back to `cooked-scrollback-lines\=' if it has outgrown it.
 
 Runs at the end of every drain, and does nothing on all but a few of them: the
-line count is only taken once the buffer is plainly large, and the deletion only
-happens once it is over the cap by `cooked--scrollback-slack\='.
+line count is only taken once the buffer holds enough characters to have that
+many lines at all, and the deletion only happens once it is over the cap by
+`cooked--scrollback-slack\='.
 
 Cuts at a line beginning, because `cooked--discard-scrollback\=' hands the
 emulator a seam and half a line is not one."
-  (when-let* ((cap cooked-scrollback-lines)
-              (screen (cooked--screen-start-position))
-              ;; `line-number-at-pos' walks from `point-min', so it is asked only
-              ;; when the cheap test says it might matter.
-              ((> screen (* cap 40)))
-              (lines (save-restriction
-                       (widen)
-                       (line-number-at-pos screen t)))
-              ((> lines (+ cap (max 1 (round (* cap cooked--scrollback-slack)))))))
-    (save-excursion
-      (save-restriction
-        (widen)
+  (save-restriction
+    (widen)
+    (when-let* ((cap cooked-scrollback-lines)
+                (screen (cooked--screen-start-position))
+                (threshold (+ cap (max 1 (round (* cap cooked--scrollback-slack)))))
+                ;; A line above the screen carries at least its own newline, so
+                ;; there cannot be THRESHOLD of them in fewer than THRESHOLD
+                ;; characters.  That makes this a sound way to skip the count
+                ;; rather than a guess at how wide a line is: the gate this
+                ;; replaced asked for `(* cap 40)' characters, which for anything
+                ;; narrower than 40 columns never opened, and the cap it is here
+                ;; to enforce simply did not hold -- a flood of `line1234' sat at
+                ;; five times the cap and was never trimmed.
+                ((>= (- screen (point-min)) threshold))
+                ;; `line-number-at-pos' walks from `point-min', which is affordable
+                ;; precisely because the cap bounds what it walks: the buffer this
+                ;; runs against is a capped one, and an uncapped session never
+                ;; reaches here at all.  Measured at 15us for a cap of 1000 against
+                ;; the 8ms redisplay floor, and a bounded `forward-line' walk back
+                ;; from the screen -- O(cap) rather than O(buffer) -- was tried and
+                ;; is five times slower, this being a C-level scan for newlines.
+                ((> (line-number-at-pos screen t) threshold)))
+      (save-excursion
         (goto-char screen)
         (forward-line (- cap))
         (when (> (point) (point-min))
