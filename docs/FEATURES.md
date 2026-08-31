@@ -1,8 +1,8 @@
 # What you get
 
-The feature tour: completion, the command channel, links, and the UI conventions a
-cooked buffer follows. Each of these is reachable from a stock session; the ones that
-need a `require` say so.
+The feature tour: completion, the command channel, images, box drawing, links, and the
+UI conventions a cooked buffer follows. Each of these is reachable from a stock session;
+the ones that need a `require` say so.
 
 ## Completion
 
@@ -206,20 +206,51 @@ A shell reading the second line of `for x in 1 2; do` draws `PS2`, and that prom
 with `k=s` added. Without them every line after the first falls back to the shell's own
 line editor, so you would compose the first line in Emacs and the rest in zsh.
 
-`k=` says what kind of prompt this is: `i` is an initial one and anything else — `s`
-secondary, `c` continuation, `r` the right-hand prompt — is not. Only an initial prompt
-begins a command, so a mark with any other kind hands Emacs the line without moving the
-prompt marker: the command record stays filed under the prompt the construct was typed
-at rather than under its last continuation line. A kind cooked has never heard of is
-read as "not initial" for the same reason.
+`k=` says what kind of prompt this is, and there are three answers rather than two:
 
-Both spellings are read. kitty writes `A;k=s` and never sends `P`; the freedesktop
-proposal defines `A` as shorthand for `P;k=i` and hangs `k=` off `P`. cooked *emits*
-`A;k=s`, which is the spelling with emitters in the wild, and *accepts* either.
+| `k=` | meaning | what cooked does |
+|---|---|---|
+| `i`, or absent, or empty | the prompt a command is typed at | starts a command; moves the prompt marker |
+| `s`, `c` | secondary / continuation — `PS2` | hands Emacs the line, moves nothing |
+| `r`, or anything unrecognised | the right-hand prompt, or a kind from a spec revision cooked has not read | **dropped whole** — no event, no state change |
 
-Each continuation line is submitted on its own, so the command record accumulates them:
-`cooked-command-input` for the construct above is all three lines joined by newlines,
-not just the `done` that completed it.
+`r` is the one worth stating. A right-hand prompt is decoration beside an input area
+cooked already owns: it starts no command, and it continues nothing either. Reading it
+as a continuation is a session-ending bug — no `B` follows a right prompt, so Emacs
+goes to "prompt" and never comes back, and the input line is gone for good. An
+unrecognised kind joins it rather than joining `s`, because changing no state is the
+only safe answer to a mark you cannot read.
+
+Only `A` is read. The proposal spells the same mark `P` as well, and Ghostty emits that
+one from its prompt strings deliberately, to avoid `A`'s implied fresh line — a mark
+that lives in `PS1` is re-emitted on every repaint, and a repaint should not assert a
+fresh line. cooked implements no fresh-line behaviour for either spelling, so the
+argument does not reach it: `P` would be the same mark, arriving by a second name.
+
+What settles it is who can actually emit into a cooked session. The shipped snippets
+are gated on `TERM_PROGRAM=cooked`; kitty's and Ghostty's are gated on variables cooked
+never sets and that no `ssh` carries, so their spelling never arrives here. The two
+emitters that do arrive — these snippets and a fish 4 marking its own prompts — both
+write `A`, so that is the single spelling, from the prompt string to the parser.
+
+### The command line on the `C` mark
+
+`OSC 133;C;cmdline_url=<percent-encoded>` carries what the shell says it is about to
+run. cooked prefers it to its own record of what it submitted, and for two reasons: it
+is what the shell's parser actually made of the line, and it is the *only* account
+available in every case where Emacs did not own the input — a prompt whose line the
+shell kept, a program reading input of its own, the far end of an `ssh`, a
+`no-input-mark` session.
+
+kitty's older `cmdline=` is not read. It carries `printf %q` output, which is shell
+quoting: `ls -la` arrives as `ls\ -la`, and unquoting it correctly needs the dialect of
+the shell that wrote it. A guess would be indistinguishable from the truth once it was
+in the command record. `cmdline_url=` has one reading, and it is what fish 4 already
+sends — so a fish marking its own prompts gets this for free.
+
+Where neither is available, each continuation line is submitted on its own and the
+command record accumulates them: `cooked-command-input` for the construct above is all
+three lines joined by newlines, not just the `done` that completed it.
 
 ### Duplicate and missing marks
 
@@ -235,6 +266,7 @@ rather than left to be discovered:
 | a `C` after a fresh `A` | a new command, even with no `D` in between |
 | a second `D` | nothing; the first one closed the record and cleared the marker it guards on |
 | a `D` with no `C` | nothing recorded — there is no region and no input to attribute to it |
+| a `D` with no status | the same as any other `D`, and the shipped snippets send it deliberately: it is how a prompt that ran *nothing* — an empty return — is closed without inventing an exit code for it |
 
 The second `C` is the only one that could lose information, which is why it is the one
 that is ignored rather than obeyed: obeying it would move the start of the output region
@@ -283,6 +315,74 @@ anything that can write to the terminal can send one. When enabled the change is
 buffer-local face remapping — the child repaints its own terminal, not your whole
 Emacs — and OSC 110/111/112 put the theme's colours back.
 
+## Images
+
+Three protocols arrive and all of them end in the same place: the kitty graphics
+protocol (including `o=z` compression), sixel, and iTerm2's `OSC 1337` inline images.
+Whatever comes in becomes a real Emacs image, hung on the buffer as one `display` slice
+per cell it covers. The command lines that produce each are in
+[IMAGES.md](IMAGES.md).
+
+The per-cell slicing is what makes everything downstream behave, and it is the whole
+design. Text can overwrite part of a picture and the rest stays; the picture scrolls
+into scrollback as ordinary rows; a rewrap carries it along, because there is nothing to
+carry except text properties. A terminal that blits pixels into a rectangle has to
+answer all three of those questions separately. cooked never asks them.
+
+`cooked-inline-images` turns the picture off without turning the *layout* off. Those
+cells were blanks on the grid before an image was hung on them and they are blanks
+after, so a buffer with images disabled has exactly the geometry of one that never
+received any — which matters because a child that drew a picture and then placed the
+cursor relative to it is still right.
+
+**A refusal is a protocol act, not a gap.** Kitty transmission by file, temp file or
+shared memory (`t=f`, `t=t`, `t=s`) is declined *out loud*, with
+`ENOTSUPPORTED:medium`. A client told no falls back to sending the bytes; a client
+ignored waits. The reason it is refused at all is that reading a path a child names is a
+decision about trust rather than a decode, and it deserves a real decision rather than a
+default — see [IMAGES.md](IMAGES.md), which also lists the kitty extensions not attempted and the
+sixel corners left alone.
+
+Memory is bounded at both ends by one number. Image ids are content-addressed, so a
+child redrawing the same picture every frame transmits it every frame and the module
+hands it over once; what needs a bound is the child drawing a *different* picture each
+time — a plotting TUI, an image browser paging a directory. `cooked-image-cache-size`
+is that backstop rather than the eviction policy, and it matches `MAX_RETAINED_BYTES`
+in the module deliberately, because one figure is easier to reason about than two.
+
+## Box drawing
+
+Every assigned codepoint in Box Drawing and Block Elements — U+2500–U+257F and
+U+2580–U+259F, which is `─│┌┐└┘├┤┬┴┼` and their heavy, double, dashed and arc variants,
+the rounded corners, the true diagonals and half-length stubs, and the blocks, shades
+and quadrants `▀▄█▌▐░▒▓` — is drawn by cooked rather than by your font.
+
+The reason is that fonts are inconsistent about these glyph to glyph, which is
+invisible in prose and glaring in `htop`, `ranger` or `fzf`, where the characters are
+supposed to form a continuous border and instead form a dotted one. The native core
+classifies each codepoint into a compact shape descriptor and `cooked-glyph.el`
+rasterizes the descriptor to XBM at the current cell size, so the pieces tile exactly.
+
+The bitmap is colourless by construction — shape data only, coloured live through
+`:foreground`/`:background` at `create-image` time. That is why a theme change costs
+nothing here while it flushes the face cache, and why only a pixel-size change (a zoom,
+a font change) misses the cache, with no invalidation plumbing to get wrong.
+
+Falls back to plain coloured text if Emacs has no XBM support or a glyph fails to
+rasterize, which is also exactly what `cooked-box-drawing-images` set to nil does.
+
+**The trap worth writing down: the image may be shared, the property may not.** Emacs
+merges a run of characters whose `display` properties are `eq` into a single displayed
+image — so memoizing one spec and hanging it on every cell that wants it, which is
+otherwise precisely what you want and is why a picture is rasterized once, made a run of
+four `─` render as one glyph. The fix is that each character gets a fresh one-element
+list wrapping the shared spec. None of this is visible in batch, where nothing is drawn
+and every character had a correct `display` property throughout; the suite was green for
+a commit. `cooked-adjacent-box-glyphs-do-not-share-a-display-property` guards it now, and
+the geometry is tested against pixel grids directly, without a session, because a test
+that only checks a `display` property exists cannot see a dash that is not dashed or a
+diagonal that misses the corner its neighbour has to meet.
+
 ## UI notes
 
 - **Transcript, not a rectangle.** Blank screen rows below the cursor are trimmed, so the
@@ -294,29 +394,12 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
   theme that styles those wins; `cooked-color-names` is only a fallback. One `face`
   property carries a run: comint leaves `font-lock-defaults` at `(nil t)`, under which the
   first fontification strips a bare `face`, so `cooked-mode` clears it.
-- **Evil.** With `cooked-evil-integration`, evil is put in Emacs state whenever the child
-  owns the keyboard and returns to insert at a prompt; normal-state `RET` stays plain
-  `evil-ret`, exactly as in any other buffer. comint commands are remapped, so
-  `evil-collection`'s `repl-submit` and arrow-key history bindings reach
-  `cooked-send-input` and the child's own history without knowing cooked exists. Stepping
-  out of insert state gives point a visible cursor even where the child has hidden its
-  own, since point is then the only cursor there is. `C-z` out of a full-screen program
-  lands in normal state rather than in whatever state you were in when you started it —
-  insert state, usually, which forwards, and so looked as though `C-z` had done nothing.
-  `C-z` reaches Emacs from anywhere, same as in any other evil buffer — see
-  [the keyboard page](KEYBOARD.md).
-- **Commands are records.** `C-c C-p`/`C-c C-n` move between prompts and `C-c TAB` folds
-  output. A command that printed nothing still gets a record, which text properties alone
-  cannot represent — and navigation lands on the *prompt* rather than on the output for
-  exactly that reason: a quiet command's output begins where the next prompt does, so
-  walking output starts stepped over every command that printed nothing, failures
-  included.
-- **`evil` command text objects.** In a cooked buffer `vic` selects a command's output and
-  `vac` takes the prompt and the command line with it, both linewise; `[[`/`]]` move
-  between prompts. The regions come from the OSC 133 marks, so `yac` on a build copies
-  exactly what was run and what it printed, and works while it is still running. Scoped to
-  `cooked-mode` through evil's own auxiliary keymaps, so `iw`, `ip` and `i"` keep meaning
-  what they mean — see `cooked-evil-command-text-object` and `cooked-evil-section-motions`.
+- **Evil.** Evil's states decide how much of the keyboard the child gets, and cooked
+  moves the state itself when a full-screen program takes over. `[[`/`]]` walk prompts,
+  `vic`/`vac` select a command's output or the whole record, normal state keeps the view
+  still without stopping the child, and visual state freezes it. The state table, the
+  render policy and the `evil-collection` interop are in
+  [the keyboard page](KEYBOARD.md#evil).
 - **Peeking is read-only and look-only.** The mode line grows a `peek` tag; the buffer is
   read-only for the duration, so an edit command errors immediately instead of landing on
   text that goes nowhere; and typing, `RET`, or any of cooked's own commands that write to

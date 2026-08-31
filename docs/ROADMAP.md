@@ -219,10 +219,16 @@ Things that are missing rather than ideas:
   them again, preserving the round trip. A set scroll region still falls back to clamping,
   because the rows either side of it are not the caller's to rewrap; the alternate screen
   is clamped on purpose and is not a gap.
-- **fish integration is unverified.** The snippet is written but has never been
-  executed against a real fish. The `exit`-should-be-`return` bug found by inspection has
-  since been fixed, but it was found by reading rather than by running, which is the
-  point: `$status` inside a `fish_postexec` handler is the next thing to check.
+- **fish needs no snippet, and the announcement is what it is missing.** Verified
+  against fish 4.8.1: fish emits the OSC 133 marks, OSC 7 and the title itself and
+  without needing configuration, since 4.0.0, so `cooked.fish` now stands down there
+  rather than bracketing every prompt twice — reading fish's resolved `status features`
+  to decide, since `$fish_features` is the request rather than the state and misses two
+  of the three ways the flag can be set. Its own path — the one fish 3.x and a `no-mark-prompt`
+  fish take — now has a test that forces fish to be quiet so there is something of
+  ours to assert, `$status` inside `fish_postexec` included. What fish has no equivalent of is the `OSC 51;CH`
+  announcement, so a fish at the far end of an `ssh` keeps its own line editor where
+  zsh and bash would not.
 - **`vttest`-level conformance.** vim, htop, tmux and less work; the long tail of escape
   sequences is untested.
 - **powerlevel10k's instant prompt** renders before `.zshrc` finishes, so the first prompt

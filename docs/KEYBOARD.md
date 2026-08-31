@@ -202,3 +202,91 @@ At a prompt, where Emacs owns the line, Shift+RET does something more useful: it
 a newline into the pending input so you can compose a multi-line command, which is then
 submitted as one bracketed paste rather than as several separate lines.
 
+
+## evil
+
+Opt-in — `(require 'cooked-evil)` — and the whole of it is one idea: **evil's states
+already mean exactly what a terminal needs to know**, so cooked reads the state instead
+of asking you to set a mode.
+
+Normal state means "I am navigating." Insert state means "I am typing, but I still
+expect to be able to leave." Emacs state means "get out of the way entirely." A terminal
+wants all three, and a terminal pinned to emacs state — the usual arrangement — offers
+only the last.
+
+| evil state | What the child gets | What the render does |
+|---|---|---|
+| emacs | everything but `C-c`, ESC included — `cooked-alt-map` unchanged | follows the cursor, as always |
+| insert | `cooked-semi-map`: forwards, but keeps ESC, the Meta space and `cooked-semi-exceptions` for Emacs | follows the cursor |
+| normal, motion, operator | nothing; the buffer is read-only | `still` — the child keeps drawing, the view stays put |
+| visual | nothing; read-only | `frozen` — the render is deferred |
+
+Insert state is the interesting row. It forwards your typing to the child while `M-x`, a
+non-normal leader on `M-SPC`, and ESC-back-to-normal all still reach Emacs, so you can
+type at a shell without giving up the editor. That is `cooked-evil-hybrid-insert`; turn
+it off and insert state becomes indistinguishable from emacs state.
+
+### The state moves on its own
+
+You do not switch to emacs state when a full-screen program starts — cooked does it for
+you, and puts you back at the prompt. That is the entire integration
+(`cooked-evil-integration`), and it is what makes ESC reach vim rather than evil without
+anyone configuring anything.
+
+`cooked-evil-child-state` chooses what "the child has the keyboard" means:
+
+- `emacs`, the default, because it is the only state that gives a full-screen program
+  literally every key, ESC included, which is what one needs and what a terminal has
+  always done.
+- `insert` hands it `cooked-semi-map` instead. That is a friendlier default at a shell
+  than in vim — ESC leaving insert state costs nothing at a prompt and costs everything
+  inside a modal editor — so it is offered rather than chosen.
+- `nil` leaves evil alone entirely; whatever state you are in is the one that decides,
+  and cooked never moves you.
+
+### Visual freezes, normal doesn't
+
+Both halves catch people out, and in both directions, so: normal state does **not** stop
+the terminal. `cooked-evil-normal-state-render` is `still` — the child goes on drawing
+and point stays where you put it, pinned to its screen cell across each redraw. Normal
+state is somewhere an evil user passes through constantly — to reach a leader key, to
+scroll, to get to another window — and none of that is a reason to stop a running
+program.
+
+Visual state *is* `frozen`, and the asymmetry is the point: a selection is a claim about
+a region of text, and text rewritten underneath it turns the claim into a lie. The
+freeze lifts as soon as the window stops being the selected one, so it cannot strand a
+buffer.
+
+If you want the tmux-copy-mode behaviour — normal state stops the world — set
+`cooked-evil-normal-state-render` to `frozen`. `nil` goes the other way and keeps
+following the cursor, so the view chases output while you navigate.
+
+### The bindings
+
+- **`[[` and `]]`** move between prompts. `evil-collection` already routes these here
+  through `comint-previous-prompt`, which `cooked-mode-map` remaps — but only if
+  `evil-collection` is installed, so cooked binds them itself and a plain evil user gets
+  them too, in place of `evil-backward-section-begin`, which has nothing to find in a
+  transcript. See `cooked-evil-section-motions`.
+- **`vic` and `vac`** are the command text objects: `vic` selects a command's output,
+  `vac` takes the prompt and the command line above it as well, both linewise. So `yac`
+  on a build copies exactly what was run and what it printed, and works while it is
+  still running. The regions come from the OSC 133 marks. Bound only in `cooked-mode`,
+  through the same auxiliary keymap evil resolves everything else with, so `iw`, `ip`
+  and `i"` keep meaning what they mean — see `cooked-evil-command-text-object`.
+- **`p` and `P` in normal state** paste into a full-screen program. A program's own paste
+  key pastes its own registers — `p` inside vim never sees anything Emacs copied — so
+  reaching the kill ring, and through it the system clipboard, needs a key Emacs still
+  owns. Only while the child has the keyboard; at a prompt it stays evil's own paste,
+  because `evil-paste-after` pastes after the character under the cursor, which is right
+  on a line you are editing and meaningless on one you are not. See
+  `cooked-evil-normal-state-pastes`.
+- **`RET` still submits** in insert state, even under `evil-collection`, whose comint
+  module registers Enter on an auxiliary keymap evil consults ahead of any buffer's local
+  map — and defaults it to normal state, which hands insert-state Enter to `newline`.
+  cooked answers on the same terms rather than with a `define-key` that could never
+  outrank it; `cooked-evil-insert-state-submits` turns that off.
+
+Stepping out of insert state also gives point a visible cursor even where the child has
+hidden its own, since point is then the only cursor there is.

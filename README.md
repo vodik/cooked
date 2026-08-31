@@ -213,23 +213,41 @@ on a host where there is no file to source — this is the whole of what cooked 
 
 | Mark | Emitted | What it buys |
 |---|---|---|
-| `OSC 133;A` | from precmd, before the prompt is drawn | where the prompt began: prompt-to-prompt navigation, the outer half of the evil command text object, and a command record that starts at its prompt rather than at its output |
+| `OSC 133;A` | **inside `PS1`**, at the start | where the prompt began: prompt-to-prompt navigation, the outer half of the evil command text object, and a command record that starts at its prompt rather than at its output |
 | `OSC 133;B` | **inside `PS1`**, at the end | the input line becomes an Emacs buffer — your keybindings, your kill ring, your completion UI. The one mark that changes who owns the keyboard |
-| `OSC 133;A;k=s` | **inside `PS2`**, at the start, with a `B` after it | the same, for the continuation lines of a multi-line construct. `k=s` is what stops it being read as a fresh prompt, so the command record stays filed under the prompt the construct was typed at |
-| `OSC 133;C` | from preexec | where the command's output begins. Without it there is no command record at all, and so no `next-error`, no rerun, no copy-just-the-output |
-| `OSC 133;D;<code>` | from precmd, **first**, before `$?` is clobbered | the exit status: the fringe marker's colour, and telling a failed command from a successful one |
-| `OSC 7;file://host/path` | from precmd | not a 133 mark, but the same hook: tracks `default-directory`, and tells cooked the shell is on this machine |
+| `OSC 133;A;k=s` | **inside `PS2`**, at the start, with a `B` after it — and after each newline of a multi-line `PS1` | the same, for the continuation lines of a multi-line construct. `k=s` is what stops it being read as a fresh prompt, so the command record stays filed under the prompt the construct was typed at |
+| `OSC 133;C;cmdline_url=<url-encoded>` | from `PS0` in bash, from preexec in zsh | where the command's output begins. Without it there is no command record at all, and so no `next-error`, no rerun, no copy-just-the-output. The command line on it is what the shell says it is about to run, and is the only account of it when the shell kept the line |
+| `OSC 133;D;<code>` | from precmd, **first**, before `$?` is clobbered | the exit status: the fringe marker's colour, and telling a failed command from a successful one. A bare `D` closes a prompt that ran nothing |
+| `OSC 7;file://host/path` | from precmd, and only when the directory changed | not a 133 mark, but the same hook: tracks `default-directory`, and tells cooked the shell is on this machine |
 
-The two placement rules are the ones that fail silently. `B` has to live in `PS1`
-rather than be printed from precmd, because precmd runs *before* the prompt is drawn
-and a printed mark would land ahead of the prompt text — leaving Emacs to treat the
-prompt itself as input. `D` has to come from the first precmd hook, or the status it
-reports belongs to whichever hook ran before it. The shipped snippets handle both, and
-re-append `B` every prompt because powerlevel10k, starship and most oh-my-zsh themes
-rebuild `PS1` from their own precmd and would otherwise drop it.
+A bare `A`, with no `k=`, because absent means `k=i`. The proposal also spells this
+mark `P`, and Ghostty sends that one from its prompt strings because `A` is defined to
+imply a *fresh line* and a mark that lives in a prompt is re-emitted on every repaint —
+Ctrl-L, a resize, a vi-mode switch, powerlevel10k filling in an async segment. cooked
+implements no fresh-line behaviour, so the two would be the same mark to it, and it
+reads only `A`: that is what the shipped snippets send and what fish 4 sends when it
+marks its own prompts, so one spelling covers every emitter that can reach cooked.
+
+Three placement rules fail silently. `B` has to live in `PS1` rather than be printed
+from precmd, because precmd runs *before* the prompt is drawn and a printed mark would
+land ahead of the prompt text — leaving Emacs to treat the prompt itself as input. `D`
+has to come from the first precmd hook, or the status it reports belongs to whichever
+hook ran before it — which is why the shipped snippets are *two* hooks, one at each end
+of the prompt sequence, rather than the single hook kitty and Ghostty use. And the marks
+have to be re-applied to `PS1` every prompt, because powerlevel10k, starship and most
+oh-my-zsh themes rebuild it from their own precmd and would otherwise drop them; the
+snippets keep a clean copy and a marked copy and compare, rather than searching `PS1`
+for their own markers, which has both a false positive and a false negative.
 
 `PS2` is where the marks have to travel *inside* the prompt string in both shells,
-including the `A`: there is no hook that runs before a continuation prompt is drawn.
+including the `A;k=s`: there is no hook that runs before a continuation prompt is
+drawn.
+
+The path in `OSC 7` is percent-encoded, because it is a URL and cooked decodes it as
+one — a directory called `100%20cake` has to arrive as `100%2520cake` or it decodes to
+a different directory that does not exist. A fish 4 doing its own reporting encodes the
+same way, so there is one encoding on the wire and one decoding at the far end.
+
 What cooked does with `k=`, and what it does with a mark sequence that is not the tidy
 `A B C D` above, is in
 [docs/FEATURES.md](docs/FEATURES.md#what-the-prompt-marks-are-read-to-mean).
@@ -273,8 +291,13 @@ list governs a shell you sourced the snippet in by hand.
 | `shell-integration/cooked.{zsh,bash,fish}` | the marks, OSC 7, the announcement, and the optional helpers | injected for zsh and bash; source it anywhere else |
 | `shell-integration/cooked-completion.{zsh,bash}` | the completion capture, answering `TAB` from the shell's own completion | injected beside the core when `completion` is in the feature list *and* `cooked-shell-completion` is loaded; source it after the core otherwise |
 
-zsh and bash are exercised by the test suite. fish is written but unverified, which is
-why it is not injected — see the known gaps in [docs/ROADMAP.md](docs/ROADMAP.md).
+All three are exercised by the test suite. fish is not injected because it needs no
+generated startup file — and on fish 4.0 and later it needs no snippet at all: fish
+marks its own prompts with OSC 133, reports its directory with OSC 7 and sets its own
+title, none of it needing configuration, so a fish session works here out of the box. Sourcing
+`cooked.fish` anyway is safe: it detects that and stands down rather than bracketing
+every prompt twice. It still does the work on fish 3.x, and on a fish 4 told
+`no-mark-prompt`.
 
 ### The OSC 51 channels
 
@@ -396,9 +419,22 @@ At a prompt, where Emacs owns the line, ordinary editing applies and Shift+RET i
 newline into the pending input, so a multi-line command can be composed and submitted as
 one bracketed paste.
 
+**evil.** With `cooked-evil.el` required, evil's own states decide how much of the
+keyboard the child gets, because they already mean exactly that: normal is "I am
+navigating", insert is "I am typing but expect to be able to leave", emacs is "get out of
+the way entirely". cooked moves you to emacs state itself when a full-screen program
+takes the keyboard — so ESC reaches vim rather than evil, with nothing to configure — and
+back to ordinary editing at the prompt. Insert state keeps `M-x`, a leader on `M-SPC` and
+ESC for Emacs while your typing still reaches the child. Normal state is *still* rather
+than frozen: the child keeps drawing while the view stays put, since normal state is
+somewhere an evil user passes through constantly. Visual state does freeze, because a
+selection is a claim about text and text rewritten underneath it makes the claim a lie.
+`[[`/`]]` walk prompts, and `vic`/`vac` select a command's output, or the prompt and
+command line with it.
+
 [docs/KEYBOARD.md](docs/KEYBOARD.md) has the rest: what else stays with Emacs, how
-modified keys are spelled, per-program overrides, and how to reach an arbitrary command or
-`evil` normal state without waiting for the child to give the keyboard back.
+modified keys are spelled, per-program overrides, the full evil state table, and how to
+reach an arbitrary command without waiting for the child to give the keyboard back.
 
 ## Compatibility and overrides
 
@@ -446,12 +482,18 @@ is compiled into `~/.terminfo` on first use — no root needed — falling back 
 `xterm-256color` with a message if `tic` is missing. Set `cooked-term-name` to nil to
 present as `xterm-256color` always.
 
-`TERMINFO` is exported alongside it, naming that directory. ncurses looks in
+`TERMINFO_DIRS` is extended alongside it to name that directory. ncurses looks in
 `~/.terminfo` by default, so this matters only where the default is wrong — and it is
-wrong wherever `HOME` changes: `sudo`, `su -`, a service manager, a container mounting a
-different home. It is set only when the compiled entry is really there, and never over a
-`TERMINFO` you set yourself, since that variable is searched *first* and pointing it at a
-database holding one entry is the one way to break a lookup that would otherwise work.
+wrong wherever `HOME` changes (`sudo`, `su -`, a service manager, a container mounting a
+different home), and for a privileged program, which ncurses does not show `~/.terminfo`
+to at all.
+
+`TERMINFO_DIRS` rather than `TERMINFO`, because `TERMINFO` is not an override: ncurses
+searches it first and falls through on a miss, so it holds exactly one directory and may
+well be holding *yours*. `TERMINFO_DIRS` is a list and exists for this, so ours goes on
+the front and yours stays where it was — followed by an empty entry, which is how
+ncurses spells the compiled-in default. Set only when the compiled entry is really
+there, and never when we fell back to `xterm-256color`.
 
 The one case that needs a hand is ssh, where the remote host has never heard of the entry:
 
@@ -477,8 +519,8 @@ address space, and does not claim to.
 
 | | |
 |---|---|
-| [Keyboard](docs/KEYBOARD.md) | what stays with Emacs, how modified keys are spelled, per-program overrides |
-| [Features](docs/FEATURES.md) | completion, the OSC 51 command channel, links, the UI conventions |
+| [Keyboard](docs/KEYBOARD.md) | what stays with Emacs, how modified keys are spelled, per-program overrides, the evil state discipline |
+| [Features](docs/FEATURES.md) | completion, the OSC 51 command channel, images, box drawing, links, the UI conventions |
 | [Shell](docs/SHELL.md) | the shipped helpers, and writing your own on top of them |
 | [Terminfo](docs/TERMINFO.md) | why we ship an entry, and every capability in it |
 | [Images](docs/IMAGES.md) | kitty graphics, sixel, iTerm2 inline images |

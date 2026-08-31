@@ -280,6 +280,61 @@ into a local path that exists.  So a foreign host has to stop at
             (should (equal default-directory there))))
       (delete-directory here t))))
 
+(ert-deftest cooked-osc-7-decodes-a-percent-in-the-path ()
+  "The path half of an OSC 7 URL is percent-encoded, and has to be decoded as one.
+
+A directory literally called `100%20cake\=' is reported as `100%2520cake\=', and
+anything that skipped the decoding would land in `100%20cake\=' -- the right
+answer by accident.  The reverse is the bug that was there: cooked\='s own
+snippets sent the path raw while this decoded it, so that directory arrived as
+`100 cake\=', which does not exist, and tracking stopped without a word."
+  (let* ((parent (make-temp-file "cooked-osc7-" t))
+         (awkward (expand-file-name "100%20cake" parent)))
+    (unwind-protect
+        (progn
+          (make-directory awkward)
+          (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+            (let ((default-directory "/tmp/"))
+              (cooked--osc-cwd
+               (list (concat "file://" (system-name)
+                             (replace-regexp-in-string "%" "%25" awkward t t))))
+              (should (equal default-directory (file-name-as-directory awkward))))))
+      (delete-directory parent t))))
+
+(ert-deftest cooked-command-start-takes-the-shells-own-command-line ()
+  "`OSC 133;C;cmdline_url=\=' is the shell saying what it is about to run.
+
+It is the only account of the command in every case where Emacs has none -- a
+prompt whose line the shell kept, the far end of an `ssh\=', a `no-input-mark\='
+session -- where the record used to carry nothing at all.  Percent-encoded
+because kitty\='s older `cmdline=\=' spelling holds `printf %q\=' output, which
+only the shell that wrote it can undo."
+  (cooked-tests--with-session
+      (cooked-tests--marks
+       (concat "\\033]133;A\\007$ \\033]133;B\\007"
+               ;; `%%' because the script is a `printf' format; the shell writes
+               ;; one `%' per pair and the mark on the wire is `%20' and `%22'.
+               "\\033]133;C;cmdline_url=echo%%20%%22hi%%20there%%22\\007out\\r\\n"
+               "\\033]133;D;0\\007"))
+    (should (cooked-tests--settle (lambda () cooked--commands) 8))
+    (should (equal (cooked-command-input (car cooked--commands)) "echo \"hi there\""))))
+
+(ert-deftest cooked-command-start-survives-a-command-line-it-cannot-use ()
+  "A `C\=' is the mark Emacs cannot do without; the command line on it is a
+courtesy.  So one that is too long, or decodes to nothing, or is spelled in
+kitty\='s ambiguous `cmdline=\=', leaves the mark standing and the record\='s
+input merely empty -- never the mark dropped."
+  (cooked-tests--with-session
+      (cooked-tests--marks
+       (concat "\\033]133;A\\007$ \\033]133;B\\007"
+               ;; kitty's spelling, deliberately not read: shell quoting has no
+               ;; single reading and a guess would be indistinguishable from truth.
+               "\\033]133;C;cmdline=ls\\\\ -la\\007out\\r\\n"
+               "\\033]133;D;0\\007"))
+    (should (cooked-tests--settle (lambda () cooked--commands) 8))
+    (should (= (length cooked--commands) 1))
+    (should-not (cooked-command-input (car cooked--commands)))))
+
 (ert-deftest cooked-native-completion-declines-on-a-foreign-host ()
   "Both tables are about this machine, so at a remote prompt they are not a
 weaker answer but a wrong one.  Declining leaves the prompt with no Emacs
@@ -993,6 +1048,26 @@ at, not under its last continuation line."
               (marker-position cooked--prompt-start)
               (save-excursion (goto-char (marker-position cooked--prompt-start))
                               (line-end-position)))))))
+
+(ert-deftest cooked-an-orphan-continuation-does-not-latch-the-input-together ()
+  "A continuation continues *something*, and when nothing arrives to end it the
+flag saying so must not go on being true for the rest of the session.
+
+The shell that produced this: `A;k=s' emitted with the plain marks turned off, so
+no `A' ever set a prompt marker and no `C' ever consumed one.  Both arms that
+clear the flag are therefore unreachable, and every line submitted afterwards was
+appended to the one before it -- one record's input growing without bound, and
+the whole session's history attached to whichever command finally closed."
+  (cooked-tests--with-session
+      (cooked-tests--marks "\\033]133;A;k=s\\007> \\033]133;B\\007")
+    (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 8))
+    (should cooked--prompt-continued)
+    ;; No `A' came, so there is no prompt for this to be a continuation *of*.
+    (should-not cooked--prompt-start)
+    (cooked--send-input-string "one")
+    (cooked--send-input-string "two")
+    ;; Replaced, not appended: the second line is its own submission.
+    (should (equal cooked--submitted-input "two"))))
 
 (ert-deftest cooked-zsh-marks-its-continuation-prompt ()
   "The end to end version, and the reason PS2 is worth touching at all: without

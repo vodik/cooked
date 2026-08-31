@@ -504,7 +504,13 @@ is perfectly real, which is exactly the problem: resolved here it names a
 different file, or -- worse and more often -- a local file of the same name that
 does exist, on a machine whose tree is kept in step with the one you ssh\='d to.
 So a foreign host updates `cooked--host\=' and stops there, leaving
-`default-directory\=' at the last place we could actually vouch for."
+`default-directory\=' at the last place we could actually vouch for.
+
+The path is percent-encoded, because that is what a URL is: a directory called
+`100%20cake\=' has to arrive as `100%2520cake\=' or it decodes to a different
+directory that does not exist.  Both emitters that reach this parser -- cooked\='s
+own snippets and a fish 4 doing its own reporting -- encode that way, so there is
+one encoding on the wire and one decoding here."
   (when (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url)
     (setq cooked--host (url-unhex-string (match-string 1 url)))
     (unless (cooked--foreign-host-p)

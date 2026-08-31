@@ -306,7 +306,8 @@ until something downstream quietly disagrees.
 bash is the shell this matters most for.  It is the one the author does not use,
 so it has no daily driver to notice a regression, and its hooks are the fragile
 ones: PS1 holds the marks as backslash escapes rather than as bytes, and the
-DEBUG trap fires for every command including the prompt\='s own."
+`C\=' mark rides in PS0, which is a prompt string like any other and so is lost
+to anything that rebuilds it."
   (let ((marks nil))
     (with-temp-buffer
       (let ((process-environment (cons "TERM_PROGRAM=cooked" process-environment)))
@@ -315,12 +316,26 @@ DEBUG trap fires for every command including the prompt\='s own."
                              t t nil "--rcfile" rc "-i"))
       (goto-char (point-min))
       ;; The options are captured, not skipped past: `A;k=s' -- the continuation
-      ;; prompt -- differs from a bare `A' in what it means rather than in detail,
-      ;; and a regexp that read it as an `A' would report a construct's every
+      ;; prompt -- differs from a bare `A' in what it means rather than in detail, and
+      ;; a regexp that read them as the same mark would report a construct's every
       ;; continuation line as a fresh prompt.
       (while (re-search-forward "\e]133;\\([A-D]\\)\\(;[^\a]*\\)?\a" nil t)
         (push (concat (match-string 1) (or (match-string 2) "")) marks)))
     (nreverse marks)))
+
+(defun cooked-tests--bash-output (rc &optional input)
+  "Run bash over RC, feed it INPUT, and return everything it wrote, verbatim.
+
+The sibling of `cooked-tests--bash-marks\=' for the assertions that are about a
+payload rather than about a mark -- the encoding of an OSC 7 path, the contents
+of PROMPT_COMMAND -- and for the ones that are about what bash still has rather
+than about what it printed, which it can only answer by being asked."
+  (with-temp-buffer
+    (let ((process-environment (cons "TERM_PROGRAM=cooked" process-environment)))
+      (insert (or input "true\nexit\n"))
+      (call-process-region (point-min) (point-max) (executable-find "bash")
+                           t t nil "--rcfile" rc "-i"))
+    (buffer-string)))
 
 (defun cooked-tests--bash-rc (&rest lines)
   "Write a bash rc sourcing the core snippet after LINES, and return its name."
@@ -355,12 +370,18 @@ PS1 was mostly marks.  Nothing was visibly wrong: an OSC occupies no columns."
 (ert-deftest cooked-bash-does-not-mark-its-own-prompt-as-a-command ()
   "Regression: every prompt emitted a stray `C\='.
 
-The DEBUG trap fires before every command, the prompt\='s own included, so it has
-to know which ones the user typed.  Comparing against PROMPT_COMMAND could not:
-that holds several commands joined by `;\=' while the trap sees one at a time, so
-the test never fired.  A `C\=' says a command started, which is not merely untidy
--- it clears the announcement nonce, so the next completion request on that
-prompt arrives unlicensed and is refused."
+A `C\=' says a command started, which is not merely untidy -- it clears the
+announcement nonce, so the next completion request on that prompt arrives
+unlicensed and is refused.
+
+This used to be a DEBUG trap, which fires before every command including the
+prompt\='s own, so it had to work out which ones the user typed; comparing against
+PROMPT_COMMAND could not do it, because that holds several commands joined by
+`;\=' while the trap sees one at a time.  The mark now rides in PS0, which bash
+expands exactly once per command line it is about to run, so the question the
+latch answered no longer gets asked.  The test stays because the property is the
+same one either way, and it is the property rather than the mechanism that
+Emacs depends on."
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc)))
     (unwind-protect
@@ -407,6 +428,121 @@ the construct was typed at."
           (should (= 2 (seq-count (lambda (m) (equal m "A")) marks))))
       (delete-file rc))))
 
+(ert-deftest cooked-bash-gates-the-continuation-marks-like-zsh ()
+  "The two shells have to answer the feature list the same way, and did not.
+
+`PS2' is touched only under `input-mark\\=', because Emacs taking the continuation
+line is the whole point of marking it; the `A;k=s\\=' inside that is the marks\\'
+half.  Gating both halves on `input-mark\\=' alone emitted a continuation whose
+prompt start was never announced -- a claim about a command Emacs has no record
+of, which then latched a flag on the Emacs side that nothing could clear."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc))
+        (script "for x in 1 2; do\necho $x\ndone\nexit\n"))
+    (unwind-protect
+        (let ((all (let ((process-environment
+                          (cons "COOKED_SHELL_INTEGRATION_FEATURES=marks input-mark cwd"
+                                process-environment)))
+                     (cooked-tests--bash-marks rc script)))
+              (no-marks (let ((process-environment
+                               (cons "COOKED_SHELL_INTEGRATION_FEATURES=input-mark cwd"
+                                     process-environment)))
+                          (cooked-tests--bash-marks rc script)))
+              (no-input (let ((process-environment
+                               (cons "COOKED_SHELL_INTEGRATION_FEATURES=marks cwd"
+                                     process-environment)))
+                          (cooked-tests--bash-marks rc script))))
+          (should (= 2 (seq-count (lambda (m) (equal m "A;k=s")) all)))
+          ;; Never a continuation without the marks that give it something to continue.
+          (should-not (member "A;k=s" no-marks))
+          (should-not (member "A" no-marks))
+          ;; And nothing on PS2 at all when Emacs is not taking the line.
+          (should-not (member "A;k=s" no-input))
+          (should-not (member "B" no-input)))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-leaves-the-users-debug-trap-alone ()
+  "Regression: loading cooked silently disabled bash-preexec.
+
+The `C\=' mark used to come from a DEBUG trap, installed at the first prompt --
+which is to say after everything else had run.  `trap ... DEBUG\=' replaces
+whatever was there without a word, so the thing it replaced was, as often as not,
+bash-preexec: every `preexec_functions\=' hook the user had went quiet, and
+nothing anywhere said so.  The mark rides in PS0 now, which displaces nothing."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc "__user_preexec() { :; }"
+                                   "trap '__user_preexec' DEBUG")))
+    (unwind-protect
+        (let ((output (cooked-tests--bash-output rc "trap -p DEBUG\nexit\n")))
+          (should (string-match-p "__user_preexec" output)))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-keeps-an-array-prompt-command ()
+  "PROMPT_COMMAND has been an array since bash 5.1, and treating it as a string
+there does not fail loudly.
+
+`$PROMPT_COMMAND\=' reads element 0 only and assigning a string back writes
+element 0 only, so the user\='s remaining entries survive -- and now run *after*
+everything we appended, which under the old DEBUG trap meant the first of them
+was reported as a command the user had typed and every prompt emitted a stray
+`C\='.  Branch on the actual type, as kitty and Ghostty both do."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc "PROMPT_COMMAND=(\"__first=1\" \"__second=1\")")))
+    (unwind-protect
+        (let ((output (cooked-tests--bash-output
+                       rc "declare -p PROMPT_COMMAND __first __second\nexit\n"))
+              (marks (cooked-tests--bash-marks rc "true\nexit\n")))
+          ;; Still an array, with both of the user\'s entries and both of ours.
+          (should (string-match-p "declare -a PROMPT_COMMAND" output))
+          (should (string-match-p "__first=1" output))
+          (should (string-match-p "__second=1" output))
+          ;; Ours bracket theirs: the status half first, where `$?\' is still the
+          ;; command\'s, and the prompt half last, after any theme rebuilt PS1.
+          (should (string-match-p "\\[0\\]=\"__cooked_precmd\"" output))
+          (should (string-match-p "\\[3\\]=\"__cooked_prompt_hook\"" output))
+          ;; And the user\'s entries are not mistaken for typed commands.
+          (should (= 2 (seq-count (lambda (m) (string-prefix-p "C" m)) marks))))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-reports-the-command-line-it-is-about-to-run ()
+  "`cmdline_url=\=' on the `C\=' mark, which is the shell\='s own account of the
+command and the only one Emacs has when the shell kept the line.
+
+Percent-encoded rather than kitty\='s `cmdline=\=', which is `printf %q\=' output
+and so is quoted in a way only that shell can undo."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc)))
+    (unwind-protect
+        (let ((marks (cooked-tests--bash-marks rc "echo 'hi there'\nexit\n")))
+          (should (member "C;cmdline_url=echo%20%27hi%20there%27" marks)))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-refuses-to-guess-at-a-command-line-it-was-not-told ()
+  "`history 1\=' is the only way bash will tell a hook what was typed, and under
+`HISTCONTROL=ignorespace\=' it is a liar: the line about to run was never
+recorded, so it answers with the *previous* command.  kitty and Ghostty both
+report that one as the command that is running.
+
+The history number settles it -- what bash said the next command would be
+numbered, taken at the prompt, against what the entry actually carries -- and
+when they disagree the mark goes out bare.  Saying nothing is the only honest
+answer, and it costs nothing: Emacs still has the text it submitted."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc "HISTCONTROL=ignorespace")))
+    (unwind-protect
+        (let ((marks (cooked-tests--bash-marks
+                      rc "echo recorded\n echo hidden\nexit\n")))
+          (should (member "C;cmdline_url=echo%20recorded" marks))
+          ;; Three commands ran -- the two above and the `exit\' -- so three `C\'
+          ;; marks, and the hidden one is the bare one.  Above all there is no second
+          ;; claim about `echo recorded\', which is what reporting a stale history
+          ;; entry would have produced.
+          (should (= 3 (seq-count (lambda (m) (string-prefix-p "C" m)) marks)))
+          (should (= 1 (seq-count (lambda (m) (equal m "C")) marks)))
+          (should (= 1 (seq-count (lambda (m) (equal m "C;cmdline_url=echo%20recorded"))
+                                  marks))))
+      (delete-file rc))))
+
 (ert-deftest cooked-bash-survives-a-theme-that-rebuilds-the-prompt ()
   "A theme rebuilding PS1 from PROMPT_COMMAND must not cost the `B\=' mark, which
 is the whole hand-the-keyboard-back feature."
@@ -417,6 +553,170 @@ is the whole hand-the-keyboard-back feature."
         (let ((marks (cooked-tests--bash-marks rc "true\ntrue\nexit\n")))
           (should (= 3 (seq-count (lambda (m) (equal m "B")) marks))))
       (delete-file rc))))
+
+(ert-deftest cooked-fish-marks-its-prompts ()
+  "The first fish coverage the suite has ever had: a fish session reaching input
+state, recording commands with their exit codes, and tracking its directory.
+
+On a stock fish 4 the marks under test are *fish\='s own* -- `cooked.fish\='
+installs nothing there, by design.  That is the arrangement worth asserting,
+because it is the one every fish user gets.  The snippet\='s own path is
+`cooked-fish-supplies-the-marks-fish-declines-to-send\=', which has to force
+fish to be quiet before there is anything of ours to see."
+  (skip-unless (executable-find "fish"))
+  (cooked-tests--with-fish
+    ;; The `B' arrived and was believed: Emacs owns the line.
+    (should (cooked--input-state-p))
+    (cooked--replace-input "false")
+    (cooked-send-input)
+    (should (cooked-tests--settle (lambda () cooked--commands) 8))
+    ;; `$status' really is the command's inside the postexec handler.
+    (should (= (cooked-command-code (car cooked--commands)) 1))
+    (cooked--replace-input "cd /tmp")
+    (cooked-send-input)
+    (should (cooked-tests--settle
+             (lambda () (equal (expand-file-name default-directory) "/tmp/"))
+             8))))
+
+(ert-deftest cooked-fish-keeps-its-marks-when-the-prompt-is-redefined ()
+  "The marks have to travel inside `fish_prompt\=', because the `fish_prompt\='
+event fires *before* the function is called and so is no place to put the `B\='
+that must follow the prompt text.
+
+Wrapping it once at startup was not enough: anything that redefines
+`fish_prompt\=' afterwards throws the wrapper away, and `fish_config\=' does
+exactly that every time you change theme.  So the wrapper is re-applied at each
+prompt, from the same reasoning that re-applies the PS1 marks in bash and zsh.
+The test redefines the prompt mid-session and asks for the marks again."
+  (skip-unless (executable-find "fish"))
+  (skip-unless (executable-find "script"))
+  (let* ((config (make-temp-file "cooked-tests-fish-" t))
+         (input (make-temp-file "cooked-tests-fish-in-"))
+         (marks nil))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "fish" config))
+          (with-temp-file (expand-file-name "fish/config.fish" config)
+            (insert "function fish_prompt; printf \'$ \'; end\n"
+                    "source " (shell-quote-argument
+                               (expand-file-name "cooked.fish"
+                                                 (cooked--integration-directory)))
+                    "\n"))
+          (with-temp-file input
+            (insert "function fish_prompt; printf \'NEW> \'; end\n" "false\n" "exit\n"))
+          (with-temp-buffer
+            (let ((process-environment
+                   (append (list (concat "XDG_CONFIG_HOME=" config)
+                                 "TERM_PROGRAM=cooked" "TERM=xterm-256color")
+                           process-environment)))
+              (call-process "script" input t nil "-qc"
+                            "fish --features=no-mark-prompt -i" "/dev/null"))
+            (goto-char (point-min))
+            (while (re-search-forward "\e]133;\\([A-D]\\)\\(;[^\a]*\\)?\a" nil t)
+              (push (concat (match-string 1) (or (match-string 2) "")) marks)))
+          (setq marks (nreverse marks))
+          ;; Three prompts -- the one the redefinition was typed at, the one `false\'
+          ;; was typed at, and the one `exit\' was -- and the last two are drawn by a
+          ;; `fish_prompt\' the snippet never saw at startup.
+          (should (<= 3 (seq-count (lambda (m) (equal m "A")) marks)))
+          (should (<= 3 (seq-count (lambda (m) (equal m "B")) marks)))
+          ;; And the run really did get past the redefinition.
+          (should (member "C;cmdline_url=false" marks))
+          (should (member "D;1" marks)))
+      (delete-directory config t)
+      (delete-file input))))
+
+(ert-deftest cooked-fish-supplies-the-marks-fish-declines-to-send ()
+  "The snippet\\'s own path, which on a stock fish 4 never runs -- so without
+forcing it, the fish tests assert fish\\'s marks and nothing of cooked\\'s.
+
+`no-mark-prompt\\=' is fish\\'s own switch for a terminal that cannot parse the
+sequences.  A fish told to be quiet leaves the job to us, and this is the whole
+of what `cooked.fish\\=' then does: bracket the prompt, and carry the exit status
+out of a `fish_postexec\\=' handler where `$status\\=' is the command\\'s.
+
+Read off the wire rather than through a session, because what is under test is
+which *emitter* spoke: a mark reaches Emacs the same way whoever sent it."
+  (skip-unless (executable-find "fish"))
+  (skip-unless (executable-find "script"))
+  (let* ((config (make-temp-file "cooked-tests-fish-" t))
+         (input (make-temp-file "cooked-tests-fish-in-"))
+         (marks nil))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "fish" config))
+          (with-temp-file (expand-file-name "fish/config.fish" config)
+            (insert "function fish_prompt; printf '$ '; end\n"
+                    "source " (shell-quote-argument
+                               (expand-file-name "cooked.fish"
+                                                 (cooked--integration-directory)))
+                    "\n"))
+          (with-temp-file input (insert "false\nexit\n"))
+          (with-temp-buffer
+            (let ((process-environment
+                   (append (list (concat "XDG_CONFIG_HOME=" config)
+                                 "TERM_PROGRAM=cooked" "TERM=xterm-256color")
+                           process-environment)))
+              ;; fish never runs its reader off a pipe, so this needs a pty even to
+              ;; draw a prompt -- which is why it goes through `script' rather than
+              ;; through `call-process' the way the bash equivalents do.  The input is
+              ;; `script''s to forward onto the pty: piping it into fish *inside* the
+              ;; `-c' would hand fish a pipe again and nothing would ever be drawn.
+              (call-process "script" input t nil "-qc"
+                            "fish --features=no-mark-prompt -i" "/dev/null"))
+            (goto-char (point-min))
+            (while (re-search-forward "\e]133;\\([A-D]\\)\\(;[^\a]*\\)?\a" nil t)
+              (push (concat (match-string 1) (or (match-string 2) "")) marks)))
+          (setq marks (nreverse marks))
+          ;; Both emitters spell the prompt mark `A', so the discriminator is the
+          ;; option beside it: fish writes `A;click_events=1' and cooked writes the mark
+          ;; bare.  That is a thinner distinction than the one this test used to draw
+          ;; and it is the honest one -- the question here is which emitter spoke, and
+          ;; now that cooked has stopped writing a second spelling of the same mark
+          ;; there is nothing coarser left to ask.  A bare `A' present and no
+          ;; `click_events=' anywhere is fish silent and cooked speaking.
+          (should (member "A" marks))
+          (should-not (seq-find (lambda (m) (string-search "click_events" m)) marks))
+          (should (member "B" marks))
+          ;; A `C' carrying the command line, which is the shell's own account of what
+          ;; it is about to run and the one Emacs prefers to its own submitted text.
+          (should (member "C;cmdline_url=false" marks))
+          ;; `$status' really is the command's inside the postexec handler.
+          (should (member "D;1" marks)))
+      (delete-directory config t)
+      (delete-file input))))
+
+(ert-deftest cooked-fish-stands-down-where-fish-marks-its-own-prompts ()
+  "fish 4.0 emits the 133 marks, OSC 7 and OSC 0 itself and unconditionally, so
+the snippet has to get out of the way or bracket every prompt twice.
+
+Asserted through the feature list rather than by counting marks on the wire,
+because the feature list is *how* it gets out of the way: the snippet appends the
+same `no-NAME\=' forms an rc would, so there is one mechanism deciding what is on
+and `__cooked_want\=' remains the only thing that answers."
+  (skip-unless (executable-find "fish"))
+  (cooked-tests--with-fish
+    ;; Asked of `__cooked_want' rather than read off `$__cooked_features', which is
+    ;; both the predicate that actually decides and short enough not to wrap: the
+    ;; feature list is wider than the test screen, and reading a wrapped line back
+    ;; out of the buffer had this test failing on a truncated `no-input-mark'.
+    (cooked--replace-input
+     "for f in marks input-mark cwd title; __cooked_want $f; and echo \"$f=on\"; or echo \"$f=off\"; end")
+    (cooked-send-input)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "^title=" (cooked-tests--text))) 8))
+    (let ((text (cooked-tests--text)))
+      ;; `cwd' and `title' are the unconditional ones: OSC 7 and OSC 0 have both been
+      ;; unconditional in fish since 4.0.0 and neither has a switch of its own, so both
+      ;; stand down on any fish 4 whatever else is set.
+      (should (string-match-p "^title=off$" text))
+      (should (string-match-p "^cwd=off$" text))
+      ;; The marks do have a switch -- `no-mark-prompt' -- so a fish told to be quiet
+      ;; about them leaves that job to the snippet.  Either answer is correct; what
+      ;; would not be is the two halves disagreeing, since the `A' and the `B' have to
+      ;; come from the same emitter to bracket the same prompt.
+      (should (eq (and (string-match-p "^marks=off$" text) t)
+                  (and (string-match-p "^input-mark=off$" text) t))))))
 
 (ert-deftest cooked-bash-honours-the-feature-list ()
   "The same subtraction zsh honours, on the shell that gets less attention."
@@ -491,6 +791,59 @@ and a shipped file, so the rc here does not set it."
   (skip-unless (executable-find "zsh"))
   (should-not (cooked-tests--zsh-osc 2 "" "true\nexit\n"
                                      "marks input-mark cwd announce title no-title")))
+
+(ert-deftest cooked-zsh-does-not-close-a-command-that-never-ran ()
+  "A `D\=' closes a command, so a prompt with no command behind it must not send
+one carrying a status it made up.
+
+Three states, which is kitty\='s and Ghostty\='s shape: nothing marked yet -- the
+first prompt of a session -- sends no `D\=' at all; an open `C\=' is closed with
+`D;<status>\='; and a prompt that ran nothing, an empty return, is closed with a
+bare `D\=' that reports no status because there is none to report.  cooked\='s
+Emacs side ignores a `D\=' that closes nothing either way, so this is about not
+putting an untrue mark on a wire that other readers also have to make sense of."
+  (skip-unless (executable-find "zsh"))
+  (let ((marks (cooked-tests--zsh-osc 133 "" "\ntrue\nexit\n")))
+    ;; Nothing before the session\'s first prompt: the first mark on the wire opens a
+    ;; prompt rather than closing a command that never ran.
+    (should (string-prefix-p "A" (car marks)))
+    ;; The empty line closes with a bare `D\', the `true\' with its status.
+    (should (member "D" marks))
+    (should (member "D;0" marks))
+    ;; And exactly one command actually started: the empty return is not one.
+    (should (= 2 (seq-count (lambda (m) (string-prefix-p "C" m)) marks)))))
+
+(ert-deftest cooked-shells-percent-encode-the-directory-they-report ()
+  "OSC 7 carries a URL, so its path has to be encoded as one.
+
+`cd /tmp/100%20cake\=' reported raw arrives in Emacs as `/tmp/100 cake\=', a
+directory that does not exist, and tracking stops without a word.  The receiving
+half has always decoded; it was the sending half that did not encode, in all
+three shells at once, so all three are checked here against the same directory."
+  (skip-unless (executable-find "zsh"))
+  (skip-unless (executable-find "bash"))
+  (let* ((parent (make-temp-file "cooked-tests-cwd-" t))
+         (awkward (expand-file-name "100%20cake" parent))
+         (encoded (concat (replace-regexp-in-string
+                           "%" "%25" (file-name-directory awkward) t t)
+                          "100%2520cake"))
+         (rc (cooked-tests--bash-rc)))
+    (unwind-protect
+        (progn
+          (make-directory awkward)
+          (let ((zsh (cooked-tests--zsh-osc
+                      7 "" (format "cd %s\nexit\n" (shell-quote-argument awkward)))))
+            (should (seq-find (lambda (p) (string-suffix-p encoded p)) zsh))
+            ;; Reported once per directory, not once per prompt: the encoding is a
+            ;; loop over the bytes of the path and a prompt is drawn far more often
+            ;; than a directory is entered.
+            (should (= 1 (seq-count (lambda (p) (string-suffix-p encoded p)) zsh))))
+          (let ((output (cooked-tests--bash-output
+                         rc (format "cd %s\ntrue\nexit\n"
+                                    (shell-quote-argument awkward)))))
+            (should (string-match-p (regexp-quote encoded) output))))
+      (delete-file rc)
+      (delete-directory parent t))))
 
 (ert-deftest cooked-real-bash-reaches-input-state-at-its-prompt ()
   "The headline case: a real interactive shell, whose prompt is raw-mode."
@@ -603,25 +956,36 @@ stay silent -- `text-scale-mode-hook' is the one that has to pick it up."
 
 (ert-deftest cooked-exports-its-own-terminfo-database ()
   "The default lookup finds ~/.terminfo only while HOME says what it said when we
-compiled the entry, and `sudo\=', `su -\=' and a container all change it.  Naming
-the directory is what survives that."
+compiled the entry, and `sudo\=', `su -\=' and a container all change it -- and a
+privileged program is not shown ~/.terminfo at all.  Naming the directory on the
+search path is what survives that."
   ;; The entry has to be installed for there to be anything to name; installing it
   ;; is `cooked--terminfo\=''s job and is covered by its own test.
   (cooked--terminfo)
   (skip-unless (cooked--terminfo-directory cooked-term-name))
-  (let ((env (cooked--child-environment)))
-    (should (equal (cdr (assoc "TERMINFO" env)) (expand-file-name "~/.terminfo"))))
-  ;; Not when we fell back to xterm-256color: there is nothing of ours to find, and
-  ;; TERMINFO is searched first, so pointing at our database would make a lookup
-  ;; fail that would otherwise have succeeded.
-  (let* ((cooked-term-name nil)
-         (env (cooked--child-environment)))
-    (should-not (assoc "TERMINFO" env)))
-  ;; And never over one the user chose.  Same reason from the other side: their
-  ;; database is the one holding the rest of their entries.
-  (let* ((process-environment (cons "TERMINFO=/opt/terminfo" process-environment))
-         (env (cooked--child-environment)))
-    (should (equal (cdr (assoc "TERMINFO" env)) "/opt/terminfo"))))
+  (let ((home (expand-file-name "~/.terminfo")))
+    (let ((env (cooked--child-environment)))
+      ;; Ours first, then the compiled-in default, which is what the empty entry means.
+      (should (equal (cdr (assoc "TERMINFO_DIRS" env)) (concat home ":"))))
+    ;; Not when we fell back to xterm-256color: there is nothing of ours to find.
+    (let* ((cooked-term-name nil)
+           (env (cooked--child-environment)))
+      (should-not (assoc "TERMINFO_DIRS" env)))
+    ;; A search path the user already had is extended, not replaced -- the entries on
+    ;; it are theirs and a terminfo lookup that used to succeed has to go on
+    ;; succeeding.  Exactly one entry for the name, so the child cannot read the
+    ;; inherited value instead of this one.
+    (let* ((process-environment (cons "TERMINFO_DIRS=/opt/terminfo:" process-environment))
+           (env (cooked--child-environment)))
+      (should (equal (cdr (assoc "TERMINFO_DIRS" env))
+                     (concat home ":/opt/terminfo:")))
+      (should (= 1 (seq-count (lambda (pair) (equal (car pair) "TERMINFO_DIRS")) env))))
+    ;; And a TERMINFO the user chose is left alone: it holds one directory, so taking
+    ;; it would mean choosing between their entries and ours.
+    (let* ((process-environment (cons "TERMINFO=/opt/terminfo" process-environment))
+           (env (cooked--child-environment)))
+      (should (equal (cdr (assoc "TERMINFO" env)) "/opt/terminfo"))
+      (should (equal (cdr (assoc "TERMINFO_DIRS" env)) (concat home ":"))))))
 
 (ert-deftest cooked-does-not-pin-lines-and-columns ()
   "Regression: exporting LINES/COLUMNS makes ncurses ignore the tty size, so a

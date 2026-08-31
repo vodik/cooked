@@ -864,7 +864,13 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
         Event::PromptStart(at, id) => mark("prompt-start", *at, *id),
         Event::PromptContinuation(at, id) => mark("prompt-continuation", *at, *id),
         Event::PromptEnd(at, id) => mark("prompt-end", *at, *id),
-        Event::CommandStart(at, id) => mark("command-start", *at, *id),
+        // (command-start CMDLINE ANCHOR ID), CMDLINE nil when the shell did not say.
+        Event::CommandStart(cmdline, at, id) => env.list(&[
+            env.intern("command-start")?,
+            env.into_lisp(cmdline.as_deref())?,
+            update.anchor_to_lisp(env, *at, rows)?,
+            env.into_lisp(*id)?,
+        ]),
         Event::CommandEnd(code, at, id) => env.list(&[
             env.intern("command-end")?,
             env.into_lisp(code.map(i64::from))?,

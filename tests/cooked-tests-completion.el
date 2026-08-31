@@ -174,7 +174,7 @@ it, and the request then stops for the missing nonce without ever asking the
 question this test is named for."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
-    (cooked--handle-semantic '(command-start (screen 0 . 0)) nil)
+    (cooked--handle-semantic '(command-start nil (screen 0 . 0)) nil)
     (should (eq cooked--semantic 'output))
     (cooked--osc-emacs '("CH;2;abcd;1"))
     (should (equal cooked--completion-nonce "abcd"))
@@ -415,7 +415,7 @@ hand a bare remote prompt a license nothing on that host ever issued."
     (should (cooked-tests--settle #'cooked--input-start-position))
     (cooked--osc-emacs '("CH;2;1234;1"))
     (should (equal cooked--completion-nonce "1234"))
-    (cooked--handle-semantic '(command-start (screen 0 . 0)) nil)
+    (cooked--handle-semantic '(command-start nil (screen 0 . 0)) nil)
     (should-not cooked--completion-nonce)
     (should-not cooked--completion-reply-capable)))
 

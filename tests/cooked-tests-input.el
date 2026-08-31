@@ -39,7 +39,7 @@ kill-line and every shell\='s clear-screen -- go to the child like anything else
     (should-not (eq (key-binding (kbd "C-u")) #'cooked-send-key))
 
     ;; One mark is enough: the shell is talking, so its silence is informative.
-    (cooked--handle-semantic '(command-start nil) nil)
+    (cooked--handle-semantic '(command-start nil nil) nil)
     (should cooked--semantic-seen)
     (should (eq (cooked--policy) 'command))
     (cooked--refresh-keymap)

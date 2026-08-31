@@ -1144,7 +1144,13 @@ line submitted last rather than the command that ran.  See
 `cooked--prompt-continued'."
   (setq cooked--submitted-input
         (let ((line (and (not (string-blank-p text)) text)))
-          (if (and cooked--prompt-continued cooked--submitted-input)
+          (if (and cooked--prompt-continued cooked--submitted-input
+                   ;; A continuation continues *something*.  Without this the flag has
+                   ;; no path that clears it when the `A' and the `C' it expects never
+                   ;; arrive -- a shell emitting `A;k=s' with the plain marks turned
+                   ;; off does exactly that -- and every later line was appended to the
+                   ;; last, growing one record's input without bound.
+                   cooked--prompt-start)
               (concat cooked--submitted-input "\n" (or line ""))
             line)))
   (cooked--send-to-child

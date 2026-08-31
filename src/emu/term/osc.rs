@@ -4,12 +4,33 @@ use super::*;
 
 impl State {
     pub(super) fn semantic(&mut self, params: &[&[u8]]) {
-        let Some(kind) = params.get(1).and_then(|p| p.first()) else {
+        // Matched whole, not on the first byte. `params.get(1).and_then(|p| p.first())`
+        // read `Dfoo` as a `D`, which is a parser agreeing with a sender that means
+        // something else -- and the kinds are single letters, so exactness is free.
+        let Some(kind) = params.get(1).copied() else {
             return;
         };
-        if !matches!(kind, b'A' | b'B' | b'C' | b'D' | b'P') {
+        // `A` only. The proposal also spells this mark `P`, and Ghostty sends that one
+        // to avoid `A`'s implied fresh line -- but cooked implements no fresh-line
+        // behaviour, so the two would be the same mark to it, and nothing on this wire
+        // sends `P` anyway: cooked's own snippets emit `A`, fish 4 emits `A`, and
+        // kitty's and Ghostty's integrations gate themselves on environment variables
+        // cooked never sets and that no `ssh` carries. One spelling end to end.
+        let prompt = kind == b"A";
+        if !prompt && !matches!(kind, b"B" | b"C" | b"D") {
             return;
         }
+        // Decided before a mark is taken, because "ignore this" has to leave *no* trace:
+        // an id allocated for an event that is never pushed is a mark on the grid Emacs
+        // is never told about, which a later rewrap would then carry around for nobody.
+        let kind_of_prompt = prompt.then(|| Self::prompt_kind(params));
+        if kind_of_prompt == Some(PromptKind::Other) {
+            return;
+        }
+        // Read before the mark is taken, so that a `C` carrying a command line that is
+        // too long or not text is still a `C`: the mark is the part Emacs cannot do
+        // without, and the command line is a courtesy on top of it.
+        let cmdline = (kind == b"C").then(|| Self::cmdline(params)).flatten();
         // Anchored here, where the mark actually is in the stream. See [`Anchor`].
         let at = self.anchor();
         // And left on the cell, so that a rewrap can be told where it went. Allocated
@@ -18,13 +39,8 @@ impl State {
         // about again.
         let id = self.take_mark(at);
         self.events.push(match kind {
-            // `A` and `P` are the same mark read twice. The proposal defines `A` as
-            // shorthand for `P;k=i` and hangs the `k=` option off `P`; kitty spells the
-            // secondary prompt `A;k=s` and never sends `P` at all. Accepting both costs
-            // one arm, and picking only one would silently lose the continuation prompt
-            // of whichever emitter we did not pick.
-            b'A' | b'P' => {
-                if Self::continues_prompt(params) {
+            b"A" => {
+                if kind_of_prompt == Some(PromptKind::Continuation) {
                     // Deliberately *not* moving `prompt_start`. A continuation prompt is
                     // the same command still being typed, so the prompt it began at is
                     // the one `clear_to_prompt` must keep and the one Emacs files the
@@ -36,9 +52,9 @@ impl State {
                     Event::PromptStart(at, id)
                 }
             }
-            b'B' => Event::PromptEnd(at, id),
-            b'C' => Event::CommandStart(at, id),
-            b'D' => Event::CommandEnd(
+            b"B" => Event::PromptEnd(at, id),
+            b"C" => Event::CommandStart(cmdline, at, id),
+            b"D" => Event::CommandEnd(
                 params
                     .get(2)
                     .and_then(|p| std::str::from_utf8(p).ok())
@@ -50,23 +66,103 @@ impl State {
         });
     }
 
-    /// Whether an `A`/`P` mark says "this prompt continues the one before it".
+    /// What kind of prompt an `A` mark is announcing.
     ///
-    /// `k=` names the kind of prompt: `i` initial, `s` secondary — zsh's `PS2`, bash's
-    /// `PS2` — `c` continuation, `r` the right-hand prompt. Only an initial prompt
-    /// begins a command, so the test is "`k=` present and not `i`" rather than a list of
-    /// the kinds we happen to have heard of: a kind we do not know is still not the
-    /// start of a command, while guessing the other way loses the prompt marker for a
-    /// whole multi-line construct.
+    /// `k=` names it: `i` initial, `s` secondary — zsh's and bash's `PS2` — `c`
+    /// continuation, `r` the prompt drawn on the *right* of the input line. Absent, or
+    /// present but empty, means `i`: the proposal gives the kind that default, and an
+    /// emitter writing `k=` with nothing after it is not announcing a new kind. cooked's
+    /// own snippets rely on that default and send a bare `A` for an initial prompt.
+    ///
+    /// Three answers rather than the boolean this used to be, because `r` belongs to
+    /// neither. A right-hand prompt is decoration beside an input area cooked already
+    /// owns: it starts no command, so it must not move the prompt marker, and it
+    /// continues nothing, so it must not be read as a `PS2` either. Read as a
+    /// continuation it was a session-ending bug -- no `B` follows a right prompt, so
+    /// Emacs went to `prompt` and never came back, and the input line was gone for good.
+    ///
+    /// A kind nobody here has heard of joins `r` rather than joining `s`. The safe
+    /// answer for an unknown mark is to change no state at all, and both of the other
+    /// two answers change state.
     ///
     /// Options are read from `params[2..]`, which is where they arrive: `;` separates
-    /// OSC parameters, so `133;A;k=s` is three of them.
-    fn continues_prompt(params: &[&[u8]]) -> bool {
-        params
+    /// OSC parameters, so `133;A;k=s` is three of them. Every other option any emitter
+    /// sends -- kitty's `click_events=`, Ghostty's `redraw=` and `cl=`, ble.sh's
+    /// `aid=` -- is not a `k=` and so leaves the answer at `Initial`.
+    fn prompt_kind(params: &[&[u8]]) -> PromptKind {
+        let Some(kind) = params
             .iter()
             .skip(2)
-            .filter_map(|opt| opt.strip_prefix(b"k=".as_slice()))
-            .any(|kind| kind != b"i")
+            .find_map(|opt| opt.strip_prefix(b"k=".as_slice()))
+        else {
+            return PromptKind::Initial;
+        };
+        match kind {
+            b"" | b"i" => PromptKind::Initial,
+            b"s" | b"c" => PromptKind::Continuation,
+            _ => PromptKind::Other,
+        }
+    }
+
+    /// The command line a `C` mark carries, from `cmdline_url=`.
+    ///
+    /// This is what the shell is about to run, said by the shell itself, and it is the
+    /// only account of it that survives the cases where Emacs has none: a prompt whose
+    /// line the shell kept, a program reading input of its own, the far end of an `ssh`.
+    /// Where Emacs does have one, this still wins — `cooked--submitted-input` is what
+    /// Emacs *sent*, assembled by hand across the lines of a multi-line construct, while
+    /// this is what the shell parsed.
+    ///
+    /// `cmdline_url=` and not kitty's `cmdline=`. The two carry the same thing and
+    /// kitty's is the older spelling, but it holds `printf %q` output — shell quoting,
+    /// which only that shell can undo, so `ls -la` arrives as `ls\ -la`. Guessing at an
+    /// unquoting would put the guess in the command record and there would be no way to
+    /// tell it from the truth. Percent-encoding has one reading, and it is what fish 4
+    /// already sends: a fish doing its own marking gets this for free.
+    ///
+    /// Capped at [`MAX_CMDLINE_LEN`] because this arm returns before `osc_dispatch`'s
+    /// generic limit, the same way [`State::hyperlink`] is. Control characters are
+    /// dropped, except the newline that a multi-line construct genuinely contains and
+    /// the tab that can be typed into one.
+    fn cmdline(params: &[&[u8]]) -> Option<String> {
+        let raw = params
+            .iter()
+            .skip(2)
+            .find_map(|opt| opt.strip_prefix(b"cmdline_url=".as_slice()))?;
+        if raw.len() > MAX_CMDLINE_LEN {
+            return None;
+        }
+        let decoded = Self::percent_decode(raw);
+        let text: String = String::from_utf8_lossy(&decoded)
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+            .collect();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// `%XX` back into bytes, leaving anything that is not a complete escape alone.
+    ///
+    /// Lenient on purpose: a trailing `%` or a `%g7` is a malformed sender rather than an
+    /// attack, and passing the bytes through unchanged shows the user what arrived. The
+    /// result is bytes rather than a string because a multi-byte character arrives as one
+    /// `%XX` per byte and only reassembles once they are all back.
+    fn percent_decode(raw: &[u8]) -> Vec<u8> {
+        let hex = |b: u8| (b as char).to_digit(16);
+        let mut out = Vec::with_capacity(raw.len());
+        let mut rest = raw;
+        while let Some((&first, tail)) = rest.split_first() {
+            match (first, tail) {
+                (b'%', [hi, lo, ..]) if let (Some(hi), Some(lo)) = (hex(*hi), hex(*lo)) => {
+                    out.push((hi * 16 + lo) as u8);
+                    rest = &tail[2..];
+                }
+                _ => {
+                    out.push(first);
+                    rest = tail;
+                }
+            }
+        }
+        out
     }
 
     /// Name the mark at ANCHOR and leave it on the cell the anchor points at.

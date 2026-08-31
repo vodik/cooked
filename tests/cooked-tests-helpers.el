@@ -260,6 +260,46 @@ The shell is started against `cooked-tests--zshrc\=', not the user's own; see
        (with-current-buffer buffer (cooked--cleanup))
        (kill-buffer buffer))))
 
+(defmacro cooked-tests--with-fish (&rest body)
+  "Run BODY in a cooked buffer running fish, settled at its first prompt.
+
+fish needs a pty in a way bash does not: with stdin off a terminal it never runs
+its reader, so the prompt is never drawn and no mark is ever written.  The bash
+snippet tests can pipe into `call-process\='; this one has to go through a real
+session, which is why it lives here rather than beside them.
+
+fish is not injected -- cooked writes a startup file for zsh and bash, and fish
+needs none -- so the snippet is sourced from a generated `config.fish\=' reached
+by pointing XDG_CONFIG_HOME at it.  That is the arrangement the file documents
+for a user, run as documented.  The prompt is a bare `$ \=', so what a test reads
+off the buffer is the shell\='s output rather than a theme\='s."
+  (declare (indent 0))
+  `(let* ((config (make-temp-file "cooked-tests-fish-" t))
+          (buffer (generate-new-buffer "*cooked-fish*")))
+     (unwind-protect
+         (progn
+           (make-directory (expand-file-name "fish" config))
+           (with-temp-file (expand-file-name "fish/config.fish" config)
+             (insert "function fish_prompt; printf '$ '; end\n"
+                     "source " (shell-quote-argument
+                                (expand-file-name "cooked.fish"
+                                                  (cooked--integration-directory)))
+                     "\n"))
+           (with-current-buffer buffer
+             (cooked-mode)
+             (pcase-let ((`(,argv ,env ,_scratch)
+                          (cooked--shell-invocation (executable-find "fish"))))
+               (cooked--start argv nil (cons (cons "XDG_CONFIG_HOME" config) env)))
+             (cooked--refresh-keymap)
+             (should (cooked-tests--settle
+                      (lambda () (and (eq cooked--semantic 'input)
+                                      (cooked--input-start-position)))
+                      8))
+             ,@body))
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer)
+       (delete-directory config t))))
+
 (defun cooked-tests--undo-entries ()
   "The real entries in `buffer-undo-list\=', with the boundaries dropped.
 

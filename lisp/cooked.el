@@ -135,22 +135,27 @@ folding and navigation walk."
   (code 0 :documentation "Exit status.")
   (prompt nil :documentation "Marker where the prompt that ran this command began.
 
-From the OSC 133 `A' mark, which every shell integration sends immediately
-before it draws the prompt, so the marker names column 0 of the prompt's first
-row.  That is a position a repaint cannot spoil -- a damaged row is deleted
-whole and its markers collapse to the row's start, which is where this one
-already is -- unlike a marker inside the input row; see `input' below.
+From the OSC 133 `A' prompt mark, which cooked's own snippets carry inside the
+prompt string rather than printing from a hook -- so the marker names column 0
+of the prompt's first row.  That is a position a repaint cannot spoil -- a
+damaged row is deleted whole and its markers collapse to the row's start, which
+is where this one already is -- unlike a marker inside the input row; see
+`input' below.
 
-Nil for a shell that never sent an `A' mark, in which case the output start is
+Nil for a shell that never sent a prompt mark, in which case the output start is
 the closest thing to a beginning there is.")
   (input nil :documentation "The command line itself, or nil if we never saw it.
 
-The text cooked submitted, not a position recovered afterwards.  A marker would
-not survive: the input row is repainted on every keystroke and again when the
-shell echoes the line, and `cooked--render-rows' deletes a damaged row whole, so
-any marker inside it collapses to the row's start -- taking the prompt with it.
-Nil for a command Emacs did not submit, such as one typed while the child owned
-the keyboard, or one the shell ran itself."))
+What the shell said it was about to run, from `cmdline_url=' on the `C' mark,
+and failing that the text cooked submitted.  Not a position recovered
+afterwards: a marker would not survive, because the input row is repainted on
+every keystroke and again when the shell echoes the line, and
+`cooked--render-rows' deletes a damaged row whole, so any marker inside it
+collapses to the row's start -- taking the prompt with it.
+
+Nil only when neither account exists: a shell that sends no `cmdline_url=' and a
+command Emacs did not submit, such as one typed while the child owned the
+keyboard or one the shell ran itself."))
 
 (defun cooked--command-start-position (command)
   "Buffer position where COMMAND's output begins."
@@ -418,8 +423,9 @@ xterm-256color if that is not possible."
 ~/.terminfo is where `cooked--terminfo\=' installs the entry, and ncurses looks
 there by default -- so this exists for the cases where the default is wrong.
 Anything that changes HOME loses the entry silently: `sudo\=', `su -\=', a
-service manager, a container that mounts a different home.  Naming the
-directory in TERMINFO is what survives that.
+service manager, a container that mounts a different home.  ncurses also skips
+~/.terminfo outright for a privileged program.  Naming the directory is what
+survives all of that.
 
 The entry is looked for rather than assumed, and by wildcard rather than by
 path: implementations disagree about whether the subdirectory is the first
@@ -431,6 +437,25 @@ that can make a lookup fail which would otherwise have succeeded."
          (file-directory-p database)
          (file-expand-wildcards (expand-file-name (concat "*/" name) database))
          database)))
+
+(defun cooked--terminfo-search-path (database)
+  "TERMINFO_DIRS naming DATABASE ahead of wherever the child would look anyway.
+
+TERMINFO_DIRS rather than TERMINFO, and that is the whole of why this is a
+function.  TERMINFO is not an override -- ncurses searches it *first* and falls
+through on a miss, so a database of ours in that slot would answer for our entry
+and step aside for everything else, which is what makes setting it safe.  But it
+is also the variable a user may have set for their own database, and TERMINFO
+holds exactly one directory: taking it would mean choosing between their entries
+and ours.  TERMINFO_DIRS is a list and exists for precisely this, so there is
+nothing to choose between.
+
+The trailing empty entry is not a stray separator.  ncurses reads an empty
+directory name as the compiled-in default, so this says \"ours, then whatever
+you already had, then the system\" -- and dropping it would say \"ours, and
+nothing else\" on an implementation stricter than the one this was written
+against."
+  (concat database ":" (or (getenv "TERMINFO_DIRS") "")))
 
 (defun cooked-version ()
   "Version of cooked, as `Cargo.toml\=' declares it.
@@ -1062,7 +1087,7 @@ older three-element shape."
     ;; by every `A' and cleared by the `C' that consumes it, so nil here means no
     ;; prompt has begun since a command started.  A shell that drops its `D' therefore
     ;; still recovers at its next prompt instead of never opening a record again.
-    (`(command-start ,at . ,id)
+    (`(command-start ,cmdline ,at . ,id)
      ;; Nothing at all for the duplicate, not even a marker: the id names a mark no
      ;; record will hold, so registering it would only put an entry in
      ;; `cooked--marks' for a resize to move on nobody's behalf.
@@ -1080,9 +1105,19 @@ older three-element shape."
                ;; now it is neither's.
                cooked--delegated nil
                cooked--command-start marker
-               ;; Whatever we last submitted is what is now running.
-               cooked--command-input (prog1 cooked--submitted-input
-                                       (setq cooked--submitted-input nil))
+               ;; What the shell said it was about to run, and only failing that what
+               ;; we last submitted.  The shell's account wins where both exist: ours
+               ;; is the text Emacs *sent*, glued together across the lines of a
+               ;; multi-line construct by `cooked--send-input-string', while the
+               ;; shell's is what its parser actually made of it.  And it is the only
+               ;; account at all in every case where the shell kept the line -- a
+               ;; remote prompt, a program reading input of its own, a `no-input-mark'
+               ;; session -- where `cooked--submitted-input' is nil and the record
+               ;; used to carry nothing.  See `State::cmdline' on the Rust side.
+               cooked--command-input (or cmdline
+                                         (prog1 cooked--submitted-input
+                                           (setq cooked--submitted-input nil)))
+               cooked--submitted-input nil
                ;; The prompt this was typed at stops being the live one here, and
                ;; becomes the running command's.
                cooked--command-prompt (prog1 cooked--prompt-start
@@ -2128,17 +2163,13 @@ whole point of the exclusion list below: an inherited TERM_PROGRAM=iTerm.app
 sitting beside our own TERM is worse than no answer at all, because the programs
 that branch on it would take a path for a terminal that is not driving this pty.
 
-TERMINFO is the exception, and is set only when the inherited environment does
-not name one -- see `cooked--terminfo-directory\=' for why deferring to a
-database the user chose is the safe direction here."
+TERMINFO_DIRS is the exception: it is *extended* rather than replaced, because
+it is a search list and a user may have their own entries on it.  See
+`cooked--terminfo-search-path\='."
   (let* ((term (cooked--terminfo))
-         ;; Only alongside our own entry, and only when nothing already names a
-         ;; database.  TERMINFO is searched *first*, so overriding one the user set
-         ;; would point every other lookup on the system at a directory holding one
-         ;; entry -- and if we fell back to xterm-256color there is nothing of ours
-         ;; to find and nothing to say.
+         ;; Only alongside our own entry: if we fell back to xterm-256color there is
+         ;; nothing of ours to find and so nothing to say.
          (database (and (equal term cooked-term-name)
-                        (not (getenv "TERMINFO"))
                         (cooked--terminfo-directory term))))
     `(,@extra
       ("TERM" . ,term)
@@ -2149,7 +2180,7 @@ database the user chose is the safe direction here."
       ;; never heard of.  Set as a pair: they are read as one.
       ("TERM_PROGRAM" . "cooked")
       ("TERM_PROGRAM_VERSION" . ,(cooked-version))
-      ,@(and database `(("TERMINFO" . ,database)))
+      ,@(and database `(("TERMINFO_DIRS" . ,(cooked--terminfo-search-path database))))
       ;; LINES and COLUMNS are deliberately *not* set. ncurses treats them as
       ;; authoritative over the tty's own size (`use_env'), so a program started with
       ;; them pinned keeps its original geometry for life and ignores every SIGWINCH.
@@ -2159,7 +2190,7 @@ database the user chose is the safe direction here."
                  when (and split (not (member (substring entry 0 split)
                                               '("TERM" "COLORTERM" "TERM_PROGRAM"
                                                 "TERM_PROGRAM_VERSION" "LINES"
-                                                "COLUMNS"))))
+                                                "COLUMNS" "TERMINFO_DIRS"))))
                  collect (cons (substring entry 0 split) (substring entry (1+ split)))))))
 
 
@@ -2605,7 +2636,7 @@ two chances to disagree."
      (cooked--update-mouse-grab))
     ((or `(prompt-start ,_ . ,_) `(prompt-continuation ,_ . ,_)
          `(prompt-end ,_ . ,_)
-         `(command-start ,_ . ,_) `(command-end ,_ ,_ . ,_))
+         `(command-start ,_ ,_ . ,_) `(command-end ,_ ,_ . ,_))
      (cooked--handle-semantic event batch-start))
     (_ nil)))
 

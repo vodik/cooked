@@ -1384,7 +1384,7 @@ fn osc_133_becomes_semantic_events() {
             // each one back up with the marker Emacs makes for it.
             Event::PromptStart(at(0, 0), MarkId(0)),
             Event::PromptEnd(at(0, 2), MarkId(1)),
-            Event::CommandStart(at(0, 4), MarkId(2)),
+            Event::CommandStart(None, at(0, 4), MarkId(2)),
             Event::CommandEnd(Some(3), at(0, 7), MarkId(3)),
         ]
     );
@@ -1412,33 +1412,99 @@ fn osc_133_marks_a_continuation_prompt() {
     );
 }
 
-/// The proposal hangs `k=` off `P` and calls `A` shorthand for `P;k=i`; kitty sends
-/// `A;k=s` and never sends `P`. Both spellings have to arrive as the same thing.
+/// The proposal hangs `k=` off `P` and calls `A` shorthand for `P;k=i`, and Ghostty
+/// emits `P` from its prompt strings to dodge `A`'s implied fresh line. cooked has no
+/// fresh-line behaviour, so `P` would be the same mark under a second name -- and
+/// nothing that sends it can reach this parser, since the shipped snippets are gated on
+/// `TERM_PROGRAM=cooked` and write `A`, as does a fish 4 marking its own prompts. So a
+/// `P` is a kind this parser has never heard of, and is dropped whole like any other:
+/// no event, no mark id spent, and in particular no prompt start, which is the one
+/// outcome that would move state on a mark nobody here meant to send.
 #[test]
-fn osc_133_reads_both_spellings_of_the_prompt_kind() {
-    let mut t = term(4, 20, b"\x1b]133;P;k=s\x07\x1b]133;P\x07\x1b]133;A;k=i\x07");
+fn osc_133_ignores_the_other_spelling_of_the_prompt_mark() {
+    let mut t = term(4, 20, b"\x1b]133;P;k=s\x07\x1b]133;P\x07\x1b]133;A\x07");
+    assert_eq!(
+        t.drain().events,
+        vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))]
+    );
+}
+
+/// The bug this cost: `k=r` is the prompt drawn to the *right* of the input line, not
+/// a continuation of anything. No `B` follows one, so reading it as a `PS2` left Emacs
+/// in `prompt` for the rest of the session with the input line gone for good.
+///
+/// A kind nobody here has heard of joins it: the safe answer for an unknown mark is to
+/// move no state, and both of the other answers move some.
+#[test]
+fn osc_133_drops_a_prompt_kind_that_is_neither_initial_nor_a_continuation() {
+    for kind in [&b"r"[..], b"z", b"unheard-of"] {
+        let mut t = Term::new(4, 20);
+        t.feed(b"\x1b]133;A\x07");
+        t.feed(format!("\x1b]133;A;k={}\x07", String::from_utf8_lossy(kind)).as_bytes());
+        assert_eq!(
+            t.drain().events,
+            vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))],
+            "k={} should have been dropped whole",
+            String::from_utf8_lossy(kind)
+        );
+    }
+}
+
+/// `c` is the proposal's spelling of the same thing kitty calls `s`.
+#[test]
+fn osc_133_reads_both_spellings_of_a_continuation() {
+    let mut t = term(4, 20, b"\x1b]133;A;k=c\x07\x1b]133;A;k=s\x07");
     let at = |row, col| Anchor { row, col };
     assert_eq!(
         t.drain().events,
         vec![
             Event::PromptContinuation(at(0, 0), MarkId(0)),
-            // `P` with no `k=` is an initial prompt, exactly as a bare `A` is.
-            Event::PromptStart(at(0, 0), MarkId(1)),
-            Event::PromptStart(at(0, 0), MarkId(2)),
+            Event::PromptContinuation(at(0, 0), MarkId(1)),
         ]
     );
 }
 
-/// The kind we have not heard of is still not the start of a command. Guessing the
-/// other way would move the prompt marker onto a right-hand prompt or onto whatever
-/// the next revision of the proposal adds.
+/// The proposal gives the kind a default of `i`, so `k=` with nothing after it is an
+/// emitter saying nothing rather than an emitter naming a kind we have never heard of.
 #[test]
-fn osc_133_treats_an_unknown_prompt_kind_as_a_continuation() {
-    let mut t = term(4, 20, b"\x1b]133;A;k=r\x07");
+fn osc_133_treats_an_empty_prompt_kind_as_initial() {
+    let mut t = term(4, 20, b"\x1b]133;A;k=\x07");
     assert_eq!(
         t.drain().events,
-        vec![Event::PromptContinuation(Anchor { row: 0, col: 0 }, MarkId(0))]
+        vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))]
     );
+}
+
+/// The options real terminals actually send, none of which is a `k=`: kitty's
+/// `click_events=` (which is what fish 4 emits), Ghostty's `redraw=` and `cl=`, and
+/// ble.sh's `aid=`. Every one of them is an ordinary prompt start.
+#[test]
+fn osc_133_ignores_the_options_that_are_not_a_prompt_kind() {
+    for opts in [
+        &b"click_events=1"[..],
+        b"redraw=last;cl=line;aid=123",
+        b"cl=line",
+    ] {
+        let mut t = Term::new(4, 20);
+        t.feed(&[b"\x1b]133;A;", opts, b"\x07"].concat());
+        assert_eq!(
+            t.drain().events,
+            vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))],
+            "{} should have been an initial prompt",
+            String::from_utf8_lossy(opts)
+        );
+    }
+}
+
+/// The kind field is matched whole. Reading only its first byte had `Dfoo` agreeing to
+/// be a `D`, which is the parser inventing consent from a sender that meant something
+/// else. The examples are spelled with kinds this parser *does* accept, because those
+/// are the ones a prefix match would wrongly swallow -- a suffix on a kind nobody reads
+/// is dropped either way and would prove nothing.
+#[test]
+fn osc_133_matches_the_kind_field_exactly() {
+    let mut t = term(4, 20, b"\x1b]133;Dfoo\x07\x1b]133;Az\x07\x1b]133;\x07");
+    assert!(t.drain().events.is_empty());
 }
 
 /// `clear_to_prompt` cuts at the prompt the construct began at, so a continuation
@@ -1526,7 +1592,7 @@ fn marks_in_one_drain_keep_their_own_positions() {
         .events
         .into_iter()
         .filter_map(|e| match e {
-            Event::CommandStart(at, _) => Some(at),
+            Event::CommandStart(_, at, _) => Some(at),
             _ => None,
         })
         .collect();
@@ -1631,7 +1697,7 @@ fn an_anchor_survives_the_row_scrolling_off() {
     let mut t = term(3, 20, b"\x1b]133;C\x07start\r\n");
     t.feed(b"a\r\nb\r\nc\r\nd\r\n");
     let delta = t.drain();
-    let Some(&Event::CommandStart(at, _)) = delta.events.first() else {
+    let Some(Event::CommandStart(_, at, _)) = delta.events.first() else {
         panic!("no command-start: {:?}", delta.events);
     };
     assert_eq!(at.row, 0, "the mark fell on the first row written");

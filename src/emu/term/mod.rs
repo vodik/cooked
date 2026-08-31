@@ -73,6 +73,18 @@ pub struct Anchor {
     pub col: usize,
 }
 
+/// Which of the prompts a `133;A` mark is announcing. See [`State::prompt_kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PromptKind {
+    /// The prompt a command is typed at: `PS1`, and the default when `k=` is absent.
+    Initial,
+    /// `PS2` — the same command, still being typed.
+    Continuation,
+    /// A right-hand prompt, or a kind this version has never heard of. Neither starts a
+    /// command nor continues one, so the mark is dropped and no state moves.
+    Other,
+}
+
 /// Something the Lisp side must react to, beyond redrawing cells.
 ///
 /// The division of labour with [`Delta`]'s fields is deliberate, and worth keeping to:
@@ -109,7 +121,7 @@ pub enum Event {
     /// resize rewraps the grid, and the id is what pairs the two ends up again. See
     /// [`Delta::marks`].
     PromptStart(Anchor, MarkId),
-    /// OSC 133;A;k=s (or `P;k=s`) — a *continuation* prompt begins: `PS2`, the second
+    /// OSC 133;A;k=s — a *continuation* prompt begins: `PS2`, the second
     /// and later lines of a multi-line construct.
     ///
     /// Its own event rather than a flag on [`Event::PromptStart`] because the two differ
@@ -120,7 +132,11 @@ pub enum Event {
     /// OSC 133;B — user input begins; this is where comint takes over.
     PromptEnd(Anchor, MarkId),
     /// OSC 133;C — the command is running and owns the output region.
-    CommandStart(Anchor, MarkId),
+    ///
+    /// The [`String`] is the command line the shell said it was about to run, from the
+    /// mark's `cmdline_url=`, and is absent when the shell did not say. See
+    /// [`State::cmdline`] for why that spelling and not kitty's `cmdline=`.
+    CommandStart(Option<String>, Anchor, MarkId),
     /// OSC 133;D — the command finished, with its exit status when reported.
     CommandEnd(Option<i32>, Anchor, MarkId),
     /// The child changed its mind about mouse reporting. An occurrence rather than a
@@ -286,6 +302,13 @@ pub const BACKLOG_HIGH_WATER: usize = 8_000;
 /// Largest OSC payload forwarded to Lisp, in bytes. Well past any real title or
 /// hyperlink, and short of letting a single escape sequence allocate without bound.
 pub const OSC_PAYLOAD_LIMIT: usize = 1 << 20;
+
+/// How long a `cmdline_url=` may be before the `C` mark is taken without one.
+///
+/// A command line is typed, so this is generous past anything a person writes and still
+/// far short of letting a hostile stream size our heap. A `C` with an over-long command
+/// line is still a `C`; only the courtesy is dropped.
+pub const MAX_CMDLINE_LEN: usize = 8 << 10;
 
 /// Longest sixel body collected from one DCS string.
 ///
