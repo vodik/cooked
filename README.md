@@ -169,7 +169,7 @@ code already loaded and running is a switch in name only:
   (require 'cooked-shell-completion)     ; zsh's own completion, over OSC 51;C
   (require 'cooked-file-link)            ; file names in output become links
   (require 'cooked-next-error)           ; M-g M-n through a command's output
-  (require 'cooked-command-decorations)  ; a fringe marker per command, coloured by exit
+  (require 'cooked-command-decorations)  ; a fringe marker per command: exit code, or running
   (require 'cooked-project))             ; a session scoped to the project root
 ```
 

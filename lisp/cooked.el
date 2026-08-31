@@ -1129,11 +1129,49 @@ older three-element shape."
          ;; `comint-show-output' and `comint-write-output' all measure from it; it sat at
          ;; `point-min' until now, which is why deleting output flushed the whole buffer.
          (set-marker comint-last-input-end start)
-         (set-marker comint-last-output-start start))
+         (set-marker comint-last-output-start start)
+         (run-hook-with-args 'cooked-command-started-functions
+                             (cooked--running-anchor)))
        (cooked--refresh-keymap)))
     (`(command-end ,code ,at . ,id)
      (setq cooked--semantic nil)
      (cooked--mark-command-end code (cooked--register-mark (car id) at batch-start)))))
+
+(defcustom cooked-command-started-functions nil
+  "Functions called each time a command starts, with its anchor marker.
+
+The `C\=' half of the pair `cooked-command-finished-functions\=' is the `D\=' half
+of, and nil by default for the same reason: a session nothing is listening to
+pays only the `run-hook\='.
+
+Called from the `command-start\=' branch of `cooked--handle-semantic\=', once the
+makings of the record are in place, with one argument -- `cooked--running-anchor\='.
+
+There is no `cooked-command\=' to pass, and that is not an oversight to be fixed
+by building one early: a record exists because a `D\=' mark supplied an exit
+code, and a half-built one would carry `code\=' 0, which every reader of that
+field has always been entitled to read as success.  A consumer wanting more
+than the anchor reads `cooked--command-input\=' and `cooked--command-start\=',
+both of which are live at the moment this fires.
+
+Command decorations use it to put a marker up in the running colour that the
+`D\=' mark then repaints; a notifier for long-running commands wants this same
+moment to start its clock."
+  :type 'hook
+  :group 'cooked)
+
+(defun cooked--running-anchor ()
+  "Marker naming the row the running command was typed at, or nil.
+
+Its prompt where the shell sent an `A\=' mark and the start of its output
+otherwise -- the same fallback `cooked-command-decorations--anchor\=' makes for a
+finished record, made here for the command that does not have one yet.
+
+Nil between a `D\=' mark and the next `C\=', which is to say exactly when nothing
+is running: that is the question most callers are really asking."
+  (when-let* ((marker (or cooked--command-prompt cooked--command-start))
+              ((marker-position marker)))
+    marker))
 
 (defcustom cooked-command-finished-functions nil
   "Functions called with a `cooked-command\=' each time one finishes.

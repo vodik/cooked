@@ -199,6 +199,42 @@ render path themselves.
 
 ---
 
+## The running command's marker: a third state, not a third answer
+
+`cooked-command-decorations` marks the command that is running right now as well as the
+ones that have finished. Three states is where terminals with this feature land — VS
+Code's `terminalCommandDecoration` has `successBackground`, `errorBackground` and a
+`defaultBackground` for the command with no exit code yet; iTerm2 paints only the two,
+blue turning red on failure — and the interesting part is the *colour* of the third.
+
+It is dim (`shadow`), not an orange. Success and failure are the two answers to one
+question, and a command that is still running has not answered it. A warning colour
+would put a third answer on that axis, and in most themes would say something worse than
+"unfinished". Dim also keeps the loud markers loud: on a screen full of prompts the one
+that should catch the eye is the failure.
+
+**No record exists while a command runs**, which is why this is not simply a third
+branch in the paint. `cooked--commands` holds finished commands, and a `cooked-command`
+is built at the `D` mark because that is what supplies its exit code. Pushing a half-built
+one would give it `code` 0 — indistinguishable from success to every reader of that field,
+which is the worst wrong answer available. So the running marker is a single buffer-local
+overlay outside the weak table, keyed on nothing, and `cooked--running-anchor` is what
+says where it goes. One command runs at a time, so a singleton is the honest shape.
+
+**It is derived, not maintained.** `cooked-command-decorations--sync-running` puts it up
+or takes it down from `cooked--running-anchor` on every render, so no code path has to
+remember to clean up after itself: a `D` whose `C` was lost, an alt screen coming up
+under it, a drain dragging the overlay off its row all correct themselves at the next
+drain. The handover at the `D` mark is the one thing done eagerly, because both markers
+want the same row and the exit code is what the finished colour is read from.
+
+*Related:* the "already right" test in `cooked-command-decorations--place` names the face
+as well as the span. It used to name the span alone, which was sufficient while the only
+way a marker changed was moving; a marker repainted in place, in a new colour, would
+otherwise have stayed grey for the rest of the session.
+
+---
+
 ## `cooked--sync-cursor-type`: why it runs last, twice
 
 `evil` advises `select-window` to refresh its own cursor, and refreshes it again from

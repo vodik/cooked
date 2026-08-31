@@ -17,6 +17,7 @@
 (ert-deftest cooked-command-decorations-requiring-the-file-wires-the-hook ()
   "The extension point: requiring this file is the whole of opting in.
 Both halves of it -- the once-per-command paint and the per-render re-arm."
+  (should (memq #'cooked-command-decorations--started cooked-command-started-functions))
   (should (memq #'cooked-command-decorations--add cooked-command-finished-functions))
   (should (eq cooked-row-rendered-function #'cooked-command-decorations--rearm)))
 
@@ -239,6 +240,82 @@ primary marks every row damaged, and the re-arm repaints from that."
                  (lambda () (cooked-command-decorations--decoration-at
                              (cooked--command-prompt-position command) command))
                  8))))))
+
+(ert-deftest cooked-command-decorations-mark-a-running-command-neutrally ()
+  "The third state, and the whole of what makes it a third state rather than a
+third *answer*: it is dim, it carries no exit code, and there is nothing on it
+to click, since all three menu actions want a command that has finished."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (goto-char (point-max))
+    (let ((prompt (point-marker)))
+      (insert "$ sleep 1\n")
+      (setq cooked--command-prompt prompt
+            cooked--command-start (point-marker)
+            cooked--command-input "sleep 1")
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+        (cooked-command-decorations--started (cooked--running-anchor)))
+      (let* ((overlay cooked-command-decorations--running)
+             (string (overlay-get overlay 'before-string))
+             (spec (get-text-property 0 'display string)))
+        (should (= (overlay-start overlay) prompt))
+        (should (eq (caddr spec) 'cooked-command-decoration-running))
+        (should-not (get-text-property 0 'keymap string))
+        ;; And it names no command, there being no record to name: what the menu
+        ;; makes of a running prompt is `cooked--command-around''s business and
+        ;; predates this marker, but the marker itself offers it nothing.
+        (should-not (overlay-get overlay 'cooked-command-decoration))))))
+
+(ert-deftest cooked-command-decorations-take-the-running-marker-down-again ()
+  "Derived, not remembered.  Nothing has to notice the ways a running marker
+can be stranded -- a `D\=' whose `C\=' was lost, a session reset -- because the
+re-arm asks `cooked--running-anchor\=' what is running rather than trusting what
+it painted last."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (goto-char (point-max))
+    (let ((prompt (point-marker)))
+      (insert "$ sleep 1\n")
+      (setq cooked--command-prompt prompt cooked--command-start (point-marker))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+        (cooked-command-decorations--started (cooked--running-anchor))
+        (should cooked-command-decorations--running)
+        (setq cooked--command-prompt nil cooked--command-start nil)
+        (cooked-command-decorations--rearm (point-min) (point-max)))
+      (should-not cooked-command-decorations--running)
+      (should-not (overlays-in (point-min) (point-max))))))
+
+(ert-deftest cooked-command-decorations-hand-the-marker-over-at-the-exit-code ()
+  "The two markers want the same row -- this command's prompt -- so the running
+one comes down as the finished one goes up, at the `D\=' mark rather than at the
+next render.  One marker on that row throughout, and the colour changes under
+it."
+  (skip-unless (executable-find "zsh"))
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+    (cooked-tests--with-zsh
+      (cooked--send-input-string "sleep 1")
+      (should (cooked-tests--settle
+               (lambda () cooked-command-decorations--running) 8))
+      (let ((overlay cooked-command-decorations--running))
+        (should (= (overlay-start overlay)
+                   (marker-position (cooked--running-anchor))))
+        (should (eq (caddr (get-text-property
+                            0 'display (overlay-get overlay 'before-string)))
+                    'cooked-command-decoration-running)))
+      (should (cooked-tests--settle (lambda () cooked--commands) 8))
+      (should-not cooked-command-decorations--running)
+      (let* ((command (car cooked--commands))
+             (anchor (cooked--command-prompt-position command)))
+        (should (= 1 (length (overlays-at anchor))))
+        (should (cooked-command-decorations--decoration-at anchor command))
+        (should (eq (caddr (get-text-property
+                            0 'display
+                            (overlay-get (cooked-command-decorations--decoration-at
+                                          anchor command)
+                                         'before-string)))
+                    'cooked-command-decoration-success))))))
 
 (ert-deftest cooked-command-decorations-menu-finds-the-command-at-point ()
   "Keyboard-reachable: the menu command works from ordinary point, not only
