@@ -212,6 +212,7 @@ on a host where there is no file to source — this is the whole of what cooked 
 |---|---|---|
 | `OSC 133;A` | from precmd, before the prompt is drawn | where the prompt began: prompt-to-prompt navigation, the outer half of the evil command text object, and a command record that starts at its prompt rather than at its output |
 | `OSC 133;B` | **inside `PS1`**, at the end | the input line becomes an Emacs buffer — your keybindings, your kill ring, your completion UI. The one mark that changes who owns the keyboard |
+| `OSC 133;A;k=s` | **inside `PS2`**, at the start, with a `B` after it | the same, for the continuation lines of a multi-line construct. `k=s` is what stops it being read as a fresh prompt, so the command record stays filed under the prompt the construct was typed at |
 | `OSC 133;C` | from preexec | where the command's output begins. Without it there is no command record at all, and so no `next-error`, no rerun, no copy-just-the-output |
 | `OSC 133;D;<code>` | from precmd, **first**, before `$?` is clobbered | the exit status: the fringe marker's colour, and telling a failed command from a successful one |
 | `OSC 7;file://host/path` | from precmd | not a 133 mark, but the same hook: tracks `default-directory`, and tells cooked the shell is on this machine |
@@ -223,6 +224,12 @@ prompt itself as input. `D` has to come from the first precmd hook, or the statu
 reports belongs to whichever hook ran before it. The shipped snippets handle both, and
 re-append `B` every prompt because powerlevel10k, starship and most oh-my-zsh themes
 rebuild `PS1` from their own precmd and would otherwise drop it.
+
+`PS2` is where the marks have to travel *inside* the prompt string in both shells,
+including the `A`: there is no hook that runs before a continuation prompt is drawn.
+What cooked does with `k=`, and what it does with a mark sequence that is not the tidy
+`A B C D` above, is in
+[docs/FEATURES.md](docs/FEATURES.md#what-the-prompt-marks-are-read-to-mean).
 
 One thing the marks do not buy on their own: a `B` at the far end of an `ssh` does not
 hand Emacs the line by itself. A mark is a claim, and lifting the line out of a pty
@@ -435,6 +442,13 @@ There is nothing to install by hand. `TERM` defaults to `cooked-256color`, and t
 is compiled into `~/.terminfo` on first use — no root needed — falling back to
 `xterm-256color` with a message if `tic` is missing. Set `cooked-term-name` to nil to
 present as `xterm-256color` always.
+
+`TERMINFO` is exported alongside it, naming that directory. ncurses looks in
+`~/.terminfo` by default, so this matters only where the default is wrong — and it is
+wrong wherever `HOME` changes: `sudo`, `su -`, a service manager, a container mounting a
+different home. It is set only when the compiled entry is really there, and never over a
+`TERMINFO` you set yourself, since that variable is searched *first* and pointing it at a
+database holding one entry is the one way to break a lookup that would otherwise work.
 
 The one case that needs a hand is ssh, where the remote host has never heard of the entry:
 

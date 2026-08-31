@@ -192,6 +192,57 @@ are never answered — replying to a query would hand your clipboard to whatever
 Set `cooked-clipboard-write` to nil to refuse writes too.
 
 
+## What the prompt marks are read to mean
+
+The marks themselves, and where to put them, are in the
+[README](../README.md#the-marks-and-what-each-one-buys). This is the part nobody else
+writes down: what cooked does with a mark sequence that is not the tidy
+`A B C D` the shipped snippets emit.
+
+### Continuation prompts
+
+A shell reading the second line of `for x in 1 2; do` draws `PS2`, and that prompt gets
+`OSC 133;A;k=s` before it and `OSC 133;B` after — the same pair a first prompt gets,
+with `k=s` added. Without them every line after the first falls back to the shell's own
+line editor, so you would compose the first line in Emacs and the rest in zsh.
+
+`k=` says what kind of prompt this is: `i` is an initial one and anything else — `s`
+secondary, `c` continuation, `r` the right-hand prompt — is not. Only an initial prompt
+begins a command, so a mark with any other kind hands Emacs the line without moving the
+prompt marker: the command record stays filed under the prompt the construct was typed
+at rather than under its last continuation line. A kind cooked has never heard of is
+read as "not initial" for the same reason.
+
+Both spellings are read. kitty writes `A;k=s` and never sends `P`; the freedesktop
+proposal defines `A` as shorthand for `P;k=i` and hangs `k=` off `P`. cooked *emits*
+`A;k=s`, which is the spelling with emitters in the wild, and *accepts* either.
+
+Each continuation line is submitted on its own, so the command record accumulates them:
+`cooked-command-input` for the construct above is all three lines joined by newlines,
+not just the `done` that completed it.
+
+### Duplicate and missing marks
+
+`no-marks` exists so that a prompt already emitting its own OSC 133 can stand cooked's
+half down, and that is the right fix — but it is a thing your rc has to do, and a shell
+at the far end of an `ssh` may know nothing about it. So the failure mode is specified
+rather than left to be discovered:
+
+| What arrives | What cooked does |
+|---|---|
+| a second `A` before any `C` | replaces the prompt marker — the later mark is where the prompt on screen actually starts |
+| a second `C` before the `D` | **ignored**; the first `C` keeps the output region |
+| a `C` after a fresh `A` | a new command, even with no `D` in between |
+| a second `D` | nothing; the first one closed the record and cleared the marker it guards on |
+| a `D` with no `C` | nothing recorded — there is no region and no input to attribute to it |
+
+The second `C` is the only one that could lose information, which is why it is the one
+that is ignored rather than obeyed: obeying it would move the start of the output region
+past whatever the command had already printed, and the exit code arriving at `D` was
+attributed to the record the *first* `C` opened. The `A` escape hatch on that rule is
+what keeps a shell that drops its `D` from never opening a record again — a fresh prompt
+is the shell saying the last command is over, whether or not it said so with a `D`.
+
 ## Adding your own escape sequences
 
 Every OSC except 133 is passed through verbatim, so teaching cooked a new sequence

@@ -99,6 +99,20 @@ __cooked_prompt() {
       *'\033]133;B\007'*) ;;
       *) PS1="${PS1}"'\[\033]133;B\007\]' ;;
     esac
+    # PS2, the continuation prompt.  Without a `B' here every line after the first of
+    # `for x in 1 2; do' falls out of Emacs' hands back to readline, so you compose
+    # the first line in Emacs and the rest in bash's own line editor.
+    #
+    # `A;k=s' rather than a bare `A': `k=s' says this prompt *continues* the previous
+    # one, which is what lets Emacs leave the prompt marker where the construct began
+    # instead of restarting the command record at the last continuation line.  Both
+    # halves are appended together and tested for as one -- an `A' with no `B' here
+    # would be a mark with nothing to buy -- so this is under `input-mark' rather
+    # than split across the two features the way PS1 is.
+    case "$PS2" in
+      *'\033]133;B\007'*) ;;
+      *) PS2='\[\033]133;A;k=s\007\]'"${PS2}"'\[\033]133;B\007\]' ;;
+    esac
   fi
 }
 

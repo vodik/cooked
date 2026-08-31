@@ -885,5 +885,164 @@ only the scrollback."
     ;; The live screen is untouched: real xterm's `3 J' never erases it.
     (should (string-match-p "line60" (cooked-tests--text)))))
 
+
+;;; Duplicate and missing OSC 133 marks
+;;
+;; Nobody specifies these -- not kitty, not Ghostty, not the freedesktop proposal --
+;; and we own the parser, so the behaviour is ours to state and ours to keep true.
+;; The `no-marks' negotiation exists to stop two emitters bracketing the same prompt;
+;; these are what happens when it fails, which is a shell on the far end of an ssh
+;; whose rc knows nothing of the feature list.  Driven through a real pty rather than
+;; by handing `cooked--handle-semantic' events, because the marks have to survive the
+;; Rust half -- which is where a duplicate `A' is decided -- to mean anything here.
+
+(defun cooked-tests--marks (script)
+  "An argv printing SCRIPT and then waiting, for driving marks by hand.
+
+SCRIPT is a `printf\=' format, so the marks are written as the octal escapes a
+shell would print rather than as literal control bytes.  The trailing sleep is
+what keeps the child alive long enough for the assertions: a session whose child
+has exited is torn down."
+  (list "/bin/sh" "-c" (concat "printf '" script "'; sleep 5")))
+
+(ert-deftest cooked-a-second-command-start-is-ignored ()
+  "The one duplicate that loses information, so the one worth a rule.
+
+A second `C' before the `D' would move the start of the output region down to
+it, dropping whatever the command printed in between -- and the exit code, which
+the first mark opened the record for, would then be attributed to a region that
+does not describe it.  The first `C' wins."
+  (cooked-tests--with-session
+      (cooked-tests--marks
+       "\\033]133;A\\007$ \\033]133;B\\007cmd\\r\\n\\033]133;C\\007one\\r\\n\\033]133;C\\007two\\r\\n\\033]133;D;0\\007")
+    (should (cooked-tests--settle (lambda () cooked--commands) 8))
+    (should (= (length cooked--commands) 1))
+    (let ((command (car cooked--commands)))
+      ;; Both lines are inside the record: the region begins at the first `C'.
+      (should (string-match-p
+               "one"
+               (buffer-substring-no-properties (cooked--command-start-position command)
+                                               (cooked--command-end-position command)))))))
+
+(ert-deftest cooked-a-command-start-after-a-fresh-prompt-is-not-a-duplicate ()
+  "The escape hatch on that rule.  A shell that drops its `D' -- or one killed
+between two commands -- must still open a record at its next prompt, or the
+session never produces another one.  `A' is what says the last command is over."
+  (cooked-tests--with-session
+      (cooked-tests--marks
+       "\\033]133;C\\007one\\r\\n\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007two\\r\\n\\033]133;D;0\\007")
+    (should (cooked-tests--settle (lambda () cooked--commands) 8))
+    (let ((command (car cooked--commands)))
+      ;; The record is the second command's, so the first one's output is above it.
+      (should-not (string-match-p
+                   "one"
+                   (buffer-substring-no-properties (cooked--command-start-position command)
+                                                   (cooked--command-end-position command)))))))
+
+(ert-deftest cooked-a-second-command-end-is-a-no-op ()
+  "`D' clears the start marker on its way out and guards on it, so the second one
+has nothing to close.  One record, and the exit code is the first `D''s."
+  (cooked-tests--with-session
+      (cooked-tests--marks
+       "\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007out\\r\\n\\033]133;D;0\\007\\033]133;D;7\\007")
+    (should (cooked-tests--settle (lambda () cooked--commands) 8))
+    (should (= (length cooked--commands) 1))
+    (should (= (cooked-command-code (car cooked--commands)) 0))))
+
+(ert-deftest cooked-a-command-end-without-a-start-records-nothing ()
+  "There is no region to record and no input to attribute to it.  A `D' arriving
+alone is a shell whose `C' we never saw -- the first prompt after sourcing the
+snippet, or a `no-marks' rc that only half took effect."
+  (cooked-tests--with-session
+      (cooked-tests--marks "\\033]133;A\\007$ \\033]133;B\\007\\033]133;D;0\\007")
+    (should (cooked-tests--settle (lambda () (eq cooked--semantic nil)) 8))
+    (should-not cooked--commands)))
+
+(ert-deftest cooked-a-second-prompt-start-replaces-the-prompt-marker ()
+  "A second `A' before any `C' is a prompt redrawn, not a command begun -- a
+theme repainting, or two emitters bracketing the same prompt.  The later mark
+wins, because it is the one the prompt on screen actually starts at."
+  (cooked-tests--with-session
+      (cooked-tests--marks "one\\r\\n\\033]133;A\\007two\\r\\n\\033]133;A\\007$ \\033]133;B\\007")
+    (should (cooked-tests--settle
+             (lambda () (and cooked--prompt-start (eq cooked--semantic 'input))) 8))
+    (should (string-prefix-p
+             "$ " (buffer-substring-no-properties
+                   (marker-position cooked--prompt-start)
+                   (save-excursion (goto-char (marker-position cooked--prompt-start))
+                                   (line-end-position)))))))
+
+;;; Continuation prompts
+
+(ert-deftest cooked-a-continuation-prompt-keeps-the-prompt-marker ()
+  "`A;k=s' is a prompt that continues the previous one -- `PS2'.  It hands Emacs
+the line the same way a first prompt does, and deliberately does *not* move the
+prompt marker: the command record is filed under the prompt the construct began
+at, not under its last continuation line."
+  (cooked-tests--with-session
+      (cooked-tests--marks
+       "\\033]133;A\\007$ for x in 1 2; do\\r\\n\\033]133;A;k=s\\007> \\033]133;B\\007")
+    (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 8))
+    ;; Emacs owns the continuation line: the `B' arrived and was believed.
+    (should (cooked--input-state-p))
+    ;; And the marker is still on the line the construct began at.
+    (should cooked--prompt-start)
+    (should (string-match-p
+             "for x in 1 2"
+             (buffer-substring-no-properties
+              (marker-position cooked--prompt-start)
+              (save-excursion (goto-char (marker-position cooked--prompt-start))
+                              (line-end-position)))))))
+
+(ert-deftest cooked-zsh-marks-its-continuation-prompt ()
+  "The end to end version, and the reason PS2 is worth touching at all: without
+the mark every line after the first of a multi-line construct falls out of
+Emacs' hands back to ZLE, so you compose the first line in Emacs and the rest in
+the shell's own line editor.
+
+The record is the other half.  Each continuation line is submitted separately,
+so the command's own text has to accumulate across them or the record for the
+whole construct would say only its last line."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (cooked--replace-input "for x in alpha beta; do")
+    (cooked-send-input)
+    ;; The continuation prompt arrives and Emacs still owns the line.
+    (should (cooked-tests--settle
+             (lambda () (and cooked--prompt-continued
+                             (eq cooked--semantic 'input)
+                             (cooked--input-start-position)))
+             8))
+    (should (cooked--input-state-p))
+    ;; Waiting on the next prompt has to be a wait for the input region to *move*.
+    ;; `cooked--prompt-continued' is already set from the prompt above and stays set
+    ;; for the whole construct, so a settle on it returns at once and the line below
+    ;; would be typed at a prompt the shell has not drawn yet.
+    (let ((line (cooked--input-start-position)))
+      (cooked--replace-input "echo $x")
+      (cooked-send-input)
+      (should (cooked-tests--settle
+               (lambda () (let ((now (cooked--input-start-position)))
+                            (and now (> now line) cooked--prompt-continued)))
+               8)))
+    (cooked--replace-input "done")
+    (cooked-send-input)
+    (should (cooked-tests--settle
+             (lambda () (and cooked--commands
+                             (string-match-p "beta" (cooked-tests--text))))
+             8))
+    (let ((command (car cooked--commands)))
+      ;; The whole construct, not just the line that completed it.
+      (should (equal (cooked-command-input command)
+                     "for x in alpha beta; do\necho $x\ndone"))
+      ;; And the prompt it is filed under is the one it was typed at.
+      (should (string-match-p
+               "for x in alpha beta"
+               (buffer-substring-no-properties
+                (cooked--command-prompt-position command)
+                (save-excursion
+                  (goto-char (cooked--command-prompt-position command))
+                  (line-end-position))))))))
+
 (provide 'cooked-tests-osc)
 ;;; cooked-tests-osc.el ends here

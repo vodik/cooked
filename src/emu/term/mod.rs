@@ -109,6 +109,14 @@ pub enum Event {
     /// resize rewraps the grid, and the id is what pairs the two ends up again. See
     /// [`Delta::marks`].
     PromptStart(Anchor, MarkId),
+    /// OSC 133;A;k=s (or `P;k=s`) — a *continuation* prompt begins: `PS2`, the second
+    /// and later lines of a multi-line construct.
+    ///
+    /// Its own event rather than a flag on [`Event::PromptStart`] because the two differ
+    /// in what they mean to Emacs rather than in degree: this one opens no command and
+    /// moves no prompt marker, it only says that the line about to be read continues the
+    /// one already submitted. See [`State::continues_prompt`].
+    PromptContinuation(Anchor, MarkId),
     /// OSC 133;B — user input begins; this is where comint takes over.
     PromptEnd(Anchor, MarkId),
     /// OSC 133;C — the command is running and owns the output region.

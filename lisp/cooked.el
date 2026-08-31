@@ -408,6 +408,26 @@ xterm-256color if that is not possible."
       (message "cooked: could not install terminfo, presenting as xterm-256color")
       "xterm-256color"))))
 
+(defun cooked--terminfo-directory (name)
+  "Our own terminfo database, if the compiled entry for NAME is in it.
+
+~/.terminfo is where `cooked--terminfo\=' installs the entry, and ncurses looks
+there by default -- so this exists for the cases where the default is wrong.
+Anything that changes HOME loses the entry silently: `sudo\=', `su -\=', a
+service manager, a container that mounts a different home.  Naming the
+directory in TERMINFO is what survives that.
+
+The entry is looked for rather than assumed, and by wildcard rather than by
+path: implementations disagree about whether the subdirectory is the first
+letter of the name or its hex code, and a TERMINFO pointing at a database that
+does not describe TERM is worse than not setting it -- it is the one variable
+that can make a lookup fail which would otherwise have succeeded."
+  (let ((database (expand-file-name "~/.terminfo")))
+    (and name
+         (file-directory-p database)
+         (file-expand-wildcards (expand-file-name (concat "*/" name) database))
+         database)))
+
 (defun cooked-version ()
   "Version of cooked, as `Cargo.toml\=' declares it.
 
@@ -605,6 +625,17 @@ merely has nothing to offer `completion-at-point\='.")
   "Marker where the prompt now on screen began, from the OSC 133 `A' mark.
 Moved into `cooked--command-prompt' when a command starts, the way
 `cooked--submitted-input' is moved into `cooked--command-input'.")
+(defvar-local cooked--prompt-continued nil
+  "Whether the prompt now on screen continues the line already submitted.
+
+Set by the OSC 133 `A;k=s\=' mark a shell puts on its `PS2\=' and cleared at the
+next real prompt or at `command-start\='.  One boolean rather than a counter:
+what reads it only asks whether the next submission extends the last one, and a
+construct twenty lines deep is that question answered twenty times.
+
+`cooked--send-input-string\=' is the reader.  Without this the record for
+\"for x in 1 2; do ... done\" would say only `done\=', because each continuation
+line is submitted separately and would overwrite the one before it.")
 (defvar-local cooked--command-prompt nil
   "Marker where the prompt that ran the current command began.")
 (defvar-local cooked--command-start nil
@@ -1000,36 +1031,67 @@ older three-element shape."
            ;; `cooked-previous-command' moves between and where the outer half of
            ;; an `evil' command text object starts.  The mark arrives before the
            ;; prompt itself, so this is column 0 of its first row.
-           cooked--prompt-start (cooked--register-mark (car id) at batch-start)))
+           cooked--prompt-start (cooked--register-mark (car id) at batch-start)
+           ;; Whatever was being continued is over: this prompt is a new line.
+           cooked--prompt-continued nil))
+    ;; A continuation prompt -- `PS2' -- is the same command still being typed.  It
+    ;; deliberately does *not* touch `cooked--prompt-start': that marker is where the
+    ;; construct began, which is what the command record is filed under and what
+    ;; `cooked-previous-command' lands on.  Moving it here would start the record at
+    ;; the last continuation line.  The `B' that follows still arrives, so Emacs owns
+    ;; the continuation line exactly as it owns the first one.
+    (`(prompt-continuation ,_ . ,_)
+     (setq cooked--semantic 'prompt
+           ;; A fresh line, whoever it continues, and Emacs may have it back.
+           cooked--delegated nil
+           cooked--prompt-continued t))
     (`(prompt-end ,_ . ,_)
      (setq cooked--semantic 'input)
      (cooked--refresh-keymap))
+    ;; A second `C' with no prompt since the first is ignored, rather than moving the
+    ;; start of the output region down to it.  Two shells both emitting the marks --
+    ;; the `no-marks' negotiation exists to prevent exactly this, and says nothing
+    ;; about what happens when it fails -- would otherwise file the command's output
+    ;; from the later mark, losing whatever fell between them, and attribute the exit
+    ;; code the first mark opened the record for to a region it does not describe.
+    ;; `cooked--prompt-start' is the test rather than a counter of our own: it is set
+    ;; by every `A' and cleared by the `C' that consumes it, so nil here means no
+    ;; prompt has begun since a command started.  A shell that drops its `D' therefore
+    ;; still recovers at its next prompt instead of never opening a record again.
     (`(command-start ,at . ,id)
-     (let* ((marker (cooked--register-mark (car id) at batch-start))
-            (start (marker-position marker)))
-       (setq cooked--semantic 'output
-             ;; The announcement covered the line that just ended.  Anything the
-             ;; command spawns -- an `ssh', a nested shell, a REPL -- announces
-             ;; for itself or does not announce at all.
-             cooked--completion-nonce nil
-             cooked--completion-reply-capable nil
-             ;; The delegated line has been submitted; it was the shell's, and
-             ;; now it is neither's.
-             cooked--delegated nil
-             cooked--command-start marker
-             ;; Whatever we last submitted is what is now running.
-             cooked--command-input (prog1 cooked--submitted-input
-                                     (setq cooked--submitted-input nil))
-             ;; The prompt this was typed at stops being the live one here, and
-             ;; becomes the running command's.
-             cooked--command-prompt (prog1 cooked--prompt-start
-                                      (setq cooked--prompt-start nil)))
-       ;; Output begins here, so this is where the input ended.  `comint-delete-output',
-       ;; `comint-show-output' and `comint-write-output' all measure from it; it sat at
-       ;; `point-min' until now, which is why deleting output flushed the whole buffer.
-       (set-marker comint-last-input-end start)
-       (set-marker comint-last-output-start start))
-     (cooked--refresh-keymap))
+     ;; Nothing at all for the duplicate, not even a marker: the id names a mark no
+     ;; record will hold, so registering it would only put an entry in
+     ;; `cooked--marks' for a resize to move on nobody's behalf.
+     (unless (and cooked--command-start (marker-position cooked--command-start)
+                  (null cooked--prompt-start))
+       (let* ((marker (cooked--register-mark (car id) at batch-start))
+              (start (marker-position marker)))
+         (setq cooked--semantic 'output
+               ;; The announcement covered the line that just ended.  Anything the
+               ;; command spawns -- an `ssh', a nested shell, a REPL -- announces
+               ;; for itself or does not announce at all.
+               cooked--completion-nonce nil
+               cooked--completion-reply-capable nil
+               ;; The delegated line has been submitted; it was the shell's, and
+               ;; now it is neither's.
+               cooked--delegated nil
+               cooked--command-start marker
+               ;; Whatever we last submitted is what is now running.
+               cooked--command-input (prog1 cooked--submitted-input
+                                       (setq cooked--submitted-input nil))
+               ;; The prompt this was typed at stops being the live one here, and
+               ;; becomes the running command's.
+               cooked--command-prompt (prog1 cooked--prompt-start
+                                        (setq cooked--prompt-start nil))
+               ;; The construct has been submitted in full; the next line submitted
+               ;; starts a command of its own.
+               cooked--prompt-continued nil)
+         ;; Output begins here, so this is where the input ended.  `comint-delete-output',
+         ;; `comint-show-output' and `comint-write-output' all measure from it; it sat at
+         ;; `point-min' until now, which is why deleting output flushed the whole buffer.
+         (set-marker comint-last-input-end start)
+         (set-marker comint-last-output-start start))
+       (cooked--refresh-keymap)))
     (`(command-end ,code ,at . ,id)
      (setq cooked--semantic nil)
      (cooked--mark-command-end code (cooked--register-mark (car id) at batch-start)))))
@@ -2060,27 +2122,41 @@ Every name this function sets is also stripped from the inherited environment,
 so a value from whatever terminal started Emacs cannot shadow ours.  That is the
 whole point of the exclusion list below: an inherited TERM_PROGRAM=iTerm.app
 sitting beside our own TERM is worse than no answer at all, because the programs
-that branch on it would take a path for a terminal that is not driving this pty."
-  `(,@extra
-    ("TERM" . ,(cooked--terminfo))
-    ("COLORTERM" . "truecolor")
-    ;; Identity, not capability -- what we can do is in the terminfo entry and
-    ;; COLORTERM.  Nothing keys off "cooked" yet, so consumers fall through to
-    ;; their defaults, which is the correct behaviour for a terminal they have
-    ;; never heard of.  Set as a pair: they are read as one.
-    ("TERM_PROGRAM" . "cooked")
-    ("TERM_PROGRAM_VERSION" . ,(cooked-version))
-    ;; LINES and COLUMNS are deliberately *not* set. ncurses treats them as
-    ;; authoritative over the tty's own size (`use_env'), so a program started with
-    ;; them pinned keeps its original geometry for life and ignores every SIGWINCH.
-    ;; The winsize is the single source of truth; shells re-export these themselves.
-    ,@(cl-loop for entry in process-environment
-               for split = (string-search "=" entry)
-               when (and split (not (member (substring entry 0 split)
-                                            '("TERM" "COLORTERM" "TERM_PROGRAM"
-                                              "TERM_PROGRAM_VERSION" "LINES"
-					      "COLUMNS"))))
-               collect (cons (substring entry 0 split) (substring entry (1+ split))))))
+that branch on it would take a path for a terminal that is not driving this pty.
+
+TERMINFO is the exception, and is set only when the inherited environment does
+not name one -- see `cooked--terminfo-directory\=' for why deferring to a
+database the user chose is the safe direction here."
+  (let* ((term (cooked--terminfo))
+         ;; Only alongside our own entry, and only when nothing already names a
+         ;; database.  TERMINFO is searched *first*, so overriding one the user set
+         ;; would point every other lookup on the system at a directory holding one
+         ;; entry -- and if we fell back to xterm-256color there is nothing of ours
+         ;; to find and nothing to say.
+         (database (and (equal term cooked-term-name)
+                        (not (getenv "TERMINFO"))
+                        (cooked--terminfo-directory term))))
+    `(,@extra
+      ("TERM" . ,term)
+      ("COLORTERM" . "truecolor")
+      ;; Identity, not capability -- what we can do is in the terminfo entry and
+      ;; COLORTERM.  Nothing keys off "cooked" yet, so consumers fall through to
+      ;; their defaults, which is the correct behaviour for a terminal they have
+      ;; never heard of.  Set as a pair: they are read as one.
+      ("TERM_PROGRAM" . "cooked")
+      ("TERM_PROGRAM_VERSION" . ,(cooked-version))
+      ,@(and database `(("TERMINFO" . ,database)))
+      ;; LINES and COLUMNS are deliberately *not* set. ncurses treats them as
+      ;; authoritative over the tty's own size (`use_env'), so a program started with
+      ;; them pinned keeps its original geometry for life and ignores every SIGWINCH.
+      ;; The winsize is the single source of truth; shells re-export these themselves.
+      ,@(cl-loop for entry in process-environment
+                 for split = (string-search "=" entry)
+                 when (and split (not (member (substring entry 0 split)
+                                              '("TERM" "COLORTERM" "TERM_PROGRAM"
+                                                "TERM_PROGRAM_VERSION" "LINES"
+                                                "COLUMNS"))))
+                 collect (cons (substring entry 0 split) (substring entry (1+ split)))))))
 
 
 (defvar cooked--resyncing nil
@@ -2523,7 +2599,8 @@ two chances to disagree."
      ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this,
      ;; so it has to move when the child changes its mind about the mouse.
      (cooked--update-mouse-grab))
-    ((or `(prompt-start ,_ . ,_) `(prompt-end ,_ . ,_)
+    ((or `(prompt-start ,_ . ,_) `(prompt-continuation ,_ . ,_)
+         `(prompt-end ,_ . ,_)
          `(command-start ,_ . ,_) `(command-end ,_ ,_ . ,_))
      (cooked--handle-semantic event batch-start))
     (_ nil)))

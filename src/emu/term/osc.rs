@@ -7,7 +7,7 @@ impl State {
         let Some(kind) = params.get(1).and_then(|p| p.first()) else {
             return;
         };
-        if !matches!(kind, b'A' | b'B' | b'C' | b'D') {
+        if !matches!(kind, b'A' | b'B' | b'C' | b'D' | b'P') {
             return;
         }
         // Anchored here, where the mark actually is in the stream. See [`Anchor`].
@@ -18,9 +18,23 @@ impl State {
         // about again.
         let id = self.take_mark(at);
         self.events.push(match kind {
-            b'A' => {
-                self.prompt_start = Some(at);
-                Event::PromptStart(at, id)
+            // `A` and `P` are the same mark read twice. The proposal defines `A` as
+            // shorthand for `P;k=i` and hangs the `k=` option off `P`; kitty spells the
+            // secondary prompt `A;k=s` and never sends `P` at all. Accepting both costs
+            // one arm, and picking only one would silently lose the continuation prompt
+            // of whichever emitter we did not pick.
+            b'A' | b'P' => {
+                if Self::continues_prompt(params) {
+                    // Deliberately *not* moving `prompt_start`. A continuation prompt is
+                    // the same command still being typed, so the prompt it began at is
+                    // the one `clear_to_prompt` must keep and the one Emacs files the
+                    // command record under -- taking the last continuation line instead
+                    // would start the record halfway through the construct.
+                    Event::PromptContinuation(at, id)
+                } else {
+                    self.prompt_start = Some(at);
+                    Event::PromptStart(at, id)
+                }
             }
             b'B' => Event::PromptEnd(at, id),
             b'C' => Event::CommandStart(at, id),
@@ -34,6 +48,25 @@ impl State {
             ),
             _ => return,
         });
+    }
+
+    /// Whether an `A`/`P` mark says "this prompt continues the one before it".
+    ///
+    /// `k=` names the kind of prompt: `i` initial, `s` secondary — zsh's `PS2`, bash's
+    /// `PS2` — `c` continuation, `r` the right-hand prompt. Only an initial prompt
+    /// begins a command, so the test is "`k=` present and not `i`" rather than a list of
+    /// the kinds we happen to have heard of: a kind we do not know is still not the
+    /// start of a command, while guessing the other way loses the prompt marker for a
+    /// whole multi-line construct.
+    ///
+    /// Options are read from `params[2..]`, which is where they arrive: `;` separates
+    /// OSC parameters, so `133;A;k=s` is three of them.
+    fn continues_prompt(params: &[&[u8]]) -> bool {
+        params
+            .iter()
+            .skip(2)
+            .filter_map(|opt| opt.strip_prefix(b"k=".as_slice()))
+            .any(|kind| kind != b"i")
     }
 
     /// Name the mark at ANCHOR and leave it on the cell the anchor points at.

@@ -1134,8 +1134,19 @@ for ZLE."
   "Submit TEXT to the child as one line of input.
 
 Split out from `cooked-send-input' because `comint-input-sender' hands us the
-string rather than the buffer region, and both must submit the same way."
-  (setq cooked--submitted-input (and (not (string-blank-p text)) text))
+string rather than the buffer region, and both must submit the same way.
+
+At a continuation prompt this *appends* rather than replaces.  A multi-line
+construct reaches the shell one line at a time -- Emacs owns each `PS2' line
+the same way it owns the first -- so the record for
+\"for x in 1 2; do ... done\" would otherwise say only `done', which is the
+line submitted last rather than the command that ran.  See
+`cooked--prompt-continued'."
+  (setq cooked--submitted-input
+        (let ((line (and (not (string-blank-p text)) text)))
+          (if (and cooked--prompt-continued cooked--submitted-input)
+              (concat cooked--submitted-input "\n" (or line ""))
+            line)))
   (cooked--send-to-child
    ;; A multi-line submission has to arrive as a paste, or the shell's line editor
    ;; treats every embedded newline as its own Enter and runs the fragments one at

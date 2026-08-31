@@ -314,7 +314,11 @@ DEBUG trap fires for every command including the prompt\='s own."
         (call-process-region (point-min) (point-max) (executable-find "bash")
                              t t nil "--rcfile" rc "-i"))
       (goto-char (point-min))
-      (while (re-search-forward "\e]133;\\([A-D]\\)\\(;[0-9]+\\)?\a" nil t)
+      ;; The options are captured, not skipped past: `A;k=s' -- the continuation
+      ;; prompt -- differs from a bare `A' in what it means rather than in detail,
+      ;; and a regexp that read it as an `A' would report a construct's every
+      ;; continuation line as a fresh prompt.
+      (while (re-search-forward "\e]133;\\([A-D]\\)\\(;[^\a]*\\)?\a" nil t)
         (push (concat (match-string 1) (or (match-string 2) "")) marks)))
     (nreverse marks)))
 
@@ -382,6 +386,25 @@ way to break it."
     (unwind-protect
         (let ((marks (cooked-tests--bash-marks rc "(exit 7)\nexit\n")))
           (should (member "D;7" marks)))
+      (delete-file rc))))
+
+(ert-deftest cooked-bash-marks-its-continuation-prompt ()
+  "PS2 carries the marks too, or every line after the first of a multi-line
+construct falls out of Emacs\=' hands back to readline.
+
+`A;k=s\=' rather than a bare `A\=': the option is what says this prompt continues
+the previous one, which is what keeps the command record filed under the prompt
+the construct was typed at."
+  (skip-unless (executable-find "bash"))
+  (let ((rc (cooked-tests--bash-rc)))
+    (unwind-protect
+        (let ((marks (cooked-tests--bash-marks
+                      rc "for x in 1 2; do\necho $x\ndone\nexit\n")))
+          ;; Two continuation prompts -- after `do\=' and after `echo $x\=' -- and a
+          ;; `B\=' for each, since the point is that Emacs keeps the line.
+          (should (= 2 (seq-count (lambda (m) (equal m "A;k=s")) marks)))
+          ;; Still one real prompt per command, not one per line typed.
+          (should (= 2 (seq-count (lambda (m) (equal m "A")) marks))))
       (delete-file rc))))
 
 (ert-deftest cooked-bash-survives-a-theme-that-rebuilds-the-prompt ()
@@ -577,6 +600,28 @@ stay silent -- `text-scale-mode-hook' is the one that has to pick it up."
 (ert-deftest cooked-terminfo-falls-back-when-unavailable ()
   (let ((cooked-term-name nil))
     (should (equal (cooked--terminfo) "xterm-256color"))))
+
+(ert-deftest cooked-exports-its-own-terminfo-database ()
+  "The default lookup finds ~/.terminfo only while HOME says what it said when we
+compiled the entry, and `sudo\=', `su -\=' and a container all change it.  Naming
+the directory is what survives that."
+  ;; The entry has to be installed for there to be anything to name; installing it
+  ;; is `cooked--terminfo\=''s job and is covered by its own test.
+  (cooked--terminfo)
+  (skip-unless (cooked--terminfo-directory cooked-term-name))
+  (let ((env (cooked--child-environment)))
+    (should (equal (cdr (assoc "TERMINFO" env)) (expand-file-name "~/.terminfo"))))
+  ;; Not when we fell back to xterm-256color: there is nothing of ours to find, and
+  ;; TERMINFO is searched first, so pointing at our database would make a lookup
+  ;; fail that would otherwise have succeeded.
+  (let* ((cooked-term-name nil)
+         (env (cooked--child-environment)))
+    (should-not (assoc "TERMINFO" env)))
+  ;; And never over one the user chose.  Same reason from the other side: their
+  ;; database is the one holding the rest of their entries.
+  (let* ((process-environment (cons "TERMINFO=/opt/terminfo" process-environment))
+         (env (cooked--child-environment)))
+    (should (equal (cdr (assoc "TERMINFO" env)) "/opt/terminfo"))))
 
 (ert-deftest cooked-does-not-pin-lines-and-columns ()
   "Regression: exporting LINES/COLUMNS makes ncurses ignore the tty size, so a

@@ -1390,6 +1390,71 @@ fn osc_133_becomes_semantic_events() {
     );
 }
 
+/// PS2. The mark the shell puts on a continuation prompt has to reach Emacs as
+/// something other than a fresh prompt, or the command record for a multi-line
+/// construct begins at its last line instead of at the prompt it was typed at.
+#[test]
+fn osc_133_marks_a_continuation_prompt() {
+    let mut t = term(
+        4,
+        20,
+        b"\x1b]133;A\x07> \x1b]133;A;k=s\x07\x1b]133;B\x07",
+    );
+    let events = t.drain().events;
+    let at = |row, col| Anchor { row, col };
+    assert_eq!(
+        events,
+        vec![
+            Event::PromptStart(at(0, 0), MarkId(0)),
+            Event::PromptContinuation(at(0, 2), MarkId(1)),
+            Event::PromptEnd(at(0, 2), MarkId(2)),
+        ]
+    );
+}
+
+/// The proposal hangs `k=` off `P` and calls `A` shorthand for `P;k=i`; kitty sends
+/// `A;k=s` and never sends `P`. Both spellings have to arrive as the same thing.
+#[test]
+fn osc_133_reads_both_spellings_of_the_prompt_kind() {
+    let mut t = term(4, 20, b"\x1b]133;P;k=s\x07\x1b]133;P\x07\x1b]133;A;k=i\x07");
+    let at = |row, col| Anchor { row, col };
+    assert_eq!(
+        t.drain().events,
+        vec![
+            Event::PromptContinuation(at(0, 0), MarkId(0)),
+            // `P` with no `k=` is an initial prompt, exactly as a bare `A` is.
+            Event::PromptStart(at(0, 0), MarkId(1)),
+            Event::PromptStart(at(0, 0), MarkId(2)),
+        ]
+    );
+}
+
+/// The kind we have not heard of is still not the start of a command. Guessing the
+/// other way would move the prompt marker onto a right-hand prompt or onto whatever
+/// the next revision of the proposal adds.
+#[test]
+fn osc_133_treats_an_unknown_prompt_kind_as_a_continuation() {
+    let mut t = term(4, 20, b"\x1b]133;A;k=r\x07");
+    assert_eq!(
+        t.drain().events,
+        vec![Event::PromptContinuation(Anchor { row: 0, col: 0 }, MarkId(0))]
+    );
+}
+
+/// `clear_to_prompt` cuts at the prompt the construct began at, so a continuation
+/// must leave that anchor alone -- the whole reason `k=` is parsed rather than dropped.
+#[test]
+fn a_continuation_prompt_does_not_move_the_clear_anchor() {
+    let mut t = Term::new(6, 20);
+    t.feed(b"noise\r\n\x1b]133;A\x07$ for x in 1 2; do\r\n");
+    t.feed(b"\x1b]133;A;k=s\x07> echo $x\r\n");
+    t.drain();
+    // Two rows kept: the prompt row and the continuation under it. Had the
+    // continuation moved the anchor, only the second would have survived.
+    assert_eq!(t.clear_to_prompt(), 1);
+    assert_eq!(text(&t, 0), "$ for x in 1 2; do");
+}
+
 #[test]
 fn osc_133_d_without_a_status() {
     let mut t = term(4, 20, b"\x1b]133;D\x07");

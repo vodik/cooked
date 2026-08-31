@@ -102,6 +102,26 @@ __cooked_prompt_precmd() {
     [[ $PS1 == *'%' && $PS1 != *'%%' ]] && PS1="${PS1}%"
     PS1="${PS1}"$'%{\e]133;B\a%}'
   fi
+  # PS2, the continuation prompt, and the same reasoning throughout -- without a `B'
+  # here every line after the first of `for x in 1 2; do' falls out of Emacs' hands
+  # back to ZLE, so you compose the first line in Emacs and the rest in the shell's
+  # line editor.
+  #
+  # `A;k=s' rather than a bare `A': `k=s' is what says this prompt *continues* the
+  # previous one, and Emacs uses it to leave the prompt marker where the construct
+  # began.  A bare `A' would restart the command record at the last continuation
+  # line.  Both halves go in together and are tested for as one, because the `A'
+  # without the `B' would be a mark with nothing to buy.
+  #
+  # Prepended rather than printed from precmd, which is where PS2 differs from PS1:
+  # there is no hook that runs before a continuation prompt is drawn, so the mark
+  # has to travel inside the prompt itself.  The trailing-`%' guard is the PS1 one
+  # for the same reason.
+  if [[ $PS2 != *$'\e]133;B\a'* ]]; then
+    [[ $PS2 == *'%' && $PS2 != *'%%' ]] && PS2="${PS2}%"
+    PS2="${PS2}"$'%{\e]133;B\a%}'
+    __cooked_want marks && PS2=$'%{\e]133;A;k=s\a%}'"${PS2}"
+  fi
 }
 
 #

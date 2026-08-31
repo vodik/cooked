@@ -862,6 +862,7 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
             env.list(&items)
         }
         Event::PromptStart(at, id) => mark("prompt-start", *at, *id),
+        Event::PromptContinuation(at, id) => mark("prompt-continuation", *at, *id),
         Event::PromptEnd(at, id) => mark("prompt-end", *at, *id),
         Event::CommandStart(at, id) => mark("command-start", *at, *id),
         Event::CommandEnd(code, at, id) => env.list(&[
