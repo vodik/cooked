@@ -48,7 +48,55 @@ impl<T> LockExt<T> for Mutex<T> {
 }
 
 const READ_CHUNK: usize = 64 * 1024;
+/// How long the reader may sit in `poll` with nothing else to wait for.
+///
+/// This is not a frame rate and nothing about redisplay is keyed on it: real pty data
+/// wakes `poll` the moment it arrives, whatever this says. It bounds exactly one thing —
+/// how stale the termios sample may be while the child is silent — because Linux reports
+/// no `ICANON`/`ECHO` change to the master. See `Pty::mode`.
+///
+/// Left at 100ms, and the reasoning is worth keeping because the obvious change here is
+/// a trap that has already been measured.
+///
+/// The tick used to carry two jobs: noticing a silent mode change, *and* standing between
+/// a `tcsetattr` and a password typed into an Emacs-owned line. The second is what made
+/// it unbudgeable, since every millisecond added widened the window in which a secret
+/// could be rendered into the buffer. [`Session::sample_mode`] took that job away — the
+/// input path reads the tty itself now, so no keystroke is interpreted under a stale mode
+/// at any tick length — which leaves this bounding only how soon a *silent* mode change
+/// is noticed by nobody in particular.
+///
+/// That looks like a free knob and is not. Raising it to 250ms was tried and measured: it
+/// takes an idle session from ~10 wakeups/sec to ~4, which is a real power win, and it
+/// costs exactly the case the tick exists for. A child that turns echo off and prints
+/// nothing can only ever be noticed here, so the detection latency for it rises with the
+/// interval — far enough that
+/// `cooked-a-child-that-exits-while-suspended-hands-the-buffer-back` and
+/// `cooked-evil-normal-state-does-not-outlive-the-child`, whose children go silently raw
+/// and then exit 200ms later, stop observing the mode at all.
+///
+/// So the trade is live and one-sided in a way only the user can price: 2.5x fewer idle
+/// wakeups against a silent `read -s` taking a quarter second to raise its prompt. It is
+/// one constant, and it should be changed deliberately rather than because it looks
+/// harmless. [`RESAMPLE_DELAY`] is the half of that win which costs nothing, and is
+/// taken.
 const POLL_TIMEOUT_MS: u8 = 100;
+
+/// How long after a burst of output to take one extra termios sample.
+///
+/// The common secret read does not arrive silently: `read -s -p`, `getpass` and `sudo`
+/// all write their prompt and change the tty within a fraction of a millisecond of each
+/// other, in that order. Measured, on the shells this was written against, at ~0.03ms
+/// apart — which is why `cooked-secret-debounce` on the Lisp side is 0.03s and says the
+/// same thing from the other end: "programs differ on whether they clear ECHO before or
+/// after printing the prompt."
+///
+/// So the sample taken immediately after a read is a coin flip, and the one after that is
+/// [`POLL_TIMEOUT_MS`] away. Arming a single extra sample in the wake of output catches
+/// the whole ordered-after case promptly without putting the base tick back: output is
+/// what makes it worth asking again, so a session with no output arms nothing and pays
+/// nothing.
+const RESAMPLE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 /// How long to wait for a child that closed the pty to become reapable.
 const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500);
 /// How long an explicit shutdown gives the child to honour SIGHUP before SIGKILL,
@@ -90,7 +138,7 @@ struct Notifier {
     /// No matching ceiling is needed the way `eat-maximum-latency` provides one: `Term`
     /// always holds the latest state regardless of whether a wakeup was sent for it, and
     /// [`Notifier::flush`] is retried every reader-thread tick — see
-    /// [`Notifier::poll_timeout`], which shortens that tick to this interval's own
+    /// [`Notifier::poll_wait`], which shortens that tick to this interval's own
     /// remaining window rather than leaving a throttled notification to wait out the
     /// coarser `POLL_TIMEOUT_MS`.
     min_interval: std::time::Duration,
@@ -192,9 +240,9 @@ impl Notifier {
     /// just asked a full-screen program to draw. Shortening the poll to exactly that
     /// remaining window, only while it applies, retires the notification at `min_interval`'s
     /// own cadence instead.
-    fn poll_timeout(&self) -> PollTimeout {
+    fn poll_wait(&self) -> std::time::Duration {
         if self.notified.load(Ordering::SeqCst) || !self.dirty.load(Ordering::SeqCst) {
-            return PollTimeout::from(POLL_TIMEOUT_MS);
+            return std::time::Duration::from_millis(u64::from(POLL_TIMEOUT_MS));
         }
         // One lock for both halves; as two fields it was two, on every tick.
         let state = self.state.held();
@@ -209,7 +257,7 @@ impl Notifier {
         // poll late.
         let wait = throttle.max(remaining(state.sync_until).unwrap_or_default());
         drop(state);
-        PollTimeout::try_from(wait).unwrap_or(PollTimeout::from(POLL_TIMEOUT_MS))
+        wait
     }
 
     /// Close the wake pipe, so Emacs' read end sees EOF.
@@ -232,6 +280,10 @@ struct Shared {
     pending_resize: Mutex<Option<Winsize>>,
     /// Everything to do with telling Emacs there is something to draw; see [`Notifier`].
     notifier: Notifier,
+    /// When to take one extra termios sample in the wake of output; see
+    /// [`RESAMPLE_DELAY`]. `None` whenever no burst is outstanding, which is most of the
+    /// time and is what keeps an idle session from arming anything at all.
+    resample_at: Mutex<Option<std::time::Instant>>,
     /// Pending items — scrolled-off lines plus undelivered events — at which the reader
     /// stops pulling from the pty and lets the child block. Raising it does not make
     /// rendering faster, since throughput is bounded by Emacs rather than by this queue;
@@ -339,6 +391,7 @@ impl Session {
             mode: AtomicMode::new(mode),
             pending_resize: Mutex::new(None),
             notifier: Notifier::new(wake, options.min_redisplay_interval),
+            resample_at: Mutex::new(None),
             backlog_limit: options.backlog_limit,
             shutdown: AtomicBool::new(false),
             interrupt: Interrupt::new()?,
@@ -480,6 +533,41 @@ impl Session {
         self.shared.mode.load()
     }
 
+    /// Re-read the child's termios now, rather than reporting the last sample.
+    ///
+    /// [`Session::mode`] answers from whatever the reader thread last saw, which is as
+    /// fresh as the poll interval and no fresher. That is the right answer for a drain,
+    /// which is describing a moment that has already passed. It is the wrong one for a
+    /// keystroke.
+    ///
+    /// A child that turns echo off *without printing anything* — `read -s` with no
+    /// prompt, a bare `stty -echo` — moves the tty and leaves nothing on the pty for the
+    /// reader to wake on, so between that `tcsetattr` and the next sample the cached
+    /// answer still says a line editor is reading when a password read is. Emacs owning
+    /// the line on the strength of that is how a typed secret reaches the buffer, and it
+    /// is the one staleness this crate cannot spend.
+    ///
+    /// So the input path asks here instead, once per typed character, and pays one
+    /// `tcgetattr` for an answer that cannot be stale.
+    ///
+    /// The returned mode is what *this* call read, not a re-load of the cache. The
+    /// distinction matters because the store races the reader thread's own: two samples
+    /// taken microseconds apart can be written back in either order, so the cache can go
+    /// momentarily backwards. Nothing is harmed by that — the next sample corrects it —
+    /// but the caller deciding whether to insert a character must act on the tty it just
+    /// read, not on whichever write happened to land last.
+    pub fn sample_mode(&self) -> Mode {
+        match self.shared.pty.mode() {
+            Ok(mode) => {
+                self.shared.mode.store(mode);
+                mode
+            }
+            // Nothing to be learned and nothing to report: a pty that will not answer is
+            // a session on its way out, and the last known mode is the honest fallback.
+            Err(_) => self.shared.mode.load(),
+        }
+    }
+
     pub fn pid(&self) -> Pid {
         self.shared.pty.pid()
     }
@@ -558,6 +646,43 @@ impl Shared {
         self.notifier.set_sync(deadline);
     }
 
+    /// How long this iteration may sleep: the notifier's answer, cut short by a pending
+    /// one-shot resample if that lands sooner.
+    ///
+    /// Combined here rather than inside [`Notifier`] because the two deadlines are about
+    /// different things — one is when Emacs next wants drawing, the other is when the tty
+    /// is next worth asking about — and folding a termios concern into the notifier would
+    /// put it in the one place that has no business knowing about termios at all.
+    ///
+    /// `min` and not `max`: an earlier deadline is a reason to wake sooner, never later.
+    /// [`remaining`] answers `None` once the deadline has passed, so an expired resample
+    /// contributes nothing and cannot pin the timeout at zero and spin this thread.
+    fn poll_timeout(&self) -> PollTimeout {
+        let mut wait = self.notifier.poll_wait();
+        if let Some(left) = remaining(*self.resample_at.held()) {
+            wait = wait.min(left);
+        }
+        PollTimeout::try_from(wait)
+            .unwrap_or_else(|_| PollTimeout::from(POLL_TIMEOUT_MS))
+    }
+
+    /// Ask again shortly, because the child just wrote something; see [`RESAMPLE_DELAY`].
+    fn arm_resample(&self) {
+        *self.resample_at.held() = Some(std::time::Instant::now() + RESAMPLE_DELAY);
+    }
+
+    /// Retire an armed resample once its moment has come and gone.
+    ///
+    /// The sample itself is [`Shared::sample_mode`]'s, taken unconditionally on every tick
+    /// -- this only decides *when* the tick happens, so once the deadline is behind us
+    /// there is nothing left for it to bring forward.
+    fn retire_resample(&self) {
+        let mut at = self.resample_at.held();
+        if at.is_some_and(|t| t <= std::time::Instant::now()) {
+            *at = None;
+        }
+    }
+
     fn read_loop(&self) {
         block_sigpipe();
         let mut buf = vec![0u8; READ_CHUNK];
@@ -567,7 +692,7 @@ impl Shared {
                 PollFd::new(self.pty.as_fd(), PollFlags::POLLIN),
                 PollFd::new(self.interrupt.read.as_fd(), PollFlags::POLLIN),
             ];
-            match poll(&mut fds, self.notifier.poll_timeout()) {
+            match poll(&mut fds, self.poll_timeout()) {
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(_) => break,
                 Ok(_) => {}
@@ -589,6 +714,7 @@ impl Shared {
             if self.sample_mode() {
                 self.announce();
             }
+            self.retire_resample();
 
             // A `resize` that arrived before the child opened its slave (see `Session::resize`)
             // is retried here, on the same cadence as `sample_mode` above and for the same
@@ -622,6 +748,11 @@ impl Shared {
                 Ok([]) => return self.finish(Ended::ChildGone),
                 Ok(data) => {
                     self.term.held().feed(data);
+                    // The child has just written, so the tty is worth asking about again
+                    // shortly: the prompt of a secret read lands here, and the
+                    // `tcsetattr` behind it a fraction of a millisecond later. See
+                    // [`RESAMPLE_DELAY`].
+                    self.arm_resample();
                     // A child that changes mode almost always writes at the same moment, so
                     // re-sampling here is what makes the common case feel instantaneous.
                     self.sample_mode();
@@ -960,7 +1091,7 @@ mod tests {
     /// between the child's two writes was really doing -- gives a test that passes for
     /// one reason on an idle machine and another under load, and covers neither on purpose.
     enum Drain {
-        /// The reader computes its next [`Notifier::poll_timeout`] already knowing the
+        /// The reader computes its next [`Notifier::poll_wait`] already knowing the
         /// notification is Emacs' to hear, and shortens its own tick to the rest of the
         /// interval.
         BeforeTheWrite,

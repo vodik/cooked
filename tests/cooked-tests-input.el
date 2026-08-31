@@ -601,6 +601,170 @@ because cooked's input mark is the process mark comint asks for."
     (should-not (string-match-p "hunter2" (buffer-substring-no-properties
                                            (point-min) (point-max))))))
 
+(ert-deftest cooked-a-stale-cooked-mode-cannot-leak-a-typed-secret ()
+  "Typing must never insert under a `cooked--mode\=' the child has moved on from.
+
+The window this closes: a child that turns echo off *without printing anything*
+-- `read -s\=' with no prompt, `stty -echo\=' -- changes nothing the pty ever
+reports, so `cooked--mode\=' stays `cooked\=' until the next termios sample.
+Emacs still owns the line, and every character of the password the user is
+already typing is rendered into the buffer, sent on RET, and left in the
+scrollback and the undo history.
+
+Spelled without waiting for a sample, deliberately: the point is the state
+between the child\='s `tcsetattr\=' and cooked noticing it, so the test puts the
+buffer in exactly that state -- a real child really in secret mode, and a
+`cooked--mode\=' that still says otherwise -- and then types one character."
+  ;; The poll notices the child's `stty\=' during the pump below and puts up the
+  ;; secret prompt for it -- which is the feature working, and in batch is a
+  ;; `read-passwd\=' with nobody to answer it.  Answered from here instead; the
+  ;; timer fires inside the pump and so inside this binding.
+  (let ((cooked-password-function (lambda (_prompt) "")))
+    (cooked-tests--with-session '("/bin/sh" "-c" "stty -echo; sleep 5")
+      ;; No output, so nothing here can be waited for; the child needs only enough
+      ;; time to reach its `stty\='.
+      (cooked-tests--pump 0.3)
+      ;; The stale state, built rather than waited for -- and built by putting the
+      ;; clock back, because the pump above is longer than the poll interval, so
+      ;; the timer has already noticed.  Cancelling its prompt is part of the
+      ;; reconstruction: the window under test is the one before anything had.
+      (setq cooked--mode 'cooked)
+      (cooked--cancel-secret)
+      (cooked--refresh-keymap)
+      (should (cooked--input-state-p))
+      (goto-char (point-max))
+      (let ((last-command-event ?p))
+        (call-interactively (key-binding (kbd "p"))))
+      (cooked--cancel-secret)
+      (should-not (string-match-p "p" (buffer-substring-no-properties
+                                       (point-min) (point-max))))
+      ;; And the reason it did not: the sample that refused the insertion also
+      ;; updated the mode, so the secret prompt was on its way.
+      (should (eq cooked--mode 'secret)))))
+
+(ert-deftest cooked-a-stale-cooked-mode-forwards-rather-than-looping ()
+  "The refusal must forward the key and return, not re-dispatch it.
+
+The bug this rules out is not a wrong character but a command loop that never
+ends.  An earlier draft of `cooked--self-insert\=' pushed the key back onto
+`unread-command-events\=' for Emacs to look up again under the corrected keymap,
+which is only bounded while every map that key can reach binds something other
+than `cooked--self-insert\='.  Where the *policy* moves without the *mode*
+moving, `cooked--set-mode\=' short-circuits, no refresh runs, the key lands in
+the same map it came from, and the command re-dispatches itself forever --
+taking the editor with it rather than signalling.
+
+So the character is handed to `cooked-send-key\=' outright.  Both branches of
+this command call a leaf command and return, and nothing is ever queued, which
+is what makes one keystroke cost exactly one invocation.  Spelled against `raw\='
+rather than `secret\=' so that what is asserted is the forwarding itself, with
+no password prompt in the way."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; cat -v")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+    ;; Put the clock back, exactly as above.
+    (setq cooked--mode 'cooked)
+    (cooked--refresh-keymap)
+    (should (cooked--input-state-p))
+    (goto-char (point-max))
+    (let ((last-command-event ?z))
+      (call-interactively (key-binding (kbd "z"))))
+    ;; Returned at all, which is the whole assertion: a re-dispatching draft
+    ;; never reaches this line.  And the mode is corrected on the way.
+    (should (eq cooked--mode 'raw))
+    ;; Forwarded, not inserted: `cat -v' echoes it back, so it arrives as the
+    ;; child's own output rather than as text Emacs typed into the buffer.
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "z" (cooked-tests--text)))))))
+
+(defun cooked-tests--run-command (command)
+  "Run COMMAND the way the command loop would, hooks and all.
+
+`call-interactively\' on its own is not enough for anything guarded from
+`pre-command-hook\': the hook is the command loop\'s job, so a test that skips
+it exercises the command without the guard that protects it -- and would pass
+just as happily with the guard deleted.  Binding `this-command\' and running the
+hook by hand is the smallest faithful model, including the part that matters
+here, which is that the hook is allowed to substitute `this-command\' and the
+loop runs whatever it finds afterwards."
+  (let ((this-command command)
+        (last-command-event ?p))
+    (run-hooks 'pre-command-hook)
+    (call-interactively this-command)
+    this-command))
+
+(ert-deftest cooked-a-stale-cooked-mode-cannot-leak-a-pasted-secret ()
+  "Pasting must never insert under a `cooked--mode\=' the child has moved on from.
+
+The same window `cooked-a-stale-cooked-mode-cannot-leak-a-typed-secret\=' closes,
+reached by the other door and arguably the likelier one: a password manager puts
+the secret on the clipboard and the user pastes it at the `sudo\=' prompt rather
+than typing it, so the whole secret lands in the buffer in a single edit rather
+than a character at a time.
+
+Both doors are checked here because they are guarded differently.
+`cooked-paste\=' is cooked\='s own and asks `cooked--input-state-p\=' for itself,
+so all it needed was a current answer; `yank\=' is a foreign command that would
+insert wherever point is, so `cooked--guard-insertion\=' substitutes the
+equivalent that goes through the child.  A fix that covered only one of them
+would leave the other open."
+  (let ((cooked-password-function (lambda (_prompt) "")))
+    (dolist (command '(cooked-paste yank))
+      (cooked-tests--with-session '("/bin/sh" "-c" "stty -echo; sleep 5")
+        (cooked-tests--pump 0.3)
+        (setq cooked--mode 'cooked)
+        (cooked--cancel-secret)
+        (cooked--refresh-keymap)
+        (should (cooked--input-state-p))
+        (goto-char (point-max))
+        (kill-new "hunter2")
+        (cooked-tests--run-command command)
+        (cooked--cancel-secret)
+        (should-not (string-match-p "hunter2" (cooked-tests--text)))
+        (should (eq cooked--mode 'secret))))))
+
+(ert-deftest cooked-a-foreign-inserter-is-substituted-not-refused ()
+  "`yank\=' at a line the child has taken becomes `cooked-paste\=', not an error.
+
+The substitution is the half of `cooked--guard-insertion\=' that keeps the user
+able to act.  Refusing would be safe and useless: a paste that signals leaves
+them to work out that pressing it again would have worked, and a password
+manager\='s clipboard entry is often good for exactly one use.  So the intent
+survives the correction -- a paste is still a paste, it just reaches the child
+rather than the buffer.
+
+Spelled against `raw\=' so the assertion is the substitution itself, with no
+password prompt in the way."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; cat -v")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+    (setq cooked--mode 'cooked)
+    (cooked--refresh-keymap)
+    (should (cooked--input-state-p))
+    (goto-char (point-max))
+    (kill-new "zz")
+    (should (eq (cooked-tests--run-command 'yank) 'cooked-paste))
+    (should (eq cooked--mode 'raw))
+    ;; Reached the child rather than the buffer: `cat -v\=' echoes it back, so it
+    ;; arrives as the child\='s own output.
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "zz" (cooked-tests--text)))))))
+
+(ert-deftest cooked-a-silent-secret-read-is-still-detected ()
+  "`read -s\=' with no prompt at all must still raise the secret prompt.
+
+The feature that a timer is kept for.  A child that turns echo off without
+printing anything leaves nothing on the pty to wake the reader, so nothing but
+the periodic termios sample can notice it -- there is no output to ride in on
+and no keystroke to hang the question off.  `cooked--self-insert\=' covers the
+window before the sample lands; it does not replace the sample, and this is the
+test that says so."
+  (let* ((asked nil)
+         (cooked-password-function (lambda (prompt) (setq asked prompt) "")))
+    (cooked-tests--with-session '("/bin/sh" "-c" "stty -echo; sleep 5")
+      ;; No keystroke anywhere in this test: detection has to be proactive.
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+      (cooked-tests--pump 0.2)
+      (should asked))))
+
 (ert-deftest cooked-secret-prompt-text-is-recovered ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'Enter passphrase: '; stty -echo; sleep 5")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))

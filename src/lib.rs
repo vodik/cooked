@@ -15,7 +15,7 @@ use emu::{
 };
 use env::{Env, Result, Runtime, Value, plist};
 use nix::sys::signal::Signal;
-use pty::{Pid, Winsize};
+use pty::{Mode, Pid, Winsize};
 use session::{Session, Update};
 
 /// Join the `///` lines of a table entry into the docstring Emacs will show.
@@ -240,6 +240,19 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Whether SESSION's child is still running.
         "cooked--live-p" => alive;
 
+        /// Re-read SESSION's termios now and return the mode it reports.
+        ///
+        /// cooked's drain carries `:mode', which is what the reader thread last
+        /// sampled -- as fresh as the poll interval and no fresher.  This forces a read
+        /// instead, for the one caller that cannot afford a stale answer: the input path,
+        /// before it lets a typed character into the buffer.
+        ///
+        /// A child that turns echo off without printing anything -- `read -s' with no
+        /// prompt -- leaves nothing on the pty to wake anyone, so the cached mode goes on
+        /// saying `cooked' while a password read is in progress.  Asking here, once per
+        /// character, is what keeps that window from ever being a window.
+        "cooked--sample-mode" => sample_mode;
+
         /// Whether SESSION requested bracketed paste.
         "cooked--bracketed-paste-p" => bracketed_paste;
 
@@ -333,6 +346,17 @@ macro_rules! into_lisp_id {
 }
 
 into_lisp_id!(MarkId, LinkId, ImageId);
+
+/// The line-discipline state, as the symbol `cooked.el' matches on.
+///
+/// [`Mode::as_str`] is the one spelling of these names, so the drain's `:mode' and
+/// `cooked--sample-mode' cannot drift into disagreeing about what to call the same
+/// state.
+impl env::IntoLisp for Mode {
+    fn into_lisp(self, env: &Env) -> Result<Value> {
+        env.intern(self.as_str())
+    }
+}
 
 impl env::IntoLisp for Pid {
     fn into_lisp(self, env: &Env) -> Result<Value> {

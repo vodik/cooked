@@ -77,6 +77,7 @@
 (declare-function cooked--pid "cooked-core")
 (declare-function cooked--bracketed-paste-p "cooked-core")
 (declare-function cooked--live-p "cooked-core")
+(declare-function cooked--sample-mode "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
 (declare-function cooked--handle-osc "cooked-osc")
@@ -524,26 +525,118 @@ beside it, let alone to rebuild over the top of it."
                     (directory-files-recursively
                      (expand-file-name "src" root) (rx ".rs" eos))))))
 
+(defvar cooked--core-loaded nil
+  "(FILE . MTIME) of the native core this session loaded, or nil.
+
+Emacs cannot unload a dynamic module, so a session is married to the core it
+mapped for as long as it lives.  Recording which file that was, and when it was
+built, is what lets `cooked--load-module\=' notice the artifact being rebuilt
+underneath it -- see `cooked--check-core-drift\=' for why that is worth saying
+out loud rather than letting it surface as something else entirely.")
+
+(defun cooked--build-module (root built)
+  "Build the native core under ROOT and install it at BUILT.
+
+Installed by rename, never by letting cargo write BUILT directly, and that is
+the whole reason this is a function rather than the `call-process\=' that used to
+sit inline in `cooked--load-module\='.
+
+rustc writes its output in place -- same inode, new contents -- and cargo
+hardlinks the uplifted copy to the one under `deps/\='.  So a rebuild rewrites
+the very bytes every *other* Emacs has mapped, and the kernel answers their next
+page fault with SIGBUS.  Emacs\=' fatal-signal handler exits without dumping
+core, so what those users see is the editor vanishing with nothing in
+`coredumpctl\=' and nothing in the journal to say why.  This is the path that
+matters, because it is the automatic one: it fires from `\\[cooked]\=' with
+nobody having asked for a build.
+
+So cargo is pointed at its own directory and the result is copied to a staging
+name and renamed over BUILT.  A rename swaps which inode the name points at and
+leaves the old one alive for whoever still has it mapped, so an Emacs running
+the previous core goes on running against it -- `/proc/PID/maps\=' shows it as
+`(deleted)\=' -- instead of being killed.  The staging copy is made in BUILT\='s
+own directory so the rename cannot degrade into a cross-filesystem copy and
+stop being atomic.  `elisp-tree-sitter\=' installs its own core this way, for
+this reason.
+
+Copied rather than moved.  Leaving cargo\='s artifact where cargo put it is what
+keeps its fingerprint tracking honest, so the next build relinks only when
+something changed.  `make module\=' does exactly this, and the two have to agree:
+fixing one and leaving the other is how a bug like this survives being found."
+  (let* ((default-directory root)
+         ;; The Makefile spells this `?=', and this is the same bargain: an outer
+         ;; CARGO_TARGET_DIR still wins, so a CI cache or a scratch build kept
+         ;; deliberately away from the tree goes on working, and `target/cargo'
+         ;; is the default both halves share.  Passed as an argument rather than
+         ;; left to the environment because we have to know where to find what
+         ;; cargo produced, and an argument cannot be overridden behind our back.
+         (target (expand-file-name (or (getenv "CARGO_TARGET_DIR") "target/cargo")
+                                   root))
+         (out (expand-file-name (concat "release/libcooked" module-file-suffix)
+                                target))
+         (staging (concat built ".new")))
+    (message "cooked: building native core...")
+    (unless (zerop (call-process "cargo" nil "*cooked-build*" nil "build"
+                                 "--release" "--target-dir" target))
+      (pop-to-buffer "*cooked-build*")
+      (error "cooked: cargo build failed"))
+    ;; A cargo that exits 0 having produced nothing is not something to paper
+    ;; over with a `module-load' of whatever stale file happens to be there.
+    (unless (file-exists-p out)
+      (error "cooked: cargo built no %s" (file-name-nondirectory out)))
+    (make-directory (file-name-directory built) t)
+    (copy-file out staging t)
+    (rename-file staging built t)))
+
+(defun cooked--check-core-drift (built)
+  "Say so if BUILT was rebuilt after this session loaded it.
+
+Installing by rename is what leaves a running session on the core it already
+mapped, and that is exactly what stops it crashing -- but it also means the
+session goes on answering with the old protocol while the Lisp beside it may
+have been reloaded from a newer tree.  What surfaces then is a void-function
+for a defun the new core provides, several layers away from the cause;
+`cooked--sample-mode\=' arriving in a checkout whose loaded core predated it is
+precisely what that looked like.
+
+A message rather than an error, because there is nothing to be done about it
+from here.  Emacs cannot unload a module, so the only cure is a restart, and
+refusing to open a terminal would be a worse answer than opening one that
+works.
+
+Deliberately not a version comparison.  `cooked--core-version\=' exists and is
+the obvious thing to reach for, but a version moves on a release while the
+protocol moves whenever a defun is added -- so the drift that actually bites
+happens with both halves reporting the same 1.0.0, and a check keyed on that
+would have stayed silent through every instance of it.  What changed is the
+file, so the file is what gets asked."
+  (when-let* ((loaded cooked--core-loaded)
+              ((equal (car loaded) built))
+              (built-at (file-attribute-modification-time (file-attributes built)))
+              ((time-less-p (cdr loaded) built-at)))
+    (message "cooked: the native core was rebuilt after this session loaded it%s"
+             " -- restart Emacs if anything looks wrong")))
+
 (defun cooked--load-module ()
   "Load the native core, building it if necessary."
-  (unless (featurep 'cooked-core)
-    (unless module-file-suffix
-      (error "cooked: this Emacs was built without dynamic module support"))
-    (let* ((root (cooked--root))
-           (ours (null cooked-native-module))
-           ;; Not a hardcoded \".so\": cargo names a cdylib \"libcooked.dylib\" on macOS,
-           ;; which is exactly what `module-file-suffix' reports there.
-           (built (or cooked-native-module
-                      (expand-file-name (concat "target/release/libcooked" module-file-suffix)
-                                        root))))
+  (unless module-file-suffix
+    (error "cooked: this Emacs was built without dynamic module support"))
+  (let* ((root (cooked--root))
+         (ours (null cooked-native-module))
+         ;; Not a hardcoded \".so\": cargo names a cdylib \"libcooked.dylib\" on macOS,
+         ;; which is exactly what `module-file-suffix' reports there.
+         (built (or cooked-native-module
+                    (expand-file-name (concat "target/release/libcooked" module-file-suffix)
+                                      root))))
+    (if (featurep 'cooked-core)
+        (cooked--check-core-drift built)
       (when (or (not (file-exists-p built))
                 (and ours (cooked--module-stale-p built root)))
-        (message "cooked: building native core...")
-        (let ((default-directory root))
-          (unless (zerop (call-process "cargo" nil "*cooked-build*" nil "build" "--release"))
-            (pop-to-buffer "*cooked-build*")
-            (error "cooked: cargo build failed"))))
-      (module-load built))))
+        (cooked--build-module root built))
+      (module-load built)
+      (setq cooked--core-loaded
+            (cons built (file-attribute-modification-time
+                         (file-attributes built)))))))
 
 
 ;;;; Putting styled text in the buffer
@@ -922,14 +1015,32 @@ was never built."
     (buffer-substring-no-properties (car region) (cdr region))))
 
 (defvar cooked-snap-commands
-  '(self-insert-command cooked-newline newline newline-and-indent
+  '(self-insert-command cooked--self-insert
+    cooked-newline newline newline-and-indent
     yank yank-pop cooked-paste cooked-evil-paste
     evil-paste-before evil-paste-after evil-paste-from-register)
   "Commands that should act on the input region even if point drifted out of it.
 See `cooked--snap-to-input'.
 
 Plain `newline' is here because `evil-collection' binds S-RET to it directly
-rather than to `cooked-newline', so it needs the same protection.")
+rather than to `cooked-newline', so it needs the same protection.
+
+`cooked--self-insert' is here for the same reason and is easy to miss: this list
+is matched against `this-command', and a remap replaces `this-command' outright
+rather than layering over it.  So remapping `self-insert-command' -- which is
+what puts the termios sample in front of a typed character -- takes every
+ordinary keystroke out of this list unless the remap target is named too, and
+what breaks is not the sample but the snap: typing on the blank line below the
+prompt silently lands outside the input markers again.
+
+This list has a second reader, and adding to it now buys two things rather than
+one.  `cooked--guard-insertion' keys the point-of-use termios sample off it, on
+the reasoning that \"commands that act on the input region\" and \"commands that
+could insert under a mode the child has already left\" are the same set -- so a
+new insertion path is guarded by joining the list it had to join anyway.  Keep
+it that way: a command that inserts and is left out of this list loses the snap
+and the sample together, and the second failure is a password in the buffer
+rather than a misplaced character.")
 
 (defun cooked--snap-to-input ()
   "Move point into the pending-input region before an insertion command.

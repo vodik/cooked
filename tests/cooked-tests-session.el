@@ -57,6 +57,27 @@ answer no requests.  Sourcing the capture is what turns the last field on."
   (dolist (fn '(cooked--spawn cooked--drain cooked--send cooked--resize cooked--redraw))
     (should (fboundp fn))))
 
+(ert-deftest cooked-a-core-rebuilt-under-a-session-is-reported ()
+  "Installing by rename is what keeps a running session alive across a rebuild,
+and the same thing is what lets its core fall behind the Lisp calling it.  Emacs
+cannot unload a module, so all that is left is to say so; the check answers on
+the file rather than on `cooked--core-version\=', which does not move when a
+defun is added and so stays quiet through exactly the drift that bites."
+  (cooked--load-module)
+  (let ((file (car cooked--core-loaded))
+        (built-at (cdr cooked--core-loaded)))
+    ;; The artifact this session mapped is still the one on disk.
+    (let ((cooked--core-loaded (cons file built-at)))
+      (should-not (cooked--check-core-drift file)))
+    ;; Rebuilt since: the session is running a core older than the file.
+    (let ((cooked--core-loaded (cons file (time-subtract built-at 3600))))
+      (should (cooked--check-core-drift file)))
+    ;; A core somebody else is responsible for -- `cooked-native-module' -- is
+    ;; not this session's to have an opinion about.
+    (let ((cooked--core-loaded
+           (cons "/nonexistent/libcooked.so" (time-subtract built-at 3600))))
+      (should-not (cooked--check-core-drift file)))))
+
 (ert-deftest cooked-signal-refuses-a-number-that-is-not-one ()
   "Regression: a signal number wider than an int used to wrap into a real signal.
 

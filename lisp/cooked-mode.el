@@ -26,6 +26,7 @@
 ;; Defined by the native core at `module-load' time, so the byte-compiler cannot
 ;; see them; cooked.el declares the same set for its own use.
 (declare-function cooked--send "cooked-core")
+(declare-function cooked--sample-mode "cooked-core")
 (declare-function cooked--resize "cooked-core")
 (declare-function cooked--cell-size "cooked")
 (declare-function cooked--signal "cooked-core")
@@ -1005,6 +1006,10 @@ time, and rebuilding is the only way to put a key back that used to be
 delegated.  Unbinding it instead would leave `TAB\=' bound to nothing rather
 than to `completion-at-point\='."
   (let ((map (make-sparse-keymap)))
+    ;; The whole of the point-of-use termios sample; see `cooked--self-insert'.
+    ;; Here rather than in `cooked-mode-map', because this is the only state in
+    ;; which a printable key becomes buffer text instead of a byte to the child.
+    (define-key map [remap self-insert-command] #'cooked--self-insert)
     (define-key map (kbd "RET") #'cooked-send-input)
     (define-key map (kbd "<S-return>") #'cooked-newline)
     (define-key map (kbd "C-d") #'cooked-delete-char-or-eof)
@@ -1372,6 +1377,127 @@ first when peeking: a signal you cannot see land is not worth sending blind."
     (cooked--send-job-control session :intr 2)))
 
 ;;;; State transitions
+
+(defun cooked--resample-mode ()
+  "Re-read the child's termios and adopt what it says, right now.
+
+The drain's `:mode\=' is whatever the reader thread last sampled, and the poll
+interval is the whole of how fresh that is.  For redisplay that is exactly
+right: a drain describes a moment that has already gone by.  For a keystroke it
+is not, because one kind of mode change reaches the pty as nothing at all.
+
+A child that turns echo off *without printing anything* -- `read -s\=' with no
+prompt, a bare `stty -echo\=' -- moves the tty and writes no byte, so nothing
+wakes the reader and nothing schedules a drain.  Until the next timer tick
+`cooked--mode\=' still says `cooked\=', Emacs still believes it owns the line, and
+the password the user has already started typing is being rendered into the
+buffer, sent on RET, and left behind in the scrollback and the undo history.
+
+Closing that costs one `tcgetattr\=' on the character that would have leaked --
+paid only while someone is actually typing at an editable prompt, against a
+timer that otherwise pays it ten times a second forever.  See
+`cooked--self-insert\=', which is the only caller and the only place the answer
+can be spent."
+  (when cooked--session
+    (cooked--set-mode (cooked--sample-mode cooked--session))))
+
+(defvar cooked--child-equivalents
+  '((yank                     . cooked-paste)
+    (yank-pop                 . cooked-paste)
+    (evil-paste-before        . cooked-paste)
+    (evil-paste-after         . cooked-paste)
+    (evil-paste-from-register . cooked-paste)
+    (newline                  . cooked-send-key)
+    (newline-and-indent       . cooked-send-key))
+  "What each foreign insertion command means once the child owns the line.
+
+The division this encodes is the whole shape of the guard.  Cooked\\='s own
+insertion commands already ask `cooked--input-state-p\\=' and do the right thing
+on either answer -- `cooked-paste\\=' yanks or hands the kill to the child,
+`cooked-newline\\=' and `cooked--history-move\\=' refuse -- so all they ever needed
+was for that answer to be current, which `cooked--guard-insertion\\=' gives them.
+
+These are the ones that cannot: `yank\\=', `newline\\=' and evil\\='s paste commands
+know nothing about cooked and will insert wherever point happens to be.  For
+them the guard substitutes the command that does the same job through the
+child, so the user\\='s intent survives being answered by the other half of the
+terminal.  A paste is still a paste; it just reaches the password read instead
+of the buffer.
+
+Substituting rather than refusing, because refusing is what the user cannot
+act on: a paste that errors leaves them to work out that pressing it again
+would have worked, and a password manager\\='s clipboard entry is often
+single-use.  `cooked-evil-paste\\=' already makes exactly this mapping by hand,
+so this generalises a choice the tree had already made.")
+
+(defun cooked--guard-insertion ()
+  "Re-read the tty before a command that would insert into the input region.
+
+The shared half of the point-of-use termios sample.  `cooked--self-insert\\='
+covers a typed character; this covers everything else that puts text on the
+input line, and it covers them in one place rather than by each one
+remembering to ask.
+
+Keyed on `cooked-snap-commands\\=', which is not an approximation of \"commands
+that insert\" but the very list the tree already maintains for that -- a new
+insertion path has to join it for the snap to work at all, and so is enrolled
+here by construction rather than by anyone thinking of it.  That is the point
+of reusing it: the failure mode being designed out is a future command that
+inserts and nobody remembers to guard.
+
+The cost is one `tcgetattr\\=' on commands that were about to edit the buffer
+anyway, and none at all on the cursor motions and window commands that make up
+most of what runs here.  Sampling from `pre-command-hook\\=' unconditionally was
+rejected for the typed case for exactly that reason and is rejected again here.
+
+What the sample buys is that every `cooked--input-state-p\\=' asked during the
+command that follows is answered against the tty as it is now, rather than as
+the last poll left it -- which is the window a child\\='s silent `tcsetattr\\='
+opens and the whole reason any of this exists.  See
+`cooked--child-equivalents\\=' for the commands that cannot ask for themselves.
+
+Runs ahead of `cooked--snap-to-input\\=', so a substituted command is snapped
+against the state it will actually run in."
+  (cooked--protect-hook
+    (when (and cooked--session
+               (memq this-command cooked-snap-commands)
+               (cooked--input-state-p))
+      (cooked--resample-mode)
+      (unless (cooked--input-state-p)
+        (when-let* ((equivalent (alist-get this-command cooked--child-equivalents)))
+          (setq this-command equivalent))))))
+
+(defun cooked--self-insert (n)
+  "Insert N copies of the typed character, unless the child has taken the line.
+
+Bound in `cooked-input-map\=' as the remap of `self-insert-command\=', which is
+the narrowest seam that covers the leak: printable keys are not bound there at
+all, so they fall through to ordinary self-insertion, and self-insertion is the
+one path by which a keystroke becomes buffer text.  A `pre-command-hook\=' would
+have covered it too and would have sampled on every cursor motion to do it.
+
+On a mode the sample has moved, the character is *forwarded* rather than
+swallowed or inserted -- by calling `cooked-send-key\=' outright, which is what
+the map the child owns would have run anyway.  Swallowing it would cost the
+user the first character of their password and leave them an authentication
+failure to work out; inserting it is the leak this exists to close.
+
+Forwarded directly rather than pushed back onto `unread-command-events\=' for
+Emacs to look up again, and that is a safety property rather than a shortcut.
+A re-dispatch is only loop-free while every map that key can land in binds
+something other than this command -- which is true today and is exactly the
+kind of thing a later keymap change breaks silently.  The failure it breaks
+into is not a Lisp error but a command loop that never returns, taking the
+whole editor with it.  Calling the sender is the same behaviour with no such
+edge: this command runs once per keystroke and returns."
+  (interactive "p")
+  (cooked--resample-mode)
+  (if (cooked--input-state-p)
+      (self-insert-command n)
+    ;; N times, so a prefix argument reaches the child as the repeats the user
+    ;; asked for rather than collapsing to one byte.
+    (dotimes (_ n)
+      (cooked-send-key))))
 
 (defun cooked--set-mode (mode)
   "Adopt MODE, switching keymaps and handling secret prompts on a change."
@@ -2317,6 +2443,11 @@ to the child verbatim."
   ;; only incidentally -- the two never bind the same event.
   (add-to-list 'emulation-mode-map-alists 'cooked--override-map-alist)
   (cooked--install-global-hooks)
+  ;; Negative depth so it runs ahead of the snap: the guard can substitute
+  ;; `this-command', and the snap reads `this-command' to decide whether to move
+  ;; point at all.  Run the other way round, a substituted command would be
+  ;; snapped against the command it replaced.
+  (add-hook 'pre-command-hook #'cooked--guard-insertion -50 t)
   (add-hook 'pre-command-hook #'cooked--snap-to-input nil t)
   (add-hook 'post-command-hook #'cooked--track-wandering nil t)
   ;; From the same hook and for the same reason: the user's own commands produce
