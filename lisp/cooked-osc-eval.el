@@ -47,9 +47,9 @@
 (defconst cooked-osc-eval-protocol-version 1
   "Wire version this file speaks, sent as `OSC 51;E<version>;...'.
 
-Checked before the verb, so a shell snippet newer than the Emacs it is talking to
-is declined rather than half-understood.  `cooked-shell-completion' versions its
-own channel the same way and for the same reason.")
+Checked before the verb, so a shell snippet newer than the Emacs it is talking
+to is declined rather than half-understood.  `cooked-shell-completion' versions
+its own channel the same way and for the same reason.")
 
 (defun cooked-osc-eval-visit-file (name)
   "Visit NAME, unless it is a remote file name."
@@ -120,9 +120,9 @@ PAYLOAD is `<version>;<verb>[;<arg>]' -- everything after the `E\\=', which
 verbatim, `;\\=' and all, because every verb takes at most one and so there is
 nothing to disambiguate.
 
-Anything unrecognised is refused with a message rather than signalled: this runs
-from a timer the drain queued, where an error is a backtrace the user did not ask
-for and cannot act on."
+Anything unrecognised is refused with a message rather than signalled: this
+runs from a timer the drain queued, where an error is a backtrace the user did
+not ask for and cannot act on."
   (pcase (split-string payload ";")
     (`(,version ,verb . ,rest)
      (let ((arg (string-join rest ";")))

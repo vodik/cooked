@@ -454,8 +454,21 @@ The trailing empty entry is not a stray separator.  ncurses reads an empty
 directory name as the compiled-in default, so this says \"ours, then whatever
 you already had, then the system\" -- and dropping it would say \"ours, and
 nothing else\" on an implementation stricter than the one this was written
-against."
-  (concat database ":" (or (getenv "TERMINFO_DIRS") "")))
+against.
+
+An inherited entry naming DATABASE itself is dropped rather than kept behind
+ours.  ~/.terminfo is where ncurses looks by default, so having it on the
+search path explicitly is a reasonable thing to have done, and a user who did
+lands here with it already at the front -- which produced
+`~/.terminfo:~/.terminfo:\=', a path that is not wrong so much as it is us not
+reading what was already there.
+Empty entries are never dropped: an empty name is the compiled-in default, not a
+directory that could be a duplicate of anything."
+  (let ((kept (cl-remove-if (lambda (dir)
+                              (and (not (string-empty-p dir))
+                                   (equal (expand-file-name dir) database)))
+                            (split-string (or (getenv "TERMINFO_DIRS") "") ":"))))
+    (concat database ":" (string-join kept ":"))))
 
 (defun cooked-version ()
   "Version of cooked, as `Cargo.toml\=' declares it.
@@ -695,7 +708,9 @@ below `cooked--screen-start' is in settled text the emulator will never speak
 about again.")
 
 (defun cooked--policy ()
-  "How the buffer should behave right now: `cooked\=', `prompt\=', `command\=', `raw\=' or `alt\='.
+  "How the buffer should behave right now.
+
+One of `cooked\=', `prompt\=', `command\=', `raw\=' or `alt\='.
 
 Derived rather than reported, because no single source knows the answer.  The
 alt screen comes from the child\='s own output, the line discipline is sampled
@@ -718,11 +733,11 @@ shell editing its own prompt line, and `cooked-raw-exceptions\=' hedges against
 the second.
 
 `prompt\=' is a marked prompt with nothing corroborating the mark -- see
-`cooked--ownership-license\='.  It keeps nothing back either, for the same reason
-`command\=' does not: the shell said where it was, and a shell at its own prompt
-wants every key.  It is the state a bare shell at the far end of an `ssh\=' sits
-in, and everything the marks buy other than the keyboard -- extents, exit codes,
-`next-error\=', rerun -- works there unchanged."
+`cooked--ownership-license\='.  It keeps nothing back either, for the same
+reason `command\=' does not: the shell said where it was, and a shell at its own
+prompt wants every key.  It is the state a bare shell at the far end of an
+`ssh\=' sits in, and everything the marks buy other than the keyboard --
+extents, exit codes, `next-error\=', rerun -- works there unchanged."
   (cond (cooked--alt 'alt)
         ;; A password read forwards keys too; the minibuffer collects them.
         ((eq cooked--mode 'secret) 'raw)
@@ -785,28 +800,28 @@ collected, not who owns the screen."
 (defun cooked--child-owns-keyboard-p ()
   "Whether the child, rather than Emacs, is the one being typed at.
 
-Every policy but `cooked\=', which is to say `alt\=', `prompt\=', `command\=' and `raw\=' --
-said that way round on purpose.  Spelling it as a list of the states that
-qualify is what left `command\=' out of three separate checks when it was added:
-the answer is a property of not being at a prompt, so asking that directly
-cannot go stale when another state arrives."
+Every policy but `cooked\=', which is to say `alt\=', `prompt\=', `command\=' and
+`raw\=' -- said that way round on purpose.  Spelling it as a list of the states
+that qualify is what left `command\=' out of three separate checks when it was
+added: the answer is a property of not being at a prompt, so asking that
+directly cannot go stale when another state arrives."
   (not (cooked--input-state-p)))
 
 (defun cooked--input-mark ()
   "The marker where the pending input begins, or nil before a session.
 
-This is the buffer\='s process mark, not a variable of our own.  comint\='s entire
-command set navigates relative to `process-mark\=', so keeping the near edge of
-the input region anywhere else is what made `comint-previous-input\=' answer
-\"Not at command line\" -- the mark it consults was one cooked never maintained.
-Storing it here rather than copying it into a private marker means there is no
-second opinion to drift.
+This is the buffer\='s process mark, not a variable of our own.  comint\='s
+entire command set navigates relative to `process-mark\=', so keeping the near
+edge of the input region anywhere else is what made `comint-previous-input\='
+answer \"Not at command line\" -- the mark it consults was one cooked never
+maintained.  Storing it here rather than copying it into a private marker means
+there is no second opinion to drift.
 
 `cooked--wake\=' carries it.  The pipe is a doorbell the child rings and owns no
-text, so its mark is free for this, and attaching it to the buffer is what makes
-`get-buffer-process\=' answer at all.  The mark points nowhere whenever the child
-owns the keyboard, so `cooked--input-region\=' is the guard callers should go
-through."
+text, so its mark is free for this, and attaching it to the buffer is what
+makes `get-buffer-process\=' answer at all.  The mark points nowhere whenever
+the child owns the keyboard, so `cooked--input-region\=' is the guard callers
+should go through."
   (and cooked--wake (process-mark cooked--wake)))
 
 (defun cooked--set-input-mark (position)
@@ -1140,12 +1155,13 @@ older three-element shape."
 (defcustom cooked-command-started-functions nil
   "Functions called each time a command starts, with its anchor marker.
 
-The `C\=' half of the pair `cooked-command-finished-functions\=' is the `D\=' half
-of, and nil by default for the same reason: a session nothing is listening to
-pays only the `run-hook\='.
+The `C\=' half of the pair `cooked-command-finished-functions\=' is the `D\='
+half of, and nil by default for the same reason: a session nothing is listening
+to pays only the `run-hook\='.
 
-Called from the `command-start\=' branch of `cooked--handle-semantic\=', once the
-makings of the record are in place, with one argument -- `cooked--running-anchor\='.
+Called from the `command-start\=' branch of `cooked--handle-semantic\=', once
+the makings of the record are in place, with one argument --
+`cooked--running-anchor\='.
 
 There is no `cooked-command\=' to pass, and that is not an oversight to be fixed
 by building one early: a record exists because a `D\=' mark supplied an exit
@@ -1164,11 +1180,11 @@ moment to start its clock."
   "Marker naming the row the running command was typed at, or nil.
 
 Its prompt where the shell sent an `A\=' mark and the start of its output
-otherwise -- the same fallback `cooked-command-decorations--anchor\=' makes for a
-finished record, made here for the command that does not have one yet.
+otherwise -- the same fallback `cooked-command-decorations--anchor\=' makes for
+a finished record, made here for the command that does not have one yet.
 
-Nil between a `D\=' mark and the next `C\=', which is to say exactly when nothing
-is running: that is the question most callers are really asking."
+Nil between a `D\=' mark and the next `C\=', which is to say exactly when
+nothing is running: that is the question most callers are really asking."
   (when-let* ((marker (or cooked--command-prompt cooked--command-start))
               ((marker-position marker)))
     marker))
@@ -1595,10 +1611,11 @@ dozen empty lines under the prompt, and a program drawing below the cursor is
 inside `:used' by construction, so its layout survives.
 
 Unconditional in both cases, and deliberately not conditioned on the tail being
-*wholly blank*: that is a question about the buffer's text rather than about the
-grid, and the two stop agreeing the moment a height shrink evicts rows.  The rows
-that left are inserted above as scrollback and the survivors re-rendered from row
-0 down, so the old lines below the new last row are not blank — they are a stale
+*wholly blank*: that is a question about the buffer's text rather than about
+the grid, and the two stop agreeing the moment a height shrink evicts rows.
+The rows that left are inserted above as scrollback and the survivors
+re-rendered from row 0 down, so the old lines below the new last row are not
+blank — they are a stale
 copy of the live screen, and a blankness test leaves the screen showing twice."
   (save-excursion
     (let ((rows (if cooked--alt

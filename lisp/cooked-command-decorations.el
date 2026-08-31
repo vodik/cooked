@@ -171,11 +171,12 @@ than writing twice: the running marker and the finished one are the same
 overlay in the same fringe, differing only in what they are coloured by and in
 whether there is anything to click.  Returns the overlay, live and correct.
 
-Uses an overlay\='s `before-string\=', never a `display\=' property on the buffer\='s
-own text: `cooked--render-rows\=' deletes and reinserts whole rows, so a text
-property dies with the row, and a `display\=' spec on a real character costs
-that character a column.  `evaporate t\=' so `cooked--discard-scrollback\='
-cleans the overlay up for free when the text it anchors to goes.
+Uses an overlay\='s `before-string\=', never a `display\=' property on the
+buffer\='s own text: `cooked--render-rows\=' deletes and reinserts whole rows,
+so a text property dies with the row, and a `display\=' spec on a real
+character costs that character a column.  `evaporate t\=' so
+`cooked--discard-scrollback\=' cleans the overlay up for free when the text it
+anchors to goes.
 
 The \"already right\" test names FACE as well as the span, which the span alone
 used to carry: the running marker is repainted in its finished colour by this
@@ -254,9 +255,10 @@ record when its `D\=' mark supplies an exit code.  Nothing is lost by keeping it
 apart -- a shell runs one command at a time, so this marker is a singleton in a
 way the finished ones are not.
 
-Torn down and rebuilt freely: `cooked-command-decorations--sync-running\=' derives
-it from `cooked--running-anchor\=' on every render rather than maintaining it,
-which is the same bargain the finished markers make with the re-arm.")
+Torn down and rebuilt freely: `cooked-command-decorations--sync-running\='
+derives it from `cooked--running-anchor\=' on every render rather than
+maintaining it, which is the same bargain the finished markers make with the
+re-arm.")
 
 (defun cooked-command-decorations--drop-running ()
   "Take the running marker down, if one is up."
@@ -270,11 +272,13 @@ which is the same bargain the finished markers make with the re-arm.")
 Which is to say: up, on the anchor `cooked--running-anchor\=' names, whenever a
 command is running -- and down otherwise.  Both directions from one function
 and derived from cooked\='s own bookkeeping each time, so nothing has to notice
-the ways a running marker can be left stranded: a `D\=' mark whose `C\=' was lost,
-an alt screen coming up under it, a drain dragging the overlay off its row.
+the ways a running marker can be left stranded: a `D\=' mark whose `C\=' was
+lost, an alt screen coming up under it, a drain dragging the overlay off its
+row.
 
-Down under the alt screen for the reason `cooked-command-decorations--clear-live\='
-takes the finished markers down -- a full-screen program is drawn over these
+Down under the alt screen for the reason
+`cooked-command-decorations--clear-live\=' takes the finished markers down -- a
+full-screen program is drawn over these
 very rows -- and back up on the first render after it leaves, since the marker
 is derived and not remembered."
   (if-let* (((not cooked--alt))
@@ -395,8 +399,8 @@ narrowing, and so outside the range that sweep looks in.
 
 Nothing puts any of them back explicitly, and nothing needs to: restoring the
 primary marks every row damaged, and `cooked-command-decorations--rearm\='
-repaints from that -- which is the whole reason the decoration is re-applied per render rather
-than persisted."
+repaints from that -- which is the whole reason the decoration is re-applied
+per render rather than persisted."
   (when-let* ((screen (and cooked--alt (cooked--screen-start-position))))
     (cooked-command-decorations--drop-running)
     (dolist (overlay (overlays-in screen (point-max)))

@@ -964,8 +964,18 @@ search path is what survives that."
   (cooked--terminfo)
   (skip-unless (cooked--terminfo-directory cooked-term-name))
   (let ((home (expand-file-name "~/.terminfo")))
-    (let ((env (cooked--child-environment)))
+    ;; Bound rather than inherited, and that is the point of spelling it out: read
+    ;; from the environment this ran in, this case asserted whatever the developer
+    ;; happened to export.  Anyone with TERMINFO_DIRS already set failed here.
+    (let* ((process-environment (cons "TERMINFO_DIRS=" process-environment))
+           (env (cooked--child-environment)))
       ;; Ours first, then the compiled-in default, which is what the empty entry means.
+      (should (equal (cdr (assoc "TERMINFO_DIRS" env)) (concat home ":"))))
+    ;; The database already on the user's own path, which is where ncurses looks by
+    ;; default and so a reasonable thing to have set.  Ours moves to the front and
+    ;; theirs is dropped rather than left behind it: one entry, not two.
+    (let* ((process-environment (cons (concat "TERMINFO_DIRS=" home ":") process-environment))
+           (env (cooked--child-environment)))
       (should (equal (cdr (assoc "TERMINFO_DIRS" env)) (concat home ":"))))
     ;; Not when we fell back to xterm-256color: there is nothing of ours to find.
     (let* ((cooked-term-name nil)
@@ -981,8 +991,11 @@ search path is what survives that."
                      (concat home ":/opt/terminfo:")))
       (should (= 1 (seq-count (lambda (pair) (equal (car pair) "TERMINFO_DIRS")) env))))
     ;; And a TERMINFO the user chose is left alone: it holds one directory, so taking
-    ;; it would mean choosing between their entries and ours.
-    (let* ((process-environment (cons "TERMINFO=/opt/terminfo" process-environment))
+    ;; it would mean choosing between their entries and ours.  TERMINFO_DIRS is bound
+    ;; here for the same reason as above -- this case is about TERMINFO, and reading
+    ;; the other one from the ambient environment is what made it fail elsewhere.
+    (let* ((process-environment (append '("TERMINFO=/opt/terminfo" "TERMINFO_DIRS=")
+                                        process-environment))
            (env (cooked--child-environment)))
       (should (equal (cdr (assoc "TERMINFO" env)) "/opt/terminfo"))
       (should (equal (cdr (assoc "TERMINFO_DIRS" env)) (concat home ":"))))))

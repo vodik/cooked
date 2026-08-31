@@ -508,9 +508,9 @@ So a foreign host updates `cooked--host\=' and stops there, leaving
 
 The path is percent-encoded, because that is what a URL is: a directory called
 `100%20cake\=' has to arrive as `100%2520cake\=' or it decodes to a different
-directory that does not exist.  Both emitters that reach this parser -- cooked\='s
-own snippets and a fish 4 doing its own reporting -- encode that way, so there is
-one encoding on the wire and one decoding here."
+directory that does not exist.  Both emitters that reach this parser --
+cooked\='s own snippets and a fish 4 doing its own reporting -- encode that way,
+so there is one encoding on the wire and one decoding here."
   (when (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url)
     (setq cooked--host (url-unhex-string (match-string 1 url)))
     (unless (cooked--foreign-host-p)

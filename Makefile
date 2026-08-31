@@ -24,8 +24,15 @@ lint: compile checkdoc
 
 # Warnings are errors here: the tree is clean, and the only way it stays clean is
 # if a new one fails the build rather than scrolling past.
+#
+# Make does the globbing and `batch-byte-compile' takes the files as arguments, so
+# there is no regexp in the middle to get wrong.  There was: `"[.]el\z"' spent a long
+# time here, and `\z' is not an escape Elisp strings know -- it collapsed to the
+# regexp `[.]elz', which matches nothing, so this target compiled no files and
+# reported success for years.  A gate that cannot fail is worse than no gate.
 compile:
-	$(BATCH) --eval '(let ((byte-compile-error-on-warn t)) (dolist (f (directory-files "lisp" t "[.]el\z")) (unless (byte-compile-file f) (kill-emacs 1))))'
+	$(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
+	  -f batch-byte-compile $(wildcard lisp/*.el)
 	@rm -f lisp/*.elc
 
 # Advisory rather than gating.  Three of checkdoc's rules disagree with this tree
