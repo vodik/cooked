@@ -1015,7 +1015,7 @@ was never built."
     (buffer-substring-no-properties (car region) (cdr region))))
 
 (defvar cooked-snap-commands
-  '(self-insert-command cooked--self-insert
+  '(self-insert-command
     cooked-newline newline newline-and-indent
     yank yank-pop cooked-paste cooked-evil-paste
     evil-paste-before evil-paste-after evil-paste-from-register)
@@ -1025,13 +1025,14 @@ See `cooked--snap-to-input'.
 Plain `newline' is here because `evil-collection' binds S-RET to it directly
 rather than to `cooked-newline', so it needs the same protection.
 
-`cooked--self-insert' is here for the same reason and is easy to miss: this list
-is matched against `this-command', and a remap replaces `this-command' outright
-rather than layering over it.  So remapping `self-insert-command' -- which is
-what puts the termios sample in front of a typed character -- takes every
-ordinary keystroke out of this list unless the remap target is named too, and
-what breaks is not the sample but the snap: typing on the blank line below the
-prompt silently lands outside the input markers again.
+A remap would need its target named here too, and that is easy to miss: this
+list is matched against `this-command', and a remap replaces `this-command'
+outright rather than layering over it.  A `self-insert-command' remap once took
+every ordinary keystroke out of this list, and what broke was not the feature
+the remap was added for but the snap -- typing on the blank line below the
+prompt silently landed outside the input markers again.  There is no such remap
+now, and `cooked--guard-insertion' substitutes rather than remaps for exactly
+this reason.
 
 This list has a second reader, and adding to it now buys two things rather than
 one.  `cooked--guard-insertion' keys the point-of-use termios sample off it, on

@@ -1006,10 +1006,6 @@ time, and rebuilding is the only way to put a key back that used to be
 delegated.  Unbinding it instead would leave `TAB\=' bound to nothing rather
 than to `completion-at-point\='."
   (let ((map (make-sparse-keymap)))
-    ;; The whole of the point-of-use termios sample; see `cooked--self-insert'.
-    ;; Here rather than in `cooked-mode-map', because this is the only state in
-    ;; which a printable key becomes buffer text instead of a byte to the child.
-    (define-key map [remap self-insert-command] #'cooked--self-insert)
     (define-key map (kbd "RET") #'cooked-send-input)
     (define-key map (kbd "<S-return>") #'cooked-newline)
     (define-key map (kbd "C-d") #'cooked-delete-char-or-eof)
@@ -1393,11 +1389,11 @@ wakes the reader and nothing schedules a drain.  Until the next timer tick
 the password the user has already started typing is being rendered into the
 buffer, sent on RET, and left behind in the scrollback and the undo history.
 
-Closing that costs one `tcgetattr\=' on the character that would have leaked --
-paid only while someone is actually typing at an editable prompt, against a
+Closing that costs one `tcgetattr\=' on the command that would have leaked --
+paid only when something is about to put text on an editable line, against a
 timer that otherwise pays it ten times a second forever.  See
-`cooked--self-insert\=', which is the only caller and the only place the answer
-can be spent."
+`cooked--guard-insertion\=', which is the only caller and the only place the
+answer can be spent."
   (when cooked--session
     (cooked--set-mode (cooked--sample-mode cooked--session))))
 
@@ -1408,7 +1404,8 @@ can be spent."
     (evil-paste-after         . cooked-paste)
     (evil-paste-from-register . cooked-paste)
     (newline                  . cooked-send-key)
-    (newline-and-indent       . cooked-send-key))
+    (newline-and-indent       . cooked-send-key)
+    (self-insert-command      . cooked-send-key))
   "What each foreign insertion command means once the child owns the line.
 
 The division this encodes is the whole shape of the guard.  Cooked\\='s own
@@ -1417,8 +1414,12 @@ on either answer -- `cooked-paste\\=' yanks or hands the kill to the child,
 `cooked-newline\\=' and `cooked--history-move\\=' refuse -- so all they ever needed
 was for that answer to be current, which `cooked--guard-insertion\\=' gives them.
 
-These are the ones that cannot: `yank\\=', `newline\\=' and evil\\='s paste commands
-know nothing about cooked and will insert wherever point happens to be.  For
+These are the ones that cannot: `yank\\=', `newline\\=', `self-insert-command\\='
+and evil\\='s paste commands know nothing about cooked and will insert wherever
+point happens to be.  `self-insert-command\\=' earns its place twice over: the
+substitution it gets here is the one `cooked--build-passthrough-map\\=' already
+makes for it as a remap, so a keystroke arriving a moment early on the sample
+reaches the child exactly as it would have a moment later.  For
 them the guard substitutes the command that does the same job through the
 child, so the user\\='s intent survives being answered by the other half of the
 terminal.  A paste is still a paste; it just reaches the password read instead
@@ -1433,10 +1434,19 @@ so this generalises a choice the tree had already made.")
 (defun cooked--guard-insertion ()
   "Re-read the tty before a command that would insert into the input region.
 
-The shared half of the point-of-use termios sample.  `cooked--self-insert\\='
-covers a typed character; this covers everything else that puts text on the
-input line, and it covers them in one place rather than by each one
-remembering to ask.
+The whole of the point-of-use termios sample.  Everything that can put text on
+the input line passes through here first -- a typed character, a paste, a yank
+from a package that has never heard of cooked -- in one place rather than by
+each one remembering to ask.
+
+It was briefly two mechanisms: a `self-insert-command\\=' remap for the typed
+character, and this hook for the rest.  One is enough, and the remap was the
+half worth losing.  A remap *replaces* `this-command\\=' rather than layering
+over it, so it silently took every ordinary keystroke out of
+`cooked-snap-commands\\=' and broke the snap until the replacement was named
+there too.  That trap is re-armed by any later remap and cannot be designed
+away while one exists, and the substitution below does the same job without
+it.
 
 Keyed on `cooked-snap-commands\\=', which is not an approximation of \"commands
 that insert\" but the very list the tree already maintains for that -- a new
@@ -1466,38 +1476,6 @@ against the state it will actually run in."
       (unless (cooked--input-state-p)
         (when-let* ((equivalent (alist-get this-command cooked--child-equivalents)))
           (setq this-command equivalent))))))
-
-(defun cooked--self-insert (n)
-  "Insert N copies of the typed character, unless the child has taken the line.
-
-Bound in `cooked-input-map\=' as the remap of `self-insert-command\=', which is
-the narrowest seam that covers the leak: printable keys are not bound there at
-all, so they fall through to ordinary self-insertion, and self-insertion is the
-one path by which a keystroke becomes buffer text.  A `pre-command-hook\=' would
-have covered it too and would have sampled on every cursor motion to do it.
-
-On a mode the sample has moved, the character is *forwarded* rather than
-swallowed or inserted -- by calling `cooked-send-key\=' outright, which is what
-the map the child owns would have run anyway.  Swallowing it would cost the
-user the first character of their password and leave them an authentication
-failure to work out; inserting it is the leak this exists to close.
-
-Forwarded directly rather than pushed back onto `unread-command-events\=' for
-Emacs to look up again, and that is a safety property rather than a shortcut.
-A re-dispatch is only loop-free while every map that key can land in binds
-something other than this command -- which is true today and is exactly the
-kind of thing a later keymap change breaks silently.  The failure it breaks
-into is not a Lisp error but a command loop that never returns, taking the
-whole editor with it.  Calling the sender is the same behaviour with no such
-edge: this command runs once per keystroke and returns."
-  (interactive "p")
-  (cooked--resample-mode)
-  (if (cooked--input-state-p)
-      (self-insert-command n)
-    ;; N times, so a prefix argument reaches the child as the repeats the user
-    ;; asked for rather than collapsing to one byte.
-    (dotimes (_ n)
-      (cooked-send-key))))
 
 (defun cooked--set-mode (mode)
   "Adopt MODE, switching keymaps and handling secret prompts on a change."

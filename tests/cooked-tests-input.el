@@ -633,8 +633,7 @@ buffer in exactly that state -- a real child really in secret mode, and a
       (cooked--refresh-keymap)
       (should (cooked--input-state-p))
       (goto-char (point-max))
-      (let ((last-command-event ?p))
-        (call-interactively (key-binding (kbd "p"))))
+      (cooked-tests--run-command 'self-insert-command)
       (cooked--cancel-secret)
       (should-not (string-match-p "p" (buffer-substring-no-properties
                                        (point-min) (point-max))))
@@ -646,17 +645,18 @@ buffer in exactly that state -- a real child really in secret mode, and a
   "The refusal must forward the key and return, not re-dispatch it.
 
 The bug this rules out is not a wrong character but a command loop that never
-ends.  An earlier draft of `cooked--self-insert\=' pushed the key back onto
-`unread-command-events\=' for Emacs to look up again under the corrected keymap,
-which is only bounded while every map that key can reach binds something other
-than `cooked--self-insert\='.  Where the *policy* moves without the *mode*
+ends.  An earlier draft pushed the key back onto `unread-command-events\=' for
+Emacs to look up again under the corrected keymap, which is only bounded while
+every map that key can reach binds something other than the pusher.  Where the
+*policy* moves without the *mode*
 moving, `cooked--set-mode\=' short-circuits, no refresh runs, the key lands in
 the same map it came from, and the command re-dispatches itself forever --
 taking the editor with it rather than signalling.
 
-So the character is handed to `cooked-send-key\=' outright.  Both branches of
-this command call a leaf command and return, and nothing is ever queued, which
-is what makes one keystroke cost exactly one invocation.  Spelled against `raw\='
+So `cooked--guard-insertion\=' *substitutes* instead: it rewrites `this-command\='
+to `cooked-send-key\=' and the loop runs that, once.  Nothing is ever queued and
+no key is looked up twice, which is what makes one keystroke cost exactly one
+invocation.  Spelled against `raw\='
 rather than `secret\=' so that what is asserted is the forwarding itself, with
 no password prompt in the way."
   (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; cat -v")
@@ -666,17 +666,18 @@ no password prompt in the way."
     (cooked--refresh-keymap)
     (should (cooked--input-state-p))
     (goto-char (point-max))
-    (let ((last-command-event ?z))
-      (call-interactively (key-binding (kbd "z"))))
-    ;; Returned at all, which is the whole assertion: a re-dispatching draft
-    ;; never reaches this line.  And the mode is corrected on the way.
+    ;; Returns at all, which is half the assertion: a re-dispatching draft never
+    ;; reaches the next line.  The other half is what it ran instead.
+    (should (eq (cooked-tests--run-command 'self-insert-command ?z)
+                'cooked-send-key))
+    ;; And the mode is corrected on the way.
     (should (eq cooked--mode 'raw))
     ;; Forwarded, not inserted: `cat -v' echoes it back, so it arrives as the
     ;; child's own output rather than as text Emacs typed into the buffer.
     (should (cooked-tests--settle
              (lambda () (string-match-p "z" (cooked-tests--text)))))))
 
-(defun cooked-tests--run-command (command)
+(defun cooked-tests--run-command (command &optional event)
   "Run COMMAND the way the command loop would, hooks and all.
 
 `call-interactively\' on its own is not enough for anything guarded from
@@ -685,9 +686,10 @@ it exercises the command without the guard that protects it -- and would pass
 just as happily with the guard deleted.  Binding `this-command\' and running the
 hook by hand is the smallest faithful model, including the part that matters
 here, which is that the hook is allowed to substitute `this-command\' and the
-loop runs whatever it finds afterwards."
+loop runs whatever it finds afterwards.  EVENT is the key typed, defaulting to
+`?p\='; it matters only for the commands that read `last-command-event\='."
   (let ((this-command command)
-        (last-command-event ?p))
+        (last-command-event (or event ?p)))
     (run-hooks 'pre-command-hook)
     (call-interactively this-command)
     this-command))
@@ -754,9 +756,9 @@ password prompt in the way."
 The feature that a timer is kept for.  A child that turns echo off without
 printing anything leaves nothing on the pty to wake the reader, so nothing but
 the periodic termios sample can notice it -- there is no output to ride in on
-and no keystroke to hang the question off.  `cooked--self-insert\=' covers the
-window before the sample lands; it does not replace the sample, and this is the
-test that says so."
+and no keystroke to hang the question off.  `cooked--guard-insertion\=' covers
+the window before the sample lands, but only for a user who types or pastes
+into it; it does not replace the sample, and this is the test that says so."
   (let* ((asked nil)
          (cooked-password-function (lambda (prompt) (setq asked prompt) "")))
     (cooked-tests--with-session '("/bin/sh" "-c" "stty -echo; sleep 5")
