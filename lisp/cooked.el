@@ -16,18 +16,22 @@
 ;;
 ;;   (use-package cooked
 ;;     :load-path "/path/to/cooked/lisp"
-;;     :commands (cooked cooked-other-window)
+;;     :commands (cooked cooked-other-window
+;;                cooked-project cooked-project-other-window
+;;                cooked-here cooked-here-other-window)
 ;;     :custom (cooked-buffer-name "*cooked: %s*")
 ;;     :config
 ;;     (require 'cooked-evil)             ; opt in to evil state syncing
 ;;     (require 'cooked-osc-eval)         ; opt in to the OSC 51 command channel
-;;     (require 'cooked-shell-completion)); opt in to the shell's own completion
+;;     (require 'cooked-shell-completion) ; opt in to the shell's own completion
+;;     (require 'cooked-project))         ; opt in to project-scoped sessions
 ;;
 ;; Emulation happens in a Rust module, built on first use with cargo.
 ;;
 ;; This file is the core: rendering, colours, and the OSC handlers that are inert
 ;; enough to be on by default.  `cooked-mode' has the interaction; `cooked-evil',
-;; `cooked-osc-eval' and `cooked-shell-completion' are separate because you should
+;; `cooked-osc-eval', `cooked-shell-completion' and `cooked-project' are separate
+;; because you should
 ;; choose them.
 
 ;; The buffer is the scrollback.  Rows that scroll off the emulator's screen are

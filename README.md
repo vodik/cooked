@@ -153,21 +153,24 @@ emacs -Q -L lisp -l cooked-mode -f cooked
 
 ### The optional layers
 
-Six things are separate files you `require`, not settings — because a setting that gates
+Seven things are separate files you `require`, not settings — because a setting that gates
 code already loaded and running is a switch in name only:
 
 ```elisp
 (use-package cooked
   :straight (cooked :type git :host github :repo "vodik/cooked"
                     :files ("lisp/*.el"))
-  :commands (cooked cooked-other-window)
+  :commands (cooked cooked-other-window
+             cooked-project cooked-project-other-window
+             cooked-here cooked-here-other-window)
   :config
   (require 'cooked-evil)                 ; evil state syncing, command text objects
   (require 'cooked-osc-eval)             ; the OSC 51 command channel
   (require 'cooked-shell-completion)     ; zsh's own completion, over OSC 51;C
   (require 'cooked-file-link)            ; file names in output become links
   (require 'cooked-next-error)           ; M-g M-n through a command's output
-  (require 'cooked-command-decorations)) ; a fringe marker per command, coloured by exit
+  (require 'cooked-command-decorations)  ; a fringe marker per command, coloured by exit
+  (require 'cooked-project))             ; a session scoped to the project root
 ```
 
 `cooked-osc-eval` is the one to read before enabling: it lets the child ask Emacs to
@@ -509,6 +512,7 @@ lisp/            cooked-util.el             macros, session handle, the group
                  cooked-file-link.el            opt-in
                  cooked-next-error.el           opt-in
                  cooked-command-decorations.el  opt-in
+                 cooked-project.el              opt-in
 shell-integration/  bash, zsh, fish, plus zsh's completion capture
 docs/            DESIGN, KEYBOARD, FEATURES, TERMINFO, IMAGES, ROADMAP
 tests/           cooked-tests.el loads the suite; the rest are split by subject
