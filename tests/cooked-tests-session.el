@@ -103,16 +103,28 @@ else.  It lived in cooked-mode.el, which cooked.el does not require, and an
 autoload cookie there does not help: an autoload that forwards to a second file
 is not followed, it is signalled.
 
+Reaching the command is only half of it: it also has to *run*.  Each of these
+passes a display action as an argument, which is evaluated before the callee's
+own `require' of cooked-mode -- so an option defined over there is read while it
+is still void.  That is why `cooked-display-action' lives in cooked.el, and
+calling the command rather than merely resolving it is what says so.
+
 Run in a fresh Emacs, because in this one the whole suite is already loaded and
 there is no autoload left to resolve."
   (let ((lisp (expand-file-name "lisp" (cooked--root))))
-    (dolist (command '(cooked cooked-other-window))
+    (pcase-dolist (`(,command . ,file)
+                   '((cooked . "cooked")
+                     (cooked-other-window . "cooked")
+                     ;; The project commands are autoloaded from their own file,
+                     ;; which is a second entry point into the same hazard.
+                     (cooked-here . "cooked-project")
+                     (cooked-here-other-window . "cooked-project")))
       (should
        (eq 0 (call-process
               (expand-file-name invocation-name invocation-directory)
               nil nil nil "-Q" "--batch" "-L" lisp
               "--eval" (prin1-to-string
-                        `(progn (autoload ',command "cooked" nil t)
+                        `(progn (autoload ',command ,file nil t)
                                 (unless (commandp ',command) (kill-emacs 1))
                                 (call-interactively ',command)
                                 (unless cooked--session (kill-emacs 1))
@@ -136,31 +148,20 @@ own ~/.zshenv — where PATH and friends usually live — was never read."
   (cooked-tests--with-fake-zdotdir
       '((".zshenv" . "export COOKED_ZSHENV_WITNESS=yes\n")
         (".zshrc" . "export COOKED_ZSHRC_WITNESS=yes\n"))
-    (let ((buffer (generate-new-buffer "*cooked-zshenv*")))
-      (unwind-protect
-          (with-current-buffer buffer
-            (cooked-mode)
-            (pcase-let ((`(,argv ,env ,scratch)
-                         (cooked--shell-invocation (executable-find "zsh"))))
-              (setq cooked--scratch scratch)
-              (cooked--start argv nil env))
-            (cooked--refresh-keymap)
-            (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-            (cooked--send cooked--session "echo env=$COOKED_ZSHENV_WITNESS rc=$COOKED_ZSHRC_WITNESS\r")
-            (should (cooked-tests--settle
-                     (lambda () (string-match-p "env=yes rc=yes" (cooked-tests--text)))))
-            ;; And ZDOTDIR is handed back, so nested shells still find the real config.
-            ;; Compared against the actual paths, not a literal /tmp: macOS puts temp
-            ;; files under $TMPDIR in /var/folders.
-            (let ((user-zdotdir (getenv "ZDOTDIR")))
-              (cooked--send cooked--session "echo zdot=$ZDOTDIR\r")
-              (should (cooked-tests--settle
-                       (lambda () (string-match-p (concat "zdot=" (regexp-quote user-zdotdir))
-                                                  (cooked-tests--text)))))
-              (should-not (string-match-p (concat "zdot=" (regexp-quote cooked--scratch))
-                                          (cooked-tests--text)))))
-        (with-current-buffer buffer (cooked--cleanup))
-        (kill-buffer buffer)))))
+    (cooked-tests--with-shell ("zsh" :name "*cooked-zshenv*" :settle (lambda () (eq cooked--semantic 'input)))
+      (cooked--send cooked--session "echo env=$COOKED_ZSHENV_WITNESS rc=$COOKED_ZSHRC_WITNESS\r")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "env=yes rc=yes" (cooked-tests--text)))))
+      ;; And ZDOTDIR is handed back, so nested shells still find the real config.
+      ;; Compared against the actual paths, not a literal /tmp: macOS puts temp
+      ;; files under $TMPDIR in /var/folders.
+      (let ((user-zdotdir (getenv "ZDOTDIR")))
+        (cooked--send cooked--session "echo zdot=$ZDOTDIR\r")
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p (concat "zdot=" (regexp-quote user-zdotdir))
+                                            (cooked-tests--text)))))
+        (should-not (string-match-p (concat "zdot=" (regexp-quote cooked--scratch))
+                                    (cooked-tests--text)))))))
 
 (ert-deftest cooked-zsh-survives-a-theme-that-rebuilds-the-prompt ()
   "Regression: the 133;B mark was appended to PS1 once at source time, so any
@@ -172,24 +173,13 @@ precmd then ran after the theme's and read its status instead of the command's."
       '((".zshrc" . "__theme_precmd() { PS1='theme%% ' }\n\
 autoload -Uz add-zsh-hook\n\
 add-zsh-hook precmd __theme_precmd\n"))
-    (let ((buffer (generate-new-buffer "*cooked-theme*")))
-      (unwind-protect
-          (with-current-buffer buffer
-            (cooked-mode)
-            (pcase-let ((`(,argv ,env ,scratch)
-                         (cooked--shell-invocation (executable-find "zsh"))))
-              (setq cooked--scratch scratch)
-              (cooked--start argv nil env))
-            (cooked--refresh-keymap)
-            ;; Only an OSC 133;B can put us here.
-            (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-            ;; And the exit code still belongs to the command, not the theme's hook.
-            (cooked--replace-input "exit 7")
-            (cooked--send cooked--session "(exit 7)\r")
-            (should (cooked-tests--settle
-                     (lambda () (eql (cooked-last-exit-code) 7)))))
-        (with-current-buffer buffer (cooked--cleanup))
-        (kill-buffer buffer)))))
+    ;; Settling at all means an OSC 133;B arrived.
+    (cooked-tests--with-shell ("zsh" :name "*cooked-theme*")
+      ;; And the exit code still belongs to the command, not the theme's hook.
+      (cooked--replace-input "exit 7")
+      (cooked--send cooked--session "(exit 7)\r")
+      (should (cooked-tests--settle
+               (lambda () (eql (cooked-last-exit-code) 7)))))))
 
 (ert-deftest cooked-integration-features-reach-the-child-verbatim ()
   "The feature list is passed as a string the shell can append to.
@@ -250,22 +240,11 @@ which runs earlier, has somewhere to stand."
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "PROMPT='$ '\nCOOKED_SHELL_INTEGRATION_FEATURES=\"${COOKED_SHELL_INTEGRATION_FEATURES-} no-marks\"\n"))
-    (let ((buffer (generate-new-buffer "*cooked-no-marks*")))
-      (unwind-protect
-          (with-current-buffer buffer
-            (cooked-mode)
-            (pcase-let ((`(,argv ,env ,scratch)
-                         (cooked--shell-invocation (executable-find "zsh"))))
-              (setq cooked--scratch scratch)
-              (cooked--start argv nil env))
-            (cooked--refresh-keymap)
-            ;; The `B\=' mark still arrives, so Emacs still owns the line.
-            (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-            ;; But no `A\=' ever did, so there is no prompt extent to report --
-            ;; which is what the rc asked for by standing the marks down.
-            (should (null cooked--prompt-start)))
-        (with-current-buffer buffer (cooked--cleanup))
-        (kill-buffer buffer)))))
+    ;; Settling means the `B\=' mark still arrives, so Emacs still owns the line.
+    (cooked-tests--with-shell ("zsh" :name "*cooked-no-marks*")
+      ;; But no `A\=' ever did, so there is no prompt extent to report --
+      ;; which is what the rc asked for by standing the marks down.
+      (should (null cooked--prompt-start)))))
 
 (ert-deftest cooked-cleanup-kills-the-child-without-waiting-for-gc ()
   "Clearing the Lisp variable only drops a reference; nothing guarantees a
@@ -869,60 +848,45 @@ three shells at once, so all three are checked here against the same directory."
 (ert-deftest cooked-real-bash-reaches-input-state-at-its-prompt ()
   "The headline case: a real interactive shell, whose prompt is raw-mode."
   (skip-unless (executable-find "bash"))
-  (let ((buffer (generate-new-buffer "*cooked-bash*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "bash"))))
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          ;; The shell's own line editor puts the tty in raw mode...
-          (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
-          ;; ...yet OSC 133 still hands the line to Emacs.
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-          (should (cooked--input-state-p))
-          (should (eq (current-local-map) cooked-input-map))
-          ;; Submitting runs the command and the output is attributed to it.
-          (cooked--restore-pending-input nil)
-          (goto-char cooked--input-end)
-          (insert "echo marker-ok")
-          (cooked-send-input)
-          (should (cooked-tests--settle
-                   (lambda () (string-match-p "marker-ok" (cooked-tests--text)))))
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)))))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer))))
+  (cooked-tests--with-shell
+      ("bash"
+       ;; The shell's own line editor puts the tty in raw mode, and yet OSC 133
+       ;; still hands the line to Emacs -- which is the whole headline.
+       :settle (lambda () (and (eq cooked--mode 'raw)
+                               (eq cooked--semantic 'input)
+                               (cooked--input-start-position))))
+    (should (cooked--input-state-p))
+    (should (eq (current-local-map) cooked-input-map))
+    ;; Submitting runs the command and the output is attributed to it.
+    (cooked--restore-pending-input nil)
+    (goto-char cooked--input-end)
+    (insert "echo marker-ok")
+    (cooked-send-input)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "marker-ok" (cooked-tests--text)))))
+    (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))))
 
 (ert-deftest cooked-zsh-reports-command-exit-codes ()
   "Regression: `local status=$?' fails in zsh, which silently killed OSC 133;D."
   (skip-unless (executable-find "zsh"))
-  (let ((buffer (generate-new-buffer "*cooked-zsh*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-          (should-not (string-match-p "read-only variable" (cooked-tests--text)))
-          (cooked--restore-pending-input nil)
-          (goto-char cooked--input-end)
-          (insert "(exit 42)")
-          (cooked-send-input)
-          (should (cooked-tests--settle (lambda () (cooked-last-exit-code))))
-          (should (equal (cooked-last-exit-code) 42))
-          ;; A command that printed nothing still gets a record.
-          (should (= 1 (length cooked--commands)))
-          ;; And a second one with output is tagged in the text too.
-          (cooked--restore-pending-input nil)
-          (goto-char cooked--input-end)
-          (insert "echo out-marker")
-          (cooked-send-input)
-          (should (cooked-tests--settle
-                   (lambda () (equal (cooked-last-exit-code) 0))))
-          (should (string-match-p "out-marker" (cooked-tests--text))))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer))))
+  (cooked-tests--with-shell ("zsh" :settle (lambda () (eq cooked--semantic 'input)))
+    (should-not (string-match-p "read-only variable" (cooked-tests--text)))
+    (cooked--restore-pending-input nil)
+    (goto-char cooked--input-end)
+    (insert "(exit 42)")
+    (cooked-send-input)
+    (should (cooked-tests--settle (lambda () (cooked-last-exit-code))))
+    (should (equal (cooked-last-exit-code) 42))
+    ;; A command that printed nothing still gets a record.
+    (should (= 1 (length cooked--commands)))
+    ;; And a second one with output is tagged in the text too.
+    (cooked--restore-pending-input nil)
+    (goto-char cooked--input-end)
+    (insert "echo out-marker")
+    (cooked-send-input)
+    (should (cooked-tests--settle
+             (lambda () (equal (cooked-last-exit-code) 0))))
+    (should (string-match-p "out-marker" (cooked-tests--text)))))
 
 (ert-deftest cooked-resize-reaches-sessions-in-other-buffers ()
   "`window-size-change-functions' runs per frame, not per buffer."

@@ -11,10 +11,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # 28.1 is the floor Package-Requires declares; the module ABI check in
-        # emacs_module_init is written against it. `release-snapshot' catches a
-        # break against what users on master will actually have.
-        emacs: ['28.1', '29.4', 'release-snapshot']
+        # 29.1 is the floor Package-Requires declares -- `defvar-keymap' and
+        # `with-memoization' are both 29.1, and the tree uses them. The module
+        # ABI check in `Runtime::compatible' is a size comparison rather than a
+        # version test, so it needs no floor of its own. `release-snapshot'
+        # catches a break against what users on master will actually have.
+        emacs: ['29.1', '29.4', 'release-snapshot']
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

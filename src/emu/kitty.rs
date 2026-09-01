@@ -457,28 +457,35 @@ pub(super) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Standard base64, for tests that have to hand the parser a payload.
+///
+/// The inverse of [`decode_base64`] and beside it on purpose: both the kitty tests here
+/// and the end-to-end ones in [`super::term`] need to encode a picture, and the two had
+/// grown a byte-identical copy each.
+#[cfg(test)]
+pub(super) fn encode_base64(bytes: &[u8]) -> String {
+    const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let mut n = 0u32;
+        for (i, b) in chunk.iter().enumerate() {
+            n |= u32::from(*b) << (16 - 8 * i);
+        }
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(SET[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn b64(bytes: &[u8]) -> String {
-        const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for chunk in bytes.chunks(3) {
-            let mut n = 0u32;
-            for (i, b) in chunk.iter().enumerate() {
-                n |= u32::from(*b) << (16 - 8 * i);
-            }
-            for i in 0..4 {
-                if i <= chunk.len() {
-                    out.push(SET[((n >> (18 - 6 * i)) & 63) as usize] as char);
-                } else {
-                    out.push('=');
-                }
-            }
-        }
-        out
-    }
+    use super::encode_base64 as b64;
 
     #[test]
     fn the_default_action_is_transmit_not_display() {

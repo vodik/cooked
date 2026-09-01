@@ -258,15 +258,6 @@ half of that pair."
           (puthash candidate group groups))))
     (nreverse matches)))
 
-(defun cooked--shell-completion-table (records)
-  "A completion table over RECORDS, with their descriptions and groups."
-  (let ((annotations (make-hash-table :test #'equal))
-        (groups (make-hash-table :test #'equal)))
-    (list (cooked--completion-index records "" annotations groups)
-          (lambda (candidate) (gethash candidate annotations))
-          (lambda (candidate transform)
-            (if transform candidate (gethash candidate groups))))))
-
 (defun cooked--completion-settled-p (word cached-word cached-matches)
   "Whether CACHED-MATCHES, collected for CACHED-WORD, still answers for WORD.
 

@@ -2,7 +2,7 @@
 
 ;; Author: Simon Gomizelj <simongmzlj@gmail.com>
 ;; Version: 1.0.0
-;; Package-Requires: ((emacs "28.1"))
+;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: terminals, processes
 ;; URL: https://github.com/vodik/cooked
 
@@ -170,10 +170,6 @@ keyboard or one the shell ran itself."))
   "Buffer position where the prompt that ran COMMAND begins, if it is known."
   (when-let* ((marker (cooked-command-prompt command)))
     (marker-position marker)))
-
-(defun cooked--command-input (command)
-  "The line COMMAND was invoked with, or nil if cooked did not submit it."
-  (cooked-command-input command))
 
 (defvar-local cooked--wake nil "Pipe process Rust pokes when output is pending.")
 (defvar-local cooked--rows 24
@@ -2098,11 +2094,16 @@ wrap and clip everything shown in the smaller one.
 latter counts the column reserved for the continuation glyph and measures
 in the frame's canonical character width.  Both round the wrong way: claim
 one column too many and the child wraps a line the window cannot fit,
-which shows up as the last character folding onto a line of its own."
+which shows up as the last character folding onto a line of its own.
+
+The column count comes from `cooked--layout-window' rather than from a second
+minimum taken here.  They were computed separately and are the same quantity by
+construction -- that window is *defined* as the narrowest one -- so a change to
+what counts as narrowest had two places to land and only ever reached one."
   (let ((windows (get-buffer-window-list (current-buffer) nil t)))
-    (if windows
+    (if-let* ((layout (cooked--layout-window)))
         (cons (max 1 (apply #'min (mapcar #'cooked--window-rows windows)))
-              (max 1 (apply #'min (mapcar #'window-max-chars-per-line windows))))
+              (max 1 (window-max-chars-per-line layout)))
       (cons cooked--rows cooked--cols))))
 
 (defun cooked--window-rows (window)
@@ -2257,15 +2258,7 @@ filesystem already goes through, and its message is the one the user is told.
 Only when DIRECTORY is non-nil: nil keeps its own meaning of leaving the child
 wherever Emacs is, and is not a request to be second-guessed."
   (cooked--load-module)
-  (setq cooked--face-cache (make-hash-table :test #'equal))
-  (setq cooked--box-glyph-cache (make-hash-table :test #'equal))
-  (setq cooked--box-ascent-cache (make-hash-table :test #'equal))
-  (setq cooked--deco-image-cache (make-hash-table :test #'equal))
-  (setq cooked--image-data (make-hash-table :test #'eq))
-  (setq cooked--image-specs (make-hash-table :test #'equal :weakness 'value))
-  (setq cooked--image-bytes 0)
-  (setq cooked--image-order nil)
-  (setq cooked--deco-cell nil)
+  (cooked--reset-images)
   (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
     (setq cooked--rows rows cooked--cols cols
           ;; Matches `cooked--sync-size' having already run once at exactly
@@ -3023,7 +3016,46 @@ only the region below `cooked--screen-start' is rebuilt."
 (declare-function cooked--display "cooked-mode")
 (declare-function cooked--start-session "cooked-mode")
 (declare-function cooked--live-buffers "cooked-mode")
-(defvar cooked-display-action)
+
+(defcustom cooked-display-action '(display-buffer-same-window
+                                   display-buffer-pop-up-window)
+  "Action `\\[cooked]' passes to `pop-to-buffer\='.
+
+The selected window first, the way `vterm\=' and `eat\=' do it: a terminal is
+usually what you want to be looking at, whereas the fallback `display-buffer\='
+uses -- reuse a window, else split -- would put it beside the buffer you
+invoked it from as often as not.  Splitting is still the second choice, for
+when the selected window will not take it (a dedicated or side window), and
+`\\[cooked-other-window]\=' remains the way to ask for the split on purpose.
+
+Here rather than in cooked-mode.el with the other session options, because
+every command that reads it is here or in cooked-project.el, and each reads it
+as an *argument* -- evaluated before the callee\='s `require\=' of cooked-mode
+could have run.  Defined beside its readers, an autoloaded `\\[cooked]\=' in an
+Emacs that has never loaded the interaction layer finds a value rather than a
+void variable."
+  :type 'sexp :group 'cooked)
+
+(defconst cooked-other-window-action '(display-buffer-pop-up-window)
+  "Display action every `-other-window\=' command in cooked passes.
+
+A constant rather than the literal written out at each of them: there are three
+pairs of commands whose two halves differ in nothing else -- here, and the two
+in cooked-project.el -- so the literal was the only thing saying they agree,
+three times over.  Deliberately not a `defcustom\=': the customisable choice is
+`cooked-display-action\=', and a command whose whole name is `other-window\='
+has already been told what to do.")
+
+(defun cooked--open-session (new command action)
+  "Display a session using ACTION, starting one unless a live one may be reused.
+
+The body `cooked\=' and `cooked-other-window\=' share; NEW and COMMAND mean what
+they do there.  cooked-project.el has its own, which differs in looking for a
+session already rooted at a particular directory rather than for any at all."
+  (require 'cooked-mode)
+  (cooked--display (or (unless new (car (cooked--live-buffers)))
+                       (cooked--start-session command))
+                   action))
 
 ;;;###autoload
 (defun cooked (&optional new command)
@@ -3032,10 +3064,7 @@ only the region below `cooked--screen-start' is rebuilt."
 With a prefix argument, or NEW non-nil, always start another session rather than
 reusing a live one.  COMMAND overrides `cooked-shell'."
   (interactive "P")
-  (require 'cooked-mode)
-  (cooked--display (or (unless new (car (cooked--live-buffers)))
-                       (cooked--start-session command))
-                   cooked-display-action))
+  (cooked--open-session new command cooked-display-action))
 
 ;;;###autoload
 (defun cooked-other-window (&optional new command)
@@ -3043,10 +3072,7 @@ reusing a live one.  COMMAND overrides `cooked-shell'."
 
 NEW and COMMAND mean what they do there."
   (interactive "P")
-  (require 'cooked-mode)
-  (cooked--display (or (unless new (car (cooked--live-buffers)))
-                       (cooked--start-session command))
-                   '(display-buffer-pop-up-window)))
+  (cooked--open-session new command cooked-other-window-action))
 
 (provide 'cooked)
 ;;; cooked.el ends here

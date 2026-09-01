@@ -228,10 +228,8 @@ nothing has ever displayed.  Callers decorate nothing rather than guessing; see
 PHASE joins the cache key, since two cells of the same glyph at opposite phases
 are genuinely different bitmaps.  It is non-zero only for shade glyphs at an odd
 cell size, so in practice nothing else pays for the extra variant."
-  (let ((key (list bits (car size) (cdr size) (or phase 0))))
-    (or (gethash key cooked--box-glyph-cache)
-        (puthash key (cooked--render-box-glyph bits (car size) (cdr size) (or phase 0))
-                 cooked--box-glyph-cache))))
+  (cooked--cached cooked--box-glyph-cache (list bits (car size) (cdr size) (or phase 0))
+    (cooked--render-box-glyph bits (car size) (cdr size) (or phase 0))))
 
 (defun cooked--box-glyph-ascent (window height)
   "Return the `:ascent' that places a bitmap on WINDOW's line box.
@@ -246,17 +244,12 @@ where Emacs actually puts it — below the baseline.
 
 Falls back to `center' if the font reports no metrics, which is the previous
 behaviour and still correct whenever `line-spacing' is nil."
-  (unless cooked--box-ascent-cache ; `cooked--rescale-deco' is not error-guarded
-    (setq cooked--box-ascent-cache (make-hash-table :test #'equal)))
-  (let ((key (list 'ascent height)))
-    (or (gethash key cooked--box-ascent-cache)
-        (puthash key
-                 (let ((base (ignore-errors
-                               (aref (font-info (face-font 'default nil window)) 8))))
-                   (if (and (natnump base) (> height 0) (<= base height))
-                       (round (* 100 base) height)
-                     'center))
-                 cooked--box-ascent-cache))))
+  (cooked--cached cooked--box-ascent-cache height
+    (let ((base (ignore-errors
+                  (aref (font-info (face-font 'default nil window)) 8))))
+      (if (and (natnump base) (> height 0) (<= base height))
+          (round (* 100 base) height)
+        'center))))
 
 (defun cooked--box-phase (bits size column row)
   "Dither phase for glyph BITS drawn at screen COLUMN and ROW, at cell SIZE.
@@ -313,12 +306,9 @@ at exactly the cell size, so letting that apply would resample a pixel-exact
 10x20 stroke up to 12x24 inside a 10x20 cell: borders stop meeting at the cell
 edge and the strokes blur into something no better than the font glyphs this
 replaces."
-  (unless cooked--deco-image-cache ; `cooked--rescale-deco' is not error-guarded
-    (setq cooked--deco-image-cache (make-hash-table :test #'equal)))
-  (let ((key (list bits fg bg attrs (car size) (cdr size) phase)))
-    (or (gethash key cooked--deco-image-cache)
-        (puthash key (cooked--box-glyph-image-1 bits fg bg attrs window size phase)
-                 cooked--deco-image-cache))))
+  (cooked--cached cooked--deco-image-cache
+      (list bits fg bg attrs (car size) (cdr size) phase)
+    (cooked--box-glyph-image-1 bits fg bg attrs window size phase)))
 
 (defun cooked--box-glyph-image-1 (bits fg bg attrs window size phase)
   "Build the spec `cooked--box-glyph-image' memoizes.
@@ -397,6 +387,28 @@ up."
     ;; A cosmetic feature must never break rendering: any failure here leaves the
     ;; plain face-only text `cooked--render-block' already inserted.
     (error nil)))
+
+(defun cooked--reset-images ()
+  "Forget every image the previous session on this buffer transmitted.
+
+Called from `cooked--start\=', and the one thing about decoration state that a
+new session must not inherit.  Image ids come from the core and begin again at
+one, so a spec left over from the last child answers for the next child\='s
+first picture -- the same id naming different bytes.  The transmitted data goes
+with them because nothing can reach it any more once the buffer has been
+erased.
+
+The colour and glyph caches deliberately do *not* reset here.  Their keys say
+everything about their values -- a bit pattern, a pixel size, a pair of colours
+-- so an entry made for the last session is still the right answer for this one,
+and each is made on first use by `cooked--cached\=' rather than owned by any
+session.  `cooked--deco-cell\=' is cleared because it records what the buffer was
+last painted *at*, which a fresh buffer has no claim to."
+  (setq cooked--image-data (make-hash-table :test #'eq)
+        cooked--image-specs (make-hash-table :test #'equal :weakness 'value)
+        cooked--image-bytes 0
+        cooked--image-order nil
+        cooked--deco-cell nil))
 
 (defun cooked--install-images (images)
   "Record IMAGES, a drain's `:images\=', before anything referring to them renders.
@@ -564,17 +576,45 @@ it exactly.  `:scale 1\=' for the same reason it is on a box glyph:
 scaled to fit."
   (when-let* ((entry (gethash id cooked--image-data))
               ((image-type-available-p (car entry))))
-    (let ((key (list id (car size) (cdr size))))
-      (or (gethash key cooked--image-specs)
-          (puthash key
-                   (pcase-let ((`(,format ,data ,_px-w ,_px-h ,cols ,rows) entry))
-                     (create-image data format t
-                                   :width (* cols (car size))
-                                   :height (* rows (cdr size))
-                                   :scale 1
-                                   :ascent (cooked--box-glyph-ascent
-                                            (cooked--layout-window) (cdr size))))
-                   cooked--image-specs)))))
+    ;; Not `cooked--cached': this table is weak on its values by design -- see
+    ;; `cooked--image-specs' -- and is cleared per session, so it is made by
+    ;; `cooked--reset-images' rather than on first use.
+    (with-memoization (gethash (list id (car size) (cdr size)) cooked--image-specs)
+      (pcase-let ((`(,format ,data ,_px-w ,_px-h ,cols ,rows) entry))
+        (create-image data format t
+                      :width (* cols (car size))
+                      :height (* rows (cdr size))
+                      :scale 1
+                      :ascent (cooked--box-glyph-ascent
+                               (cooked--layout-window) (cdr size)))))))
+
+(defun cooked--deco-display-value (deco size window)
+  "The `display\=' value DECO should carry at cell SIZE, or nil for none.
+
+DECO is the `cooked-deco\=' property: `(image ID CROW CCOL)\=' or
+`(glyph BITS FG BG ATTRS COLUMN ROW)\='.  WINDOW is only ever the ascent
+lookup\='s.  Nil SIZE means there is no cell rectangle to draw against yet, and
+the caller records the decoration without displaying anything.
+
+The single answer to \"what does this decoration look like\", and both paths
+that can ask it go through here: `cooked--apply-image-deco\' and
+`cooked--apply-glyph-deco\' when a row is first rendered, and
+`cooked--rescale-deco\' when the cell size moves under text already in the
+buffer.  That was three derivations of the same two shapes, which is three
+places for a new decoration kind to be added and two of them easy to miss --
+the rescale path is the one that would silently go on painting the old size."
+  (when size
+    (pcase deco
+      (`(image ,id ,crow ,ccol)
+       (when-let* ((spec (cooked--image-spec id size)))
+         (list (list 'slice (* ccol (car size)) (* crow (cdr size))
+                     (car size) (cdr size))
+               spec)))
+      (`(glyph ,bits ,fg ,bg ,attrs . ,where)
+       (cooked--deco-display
+        (cooked--box-glyph-image
+         bits fg bg attrs window size
+         (cooked--box-phase bits size (car where) (cadr where))))))))
 
 (defun cooked--apply-image-deco (start packed size)
   "Apply image decoration PACKED from START: eight bytes per character.
@@ -590,9 +630,7 @@ leaves the rest, a scroll carries each row\='s slices into the scrollback
 independently, and a rewrap moves them with their columns.  A single image
 spanning the whole rectangle would have to be torn down and rebuilt for any of
 that."
-  (let ((pos start)
-        (cw (car-safe size))
-        (ch (cdr-safe size)))
+  (let ((pos start))
     (dotimes (i (/ (length packed) 8))
       (let* ((base (* 8 i))
              (id (logior (aref packed base)
@@ -603,12 +641,10 @@ that."
                            (ash (aref packed (+ base 5)) 8)))
              (ccol (logior (aref packed (+ base 6))
                            (ash (aref packed (+ base 7)) 8)))
-             (spec (and size (cooked--image-spec id size))))
-        (put-text-property pos (1+ pos) 'cooked-deco (list 'image id crow ccol))
-        (when spec
-          (put-text-property pos (1+ pos) 'display
-                             (list (list 'slice (* ccol cw) (* crow ch) cw ch)
-                                   spec))))
+             (deco (list 'image id crow ccol)))
+        (put-text-property pos (1+ pos) 'cooked-deco deco)
+        (when-let* ((display (cooked--deco-display-value deco size nil)))
+          (put-text-property pos (1+ pos) 'display display)))
       (setq pos (1+ pos)))))
 
 (defun cooked--apply-glyph-deco (start packed fg bg attrs window size origin row)
@@ -622,15 +658,11 @@ same case."
     (dotimes (i (/ (length packed) 2))
       (let* ((bits (logior (aref packed (* 2 i))
                            (ash (aref packed (1+ (* 2 i))) 8)))
-             (column (and origin (- pos origin))))
-        (put-text-property pos (1+ pos) 'cooked-deco
-                           (list 'glyph bits fg bg attrs column row))
-        (when size
-          (put-text-property pos (1+ pos) 'display
-                             (cooked--deco-display
-                              (cooked--box-glyph-image
-                               bits fg bg attrs window size
-                               (cooked--box-phase bits size column row))))))
+             (column (and origin (- pos origin)))
+             (deco (list 'glyph bits fg bg attrs column row)))
+        (put-text-property pos (1+ pos) 'cooked-deco deco)
+        (when-let* ((display (cooked--deco-display-value deco size window)))
+          (put-text-property pos (1+ pos) 'display display)))
       (setq pos (1+ pos)))))
 
 (defun cooked--rescale-deco ()
@@ -672,26 +704,14 @@ stuck at the previous font size, visibly mismatched once the pin is released."
                (inhibit-read-only t)
                (buffer-undo-list t))
           (while (< (point) (point-max))
-            (let ((spec (get-text-property (point) 'cooked-deco))
+            (let ((deco (get-text-property (point) 'cooked-deco))
                   (next (or (next-single-property-change (point) 'cooked-deco)
                             (point-max))))
-              (pcase spec
-                (`(glyph ,bits ,fg ,bg ,attrs . ,where)
-                 (let ((phase (cooked--box-phase bits size (car where) (cadr where))))
-                   (put-text-property (point) (1+ (point)) 'display
-                                      (cooked--deco-display
-                                       (cooked--box-glyph-image
-                                        bits fg bg attrs window size phase)))))
-                (`(image ,id ,crow ,ccol)
-                 ;; The slice geometry is in cells, so a new cell size moves every
-                 ;; slice as well as resizing the spec they cut from.
-                 (when-let* ((image (cooked--image-spec id size)))
-                   (put-text-property (point) (1+ (point)) 'display
-                                      (list (list 'slice
-                                                  (* ccol (car size))
-                                                  (* crow (cdr size))
-                                                  (car size) (cdr size))
-                                            image)))))
+              ;; The slice geometry is in cells and a glyph's bitmap is rendered
+              ;; at the cell size, so both shapes move; asking the one derivation
+              ;; is what keeps this in step with how they were drawn originally.
+              (when-let* ((display (cooked--deco-display-value deco size window)))
+                (put-text-property (point) (1+ (point)) 'display display))
               (goto-char next)))
           (setq cooked--deco-cell size))))))
 

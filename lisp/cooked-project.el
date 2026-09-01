@@ -32,7 +32,6 @@
 (declare-function cooked--display "cooked-mode")
 (declare-function cooked--start-session "cooked-mode")
 (declare-function cooked--live-buffers "cooked-mode")
-(defvar cooked-display-action)
 
 (defun cooked-project--buffer (root)
   "The most recently used live session whose shell is in ROOT, if any."
@@ -76,7 +75,7 @@ that does not."
 NEW means what it does there."
   (interactive "P")
   (cooked-project--session (project-root (project-current t)) new
-                           '(display-buffer-pop-up-window)))
+                           cooked-other-window-action))
 
 ;;;###autoload
 (defun cooked-here (&optional new)
@@ -96,7 +95,7 @@ does there."
 NEW means what it does there."
   (interactive "P")
   (cooked-project--session (cooked-project--here-root) new
-                           '(display-buffer-pop-up-window)))
+                           cooked-other-window-action))
 
 (provide 'cooked-project)
 ;;; cooked-project.el ends here

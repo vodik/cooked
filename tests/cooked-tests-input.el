@@ -388,6 +388,24 @@ ends, so its line editor takes the whole thing as one insertion."
     (should (cooked-tests--settle
              (lambda () (string-search "hello" (cooked-tests--text)))))))
 
+(ert-deftest cooked-submitted-input-cannot-close-its-own-bracket ()
+  "A multi-line submission is bracketed too, and gets the same guard.
+
+The submission path spelled the wrapping out for itself instead of going through
+`cooked--bracketed-paste', and so never stripped the end marker.  Reaching it
+takes nothing exotic: the text is whatever sits in the input region, and a paste
+into that region carries whatever was on the kill ring.  Left unstripped, the
+bracket closed early and the shell took the rest as keystrokes -- which is the
+bug `cooked-paste-cannot-be-made-to-close-its-own-bracket' already rules out for
+the other path."
+  (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
+    (should (cooked--bracketed-paste-p cooked--session))
+    (cooked--send-input-string "a\n\e[201~; rm -rf /")
+    (should (cooked-tests--settle
+             (lambda () (string-search "; rm -rf /^[[201~" (cooked-tests--text)))))
+    (should (string-search "^[[200~a" (cooked-tests--text)))
+    (should-not (string-search "^[[201~; rm" (cooked-tests--text)))))
+
 (ert-deftest cooked-paste-cannot-be-made-to-close-its-own-bracket ()
   "An end marker inside the pasted text would close the bracket early and hand
 what followed to the child as if it had been typed — how a copied line runs
@@ -1075,40 +1093,31 @@ has no handler and nothing drives evil at all."
   (skip-unless (and (executable-find "zsh") (require 'evil nil t)))
   (require 'cooked-evil)
   (evil-mode 1)
-  (let ((buffer (generate-new-buffer "*cooked-evil*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-          (should (eq (current-local-map) cooked-input-map))
-          (should (eq evil-state 'insert))
-          ;; RET submits from insert state by falling through to `cooked-input-map'.
-          (should (eq (key-binding (kbd "RET")) #'cooked-send-input))
-          ;; In normal state RET is evil's own, as in any other buffer: cooked no
-          ;; longer installs a state-specific binding for it.
-          (evil-normal-state)
+  (cooked-tests--with-shell ("zsh" :name "*cooked-evil*" :settle (lambda () (eq cooked--semantic 'input)))
+    (should (eq (current-local-map) cooked-input-map))
+    (should (eq evil-state 'insert))
+    ;; RET submits from insert state by falling through to `cooked-input-map'.
+    (should (eq (key-binding (kbd "RET")) #'cooked-send-input))
+    ;; In normal state RET is evil's own, as in any other buffer: cooked no
+    ;; longer installs a state-specific binding for it.
+    (evil-normal-state)
 
-          ;; A raw full-screen program takes the keyboard, and evil steps aside.
-          ;; The shell restores canonical mode before exec'ing, so this is briefly
-          ;; still an input state; wait for the program itself to go raw.
-          (cooked--send cooked--session "stty raw -echo; sleep 1; stty sane\r")
-          ;; With the shell's integration working this is `command' rather than
-          ;; `raw' -- a positive signal, so nothing is held back.
-          (should (cooked-tests--settle
-                   (lambda () (and (eq cooked--semantic 'output)
-                                   (eq (current-local-map) cooked-command-map)))))
-          (should (eq evil-state 'emacs))
+    ;; A raw full-screen program takes the keyboard, and evil steps aside.
+    ;; The shell restores canonical mode before exec'ing, so this is briefly
+    ;; still an input state; wait for the program itself to go raw.
+    (cooked--send cooked--session "stty raw -echo; sleep 1; stty sane\r")
+    ;; With the shell's integration working this is `command' rather than
+    ;; `raw' -- a positive signal, so nothing is held back.
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'output)
+                             (eq (current-local-map) cooked-command-map)))))
+    (should (eq evil-state 'emacs))
 
-          ;; ...and hands it back at the next prompt.
-          (should (cooked-tests--settle
-                   (lambda () (and (eq cooked--semantic 'input)
-                                   (eq (current-local-map) cooked-input-map)))))
-          (should (eq evil-state 'insert)))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer))))
+    ;; ...and hands it back at the next prompt.
+    (should (cooked-tests--settle
+             (lambda () (and (eq cooked--semantic 'input)
+                             (eq (current-local-map) cooked-input-map)))))
+    (should (eq evil-state 'insert))))
 
 (ert-deftest cooked-cursor-visibility-follows-the-child ()
   "`stty raw' is load-bearing: a hidden cursor is honoured only while the child
@@ -2096,31 +2105,20 @@ buffer looking accepted.  Before the region, the prompt is read-only, so typing
 signalled \"Text is read-only\" — which is exactly where evil's normal state
 leaves the cursor at an empty prompt, since it pulls back off the end of a line."
   (skip-unless (executable-find "zsh"))
-  (let ((buffer (generate-new-buffer "*cooked-snap*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (pcase-let ((`(,argv ,env ,scratch)
-                       (cooked--shell-invocation (executable-find "zsh"))))
-            (setq cooked--scratch scratch)
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-          (switch-to-buffer buffer)
+  (cooked-tests--with-shell ("zsh" :name "*cooked-snap*" :settle (lambda () (eq cooked--semantic 'input)))
+    (switch-to-buffer buffer)
 
-          ;; Below the input region: the blank line the screen render leaves.
-          (goto-char (point-max))
-          (should (> (point) (marker-position cooked--input-end)))
-          (cooked-tests--type "e c h o")
-          (should (equal (cooked--pending-input) "echo"))
+    ;; Below the input region: the blank line the screen render leaves.
+    (goto-char (point-max))
+    (should (> (point) (marker-position cooked--input-end)))
+    (cooked-tests--type "e c h o")
+    (should (equal (cooked--pending-input) "echo"))
 
-          ;; Before it: inside the read-only prompt, where evil parks the cursor.
-          (cooked-kill-input)
-          (goto-char (1- (cooked--input-start-position)))
-          (cooked-tests--type "h i")
-          (should (equal (cooked--pending-input) "hi")))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer))))
+    ;; Before it: inside the read-only prompt, where evil parks the cursor.
+    (cooked-kill-input)
+    (goto-char (1- (cooked--input-start-position)))
+    (cooked-tests--type "h i")
+    (should (equal (cooked--pending-input) "hi"))))
 
 (ert-deftest cooked-editing-mid-line-survives-a-drain ()
   "A drain must not move point out of the line the user is typing.

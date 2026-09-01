@@ -110,24 +110,14 @@ redisplay: a header line costs a row of the window body, which
 133 marks land in `cooked--commands' with a prompt marker and an `input', and
 the header pins to it once the window is scrolled into its output."
   (skip-unless (executable-find "zsh"))
-  (let ((buffer (generate-new-buffer "*cooked-sticky-zsh*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (cooked-tests--display-buffer)
-          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-          (cooked--restore-pending-input nil)
-          (goto-char cooked--input-end)
-          (insert "echo sticky-marker")
-          (cooked-send-input)
-          (should (cooked-tests--settle (lambda () cooked--commands)))
-          (set-window-start (selected-window) (cooked--command-start-position (car cooked--commands)))
-          (should (string-search "echo sticky-marker" (cooked--sticky-header))))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer))))
+  (cooked-tests--with-shell ("zsh" :name "*cooked-sticky-zsh*" :setup (cooked-tests--display-buffer) :settle (lambda () (eq cooked--semantic 'input)))
+    (cooked--restore-pending-input nil)
+    (goto-char cooked--input-end)
+    (insert "echo sticky-marker")
+    (cooked-send-input)
+    (should (cooked-tests--settle (lambda () cooked--commands)))
+    (set-window-start (selected-window) (cooked--command-start-position (car cooked--commands)))
+    (should (string-search "echo sticky-marker" (cooked--sticky-header)))))
 
 (provide 'cooked-tests-sticky-scroll)
 ;;; cooked-tests-sticky-scroll.el ends here

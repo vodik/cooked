@@ -415,24 +415,7 @@ fn xtwinops_pixel_geometry_stays_silent_without_a_cell_size() {
 }
 
 /// Base64, so the tests spell a kitty transmission the way a client would.
-fn b64(bytes: &[u8]) -> String {
-    const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let mut n = 0u32;
-        for (i, b) in chunk.iter().enumerate() {
-            n |= u32::from(*b) << (16 - 8 * i);
-        }
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(SET[((n >> (18 - 6 * i)) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
+use crate::emu::kitty::encode_base64 as b64;
 
 #[test]
 fn an_explicit_row_count_cannot_force_tens_of_thousands_of_linefeeds() {

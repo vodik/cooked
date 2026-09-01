@@ -519,15 +519,9 @@ are called here where Emacs would call them: `cooked--update-attention' from
 (ert-deftest cooked-find-file-works-end-to-end-from-the-shell ()
   "The headline trick: a shell function opens a buffer in the Emacs running it."
   (skip-unless (executable-find "zsh"))
-  (let ((buffer (generate-new-buffer "*cooked-zsh*"))
-        (target (make-temp-file "cooked-open")))
+  (let ((target (make-temp-file "cooked-open")))
     (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
+        (cooked-tests--with-shell ("zsh")
           (let ((opened nil))
             ;; `find_file' is the shell helper emitting the `F' verb, so what this
             ;; exercises is the whole path: zsh's function, the wire format, the
@@ -537,8 +531,6 @@ are called here where Emacs would call them: `cooked--update-attention' from
               (cooked-send-input)
               (should (cooked-tests--settle (lambda () opened) 8))
               (should (equal opened target)))))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer)
       (delete-file target))))
 
 (ert-deftest cooked-comint-markers-follow-the-osc-133-marks ()
@@ -547,34 +539,22 @@ its whole output family measures from them.  They sat at `point-min\=' until the
 shell\='s own marks started feeding them -- which is why `comint-delete-output\='
 used to flush the entire buffer."
   (skip-unless (executable-find "zsh"))
-  (let ((buffer (generate-new-buffer "*cooked-zsh*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          (should (cooked-tests--settle
-                   (lambda () (and (eq cooked--semantic 'input)
-                                   (cooked--input-start-position)))
-                   8))
-          (cooked--replace-input "echo alpha")
-          (cooked-send-input)
-          (should (cooked-tests--settle (lambda () cooked--commands) 8))
-          (let ((command (car cooked--commands)))
-            ;; The command line is recovered from the marks, not from a prompt regexp.
-            (should (equal (cooked--command-input command) "echo alpha"))
-            (goto-char (cooked--command-start-position command))
-            (should (equal (cooked--get-old-input) "echo alpha"))
-            ;; ...and the output really is bracketed, rather than starting at point-min.
-            (should (> (cooked--command-start-position command) (point-min)))
-            (should (string-match-p
-                     "alpha"
-                     (buffer-substring-no-properties
-                      (cooked--command-start-position command)
-                      (cooked--command-end-position command))))))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer))))
+  (cooked-tests--with-shell ("zsh")
+    (cooked--replace-input "echo alpha")
+    (cooked-send-input)
+    (should (cooked-tests--settle (lambda () cooked--commands) 8))
+    (let ((command (car cooked--commands)))
+      ;; The command line is recovered from the marks, not from a prompt regexp.
+      (should (equal (cooked-command-input command) "echo alpha"))
+      (goto-char (cooked--command-start-position command))
+      (should (equal (cooked--get-old-input) "echo alpha"))
+      ;; ...and the output really is bracketed, rather than starting at point-min.
+      (should (> (cooked--command-start-position command) (point-min)))
+      (should (string-match-p
+               "alpha"
+               (buffer-substring-no-properties
+                (cooked--command-start-position command)
+                (cooked--command-end-position command)))))))
 
 (defun cooked-tests--prompt-texts ()
   "Each recorded command\='s input, paired with the text its prompt region holds.

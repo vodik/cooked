@@ -55,22 +55,29 @@ breaks anything holding on to the old name.  Turn it on for the vterm-like
 behaviour of showing the running command in the buffer list."
   :type 'boolean :group 'cooked)
 
+(defun cooked--format-buffer-name (subject)
+  "Apply `cooked-buffer-name\=' to SUBJECT, whichever kind of setting it is.
+
+SUBJECT is the directory for a new session and the child\='s title for a rename,
+which is the whole of the difference between this option\='s two readers: the
+option itself does not care which it is given, and neither does a user who set
+it to a function."
+  (if (functionp cooked-buffer-name)
+      (funcall cooked-buffer-name subject)
+    (format cooked-buffer-name subject)))
+
 (defun cooked--buffer-name (&optional directory)
   "A fresh, unique buffer name for a session in DIRECTORY."
-  (let* ((directory (abbreviate-file-name (or directory default-directory)))
-         (name (if (functionp cooked-buffer-name)
-                   (funcall cooked-buffer-name directory)
-                 (format cooked-buffer-name directory))))
-    (generate-new-buffer-name name)))
+  (generate-new-buffer-name
+   (cooked--format-buffer-name
+    (abbreviate-file-name (or directory default-directory)))))
 
 (defun cooked--rename-to-title ()
   "Rename the buffer after the child's title, when asked to."
   (when (and cooked-buffer-name-follows-title
              cooked--title
              (not (string-empty-p cooked--title)))
-    (let ((name (if (functionp cooked-buffer-name)
-                    (funcall cooked-buffer-name cooked--title)
-                  (format cooked-buffer-name cooked--title))))
+    (let ((name (cooked--format-buffer-name cooked--title)))
       (unless (equal name (buffer-name))
         (rename-buffer (generate-new-buffer-name name))))))
 
@@ -89,18 +96,6 @@ row, hard-wrapped at whatever width was in force when it was printed."
 (defcustom cooked-shell (or (bound-and-true-p explicit-shell-file-name) shell-file-name)
   "Program run by \\[cooked]."
   :type 'string :group 'cooked)
-
-(defcustom cooked-display-action '(display-buffer-same-window
-                                   display-buffer-pop-up-window)
-  "Action `\\[cooked]' passes to `pop-to-buffer\='.
-
-The selected window first, the way `vterm\=' and `eat\=' do it: a terminal is
-usually what you want to be looking at, whereas the fallback `display-buffer\='
-uses -- reuse a window, else split -- would put it beside the buffer you
-invoked it from as often as not.  Splitting is still the second choice, for
-when the selected window will not take it (a dedicated or side window), and
-`\\[cooked-other-window]\=' remains the way to ask for the split on purpose."
-  :type 'sexp :group 'cooked)
 
 (defcustom cooked-password-function nil
   "Function called with the prompt string to supply a password non-interactively.
@@ -862,27 +857,41 @@ key waits.  See `cooked-semi-map', which is where that trade is worth making."
     ;; ones that write to the child out of band -- lives on `cooked-mode-map'
     ;; instead of here, so it survives peeking too; see the `set-keymap-parent'
     ;; block below `define-derived-mode'.
-    (dolist (event '(down-mouse-1 mouse-1 drag-mouse-1
-                     down-mouse-2 mouse-2 drag-mouse-2
-                     down-mouse-3 mouse-3 drag-mouse-3
-                     wheel-up wheel-down mouse-4 mouse-5))
+    (dolist (event cooked--mouse-events)
       (define-key map (vector event) #'cooked-mouse-event))
     map))
 
-(defun cooked--set-passthrough-map (map exceptions &optional reserve-meta)
-  "Replace MAP's own bindings with a fresh passthrough map for EXCEPTIONS.
+(defun cooked--replace-keymap (map fresh)
+  "Give MAP the bindings of FRESH, keeping MAP\='s own identity.
 
-RESERVE-META keeps the Meta prefix for Emacs, as in
-`cooked--build-passthrough-map'.  Keeps MAP's identity, and with it the keymap
-parent `cooked-mode' gave it, so `cooked-raw-map' can be rebuilt in place when
-`cooked-raw-exceptions' changes.
+Every map in this file is reachable from a variable that other maps have as
+their parent and that `cooked--state-keymap\=' hands to `use-local-map\=', so a
+`:set\=' that rebuilt one by assigning a new keymap would leave every one of
+those pointing at the old object.  Replacing the bindings in place is what lets
+`cooked-raw-exceptions\=' and friends be customised in a running session.
 
-`set-keymap-parent' stores the parent as the list's own terminating cdr
-rather than in a separate slot, so a plain `(setcdr map (cdr fresh))' would
+`set-keymap-parent\=' stores the parent as the list\='s own terminating cdr
+rather than in a separate slot, so a plain `(setcdr map (cdr fresh))\=' would
 silently drop it; save and restore it around the replacement."
   (let ((parent (keymap-parent map)))
-    (setcdr map (cdr (cooked--build-passthrough-map exceptions reserve-meta)))
+    (setcdr map (cdr fresh))
     (set-keymap-parent map parent)))
+
+(defun cooked--passthrough-setter (map &optional reserve-meta)
+  "A `defcustom\=' `:set\=' rebuilding MAP as a passthrough map for its value.
+
+The value is a list of key strings naming the control characters to keep for
+Emacs; RESERVE-META means what it does in `cooked--build-passthrough-map\='.
+MAP is named rather than passed, and checked for at call time, because the maps
+are defined below the options that configure them -- the option has to exist
+first for the `defvar\=' to read it."
+  (lambda (symbol value)
+    (set-default symbol value)
+    (when (and (boundp map) (keymapp (symbol-value map)))
+      (cooked--replace-keymap
+       (symbol-value map)
+       (cooked--build-passthrough-map (mapcar #'cooked--exception-code value)
+                                      reserve-meta)))))
 
 (defcustom cooked-raw-exceptions '("C-g" "C-x" "C-h" "C-u" "C-l")
   "Keys kept for Emacs during a raw read outside the alternate screen.
@@ -920,11 +929,7 @@ guaranteed to work regardless of frame type.
 `cooked-send-literal-key' (\\`C-c C-q') sends any one key through to the child
 regardless of this list, for a raw program that wants one of these keys back."
   :type '(repeat string)
-  :set (lambda (symbol value)
-         (set-default symbol value)
-         (when (and (boundp 'cooked-raw-map) (keymapp cooked-raw-map))
-           (cooked--set-passthrough-map
-            cooked-raw-map (mapcar #'cooked--exception-code value))))
+  :set (cooked--passthrough-setter 'cooked-raw-map)
   :group 'cooked)
 
 (defvar cooked-raw-map
@@ -964,11 +969,7 @@ not listed here -- see `cooked-semi-map'.
 `cooked-send-literal-key' (\\`C-c C-q') sends any one of these through to the
 child anyway, for the program that wants it back."
   :type '(repeat string)
-  :set (lambda (symbol value)
-         (set-default symbol value)
-         (when (and (boundp 'cooked-semi-map) (keymapp cooked-semi-map))
-           (cooked--set-passthrough-map
-            cooked-semi-map (mapcar #'cooked--exception-code value) t)))
+  :set (cooked--passthrough-setter 'cooked-semi-map t)
   :group 'cooked)
 
 (defvar cooked-semi-map
@@ -1100,14 +1101,8 @@ no completion channel reaches `git checkout <TAB>\=' -- but it should be chosen.
   :set (lambda (symbol value)
          (set-default symbol value)
          (when (and (boundp 'cooked-input-map) (keymapp cooked-input-map))
-           ;; Rebuilt in place, keeping the map's identity and the parent
-           ;; `cooked-mode' gave it -- `set-keymap-parent' stores that parent as
-           ;; the list's terminating cdr, so a plain `setcdr' would drop it.  The
-           ;; same dance as `cooked--set-passthrough-map', and for the same
-           ;; reason: buffers already showing this map must follow the change.
-           (let ((parent (keymap-parent cooked-input-map)))
-             (setcdr cooked-input-map (cdr (cooked--build-input-map value)))
-             (set-keymap-parent cooked-input-map parent))))
+           (cooked--replace-keymap cooked-input-map
+                                   (cooked--build-input-map value))))
   :group 'cooked)
 
 (defun cooked-send-input ()
@@ -1158,10 +1153,18 @@ line submitted last rather than the command that ran.  See
    ;; A multi-line submission has to arrive as a paste, or the shell's line editor
    ;; treats every embedded newline as its own Enter and runs the fragments one at
    ;; a time.
-   (if (and (string-search "\n" text)
-            (cooked--bracketed-paste-p cooked--session))
-       (concat "\e[200~" text "\e[201~\r")
-     (concat text "\r"))))
+   ;;
+   ;; Through `cooked--bracketed-paste' rather than bracketing it here, because
+   ;; the end marker has to be stripped out of TEXT first and this path used to
+   ;; spell the wrapping itself and forget to.  TEXT is not ours: it is whatever
+   ;; is in the input region, and a paste into that region can carry a literal
+   ;; `ESC [ 201 ~' -- which closed the bracket early and handed the shell the
+   ;; rest as keystrokes.
+   (concat (if (and (string-search "\n" text)
+                    (cooked--bracketed-paste-p cooked--session))
+               (cooked--bracketed-paste text)
+             text)
+           "\r")))
 
 (defun cooked-newline ()
   "Insert a newline in the pending input without submitting it.
@@ -1790,8 +1793,27 @@ comint\='s default scans backwards for a prompt it can recognise.  The OSC 133
 records already know where the line began, so \\[comint-copy-old-input] recovers
 exactly what was run rather than whatever a regexp happened to match."
   (or (when-let* ((command (cooked--command-at (point))))
-        (cooked--command-input command))
+        (cooked-command-input command))
       ""))
+
+(defun cooked--output-region-at-point ()
+  "The output region of the command at point, as (BEG . END).
+
+The command point is inside, falling back to the most recent one -- which is
+what makes both callers work from the prompt below a command as well as from
+inside its output, and is the reading a user invoking either from where they
+are typing expects.
+
+Refuses rather than returns nil for an empty region: a command that printed
+nothing has a start and an end that coincide, and there is nothing to fold or
+delete there.  Signalling here rather than at each call site is the point; the
+two commands used to carry a copy of this each."
+  (let* ((command (or (cooked--command-at (point)) (car cooked--commands)))
+         (beg (and command (cooked--command-start-position command)))
+         (end (and command (cooked--command-end-position command))))
+    (unless (and beg end (< beg end))
+      (user-error "No command output here"))
+    (cons beg end)))
 
 (defun cooked-delete-output ()
   "Delete the output of the command at point, keeping the command line.
@@ -1812,11 +1834,7 @@ Refuses when the output reaches the row the child is on.  Below that the shell
 is editing its own prompt line and tracking where it sits, and moving it would
 corrupt a redisplay cooked cannot see, let alone repair."
   (interactive)
-  (let* ((command (or (cooked--command-at (point)) (car cooked--commands)))
-         (beg (and command (cooked--command-start-position command)))
-         (end (and command (cooked--command-end-position command))))
-    (unless (and beg end (< beg end))
-      (user-error "No command output here"))
+  (pcase-let ((`(,beg . ,end) (cooked--output-region-at-point)))
     ;; END is one past the output, so it lands on whatever the child drew next --
     ;; usually the following prompt.  The last character of the output is the one
     ;; whose row should go.
@@ -1837,11 +1855,7 @@ corrupt a redisplay cooked cannot see, let alone repair."
 (defun cooked-toggle-fold ()
   "Hide or reveal the output of the command at point."
   (interactive)
-  (let* ((command (or (cooked--command-at (point)) (car cooked--commands)))
-         (beg (and command (cooked--command-start-position command)))
-         (end (and command (cooked--command-end-position command))))
-    (unless (and beg end (< beg end))
-      (user-error "No command output here"))
+  (pcase-let ((`(,beg . ,end) (cooked--output-region-at-point)))
     (if-let* ((existing (seq-find (lambda (o) (overlay-get o 'cooked-fold))
                                   (overlays-in beg end))))
         (delete-overlay existing)
@@ -2125,6 +2139,25 @@ and anything watching the buffer list see an ordinary kill."
     ((and (pred functionp) f) (funcall f code))
     (_ t)))
 
+(defun cooked--stop-session ()
+  "Kill the child and close the wake pipe, leaving the buffer sessionless.
+
+Kill before closing the pipe.  The other order leaves the reader thread writing
+into a closed pipe -- harmless, since it blocks SIGPIPE -- but this order costs
+nothing.
+
+The child is killed rather than left to the garbage collector: clearing
+`cooked--session\=' only drops the last reference, and nothing guarantees a
+collection ever runs, so the child would keep going long after whatever reason
+there was to stop it.
+
+Idempotent, and both callers rely on that -- `cooked--on-exit\=' runs when the
+child reports its own exit and `cooked--cleanup\=' when the buffer is killed,
+and a session that exits and is then killed goes through both."
+  (when cooked--session (ignore-errors (cooked--kill cooked--session)))
+  (when cooked--wake (delete-process cooked--wake))
+  (setq cooked--session nil cooked--wake nil))
+
 (defun cooked--on-exit (code)
   "Report that the child exited with CODE and stop the session."
   ;; A child can die while still on the alt screen — killed from outside, or
@@ -2135,9 +2168,7 @@ and anything watching the buffer list see an ordinary kill."
     (save-excursion
       (goto-char (point-max))
       (insert (format "\n[exited %s]\n" code))))
-  (when cooked--session (ignore-errors (cooked--kill cooked--session)))
-  (when cooked--wake (delete-process cooked--wake))
-  (setq cooked--session nil cooked--wake nil)
+  (cooked--stop-session)
   ;; After the session is gone, so the mode is recomputed as nil: a child that
   ;; exited while the buffer was suspended -- evil in normal state, or a
   ;; deliberate peek -- would otherwise leave it read-only under `cooked-peek-map'
@@ -2591,21 +2622,14 @@ replaces."
 ;; normal state does not bind `C-c', so it already falls through to the local map.
 
 (defun cooked--cleanup ()
-  "Tear down the session behind this buffer.
+  "Tear down the session behind this buffer, and the files it generated.
 
-The child is killed here rather than left to the garbage collector:
-clearing `cooked--session' only drops the last reference, and nothing
-guarantees a collection ever runs, so the child would keep going long
-after its buffer is gone.
-
-Kill before closing the wake pipe.  The other order leaves the reader
-thread writing into a closed pipe — harmless, since it blocks SIGPIPE —
-but this order costs nothing."
+On `kill-buffer-hook\='.  `cooked--stop-session\=' is the half shared with
+`cooked--on-exit\='; the generated startup files are removed only here, since
+they are named by a path the buffer holds and nothing else can reach them."
   (cooked--cancel-secret)
-  (when cooked--session (ignore-errors (cooked--kill cooked--session)))
-  (when cooked--wake (delete-process cooked--wake))
-  (cooked--remove-scratch)
-  (setq cooked--session nil cooked--wake nil))
+  (cooked--stop-session)
+  (cooked--remove-scratch))
 
 (defcustom cooked-shell-integration 'detect
   "Which shell to inject the OSC 133 integration into, if any.

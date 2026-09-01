@@ -98,6 +98,27 @@ being gone by the time it is reached is ordinary rather than exceptional."
      (when (window-live-p ,var)
        ,@body)))
 
+(defmacro cooked--cached (table key &rest body)
+  "Value of BODY for KEY, memoized in the hash table held in TABLE.
+
+TABLE is a symbol naming a variable, not an expression: the table is made on
+first use and stored back, so no caller has to have been initialised first.
+That is the whole reason this exists rather than a bare `with-memoization\='.
+The caches it fronts are reached from paths that run before -- and without --
+`cooked--start\=', `cooked--rescale-deco\=' from a `text-scale\=' change being the
+one that actually bit, and a nil table there is a wrong-type error inside a
+redisplay hook that nothing catches.
+
+Only for caches whose key says everything about the value, which is what makes
+one shared with the session before it harmless.  Anything keyed on something the
+core hands out afresh per session -- an image id -- must be cleared when a
+session starts instead; see `cooked--reset-images\='."
+  (declare (indent 2) (debug (symbolp form body)))
+  `(progn
+     (unless (hash-table-p ,table)
+       (setq ,table (make-hash-table :test #'equal)))
+     (with-memoization (gethash ,key ,table) ,@body)))
+
 (defmacro cooked--with-child-edit (&rest body)
   "Run BODY as an edit made on the child\='s behalf rather than by the user.
 

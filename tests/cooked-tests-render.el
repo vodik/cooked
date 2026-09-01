@@ -332,36 +332,27 @@ output with the prompt that followed it."
 
 (ert-deftest cooked-prompt-lands-on-its-own-line-after-a-command ()
   (skip-unless (executable-find "zsh"))
-  (let ((buffer (generate-new-buffer "*cooked-zsh*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (cooked-mode)
-          (pcase-let ((`(,argv ,env ,_scratch) (cooked--shell-invocation (executable-find "zsh"))))
-            (cooked--start argv nil env))
-          (cooked--refresh-keymap)
-          (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input))))
-          (let ((prompt (string-trim (buffer-substring-no-properties
-                                      (line-beginning-position) (point-max)))))
-            (cooked--replace-input "printf 'one\\ntwo\\n'")
-            (cooked-send-input)
-            ;; Waited out on the command record rather than on the text: the
-            ;; submitted line stays on screen until the echo redraws over it, so
-            ;; "two" is in the buffer -- inside the command itself -- before the
-            ;; child has run anything.
-            (should (cooked-tests--settle
-                     (lambda () (and (eq cooked--semantic 'input)
-                                     cooked--commands
-                                     (string-match-p "two" (cooked-tests--text))))))
-            (let ((lines (split-string (cooked-tests--text) "\n")))
-              (should (member "one" lines))
-              (should (member "two" lines))
-              ;; The new prompt must not be glued onto the last output line.
-              (should-not (seq-find (lambda (l)
-                                      (and (string-match-p (regexp-quote prompt) l)
-                                           (string-match-p "^two" l)))
-                                    lines)))))
-      (with-current-buffer buffer (cooked--cleanup))
-      (kill-buffer buffer))))
+  (cooked-tests--with-shell ("zsh" :settle (lambda () (eq cooked--semantic 'input)))
+    (let ((prompt (string-trim (buffer-substring-no-properties
+                                (line-beginning-position) (point-max)))))
+      (cooked--replace-input "printf 'one\\ntwo\\n'")
+      (cooked-send-input)
+      ;; Waited out on the command record rather than on the text: the
+      ;; submitted line stays on screen until the echo redraws over it, so
+      ;; "two" is in the buffer -- inside the command itself -- before the
+      ;; child has run anything.
+      (should (cooked-tests--settle
+               (lambda () (and (eq cooked--semantic 'input)
+                               cooked--commands
+                               (string-match-p "two" (cooked-tests--text))))))
+      (let ((lines (split-string (cooked-tests--text) "\n")))
+        (should (member "one" lines))
+        (should (member "two" lines))
+        ;; The new prompt must not be glued onto the last output line.
+        (should-not (seq-find (lambda (l)
+                                (and (string-match-p (regexp-quote prompt) l)
+                                     (string-match-p "^two" l)))
+                              lines))))))
 
 (ert-deftest cooked-point-follows-the-cursor-after-falling-behind ()
   "Regression: output arriving in chunks let the cursor overtake point for one

@@ -98,7 +98,7 @@ program that has taken the whole keyboard.
 
 ## Installing
 
-You need **Emacs 28.1+** built with dynamic module support, and a **Rust toolchain**
+You need **Emacs 29.1+** built with dynamic module support, and a **Rust toolchain**
 (1.85+, for edition 2024). Linux and macOS.
 
 The native core is built with `cargo` on first use and rebuilt when the Rust sources are

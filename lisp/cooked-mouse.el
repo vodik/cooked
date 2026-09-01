@@ -48,12 +48,26 @@
   '(wheel-up wheel-down wheel-left wheel-right mouse-4 mouse-5 mouse-6 mouse-7)
   "Events carrying a wheel notch rather than a button that can be held.")
 
+(defconst cooked--button-events
+  '(down-mouse-1 mouse-1 drag-mouse-1
+    down-mouse-2 mouse-2 drag-mouse-2
+    down-mouse-3 mouse-3 drag-mouse-3)
+  "Events for a button that can be pressed, dragged and released.")
+
+(defconst cooked--mouse-events
+  (append cooked--button-events cooked--wheel-events)
+  "Every mouse event cooked forwards to the child, in either map that does it.
+
+One list because there are two maps -- `cooked--mouse-map\=' here and the one
+`cooked--build-passthrough-map\=' makes -- and they must agree about what a
+mouse event is.  Spelled out separately, they drifted: the passthrough map
+listed only the vertical wheel, so `wheel-left\=' and `wheel-right\=' reached a
+child that had asked for the mouse and vanished for one doing an ordinary raw
+read.")
+
 (defconst cooked--mouse-map
   (let ((map (make-sparse-keymap)))
-    (dolist (event (append '(down-mouse-1 mouse-1 drag-mouse-1
-                             down-mouse-2 mouse-2 drag-mouse-2
-                             down-mouse-3 mouse-3 drag-mouse-3)
-                           cooked--wheel-events))
+    (dolist (event cooked--mouse-events)
       (define-key map (vector event) #'cooked-mouse-event))
     map)
   "Mouse bindings for when the child has asked to receive them.

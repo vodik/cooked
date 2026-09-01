@@ -40,6 +40,24 @@
                                 (directory-file-name cooked--source-directory))))
         (should (member "README.md" (all-completions "REA" table)))))))
 
+(defun cooked-tests--indexed (records)
+  "Index RECORDS as (MATCHES ANNOTATE GROUP), for reading the answers back.
+
+`cooked--completion-index' fills two tables the *caller* owns, because the live
+path has to refill them as the shell is asked again while the word grows -- see
+`cooked--completion-dynamic', which is handed the same two tables the CAPF's
+`:annotation-function' closes over.  A test only ever wants to look an answer
+up, so this wraps them in the two lookup functions that path ends up exposing.
+
+A fixture rather than something the layer provides: it owns its tables, which is
+exactly what makes it useless to the code under test."
+  (let ((annotations (make-hash-table :test #'equal))
+        (groups (make-hash-table :test #'equal)))
+    (list (cooked--completion-index records "" annotations groups)
+          (lambda (candidate) (gethash candidate annotations))
+          (lambda (candidate transform)
+            (if transform candidate (gethash candidate groups))))))
+
 (ert-deftest cooked-completion-reply-becomes-candidates ()
   "The shell's answer, decoded: candidates, their descriptions, their groups."
   (with-temp-buffer
@@ -53,7 +71,7 @@
       (should (= serial 3))
       (should (= prefix 4))
       (pcase-let ((`(,matches ,annotate ,group)
-                   (cooked--shell-completion-table records)))
+                   (cooked-tests--indexed records)))
         (should (equal matches '("checkout" "check-attr")))
         (should (equal (funcall annotate "checkout") " switch branches"))
         ;; The heading is what compsys would have printed, prompt escapes and all.
@@ -70,7 +88,7 @@
             ("main" "main -- [76165fd] the tip" "branch"))))
     (pcase-let* ((`(,_serial ,_prefix ,_suffix ,_truncated . ,records)
                   cooked--completion-reply)
-                 (`(,matches ,annotate ,_group) (cooked--shell-completion-table records)))
+                 (`(,matches ,annotate ,_group) (cooked-tests--indexed records)))
       (should (equal matches '("main")))
       (should (equal (funcall annotate "main") " [76165fd] the tip")))))
 
@@ -192,57 +210,48 @@ the shell you are typing at, over a line it has never seen."
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
-    (let ((buffer (generate-new-buffer "*cooked-complete*"))
-          (root (file-name-directory (directory-file-name cooked--source-directory))))
-      (unwind-protect
-          (with-current-buffer buffer
-            (cooked-mode)
-            (pcase-let ((`(,argv ,env ,scratch)
-                         (cooked--shell-invocation (executable-find "zsh"))))
-              (setq cooked--scratch scratch)
-              (cooked--start argv root env))
-            (cooked--refresh-keymap)
-            ;; The nonce is the shell saying its widget is bound and ZLE is reading.
-            (should (cooked-tests--settle
-                     (lambda () (and (cooked--input-start-position) cooked--completion-nonce))))
-            (goto-char cooked--input-end)
-            (insert "cd shell-int")
-            (let ((before (cooked-tests--text))
-                  (cooked-completion-timeout 5))
-              (cooked-completion-at-point)
-              ;; The line briefly lives in ZLE, which redraws from it when the widget
-              ;; returns.  Putting it back byte for byte is what keeps that redraw a
-              ;; no-op; anything else shows up here as the screen having changed.
-              (cooked-tests--settle (lambda () nil) 0.3)
-              (should (equal (cooked-tests--text) before)))
-            (let ((cooked-completion-timeout 5))
-              (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
-                ;; Only the word is replaced, and only the directory is offered.
-                ;; Emacs would have offered the files too: knowing that `cd' takes a
-                ;; directory is the shell's knowledge, not ours.
-                (should (equal (buffer-substring-no-properties start end) "shell-int"))
-                (should (equal (all-completions "shell-int" table) '("shell-integration")))))
-            ;; A path is completed against its own directory, and the candidate comes
-            ;; back carrying the components compsys walked past to reach it.
-            (delete-region (cooked--input-start-position) (point))
-            (insert "cat shell-integration/cooked.z")
-            (let ((cooked-completion-timeout 5))
-              (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
-                (should (equal (buffer-substring-no-properties start end)
-                               "shell-integration/cooked.z"))
-                (should (equal (all-completions "shell-integration/cooked.z" table)
-                               '("shell-integration/cooked.zsh")))))
-            ;; The table is asked again for each word typed into it, rather than
-            ;; filtered in Emacs.  Nothing else can pass this: the first answer is a
-            ;; list of file names, and no amount of filtering turns that into flags.
-            (let ((cooked-completion-timeout 5))
-              (delete-region (cooked--input-start-position) (point))
-              (insert "ls ")
-              (pcase-let ((`(,_start ,_end ,table . ,_) (cooked-completion-at-point)))
-                (should (member "README.md" (all-completions "" table)))
-                (should (equal (all-completions "--colo" table) '("--color"))))))
-        (with-current-buffer buffer (cooked--cleanup))
-        (kill-buffer buffer)))))
+    (cooked-tests--with-shell
+        ("zsh"
+         :name "*cooked-complete*"
+         :directory (file-name-directory (directory-file-name cooked--source-directory))
+         ;; The nonce is the shell saying its widget is bound and ZLE is reading.
+         :settle (lambda () (and (cooked--input-start-position) cooked--completion-nonce)))
+      (goto-char cooked--input-end)
+      (insert "cd shell-int")
+      (let ((before (cooked-tests--text))
+            (cooked-completion-timeout 5))
+        (cooked-completion-at-point)
+        ;; The line briefly lives in ZLE, which redraws from it when the widget
+        ;; returns.  Putting it back byte for byte is what keeps that redraw a
+        ;; no-op; anything else shows up here as the screen having changed.
+        (cooked-tests--settle (lambda () nil) 0.3)
+        (should (equal (cooked-tests--text) before)))
+      (let ((cooked-completion-timeout 5))
+        (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
+          ;; Only the word is replaced, and only the directory is offered.
+          ;; Emacs would have offered the files too: knowing that `cd' takes a
+          ;; directory is the shell's knowledge, not ours.
+          (should (equal (buffer-substring-no-properties start end) "shell-int"))
+          (should (equal (all-completions "shell-int" table) '("shell-integration")))))
+      ;; A path is completed against its own directory, and the candidate comes
+      ;; back carrying the components compsys walked past to reach it.
+      (delete-region (cooked--input-start-position) (point))
+      (insert "cat shell-integration/cooked.z")
+      (let ((cooked-completion-timeout 5))
+        (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
+          (should (equal (buffer-substring-no-properties start end)
+                         "shell-integration/cooked.z"))
+          (should (equal (all-completions "shell-integration/cooked.z" table)
+                         '("shell-integration/cooked.zsh")))))
+      ;; The table is asked again for each word typed into it, rather than
+      ;; filtered in Emacs.  Nothing else can pass this: the first answer is a
+      ;; list of file names, and no amount of filtering turns that into flags.
+      (let ((cooked-completion-timeout 5))
+        (delete-region (cooked--input-start-position) (point))
+        (insert "ls ")
+        (pcase-let ((`(,_start ,_end ,table . ,_) (cooked-completion-at-point)))
+          (should (member "README.md" (all-completions "" table)))
+          (should (equal (all-completions "--colo" table) '("--color"))))))))
 
 (ert-deftest cooked-completion-mid-line-replaces-the-word-under-the-cursor ()
   "The span is anchored at the cursor the request was *sent* from.
@@ -257,37 +266,27 @@ after the cursor to make the difference visible."
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
-    (let ((buffer (generate-new-buffer "*cooked-complete*"))
-          (root (file-name-directory (directory-file-name cooked--source-directory))))
-      (unwind-protect
-          (with-current-buffer buffer
-            (cooked-mode)
-                    (pcase-let ((`(,argv ,env ,scratch)
-                         (cooked--shell-invocation (executable-find "zsh"))))
-              (setq cooked--scratch scratch)
-              (cooked--start argv root env))
-            (cooked--refresh-keymap)
-            (should (cooked-tests--settle
-                     (lambda () (and (cooked--input-start-position)
-                                     cooked--completion-nonce))))
-            (goto-char cooked--input-end)
-            (insert "cat shell-int README.md")
-            ;; Back onto the end of `shell-int', leaving ` README.md' after point.
-            (goto-char (- (point) (length " README.md")))
-            (let ((here (point))
-                  (cooked-completion-timeout 5))
-              (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
-                ;; Point is where the request was issued from, not at the end of
-                ;; the line the drain rebuilt.
-                (should (= (point) here))
-                (should (= end here))
-                (should (equal (buffer-substring-no-properties start end) "shell-int"))
-                (should (equal (all-completions "shell-int" table)
-                               '("shell-integration")))))
-            ;; And the rest of the line is untouched by any of it.
-            (should (equal (cooked--pending-input) "cat shell-int README.md")))
-        (with-current-buffer buffer (cooked--cleanup))
-        (kill-buffer buffer)))))
+    (cooked-tests--with-shell
+        ("zsh"
+         :name "*cooked-complete*"
+         :directory (file-name-directory (directory-file-name cooked--source-directory))
+         :settle (lambda () (and (cooked--input-start-position) cooked--completion-nonce)))
+      (goto-char cooked--input-end)
+      (insert "cat shell-int README.md")
+      ;; Back onto the end of `shell-int', leaving ` README.md' after point.
+      (goto-char (- (point) (length " README.md")))
+      (let ((here (point))
+            (cooked-completion-timeout 5))
+        (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
+          ;; Point is where the request was issued from, not at the end of
+          ;; the line the drain rebuilt.
+          (should (= (point) here))
+          (should (= end here))
+          (should (equal (buffer-substring-no-properties start end) "shell-int"))
+          (should (equal (all-completions "shell-int" table)
+                         '("shell-integration")))))
+      ;; And the rest of the line is untouched by any of it.
+      (should (equal (cooked--pending-input) "cat shell-int README.md")))))
 
 (ert-deftest cooked-completion-comes-from-bash-itself ()
   "The same exchange against bash, over the same wire.
@@ -455,33 +454,24 @@ flags have already said everything, so `_git' offers nothing and explains why."
   (skip-unless (executable-find "git"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
-    (let ((buffer (generate-new-buffer "*cooked-complete*"))
-          (root (file-name-directory (directory-file-name cooked--source-directory))))
-      (unwind-protect
-          (with-current-buffer buffer
-            (cooked-mode)
-            (pcase-let ((`(,argv ,env ,scratch)
-                         (cooked--shell-invocation (executable-find "zsh"))))
-              (setq cooked--scratch scratch)
-              (cooked--start argv root env))
-            (cooked--refresh-keymap)
-            (should (cooked-tests--settle
-                     (lambda () (and (cooked--input-start-position) cooked--completion-nonce))))
-            (goto-char cooked--input-end)
-            (insert "git commit -am ")
-            (let ((before (cooked-tests--text))
-                  (cooked-completion-timeout 5))
-              ;; An answer arrived and it is empty -- (PREFIX SUFFIX TRUNCATED),
-              ;; with no records behind it -- which is the case this is about.
-              (should-not (nthcdr 3 (cooked--shell-completions "git commit -am " 15)))
-              ;; Asserted the moment the reply lands, not after the dust settles: the
-              ;; repair travels ahead of the reply, so there is no drain that can see
-              ;; the answer and still be showing the copy.
-              (should (equal (cooked-tests--text) before))
-              (cooked-tests--settle (lambda () nil) 0.3)
-              (should (equal (cooked-tests--text) before))))
-        (with-current-buffer buffer (cooked--cleanup))
-        (kill-buffer buffer)))))
+    (cooked-tests--with-shell
+        ("zsh"
+         :name "*cooked-complete*"
+         :directory (file-name-directory (directory-file-name cooked--source-directory))
+         :settle (lambda () (and (cooked--input-start-position) cooked--completion-nonce)))
+      (goto-char cooked--input-end)
+      (insert "git commit -am ")
+      (let ((before (cooked-tests--text))
+            (cooked-completion-timeout 5))
+        ;; An answer arrived and it is empty -- (PREFIX SUFFIX TRUNCATED),
+        ;; with no records behind it -- which is the case this is about.
+        (should-not (nthcdr 3 (cooked--shell-completions "git commit -am " 15)))
+        ;; Asserted the moment the reply lands, not after the dust settles: the
+        ;; repair travels ahead of the reply, so there is no drain that can see
+        ;; the answer and still be showing the copy.
+        (should (equal (cooked-tests--text) before))
+        (cooked-tests--settle (lambda () nil) 0.3)
+        (should (equal (cooked-tests--text) before))))))
 
 (ert-deftest cooked-completion-is-a-normal-capf ()
   "So corfu, cape and friends work without knowing about cooked."

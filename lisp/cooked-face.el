@@ -135,9 +135,8 @@ that was just computed — are handled separately in `cooked--face'.")
 (defun cooked--face (fg bg attrs &optional ul)
   "Face plist for FG, BG, the ATTRS bitmask and underline colour UL.
 Memoized per buffer."
-  (let ((key (list fg bg attrs ul)))
-    (or (gethash key cooked--face-cache)
-        (puthash key (cooked--face-build fg bg attrs ul) cooked--face-cache))))
+  (cooked--cached cooked--face-cache (list fg bg attrs ul)
+    (cooked--face-build fg bg attrs ul)))
 
 (defun cooked--face-build (fg bg attrs ul)
   "Build the face plist `cooked--face' memoizes for FG, BG, ATTRS and UL."

@@ -15,6 +15,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 
 ;; Optional packages the suite tests against have to be found before the tests
 ;; that need them run, or `skip-unless' quietly turns a whole feature's coverage
@@ -233,32 +234,65 @@ the suite cannot append to the history of the person running it."
 
 (cooked-tests--isolate-zsh)
 
+(cl-defmacro cooked-tests--with-shell ((shell &key name env setup settle directory
+                                              (timeout 8))
+                                       &rest body)
+  "Run BODY in a cooked buffer running SHELL, settled at its first prompt.
+
+SHELL is a program name looked up on PATH; callers should `skip-unless\=' it
+themselves, since a macro cannot skip for them.  The shell is started through
+`cooked--shell-invocation\=', so the integration snippet is injected exactly as
+it would be for a user -- which is the point: the marks are what everything
+about prompts, command records and exit codes depends on, and a printf cannot
+produce them.
+
+  :name     buffer name, for reading a failure; defaults to the shell\='s.
+  :env      extra environment pairs, ahead of the invocation\='s own.
+  :directory  where to start the child, when it matters what it completes
+            against; nil leaves it wherever Emacs is.
+  :setup    one form run in the buffer after `cooked-mode\=' and before the
+            child, for a test that has to arrange something first.
+  :settle   predicate for the first prompt, replacing the default below.
+  :timeout  seconds to wait for it.
+
+`cooked--scratch\=' is set from the invocation, which is not bookkeeping: it is
+the only handle on the generated startup files, and `cooked--cleanup\=' removes
+them through it.  The helper this replaces discarded it, and so left one
+temporary directory behind per test that used it.
+
+The default settle condition asks for the editable line as well as the mark,
+because \"the prompt has arrived\" is what callers mean and `cooked--semantic\='
+alone is true a moment before the input region exists."
+  (declare (indent 1) (debug (sexp body)))
+  (let ((invocation (gensym "invocation"))
+        (extra (gensym "extra")))
+    `(let ((buffer (generate-new-buffer (or ,name (format "*cooked-%s*" ,shell))))
+           (,extra ,env))
+       (unwind-protect
+           (with-current-buffer buffer
+             (cooked-mode)
+             ,@(and setup (list setup))
+             (pcase-let ((`(,argv ,,invocation ,scratch)
+                          (cooked--shell-invocation (executable-find ,shell))))
+               (setq cooked--scratch scratch)
+               (cooked--start argv ,directory (append ,extra ,invocation)))
+             (cooked--refresh-keymap)
+             (should (cooked-tests--settle
+                      ,(or settle
+                           '(lambda () (and (eq cooked--semantic 'input)
+                                            (cooked--input-start-position))))
+                      ,timeout))
+             ,@body)
+         (with-current-buffer buffer (cooked--cleanup))
+         (kill-buffer buffer)))))
+
 (defmacro cooked-tests--with-zsh (&rest body)
   "Run BODY in a cooked buffer running zsh, settled at its first prompt.
 
-The shape several OSC 133 tests already open with, factored out: the shell
-integration is what makes the marks arrive at all, so anything about prompts,
-command records or their exit codes needs a real shell rather than a printf.
-Callers should `skip-unless\=' zsh themselves -- a macro cannot skip for them.
-
-The shell is started against `cooked-tests--zshrc\=', not the user's own; see
+Started against `cooked-tests--zshrc\=', not the user\='s own; see
 `cooked-tests--isolate-zsh\=' for why that is not optional."
   (declare (indent 0))
-  `(let ((buffer (generate-new-buffer "*cooked-zsh*")))
-     (unwind-protect
-         (with-current-buffer buffer
-           (cooked-mode)
-           (pcase-let ((`(,argv ,env ,_scratch)
-                        (cooked--shell-invocation (executable-find "zsh"))))
-             (cooked--start argv nil env))
-           (cooked--refresh-keymap)
-           (should (cooked-tests--settle
-                    (lambda () (and (eq cooked--semantic 'input)
-                                    (cooked--input-start-position)))
-                    8))
-           ,@body)
-       (with-current-buffer buffer (cooked--cleanup))
-       (kill-buffer buffer))))
+  `(cooked-tests--with-shell ("zsh") ,@body))
 
 (defmacro cooked-tests--with-fish (&rest body)
   "Run BODY in a cooked buffer running fish, settled at its first prompt.
@@ -274,8 +308,7 @@ by pointing XDG_CONFIG_HOME at it.  That is the arrangement the file documents
 for a user, run as documented.  The prompt is a bare `$ \=', so what a test reads
 off the buffer is the shell\='s output rather than a theme\='s."
   (declare (indent 0))
-  `(let* ((config (make-temp-file "cooked-tests-fish-" t))
-          (buffer (generate-new-buffer "*cooked-fish*")))
+  `(let ((config (make-temp-file "cooked-tests-fish-" t)))
      (unwind-protect
          (progn
            (make-directory (expand-file-name "fish" config))
@@ -285,19 +318,8 @@ off the buffer is the shell\='s output rather than a theme\='s."
                                 (expand-file-name "cooked.fish"
                                                   (cooked--integration-directory)))
                      "\n"))
-           (with-current-buffer buffer
-             (cooked-mode)
-             (pcase-let ((`(,argv ,env ,_scratch)
-                          (cooked--shell-invocation (executable-find "fish"))))
-               (cooked--start argv nil (cons (cons "XDG_CONFIG_HOME" config) env)))
-             (cooked--refresh-keymap)
-             (should (cooked-tests--settle
-                      (lambda () (and (eq cooked--semantic 'input)
-                                      (cooked--input-start-position)))
-                      8))
+           (cooked-tests--with-shell ("fish" :env `(("XDG_CONFIG_HOME" . ,config)))
              ,@body))
-       (with-current-buffer buffer (cooked--cleanup))
-       (kill-buffer buffer)
        (delete-directory config t))))
 
 (defun cooked-tests--undo-entries ()

@@ -150,6 +150,22 @@ arrive too late for the row that needed it."
   "Whether a key pressed now would be forwarded to the child."
   (and (cooked--child-owns-keyboard-p) (not (cooked--suspended-p))))
 
+(defun cooked--open-link-at-point ()
+  "Open whatever at point counts as a link, in the order the sources rank.
+
+An `OSC 8\=' destination first, because the child named it and nothing here has
+to guess; then `cooked-link-follow-function\=', which is where local files are
+answered when that layer is loaded; then goto-addr\='s own
+`goto-address-at-point\=', which handles both the URL and the mail case.
+
+The shared tail of `cooked-follow-link\=' and `cooked-follow-link-at-point\=',
+which differ only in what they do *before* deciding to open anything."
+  (if-let* ((uri (cooked-link-uri)))
+      (browse-url uri)
+    (or (and cooked-link-follow-function
+             (funcall cooked-link-follow-function))
+        (goto-address-at-point))))
+
 (defun cooked-follow-link (&optional event)
   "Open the link at point, or hand EVENT to the child if it owns the input.
 
@@ -164,10 +180,8 @@ have forwarded had this binding not existed, and the shifted variant — `S-RET\
 and `S-mouse-2\=' — follows the link regardless, which is what keeps a link
 reachable at all inside a full-screen program.
 
-What gets opened, in order: an `OSC 8\=' destination, because the child said so
-and nothing here has to guess; then `cooked-link-follow-function\=', which is
-where local files are answered when that layer is loaded; then goto-addr's own
-`goto-address-at-point\=', which handles both the URL and the mail case."
+Once it does decide to open something, `cooked--open-link-at-point\=' says what
+that is."
   (interactive (list last-nonmenu-event))
   ;; Both questions are asked of `last-input-event' rather than of EVENT: it is the
   ;; same object for every interactive route into here, and it is the one that is
@@ -182,11 +196,7 @@ where local files are answered when that layer is loaded; then goto-addr's own
      (t
       (when (and (consp event) (posn-point (event-end event)))
         (posn-set-point (event-end event)))
-      (if-let* ((uri (cooked-link-uri)))
-          (browse-url uri)
-        (or (and cooked-link-follow-function
-                 (funcall cooked-link-follow-function))
-            (goto-address-at-point)))))))
+      (cooked--open-link-at-point)))))
 
 (defun cooked-follow-link-at-point ()
   "Follow the link at point, whoever owns the keyboard.
@@ -197,11 +207,7 @@ goto-addr's own advertised key and reaches cooked's commands in every state
 where Emacs is reading them at all.  It is what answers a file name that
 nothing highlighted, since `cooked-link-follow-function\=' validates on demand."
   (interactive)
-  (if-let* ((uri (cooked-link-uri)))
-      (browse-url uri)
-    (or (and cooked-link-follow-function
-             (funcall cooked-link-follow-function))
-        (goto-address-at-point))))
+  (cooked--open-link-at-point))
 
 (defvar-keymap cooked-link-map
   :doc "Bindings carried by the text of a link.
