@@ -92,10 +92,16 @@ __cooked_osc() { builtin print -nu $__cooked_fd -- "\e]$1\a" }
 # The answer is left in __cooked_encoded rather than printed, so that callers can have
 # it without a `$(...)' -- which is a fork, on a path that runs once per command and
 # once per directory change.  kitty and Ghostty both fork here; there is no need to.
+#
+# Both this and __cooked_last_cwd below end up holding an absolute directory path, which
+# under a user's AUTO_NAME_DIRS makes the variable's own name a `~name' alias for that
+# directory -- and the next `%~' in their prompt or title picks the alias over the real
+# `~'.  `no_auto_name_dirs' on the assignment is what keeps that option from ever seeing
+# these as candidates.
 typeset -g __cooked_encoded=
 
 __cooked_encode() {
-  builtin emulate -L zsh
+  builtin emulate -L zsh -o no_auto_name_dirs
   local LC_ALL=C
   local out= i c n
   n=${#1}
@@ -120,6 +126,11 @@ __cooked_encode() {
 typeset -g __cooked_last_cwd=
 
 __cooked_report_cwd() {
+  # See the AUTO_NAME_DIRS note above __cooked_encoded -- same reasoning, and set here
+  # too rather than relied on from the caller, since this runs both inside
+  # __cooked_precmd's option scope and, on the first prompt, from __cooked_deferred_init
+  # with no scope of its own.
+  setopt local_options no_auto_name_dirs
   [[ $PWD == $__cooked_last_cwd ]] && return 0
   __cooked_last_cwd=$PWD
   __cooked_encode "$PWD"
