@@ -920,11 +920,159 @@ impl Row {
         }
     }
 
+    /// The simplest correct statement of what [`Row::runs_to`] must produce.
+    ///
+    /// A reference implementation, for `runs_to_matches_the_reference` to check the fast
+    /// one against. It exists because `build_runs` is the hottest read in the emulator and
+    /// therefore the most tempting to optimise, while also being the thing every character
+    /// Emacs renders passes through -- so an optimisation there needs something to be
+    /// *equivalent to*, not merely a suite that happened to keep passing.
+    ///
+    /// Deliberately an independent formulation rather than a copy: the shipping version
+    /// walks `entries` with a cursor and specialises on a const `EXTRAS`, and this one
+    /// searches per column and branches at runtime. Two spellings of the same rules cannot
+    /// share a mistake in the spelling.
+    #[cfg(test)]
+    pub(crate) fn runs_to_reference(&self, end: usize) -> Vec<Run> {
+        let entries: &[(u16, Extra)] = self.extras.as_deref().map_or(&[], |e| &e.entries);
+        let mut runs: Vec<Run> = Vec::new();
+        for (col, cell) in self.cells[..end].iter().enumerate() {
+            if cell.is_continuation() {
+                continue;
+            }
+            let (mut underline, mut marks, mut placed, mut link) =
+                (Color::Default, None, None, None);
+            for (_, extra) in entries.iter().filter(|(at, _)| usize::from(*at) == col) {
+                match extra {
+                    Extra::Underline(color) => underline = *color,
+                    Extra::Marks(text) => marks = Some(&**text),
+                    Extra::Image(p) => placed = Some(*p),
+                    Extra::Link(id) => link = Some(*id),
+                    Extra::Mark(_) => {}
+                }
+            }
+            let deco = placed
+                .map(DecoCell::Image)
+                .or_else(|| DecoCell::classify(cell.ch));
+            let joins = runs.last().is_some_and(|run| {
+                run.style == cell.style
+                    && run.underline == underline
+                    && run.link == link
+                    && match (&run.deco, deco) {
+                        (None, None) => true,
+                        (Some(d), Some(c)) => d.accepts(c),
+                        _ => false,
+                    }
+            });
+            if joins {
+                let run = runs.last_mut().expect("joins implies a last run");
+                run.text.push(cell.ch);
+                if let (Some(d), Some(c)) = (&mut run.deco, deco) {
+                    d.push(c);
+                }
+            } else {
+                runs.push(Run {
+                    text: String::from(cell.ch),
+                    style: cell.style,
+                    deco: deco.map(Deco::start),
+                    underline,
+                    link,
+                });
+            }
+            if let (Some(marks), Some(run)) = (marks, runs.last_mut()) {
+                run.text.push_str(marks);
+            }
+        }
+        runs
+    }
+
     fn runs_to(&self, end: usize) -> Vec<Run> {
         match self.extras.as_deref() {
             Some(extras) => self.build_runs::<true>(end, &extras.entries),
-            None => self.build_runs::<false>(end, &[]),
+            None => self.build_plain_runs(end),
         }
+    }
+
+    /// [`Row::build_runs`] for a row with nothing attached, which is nearly every row.
+    ///
+    /// With no attachments there is no underline colour, no link and no image placement,
+    /// so the only things that can end a run are the pen changing and a character that
+    /// draws a shape. That collapses the per-cell decision the general form has to make
+    /// into a scan for the end of the run, after which the whole span is appended at once
+    /// -- one `runs.last_mut()`, one capacity check and one join test per *run* instead of
+    /// per cell.
+    ///
+    /// It is worth having as its own function rather than another `EXTRAS` specialisation
+    /// because it is a different shape, not a different constant: the general form walks
+    /// cell by cell because an attachment can land on any one of them.
+    ///
+    /// `runs_to_matches_the_reference` is what keeps this honest -- it is checked against
+    /// [`Row::runs_to_reference`] over randomised rows, including the wide characters and
+    /// box glyphs that make the two disagree if the scan is wrong.
+    fn build_plain_runs(&self, end: usize) -> Vec<Run> {
+        let mut runs = Vec::<Run>::with_capacity(4);
+        let cells = &self.cells[..end];
+        let mut col = 0;
+        while col < end {
+            let cell = &cells[col];
+            // A continuation cell belongs to the wide character before it and contributes
+            // no text of its own, so it can neither start a run nor end one.
+            if cell.is_continuation() {
+                col += 1;
+                continue;
+            }
+            let style = cell.style;
+            let start = col;
+            let deco = DecoCell::classify(cell.ch);
+            col += 1;
+            // A decorated cell is taken one at a time: consecutive box glyphs join only if
+            // `Deco::accepts` says so, which is a per-character question the bulk path
+            // cannot ask. Plain text -- the case this function exists for -- runs on.
+            if deco.is_none() {
+                while col < end {
+                    let next = &cells[col];
+                    if !next.is_continuation()
+                        && (next.style != style || DecoCell::classify(next.ch).is_some())
+                    {
+                        break;
+                    }
+                    col += 1;
+                }
+            }
+            let text = cells[start..col]
+                .iter()
+                .filter(|c| !c.is_continuation())
+                .map(|c| c.ch);
+            match runs.last_mut() {
+                Some(run)
+                    if run.style == style
+                        && match (&run.deco, deco) {
+                            (None, None) => true,
+                            (Some(d), Some(c)) => d.accepts(c),
+                            _ => false,
+                        } =>
+                {
+                    run.text.extend(text);
+                    if let (Some(d), Some(c)) = (&mut run.deco, deco) {
+                        d.push(c);
+                    }
+                }
+                _ => {
+                    // Sized to the columns left, for the same reason `build_runs` does it:
+                    // the row's dominant shape is one run spanning it.
+                    let mut buffer = String::with_capacity(end - start);
+                    buffer.extend(text);
+                    runs.push(Run {
+                        text: buffer,
+                        style,
+                        deco: deco.map(Deco::start),
+                        underline: Color::Default,
+                        link: None,
+                    });
+                }
+            }
+        }
+        runs
     }
 
     /// The row's cells as runs, reading attachments only when there are any.
@@ -1317,6 +1465,119 @@ mod tests {
         assert!(row.extras.is_some());
         row.set_underline(1, Color::Default);
         assert!(row.extras.is_none());
+    }
+
+    /// `build_runs` must agree with [`Row::runs_to_reference`] on every row shape.
+    ///
+    /// Randomised rather than enumerated: the interesting cases are *combinations* --
+    /// a link opening mid-run under one style, a combining mark on a box glyph, an image
+    /// cell between two runs of matching colour, a wide character's continuation cell
+    /// splitting nothing -- and there are far more of those than anyone writes out by
+    /// hand. A fixed seed keeps a failure reproducible.
+    ///
+    /// Every `end` is checked, not just `content_len`, because `line_runs` asks for the
+    /// full width on a wrapped row and the trimmed width otherwise.
+    #[test]
+    fn runs_to_matches_the_reference() {
+        // xorshift: a deterministic sequence, and small enough to read.
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        const COLS: usize = 24;
+        let palette = [
+            Color::Default,
+            Color::Indexed(1),
+            Color::Indexed(200),
+            Color::Rgb(10, 20, 30),
+        ];
+        // Plain ASCII, a box glyph, a shade block, a wide character and a zero-width
+        // mark -- every branch `DecoCell::classify` and the width logic can take.
+        let chars = ['a', 'b', ' ', '\u{2500}', '\u{2503}', '\u{2591}', '\u{6f22}'];
+
+        // Both paths, deliberately. `runs_to` sends a row with attachments to
+        // `build_runs` and a row without to `build_plain_runs`, and with attachments
+        // sprinkled at 5 cells in 16 essentially every generated row has one -- so a
+        // single pass would have left the plain path, the one this test was written for,
+        // never executed once.
+        let mut plain_rows = 0;
+        let mut attached_rows = 0;
+        for case in 0..4_000 {
+            let attachments = case % 2 == 0;
+            let mut row = Row::new(COLS);
+            let mut col = 0;
+            while col < COLS {
+                let r = next();
+                let ch = chars[(r % chars.len() as u64) as usize];
+                let style = Style {
+                    fg: palette[((r >> 8) % 4) as usize],
+                    bg: palette[((r >> 16) % 4) as usize],
+                    attrs: if (r >> 24) % 3 == 0 {
+                        Attrs::BOLD
+                    } else {
+                        Attrs::NONE
+                    },
+                };
+                let width = if ch == '\u{6f22}' { 2 } else { 1 };
+                if col + width > COLS {
+                    break;
+                }
+                row.set(col, Cell { ch, style });
+                if width == 2 {
+                    row.set(
+                        col + 1,
+                        Cell {
+                            ch: CONTINUATION,
+                            style,
+                        },
+                    );
+                }
+                // Attachments, each rare enough that most cells carry none -- which is
+                // also the distribution the real grid has.
+                match if attachments { (r >> 32) % 16 } else { u64::MAX } {
+                    0 => row.set_underline(col, Color::Indexed(196)),
+                    1 => row.set_link(col, Some(LinkId(((r >> 40) % 3) as u32))),
+                    2 => row.combine(col, '\u{301}'),
+                    3 => row.mark(col, MarkId(((r >> 40) % 4) as u32)),
+                    4 => row.place(
+                        col,
+                        Placement {
+                            id: crate::emu::image::ImageId(((r >> 40) % 2) as u32),
+                            cell_row: 0,
+                            cell_col: 0,
+                        },
+                        style,
+                    ),
+                    _ => {}
+                }
+                col += width;
+            }
+
+            if row.extras.is_some() {
+                attached_rows += 1;
+            } else {
+                plain_rows += 1;
+            }
+            for end in 0..=COLS {
+                assert_eq!(
+                    row.runs_to(end),
+                    row.runs_to_reference(end),
+                    "case {case}, end {end}: runs disagree with the reference"
+                );
+            }
+        }
+
+        // Asserted, not assumed: this test is only worth anything if both
+        // implementations actually ran, and which one runs is decided by whether the row
+        // happened to pick up an attachment.
+        assert!(
+            plain_rows > 1_000 && attached_rows > 1_000,
+            "both run builders must be exercised: {plain_rows} plain, {attached_rows} attached"
+        );
     }
 
     #[test]
