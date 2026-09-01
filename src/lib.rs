@@ -108,6 +108,15 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         return 2;
     }
 
+    // Before any defun exists to be called: `Env::list`, `Env::cons` and `Env::nil` read
+    // this table, and `defuns!` itself calls `defalias` through them. Failure here means
+    // Emacs signalled during `intern`, which the trampoline has nothing to do with -- so
+    // it surfaces the same way an ABI mismatch does rather than leaving a half-registered
+    // module behind.
+    if env.intern_symbols().is_err() {
+        return 2;
+    }
+
     let registered = defuns!(env, {
         /// Spawn ARGV on a new pty and return a session handle.
         /// Arguments are ARGV, ENV, ROWS, COLS, WAKE, optional DIRECTORY, optional

@@ -202,25 +202,28 @@ impl State {
 
     /// Every mark ROWS carry, numbered from absolute row BASE.
     ///
-    /// Used twice per resize and nowhere else: once over the rows the rewrap pushed off
-    /// the top, whose absolute numbers start where the eviction counter stood before they
-    /// were archived, and once over the grid that came out of it.
+    /// One caller: [`State::take_marks`], over the live primary grid, on a drain that
+    /// something moved. Rows that *left* the grid no longer come through here — they
+    /// carry their own marks out in [`Departed`](crate::emu::screen::Departed), recorded
+    /// as they went, and `take_marks` merges the two.
+    ///
+    /// Lazy throughout. This used to `collect` inside the `flat_map`, which cost a `Vec`
+    /// per row scanned whether or not the row carried a single mark — and while it was
+    /// also on the eviction path, that was a `Vec` per scrolled line.
     pub(super) fn marks_in<'a>(
         rows: impl Iterator<Item = &'a Row>,
         base: usize,
     ) -> impl Iterator<Item = (MarkId, Anchor)> {
         rows.enumerate().flat_map(move |(index, row)| {
-            row.marks()
-                .map(move |(col, id)| {
-                    (
-                        id,
-                        Anchor {
-                            row: base + index,
-                            col,
-                        },
-                    )
-                })
-                .collect::<Vec<_>>()
+            row.marks().map(move |(col, id)| {
+                (
+                    id,
+                    Anchor {
+                        row: base + index,
+                        col,
+                    },
+                )
+            })
         })
     }
 

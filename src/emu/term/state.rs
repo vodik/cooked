@@ -9,7 +9,10 @@ impl State {
         // a new field is initialised by construction rather than by remembering to.
         Self {
             primary: Screen::new(rows, cols),
-            alt: Screen::new(rows, cols),
+            // `scratch`, not `new`: the alt grid archives nothing, and saying so at
+            // construction is what stops `scroll_up` building a departure record per line
+            // for a transcript that does not exist. See `Screen::history`.
+            alt: Screen::scratch(rows, cols),
             ..Self::default()
         }
     }
@@ -57,6 +60,7 @@ impl State {
     /// its grid is a fixed size, and `min_redisplay_interval` already bounds how often its
     /// frames are drawn — so intermediate frames of a repaint are genuinely discardable in
     /// a way log lines are not, and there is nothing to apply backpressure against.
+    ///
     pub(super) fn evicted(&mut self, rows: Evicted) {
         if self.on_alt {
             return;
@@ -86,26 +90,45 @@ impl State {
         // lines' withholds from a continuation row. So every position below it slides by
         // one per wrapped row that leaves, which is the drift a long-running command
         // shows: its marker walks away from its prompt as its own output scrolls.
+        // The empty case first, because it is not the rare one: `Perform::print` hands the
+        // result of every single printed character to `evicted`, and only the character
+        // that scrolls the bottom margin brings a row with it. Everything below is a
+        // no-op for the rest -- but it is a no-op that still reads two fields, sets up an
+        // iterator and drops a `Vec`, once per byte of output.
+        //
+        // Worth ~10%: the full-screen repaint benchmark, which never evicts a single row,
+        // runs at 277ms with this return and 313ms without it, and `plain` at 203ms
+        // against 224ms. Hoisting the same test up into `evicted`, or adding it again at
+        // the `print` call site, both measured as no further gain -- so it belongs here,
+        // once, at the funnel every eviction path already goes through.
+        if rows.is_empty() {
+            return;
+        }
         let base = self.evicted_total;
-        let marks: Vec<_> = Self::marks_in(rows.iter(), base).collect();
-        if !marks.is_empty() {
-            self.evicted_marks.extend(marks);
-        }
-        if !rows.is_empty() {
-            self.marks_dirty = true;
-        }
+        self.marks_dirty = true;
         self.evicted_total += rows.len();
-        // Reduced to runs here rather than at drain time: a Row owns a cell for every
-        // column, so retaining thousands of them keeps megabytes of mostly-blank grid
-        // alive. Runs are trimmed to content, and the work has to happen regardless.
-        // `line_runs` rather than `runs`: these rows are becoming buffer text as part of a
-        // logical line, and a continuation row has to keep the blanks that are interior to
-        // it. See `Row::line_runs`.
-        self.pending_scrollback
-            .extend(rows.iter().map(|row| Scrolled {
-                runs: row.line_runs(),
-                wrapped: row.wrapped,
+        // A move, not a rebuild. `Screen` reduced these rows to runs as they left the
+        // grid -- see `Departed` -- so everything here is already the shape the backlog
+        // wants, and both halves of this loop hand it straight over.
+        //
+        // `extend` on an empty iterator neither allocates nor grows, which is what makes
+        // the mark half free: a row carrying no marks is the overwhelming case, and it
+        // used to cost a `Vec` per eviction here plus another per row inside `marks_in`.
+        for (index, row) in rows.into_iter().enumerate() {
+            self.evicted_marks.extend(row.marks.iter().map(|&(col, id)| {
+                (
+                    id,
+                    Anchor {
+                        row: base + index,
+                        col,
+                    },
+                )
             }));
+            self.pending_scrollback.push_back(Scrolled {
+                runs: row.runs,
+                wrapped: row.wrapped,
+            });
+        }
     }
 
     /// See [`Term::clear_to_prompt`].
@@ -206,6 +229,11 @@ impl State {
         let damaged = self.screen_mut().drain_damage();
         let images = std::mem::take(&mut self.pending_images);
         let links = std::mem::take(&mut self.pending_links);
+        // `Vec::from` rather than `drain(..).collect()`: this hands the deque's own ring
+        // buffer over as the Vec's, so there is no second allocation and nothing is
+        // copied element-wise. Draining to keep the deque's capacity across drains was
+        // tried and measured as noise in both directions -- and it is strictly more
+        // allocation, since the collect has to build a fresh Vec anyway.
         let scrolled = Vec::from(std::mem::take(&mut self.pending_scrollback));
         // Taken before the batch is handed over, so it names the first line *in* it.
         let scrolled_base = self.evicted_total - scrolled.len();

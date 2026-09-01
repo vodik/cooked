@@ -138,11 +138,137 @@ macro_rules! ffi {
 macro_rules! plist {
     ($env:expr, { $($key:literal => $val:expr),* $(,)? }) => {{
         let env = $env;
-        let items = [ $( env.intern($key)?, env.into_lisp($val)? ),* ];
+        let items = [ $(
+            // A `const` item, so the lookup happens at compile time and a key that is not
+            // in the symbol table stops the build. See `sym_index`.
+            { const I: usize = $crate::env::sym_index($key); env.sym_at(I)? },
+            env.into_lisp($val)?
+        ),* ];
         env.list(&items)
     }};
 }
 pub(crate) use plist;
+
+/// Symbols this module interns once, at load, and holds for the process' life.
+///
+/// `Env::intern` costs a `CString` allocation and two FFI calls -- the `intern` itself
+/// and the `non_local_exit_check` every `ffi!` does after it. `list`, `cons` and `nil`
+/// re-interned their own names on *every* call, and a drain makes tens of thousands of
+/// them, so the name lookup dominated the work of building the reply.
+macro_rules! symbols {
+    ($($variant:ident => $name:literal),* $(,)?) => {
+        /// A symbol resolved by array index rather than by interning.
+        #[derive(Clone, Copy)]
+        #[repr(usize)]
+        pub enum Sym { $($variant),* }
+
+        impl Sym {
+            /// Indexed by the discriminant, so the two cannot drift: both come from the
+            /// one list above.
+            const NAMES: &'static [&'static str] = &[$($name),*];
+        }
+        // Most variants are never written as `Sym::Something`. They are here to give
+        // their string a slot in `NAMES`, which `sym_index` searches by spelling on
+        // behalf of `plist!` -- one table, reached two ways, rather than two tables whose
+        // indices could disagree.
+    };
+}
+
+symbols! {
+    List => "list",
+    Cons => "cons",
+    Nil => "nil",
+    // Every `plist!` key in the module. They are interned once each here instead of once
+    // each per drain, which is where fifteen of them were being rebuilt sixty times a
+    // second. `sym_index` makes leaving one out a compile error rather than a silent
+    // fallback, so this list cannot quietly fall behind the call sites.
+    Scrolled => ":scrolled",
+    Rows => ":rows",
+    Height => ":height",
+    Used => ":used",
+    Head => ":head",
+    Cursor => ":cursor",
+    Marks => ":marks",
+    Alt => ":alt",
+    AppCursor => ":app-cursor",
+    Keys => ":keys",
+    Mode => ":mode",
+    Images => ":images",
+    Links => ":links",
+    Events => ":events",
+    Exit => ":exit",
+    Intr => ":intr",
+    Quit => ":quit",
+    Susp => ":susp",
+    Eof => ":eof",
+    Isig => ":isig",
+}
+
+/// `a == b` for `&str`, in a const context.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Where `name` sits in [`Sym::NAMES`], resolved at compile time.
+///
+/// This is what lets [`plist!`] go on being written with the keyword it puts on the wire
+/// -- `":rows"`, matching the `(plist-get update :rows)` on the Lisp side -- while costing
+/// an array index rather than an `intern`. The `panic!` is in a `const` context, so a key
+/// missing from the table above fails the build with that message pointing at the call
+/// site; it can never degrade to a slow path nobody notices.
+pub(crate) const fn sym_index(name: &str) -> usize {
+    let mut i = 0;
+    while i < Sym::NAMES.len() {
+        if str_eq(Sym::NAMES[i], name) {
+            return i;
+        }
+        i += 1;
+    }
+    panic!("this plist key is missing from `symbols!` in env.rs; add it there")
+}
+
+/// The interned symbols, as global references.
+struct Symbols([Value; Sym::NAMES.len()]);
+
+/// SAFETY: `Value` is a raw pointer, so `Symbols` is neither `Send` nor `Sync` on its
+/// own, and a `static OnceLock<T>` needs both. Each is sound here for its own reason.
+///
+/// `Sync` -- shared reads from several threads -- because there is only ever one thread
+/// that reads it. The table is *written* exactly once, inside `emacs_module_init`, before
+/// any defun exists to be called and before this module has started a thread of its own,
+/// with `OnceLock` providing the publication barrier. It is *read* only through
+/// [`Env::sym`], and an `Env` is only ever held by the thread Emacs calls module
+/// functions on -- which is why [`Env::from_raw`] is `unsafe` in the first place. cooked's
+/// one background thread, `session.rs`'s reader, never touches Lisp at all: it parses
+/// into a shared `Term` and writes a byte to a pipe, and has no `Env` to reach this with.
+///
+/// `Send` -- transfer to another thread -- because the only thing transfer could do to a
+/// type that is otherwise never touched off the main thread is drop it somewhere
+/// unexpected, and `Symbols` is a plain array of pointers with no `Drop`. Living in a
+/// `static`, it is never dropped at all.
+///
+/// Neither claim licenses *calling* Emacs off the main thread. They cover holding the
+/// symbols; using one still requires an `Env`, whose own contract is what keeps that
+/// honest.
+unsafe impl Sync for Symbols {}
+unsafe impl Send for Symbols {}
+
+/// Never freed, and that is deliberate rather than an omission: Emacs does not unload a
+/// dynamic module, so these references are live for the process' lifetime by
+/// construction and there is no teardown hook to release them from. It is a bounded leak
+/// of one pointer per name above.
+static SYMBOLS: std::sync::OnceLock<Symbols> = std::sync::OnceLock::new();
 
 impl<'e> Env<'e> {
     /// # Safety
@@ -166,8 +292,46 @@ impl<'e> Env<'e> {
         ffi!(self, intern, c.as_ptr())
     }
 
+    /// A symbol from the load-time table; no allocation and no FFI call.
+    ///
+    /// Falls back to interning if the table is somehow not populated. That cannot happen
+    /// through any path a user can reach -- `emacs_module_init` fills it before it
+    /// registers a single defun -- but the fallback is one line and costs nothing on the
+    /// path that matters, and the alternative is a panic in FFI code.
+    pub fn sym(&self, s: Sym) -> Result<Value> {
+        self.sym_at(s as usize)
+    }
+
+    /// [`Env::sym`] by raw index, for [`plist!`]'s compile-time lookup.
+    pub fn sym_at(&self, index: usize) -> Result<Value> {
+        match SYMBOLS.get() {
+            Some(table) => Ok(table.0[index]),
+            None => self.intern(Sym::NAMES[index]),
+        }
+    }
+
+    /// Promote a value to one that outlives the call that produced it.
+    fn global_ref(&self, v: Value) -> Result<Value> {
+        ffi!(self, make_global_ref, v)
+    }
+
+    /// Fill [`SYMBOLS`]. Called once, from `emacs_module_init`.
+    ///
+    /// A second `module-load` of the same file runs `emacs_module_init` again and finds
+    /// the table already set. Ignoring that is correct rather than merely tolerable: one
+    /// process is one Emacs with one obarray, so the symbols already in the table name
+    /// the very same objects a re-intern would find.
+    pub fn intern_symbols(&self) -> Result<()> {
+        let mut table = [Value::NULL; Sym::NAMES.len()];
+        for (slot, name) in table.iter_mut().zip(Sym::NAMES) {
+            *slot = self.global_ref(self.intern(name)?)?;
+        }
+        let _ = SYMBOLS.set(Symbols(table));
+        Ok(())
+    }
+
     pub fn nil(&self) -> Value {
-        self.intern("nil").unwrap_or(Value::NULL)
+        self.sym(Sym::Nil).unwrap_or(Value::NULL)
     }
 
     pub fn is_nil(&self, v: Value) -> bool {
@@ -183,12 +347,19 @@ impl<'e> Env<'e> {
         ffi!(self, funcall, f, args.len() as isize, args.as_ptr())
     }
 
+    /// [`Env::call`] for a function named in the symbol table, which is every function
+    /// this module calls often enough for the name lookup to show.
+    fn call_sym(&self, func: Sym, args: &[Value]) -> Result<Value> {
+        let f = self.sym(func)?;
+        ffi!(self, funcall, f, args.len() as isize, args.as_ptr())
+    }
+
     pub fn list(&self, items: &[Value]) -> Result<Value> {
-        self.call("list", items)
+        self.call_sym(Sym::List, items)
     }
 
     pub fn cons(&self, car: Value, cdr: Value) -> Result<Value> {
-        self.call("cons", &[car, cdr])
+        self.call_sym(Sym::Cons, &[car, cdr])
     }
 
     /// Wrap `data` in an opaque Lisp user-pointer; Emacs' GC runs the destructor.

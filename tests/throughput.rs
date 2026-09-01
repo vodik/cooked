@@ -1,8 +1,13 @@
 //! Where does the time go? Run with:
 //!   cargo test --release --test throughput -- --ignored --nocapture
 
-use cooked::emu::Term;
+use cooked::emu::{BACKLOG_HIGH_WATER, Term};
 use std::time::Instant;
+
+/// Mirrors `session::READ_CHUNK`, which is private. Restated rather than exported: this
+/// is a benchmark asserting it models the reader loop, and a constant that has to be
+/// made public to be copied here would be public for no other reason.
+const READ_CHUNK: usize = 64 * 1024;
 
 fn timed(label: &str, bytes: usize, work: impl FnOnce()) {
     let start = Instant::now();
@@ -55,10 +60,25 @@ fn repaint(frames: usize, rows: usize, cols: usize) -> Vec<u8> {
 
 /// Parsing with nothing collecting the output — what happens while Emacs is busy.
 ///
-/// This measured allocator churn rather than parsing until scrollback stopped
-/// retaining full-width grid rows: 200k un-drained rows dominated everything and made
-/// "parse only" look slower than parse-and-drain, which is impossible. In a real
-/// session the reader applies backpressure long before the backlog gets this large.
+/// Backpressure is modelled rather than omitted, and that is the whole design of this
+/// benchmark. Feeding all 200k lines in one call lets `pending_scrollback` reach 200k
+/// entries, which is a state the reader thread makes unreachable: `Shared::read_loop`
+/// stops reading the pty at `backlog() >= backlog_limit` and lets the child block in
+/// `write`. So the un-throttled form measured heap growth, not parsing.
+///
+/// It measured it badly enough to invert the ordering: "parse only" came out
+/// *slower* than parse-and-drain, which cannot be true of strictly less work. Reducing
+/// evicted rows to runs in `State::archive` shrank the retained footprint but did not
+/// bound it, and only the reader stopping bounds it. `perf stat` settles what the residue
+/// was — 28,681 page faults against 3,826 for the draining variant, with instruction
+/// counts within 2% of each other (10.18B vs 10.36B). Identical work, different memory:
+/// the cost was the kernel handing over fresh pages, inside the timed region.
+///
+/// So the chunk size is `READ_CHUNK` and the backlog is sampled between chunks, both
+/// matching `Shared::read_loop`, and a drain that trips the limit is thrown away —
+/// `drop`, not consumption, because the premise is that Emacs is busy. The delta still
+/// has to be built, which is the honest cost: in production backpressure is released by
+/// Emacs draining, and that drain is not free either.
 #[test]
 #[ignore = "benchmark"]
 fn feed_only() {
@@ -67,9 +87,22 @@ fn feed_only() {
         ("styled, parse only", styled(200_000)),
     ] {
         let mut term = Term::new(50, 200);
-        timed(label, data.len(), || term.feed(&data));
+        let mut forced = 0usize;
+        timed(label, data.len(), || {
+            for piece in data.chunks(READ_CHUNK) {
+                term.feed(piece);
+                if term.backlog() >= BACKLOG_HIGH_WATER {
+                    drop(term.drain());
+                    forced += 1;
+                }
+            }
+        });
         let delta = term.drain();
-        println!("{:>44}({} rows backlogged)", "", delta.scrolled.len());
+        println!(
+            "{:>44}({} rows backlogged, {forced} drains forced by backpressure)",
+            "",
+            delta.scrolled.len()
+        );
     }
 }
 

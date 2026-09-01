@@ -200,6 +200,9 @@ impl DecoCell {
     /// there is nothing to keep on the row and nothing to maintain when the cell is
     /// overwritten. Attachments held in [`Extras`] are the other source, and they cannot
     /// work this way because no character stands for them.
+    /// `#[inline]` because it is a one-line forwarder on the per-cell path; see
+    /// [`glyph::classify`], which carries the fast path this hands through to.
+    #[inline]
     fn classify(ch: char) -> Option<Self> {
         glyph::classify(ch).map(Self::Glyph)
     }
@@ -803,14 +806,16 @@ impl Row {
         if col >= cols {
             return;
         }
-        self.cells.splice(
-            col..col,
-            std::iter::repeat_n(Cell::blank(style), count.min(cols - col)),
-        );
-        self.cells.truncate(cols);
+        let n = count.min(cols - col);
+        // In place, because `Cell` is `Copy` and the row's length does not change. The
+        // `splice`-then-`truncate` this replaces grew `cells` past `cols` before cutting
+        // it back, and the row's capacity is exactly `cols` -- so IRM cost a realloc per
+        // character written in insert mode.
+        self.cells.copy_within(col..cols - n, col + n);
+        self.cells[col..col + n].fill(Cell::blank(style));
         // The cells from `col` on moved right; their attachments move with them, and
         // whatever was pushed off the end goes.
-        self.edit_extras(|extras| extras.shift(col, count.min(cols - col) as isize, cols));
+        self.edit_extras(|extras| extras.shift(col, n as isize, cols));
     }
 
     pub fn delete(&mut self, col: usize, count: usize, style: Style) {
@@ -910,7 +915,10 @@ impl Row {
     /// rather than a lookup per character — which the per-column form pays whether or not
     /// the row has a single mark on it.
     fn build_runs<const EXTRAS: bool>(&self, end: usize, entries: &[(u16, Extra)]) -> Vec<Run> {
-        let mut runs = Vec::<Run>::new();
+        // Four, not `end`: the row's dominant shapes are one run of plain text and a
+        // handful for a coloured prompt, so a capacity of one per column would be a far
+        // bigger allocation than the growth it saves.
+        let mut runs = Vec::<Run>::with_capacity(4);
         let mut at = 0;
         for (col, cell) in self.cells[..end].iter().enumerate() {
             if cell.is_continuation() {
@@ -971,7 +979,16 @@ impl Row {
                     }
                 }
                 _ => runs.push(Run {
-                    text: String::from(cell.ch),
+                    // The run cannot outgrow the columns left in the row, and for the
+                    // ASCII that dominates, bytes and columns are the same number -- so
+                    // this is one allocation where growing from `String::from(char)`'s
+                    // capacity of 1 took roughly five. Over-allocates for a run that ends
+                    // early, which the reallocation it replaces cost more than.
+                    text: {
+                        let mut text = String::with_capacity(end - col);
+                        text.push(cell.ch);
+                        text
+                    },
                     style: cell.style,
                     deco: deco.map(Deco::start),
                     underline,
@@ -1274,6 +1291,40 @@ mod tests {
         assert!(row.extras.is_some());
         row.set_underline(1, Color::Default);
         assert!(row.extras.is_none());
+    }
+
+    #[test]
+    fn insert_blank_keeps_the_row_exactly_cols_wide() {
+        let plain = |ch| Cell {
+            ch,
+            style: Style::default(),
+        };
+        let text = |row: &Row| row.cells().iter().map(|c| c.ch).collect::<String>();
+
+        let mut row = Row::new(4);
+        for (col, ch) in "abcd".chars().enumerate() {
+            row.set(col, plain(ch));
+        }
+
+        // The ordinary shift: `d` falls off the end rather than widening the row.
+        row.insert_blank(1, 1, Style::default());
+        assert_eq!(row.len(), 4);
+        assert_eq!(text(&row), "a bc");
+
+        // The boundary the in-place rewrite has to get right: `count` at or past the
+        // columns remaining leaves an empty copy range, so the tail is filled and nothing
+        // is read from beyond the row.
+        row.insert_blank(2, 99, Style::default());
+        assert_eq!(row.len(), 4);
+        assert_eq!(text(&row), "a   ");
+
+        // Inserting at the last column touches exactly that column.
+        let mut row = Row::new(4);
+        for (col, ch) in "abcd".chars().enumerate() {
+            row.set(col, plain(ch));
+        }
+        row.insert_blank(3, 1, Style::default());
+        assert_eq!(text(&row), "abc ");
     }
 
     #[test]

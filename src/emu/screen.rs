@@ -1,6 +1,6 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
-use super::cell::{CONTINUATION, Cell, Color, Extra, MarkId, Row, Style};
+use super::cell::{CONTINUATION, Cell, Color, Extra, MarkId, Row, Run, Style};
 use super::image::{ImageId, Placement};
 use super::link::LinkId;
 use unicode_width::UnicodeWidthChar;
@@ -83,12 +83,65 @@ impl Erase {
 /// the forgotten one.
 #[must_use = "evicted rows are the session transcript; archive them or call `discard`"]
 #[derive(Debug, Default)]
-pub struct Evicted(Vec<Row>);
+pub struct Evicted(Vec<Departed>);
+
+/// One row on its way out of a grid, already reduced to what the transcript needs.
+///
+/// A [`Row`] owns a cell for every column, so carrying departing rows as rows kept
+/// `cols * size_of::<Cell>()` alive per line for as long as the backlog held them --
+/// and, worse, meant `scroll_up` had to *clone* the rows it was about to rotate away
+/// just so the archiver could read them. Reducing here instead deletes both costs: the
+/// clone has nothing to copy, and what is retained is trimmed to content.
+///
+/// The reduction is work that had to happen regardless; only its position moved.
+#[derive(Debug)]
+pub struct Departed {
+    pub runs: Vec<Run>,
+    pub wrapped: bool,
+    /// Semantic marks still attached, as `(column, id)`.
+    ///
+    /// Empty for essentially every row, and an empty `Vec` does not allocate, so the
+    /// ordinary line pays nothing to carry this.
+    pub marks: Vec<(usize, MarkId)>,
+}
+
+impl Departed {
+    /// `line_runs` rather than `runs`: these rows are becoming buffer text as part of a
+    /// logical line, and a continuation row has to keep the blanks that are interior to
+    /// it. See [`Row::line_runs`].
+    fn from_row(row: &Row) -> Self {
+        Self {
+            runs: row.line_runs(),
+            wrapped: row.wrapped,
+            marks: row.marks().collect(),
+        }
+    }
+
+    /// The row's text, for tests and diagnostics. Mirrors [`Row::to_text`], which is what
+    /// the assertions on evicted rows used before they were reduced this early.
+    pub fn to_text(&self) -> String {
+        self.runs.iter().map(|run| run.text.as_str()).collect()
+    }
+}
 
 impl Evicted {
     /// Nothing left the screen.
-    pub fn none() -> Self {
+    ///
+    /// `const` because it can be: this is the return on the overwhelming majority of
+    /// writes -- every character that does not sit at the bottom margin -- so it is worth
+    /// being a value the compiler can fold rather than a call.
+    pub const fn none() -> Self {
         Self(Vec::new())
+    }
+
+    /// Reduce rows leaving a grid, for the producers that already own them.
+    ///
+    /// `scroll_up` deliberately does not use this: it reduces from the slice it is about
+    /// to rotate, which is the whole point of reducing here rather than at drain time.
+    /// The rest -- a resize shrinking, a rewrap overflowing, a full erase going to
+    /// history -- construct their rows and have nothing to save by borrowing.
+    fn from_rows(rows: &[Row]) -> Self {
+        Self(rows.iter().map(Departed::from_row).collect())
     }
 
     /// These rows are not history. Says so out loud, so that a reader can tell this apart
@@ -98,16 +151,22 @@ impl Evicted {
 
 /// Reading the rows is ordinary slice work; only *dropping* them needed a type.
 impl std::ops::Deref for Evicted {
-    type Target = [Row];
+    type Target = [Departed];
 
-    fn deref(&self) -> &[Row] {
+    fn deref(&self) -> &[Departed] {
         &self.0
     }
 }
 
-impl From<Vec<Row>> for Evicted {
-    fn from(rows: Vec<Row>) -> Self {
-        Self(rows)
+/// By value, so `State::archive` can move each row's runs into the backlog rather than
+/// rebuilding them. [`Evicted::discard`] and the `#[must_use]` above are unaffected:
+/// consuming one deliberately still has to name the consumer.
+impl IntoIterator for Evicted {
+    type Item = Departed;
+    type IntoIter = std::vec::IntoIter<Departed>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
@@ -140,6 +199,19 @@ pub struct Screen {
     autowrap: bool,
     /// IRM. See [`Screen::set_insert_mode`].
     insert_mode: bool,
+    /// Whether rows leaving the top of this grid are history worth building.
+    ///
+    /// False for the alternate grid, which is a running program's scratch frame and
+    /// contributes no transcript. [`State::evicted`](super::term) already refuses to
+    /// archive while `on_alt`, and this does not replace that: `evicted` is the funnel
+    /// that owns the policy, and this only stops the *work* being done for rows nobody
+    /// will read. Deleting either is wrong.
+    ///
+    /// It cannot be folded into [`Screen::archives`]'s region test. That test asks whether
+    /// the scroll covers the whole grid, which is true of the alt screen as often as the
+    /// primary — so before this flag existed, every full-region scroll under `less` or
+    /// `vim` built a departure record per line and dropped it on the floor.
+    history: bool,
 }
 
 impl Default for Screen {
@@ -170,6 +242,21 @@ impl Screen {
             carried: 0,
             autowrap: true,
             insert_mode: false,
+            history: true,
+        }
+    }
+
+    /// A grid whose departing rows are not history: the alternate screen.
+    ///
+    /// A constructor rather than a field left for the caller to clear, because the two
+    /// grids are built side by side in [`State::new`](super::term) and a flag assigned
+    /// after the fact is one a later edit can drop without anything failing — the symptom
+    /// would be wasted work, which no test asserts the absence of. Saying it in the name
+    /// makes it structural. See [`Screen::history`].
+    pub fn scratch(rows: usize, cols: usize) -> Self {
+        Self {
+            history: false,
+            ..Self::new(rows, cols)
         }
     }
 
@@ -201,7 +288,7 @@ impl Screen {
     ///
     /// Only for rows that actually reached Emacs: a scroll region discards rows instead,
     /// and `reflow` refuses to run under one, so the carry is never read in that state.
-    fn carry(&mut self, evicted: &[Row]) {
+    fn carry(&mut self, evicted: &[Departed]) {
         let Some(last) = evicted.last() else { return };
         if !last.wrapped {
             // The line ended with the rows that left, so row 0 starts a fresh one.
@@ -285,6 +372,8 @@ impl Screen {
         }
 
         let cols = self.cols;
+        // Read before `touch` borrows `self` mutably below.
+        let insert_mode = self.insert_mode;
         let mut evicted = Evicted::none();
         // The margin decision, made once. Both new modes live inside the branch that was
         // already taken only at the edge of a row, so the common path is untouched.
@@ -303,14 +392,16 @@ impl Screen {
         }
 
         let (row, col) = (self.cursor.row, self.cursor.col);
-        if self.insert_mode {
-            // IRM shifts the rest of the row right by the character's full width, so a
-            // wide character does not tear the cell it displaces.
-            if let Some(r) = self.touch(row) {
+        // One `touch` for both edits. Two of them re-did the damage flag and the row
+        // lookup for every character written in insert mode, and this is the hottest call
+        // in the emulator -- so the insert lives inside the borrow rather than taking its
+        // own.
+        if let Some(r) = self.touch(row) {
+            if insert_mode {
+                // IRM shifts the rest of the row right by the character's full width, so a
+                // wide character does not tear the cell it displaces.
                 r.insert_blank(col, width, style);
             }
-        }
-        if let Some(r) = self.touch(row) {
             r.set(col, Cell { ch, style });
             for offset in 1..width {
                 r.set(
@@ -437,7 +528,7 @@ impl Screen {
     /// True when the scroll region is the whole screen, the only case in which rows
     /// leaving the top are history rather than discarded.
     fn archives(&self) -> bool {
-        self.region == Region::full(self.rows.len())
+        self.history && self.region == Region::full(self.rows.len())
     }
 
     /// Shift the region up by `n`, returning rows that became scrollback.
@@ -447,10 +538,19 @@ impl Screen {
         if n == 0 {
             return Evicted::none();
         }
+        // Reduced here, from the rows still in place, rather than cloned across the
+        // rotation below. `rotate_left` moves rows without touching their contents and
+        // the `clear` after it is what the clone used to be protecting against, so
+        // reading them first is trivially equivalent -- and it is the difference between
+        // one `Vec<Cell>` copy per scrolled line and none.
+        //
+        // After the flag, not before: `Screen::write` marks the row above `wrapped` on a
+        // write-wrap and only then calls `linefeed`, so the value `line_runs` reads here
+        // is the settled one.
         let evicted = if self.archives() {
-            self.rows[top..top + n].to_vec()
+            Evicted::from_rows(&self.rows[top..top + n])
         } else {
-            Vec::new()
+            Evicted::none()
         };
         self.rows[top..=bottom].rotate_left(n);
         for row in &mut self.rows[bottom + 1 - n..=bottom] {
@@ -458,7 +558,7 @@ impl Screen {
         }
         self.touch_range(top..=bottom);
         self.carry(&evicted);
-        evicted.into()
+        evicted
     }
 
     /// Remove `count` rows starting at `first`, closing the gap from below.
@@ -597,15 +697,15 @@ impl Screen {
                 // then cleared has a background on every cell, and archiving that would
                 // hand Emacs a screenful of pure colour with nothing written on it.
                 let history = if self.archives() && self.rows.iter().any(Row::has_text) {
-                    self.rows[..=self.last_used_row()].to_vec()
+                    Evicted::from_rows(&self.rows[..=self.last_used_row()])
                 } else {
-                    Vec::new()
+                    Evicted::none()
                 };
                 self.clear_rows(0..last, pen);
                 // Whatever was on screen has gone to history whole, so the next row 0
                 // starts a line rather than continuing one.
                 self.carried = 0;
-                history.into()
+                history
             }
         }
     }
@@ -778,7 +878,7 @@ impl Screen {
             }
         }
 
-        let evicted = match rows.cmp(&self.rows.len()) {
+        let shed: Vec<Row> = match rows.cmp(&self.rows.len()) {
             std::cmp::Ordering::Less => {
                 let excess = self.rows.len() - rows;
                 let keep = self.used();
@@ -792,6 +892,7 @@ impl Screen {
             }
             std::cmp::Ordering::Equal => Vec::new(),
         };
+        let evicted = Evicted::from_rows(&shed);
 
         self.carry(&evicted);
         self.cursor.row = self
@@ -802,7 +903,7 @@ impl Screen {
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         self.dirty = vec![true; rows];
         self.reset_region();
-        evicted.into()
+        evicted
     }
 
     /// Rewrap the grid to `rows` by `cols`, returning rows pushed off the top as history.
@@ -862,7 +963,7 @@ impl Screen {
         if head % cols != 0 && !lines.is_empty() {
             let split = (cols - head % cols).min(lines[0].cells.len());
             let ends_here = split == lines[0].cells.len();
-            history.push(lines[0].take_front(split, !ends_here));
+            history.push(Departed::from_row(&lines[0].take_front(split, !ends_here)));
             head += split;
             if cursor_line == 0 {
                 // Inside the fragment the cursor has left the grid; the nearest cell it
@@ -903,6 +1004,7 @@ impl Screen {
         // Set from the re-aligned head first, so the eviction extends it rather than
         // measuring against the width the head was chunked at.
         self.carried = head / cols;
+        let evicted = Evicted::from_rows(&evicted);
         self.carry(&evicted);
         history.extend(evicted);
 
@@ -918,7 +1020,7 @@ impl Screen {
         };
         self.dirty = vec![true; rows];
         self.reset_region();
-        history.into()
+        Evicted(history)
     }
 
     /// Text of the current line up to the cursor — the password prompt lives here.
@@ -1327,6 +1429,25 @@ mod tests {
         assert_eq!(evicted[0].to_text(), "r0");
         assert_eq!(screen.row(0).unwrap().to_text(), "r2");
         assert_eq!(screen.cursor.row, 3);
+    }
+
+    #[test]
+    fn a_scratch_grid_hands_nothing_to_history() {
+        let mut primary = Screen::new(2, 10);
+        let mut scratch = Screen::scratch(2, 10);
+        for screen in [&mut primary, &mut scratch] {
+            screen.goto(0, 0);
+            write(screen, "top");
+        }
+
+        // Both scroll the full region, which is the only condition `archives' used to
+        // test -- so before `history' this pair was indistinguishable and the scratch
+        // grid built a departure record per line for a transcript that does not exist.
+        assert_eq!(primary.scroll_up(1, Style::default()).len(), 1);
+        assert!(scratch.scroll_up(1, Style::default()).is_empty());
+
+        // The scroll itself still happened: this is about what leaves, not what moves.
+        assert_eq!(scratch.row(0).unwrap().to_text(), "");
     }
 
     #[test]
