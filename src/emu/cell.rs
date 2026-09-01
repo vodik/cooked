@@ -690,6 +690,32 @@ impl Row {
         }
     }
 
+    /// Place a run of characters from COL, each one column wide.
+    ///
+    /// [`Row::set`] in bulk, and identical to calling it per character -- including the
+    /// retirement of whatever the old occupants had attached. The `extras` test is
+    /// hoisted out of the loop because it is a property of the row, not of the cell, and
+    /// a row carrying attachments is the rare case; that hoist is the whole point of
+    /// having this beside `set` rather than looping over it.
+    ///
+    /// Writes only as far as the row goes, so an over-long run is truncated rather than
+    /// panicking. Callers size the run themselves; this is the backstop.
+    pub fn fill_run(&mut self, col: usize, text: &str, style: Style) {
+        let Some(slots) = self.cells.get_mut(col..) else {
+            return;
+        };
+        let mut placed = 0;
+        for (slot, ch) in slots.iter_mut().zip(text.chars()) {
+            *slot = Cell { ch, style };
+            placed += 1;
+        }
+        if self.extras.is_some() {
+            for at in col..col + placed {
+                self.retire(at);
+            }
+        }
+    }
+
     /// Make COL one cell of an image, blanking whatever was there.
     ///
     /// The cell keeps a blank character in the pen's style, so the row still copies,

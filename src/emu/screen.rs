@@ -335,11 +335,17 @@ impl Screen {
         self.rows.get_mut(index)
     }
 
-    fn touch_range(&mut self, range: impl IntoIterator<Item = usize>) {
-        for i in range {
-            if let Some(d) = self.dirty.get_mut(i) {
-                *d = true;
-            }
+    /// Mark every row in an inclusive range damaged.
+    ///
+    /// A slice fill rather than a loop of `dirty.get_mut(i)`: `scroll_up` calls this for
+    /// the whole scroll region on *every* scrolled line, so the per-index bounds check was
+    /// one branch per row per line of output. Clamping once and filling lets this be the
+    /// memset it always was.
+    fn touch_range(&mut self, range: std::ops::RangeInclusive<usize>) {
+        let (first, last) = range.into_inner();
+        let end = (last + 1).min(self.dirty.len());
+        if let Some(span) = self.dirty.get_mut(first..end) {
+            span.fill(true);
         }
     }
 
@@ -423,6 +429,42 @@ impl Screen {
             next => self.cursor.col = next,
         }
         evicted
+    }
+
+    /// Place a run of one-column characters from the cursor, without leaving the row.
+    ///
+    /// Returns how many were placed, which may be fewer than offered and may be zero; the
+    /// caller writes whatever is left through [`Screen::write`], one character at a time.
+    /// That split is deliberate. Everything genuinely hard about placing a character --
+    /// the deferred wrap, DECAWM, the scroll it can trigger, wide characters and the
+    /// continuation cell they need, combining marks folding onto the cell to their left --
+    /// stays in `write`, in one copy. This handles only the case where none of that
+    /// applies, which is also the case that accounts for nearly all output.
+    ///
+    /// **The last column is left alone on purpose.** It is where `write` decides whether
+    /// to arm the deferred wrap, and a second copy of that decision is how the two would
+    /// drift apart. So the run stops one short and `write` places the character that
+    /// lands there.
+    ///
+    /// Insert mode and a pending wrap both bail out entirely rather than being handled:
+    /// IRM shifts the row per character, and a pending wrap means the next character
+    /// scrolls.
+    pub fn write_run(&mut self, text: &str, style: Style) -> usize {
+        if self.insert_mode || self.cursor.wrap_pending {
+            return 0;
+        }
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        let room = self.cols.saturating_sub(col + 1);
+        let n = text.len().min(room);
+        if n == 0 {
+            return 0;
+        }
+        let Some(r) = self.touch(row) else {
+            return 0;
+        };
+        r.fill_run(col, &text[..n], style);
+        self.cursor.col = col + n;
+        n
     }
 
     pub fn autowrap(&self) -> bool {

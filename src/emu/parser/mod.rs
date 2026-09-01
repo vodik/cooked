@@ -815,12 +815,33 @@ impl Parser {
     }
 
     /// Handle ground dispatch of print/execute for all characters in a string.
+    ///
+    /// Printable characters are handed over in the longest runs the text allows, through
+    /// [`Perform::print_str`]; controls still go one at a time to `execute`. Upstream
+    /// calls `print` per character -- see `print_str` for why that is worth changing.
     #[inline]
     fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
-        for c in text.chars() {
-            match c {
-                '\x00'..='\x1f' | '\u{80}'..='\u{9f}' => performer.execute(c as u8),
-                _ => performer.print(c),
+        let is_control = |c: char| matches!(c, '\x00'..='\x1f' | '\u{80}'..='\u{9f}');
+        let mut rest = text;
+        while !rest.is_empty() {
+            match rest.find(is_control) {
+                // No control left: the remainder is one run.
+                None => {
+                    performer.print_str(rest);
+                    return;
+                }
+                // A control at the front. `execute` takes the byte, which is what the C1
+                // range means here: those characters are one byte in the stream cooked
+                // parses, whatever their UTF-8 length is in this `&str`.
+                Some(0) => {
+                    let c = rest.chars().next().unwrap_or('\0');
+                    performer.execute(c as u8);
+                    rest = &rest[c.len_utf8()..];
+                }
+                Some(at) => {
+                    performer.print_str(&rest[..at]);
+                    rest = &rest[at..];
+                }
             }
         }
     }
@@ -864,6 +885,26 @@ enum State {
 pub trait Perform {
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
+
+    /// Draw a run of printable characters, none of them a C0 or C1 control.
+    ///
+    /// Upstream calls [`Perform::print`] once per character and nothing else. That is the
+    /// wrong shape for the common case by a wide margin: ordinary output is long runs of
+    /// text in one pen, and a performer that can place a whole run at once pays the
+    /// cursor bookkeeping, the margin tests and the damage flag once instead of per
+    /// character. The emulator measured at ~4 instructions per cycle before this existed,
+    /// so what was left to win was instructions, not stalls.
+    ///
+    /// The default implementation is exactly the old behaviour, so a performer that does
+    /// not care may ignore this and implement `print` alone.
+    ///
+    /// No guarantee is made about where runs are cut: a single logical line may arrive as
+    /// several calls, and a call may end mid-word.
+    fn print_str(&mut self, text: &str) {
+        for c in text.chars() {
+            self.print(c);
+        }
+    }
 
     /// Execute a C0 or C1 control function.
     fn execute(&mut self, _byte: u8) {}

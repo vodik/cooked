@@ -42,6 +42,58 @@ impl Perform for State {
         }
     }
 
+    /// The batched half of [`Perform::print`], and the path nearly all output takes.
+    ///
+    /// Only printable ASCII goes fast: `0x20..=0x7e` is exactly the set that is one byte
+    /// in the stream, one column on the grid, never zero-width and never a control. DEL
+    /// is deliberately outside it -- `ground_dispatch` does not treat `0x7f` as a control,
+    /// so it arrives here, and `unicode-width` gives it no width, which is the combining
+    /// path. Anything else -- a wide character, a combining mark, a box glyph, DEL --
+    /// falls through to `print` one character at a time and behaves exactly as it did.
+    ///
+    /// The pen cannot change inside a run, because changing it takes an escape sequence
+    /// and that would have ended the run, so the conditions are tested once here rather
+    /// than per character.
+    fn print_str(&mut self, text: &str) {
+        // `mark_underline` and `mark_link` attach to each cell written, and DEC graphics
+        // substitutes the character; each is per-character work the run form does not do,
+        // so their presence disqualifies the whole run rather than being reimplemented.
+        let batched = !self.modes.dec_graphics
+            && self.underline == Color::Default
+            && self.link.is_none();
+        // Compiled out of a release build entirely; see `State::force_per_character_print`.
+        #[cfg(test)]
+        let batched = batched && !self.force_per_character_print;
+        let pen = self.pen;
+
+        let mut rest = text;
+        while !rest.is_empty() {
+            let plain = if batched {
+                rest.as_bytes()
+                    .iter()
+                    .take_while(|&&b| (0x20..0x7f).contains(&b))
+                    .count()
+            } else {
+                0
+            };
+            let placed = if plain == 0 {
+                0
+            } else {
+                self.screen_mut().write_run(&rest[..plain], pen)
+            };
+            if placed == 0 {
+                // The character `write_run` declined: the last column of a row, a wide
+                // character, a pending wrap. One trip through the full path settles it.
+                let c = rest.chars().next().unwrap_or('\0');
+                self.print(c);
+                rest = &rest[c.len_utf8()..];
+            } else {
+                self.last_print = rest[..placed].chars().next_back();
+                rest = &rest[placed..];
+            }
+        }
+    }
+
     fn execute(&mut self, byte: u8) {
         match byte {
             0x07 => self.events.push(Event::Bell),

@@ -2208,3 +2208,76 @@ fn backlog_counts_pending_events_as_well_as_scrollback() {
     t.drain();
     assert_eq!(t.backlog(), 0, "draining clears the measure");
 }
+
+/// The batched print path must be indistinguishable from the per-character one.
+///
+/// The reference side sets `force_per_character_print`, which is the only way to make a
+/// `Term` take the old path. Feeding a byte at a time does *not* do it -- `print_str`
+/// still runs, with runs of length one -- so a test built that way compares the fast path
+/// against itself; the first version of this test did exactly that and survived
+/// deliberately breaking `write_run` twice.
+///
+/// The cases land on the seams: the last column, where `write_run` stops one short so the
+/// deferred wrap is decided in one place; wide characters and combining marks, which it
+/// declines; DEL, which is not a C0 control and so reaches `print_str` while having no
+/// width; insert mode and DEC graphics, which disable it; and a scroll, so eviction is
+/// compared too.
+#[test]
+fn batched_and_per_character_printing_agree() {
+    let cases: &[(&str, &[u8])] = &[
+        ("plain text", b"hello world"),
+        ("exactly one row", b"0123456789"),
+        ("one past the row", b"0123456789x"),
+        ("two rows and a bit", b"0123456789abcdefghijQR"),
+        ("wrap then newline", b"0123456789abc\r\ndef"),
+        ("wide characters", "ab\u{6f22}\u{5b57}cd".as_bytes()),
+        ("wide character across the margin", "012345678\u{6f22}z".as_bytes()),
+        ("combining mark", "abe\u{301}f".as_bytes()),
+        ("DEL is not a control", b"ab\x7fcd"),
+        ("styled runs", b"a\x1b[31mred\x1b[0mb"),
+        ("insert mode", b"abcdef\x1b[4D\x1b[4hXY"),
+        ("dec graphics", b"\x1b(0qqq\x1b(Babc"),
+        ("hyperlink attaches per cell", b"a\x1b]8;;http://x\x07bcd\x1b]8;;\x07e"),
+        ("tabs and returns", b"ab\tcd\rZ"),
+        ("scrolls off the top", b"aaa\r\nbbb\r\nccc\r\nddd\r\neee\r\nfff"),
+        ("REP after a run", b"abc\x1b[4b"),
+        ("erase then refill", b"0123456789\x1b[H\x1b[2Jxy"),
+    ];
+
+    // The text on the grid, the runs it reduces to (which carry style, so a pen dropped
+    // mid-run would show), the cursor, and what left for scrollback.
+    /// Everything the two printing paths could disagree about.
+    type Snapshot = (Vec<String>, Vec<Vec<Run>>, (usize, usize), Vec<String>);
+
+    fn rendered(t: &mut Term) -> Snapshot {
+        let scrolled = t
+            .drain()
+            .scrolled
+            .iter()
+            .map(|line| line.runs.iter().map(|r| r.text.as_str()).collect())
+            .collect();
+        let screen = (0..4)
+            .map(|i| t.screen().row(i).map(Row::to_text).unwrap_or_default())
+            .collect();
+        let runs = (0..4)
+            .map(|i| t.screen().row(i).map(Row::runs).unwrap_or_default())
+            .collect();
+        let cursor = (t.screen().cursor.row, t.screen().cursor.col);
+        (screen, runs, cursor, scrolled)
+    }
+
+    for (name, input) in cases {
+        let mut batched = Term::new(4, 10);
+        batched.feed(input);
+
+        let mut reference = Term::new(4, 10);
+        reference.force_per_character_print();
+        reference.feed(input);
+
+        assert_eq!(
+            rendered(&mut batched),
+            rendered(&mut reference),
+            "batched and per-character printing disagree on {name}"
+        );
+    }
+}

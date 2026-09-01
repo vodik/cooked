@@ -506,6 +506,12 @@ impl Term {
     /// Events are counted because they are the other path that grows without bound while
     /// Emacs is behind — a child spraying OSC titles or DA/CPR queries never scrolls a row,
     /// so a scrollback-only measure would let it allocate freely.
+    /// See [`State::force_per_character_print`].
+    #[cfg(test)]
+    pub(crate) fn force_per_character_print(&mut self) {
+        self.state.force_per_character_print = true;
+    }
+
     pub fn backlog(&self) -> usize {
         self.state.pending_scrollback.len() + self.state.events.len()
     }
@@ -621,6 +627,19 @@ struct State {
     /// character, and repeating a combining mark would fold it onto the cell to the left
     /// over and over rather than printing anything.
     last_print: Option<char>,
+    /// Test-only: force every character through [`State::print`] rather than the batched
+    /// [`Perform::print_str`] path.
+    ///
+    /// It exists because the two paths are only worth having if they are indistinguishable,
+    /// and nothing else can make a `Term` demonstrate that. Feeding a byte at a time does
+    /// not do it -- `print_str` still runs, just with runs of length one, so a test built
+    /// that way compares the fast path against itself and passes no matter how wrong it
+    /// is. That was the first attempt, and it survived deliberately breaking `write_run`
+    /// twice. See `batched_and_per_character_printing_agree`.
+    ///
+    /// `#[cfg(test)]`, so the field and its test do not exist in a release build.
+    #[cfg(test)]
+    force_per_character_print: bool,
     /// The pen's underline colour (`SGR 58`). Not part of [`Style`]: it is stored per row
     /// in a side table, so that a rare feature does not grow every cell on the grid.
     underline: Color,
