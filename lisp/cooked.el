@@ -2672,6 +2672,36 @@ forcing would drag point along with it."
     (cooked--dolist-windows w windows
       (set-window-start w top t))))
 
+(defun cooked--unclip-bottom-line (window pos)
+  "Give POS's row in WINDOW the height `recenter' assumed it had.
+
+`recenter' places `window-start' on the assumption that every screen line is
+exactly the default font's height, which is why the call just before this one
+put POS where it did.  A row whose tallest glyph disagrees with that
+assumption -- a wide or composed character, or one of the Nerd Font icons most
+shell prompts draw a segment separator with -- can be taller than the default
+line, and then POS lands with its own bottom edge past the window's rather
+than flush with it: the very thing `cooked--scroll-transcript' calls `recenter'
+to prevent, just paid for in pixels `recenter' never counted.
+
+Corrected by dropping one screen line from the top rather than by recentring
+again: `recenter' chose POS's row correctly, only its height was wrong, and
+scrolling the window up by the one row it shorted that row gives it back
+exactly the room it needed.  Bounded, because a POS that is not on screen at
+all -- not the failure mode this exists for -- must not spin forever chasing a
+full visibility that is never coming."
+  (let ((tries 3) visible)
+    (while (and (> tries 0)
+                (consp (setq visible (pos-visible-in-window-p pos window t)))
+                (> (nth 3 visible) 0))
+      (setq tries (1- tries))
+      (set-window-start window
+                         (save-excursion
+                           (goto-char (window-start window))
+                           (vertical-motion 1 window)
+                           (point))
+                         t))))
+
 (defun cooked--scroll-transcript (viewport here others)
   "Scroll the transcript in HERE and OTHERS as VIEWPORT asks."
   (let* ((target (cooked--point-after-input))
@@ -2698,7 +2728,9 @@ forcing would drag point along with it."
           (set-window-start w top t))))
      ((and (cooked-viewport-follow viewport) at-end)
       (cooked--dolist-windows w (append here others)
-        (with-selected-window w (recenter (- -1 scroll-margin))))))))
+        (with-selected-window w
+          (recenter (- -1 scroll-margin))
+          (cooked--unclip-bottom-line w target)))))))
 
 (defun cooked--apply (update)
   "Apply UPDATE, the plist returned by `cooked--drain'.
