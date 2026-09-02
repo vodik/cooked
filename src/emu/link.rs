@@ -94,9 +94,8 @@ impl LinkStore {
         let hash = fast_hash(uri.as_bytes());
         if let Some(id) = self
             .ledger
-            .lookup(hash, |id| self.uris.get(&id).is_some_and(|u| u == uri))
+            .find(hash, |id| self.uris.get(&id).is_some_and(|u| u == uri))
         {
-            self.ledger.touch(id);
             return (id, false);
         }
 

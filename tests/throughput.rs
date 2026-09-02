@@ -43,6 +43,25 @@ fn styled(lines: usize) -> Vec<u8> {
         .collect()
 }
 
+/// Hyperlinked output, and the two shapes it comes in.
+///
+/// `distinct` links, cycled over `lines` rows. The two ends of that are the two things
+/// `LinkStore` is asked to do, and they cost differently: one URI re-emitted per line
+/// (`distinct == 1`) is pure reuse, while a fresh URI per line is pure interning, and
+/// enough of them to pass `MAX_TRACKED_LINKS` is what puts the store in its steady state
+/// of evicting one entry per insert.
+fn hyperlinked(lines: usize, distinct: usize) -> Vec<u8> {
+    (0..lines)
+        .flat_map(|i| {
+            let link = i % distinct.max(1);
+            format!(
+                "\x1b]8;;https://example.invalid/issue/{link:06}\x07issue {link}\x1b]8;;\x07 on line {i}\r\n"
+            )
+            .into_bytes()
+        })
+        .collect()
+}
+
 /// Full-screen repaint, the `htop` case: cursor addressing over the same cells.
 fn repaint(frames: usize, rows: usize, cols: usize) -> Vec<u8> {
     let mut out = Vec::new();
@@ -148,6 +167,38 @@ fn full_screen_repaint() {
         }
     });
     println!("{:>44}({rows} damaged rows handed to Lisp)", "");
+}
+
+/// What hyperlinks cost, which is a question about `LinkStore` rather than the parser.
+///
+/// Here because the other four benchmarks emit no `OSC 8` at all, so the store they all
+/// share with the image path had no gate on it -- which is how an eviction that walked
+/// every hash bucket, and so went quadratic once past `MAX_TRACKED_LINKS`, went unnoticed.
+/// Both shapes are driven past that cap deliberately.
+#[test]
+#[ignore = "benchmark"]
+fn hyperlinks() {
+    for (label, data) in [
+        // Reuse, but of a store that is already full: one URI re-emitted per line with
+        // several thousand others behind it. `distinct == 1` would exercise the same
+        // code against a single entry, where any ordering is O(1) and a scan that had
+        // crept back in would cost nothing measurable.
+        (
+            "OSC 8, one link reused, store full",
+            [hyperlinked(8_000, 8_000), hyperlinked(200_000, 1)].concat(),
+        ),
+        ("OSC 8, 100k distinct links", hyperlinked(200_000, 100_000)),
+    ] {
+        let mut term = Term::new(50, 200);
+        let mut links = 0usize;
+        timed(label, data.len(), || {
+            for piece in data.chunks(READ_CHUNK) {
+                term.feed(piece);
+                links += term.drain().links.len();
+            }
+        });
+        println!("{:>44}({links} distinct URIs handed to Lisp)", "");
+    }
 }
 
 /// How much does an OSC cost, given they arrive a handful of times per command?

@@ -502,12 +502,11 @@ impl ImageStore {
         metrics: CellMetrics,
     ) -> (ImageId, bool) {
         let hash = fast_hash(bytes);
-        if let Some(id) = self.ledger.lookup(hash, |id| {
+        if let Some(id) = self.ledger.find(hash, |id| {
             self.retained
                 .get(&id)
                 .is_none_or(|(_, held)| held.as_slice() == bytes)
         }) {
-            self.ledger.touch(id);
             return (id, false);
         }
 
