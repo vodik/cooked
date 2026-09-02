@@ -2381,10 +2381,22 @@ and a session that exits and is then killed goes through both."
   ;; crashed mid-redraw — and nothing later would widen the buffer for it.
   (setq cooked--alt nil)
   (cooked--release-alt-pin)
-  (cooked--with-child-edit
-    (save-excursion
-      (goto-char (point-max))
-      (insert (format "\n[exited %s]\n" code))))
+  ;; `cooked--scroll-windows' already ran for this drain and pinned whatever was
+  ;; then the buffer's true end to the bottom of every window that was following
+  ;; it -- this call is what appends past that end, from entirely outside that
+  ;; machinery, and stranding the line it adds is the same bug
+  ;; `cooked--pin-transcript-bottom' exists to prevent. Captured before the
+  ;; insert, and compared with the same slack-of-one `cooked--scroll-transcript'
+  ;; uses: a window whose point was already at the old end was following, and
+  ;; is owed the new one; a window scrolled up into history is left alone.
+  (let ((old-end (point-max)))
+    (cooked--with-child-edit
+      (save-excursion
+        (goto-char (point-max))
+        (insert (format "\n[exited %s]\n" code))))
+    (cooked--dolist-windows w (get-buffer-window-list nil nil t)
+      (when (>= (window-point w) (1- old-end))
+        (cooked--pin-transcript-bottom (list w)))))
   ;; A child that dies mid-`getpass' -- interrupted from the buffer, killed from
   ;; outside -- leaves a password prompt with nothing behind it.
   (cooked--cancel-secret)

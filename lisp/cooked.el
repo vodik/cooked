@@ -1871,6 +1871,17 @@ was mismeasured rather than an adjacent one."
         (goto-char start)
         (cooked--mark-truncation start (1- (line-end-position)) window)))))
 
+(defcustom cooked-truncation-bitmap nil
+  "Fringe bitmap `cooked--truncation-bitmap' draws for a trimmed row.
+
+nil (the default) defers to the `truncation' entry in
+`fringe-indicator-alist', the way Emacs's own truncation arrow does, so a
+user who already rebound that indicator sees their own choice here too.  Set
+this to a bitmap symbol -- one of `fringe-bitmaps', or one of your own from
+`define-fringe-bitmap' -- to override it directly instead."
+  :type '(choice (const :tag "Defer to fringe-indicator-alist" nil) symbol)
+  :group 'cooked)
+
 (defun cooked--mark-truncation (start cut window)
   "Mark the row from START to CUT as having had characters trimmed.
 
@@ -1913,12 +1924,14 @@ draw the bitmap, so the marker is invisible there.  See docs/DESIGN.md."
 (defun cooked--truncation-bitmap ()
   "The fringe bitmap Emacs marks a line truncated on the right with.
 
-Read from `fringe-indicator-alist\=' rather than named outright, so a user who
-rebound the indicator sees their own choice.  Its entry is (LEFT RIGHT) and we
-are always the right-hand end."
-  (let ((indicator (cdr (assq 'truncation fringe-indicator-alist))))
-    (or (if (consp indicator) (nth 1 indicator) indicator)
-        'right-arrow)))
+Reads `cooked-truncation-bitmap' first; when that is nil, falls back to
+`fringe-indicator-alist' so a user who rebound the indicator but never set
+`cooked-truncation-bitmap' sees their own choice.  Its entry is (LEFT RIGHT)
+and we are always the right-hand end."
+  (or cooked-truncation-bitmap
+      (let ((indicator (cdr (assq 'truncation fringe-indicator-alist))))
+        (if (consp indicator) (nth 1 indicator) indicator))
+      'right-arrow))
 
 (defun cooked--truncation-glyph ()
   "The character a terminal frame marks a truncated line with.
@@ -2689,10 +2702,18 @@ again: `recenter' chose POS's row correctly, only its height was wrong, and
 scrolling the window up by the one row it shorted that row gives it back
 exactly the room it needed.  Bounded, because a POS that is not on screen at
 all -- not the failure mode this exists for -- must not spin forever chasing a
-full visibility that is never coming."
+full visibility that is never coming.
+
+`pos-visible-in-window-p' only returns RBOT (element 3) when POS's row is
+*partially* obscured; a fully visible row -- the ordinary case, and always the
+case the very first time a window is ever shown -- gets back the bare `(X Y)'
+form, with nothing at 3.  `(nth 3 visible)' is checked for nil before it is
+compared to a number, or a row that needed no correction signals instead of
+just ending the loop."
   (let ((tries 3) visible)
     (while (and (> tries 0)
                 (consp (setq visible (pos-visible-in-window-p pos window t)))
+                (nth 3 visible)
                 (> (nth 3 visible) 0))
       (setq tries (1- tries))
       (set-window-start window
@@ -2701,6 +2722,23 @@ full visibility that is never coming."
                            (vertical-motion 1 window)
                            (point))
                          t))))
+
+(defun cooked--pin-transcript-bottom (windows &optional pos)
+  "Put POS, defaulting to `point-max\=', on the bottom row of each of WINDOWS.
+
+The two steps `cooked--scroll-transcript\=' takes to keep the live prompt in
+view when a drain ends at the true end of the buffer -- `recenter\=' to choose
+the row, `cooked--unclip-bottom-line\=' to give it back whatever height
+`recenter\=' miscounted -- factored out here because a drain is not the only
+thing that can grow the buffer's true end.  `cooked--on-exit\=' does too,
+appending the \"[exited N]\=\" line from outside `cooked--scroll-windows\='
+entirely, and it needs exactly this rather than a second copy of it."
+  (let ((target (or pos (point-max))))
+    (cooked--dolist-windows w windows
+      (set-window-point w target)
+      (with-selected-window w
+        (recenter (- -1 scroll-margin))
+        (cooked--unclip-bottom-line w target)))))
 
 (defun cooked--scroll-transcript (viewport here others)
   "Scroll the transcript in HERE and OTHERS as VIEWPORT asks."
@@ -2727,10 +2765,7 @@ full visibility that is never coming."
         (cooked--dolist-windows w (append here others)
           (set-window-start w top t))))
      ((and (cooked-viewport-follow viewport) at-end)
-      (cooked--dolist-windows w (append here others)
-        (with-selected-window w
-          (recenter (- -1 scroll-margin))
-          (cooked--unclip-bottom-line w target)))))))
+      (cooked--pin-transcript-bottom (append here others) target)))))
 
 (defun cooked--apply (update)
   "Apply UPDATE, the plist returned by `cooked--drain'.
