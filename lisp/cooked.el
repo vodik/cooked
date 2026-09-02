@@ -643,16 +643,18 @@ file, so the file is what gets asked."
 
 BLOCK is (TEXT STYLE-SPANS DECO-SPANS LINK-SPANS), the one shape rendered text
 crosses the module boundary in -- see `cooked--drain\='.  TEXT is the whole run
-of characters; a style or decoration span is (START END FG BG ATTRS TAIL) with
-offsets in characters into TEXT, and spans appear only where there is something
-to say, so a plain unstyled row carries no list at all.  A style span\='s TAIL is
-the underline colour; a decoration span\='s is what its characters display
-instead of themselves.
+of characters, and every span carries offsets in characters into it; spans
+appear only where there is something to say, so a plain unstyled row carries no
+list at all.
 
-A LINK-SPAN is (START END ID) and shares neither shape, because an `OSC 8\='
-hyperlink says nothing about how its characters are drawn -- whatever style they
-have is already in STYLE-SPANS.  It is applied last, over the decorations, so it
-can see which cells turned out to be an image and leave those alone.
+A STYLE-SPAN is (START END FG BG ATTRS UNDERLINE) and is the only one naming a
+rendition.  A DECO-SPAN is (START DECO), what its characters display instead of
+themselves, and a LINK-SPAN (START END ID) for an `OSC 8\=' hyperlink.  Neither
+of the last two repeats the colours, because neither is drawn in colours of its
+own: a box glyph takes them from the face at the position it sits on, which the
+style span has just put there over exactly the same characters.  Links are
+applied last, over the decorations, so they can see which cells turned out to
+be an image and leave those alone.
 
 One insert plus properties, rather than an insert per run: Emacs pays for every
 `insert\=', and building a propertized string in Lisp and inserting that instead
@@ -677,9 +679,8 @@ Returns the position the text was inserted at."
           (when-let* ((face (cooked--face fg bg attrs ul)))
             (put-text-property (+ start from) (+ start to) 'face face))))
       (dolist (span decos)
-        (pcase-let ((`(,from ,_to ,fg ,bg ,attrs ,deco) span))
-          (cooked--apply-deco (+ start from) deco fg bg attrs
-                              (and row start) row)))
+        (pcase-let ((`(,from ,deco) span))
+          (cooked--apply-deco (+ start from) deco (and row start) row)))
       (when links
         (cooked--render-link-spans start links))
       start)))

@@ -9,8 +9,9 @@
 ;;
 ;; The rasterizer is cooked-glyph.el, which knows nothing about terminals.  What is
 ;; here is everything buffer-shaped: caching a bitmap against the window\='s cell size,
-;; colouring it from the cell\='s own attributes, slicing an image one cell at a time,
-;; and rebuilding all of it when the font moves under it.
+;; slicing an image one cell at a time, and rebuilding all of it when the font moves
+;; under it.  Colour is nobody\='s job here -- a glyph is drawn in the colours of the
+;; face it lands on, which is what keeps it in step with the text beside it.
 ;;
 ;; Image lifetime is Emacs\=' and there is no release protocol.  `cooked--image-data\=' is
 ;; the only copy of the bytes, so it is strong; `cooked--image-specs\=' is rebuildable, so
@@ -82,11 +83,11 @@ the font's ascent relative to the line box.")
 (defvar-local cooked--box-glyph-cache nil
   "Descriptor+pixel-size -> raw XBM bitmap, memoized per buffer.
 
-Colorless by construction: the cached value is a shape only, colorized live
-via :foreground/:background at `create-image' time, so unlike
-`cooked--face-cache' this needs no theme-change invalidation — only pixel-size
-changes (zoom, font change) miss the cache key, naturally, with no extra
-plumbing.")
+Colorless by construction: the cached value is a shape only, and stays one all
+the way to the screen — Emacs colours the finished XBM from the face it is
+displayed on.  So unlike `cooked--face-cache' this needs no theme-change
+invalidation; only pixel-size changes (zoom, font change) miss the cache key,
+naturally, with no extra plumbing.")
 
 (defvar-local cooked--image-data nil
   "Image id -> (FORMAT DATA PX-WIDTH PX-HEIGHT COLS ROWS), as transmitted.
@@ -141,33 +142,35 @@ in between used the same `cooked--deco-cell-size\=', so agreement here is
 agreement everywhere.")
 
 (defvar-local cooked--deco-image-cache nil
-  "Decoration + colors + cell size -> the `create-image' spec, per buffer.
+  "Decoration + cell size -> the `create-image' spec, per buffer.
 
 A second cache in front of `cooked--box-glyph-cache', which memoizes only the
-colorless bits.  Building the spec was still per character per frame: a fresh
-list and a fresh image object for every box character of every damaged row,
-which on a full-screen TUI is most of the screen many times a second.  Sharing
-one spec across every cell that wants it also means Emacs' own image cache sees
-one image rather than hundreds of identical ones.
+raw bits.  Building the spec was still per character per frame: a fresh list
+and a fresh image object for every box character of every damaged row, which on
+a full-screen TUI is most of the screen many times a second.  Sharing one spec
+across every cell that wants it also means Emacs' own image cache sees one
+image rather than hundreds of identical ones.
 
-Unlike the bits cache this *does* hold resolved colors -- `cooked--face' has
-already turned a default foreground into a concrete one -- so
-`cooked--flush-face-cache' must empty it when the theme changes.  Pixel size is
-part of the key, so a zoom misses it without any help.")
+Colour is no part of the key, because it is no part of the spec: a glyph is
+drawn in the colours of the face it lands on, so one entry serves every
+rendition of that shape at that size.  What the spec does hold that the bits do
+not is `:ascent', measured from the default face's font -- which a theme can
+move without moving the cell size, and is why `cooked--flush-deco-cache' still
+empties this on a theme change.")
 
 ;;;; Box-drawing / block-element bitmaps
 ;;
 ;; The rasterizer itself is cooked-glyph.el, which knows nothing about terminals:
 ;; it turns a shape descriptor and a pixel size into raw XBM bits.  What is left
 ;; here is everything that depends on this buffer — caching a bitmap against the
-;; window's current cell size, colouring it from the cell's own attributes, and
-;; hanging the result on buffer text.
+;; window's current cell size, and hanging the result on buffer text.
 ;;
-;; Rendering is a themed XBM mask: the bitmap itself is colorless shape data,
-;; colorized live via :foreground/:background at `create-image' time, so
-;; `cooked--box-glyph-cache' never needs the theme-flush treatment
-;; `cooked--face-cache' gets — only pixel-size (zoom, font change) is part of its
-;; cache key.
+;; Nothing here colours anything.  An XBM with no `:foreground' and no
+;; `:background' is drawn in the colours of the face it is displayed on, and
+;; Emacs re-renders it when that face changes, so the shape stays shape data all
+;; the way to the screen and a glyph tracks the region, `hl-line-mode' and an
+;; `isearch' match exactly as the text beside it does.  Neither cache below needs
+;; the theme-flush treatment `cooked--face-cache' gets for anything colour.
 
 (defun cooked--cell-size (window)
   "WINDOW's cell size in pixels, as (WIDTH . HEIGHT).
@@ -289,14 +292,19 @@ worth roughly half the box-drawing frame time.
 The image itself stays shared, so Emacs still decodes it once."
   (list image))
 
-(defun cooked--box-glyph-image (bits fg bg attrs window size phase)
-  "Image spec for glyph BITS at cell SIZE, colored from FG/BG/ATTRS.
+(defun cooked--box-glyph-image (bits window size phase)
+  "Image spec for glyph BITS at cell SIZE.
 
 Memoized in `cooked--deco-image-cache'.  Not premature: the bits underneath were
 already cached, but the spec was rebuilt for every box character of every
 damaged row of every frame — and a fresh spec each time also denies Emacs' own
 image cache the chance to notice that a screenful of box drawing is a handful of
 distinct images.  WINDOW is needed only for the ascent's `font-info' lookup.
+
+Colourless, so the key is the shape and the pixels alone: a spec is now shared
+by every cell drawing this glyph at this size whatever rendition it is under,
+and Emacs\=' own image cache does the per-face split — see
+`cooked--box-glyph-image-1\='.
 
 `:scale 1' is load-bearing, not a default being restated.
 `image-scaling-factor' is `auto', which scales every image by cell-width/10
@@ -307,35 +315,53 @@ at exactly the cell size, so letting that apply would resample a pixel-exact
 edge and the strokes blur into something no better than the font glyphs this
 replaces."
   (cooked--cached cooked--deco-image-cache
-      (list bits fg bg attrs (car size) (cdr size) phase)
-    (cooked--box-glyph-image-1 bits fg bg attrs window size phase)))
+      (list bits (car size) (cdr size) phase)
+    (cooked--box-glyph-image-1 bits window size phase)))
 
-(defun cooked--box-glyph-image-1 (bits fg bg attrs window size phase)
+(defun cooked--box-glyph-image-1 (bits window size phase)
   "Build the spec `cooked--box-glyph-image' memoizes.
 
-BITS, FG, BG, ATTRS, WINDOW, SIZE and PHASE mean what they do there."
-  (let* ((reverse (cooked--attr-p attrs cooked--attr-reverse))
-         (fg* (or (cooked--color (if reverse bg fg)) (face-foreground 'default nil t)))
-         (bg* (or (cooked--color (if reverse fg bg)) (face-background 'default nil t))))
-    ;; `:data-width'/`:data-height'/`:stride' are what an inline `xbm' actually
-    ;; requires when `:data' is raw bits, per (elisp) XBM Images -- and they are not
-    ;; interchangeable with `:width'/`:height', which scale an already-decoded image
-    ;; rather than describe the bit layout.  Emacs accepts only three `:data' shapes:
-    ;; a vector of per-row strings, a whole XBM *file* in a string, or bare bits with
-    ;; these three properties.  A packed (WIDTH HEIGHT DATA) list is none of them.
-    (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits bits size phase)))
-      (create-image data 'xbm t
-                    :data-width width :data-height height
-                    :stride (* 8 (ceiling width 8)) ; bits per row, byte-aligned
-                    :foreground fg* :background bg* :scale 1
-                    ;; `image-transform-smoothing' defaults on, which interpolates
-                    ;; edge pixels.  These bitmaps are pixel art meant to butt up
-                    ;; against their neighbours, and a smoothed edge column reads as
-                    ;; a faint seam between adjacent glyphs rather than a join.
-                    :transform-smoothing nil
-                    :ascent (cooked--box-glyph-ascent window height)))))
+BITS, WINDOW, SIZE and PHASE mean what they do there.
 
-(defun cooked--apply-deco (start deco fg bg attrs &optional origin row)
+Carries no `:foreground' and no `:background', which is the whole colour model
+rather than an omission.  An XBM given neither is drawn in the colours of the
+face it is displayed *on*: `xbm_load' falls back to the face\='s own pair, and
+`search_image_cache' keys the cached pixmap on it, so one spec renders
+correctly under every face it lands on and re-renders by itself when that face
+changes.
+
+Naming the colours here instead pinned the glyph to the run\='s own rendition
+and so defeated everything Emacs composites over it — the region, `hl-line-mode\=',
+an `isearch\=' match, `mouse-face\=', and the buffer-local remapping of `default\='
+an OSC 11 background is applied as.  The foreground came through that unharmed
+because a cell\='s foreground is exactly what the face already carries; a
+background is not, being whatever ends up merged at the position, so box
+drawing was the one run of text in the buffer that a selection left
+unhighlighted.
+
+The face is there to be read: `cooked--render-block' puts the run\='s style span
+over exactly the characters its decoration span covers, so an explicit
+background, reverse video and conceal all reach the bitmap through it — conceal
+now hiding a box glyph as it always did the text beside it."
+  ;; `:data-width'/`:data-height'/`:stride' are what an inline `xbm' actually
+  ;; requires when `:data' is raw bits, per (elisp) XBM Images -- and they are not
+  ;; interchangeable with `:width'/`:height', which scale an already-decoded image
+  ;; rather than describe the bit layout.  Emacs accepts only three `:data' shapes:
+  ;; a vector of per-row strings, a whole XBM *file* in a string, or bare bits with
+  ;; these three properties.  A packed (WIDTH HEIGHT DATA) list is none of them.
+  (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits bits size phase)))
+    (create-image data 'xbm t
+                  :data-width width :data-height height
+                  :stride (* 8 (ceiling width 8)) ; bits per row, byte-aligned
+                  :scale 1
+                  ;; `image-transform-smoothing' defaults on, which interpolates
+                  ;; edge pixels.  These bitmaps are pixel art meant to butt up
+                  ;; against their neighbours, and a smoothed edge column reads as
+                  ;; a faint seam between adjacent glyphs rather than a join.
+                  :transform-smoothing nil
+                  :ascent (cooked--box-glyph-ascent window height))))
+
+(defun cooked--apply-deco (start deco &optional origin row)
   "Hang DECO's per-character `display' properties on the text at START.
 
 DECO is `(KIND . PACKED)\=', what `deco_to_lisp\=' in src/lib.rs hands over: KIND
@@ -354,9 +380,12 @@ ORIGIN is the buffer position of screen column 0 on this row, and ROW the row\='
 index; together they place a shade glyph\='s dither in absolute screen space.
 ORIGIN is passed in rather than taken from `line-beginning-position\=' because
 row 0 does not always start a buffer line -- it continues the wrapped row above
-it.  FG, BG and ATTRS are the run\='s own, a decoration being colored from the
-cell it stands in; the underline colour is not passed, nothing here rendering
-from it.
+it.
+
+No colours are passed, and none are wanted: a decoration is drawn in the
+colours of the face `cooked--render-block\=' has already put on the very
+characters it covers.  See `cooked--box-glyph-image-1\=' for why reading them a
+second time here is not merely redundant but wrong.
 
 With no cell size to be had (`cooked--deco-cell-size\=' nil: a terminal frame, or
 a session nothing has ever displayed) the `cooked-deco\=' properties are still
@@ -382,7 +411,7 @@ up."
          ;; condition every time a kind is added.
          (when (and cooked-box-drawing-images (image-type-available-p 'xbm))
            (cooked--apply-glyph-deco
-            start packed fg bg attrs (cooked--layout-window)
+            start packed (cooked--layout-window)
             (cooked--deco-cell-size) origin row))))
     ;; A cosmetic feature must never break rendering: any failure here leaves the
     ;; plain face-only text `cooked--render-block' already inserted.
@@ -592,8 +621,7 @@ scaled to fit."
   "The `display\=' value DECO should carry at cell SIZE, or nil for none.
 
 DECO is the `cooked-deco\=' property: `(image ID CROW CCOL)\=' or
-`(glyph BITS FG BG ATTRS COLUMN ROW)\='.  WINDOW is only ever the ascent
-lookup\='s.  Nil SIZE means there is no cell rectangle to draw against yet, and
+`(glyph BITS COLUMN ROW)\='.  WINDOW is only ever the ascent lookup\='s.  Nil SIZE means there is no cell rectangle to draw against yet, and
 the caller records the decoration without displaying anything.
 
 The single answer to \"what does this decoration look like\", and both paths
@@ -610,10 +638,10 @@ the rescale path is the one that would silently go on painting the old size."
          (list (list 'slice (* ccol (car size)) (* crow (cdr size))
                      (car size) (cdr size))
                spec)))
-      (`(glyph ,bits ,fg ,bg ,attrs . ,where)
+      (`(glyph ,bits . ,where)
        (cooked--deco-display
         (cooked--box-glyph-image
-         bits fg bg attrs window size
+         bits window size
          (cooked--box-phase bits size (car where) (cadr where))))))))
 
 (defun cooked--apply-image-deco (start packed size)
@@ -647,19 +675,18 @@ that."
           (put-text-property pos (1+ pos) 'display display)))
       (setq pos (1+ pos)))))
 
-(defun cooked--apply-glyph-deco (start packed fg bg attrs window size origin row)
+(defun cooked--apply-glyph-deco (start packed window size origin row)
   "Apply box-glyph decoration PACKED at START, two bytes per character.
 
-PACKED is little-endian.  FG, BG and ATTRS colour the shapes; ORIGIN and ROW
-locate them, as in `cooked--apply-deco\='.  SIZE nil records the shapes and
-displays nothing; WINDOW is only ever the ascent lookup\='s, and is nil in the
-same case."
+PACKED is little-endian.  ORIGIN and ROW locate the shapes, as in
+`cooked--apply-deco\='.  SIZE nil records them and displays nothing; WINDOW is
+only ever the ascent lookup\='s, and is nil in the same case."
   (let ((pos start))
     (dotimes (i (/ (length packed) 2))
       (let* ((bits (logior (aref packed (* 2 i))
                            (ash (aref packed (1+ (* 2 i))) 8)))
              (column (and origin (- pos origin)))
-             (deco (list 'glyph bits fg bg attrs column row)))
+             (deco (list 'glyph bits column row)))
         (put-text-property pos (1+ pos) 'cooked-deco deco)
         (when-let* ((display (cooked--deco-display-value deco size window)))
           (put-text-property pos (1+ pos) 'display display)))
@@ -736,8 +763,10 @@ itself is the one thing every zoom entry point actually sets."
 (add-variable-watcher 'text-scale-mode-amount #'cooked--rescale-deco-on-zoom)
 
 (defun cooked--flush-deco-cache ()
-  "Drop decoration specs colored against the outgoing theme.
-On `cooked-theme-change-hook\=', which runs with the buffer current."
+  "Drop decoration specs measured against the outgoing theme.
+On `cooked-theme-change-hook\=', which runs with the buffer current.  Not the
+colours, which a spec no longer holds, but the `:ascent\=' a theme moves whenever
+it changes the default face\='s font -- see `cooked--deco-image-cache\='."
   (when (hash-table-p cooked--deco-image-cache)
     (clrhash cooked--deco-image-cache)))
 

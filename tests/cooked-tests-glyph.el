@@ -108,6 +108,46 @@ engine merged them."
       (should (>= (* 8 (length (plist-get plist :data)))
                   (* (plist-get plist :stride) (plist-get plist :data-height)))))))
 
+;; The colour model, and the one thing about it that is easy to get backwards.  A
+;; glyph names neither colour, so Emacs draws the XBM in the colours of the face at
+;; the position it sits on (`xbm_load' falls back to the face's own pair, and
+;; `search_image_cache' keys the cached pixmap on it).  Naming them in the spec
+;; instead looks right and is wrong for the background: it paints over the region,
+;; `hl-line-mode', an `isearch' match and every other face Emacs composites on top,
+;; so a selection over a screenful of `htop' highlighted everything but the borders.
+;; The foreground hid that for as long as it lasted, being exactly the colour the
+;; face already carries.
+;;
+;; Asserted on the spec because it is the whole of the mechanism: what is under test
+;; is the *absence* of two properties, which no rendering test in batch could see.
+(ert-deftest cooked-box-drawing-takes-its-colors-from-the-face ()
+  (cooked-tests--with-session
+      ;; A red-on-blue border, so a spec that colours itself has something to say.
+      '("/bin/sh" "-c" "printf '\\033[31;44m\\342\\224\\214\\342\\224\\200\\033[0m\\n'") ; ┌─
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((plist (cdr (cooked-tests--glyph-image (point-min)))))
+      (should-not (plist-member plist :foreground))
+      (should-not (plist-member plist :background)))
+    ;; ...and the rendition is not lost, it is on the text, which is where Emacs
+    ;; reads it from.
+    (should (equal (get-text-property (point-min) 'face)
+                   '(:foreground "red3" :background "blue2")))))
+
+;; One spec per shape and size, whatever colour the cells are drawn in.  This is the
+;; payoff of the test above rather than a separate feature: once the colours are out
+;; of the spec they are out of the cache key too, so a border that changes colour
+;; part way along still rasterizes once.
+(ert-deftest cooked-box-drawing-shares-one-spec-across-renditions ()
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[31m\\342\\224\\200\\033[44m\\342\\224\\200\\033[0m\\n'") ; ──
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (1+ (point-min)) 'display))))
+    (should (eq (cooked-tests--glyph-image (point-min))
+                (cooked-tests--glyph-image (1+ (point-min)))))))
+
 (ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐

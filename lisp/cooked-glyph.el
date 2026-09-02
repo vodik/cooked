@@ -11,9 +11,10 @@
 ;; Alacritty all stopped trusting the font here for the same reason.
 ;;
 ;; Nothing in this file knows about terminals, buffers, windows or colour.  It takes
-;; a descriptor and a pixel size and returns raw XBM bits; caching the result,
-;; colouring it and hanging it on buffer text are cooked.el's business.  That split
-;; is what makes the geometry testable on its own — see cooked-tests-glyph.el, which
+;; a descriptor and a pixel size and returns raw XBM bits; caching the result and
+;; hanging it on buffer text are cooked-deco.el's business, and colouring it is
+;; Emacs' -- an XBM naming neither colour is drawn in those of the face it lands on.
+;; That split is what makes the geometry testable on its own — see cooked-tests-glyph.el, which
 ;; asserts against pixel grids without starting a session.
 ;;
 ;; The one idea worth having before reading the drawing code: a cell is not square

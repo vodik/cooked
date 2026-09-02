@@ -363,10 +363,20 @@ supposed to form a continuous border and instead form a dotted one. The native c
 classifies each codepoint into a compact shape descriptor and `cooked-glyph.el`
 rasterizes the descriptor to XBM at the current cell size, so the pieces tile exactly.
 
-The bitmap is colourless by construction — shape data only, coloured live through
-`:foreground`/`:background` at `create-image` time. That is why a theme change costs
-nothing here while it flushes the face cache, and why only a pixel-size change (a zoom,
-a font change) misses the cache, with no invalidation plumbing to get wrong.
+The bitmap is colourless by construction, and stays that way all the way to the screen:
+the XBM spec names no `:foreground` and no `:background`, so Emacs draws it in the
+colours of the face at the position it sits on and re-renders it by itself when that
+face changes. One spec therefore serves every rendition of a shape at a size, a theme
+change costs nothing here, and only a pixel-size change (a zoom, a font change) misses
+the cache.
+
+**Colouring the glyph here instead is the trap, and only the background shows it.** An
+explicit `:background` pins the bitmap to the run's own rendition and paints over
+everything Emacs composites on top — the region, `hl-line-mode`, an `isearch` match,
+`mouse-face`, and the buffer-local `default` remapping an OSC 11 background arrives as.
+A foreground survives that, being exactly what the face already carries, so a border
+drawn in the right colour on the wrong background is what the defect looked like:
+selecting a screenful of `htop` highlighted all of it except the box drawing.
 
 Falls back to plain coloured text if Emacs has no XBM support or a glyph fails to
 rasterize, which is also exactly what `cooked-box-drawing-images` set to nil does.

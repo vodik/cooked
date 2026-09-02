@@ -189,7 +189,7 @@ left and right edges at weight 1 — which is what a border is made of."
   (let* ((text (make-string cols ?─))
          (deco (cons 'glyph (apply #'unibyte-string
                                    (cl-loop repeat cols append (list #x50 #x00)))))
-         (spans (list (list 0 cols nil nil 0 deco))))
+         (spans (list (list 0 deco))))
     (cl-loop for i below count collect (cons i (list text nil spans)))))
 
 (defun cooked-bench--frames (label rows frames)

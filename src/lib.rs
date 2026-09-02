@@ -657,16 +657,19 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
 /// the primary screen — pays for neither span list, and a row of eight styled runs costs
 /// one insert rather than eight.
 ///
-/// STYLE-SPANS and DECO-SPANS share a prefix and diverge in their last element, which is
-/// not an accident worth tidying: a style span's tail is the underline colour, and a
-/// decoration renders from the foreground, background and attributes but never from
-/// that, so giving DECO-SPANS an underline it would ignore would be carrying a field to
-/// look symmetric.
+/// A style span is `(START END FG BG ATTRS UNDERLINE)`, and it is the only one carrying
+/// a rendition. DECO-SPANS is `(START DECO)` and LINK-SPANS `(START END ID)`, both for
+/// the same reason: neither says anything about how its characters are *coloured*.
+/// Emacs draws a box glyph in the colours of the face at the position it sits on, which
+/// STYLE-SPANS has already put there over exactly those characters, so a decoration
+/// span repeating them would be handing Lisp a second, staler answer to a question it
+/// has already had — see `cooked--box-glyph-image-1' for what reading that second copy
+/// cost. A hyperlink is the same story: whatever style it has is in STYLE-SPANS, and
+/// Lisp deliberately leaves it alone.
 ///
-/// LINK-SPANS shares neither shape. It is `(START END ID)` and nothing else, because a
-/// hyperlink says nothing about how its characters are drawn — whatever style they
-/// carry is already in STYLE-SPANS, and Lisp deliberately leaves it alone. The id is
-/// resolved against the `:links` table the same drain carries.
+/// A decoration span needs no END either, the packed record holding one entry per
+/// character it covers. The link id is resolved against the `:links` table the same
+/// drain carries.
 #[derive(Default)]
 struct Block {
     text: String,
@@ -677,12 +680,7 @@ struct Block {
 }
 
 impl Block {
-    /// One span: the run's extent and rendition, then whatever distinguishes this list.
-    ///
-    /// The style and deco spans agree on five of their six elements, so they are built
-    /// once here and given their differing sixth as `tail`. That difference is the whole
-    /// distinction between them, which the type's doc comment explains; writing the shared
-    /// five out twice would bury it.
+    /// One style span: the run's extent, its rendition, and its underline colour.
     fn span(&self, env: Env, chars: usize, style: Style, tail: Value) -> Result<Value> {
         let Style { fg, bg, attrs } = style;
         list!(
@@ -711,8 +709,8 @@ impl Block {
                     .push(list!(env, [self.offset, self.offset + chars, link])?);
             }
             if run.deco.is_some() {
-                let tail = env.into_lisp(run.deco.as_ref())?;
-                self.decos.push(self.span(env, chars, run.style, tail)?);
+                let deco = env.into_lisp(run.deco.as_ref())?;
+                self.decos.push(list!(env, [self.offset, deco])?);
             }
             self.text.push_str(&run.text);
             self.offset += chars;
