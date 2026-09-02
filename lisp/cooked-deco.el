@@ -331,13 +331,13 @@ correctly under every face it lands on and re-renders by itself when that face
 changes.
 
 Naming the colours here instead pinned the glyph to the run\='s own rendition
-and so defeated everything Emacs composites over it — the region, `hl-line-mode\=',
-an `isearch\=' match, `mouse-face\=', and the buffer-local remapping of `default\='
-an OSC 11 background is applied as.  The foreground came through that unharmed
-because a cell\='s foreground is exactly what the face already carries; a
-background is not, being whatever ends up merged at the position, so box
-drawing was the one run of text in the buffer that a selection left
-unhighlighted.
+and so defeated everything Emacs composites over it -- the region,
+`hl-line-mode\=', an `isearch\=' match, `mouse-face\=', and the buffer-local
+remapping of `default\=' an OSC 11 background is applied as.  The foreground
+came through that unharmed because a cell\='s foreground is exactly what the
+face already carries; a background is not, being whatever ends up merged at
+the position, so box drawing was the one run of text in the buffer that a
+selection left unhighlighted.
 
 The face is there to be read: `cooked--render-block' puts the run\='s style span
 over exactly the characters its decoration span covers, so an explicit
@@ -621,8 +621,9 @@ scaled to fit."
   "The `display\=' value DECO should carry at cell SIZE, or nil for none.
 
 DECO is the `cooked-deco\=' property: `(image ID CROW CCOL)\=' or
-`(glyph BITS COLUMN ROW)\='.  WINDOW is only ever the ascent lookup\='s.  Nil SIZE means there is no cell rectangle to draw against yet, and
-the caller records the decoration without displaying anything.
+`(glyph BITS COLUMN ROW)\='.  WINDOW is only ever the ascent lookup\='s.  Nil
+SIZE means there is no cell rectangle to draw against yet, and the caller
+records the decoration without displaying anything.
 
 The single answer to \"what does this decoration look like\", and both paths
 that can ask it go through here: `cooked--apply-image-deco\' and
