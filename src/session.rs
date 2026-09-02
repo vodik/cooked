@@ -82,6 +82,31 @@ const READ_CHUNK: usize = 64 * 1024;
 /// taken.
 const POLL_TIMEOUT_MS: u8 = 100;
 
+/// The same tick, for a session nobody is looking at. See [`Session::set_attended`].
+///
+/// The trade `POLL_TIMEOUT_MS` refuses to make globally is a bargain when taken only
+/// while the buffer is off screen, because the cost of a stale mode is entirely a cost
+/// to somebody watching. What the tick buys is noticing a *silent* mode change — one
+/// that moves the tty and writes no byte — and the two things that can be done with
+/// that knowledge are to raise a password prompt and to swap a keymap. Neither is worth
+/// anything to a buffer in no window: nothing is being drawn to read, and no keystroke
+/// can arrive without [`Session::sample_mode`] reading the tty first, on the input path,
+/// which is the guarantee that does not depend on this tick at all.
+///
+/// So the mode goes stale while unattended, by design, and is made fresh again the
+/// moment attention returns — Emacs forces a sample on the way back in. Ten times fewer
+/// wakeups for a session left open in a background buffer, which is most of them, most
+/// of the time.
+///
+/// Bounded rather than infinite, deliberately. `poll` would happily wait forever and the
+/// power win would be marginally larger, but three things ride on this loop turning over
+/// — the pending resize, the throttled-notification retry, and the resample deadline —
+/// and while each has its own path that wakes it, an infinite timeout makes the tick a
+/// thing that can never be relied on rather than one that is merely slow. A second keeps
+/// every existing invariant working at a tenth the rate, which is the whole of the win
+/// with none of the new failure modes.
+const UNATTENDED_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+
 /// How long after a burst of output to take one extra termios sample.
 ///
 /// The common secret read does not arrive silently: `read -s -p`, `getpass` and `sudo`
@@ -104,7 +129,7 @@ const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500)
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// A snapshot handed to Lisp on each drain.
-pub struct Update {
+pub(crate) struct Update {
     pub delta: Delta,
     pub mode: Mode,
     pub exit: Option<i32>,
@@ -229,9 +254,17 @@ impl Notifier {
 
     /// How long the reader thread may sleep in `poll`.
     ///
-    /// Ordinarily [`POLL_TIMEOUT_MS`] — plenty coarse, since real pty data wakes `poll`
-    /// immediately regardless of the timeout, and nothing else queued behind it (teardown,
-    /// a stashed resize, a termios change) needs finer granularity. But when [`Self::flush`]
+    /// `base` is the caller's answer for the quiet case, which is [`POLL_TIMEOUT_MS`] or
+    /// [`UNATTENDED_POLL_TIMEOUT`] depending on whether anyone is looking. It is a
+    /// parameter rather than a field for the same reason [`Shared::poll_timeout`] folds
+    /// in the resample deadline from outside: how often the tty is worth asking about is
+    /// a termios question, and the notifier has no business knowing about termios. What
+    /// it owns is the *other* two deadlines below, which are its own and which override
+    /// the base whenever they apply.
+    ///
+    /// Plenty coarse either way, since real pty data wakes `poll` immediately regardless
+    /// of the timeout, and nothing else queued behind it (teardown, a stashed resize, a
+    /// termios change) needs finer granularity. But when [`Self::flush`]
     /// has already deferred a notification to `min_interval`'s throttle and the child then
     /// falls quiet, nothing else will wake the loop before that window elapses — so waiting
     /// out the rest of `POLL_TIMEOUT_MS` instead adds up to a hundred extra milliseconds
@@ -240,9 +273,9 @@ impl Notifier {
     /// just asked a full-screen program to draw. Shortening the poll to exactly that
     /// remaining window, only while it applies, retires the notification at `min_interval`'s
     /// own cadence instead.
-    fn poll_wait(&self) -> std::time::Duration {
+    fn poll_wait(&self, base: std::time::Duration) -> std::time::Duration {
         if self.notified.load(Ordering::SeqCst) || !self.dirty.load(Ordering::SeqCst) {
-            return std::time::Duration::from_millis(u64::from(POLL_TIMEOUT_MS));
+            return base;
         }
         // One lock for both halves; as two fields it was two, on every tick.
         let state = self.state.held();
@@ -293,6 +326,10 @@ struct Shared {
     /// accumulate between drains, so this fills sooner.
     backlog_limit: usize,
     shutdown: AtomicBool,
+    /// Whether anyone is looking at this session's buffer; see [`Session::set_attended`].
+    /// Starts true, so a session Emacs never reports on — a test, a buffer driven from
+    /// Lisp — keeps the eager tick it has always had.
+    attended: AtomicBool,
     interrupt: Interrupt,
     exited: Mutex<Option<i32>>,
 }
@@ -342,7 +379,7 @@ impl Interrupt {
 /// last two of seven positional parameters -- and so their defaults live in the [`Default`]
 /// impl below, next to the fields they belong to, rather than at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Options {
+pub(crate) struct Options {
     /// See [`Notifier::min_interval`].
     pub min_redisplay_interval: std::time::Duration,
     /// See [`Shared::backlog_limit`].
@@ -358,7 +395,7 @@ impl Default for Options {
     }
 }
 
-pub struct Session {
+pub(crate) struct Session {
     shared: Arc<Shared>,
     reader: Mutex<Option<JoinHandle<()>>>,
 }
@@ -366,7 +403,7 @@ pub struct Session {
 impl Session {
     /// Spawn `argv` and start reading. `wake` is a writable descriptor from
     /// `open_channel`, taken over by the session.
-    pub fn spawn(
+    pub(crate) fn spawn(
         argv: &[impl AsRef<OsStr>],
         env: &[(impl AsRef<str>, impl AsRef<str>)],
         size: Winsize,
@@ -394,6 +431,7 @@ impl Session {
             resample_at: Mutex::new(None),
             backlog_limit: options.backlog_limit,
             shutdown: AtomicBool::new(false),
+            attended: AtomicBool::new(true),
             interrupt: Interrupt::new()?,
             exited: Mutex::new(None),
         });
@@ -418,7 +456,7 @@ impl Session {
     /// short grace period, then SIGKILL. The escalation is not belt and braces: a child
     /// that ignores SIGHUP — `nohup`, `trap '' HUP`, a detached session leader — otherwise
     /// survives an explicit kill and is never reaped.
-    pub fn shutdown(&self) -> bool {
+    pub(crate) fn shutdown(&self) -> bool {
         if self.shared.shutdown.swap(true, Ordering::SeqCst) {
             return false;
         }
@@ -442,7 +480,7 @@ impl Session {
     }
 
     /// Collect everything that changed, re-arming the wakeup.
-    pub fn drain(&self) -> Update {
+    pub(crate) fn drain(&self) -> Update {
         if self.shared.notifier.drained() {
             self.shared.interrupt.raise();
         }
@@ -453,14 +491,14 @@ impl Session {
         }
     }
 
-    pub fn send(&self, bytes: &[u8]) -> Result<()> {
+    pub(crate) fn send(&self, bytes: &[u8]) -> Result<()> {
         self.shared.pty.write(bytes)
     }
 
     /// Forget that any of the top row's line is already in Emacs.
     ///
     /// Emacs holds the scrollback, so only Emacs knows when it has thrown it away.
-    pub fn forget_history(&self) {
+    pub(crate) fn forget_history(&self) {
         self.shared.term.held().forget_history();
     }
 
@@ -485,7 +523,7 @@ impl Session {
     /// until the tty reads back with it. That converges within one poll tick, subsumes
     /// the `ENOTTY` case instead of special-casing it, and stops as soon as the two
     /// agree — so a child that later sets its own size is left alone.
-    pub fn resize(&self, size: Winsize) -> Result<()> {
+    pub(crate) fn resize(&self, size: Winsize) -> Result<()> {
         {
             let mut term = self.shared.term.held();
             term.resize(size.rows.into(), size.cols.into());
@@ -494,6 +532,14 @@ impl Session {
             term.set_cell_metrics(size.cell);
         }
         *self.shared.pending_resize.held() = Some(size);
+        // Wake the reader rather than leaving the retry to its next tick. That tick used
+        // to be at most `POLL_TIMEOUT_MS` away, which was near enough to immediate to
+        // leave alone; under [`UNATTENDED_POLL_TIMEOUT`] it can be a second, and a
+        // resize that lands while the buffer is off screen — a frame resized around it,
+        // a window configuration changing underneath — would take that long to converge.
+        // A resize is rare and user-driven, so the extra wakeup costs nothing measurable
+        // and buys the retry back its old latency in both states.
+        self.shared.interrupt.raise();
         match self.shared.pty.resize(size) {
             // Not ours to set yet; the reader thread keeps trying.
             Err(e) if e.is(Errno::ENOTTY) => Ok(()),
@@ -507,7 +553,7 @@ impl Session {
     /// trusted — a redisplay that signalled part-way through leaves the buffer holding
     /// some rows of a drain and not others, and no amount of further deltas repairs
     /// that, because a delta only describes what changed since.
-    pub fn redraw(&self) {
+    pub(crate) fn redraw(&self) {
         self.shared.term.held().touch_all();
     }
 
@@ -516,7 +562,7 @@ impl Session {
     /// The one edit the grid accepts from Emacs. It goes through the emulator rather than
     /// Emacs deleting the buffer text itself for the same reason input does: the rows have
     /// one owner, and the drain that follows is the ordinary one.
-    pub fn remove_rows(&self, first: usize, count: usize) {
+    pub(crate) fn remove_rows(&self, first: usize, count: usize) {
         self.shared.term.held().remove_rows(first, count);
     }
 
@@ -525,17 +571,20 @@ impl Session {
     /// The other edit the grid accepts from Emacs, and the same bargain as
     /// [`Session::remove_rows`]: Emacs asks, the emulator moves the rows, and the drain
     /// that follows is the ordinary one.
-    pub fn clear_to_prompt(&self) -> usize {
+    pub(crate) fn clear_to_prompt(&self) -> usize {
         self.shared.term.held().clear_to_prompt()
     }
 
-    pub fn mode(&self) -> Mode {
+    /// The reader thread's last sample. Lisp reads this off the drain's `:mode' instead,
+    /// so only the tests ask the session directly.
+    #[cfg(test)]
+    pub(crate) fn mode(&self) -> Mode {
         self.shared.mode.load()
     }
 
     /// Re-read the child's termios now, rather than reporting the last sample.
     ///
-    /// [`Session::mode`] answers from whatever the reader thread last saw, which is as
+    /// The drain's `:mode' answers from whatever the reader thread last saw, which is as
     /// fresh as the poll interval and no fresher. That is the right answer for a drain,
     /// which is describing a moment that has already passed. It is the wrong one for a
     /// keystroke.
@@ -556,7 +605,7 @@ impl Session {
     /// momentarily backwards. Nothing is harmed by that — the next sample corrects it —
     /// but the caller deciding whether to insert a character must act on the tty it just
     /// read, not on whichever write happened to land last.
-    pub fn sample_mode(&self) -> Mode {
+    pub(crate) fn sample_mode(&self) -> Mode {
         match self.shared.pty.mode() {
             Ok(mode) => {
                 self.shared.mode.store(mode);
@@ -568,43 +617,68 @@ impl Session {
         }
     }
 
-    pub fn pid(&self) -> Pid {
+    /// Say whether anyone is looking at this session, which sets the tick it polls on.
+    ///
+    /// Attended is [`POLL_TIMEOUT_MS`]; unattended is [`UNATTENDED_POLL_TIMEOUT`], ten
+    /// times longer, because the only thing the tick is for is noticing a silent termios
+    /// change and there is nobody to tell. Emacs decides what "looking" means — its
+    /// `cooked--attention` already answers that for the render freeze — and this only
+    /// spends the answer.
+    ///
+    /// Regaining attention raises the interrupt rather than waiting for the long poll
+    /// already in progress to expire. Without that, coming back to a buffer would leave
+    /// the reader asleep for up to a second before the shorter tick took effect, which
+    /// is exactly the moment it matters most and would put the staleness back where it
+    /// was taken from. The interrupt costs one byte and the loop's next pass is
+    /// unconditional and idempotent, so there is nothing to get wrong by raising it.
+    ///
+    /// The freshness the mode itself needs on the way back is not this function's to
+    /// give: Emacs forces a [`Session::sample_mode`] as it re-enters, so the answer it
+    /// acts on is read at that moment rather than inherited from however long the buffer
+    /// sat unwatched.
+    pub(crate) fn set_attended(&self, attended: bool) {
+        if self.shared.attended.swap(attended, Ordering::Relaxed) != attended && attended {
+            self.shared.interrupt.raise();
+        }
+    }
+
+    pub(crate) fn pid(&self) -> Pid {
         self.shared.pty.pid()
     }
 
-    pub fn signal(&self, sig: Signal) -> Result<()> {
+    pub(crate) fn signal(&self, sig: Signal) -> Result<()> {
         self.shared.pty.signal(sig)
     }
 
     /// What is actually running on the tty right now, which is not the same question as
     /// [`Session::pid`]: the child is usually a shell, and the program the user is looking
     /// at is whatever that shell put in the foreground.
-    pub fn foreground(&self) -> Result<Pid> {
+    pub(crate) fn foreground(&self) -> Result<Pid> {
         self.shared.pty.foreground()
     }
 
-    pub fn job_control(&self) -> Result<JobControl> {
+    pub(crate) fn job_control(&self) -> Result<JobControl> {
         self.shared.pty.job_control()
     }
 
-    pub fn alive(&self) -> bool {
+    pub(crate) fn alive(&self) -> bool {
         self.shared.exited.held().is_none()
     }
 
     /// The last non-blank line — the prompt text for a [`Mode::Secret`] read.
-    pub fn trailing_text(&self) -> Option<String> {
+    pub(crate) fn trailing_text(&self) -> Option<String> {
         self.shared.term.held().trailing_text()
     }
 
-    pub fn bracketed_paste(&self) -> bool {
+    pub(crate) fn bracketed_paste(&self) -> bool {
         self.shared.term.held().bracketed_paste()
     }
 
-    pub fn focus_events(&self) -> bool {
+    pub(crate) fn focus_events(&self) -> bool {
         self.shared.term.held().focus_events()
     }
 
-    pub fn alt_scroll(&self) -> bool {
+    pub(crate) fn alt_scroll(&self) -> bool {
         self.shared.term.held().alt_scroll()
     }
 }
@@ -657,13 +731,26 @@ impl Shared {
     /// `min` and not `max`: an earlier deadline is a reason to wake sooner, never later.
     /// [`remaining`] answers `None` once the deadline has passed, so an expired resample
     /// contributes nothing and cannot pin the timeout at zero and spin this thread.
+    ///
+    /// The unattended stretch is only the *base*, for the same reason: it is the answer
+    /// when nothing else is waiting, and every deadline below still cuts it short. A
+    /// throttled notification or an armed resample retires on its own schedule whether
+    /// or not anyone is watching the buffer it belongs to.
     fn poll_timeout(&self) -> PollTimeout {
-        let mut wait = self.notifier.poll_wait();
+        let mut wait = self.notifier.poll_wait(self.base_poll_wait());
         if let Some(left) = remaining(*self.resample_at.held()) {
             wait = wait.min(left);
         }
-        PollTimeout::try_from(wait)
-            .unwrap_or_else(|_| PollTimeout::from(POLL_TIMEOUT_MS))
+        PollTimeout::try_from(wait).unwrap_or_else(|_| PollTimeout::from(POLL_TIMEOUT_MS))
+    }
+
+    /// How long a quiet tick lasts, which is the whole of what attention changes.
+    fn base_poll_wait(&self) -> std::time::Duration {
+        if self.attended.load(Ordering::Relaxed) {
+            std::time::Duration::from_millis(u64::from(POLL_TIMEOUT_MS))
+        } else {
+            UNATTENDED_POLL_TIMEOUT
+        }
     }
 
     /// Ask again shortly, because the child just wrote something; see [`RESAMPLE_DELAY`].
@@ -1052,7 +1139,7 @@ mod tests {
             "-c",
             "printf '\x1b[?2026h'; printf 'half a frame'; sleep 5",
         ]);
-        std::thread::sleep(emu::SYNC_TIMEOUT + Duration::from_millis(120));
+        std::thread::sleep(emu::term::SYNC_TIMEOUT + Duration::from_millis(120));
         // A short patience rather than none, for scheduling slop -- but bounded well
         // under the child's own `sleep 5`, since a blocking read here would have been
         // satisfied by the byte that the child's *exit* sends and passed regardless.
@@ -1201,6 +1288,66 @@ mod tests {
         assert_eq!(session.mode(), Mode::Cooked);
         let update = wait_for(&session, |u| u.mode == Mode::Secret);
         assert_eq!(update.mode, Mode::Secret);
+    }
+
+    /// The stretch is a stretch and not a stop: a silent mode change is still noticed
+    /// while unattended, just later. Worth pinning because "nobody is looking" is a
+    /// reason to ask less often and never a reason to stop parsing or stop sampling,
+    /// and an infinite timeout would pass every other test in this file.
+    #[test]
+    fn an_unattended_session_still_observes_a_silent_mode_change() {
+        let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.2; stty -echo; sleep 5"]);
+        session.set_attended(false);
+        assert_eq!(session.mode(), Mode::Cooked);
+        // Generously past `UNATTENDED_POLL_TIMEOUT`; the assertion is that it arrives at
+        // all, not when. `wait_for` polls `Session::mode`, which is the reader thread's
+        // cached sample rather than a fresh `tcgetattr`, so nothing here can observe the
+        // transition except the tick under test.
+        let update = wait_for(&session, |u| u.mode == Mode::Secret);
+        assert_eq!(update.mode, Mode::Secret);
+    }
+
+    /// Regaining attention must not leave the reader asleep for the rest of a long poll.
+    ///
+    /// This is the whole reason `set_attended` raises the interrupt. Without it the
+    /// child's `stty` below is noticed on whatever remains of a one-second tick that
+    /// began before the buffer came back — up to a second of the exact staleness the
+    /// stretch was only ever allowed to have while nobody could be hurt by it.
+    #[test]
+    fn regaining_attention_interrupts_the_long_poll() {
+        let (session, _read) = session(&["/bin/sh", "-c", "stty -echo; sleep 5"]);
+        session.set_attended(false);
+        // Long enough to be certainly inside a fresh unattended poll, and far short of
+        // its one-second expiry, so a pass cannot be the tick expiring on its own.
+        std::thread::sleep(Duration::from_millis(250));
+        let start = Instant::now();
+        session.set_attended(true);
+        let update = wait_for(&session, |u| u.mode == Mode::Secret);
+        assert_eq!(update.mode, Mode::Secret);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "took {elapsed:?} to notice the mode after attention returned; expected the \
+             interrupt to wake the reader, not the rest of a 1s unattended tick"
+        );
+    }
+
+    /// Attention changes the tick and nothing else. The pty is read on `POLLIN`, which
+    /// no timeout defers, so output must arrive at the same speed either way.
+    #[test]
+    fn an_unattended_session_still_renders_output_promptly() {
+        let (session, _read) = session(&["/bin/cat"]);
+        session.set_attended(false);
+        let start = Instant::now();
+        session.send(b"ping\n").expect("send");
+        let update = wait_for(&session, |u| rendered(u).contains("ping"));
+        assert!(rendered(&update).contains("ping"));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "took {elapsed:?} for output to reach an unattended session; the poll timeout \
+             must not gate reading, only the termios sample"
+        );
     }
 
     /// The pty master is closed by `Pty::spawn`, but the wake descriptor is only ours

@@ -13,13 +13,13 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 
 /// A dense id handed out by a [`Ledger`].
-pub trait Id: Copy + Eq + Hash {
+pub(crate) trait Id: Copy + Eq + Hash {
     fn from_index(index: u32) -> Self;
 }
 
 /// Ids, their hash buckets, and their least-recently-used order.
 #[derive(Debug)]
-pub struct Ledger<K> {
+pub(crate) struct Ledger<K> {
     /// A hash bucket, not the identity itself. More than one entry only when two distinct
     /// payloads happen to share a hash, which is why every caller still compares properly
     /// before treating a hit as the same content.
@@ -49,7 +49,7 @@ impl<K: Id> Ledger<K> {
     /// [`Ledger::touch`]: folding the touch in here would make this `&mut self`, and a
     /// caller whose `matches` closure reads its own value map would then have to
     /// pre-borrow that map to keep the two borrows disjoint. Shared here, both are.
-    pub fn lookup(&self, hash: u64, matches: impl Fn(K) -> bool) -> Option<K> {
+    pub(crate) fn lookup(&self, hash: u64, matches: impl Fn(K) -> bool) -> Option<K> {
         self.by_hash
             .get(&hash)?
             .iter()
@@ -58,7 +58,7 @@ impl<K: Id> Ledger<K> {
     }
 
     /// Hand out the next id and file it under `hash`.
-    pub fn insert(&mut self, hash: u64) -> K {
+    pub(crate) fn insert(&mut self, hash: u64) -> K {
         let id = K::from_index(self.next);
         self.next = self.next.wrapping_add(1);
         self.by_hash.entry(hash).or_default().push(id);
@@ -67,7 +67,7 @@ impl<K: Id> Ledger<K> {
     }
 
     /// Move `id` to the most-recently-used end.
-    pub fn touch(&mut self, id: K) {
+    pub(crate) fn touch(&mut self, id: K) {
         if let Some(at) = self.order.iter().position(|&i| i == id) {
             self.order.remove(at);
             self.order.push_back(id);
@@ -78,7 +78,7 @@ impl<K: Id> Ledger<K> {
     ///
     /// The hash goes too, and that is load-bearing rather than tidy: leaving it behind
     /// would make a later, identical payload resolve to an id whose content has gone.
-    pub fn evict_oldest(&mut self) -> Option<K> {
+    pub(crate) fn evict_oldest(&mut self) -> Option<K> {
         let id = self.order.pop_front()?;
         self.by_hash.retain(|_, bucket| {
             bucket.retain(|&v| v != id);
@@ -90,20 +90,17 @@ impl<K: Id> Ledger<K> {
     /// Every id, least-recently-used first, without disturbing the order.
     ///
     /// For a store that sheds part of an entry before shedding the entry itself.
-    pub fn lru(&self) -> impl Iterator<Item = K> + '_ {
+    pub(crate) fn lru(&self) -> impl Iterator<Item = K> + '_ {
         self.order.iter().copied()
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.order.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
-    }
-
     /// Total ids across all buckets, for the tests that check nothing is left stranded.
-    pub fn tracked(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn tracked(&self) -> usize {
         self.by_hash.values().map(Vec::len).sum()
     }
 
@@ -112,7 +109,7 @@ impl<K: Id> Ledger<K> {
     /// Only the collision tests use this: a real fast-hash collision is expensive to find
     /// by brute force, so they plant one.
     #[cfg(test)]
-    pub fn plant(&mut self, hash: u64, id: K) {
+    pub(crate) fn plant(&mut self, hash: u64, id: K) {
         self.by_hash.entry(hash).or_default().push(id);
     }
 }

@@ -16,7 +16,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::slice;
 
 #[repr(C)]
-pub struct ValueTag {
+pub(crate) struct ValueTag {
     _opaque: [u8; 0],
 }
 
@@ -36,7 +36,7 @@ type Slot = *const c_void;
 #[derive(Debug, Clone, Copy)]
 pub struct Error;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 #[repr(C)]
 pub struct Runtime {
@@ -123,28 +123,85 @@ macro_rules! ffi {
     }};
 }
 
-/// Build a Lisp plist, written the way it reads on the other side.
+/// A symbol from the load-time table, named by the spelling it has in Lisp.
 ///
-/// The alternative is `env.list(&[..])` over a flat array of alternating keys and values,
-/// which is what this replaces: there the pairing is a convention the array cannot
-/// enforce, so dropping one element shifts every key onto the wrong value and nothing
-/// says so until Lisp reads it. Here a key without a value does not parse.
+/// [`Env::intern`] costs a `CString` allocation, an FFI call and the
+/// `non_local_exit_check` every [`ffi!`] does after it. That is the cost [`symbols!`]
+/// exists to remove, and this is how a call site reaches the table without naming a
+/// [`Sym`] variant -- so a symbol goes on being written as the word it is in Lisp.
 ///
-/// Values are anything [`IntoLisp`], which includes [`Value`] itself -- so a field that
+/// The lookup is a `const` item, so a name missing from the table stops the build with
+/// [`sym_index`]'s message rather than degrading to an `intern` nobody notices.
+macro_rules! sym {
+    ($env:expr, $name:literal) => {{
+        const I: usize = $crate::env::sym_index($name);
+        $env.sym_at(I)
+    }};
+}
+pub(crate) use sym;
+
+/// Generate [`IntoLisp`] for enums whose Lisp face is a symbol.
+///
+/// Each of these had a `fn as_str(self) -> &'static str` beside the enum and an
+/// `env.intern(x.as_str())` at the boundary, which put the naming in the wrong place
+/// twice over. The spelling is a fact about what crosses into Lisp, not about the
+/// emulator, and interning it per drain is the cost [`symbols!`] exists to remove -- but
+/// the enums live in `emu` and `pty`, which are plain Rust with no [`Env`] in sight and
+/// no business naming a [`Sym`].
+///
+/// So the list moves to the boundary, where it is invoked once and generates both. There
+/// is still exactly one spelling of each name; it is now in the module that sends it, and
+/// on the symbol table like every other symbol.
+macro_rules! lisp_enum {
+    ($( $(#[doc = $doc:literal])* $t:ty { $($variant:ident => $name:literal),* $(,)? } )*) => {
+        $($(#[doc = $doc])*
+        impl $crate::env::IntoLisp for $t {
+            fn into_lisp(self, env: &$crate::env::Env) -> $crate::env::Result<$crate::env::Value> {
+                match self {
+                    $(Self::$variant => $crate::env::sym!(env, $name)),*
+                }
+            }
+        })*
+    };
+}
+pub(crate) use lisp_enum;
+
+/// Build a Lisp list, converting each element on the way.
+///
+/// The alternative is `env.list(&[..])` over an array the caller has already converted,
+/// which is what this replaces: there every element carries its own `env.into_lisp(..)?`,
+/// and the six that say something are read out of forty that do not.
+///
+/// Elements are anything [`IntoLisp`], which includes [`Value`] itself -- so a field that
 /// had to be built beforehand sits in the same list as one converted in place.
 ///
 /// Expands to an expression of `Result<Value>`, and the conversions use `?`, so it must
 /// be written inside a function returning [`Result`].
+macro_rules! list {
+    ($env:expr, [ $($item:expr),* $(,)? ]) => {{
+        // Annotated rather than inferred, so the two spellings of the same argument --
+        // `env` and `&env`, both of which autoref their way to the same methods -- cannot
+        // both compile. One shape, checked.
+        let env: $crate::env::Env<'_> = $env;
+        let items = [ $( env.into_lisp($item)? ),* ];
+        env.list(&items)
+    }};
+}
+pub(crate) use list;
+
+/// Build a Lisp plist, written the way it reads on the other side.
+///
+/// [`list!`] with the keys interleaved, which is the whole difference: there the pairing
+/// is a convention a flat array cannot enforce, so dropping one element shifts every key
+/// onto the wrong value and nothing says so until Lisp reads it. Here a key without a
+/// value does not parse.
+///
+/// Keys go through [`sym!`], so they cost an array index rather than an `intern` and a
+/// key that is not in the symbol table stops the build.
 macro_rules! plist {
     ($env:expr, { $($key:literal => $val:expr),* $(,)? }) => {{
-        let env = $env;
-        let items = [ $(
-            // A `const` item, so the lookup happens at compile time and a key that is not
-            // in the symbol table stops the build. See `sym_index`.
-            { const I: usize = $crate::env::sym_index($key); env.sym_at(I)? },
-            env.into_lisp($val)?
-        ),* ];
-        env.list(&items)
+        let env: $crate::env::Env<'_> = $env;
+        $crate::env::list!(env, [ $( $crate::env::sym!(env, $key)?, $val ),* ])
     }};
 }
 pub(crate) use plist;
@@ -178,6 +235,11 @@ symbols! {
     List => "list",
     Cons => "cons",
     Nil => "nil",
+    T => "t",
+    // The list walk in `lib.rs` calls these once per element of the environment alist,
+    // which is the child's to grow.
+    Car => "car",
+    Cdr => "cdr",
     // Every `plist!` key in the module. They are interned once each here instead of once
     // each per drain, which is where fifteen of them were being rebuilt sixty times a
     // second. `sym_index` makes leaving one out a compile error rather than a silent
@@ -202,6 +264,47 @@ symbols! {
     Susp => ":susp",
     Eof => ":eof",
     Isig => ":isig",
+    // Every remaining symbol `lib.rs` writes as a literal, for the same reason the keys
+    // above are here. The two deco kinds are the sharpest case: they were interned once
+    // per decorated run of every damaged row of every frame, which is the per-character
+    // consing `Deco` is packed to avoid, paid per run instead.
+    Glyph => "glyph",
+    Image => "image",
+    // How an `Anchor` is spelled: a character offset into this drain's scrollback, or a
+    // cell on the live grid.
+    AtScrolled => "scrolled",
+    AtScreen => "screen",
+    // The event tags. One per event of every drain that has any.
+    Bell => "bell",
+    Osc => "osc",
+    Mouse => "mouse",
+    Reply => "reply",
+    EraseScrollback => "erase-scrollback",
+    DisplayCleared => "display-cleared",
+    TitleStack => "title-stack",
+    PromptStart => "prompt-start",
+    PromptContinuation => "prompt-continuation",
+    PromptEnd => "prompt-end",
+    CommandStart => "command-start",
+    CommandEnd => "command-end",
+    // The `lisp_enum!` names. Each was interned from an `as_str` once per drain -- the
+    // cursor shape, the key encoding and the line-discipline mode on every one, the
+    // image format on every image transmitted.
+    Cooked => "cooked",
+    Raw => "raw",
+    Secret => "secret",
+    Block => "block",
+    Underline => "underline",
+    Bar => "bar",
+    Legacy => "legacy",
+    ModifyOtherKeys => "modify-other",
+    Kitty => "kitty",
+    Png => "png",
+    Jpeg => "jpeg",
+    Gif => "gif",
+    // `pbm', not `ppm': it is the name of the Emacs image type that reads binary P6, and
+    // that is what this string is for.
+    Pbm => "pbm",
 }
 
 /// `a == b` for `&str`, in a const context.
@@ -222,11 +325,12 @@ const fn str_eq(a: &str, b: &str) -> bool {
 
 /// Where `name` sits in [`Sym::NAMES`], resolved at compile time.
 ///
-/// This is what lets [`plist!`] go on being written with the keyword it puts on the wire
-/// -- `":rows"`, matching the `(plist-get update :rows)` on the Lisp side -- while costing
-/// an array index rather than an `intern`. The `panic!` is in a `const` context, so a key
-/// missing from the table above fails the build with that message pointing at the call
-/// site; it can never degrade to a slow path nobody notices.
+/// This is what lets [`sym!`] and [`plist!`] go on being written with the spelling they
+/// put on the wire -- `":rows"`, matching the `(plist-get update :rows)` on the Lisp
+/// side; `"prompt-start"`, matching the symbol Lisp dispatches the event on -- while
+/// costing an array index rather than an `intern`. The `panic!` is in a `const` context,
+/// so a name missing from the table above fails the build with that message pointing at
+/// the call site; it can never degrade to a slow path nobody notices.
 pub(crate) const fn sym_index(name: &str) -> usize {
     let mut i = 0;
     while i < Sym::NAMES.len() {
@@ -235,7 +339,7 @@ pub(crate) const fn sym_index(name: &str) -> usize {
         }
         i += 1;
     }
-    panic!("this plist key is missing from `symbols!` in env.rs; add it there")
+    panic!("this symbol is missing from `symbols!` in env.rs; add it there")
 }
 
 /// The interned symbols, as global references.
@@ -362,6 +466,14 @@ impl<'e> Env<'e> {
         self.call_sym(Sym::Cons, &[car, cdr])
     }
 
+    pub fn car(&self, cell: Value) -> Result<Value> {
+        self.call_sym(Sym::Car, &[cell])
+    }
+
+    pub fn cdr(&self, cell: Value) -> Result<Value> {
+        self.call_sym(Sym::Cdr, &[cell])
+    }
+
     /// Wrap `data` in an opaque Lisp user-pointer; Emacs' GC runs the destructor.
     pub fn user_ptr<T>(&self, data: T) -> Result<Value> {
         let boxed = Box::into_raw(Box::new(data)).cast::<c_void>();
@@ -451,10 +563,12 @@ impl<'e> Env<'e> {
     /// be told why it is being refused rather than only handed a number.
     pub const MINIMAL_ABI: isize = std::mem::offset_of!(Raw, should_quit) as isize;
 
+    #[allow(clippy::wrong_self_convention, reason = "converts `v`, not `self`")]
     pub fn into_lisp<T: IntoLisp>(&self, v: T) -> Result<Value> {
         v.into_lisp(self)
     }
 
+    #[allow(clippy::wrong_self_convention, reason = "converts `v`, not `self`")]
     pub fn from_lisp<T: FromLisp>(&self, v: Value) -> Result<T> {
         T::from_lisp(self, v)
     }
@@ -493,7 +607,7 @@ impl<'e> Env<'e> {
     }
 }
 
-pub type Defun = fn(Env, &[Value]) -> Result<Value>;
+pub(crate) type Defun = fn(Env, &[Value]) -> Result<Value>;
 
 type Finalizer = extern "C" fn(*mut c_void);
 
@@ -590,7 +704,7 @@ impl IntoLisp for u32 {
 
 impl IntoLisp for bool {
     fn into_lisp(self, env: &Env) -> Result<Value> {
-        if self { env.intern("t") } else { Ok(env.nil()) }
+        if self { sym!(env, "t") } else { Ok(env.nil()) }
     }
 }
 
@@ -710,7 +824,7 @@ impl<T: FromLisp> FromLisp for Option<T> {
 
 /// Declare that this module is GPL-compatible, as Emacs requires.
 #[unsafe(no_mangle)]
-pub static plugin_is_GPL_compatible: c_int = 1;
+pub(crate) static plugin_is_GPL_compatible: c_int = 1;
 
 pub(crate) fn provide(env: &Env, feature: &str) -> Result<()> {
     let sym = env.intern(feature)?;

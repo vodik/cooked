@@ -33,14 +33,14 @@
 /// name ten thousand pixels — so the body's length bounds the output only weakly.
 use super::image::{PixelFormat, PixelSize, Pixels};
 
-pub const MAX_PIXELS: usize = super::kitty::MAX_PAYLOAD / 4;
+pub(crate) const MAX_PIXELS: usize = super::kitty::MAX_PAYLOAD / 4;
 
 /// A decoded sixel is just [`Pixels`]: RGBA and a size.
 ///
 /// An alias rather than its own struct, because it was one -- with `width`/`height`
 /// spelled as two fields here, as a `(u32, u32)` tuple in the caller, and as a third
 /// arrangement again in kitty -- and every one of them ended in the same encode.
-pub type Bitmap = Pixels;
+pub(crate) type Bitmap = Pixels;
 
 /// The VT340's colour registers, which a stream may use without defining anything.
 ///
@@ -73,7 +73,7 @@ const PALETTE_SIZE: usize = 256;
 /// `None` when the body describes no pixels at all, or more of them than [`MAX_PIXELS`]
 /// allows. A body with unrecognised bytes in it is not an error: sixel has accumulated
 /// private extensions, and the readable parts of a picture are worth more than a refusal.
-pub fn decode(body: &[u8]) -> Option<Bitmap> {
+pub(crate) fn decode(body: &[u8]) -> Option<Bitmap> {
     let size = measure(body)?;
     let mut bitmap = Pixels::new(
         size,

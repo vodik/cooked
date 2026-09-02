@@ -58,9 +58,8 @@ impl Perform for State {
         // `mark_underline` and `mark_link` attach to each cell written, and DEC graphics
         // substitutes the character; each is per-character work the run form does not do,
         // so their presence disqualifies the whole run rather than being reimplemented.
-        let batched = !self.modes.dec_graphics
-            && self.underline == Color::Default
-            && self.link.is_none();
+        let batched =
+            !self.modes.dec_graphics && self.underline == Color::Default && self.link.is_none();
         // Compiled out of a release build entirely; see `State::force_per_character_print`.
         #[cfg(test)]
         let batched = batched && !self.force_per_character_print;

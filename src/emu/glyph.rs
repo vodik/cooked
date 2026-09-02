@@ -243,7 +243,7 @@ const LAST_GLYPH: char = '\u{259F}';
 /// 277ms with this guard and 334ms without, and `plain` at 203ms against 238ms -- 15-17%
 /// of total throughput, for two compares on a path that was already returning `None`.
 #[inline]
-pub fn classify(ch: char) -> Option<BoxGlyph> {
+pub(crate) fn classify(ch: char) -> Option<BoxGlyph> {
     if ch < FIRST_GLYPH || ch > LAST_GLYPH {
         return None;
     }

@@ -28,8 +28,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::PoisonError;
 
-use crate::platform;
 use crate::emu::CellMetrics;
+use crate::platform;
 
 /// What the child is currently asking the tty for.
 ///
@@ -37,7 +37,7 @@ use crate::emu::CellMetrics;
 /// canonically, and nothing but a secret read disables echo while keeping canonical mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
-pub enum Mode {
+pub(crate) enum Mode {
     /// `ICANON | ECHO` — the kernel is line-editing; Emacs should own the input region.
     #[default]
     Cooked,
@@ -58,7 +58,7 @@ pub enum Mode {
 /// `None` means the character is disabled (`_POSIX_VDISABLE`), so there is nothing to send
 /// and a caller with a signal to fall back on should use it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JobControl {
+pub(crate) struct JobControl {
     pub intr: Option<u8>,
     pub quit: Option<u8>,
     pub susp: Option<u8>,
@@ -113,51 +113,36 @@ impl TryFrom<u8> for Mode {
     }
 }
 
-impl Mode {
-    /// Whether Emacs, rather than the child, should interpret keys in this mode.
-    pub fn editable(self) -> bool {
-        matches!(self, Self::Cooked)
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Cooked => "cooked",
-            Self::Raw => "raw",
-            Self::Secret => "secret",
-        }
-    }
-}
-
 /// A [`Mode`] readable from the reader thread and Emacs' thread alike.
 ///
 /// Lives beside the enum rather than at the use site because it is the discriminant that
 /// makes it work: `Mode` is `#[repr(u8)]`, so `as u8` and [`Mode::try_from`] are inverses
 /// by declaration rather than by a match that happens to agree with the variant order.
 #[derive(Debug)]
-pub struct AtomicMode(std::sync::atomic::AtomicU8);
+pub(crate) struct AtomicMode(std::sync::atomic::AtomicU8);
 
 impl AtomicMode {
-    pub fn new(mode: Mode) -> Self {
+    pub(crate) fn new(mode: Mode) -> Self {
         Self(std::sync::atomic::AtomicU8::new(mode as u8))
     }
 
-    pub fn load(&self) -> Mode {
+    pub(crate) fn load(&self) -> Mode {
         let raw = self.0.load(std::sync::atomic::Ordering::Relaxed);
         // Only `store` ever writes here, and it writes a discriminant.
         Mode::try_from(raw).unwrap_or_default()
     }
 
-    pub fn store(&self, mode: Mode) {
+    pub(crate) fn store(&self, mode: Mode) {
         self.0
             .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pid(libc::pid_t);
+pub(crate) struct Pid(libc::pid_t);
 
 impl Pid {
-    pub fn get(self) -> i32 {
+    pub(crate) fn get(self) -> i32 {
         self.0
     }
 }
@@ -193,7 +178,7 @@ impl From<Winsize> for libc::winsize {
 
 /// A forked child attached to a pty we own the master end of.
 #[derive(Debug)]
-pub struct Pty {
+pub(crate) struct Pty {
     master: PtyMaster,
     child: Pid,
     /// Set once `waitpid` has collected the child. Signalling after that point would
@@ -232,7 +217,7 @@ const DROP_KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50
 
 impl Pty {
     /// Fork `argv` on a fresh pty in its own session, with `size` and `env` applied.
-    pub fn spawn(
+    pub(crate) fn spawn(
         argv: &[impl AsRef<OsStr>],
         env: &[(impl AsRef<str>, impl AsRef<str>)],
         size: Winsize,
@@ -312,16 +297,16 @@ impl Pty {
         })
     }
 
-    pub fn as_fd(&self) -> BorrowedFd<'_> {
+    pub(crate) fn as_fd(&self) -> BorrowedFd<'_> {
         self.master.as_fd()
     }
 
-    pub fn pid(&self) -> Pid {
+    pub(crate) fn pid(&self) -> Pid {
         self.child
     }
 
     /// The child's current line-discipline state.
-    pub fn mode(&self) -> Result<Mode> {
+    pub(crate) fn mode(&self) -> Result<Mode> {
         Ok(Mode::from(&tcgetattr(self.master.as_fd())?))
     }
 
@@ -329,12 +314,12 @@ impl Pty {
     ///
     /// Sampled on demand rather than carried in [`Mode`]: these change when someone runs
     /// `stty`, not on every read, and the one caller asks only when about to send one.
-    pub fn job_control(&self) -> Result<JobControl> {
+    pub(crate) fn job_control(&self) -> Result<JobControl> {
         Ok(JobControl::from(&tcgetattr(self.master.as_fd())?))
     }
 
     /// Process group in the foreground of the tty — i.e. what is actually running.
-    pub fn foreground(&self) -> Result<Pid> {
+    pub(crate) fn foreground(&self) -> Result<Pid> {
         match tcgetpgrp(self.master.as_fd())?.as_raw() {
             pgrp if pgrp > 1 => Ok(Pid(pgrp)),
             _ => Err(Error::NoForeground),
@@ -349,7 +334,7 @@ impl Pty {
     /// macOS's ptmx master answers no termios/winsize ioctl at all — `session::Session`
     /// is the layer that knows what to do with that `ENOTTY`, by way of its already-running
     /// reader thread; see `Session::resize`.
-    pub fn resize(&self, size: Winsize) -> Result<()> {
+    pub(crate) fn resize(&self, size: Winsize) -> Result<()> {
         set_winsize(self.master.as_fd(), size)
     }
 
@@ -359,7 +344,7 @@ impl Pty {
     /// fork — so a `resize` issued in the moments after `spawn` can be applied to the
     /// master, return success, and then be overwritten by the child's own initialisation.
     /// Reading it back is what lets `session` tell "applied" from "applied and lost".
-    pub fn winsize(&self) -> Result<Winsize> {
+    pub(crate) fn winsize(&self) -> Result<Winsize> {
         let mut ws = libc::winsize {
             ws_row: 0,
             ws_col: 0,
@@ -389,7 +374,7 @@ impl Pty {
     /// waiting on the child indefinitely. A short individual poll keeps the common case
     /// (plenty of room) indistinguishable from the old unconditional write; the bound
     /// only ever bites when the child truly cannot make progress.
-    pub fn write(&self, mut buf: &[u8]) -> Result<()> {
+    pub(crate) fn write(&self, mut buf: &[u8]) -> Result<()> {
         let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
         while !buf.is_empty() {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -419,7 +404,7 @@ impl Pty {
     }
 
     /// Read available output. An empty slice means the child closed the slave end.
-    pub fn read<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8]> {
+    pub(crate) fn read<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8]> {
         loop {
             return match nix::unistd::read(self.master.as_fd(), buf) {
                 Ok(n) => Ok(&buf[..n]),
@@ -434,7 +419,7 @@ impl Pty {
     /// The guard is not paranoia: `tcgetpgrp` can report 0 once the session is gone, and
     /// `kill(-0, ...)` means "my own process group" — which here is Emacs. Once the child
     /// has been reaped its pid is available for reuse, so refuse then too.
-    pub fn signal(&self, sig: Signal) -> Result<()> {
+    pub(crate) fn signal(&self, sig: Signal) -> Result<()> {
         // Held across the check and the `killpg` so a `waitpid` on another thread
         // cannot reap the child, and free its pid for reuse, in between. See the field
         // comment on `reap_lock`.
@@ -453,12 +438,12 @@ impl Pty {
     }
 
     /// Whether the child has been collected, and its pid therefore no longer ours.
-    pub fn reaped(&self) -> bool {
+    pub(crate) fn reaped(&self) -> bool {
         self.reaped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Exit status if the child has terminated, without blocking.
-    pub fn try_wait(&self) -> Result<Option<i32>> {
+    pub(crate) fn try_wait(&self) -> Result<Option<i32>> {
         self.waitpid(WaitPidFlag::WNOHANG)
     }
 
@@ -467,7 +452,7 @@ impl Pty {
     /// A plain `try_wait` races a child that has closed the pty but has not yet been
     /// reaped, which loses the real exit code; a blocking `waitpid` would deadlock
     /// teardown against a child that is not exiting at all. Hence a bounded wait.
-    pub fn reap(&self, patience: std::time::Duration) -> Option<i32> {
+    pub(crate) fn reap(&self, patience: std::time::Duration) -> Option<i32> {
         let deadline = std::time::Instant::now() + patience;
         loop {
             match self.try_wait() {
@@ -874,13 +859,6 @@ mod tests {
             Some(0),
             "an fd leaked past exec"
         );
-    }
-
-    #[test]
-    fn only_cooked_is_editable() {
-        assert!(Mode::Cooked.editable());
-        assert!(!Mode::Raw.editable());
-        assert!(!Mode::Secret.editable());
     }
 
     #[test]

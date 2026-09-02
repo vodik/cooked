@@ -141,8 +141,8 @@ pub struct Cell {
     pub style: Style,
 }
 
-pub const CONTINUATION: char = '\0';
-pub const BLANK: char = ' ';
+pub(crate) const CONTINUATION: char = '\0';
+pub(crate) const BLANK: char = ' ';
 
 impl Default for Cell {
     fn default() -> Self {
@@ -176,7 +176,7 @@ impl Cell {
 /// and hangs it on the text as a `display` property — which is why they share a type
 /// rather than each growing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecoCell {
+pub(crate) enum DecoCell {
     Glyph(BoxGlyph),
     Image(Placement),
 }
@@ -282,7 +282,7 @@ pub struct Run {
 /// command's `D' and the new prompt's `A', `B' and `C', and a reprinted prompt can double
 /// that -- while keeping the whole grid's worth bounded at a few hundred entries. See
 /// [`Row::mark`] for why a bound is needed at all.
-pub const MARKS_PER_ROW: usize = 8;
+pub(crate) const MARKS_PER_ROW: usize = 8;
 
 /// The wire name for one OSC 133 semantic mark, so Emacs can be told where a mark it
 /// already holds a buffer marker for has *moved* to.
@@ -338,7 +338,7 @@ pub enum Extra {
 /// `None` the moment the last entry goes, so "has this row any attachments at all" stays
 /// a null check on a pointer already in cache.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Extras {
+pub(crate) struct Extras {
     entries: Vec<(u16, Extra)>,
 }
 
@@ -375,7 +375,7 @@ impl Extra {
 }
 
 impl Extras {
-    pub fn entries(&self) -> &[(u16, Extra)] {
+    pub(crate) fn entries(&self) -> &[(u16, Extra)] {
         &self.entries
     }
 
@@ -434,7 +434,7 @@ impl Extras {
 ///
 /// [`Marks::Drop`] is for the one case where the column itself ceases to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Marks {
+pub(crate) enum Marks {
     Keep,
     Drop,
 }
@@ -1497,7 +1497,9 @@ mod tests {
         ];
         // Plain ASCII, a box glyph, a shade block, a wide character and a zero-width
         // mark -- every branch `DecoCell::classify` and the width logic can take.
-        let chars = ['a', 'b', ' ', '\u{2500}', '\u{2503}', '\u{2591}', '\u{6f22}'];
+        let chars = [
+            'a', 'b', ' ', '\u{2500}', '\u{2503}', '\u{2591}', '\u{6f22}',
+        ];
 
         // Both paths, deliberately. `runs_to` sends a row with attachments to
         // `build_runs` and a row without to `build_plain_runs`, and with attachments
@@ -1538,7 +1540,11 @@ mod tests {
                 }
                 // Attachments, each rare enough that most cells carry none -- which is
                 // also the distribution the real grid has.
-                match if attachments { (r >> 32) % 16 } else { u64::MAX } {
+                match if attachments {
+                    (r >> 32) % 16
+                } else {
+                    u64::MAX
+                } {
                     0 => row.set_underline(col, Color::Indexed(196)),
                     1 => row.set_link(col, Some(LinkId(((r >> 40) % 3) as u32))),
                     2 => row.combine(col, '\u{301}'),

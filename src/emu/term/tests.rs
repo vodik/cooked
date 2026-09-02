@@ -1378,11 +1378,7 @@ fn osc_133_becomes_semantic_events() {
 /// construct begins at its last line instead of at the prompt it was typed at.
 #[test]
 fn osc_133_marks_a_continuation_prompt() {
-    let mut t = term(
-        4,
-        20,
-        b"\x1b]133;A\x07> \x1b]133;A;k=s\x07\x1b]133;B\x07",
-    );
+    let mut t = term(4, 20, b"\x1b]133;A\x07> \x1b]133;A;k=s\x07\x1b]133;B\x07");
     let events = t.drain().events;
     let at = |row, col| Anchor { row, col };
     assert_eq!(
@@ -2231,15 +2227,24 @@ fn batched_and_per_character_printing_agree() {
         ("two rows and a bit", b"0123456789abcdefghijQR"),
         ("wrap then newline", b"0123456789abc\r\ndef"),
         ("wide characters", "ab\u{6f22}\u{5b57}cd".as_bytes()),
-        ("wide character across the margin", "012345678\u{6f22}z".as_bytes()),
+        (
+            "wide character across the margin",
+            "012345678\u{6f22}z".as_bytes(),
+        ),
         ("combining mark", "abe\u{301}f".as_bytes()),
         ("DEL is not a control", b"ab\x7fcd"),
         ("styled runs", b"a\x1b[31mred\x1b[0mb"),
         ("insert mode", b"abcdef\x1b[4D\x1b[4hXY"),
         ("dec graphics", b"\x1b(0qqq\x1b(Babc"),
-        ("hyperlink attaches per cell", b"a\x1b]8;;http://x\x07bcd\x1b]8;;\x07e"),
+        (
+            "hyperlink attaches per cell",
+            b"a\x1b]8;;http://x\x07bcd\x1b]8;;\x07e",
+        ),
         ("tabs and returns", b"ab\tcd\rZ"),
-        ("scrolls off the top", b"aaa\r\nbbb\r\nccc\r\nddd\r\neee\r\nfff"),
+        (
+            "scrolls off the top",
+            b"aaa\r\nbbb\r\nccc\r\nddd\r\neee\r\nfff",
+        ),
         ("REP after a run", b"abc\x1b[4b"),
         ("erase then refill", b"0123456789\x1b[H\x1b[2Jxy"),
     ];

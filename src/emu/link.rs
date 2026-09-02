@@ -37,14 +37,14 @@ pub struct LinkId(pub u32);
 /// `ls --hyperlink` over a large directory is the case this is sized for: one entry
 /// per file, and the screen holds a few hundred at a time, so a few thousand is
 /// several screens of history deep.
-pub const MAX_TRACKED_LINKS: usize = 4096;
+pub(crate) const MAX_TRACKED_LINKS: usize = 4096;
 
 /// Total URI bytes held before the oldest entries are dropped.
 ///
 /// Small next to [`super::image::MAX_RETAINED_BYTES`] because the payloads are: a URI
 /// is bounded by [`MAX_URI_LEN`], so this is a second bound for the pathological case
 /// of thousands of long ones rather than the one that usually bites.
-pub const MAX_RETAINED_URI_BYTES: usize = 4 << 20;
+pub(crate) const MAX_RETAINED_URI_BYTES: usize = 4 << 20;
 
 /// Longest URI accepted from the child.
 ///
@@ -53,11 +53,11 @@ pub const MAX_RETAINED_URI_BYTES: usize = 4 << 20;
 /// destination, which is worse than no destination. Doubled here, and enforced in
 /// [`super::term`] rather than relying on the generic OSC payload limit, because the
 /// hyperlink arm returns before that check.
-pub const MAX_URI_LEN: usize = 4096;
+pub(crate) const MAX_URI_LEN: usize = 4096;
 
 /// The hyperlink destinations this terminal knows about.
 #[derive(Debug, Default)]
-pub struct LinkStore {
+pub(crate) struct LinkStore {
     /// Ids, hash buckets and LRU order; see [`Ledger`].
     ledger: Ledger<LinkId>,
     uris: HashMap<LinkId, String>,
@@ -90,7 +90,7 @@ impl LinkStore {
     /// winning and the other's destination vanishing — the fast hash used here makes no
     /// promise against a deliberate search for such a pair, so the comparison is load-
     /// bearing, not a redundant sanity check.
-    pub fn intern(&mut self, uri: &str) -> (LinkId, bool) {
+    pub(crate) fn intern(&mut self, uri: &str) -> (LinkId, bool) {
         let hash = fast_hash(uri.as_bytes());
         if let Some(id) = self
             .ledger
@@ -107,7 +107,10 @@ impl LinkStore {
         (id, true)
     }
 
-    pub fn get(&self, id: LinkId) -> Option<&str> {
+    /// The URI behind an id. Only the eviction tests ask: a drain sends each URI once
+    /// and Lisp holds the table thereafter, so the crate never looks one back up.
+    #[cfg(test)]
+    pub(crate) fn get(&self, id: LinkId) -> Option<&str> {
         self.uris.get(&id).map(String::as_str)
     }
 

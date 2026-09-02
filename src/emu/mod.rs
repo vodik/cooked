@@ -26,23 +26,21 @@ pub(crate) fn fast_hash(bytes: &[u8]) -> u64 {
     hash
 }
 
-pub mod cell;
-pub mod glyph;
-pub mod image;
-pub mod intern;
-pub mod kitty;
-pub mod link;
-pub mod parser;
-pub mod screen;
-pub mod sixel;
-pub mod term;
+pub(crate) mod cell;
+pub(crate) mod glyph;
+pub(crate) mod image;
+pub(crate) mod intern;
+pub(crate) mod kitty;
+pub(crate) mod link;
+pub(crate) mod parser;
+pub(crate) mod screen;
+pub(crate) mod sixel;
+pub(crate) mod term;
 
-pub use cell::{Attrs, Cell, Color, Deco, DecoCell, Extra, MarkId, Row, Run, Style};
-pub use glyph::BoxGlyph;
-pub use image::{CellMetrics, Image, ImageData, ImageFormat, ImageId, Placement};
-pub use link::{LinkId, LinkStore};
-pub use screen::{Cursor, Erase, Screen};
-pub use term::{
-    Anchor, BACKLOG_HIGH_WATER, CursorShape, Delta, Event, KeyEncoding, Mouse, SYNC_TIMEOUT,
-    Scrolled, Term, osc_reply,
-};
+pub(crate) use cell::{Color, Deco, MarkId, Run, Style};
+pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ImageId};
+pub(crate) use link::LinkId;
+pub(crate) use term::{Anchor, CursorShape, Delta, Event, KeyEncoding, osc_reply};
+
+// The benchmark's whole surface; see `tests/throughput.rs`.
+pub use term::{BACKLOG_HIGH_WATER, Term};

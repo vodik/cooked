@@ -22,11 +22,11 @@ use super::image::{CellSize, ImageFormat, ImageId, PixelFormat, PixelSize, Pixel
 ///
 /// Chunks are capped at 4096 bytes by the protocol, so this is a bound on how many of
 /// them one image may take rather than on any single APC.
-pub const MAX_PAYLOAD: usize = 32 << 20;
+pub(crate) const MAX_PAYLOAD: usize = 32 << 20;
 
 /// What the child asked for. `a=` in the control data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Action {
+pub(crate) enum Action {
     /// `a=t` — transmit, do not display. The protocol's default when `a=` is absent.
     #[default]
     Transmit,
@@ -42,7 +42,7 @@ pub enum Action {
 
 /// How the payload's bytes are meant. `f=` in the control data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Payload {
+pub(crate) enum Payload {
     /// `f=24`
     Rgb,
     /// `f=32`, the protocol's default.
@@ -65,7 +65,7 @@ impl Payload {
 
 /// One parsed command, before its payload has been reassembled.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Command {
+pub(crate) struct Command {
     pub action: Action,
     pub format: Payload,
     pub more: bool,
@@ -100,7 +100,7 @@ impl Command {
     /// for: it is extended by adding keys, and a terminal that failed on the first one
     /// it had not heard of would break on every new client. Keys naming a *capability*
     /// are different, and land in `unsupported`.
-    pub fn parse(control: &str) -> Self {
+    pub(crate) fn parse(control: &str) -> Self {
         let mut cmd = Self::default();
         for pair in control.split(',') {
             let Some((key, value)) = pair.split_once('=') else {
@@ -161,7 +161,7 @@ impl Command {
 
 /// What the terminal should do once a command's payload is complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     /// Nothing yet — more chunks are coming.
     Incomplete,
     /// Hand these bytes to the image store; display them if `display`.
@@ -181,7 +181,7 @@ pub enum Outcome {
 
 /// Per-session protocol state: partly-received transmissions and the client's id space.
 #[derive(Debug, Default)]
-pub struct Kitty {
+pub(crate) struct Kitty {
     /// The transmission being reassembled, if a chunked one is in flight.
     ///
     /// One at a time, which is what the protocol allows: a client must finish a chunked
@@ -203,7 +203,7 @@ pub struct Kitty {
 
 impl Kitty {
     /// Note that CLIENT_ID now means the image we interned as OURS.
-    pub fn bind(&mut self, client_id: u32, ours: ImageId) {
+    pub(crate) fn bind(&mut self, client_id: u32, ours: ImageId) {
         if client_id != 0 {
             self.by_client.insert(client_id, ours);
         }
@@ -214,7 +214,7 @@ impl Kitty {
     /// PAYLOAD is the whole APC body, `G` and all — the introducer is checked here
     /// rather than by the caller, because APC is a general escape and something else
     /// may one day be carried in it. Anything not addressed to `G` is not ours.
-    pub fn feed(&mut self, payload: &[u8]) -> (Outcome, Option<Vec<u8>>) {
+    pub(crate) fn feed(&mut self, payload: &[u8]) -> (Outcome, Option<Vec<u8>>) {
         let Some(payload) = payload.strip_prefix(b"G") else {
             return (Outcome::Nothing, None);
         };
@@ -484,8 +484,8 @@ pub(super) fn encode_base64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::encode_base64 as b64;
+    use super::*;
 
     #[test]
     fn the_default_action_is_transmit_not_display() {

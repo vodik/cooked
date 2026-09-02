@@ -27,6 +27,7 @@
 ;; see them; cooked.el declares the same set for its own use.
 (declare-function cooked--send "cooked-core")
 (declare-function cooked--sample-mode "cooked-core")
+(declare-function cooked--set-attended "cooked-core")
 (declare-function cooked--resize "cooked-core")
 (declare-function cooked--cell-size "cooked")
 (declare-function cooked--signal "cooked-core")
@@ -111,6 +112,13 @@ this lets the prompt text arrive first."
   :type 'number :group 'cooked)
 
 (defvar-local cooked--secret-timer nil)
+(defvar-local cooked--secret-read nil
+  "The minibuffer of the password read in flight, if there is one.")
+(defvar-local cooked--secret-epoch 0
+  "Counter bumped every time the child stops asking for a secret.
+A read that finishes holding a stale epoch is answering a question nobody
+is waiting on any more, and must not touch the child -- see
+`cooked--cancel-secret'.")
 (defvar-local cooked--history-stash nil
   "Input set aside while browsing history.
 The one piece of history state that is cooked's: the ring, and the position in
@@ -312,6 +320,29 @@ negotiation that never happened -- see `cooked--assumed-key-protocol'."
       (cooked--snap-to-cursor)
       (cooked--send-to-child bytes))))
 
+(defvar cooked-send-string-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map minibuffer-local-map)
+    (define-key map (kbd "S-<return>") #'newline)
+    (define-key map (kbd "M-RET") #'newline)
+    map)
+  "Minibuffer map for `cooked-send-string\='.
+
+`RET\=' sends what has been typed, so the newline a here-document or a
+multi-line send needs has nowhere else to come from; `S-RET\=' inserts one, the
+same split every chat client makes.
+
+Both spellings, unconditionally, because nothing here can tell whether the
+first will arrive.  This is Emacs\=' own keyboard, not the child\='s: what
+`cooked--keys\=' negotiated says what the program *inside* the terminal may
+send us, and has no bearing on whether the terminal Emacs is itself running in
+reports a shift modifier on `RET\='.  A GUI frame does; a terminal one does
+only if it speaks a protocol that can, which is between Emacs and its own
+terminal.  So `M-RET\=' is bound alongside as the spelling that always
+survives.  `C-j\=' is not: `minibuffer-local-map\=' binds it to
+`exit-minibuffer\=', and taking that away would be a worse trade than the one
+it fixes.  `C-q C-j\=' inserts a newline anywhere and is unaffected by either.")
+
 (defun cooked-send-string (string)
   "Send STRING to the child.
 
@@ -320,7 +351,7 @@ also reaches the child while peeking -- ending peek first, so the result is
 seen immediately rather than held behind the freeze -- but refuses once Emacs
 owns the line: a string sent out of band would arrive at the child ahead of
 whatever pending input is still sitting unsent in the buffer."
-  (interactive "sSend: ")
+  (interactive (list (read-from-minibuffer "Send: " nil cooked-send-string-map)))
   (cooked--resume-forwarding)
   (when (cooked--input-state-p)
     (user-error "Emacs already owns the line; type directly instead"))
@@ -1926,18 +1957,122 @@ corrupt a redisplay cooked cannot see, let alone repair."
 ;;;; Secrets
 
 (defun cooked--schedule-secret ()
-  "Prompt for a secret once the prompt text has had time to arrive."
+  "Prompt for a secret once the prompt text has had time to arrive.
+
+Not while the user is looking at something else.  `read-passwd\=' takes the
+minibuffer of whatever frame is selected, which for a buffer nobody is in means
+a masked prompt appearing under the cursor in an unrelated buffer -- and then
+the next thing typed there, whatever it was meant for, is sent to this child
+followed by a newline.  A password prompt that arrives late is a small thing; a
+password prompt that quietly redirects the keys you are already typing is not,
+and the second is what this used to do.
+
+So the read is held instead, and `cooked--resume-secret\=' raises it when
+attention comes back.  Nothing else is deferred with it: `cooked--mode\=' is
+already `secret\=', the keymap has already been swapped, and the child is
+blocked in a `getpass\=' that will wait as long as it takes.
+
+Said out loud rather than held silently, because the buffer is off screen and
+the alternative is a session that has stopped for no visible reason.  A message
+is the smallest thing that cannot steal a keystroke; a notification is the
+better one, and is `cooked-command-finished-functions\=' territory rather than
+this function\='s."
   (cooked--cancel-secret)
-  (setq cooked--secret-timer
-        (run-with-timer cooked-secret-debounce nil
-                        (let ((buffer (current-buffer)))
-                          (lambda () (cooked--prompt-secret buffer))))))
+  (if (eq cooked--attention 'away)
+      (message "cooked: %s is asking for a password" (buffer-name))
+    (setq cooked--secret-timer
+          (run-with-timer cooked-secret-debounce nil
+                          (let ((buffer (current-buffer)))
+                            (lambda () (cooked--prompt-secret buffer)))))))
+
+(defun cooked--resume-secret ()
+  "Raise a secret prompt that was held back while the user was elsewhere.
+
+Called as attention returns, and only then.  Three things have to be true and
+each rules out a different way of prompting for nothing: the child must still
+be asking, or the prompt would be answered by whatever it is running now; no
+timer may be pending, or `cooked--schedule-secret\=' has already been through
+here and rescheduling would bump the epoch out from under it; and no read may
+be on screen, which is the case of leaving the buffer *while* the minibuffer
+was up and coming back to it, where cancelling and re-asking would dismiss a
+prompt the user is part-way through answering."
+  (when (and cooked--session
+             (eq cooked--mode 'secret)
+             (not cooked--secret-timer)
+             (not cooked--secret-read))
+    (cooked--schedule-secret)))
 
 (defun cooked--cancel-secret ()
-  "Abandon any pending secret prompt."
+  "Abandon any pending or on-screen secret prompt.
+
+Called whenever the child stops asking: it left secret mode, it exited, or the
+buffer was killed.  The pending timer is the easy half.  The hard half is a
+read already on screen -- `sudo\=' interrupted from the terminal window leaves
+the minibuffer sitting there, and answering it later would hand a password, or
+a `C-c\=', to whatever the child is running by then.  That is not a stale
+window; it is the wrong program being killed.
+
+So two things happen.  The epoch moves, which is what makes the read harmless
+whatever it does next: `cooked--prompt-secret\=' compares before it sends
+anything.  Then the minibuffer is dismissed from a zero-delay timer, because it
+is a recursive edit this is not inside -- the timer runs in that recursive
+edit\='s command loop, where `abort-recursive-edit\=' has a tag to throw to.  It
+is allowed to fail: if the user has since opened a minibuffer of their own on
+top of ours, both are left alone and the epoch carries the safety."
+  (setq cooked--secret-epoch (1+ cooked--secret-epoch))
   (when cooked--secret-timer
     (cancel-timer cooked--secret-timer)
-    (setq cooked--secret-timer nil)))
+    (setq cooked--secret-timer nil))
+  (when-let* ((minibuffer cooked--secret-read))
+    (setq cooked--secret-read nil)
+    (run-at-time 0 nil #'cooked--dismiss-secret minibuffer)))
+
+(defun cooked--dismiss-secret (minibuffer)
+  "Abort the password read in MINIBUFFER, if it is still the one on screen."
+  (when-let* ((window (active-minibuffer-window)))
+    (when (eq (window-buffer window) minibuffer)
+      (with-selected-window window
+        (abort-recursive-edit)))))
+
+(defvar cooked-secret-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'cooked-secret-abort)
+    map)
+  "Keys layered over the map `read-passwd\=' installs.
+
+`C-c C-c\=' only: the read is a minibuffer, so `C-g\=' already aborts it, but
+the prompt on screen is sudo\='s rather than Emacs\=', and the key that gets you
+out of a program asking for a password on a terminal is the interrupt.  It is
+spelled the same here as in the buffer, where `C-c C-c\=' is
+`cooked-interrupt\=', so the answer does not depend on which window point
+happens to be in.")
+
+(defun cooked-secret-abort ()
+  "Abandon the password read, leaving the child to be interrupted.
+
+Signals quit rather than sending anything itself; `cooked--prompt-secret\=' is
+already handling quit by sending the child `C-c\=', and that is the one place
+that knows which buffer\='s child is waiting."
+  (interactive)
+  (abort-minibuffers))
+
+(defun cooked--read-passwd (prompt)
+  "Read a secret for PROMPT with `cooked-secret-map\=' in force.
+
+The minibuffer is recorded on the session\='s buffer for as long as the read
+lasts, which is what lets `cooked--cancel-secret\=' take it back down when the
+child stops asking."
+  (let ((buffer (current-buffer)))
+    (unwind-protect
+        (minibuffer-with-setup-hook
+            (lambda ()
+              (use-local-map
+               (make-composed-keymap cooked-secret-map (current-local-map)))
+              (let ((minibuffer (current-buffer)))
+                (with-current-buffer buffer (setq cooked--secret-read minibuffer))))
+          (read-passwd prompt))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (setq cooked--secret-read nil))))))
 
 (defun cooked--prompt-secret (buffer)
   "Read a secret for BUFFER and send it, without it touching the buffer.
@@ -1958,19 +2093,30 @@ space, and does not."
       (setq cooked--secret-timer nil)
       (when (eq cooked--mode 'secret)
         (let* ((prompt (or (cooked--prompt-text cooked--session) "Password"))
-               (prompt (if (string-suffix-p ":" prompt) (concat prompt " ") (concat prompt ": "))))
+               (prompt (if (string-suffix-p ":" prompt) (concat prompt " ") (concat prompt ": ")))
+               ;; Read before the prompt is answered and compared after, in both
+               ;; the answered and the quit branch below.
+               (epoch cooked--secret-epoch))
           (condition-case nil
               (let ((secret (or (and cooked-password-function
                                      (funcall cooked-password-function prompt))
-                                (read-passwd prompt))))
+                                (cooked--read-passwd prompt))))
                 (unwind-protect
-                    (progn (cooked--send-to-child secret)
-                           (cooked--send-to-child "\n"))
+                    (if (/= epoch cooked--secret-epoch)
+                        (message "Nothing is asking for that any more; not sent")
+                      (cooked--send-to-child secret)
+                      (cooked--send-to-child "\n"))
                   (clear-string secret)))
-            ;; C-g at the prompt should interrupt the child's read rather than leave
-            ;; it blocked on a `getpass' nobody is going to answer.
+            ;; C-g or C-c C-c at the prompt should interrupt the child's read
+            ;; rather than leave it blocked on a `getpass' nobody is going to
+            ;; answer -- but only while it is still that read we would be
+            ;; interrupting.  A prompt the child abandoned on its own leaves a
+            ;; minibuffer that outlives it, and sending the interrupt anyway is
+            ;; how quitting a dead password prompt kills the command typed after
+            ;; it.
             (quit
-             (cooked--send-if-live "\C-c")
+             (when (= epoch cooked--secret-epoch)
+               (cooked--send-if-live "\C-c"))
              (signal 'quit nil))))))))
 
 ;;;; Size and lifecycle
@@ -2101,11 +2247,26 @@ whatever it showed when the freeze began until something else asked."
                           'away))))
         (unless (or (null state) (eq state cooked--attention))
           (setq cooked--attention state)
+          ;; The native core polls the child's termios on a tick, and the tick is
+          ;; only ever for somebody watching -- so it stretches while nobody is.
+          ;; Told before anything below acts on the new state, because coming back
+          ;; is the one direction that needs the eager tick restored *first*.
+          (cooked--set-attended cooked--session (eq state 'here))
           ;; Coming back is where Emacs hands the buffer a point it recorded
           ;; before every drain since, and a cooked position does not keep that
           ;; long.  See `cooked--restore-point'.
           (when (eq state 'here)
-            (cooked--restore-point (cooked--user-window)))
+            (cooked--restore-point (cooked--user-window))
+            ;; The mode is as stale as the tick that was running while the buffer
+            ;; sat off screen, so it is read again here rather than inherited: a
+            ;; child that went into a secret read silently would otherwise not be
+            ;; noticed for up to a second after the user is already looking at it.
+            ;; This is also what raises the prompt in the ordinary case, by way of
+            ;; `cooked--set-mode'; `cooked--resume-secret' is for the other one,
+            ;; where the mode was already `secret' before the buffer was left and
+            ;; so nothing changes for `cooked--set-mode' to notice.
+            (cooked--resample-mode)
+            (cooked--resume-secret))
           (when (and (eq state 'away) (eq cooked--input-mode 'frozen))
             (cooked--defer
              (lambda ()
@@ -2224,6 +2385,9 @@ and a session that exits and is then killed goes through both."
     (save-excursion
       (goto-char (point-max))
       (insert (format "\n[exited %s]\n" code))))
+  ;; A child that dies mid-`getpass' -- interrupted from the buffer, killed from
+  ;; outside -- leaves a password prompt with nothing behind it.
+  (cooked--cancel-secret)
   (cooked--stop-session)
   ;; After the session is gone, so the mode is recomputed as nil: a child that
   ;; exited while the buffer was suspended -- evil in normal state, or a
@@ -2347,14 +2511,12 @@ as long as the state lasts."
 (defun cooked--mode-line-click (command help)
   "Property list making mode-line text run COMMAND on a click, described by HELP.
 
-Mode-line text needs its keymap nested under the `mode-line\=' pseudo-event
-rather than bound directly, which is the only thing here that is not obvious.
 `down-mouse-1\=' rather than `mouse-1\=' so the action fires on the press, as
 term.el and eat both do -- a mode-line indicator that waits for the release
 feels broken next to every other one in the frame."
   (list 'mouse-face 'mode-line-highlight
         'help-echo help
-        'local-map `(keymap (mode-line keymap (down-mouse-1 . ,command)))))
+        'local-map (make-mode-line-mouse-map 'down-mouse-1 command)))
 
 (defun cooked--mode-line-state ()
   "The state word: who owns the keyboard, and how well that is known.

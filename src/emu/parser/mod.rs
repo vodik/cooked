@@ -28,6 +28,10 @@
 //!
 //! [Paul Williams' ANSI parser state machine]: https://vt100.net/emu/dec_ansi_parser
 #![deny(clippy::all, clippy::if_not_else, clippy::enum_glob_use)]
+// Upstream is a library crate, where these are the API; here they are crate-internal.
+// Narrowing them would make a re-sync a rewrite rather than a diff, which is the whole
+// bargain this file's header strikes.
+#![allow(unreachable_pub)]
 use core::str;
 
 mod params;
@@ -194,6 +198,10 @@ impl Parser {
     /// See [`Perform::advance`] for more details.
     #[inline]
     #[must_use = "Returned value should be used to processs the remaining bytes"]
+    // Unused in cooked, which handles synchronized updates through `Modes::sync_until`
+    // rather than by stopping the parser. Kept because this file's contract is to stay
+    // faithful to vte 0.15.0; see the module header.
+    #[allow(dead_code)]
     pub fn advance_until_terminated<P: Perform>(
         &mut self,
         performer: &mut P,
@@ -981,6 +989,8 @@ pub trait Perform {
     /// This is checked after every parsed byte, so no expensive computation
     /// should take place in this function.
     #[inline(always)]
+    // The other half of `Parser::advance_until_terminated`, and kept for the same reason.
+    #[allow(dead_code)]
     fn terminated(&self) -> bool {
         false
     }

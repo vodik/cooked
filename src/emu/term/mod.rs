@@ -45,14 +45,6 @@ impl CursorShape {
             _ => None,
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Block => "block",
-            Self::Underline => "underline",
-            Self::Bar => "bar",
-        }
-    }
 }
 
 /// Where in the output stream a mark landed.
@@ -185,16 +177,6 @@ pub enum KeyEncoding {
     Kitty,
 }
 
-impl KeyEncoding {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Legacy => "legacy",
-            Self::ModifyOtherKeys => "modify-other",
-            Self::Kitty => "kitty",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Mouse {
     pub click: bool,
@@ -294,28 +276,28 @@ pub struct Delta {
 /// to freeze the buffer. A child killed mid-frame never sends the end marker, so without
 /// a cap the last thing the user sees is a partial screen. xterm and contour use 150ms,
 /// kitty 100; the longer of the two is the safer choice on a loaded machine.
-pub const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+pub(crate) const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Backlog at which the reader stops pulling from the pty, letting the child block.
 pub const BACKLOG_HIGH_WATER: usize = 8_000;
 
 /// Largest OSC payload forwarded to Lisp, in bytes. Well past any real title or
 /// hyperlink, and short of letting a single escape sequence allocate without bound.
-pub const OSC_PAYLOAD_LIMIT: usize = 1 << 20;
+pub(crate) const OSC_PAYLOAD_LIMIT: usize = 1 << 20;
 
 /// How long a `cmdline_url=` may be before the `C` mark is taken without one.
 ///
 /// A command line is typed, so this is generous past anything a person writes and still
 /// far short of letting a hostile stream size our heap. A `C` with an over-long command
 /// line is still a `C`; only the courtesy is dropped.
-pub const MAX_CMDLINE_LEN: usize = 8 << 10;
+pub(crate) const MAX_CMDLINE_LEN: usize = 8 << 10;
 
 /// Longest sixel body collected from one DCS string.
 ///
 /// Sixel is a verbose encoding — one byte per six pixels per colour pass — so this is
 /// smaller than it looks: a full-screen picture is comfortably inside it, and the decoded
 /// result is bounded again, and more tightly, by [`sixel::MAX_PIXELS`].
-pub const SIXEL_BODY_LIMIT: usize = 8 << 20;
+pub(crate) const SIXEL_BODY_LIMIT: usize = 8 << 20;
 
 /// Depth of the kitty keyboard flag stack. Real clients push once around a full-screen
 /// session; anything deeper is a child that never pops.
@@ -356,7 +338,7 @@ fn plain_cells(value: &str) -> Option<u16> {
 /// early or inject one of their own. Payloads are attacker-reachable — a colour name can
 /// arrive from the child in a set request and come straight back out in the echo — so
 /// centralising the framing buys nothing unless it also refuses to frame a lie.
-pub fn osc_reply(code: u16, payload: &str, bell: bool) -> Option<Vec<u8>> {
+pub(crate) fn osc_reply(code: u16, payload: &str, bell: bool) -> Option<Vec<u8>> {
     if payload.chars().any(|c| c.is_control() || c == '\u{7f}') {
         return None;
     }

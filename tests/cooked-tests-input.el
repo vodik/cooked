@@ -724,6 +724,79 @@ because cooked's input mark is the process mark comint asks for."
     (should-not (string-match-p "hunter2" (buffer-substring-no-properties
                                            (point-min) (point-max))))))
 
+(ert-deftest cooked-a-secret-prompt-is-held-back-while-the-user-is-elsewhere ()
+  "A password read must not seize the minibuffer of a buffer nobody is in.
+
+`read-passwd\=' prompts in whatever frame is selected, so a prompt raised for an
+off-screen session lands under the cursor wherever the user actually is -- and
+the next thing they type there is sent to *this* child with a newline after it.
+Late is fine; redirecting live keystrokes is not.
+
+Asserted on whether a read was *raised*, not on `cooked--secret-timer\=' being
+nil: the timer clears itself as it fires, so a scheduled prompt and a withheld
+one leave that variable looking identical a moment later.  Answering through
+`cooked-password-function\=' is what makes the difference visible -- and keeps a
+regression here a failing assertion rather than a batch Emacs blocked forever
+in a `read-passwd\=' nobody can answer."
+  (let ((asked nil))
+    (let ((cooked-password-function (lambda (_prompt) (setq asked t) "")))
+      (cooked-tests--with-session '("/bin/sh" "-c" "printf 'Password: '; stty -echo; sleep 5")
+        (setq cooked--attention 'away)
+        (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+        ;; Well past `cooked-secret-debounce', so a scheduled read would have run.
+        (cooked-tests--pump 0.3)
+        (should-not asked)
+        ;; The mode moved and the keymap swapped regardless: only the read is
+        ;; withheld, and the child is still blocked waiting for it.
+        (should (eq cooked--mode 'secret))
+        (should-not cooked--secret-timer)))))
+
+(ert-deftest cooked-a-held-secret-prompt-is-raised-when-attention-returns ()
+  "The other half: held is held until the user comes back, not dropped.
+
+Spelled through `cooked--update-attention\=' rather than by calling
+`cooked--resume-secret\=' directly, because the wiring between them is the part
+that can rot -- a resume nothing calls looks exactly like this test passing."
+  (let ((answered nil))
+    (let ((cooked-password-function (lambda (_prompt) (setq answered t) "hunter2")))
+      (cooked-tests--with-session
+          '("/bin/sh" "-c" "printf 'Password: '; stty -echo; read p; printf '\\nGOT\\n'; sleep 5")
+        (setq cooked--attention 'away)
+        (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+        (should-not answered)
+        ;; Coming back.  `cooked--update-attention\=' walks live sessions and reads
+        ;; the window itself, so the buffer has to actually be in one.
+        (set-window-buffer (selected-window) (current-buffer))
+        (cooked--update-attention)
+        (should (eq cooked--attention 'here))
+        (should (cooked-tests--settle (lambda () answered)))
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "GOT" (cooked-tests--text)))))))))
+
+(ert-deftest cooked-returning-does-not-disturb-a-secret-read-already-on-screen ()
+  "Leaving the buffer with the minibuffer up and coming back must not re-ask.
+
+`cooked--schedule-secret\=' begins with `cooked--cancel-secret\=', which bumps the
+epoch and dismisses the read on screen -- correct when the child has stopped
+asking, and destructive when the user is halfway through answering.  So the
+resume path has to decline while a read is in flight, and this pins the guard
+rather than the timer it protects."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'Password: '; stty -echo; sleep 5")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+    (cooked--cancel-secret)
+    ;; Stand in for a live read: `cooked--secret-read' holds the minibuffer for as
+    ;; long as `cooked--read-passwd' is inside it.
+    (let ((epoch cooked--secret-epoch))
+      (setq cooked--secret-read (current-buffer))
+      (unwind-protect
+          (progn
+            (cooked--resume-secret)
+            (should-not cooked--secret-timer)
+            ;; The epoch is the tell: a resume that went through would have moved
+            ;; it, and the read in flight would then refuse to send its answer.
+            (should (= epoch cooked--secret-epoch)))
+        (setq cooked--secret-read nil)))))
+
 (ert-deftest cooked-a-stale-cooked-mode-cannot-leak-a-typed-secret ()
   "Typing must never insert under a `cooked--mode\=' the child has moved on from.
 

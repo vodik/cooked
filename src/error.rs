@@ -17,7 +17,7 @@ use nix::errno::Errno;
 use std::ffi::OsString;
 use std::fmt;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

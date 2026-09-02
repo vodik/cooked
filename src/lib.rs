@@ -3,17 +3,18 @@
 //! Lisp entry points live here; everything below is plain Rust and unit-testable without
 //! an Emacs in the loop.
 
-pub mod platform;
 pub mod emu;
-pub mod env;
-pub mod error;
-pub mod pty;
-pub mod session;
+pub(crate) mod env;
+pub(crate) mod error;
+pub(crate) mod platform;
+pub(crate) mod pty;
+pub(crate) mod session;
 
 use emu::{
-    Anchor, CellMetrics, Color, Deco, Event, ImageData, ImageId, LinkId, MarkId, Run, Style,
+    Anchor, CellMetrics, Color, CursorShape, Deco, Event, ImageData, ImageFormat, ImageId,
+    KeyEncoding, LinkId, MarkId, Run, Style,
 };
-use env::{Env, Result, Runtime, Value, plist};
+use env::{Env, Result, Runtime, Value, lisp_enum, list, plist, sym};
 use nix::sys::signal::Signal;
 use pty::{Mode, Pid, Winsize};
 use session::{Session, Update};
@@ -182,6 +183,21 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// deleted, and archiving would return them to the buffer as scrollback.
         "cooked--remove-rows" 3..=3 => remove_rows;
 
+        /// Tell SESSION whether anyone is looking at its buffer, as ATTENDED.
+        ///
+        /// Sets how often the reader thread re-reads the child's termios while the child
+        /// is quiet: ten times a second when attended, once a second when not.  The tick
+        /// exists to notice a mode change that moves the tty without writing a byte --
+        /// `read -s' with no prompt -- and the only things that answer such a change are
+        /// raising a password prompt and swapping a keymap, neither of which is worth
+        /// anything to a buffer in no window.
+        ///
+        /// Safe to leave alone.  A session that is never told stays on the eager tick,
+        /// and no keystroke depends on this either way: `cooked--sample-mode' reads the
+        /// tty on the input path, which is the guarantee that a stale mode can never
+        /// reach a typed character.
+        "cooked--set-attended" 2..=2 => set_attended;
+
         /// Send signal NUMBER to SESSION's foreground group.
         "cooked--signal" 2..=2 => signal;
 
@@ -314,8 +330,8 @@ fn each<T>(env: Env, mut list: Value, mut f: impl FnMut(Value) -> Result<T>) -> 
         if out.len() >= MAX_LIST_LEN {
             return Err(env.signal("error", "cooked: list argument too long or improper"));
         }
-        out.push(f(env.call("car", &[list])?)?);
-        list = env.call("cdr", &[list])?;
+        out.push(f(env.car(list)?)?);
+        list = env.cdr(list)?;
     }
     Ok(out)
 }
@@ -327,8 +343,8 @@ fn strings(env: Env, list: Value) -> Result<Vec<String>> {
 fn pairs(env: Env, alist: Value) -> Result<Vec<(String, String)>> {
     each(env, alist, |cell| {
         Ok((
-            env.from_lisp::<String>(env.call("car", &[cell])?)?,
-            env.from_lisp::<String>(env.call("cdr", &[cell])?)?,
+            env.from_lisp::<String>(env.car(cell)?)?,
+            env.from_lisp::<String>(env.cdr(cell)?)?,
         ))
     })
 }
@@ -356,14 +372,36 @@ macro_rules! into_lisp_id {
 
 into_lisp_id!(MarkId, LinkId, ImageId);
 
-/// The line-discipline state, as the symbol `cooked.el' matches on.
-///
-/// [`Mode::as_str`] is the one spelling of these names, so the drain's `:mode' and
-/// `cooked--sample-mode' cannot drift into disagreeing about what to call the same
-/// state.
-impl env::IntoLisp for Mode {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
-        env.intern(self.as_str())
+// Every enum this module sends as a bare symbol, and the symbol each variant is. One
+// list per type, so the drain's `:mode' and `cooked--sample-mode' cannot drift into
+// disagreeing about what to call the same state -- they now reach the same table through
+// the same impl, where before one went through an impl here and the other interned
+// `Mode::as_str' on its own.
+lisp_enum! {
+    Mode {
+        Cooked => "cooked",
+        Raw => "raw",
+        Secret => "secret",
+    }
+    /// `cooked.el' maps these onto `cursor-type'.
+    CursorShape {
+        Block => "block",
+        Underline => "underline",
+        Bar => "bar",
+    }
+    /// What the child negotiated, which decides how a modified key is encoded on the way
+    /// back. See [`KeyEncoding`] for why the default is the conservative one.
+    KeyEncoding {
+        Legacy => "legacy",
+        ModifyOtherKeys => "modify-other",
+        Kitty => "kitty",
+    }
+    /// The type symbol handed to `create-image'.
+    ImageFormat {
+        Png => "png",
+        Jpeg => "jpeg",
+        Gif => "gif",
+        Ppm => "pbm",
     }
 }
 
@@ -500,13 +538,22 @@ fn signal(env: Env, args: &[Value]) -> Result<Value> {
     Ok(env.nil())
 }
 
+/// Not an `accessors!` entry: those take the handle alone, and this carries a flag.
+fn set_attended(env: Env, args: &[Value]) -> Result<Value> {
+    // `from_lisp::<bool>` is nil-or-not rather than a type check, which is what a Lisp
+    // caller means by a boolean -- so anything non-nil reads as attended and there is no
+    // wrong value to report.
+    handle(env, args[0])?.set_attended(env.from_lisp(args[1])?);
+    Ok(env.nil())
+}
+
 fn job_control(env: Env, args: &[Value]) -> Result<Value> {
     let jc = handle(env, args[0])?.job_control().or_signal(env)?;
     let ch = |env: Env, c: Option<u8>| match c {
         Some(b) => env.into_lisp(b),
         None => Ok(env.nil()),
     };
-    plist!(&env, {
+    plist!(env, {
         ":intr" => ch(env, jc.intr)?,
         ":quit" => ch(env, jc.quit)?,
         ":susp" => ch(env, jc.susp)?,
@@ -549,12 +596,15 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
             env.cons(env.into_lisp(*index)?, block.into_lisp(&env)?)
         })
         .collect::<Result<Vec<_>>>()?;
-    let cursor = env.list(&[
-        env.into_lisp(update.delta.cursor.row)?,
-        env.into_lisp(update.delta.cursor.col)?,
-        env.into_lisp(update.delta.cursor_visible)?,
-        env.intern(update.delta.cursor_shape.as_str())?,
-    ])?;
+    let cursor = list!(
+        env,
+        [
+            update.delta.cursor.row,
+            update.delta.cursor.col,
+            update.delta.cursor_visible,
+            update.delta.cursor_shape,
+        ]
+    )?;
     let events = update
         .delta
         .events
@@ -577,19 +627,19 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
 
     plist!(env, {
         ":scrolled"   => scrolled,
-        ":rows"       => env.list(&rows)?,
+        ":rows"       => rows,
         ":height"     => update.delta.height,
         ":used"       => update.delta.used,
         ":head"       => update.delta.head,
         ":cursor"     => cursor,
-        ":marks"      => env.list(&marks)?,
+        ":marks"      => marks,
         ":alt"        => update.delta.alt,
         ":app-cursor" => update.delta.app_cursor,
-        ":keys"       => env.intern(update.delta.keys.as_str())?,
-        ":mode"       => env.intern(update.mode.as_str())?,
-        ":images"     => env.list(&images_to_lisp(env, &update.delta.images)?)?,
-        ":links"      => env.list(&links_to_lisp(env, &update.delta.links)?)?,
-        ":events"     => env.list(&events)?,
+        ":keys"       => update.delta.keys,
+        ":mode"       => update.mode,
+        ":images"     => images_to_lisp(env, &update.delta.images)?,
+        ":links"      => links_to_lisp(env, &update.delta.links)?,
+        ":events"     => events,
         ":exit"       => update.exit.map(i64::from),
     })
 }
@@ -635,14 +685,17 @@ impl Block {
     /// five out twice would bury it.
     fn span(&self, env: Env, chars: usize, style: Style, tail: Value) -> Result<Value> {
         let Style { fg, bg, attrs } = style;
-        env.list(&[
-            env.into_lisp(self.offset)?,
-            env.into_lisp(self.offset + chars)?,
-            env.into_lisp(fg)?,
-            env.into_lisp(bg)?,
-            env.into_lisp(u32::from(attrs.bits()))?,
-            tail,
-        ])
+        list!(
+            env,
+            [
+                self.offset,
+                self.offset + chars,
+                fg,
+                bg,
+                u32::from(attrs.bits()),
+                tail,
+            ]
+        )
     }
 
     /// Append RUNS, emitting spans only where there is something to say.
@@ -654,11 +707,8 @@ impl Block {
                 self.styles.push(self.span(env, chars, run.style, tail)?);
             }
             if let Some(link) = run.link {
-                self.links.push(env.list(&[
-                    env.into_lisp(self.offset)?,
-                    env.into_lisp(self.offset + chars)?,
-                    env.into_lisp(link)?,
-                ])?);
+                self.links
+                    .push(list!(env, [self.offset, self.offset + chars, link])?);
             }
             if run.deco.is_some() {
                 let tail = env.into_lisp(run.deco.as_ref())?;
@@ -676,12 +726,10 @@ impl Block {
     }
 
     fn into_lisp(self, env: &Env) -> Result<Value> {
-        env.list(&[
-            env.into_lisp(self.text.as_str())?,
-            env.list(&self.styles)?,
-            env.list(&self.decos)?,
-            env.list(&self.links)?,
-        ])
+        list!(
+            *env,
+            [self.text.as_str(), self.styles, self.decos, self.links]
+        )
     }
 }
 
@@ -746,7 +794,7 @@ impl Update {
         let on_grid = base + self.delta.scrolled.len();
         if at.row >= on_grid {
             return env.cons(
-                env.intern("screen")?,
+                sym!(env, "screen")?,
                 env.cons(env.into_lisp(at.row - on_grid)?, env.into_lisp(at.col)?)?,
             );
         }
@@ -754,7 +802,7 @@ impl Update {
             // Trailing blanks are trimmed out of the runs, so a column past the end of
             // what the row actually kept is clamped rather than run off the line.
             Some(row) => env.cons(
-                env.intern("scrolled")?,
+                sym!(env, "scrolled")?,
                 env.into_lisp(row.start + at.col.min(row.chars))?,
             ),
             None => Ok(env.nil()),
@@ -776,15 +824,18 @@ fn images_to_lisp(env: Env, images: &[ImageData]) -> Result<Vec<Value>> {
     images
         .iter()
         .map(|image| {
-            env.list(&[
-                env.into_lisp(image.id)?,
-                env.intern(image.format.as_str())?,
-                env.into_lisp(image.bytes.as_slice())?,
-                env.into_lisp(image.px.w)?,
-                env.into_lisp(image.px.h)?,
-                env.into_lisp(image.cells.cols)?,
-                env.into_lisp(image.cells.rows)?,
-            ])
+            list!(
+                env,
+                [
+                    image.id,
+                    image.format,
+                    image.bytes.as_slice(),
+                    image.px.w,
+                    image.px.h,
+                    image.cells.cols,
+                    image.cells.rows,
+                ]
+            )
         })
         .collect()
 }
@@ -828,7 +879,7 @@ impl env::IntoLisp for Option<&Deco> {
                 for glyph in glyphs {
                     packed.extend_from_slice(&glyph.bits().to_le_bytes());
                 }
-                env.cons(env.intern("glyph")?, env.into_lisp(packed.as_slice())?)
+                env.cons(sym!(env, "glyph")?, env.into_lisp(packed.as_slice())?)
             }
             Deco::Images(places) => {
                 let mut packed = Vec::with_capacity(places.len() * 8);
@@ -837,7 +888,7 @@ impl env::IntoLisp for Option<&Deco> {
                     packed.extend_from_slice(&place.cell_row.to_le_bytes());
                     packed.extend_from_slice(&place.cell_col.to_le_bytes());
                 }
-                env.cons(env.intern("image")?, env.into_lisp(packed.as_slice())?)
+                env.cons(sym!(env, "image")?, env.into_lisp(packed.as_slice())?)
             }
         }
     }
@@ -871,60 +922,60 @@ impl env::IntoLisp for Color {
 /// `:marks` reports the same id with a fresh anchor and Lisp moves the marker it made.
 /// See `Delta::marks` and `cooked--relocate-marks'.
 fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> Result<Value> {
-    let tagged = |name: &str, payload: Value| env.cons(env.intern(name)?, payload);
-    let mark = |name: &str, at: Anchor, id: MarkId| {
-        env.list(&[
-            env.intern(name)?,
-            update.anchor_to_lisp(env, at, rows)?,
-            env.into_lisp(id)?,
-        ])
+    // The tag arrives already resolved, because `sym!` needs the literal at its own
+    // call site to do the lookup at compile time -- which is the point of it.
+    let mark = |name: Value, at: Anchor, id: MarkId| {
+        list!(env, [name, update.anchor_to_lisp(env, at, rows)?, id])
     };
     match event {
-        Event::Bell => env.list(&[env.intern("bell")?]),
+        Event::Bell => list!(env, [sym!(env, "bell")?]),
         // (osc CODE BELL-P PART...) — Lisp decides what the code means. BELL-P is
         // opaque to the handler: it hands it back to `cooked--reply-osc' if it answers.
         Event::Osc(code, parts, bell) => {
             let mut items = vec![
-                env.intern("osc")?,
+                sym!(env, "osc")?,
                 env.into_lisp(*code)?,
                 env.into_lisp(*bell)?,
             ];
             for part in parts {
                 items.push(env.into_lisp(part.as_str())?);
             }
-            env.list(&items)
+            env.into_lisp(items)
         }
-        Event::PromptStart(at, id) => mark("prompt-start", *at, *id),
-        Event::PromptContinuation(at, id) => mark("prompt-continuation", *at, *id),
-        Event::PromptEnd(at, id) => mark("prompt-end", *at, *id),
+        Event::PromptStart(at, id) => mark(sym!(env, "prompt-start")?, *at, *id),
+        Event::PromptContinuation(at, id) => mark(sym!(env, "prompt-continuation")?, *at, *id),
+        Event::PromptEnd(at, id) => mark(sym!(env, "prompt-end")?, *at, *id),
         // (command-start CMDLINE ANCHOR ID), CMDLINE nil when the shell did not say.
-        Event::CommandStart(cmdline, at, id) => env.list(&[
-            env.intern("command-start")?,
-            env.into_lisp(cmdline.as_deref())?,
-            update.anchor_to_lisp(env, *at, rows)?,
-            env.into_lisp(*id)?,
-        ]),
-        Event::CommandEnd(code, at, id) => env.list(&[
-            env.intern("command-end")?,
-            env.into_lisp(code.map(i64::from))?,
-            update.anchor_to_lisp(env, *at, rows)?,
-            env.into_lisp(*id)?,
-        ]),
+        Event::CommandStart(cmdline, at, id) => list!(
+            env,
+            [
+                sym!(env, "command-start")?,
+                cmdline.as_deref(),
+                update.anchor_to_lisp(env, *at, rows)?,
+                *id,
+            ]
+        ),
+        Event::CommandEnd(code, at, id) => list!(
+            env,
+            [
+                sym!(env, "command-end")?,
+                code.map(i64::from),
+                update.anchor_to_lisp(env, *at, rows)?,
+                *id,
+            ]
+        ),
         // (mouse ENABLED SGR DRAG MOTION). Flattening this to a single "wants the
         // mouse" bit lost the reach of the request: 1002 and 1003 ask to be told
         // where the pointer went, not merely which cell it was pressed in, and the
         // sender cannot manufacture motion reports it was never told to send.
-        Event::Mouse(m) => env.list(&[
-            env.intern("mouse")?,
-            env.into_lisp(m.enabled())?,
-            env.into_lisp(m.sgr)?,
-            env.into_lisp(m.drag)?,
-            env.into_lisp(m.motion)?,
-        ]),
-        Event::Reply(bytes) => tagged("reply", env.into_lisp(bytes.as_slice())?),
-        Event::EraseScrollback => env.list(&[env.intern("erase-scrollback")?]),
-        Event::DisplayCleared => env.list(&[env.intern("display-cleared")?]),
+        Event::Mouse(m) => list!(
+            env,
+            [sym!(env, "mouse")?, m.enabled(), m.sgr, m.drag, m.motion,]
+        ),
+        Event::Reply(bytes) => env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?),
+        Event::EraseScrollback => list!(env, [sym!(env, "erase-scrollback")?]),
+        Event::DisplayCleared => list!(env, [sym!(env, "display-cleared")?]),
         // (title-stack PUSH-P)
-        Event::TitleStack(push) => env.list(&[env.intern("title-stack")?, env.into_lisp(*push)?]),
+        Event::TitleStack(push) => list!(env, [sym!(env, "title-stack")?, *push]),
     }
 }

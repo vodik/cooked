@@ -78,6 +78,7 @@
 (declare-function cooked--bracketed-paste-p "cooked-core")
 (declare-function cooked--live-p "cooked-core")
 (declare-function cooked--sample-mode "cooked-core")
+(declare-function cooked--set-attended "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
 (declare-function cooked--handle-osc "cooked-osc")

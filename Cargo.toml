@@ -16,6 +16,13 @@ miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-a
 nix = { version = "0.31", features = ["fs", "poll", "process", "pthread", "signal", "term"] }
 unicode-width = "0.2"
 
+# `unreachable_pub` is what makes `dead_code` mean anything here: an item that is `pub`
+# in a crate whose modules are `pub` is reachable by definition, so the compiler cannot
+# say it is unused. Narrowing the default keeps that gate shut. The vendored parser opts
+# out at the module, where its own contract explains why.
+[lints.rust]
+unreachable_pub = "warn"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

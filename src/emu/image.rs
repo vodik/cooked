@@ -52,17 +52,6 @@ pub enum ImageFormat {
     Ppm,
 }
 
-impl ImageFormat {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Png => "png",
-            Self::Jpeg => "jpeg",
-            Self::Gif => "gif",
-            Self::Ppm => "pbm",
-        }
-    }
-}
-
 /// A size in pixels.
 ///
 /// A named pair rather than `(u32, u32)` because the tuple form was threaded positionally
@@ -176,7 +165,7 @@ pub struct Placement {
 
 /// Everything retained about an image once its bytes have been handed to Lisp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Image {
+pub(crate) struct Image {
     /// Intrinsic size, which is the aspect ratio Lisp scales slices against.
     pub px: PixelSize,
     /// The cell rectangle it was laid into, fixed at transmission.
@@ -212,7 +201,7 @@ const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 /// the protocol does not ask them to repeat it. The alternative to reading it here is
 /// refusing those transmissions, or guessing — and the cell rectangle has to be settled
 /// before the image is laid into the grid, long before Emacs decodes anything.
-pub fn png_dimensions(bytes: &[u8]) -> Option<PixelSize> {
+pub(crate) fn png_dimensions(bytes: &[u8]) -> Option<PixelSize> {
     // 8-byte signature, then a chunk header of length and tag, then IHDR's width/height.
     if !bytes.starts_with(PNG_MAGIC) || bytes.get(12..16)? != b"IHDR" {
         return None;
@@ -231,7 +220,7 @@ pub fn png_dimensions(bytes: &[u8]) -> Option<PixelSize> {
 /// Only the three formats Emacs decodes natively are recognised. Anything else is
 /// declined rather than passed through hopefully: a format Emacs cannot read renders as
 /// nothing, and nothing is indistinguishable from a bug.
-pub fn sniff(bytes: &[u8]) -> Option<(ImageFormat, PixelSize)> {
+pub(crate) fn sniff(bytes: &[u8]) -> Option<(ImageFormat, PixelSize)> {
     if bytes.starts_with(PNG_MAGIC) {
         return Some((ImageFormat::Png, png_dimensions(bytes)?));
     }
@@ -295,13 +284,13 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<PixelSize> {
 /// having it here is what made kitty's validator carry a `bytes_per_pixel` of 0 as a
 /// sentinel for "not raw at all".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PixelFormat {
+pub(crate) enum PixelFormat {
     Rgb,
     Rgba,
 }
 
 impl PixelFormat {
-    pub fn bytes_per_pixel(self) -> u64 {
+    pub(crate) fn bytes_per_pixel(self) -> u64 {
         match self {
             Self::Rgb => 3,
             Self::Rgba => 4,
@@ -316,21 +305,21 @@ impl PixelFormat {
 /// container, spelled out separately in each. [`Pixels::encode`] is now the one place
 /// that rule lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Pixels {
+pub(crate) struct Pixels {
     pub size: PixelSize,
     pub format: PixelFormat,
     pub data: Vec<u8>,
 }
 
 impl Pixels {
-    pub fn new(size: PixelSize, format: PixelFormat, data: Vec<u8>) -> Self {
+    pub(crate) fn new(size: PixelSize, format: PixelFormat, data: Vec<u8>) -> Self {
         Self { size, format, data }
     }
 
     /// How many bytes a complete buffer of this size and layout would be.
     ///
     /// `u64` so that a hostile size cannot wrap the product back into a plausible number.
-    pub fn expected_len(&self) -> u64 {
+    pub(crate) fn expected_len(&self) -> u64 {
         self.size.area() * self.format.bytes_per_pixel()
     }
 
@@ -339,7 +328,7 @@ impl Pixels {
     /// The one statement of the rule, so the three call sites do not each carry a copy:
     /// RGB becomes a P6, which costs a header, and RGBA has to become a PNG because
     /// Emacs' pbm reader has no alpha.
-    pub fn encode(self) -> (ImageFormat, Vec<u8>) {
+    pub(crate) fn encode(self) -> (ImageFormat, Vec<u8>) {
         match self.format {
             PixelFormat::Rgb => (ImageFormat::Ppm, ppm_from_rgb(self.size, &self.data)),
             PixelFormat::Rgba => (ImageFormat::Png, png_from_rgba(self.size, &self.data)),
@@ -462,18 +451,18 @@ impl Crc32 {
 /// Retained not for lifetime reasons — Emacs owns that — but because kitty's protocol
 /// lets a client place an image it transmitted earlier by id alone, and expects that to
 /// work. This is the bound on how far back "earlier" reaches.
-pub const MAX_RETAINED_BYTES: usize = 64 << 20;
+pub(crate) const MAX_RETAINED_BYTES: usize = 64 << 20;
 
 /// Distinct images whose geometry is remembered, which outlives their bytes.
 ///
 /// Metadata is two words; keeping far more of it than of the payloads costs nothing and
 /// means a re-placement usually still knows how big the picture was even after the bytes
 /// have gone.
-pub const MAX_TRACKED_IMAGES: usize = 4096;
+pub(crate) const MAX_TRACKED_IMAGES: usize = 4096;
 
 /// The images this terminal knows about.
 #[derive(Debug, Default)]
-pub struct ImageStore {
+pub(crate) struct ImageStore {
     /// Ids, hash buckets and LRU order; see [`Ledger`].
     ledger: Ledger<ImageId>,
     images: HashMap<ImageId, Image>,
@@ -505,7 +494,7 @@ impl ImageStore {
     /// needs a hash collision *and* the true match to have aged out of the byte cap
     /// first, which is narrow enough to accept rather than keep payloads forever to
     /// close it.
-    pub fn intern(
+    pub(crate) fn intern(
         &mut self,
         format: ImageFormat,
         bytes: &[u8],
@@ -536,12 +525,17 @@ impl ImageStore {
         (id, true)
     }
 
-    pub fn get(&self, id: ImageId) -> Option<Image> {
+    pub(crate) fn get(&self, id: ImageId) -> Option<Image> {
         self.images.get(&id).copied()
     }
 
     /// The bytes of an already-transmitted image, if they are still held.
-    pub fn retained(&self, id: ImageId) -> Option<(ImageFormat, &[u8])> {
+    ///
+    /// Only the eviction and collision tests read this back: the drain hands the bytes
+    /// to Lisp once and thereafter refers to the image by id, so nothing in the crate
+    /// asks the store for a payload it has already sent.
+    #[cfg(test)]
+    pub(crate) fn retained(&self, id: ImageId) -> Option<(ImageFormat, &[u8])> {
         self.retained.get(&id).map(|(f, b)| (*f, b.as_slice()))
     }
 

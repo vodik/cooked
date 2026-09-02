@@ -115,15 +115,16 @@ impl State {
         // the mark half free: a row carrying no marks is the overwhelming case, and it
         // used to cost a `Vec` per eviction here plus another per row inside `marks_in`.
         for (index, row) in rows.into_iter().enumerate() {
-            self.evicted_marks.extend(row.marks.iter().map(|&(col, id)| {
-                (
-                    id,
-                    Anchor {
-                        row: base + index,
-                        col,
-                    },
-                )
-            }));
+            self.evicted_marks
+                .extend(row.marks.iter().map(|&(col, id)| {
+                    (
+                        id,
+                        Anchor {
+                            row: base + index,
+                            col,
+                        },
+                    )
+                }));
             self.pending_scrollback.push_back(Scrolled {
                 runs: row.runs,
                 wrapped: row.wrapped,
