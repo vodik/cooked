@@ -45,7 +45,7 @@ pub(crate) use linux::*;
 #[cfg(target_vendor = "apple")]
 mod apple;
 #[cfg(target_vendor = "apple")]
-pub use apple::*;
+pub(crate) use apple::*;
 
 #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 compile_error!(

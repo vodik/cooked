@@ -14,15 +14,15 @@ use std::os::fd::{AsFd, OwnedFd};
 /// `IOC_IN = 0x80000000`, `IOC_OUT = 0x40000000` and the 8-byte `winsize` landing in
 /// bits 16..29. Written out rather than computed so they can be checked against
 /// `sys/ttycom.h` by eye.
-pub const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
-pub const TIOCSWINSZ: libc::c_ulong = 0x8008_7467;
-pub const TIOCGWINSZ: libc::c_ulong = 0x4008_7468;
+pub(crate) const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
+pub(crate) const TIOCSWINSZ: libc::c_ulong = 0x8008_7467;
+pub(crate) const TIOCGWINSZ: libc::c_ulong = 0x4008_7468;
 
 /// `_POSIX_VDISABLE` — the `c_cc` value meaning "this character is turned off".
 ///
 /// Not zero here, unlike Linux: the BSDs spell it `0xff`, and NUL is a perfectly ordinary
 /// character a `c_cc` slot may legitimately hold.
-pub const POSIX_VDISABLE: libc::cc_t = 0xff;
+pub(crate) const POSIX_VDISABLE: libc::cc_t = 0xff;
 
 /// Path of the slave belonging to `master`.
 ///
@@ -31,7 +31,7 @@ pub const POSIX_VDISABLE: libc::cc_t = 0xff;
 /// calling `ptsname` between our call and the copy below, which would need a second
 /// terminal emulator inside the same Emacs racing us on the same instant. We copy
 /// immediately and hold nothing.
-pub fn slave_name(master: &PtyMaster) -> crate::error::Result<CString> {
+pub(crate) fn slave_name(master: &PtyMaster) -> crate::error::Result<CString> {
     let name = unsafe { nix::pty::ptsname(master) }?;
     Ok(CString::new(name)?)
 }
@@ -42,7 +42,7 @@ pub fn slave_name(master: &PtyMaster) -> crate::error::Result<CString> {
 /// returning and the `fcntl`s landing — in which a fork on another thread would inherit
 /// both ends. Unavoidable without `pipe2`; it is microseconds once per session, and the
 /// descriptors are a wakeup pipe rather than anything secret.
-pub fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+pub(crate) fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let (read, write) = nix::unistd::pipe()?;
     for fd in [read.as_fd(), write.as_fd()] {
         fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
