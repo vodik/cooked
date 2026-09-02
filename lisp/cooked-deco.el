@@ -318,6 +318,33 @@ replaces."
       (list bits (car size) (cdr size) phase)
     (cooked--box-glyph-image-1 bits window size phase)))
 
+(defun cooked--uncolored (image)
+  "IMAGE with any `:foreground\=' or `:background\=' removed.
+
+Enforced rather than assumed, because a spec leaves `create-image\=' having
+passed through whatever advice the user\='s configuration has put on it, and one
+package in circulation colours every image unconditionally: `solaire-mode\='
+installs a `:filter-return\=' advice that `plist-put\='s the background of
+`solaire-default-face\=' onto anything created in a buffer where it is enabled.
+That is right for the transparent PNG of an icon, which has no colour of its
+own to lose, and wrong for a bitmap whose second colour is the terminal cell it
+stands in: the glyph then keeps solaire\='s background whatever the child paints
+behind it.  Which is the defect `cooked--box-glyph-image-1\=' exists to avoid,
+reaching the spec from outside instead of from us.
+
+Rebuilt rather than edited in place, because the pair is spliced onto a list
+`create-image\=' has already returned and can sit anywhere in it -- and because
+a spec we hand to a hash table should not be a list somebody else still holds a
+tail of."
+  (let ((out nil)
+        (tail (cdr image)))
+    (while tail
+      (unless (memq (car tail) '(:foreground :background))
+        (push (car tail) out)
+        (push (cadr tail) out))
+      (setq tail (cddr tail)))
+    (cons (car image) (nreverse out))))
+
 (defun cooked--box-glyph-image-1 (bits window size phase)
   "Build the spec `cooked--box-glyph-image' memoizes.
 
@@ -331,13 +358,13 @@ correctly under every face it lands on and re-renders by itself when that face
 changes.
 
 Naming the colours here instead pinned the glyph to the run\='s own rendition
-and so defeated everything Emacs composites over it -- the region,
+and so defeated everything Emacs composites over it — the region, an active
 `hl-line-mode\=', an `isearch\=' match, `mouse-face\=', and the buffer-local
-remapping of `default\=' an OSC 11 background is applied as.  The foreground
-came through that unharmed because a cell\='s foreground is exactly what the
-face already carries; a background is not, being whatever ends up merged at
-the position, so box drawing was the one run of text in the buffer that a
-selection left unhighlighted.
+remapping of `default\=' an OSC 11 background arrives as.  The foreground came
+through all of that unharmed because a cell\='s foreground is exactly what the
+face already carries; a background is not, being whatever ends up merged at the
+position, so box drawing was the one run of text in the buffer that a selection
+left unhighlighted.
 
 The face is there to be read: `cooked--render-block' puts the run\='s style span
 over exactly the characters its decoration span covers, so an explicit
@@ -350,16 +377,17 @@ now hiding a box glyph as it always did the text beside it."
   ;; a vector of per-row strings, a whole XBM *file* in a string, or bare bits with
   ;; these three properties.  A packed (WIDTH HEIGHT DATA) list is none of them.
   (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits bits size phase)))
-    (create-image data 'xbm t
-                  :data-width width :data-height height
-                  :stride (* 8 (ceiling width 8)) ; bits per row, byte-aligned
-                  :scale 1
-                  ;; `image-transform-smoothing' defaults on, which interpolates
-                  ;; edge pixels.  These bitmaps are pixel art meant to butt up
-                  ;; against their neighbours, and a smoothed edge column reads as
-                  ;; a faint seam between adjacent glyphs rather than a join.
-                  :transform-smoothing nil
-                  :ascent (cooked--box-glyph-ascent window height))))
+    (cooked--uncolored
+     (create-image data 'xbm t
+                   :data-width width :data-height height
+                   :stride (* 8 (ceiling width 8)) ; bits per row, byte-aligned
+                   :scale 1
+                   ;; `image-transform-smoothing' defaults on, which interpolates
+                   ;; edge pixels.  These bitmaps are pixel art meant to butt up
+                   ;; against their neighbours, and a smoothed edge column reads
+                   ;; as a faint seam between adjacent glyphs rather than a join.
+                   :transform-smoothing nil
+                   :ascent (cooked--box-glyph-ascent window height)))))
 
 (defun cooked--apply-deco (start deco &optional origin row)
   "Hang DECO's per-character `display' properties on the text at START.

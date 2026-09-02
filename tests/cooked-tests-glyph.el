@@ -148,6 +148,32 @@ engine merged them."
     (should (eq (cooked-tests--glyph-image (point-min))
                 (cooked-tests--glyph-image (1+ (point-min)))))))
 
+;; A spec leaves `create-image' having passed through the user's advice on it,
+;; and `solaire-mode' ships one that `plist-put's the background of
+;; `solaire-default-face' onto every image made in a buffer where it is enabled.
+;; That is right for an icon's transparent PNG and wrong for a bitmap whose
+;; second colour is the cell it stands in: it pinned box drawing to solaire's
+;; background, so a full-screen program repainting on a colourscheme change
+;; recoloured its whole screen except the borders.  Reproduced here with the
+;; same advice rather than with solaire, since what matters is the shape of the
+;; interference and not who wrote it.
+(ert-deftest cooked-box-drawing-resists-advice-that-colors-every-image ()
+  (advice-add 'create-image :filter-return #'cooked-tests--stamp-background)
+  (unwind-protect
+      (cooked-tests--with-session
+          '("/bin/sh" "-c" "printf '\\033[44m\\342\\224\\200\\033[0m\\n'") ; blue ─
+        (cooked-tests--cell)
+        (should (cooked-tests--settle
+                 (lambda () (get-text-property (point-min) 'display))))
+        (let ((plist (cdr (cooked-tests--glyph-image (point-min)))))
+          (should-not (plist-member plist :background))
+          (should-not (plist-member plist :foreground))
+          ;; The rest of the spec is untouched -- this strips two keys, it does
+          ;; not rebuild the image.
+          (should (equal (plist-get plist :scale) 1))
+          (should (stringp (plist-get plist :data)))))
+    (advice-remove 'create-image #'cooked-tests--stamp-background)))
+
 (ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐

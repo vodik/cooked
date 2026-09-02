@@ -76,6 +76,17 @@ Returns the packages that could not be found."
 (require 'cooked)
 (require 'cooked-mode)
 
+(defun cooked-tests--stamp-background (image)
+  "Put a `:background\=' on IMAGE, as `solaire-mode\=' advises `create-image\=' to do.
+
+A stand-in for third-party advice that colours every image unconditionally --
+see `cooked-box-drawing-resists-advice-that-colors-every-image\='.  Mutates the
+returned spec with `plist-put\=', which is what the original does and is the
+half that matters: the pair is spliced onto a list the caller already holds."
+  (when (consp image)
+    (plist-put (cdr image) :background "#123456"))
+  image)
+
 (defun cooked-tests--cell (&optional width height)
   "Give the current buffer a cell size of WIDTH by HEIGHT pixels, default 10x20.
 

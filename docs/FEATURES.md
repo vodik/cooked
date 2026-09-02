@@ -378,6 +378,13 @@ A foreground survives that, being exactly what the face already carries, so a bo
 drawn in the right colour on the wrong background is what the defect looked like:
 selecting a screenful of `htop` highlighted all of it except the box drawing.
 
+The same trap arrives from outside, which is why the spec is stripped of both colours
+after `create-image` rather than merely built without them. `solaire-mode` advises
+`create-image` to `plist-put` the background of `solaire-default-face` onto every image
+made in a buffer where it is enabled — correct for an icon's transparent PNG, wrong for
+a bitmap whose second colour is the cell it stands in. With it left in place, `nvim`
+`:colorscheme blue` recoloured its entire screen except the borders and the logo.
+
 Falls back to plain coloured text if Emacs has no XBM support or a glyph fails to
 rasterize, which is also exactly what `cooked-box-drawing-images` set to nil does.
 

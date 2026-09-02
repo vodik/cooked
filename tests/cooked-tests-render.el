@@ -1460,7 +1460,7 @@ genuinely printed nothing."
     (list :scrolled nil
           :rows (list (cons 0 (list (make-string cols ?\s)
                                     nil
-                                    (list (list 0 cols nil nil 0 (cons 'image packed))))))
+                                    (list (list 0 (cons 'image packed))))))
           :images (and data
                        (list (list id 'png data (* cols 10) (* rows 20) cols rows)))
           :height 12 :used 1 :head 0
