@@ -126,12 +126,15 @@ __cooked_encode() {
 typeset -g __cooked_last_cwd=
 
 __cooked_report_cwd() {
-  # See the AUTO_NAME_DIRS note above __cooked_encoded -- same reasoning, and set here
-  # too rather than relied on from the caller, since this runs both inside
-  # __cooked_precmd's option scope and, on the first prompt, from __cooked_deferred_init
-  # with no scope of its own.
-  setopt local_options no_auto_name_dirs
-  [[ $PWD == $__cooked_last_cwd ]] && return 0
+  # `emulate -L zsh' rather than a bare `setopt local_options', because the reason this
+  # function carries its own scope at all is that it has no reliable caller: it runs
+  # inside __cooked_precmd's scope on every later prompt and from __cooked_deferred_init,
+  # which has none, on the first.  Naming one option answered that for AUTO_NAME_DIRS --
+  # see the note above __cooked_encoded -- and left every other option to whatever the
+  # user set.  Emulation answers it for all of them, which is what every other hook in
+  # this file already does.
+  builtin emulate -L zsh -o no_auto_name_dirs
+  [[ $PWD == "$__cooked_last_cwd" ]] && return 0
   __cooked_last_cwd=$PWD
   __cooked_encode "$PWD"
   __cooked_osc "7;file://${HOST}${__cooked_encoded}"
@@ -259,6 +262,14 @@ __cooked_first_precmd() {
 # touched it and our copy of the clean text still stands; if it is anything else, a
 # theme rebuilt it and *that* is the new clean text.  No pattern matching, no
 # accumulation, and correct under both options.
+#
+# "No pattern matching" has to be spelled with quotes to be true.  An unquoted right
+# operand of `==' is a pattern, and while zsh does not re-read one that came out of a
+# parameter, GLOB_SUBST makes it do exactly that -- so under a user with that option a
+# PS1 containing `[' or `*' would compare unequal to itself, be taken for a theme's
+# rebuild, and have the marks appended again on every prompt.  The bash half quotes
+# these for the same reason without the escape clause, bash having no GLOB_SUBST to be
+# off: one spelling, correct in both shells and under any options.
 typeset -g __cooked_ps1_clean=
 typeset -g __cooked_ps1_marked=
 typeset -g __cooked_ps2_clean=
@@ -302,7 +313,7 @@ __cooked_prompt_precmd() {
   __cooked_want input-mark && b=$'%{\e]133;B\a%}'
   [[ -z $a && -z $b ]] && return 0
 
-  [[ $PS1 == $__cooked_ps1_marked ]] || __cooked_ps1_clean=$PS1
+  [[ $PS1 == "$__cooked_ps1_marked" ]] || __cooked_ps1_clean=$PS1
   __cooked_pad_percent "$__cooked_ps1_clean"
   PS1="${a}${__cooked_padded}${b}"
   # A multi-line prompt, which is what powerlevel10k and starship both draw by default.
@@ -327,7 +338,7 @@ __cooked_prompt_precmd() {
   # continuation whose prompt start was never announced, which is a claim about a
   # command Emacs has no record of.  The bash half is spelled the same way.
   if [[ -n $b ]]; then
-    [[ $PS2 == $__cooked_ps2_marked ]] || __cooked_ps2_clean=$PS2
+    [[ $PS2 == "$__cooked_ps2_marked" ]] || __cooked_ps2_clean=$PS2
     __cooked_pad_percent "$__cooked_ps2_clean"
     PS2="${a2}${__cooked_padded}${b}"
     __cooked_ps2_marked=$PS2
