@@ -326,13 +326,20 @@ advances the code."
 (defun cooked--set-default-color (kind spec)
   "Remap this buffer's default KIND to SPEC, if it parses.
 Buffer-local rather than frame-wide: a child gets to repaint its own terminal,
-not every window in the Emacs running it."
+not every window in the Emacs running it.
+
+A `background\=' set also remaps `fringe\=', not just `default\=': the fringe is
+its own face, styled by the Emacs theme rather than by anything a shell can
+see, so without this a child that paints its own background leaves the fringe
+sitting in whatever shade the Emacs theme picked -- visibly split down the
+window edge from the terminal background right next to it."
   (when-let* ((color (cooked--parse-osc-color spec)))
     (cooked--reset-default-color kind)
     (push (cons kind (pcase kind
-                       ('foreground (face-remap-add-relative 'default :foreground color))
-                       ('background (face-remap-add-relative 'default :background color))
-                       ('cursor (face-remap-add-relative 'cursor :background color))))
+                       ('foreground (list (face-remap-add-relative 'default :foreground color)))
+                       ('background (list (face-remap-add-relative 'default :background color)
+                                          (face-remap-add-relative 'fringe :background color)))
+                       ('cursor (list (face-remap-add-relative 'cursor :background color)))))
           cooked--color-remaps)
     ;; Every cell face resolves against `default', so the memoized ones are stale the
     ;; moment the remap lands.
@@ -340,8 +347,8 @@ not every window in the Emacs running it."
 
 (defun cooked--reset-default-color (kind)
   "Drop any OSC 10/11/12 remap of KIND, restoring the theme's own color."
-  (when-let* ((cookie (alist-get kind cooked--color-remaps)))
-    (face-remap-remove-relative cookie)
+  (when-let* ((cookies (alist-get kind cooked--color-remaps)))
+    (mapc #'face-remap-remove-relative cookies)
     (setq cooked--color-remaps (assq-delete-all kind cooked--color-remaps))
     (cooked--flush-face-cache)))
 

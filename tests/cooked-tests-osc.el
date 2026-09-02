@@ -891,7 +891,10 @@ so a terminal that never answers costs them their whole timeout on startup."
         (should (alist-get 'background cooked--color-remaps))
         ;; Buffer-local, not frame-wide: the child repaints its own terminal only.
         (should (member '(:background "#ff0000")
-                        (alist-get 'default face-remapping-alist))))
+                        (alist-get 'default face-remapping-alist)))
+        ;; The fringe rides along, or it visibly splits from the terminal background.
+        (should (member '(:background "#ff0000")
+                        (alist-get 'fringe face-remapping-alist))))
       ;; OSC 111 puts the theme's own background back.
       (let ((cooked--osc-code 111))
         (cooked--osc-color-reset nil))

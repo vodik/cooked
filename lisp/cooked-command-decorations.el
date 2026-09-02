@@ -73,16 +73,32 @@ ones `fringe-bitmaps' lists (\\[describe-variable] on that variable, or
   :type 'symbol
   :group 'cooked)
 
-(defface cooked-command-decoration-success '((t :inherit success))
-  "Face for the fringe marker on a command that exited zero."
+(defface cooked-command-decoration-success '((t :inherit (success fringe)))
+  "Face for the fringe marker on a command that exited zero.
+
+Inherits `fringe\=' after `success\=' -- neither `success\=' nor the two faces
+below it ever set a `:background\=', so without this the bitmap's off-pixels
+fall back to whatever the *fringe drawing code* itself uses as a fringe
+background, which is not the same lookup as an `:inherit\=' reference: a plain
+`:inherit\=' is re-merged through `face-remapping-alist\=' on every redisplay,
+the same as buffer text, while that other fallback is not.  A buffer with a
+remapped `fringe\=' -- `solaire-mode\=', say, dimming a non-file buffer -- then
+shows the marker's own bar in the right colour sitting on the *unremapped*
+fringe background, a bright square around an otherwise dim fringe.  Naming
+`fringe\=' here explicitly routes the background through the remap-aware path
+instead of the fallback."
   :group 'cooked)
 
-(defface cooked-command-decoration-failure '((t :inherit error))
-  "Face for the fringe marker on a command that exited non-zero."
+(defface cooked-command-decoration-failure '((t :inherit (error fringe)))
+  "Face for the fringe marker on a command that exited non-zero.
+
+See `cooked-command-decoration-success\=' for why `fringe\=' is inherited too."
   :group 'cooked)
 
-(defface cooked-command-decoration-running '((t :inherit shadow))
+(defface cooked-command-decoration-running '((t :inherit (shadow fringe)))
   "Face for the fringe marker on the command that is running right now.
+
+See `cooked-command-decoration-success\=' for why `fringe\=' is inherited too.
 
 Inherits `shadow\=' rather than `warning\=' deliberately.  The other two faces are
 the two answers to one question, and a command that has not finished has not
