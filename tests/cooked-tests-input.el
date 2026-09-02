@@ -297,6 +297,111 @@ different things to be looking at."
             (should (string-search (cdr case) (cooked--mode-line)))
           (should-not (string-match-p "still\\|semi\\|frozen" (cooked--mode-line))))))))
 
+(ert-deftest cooked-mode-line-names-the-program-without-shell-integration ()
+  "The `bare\= session is exactly where naming the program matters most.
+
+A title is the shell's own summary and needs the snippet loaded; the foreground
+process group needs nothing at all.  So the fallback is what tells `htop\= from a
+shell editing its own line -- the pair the state word alone has never been able
+to separate, and the one this whole indicator is judged on."
+  (with-temp-buffer
+    (setq-local cooked--mode 'raw
+                cooked--alt nil
+                cooked--semantic nil
+                cooked--semantic-seen nil
+                cooked--host nil
+                cooked--completion-nonce nil
+                cooked--exit nil
+                cooked--title nil
+                cooked--foreground-label "htop")
+    (should (equal (substring-no-properties (cooked--mode-line)) " raw htop"))
+    ;; A title outranks it: the shell knows the arguments, `comm\= knows a name.
+    (setq-local cooked--title "make -j8 world")
+    (should (equal (substring-no-properties (cooked--mode-line))
+                   " raw make -j8 world"))
+    ;; Never both -- two accounts of one thing, and only room for the better.
+    (should-not (string-search "htop" (cooked--mode-line)))
+    ;; And no title at all when the buffer is already named after it.
+    (let ((cooked-buffer-name-follows-title t))
+      (should (equal (substring-no-properties (cooked--mode-line)) " raw htop")))))
+
+(ert-deftest cooked-mode-line-names-a-job-but-not-the-shell-itself ()
+  "The suppression is keyed on which process, not on which policy.
+
+`tcgetpgrp\=' answers with a process *group*, and an interactive shell doing job
+control puts each job in one of its own -- so the shell at its prompt is its own
+foreground group and every command it runs is not.  That is the whole test: `zsh\='
+in the mode line for the life of every session is a word always true and never
+news, while the job\='s name is the only thing on screen saying what the line
+being typed will be read by.
+
+`sleep\=' rather than a full-screen program on purpose.  It leaves the tty
+canonical, so cooked reads it as `edit\=' -- correctly, it is a line being edited
+-- and that is exactly the case the state word alone cannot distinguish from a
+shell prompt."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (cooked--refresh-keymap)
+    ;; Assertions on the segments rather than the whole indicator: whether the
+    ;; input mode contributes a `semi\=' tag is evil\='s business and orthogonal
+    ;; to this, and a suite that has loaded evil must not fail this test.
+    (should-not cooked--foreground-label)
+    (should (string-prefix-p " edit" (substring-no-properties (cooked--mode-line))))
+    (should-not (string-search "zsh" (cooked--mode-line)))
+    (goto-char cooked--input-end)
+    (insert "sleep 20")
+    (cooked-send-input)
+    (should (cooked-tests--settle (lambda () cooked--foreground-label)))
+    (cooked--refresh-keymap)
+    (should (equal cooked--foreground-label "sleep"))
+    (should (string-search "sleep" (cooked--mode-line)))))
+
+(ert-deftest cooked-mode-line-asks-the-os-nothing ()
+  "`cooked--mode-line\= runs from an `:eval\= on every redisplay, so it must be a
+pure function of buffer-locals.  The foreground program is the one fact in it
+that has to come from outside, and it is cached for exactly that reason -- a
+`tcgetpgrp\= and a `process-attributes\= per frame to render one word is a cost
+nobody asked for, and easy to reintroduce by inlining the obvious call."
+  (with-temp-buffer
+    (setq-local cooked--mode 'raw
+                cooked--alt nil
+                cooked--semantic nil
+                cooked--semantic-seen nil
+                cooked--host nil
+                cooked--completion-nonce nil
+                cooked--exit nil
+                cooked--title nil
+                cooked--foreground-label "htop")
+    (cl-letf (((symbol-function 'process-attributes)
+               (lambda (&rest _) (ert-fail "mode line called process-attributes")))
+              ((symbol-function 'cooked--foreground-pid)
+               (lambda (&rest _) (ert-fail "mode line called cooked--foreground-pid"))))
+      (should (equal (substring-no-properties (cooked--mode-line)) " raw htop")))))
+
+(ert-deftest cooked-mode-line-stops-describing-a-dead-session ()
+  "Buffer-locals do not decay.  A child that exited ten minutes ago leaves
+`cooked--mode\=, `cooked--semantic\= and the rest holding whatever they last
+said, so an indicator that keeps reading them is not showing stale information
+-- it is showing wrong information in the same clothes as the live kind.  The
+exit status is the only thing about a dead session still true."
+  (with-temp-buffer
+    (setq-local cooked--mode 'raw
+                cooked--alt nil
+                cooked--semantic nil
+                cooked--semantic-seen nil
+                cooked--host nil
+                cooked--completion-nonce nil
+                cooked--title nil
+                cooked--foreground-label "htop"
+                cooked--input-mode 'frozen
+                cooked--exit 0)
+    (should (equal (substring-no-properties (cooked--mode-line)) " exited 0"))
+    (setq-local cooked--exit 130)
+    (should (equal (substring-no-properties (cooked--mode-line)) " exited 130"))
+    ;; None of the live vocabulary survives, including the freeze -- there is
+    ;; nothing left to keep keys from and nothing left to defer.
+    (should-not (string-match-p "raw\\|htop\\|frozen" (cooked--mode-line)))))
+
 (ert-deftest cooked-evil-visual-state-freezes-the-render ()
   "A selection is a claim about a region of text, and text rewritten
 underneath it makes the claim a lie -- so visual state defers the render where
@@ -918,10 +1023,12 @@ no integration at all\" only exists as a latch."
                    ;; mode      alt  semantic  seen  policy   owns  mode line
                    '((cooked    nil  nil       nil   cooked   t     " edit bare")
                      (cooked    nil  output    t     cooked   t     " edit")
-                     (raw       nil  nil       nil   raw      nil   " raw bare")
+                     ;; No `bare\=' beside `raw\=': that word is reached only
+                     ;; through the fallback, which is this same condition.
+                     (raw       nil  nil       nil   raw      nil   " raw")
                      ;; A mark has arrived and this is not a prompt, so the shell
                      ;; is running something and said so: `command', not a guess.
-                     (raw       nil  output    t     command  nil   " raw")
+                     (raw       nil  output    t     command  nil   " run")
                      ;; A shell prompt: termios says raw, OSC 133 says otherwise.
                      (raw       nil  input     t     cooked   t     " edit")
                      (secret    nil  nil       nil   raw      nil   " secret bare")
@@ -937,6 +1044,7 @@ no integration at all\" only exists as a latch."
                   cooked--host nil
                   cooked--completion-nonce nil
                   cooked--title nil
+                  cooked--foreground-label nil
                   cooked--exit nil)
       (should (eq (cooked--policy) policy))
       (should (eq (and (cooked--input-state-p) t) owns))
@@ -962,22 +1070,32 @@ the same certainty a local one does, by the same bytes."
                 cooked--host nil
                 cooked--completion-nonce nil
                 cooked--title nil
+                cooked--foreground-label nil
                 cooked--exit nil)
     ;; Local: the child is ours, and nothing about this changes.
     (should (eq (cooked--policy) 'cooked))
     (should (cooked--input-state-p))
+    ;; A local session spends no columns saying it is local.
+    (should (equal (substring-no-properties (cooked--mode-line)) " edit"))
     ;; Behind an ssh, with only the core marks.
     (setq-local cooked--host "other.example")
     (should (eq (cooked--policy) 'prompt))
     (should-not (cooked--input-state-p))
     (should (cooked--child-owns-keyboard-p))
+    ;; And it says so, both halves: which host, and that the shell has its own
+    ;; line.  This used to read `raw\=', which is what made a remote session
+    ;; look like cooked misbehaving rather than like a shell doing its job.
+    (should (equal (substring-no-properties (cooked--mode-line)) " @other prompt"))
     ;; And it keeps nothing back, for the reason `command' does not: the shell
     ;; said where it was, and a shell at its own prompt wants every key.
     (should (eq (cooked--state-keymap nil 'prompt) cooked-command-map))
     ;; The same remote host, running the full snippet.
     (setq-local cooked--completion-nonce "1234")
     (should (eq (cooked--policy) 'cooked))
-    (should (cooked--input-state-p))))
+    (should (cooked--input-state-p))
+    ;; The host stays named -- it is still not this machine, and that is what
+    ;; every path in the buffer now means -- but the state word moves.
+    (should (equal (substring-no-properties (cooked--mode-line)) " @other edit"))))
 
 (ert-deftest cooked-delegation-hands-the-whole-line-to-the-shell ()
   "The line reaches ZLE, the cursor is put back, and Emacs stops owning it.

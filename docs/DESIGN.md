@@ -582,10 +582,16 @@ corrupted line.
   and wrong for a shell on another host. OSC 7 already carries `file://${HOST}${PWD}`;
   when `HOST` is not this machine, the file and PATH tables should decline rather than
   guess. This is worth fixing independently of everything else here.
-- **The level must be legible.** `cooked--mode-line` currently shows `" raw"` for both
+- **The level must be legible.** Done. `cooked--mode-line` used to show `" raw"` for both
   "you are in htop" and "you are at an unmarked shell," which are one policy and two
-  situations. A level that moves when you ssh has to say so, or the difference reads as
-  cooked being unreliable across hosts.
+  situations; and a level that moves when you ssh has to say so, or the difference reads
+  as cooked being unreliable across hosts. Both are now said. `cooked--policy` tells five
+  states apart and the indicator spells all five — `prompt` and `run` were the two hiding
+  inside `raw` — `@host` prefixes a session the child says is elsewhere, and the
+  foreground process group names the running program in exactly the unmarked session where
+  there is no title to have. That last one is what separates the two situations above, and
+  it needed no new signal: `cooked--foreground-program` was already there for the key
+  overrides.
 - **bash was the largest level-1.5 population, and it was the shortest-lived.**
   `cooked-completion.bash` answers over the same `OSC 51;C` framing with none of zsh's
   ZLE gymnastics — `complete -p` names the registered function and it can be invoked

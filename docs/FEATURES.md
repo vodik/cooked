@@ -400,10 +400,29 @@ diagonal that misses the corner its neighbour has to meet.
   still without stopping the child, and visual state freezes it. The state table, the
   render policy and the `evil-collection` interop are in
   [the keyboard page](KEYBOARD.md#evil).
-- **Peeking is read-only and look-only.** The mode line grows a `peek` tag; the buffer is
-  read-only for the duration, so an edit command errors immediately instead of landing on
+- **Peeking is read-only and look-only.** The mode line grows a `still` or `frozen` tag —
+  the two differ in whether the render is merely unfollowed or actually deferred; the buffer
+  is read-only for the duration, so an edit command errors immediately instead of landing on
   text that goes nowhere; and typing, `RET`, or any of cooked's own commands that write to
   the child end it and forward what was pressed, rather than requiring a separate step back.
+- **The mode line says who owns the keyboard, and how well that is known.** One word:
+  `edit` (Emacs owns the line), `prompt` (a marked prompt the shell is editing itself —
+  where a bare shell behind an `ssh` sits), `run` (a marked command the shell announced),
+  `alt` (a full-screen program), `raw` (no mark has ever arrived, so this is a guess), or
+  `secret` (a `getpass(3)` read). A `bare` tag follows it where the situation is a positive
+  reading of the child that still says nothing about the shell; beside `raw` it would only
+  restate the word, so it is left off. `@host` prefixes the lot when the child last
+  reported it was somewhere other than this machine, and nothing is spent saying a local
+  session is local.
+- **It names what is running without needing the snippet.** The child's title if the shell
+  set one, and otherwise the program in the foreground process group, read from the OS —
+  which is what tells `htop` from a shell editing its own line, the pair no amount of
+  termios watching can separate. Never both: they are two accounts of one thing.
+- **The words are also controls.** `mouse-1` on the state word peeks (`C-c C-v`);
+  `mouse-1` on the exit status goes to that command (`M-x cooked-goto-last-command`);
+  hovering `bare` explains what is missing. A dead session reports only `exited N` — its
+  buffer-locals still hold whatever they last said, and reporting those would be wrong
+  rather than merely stale.
 
 
 ## Links

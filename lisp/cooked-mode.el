@@ -35,6 +35,7 @@
 (declare-function cooked--focus-events-p "cooked-core")
 (declare-function cooked--live-p "cooked-core")
 (declare-function cooked--foreground-pid "cooked-core")
+(declare-function cooked--pid "cooked-core")
 (declare-function cooked--kill "cooked-core")
 
 (defcustom cooked-buffer-name "*cooked: %s*"
@@ -508,6 +509,42 @@ able to name."
         (cdr cooked--foreground-name)
       (cdr (setq cooked--foreground-name
                  (cons pid (alist-get 'comm (process-attributes pid))))))))
+
+(defvar-local cooked--foreground-label nil
+  "Name of the program the child last had in the foreground, for the mode line.
+
+Maintained from `cooked--refresh-keymap\=' rather than read when the mode line
+asks, for the same reason `cooked--attention\=' is: `cooked--mode-line\=' runs
+from an `:eval\=' on every redisplay, and the answer costs a `tcgetpgrp\=' and,
+on a miss, a `process-attributes\=' -- which its own cache exists because it is
+not free.  Recomputing that per frame to render one word would be paying a
+syscall for a string that changes when the policy does.
+
+Every transition worth naming already passes through that refresh: termios
+flipping as a full-screen program takes the tty, and an OSC 133 `C\=' as a
+marked command starts.  What it misses is one quiet command following another
+at an unmarked shell, where nothing changes state -- so the label is a
+best-effort hint, and is allowed to be.")
+
+(defun cooked--update-foreground-label ()
+  "Refresh `cooked--foreground-label\=' for what the child is running now.
+
+Nil when the foreground process group is the session\='s own child -- the shell
+cooked spawned, sitting at its prompt.  Naming it there would put `zsh\=' in the
+mode line for the whole life of every session, which is a word that is always
+true and never news.
+
+Deliberately *not* keyed on who owns the line.  A canonical tty is not a shell
+prompt: `cat\=' and `sleep\=' hold one too, and cooked reads those as `edit\='
+because they genuinely are a line being edited.  Those are exactly the cases
+where the program\='s name is the only thing on screen saying what the line will
+be read by -- so the test is which process, not which policy."
+  (setq cooked--foreground-label
+        (and cooked--session
+             (let ((foreground (cooked--foreground-pid cooked--session)))
+               (and foreground
+                    (not (eql foreground (cooked--pid cooked--session)))
+                    (cooked--foreground-program))))))
 
 (defun cooked--override-applies-p (condition)
   "Whether CONDITION selects what the child is running now."
@@ -1640,6 +1677,10 @@ are the ones left standing."
     ;; program starting or exiting is exactly what moves the policy that brought
     ;; us here.
     (cooked--update-key-overrides)
+    ;; Same question, same moment, different consumer: the mode line names the
+    ;; program too, and this is the one place that already knows the answer has
+    ;; had a chance to change.
+    (cooked--update-foreground-label)
     ;; And for the same reason: under `auto' the answer to "is this session
     ;; worth a warning before it is killed" is the policy that just changed.
     (cooked--sync-query-flag)
@@ -1661,6 +1702,21 @@ are the ones left standing."
   "Exit status of the most recently finished command, if any."
   (when-let* ((command (car cooked--commands)))
     (cooked-command-code command)))
+
+(defun cooked-goto-last-command ()
+  "Move to the prompt of the most recently finished command.
+
+What the mode line\='s exit status is a click away from, and the reason it is a
+command rather than a closure: the status answers \"how did it go\" and the
+obvious next question is \"which one, and what did it print\", which is a
+position.  Lands on the prompt rather than the output for the reason
+`cooked-previous-command\=' does -- a command that printed nothing has no output
+to land in, and its exit status is exactly the one worth chasing."
+  (interactive)
+  (if-let* ((command (car cooked--commands)))
+      (goto-char (or (cooked--command-prompt-position command)
+                     (cooked--command-start-position command)))
+    (user-error "cooked: no command has finished yet")))
 
 (defun cooked--command-at (point)
   "The command record whose output contains POINT."
@@ -2233,21 +2289,34 @@ has not connected yet.  Long enough that a working setup is never accused, short
 enough that a broken one is not left to be discovered."
   :type 'number :group 'cooked)
 
-(defun cooked--mode-line-bare ()
-  "The `bare\=' tag, when this session has never seen an OSC 133 mark.
+(defconst cooked--integration-hint
+  "no shell integration in this session; source shell-integration/cooked.zsh \
+from your shell\='s rc"
+  "What the `bare\=' tag means, in a sentence.
 
-Two situations wear `raw\=' in the indicator and they are not the same trouble:
-the child is a full-screen program, or the shell simply never spoke.  Which one
-cannot be told apart by watching -- a shell editing its own line and `htop\='
-hold the tty identically -- but *whether a mark has ever arrived* can, and it is
-the more useful question anyway.  It is a fact about the host rather than a
-guess about the child, and it is the one that explains why the buffer behaves
-differently here than it does at home.
+One string with two readers -- `cooked--mode-line-bare\=' hangs it off the tag
+as a `help-echo\=' and `cooked--schedule-integration-hint\=' says it once in the
+echo area -- because a tag and a message that explain the same state must not be
+able to drift apart.")
 
-Latched through `cooked--semantic-seen\=', so a marked session that is midway
-through a command does not blink the tag on and off."
-  (unless cooked--semantic-seen
-    (propertize " bare" 'face 'shadow)))
+(defun cooked--mode-line-bare (state)
+  "The `bare\=' tag beside STATE, when no OSC 133 mark has ever arrived.
+
+Not shown beside `raw\='.  That *word* -- not the policy behind it, which a
+password read also reaches -- is printed only where `cooked--policy\=' fell
+through to its own default, which is exactly this condition, so the tag there
+would restate the word next to it.  Beside `alt\=' and `secret\=' it still earns
+its place: those are positive readings of the child that say nothing at all
+about the shell, and the tag is what explains why no record will be filed for
+what is happening.
+
+It is a fact about the host rather than a guess about the child, which is what
+makes it worth saying at all -- it is the thing that explains why the buffer
+behaves differently here than it does at home.  Latched through
+`cooked--semantic-seen\=', so a marked session midway through a command does not
+blink the tag on and off."
+  (unless (or cooked--semantic-seen (equal state "raw"))
+    (propertize " bare" 'face 'shadow 'help-echo cooked--integration-hint)))
 
 (defun cooked--schedule-integration-hint (buffer)
   "Say once, in BUFFER, that no OSC 133 mark ever arrived.
@@ -2262,7 +2331,9 @@ mean anything.
 Not rescheduled afterwards.  A shell that sources the snippet later starts being
 believed at once, because everything downstream reads `cooked--semantic-seen\='
 directly; it is only this sentence that does not come back, and a second copy of
-it would be worth less than the silence."
+it would be worth less than the silence.  What does come back is the `bare\='
+tag\='s `help-echo\=', which carries this same `cooked--integration-hint\=' for
+as long as the state lasts."
   (run-at-time
    cooked-integration-hint-delay nil
    (lambda ()
@@ -2271,34 +2342,100 @@ it would be worth less than the silence."
          (when (and cooked-integration-hint
                     cooked--session
                     (not cooked--semantic-seen))
-           (message "cooked: no shell integration in this session; \
-source shell-integration/cooked.zsh from your shell's rc")))))))
+           (message "cooked: %s" cooked--integration-hint)))))))
+
+(defun cooked--mode-line-click (command help)
+  "Property list making mode-line text run COMMAND on a click, described by HELP.
+
+Mode-line text needs its keymap nested under the `mode-line\=' pseudo-event
+rather than bound directly, which is the only thing here that is not obvious.
+`down-mouse-1\=' rather than `mouse-1\=' so the action fires on the press, as
+term.el and eat both do -- a mode-line indicator that waits for the release
+feels broken next to every other one in the frame."
+  (list 'mouse-face 'mode-line-highlight
+        'help-echo help
+        'local-map `(keymap (mode-line keymap (down-mouse-1 . ,command)))))
+
+(defun cooked--mode-line-state ()
+  "The state word: who owns the keyboard, and how well that is known.
+
+`cooked--policy\=' tells five situations apart and this says all five, because
+the three it used to spell `raw\=' are not one state told badly -- they are a
+marked prompt the shell is editing itself, a marked command the shell announced,
+and a genuine unknown.  Spelling them alike is what made a session read as
+unreliable the moment it went remote: `prompt\=' is where a bare shell at the far
+end of an `ssh\=' sits, and it is doing exactly what it should.
+
+Echo state is an overlay on the policy rather than one of its values, but it
+subsumes it here: a password read always forwards keys, so `raw secret\=' says
+nothing `secret\=' does not already imply."
+  (if (cooked--secret-p)
+      "secret"
+    (pcase (cooked--policy)
+      ('cooked "edit")
+      ('prompt "prompt")
+      ('command "run")
+      ('alt "alt")
+      (_ "raw"))))
+
+(defun cooked--mode-line-subject ()
+  "What the child is running, in as many words as are known.
+
+The title first: it is the shell\='s own summary, and a shell that sets one is
+saying something `comm\=' cannot -- arguments, an `ssh\=' destination, a `make\='
+target.  `cooked--foreground-label\=' is the fallback, and it is the one that
+matters, because it needs no shell integration at all and so answers in exactly
+the `bare\=' session where there is no title to have.  That is what tells `htop\='
+from a shell editing its own line, which the state word alone cannot.
+
+Never both.  They are two accounts of one thing, and the mode line has room for
+the better one.  The title also stands down entirely under
+`cooked-buffer-name-follows-title\=', where the buffer is already named after it
+and printing it again spends columns on a word already on screen."
+  (or (and (not cooked-buffer-name-follows-title)
+           cooked--title
+           (not (string-empty-p cooked--title))
+           cooked--title)
+      cooked--foreground-label))
 
 (defun cooked--mode-line ()
   "Compact indicator: what is running, who owns the keyboard, how it went."
-  (let ((code (cooked-last-exit-code)))
-    (concat
-     ;; Echo state is an overlay on the policy, but it subsumes it in the indicator:
-     ;; a password read always forwards keys, so " raw secret" says nothing " secret"
-     ;; does not already imply.
-     (if (cooked--secret-p)
-         " secret"
-       (pcase (cooked--policy)
-         ('cooked " edit")
-         ('alt " alt")
-         (_ " raw")))
-     (cooked--mode-line-bare)
-     (pcase cooked--input-mode
-       ('semi (propertize " semi" 'face 'shadow))
-       ('still (propertize " still" 'face 'cooked-still))
-       ('frozen (propertize " frozen" 'face 'cooked-peek)))
-     ;; The title is the shell's own summary of the running command.
-     (when (and cooked--title (not (string-empty-p cooked--title)))
-       (propertize (format " %s" (truncate-string-to-width cooked--title 24 nil nil t))
-                   'face 'shadow))
-     (when code
-       (propertize (format " %s" code)
-                   'face (if (zerop code) 'cooked-success 'cooked-failure))))))
+  ;; A dead session's buffer-locals do not decay -- they hold whatever they last
+  ;; said, forever -- so reporting the state of a child that exited some minutes
+  ;; ago is not stale information, it is wrong information wearing the same
+  ;; clothes as the live kind.  The exit status is the only thing still true.
+  (if cooked--exit
+      (propertize (format " exited %s" cooked--exit)
+                  'face (if (eql cooked--exit 0) 'cooked-success 'cooked-failure))
+    (let ((state (cooked--mode-line-state))
+          (subject (cooked--mode-line-subject))
+          (code (cooked-last-exit-code)))
+      (concat
+       ;; Only when the child says it is somewhere else.  A local session is
+       ;; the overwhelming majority and pays nothing; a remote one is where the
+       ;; state word starts meaning something different, and saying which host
+       ;; is what keeps that from reading as cooked being erratic across hosts.
+       (when (cooked--foreign-host-p)
+         (propertize (format " @%s" (car (split-string cooked--host "\\.")))
+                     'face 'shadow))
+       (apply #'propertize (concat " " state)
+              (cooked--mode-line-click
+               #'cooked-toggle-peek
+               "cooked: who owns the keyboard.  mouse-1: peek (C-c C-v)"))
+       (cooked--mode-line-bare state)
+       (pcase cooked--input-mode
+         ('semi (propertize " semi" 'face 'shadow))
+         ('still (propertize " still" 'face 'cooked-still))
+         ('frozen (propertize " frozen" 'face 'cooked-peek)))
+       (when subject
+         (propertize (format " %s" (truncate-string-to-width subject 24 nil nil t))
+                     'face 'shadow))
+       (when code
+         (apply #'propertize (format " %s" code)
+                'face (if (zerop code) 'cooked-success 'cooked-failure)
+                (cooked--mode-line-click
+                 #'cooked-goto-last-command
+                 "cooked: last exit status.  mouse-1: go to that command")))))))
 
 ;;;; Sticky scroll
 ;;
