@@ -169,6 +169,57 @@ keep point on screen, and nothing corrected that once the buffer caught up.
 
 ---
 
+## `cooked--pin-transcript-bottom`: monotone follow, not a two-way pin
+
+The transcript's pin is the alt screen's opposite number and wants the opposite
+discipline. The alt screen has a fixed anchor — the top of the screen region, which moves
+only when the region does — so pinning it unconditionally on every drain is a no-op
+whenever nothing changed. The transcript's anchor is the buffer's *end*, and that moves
+under it: `cooked--fit-screen` trims the region to the number of rows the grid says are
+used, so a child that draws a short screen and then a tall one moves `point-max` back and
+forth between drains. Pinning a moving target to the foot of the window at a drain rate
+whose floor is `cooked-min-redisplay-interval` — 125 Hz — is the whole of the jitter this
+used to have.
+
+So the follow is **monotone**: `window-start` is computed rather than recentred to, and
+only ever moves *down*. A steady stream whose tail is the same length computes the start
+the window already has and writes nothing, which is the common case; a tail that grew
+scrolls; a tail that shrank moves nothing except under the guard below. Two-way motion at
+drain rate becomes one-way motion when the child actually printed something, and there is
+no second drain to undo it.
+
+**Not `recenter`.** `recenter` sets a *forced* start, which redisplay is then free to
+overrule through `make-cursor-line-fully-visible` — so the window landed where neither
+had chosen. It also counts every screen line as the default font's height, which is a lie
+on a row carrying an image slice or a Nerd Font prompt separator, and the correction for
+that was a second pass paying for a few pixels of overflow with a whole screen line of
+scroll, up to three times per window per drain. That pass is gone: pixels are
+`make-cursor-line-fully-visible`'s business and always were, and it does the job after the
+fact rather than by guessing ahead of it. The start is set NOFORCE, so it is a suggestion
+redisplay may settle against instead of an instruction it will contradict.
+
+Nor `with-selected-window`. Nothing in the pin needs a selected window, and
+`select-window` is advised — see `cooked--sync-cursor-type` — so a pair of them per window
+per drain was arbitrary code running in the middle of a render. vterm makes the same
+distinction from the other side: it recenters only the selected window, and gives the rest
+`set_window_point` and `scroll-conservatively`.
+
+**The shrink direction, kept but rationed.** A pin that only ever scrolls down would leave
+blank space under the last line when the tail gets shorter, which is exactly what
+`comint-scroll-show-maximum-output` exists to prevent. So the upward correction is still
+made — but only when the *last* redisplay had the buffer's end on screen, which is what
+tells a grid that really has fewer used rows from `vertical-motion`'s whole-line count
+merely disagreeing with what redisplay laid out in pixels. The second is permanent on a
+window whose rows differ in height, and correcting for it once per drain is the
+oscillation itself.
+
+**`scroll-margin` and `hscroll-margin` are zeroed** in `cooked-mode`, as eat and vterm
+both do. A terminal's viewport is the whole window: the child decides what is on the
+bottom row and there is nothing below it to hold in reserve, so a user's margin only puts
+redisplay in disagreement with the start the pin just computed.
+
+---
+
 ## `cooked-row-rendered-functions`: why the bounds arrive late
 
 The hook is called at the end of the drain, from `cooked--notify-rows-rendered`, rather
@@ -238,12 +289,14 @@ otherwise have stayed grey for the rest of the session.
 ## `cooked--sync-cursor-type`: why it runs last, twice
 
 `evil` advises `select-window` to refresh its own cursor, and refreshes it again from
-`window-configuration-change-hook` and on every state change. The render selects windows
-in order to `recenter` them. So setting `cursor-type` any earlier in the drain lets evil
-get the last word inside the very drain that hid the cursor — and because this writes
-only on a change, the next drain computes the same value, skips the write, and never
-repairs it. The visible result was a cursor jumping around a progress bar the child had
-asked to draw without one.
+`window-configuration-change-hook` and on every state change. The render used to select
+windows in order to `recenter` them; `cooked--pin-transcript-bottom` no longer selects
+anything, so that door is shut, but the other two are still open and the ordering earns
+its keep on them. Setting `cursor-type` any earlier in the drain lets evil get the last
+word inside the very drain that hid the cursor — and because this writes only on a
+change, the next drain computes the same value, skips the write, and never repairs it.
+The visible result was a cursor jumping around a progress bar the child had asked to
+draw without one.
 
 The second call, from `post-command-hook`, covers a state change that produced no output:
 without it nothing would put a cursor back until the child next drew something.

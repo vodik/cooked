@@ -76,6 +76,10 @@ pub(crate) struct Command {
     pub cells: CellSize,
     /// `q=1` suppresses success, `q=2` suppresses everything.
     pub quiet: u8,
+    /// `C=1` — display the picture without moving the cursor. Spelled as the exception
+    /// rather than as "should the cursor move", so the derived default is the protocol's
+    /// default: absent `C=` moves it.
+    pub freeze_cursor: bool,
     /// A capability named in the control data that this terminal does not implement.
     pub unsupported: Option<&'static str>,
     /// The action the control data *named*, as distinct from the one that applies.
@@ -152,6 +156,9 @@ impl Command {
                 "c" => cmd.cells.cols = u16::try_from(num()).unwrap_or(u16::MAX),
                 "r" => cmd.cells.rows = u16::try_from(num()).unwrap_or(u16::MAX),
                 "q" => cmd.quiet = u8::try_from(num()).unwrap_or(u8::MAX),
+                // Only `C=1` freezes it. The protocol defines no other value, and
+                // reading "anything but zero" would make a future one mean this.
+                "C" => cmd.freeze_cursor = value == "1",
                 _ => {}
             }
         }
@@ -172,9 +179,10 @@ pub(crate) enum Outcome {
         cells: CellSize,
         client_id: u32,
         display: bool,
+        freeze_cursor: bool,
     },
     /// Place an image already transmitted under this id.
-    Place(ImageId),
+    Place { id: ImageId, freeze_cursor: bool },
     /// Nothing to do, but the child may be owed an answer.
     Nothing,
 }
@@ -298,7 +306,13 @@ impl Kitty {
                 (Outcome::Nothing, response(&cmd, None))
             }
             Action::Put => match self.by_client.get(&cmd.id).copied() {
-                Some(id) => (Outcome::Place(id), response(&cmd, None)),
+                Some(id) => (
+                    Outcome::Place {
+                        id,
+                        freeze_cursor: cmd.freeze_cursor,
+                    },
+                    response(&cmd, None),
+                ),
                 None => (Outcome::Nothing, response(&cmd, Some("ENOENT:image"))),
             },
             Action::Transmit | Action::Display => (Outcome::Nothing, None),
@@ -377,6 +391,7 @@ impl Kitty {
                 cells: cmd.cells,
                 client_id: cmd.id,
                 display: cmd.action == Action::Display,
+                freeze_cursor: cmd.freeze_cursor,
             },
             response(&cmd, None),
         )
@@ -610,6 +625,7 @@ mod tests {
                 cells: CellSize::new(0, 0),
                 client_id: 3,
                 display: true,
+                freeze_cursor: false,
             }
         );
         assert_eq!(reply.unwrap(), b"\x1b_Gi=3;OK\x1b\\");
@@ -774,7 +790,20 @@ mod tests {
     fn placing_a_bound_id_finds_it_again() {
         let mut k = Kitty::default();
         k.bind(9, ImageId(42));
-        assert_eq!(k.feed(b"Ga=p,i=9").0, Outcome::Place(ImageId(42)));
+        assert_eq!(
+            k.feed(b"Ga=p,i=9").0,
+            Outcome::Place {
+                id: ImageId(42),
+                freeze_cursor: false,
+            }
+        );
+    }
+
+    #[test]
+    fn c_says_whether_the_cursor_moves() {
+        assert!(!Command::parse("a=T,i=1").freeze_cursor);
+        assert!(Command::parse("a=T,i=1,C=1").freeze_cursor);
+        assert!(!Command::parse("a=T,i=1,C=0").freeze_cursor);
     }
 
     #[test]

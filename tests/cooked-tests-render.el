@@ -703,43 +703,104 @@ cursor, the same restraint `follow' already shows for the buffer's own point."
         (should (= (window-point other) reading))
         (delete-window other)))))
 
-(ert-deftest cooked-new-output-recenters-a-following-window ()
-  "`scroll-conservatively' is not a redisplay guarantee when output arrives
-from a process filter rather than a command -- `comint-postoutput-scroll-
-to-bottom' recenters explicitly for the same reason, which is the pattern
-`cooked--apply' mirrors.  Batch Emacs has no real display for `pos-visible-
-in-window-p' to check against, so this asserts the mechanism fires rather
-than its rendered effect."
+(ert-deftest cooked-new-output-scrolls-a-following-window ()
+  "Redisplay will not move a window whose point nothing touched, and the drain
+moves `window-point\=' explicitly for exactly that reason -- so the window start
+has to follow it down rather than be left where the last screenful put it.
+
+Asserted on `window-start\=' and `window-point\=' rather than on the pin firing:
+the pin is now a computed `set-window-start\=', so there is no call to count,
+and the rendered effect is the thing worth asserting anyway."
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
     (should-not cooked--alt)
     ;; The selected window only counts if it is actually showing this buffer —
-    ;; without this, `cooked--apply' correctly declines to recenter a window
-    ;; that has nothing to do with this session.
+    ;; without this, `cooked--apply' correctly declines to scroll a window that
+    ;; has nothing to do with this session.
     (set-window-buffer (selected-window) (current-buffer))
-    (let ((calls 0))
-      (cl-letf (((symbol-function 'recenter)
-                 (lambda (&rest _) (cl-incf calls))))
+    (let ((window (selected-window)))
+      (cooked--apply (cooked--drain cooked--session))
+      (let ((before (window-start window)))
         (should (cooked-tests--settle
-                 (lambda () (string-match-p "AFTER" (cooked-tests--text))))))
-      (should (> calls 0)))))
+                 (lambda () (string-match-p "AFTER" (cooked-tests--text)))))
+        ;; The window followed the cursor, and did so by scrolling down: the
+        ;; transcript only ever grew here.
+        (should (= (window-point window) (point)))
+        (should (>= (window-start window) before))
+        ;; And the start is where the pin computes it: the target's own screen
+        ;; line, a windowful from the top.
+        (should (= (window-start window)
+                   (save-excursion
+                     (goto-char (point))
+                     (vertical-motion (- (1- (window-body-height window))) window)
+                     (point))))))))
 
-(ert-deftest cooked-recenter-never-touches-an-unrelated-selected-window ()
+(ert-deftest cooked-scrolling-never-touches-an-unrelated-selected-window ()
   "Output can arrive from a process filter for a session that is not on
 screen anywhere -- whatever window happens to be selected at that moment is
-almost certainly showing something else, and recentering it would scroll the
+almost certainly showing something else, and scrolling it would move the
 user's actual work out from under them."
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
              (lambda () (string-match-p "line40" (cooked-tests--text)))))
     (should-not (eq (window-buffer (selected-window)) (current-buffer)))
-    (let ((calls 0))
-      (cl-letf (((symbol-function 'recenter)
-                 (lambda (&rest _) (cl-incf calls))))
-        (should (cooked-tests--settle
-                 (lambda () (string-match-p "AFTER" (cooked-tests--text))))))
-      (should (= calls 0)))))
+    (let* ((window (selected-window))
+           (start (window-start window))
+           (point (window-point window)))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "AFTER" (cooked-tests--text)))))
+      (should (= (window-start window) start))
+      (should (= (window-point window) point)))))
+
+(ert-deftest cooked-pinning-the-transcript-is-idempotent ()
+  "The property the old `recenter\='-and-correct pin never had, and the whole
+point of computing the start instead: run twice over the same view, the second
+run writes nothing.  Four writes to `window-start\=' per window per drain --
+`set-window-point\=', `recenter\=', and the whole-line corrections after it --
+each of which redisplay was then free to disagree with, is what the terminal
+was visibly jittering to."
+  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    (set-window-buffer (selected-window) (current-buffer))
+    (let ((window (selected-window)))
+      (cooked--pin-transcript-bottom (list window))
+      (let ((start (window-start window)))
+        (cooked--pin-transcript-bottom (list window))
+        (should (= (window-start window) start))
+        (cooked--pin-transcript-bottom (list window))
+        (should (= (window-start window) start))))))
+
+(ert-deftest cooked-a-moving-buffer-end-does-not-move-the-transcript ()
+  "The structural oscillator this was jittering to: `cooked--fit-screen\=' shapes
+the region to the rows the grid says are *used*, so `point-max\=' moves between
+drains whenever a child alternates a tall screen with a short one -- while the
+row the cursor is on, which is what the window is following, has not moved at
+all.  Pinning the buffer's end to the foot of the window shifted the whole
+transcript up and down at drain rate for that.  Following the cursor's own row
+does not: the start is computed from the target, so the end of the buffer can
+move under it without the window going anywhere."
+  (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line40" (cooked-tests--text)))))
+    (set-window-buffer (selected-window) (current-buffer))
+    (let* ((window (selected-window))
+           (target (cooked--point-after-input)))
+      (cooked--pin-transcript-bottom (list window) target)
+      (let ((start (window-start window))
+            (end (point-max)))
+        ;; The region grows below the cursor and shrinks back, as a drain that
+        ;; changes `cooked-grid-used' does.
+        (let ((inhibit-read-only t))
+          (save-excursion (goto-char (point-max)) (insert "\n\n\n")))
+        (should (> (point-max) end))
+        (cooked--pin-transcript-bottom (list window) target)
+        (should (= (window-start window) start))
+        (let ((inhibit-read-only t))
+          (delete-region end (point-max)))
+        (cooked--pin-transcript-bottom (list window) target)
+        (should (= (window-start window) start))))))
 
 (ert-deftest cooked-wrapped-lines-rejoin-in-scrollback ()
   "A line the terminal wrapped is one line again, so yanking history does not

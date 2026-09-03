@@ -1382,11 +1382,14 @@ perturbs the cursor\='s blink phase, which is one more contributor to flicker on
 a line the child rewrites rapidly.
 
 Called at the end of a drain, after the block that scrolls windows, and again
-from `post-command-hook\='.  `evil\=' advises `select-window\=' to refresh its own
-cursor, and the render selects windows in order to `recenter\=' them -- so set
-any earlier and evil gets the last word inside the very drain that hid the
-cursor, which showed up as a cursor jumping around a progress bar the child had
-asked to draw without one.
+from `post-command-hook\='.  `evil\=' refreshes its own cursor from
+`window-configuration-change-hook\=' and on every state change, and it advises
+`select-window\=' -- which the render used to call, once per window, to
+`recenter\=' through `with-selected-window\='.  Setting the cursor any earlier
+let evil get the last word inside the very drain that hid it, which showed up
+as a cursor jumping around a progress bar the child had asked to draw without
+one.  Scrolling no longer selects anything, so that particular door is shut;
+the ordering stays because the other two ways in are still open.
 
 A hidden cursor is honoured by default: every full-screen program drawing a
 frame, `less\=', and any progress bar worth the name relies on that.  Two cases
@@ -2245,10 +2248,10 @@ the outer drain has returned, which is also the only point at which draining
 again is safe."
   (if cooked--draining
       (setq cooked--drain-pending t)
-    ;; `unwind-protect' and `setq' rather than `let': `cooked--apply' selects
-    ;; other windows to recenter them, which changes the current buffer, and a
-    ;; `let' on a buffer-local restores into whichever buffer is current when
-    ;; the binding unwinds.
+    ;; `unwind-protect' and `setq' rather than `let': `cooked--apply' runs the
+    ;; layers' own hooks, which may change the current buffer, and a `let' on a
+    ;; buffer-local restores into whichever buffer is current when the binding
+    ;; unwinds.
     ;;
     ;; The invariant the captured buffer keeps: *the flags are cleared in the
     ;; buffer they were set in, whatever the current buffer has become by then*.
@@ -2497,12 +2500,15 @@ The ghost keeps the way back visible; `cooked--snap-to-cursor' takes it."
 (defun cooked--scroll-windows (viewport)
   "Scroll every window on this buffer to what VIEWPORT and the new grid want.
 
-Explicit rather than left to redisplay, for two separate reasons: a
-non-selected window is never the one `cooked--place-point' just moved, so
-nothing else here would touch it; and even the selected window's
-`scroll-conservatively' is not a redisplay guarantee once output arrives from a
-process filter rather than a command.  `comint-postoutput-scroll-to-bottom'
-recenters explicitly for exactly that reason.
+Explicit rather than left to redisplay, and the honest reason is narrower than
+it used to be stated here.  `scroll-conservatively' *is* a guarantee for the
+selected window whatever moved its point: `redisplay_window' compares the
+window's start against its point and has no idea whether a command or a process
+filter did the moving.  What redisplay will not do is move a *non-selected*
+window, whose `window-point' nothing here has touched, and what it will not
+decide is the policy question -- whether the last line belongs at the foot of
+the window with nothing below it, which is what `comint-scroll-show-maximum-
+output' gates comint's own recentring on.
 
 The selected window belongs in none of these lists unless it is actually showing
 this buffer: output can arrive while the user's focus is elsewhere, and
@@ -2532,60 +2538,51 @@ forcing would drag point along with it."
     (cooked--dolist-windows w windows
       (set-window-start w top t))))
 
-(defun cooked--unclip-bottom-line (window pos)
-  "Give POS's row in WINDOW the height `recenter' assumed it had.
-
-`recenter' places `window-start' on the assumption that every screen line is
-exactly the default font's height, which is why the call just before this one
-put POS where it did.  A row whose tallest glyph disagrees with that
-assumption -- a wide or composed character, or one of the Nerd Font icons most
-shell prompts draw a segment separator with -- can be taller than the default
-line, and then POS lands with its own bottom edge past the window's rather
-than flush with it: the very thing `cooked--scroll-transcript' calls `recenter'
-to prevent, just paid for in pixels `recenter' never counted.
-
-Corrected by dropping one screen line from the top rather than by recentring
-again: `recenter' chose POS's row correctly, only its height was wrong, and
-scrolling the window up by the one row it shorted that row gives it back
-exactly the room it needed.  Bounded, because a POS that is not on screen at
-all -- not the failure mode this exists for -- must not spin forever chasing a
-full visibility that is never coming.
-
-`pos-visible-in-window-p' only returns RBOT (element 3) when POS's row is
-*partially* obscured; a fully visible row -- the ordinary case, and always the
-case the very first time a window is ever shown -- gets back the bare `(X Y)'
-form, with nothing at 3.  `(nth 3 visible)' is checked for nil before it is
-compared to a number, or a row that needed no correction signals instead of
-just ending the loop."
-  (let ((tries 3) visible)
-    (while (and (> tries 0)
-                (consp (setq visible (pos-visible-in-window-p pos window t)))
-                (nth 3 visible)
-                (> (nth 3 visible) 0))
-      (setq tries (1- tries))
-      (set-window-start window
-                         (save-excursion
-                           (goto-char (window-start window))
-                           (vertical-motion 1 window)
-                           (point))
-                         t))))
-
 (defun cooked--pin-transcript-bottom (windows &optional pos)
-  "Put POS, defaulting to `point-max\=', on the bottom row of each of WINDOWS.
+  "Follow POS, defaulting to `point-max\=', with the bottom row of each of WINDOWS.
 
-The two steps `cooked--scroll-transcript\=' takes to keep the live prompt in
-view when a drain ends at the true end of the buffer -- `recenter\=' to choose
-the row, `cooked--unclip-bottom-line\=' to give it back whatever height
-`recenter\=' miscounted -- factored out here because a drain is not the only
-thing that can grow the buffer's true end.  `cooked--on-exit\=' does too,
+Factored out of `cooked--scroll-transcript\=' because a drain is not the only
+thing that can grow the buffer\='s true end.  `cooked--on-exit\=' does too,
 appending the \"[exited N]\=\" line from outside `cooked--scroll-windows\='
-entirely, and it needs exactly this rather than a second copy of it."
+entirely, and it needs exactly this rather than a second copy of it.
+
+Computed and NOFORCE, rather than the `recenter\=' this used to be.
+`recenter\=' sets a forced start that redisplay then overrules through
+`make-cursor-line-fully-visible\=', so the window landed where neither of them
+had chosen; and it counts every screen line as the default font\='s height, so a
+row taller than that -- an image slice, a Nerd Font prompt separator -- had to
+be paid back afterwards in whole lines of scroll.  A NOFORCE start is a
+suggestion redisplay may settle against instead, and the pixels are
+`make-cursor-line-fully-visible\='s business, which is where they were always
+handled correctly.  No `with-selected-window\=' either: nothing here needs the
+window selected, and `select-window\=' is advised -- by `evil\=', to refresh its
+cursor -- so a pair of them per window per drain was arbitrary code running in
+the middle of a render.
+
+Monotone, which is what stops this jittering.  The follow direction is taken
+whenever the tail has grown, and the equality is the common case: a steady
+stream whose tail is the same length leaves TOP exactly where it already is and
+this writes nothing at all, at a drain rate whose floor is
+`cooked-min-redisplay-interval\='.  The shrink direction is the one thing the
+two-way pin was buying -- `comint-scroll-show-maximum-output\='s actual
+semantics, no blank space below the last line -- and is taken only when the
+*last* redisplay had the buffer\='s end on screen, so it fires when the grid
+really has fewer used rows than before rather than every time
+`vertical-motion\='s whole-line count disagrees with what redisplay laid out in
+pixels.  That disagreement is permanent on a window whose rows differ in height,
+and correcting for it once per drain is the oscillation itself."
   (let ((target (or pos (point-max))))
     (cooked--dolist-windows w windows
       (set-window-point w target)
-      (with-selected-window w
-        (recenter (- -1 scroll-margin))
-        (cooked--unclip-bottom-line w target)))))
+      (let ((top (save-excursion
+                   (goto-char target)
+                   (vertical-motion (- (1- (window-body-height w))) w)
+                   (point))))
+        (when (or (> top (window-start w))
+                  (and (< top (window-start w))
+                       (let ((end (window-end w)))
+                         (and end (>= end (point-max))))))
+          (set-window-start w top t))))))
 
 (defun cooked--scroll-transcript (viewport here others)
   "Scroll the transcript in HERE and OTHERS as VIEWPORT asks."
@@ -2594,7 +2591,12 @@ entirely, and it needs exactly this rather than a second copy of it."
          ;; terminating newline depends on how the region was last shaped: rows
          ;; are made to exist by the newline ending the row above them, so the
          ;; bottom one has one only when `cooked--fit-screen' trimmed something
-         ;; below it.
+         ;; below it.  So this can flip from drain to drain, which used to mean
+         ;; the pin alternated with whatever redisplay chose for itself.  It no
+         ;; longer costs anything: a drain that declines to pin leaves point at
+         ;; the buffer's end under `scroll-conservatively' 101 and
+         ;; `scroll-margin' 0, and the minimal scroll redisplay makes to keep it
+         ;; visible is the same start `cooked--pin-transcript-bottom' computes.
          (at-end (>= target (1- (point-max)))))
     ;; Only while the view is following at all: suspending exists to stop the
     ;; child's output moving what is being read, and a second window on the same

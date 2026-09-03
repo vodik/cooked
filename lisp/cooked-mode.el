@@ -2177,6 +2177,15 @@ buffer and \\[cooked-send-input] submits the line.  Otherwise keys are forwarded
 to the child verbatim."
   :interactive nil
   (setq-local scroll-conservatively 101
+              ;; Both margins to zero, as eat and vterm also set them.  A
+              ;; terminal's viewport is the whole window: the child decides what
+              ;; is on the bottom row and there is nothing below it to keep in
+              ;; reserve, so a margin only puts redisplay in disagreement with
+              ;; `cooked--pin-transcript-bottom' about where the start belongs
+              ;; -- redisplay enforcing the margin against the start the pin
+              ;; just computed, once per drain.
+              scroll-margin 0
+              hscroll-margin 0
               truncate-lines (not cooked-rejoin-wrapped-lines)
               mode-line-process '(:eval (cooked--mode-line))
               ;; Read once here and never toggled afterwards -- see

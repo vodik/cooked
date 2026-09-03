@@ -53,6 +53,7 @@
 (require 'seq)
 (require 'goto-addr)
 (require 'browse-url)
+(require 'thingatpt)
 
 (declare-function cooked--suspended-p "cooked")
 (declare-function cooked--child-owns-keyboard-p "cooked")
@@ -327,6 +328,17 @@ claim a click the image had a better claim to."
 
 ;;;; The goto-addr pass
 
+(defvar cooked--url-scheme-regexp nil
+  "Cached (SCHEMES . REGEXP) for `thing-at-point-uri-schemes\='.")
+
+(defun cooked--url-scheme-regexp ()
+  "The scheme alternation `thing-at-point\=' would have built, built once."
+  (let ((schemes thing-at-point-uri-schemes))
+    (if (eq (car cooked--url-scheme-regexp) schemes)
+        (cdr cooked--url-scheme-regexp)
+      (cdr (setq cooked--url-scheme-regexp
+                 (cons schemes (regexp-opt schemes)))))))
+
 (defun cooked--fontify-links (beg end)
   "Scan BEG..END for things that look like URLs, and highlight what it finds.
 
@@ -342,6 +354,16 @@ guarantee `cooked-follow-link' exists to keep.
 `goto-address-prog-mode' is bound off: it tests `(nth 8 (syntax-ppss))', which
 over raw terminal output parses nothing meaningful.
 
+`thing-at-point-beginning-of-url-regexp' is bound because thingatpt does not
+cache it.  goto-addr asks `bounds-of-thing-at-point' about every match, and with
+that variable nil — which is its default — the well-formed-URL check runs
+`regexp-opt' over ninety-odd schemes for each one: a millisecond and 170 KB of
+garbage per row carrying a URL, which is a full GC every few keystrokes at a
+prompt.  The bound value is literally the expression thingatpt would have
+evaluated, so nothing about the match changes; ffap binds the same variable for
+the same purpose, so it is a seam rather than a reach into internals.  The `or'
+leaves a user who set it their own.
+
 And an explicit `OSC 8' span wins.  A match that starts inside one is dropped
 rather than suppressed beforehand, since goto-addr offers no hook to filter
 with and the alternative is reimplementing its scan to add one.  Overlays are
@@ -353,7 +375,10 @@ cheap and this only ever runs over a row or a batch."
     ;; abort a redisplay half-done.
     (cooked--protect-seam 'cooked--fontify-links
       (let ((goto-address-highlight-keymap cooked-link-map)
-            (goto-address-prog-mode nil))
+            (goto-address-prog-mode nil)
+            (thing-at-point-beginning-of-url-regexp
+             (or thing-at-point-beginning-of-url-regexp
+                 (cooked--url-scheme-regexp))))
         (goto-address-fontify-region beg end))
       (dolist (overlay (overlays-in beg end))
         (when (and (overlay-get overlay 'goto-address)

@@ -180,6 +180,15 @@ no span list at all, which is the case the sparse shape is built around."
                                                           (if (cl-evenp r) 1 0) nil))
                                    nil nil)))))
 
+(defun cooked-bench--url-rows (count cols)
+  "COUNT damaged rows each carrying a URL, which is what the goto-addr scan costs.
+
+Plain text otherwise, so the gap against `cooked-bench--plain-rows\=' is the whole
+of what `cooked--fontify-links\=' spends on a row that has something to find."
+  (let* ((url "curl https://example.com/some/long/path ")
+         (text (truncate-string-to-width (concat url (make-string cols ?x)) cols)))
+    (cl-loop for i below count collect (cons i (list text nil nil nil)))))
+
 (defun cooked-bench--box-rows (count cols)
   "COUNT damaged rows of box drawing, every cell taking the bitmap path.
 
@@ -218,7 +227,13 @@ left and right edges at weight 1 — which is what a border is made of."
   (cooked-bench--frames "per-frame, 24x80 styled (8 runs/row)"
                         (cooked-bench--styled-rows 24 80) 200)
   (cooked-bench--frames "per-frame, 24x80 box drawing"
-                        (cooked-bench--box-rows 24 80) 200))
+                        (cooked-bench--box-rows 24 80) 200)
+  ;; `cooked-bench--frames' paints the alternate screen, where the URL scan is off
+  ;; by default -- see `cooked-detect-links-on-alt-screen'.  What is under test is
+  ;; the scan, not which screen it runs on, so it is asked for here.
+  (let ((cooked-detect-links-on-alt-screen t))
+    (cooked-bench--frames "per-frame, 24x80 with a URL per row"
+                          (cooked-bench--url-rows 24 80) 200)))
 
 (defun cooked-bench-rescale ()
   "Cost of `cooked--rescale-deco\=', the walk a cell-size change runs.

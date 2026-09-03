@@ -167,6 +167,35 @@
                             (overlays-at (cooked-tests--link-at "https://")))))))
 
 
+(ert-deftest cooked-the-url-scheme-regexp-is-built-once ()
+  ;; `bounds-of-thing-at-point' is asked about every match, and thingatpt rebuilds
+  ;; the ninety-scheme alternation on each call unless
+  ;; `thing-at-point-beginning-of-url-regexp' is already set.  Binding it is the
+  ;; whole of the fix, so what is pinned here is that no pass rebuilds it.
+  (setq cooked--url-scheme-regexp nil)
+  (let ((built 0))
+    (cl-letf* ((original (symbol-function 'regexp-opt))
+               ((symbol-function 'regexp-opt)
+                (lambda (&rest args) (setq built (1+ built)) (apply original args))))
+      (with-temp-buffer
+        (insert "go to https://example.com/some/long/path now\n")
+        (cooked--fontify-links (point-min) (point-max))
+        (cooked--fontify-links (point-min) (point-max))))
+    (should (<= built 1))))
+
+(ert-deftest cooked-fontifying-a-url-does-not-allocate-a-regexp-per-match ()
+  ;; The cost that made this worth fixing was the garbage rather than the time: a
+  ;; row with a URL allocated ~25000 string characters, so at the default
+  ;; `gc-cons-threshold' typing a URL at a prompt collected every few keystrokes.
+  ;; The first pass warms the cache; the second is the one a drain actually pays.
+  (with-temp-buffer
+    (insert "curl https://example.com/some/long/path\n")
+    (cooked--fontify-links (point-min) (point-max))
+    (let ((before (nth 4 (memory-use-counts))))
+      (cooked--fontify-links (point-min) (point-max))
+      (should (< (- (nth 4 (memory-use-counts)) before) 5000)))))
+
+
 ;;;; The optional file layer
 ;;
 ;; Required inside the tests rather than at the top, and with both seams let-bound

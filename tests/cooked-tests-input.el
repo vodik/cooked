@@ -1976,11 +1976,17 @@ next focus change signals `invalid-function\='."
 (ert-deftest cooked-hidden-cursor-survives-the-render-selecting-a-window ()
   "A child that hid its cursor must still have none after a drain that scrolls.
 
-The render `recenter\='s through `with-selected-window\=', and `evil\=' advises
-`select-window\=' to refresh its own cursor -- so setting `cursor-type\=' before
-that block let evil overwrite it inside the very same drain.  Because the write
-is skipped when the value has not changed, no later drain repaired it either,
-and a progress bar drawn without a cursor got one anyway, jumping about.
+The render used to `recenter\=' through `with-selected-window\=', and `evil\='
+advises `select-window\=' to refresh its own cursor -- so setting `cursor-type\='
+before that block let evil overwrite it inside the very same drain.  Because the
+write is skipped when the value has not changed, no later drain repaired it
+either, and a progress bar drawn without a cursor got one anyway, jumping about.
+
+`cooked--pin-transcript-bottom\=' computes the window start instead of selecting
+the window to recentre it, so that particular route in is now structurally
+impossible.  The test stays: evil refreshes its cursor from
+`window-configuration-change-hook\=' and on every state change too, and the
+ordering in `cooked--sync-cursor-type\=' is what those still need.
 
 The buffer has to be shown in a window for any of that to run, which is why the
 older visibility test never saw it."

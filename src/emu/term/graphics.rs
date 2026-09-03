@@ -5,6 +5,26 @@
 
 use super::*;
 
+/// Where the cursor is left once a picture has been laid into the grid.
+///
+/// The three producers genuinely disagree about this, so it is the caller's to say
+/// rather than something [`State::lay_image`] can settle on its own — and getting it
+/// wrong is not a cosmetic matter, because a client that draws a frame, moves the cursor
+/// back up by the picture's height and draws the next one accumulates one row of drift
+/// per frame until the animation walks off the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CursorAfterImage {
+    /// Column 0 of the line below the picture, which is where xterm leaves a sixel and
+    /// what makes a bare `printf` of one behave like printing that many lines. Sixel and
+    /// iTerm2 both want this.
+    NextLine,
+    /// On the picture's last row, just past its right edge — kitty's rule. It moves to
+    /// the next line only when that column reaches the screen width, which is exactly
+    /// the case kitty's clients guard against: viuer emits the newline itself *unless*
+    /// the image reached the boundary, because otherwise it would get a blank line.
+    PastRightEdge,
+}
+
 impl State {
     pub(super) fn place_image(
         &mut self,
@@ -13,7 +33,7 @@ impl State {
         px: PixelSize,
     ) -> ImageId {
         let id = self.intern_image(format, bytes, px, None);
-        self.lay_image(id);
+        self.lay_image(id, CursorAfterImage::NextLine);
         id
     }
 
@@ -143,12 +163,18 @@ impl State {
         let cells = (cols.is_some() || rows.is_some())
             .then(|| CellSize::new(cols.unwrap_or(1), rows.unwrap_or(1)));
         let id = self.intern_image(format, &bytes, px, cells);
-        self.lay_image(id);
+        self.lay_image(id, CursorAfterImage::NextLine);
         true
     }
 
-    /// Lay an already-interned image into the grid at the cursor.
-    pub(super) fn lay_image(&mut self, id: ImageId) {
+    /// Lay an already-interned image into the grid at the cursor, leaving the cursor
+    /// where AFTER says.
+    ///
+    /// Rows are laid top to bottom, scrolling when the picture runs past the bottom of
+    /// the screen, and each is clipped to the screen width rather than wrapped — an
+    /// image is a rectangle, and a row of it continuing on the next line would not be
+    /// one.
+    pub(super) fn lay_image(&mut self, id: ImageId, after: CursorAfterImage) {
         let cells = self
             .image_cells
             .get(&id)
@@ -160,10 +186,34 @@ impl State {
             self.screen_mut().cursor.col = start_col;
             self.screen_mut()
                 .place_image_row(id, cell_row, cells.cols, pen);
+            // The linefeed after the *last* row is what separates the two dispositions:
+            // running it there is what puts the cursor on the line below the picture,
+            // and skipping it is what leaves it on the picture's last row.
+            let last = cell_row + 1 == cells.rows;
+            if last && after == CursorAfterImage::PastRightEdge {
+                break;
+            }
             let evicted = self.screen_mut().linefeed(pen);
             self.evicted(evicted);
         }
-        self.screen_mut().carriage_return();
+        match after {
+            CursorAfterImage::NextLine => self.screen_mut().carriage_return(),
+            CursorAfterImage::PastRightEdge => {
+                let end = start_col + usize::from(cells.cols);
+                if end < self.screen().width() {
+                    self.screen_mut().cursor.col = end;
+                    self.screen_mut().cursor.wrap_pending = false;
+                } else {
+                    // The picture reached the right edge, so the column past it is not
+                    // on this line. A real linefeed rather than a clamp, because this is
+                    // the case that has to scroll when the picture ends on the bottom
+                    // row.
+                    let evicted = self.screen_mut().linefeed(pen);
+                    self.evicted(evicted);
+                    self.screen_mut().carriage_return();
+                }
+            }
+        }
     }
 
     /// `ESC P ... q` — the start of a sixel image, and nothing else so far.
@@ -210,7 +260,7 @@ impl State {
         let px = bitmap.size;
         let (format, bytes) = bitmap.encode();
         let id = self.intern_image(format, &bytes, px, None);
-        self.lay_image(id);
+        self.lay_image(id, CursorAfterImage::NextLine);
     }
 
     /// `ESC _ ... ST` — the kitty graphics protocol, and nothing else so far.
@@ -230,17 +280,32 @@ impl State {
                 cells,
                 client_id,
                 display,
+                freeze_cursor,
             } => {
                 let id = self.intern_image(format, &bytes, px, cells.asked());
                 // The child's id space is not ours — ours is content-addressed — so the
                 // mapping is what makes a later `a=p` find this picture again.
                 self.kitty.bind(client_id, id);
                 if display {
-                    self.lay_image(id);
+                    self.kitty_place(id, freeze_cursor);
                 }
             }
-            Outcome::Place(id) => self.lay_image(id),
+            Outcome::Place { id, freeze_cursor } => self.kitty_place(id, freeze_cursor),
             Outcome::Incomplete | Outcome::Nothing => {}
+        }
+    }
+
+    /// Draw a picture for the kitty protocol, honouring `C=`.
+    ///
+    /// `C=1` is "do not move the cursor", so the whole of it is putting back what was
+    /// there. The one thing that cannot be put back is the *text* the cursor sat in when
+    /// a picture tall enough to scroll pushed it up: the row restored is the same screen
+    /// row, which is what a terminal that never scrolls at all would have left anyway.
+    fn kitty_place(&mut self, id: ImageId, freeze_cursor: bool) {
+        let entry = self.screen().cursor;
+        self.lay_image(id, CursorAfterImage::PastRightEdge);
+        if freeze_cursor {
+            self.screen_mut().cursor = entry;
         }
     }
 }

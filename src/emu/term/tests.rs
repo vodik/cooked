@@ -775,6 +775,66 @@ fn an_image_covers_a_rectangle_of_cells() {
     assert!(placements(&t, 2).is_empty(), "nothing below the picture");
 }
 
+/// A `c=`/`r=` kitty transmission of a one-pixel PNG, which is the cheapest way to ask
+/// for a picture of an exact cell size.
+fn kitty_image(t: &mut Term, control: &str) {
+    let png = rgba_png(1, 1, &[0, 0, 0, 255]);
+    t.feed(format!("\x1b_G{control};{}\x1b\\", b64(&png)).as_bytes());
+}
+
+#[test]
+fn kitty_leaves_the_cursor_on_the_pictures_last_row() {
+    let mut t = with_metrics(24, 80);
+    kitty_image(&mut t, "a=T,f=100,c=3,r=2,i=1");
+    // Row 1 is the picture's last, and column 3 is one past its right edge. This is
+    // kitty's rule, and its clients print their own newline on top of it.
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (1, 3));
+}
+
+#[test]
+fn a_sixel_leaves_the_cursor_on_the_line_below() {
+    let mut t = with_metrics(24, 80);
+    // The same 3x2-cell picture by the route sixel and iTerm2 take. xterm scrolls a
+    // sixel to the next line, so the disposition genuinely differs from kitty's.
+    t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(30, 40));
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (2, 0));
+}
+
+#[test]
+fn a_kitty_picture_reaching_the_right_edge_wraps_to_the_next_line() {
+    let mut t = with_metrics(24, 4);
+    kitty_image(&mut t, "a=T,f=100,c=4,r=1,i=1");
+    // Column 4 is off a four-column screen, so there is nowhere on this row for the
+    // cursor to rest -- which is the one case kitty's clients expect the move for.
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (1, 0));
+}
+
+#[test]
+fn an_animation_redrawn_in_place_does_not_walk_down_the_screen() {
+    // What viu does per frame: draw, print a newline, and come back up by the picture's
+    // height. An extra linefeed after the last row makes that arithmetic wrong by one
+    // row a frame, and the picture crawls off the bottom.
+    let mut t = with_metrics(24, 80);
+    t.feed(b"\x1b[6;1H");
+    let top = t.screen().cursor.row;
+    for _ in 0..4 {
+        kitty_image(&mut t, "a=T,f=100,c=3,r=2,i=1");
+        t.feed(b"\r\n\x1b[2A");
+        assert_eq!(t.screen().cursor.row, top, "the frame drifted");
+    }
+}
+
+#[test]
+fn kitty_c_leaves_the_cursor_exactly_where_it_was() {
+    let mut t = with_metrics(24, 80);
+    t.feed(b"\x1b[3;6H");
+    let entry = t.screen().cursor;
+    kitty_image(&mut t, "a=T,f=100,c=3,r=2,i=1,C=1");
+    assert_eq!(t.screen().cursor, entry);
+    // The picture was still drawn, from the cursor as usual.
+    assert_eq!(placements(&t, 2).len(), 3);
+}
+
 #[test]
 fn image_cells_reach_lisp_as_one_run_of_their_own() {
     let mut t = with_metrics(10, 20);

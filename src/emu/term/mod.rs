@@ -400,12 +400,9 @@ impl Term {
     /// a placement per cell and nothing else.
     ///
     /// Rows are laid top to bottom from the cursor, scrolling when the picture runs past
-    /// the bottom of the screen, and each is clipped to the screen width rather than
-    /// wrapped — an image is a rectangle, and a row of it continuing on the next line
-    /// would not be one. The cursor lands at the start of the row below the image, which
-    /// is what makes a bare `printf` of a transmission behave like printing that many
-    /// lines. A protocol with something else to say about the cursor says it in the
-    /// handler, not here.
+    /// the bottom of the screen. The cursor lands at the start of the row below the
+    /// image — `CursorAfterImage::NextLine`, the sixel and iTerm2 disposition; kitty's
+    /// is not reachable from here, because it is the APC handler that knows about `C=`.
     pub fn place_image(&mut self, format: ImageFormat, bytes: &[u8], px: PixelSize) -> ImageId {
         self.state.place_image(format, bytes, px)
     }
