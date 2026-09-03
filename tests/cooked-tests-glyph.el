@@ -361,5 +361,77 @@ engine merged them."
                   (dotimes (y height) (when (cooked--bitmap-ref grid x y) (setq set t)))
                   set))))))
 
+(ert-deftest cooked-box-glyph-bits-match-the-rust-side-encoding ()
+  "Descriptors mirror `BoxGlyph' in src/emu/glyph.rs by hand (see this file's own
+\"Mirrors the bit layout\" commentary), and cross the wire as a raw `u16' (see
+`Deco::Glyphs' in lib.rs) -- nothing enforces that the two ends agree on what a
+bit means. These are the same twelve literals
+`bit_pattern_matches_the_lisp_side_mirror' pins in glyph.rs, written here
+independently rather than read across the boundary: a change to either side's
+packing with no matching change to the other is exactly the bug this pair of
+tests exists to catch."
+  ;; ─ U+2500 light horizontal
+  (let ((bits #x0050))
+    (should (= (cooked--box-weight bits 'left) 1))
+    (should (= (cooked--box-weight bits 'right) 1))
+    (should (= (cooked--box-weight bits 'up) 0))
+    (should (= (cooked--box-weight bits 'down) 0))
+    (should (= (cooked--box-dashes bits) 0))
+    (should-not (cooked--box-block-p bits)))
+  ;; ┃ U+2503 heavy vertical
+  (let ((bits #x000A))
+    (should (= (cooked--box-weight bits 'up) 2))
+    (should (= (cooked--box-weight bits 'down) 2))
+    (should (= (cooked--box-weight bits 'left) 0))
+    (should (= (cooked--box-weight bits 'right) 0)))
+  ;; ╋ U+254B heavy cross
+  (let ((bits #x00AA))
+    (dolist (edge '(up down left right))
+      (should (= (cooked--box-weight bits edge) 2))))
+  ;; ═ U+2550 double horizontal
+  (let ((bits #x00F0))
+    (should (= (cooked--box-weight bits 'left) 3))
+    (should (= (cooked--box-weight bits 'right) 3))
+    (should (= (cooked--box-weight bits 'up) 0)))
+  ;; ┄ U+2504 light horizontal, triple-dashed
+  (let ((bits #x1050))
+    (should (= (cooked--box-weight bits 'left) 1))
+    (should (= (cooked--box-weight bits 'right) 1))
+    (should (= (cooked--box-dashes bits) 3)))
+  ;; ╭ U+256D light arc, down and right
+  (let ((bits #x0144))
+    (should (/= 0 (logand bits cooked--box-arc)))
+    (should (= (cooked--box-weight bits 'down) 1))
+    (should (= (cooked--box-weight bits 'right) 1))
+    (should (= (cooked--box-weight bits 'up) 0))
+    (should (= (cooked--box-weight bits 'left) 0)))
+  ;; ╱ U+2571 diagonal, forward only
+  (let ((bits #x0200))
+    (should (/= 0 (logand bits cooked--box-diag-forward)))
+    (should (= 0 (logand bits cooked--box-diag-backward))))
+  ;; ╳ U+2573 diagonal, both directions
+  (let ((bits #x0600))
+    (should (/= 0 (logand bits cooked--box-diag-forward)))
+    (should (/= 0 (logand bits cooked--box-diag-backward))))
+  ;; █ U+2588 full block
+  (let ((bits #x8044))
+    (should (cooked--box-block-p bits))
+    (should (= (logand bits 7) cooked--box-direction-full))
+    (should (= (logand (ash bits -3) 15) 8)))
+  ;; ▄ U+2584 lower half block
+  (let ((bits #x8021))
+    (should (cooked--box-block-p bits))
+    (should (= (logand bits 7) cooked--box-direction-down))
+    (should (= (logand (ash bits -3) 15) 4)))
+  ;; ▒ U+2592 medium shade
+  (let ((bits #x8015))
+    (should (cooked--box-shade-p bits))
+    (should (= (logand (ash bits -3) 15) 2)))
+  ;; ▙ U+2599 quadrant: upper-left, lower-left, lower-right
+  (let ((bits #x806E))
+    (should (cooked--box-block-p bits))
+    (should (= (logand bits 7) cooked--box-direction-quadrant))
+    (should (= (logand (ash bits -3) 15) #b1101))))
+
 (provide 'cooked-tests-glyph)
 ;;; cooked-tests-glyph.el ends here

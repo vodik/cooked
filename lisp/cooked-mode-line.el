@@ -21,6 +21,7 @@
 ;; state segment is a click away from.
 (defvar cooked--foreground-label)
 (defvar cooked--ownership)
+(defvar cooked-buffer-name-follows-title)
 (declare-function cooked-toggle-peek "cooked-mode")
 
 (defface cooked-failure '((t :inherit error))

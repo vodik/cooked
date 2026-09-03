@@ -4,6 +4,7 @@
 //! everything downstream of "here are some pixels".
 
 use super::*;
+use super::osc::rejoin;
 
 /// Where the cursor is left once a picture has been laid into the grid.
 ///
@@ -111,13 +112,7 @@ impl State {
     /// Returns whether this was an inline-image `File=`, handled or refused. `false`
     /// means it was some other `OSC 1337` and belongs to whoever else is listening.
     pub(super) fn iterm_file(&mut self, params: &[&[u8]]) -> bool {
-        let mut joined = Vec::new();
-        for (at, part) in params[1..].iter().enumerate() {
-            if at != 0 {
-                joined.push(b';');
-            }
-            joined.extend_from_slice(part);
-        }
+        let joined = rejoin(params.get(1..).unwrap_or(&[]));
         // The colon separates the arguments from the payload, and only the first one
         // does: base64 has no colon in it.
         let colon = joined.iter().position(|&b| b == b':');

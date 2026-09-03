@@ -491,7 +491,7 @@ impl State {
                 // producer asks before deciding whether to draw at all. Silent when
                 // nothing has been reported — a terminal frame has no cell size, and
                 // answering zero would be a claim rather than an absence.
-                14 if self.metrics.height != 0 && self.metrics.width != 0 => {
+                14 if self.metrics.is_reported() => {
                     let (h, w) = (self.screen().height(), self.screen().width());
                     let (ph, pw) = (
                         h.saturating_mul(usize::from(self.metrics.height)),
@@ -500,7 +500,7 @@ impl State {
                     self.events
                         .push(Event::Reply(format!("\x1b[4;{ph};{pw}t").into_bytes()));
                 }
-                16 if self.metrics.height != 0 && self.metrics.width != 0 => {
+                16 if self.metrics.is_reported() => {
                     let (ch, cw) = (self.metrics.height, self.metrics.width);
                     self.events
                         .push(Event::Reply(format!("\x1b[6;{ch};{cw}t").into_bytes()));

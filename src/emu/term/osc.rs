@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// Undoes the parser's `;`-splitting of a payload that legitimately contains
+/// semicolons of its own -- a URI, or iTerm2's `File=` argument string. Shared
+/// because two OSC producers ([`State::hyperlink`] and [`State::iterm_file`]) both
+/// need it and would otherwise drift apart one length cap or edge case at a time.
+pub(super) fn rejoin(parts: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (at, part) in parts.iter().enumerate() {
+        if at != 0 {
+            out.push(b';');
+        }
+        out.extend_from_slice(part);
+    }
+    out
+}
+
 impl State {
     pub(super) fn semantic(&mut self, params: &[&[u8]]) {
         // Matched whole, not on the first byte. `params.get(1).and_then(|p| p.first())`
@@ -243,13 +258,7 @@ impl State {
     /// anybody meant — or if it is longer than [`MAX_URI_LEN`]. Length is checked here
     /// because this arm returns before `osc_dispatch`'s generic payload limit.
     pub(super) fn hyperlink(&mut self, params: &[&[u8]]) {
-        let mut uri = Vec::new();
-        for (at, part) in params.iter().skip(2).enumerate() {
-            if at != 0 {
-                uri.push(b';');
-            }
-            uri.extend_from_slice(part);
-        }
+        let uri = rejoin(params.get(2..).unwrap_or(&[]));
         if uri.is_empty() {
             self.link = None;
             return;

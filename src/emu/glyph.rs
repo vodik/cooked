@@ -690,6 +690,42 @@ mod tests {
         assert_eq!(mixed.edge(Edge::Left), Weight::Light);
         assert_eq!(mixed.edge(Edge::Right), Weight::Heavy);
     }
+
+    /// `BoxGlyph`'s bit layout is mirrored by hand on the Lisp side (`cooked-glyph.el`,
+    /// see its "Mirrors the bit layout" commentary) — the wire format is a raw `u16`
+    /// (`Deco::Glyphs` in `lib.rs`), so nothing short of matching literals on both ends
+    /// catches the two drifting apart. Every other test in this module asserts through
+    /// `BoxGlyph`'s own accessors, which would keep passing even if the *packing*
+    /// changed as long as the accessors changed to match — exactly the failure mode this
+    /// pins against. `tests/cooked-tests-glyph.el`'s
+    /// `cooked-box-glyph-bits-match-the-rust-side-encoding` decodes these same literals
+    /// independently; a change here with no matching change there is the bug this exists
+    /// to catch.
+    #[test]
+    fn bit_pattern_matches_the_lisp_side_mirror() {
+        let cases: &[(char, u16)] = &[
+            ('\u{2500}', 0x0050), // ─ light horizontal
+            ('\u{2503}', 0x000A), // ┃ heavy vertical
+            ('\u{254B}', 0x00AA), // ╋ heavy cross
+            ('\u{2550}', 0x00F0), // ═ double horizontal
+            ('\u{2504}', 0x1050), // ┄ light horizontal, triple-dashed
+            ('\u{256D}', 0x0144), // ╭ light arc (down, right)
+            ('\u{2571}', 0x0200), // ╱ diagonal, forward only
+            ('\u{2573}', 0x0600), // ╳ diagonal, both directions
+            ('\u{2588}', 0x8044), // █ full block
+            ('\u{2584}', 0x8021), // ▄ lower half block
+            ('\u{2592}', 0x8015), // ▒ medium shade
+            ('\u{2599}', 0x806E), // ▙ quadrant: upper-left, lower-left, lower-right
+        ];
+        for &(ch, bits) in cases {
+            assert_eq!(
+                classify(ch).unwrap().bits(),
+                bits,
+                "{ch:?} (U+{:04X})",
+                ch as u32
+            );
+        }
+    }
 }
 
 #[cfg(test)]

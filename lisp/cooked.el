@@ -53,6 +53,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'comint)
 (require 'face-remap)
 (require 'cooked-util)
 (require 'cooked-command)
@@ -102,6 +103,9 @@
   (visible t :documentation "Whether the child has asked for it to be shown.")
   (shape 'block :documentation "`block', `underline' or `bar', from DECSCUSR."))
 
+(defvar-local cooked--cursor (cooked--cursor-make)
+  "The child's cursor as of the last drain, a `cooked-cursor'.")
+
 (defun cooked--cursor-decode (spec)
   "Decode SPEC, the (ROW COL VISIBLE SHAPE) list the native core reports."
   (pcase-let ((`(,row ,col ,visible ,shape) spec))
@@ -146,8 +150,6 @@ loudest thing at every call site."
 
 (defvar-local cooked--grid (cooked--grid-make)
   "The grid as the emulator last described it, a `cooked-grid'.")
-(defvar-local cooked--cursor (cooked--cursor-make)
-  "The child's cursor as of the last drain, a `cooked-cursor'.")
 (defvar-local cooked--alt nil)
 (defvar-local cooked--pin-screen-top nil
   "Non-nil while the live screen belongs at the top of the window.
@@ -300,6 +302,7 @@ see it for what declines and why.")
 (declare-function cooked--defer "cooked-mode")
 (declare-function cooked--rename-to-title "cooked-mode")
 (defvar cooked-rejoin-wrapped-lines)
+(defvar cooked--last-size)
 (declare-function cooked--kill "cooked-core")
 
 (defun cooked--foreign-host-p ()
