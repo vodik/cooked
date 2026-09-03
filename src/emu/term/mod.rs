@@ -329,7 +329,15 @@ fn plain_cells(value: &str) -> Option<u16> {
 ///
 /// Queries whose answer only Emacs knows — the default colours, which resolve against
 /// the buffer's faces rather than any palette we hold — are answered from Lisp, but the
-/// framing belongs here so that no Lisp ever splices control bytes by hand.
+/// framing belongs here so that no Lisp frames a payload the *child* supplied.
+///
+/// That is narrower than "Lisp never splices control bytes", which is how this used to
+/// read and is not the rule the tree keeps: `cooked--encode-event' spells out
+/// `ESC [ 27 ; MOD ; CHAR ~', `cooked--mouse-report' spells out an SGR report, and
+/// `cooked--alt-scroll-keys' spells out cursor keys — all correctly, because every field
+/// in them is an Emacs-side integer or symbol and none can carry an `ESC` the child
+/// chose. What cannot be done in Lisp is framing a string that came *from* the child,
+/// which is this function's whole case and the reason for the refusal below.
 ///
 /// `bell` picks BEL over ST because xterm echoes the terminator it was asked with, and a
 /// client scanning its input for BEL hangs on an ST-terminated reply.
