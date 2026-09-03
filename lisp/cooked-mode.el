@@ -1398,16 +1398,22 @@ Which byte that is comes from the tty -- see `cooked--eof-byte'."
 (defun cooked--send-job-control (session key signal)
   "Ask SESSION for job control the way a terminal does.
 
-KEY is `:intr\=', `:quit\=' or `:susp\=', and SIGNAL the signal the line discipline
-would raise for it.  A terminal sends no signal of its own: it writes the
-character the tty has in `c_cc\=' and lets the line discipline decide.  Reading
-that character rather than assuming ^C/^\\/^Z is what makes `stty intr ^X\='
-work, and honouring ISIG is what keeps a program that deliberately cleared it
--- so as to read the byte itself -- from being signalled behind its own back.
+KEY is `:intr\=', `:quit\=' or `:susp\='.  A terminal sends no signal of its own:
+it writes the character the tty has in `c_cc\=' and lets the line discipline
+decide.  Reading that character rather than assuming ^C/^\\/^Z is what makes
+`stty intr ^X\=' work, and honouring ISIG is what keeps a program that
+deliberately cleared it -- so as to read the byte itself -- from being
+signalled behind its own back.
 
 SIGNAL is the fallback, for the two cases where writing cannot mean anything:
 ISIG is off, so no byte would be turned into one; or the character is disabled
-\=(`_POSIX_VDISABLE\='), so there is no byte to write."
+\=(`_POSIX_VDISABLE\='), so there is no byte to write.  It names the signal
+rather than numbering it, because the numbers are not the same everywhere:
+SIGTSTP is 20 on Linux and 18 on the BSDs, where 20 is SIGCHLD.  Written as
+numbers here they were Linux\='s, so on macOS the suspend fallback sent a
+SIGCHLD the child ignores -- the whole of why \\[cooked-suspend] did nothing to
+a program that had cleared ISIG.  The core links libc and can see which
+platform it is; this side cannot, so this side spells the name."
   (let* ((jc (cooked--job-control session))
          (char (plist-get jc key)))
     (if (and (plist-get jc :isig) char)
@@ -1420,7 +1426,7 @@ Ends peek first when peeking, so the effect is seen right away rather than
 held behind the freeze."
   (interactive)
   (cooked--resume-forwarding)
-  (cooked--send-job-control (cooked--require-session) :susp 20))
+  (cooked--send-job-control (cooked--require-session) :susp 'sigtstp))
 
 (defun cooked-quit ()
   "Quit the foreground command -- SIGQUIT, the harder sibling of \\[cooked-interrupt].
@@ -1433,7 +1439,7 @@ child."
   (cooked--resume-forwarding)
   (let ((session (cooked--require-session)))
     (cooked--clear-input-region)
-    (cooked--send-job-control session :quit 3)))
+    (cooked--send-job-control session :quit 'sigquit)))
 
 (defun cooked-interrupt ()
   "Interrupt the foreground command.
@@ -1446,7 +1452,7 @@ first when peeking: a signal you cannot see land is not worth sending blind."
   (cooked--resume-forwarding)
   (let ((session (cooked--require-session)))
     (cooked--clear-input-region)
-    (cooked--send-job-control session :intr 2)))
+    (cooked--send-job-control session :intr 'sigint)))
 
 (defun cooked-kill-session ()
   "Kill the child outright, leaving the transcript behind.
@@ -1485,9 +1491,13 @@ wrote the `susp\=' character.
 It exists because comint\='s `comint-continue-subjob\=' is inherited, and
 inherited it calls `continue-process\=' on `cooked--wake\='.  The remap is the
 point of this function; anyone reaching for it directly almost certainly wants
-`fg\='."
+`fg\='.
+
+Named rather than numbered for the reason `cooked--send-job-control\=' is, and
+this was the worse of the two: 18 is SIGCONT on Linux and SIGTSTP on the BSDs,
+so on macOS the continue stopped the job it was asked to restart."
   (interactive)
-  (cooked--signal (cooked--require-session) 18))
+  (cooked--signal (cooked--require-session) 'sigcont))
 
 ;;;; State transitions
 

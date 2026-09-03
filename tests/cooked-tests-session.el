@@ -94,6 +94,31 @@ child is still there afterwards to prove it."
     ;; A real one still gets through, so the check is not simply refusing everything.
     (should-not (cooked--signal cooked--session 2))))
 
+(ert-deftest cooked-signal-takes-a-name-as-well-as-a-number ()
+  "Regression: the signal numbers written down in Lisp were Linux's.
+
+SIGTSTP is 20 there and 18 on the BSDs, where 20 is SIGCHLD and 18 is what
+Linux calls SIGCONT -- so `cooked-suspend' sent macOS a signal the child
+ignores, and `cooked-continue' sent it the one that stops the job it means to
+restart.  Naming the signal moves the number to the side that links libc and
+can see which platform it is on; see `cooked--send-job-control'.
+
+A name that is not a signal is refused the same way a number that is not one
+is, and the child is still there afterwards to prove nothing was guessed at."
+  (cooked-tests--with-session (list "/bin/sh")
+    (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
+    (dolist (name '(sigwoof sig nil t))
+      (should-error (cooked--signal cooked--session name)
+                    :type (quote args-out-of-range)))
+    ;; Neither a symbol nor a number, so it is the wrong kind of thing rather
+    ;; than the wrong value -- which is what double-quoting the name looks like.
+    (should-error (cooked--signal cooked--session ''sigtstp)
+                  :type (quote wrong-type-argument))
+    (should (cooked--live-p cooked--session))
+    (dolist (name '(sigcont SIGCONT sigwinch))
+      (should-not (cooked--signal cooked--session name)))
+    (should (cooked--live-p cooked--session))))
+
 (ert-deftest cooked-entry-points-autoload-from-the-main-file ()
   "Regression: `M-x cooked' from a `:load-path' install.
 

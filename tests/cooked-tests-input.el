@@ -279,6 +279,57 @@ result land where it can be seen."
     (cooked-interrupt)
     (should-not (cooked--suspended-p))))
 
+(defun cooked-tests--stopped-p (pid)
+  "Whether PID is a stopped job -- `T\=' in the state `ps\=' reports for it."
+  (string-prefix-p "T" (string-trim
+                        (shell-command-to-string (format "ps -o stat= -p %s" pid)))))
+
+(defun cooked-tests--foreground-job ()
+  "The foreground pid once it is something other than the shell itself."
+  (let ((shell (cooked--pid cooked--session)))
+    (cooked-tests--settle
+     (lambda () (let ((fg (cooked--foreground-pid cooked--session)))
+                  (and fg (not (equal fg shell)))))
+     6)
+    (cooked--foreground-pid cooked--session)))
+
+(ert-deftest cooked-suspend-stops-the-job-with-isig-on ()
+  "The ordinary path: the tty still acts on its `susp\=' character, so writing
+that byte is the whole of it and the line discipline does the rest."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (cooked--send cooked--session "sleep 60\r")
+    (let ((job (cooked-tests--foreground-job)))
+      (should job)
+      (should-not (cooked-tests--stopped-p job))
+      (cooked-suspend)
+      (should (cooked-tests--settle (lambda () (cooked-tests--stopped-p job)) 4)))))
+
+(ert-deftest cooked-suspend-stops-the-job-with-isig-off ()
+  "Regression: \\[cooked-suspend] did nothing at all on macOS to a program that
+had cleared ISIG.
+
+With ISIG off there is no byte to write -- the line discipline would hand it
+straight to the child instead of raising anything -- so `cooked--send-job-control\='
+falls back on the signal itself.  That signal was spelled 20, which is SIGTSTP
+on Linux and SIGCHLD on the BSDs, and SIGCHLD is ignored by default: the job
+carried on and the keystroke looked broken.  The number is the core\='s to pick
+now; this side names it.
+
+`stty raw -isig\=' is the smallest thing that reproduces it, and it is exactly
+what a full-screen program does when it wants ^Z as a byte of its own."
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (cooked--send cooked--session "sh -c 'stty raw -isig; sleep 60'\r")
+    (let ((job (cooked-tests--foreground-job)))
+      (should job)
+      (should (cooked-tests--settle
+               (lambda () (not (plist-get (cooked--job-control cooked--session) :isig)))
+               4))
+      (should-not (cooked-tests--stopped-p job))
+      (cooked-suspend)
+      (should (cooked-tests--settle (lambda () (cooked-tests--stopped-p job)) 4)))))
+
 (ert-deftest cooked-mode-line-names-the-input-mode ()
   "Stepping out used to have no mode-line indicator at all, which made it easy
 to forget you had done it and wonder why keys had stopped reaching the child.

@@ -198,7 +198,12 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// reach a typed character.
         "cooked--set-attended" 2..=2 => set_attended;
 
-        /// Send signal NUMBER to SESSION's foreground group.
+        /// Send SIGNAL to SESSION's foreground group.
+        ///
+        /// SIGNAL is a symbol naming it -- `sigtstp', `sigcont' -- or, for a caller with a
+        /// number already in hand, the number. Prefer the name: the numbers differ between
+        /// Linux and the BSDs, and Lisp has no way to tell which it is running on. See
+        /// `to_signal`.
         "cooked--signal" 2..=2 => signal;
 
         /// SESSION's job-control characters, as a plist.
@@ -520,22 +525,44 @@ fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 fn signal(env: Env, args: &[Value]) -> Result<Value> {
-    // Validated here rather than inside `Pty::signal`, because this is the only caller
-    // whose number is untrusted -- the rest name the signal statically. A number that is
-    // not a signal is the caller passing the wrong thing, so it gets the Lisp condition
-    // for that rather than being flattened into a `cooked-error' string.
-    //
+    let sig = to_signal(env, args[1])?;
+    handle(env, args[0])?.signal(sig).or_signal(env)?;
+    Ok(env.nil())
+}
+
+/// The signal named by a Lisp `sigtstp'-style symbol, or given as a raw number.
+///
+/// Names exist because the numbers are not portable and Lisp cannot see which platform
+/// it is on. `SIGTSTP` is 20 on Linux and 18 on the BSDs, where 20 is `SIGCHLD` and 18
+/// is what Linux calls `SIGCONT` -- so a number written down in Lisp is right on one
+/// platform and quietly wrong on the other. It was: `cooked-suspend' sent 20, which on
+/// macOS is a `SIGCHLD' the child ignores, and `cooked-continue' sent 18, which there
+/// stops the job it is supposed to restart. This is the side that links libc, so this is
+/// the side that should be turning a name into a number.
+///
+/// Numbers still work, and are still validated here rather than inside `Pty::signal`:
+/// that is the one caller whose number is untrusted, and one that is not a signal is the
+/// caller passing the wrong thing, so it gets the Lisp condition for that rather than
+/// being flattened into a `cooked-error' string.
+fn to_signal(env: Env, value: Value) -> Result<Signal> {
+    // Asked before `from_lisp`, not after: a failed conversion leaves a non-local exit
+    // pending on the Emacs side, and everything after it is a no-op until Lisp unwinds.
+    // So there is no trying the number first and falling back to the name.
+    if !env.is_nil(env.call("symbolp", &[value])?) {
+        let name = env.from_lisp::<String>(env.call("symbol-name", &[value])?)?;
+        return name
+            .to_uppercase()
+            .parse()
+            .map_err(|_| env.signal("args-out-of-range", "not a signal name"));
+    }
     // `try_from` rather than `as i32`: the cast wraps, so 4294967305 would arrive as 9
     // and kill the child outright. Lisp integers are wider than the signal number they
     // stand in for, and one that does not fit is a mistake to report rather than a bit
     // pattern to truncate.
-    let sig = env.from_lisp::<i64>(args[1])?;
-    let sig = i32::try_from(sig)
+    i32::try_from(env.from_lisp::<i64>(value)?)
         .ok()
         .and_then(|n| Signal::try_from(n).ok())
-        .ok_or_else(|| env.signal("args-out-of-range", "not a signal number"))?;
-    handle(env, args[0])?.signal(sig).or_signal(env)?;
-    Ok(env.nil())
+        .ok_or_else(|| env.signal("args-out-of-range", "not a signal number"))
 }
 
 /// Not an `accessors!` entry: those take the handle alone, and this carries a flag.

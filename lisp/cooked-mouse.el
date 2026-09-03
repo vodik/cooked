@@ -55,6 +55,32 @@
     down-mouse-3 mouse-3 drag-mouse-3)
   "Events for a button that can be pressed, dragged and released.")
 
+(defconst cooked--mouse-wheel-numbers
+  (delete-dups (mapcar (lambda (event) (alist-get event cooked--mouse-buttons))
+                       cooked--wheel-events))
+  "Button numbers standing for a wheel notch rather than a button held down.
+
+Derived from the two tables above rather than written out again.  A notch is
+whatever `cooked--wheel-events\=' maps to, and the literal `(64 65 66 67)\=' this
+replaces was a second copy of that fact with nothing keeping it in step.")
+
+(defconst cooked--mouse-x10-offset 32
+  "What X10 adds to every field of a report, so no field can be a control byte.
+Coordinates are 1-based on top of it, which is where the 33s come from.")
+
+(defconst cooked--mouse-motion-bit 32
+  "Bit set in a button number to say the report is motion rather than a press.
+
+The same value as `cooked--mouse-x10-offset\=' and emphatically not the same
+thing: this one is part of the button number, in SGR as much as in X10, while
+that one is how X10 spells a field.  Two 32s three lines apart, each meaning
+something the other does not, is what the names are for.")
+
+(defconst cooked--mouse-no-button 3
+  "Button number for \"nothing held\".
+What a release reports in X10, which has no field to name the button being let
+go of, and what a 1003 child is told when the pointer moves with nothing down.")
+
 (defconst cooked--mouse-events
   (append cooked--button-events cooked--wheel-events)
   "Every mouse event cooked forwards to the child, in either map that does it.
@@ -235,7 +261,11 @@ SGR is preferred wherever the child asked for it, because X10 cannot count
 past column 223."
   (if (cooked-mouse-state-sgr cooked--mouse-state)
       (format "\e[<%d;%d;%d%s" button (1+ col) (1+ row) (if pressed "M" "m"))
-    (format "\e[M%c%c%c" (+ 32 (if pressed button 3)) (+ 33 col) (+ 33 row))))
+    (format "\e[M%c%c%c"
+            (+ cooked--mouse-x10-offset
+               (if pressed button cooked--mouse-no-button))
+            (+ cooked--mouse-x10-offset 1 col)
+            (+ cooked--mouse-x10-offset 1 row))))
 
 (defun cooked--send-mouse (button row col pressed)
   "Send one report for BUTTON at ROW/COL, PRESSED or not, and drop the region.
@@ -260,7 +290,7 @@ not share.  One answer for both beats two that agree by accident."
 
 (defun cooked--report-button (button row col pressed)
   "Report BUTTON at ROW/COL as PRESSED or released, remembering that it is held."
-  (cond ((memq button '(64 65 66 67)))   ; a notch is not a button you can hold
+  (cond ((memq button cooked--mouse-wheel-numbers)) ; a notch cannot be held
         (pressed (unless (memq button cooked--mouse-held)
                    (push button cooked--mouse-held)))
         (t (setq cooked--mouse-held (delq button cooked--mouse-held))))
@@ -269,13 +299,15 @@ not share.  One answer for both beats two that agree by accident."
 (defun cooked--report-motion (row col)
   "Report the pointer arriving at ROW/COL, if it is a cell it was not already in.
 
-32 is the motion bit, added to the button being dragged; 3 stands for \"no
-button\", which is what a 1003 child is told when nothing is held.  Suppressing
+`cooked--mouse-motion-bit\=' is added to the button being dragged, or to
+`cooked--mouse-no-button\=' where nothing is held.  Suppressing
 a repeat of the last cell is not an optimisation so much as the contract: Emacs
 tracks the pointer by pixel, and a child that asked for cells would otherwise
 receive several dozen identical reports per cell crossed."
   (unless (equal cooked--mouse-last-cell (cons row col))
-    (cooked--send-mouse (+ 32 (or (car cooked--mouse-held) 3)) row col t)))
+    (cooked--send-mouse (+ cooked--mouse-motion-bit
+                           (or (car cooked--mouse-held) cooked--mouse-no-button))
+                        row col t)))
 
 (defun cooked--mouse-track (window)
   "Follow the pointer into the child until the gesture ends, over WINDOW.
@@ -314,7 +346,8 @@ every 1003 client also gets from 1002."
 
 Only the vertical notches translate; a horizontal one has no cursor-key
 spelling a pager would understand, so it sends nothing."
-  (if-let* ((final (cond ((= button 64) "A") ((= button 65) "B"))))
+  (if-let* ((final (cond ((= button (alist-get 'wheel-up cooked--mouse-buttons)) "A")
+                         ((= button (alist-get 'wheel-down cooked--mouse-buttons)) "B"))))
       (let ((key (if cooked--app-cursor (concat "\eO" final) (concat "\e[" final))))
         (mapconcat #'identity (make-list cooked-alternate-scroll-lines key)))
     ""))

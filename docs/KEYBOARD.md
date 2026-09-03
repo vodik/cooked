@@ -213,7 +213,10 @@ reads it — which is what makes `stty intr ^X` work. `ISIG` is the other half: 
 that cleared it did so to read the byte itself, and signalling it behind its own back
 would be wrong. The signal is the fallback for the two cases where writing cannot mean
 anything: `ISIG` off, or the character disabled (`_POSIX_VDISABLE` — zero on Linux,
-`0xff` on the BSDs, which is why it lives in `src/platform/`).
+`0xff` on the BSDs, which is why it lives in `src/platform/`). The fallback signal is
+named rather than numbered for the same reason: `SIGTSTP` is 20 on Linux and 18 on the
+BSDs, where 20 is `SIGCHLD`, so the Lisp says `sigtstp` and the core — which links libc
+and can see which platform it is on — turns that into a number.
 
 For anything that needs more than one key — an arbitrary command, `isearch`, or just
 moving around with `evil` normal state — `cooked-toggle-peek` freezes the screen (the
