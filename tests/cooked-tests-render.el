@@ -12,6 +12,11 @@
 
 (require 'cooked-tests-helpers)
 
+(defvar cooked-tests--seam nil
+  "A stand-in abnormal hook, for testing the seam runners themselves.
+`cooked--run-seam' takes the hook by symbol, so the runners can be exercised
+without borrowing a real seam and having its own listeners in the way.")
+
 (ert-deftest cooked-child-output-reaches-the-buffer ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'hello world\\n'")
     (should (cooked-tests--settle
@@ -1800,3 +1805,95 @@ buffer shows is the answer having reached the child, which is the claim."
     (should (cooked-tests--settle
              (lambda () (string-match-p "_Gi=31;OK" (cooked-tests--text)))
              8))))
+
+;;;; Containment
+;;
+;; Every one of these binds `cooked-debug' back to nil against the fixture's own
+;; binding, and has to: under debug the containment they are about re-signals by
+;; design, which would put the deliberate error into the process filter and end
+;; the batch run rather than fail one test.  The fixture turning it *on* is what
+;; makes the rest of the suite mean anything; these are the exception that
+;; proves it.
+
+(ert-deftest cooked-a-signalling-row-layer-does-not-end-the-drain ()
+  "`cooked-row-rendered-functions' is the loudest seam there is -- once per
+damaged row per drain -- so a layer that signals there signals continuously.
+The buffer has to go on rendering regardless, because the text was already
+correct before the layer was asked."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    ;; Two entries, and the assertion is on the *second*: the drain surviving
+    ;; on its own proves nothing here, because `cooked--on-wake' has an outer
+    ;; guard that resyncs a failed redisplay and the text would arrive that way
+    ;; regardless.  What only per-entry containment can give is the entry after
+    ;; the broken one still running.
+    (let* ((cooked-debug nil)
+           (painted 0)
+           (cooked-row-rendered-functions
+            (list (lambda (_beg _end) (error "cooked-tests: deliberate row failure"))
+                  (lambda (_beg _end) (cl-incf painted)))))
+      (cooked--send cooked--session "hello\n")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "hello" (cooked-tests--text)))))
+      (should (> painted 0)))
+    ;; And the session is not wedged once the layer is gone.
+    (cooked--send cooked--session "afterwards\n")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "afterwards" (cooked-tests--text)))))))
+
+(ert-deftest cooked-a-signalling-scan-layer-does-not-end-the-drain ()
+  "The same for the scrollback scan, which is the seam an optional layer is
+allowed to touch the filesystem from."
+  (cooked-tests--with-session '("/bin/sh" "-c" "for i in $(seq 60); do echo line $i; done; sleep 5")
+    ;; The second entry is the assertion, for the reason the row test gives:
+    ;; the transcript arriving proves only that `cooked--on-wake' resynced.
+    (let* ((cooked-debug nil)
+           (scanned 0)
+           (cooked-link-scan-functions
+            (list (lambda (_beg _end) (error "cooked-tests: deliberate scan failure"))
+                  (lambda (_beg _end) (cl-incf scanned)))))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "line 60" (cooked-tests--text)))))
+      (should (> scanned 0)))))
+
+(ert-deftest cooked-a-signalling-seam-entry-costs-only-its-own-contribution ()
+  "The whole reason `cooked--run-seam' is not `run-hook-with-args': that one
+contains nothing, so the first entry to signal would take every entry after it."
+  (with-temp-buffer
+    (cooked-mode)
+    (let* ((cooked-debug nil)
+           (ran nil)
+           (seam (list (lambda () (error "cooked-tests: deliberate"))
+                       (lambda () (push 'second ran)))))
+      (let ((cooked-tests--seam seam))
+        (cooked--run-seam 'cooked-tests--seam))
+      (should (equal ran '(second))))))
+
+(ert-deftest cooked-a-signalling-seam-entry-is-no-answer-rather-than-no-seam ()
+  "`until-success' and the containment compose: an entry that signals has given
+no answer, so the next one is asked instead of the seam falling silent."
+  (with-temp-buffer
+    (cooked-mode)
+    (let* ((cooked-debug nil)
+           (cooked-tests--seam (list (lambda () (error "cooked-tests: deliberate"))
+                                     (lambda () 'answer))))
+      (should (eq (cooked--run-seam-until-success 'cooked-tests--seam) 'answer)))))
+
+(ert-deftest cooked-a-broken-seam-is-reported-once-and-then-goes-quiet ()
+  "A seam on the drain path fires per row per drain, so an unrated `message' is
+a broken layer taking the echo area away from everything else Emacs has to say."
+  (with-temp-buffer
+    (cooked-mode)
+    (let* ((cooked-debug nil)
+           (said 0)
+           (cooked-tests--seam (list (lambda () (error "cooked-tests: deliberate")))))
+      (cl-letf (((symbol-function 'message) (lambda (&rest _) (cl-incf said))))
+        (dotimes (_ 5) (cooked--run-seam 'cooked-tests--seam)))
+      (should (= said 1))
+      ;; A different entry on the same seam is still heard from: the key is the
+      ;; pair, not the hook, so one broken layer silences only itself.
+      (let ((cooked-tests--seam
+             (list (lambda () (error "cooked-tests: a different one")))))
+        (cl-letf (((symbol-function 'message) (lambda (&rest _) (cl-incf said))))
+          (cooked--run-seam 'cooked-tests--seam))
+        (should (= said 2))))))
