@@ -100,6 +100,26 @@ Set to nil for the literal thing a terminal shows: one buffer line per screen
 row, hard-wrapped at whatever width was in force when it was printed."
   :type 'boolean :group 'cooked)
 
+(defun cooked-toggle-rejoin-wrapped-lines ()
+  "Flip `cooked-rejoin-wrapped-lines\=', here and for buffers made after this.
+
+A command rather than a menu item that sets the variable, because the variable
+is only half of what has to move: `cooked-mode\=' derives `truncate-lines\=' from
+it, and every drain since is asked with the value in force, so a bare `setq\='
+would change what happens to output arriving from now on and leave this
+buffer's own wrapping set the way it was.  The two would then disagree, quietly,
+which is exactly what a switch on a menu must not do.
+
+Only this buffer's `truncate-lines\=' is touched.  Another live session keeps the
+answer it was started with until its next `cooked-mode\=', and saying so is
+better than walking every cooked buffer to impose a setting the user changed
+from inside one of them."
+  (interactive)
+  (setq cooked-rejoin-wrapped-lines (not cooked-rejoin-wrapped-lines))
+  (setq-local truncate-lines (not cooked-rejoin-wrapped-lines))
+  (message "cooked: wrapped lines %s"
+           (if cooked-rejoin-wrapped-lines "rejoin" "stay split")))
+
 (defcustom cooked-shell (or (bound-and-true-p explicit-shell-file-name) shell-file-name)
   "Program run by \\[cooked]."
   :type 'string :group 'cooked)
@@ -1428,6 +1448,47 @@ first when peeking: a signal you cannot see land is not worth sending blind."
     (cooked--clear-input-region)
     (cooked--send-job-control session :intr 2)))
 
+(defun cooked-kill-session ()
+  "Kill the child outright, leaving the transcript behind.
+
+Not job control, and deliberately not routed through
+`cooked--send-job-control\=': there is no tty character for this and no line
+discipline to turn one into anything, so a signal is not the fallback here --
+it is the only thing this could ever have been.  Written as one directly, so
+the shape of the code says which kind of thing it is.
+
+Where comint puts `comint-kill-subjob\=', which cannot be inherited: it calls
+`kill-process\=' on the buffer\='s process, and this buffer\='s process is
+`cooked--wake\=', the pipe the child rings when output is pending.  Left alone,
+that menu entry killed the doorbell and left the child running behind a buffer
+that had stopped hearing from it.
+
+Asks first, because it is the one thing on that menu with no softer form: the
+rest write a character the child is free to ignore, and this is not deliverable
+to anything that could decline it."
+  (interactive)
+  (let ((session (cooked--require-session)))
+    (when (yes-or-no-p "cooked: kill the child? ")
+      (cooked--kill session))))
+
+(defun cooked-continue ()
+  "Send SIGCONT to the child.
+
+Deliberately absent from the menu, which is worth saying here rather than
+leaving to look like an oversight.  A terminal has no continue character: the
+tty carries `intr\=', `quit\=' and `susp\=' in `c_cc\=' and nothing else, so
+`cooked-interrupt\=', `cooked-quit\=' and `cooked-suspend\=' each have a byte to
+write and this has none.  What resumes a stopped job is the shell\='s own `fg\=',
+a piece of bookkeeping the terminal is not party to -- its part ended when it
+wrote the `susp\=' character.
+
+It exists because comint\='s `comint-continue-subjob\=' is inherited, and
+inherited it calls `continue-process\=' on `cooked--wake\='.  The remap is the
+point of this function; anyone reaching for it directly almost certainly wants
+`fg\='."
+  (interactive)
+  (cooked--signal (cooked--require-session) 18))
+
 ;;;; State transitions
 
 (defun cooked--resample-mode ()
@@ -1786,6 +1847,30 @@ corrupt a redisplay cooked cannot see, let alone repair."
                      (propertize (format " [%d lines folded] "
                                          (count-lines beg end))
                                  'face 'shadow))))))
+
+(defun cooked-rerun-command (&optional command)
+  "Resend COMMAND's input line through the ordinary submit path.
+
+The one verb of the three that cannot live beside the other two in
+cooked-command.el: `cooked-copy-command\=' and `cooked-copy-output\=' ask the
+records a question, and this one writes to the child, which is a direction that
+file deliberately does not face.
+
+Refuses anywhere but an empty prompt, and the two halves of that are separate
+refusals rather than one.  With the child owning the line there is nothing to
+submit *to* -- the text would be typed into whatever program is reading, which
+is not what a rerun means.  With a line already half-typed the submission would
+run that line with this one appended, which is worse than doing nothing because
+it looks like it worked."
+  (interactive)
+  (let ((input (cooked-command-input (cooked--command-here command))))
+    (unless input
+      (user-error "cooked: nothing to rerun"))
+    (unless (and (cooked--input-state-p)
+                 (string-empty-p (or (cooked--pending-input) "")))
+      (user-error "cooked: can only rerun at an empty prompt"))
+    (cooked--history-record input)
+    (cooked--send-input-string input)))
 
 ;;;; Size and lifecycle
 
@@ -2149,6 +2234,7 @@ to the child verbatim."
   ;; that runs on every call, even repeated ones that leave the mode already on.
   (add-hook 'text-scale-mode-hook #'cooked--sync-size nil t)
   (add-hook 'window-selection-change-functions #'cooked--window-selection-changed nil t)
+  (add-hook 'context-menu-functions #'cooked--context-menu nil t)
   (add-hook 'kill-buffer-hook #'cooked--cleanup nil t))
 
 ;; The state maps are installed with `use-local-map', which replaces the local map
@@ -2179,6 +2265,12 @@ to the child verbatim."
 (define-key cooked-mode-map (kbd "C-c C-n") #'cooked-next-command)
 (define-key cooked-mode-map (kbd "C-c TAB") #'cooked-toggle-fold)
 (define-key cooked-mode-map (kbd "C-c C-l") #'cooked-refresh)
+;; Reads the way \\`M->' does for the end of a buffer, and for the same reason:
+;; the newest command is the one end of the transcript that keeps moving.  It had
+;; no key at all until now -- only the mode line's exit status was a click away
+;; from it, which is a control a keyboard cannot reach and a terminal frame does
+;; not draw.
+(define-key cooked-mode-map (kbd "C-c C->") #'cooked-goto-last-command)
 ;; goto-addr's own advertised key, and the entry point that does not need point to
 ;; be inside a highlighted span -- see `cooked-follow-link-at-point'.  Here rather
 ;; than in a `keymap' text property because `C-c' is forwarded to the child as the
@@ -2195,6 +2287,26 @@ to the child verbatim."
 (define-key cooked-mode-map (kbd "C-c M-o") #'cooked-clear-scrollback)
 (define-key cooked-mode-map (kbd "C-c SPC") #'cooked-newline)
 
+;; Middle-click pastes to the child, which is what it does in every other
+;; terminal.  comint binds it to `comint-insert-input', which looks for the input
+;; field under the click; cooked sets no `field' properties, so it fell through to
+;; the global `mouse-2' -- `mouse-yank-primary', which inserts the X selection
+;; into the buffer.  Text that goes nowhere, in a transcript that is read-only
+;; above the prompt, at a position the next repaint may overwrite.
+;;
+;; It composes with the two other claims on `mouse-2' by outranking neither,
+;; which is the correct order rather than an accident.  A link span carries
+;; `cooked-link-map' as a `keymap' text property, and a property keymap is
+;; consulted before any keymap here, so clicking a link still follows it --
+;; `cooked-follow-link' then makes the same decision this binding would have.
+;; `cooked--mouse-map' lives in `emulation-mode-map-alists', which outranks the
+;; local map, so a child that asked for the mouse gets the click and this is
+;; never reached.  `S-mouse-2' is left alone in both directions.
+;;
+;; No `down-mouse-2' to go with it: nothing binds it globally, so there is no
+;; earlier command to head off.
+(define-key cooked-mode-map [mouse-2] #'cooked-paste)
+
 ;; Whatever key a user has bound to comint's commands reaches ours, so
 ;; `evil-collection-comint' (which binds `repl-submit' to `comint-send-input')
 ;; works without knowing cooked exists.
@@ -2204,6 +2316,26 @@ to the child verbatim."
                  (comint-delete-output . cooked-delete-output)
                  (comint-stop-subjob . cooked-suspend)
                  (comint-delchar-or-maybe-eof . cooked-delete-char-or-eof)
+                 ;; The three that were left out, and the reason this list is
+                 ;; worth auditing rather than adding to as commands appear.
+                 ;; comint's own implementations do not fail here -- they
+                 ;; *succeed*, against `cooked--wake': `comint-kill-subjob'
+                 ;; kills the pipe the child rings when output is pending, and
+                 ;; the buffer stops hearing from a child that is still
+                 ;; running.  `cooked-continue' exists for no other reason than
+                 ;; to stand here; see its docstring for why a terminal has no
+                 ;; continue of its own.
+                 (comint-send-eof . cooked-send-eof)
+                 (comint-kill-subjob . cooked-kill-session)
+                 (comint-continue-subjob . cooked-continue)
+                 ;; And the two that read comint's input fields, which cooked
+                 ;; does not set, so they answered from `point-min' and from
+                 ;; nowhere respectively.  `comint-append-output-to-file' is
+                 ;; deliberately not here: it misreads positions like these two
+                 ;; but touches no process, so it is wrong rather than
+                 ;; dangerous, and the menu simply stops offering it.
+                 (comint-show-output . cooked-show-output)
+                 (comint-write-output . cooked-write-output)
                  (comint-kill-input . cooked-kill-input)
                  (comint-previous-input . cooked-previous-input)
                  (comint-next-input . cooked-next-input)
@@ -2221,6 +2353,238 @@ to the child verbatim."
                  ;; order and needs no repeat to be recognised.
                  (comint-bol-or-process-mark . cooked-beginning-of-line)))
   (define-key cooked-mode-map (vector 'remap (car remap)) (cdr remap)))
+
+;;;; The menu
+
+;; comint's three menus arrive with the parent keymap, and each is wrong here in
+;; its own way.
+;;
+;; In/Out is mostly right, and that is the problem: three of its twenty-one
+;; entries are not, and nothing on it says which three.  "Show Current Output
+;; Group" walks `field' text properties, which cooked sets nowhere -- it marks
+;; the prompt read-only instead -- so `field-beginning' answers `point-min' and
+;; it scrolls to the top of the scrollback.  The two "Matching Input..." motions
+;; count a hit only where `(get-char-property (point) 'field)' is non-nil, so
+;; they search to the end of the buffer and report "Not found", every time.
+;;
+;; Signals offers EOF, KILL and CONT against the buffer's process, which is the
+;; wakeup pipe; see the remap table above for where those three went.
+;;
+;; Complete asks a process that is not the child for filename completion -- the
+;; same reason `cooked-mode' takes `comint-completion-at-point' out of
+;; `completion-at-point-functions'.  Its one honest entry survives below,
+;; running cooked's own capf.
+;;
+;; Deleted per entry rather than by giving `cooked-mode-map' a menu bar of its
+;; own: a child keymap that binds `[menu-bar]' outright does not shadow the
+;; parent's, because Emacs composes the two for the same prefix -- tried, and
+;; `[menu-bar inout]' still resolved through it to comint's submenu.  An explicit
+;; nil does shadow, and keeps shadowing through `cooked-input-map' and the rest,
+;; which are installed with `use-local-map' and reach this map only as a parent.
+;; `keymap-set' refuses a nil definition, so `define-key' is the tool here and
+;; not a modernisation someone has yet to do.
+;;
+;; `menu-bar-final-items', which comint mutated globally when it loaded, is left
+;; alone: with these three shadowed there is nothing left for those names to
+;; order, and un-mutating a global another package set is not ours to do.
+(define-key cooked-mode-map [menu-bar inout] nil)
+(define-key cooked-mode-map [menu-bar signals] nil)
+(define-key cooked-mode-map [menu-bar completion] nil)
+
+(easy-menu-define cooked-mode-menu cooked-mode-map
+  "Menu for `cooked-mode\='.
+
+On `cooked-mode-map\=' rather than on each state map, for the reason cooked\='s
+own commands are bound there: it should not evaporate because the child took the
+keyboard, and every state map reaches this one as a parent -- peek included.
+One menu rather than comint\='s three or `term.el\='s four, because four items of
+job control and one of completion do not each earn a place on the menu bar, and
+because this is the whole of what \\`mouse-1' on the mode name and a right-click
+under `context-menu-mode\=' will show.
+
+Every item is guarded rather than left to signal when it is chosen.  A menu is
+the one interface that says what is possible *before* you commit to it, so an
+item that would answer \"No live session\" is one that should have been greyed
+out -- and cooked has the predicates already, because the mode line has been
+reporting the same facts in words all along.  Greyed rather than hidden, too:
+which state the terminal is in is exactly what someone reaching for the menu is
+unsure of, and an item that vanishes answers nothing.
+
+The guard forms are data.  The byte-compiler never looks inside them, so `make
+lint\=' cannot catch a misspelled predicate or a command that does not exist the
+way it catches one anywhere else in this file.  That is what the menu tests are
+for, and why they walk this whole structure and evaluate every guard in every
+state rather than merely checking that it parses."
+  '("Cooked"
+    ;; `cooked--input-state-p' alone is not the guard these want, and finding
+    ;; that out is what the menu tests are for: with no session at all it
+    ;; answers t -- the policy falls through to `cooked', Emacs owning a line
+    ;; there is nobody to send -- so a buffer whose child has exited would have
+    ;; offered every one of these.  A live child and an editable line are two
+    ;; conditions, and the mode line has always said so: `exited 0' replaces the
+    ;; state word rather than qualifying it.
+    ["Send Input" cooked-send-input :enable (and (cooked--live-session)
+                                                 (cooked--input-state-p))
+     :help "Submit the pending line to the child"]
+    ["Insert Newline" cooked-newline :enable (and (cooked--live-session)
+                                                  (cooked--input-state-p))
+     :help "Continue on a second line without submitting"]
+    ["Kill Input" cooked-kill-input :enable (cooked--input-region)
+     :help "Delete what has been typed but not sent"]
+    ["Previous Input" cooked-previous-input :enable (and (cooked--live-session)
+                                                         (cooked--input-state-p))
+     :help "Recall the previous line from the history"]
+    ["Next Input" cooked-next-input :enable (and (cooked--live-session)
+                                                 (cooked--input-state-p))
+     :help "Recall the next line from the history"]
+    ["Complete at Point" completion-at-point :enable (and (cooked--live-session)
+                                                          (cooked--input-state-p))
+     :help "Complete the word at point, through the shell where it can"]
+    "--"
+    ["Paste to Terminal" cooked-paste :enable (cooked--live-session)
+     :help "Send the head of the kill ring, bracketed if the child asked"]
+    ["Send String..." cooked-send-string :enable (cooked--live-session)
+     :help "Send text of your own to the child"]
+    ["Send Next Key Literally" cooked-send-literal-key :enable (cooked--live-session)
+     :help "Send the next key even where Emacs would have bound it"]
+    ["Send M-x to the Child" cooked-meta-x :enable (cooked--live-session)
+     :help "For a child that has its own M-x, rather than reading one here"]
+    "--"
+    ("Signals"
+     ["Interrupt" cooked-interrupt :enable (cooked--live-session)
+      :help "Write the tty's interrupt character, or SIGINT where ISIG is off"]
+     ["Quit" cooked-quit :enable (cooked--live-session)
+      :help "Write the tty's quit character, or SIGQUIT where ISIG is off"]
+     ["Suspend" cooked-suspend :enable (cooked--live-session)
+      :help "Write the tty's suspend character, or SIGTSTP where ISIG is off"]
+     ["End of File" cooked-send-eof :enable (cooked--live-session)
+      :help "Send the tty's EOF byte -- a byte, not a signal"]
+     "--"
+     ["Kill the Child" cooked-kill-session :enable (cooked--live-session)
+      :help "SIGKILL, with the transcript left behind"])
+    ("This Command"
+     ["Show Its Output" cooked-show-output :enable (cooked--command-around (point))
+      :help "Put the start of this command's output at the top of the window"]
+     ["Fold Its Output" cooked-toggle-fold :enable (cooked--command-around (point))
+      :help "Hide or reveal the output of the command at point"]
+     ["Delete Its Output" cooked-delete-output :enable (cooked--command-around (point))
+      :help "Ask the emulator to drop those rows"]
+     ["Write Its Output to File..." cooked-write-output
+      :enable (cooked--command-around (point))
+      :help "Save this command's output, or with a prefix its whole record"]
+     "--"
+     ["Rerun It" cooked-rerun-command
+      :enable (and (cooked--live-session)
+                   (cooked--input-state-p)
+                   (cooked--command-around (point)))
+      :help "Resend this command's line, at an empty prompt"]
+     ["Copy Its Command Line" cooked-copy-command
+      :enable (cooked--command-around (point))
+      :help "Put the line that was run on the kill ring"]
+     ["Copy Its Output" cooked-copy-output :enable (cooked--command-around (point))
+      :help "Put the output on the kill ring"])
+    ["Previous Command" cooked-previous-command :enable cooked--commands
+     :help "Move to the previous prompt"]
+    ["Next Command" cooked-next-command :enable cooked--commands
+     :help "Move to the next prompt"]
+    ["Last Command" cooked-goto-last-command :enable cooked--commands
+     :help "Move to the prompt of the most recently finished command"]
+    ["Scroll to the Bottom" comint-show-maximum-output
+     :help "Put the end of the transcript at the bottom of the window"]
+    ["List Input History" comint-dynamic-list-input-ring
+     :help "Show the input ring in a buffer of its own"]
+    "--"
+    ["Peek" cooked-toggle-peek
+     :style toggle :selected cooked--peek-explicit
+     :enable (or cooked--peek-explicit (not (cooked--input-state-p)))
+     :help "Stop redrawing and hand the buffer to ordinary Emacs keys"]
+    ["Refresh the Screen" cooked-refresh :enable (cooked--live-session)
+     :help "Repaint from the emulator's own grid"]
+    ["Clear Scrollback" cooked-clear-scrollback
+     :help "Everything above the prompt goes, grid rows and scrollback alike"]
+    ["Follow Link at Point" cooked-follow-link-at-point
+     :help "Open the URL or file name at point"]
+    "--"
+    ("Options"
+     ["Detect Links" (setq cooked-detect-links (not cooked-detect-links))
+      :style toggle :selected cooked-detect-links
+      :help "Highlight things that look like URLs as output is rendered"]
+     ["Detect Links on the Alt Screen"
+      (setq cooked-detect-links-on-alt-screen (not cooked-detect-links-on-alt-screen))
+      :style toggle :selected cooked-detect-links-on-alt-screen
+      :enable cooked-detect-links
+      :help "A full-screen program usually wants the mouse for itself"]
+     ["Inline Images" (setq cooked-inline-images (not cooked-inline-images))
+      :style toggle :selected cooked-inline-images
+      :help "Show images the child sends rather than their placeholder cells"]
+     ["Rejoin Wrapped Lines" cooked-toggle-rejoin-wrapped-lines
+      :style toggle :selected cooked-rejoin-wrapped-lines
+      :help "Store a wrapped row as part of the line it belongs to"]
+     ["Buffer Name Follows the Title"
+      (setq cooked-buffer-name-follows-title (not cooked-buffer-name-follows-title))
+      :style toggle :selected cooked-buffer-name-follows-title
+      :help "Rename the buffer as the child sets its title"]
+     ["Home Skips the Prompt"
+      (setq cooked-beginning-of-line-skips-prompt
+            (not cooked-beginning-of-line-skips-prompt))
+      :style toggle :selected cooked-beginning-of-line-skips-prompt
+      :help "Start-of-line lands on the command rather than inside the prompt"]
+     "--"
+     ;; Not a toggle, and it cannot be one: the header line it adds takes a row
+     ;; of the window body, which is a row off the PTY, which is why
+     ;; `cooked-mode' reads it once and never again.  Offered here as a switch it
+     ;; would appear to do nothing; sent to Customize it says plainly that the
+     ;; answer applies to the next cooked buffer.
+     ["Sticky Scroll..." (customize-variable 'cooked-sticky-scroll)
+      :help "Takes effect in new cooked buffers -- it resizes the PTY"]
+     ["Customize Cooked" (customize-group 'cooked)])
+    "--"
+    ["Describe Mode" describe-mode]
+    ["Install terminfo on a Host..." cooked-install-terminfo-remote]
+    ;; A form rather than the function: `cooked-version' returns the string the
+    ;; core was built with and is not a command, having been written for callers
+    ;; rather than for a keystroke.
+    ["Cooked Version" (message "cooked %s" (cooked-version))]))
+
+(defun cooked--context-menu (menu click)
+  "Add the command under CLICK to MENU, and return it.
+
+`context-menu-local\=' already copies the menu above into every right-click, so
+this is not where the verbs first appear -- it is where they are asked about
+the right command.  Everything on that menu resolves its record from point, and
+for a right-click point is wrong by exactly the distance the mouse travelled;
+the three verbs that name a command are therefore worth a second copy up here,
+each closed over the record `posn-point\=' found.
+
+Nothing here has to consult `cooked--mouse-grab\='.  A child that asked for the
+mouse gets `down-mouse-3' from `cooked--mouse-map\=', which lives in
+`emulation-mode-map-alists\=' and so outranks the binding `context-menu-mode\='
+installs globally -- meaning this is never reached in that state at all, and
+Shift is the way in, exactly as it is everywhere else the child holds the
+pointer."
+  (when-let* ((position (posn-point (event-start click)))
+              (command (cooked--command-around position)))
+    (define-key-after menu [cooked-command-separator] menu-bar-separator)
+    (define-key-after menu [cooked-context-copy-command]
+      `(menu-item "Copy This Command Line"
+                  ,(lambda () (interactive) (cooked-copy-command command))
+                  :help "Put the line that was run on the kill ring"))
+    (define-key-after menu [cooked-context-copy-output]
+      `(menu-item "Copy This Output"
+                  ,(lambda () (interactive) (cooked-copy-output command))
+                  :help "Put this command's output on the kill ring"))
+    (define-key-after menu [cooked-context-rerun]
+      `(menu-item "Rerun This Command"
+                  ,(lambda () (interactive) (cooked-rerun-command command))
+                  :enable (cooked--input-state-p)
+                  :help "Resend this command's line, at an empty prompt"))
+    (define-key-after menu [cooked-context-fold]
+      `(menu-item "Fold This Output"
+                  ,(lambda ()
+                     (interactive)
+                     (save-excursion (goto-char position) (cooked-toggle-fold)))
+                  :help "Hide or reveal this command's output")))
+  menu)
 
 (defun cooked-kill-input ()
   "Delete the pending input."

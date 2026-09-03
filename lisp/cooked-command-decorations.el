@@ -394,7 +394,7 @@ the walk below would never reach it."
 No mention of clicking, because the running marker is given no keymap: the
 three actions the menu offers all want a command that has finished.  Rerunning
 one that is still going means submitting at a busy prompt, which
-`cooked-command-decorations--rerun\=' refuses on its own, and copying its output
+`cooked-rerun-command\=' refuses on its own, and copying its output
 would copy however much of it has arrived so far."
   (format "%s\nrunning" (or cooked--command-input "")))
 
@@ -444,39 +444,26 @@ fringe and so no marker to aim at."
                 (overlays-at position))
       (cooked--command-around position)))
 
-(defun cooked-command-decorations--rerun (command)
-  "Resend COMMAND's input line through the ordinary submit path."
-  (let ((input (cooked-command-input command)))
-    (unless input
-      (user-error "cooked: nothing to rerun"))
-    (unless (and (cooked--input-state-p)
-                (string-empty-p (or (cooked--pending-input) "")))
-      (user-error "cooked: can only rerun at an empty prompt"))
-    (cooked--history-record input)
-    (cooked--send-input-string input)))
-
-(defun cooked-command-decorations--copy-command (command)
-  "Put COMMAND's input line on the kill ring."
-  (if-let* ((input (cooked-command-input command)))
-      (progn (kill-new input) (message "cooked: copied command"))
-    (user-error "cooked: this command has no recorded input")))
-
-(defun cooked-command-decorations--copy-output (command)
-  "Put COMMAND's output region on the kill ring."
-  (pcase-let ((`(,beg . ,end) (cooked--command-region command)))
-    (kill-new (buffer-substring-no-properties beg end))
-    (message "cooked: copied output")))
-
 (defun cooked-command-decorations--act (command)
-  "Offer the rerun / copy command / copy output menu for COMMAND."
+  "Offer the rerun / copy command / copy output menu for COMMAND.
+
+The three verbs are `cooked-rerun-command\=', `cooked-copy-command\=' and
+`cooked-copy-output\=', which live in the tree proper rather than here: they
+need a command record and nothing else, so tying them to a fringe this file
+paints would have made them opt-in for no reason -- and the menu on
+`cooked-mode-map\=' has to be able to name them whether this file was loaded or
+not.  Each is called with COMMAND rather than left to resolve point for itself,
+which is the whole reason they take one: a click on a marker knows exactly
+which record it means, and re-deriving that from point would sometimes answer
+with a different one."
   (pcase (read-multiple-choice
           (format "cooked command (exit %s)" (cooked-command-code command))
           '((?r "rerun" "resend the command line")
             (?c "copy command" "kill-ring the input line")
             (?o "copy output" "kill-ring the command's output")))
-    (`(?r . ,_) (cooked-command-decorations--rerun command))
-    (`(?c . ,_) (cooked-command-decorations--copy-command command))
-    (`(?o . ,_) (cooked-command-decorations--copy-output command))))
+    (`(?r . ,_) (cooked-rerun-command command))
+    (`(?c . ,_) (cooked-copy-command command))
+    (`(?o . ,_) (cooked-copy-output command))))
 
 (defun cooked-command-decorations-menu ()
   "Act on the command at point: rerun, copy command, or copy output.
