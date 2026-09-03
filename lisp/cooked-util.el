@@ -135,6 +135,33 @@ so the next entry is asked."
     (push key cooked--seams-reported)
     (message "cooked: %S failed and will not be reported again here: %S" key err)))
 
+(defvar cooked--seam-running nil
+  "The seam being walked, for `cooked--protect-seam\\=' to key a failure on.
+
+A dynamic binding rather than something the wrapper closes over, and the reason
+is worth a sentence because the closure is the obvious spelling.
+`run-hook-wrapped\\=' hands the wrapper its arguments, so the only thing left to
+capture is the seam\\='s own name -- and capturing it costs a closure per call, on
+a path that runs once per damaged row per drain.  Measured byte-compiled at
+1.14us per call against 0.50us with the wrapper hoisted to top level.  The CPU
+time is immaterial either way; one closure per row per frame is garbage this
+tree does not otherwise make.
+
+Bound around the whole walk rather than per entry, and with `let\\=' rather than
+`setq\\=', so a seam whose entry runs another seam -- a row listener that
+refreshes the keymap, which asks `cooked-input-mode-functions\\=' -- unwinds to
+the right name.")
+
+(defun cooked--seam-notify (fn &rest args)
+  "Apply FN to ARGS under containment, answering nil so the walk goes on."
+  (cooked--protect-seam (cons cooked--seam-running fn) (apply fn args))
+  nil)
+
+(defun cooked--seam-answer (fn &rest args)
+  "Apply FN to ARGS under containment, answering whatever it answered."
+  (cooked--protect-seam (cons cooked--seam-running fn) (apply fn args)))
+
+
 (defun cooked--run-seam (seam &rest args)
   "Call every function on abnormal hook SEAM with ARGS.  Always nil.
 
@@ -148,13 +175,8 @@ function.
 
 See `cooked--protect-seam\\=' for what each entry is protected from and how a
 failure is reported."
-  (apply #'run-hook-wrapped seam
-         (lambda (fn &rest fargs)
-           (cooked--protect-seam (cons seam fn) (apply fn fargs))
-           ;; Always nil: `run-hook-wrapped' stops on a non-nil wrapper, and this
-           ;; shape has no answer to stop for.
-           nil)
-         args))
+  (let ((cooked--seam-running seam))
+    (apply #'run-hook-wrapped seam #'cooked--seam-notify args)))
 
 (defun cooked--run-seam-until-success (seam &rest args)
   "The first non-nil answer any function on abnormal hook SEAM gives to ARGS.
@@ -168,10 +190,8 @@ over one layer\\='s bug.
 Not simulated: `run-hook-wrapped\\=' already returns the first non-nil value its
 wrapper produced and stops there, so this is that function with a contained
 wrapper and nothing else."
-  (apply #'run-hook-wrapped seam
-         (lambda (fn &rest fargs)
-           (cooked--protect-seam (cons seam fn) (apply fn fargs)))
-         args))
+  (let ((cooked--seam-running seam))
+    (apply #'run-hook-wrapped seam #'cooked--seam-answer args)))
 
 (defmacro cooked--dolist-windows (var windows &rest body)
   "Run BODY with VAR bound to each still-live window of WINDOWS.
