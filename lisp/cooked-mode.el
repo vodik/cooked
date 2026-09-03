@@ -2592,7 +2592,12 @@ and printing it again spends columns on a word already on screen."
        (when (cooked--foreign-host-p)
          (propertize (format " @%s" (car (split-string cooked--host "\\.")))
                      'face 'shadow))
-       (apply #'propertize (concat " " state)
+       ;; The separator space stays outside the `propertize', so the
+       ;; `mouse-face' run covers the word and not the gap before it -- the
+       ;; mode line's own clickable segments pad from the outside for the same
+       ;; reason, and a highlight that starts a column early reads as sloppy.
+       " "
+       (apply #'propertize state
               (cooked--mode-line-click
                #'cooked-toggle-peek
                "cooked: who owns the keyboard.  mouse-1: peek (C-c C-v)"))
@@ -2605,11 +2610,13 @@ and printing it again spends columns on a word already on screen."
          (propertize (format " %s" (truncate-string-to-width subject 24 nil nil t))
                      'face 'shadow))
        (when code
-         (apply #'propertize (format " %s" code)
-                'face (if (zerop code) 'cooked-success 'cooked-failure)
-                (cooked--mode-line-click
-                 #'cooked-goto-last-command
-                 "cooked: last exit status.  mouse-1: go to that command")))))))
+         (concat
+          " "
+          (apply #'propertize (number-to-string code)
+                 'face (if (zerop code) 'cooked-success 'cooked-failure)
+                 (cooked--mode-line-click
+                  #'cooked-goto-last-command
+                  "cooked: last exit status.  mouse-1: go to that command"))))))))
 
 ;;;; Sticky scroll
 ;;
