@@ -315,8 +315,6 @@ see `cooked--literal-codes' for why this cannot simply be assumed.")
 (defvar-local cooked--title nil "Title the child last set, via OSC 0 or 2.")
 (defvar-local cooked--title-stack nil
   "Titles saved by XTWINOPS 22, newest first.  See `cooked--handle-title-stack'.")
-(defvar-local cooked--hyperlink nil "Current OSC 8 hyperlink target, if any.")
-(defvar-local cooked--annotation nil "Prompt annotation from OSC 51;A.")
 (defvar-local cooked--host nil
   "Host the child last reported over OSC 7, or nil for this machine.
 

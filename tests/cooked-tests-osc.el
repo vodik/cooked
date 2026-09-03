@@ -145,10 +145,7 @@ must do nothing at all until the user has loaded `cooked-osc-eval' on purpose."
       (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
         (cooked--osc-emacs '("E1" "F" "/tmp/x"))
         (cooked-tests--run-deferred)
-        (should-not visited))
-      ;; The annotation half is inert, so it keeps working without opting in.
-      (cooked--osc-emacs '("Asimon@host:~"))
-      (should (equal cooked--annotation "simon@host:~")))))
+        (should-not visited)))))
 
 (ert-deftest cooked-osc-51-runs-the-fixed-verbs ()
   "The closed set, each reached the way the emulator delivers it: split on `;'."
@@ -376,11 +373,6 @@ verbs need no entry, so deny-by-default costs nothing here."
       (cooked--osc-emacs '("E1" "!" "\"noted\" \"one\" \"two\""))
       (cooked-tests--run-deferred)
       (should (equal called '("one" "two"))))))
-
-(ert-deftest cooked-osc-51-annotation-is-recorded ()
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (cooked--osc-emacs '("Asimon@ryzen:~/src"))
-    (should (equal cooked--annotation "simon@ryzen:~/src"))))
 
 (defun cooked-tests--pump-wakes (predicate &optional seconds)
   "Pump the event loop until PREDICATE holds or SECONDS elapse.

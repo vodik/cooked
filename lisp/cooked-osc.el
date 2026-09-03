@@ -2,16 +2,20 @@
 
 ;;; Commentary:
 
-;; Every OSC except 133 is passed through verbatim by the native core, so teaching
-;; cooked a new sequence is Lisp rather than Rust -- an entry in `cooked-osc-handlers\='.
-;; OSC 133 is the one exception, because it decides who owns the keyboard, which is
-;; core behaviour rather than user-extensible policy.
+;; Almost every OSC is passed through verbatim by the native core, so teaching cooked a
+;; new sequence is Lisp rather than Rust -- an entry in `cooked-osc-handlers\='.
+;;
+;; Two are excepted, and for the same reason: they are already the core\='s own business,
+;; so a handler here could only be a second opinion about state Rust already holds.  OSC
+;; 133 decides who owns the keyboard.  OSC 8 is grid state -- a link id is carried per
+;; cell and arrives as the drain\='s `:links\=', which `cooked-link.el\=' installs -- and
+;; `State::osc\=' in src/emu/term/osc.rs returns before raising an event for either.
 ;;
 ;; The division the core draws: it interprets what changes *the terminal* -- the
 ;; alternate screen, mouse and paste modes, device replies -- and nothing else.  What a
 ;; sequence means to Emacs is Emacs\=' business, and that is this file: titles, the
-;; working directory, hyperlinks, the default colours, notifications, the clipboard,
-;; and the OSC 51 channel\='s two nil-valued hooks.
+;; working directory, the default colours, notifications, the clipboard, and the OSC 51
+;; channel\='s two nil-valued hooks.
 ;;
 ;; Two of these are refused by default and say so in their own docstrings, for the same
 ;; reason: anything that can write to the terminal can send one.  See
@@ -37,7 +41,6 @@
   '((0 . cooked--osc-title)
     (2 . cooked--osc-title)
     (7 . cooked--osc-cwd)
-    (8 . cooked--osc-hyperlink)
     (10 . cooked--osc-color)
     (11 . cooked--osc-color)
     (12 . cooked--osc-color)
@@ -119,11 +122,6 @@ without them a full-screen program that sets a title leaves it behind on exit."
 (defun cooked--osc-cwd (parts)
   "Track the child's directory, from the OSC 7 payload PARTS."
   (cooked--set-directory (string-join parts ";")))
-
-(defun cooked--osc-hyperlink (parts)
-  "Record the OSC 8 hyperlink target named by PARTS."
-  (setq cooked--hyperlink (let ((uri (string-join (cdr parts) ";")))
-                            (unless (string-empty-p uri) uri))))
 
 ;;;; OSC 10/11/12 — the default colors
 ;;
@@ -431,7 +429,7 @@ failing to make a claim, and the safe reading of no claim is no license."
 (defun cooked--osc-emacs (parts)
   "Handle the OSC 51 payload PARTS.
 
-E asks Emacs to run something; A annotates the prompt."
+E asks Emacs to run something; C is the completion channel."
   (let ((payload (string-join parts ";")))
     (unless (string-empty-p payload)
       (pcase (aref payload 0)
@@ -448,8 +446,8 @@ E asks Emacs to run something; A annotates the prompt."
               ;; the only thing deferral costs is a trip round the event loop,
               ;; and same-time timers keep the order the requests arrived in.
               ;;
-              ;; The `A' and `C' arms below stay synchronous on purpose: they are
-              ;; `setq's of inert data that later parts of this same drain read.
+              ;; The `C' arm below stays synchronous on purpose: it is a `setq'
+              ;; of inert data that later parts of this same drain read.
               (let ((request (substring payload 1)))
                 (cooked--defer (lambda () (funcall cooked-osc-eval-function request)))))
              ;; Once per buffer: silence looks like a bug to someone porting their
@@ -457,7 +455,6 @@ E asks Emacs to run something; A annotates the prompt."
              ((not cooked--eval-refused)
               (setq cooked--eval-refused t)
               (message "cooked: ignoring an OSC 51 command; (require 'cooked-osc-eval) to enable"))))
-        (?A (setq cooked--annotation (substring payload 1)))
         (?C (let ((rest (substring payload 1)))
               (if (and (not (string-empty-p rest)) (eq (aref rest 0) ?H))
                   (cooked--osc-announce (substring rest 1))
