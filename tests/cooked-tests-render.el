@@ -1245,7 +1245,14 @@ resync went and got it."
     (should (cooked-tests--settle (lambda () cooked--session)))
     ;; Fail exactly one `cooked--apply', from inside the filter where Emacs would
     ;; otherwise swallow the error entirely.
-    (let* ((failed nil)
+    ;;
+    ;; `cooked-debug' back off for the duration, against the fixture's own
+    ;; binding: this test is *about* the containment in `cooked--on-wake', and
+    ;; under debug that containment re-signals by design -- which here would put
+    ;; the deliberate error back into the process filter and take the whole batch
+    ;; run with it rather than failing one test.
+    (let* ((cooked-debug nil)
+           (failed nil)
            (advice (lambda (orig &rest args)
                      (if failed
                          (apply orig args)

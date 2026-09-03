@@ -100,9 +100,21 @@ arithmetic a reader can check."
   (setq cooked--last-cell (cons (or width 10) (or height 20))))
 
 (defmacro cooked-tests--with-session (argv &rest body)
-  "Run BODY in a live cooked buffer running ARGV."
+  "Run BODY in a live cooked buffer running ARGV.
+
+`cooked-debug' is bound throughout, which is what makes the rest of the suite
+mean anything.  Without it every protective `condition-case' in the tree --
+`cooked--protect-hook', `cooked--dolist-buffers', and the guards around the
+cosmetic passes inside a drain -- swallows what it catches, so a test can go on
+passing over a layer that signals on every row.  `cooked--check-seam', the
+assertion that buffer text still equals the grid, is gated on it too and
+otherwise never runs at all.
+
+A test that is *about* containment has to bind it back to nil for the duration;
+see `cooked-osc-handler-errors-do-not-break-redisplay'."
   (declare (indent 1))
-  `(let ((buffer (generate-new-buffer "*cooked-test*")))
+  `(let ((buffer (generate-new-buffer "*cooked-test*"))
+         (cooked-debug t))
      (unwind-protect
          (with-current-buffer buffer
            (cooked-mode)
