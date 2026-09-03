@@ -328,16 +328,6 @@ they keep in step.
 
 Set by `cooked--set-directory\=' and read through `cooked--foreign-host-p\=';
 see it for what declines and why.")
-(defvar-local cooked--mouse nil "Whether the child asked for mouse reports.")
-(defvar-local cooked--mouse-sgr nil "Whether to encode mouse reports as SGR (1006).")
-(defvar-local cooked--mouse-drag nil
-  "DEC mode 1002: report the pointer while a button is held.")
-(defvar-local cooked--mouse-motion nil
-  "DEC mode 1003: report the pointer whether or not a button is held.
-
-Kept apart from `cooked--mouse-drag\=' even though cooked drives both from the
-same tracking loop, because the child asked two different questions and
-`cooked--mouse-track\=' can only honestly answer one of them; see its docstring.")
 (defvar-local cooked--mode 'cooked)
 (defvar-local cooked--exit nil)
 
@@ -349,6 +339,7 @@ same tracking loop, because the child asked two different questions and
 ;; "Who owns the keyboard" below, which is where that rule moved the policy.
 (declare-function cooked--refresh-keymap "cooked-mode")
 (declare-function cooked--update-mouse-grab "cooked-mouse")
+(declare-function cooked--set-mouse-state "cooked-mouse")
 (declare-function cooked--set-mode "cooked-mode")
 (declare-function cooked--on-exit "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
@@ -2854,12 +2845,11 @@ two chances to disagree."
     (`(erase-scrollback)
      (cooked--discard-scrollback (cooked--screen-start-position)))
     (`(display-cleared) (setq cooked--pin-screen-top t))
+    ;; Decoded into a record at the boundary, like the cursor and the grid; see
+    ;; `cooked-mouse-state'.  cooked-mouse.el owns it because it is the only
+    ;; reader, and re-gates its own keymap on the way through.
     (`(mouse ,enabled ,sgr ,drag ,motion)
-     (setq cooked--mouse enabled cooked--mouse-sgr sgr
-           cooked--mouse-drag drag cooked--mouse-motion motion)
-     ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this,
-     ;; so it has to move when the child changes its mind about the mouse.
-     (cooked--update-mouse-grab))
+     (cooked--set-mouse-state enabled sgr drag motion))
     ((or `(prompt-start ,_ . ,_) `(prompt-continuation ,_ . ,_)
          `(prompt-end ,_ . ,_)
          `(command-start ,_ ,_ . ,_) `(command-end ,_ ,_ . ,_))

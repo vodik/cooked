@@ -87,6 +87,16 @@ half that matters: the pair is spliced onto a list the caller already holds."
     (plist-put (cdr image) :background "#123456"))
   image)
 
+(defun cooked-tests--mouse (&rest keys)
+  "Set this buffer's mouse state from KEYS, as a drain's `mouse\=' event would.
+
+KEYS are `cooked--mouse-state-make\=' keywords: :enabled, :sgr, :drag, :motion.
+A field not named is off, deliberately -- the child\='s request arrives as one
+event rather than four independent switches, so a test naming only `:sgr\=' is
+describing a child that asked for SGR and nothing else.  Where a test means
+\"and keep the mouse on\", it says `:enabled t\=' as well."
+  (setq-local cooked--mouse-state (apply #'cooked--mouse-state-make keys)))
+
 (defun cooked-tests--cell (&optional width height)
   "Give the current buffer a cell size of WIDTH by HEIGHT pixels, default 10x20.
 

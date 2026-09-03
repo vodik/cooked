@@ -972,11 +972,11 @@ into it; it does not replace the sample, and this is the test that says so."
   "Emacs calls a notch a click; encoding that as a release loses the scroll.
 Applications discard a release of buttons 64/65, so a wheel report that goes out
 as `m' rather than `M' reaches the child and is thrown away."
-  (let ((cooked--mouse-sgr t))
+  (let ((cooked--mouse-state (cooked--mouse-state-make :sgr t)))
     (should (equal (cooked--mouse-report 64 3 5 t) "\e[<64;6;4M")))
   ;; X10 is worse than merely ignored: a release cannot say which way the wheel
   ;; turned, because it reports button 3 for every button.
-  (let ((cooked--mouse-sgr nil))
+  (let ((cooked--mouse-state cooked--mouse-state-none))
     (should-not (equal (cooked--mouse-report 64 3 5 t)
                        (cooked--mouse-report 65 3 5 t)))
     (should (equal (cooked--mouse-report 64 3 5 nil)
@@ -986,7 +986,9 @@ as `m' rather than `M' reaches the child and is thrown away."
   "The whole path: alt screen, mouse tracking on, wheel event in, report out."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw; cat -v")
-    (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
+    (should (cooked-tests--settle
+             (lambda () (and cooked--alt
+                             (cooked-mouse-state-enabled cooked--mouse-state)))))
     (should (eq (cooked--policy) 'alt))
     ;; The alt map owns the wheel while the child does; otherwise Emacs would
     ;; scroll the buffer out from under a full-screen program.
@@ -1013,7 +1015,9 @@ order.  A terminal frame never showed this because there the wheel arrives as
 `mouse-4', which pixel-scroll does not bind."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; stty raw; cat -v")
-    (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
+    (should (cooked-tests--settle
+             (lambda () (and cooked--alt
+                             (cooked-mouse-state-enabled cooked--mouse-state)))))
     (should cooked--mouse-grab)
     ;; Stand in for pixel-scroll rather than loading it: what matters is that
     ;; *some* enabled minor mode claims the same event, which is the position in
@@ -1032,7 +1036,7 @@ order.  A terminal frame never showed this because there the wheel arrives as
       (should (eq (key-binding (vector 'mouse-4)) #'cooked-mouse-event)))
     ;; And it stands down the moment the child stops asking for the mouse, so a
     ;; plain prompt scrolls the transcript as any buffer would.
-    (setq cooked--mouse nil)
+    (cooked-tests--mouse)
     (cooked--update-mouse-grab)
     (should-not cooked--mouse-grab)))
 
@@ -1514,16 +1518,18 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
 
 (ert-deftest cooked-mouse-reports-reach-the-child ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; exec cat")
-    (should (cooked-tests--settle (lambda () cooked--mouse)))
-    (should cooked--mouse-sgr)
+    (should (cooked-tests--settle
+             (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
+    (should (cooked-mouse-state-sgr cooked--mouse-state))
     (should (equal (cooked--mouse-report 0 4 9 t) "\e[<0;10;5M"))
     (should (equal (cooked--mouse-report 0 4 9 nil) "\e[<0;10;5m"))
     (should (equal (cooked--mouse-report 64 0 0 t) "\e[<64;1;1M"))))
 
 (ert-deftest cooked-mouse-x10-encoding-when-sgr-is-off ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1000h'; exec cat")
-    (should (cooked-tests--settle (lambda () cooked--mouse)))
-    (should-not cooked--mouse-sgr)
+    (should (cooked-tests--settle
+             (lambda () (cooked-mouse-state-enabled cooked--mouse-state))))
+    (should-not (cooked-mouse-state-sgr cooked--mouse-state))
     ;; X10 biases coordinates by 32 and is 1-based, so column 0 is ?!.
     (should (equal (cooked--mouse-report 0 0 0 t) "\e[M !!"))
     (should (equal (cooked--mouse-report 0 2 4 t) "\e[M %#"))
@@ -1536,7 +1542,7 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
     (should (cooked-tests--settle #'cooked--input-start-position))
     ;; The child never enabled reporting, so `cooked-mouse-event' takes the
     ;; fallback branch and the click behaves as it would in any buffer.
-    (should-not cooked--mouse)
+    (should-not (cooked-mouse-state-enabled cooked--mouse-state))
     (should (eq (lookup-key cooked-raw-map [mouse-1]) #'cooked-mouse-event))))
 
 (defmacro cooked-tests--displayed (&rest body)
@@ -1566,7 +1572,9 @@ holding a button forever, and the region it never asked for appeared in one jump
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; \
                         printf 'alpha\\r\\nbravo'; stty raw; cat -v")
-    (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
+    (should (cooked-tests--settle
+             (lambda () (and cooked--alt
+                             (cooked-mouse-state-enabled cooked--mouse-state)))))
     (should (cooked-tests--settle
              (lambda () (string-match-p "bravo" (cooked-tests--text)))))
     (should (eq (key-binding (vector 'drag-mouse-1)) #'cooked-mouse-event))
@@ -1611,7 +1619,7 @@ screen and ask for SGR mouse reporting."
            (dolist (buffer (list ,a ,b))
              (with-current-buffer buffer
                (should (cooked-tests--settle
-                        (lambda () (and cooked--alt cooked--mouse))))
+                        (lambda () (and cooked--alt (cooked-mouse-state-enabled cooked--mouse-state)))))
                (should cooked--mouse-grab)))
            (save-window-excursion
              (set-window-buffer (selected-window) ,a)
@@ -1685,7 +1693,9 @@ happened to be."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\033[?1049h\033[?1000h\033[?1006h'; \
                         printf 'alpha\r\nbravo'; stty raw; cat -v")
-    (should (cooked-tests--settle (lambda () (and cooked--alt cooked--mouse))))
+    (should (cooked-tests--settle
+             (lambda () (and cooked--alt
+                             (cooked-mouse-state-enabled cooked--mouse-state)))))
     (should (cooked-tests--settle
              (lambda () (string-match-p "bravo" (cooked-tests--text)))))
     (let* ((from (save-excursion (goto-char (point-min))
@@ -1825,20 +1835,20 @@ where the pointer went, and flattening them into one enabled bit left the sender
 unable to know whether motion reports were asked for at all."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[?1002h\\033[?1006h'; exec cat")
-    (should (cooked-tests--settle (lambda () cooked--mouse-drag)))
-    (should cooked--mouse)
-    (should cooked--mouse-sgr)
-    (should-not cooked--mouse-motion))
+    (should (cooked-tests--settle (lambda () (cooked-mouse-state-drag cooked--mouse-state))))
+    (should (cooked-mouse-state-enabled cooked--mouse-state))
+    (should (cooked-mouse-state-sgr cooked--mouse-state))
+    (should-not (cooked-mouse-state-motion cooked--mouse-state)))
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[?1003h'; exec cat")
-    (should (cooked-tests--settle (lambda () cooked--mouse-motion)))
-    (should cooked--mouse)
-    (should-not cooked--mouse-drag)))
+    (should (cooked-tests--settle (lambda () (cooked-mouse-state-motion cooked--mouse-state))))
+    (should (cooked-mouse-state-enabled cooked--mouse-state))
+    (should-not (cooked-mouse-state-drag cooked--mouse-state))))
 
 (ert-deftest cooked-motion-reports-carry-the-motion-bit ()
   "32 added to the button being dragged, and 3 for no button at all."
   (with-temp-buffer
     (cooked-mode)
-    (setq-local cooked--mouse-sgr t)
+    (cooked-tests--mouse :sgr t)
     (let (sent)
       (cl-letf (((symbol-function 'cooked--send-to-child)
                  (lambda (text) (push text sent))))
@@ -1861,7 +1871,7 @@ unable to know whether motion reports were asked for at all."
 as far as the child knows.  Falling through to Emacs there left it held forever."
   (with-temp-buffer
     (cooked-mode)
-    (setq-local cooked--mouse t cooked--mouse-sgr t)
+    (cooked-tests--mouse :enabled t :sgr t)
     (setq cooked--mouse-held '(0) cooked--mouse-last-cell '(4 . 9))
     (let (sent)
       (cl-letf (((symbol-function 'cooked--send-to-child)
@@ -1891,7 +1901,8 @@ as far as the child knows.  Falling through to Emacs there left it held forever.
   "The keymap gate must widen, or the whole feature is unreachable."
   (with-temp-buffer
     (cooked-mode)
-    (setq-local cooked--mouse nil cooked--semantic nil cooked--mode 'raw)
+    (cooked-tests--mouse)
+    (setq-local cooked--semantic nil cooked--mode 'raw)
     (cl-letf (((symbol-function 'cooked--alt-scroll-active-p) (lambda () t)))
       (cooked--update-mouse-grab)
       (should cooked--mouse-grab))
@@ -2827,7 +2838,8 @@ far as `cooked--input-state-p' alone can tell."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h'; stty raw -echo; cat -v")
     (should (cooked-tests--settle
-             (lambda () (and cooked--mouse (not (cooked--input-state-p))))))
+             (lambda () (and (cooked-mouse-state-enabled cooked--mouse-state)
+                       (not (cooked--input-state-p))))))
     (should cooked--mouse-grab)
     (call-interactively #'cooked-toggle-peek)
     (should-not cooked--mouse-grab)

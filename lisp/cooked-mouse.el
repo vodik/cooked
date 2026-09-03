@@ -28,6 +28,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'cooked)
 (require 'cooked-util)
 
@@ -96,10 +97,68 @@ Shift is more than a convenience here: `S-down-mouse-1' reaching
 program that has grabbed the mouse, and it works precisely because this map
 never claims it.")
 
+(cl-defstruct (cooked-mouse-state (:constructor cooked--mouse-state-make)
+                                  (:copier nil))
+  "What the child has asked for about the mouse, as of the last drain.
+
+The same wire shape `cooked-cursor\=' and `cooked-grid\=' get, decoded at the same
+boundary and for the same reason -- see \"What the two ends exchange\" in
+cooked.el.  This one arrived as four flat buffer-locals set positionally from a
+single event, which is the shape that preamble exists to argue against.
+
+Never mutated in place.  `cooked--set-mouse-state\=' replaces it wholesale on
+every `mouse\=' event, which is what makes `cooked--mouse-state-none\=' safe to
+share as the default across every buffer that has never been told anything."
+  (enabled nil :documentation "Whether the child asked for mouse reports at all.")
+  (sgr nil :documentation "Whether to encode reports as SGR (1006).")
+  (drag nil :documentation "\
+DEC mode 1002: report the pointer while a button is held.")
+  (motion nil :documentation "\
+DEC mode 1003: report the pointer whether or not a button is held.
+
+Kept apart from `drag\=' even though cooked drives both from the same tracking
+loop, because the child asked two different questions and `cooked--mouse-track\='
+can only honestly answer one of them; see its docstring."))
+
+(defconst cooked--mouse-state-none (cooked--mouse-state-make)
+  "The state of a child that has asked for nothing.
+
+The default value of `cooked--mouse-state\=', so that `buffer-local-value\='
+answers a struct for *any* buffer -- including one that is not a cooked buffer
+at all, which `cooked-mouse-event\=' is handed whenever a drag ends over another
+window.  A nil there would be a wrong-type error inside a mouse command; one
+shared immutable struct is nil-safety at the source rather than a guard at each
+reader.")
+
+(defvar-local cooked--mouse-state cooked--mouse-state-none
+  "What the child last asked for about the mouse; see `cooked-mouse-state'.")
+
+(defun cooked--set-mouse-state (enabled sgr drag motion)
+  "Adopt ENABLED, SGR, DRAG and MOTION, and re-gate the keymap.
+
+The four fields of the drain\='s `mouse\=' event, in the order it carries them.
+
+Called from `cooked--handle-event\=', which is in cooked.el and cannot require
+this file -- so it reaches here through a `declare-function\=', as a
+notification that something changed rather than a question asked upward."
+  (setq cooked--mouse-state (cooked--mouse-state-make
+                             :enabled enabled :sgr sgr :drag drag :motion motion))
+  ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this, so
+  ;; it has to move when the child changes its mind about the mouse.
+  (cooked--update-mouse-grab))
+
 (defvar-local cooked--mouse-grab nil
   "Whether the child both wants the mouse and owns the keyboard.
 Gates `cooked--mouse-map'; nil everywhere else, so the entry in
-`emulation-mode-map-alists' is inert outside a session that asked for it.")
+`emulation-mode-map-alists' is inert outside a session that asked for it.
+
+Deliberately not a slot on `cooked-mouse-state\=', and the omission is not an
+oversight.  Two independent reasons: `cooked--mouse-map-alist\=' puts this
+*symbol* into `emulation-mode-map-alists\=', which Emacs evaluates as a
+variable, and `cooked-link.el\=' reads it through `bound-and-true-p\=' behind a
+forward `defvar\=', being a file cooked.el requires and so one that cannot
+require this one.  It is also a *derived* value rather than something the child
+said, which is what that struct holds.")
 
 (defvar cooked--mouse-map-alist `((cooked--mouse-grab . ,cooked--mouse-map))
   "The `emulation-mode-map-alists' entry activating `cooked--mouse-map'.")
@@ -137,9 +196,9 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
 
 (defun cooked--update-mouse-grab ()
   "Recompute whether `cooked--mouse-map' should be in force."
-  ;; Alternate scroll has to be here as well as `cooked--mouse': it exists precisely
-  ;; for children that did *not* ask for the mouse, so gating the keymap on
-  ;; `cooked--mouse' alone would leave the whole feature unreachable.
+  ;; Alternate scroll has to be here as well as the child's own request: it
+  ;; exists precisely for children that did *not* ask for the mouse, so gating
+  ;; the keymap on `enabled' alone would leave the whole feature unreachable.
   ;;
   ;; Suspended forwarding has to be here too: it hands the buffer back to
   ;; ordinary Emacs commands, and a click should select text like any other
@@ -147,7 +206,8 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
   ;; owns the keyboard as far as `cooked--input-state-p' alone can tell.  Both
   ;; `still' and `frozen' count -- the render being live in `still' says nothing
   ;; about who a click belongs to.
-  (setq cooked--mouse-grab (and (or cooked--mouse (cooked--alt-scroll-active-p))
+  (setq cooked--mouse-grab (and (or (cooked-mouse-state-enabled cooked--mouse-state)
+                                    (cooked--alt-scroll-active-p))
                                 (not (cooked--input-state-p))
                                 (not (cooked--suspended-p)))))
 
@@ -173,7 +233,7 @@ every click on row 0 to the right of where it was made."
 
 SGR is preferred wherever the child asked for it, because X10 cannot count
 past column 223."
-  (if cooked--mouse-sgr
+  (if (cooked-mouse-state-sgr cooked--mouse-state)
       (format "\e[<%d;%d;%d%s" button (1+ col) (1+ row) (if pressed "M" "m"))
     (format "\e[M%c%c%c" (+ 32 (if pressed button 3)) (+ 33 col) (+ 33 row))))
 
@@ -307,7 +367,10 @@ into by the time it comes up."
          ;; what it usually means.
          (select (and target pressed (not wheel)
                       (not (eq window (selected-window)))
-                      (buffer-local-value 'cooked--mouse target))))
+                      ;; Nil-safe for any buffer by the shared default; see
+                      ;; `cooked--mouse-state-none'.
+                      (cooked-mouse-state-enabled
+                       (buffer-local-value 'cooked--mouse-state target)))))
     (if (null target)
         (cooked--mouse-fallback event)
       (when select (select-window window))
@@ -316,7 +379,7 @@ into by the time it comes up."
                ;; the far end of a drag that started in it.
                (here (eq target (and (windowp window) (window-buffer window))))
                (cell
-                (and cooked--mouse button
+                (and (cooked-mouse-state-enabled cooked--mouse-state) button
                      (or (and here (or pressed (memq button cooked--mouse-held))
                               (cooked--mouse-cell posn))
                          ;; A notch has nowhere to land when the pointer is over a
@@ -350,7 +413,8 @@ into by the time it comes up."
             ;; from another window is a release, and there is no gesture left to
             ;; follow once the button is up.
             (when (and pressed here (not wheel)
-                       (or cooked--mouse-drag cooked--mouse-motion))
+                       (or (cooked-mouse-state-drag cooked--mouse-state)
+                           (cooked-mouse-state-motion cooked--mouse-state)))
               (cooked--mouse-track window)))))))))
 
 (defun cooked--mouse-fallback (event)
