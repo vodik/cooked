@@ -55,6 +55,7 @@
 (require 'cl-lib)
 (require 'face-remap)
 (require 'cooked-util)
+(require 'cooked-command)
 (require 'cooked-face)
 (require 'cooked-deco)
 (require 'cooked-link)
@@ -125,52 +126,6 @@ Characters of screen row 0's logical line that are already in the buffer, above
 `cooked--screen-start'.  Non-zero exactly when the last row handed to scrollback
 was wrapped and row 0 continues it, which is why the marker then sits mid-line.
 See `cooked--check-seam'."))
-
-(cl-defstruct (cooked-command (:constructor cooked--command-make) (:copier nil))
-  "One command the shell ran, as delimited by its OSC 133 marks.
-
-A record rather than only text properties: a command that printed nothing spans
-an empty region, which no text property can describe, and the records are what
-folding and navigation walk."
-  (start nil :documentation "Marker where the command's output began.")
-  (end nil :documentation "Marker where it ended.")
-  (code 0 :documentation "Exit status.")
-  (prompt nil :documentation "Marker where the prompt that ran this command began.
-
-From the OSC 133 `A' prompt mark, which cooked's own snippets carry inside the
-prompt string rather than printing from a hook -- so the marker names column 0
-of the prompt's first row.  That is a position a repaint cannot spoil -- a
-damaged row is deleted whole and its markers collapse to the row's start, which
-is where this one already is -- unlike a marker inside the input row; see
-`input' below.
-
-Nil for a shell that never sent a prompt mark, in which case the output start is
-the closest thing to a beginning there is.")
-  (input nil :documentation "The command line itself, or nil if we never saw it.
-
-What the shell said it was about to run, from `cmdline_url=' on the `C' mark,
-and failing that the text cooked submitted.  Not a position recovered
-afterwards: a marker would not survive, because the input row is repainted on
-every keystroke and again when the shell echoes the line, and
-`cooked--render-rows' deletes a damaged row whole, so any marker inside it
-collapses to the row's start -- taking the prompt with it.
-
-Nil only when neither account exists: a shell that sends no `cmdline_url=' and a
-command Emacs did not submit, such as one typed while the child owned the
-keyboard or one the shell ran itself."))
-
-(defun cooked--command-start-position (command)
-  "Buffer position where COMMAND's output begins."
-  (marker-position (cooked-command-start command)))
-
-(defun cooked--command-end-position (command)
-  "Buffer position where COMMAND's output ends."
-  (marker-position (cooked-command-end command)))
-
-(defun cooked--command-prompt-position (command)
-  "Buffer position where the prompt that ran COMMAND begins, if it is known."
-  (when-let* ((marker (cooked-command-prompt command)))
-    (marker-position marker)))
 
 (defvar-local cooked--wake nil "Pipe process Rust pokes when output is pending.")
 (defvar-local cooked--rows 24
@@ -743,10 +698,6 @@ Separate from `cooked--completion-nonce\=' because the two questions came apart:
 framing a reply needs `base64\=', owning the input line does not.  A shell
 without it announces anyway and says so here, so it keeps its editable line and
 merely has nothing to offer `completion-at-point\='.")
-(defvar-local cooked--prompt-start nil
-  "Marker where the prompt now on screen began, from the OSC 133 `A' mark.
-Moved into `cooked--command-prompt' when a command starts, the way
-`cooked--submitted-input' is moved into `cooked--command-input'.")
 (defvar-local cooked--prompt-continued nil
   "Whether the prompt now on screen continues the line already submitted.
 
@@ -758,16 +709,8 @@ construct twenty lines deep is that question answered twenty times.
 `cooked--send-input-string\=' is the reader.  Without this the record for
 \"for x in 1 2; do ... done\" would say only `done\=', because each continuation
 line is submitted separately and would overwrite the one before it.")
-(defvar-local cooked--command-prompt nil
-  "Marker where the prompt that ran the current command began.")
-(defvar-local cooked--command-start nil
-  "Marker where the running command's output began.")
-(defvar-local cooked--command-input nil
-  "The running command's own line, as cooked submitted it.")
 (defvar-local cooked--submitted-input nil
   "The last line submitted, waiting for the OSC 133 mark that says it started.")
-(defvar-local cooked--commands nil
-  "Finished `cooked-command' records, newest first.")
 (defvar-local cooked--marks nil
   "Hash of OSC 133 mark id to the buffer marker made for it.
 
@@ -1250,90 +1193,6 @@ older three-element shape."
     (`(command-end ,code ,at . ,id)
      (setq cooked--semantic nil)
      (cooked--mark-command-end code (cooked--register-mark (car id) at batch-start)))))
-
-(defcustom cooked-command-started-functions nil
-  "Functions called each time a command starts, with its anchor marker.
-
-The `C\=' half of the pair `cooked-command-finished-functions\=' is the `D\='
-half of, and nil by default for the same reason: a session nothing is listening
-to pays only the `run-hook\='.
-
-Called from the `command-start\=' branch of `cooked--handle-semantic\=', once
-the makings of the record are in place, with one argument --
-`cooked--running-anchor\='.
-
-There is no `cooked-command\=' to pass, and that is not an oversight to be fixed
-by building one early: a record exists because a `D\=' mark supplied an exit
-code, and a half-built one would carry `code\=' 0, which every reader of that
-field has always been entitled to read as success.  A consumer wanting more
-than the anchor reads `cooked--command-input\=' and `cooked--command-start\=',
-both of which are live at the moment this fires.
-
-Command decorations use it to put a marker up in the running colour that the
-`D\=' mark then repaints; a notifier for long-running commands wants this same
-moment to start its clock."
-  :type 'hook
-  :group 'cooked)
-
-(defun cooked--running-anchor ()
-  "Marker naming the row the running command was typed at, or nil.
-
-Its prompt where the shell sent an `A\=' mark and the start of its output
-otherwise -- the same fallback `cooked-command-decorations--anchor\=' makes for
-a finished record, made here for the command that does not have one yet.
-
-Nil between a `D\=' mark and the next `C\=', which is to say exactly when
-nothing is running: that is the question most callers are really asking."
-  (when-let* ((marker (or cooked--command-prompt cooked--command-start))
-              ((marker-position marker)))
-    marker))
-
-(defcustom cooked-command-finished-functions nil
-  "Functions called with a `cooked-command\=' each time one finishes.
-
-Nil by default -- a session nothing is listening to pays only the `run-hook\='.
-This is the seam for anything that wants \"a command just finished\" without
-growing its own copy of `cooked--mark-command-end\='s bookkeeping: command
-decorations paint an indicator from it, and a notifier for long-running
-commands is the other obvious consumer.
-
-Called from `cooked--mark-command-end\=', after the record has been pushed onto
-`cooked--commands\=', with that same record.  `cooked-command-start\=' and
-`cooked-command-end\=' are markers by then; `cooked-command-prompt\=' is a marker
-too when the shell sent an `A\=' mark and nil otherwise.
-
-An abnormal hook rather than a single function, because two layers already want
-this moment and a plain variable would let the second silently replace the
-first.  Unlike `cooked-osc-eval-functions\=' this gates no
-channel the child can reach -- it fires only on cooked\='s own bookkeeping -- so
-it is ordinary hook plumbing rather than a deliberate opt-in."
-  :type 'hook
-  :group 'cooked)
-
-(defun cooked--mark-command-end (code end)
-  "Record exit CODE for the command that just finished, whose output ends at END.
-
-END is the marker `cooked--register-mark' made for the `D' mark, and the record
-is built on that marker itself rather than on a copy of it -- as it is on
-`cooked--command-start' and `cooked--command-prompt', which are the markers made
-for the `C' and `A' marks.  That sharing is the whole of how a resize is
-repaired: `cooked--relocate-marks' moves the marker the emulator named, and
-every record holding it moves with it.  A `copy-marker' here would have left
-each record with a private copy nothing could reach."
-  (when (and cooked--command-start (marker-position cooked--command-start))
-    (let* ((beg (marker-position cooked--command-start))
-           (code (or code 0))
-           ;; Clamped by moving the marker, not by measuring past it: the marker is
-           ;; the record's own and has to say the truth after this, not only here.
-           (end (set-marker end (min (point-max) (marker-position end)))))
-      (when (< beg end)
-        (put-text-property beg end 'cooked-exit-code code))
-      (let ((command (cooked--command-make :start cooked--command-start :end end
-                                           :code code :input cooked--command-input
-                                           :prompt cooked--command-prompt)))
-        (push command cooked--commands)
-        (run-hook-with-args 'cooked-command-finished-functions command))))
-  (setq cooked--command-start nil cooked--command-input nil cooked--command-prompt nil))
 
 ;;;; Locating a cell in the buffer
 ;;
