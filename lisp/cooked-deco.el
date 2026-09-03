@@ -422,28 +422,27 @@ themselves, which is strictly more information than a screenful of blanks -- the
 child chose those mosaic characters as its own fallback -- and the stashed
 records are exactly what `cooked--rescale-deco\=' needs the moment a window turns
 up."
-  (condition-case nil
-      (pcase deco
-        (`(image . ,packed)
-         ;; Its own preference, not `cooked-box-drawing-images': whether to
-         ;; substitute a pixel-exact shape for a character the font can already
-         ;; draw is a different question from whether to show a picture the child
-         ;; sent.  Whether the *format* can be displayed is asked per image, in
-         ;; `cooked--image-spec', since the answer differs between them.
-         (when cooked-inline-images
-           (cooked--apply-image-deco start packed (cooked--deco-cell-size))))
-        (`(glyph . ,packed)
-         ;; Each kind checks its own preconditions rather than the caller checking
-         ;; for all of them: what a decoration needs in order to render is the
-         ;; decoration's business, and the renderer should not have to grow a
-         ;; condition every time a kind is added.
-         (when (and cooked-box-drawing-images (image-type-available-p 'xbm))
-           (cooked--apply-glyph-deco
-            start packed (cooked--layout-window)
-            (cooked--deco-cell-size) origin row))))
-    ;; A cosmetic feature must never break rendering: any failure here leaves the
-    ;; plain face-only text `cooked--render-block' already inserted.
-    (error nil)))
+  ;; A cosmetic feature must never break rendering: any failure here leaves the
+  ;; plain face-only text `cooked--render-block' already inserted.
+  (cooked--protect-seam 'cooked--apply-deco
+    (pcase deco
+      (`(image . ,packed)
+       ;; Its own preference, not `cooked-box-drawing-images': whether to
+       ;; substitute a pixel-exact shape for a character the font can already
+       ;; draw is a different question from whether to show a picture the child
+       ;; sent.  Whether the *format* can be displayed is asked per image, in
+       ;; `cooked--image-spec', since the answer differs between them.
+       (when cooked-inline-images
+         (cooked--apply-image-deco start packed (cooked--deco-cell-size))))
+      (`(glyph . ,packed)
+       ;; Each kind checks its own preconditions rather than the caller checking
+       ;; for all of them: what a decoration needs in order to render is the
+       ;; decoration's business, and the renderer should not have to grow a
+       ;; condition every time a kind is added.
+       (when (and cooked-box-drawing-images (image-type-available-p 'xbm))
+         (cooked--apply-glyph-deco
+          start packed (cooked--layout-window)
+          (cooked--deco-cell-size) origin row))))))
 
 (defun cooked--reset-images ()
   "Forget every image the previous session on this buffer transmitted.

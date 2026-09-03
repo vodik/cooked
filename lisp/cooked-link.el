@@ -269,20 +269,19 @@ claim a click the image had a better claim to."
   ;; Guarded for the reason `cooked--apply-deco' is guarded: a link is a
   ;; convenience laid over text that has already been inserted, and no failure of
   ;; it may take the redisplay with it.
-  (condition-case nil
-      (pcase-dolist (`(,from ,to ,id) spans)
-        (let ((beg (+ start from))
-              (end (+ start to)))
-          (unless (eq (car-safe (get-text-property beg 'cooked-deco)) 'image)
-            (add-text-properties beg end
-                                 (list 'cooked-link-id id
-                                       'mouse-face 'highlight
-                                       'follow-link t
-                                       'help-echo #'cooked--link-help-echo
-                                       'keymap cooked-link-map))
-            (unless (get-text-property beg 'face)
-              (put-text-property beg end 'face 'cooked-link)))))
-    (error nil)))
+  (cooked--protect-seam 'cooked--render-link-spans
+    (pcase-dolist (`(,from ,to ,id) spans)
+      (let ((beg (+ start from))
+            (end (+ start to)))
+        (unless (eq (car-safe (get-text-property beg 'cooked-deco)) 'image)
+          (add-text-properties beg end
+                               (list 'cooked-link-id id
+                                     'mouse-face 'highlight
+                                     'follow-link t
+                                     'help-echo #'cooked--link-help-echo
+                                     'keymap cooked-link-map))
+          (unless (get-text-property beg 'face)
+            (put-text-property beg end 'face 'cooked-link)))))))
 
 ;;;; The goto-addr pass
 
@@ -310,16 +309,14 @@ cheap and this only ever runs over a row or a batch."
     ;; text that is already correct without it, and `goto-address-url-regexp' is a
     ;; variable the user may have replaced.  A cosmetic pass must not be able to
     ;; abort a redisplay half-done.
-    (condition-case nil
-        (progn
-          (let ((goto-address-highlight-keymap cooked-link-map)
-                (goto-address-prog-mode nil))
-            (goto-address-fontify-region beg end))
-          (dolist (overlay (overlays-in beg end))
-            (when (and (overlay-get overlay 'goto-address)
-                       (get-text-property (overlay-start overlay) 'cooked-link-id))
-              (delete-overlay overlay))))
-      (error nil))))
+    (cooked--protect-seam 'cooked--fontify-links
+      (let ((goto-address-highlight-keymap cooked-link-map)
+            (goto-address-prog-mode nil))
+        (goto-address-fontify-region beg end))
+      (dolist (overlay (overlays-in beg end))
+        (when (and (overlay-get overlay 'goto-address)
+                   (get-text-property (overlay-start overlay) 'cooked-link-id))
+          (delete-overlay overlay))))))
 
 (provide 'cooked-link)
 

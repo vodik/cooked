@@ -121,7 +121,12 @@
 
 (ert-deftest cooked-osc-handler-errors-do-not-break-redisplay ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;boom\\007'; printf 'after\\n'; sleep 5")
-    (let ((cooked-osc-handlers '((2 . (lambda (_parts) (error "deliberate"))))))
+    ;; `cooked-debug' back off against the fixture's binding: this is a test of
+    ;; the containment in `cooked--handle-osc', and under debug that containment
+    ;; re-signals by design -- which would put the deliberate error into the
+    ;; process filter and end the batch run rather than fail one test.
+    (let ((cooked-debug nil)
+          (cooked-osc-handlers '((2 . (lambda (_parts) (error "deliberate"))))))
       ;; The handler blows up, but output after it still renders.
       (should (cooked-tests--settle
                (lambda () (string-match-p "after" (cooked-tests--text))))))))

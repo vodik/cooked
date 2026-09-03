@@ -76,18 +76,19 @@ BELL is non-nil when the sequence arrived terminated by BEL rather than ST.
 
 `cooked-osc-handlers' is a documented extension point called from the middle
 of a drain, so this dispatch site owns the guarantee that a handler cannot
-damage the drain around it: `condition-case' for one that *fails*, and
-`save-current-buffer' for one that *relocates*.  The second is not
+damage the drain around it: `cooked--protect-seam' for one that *fails*, and
+`save-current-buffer' for one that *relocates*.  The seam key names the code
+and the handler both, so two handlers failing on different codes are reported
+separately rather than the first silencing the rest.  The second is not
 hypothetical -- `cooked--osc-emacs' can reach `find-file', which
 `switch-to-buffer's -- and an unrestored switch leaves the rest of
 `cooked--apply' rewriting a buffer that has no screen."
   (when-let* ((handler (alist-get code cooked-osc-handlers)))
-    (condition-case err
-        (save-current-buffer
-          (let ((cooked--osc-bell-terminated bell)
-                (cooked--osc-code code))
-            (funcall handler parts)))
-      (error (message "cooked: OSC %s handler failed: %S" code err)))))
+    (cooked--protect-seam (list 'cooked-osc-handlers code handler)
+      (save-current-buffer
+        (let ((cooked--osc-bell-terminated bell)
+              (cooked--osc-code code))
+          (funcall handler parts))))))
 
 (defun cooked--osc-title (parts)
   "Show the child's title, from the OSC 0 or 2 payload PARTS."

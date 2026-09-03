@@ -88,6 +88,53 @@ handful of functions that reach the buffer from outside a drain."
          (progn ,@body)
        (error (message "cooked: hook failed: %S" err)))))
 
+(defvar-local cooked--seams-reported nil
+  "Seams that have already reported a failure in this buffer.
+
+Keys, compared with `equal\\=': what `cooked--protect-seam\\=' was given, which is
+the hook symbol consed onto the entry for a layer and a bare symbol for one of
+cooked\\='s own passes.  Per key rather than per seam, so one broken function
+silences only itself and a second listener on the same hook is still heard from.
+
+Per buffer, and cleared when a session starts: a layer that fails only against
+one child\\='s output is worth hearing about again for the next one.")
+
+(defmacro cooked--protect-seam (key &rest body)
+  "Value of BODY, or nil if it signalled, reported once per buffer under KEY.
+
+The call site for anything running from inside a drain that the buffer is
+already correct without -- an optional layer\\='s contribution, or one of cooked\\='s
+own cosmetic passes.  Three policies, and the five open-coded `condition-case\\='s
+this replaced each got a different pair of them wrong.
+
+*Re-signals under `cooked-debug\\='*, like `cooked--protect-hook\\=' and
+`cooked--dolist-buffers\\='.  A developer who asked to see failures must not have
+this one class of them swallowed anyway, which is what made a decoration layer
+that signalled on every row impossible to debug from inside Emacs.
+
+*Reports rather than discards.*  `(error nil)\\=' meant a layer that had never
+worked was indistinguishable from a layer nobody had loaded.
+
+*Reports once.*  The loudest of these seams fires per damaged row per drain, so
+an unrated `message\\=' is a broken layer taking the echo area away from
+everything else Emacs has to say.  See `cooked--seams-reported\\='.
+
+Returns nil on failure, which is what makes it compose with
+`cooked--run-seam-until-success\\=': an entry that signalled has given no answer,
+so the next entry is asked."
+  (declare (indent 1) (debug (form body)))
+  `(if cooked-debug
+       (progn ,@body)
+     (condition-case err
+         (progn ,@body)
+       (error (cooked--seam-failed ,key err) nil))))
+
+(defun cooked--seam-failed (key err)
+  "Report ERR against KEY, once per buffer, and then stay quiet about it."
+  (unless (member key cooked--seams-reported)
+    (push key cooked--seams-reported)
+    (message "cooked: %S failed and will not be reported again here: %S" key err)))
+
 (defmacro cooked--dolist-windows (var windows &rest body)
   "Run BODY with VAR bound to each still-live window of WINDOWS.
 

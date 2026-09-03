@@ -1433,14 +1433,13 @@ that one glyph kind, exactly as a live row rendered without a known origin does.
         ;; in the row path: this text is settled and will never be rendered
         ;; again, so an answer that costs a `file-exists-p' is paid once instead
         ;; of once per redraw.
+        ;; An optional layer touching the filesystem from inside the drain is
+        ;; exactly the kind of extension point that must not be able to end a
+        ;; redisplay -- the same containment `cooked--handle-osc' gives a
+        ;; handler, for the same reason.
         (when cooked-link-scan-function
-          (condition-case nil
-              (funcall cooked-link-scan-function start (point))
-            ;; An optional layer touching the filesystem from inside the drain is
-            ;; exactly the kind of extension point that must not be able to end a
-            ;; redisplay -- the same containment `cooked--handle-osc' gives a
-            ;; handler, for the same reason.
-            (error nil)))
+          (cooked--protect-seam 'cooked-link-scan-function
+            (funcall cooked-link-scan-function start (point))))
         (set-marker cooked--screen-start (point))
         ;; After the marker moves, so it names the seam these marks are now above.
         (cooked--prune-marks)
@@ -2018,9 +2017,8 @@ text that is already correct without whatever the layer was going to add, so a
 cosmetic pass must not be able to end a redisplay."
   (when cooked-row-rendered-function
     (pcase-dolist (`(,beg . ,end) bounds)
-      (condition-case nil
-          (funcall cooked-row-rendered-function beg end)
-        (error nil)))))
+      (cooked--protect-seam 'cooked-row-rendered-function
+        (funcall cooked-row-rendered-function beg end)))))
 
 ;;;; Cells, anchors and positions
 
@@ -2272,6 +2270,9 @@ Only when DIRECTORY is non-nil: nil keeps its own meaning of leaving the child
 wherever Emacs is, and is not a request to be second-guessed."
   (cooked--load-module)
   (cooked--reset-images)
+  ;; A layer that failed against the last child's output is worth hearing about
+  ;; again for this one; see `cooked--seams-reported'.
+  (setq cooked--seams-reported nil)
   (pcase-let ((`(,rows . ,cols) (cooked--window-size)))
     (setq cooked--rows rows cooked--cols cols
           ;; Matches `cooked--sync-size' having already run once at exactly
