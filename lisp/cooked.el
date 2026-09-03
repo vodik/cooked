@@ -1313,7 +1313,7 @@ too when the shell sent an `A\=' mark and nil otherwise.
 
 An abnormal hook rather than a single function, because two layers already want
 this moment and a plain variable would let the second silently replace the
-first.  Unlike `cooked-osc-eval-function\=' this gates no
+first.  Unlike `cooked-osc-eval-functions\=' this gates no
 channel the child can reach -- it fires only on cooked\='s own bookkeeping -- so
 it is ordinary hook plumbing rather than a deliberate opt-in."
   :type 'hook
@@ -1437,9 +1437,8 @@ that one glyph kind, exactly as a live row rendered without a known origin does.
         ;; exactly the kind of extension point that must not be able to end a
         ;; redisplay -- the same containment `cooked--handle-osc' gives a
         ;; handler, for the same reason.
-        (when cooked-link-scan-function
-          (cooked--protect-seam 'cooked-link-scan-function
-            (funcall cooked-link-scan-function start (point))))
+        (when cooked-link-scan-functions
+          (cooked--run-seam 'cooked-link-scan-functions start (point)))
         (set-marker cooked--screen-start (point))
         ;; After the marker moves, so it names the seam these marks are now above.
         (cooked--prune-marks)
@@ -1939,12 +1938,12 @@ choice here too, and `$' — which is what Emacs itself falls back to — otherw
         (glyph-char glyph))
       ?$))
 
-(defvar cooked-row-rendered-function nil
-  "Function called with the bounds of each live row this drain rewrote.
+(defvar cooked-row-rendered-functions nil
+  "Abnormal hook run with the bounds of each live row this drain rewrote.
 
-Called as (BEG END) with the row\='s own buffer positions, once per damaged row,
-from `cooked--notify-rows-rendered\=' at the end of the drain rather than from
-`cooked--render-rows\=' as each row is written.
+Each entry is called as (BEG END) with the row\='s own buffer positions, once
+per damaged row, from `cooked--notify-rows-rendered\=' at the end of the drain
+rather than from `cooked--render-rows\=' as each row is written.
 
 That delay is part of the contract rather than an implementation detail.  A
 drain that evicts rows inserts their text above the live screen, which pushes
@@ -1964,8 +1963,8 @@ which cannot reach into the render path themselves.
 
 Not called for alternate-screen rows: that grid is a rectangle the child owns
 outright, with no scrollback and no command records of Emacs\=' own to re-apply.
-Nil by default, and errors are contained the way every other cosmetic pass in
-the drain is.")
+Empty by default, and run through `cooked--run-seam\=', so an entry that signals
+costs its own contribution and neither the rest of the hook nor the drain.")
 
 (defun cooked--render-rows (rows &optional alt)
   "Rewrite damaged ROWS, an alist of (INDEX . BLOCK).
@@ -1977,7 +1976,7 @@ the frame that restores the primary screen, and every link on it, unscanned.
 
 Returns the (BEG . END) bounds of each live row it rewrote, in the order it
 wrote them, for `cooked--notify-rows-rendered' to announce once the drain has
-finished putting its markers right -- see `cooked-row-rendered-function'.  The
+finished putting its markers right -- see `cooked-row-rendered-functions'.  The
 positions stay exact while they wait: a row is rendered in place, so writing a
 later row never moves an earlier one, and nothing between here and the
 notification inserts or deletes anything either.  Nil for the alternate screen,
@@ -2001,7 +2000,7 @@ which has no such seam at all."
           ;; text is there; the optional layers cannot, because a mark on this
           ;; screen is not yet where it belongs.  So the bounds are only
           ;; remembered here.
-          (when (and cooked-row-rendered-function (not alt))
+          (when (and cooked-row-rendered-functions (not alt))
             (push (cons start (line-end-position)) rendered)))))
     (nreverse rendered)))
 
@@ -2009,16 +2008,15 @@ which has no such seam at all."
   "Hand BOUNDS, this drain\='s rewritten live rows, to the optional layers.
 
 Separate from `cooked--render-rows' and called well after it, which is the
-whole point of the split -- `cooked-row-rendered-function' says why, and
+whole point of the split -- `cooked-row-rendered-functions' says why, and
 `cooked--apply' is where the two halves are ordered against the marks.
 
 Errors are contained per row: this runs from inside the process filter, over
 text that is already correct without whatever the layer was going to add, so a
 cosmetic pass must not be able to end a redisplay."
-  (when cooked-row-rendered-function
+  (when cooked-row-rendered-functions
     (pcase-dolist (`(,beg . ,end) bounds)
-      (cooked--protect-seam 'cooked-row-rendered-function
-        (funcall cooked-row-rendered-function beg end)))))
+      (cooked--run-seam 'cooked-row-rendered-functions beg end))))
 
 ;;;; Cells, anchors and positions
 
@@ -2801,7 +2799,7 @@ and the region shaped before anything measures it."
     (cooked--relocate-marks (plist-get update :marks) batch-start)
     (dolist (event (plist-get update :events))
       (cooked--handle-event event batch-start))
-    ;; After both, which is the ordering `cooked-row-rendered-function' is
+    ;; After both, which is the ordering `cooked-row-rendered-functions' is
     ;; documented against.
     (cooked--notify-rows-rendered rendered)
     (cooked--fit-screen)

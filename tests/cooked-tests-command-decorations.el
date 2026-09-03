@@ -19,7 +19,7 @@
 Both halves of it -- the once-per-command paint and the per-render re-arm."
   (should (memq #'cooked-command-decorations--started cooked-command-started-functions))
   (should (memq #'cooked-command-decorations--add cooked-command-finished-functions))
-  (should (eq cooked-row-rendered-function #'cooked-command-decorations--rearm)))
+  (should (memq #'cooked-command-decorations--rearm cooked-row-rendered-functions)))
 
 (ert-deftest cooked-command-decorations-paints-nothing-on-a-terminal-frame ()
   "No sensible single-glyph substitute for a coloured marker exists, and a real

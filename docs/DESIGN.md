@@ -169,7 +169,7 @@ keep point on screen, and nothing corrected that once the buffer caught up.
 
 ---
 
-## `cooked-row-rendered-function`: why the bounds arrive late
+## `cooked-row-rendered-functions`: why the bounds arrive late
 
 The hook is called at the end of the drain, from `cooked--notify-rows-rendered`, rather
 than from `cooked--render-rows` as each row is written. That delay is the difference

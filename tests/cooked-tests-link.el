@@ -179,7 +179,7 @@
   `(progn
      (require 'cooked-file-link)
      (let ((cooked-link-follow-function #'cooked-file-link-follow)
-           (cooked-link-scan-function #'cooked-file-link-scan))
+           (cooked-link-scan-functions (list #'cooked-file-link-scan)))
        ,@body)))
 
 (ert-deftest cooked-file-links-are-off-until-the-layer-is-loaded ()
@@ -193,7 +193,7 @@
   ;; survive the binding instead of restating it: this used to `should-not' one of the
   ;; two variables it had just bound to nil, which holds for any `let' at all.
   (let ((cooked-link-follow-function nil)
-        (cooked-link-scan-function nil)
+        (cooked-link-scan-functions nil)
         (fell-through nil))
     (with-temp-buffer
       (insert "lisp/cooked-link.el:1:1: something\n")
@@ -234,7 +234,7 @@ land in a real file, and be the wrong file."
         (setq-local cooked--host "other.example")
         (should-not (cooked-file-link--exists "lisp/cooked-link.el"))
         (insert "built lisp/cooked-link.el\n")
-        (funcall cooked-link-scan-function (point-min) (point-max))
+        (cooked--run-seam 'cooked-link-scan-functions (point-min) (point-max))
         (goto-char (point-min))
         (search-forward "lisp/cooked-link.el")
         (should-not (get-text-property (match-beginning 0) 'cooked-file-link))))))
@@ -247,7 +247,7 @@ land in a real file, and be the wrong file."
       (with-temp-buffer
         (setq-local default-directory root)
         (insert "built lisp/cooked-link.el and lisp/nothing-here.el\n")
-        (funcall cooked-link-scan-function (point-min) (point-max))
+        (cooked--run-seam 'cooked-link-scan-functions (point-min) (point-max))
         (goto-char (point-min))
         (search-forward "lisp/cooked-link.el")
         (should (get-text-property (match-beginning 0) 'cooked-file-link))
@@ -264,7 +264,7 @@ land in a real file, and be the wrong file."
         (setq-local default-directory root)
         (dotimes (_ (1+ cooked-file-link-scan-limit))
           (insert "lisp/cooked-link.el\n"))
-        (funcall cooked-link-scan-function (point-min) (point-max))
+        (cooked--run-seam 'cooked-link-scan-functions (point-min) (point-max))
         (should-not (text-property-not-all (point-min) (point-max)
                                            'cooked-file-link nil))))))
 

@@ -21,7 +21,7 @@
 ;;
 ;; So this is lazy in both directions.  A row is examined only once it has settled
 ;; into the scrollback, where it will never be rendered again, through
-;; `cooked-link-scan-function'; and a candidate under point is resolved on demand when
+;; `cooked-link-scan-functions'; and a candidate under point is resolved on demand when
 ;; you follow it, through `cooked-link-follow-function'.  Nothing validates a live
 ;; row.
 ;;
@@ -220,7 +220,9 @@ a rule that matched some other part of the line from contributing numbers."
       t)))
 
 (defun cooked-file-link-scan (beg end)
-  "Highlight existing file names between BEG and END.  `cooked-link-scan-function'.
+  "Highlight existing file names between BEG and END.
+
+An entry on `cooked-link-scan-functions\='.
 
 Runs once per batch of settled scrollback and never on a live row, which is the
 whole reason it may touch the filesystem at all.  Answers are memoised for the
@@ -259,7 +261,7 @@ guessed."
                            'face 'cooked-link))))))))))))
 
 (setq cooked-link-follow-function #'cooked-file-link-follow)
-(setq cooked-link-scan-function #'cooked-file-link-scan)
+(add-hook 'cooked-link-scan-functions #'cooked-file-link-scan)
 
 (provide 'cooked-file-link)
 

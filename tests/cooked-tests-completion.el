@@ -11,7 +11,7 @@
 ;; layer loaded -- which is how the layer gets tested at all.  The tests for the
 ;; *unloaded* state bind the three seams back to nil rather than arranging a second
 ;; Emacs, for the same reason `cooked-osc-51-is-closed-until-opted-in' binds
-;; `cooked-osc-eval-function': the variables are not a proxy for the layer being
+;; `cooked-osc-eval-functions': the variables are not a proxy for the layer being
 ;; absent, they are the entire mechanism by which the core notices it.
 
 ;;; Code:
@@ -362,7 +362,7 @@ as one that does -- so the nonce is kept regardless of who is listening for
 replies."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
-    (let ((cooked-osc-completion-function nil)
+    (let ((cooked-osc-completion-functions nil)
           (cooked-shell-completion-function nil)
           (sent nil))
       ;; Believed with no layer loaded: this is an ownership signal, not a

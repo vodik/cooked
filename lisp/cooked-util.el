@@ -135,6 +135,44 @@ so the next entry is asked."
     (push key cooked--seams-reported)
     (message "cooked: %S failed and will not be reported again here: %S" key err)))
 
+(defun cooked--run-seam (seam &rest args)
+  "Call every function on abnormal hook SEAM with ARGS.  Always nil.
+
+`run-hook-with-args\\=' is not what this is, and the difference is the whole
+point: it contains nothing, so one broken entry would take the entries after it
+*and* the drain around them with it.  Containment has to be per entry, and
+`run-hook-wrapped\\=' is what makes that a wrapper rather than a reimplementation
+of hook traversal -- including the `t\\=' element a buffer-local hook uses to
+reach the global value, which a `dolist\\=' over the variable would call as a
+function.
+
+See `cooked--protect-seam\\=' for what each entry is protected from and how a
+failure is reported."
+  (apply #'run-hook-wrapped seam
+         (lambda (fn &rest fargs)
+           (cooked--protect-seam (cons seam fn) (apply fn fargs))
+           ;; Always nil: `run-hook-wrapped' stops on a non-nil wrapper, and this
+           ;; shape has no answer to stop for.
+           nil)
+         args))
+
+(defun cooked--run-seam-until-success (seam &rest args)
+  "The first non-nil answer any function on abnormal hook SEAM gives to ARGS.
+
+`run-hook-with-args-until-success\\=' semantics, with the per-entry containment
+`cooked--run-seam\\=' explains -- and the interaction is the useful half: an entry
+that signals returns nil through `cooked--protect-seam\\=', which is exactly \"no
+answer\", so the next entry is asked rather than the whole seam falling silent
+over one layer\\='s bug.
+
+Not simulated: `run-hook-wrapped\\=' already returns the first non-nil value its
+wrapper produced and stops there, so this is that function with a contained
+wrapper and nothing else."
+  (apply #'run-hook-wrapped seam
+         (lambda (fn &rest fargs)
+           (cooked--protect-seam (cons seam fn) (apply fn fargs)))
+         args))
+
 (defmacro cooked--dolist-windows (var windows &rest body)
   "Run BODY with VAR bound to each still-live window of WINDOWS.
 

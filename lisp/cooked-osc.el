@@ -379,22 +379,29 @@ window edge from the terminal background right next to it."
 ;; unloaded there is no function to name, so "not required" and "off" cannot come
 ;; apart.
 
-(defvar cooked-osc-eval-function nil
-  "Function handling the OSC 51;E command channel, called with the payload.
+(defvar cooked-osc-eval-functions nil
+  "Abnormal hook handling the OSC 51;E command channel, run with the payload.
 
 The payload is everything after the `E\=', so `E1;F;/tmp/x\=' arrives as
 \"1;F;/tmp/x\": a version, a verb, and at most one argument.  Parsing it is the
 layer\='s business rather than this file\='s.
 
-Nil means the channel is closed and requests are ignored.
-`cooked-osc-eval' sets it; requiring that file is how you opt in, and the
-point of the split is that opting in is something you do on purpose
-rather than inherit.")
+Empty means the channel is closed and requests are ignored -- and that
+emptiness is load-bearing rather than incidental: it is what
+`cooked--osc-emacs\=' reads to tell \"nobody is listening\" from \"somebody
+refused\", and so what raises the once-per-buffer notice pointing at
+`cooked-osc-eval\='.  Requiring that file is how you opt in, and the point of
+the split is that opting in is something you do on purpose rather than inherit.
 
-(defvar cooked-osc-completion-function nil
-  "Function handling an OSC 51;C *reply*, called with the payload.
+Deliberately a `defvar\=' and not a `defcustom\=' with `:type \='hook\=', unlike
+every other seam here: this is the one place terminal output becomes action, and
+a customize interface would be a way to open the channel without ever loading
+the file whose whole job is to make that a decision.")
 
-Nil means the completion layer is not loaded, and a reply arriving anyway is
+(defvar cooked-osc-completion-functions nil
+  "Abnormal hook handling an OSC 51;C *reply*, run with the payload.
+
+Empty means the completion layer is not loaded, and a reply arriving anyway is
 dropped unread.  Harmless: nothing asked for it, because asking is that layer\='s
 job.
 
@@ -435,7 +442,7 @@ E asks Emacs to run something; C is the completion channel."
     (unless (string-empty-p payload)
       (pcase (aref payload 0)
         (?E (cond
-             (cooked-osc-eval-function
+             (cooked-osc-eval-functions
               ;; Deferred, for the reason `cooked--defer' states: this runs from
               ;; inside a drain, which keeps working with the buffer and its
               ;; locals after we return.  The commands on the other side are
@@ -450,7 +457,8 @@ E asks Emacs to run something; C is the completion channel."
               ;; The `C' arm below stays synchronous on purpose: it is a `setq'
               ;; of inert data that later parts of this same drain read.
               (let ((request (substring payload 1)))
-                (cooked--defer (lambda () (funcall cooked-osc-eval-function request)))))
+                (cooked--defer
+                 (lambda () (cooked--run-seam 'cooked-osc-eval-functions request)))))
              ;; Once per buffer: silence looks like a bug to someone porting their
              ;; vterm configuration, but a stream can send these as fast as it likes.
              ((not cooked--eval-refused)
@@ -459,8 +467,8 @@ E asks Emacs to run something; C is the completion channel."
         (?C (let ((rest (substring payload 1)))
               (if (and (not (string-empty-p rest)) (eq (aref rest 0) ?H))
                   (cooked--osc-announce (substring rest 1))
-                (when cooked-osc-completion-function
-                  (funcall cooked-osc-completion-function rest)))))
+                (when cooked-osc-completion-functions
+                  (cooked--run-seam 'cooked-osc-completion-functions rest)))))
         (_ nil)))))
 
 ;;;; OSC 52 — clipboard

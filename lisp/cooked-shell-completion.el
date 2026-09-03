@@ -37,7 +37,7 @@
 ;; that can disagree:
 ;;
 ;;   `cooked-shell-completion-function'  the CAPF asks it before falling back
-;;   `cooked-osc-completion-function'    the OSC 51;C arm dispatches through it
+;;   `cooked-osc-completion-functions'    the OSC 51;C arm dispatches through it
 ;;
 ;; Both are questions the core asks, never calls the core makes into the layer,
 ;; and that is forced rather than stylistic: a core that pushed a notification
@@ -394,7 +394,7 @@ file, which is the whole of how the core reaches it."
 ;; the layer gone can set them back to nil themselves.
 
 (setq cooked-shell-completion-function #'cooked--shell-completion-at-point)
-(setq cooked-osc-completion-function #'cooked--completion-handle)
+(add-hook 'cooked-osc-completion-functions #'cooked--completion-handle)
 
 (provide 'cooked-shell-completion)
 ;;; cooked-shell-completion.el ends here

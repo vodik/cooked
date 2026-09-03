@@ -145,7 +145,7 @@ request arrived."
   "The command channel is the one place terminal output becomes action, so it
 must do nothing at all until the user has loaded `cooked-osc-eval' on purpose."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (let ((cooked-osc-eval-function nil)
+    (let ((cooked-osc-eval-functions nil)
           (visited nil))
       (cl-letf (((symbol-function 'find-file) (lambda (f) (setq visited f))))
         (cooked--osc-emacs '("E1" "F" "/tmp/x"))

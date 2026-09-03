@@ -140,7 +140,7 @@ not ask for and cannot act on."
            (_ (message "cooked: ignoring an unknown OSC 51;E verb `%s'" verb)))))))
     (_ nil)))
 
-(setq cooked-osc-eval-function #'cooked-osc-eval-request)
+(add-hook 'cooked-osc-eval-functions #'cooked-osc-eval-request)
 
 (provide 'cooked-osc-eval)
 ;;; cooked-osc-eval.el ends here

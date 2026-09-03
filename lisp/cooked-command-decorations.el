@@ -27,7 +27,7 @@
 ;; truth, because the shell-side half of completion runs -- and shadows `compadd'
 ;; for the life of the session -- whether or not Emacs is listening.  Decorations have no shell-side half at all -- they are painted
 ;; from `cooked-command-finished-functions' and re-armed from
-;; `cooked-row-rendered-function', both of which fire only inside this Emacs,
+;; `cooked-row-rendered-functions', both of which fire only inside this Emacs,
 ;; on cooked's own bookkeeping -- so there is no announcement that could go on
 ;; being sent to nobody.  This is a separate file because every other optional
 ;; layer in this codebase is one, not because loading it costs anything the way
@@ -343,7 +343,7 @@ it -- so Emacs tears the overlay down, and since
 `cooked-command-finished-functions\=' fires once per command, nothing would ever
 put it back.  A resize damages every live row at once, so any command whose
 prompt is still on screen loses its marker the first time the window changes
-width.  Hence this, hung on `cooked-row-rendered-function\=': re-applied per
+width.  Hence this, hung on `cooked-row-rendered-functions\=': re-applied per
 render rather than persisted, exactly as `cooked--fontify-links\=' re-runs
 goto-addr over each freshly-rendered row.
 
@@ -363,7 +363,7 @@ stops at the first command already settled in permanent scrollback when the last
 sweep ran.
 
 Called after `cooked--relocate-marks\=', not during the render -- see
-`cooked-row-rendered-function\=', which runs late for exactly this consumer.
+`cooked-row-rendered-functions\=', which runs late for exactly this consumer.
 
 The running marker is re-derived here too, and unconditionally: it sits on the
 live screen by definition, which is the part of the buffer every render damages,
@@ -424,7 +424,7 @@ per render rather than persisted."
 
 (add-hook 'cooked-command-started-functions #'cooked-command-decorations--started)
 (add-hook 'cooked-command-finished-functions #'cooked-command-decorations--add)
-(setq cooked-row-rendered-function #'cooked-command-decorations--rearm)
+(add-hook 'cooked-row-rendered-functions #'cooked-command-decorations--rearm)
 (add-hook 'cooked-alt-change-hook #'cooked-command-decorations--clear-live)
 
 ;;;; The menu

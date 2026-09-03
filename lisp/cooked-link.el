@@ -105,13 +105,17 @@ the seam `cooked-file-link.el' sets to add local-file linking, and with that
 file not loaded there is no function to name and no second switch that could
 disagree with its absence.")
 
-(defvar cooked-link-scan-function nil
-  "Function called over each batch of output that has settled into scrollback.
+(defvar cooked-link-scan-functions nil
+  "Abnormal hook run over each batch of output that has settled into scrollback.
 
-Called with two arguments, the start and end of the newly-appended region.
-Run once per batch and never from the live-row path, which is what makes it
-affordable for something that has to touch the filesystem to answer.  nil by
-default; see `cooked-link-follow-function'.")
+Each entry is called with two arguments, the start and end of the newly-appended
+region, and its value is ignored.  Run once per batch and never from the
+live-row path, which is what makes it affordable for something that has to touch
+the filesystem to answer.  Empty by default; see
+`cooked-link-follow-functions'.
+
+Run through `cooked--run-seam', so one entry signalling costs its own
+contribution and nothing else's.")
 
 ;;;; The table behind an OSC 8 id
 
