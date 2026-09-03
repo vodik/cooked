@@ -327,44 +327,6 @@ from a click on a marker that happens to still be there."
       (goto-char (cooked--command-start-position command))
       (should (eq (cooked-command-decorations--command-at (point)) command)))))
 
-(ert-deftest cooked-command-decorations-copy-command-kills-the-input ()
-  (with-temp-buffer
-    (cooked-mode)
-    (cooked-tests--display-buffer)
-    (let ((command (cooked-tests--make-command "$ " "echo copy-me" "copy-me\n" 0)))
-      (cooked-command-decorations--copy-command command)
-      (should (equal (current-kill 0) "echo copy-me")))))
-
-(ert-deftest cooked-command-decorations-copy-output-kills-the-output-region ()
-  (with-temp-buffer
-    (cooked-mode)
-    (cooked-tests--display-buffer)
-    (let ((command (cooked-tests--make-command "$ " "echo out-text" "out-text\n" 0)))
-      (cooked-command-decorations--copy-output command)
-      (should (string-search "out-text" (current-kill 0))))))
-
-(ert-deftest cooked-command-decorations-rerun-refuses-a-busy-prompt ()
-  "Resending a command line only makes sense at an empty prompt -- not while
-something is running or mid-edit, which `cooked--send-input-string' has no
-way to interleave with safely."
-  (with-temp-buffer
-    (cooked-mode)
-    (cooked-tests--display-buffer)
-    (let ((command (cooked-tests--make-command "$ " "echo hi" "hi\n" 0)))
-      (cl-letf (((symbol-function 'cooked--input-state-p) (lambda () nil)))
-        (should-error (cooked-command-decorations--rerun command) :type 'user-error)))))
-
-(ert-deftest cooked-command-decorations-rerun-refuses-a-command-with-no-input ()
-  (with-temp-buffer
-    (cooked-mode)
-    (cooked-tests--display-buffer)
-    (goto-char (point-max))
-    (insert "no input recorded\n")
-    (let ((command (cooked--command-make :start (copy-marker (point-min))
-                                         :end (copy-marker (point-max))
-                                         :code 0 :input nil :prompt nil)))
-      (should-error (cooked-command-decorations--rerun command) :type 'user-error))))
-
 (ert-deftest cooked-command-decorations-menu-key-is-bound ()
   (should (eq (lookup-key cooked-mode-map (kbd "C-c C-o")) #'cooked-command-decorations-menu)))
 

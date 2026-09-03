@@ -17,6 +17,7 @@
 ;;   cooked-tests-next-error.el  next-error over a command's output
 ;;   cooked-tests-sticky-scroll.el       the sticky-scroll header line
 ;;   cooked-tests-command-decorations.el the fringe dot per command
+;;   cooked-tests-menu.el        the menu, and the commands it names
 ;;
 ;; Run them all:
 ;;
@@ -58,6 +59,7 @@
 (require 'cooked-tests-next-error)
 (require 'cooked-tests-sticky-scroll)
 (require 'cooked-tests-command-decorations)
+(require 'cooked-tests-menu)
 
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here

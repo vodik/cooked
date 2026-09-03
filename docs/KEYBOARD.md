@@ -98,6 +98,16 @@ either way.
 next key to the child exactly as typed, regardless of what's reserved — including `C-c`
 itself (`C-c C-q C-c` sends a literal `C-c` byte).
 
+**Middle-click pastes**, as it does in every other terminal: `mouse-2` sends the head of
+the kill ring to the child. comint binds that key to `comint-insert-input`, which looks
+for the input field under the click and, finding none, fell through to the global binding
+and inserted the X selection *into the buffer* — text that goes nowhere, above a prompt
+that is read-only, at a position the next repaint may overwrite. The new binding takes
+nothing from the two claims that outrank it, which is the correct order: a link span
+carries its own keymap as a text property, consulted before any of this, so clicking a
+link still follows it; and a child that asked for the mouse is served from
+`emulation-mode-map-alists`, above the local map, so it gets the click untouched.
+
 The mouse has an escape hatch of its own, and it's the one every terminal uses: hold
 **shift**. A child that asked for mouse reports gets the whole gesture — press, the
 motion between, release — and a click that reaches it clears any Emacs region, because
@@ -131,6 +141,31 @@ comint's key:
 | `C-c M-o` | `comint-clear-buffer` | everything above the prompt goes, whether it is scrollback or still on the grid |
 | `C-c C-o` | `comint-delete-output` | asks the *emulator* to drop those rows; see below |
 | `C-c SPC` | `comint-accumulate` | `cooked-newline`, which is also how a TTY frame composes multi-line input |
+| `C-c C-r`, `C-M-l` | `comint-show-output` | scrolls *this* command's output to the top, found from the OSC 133 records |
+| `C-c C-s` | `comint-write-output` | writes the output of the command at point, not only the last one; a prefix saves the whole record |
+| `C-c C-d` | `comint-send-eof` | the tty's EOF byte to the child, not `process-send-eof` on the wakeup pipe |
+| `C-c C->` | *(new)* | `cooked-goto-last-command`, which had no key at all — only the mode line's exit status was a click away from it |
+
+The three that had been missed are the interesting half of that table, because they were
+not failing. **They were succeeding, against the wrong process.** A process object that
+answers `get-buffer-process` is what makes the rest of comint work here, and it is also
+what turns an un-remapped command into something that runs: the Signals menu's `Kill` was
+`kill-process` on `cooked--wake` — it killed the doorbell and left the child running
+behind a buffer that had stopped hearing from it, with nothing on screen to say so. `EOF`
+and `CONT` were the same shape. `cooked-kill-session` and `cooked-continue` now stand
+where those two landed; a terminal has no continue *character*, so the second exists only
+to be remapped onto, and what resumes a stopped job is still the shell's `fg`.
+
+The other two were wrong in the quieter way. `comint-show-output` and the `Matching
+Input…` motions find the input and output groups by walking `field` text properties, and
+cooked sets none anywhere — it marks the prompt read-only instead, because the transcript
+is one continuous thing the emulator rewrites in place. With no fields `field-beginning`
+answers `point-min`, so `C-c C-r` scrolled to the top of the *scrollback* and the two
+motions always reported "Not found". `cooked-show-output` answers from the command records
+instead, which is better than the field walk in the way that matters: it works pressed
+from the prompt below a command as well as from inside its output. The motions are simply
+gone — `C-c C-p`/`C-c C-n` already walk prompts, and isearch is the better tool over a
+transcript that is all one field.
 
 `C-c C-o` is the interesting one. The rows belong to the emulator, so cooked deletes no
 buffer text: it asks the core to remove the rows and lets the ordinary drain repaint what
@@ -151,6 +186,24 @@ terminal and it is what you typed `clear` to get. `C-c M-o` reaches the same sta
 help from the child: the emulator drops the rows above the prompt (from the OSC 133 mark
 when the shell sends one, from the cursor's row when it does not) and Emacs deletes the
 scrollback, each side asked for the half it owns.
+
+### The menu is comint-shaped too, and for the same reasons
+
+`cooked-mode` inherits comint's three menus along with its keymap — In/Out, Signals and
+Complete — and every one of the faults above had a menu entry sitting on top of it. So the
+same rule applies: cooked defines one `Cooked` menu and shadows those three, keeping the
+concepts a terminal genuinely has and dropping the ones that only ever meant comint's
+process.
+
+It is the same menu in all three places it can be reached: the menu bar, `mouse-1` on
+`cooked` in the mode line, and — under `context-menu-mode` — right-click. Every item is
+guarded by the predicates the mode line already reports in words, so what is greyed out
+matches what the state word says: with the child holding the keyboard the input group goes
+dim, after `exited 0` everything that writes to a child does, and the command verbs need a
+command at point. Greyed rather than hidden, deliberately — which state the terminal is in
+is exactly what someone reaching for a menu is unsure of, and an item that vanishes
+answers nothing. Right-click adds one thing the menu bar cannot: the command verbs there
+are resolved from the *click*, not from point.
 
 ### Job control comes from the tty
 

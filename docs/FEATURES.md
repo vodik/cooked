@@ -431,6 +431,15 @@ diagonal that misses the corner its neighbour has to meet.
   restate the word, so it is left off. `@host` prefixes the lot when the child last
   reported it was somewhere other than this machine, and nothing is spent saying a local
   session is local.
+- **The menu says what is possible before you commit to it.** One `Cooked` menu replaces
+  the three cooked used to inherit from comint, which were wrong in three different ways:
+  a "Show Current Output Group" that walked `field` properties cooked never sets and so
+  scrolled to the top of the scrollback, two "Matching Input…" motions that always
+  answered *Not found*, and a Signals menu whose `Kill` killed the wakeup pipe rather than
+  the child. Every item on the replacement is guarded by the same predicates the mode line
+  reports in words, so it greys out in step with the state word — and it is the same menu
+  from the menu bar, from `mouse-1` on the mode name, and from a right-click, which
+  additionally resolves the per-command verbs at the click rather than at point.
 - **It names what is running without needing the snippet.** The child's title if the shell
   set one, and otherwise the program in the foreground process group, read from the OS —
   which is what tells `htop` from a shell editing its own line, the pair no amount of

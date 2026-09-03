@@ -331,5 +331,83 @@ two commands used to carry a copy of this each."
       (user-error "No command output here"))
     (cons beg end)))
 
+;;;; Acting on one record
+
+(defun cooked--command-here (&optional command)
+  "COMMAND if it was given, and otherwise the one point is in or under.
+
+The argument is what lets the fringe marker and the menu share these commands
+without sharing their idea of *which* record is meant: a click on a marker
+knows exactly, from the overlay it was painted on, and a keystroke has only
+point to go on.  `cooked--command-around\=' is what answers for point, so the
+prompt below a command counts as that command -- see there for why that is the
+reading a user expects rather than a convenience.
+
+Signals rather than returning nil, since every caller would otherwise open with
+the same check."
+  (or command
+      (cooked--command-around (point))
+      (user-error "cooked: no command here")))
+
+(defun cooked-show-output (&optional command)
+  "Scroll so COMMAND's output starts at the top of the window.
+
+Where comint puts `comint-show-output\=', and for the concept comint means by
+it -- but not its implementation.  `comint-show-output\=' finds the output group
+by walking `field\=' text properties, and cooked sets none anywhere: it marks
+the prompt read-only instead, because the transcript is one continuous thing
+the emulator rewrites in place, and fields over rows still being redrawn would
+have to be maintained on every render for the sake of two commands.  With no
+fields `field-beginning\=' answers `point-min\=', so the inherited command
+scrolls to the top of the *scrollback* -- silently, which is the worst way for
+it to be wrong, and the reason this exists rather than the menu entry simply
+being dropped.
+
+`cooked--command-here\=' is better than the field walk in the way that matters:
+it answers from the prompt and the input line as well as from inside the
+output, so this does the right thing pressed from where the user is typing.
+
+Puts the start at the top rather than recentring, which is what the name asks
+for: the interesting end of a long output is its beginning, and recentring
+would spend half a window on the command before it."
+  (interactive)
+  (goto-char (car (cooked--command-region (cooked--command-here command))))
+  (recenter 0))
+
+(defun cooked-write-output (file &optional outer command)
+  "Write COMMAND's output to FILE, or with OUTER its whole record.
+
+Where comint puts `comint-write-output\=', which writes from
+`comint-last-input-end\=' to the process mark -- here the input mark.  At a
+prompt that is the last command's output and works by coincidence; midway
+through a command the input mark points nowhere and it raises rather than
+writing anything.  This asks for the command at point, which is both the honest
+reading of \"the current output group\" and the one that can save the output of
+something four screens up.
+
+With a prefix argument the region is the whole record -- the prompt, the
+command line and the output -- which is the form worth pasting into a bug
+report, and the one `cooked--command-region\=' already has an argument for."
+  (interactive (list (read-file-name (if current-prefix-arg
+                                         "Write command and output to file: "
+                                       "Write output to file: "))
+                     current-prefix-arg))
+  (pcase-let ((`(,beg . ,end) (cooked--command-region (cooked--command-here command) outer)))
+    (write-region beg end file)))
+
+(defun cooked-copy-command (&optional command)
+  "Put COMMAND's input line on the kill ring."
+  (interactive)
+  (if-let* ((input (cooked-command-input (cooked--command-here command))))
+      (progn (kill-new input) (message "cooked: copied command"))
+    (user-error "cooked: this command has no recorded input")))
+
+(defun cooked-copy-output (&optional command)
+  "Put COMMAND's output region on the kill ring."
+  (interactive)
+  (pcase-let ((`(,beg . ,end) (cooked--command-region (cooked--command-here command))))
+    (kill-new (buffer-substring-no-properties beg end))
+    (message "cooked: copied output")))
+
 (provide 'cooked-command)
 ;;; cooked-command.el ends here
