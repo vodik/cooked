@@ -944,6 +944,8 @@ fn decrqm_answers_honestly_about_every_mode() {
         (&b"\x1b[?2004h"[..], 2004, 1),
         (&b""[..], 7, 1),
         (&b"\x1b[?7l"[..], 7, 2),
+        (&b""[..], 2031, 2),
+        (&b"\x1b[?2031h"[..], 2031, 1),
         (&b"\x1b[?1004h"[..], 1004, 1),
         (&b"\x1b[?1049h"[..], 1049, 1),
         // Deliberately not implemented — the drop list, machine readable.
@@ -972,7 +974,7 @@ fn decrqm_answers_honestly_about_every_mode() {
 /// itself unrecognised, or survive a soft reset that was supposed to clear it.
 #[test]
 fn every_flag_mode_sets_reports_and_soft_resets() {
-    for mode in [1u16, 25, 66, 1004, 1007, 2004] {
+    for mode in [1u16, 25, 66, 1004, 1007, 2004, 2031] {
         let mut t = term(4, 8, b"");
 
         // Whatever it powers on as, DECRQM must not answer "never heard of it".
@@ -1780,6 +1782,94 @@ fn status_report_is_answered() {
         t.drain()
             .events
             .contains(&Event::Reply(b"\x1b[0n".to_vec()))
+    );
+}
+
+#[test]
+fn the_colour_scheme_is_unanswered_until_emacs_has_said() {
+    // The protocol has a value for dark and one for light and none for "not yet", so the
+    // only honest answer here is none at all.
+    let mut t = term(4, 20, b"\x1b[?996n");
+    assert!(
+        t.drain()
+            .events
+            .iter()
+            .all(|e| !matches!(e, Event::Reply(_)))
+    );
+}
+
+#[test]
+fn the_colour_scheme_is_answered_once_reported() {
+    for (scheme, want) in [
+        (ColorScheme::Dark, &b"\x1b[?997;1n"[..]),
+        (ColorScheme::Light, &b"\x1b[?997;2n"[..]),
+    ] {
+        let mut t = term(4, 20, b"");
+        t.set_color_scheme(scheme);
+        t.feed(b"\x1b[?996n");
+        assert!(
+            t.drain().events.contains(&Event::Reply(want.to_vec())),
+            "{scheme:?}"
+        );
+    }
+}
+
+#[test]
+fn only_a_subscriber_is_pushed_the_colour_scheme() {
+    let mut t = term(4, 20, b"");
+    assert_eq!(t.set_color_scheme(ColorScheme::Dark), None);
+
+    t.feed(b"\x1b[?2031h");
+    // The same scheme again is not an event, however often Emacs reloads the theme.
+    assert_eq!(t.set_color_scheme(ColorScheme::Dark), None);
+    assert_eq!(
+        t.set_color_scheme(ColorScheme::Light),
+        Some(b"\x1b[?997;2n".to_vec())
+    );
+
+    t.feed(b"\x1b[?2031l");
+    assert_eq!(t.set_color_scheme(ColorScheme::Dark), None);
+    // Unsubscribing ends the push and nothing else: the pull is not a negotiation.
+    t.feed(b"\x1b[?996n");
+    assert!(
+        t.drain()
+            .events
+            .contains(&Event::Reply(b"\x1b[?997;1n".to_vec()))
+    );
+}
+
+#[test]
+fn a_soft_reset_ends_the_subscription_and_keeps_the_scheme() {
+    // This is what the field placement buys, and the only test that pins it: the
+    // subscription is a mode the child negotiated and lives on `Modes`, so DECSTR clears
+    // it; the scheme is Emacs' report about its own theme and lives on `State`, so DECSTR
+    // must not, or a child that queried after one would be told nothing about a theme
+    // that had not changed.
+    let mut t = term(4, 20, b"");
+    t.set_color_scheme(ColorScheme::Light);
+    t.feed(b"\x1b[?2031h\x1b[!p");
+    assert_eq!(t.set_color_scheme(ColorScheme::Dark), None);
+
+    t.feed(b"\x1b[?996n");
+    assert!(
+        t.drain()
+            .events
+            .contains(&Event::Reply(b"\x1b[?997;1n".to_vec()))
+    );
+}
+
+#[test]
+fn a_private_status_report_we_do_not_implement_is_not_answered() {
+    // The `996` guard rather than a bare `(Some(b'?'), 'n')` arm: an unimplemented
+    // private DSR must stay unimplemented rather than be silently swallowed.
+    let mut t = term(4, 20, b"");
+    t.set_color_scheme(ColorScheme::Dark);
+    t.feed(b"\x1b[?15n\x1b[?6n");
+    assert!(
+        t.drain()
+            .events
+            .iter()
+            .all(|e| !matches!(e, Event::Reply(_)))
     );
 }
 

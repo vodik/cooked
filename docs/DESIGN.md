@@ -385,6 +385,59 @@ dispatch to the TRAMP handler. Asking whether the file is there is already the c
 
 ---
 
+## `cooked--sync-color-scheme`: the terminal does not know the theme
+
+A child asks `CSI ? 996 n` and is told dark or light; with DEC mode 2031 set it is told
+again, unasked, whenever the answer changes. Neither is a question the emulator can
+answer. The scheme resolves against the buffer's `default` face under whatever theme is
+loaded, which is Emacs' business entirely — so the core holds a value Emacs reported, the
+way it holds the cell size for `CSI 14t`, and the query is answered where it arrives
+rather than by waking Lisp to ask about something it already said. Unreported, both are
+answered with silence: an absence, not a claim. The colour scheme has the stronger case,
+since the protocol has a number for dark and a number for light and none for "not yet".
+
+**The push returns bytes instead of riding the drain.** Every other reply the core makes
+is an `Event::Reply` collected at drain time, which works because a reply is provoked by
+input and input is what runs a drain. A theme change is provoked by nothing the child did
+and produces no child output at all, so no drain is coming: a subscribed nvim sitting idle
+would learn about the new theme when the user next typed, which is the one moment the
+notification was supposed to save. Nor does the core write the bytes itself. That path —
+`reply_osc`'s — signals on a write error, which is correct for a query a child is blocking
+on and wrong here, where this runs from a global hook over every session and a child that
+exited a moment ago is an ordinary race. `cooked--send-if-live` already states that
+policy, and the `996` answer leaves through it too: one report, one route, one error
+policy.
+
+**Field placement is what makes RIS mean the right thing.** The subscription is a mode the
+child negotiated, so it sits on `Modes` and `Modes::default()` clears it — DECSTR and RIS
+are defined as putting negotiated state back to power-on, and a subscription is exactly
+that. The scheme is not negotiated: it is Emacs' report about its own theme, which a soft
+reset has no business forgetting, so it sits on `State` beside `metrics`. Split the other
+way, a child that soft-reset itself would be told nothing about a theme that had not
+changed, and would have to ask again to find out what it already knew.
+
+**The multi-frame gap, and why it is not patched here.** `cooked--default-color` reads the
+`default` face and falls back to the selected frame's parameters, so a buffer displayed on
+two frames with different backgrounds has one answer and it belongs to whichever frame
+happened to be selected. That is a real limitation and the fix is not at the 997 site: a
+rule applied to the colour scheme alone is precisely how the two reports come to disagree,
+which is the failure this whole design is arranged to prevent. It belongs one level down,
+in `cooked--default-color`, where it would improve OSC 10, 11 and 12 at the same time —
+and it is its own change.
+
+**A leaked subscription types at your prompt.** A TUI that sets 2031 and dies without
+resetting it leaves the mode set, and the next theme flip sends `^[[?997;1n` to whatever
+holds the terminal now — an ordinary shell, which will show it as typed input. Every
+terminal implementing this has the same exposure, because nothing in the protocol says who
+the subscription belonged to. Two cooked-only mitigations were considered and declined.
+Gating the push on the input-ownership policy (`cooked--policy`) would silence the report
+whenever the shell owns the keyboard, which is also when a shell that subscribed on its
+own behalf is entitled to it. Clearing the mode at the OSC 133 `D` mark is the tighter
+rule — a command has ended, so its subscription has too — and fails the same way: a shell
+that subscribed for itself would lose it after every command it ran.
+
+---
+
 ## `cooked-shell-integration`: why injection stops being the default
 
 cooked currently generates startup files and points the shell at them —

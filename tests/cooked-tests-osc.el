@@ -897,6 +897,100 @@ so a terminal that never answers costs them their whole timeout on startup."
         (cooked--osc-color-reset nil))
       (should-not cooked--color-remaps))))
 
+(ert-deftest cooked-color-scheme-follows-the-rendered-background ()
+  "Read from the same background OSC 11 answers with, so a child that reacts to a
+scheme change by querying the background cannot be told two different things."
+  (cl-letf (((symbol-function 'cooked--default-color) (lambda (_) "#101014")))
+    (should (eq (cooked--color-scheme) 'dark)))
+  (cl-letf (((symbol-function 'cooked--default-color) (lambda (_) "#f8f8f2")))
+    (should (eq (cooked--color-scheme) 'light))))
+
+(ert-deftest cooked-color-scheme-is-answered-from-session-start ()
+  "`cooked--start' reports it once, or a session that outlives no theme change
+would answer `CSI ? 996 n' with silence for its whole life."
+  (let ((out (make-temp-file "cooked-996")))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "stty raw -echo; printf '\\033[?996n'; cat > %s" out))
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "997" (cooked-tests--contents out)))))
+          (should (string-match-p "\\`\033\\[\\?997;[12]n\\'"
+                                  (cooked-tests--contents out))))
+      (delete-file out))))
+
+(ert-deftest cooked-a-colour-that-cannot-be-read-still-leaves-a-session ()
+  "The scheme is reported from inside `cooked--start', so anything it signals is
+signalled at the one moment there is no session yet to fall back on.  A terminal
+that failed to open because a colour could not be read would be trading the whole
+feature for the courtesy answer to a query most children never send.
+
+The fixture cannot be used: it binds `cooked-debug' before it spawns, and this is
+a test of containment, which under debug re-signals by design.  So the session is
+built by hand with debug off -- the shape
+`cooked-osc-handler-errors-do-not-break-redisplay' uses for the same reason."
+  (let ((buffer (generate-new-buffer "*cooked-test*"))
+        (cooked-debug nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (cl-letf (((symbol-function 'cooked--color-scheme)
+                     (lambda () (error "deliberate"))))
+            (cooked--start '("/bin/sh" "-c" "sleep 5")))
+          (should cooked--session)
+          (should (cooked--live-session)))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
+(ert-deftest cooked-a-theme-change-notifies-a-subscribed-child ()
+  "Driven through `cooked--flush-face-cache' rather than by calling the hook
+function: the wiring — the hook, `cooked--dolist-buffers', and the buffer being
+current — is the half most likely to be wrong.  The scheme is stubbed rather than
+really themed: `-Q --batch' has no theme worth enabling, and the derivation is
+`cooked-color-scheme-follows-the-rendered-background'."
+  (let ((out (make-temp-file "cooked-2031"))
+        (scheme 'dark))
+    (unwind-protect
+        (cl-letf (((symbol-function 'cooked--color-scheme) (lambda () scheme)))
+          (cooked-tests--with-session
+              (list "/bin/sh" "-c"
+                    (format "stty raw -echo; printf '\\033[?2031h'; echo ready; cat > %s"
+                            out))
+            ;; The subscription has to have reached the emulator before the flip, and
+            ;; the child says so on its own stdout.
+            (should (cooked-tests--settle
+                     (lambda () (string-match-p "ready" (cooked-tests--text)))))
+            (setq scheme 'light)
+            (cooked--flush-face-cache)
+            (should (cooked-tests--settle
+                     (lambda () (equal (cooked-tests--contents out) "\033[?997;2n"))))
+            ;; The theme reloaded onto itself is not a change.
+            (cooked--flush-face-cache)
+            (cooked-tests--pump 0.3)
+            (should (equal (cooked-tests--contents out) "\033[?997;2n"))
+            ;; And the reverse flip is.
+            (setq scheme 'dark)
+            (cooked--flush-face-cache)
+            (should (cooked-tests--settle
+                     (lambda () (equal (cooked-tests--contents out)
+                                       "\033[?997;2n\033[?997;1n"))))))
+      (delete-file out))))
+
+(ert-deftest cooked-a-theme-change-says-nothing-to-an-unsubscribed-child ()
+  (let ((out (make-temp-file "cooked-no-2031"))
+        (scheme 'dark))
+    (unwind-protect
+        (cl-letf (((symbol-function 'cooked--color-scheme) (lambda () scheme)))
+          (cooked-tests--with-session
+              (list "/bin/sh" "-c" (format "stty raw -echo; echo ready; cat > %s" out))
+            (should (cooked-tests--settle
+                     (lambda () (string-match-p "ready" (cooked-tests--text)))))
+            (setq scheme 'light)
+            (cooked--flush-face-cache)
+            (cooked-tests--pump 0.3)
+            (should (equal (cooked-tests--contents out) ""))))
+      (delete-file out))))
+
 (ert-deftest cooked-osc-color-parses-the-xterm-spellings ()
   "Channels are scaled by width, not zero-padded: rgb:f/f/f is white."
   (should (equal (cooked--parse-osc-color "rgb:ffff/0000/0000") "#ffff00000000"))

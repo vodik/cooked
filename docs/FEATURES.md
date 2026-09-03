@@ -310,6 +310,25 @@ default foreground or background at all, since the real value is whatever the bu
 `default` face resolves to under your theme. OSC 10, 11 and 12 are answered from there,
 so the reply tracks your theme.
 
+A program can also ask which way the theme points, and be told when it turns.
+`CSI ? 996 n` is answered with `CSI ? 997 ; 1 n` for dark and `CSI ? 997 ; 2 n` for light —
+1 is dark, which several secondary descriptions of this protocol have inverted — and DEC
+mode 2031 (`CSI ? 2031 h` to subscribe, `l` to stop) makes the terminal send that same
+report unasked every time the answer changes. That is what lets nvim flip `background`
+when you load a light theme, rather than only at startup.
+
+The answer is derived from the background this buffer actually renders — the same value
+OSC 11 replies with — rather than from `frame-background-mode`, because nvim reacts to a
+997 by querying OSC 11 for the real colour: two readings of one value can be wrong
+together, but they must not disagree. Until Emacs has reported a scheme the query is
+answered with silence, since the protocol defines dark and light and nothing else, and an
+invented third value is worse for the child than no answer.
+
+A child's *own* OSC 11 set raises nothing. The notification is defined as the palette
+being changed by the user or the OS; a child repainting its own background is neither, and
+since the child answers a notification by querying the background, reporting one would
+close a loop.
+
 Requests that *set* a colour are refused unless you set `cooked-allow-color-set`;
 anything that can write to the terminal can send one. When enabled the change is a
 buffer-local face remapping — the child repaints its own terminal, not your whole

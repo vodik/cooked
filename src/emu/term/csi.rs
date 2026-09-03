@@ -71,6 +71,7 @@ dec_flags! {
     1004 => focus_events,
     1007 => alt_scroll,
     2004 => bracketed_paste,
+    2031 => color_scheme_updates,
 }
 
 use super::*;
@@ -539,6 +540,16 @@ impl State {
                 self.events.push(Event::Reply(
                     format!("\x1b[{};{}R", row + 1, col + 1).into_bytes(),
                 ));
+            }
+            // The colour scheme, `CSI ? 996 n`. Silent until Emacs has reported one: the
+            // protocol defines dark and light and nothing else, so there is no way to say
+            // "not yet" that a child could read. The `996` guard is what keeps every other
+            // private DSR -- `CSI ? 6 n`, `CSI ? 15 n` -- falling through to unimplemented
+            // rather than being swallowed here.
+            (Some(b'?'), 'n') if params.arg(0, 0) == 996 => {
+                if let Some(scheme) = self.color_scheme {
+                    self.events.push(Event::Reply(color_scheme_report(scheme)));
+                }
             }
             _ => return false,
         }

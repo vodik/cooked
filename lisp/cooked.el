@@ -85,6 +85,7 @@
 
 (declare-function cooked--handle-osc "cooked-osc")
 (declare-function cooked--handle-title-stack "cooked-osc")
+(declare-function cooked--sync-color-scheme "cooked-osc")
 
 ;;;; What the two ends exchange
 ;;
@@ -2180,6 +2181,19 @@ wherever Emacs is, and is not a request to be second-guessed."
                         (expand-file-name (or (cooked--local-name directory) "~")))
                       (round (* 1000 cooked-min-redisplay-interval))
                       cooked-backlog-limit))
+  ;; Once, at the start: the core answers `CSI ? 996 n' from what Emacs last reported,
+  ;; and a session that outlives no theme change would otherwise answer with silence for
+  ;; its whole life.  Here rather than in `cooked--start-session' so that the callers who
+  ;; spawn directly -- the test fixture and the benchmark -- exercise the same path.
+  ;;
+  ;; Protected because the session is already started by this point and is correct
+  ;; without it: the only thing lost is a courtesy answer to a query most children never
+  ;; send, and failing the spawn over it would trade a terminal for a colour.  The seam
+  ;; is real rather than theoretical -- `cooked--default-color' guards against
+  ;; `color-values' returning nil, which is not the same as it signalling, and it does
+  ;; signal on a frame that claims to be graphical without a window system behind it.
+  (cooked--protect-seam 'cooked--sync-color-scheme
+    (cooked--sync-color-scheme))
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)

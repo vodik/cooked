@@ -369,7 +369,11 @@ that merely *looks* like a URL is linkified by `goto-address` over freshly-rende
 which brings `follow-link`, `help-echo` and your own `goto-address` customisations with
 it. With `cooked-file-link` loaded, file names in output become links too.
 
-**Other.** Synchronized output (mode 2026), cursor shape, DECRQM, DECSTR and RIS.
+**Other.** Synchronized output (mode 2026), cursor shape, DECRQM, DECSTR and RIS, and the
+colour-scheme report — `CSI ? 996 n` for the answer now, DEC mode 2031 to be told when it
+changes, so nvim and friends flip `background` with your theme instead of at startup only.
+Both are derived from the same background OSC 11 answers with, so a program cannot be told
+one thing and shown another.
 
 **Box drawing.** U+2500–U+259F — `─│┌┐└┘├┤┬┴┼`, the heavy, double, dashed and arc
 variants, the diagonals, and the block and shade elements `▀▄█▌▐░▒▓` — are not left to

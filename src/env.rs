@@ -305,6 +305,11 @@ symbols! {
     // `pbm', not `ppm': it is the name of the Emacs image type that reads binary P6, and
     // that is what this string is for.
     Pbm => "pbm",
+    // How Lisp spells a colour scheme on the way *in*, for `cooked--set-color-scheme'.
+    // Compared against with `Env::eq' rather than decoded, so there is no `FromLisp' and
+    // no third spelling to fall through to.
+    Dark => "dark",
+    Light => "light",
 }
 
 /// `a == b` for `&str`, in a const context.

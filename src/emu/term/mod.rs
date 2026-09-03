@@ -354,6 +354,35 @@ pub(crate) fn osc_reply(code: u16, payload: &str, bell: bool) -> Option<Vec<u8>>
     Some(format!("\x1b]{code};{payload}{terminator}").into_bytes())
 }
 
+/// What `CSI ? 996 n` answers, and what mode 2031 pushes.
+///
+/// The discriminants are the protocol's own numbers, so that no reporting site spells a
+/// bare `1` or `2`. There is deliberately no third variant: "Emacs has not said yet" is
+/// `Option::None`, kept outside the enum where it cannot be formatted into a reply by
+/// accident. The spec defines these two values and nothing else, so an "unknown" answer
+/// would be one we invented and a child would have no way to read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ColorScheme {
+    Dark = 1,
+    Light = 2,
+}
+
+impl std::fmt::Display for ColorScheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", *self as u8)
+    }
+}
+
+/// The DSR a child gets for the colour scheme, whether it asked or subscribed.
+///
+/// One function because the pull and the push are the same report, and a child cannot
+/// tell a solicited answer from an unsolicited one -- framed at two sites, the two could
+/// come to differ.
+pub(crate) fn color_scheme_report(scheme: ColorScheme) -> Vec<u8> {
+    format!("\x1b[?997;{scheme}n").into_bytes()
+}
+
 pub struct Term {
     parser: Parser,
     state: State,
@@ -390,6 +419,26 @@ impl Term {
 
     pub fn cell_metrics(&self) -> CellMetrics {
         self.state.metrics
+    }
+
+    /// Tell the emulator whether Emacs renders light or dark, returning what a subscriber
+    /// to mode 2031 is now owed.
+    ///
+    /// The bytes come back rather than being pushed as an [`Event::Reply`] because events
+    /// are collected at drain time, and a theme change produces no child output at all --
+    /// nothing wakes the drain, so a subscribed program sitting idle would learn of the
+    /// new theme only when the user next typed. Nor are they written to the pty from
+    /// here, the way an OSC reply is: that path signals on a write error, which is right
+    /// for a query the child is blocking on and wrong for this, which runs from a global
+    /// hook where a child that has just exited is an ordinary race. `cooked--send-if-live'
+    /// is where that policy is already written down, and it is the same route the `996'
+    /// answer leaves through -- one report, one route, one error policy.
+    ///
+    /// Nothing is owed for a theme reloaded onto itself, and nothing to a child that
+    /// never subscribed.
+    pub fn set_color_scheme(&mut self, scheme: ColorScheme) -> Option<Vec<u8>> {
+        let changed = self.state.color_scheme.replace(scheme) != Some(scheme);
+        (changed && self.state.modes.color_scheme_updates).then(|| color_scheme_report(scheme))
     }
 
     /// Take BYTES as an image and lay it into the grid at the cursor.
@@ -529,6 +578,12 @@ struct Modes {
     /// DEC mode 1004: the child wants `CSI I`/`CSI O` when the window gains or loses
     /// focus. Read at the moment focus changes, so it is state rather than a level.
     focus_events: bool,
+    /// DEC mode 2031: the child wants the colour scheme reported again every time it
+    /// changes. The subscription is something the child negotiated and so belongs here;
+    /// the scheme itself is not -- it is Emacs' answer about its own theme -- and lives
+    /// on [`State`], so that a soft reset ends the subscription without also forgetting
+    /// which way the theme points.
+    color_scheme_updates: bool,
     /// DEC mode 1007: on the alternate screen, a wheel notch becomes cursor keys. This
     /// is what makes the wheel scroll in `less`, `man` and `git log`.
     alt_scroll: bool,
@@ -563,6 +618,7 @@ impl Default for Modes {
             bracketed_paste: false,
             focus_events: false,
             alt_scroll: false,
+            color_scheme_updates: false,
             sync_until: None,
             mouse: Mouse::default(),
             origin_mode: false,
@@ -602,6 +658,17 @@ struct State {
     sixel: Option<Vec<u8>>,
     /// The cell size Emacs reports, for turning pixels into a cell rectangle.
     metrics: CellMetrics,
+    /// The light/dark scheme Emacs reports, for answering `CSI ? 996 n`.
+    ///
+    /// Emacs' to know and ours to answer with, exactly as `metrics` is: the theme
+    /// resolves against the buffer's faces, which nothing here can see. Silent until
+    /// Emacs has reported one, on the same grounds as an unreported cell size -- see the
+    /// `14t`/`16t` guards in csi.rs -- and one ground stronger, since there is no number
+    /// for "I do not know" that would not have to be invented.
+    ///
+    /// On [`State`] rather than [`Modes`] for the same reason `metrics` is: it is not
+    /// something the child negotiated, so a soft reset must not clear it.
+    color_scheme: Option<ColorScheme>,
     /// Rows that have ever left the top of the primary screen. Screen row 0 is this row,
     /// counting from the beginning of the session, which is what makes an [`Anchor`]
     /// outlive the grid position it was taken from.

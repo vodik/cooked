@@ -29,6 +29,7 @@
 ;; Calls upward into cooked-mode.el, and into the core for the handlers that
 ;; answer a query rather than merely observing it.
 (declare-function cooked--reply-osc "cooked-core")
+(declare-function cooked--set-color-scheme "cooked-core")
 (declare-function cooked--rename-to-title "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
 
@@ -280,6 +281,39 @@ exists to fix."
         (if (eq kind 'background)
             (if dark "black" "white")
           (if dark "white" "black"))))))
+
+(defun cooked--color-scheme ()
+  "Whether this buffer renders dark or light, as `dark\=' or `light\='.
+
+Derived from `cooked--default-color\=', which is what OSC 11 answers from, rather
+than from `frame-background-mode\=' — and that is the whole point.  A child told
+the scheme changed reacts by querying OSC 11 for the actual background, so two
+readings of one value cannot be allowed to contradict each other.
+
+`color-dark-p\=' is what `frame--current-background-mode\=' uses to derive
+`frame-background-mode\=' in the first place, gamma correction and empirical
+cutoff included, so with nothing remapped this agrees with Emacs\=' own answer
+rather than approximating it."
+  (if (color-dark-p (mapcar (lambda (v) (/ v 65535.0))
+                            (color-values (cooked--default-color 'background))))
+      'dark
+    'light))
+
+(defun cooked--sync-color-scheme ()
+  "Tell this buffer\\='s child which way the theme now points.
+
+On `cooked-theme-change-hook\\=', which `cooked--flush-face-cache\\=' runs once per
+session with that buffer current — so this needs no machinery of its own.  The
+core holds the answer so it can answer `CSI ? 996 n\\=' itself, and hands back the
+bytes a mode 2031 subscriber is owed, which are nil far more often than not.
+
+Sent rather than left to ride the drain because a theme change produces no child
+output, so nothing would ever wake one; see `cooked--set-color-scheme\\='."
+  (when-let* ((session (cooked--live-session))
+              (bytes (cooked--set-color-scheme session (cooked--color-scheme))))
+    (cooked--send-if-live bytes)))
+
+(add-hook 'cooked-theme-change-hook #'cooked--sync-color-scheme)
 
 (defun cooked--color-to-osc (color)
   "Format COLOR as xterm's `rgb:RRRR/GGGG/BBBB', 16 bits per channel.

@@ -8,6 +8,14 @@
 ;; `cooked--mark-truncation' -- `cl-letf' over `display-graphic-p', not a real
 ;; frame.  Command records are built with `cooked-tests--make-command' rather
 ;; than driven from a shell, for the same reason as the sticky-scroll tests.
+;;
+;; The tests that run a real shell under that mock pin `color-values' to
+;; `tty-color-values' alongside it.  `color-values' asks `display-graphic-p'
+;; which path to take, so the mock alone sends it down the window-system one on
+;; a batch frame that has no window system, and it signals -- which any session
+;; startup reaching a colour would then hit, `cooked--color-scheme' included.
+;; The lie is meant to be about the fringe, and this is what keeps it that
+;; narrow.
 
 ;;; Code:
 
@@ -110,7 +118,8 @@ damages every live row at once, while `cooked-command-finished-functions\=' fire
 exactly once per command.  A command whose prompt is still on the live screen
 would lose its marker the first time the window changed width."
   (skip-unless (executable-find "zsh"))
-  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+            ((symbol-function 'color-values) #'tty-color-values))
     (cooked-tests--with-zsh
       (cooked--send-input-string "echo decorated")
       (should (cooked-tests--settle (lambda () cooked--commands) 8))
@@ -180,7 +189,8 @@ painted the row below its own prompt, and since the correction that followed
 moved the marker and not the paint, every marker on a full screen ended up
 wearing its neighbour's colour."
   (skip-unless (executable-find "zsh"))
-  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+            ((symbol-function 'color-values) #'tty-color-values))
     (cooked-tests--with-zsh
       ;; Comfortably more than the 24 rows the screen starts at, so the last
       ;; several commands are all run against a screen that scrolls per prompt.
@@ -197,7 +207,8 @@ scrollback copy that now owns the prompt is never rendered again and would be
 decorated by nothing.  The re-arm therefore asks about commands rather than
 about the row it was called for, and reaches the ones that have just settled."
   (skip-unless (executable-find "zsh"))
-  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+            ((symbol-function 'color-values) #'tty-color-values))
     (cooked-tests--with-zsh
       (cooked-tests--run-marked-commands 24)
       ;; Several rows at once, in one drain, which is the case a per-row hook
@@ -221,7 +232,8 @@ at, so a marker left up would ride in the fringe beside its frame claiming to be
 about a command.  It comes back on its own when the program leaves: restoring the
 primary marks every row damaged, and the re-arm repaints from that."
   (skip-unless (executable-find "zsh"))
-  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+            ((symbol-function 'color-values) #'tty-color-values))
     (cooked-tests--with-zsh
       (cooked--send-input-string "echo decorated")
       (should (cooked-tests--settle (lambda () cooked--commands) 8))
@@ -293,7 +305,8 @@ one comes down as the finished one goes up, at the `D\=' mark rather than at the
 next render.  One marker on that row throughout, and the colour changes under
 it."
   (skip-unless (executable-find "zsh"))
-  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+            ((symbol-function 'color-values) #'tty-color-values))
     (cooked-tests--with-zsh
       (cooked--send-input-string "sleep 1")
       (should (cooked-tests--settle

@@ -55,7 +55,9 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 
 A child does not have to take our word for any of it. DECRQM (`CSI ? Ps $ p`) answers 1 or
 2 for a mode we implement, 4 — "permanently reset" — for every one in that last table, and
-0 for one we have never heard of.
+0 for one we have never heard of. That includes 2031, the colour-scheme subscription,
+which is the mode a child is most likely to probe before deciding whether to bother
+asking.
 
 Some requests are refused rather than merely unimplemented. `CSI 21t` reports the window
 title *on the child\'s input stream*, which turns a title the child set itself into typed

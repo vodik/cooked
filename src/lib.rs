@@ -11,8 +11,8 @@ pub(crate) mod pty;
 pub(crate) mod session;
 
 use emu::{
-    Anchor, CellMetrics, Color, CursorShape, Deco, Event, ImageData, ImageFormat, ImageId,
-    KeyEncoding, LinkId, MarkId, Run, Style,
+    Anchor, CellMetrics, Color, ColorScheme, CursorShape, Deco, Event, ImageData, ImageFormat,
+    ImageId, KeyEncoding, LinkId, MarkId, Run, Style,
 };
 use env::{Env, Result, Runtime, Value, lisp_enum, list, plist, sym};
 use nix::sys::signal::Signal;
@@ -197,6 +197,19 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// tty on the input path, which is the guarantee that a stale mode can never
         /// reach a typed character.
         "cooked--set-attended" 2..=2 => set_attended;
+
+        /// Tell SESSION that Emacs renders SCHEME, either `dark' or `light'.
+        ///
+        /// Returns the bytes owed to a child that subscribed with DEC mode 2031, or nil when
+        /// nothing is owed -- because no child asked, or because the theme was reloaded onto
+        /// itself.  Sending them is the caller's, through `cooked--send-if-live': a theme
+        /// change wakes no drain, and a child that has just exited is an ordinary race rather
+        /// than an error.
+        ///
+        /// The value is held here so the core can answer `CSI ? 996 n' itself, the way it
+        /// answers `CSI 14t' from the cell size: the child's query is answered where the
+        /// query arrives, rather than by waking Lisp to ask about a theme it already said.
+        "cooked--set-color-scheme" 2..=2 => set_color_scheme;
 
         /// Send SIGNAL to SESSION's foreground group.
         ///
@@ -522,6 +535,21 @@ fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
     let count = env.from_lisp::<i64>(args[2])?.max(0) as usize;
     handle(env, args[0])?.remove_rows(first, count);
     Ok(env.nil())
+}
+
+fn set_color_scheme(env: Env, args: &[Value]) -> Result<Value> {
+    // Two symbols compared by identity rather than a `FromLisp` for a two-value enum:
+    // the protocol has exactly these two answers, and anything else is the caller
+    // passing the wrong thing rather than a scheme we have no name for.
+    let scheme = if env.eq(args[1], sym!(env, "dark")?) {
+        ColorScheme::Dark
+    } else if env.eq(args[1], sym!(env, "light")?) {
+        ColorScheme::Light
+    } else {
+        return Err(env.signal_wrong_type("cooked-color-scheme-p", args[1]));
+    };
+    let owed = handle(env, args[0])?.set_color_scheme(scheme);
+    env.into_lisp(owed.as_deref())
 }
 
 fn signal(env: Env, args: &[Value]) -> Result<Value> {

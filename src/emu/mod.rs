@@ -62,7 +62,7 @@ pub(crate) mod term;
 pub(crate) use cell::{Color, Deco, MarkId, Run, Style};
 pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ImageId};
 pub(crate) use link::LinkId;
-pub(crate) use term::{Anchor, CursorShape, Delta, Event, KeyEncoding, osc_reply};
+pub(crate) use term::{Anchor, ColorScheme, CursorShape, Delta, Event, KeyEncoding, osc_reply};
 
 // The benchmark's whole surface; see `tests/throughput.rs`.
 pub use term::{BACKLOG_HIGH_WATER, Term};

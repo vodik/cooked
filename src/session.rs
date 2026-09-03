@@ -4,7 +4,7 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{Delta, Term};
+use crate::emu::{ColorScheme, Delta, Term};
 use crate::error::Result;
 use crate::pty::{AtomicMode, JobControl, Mode, Pid, Pty, Winsize};
 use nix::errno::Errno;
@@ -680,6 +680,11 @@ impl Session {
 
     pub(crate) fn alt_scroll(&self) -> bool {
         self.shared.term.held().alt_scroll()
+    }
+
+    /// Record Emacs' colour scheme, returning what a mode 2031 subscriber is owed.
+    pub(crate) fn set_color_scheme(&self, scheme: ColorScheme) -> Option<Vec<u8>> {
+        self.shared.term.held().set_color_scheme(scheme)
     }
 }
 
