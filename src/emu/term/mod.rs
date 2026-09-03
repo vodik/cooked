@@ -5,7 +5,8 @@
 
 use super::cell::{Attrs, Color, MarkId, Row, Run, Style};
 use super::image::{
-    CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, PixelSize, png_dimensions,
+    CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, Interned, PixelSize,
+    png_dimensions,
 };
 use super::kitty::{Kitty, Outcome, decode_base64};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
@@ -270,6 +271,58 @@ pub struct Delta {
     pub marks: Vec<(MarkId, Anchor)>,
 }
 
+/// A reading of everything [`Delta`] carries, cheap enough to take on every read.
+///
+/// [`Term::feed`] takes one of these either side of a parse and compares them, which is
+/// the whole of "did that produce anything to draw". It has to be a *reading* rather than
+/// a flag set by the code that changes things: the flag would have to be set in every one
+/// of `perform`'s several dozen arms, and the arm that was forgotten would be the one that
+/// stopped repainting. Comparing what a drain would report cannot fall out of step that
+/// way — a field added to [`Delta`] and not to this is the only failure mode left, and it
+/// is one line away from the field it belongs to.
+///
+/// The queues are counted rather than examined because they only ever grow between
+/// drains, and the level fields are copied because a [`Delta`] restates them every time.
+/// Damage is counted for a subtler reason: it stays up until Emacs drains, so a flag
+/// would read `true` on both sides of a read and make a program repainting flat out look
+/// like one doing nothing at all. See [`Screen::touches`].
+/// [`Delta::height`], `used` and `head` are the three left out, and deliberately: none can
+/// move without either damaging a row or evicting one, both of which are already here.
+#[derive(PartialEq, Eq)]
+struct Pending {
+    touches: u64,
+    scrolled: usize,
+    images: usize,
+    links: usize,
+    events: usize,
+    marks: (bool, usize),
+    cursor: Cursor,
+    cursor_visible: bool,
+    cursor_shape: CursorShape,
+    alt: bool,
+    app_cursor: bool,
+    keys: KeyEncoding,
+}
+
+impl Pending {
+    fn of(state: &State) -> Self {
+        Self {
+            touches: state.screen().touches(),
+            scrolled: state.pending_scrollback.len(),
+            images: state.pending_images.len(),
+            links: state.pending_links.len(),
+            events: state.events.len(),
+            marks: (state.marks_dirty, state.evicted_marks.len()),
+            cursor: state.screen().cursor,
+            cursor_visible: state.modes.cursor_visible,
+            cursor_shape: state.modes.cursor_shape,
+            alt: state.on_alt,
+            app_cursor: state.modes.app_cursor,
+            keys: state.key_encoding(),
+        }
+    }
+}
+
 /// How long a child may hold back a redisplay with DEC mode 2026 before we draw anyway.
 ///
 /// Synchronized output exists so a half-drawn frame is never shown; it is not a licence
@@ -396,8 +449,24 @@ impl Term {
         }
     }
 
-    pub fn feed(&mut self, bytes: &[u8]) {
+    /// Parse BYTES, reporting whether they changed anything Emacs would draw.
+    ///
+    /// The answer is what lets the reader thread not wake Emacs for bytes that turn out
+    /// to be nothing to look at, which is most of them under a graphics protocol: a
+    /// kitty image arrives as megabytes of base64 inside one APC string, and every read
+    /// of it but the last leaves the grid exactly as it was. Measured on `viu` playing a
+    /// gif, 55% of drains carried no rows, no images, no events and no cursor move.
+    ///
+    /// "Anything Emacs would draw" is [`Delta`]'s own contents, which is why
+    /// [`Pending`] is a field-for-field reading of them rather than a damage flag: a
+    /// [`Delta`] reports the cursor, the alternate screen and the key encoding on every
+    /// drain whether or not a row changed, so a cursor move with no damage is a real
+    /// update — and, in the gif case, the one that has to be *coalesced* rather than
+    /// dropped.
+    pub fn feed(&mut self, bytes: &[u8]) -> bool {
+        let before = Pending::of(&self.state);
         self.parser.advance(&mut self.state, bytes);
+        Pending::of(&self.state) != before
     }
 
     pub fn drain(&mut self) -> Delta {
@@ -413,8 +482,30 @@ impl Term {
     /// Emacs' to measure and ours to answer with. Without it a `width=200px` request
     /// cannot become a cell count, and the XTWINOPS reports that tools consult before
     /// deciding whether to draw at all have nothing to say.
+    ///
+    /// A cell that has actually moved also forgets every picture, which is a repair and
+    /// not housekeeping. A transmission naming no `c=`/`r=` is measured into cells here,
+    /// once, and that rectangle is then fixed for the life of the id — it has to be,
+    /// because Emacs hangs one slice of the picture on each of those cells and a row that
+    /// has reached the scrollback can never be re-laid. Ids are content-addressed, so an
+    /// animation looping past a cell change draws two rectangles at once otherwise: a
+    /// frame the store still recognises is answered with the rectangle measured against
+    /// the old font, while a frame Emacs has evicted is retransmitted, interned afresh,
+    /// and measured against the new one. Forgetting collapses the two — every frame from
+    /// here on crosses again and is measured the same way — and the rows already written
+    /// keep the id, the rectangle and the bytes they were drawn with, which
+    /// `cooked--rescale-deco' re-cuts to the new cell.
+    ///
+    /// Hence the guard, rather than forgetting on every call: rows and columns are
+    /// reported through this same path and do not move a cell, and an ordinary window
+    /// reshape must not spend a retransmission per picture.
     pub fn set_cell_metrics(&mut self, metrics: CellMetrics) {
+        if self.state.metrics == metrics {
+            return;
+        }
         self.state.metrics = metrics;
+        self.state.images.forget_all();
+        self.state.kitty.forget_all();
     }
 
     pub fn cell_metrics(&self) -> CellMetrics {
@@ -454,6 +545,21 @@ impl Term {
     /// is not reachable from here, because it is the APC handler that knows about `C=`.
     pub fn place_image(&mut self, format: ImageFormat, bytes: &[u8], px: PixelSize) -> ImageId {
         self.state.place_image(format, bytes, px)
+    }
+
+    /// Emacs has dropped image ID's bytes, so stop believing it has them.
+    ///
+    /// Emacs is the only cache -- see [`ImageStore`] -- and this is the one message that
+    /// keeps the module's bookkeeping honest about it. Everything the emulator hangs off
+    /// an id goes at once: the ledger entry and its digest, the geometry, and the
+    /// client's own name for the picture, so a later `a=p` is answered `ENOENT:image`
+    /// rather than placing cells nothing can draw.
+    ///
+    /// A retransmission of the same bytes afterwards is a new picture as far as the
+    /// module is concerned: a fresh id, and the payload crosses again.
+    pub fn forget_image(&mut self, id: ImageId) {
+        self.state.images.forget(id);
+        self.state.kitty.forget(id);
     }
 
     /// Emacs has discarded the scrollback, so the top row continues nothing.
@@ -641,9 +747,6 @@ struct State {
     pending_scrollback: VecDeque<Scrolled>,
     images: ImageStore,
     kitty: Kitty,
-    /// The cell rectangle each image was laid into, which `c=`/`r=` can override and so
-    /// is not always what its pixel size implies.
-    image_cells: std::collections::HashMap<ImageId, CellSize>,
     /// Images transmitted since the last drain, awaiting their one trip to Lisp.
     pending_images: Vec<ImageData>,
     /// The `OSC 8` destinations this session has seen, content-addressed.

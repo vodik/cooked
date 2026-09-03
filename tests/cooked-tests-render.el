@@ -1705,6 +1705,160 @@ blanks on the grid, and they stay blanks here."
     (should (equal (buffer-substring-no-properties (point-min) (+ (point-min) 3))
                    "   "))))
 
+(defun cooked-tests--image-cells-without-display ()
+  "Buffer positions carrying an image `cooked-deco\=' and no `display\=' property.
+
+The invariant every image path has to keep: the placement and the picture are
+put on the same characters at the same moment, so a cell that claims to be part
+of a picture and shows none is a cell whose image data went missing under it."
+  (let ((bad nil)
+        (pos (point-min)))
+    (while (< pos (point-max))
+      (let ((deco (get-text-property pos 'cooked-deco)))
+        (when (and (eq (car-safe deco) 'image)
+                   (not (get-text-property pos 'display)))
+          (push pos bad)))
+      (setq pos (1+ pos)))
+    (nreverse bad)))
+
+(ert-deftest cooked-every-image-cell-that-is-drawn-carries-its-picture ()
+  "The invariant the rest of the image path is judged against, and the probe for
+it.  A cell carrying an `(image ID ...)\=' `cooked-deco\=' and no `display\=' is a
+cell that claims to be part of a picture and shows none -- correct geometry,
+correct cursor, nothing drawn, which is what a placement of an id whose data
+went missing underneath it looks like.
+
+Both directions, because a probe that cannot fail proves nothing about the
+suite that leans on it: a rendered picture has one on every cell, and a
+placement of an id this buffer holds no data for has one on none.  The second
+is `cooked-image-placement-without-data-renders-as-blanks\=' seen from here, and
+it stays right for an id the buffer was never told about -- what must not
+happen is reaching that state for an id it was told about and dropped, which is
+`cooked-a-replayed-payload-draws-after-its-id-was-evicted\='."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked-tests--cell)
+    (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
+    (should-not (cooked-tests--image-cells-without-display))
+    (cooked--apply (cooked-tests--image-update 99 3 1 nil))
+    (should (= (length (cooked-tests--image-cells-without-display)) 3))))
+
+(ert-deftest cooked-a-replayed-payload-draws-after-its-id-was-evicted ()
+  "End to end, with a child transmitting real kitty graphics.
+
+Twenty distinct one-pixel pictures, each drawn over the last -- an animation,
+in miniature, and the shape `viu\=' draws a gif in.  Nineteen of them are then
+showing nowhere, so the cap spends them; the child sends the first one\='s bytes
+again on the next loop, and it has to arrive as a picture.  Before the module
+was told about eviction it arrived as the id it had minted the first time
+round, whose data this buffer no longer had, and the cells drew nothing.
+
+Properties only -- batch Emacs draws no pixels, and none are needed: the
+failure is entirely in whether a cell that says it is part of a picture has a
+`display\=' property."
+  ;; `stty raw -echo\=' for the reason `cooked-tests--with-echoing-child\=' uses it:
+  ;; in cooked mode the line discipline would hold an APC with no newline in it
+  ;; until one arrived, and echo it a second time when it did.
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; exec cat")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+    (cooked-tests--cell)
+    (let ((frames (cl-loop for n below 20
+                           collect (concat "\r" (cooked-tests--kitty-rgb n)))))
+      ;; `cat\=' echoes what it is sent, so the child\='s output is ours to compose
+      ;; without any shell quoting in the middle.
+      (dolist (frame frames)
+        (cooked--send cooked--session frame))
+      (should (cooked-tests--settle
+               (lambda () (= (hash-table-count cooked--image-data) 20))))
+      (should-not (cooked-tests--image-cells-without-display))
+      ;; Only the last frame is on screen; the specs for the rest are held by
+      ;; nothing once the collector has been round, which is what makes them the
+      ;; ones the cap spends.
+      (garbage-collect)
+      (let ((first (car cooked--image-order)))
+        ;; The cap is put back before the replay arrives: eviction runs as an
+        ;; image is installed, which is before the row displaying it is
+        ;; rendered, so a cap below the size of one picture would spend the
+        ;; replayed frame on its way in and prove nothing.
+        (let ((cooked-image-cache-size 1))
+          (cooked--evict-images))
+        (should-not (gethash first cooked--image-data))
+        ;; The loop comes round: the same bytes again, about which the module has
+        ;; been told we kept nothing.  A new id, and the payload with it.  The
+        ;; trailing word is how the replay is waited for -- what it draws is the
+        ;; question under test, so it cannot also be the signal that it arrived.
+        (cooked--send cooked--session (concat (car frames) "done"))
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "done" (cooked-tests--text)))))
+        (should-not (memq first (cooked--image-ids-between (point-min) (point-max))))
+        (should-not (cooked-tests--image-cells-without-display))))))
+
+(defun cooked-tests--kitty-rgb (n)
+  "A kitty transmission of a one-pixel RGB image whose colour is N.
+
+Raw pixels rather than a PNG: the payload is three bytes, so twenty distinct
+pictures cost twenty distinct colours and no encoder."
+  (format "\e_Ga=T,f=24,s=1,v=1,i=%d;%s\e\\"
+          (1+ n)
+          (base64-encode-string (unibyte-string n 0 0) t)))
+
+(defun cooked-tests--kitty-rgb-block (w h)
+  "A kitty transmission of a W by H picture of raw RGB pixels.
+
+No `c=\=' or `r=\=': the pixels are all that says how many cells this covers, which
+is what makes it a measurement against the cell size rather than a request."
+  (format "\e_Ga=T,f=24,s=%d,v=%d,i=1;%s\e\\"
+          w h (base64-encode-string (make-string (* w h 3) 0) t)))
+
+(ert-deftest cooked-a-replayed-payload-follows-the-cell-it-is-replayed-at ()
+  "A resize that moves the font must not leave two rectangles for one picture.
+
+A transmission that names no cell rectangle is measured into one from its pixels,
+once, and the id keeps that rectangle for good -- it has to, because each of those
+cells carries a slice of the picture and a row in the scrollback is never rewritten.
+Ids are content-addressed, so an animation looping past a font change used to draw
+both rectangles at once: a frame this buffer still held was recognised by the module
+and re-laid at the rectangle measured against the old cell, while a frame the cap had
+spent was retransmitted, interned afresh, and laid at the new one.  Mid-gif, the two
+alternate.
+
+So the module forgets every picture when the cell moves, and the assertion is that
+the replayed bytes arrive as a second picture whose rectangle is the new cell's.
+Resizing rows and columns alone does not move a cell and is deliberately not this."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; exec cat")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+    (cooked-tests--cell 10 20)
+    (cooked--resize cooked--session cooked--rows cooked--cols 10 20)
+    (let ((frame (cooked-tests--kitty-rgb-block 20 40)))
+      ;; 20x40 pixels is two cells by two at a 10x20 cell, and one by one once the
+      ;; cell doubles.
+      (cooked--send cooked--session frame)
+      (should (cooked-tests--settle
+               (lambda () (= (hash-table-count cooked--image-data) 1))))
+      (let ((first (car cooked--image-order)))
+        (should (equal (nthcdr 4 (gethash first cooked--image-data)) '(2 2)))
+        ;; The font doubles.  Rows and columns reach the module by this same call
+        ;; and are unchanged, which is the case the module must not spend a
+        ;; retransmission on.
+        (cooked-tests--cell 20 40)
+        (cooked--resize cooked--session cooked--rows cooked--cols 20 40)
+        (cooked--rescale-deco)
+        ;; The loop comes round with the same bytes.  The trailing word is how the
+        ;; replay is waited for, since what it draws is the question under test.
+        (cooked--send cooked--session (concat "\r" frame "done"))
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "done" (cooked-tests--text)))))
+        (should (= (hash-table-count cooked--image-data) 2))
+        (let ((again (car (last cooked--image-order))))
+          (should-not (eq again first))
+          (should (equal (nthcdr 4 (gethash again cooked--image-data)) '(1 1)))
+          ;; And the grid agrees with the transmission: one cell of the new
+          ;; rectangle on the replayed row, not two of the old.
+          (should (equal (cooked--image-ids-between (line-beginning-position)
+                                                    (line-end-position))
+                         (list again))))
+        (should-not (cooked-tests--image-cells-without-display))))))
+
 (ert-deftest cooked-inline-images-disabled-leaves-the-cells-alone ()
   (let ((cooked-inline-images nil))
     (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")

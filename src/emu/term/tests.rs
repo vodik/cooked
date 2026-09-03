@@ -825,6 +825,42 @@ fn an_animation_redrawn_in_place_does_not_walk_down_the_screen() {
 }
 
 #[test]
+fn an_echo_inside_a_frame_does_not_leave_the_shell_to_erase_the_picture() {
+    // Ctrl-C during an animation. `ECHOCTL` writes `^C` into the pty's output the moment
+    // the key is pressed, which for a child blocked part-way through a four-megabyte
+    // frame is between two pieces of that write — so the echo lands inside the payload.
+    //
+    // What that used to cost is the whole picture. A frame refused over two bytes nobody
+    // sent places nothing, so the cursor stays where the client left it between frames:
+    // the picture's *top* left, since viu comes back up by the picture's height after
+    // each one. The newline viu prints after the frame then moves one row into the
+    // picture rather than past it, and the shell's `ED` on its way to a new prompt erases
+    // everything below — leaving the first row of the picture and the prompt in the hole.
+    let mut t = with_metrics(24, 80);
+    t.feed(b"\x1b[6;1H");
+    let top = t.screen().cursor.row;
+    // A frame, then the newline viu prints after one and its climb back to the picture's
+    // top row, which is where it rests between frames.
+    let whole = format!("\x1b_Ga=T,f=32,s=6,v=2,c=3,r=2,i=1;{}\x1b\\", b64(&[9; 48]));
+    t.feed(whole.as_bytes());
+    t.feed(b"\r\n\x1b[2A");
+
+    // The next frame, mangled the two ways one interrupt mangles it: `^C` spliced into
+    // the payload, and the rest of the child's blocked write never made — six of the
+    // forty-eight bytes of pixels it declared are missing.
+    let payload = b64(&[7; 42]);
+    let (head, tail) = payload.split_at(payload.len() / 2);
+    t.feed(format!("\x1b_Ga=T,f=32,s=6,v=2,c=3,r=2,i=1;{head}^C{tail}\x1b\\").as_bytes());
+    // The picture's last row, one past its right edge: where an untouched frame ends.
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (top + 1, 3));
+
+    // So the newline and the prompt land below the picture, and both its rows survive.
+    t.feed(b"\r\n\x1b[J");
+    assert_eq!(placements(&t, top).len(), 3);
+    assert_eq!(placements(&t, top + 1).len(), 3);
+}
+
+#[test]
 fn kitty_c_leaves_the_cursor_exactly_where_it_was() {
     let mut t = with_metrics(24, 80);
     t.feed(b"\x1b[3;6H");
@@ -869,6 +905,51 @@ fn the_same_image_twice_crosses_the_boundary_once() {
     assert_eq!(placements(&t, 1)[0].id, delta.images[0].id);
 }
 
+/// The bug the single-owner invariant exists for, from the emulator's side: Emacs has
+/// dropped the picture, the child sends it again, and it has to arrive as a picture and
+/// not as a reference to one nobody holds. Ids are content-addressed, so before
+/// `forget_image` existed the second transmission was answered with the first id and no
+/// bytes -- placements on the grid, nothing to draw them with.
+#[test]
+fn an_image_crosses_again_after_the_store_forgot_it() {
+    let mut t = with_metrics(10, 20);
+    t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(10, 20));
+    let first = t.drain().images[0].id;
+
+    t.forget_image(first);
+    t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(10, 20));
+    let delta = t.drain();
+    assert_eq!(delta.images.len(), 1, "{:?}", delta.images);
+    assert_ne!(delta.images[0].id, first, "a forgotten id is not reissued");
+    assert_eq!(placements(&t, 1)[0].id, delta.images[0].id);
+}
+
+/// Forgetting has to reach everything hung off the id, not just the ledger: the cell
+/// rectangle a bare `a=p` re-places from, and the client's own name for the picture. A
+/// client that places a forgotten image is told `ENOENT:image` -- the same answer as for
+/// one never transmitted, because the remedy is the same -- and nothing is drawn.
+#[test]
+fn forgetting_an_image_takes_its_geometry_and_its_client_name_with_it() {
+    let mut t = with_metrics(10, 20);
+    let pixels = vec![0u8; 10 * 20 * 3];
+    t.feed(format!("\x1b_Ga=t,f=24,s=10,v=20,i=7;{}\x1b\\", b64(&pixels)).as_bytes());
+    let id = t.drain().images[0].id;
+
+    t.forget_image(id);
+    t.feed(b"\x1b_Ga=p,i=7\x1b\\");
+    let delta = t.drain();
+    assert!(placements(&t, 0).is_empty(), "nothing to place, nothing drawn");
+    let replies: Vec<_> = delta
+        .events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies, vec!["\x1b_Gi=7;ENOENT:image\x1b\\"]);
+}
+
 #[test]
 fn writing_over_an_image_cell_retires_its_placement() {
     let mut t = with_metrics(10, 20);
@@ -877,6 +958,21 @@ fn writing_over_an_image_cell_retires_its_placement() {
     let placed = placements(&t, 0);
     assert_eq!(placed.len(), 2, "the written cell lets go: {placed:?}");
     assert_eq!(placed[0].cell_col, 1);
+}
+
+#[test]
+fn erasing_into_a_picture_retires_only_the_rows_it_covered() {
+    // How much of a picture survives a prompt drawn over it is decided per cell, and the
+    // test above cannot say so: one cell of a one-row picture cannot tell "this cell let
+    // go" apart from "the placement was retired". A shell that erases from the middle of
+    // a picture to the end of the screen is the case that matters, since that is what a
+    // Ctrl-C in an animation does.
+    let mut t = with_metrics(10, 20);
+    t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(30, 60));
+    t.feed(b"\x1b[2;1H\x1b[J");
+    assert_eq!(placements(&t, 0).len(), 3, "the rows above are untouched");
+    assert!(placements(&t, 1).is_empty());
+    assert!(placements(&t, 2).is_empty());
 }
 
 #[test]
@@ -2435,4 +2531,117 @@ fn batched_and_per_character_printing_agree() {
             "batched and per-character printing disagree on {name}"
         );
     }
+}
+
+/// A picture the child sizes in pixels rather than in cells is measured into a cell
+/// rectangle once, and that rectangle is fixed for the life of the id. So the id has to
+/// stop outliving the measurement: Emacs reports a new cell size when the font moves,
+/// and a content-addressed id minted against the old one would go on being answered for
+/// bytes the child keeps resending.
+///
+/// This is the flip a gif shows after a zoom. Frames Emacs still holds are recognised
+/// and re-laid at the old rectangle; frames its cache has spent are retransmitted, are
+/// fresh, and are laid at the new one -- and the two populations interleave for as long
+/// as the animation loops.
+#[test]
+fn a_replayed_picture_is_measured_against_the_cell_it_is_replayed_at() {
+    let mut t = with_metrics(10, 20);
+    // 20x40 pixels: two cells by two at a 10x20 cell, one by one once the cell doubles.
+    let pixels = vec![0u8; 20 * 40 * 3];
+    let apc = format!("\x1b_Ga=T,f=24,s=20,v=40,i=1;{}\x1b\\", b64(&pixels));
+    t.feed(apc.as_bytes());
+    let first = t.drain().images;
+    assert_eq!(first[0].cells, CellSize::new(2, 2));
+
+    // The font doubles. Rows and columns arrive by the same route and are unchanged.
+    t.set_cell_metrics(CellMetrics {
+        width: 20,
+        height: 40,
+    });
+    t.feed(b"\x1b[H");
+    t.feed(apc.as_bytes());
+    let again = t.drain().images;
+    assert_eq!(again.len(), 1, "the same bytes are a picture again: {again:?}");
+    assert_ne!(again[0].id, first[0].id, "a new measurement is a new id");
+    assert_eq!(again[0].cells, CellSize::new(1, 1));
+    // ...and the grid says the same thing the transmission did.
+    let placed = placements(&t, 0);
+    assert_eq!(placed[0].id, again[0].id);
+    assert_eq!(
+        placed.iter().filter(|p| p.id == again[0].id).count(),
+        1,
+        "one cell of the new rectangle, not two of the old: {placed:?}"
+    );
+}
+
+/// The other half of the guard above: a resize that leaves the font alone reports the
+/// same cell size, and must not spend a retransmission per picture to do it.
+#[test]
+fn a_reshape_that_does_not_move_the_cell_keeps_every_picture() {
+    let mut t = with_metrics(10, 20);
+    t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(20, 40));
+    let first = t.drain().images[0].id;
+
+    t.resize(20, 40);
+    t.set_cell_metrics(CellMetrics {
+        width: 10,
+        height: 20,
+    });
+    t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(20, 40));
+    let delta = t.drain();
+    assert!(delta.images.is_empty(), "still recognised: {:?}", delta.images);
+    assert_eq!(placements(&t, 2)[0].id, first);
+}
+
+/// Forgetting on a cell change reaches the client's own names too, for the reason
+/// `forgetting_an_image_takes_its_geometry_and_its_client_name_with_it` gives: a bare
+/// `a=p` would otherwise place a rectangle the store can no longer describe.
+#[test]
+fn a_cell_change_retires_the_client_names_with_the_pictures() {
+    let mut t = with_metrics(10, 20);
+    let pixels = vec![0u8; 10 * 20 * 3];
+    t.feed(format!("\x1b_Ga=t,f=24,s=10,v=20,i=7;{}\x1b\\", b64(&pixels)).as_bytes());
+    t.drain();
+
+    t.set_cell_metrics(CellMetrics {
+        width: 20,
+        height: 40,
+    });
+    t.feed(b"\x1b_Ga=p,i=7\x1b\\");
+    let replies: Vec<_> = t
+        .drain()
+        .events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert!(placements(&t, 0).is_empty(), "nothing to place, nothing drawn");
+    assert_eq!(replies, vec!["\x1b_Gi=7;ENOENT:image\x1b\\"]);
+}
+
+/// The reader thread wakes Emacs on what [`Term::feed`] reports, so a read that changed
+/// nothing must say so -- and a cursor move with no damage must not, which is the half
+/// that is easy to get wrong and the half the flicker was made of.
+#[test]
+fn a_read_that_changes_nothing_reports_nothing() {
+    let mut t = Term::new(4, 20);
+    assert!(t.feed(b"hi"), "printed text is a change");
+    t.drain();
+
+    assert!(t.feed(b"\x1b[2;3H"), "a cursor move is a change on its own");
+    t.drain();
+
+    // A pen change: real, and invisible until something is printed with it.
+    assert!(!t.feed(b"\x1b[1;31m"));
+    // The middle of a kitty transfer, which is where a gif player spends nearly all of
+    // its bytes: an APC string that will not touch the grid until its terminator.
+    assert!(!t.feed(b"\x1b_Ga=T,f=100,i=1;iVBORw0KGgoAAAANSUhEU"));
+    assert!(!t.feed(b"gAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"));
+
+    let delta = t.drain();
+    assert!(delta.rows.is_empty(), "nothing was drawn on");
+    assert!(delta.events.is_empty() && delta.images.is_empty());
+    assert!(delta.scrolled.is_empty() && delta.marks.is_empty());
 }

@@ -41,9 +41,11 @@ pub(crate) const MAX_TRACKED_LINKS: usize = 4096;
 
 /// Total URI bytes held before the oldest entries are dropped.
 ///
-/// Small next to [`super::image::MAX_RETAINED_BYTES`] because the payloads are: a URI
-/// is bounded by [`MAX_URI_LEN`], so this is a second bound for the pathological case
-/// of thousands of long ones rather than the one that usually bites.
+/// The image store holds no payload at all -- Emacs does, and is told when it drops one
+/// -- but a URI is small enough to keep and cheap enough to compare, which is what closes
+/// the collision hole a hostile child could otherwise aim at a hyperlink's destination.
+/// So the bytes stay here, bounded twice: [`MAX_URI_LEN`] per URI, and this for the
+/// pathological case of thousands of long ones.
 pub(crate) const MAX_RETAINED_URI_BYTES: usize = 4 << 20;
 
 /// Longest URI accepted from the child.

@@ -362,12 +362,14 @@ decision about trust rather than a decode, and it deserves a real decision rathe
 default — see [IMAGES.md](IMAGES.md), which also lists the kitty extensions not attempted and the
 sixel corners left alone.
 
-Memory is bounded at both ends by one number. Image ids are content-addressed, so a
-child redrawing the same picture every frame transmits it every frame and the module
-hands it over once; what needs a bound is the child drawing a *different* picture each
-time — a plotting TUI, an image browser paging a directory. `cooked-image-cache-size`
-is that backstop rather than the eviction policy, and it matches `MAX_RETAINED_BYTES`
-in the module deliberately, because one figure is easier to reason about than two.
+Memory is bounded at one end, because there is only one end that holds anything. Image
+ids are content-addressed, so a child redrawing the same picture every frame transmits it
+every frame and the module hands it over once; Emacs keeps the bytes, the module keeps a
+digest, and it is told whenever Emacs drops one. What needs a bound is the child drawing a
+*different* picture each time — a plotting TUI, an image browser paging a directory.
+`cooked-image-cache-size` is that backstop rather than the eviction policy; see
+[DESIGN.md](DESIGN.md) on why the module having a second opinion about the same pictures
+was worse than no bound at all.
 
 ## Box drawing
 

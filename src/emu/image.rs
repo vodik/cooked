@@ -13,8 +13,11 @@
 //! carrying a placement can leave the emulator and go on being displayed indefinitely.
 //! Rust can therefore never know when the last reference to an image dies. It does not
 //! have to: Emacs hangs the image spec on the buffer text as a `display` property, so
-//! the text *is* the strong reference and Emacs' own collector owns it. There is no
-//! release protocol here because there is nothing for one to do.
+//! the text *is* the strong reference and Emacs' own collector owns it. Nothing is asked
+//! back, and the one thing said in the other direction is `cooked--image-forget' — Emacs
+//! reporting that it has dropped a picture, so that this side stops claiming it has been
+//! sent. See [`ImageStore`], which is the whole of the bookkeeping that report keeps
+//! honest.
 //!
 //! **Identity is the content.** An [`ImageId`] is minted per distinct byte string, not
 //! per transmission, so a program redrawing the same picture every frame — which is what
@@ -24,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use super::fast_hash;
+use super::content_hash;
 use super::intern::{Id, Ledger};
 
 /// The wire name for one distinct image.
@@ -163,12 +166,19 @@ pub struct Placement {
     pub cell_col: u16,
 }
 
-/// Everything retained about an image once its bytes have been handed to Lisp.
+/// Everything the module keeps about an image once its bytes have gone to Lisp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Image {
     /// Intrinsic size, which is the aspect ratio Lisp scales slices against.
     pub px: PixelSize,
     /// The cell rectangle it was laid into, fixed at transmission.
+    ///
+    /// Fixed because Emacs hangs one slice of the picture on each of those cells, and a
+    /// row that has reached the scrollback is never rewritten -- so the rectangle a
+    /// placement was made at is the only one its cells can ever show. Where the child
+    /// said nothing it was measured against the cell size of the moment, which is why
+    /// `Term::set_cell_metrics` drops the whole store when that moves: an id measured
+    /// against a font nobody is using is one no retransmission may be answered with.
     pub cells: CellSize,
 }
 
@@ -518,29 +528,57 @@ impl Crc32 {
     }
 }
 
-/// Total transmitted bytes the store will hold for re-placement before evicting.
+/// Distinct images this store will name at once.
 ///
-/// Retained not for lifetime reasons — Emacs owns that — but because kitty's protocol
-/// lets a client place an image it transmitted earlier by id alone, and expects that to
-/// work. This is the bound on how far back "earlier" reaches.
-pub(crate) const MAX_RETAINED_BYTES: usize = 64 << 20;
-
-/// Distinct images whose geometry is remembered, which outlives their bytes.
-///
-/// Metadata is two words; keeping far more of it than of the payloads costs nothing and
-/// means a re-placement usually still knows how big the picture was even after the bytes
-/// have gone.
+/// An entry is a geometry, a digest and two links: some forty bytes, against the
+/// megabytes a frame of it used to cost. The cap is here so that a session that runs for
+/// a week does not grow a map forever, not to bound anything a user would notice.
 pub(crate) const MAX_TRACKED_IMAGES: usize = 4096;
 
 /// The images this terminal knows about.
+///
+/// **One cache, and it is Emacs'.** The bytes are not here: they cross to Lisp once and
+/// live in `cooked--image-data', which is the only copy. What this keeps is bookkeeping
+/// -- what each id's content was, and how big -- and its single invariant is that the
+/// bookkeeping agrees with what Lisp holds: *an id is tracked here if and only if the
+/// module believes Lisp still has its bytes.*
+///
+/// That is not something the module can work out for itself, so Lisp says: every path in
+/// cooked-deco.el that drops an image calls `cooked--image-forget', which reaches
+/// [`Self::forget`]. Both halves used to keep their own opinion instead -- 4096 entries
+/// here against a 64MB byte cap there -- and the two disagreed by three orders of
+/// magnitude, which is exactly how an animation ended up drawing nothing for half of
+/// every loop: [`Self::intern`] answered "you already have this one" about frames Emacs
+/// had evicted, so the payload never crossed and the cells carried a placement with no
+/// picture behind it.
 #[derive(Debug, Default)]
 pub(crate) struct ImageStore {
     /// Ids, hash buckets and LRU order; see [`Ledger`].
     ledger: Ledger<ImageId>,
     images: HashMap<ImageId, Image>,
-    /// Transmitted bytes, kept only so an already-transmitted id can be placed again.
-    retained: HashMap<ImageId, (ImageFormat, Vec<u8>)>,
-    retained_bytes: usize,
+    /// What each id's bytes hashed to, which is all that is kept of them.
+    ///
+    /// The ledger buckets by the low half; the whole 128 bits is what settles whether a
+    /// transmission is the same picture as one already named. See
+    /// [`content_hash`](super::content_hash) for why a digest is allowed to be the last
+    /// word here where a hyperlink's URI is not.
+    hashes: HashMap<ImageId, u128>,
+}
+
+/// What [`ImageStore::intern`] decided about one transmission.
+///
+/// A struct rather than a pair because of `retired`: the count cap can drop an id as a
+/// side effect of naming a new one, and everything the *rest* of the emulator hangs off
+/// an id -- the client-id map in [`Kitty`](super::kitty::Kitty) -- has to go at the same
+/// moment or it outlives the picture it names. Returning it makes that the caller's
+/// visible obligation instead of a comment nobody reads.
+#[derive(Debug)]
+pub(crate) struct Interned {
+    pub id: ImageId,
+    /// Whether Lisp has yet to see these bytes, and so whether they must cross.
+    pub fresh: bool,
+    /// Ids the count cap dropped to make room for this one, usually none.
+    pub retired: Vec<ImageId>,
 }
 
 impl Id for ImageId {
@@ -552,37 +590,38 @@ impl Id for ImageId {
 impl ImageStore {
     /// Take BYTES as an image, returning its id and whether Lisp has yet to see it.
     ///
-    /// The same bytes always come back with the same id and `false`, which is the whole
-    /// point of hashing the content: a child redrawing one picture per frame transmits
-    /// it per frame, and only the first of those needs to cross the boundary.
+    /// The same bytes always come back with the same id and `fresh` false, which is the
+    /// whole point of hashing the content: a child redrawing one picture per frame
+    /// transmits it per frame, and only the first of those needs to cross the boundary.
     ///
-    /// The hash only narrows the search to a bucket; every candidate whose payload is
-    /// still retained is compared byte-for-byte before being treated as the same image
-    /// — so two distinct payloads that happen to share a hash get distinct ids rather
-    /// than the second silently aliasing the first's already-cached display. The one
-    /// case this cannot verify is a candidate whose payload has *already* been evicted
-    /// (geometry kept, bytes dropped, see [`Self::evict`]): there is nothing left to
-    /// compare against, so a hash hit there is trusted as before. That residual gap
-    /// needs a hash collision *and* the true match to have aged out of the byte cap
-    /// first, which is narrow enough to accept rather than keep payloads forever to
-    /// close it.
+    /// "The same bytes" is decided by the 128-bit digest and nothing else. The store
+    /// used to keep the payload and compare it byte for byte on a hash hit, which is
+    /// what made it a second cache of every frame in flight -- and a cache with its own
+    /// eviction policy, which is what broke: a shed payload left an entry that still
+    /// claimed Lisp had the picture. The digest is now the entry, so there is nothing
+    /// left to shed and nothing to disagree about.
     pub(crate) fn intern(
         &mut self,
-        format: ImageFormat,
         bytes: &[u8],
         px: PixelSize,
         metrics: CellMetrics,
-    ) -> (ImageId, bool) {
-        let hash = fast_hash(bytes);
-        if let Some(id) = self.ledger.find(hash, |id| {
-            self.retained
-                .get(&id)
-                .is_none_or(|(_, held)| held.as_slice() == bytes)
-        }) {
-            return (id, false);
+    ) -> Interned {
+        let hash = content_hash(bytes);
+        // The ledger's buckets are 64 bits wide; the full digest is what a hit is
+        // confirmed against, so a shared bucket still gives two pictures two ids.
+        let bucket = hash as u64;
+        if let Some(id) = self
+            .ledger
+            .find(bucket, |id| self.hashes.get(&id) == Some(&hash))
+        {
+            return Interned {
+                id,
+                fresh: false,
+                retired: Vec::new(),
+            };
         }
 
-        let id = self.ledger.insert(hash);
+        let id = self.ledger.insert(bucket);
         self.images.insert(
             id,
             Image {
@@ -590,59 +629,76 @@ impl ImageStore {
                 cells: metrics.cells_for(px),
             },
         );
-        self.retained_bytes += bytes.len();
-        self.retained.insert(id, (format, bytes.to_vec()));
-        self.evict();
-        (id, true)
+        self.hashes.insert(id, hash);
+        Interned {
+            id,
+            fresh: true,
+            retired: self.evict(),
+        }
     }
 
     pub(crate) fn get(&self, id: ImageId) -> Option<Image> {
         self.images.get(&id).copied()
     }
 
-    /// The bytes of an already-transmitted image, if they are still held.
-    ///
-    /// Only the eviction and collision tests read this back: the drain hands the bytes
-    /// to Lisp once and thereafter refers to the image by id, so nothing in the crate
-    /// asks the store for a payload it has already sent.
-    #[cfg(test)]
-    pub(crate) fn retained(&self, id: ImageId) -> Option<(ImageFormat, &[u8])> {
-        self.retained.get(&id).map(|(f, b)| (*f, b.as_slice()))
+    /// The cell rectangle an image was laid into, or `None` for an id the store has
+    /// forgotten.
+    pub(crate) fn cells(&self, id: ImageId) -> Option<CellSize> {
+        self.images.get(&id).map(|image| image.cells)
     }
 
-    /// Drop payloads over the byte cap, then whole entries over the count cap.
+    /// Record the rectangle this image was actually laid into.
     ///
-    /// Payloads go first and separately: losing one costs a re-placement by bare id,
-    /// which is rare, while losing the metadata costs the geometry of an image whose
-    /// cells may still be on the grid.
-    fn evict(&mut self) {
-        // Payloads first, oldest first, with the entries left in place.
-        let mut over = self.retained_bytes;
-        let mut shed = Vec::new();
-        for id in self.ledger.lru() {
-            if over <= MAX_RETAINED_BYTES {
-                break;
-            }
-            if let Some((_, bytes)) = self.retained.get(&id) {
-                over -= bytes.len();
-                shed.push(id);
-            }
+    /// Not always what its pixels imply: `c=`/`r=` let the child say how much of the
+    /// screen the picture should occupy. Kept against the image rather than in a map
+    /// beside it so that it cannot be left behind when the image goes -- it was, and a
+    /// long session leaked an entry per picture through both eviction paths.
+    pub(crate) fn set_cells(&mut self, id: ImageId, cells: CellSize) {
+        if let Some(image) = self.images.get_mut(&id) {
+            image.cells = cells;
         }
-        for id in shed {
-            if let Some((_, bytes)) = self.retained.remove(&id) {
-                self.retained_bytes -= bytes.len();
-            }
-        }
-        // Then whole entries, once there are more of them than the count cap allows.
+    }
+
+    /// Emacs has dropped this image's bytes, so stop claiming it has them.
+    ///
+    /// The other half of the invariant on [`ImageStore`], and the reason there is a
+    /// `cooked--image-forget' at all: the next transmission of these bytes now mints a
+    /// fresh id and crosses the boundary, instead of being answered with the name of a
+    /// picture nothing can draw any more.
+    ///
+    /// The caller retires the id's client name too; see [`Interned::retired`] for why
+    /// that cannot be left to a comment.
+    pub(crate) fn forget(&mut self, id: ImageId) {
+        self.ledger.remove(id);
+        self.images.remove(&id);
+        self.hashes.remove(&id);
+    }
+
+    /// Forget every picture at once, the cell they were measured against having moved.
+    ///
+    /// [`ImageStore::forget`] for all of them, and it leaves the same obligation on the
+    /// caller: the client's own names for these pictures have to be retired in the same
+    /// breath. See `Term::set_cell_metrics` for why a cell that has moved is a reason to
+    /// stop recognising anything.
+    pub(crate) fn forget_all(&mut self) {
+        self.ledger.clear();
+        self.images.clear();
+        self.hashes.clear();
+    }
+
+    /// Drop the oldest entries once there are more than the count cap allows, returning
+    /// what went.
+    fn evict(&mut self) -> Vec<ImageId> {
+        let mut retired = Vec::new();
         while self.ledger.len() > MAX_TRACKED_IMAGES {
             let Some(id) = self.ledger.evict_oldest() else {
                 break;
             };
             self.images.remove(&id);
-            if let Some((_, bytes)) = self.retained.remove(&id) {
-                self.retained_bytes -= bytes.len();
-            }
+            self.hashes.remove(&id);
+            retired.push(id);
         }
+        retired
     }
 }
 
@@ -654,6 +710,14 @@ mod tests {
         width: 10,
         height: 20,
     };
+
+    /// Frame N of an animation: three megabytes, as a raw RGBA frame of a picture worth
+    /// looking at is, and distinct from every other N.
+    fn frame(n: u8) -> Vec<u8> {
+        let mut bytes = vec![0u8; 3 << 20];
+        bytes[0] = n;
+        bytes
+    }
 
     #[test]
     fn png_dimensions_are_read_from_the_header() {
@@ -794,21 +858,19 @@ mod tests {
     #[test]
     fn the_same_bytes_intern_to_the_same_id_once() {
         let mut store = ImageStore::default();
-        let (a, fresh_a) =
-            store.intern(ImageFormat::Png, b"pixels", PixelSize::new(10, 20), METRICS);
-        let (b, fresh_b) =
-            store.intern(ImageFormat::Png, b"pixels", PixelSize::new(10, 20), METRICS);
-        assert_eq!(a, b);
-        assert!(fresh_a, "the first transmission has to reach Lisp");
-        assert!(!fresh_b, "the second must not");
+        let a = store.intern(b"pixels", PixelSize::new(10, 20), METRICS);
+        let b = store.intern(b"pixels", PixelSize::new(10, 20), METRICS);
+        assert_eq!(a.id, b.id);
+        assert!(a.fresh, "the first transmission has to reach Lisp");
+        assert!(!b.fresh, "the second must not");
     }
 
     #[test]
     fn different_bytes_get_different_ids() {
         let mut store = ImageStore::default();
-        let (a, _) = store.intern(ImageFormat::Png, b"one", PixelSize::new(10, 20), METRICS);
-        let (b, _) = store.intern(ImageFormat::Png, b"two", PixelSize::new(10, 20), METRICS);
-        assert_ne!(a, b);
+        let a = store.intern(b"one", PixelSize::new(10, 20), METRICS);
+        let b = store.intern(b"two", PixelSize::new(10, 20), METRICS);
+        assert_ne!(a.id, b.id);
     }
 
     #[test]
@@ -846,7 +908,7 @@ mod tests {
     #[test]
     fn geometry_is_remembered_after_the_bytes_are_handed_over() {
         let mut store = ImageStore::default();
-        let (id, _) = store.intern(ImageFormat::Png, b"pixels", PixelSize::new(25, 40), METRICS);
+        let id = store.intern(b"pixels", PixelSize::new(25, 40), METRICS).id;
         assert_eq!(
             store.get(id),
             Some(Image {
@@ -856,11 +918,12 @@ mod tests {
         );
     }
 
-    /// A real fast-hash collision is expensive to find by brute force in a unit test, so
-    /// this plants one directly: a decoy id occupies the bucket a real payload would
-    /// hash into, with different retained bytes behind it. Before the fix this was
-    /// `intern`'s only check, so the decoy's id (and its already-cached display in
-    /// Lisp) would have been returned for genuinely different pixels.
+    /// A real hash collision is expensive to find by brute force in a unit test, so this
+    /// plants one directly: a decoy id occupies the bucket a real payload would file
+    /// under, with a different digest behind it. The bucket is 64 bits wide and the
+    /// digest is 128, so sharing a bucket is not sharing an identity -- and if it ever
+    /// became one, the decoy's id and its already-cached display in Lisp would come back
+    /// for genuinely different pixels.
     #[test]
     fn a_shared_hash_bucket_does_not_alias_different_bytes() {
         let mut store = ImageStore::default();
@@ -872,46 +935,92 @@ mod tests {
                 cells: CellSize::new(1, 1),
             },
         );
+        store.hashes.insert(decoy, content_hash(b"decoy"));
         store
-            .retained
-            .insert(decoy, (ImageFormat::Png, b"decoy".to_vec()));
-        let hash = fast_hash(b"real pixels");
-        store.ledger.plant(hash, decoy);
+            .ledger
+            .plant(content_hash(b"real pixels") as u64, decoy);
 
-        let (id, fresh) = store.intern(
-            ImageFormat::Png,
-            b"real pixels",
-            PixelSize::new(10, 20),
-            METRICS,
-        );
+        let real = store.intern(b"real pixels", PixelSize::new(10, 20), METRICS);
         assert!(
-            fresh,
-            "a same-bucket decoy with different bytes is not a match"
+            real.fresh,
+            "a same-bucket decoy with a different digest is not a match"
         );
-        assert_ne!(id, decoy);
-        assert_eq!(store.retained(id).unwrap().1, b"real pixels");
-        assert_eq!(store.retained(decoy).unwrap().1, b"decoy", "untouched");
+        assert_ne!(real.id, decoy);
+        assert_eq!(store.hashes[&decoy], content_hash(b"decoy"), "untouched");
+    }
+
+    /// The bug, at its smallest. Thirty distinct multi-megabyte frames, then the first
+    /// one again byte for byte: the store used to keep the payloads and shed the oldest
+    /// past a 64MB cap, after which its find predicate matched on the hash alone and
+    /// answered "not fresh" about an image whose bytes it had itself dropped. Lisp,
+    /// whose own cap was three orders of magnitude smaller, had dropped them too, so the
+    /// picture never crossed again and the placements drew nothing.
+    ///
+    /// The answer is still "not fresh", and now it is *true*: there are no payloads to
+    /// shed, so the store's claim that Lisp has this picture is one Lisp is still good
+    /// for. Ninety megabytes of frames leave ninety digests behind.
+    #[test]
+    fn a_frame_the_store_still_names_does_not_cross_twice() {
+        let mut store = ImageStore::default();
+        let first = store.intern(&frame(0), PixelSize::new(10, 20), METRICS);
+        for n in 1..30u8 {
+            store.intern(&frame(n), PixelSize::new(10, 20), METRICS);
+        }
+        let again = store.intern(&frame(0), PixelSize::new(10, 20), METRICS);
+        assert_eq!(again.id, first.id);
+        assert!(!again.fresh, "nothing shed it, so Lisp still has it");
+    }
+
+    /// The other half of the same invariant, and the one that makes the animation draw:
+    /// once Emacs says it has dropped the bytes, the next transmission of them is a new
+    /// picture -- a fresh id, and a payload that crosses.
+    #[test]
+    fn a_forgotten_frame_crosses_again() {
+        let mut store = ImageStore::default();
+        let first = store.intern(&frame(0), PixelSize::new(10, 20), METRICS);
+        store.forget(first.id);
+        assert_eq!(store.get(first.id), None, "and its geometry goes with it");
+
+        let again = store.intern(&frame(0), PixelSize::new(10, 20), METRICS);
+        assert!(again.fresh, "the bytes have to cross again");
+        assert_ne!(again.id, first.id, "a forgotten id is not reissued");
+    }
+
+    /// Geometry and digest are one entry now, so nothing survives the id that named it.
+    /// They were two maps, and the second was pruned by neither eviction path: a long
+    /// session leaked a cell rectangle per picture, and those rectangles are what `a=p`
+    /// re-placement reads.
+    #[test]
+    fn nothing_outlives_the_entry_it_belongs_to() {
+        let mut store = ImageStore::default();
+        let id = store.intern(b"pixels", PixelSize::new(10, 20), METRICS).id;
+        store.set_cells(id, CellSize::new(4, 3));
+        assert_eq!(store.cells(id), Some(CellSize::new(4, 3)));
+
+        store.forget(id);
+        assert_eq!(store.cells(id), None);
+        assert!(store.hashes.is_empty() && store.images.is_empty());
+        assert_eq!(store.ledger.len(), 0);
+        assert_eq!(store.ledger.tracked(), 0, "no bucket is left stranded");
     }
 
     #[test]
-    fn payloads_are_dropped_before_geometry_is() {
+    fn the_count_cap_retires_the_oldest_and_says_which() {
         let mut store = ImageStore::default();
-        let big = vec![0u8; MAX_RETAINED_BYTES / 2 + 1];
-        let (first, _) = store.intern(ImageFormat::Png, &big, PixelSize::new(10, 20), METRICS);
-        let mut second_big = big.clone();
-        second_big[0] = 1;
-        let (second, _) = store.intern(
-            ImageFormat::Png,
-            &second_big,
-            PixelSize::new(10, 20),
-            METRICS,
+        let mut ids = Vec::new();
+        for n in 0..MAX_TRACKED_IMAGES {
+            ids.push(store.intern(&n.to_le_bytes(), PixelSize::new(10, 20), METRICS));
+        }
+        assert!(
+            ids.iter().all(|interned| interned.retired.is_empty()),
+            "nothing is retired below the cap"
         );
 
-        assert!(store.retained(first).is_none(), "oldest payload evicted");
-        assert!(store.retained(second).is_some(), "newest payload kept");
-        assert!(
-            store.get(first).is_some(),
-            "geometry outlives the payload, so cells still on the grid stay placeable"
-        );
+        let over = store.intern(b"one too many", PixelSize::new(10, 20), METRICS);
+        // Named rather than merely dropped: the caller has to retire the client's own
+        // name for the picture at the same moment. See `Interned::retired`.
+        assert_eq!(over.retired, vec![ids[0].id]);
+        assert_eq!(store.cells(ids[0].id), None);
+        assert_eq!(store.ledger.len(), MAX_TRACKED_IMAGES);
     }
 }

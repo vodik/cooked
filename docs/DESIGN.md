@@ -718,6 +718,71 @@ corrupted line.
 
 ---
 
+## Images have one owner, and it is Emacs
+
+An image's bytes cross the boundary once and live in `cooked--image-data`, a strong
+buffer-local table. `ImageStore` in `src/emu/image.rs` keeps no payload: a geometry and a
+128-bit digest per image, so that a child redrawing the same picture every frame
+transmits it every frame and it crosses once. Two caches with two eviction policies is
+what this replaced, and the way it failed is worth keeping written down.
+
+`viu -w 40` on a 34-frame gif drew about twenty frames, then nothing at all until the gif
+looped, forever, in an exactly periodic cycle. The placements were perfect and the cursor
+was perfect; only the picture was missing. Ids are content-addressed, so on the second
+loop the module recognised each frame and answered "you already have this one, it is id
+N" — from its own ledger of 4096 entries. Emacs' cap is in bytes, and 64MB of
+three-megabyte RGBA frames is twenty-one of them, so Emacs had thrown id N away twenty
+frames ago. `cooked--image-spec` answers nil for an id with no data, so the cells carried
+a `cooked-deco` placement and no `display` property. Neither end was wrong about anything
+it could see. They were counting different things, three orders of magnitude apart, and
+nothing connected them.
+
+So there is one cache now, and one rule:
+
+> **The module believes Emacs has an image's bytes only if `cooked--image-data` does.**
+
+One direction, not both, and the asymmetry is deliberate: the module's belief is what a
+retransmission is answered from, so it is the belief that must never outrun the table.
+Emacs holding bytes the module has stopped recognising costs a retransmission; the
+module claiming bytes Emacs has thrown away costs a hole, and that is the bug above.
+
+Each side keeps its end without asking the other. The module decides "have you seen these
+bytes?" from the digest alone. Emacs never guesses what the module holds — every path that
+drops an image goes through `cooked--forget-image`, which calls `cooked--image-forget` and
+takes the ledger entry, the digest, the geometry and the client's own name for the picture
+with it. A retransmission of forgotten bytes is then a picture the module has never seen:
+a fresh id, and the payload crosses again. That is what makes eviction cost a
+retransmission instead of a hole.
+
+Four consequences that are easy to get wrong separately:
+
+- **`cooked-image-cache-size` is a backstop again, not the policy.** The policy is
+  `cooked--release-images`/`cooked--collect-images`, driven by scrollback discard: an
+  image dies with the last row displaying it. That never fires for an animation that
+  never scrolls, which is why the cap was doing all the work when this broke.
+- **A bare-id kitty placement (`a=p`) of a forgotten image is declined**, with
+  `ENOENT:image` — the same answer as for an id never transmitted, because the client's
+  remedy is the same one: send the picture again. Retaining payloads *only* so this case
+  could be honoured is what put a second cache here in the first place.
+- **A cell size that has moved forgets everything.** `Term::set_cell_metrics` drops the
+  whole store, and it is the same repair seen from the other side. A transmission naming
+  no `c=`/`r=` is measured into cells once and keeps that rectangle for the life of the
+  id, because Emacs hangs one slice of the picture on each of those cells and a row in
+  the scrollback is never rewritten. Ids being content-addressed, an animation looping
+  past a font change would otherwise draw both rectangles at once: a frame Emacs still
+  holds is recognised and re-laid at the old measurement, a frame the cap has spent is
+  retransmitted and laid at the new one, and mid-gif the two alternate. Forgetting
+  collapses them, and the rows already written keep the id, the rectangle and the bytes
+  they were drawn with — `cooked--rescale-deco` re-cuts those to the new cell. Rows and
+  columns arrive by the same call and move no cell, so an ordinary reshape spends
+  nothing.
+- **The digest is the last word on identity.** There is no payload left to compare a hash
+  hit against, so `content_hash` is 128 bits wide; `src/emu/mod.rs` carries the argument
+  for why that is enough here and why the hyperlink store, whose collisions a hostile
+  child could actually profit from, still compares its URIs.
+
+---
+
 ## Vendored parser
 
 `src/emu/parser/` is vte 0.15, vendored rather than depended on, because two things

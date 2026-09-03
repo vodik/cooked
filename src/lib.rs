@@ -238,6 +238,24 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// own version, not the version the Lisp wishes it were.
         "cooked--core-version" 0..=0 => core_version;
 
+        /// Tell SESSION that Emacs has dropped image ID's transmitted bytes.
+        ///
+        /// Emacs holds the only copy of an image -- see src/emu/image.rs -- and the module
+        /// keeps just enough bookkeeping to answer "has Lisp seen these bytes before?".  This
+        /// is what keeps that answer true: every path in cooked-deco.el that drops an image
+        /// says so here, and the module then forgets the id, its content digest, its geometry
+        /// and the client's own name for it.
+        ///
+        /// A later transmission of the same picture is then a picture the module has never
+        /// seen: it mints a new id and the bytes cross again, which is what makes an
+        /// animation whose frames Emacs has been evicting go on drawing.  A kitty client
+        /// placing the old id by name (`a=p') is told `ENOENT:image', the same answer it
+        /// would get for an id never transmitted, and the remedy is the same one.
+        ///
+        /// Cheap and safe to call for an id the module no longer has, which is ordinary:
+        /// eviction is Emacs' decision and the module may have retired the id first.
+        "cooked--image-forget" 2..=2 => image_forget;
+
         /// Process id of SESSION's foreground process group, or nil.
         ///
         /// Not the same as `cooked--pid': that is the process cooked spawned, which is
@@ -460,6 +478,7 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
         backlog_limit: env
             .opt::<i64>(args, 7)?
             .map_or(defaults.backlog_limit, |n| n.max(1) as usize),
+        ..defaults
     };
 
     let session = Session::spawn(
@@ -534,6 +553,17 @@ fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
     let first = env.from_lisp::<i64>(args[1])?.max(0) as usize;
     let count = env.from_lisp::<i64>(args[2])?.max(0) as usize;
     handle(env, args[0])?.remove_rows(first, count);
+    Ok(env.nil())
+}
+
+fn image_forget(env: Env, args: &[Value]) -> Result<Value> {
+    // An id outside the module's own range is one it certainly does not hold, so it is
+    // nothing to forget rather than something to signal about: the caller is handing back
+    // an id the module gave it, and a number that could never have been one is the same
+    // no-op as an id already retired.
+    if let Ok(id) = u32::try_from(env.from_lisp::<i64>(args[1])?) {
+        handle(env, args[0])?.forget_image(ImageId(id));
+    }
     Ok(env.nil())
 }
 

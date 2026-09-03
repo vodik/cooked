@@ -13,9 +13,12 @@
 ;; under it.  Colour is nobody\='s job here -- a glyph is drawn in the colours of the
 ;; face it lands on, which is what keeps it in step with the text beside it.
 ;;
-;; Image lifetime is Emacs\=' and there is no release protocol.  `cooked--image-data\=' is
-;; the only copy of the bytes, so it is strong; `cooked--image-specs\=' is rebuildable, so
-;; it is weak on the value, and the buffer text displaying a spec is what keeps it alive.
+;; Image lifetime is Emacs\='.  `cooked--image-data\=' is the only copy of the bytes, so it
+;; is strong; `cooked--image-specs\=' is rebuildable, so it is weak on the value, and the
+;; buffer text displaying a spec is what keeps it alive.  The module asks for nothing back
+;; and never sends a picture twice -- but it does have to be *told* when we drop one, or
+;; it goes on answering a retransmission with an id whose bytes we no longer have.  That
+;; is `cooked--forget-image\=', and it is one-way: a report, not a protocol.
 
 ;;; Code:
 
@@ -26,6 +29,7 @@
 ;; The one thing decoration asks of the layer above: which window to measure a
 ;; cell against, when the buffer is not being rendered from the selected one.
 (declare-function cooked--layout-window "cooked")
+(declare-function cooked--image-forget "cooked-core")
 
 (defcustom cooked-inline-images t
   "Whether to display images the child transmits.
@@ -497,8 +501,12 @@ redrawing one picture costs nothing however long it runs, but a child drawing a
 through a directory, a long `icat\=' loop -- adds one entry per frame and
 nothing ever took them away.
 
-64MB matches `MAX_RETAINED_BYTES\=' in the module, deliberately: both ends bound
-the same pictures, and a single figure is easier to reason about than two.
+There is no figure to match on the module side any more, and that is the point.
+It kept the payloads too, under a cap of its own three orders of magnitude
+larger than what this one comes to for multi-megabyte frames, and an animation
+drew nothing for half of every loop because the two disagreed.  It now keeps a
+digest per picture and is told, through `cooked--forget-image\=', whenever this
+table drops one.
 
 This is a backstop and not the eviction policy.  An image\='s lifetime follows
 the buffer text that displays it: it goes when the last row referencing it is
@@ -515,7 +523,12 @@ ids nothing is displaying.  A displayed id is never evicted, so the cap is a
 soft one, and deliberately: evicting under a picture that is on screen is what
 made half a picture render at one size and the other half not at all, and no
 bound is worth a corrupt buffer.  Set it to nil to switch the backstop off
-entirely."
+entirely.
+
+So what eviction costs is a retransmission rather than a hole: the next time the
+child sends those bytes they arrive as a picture the module has never seen.  A
+child that never sends them again was showing something nothing displays, which
+is what made the id evictable in the first place."
   :type '(choice (const :tag "No limit" nil) integer)
   :group 'cooked)
 
@@ -565,11 +578,27 @@ The specs are not touched: `cooked--image-specs\=' is weak on its values, so an
 entry for a picture nothing displays is collected on its own, and one for a
 picture something *does* display must outlive this -- forgetting the bytes does
 not take a picture off the screen, it only takes away the ability to rebuild it
-at a different cell size."
+at a different cell size.
+
+The module is told, and that is the half without which the rest is a bug.  It
+has no cache of its own any more, only a note of which ids it has already sent;
+a picture it still believes we have is one it will answer a retransmission of
+with the id alone.  So an id in `cooked--image-data\=' iff the module thinks we
+have it is the invariant, and this is the only place either end drops one.
+Without it a child redrawing a picture we had evicted -- an animation looping,
+which is the case that found this -- got placements with nothing behind them:
+correct cells, correct cursor, no picture, until it happened to draw something
+we had not evicted yet.
+
+Every drop goes through here, which is why the call is here rather than in the
+two callers.  Nothing is owed once the child is gone: no further transmission
+can arrive, so a dead session is left alone."
   (when-let* ((entry (gethash id cooked--image-data)))
     (cl-decf cooked--image-bytes (length (nth 1 entry)))
     (remhash id cooked--image-data)
-    (setq cooked--image-order (delq id cooked--image-order))))
+    (setq cooked--image-order (delq id cooked--image-order))
+    (when-let* ((session (cooked--live-session)))
+      (cooked--image-forget session id))))
 
 (defun cooked--image-ids-between (beg end)
   "Image ids the `cooked-deco\=' properties between BEG and END refer to.
@@ -602,6 +631,9 @@ that sits beside it in `cooked--discard-scrollback\=': an image is a resource
 belonging to the rows that display it, so it dies exactly when the last of those
 rows does.  Nothing here is a heuristic about age or budget -- src/emu/image.rs
 says the lifetime is Emacs\=', and this is Emacs holding up that end.
+`cooked--forget-image\=' tells the module about each one, which is the other half
+of holding it up: the module must not go on believing we have a picture we have
+just decided nothing refers to.
 
 Costs a widened walk of the buffer\='s decoration runs, and only when the text
 just deleted actually had a picture in it, which a scrollback trim of ordinary

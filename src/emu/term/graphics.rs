@@ -57,7 +57,13 @@ impl State {
             px
         };
         let metrics = self.metrics;
-        let (id, fresh) = self.images.intern(format, bytes, px, metrics);
+        let Interned { id, fresh, retired } = self.images.intern(bytes, px, metrics);
+        // The count cap can retire an id to make room for this one, and the client's own
+        // name for that picture has to go at the same moment: an `a=p` naming it would
+        // otherwise place a rectangle the store can no longer describe.
+        for gone in retired {
+            self.kitty.forget(gone);
+        }
         // An explicit `c=`/`r=` overrides what the pixels imply: the child is saying how
         // much of the screen the picture should occupy, not how big its source is.
         //
@@ -92,7 +98,7 @@ impl State {
                 cells,
             });
         }
-        self.image_cells.insert(id, cells);
+        self.images.set_cells(id, cells);
         id
     }
 
@@ -170,11 +176,16 @@ impl State {
     /// image is a rectangle, and a row of it continuing on the next line would not be
     /// one.
     pub(super) fn lay_image(&mut self, id: ImageId, after: CursorAfterImage) {
-        let cells = self
-            .image_cells
-            .get(&id)
-            .copied()
-            .unwrap_or(CellSize::new(1, 1));
+        // An id the store has forgotten draws nothing rather than a one-cell stub. No
+        // path reaches here with one today -- forgetting a picture retires the client's
+        // name for it in the same call, so a bare `a=p` is refused with `ENOENT:image`
+        // before it ever becomes a placement -- but the store is the only thing that
+        // knows the rectangle, and a guessed one is worse than none: it would put a
+        // picture-shaped hole of the wrong shape on the grid, under a cursor left in the
+        // wrong place.
+        let Some(cells) = self.images.cells(id) else {
+            return;
+        };
         let pen = self.pen.erase();
         let start_col = self.screen().cursor.col;
         for cell_row in 0..cells.rows {

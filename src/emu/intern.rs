@@ -5,9 +5,10 @@
 //! a dense id, and evict least-recently-used. Written out, they were field-for-field
 //! identical in four places and the ordering was character-for-character the same code.
 //!
-//! What is *not* shared is what each keeps against an id -- a link is nothing but its URI,
-//! while an image keeps geometry that outlives its payload, and evicts the two separately.
-//! So this owns the ids and the ordering, and each store layers its own tables on top.
+//! What is *not* shared is what each keeps against an id -- a link is its URI, an image is
+//! a geometry and a digest of bytes that live in Emacs -- and how each settles a hash hit:
+//! a link compares the URI it holds, an image has only the digest. So this owns the ids and
+//! the ordering, and each store layers its own tables on top.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -111,12 +112,25 @@ impl<K: Id> Ledger<K> {
     }
 
     /// Take the least-recently-used id, forgetting its hash along with it.
-    ///
-    /// The hash goes too, and that is load-bearing rather than tidy: leaving it behind
-    /// would make a later, identical payload resolve to an id whose content has gone.
     pub(crate) fn evict_oldest(&mut self) -> Option<K> {
         let id = self.oldest?;
-        let entry = self.unlink(id)?;
+        self.remove(id).then_some(id)
+    }
+
+    /// Take a named id out of the order and its bucket, saying whether it was held.
+    ///
+    /// [`Ledger::evict_oldest`] with the choice of victim made by the caller instead of
+    /// by the order, and it exists for the one thing the order cannot decide: Emacs
+    /// dropping an image's bytes. See `ImageStore::forget`.
+    ///
+    /// The hash goes with the entry either way, and that is load-bearing rather than
+    /// tidy: leaving it behind would make a later, identical payload resolve to an id
+    /// whose content has gone -- which for `remove` is precisely the picture Emacs has
+    /// just thrown away, and so precisely the transmission that has to cross again.
+    pub(crate) fn remove(&mut self, id: K) -> bool {
+        let Some(entry) = self.unlink(id) else {
+            return false;
+        };
         // The one bucket it was in, named by the entry rather than searched for.
         if let Some(bucket) = self.by_hash.get_mut(&entry.hash) {
             bucket.retain(|&v| v != id);
@@ -124,12 +138,28 @@ impl<K: Id> Ledger<K> {
                 self.by_hash.remove(&entry.hash);
             }
         }
-        Some(id)
+        true
+    }
+
+    /// Drop every id held, keeping the counter that mints them.
+    ///
+    /// Not `Default::default()`, and the difference is the whole of it: an id that has
+    /// been handed out must never be handed out again. Emacs goes on displaying buffer
+    /// text naming an id long after this side has stopped recognising the picture, so a
+    /// reissued `0` would answer that text with somebody else's image.
+    pub(crate) fn clear(&mut self) {
+        self.by_hash.clear();
+        self.entries.clear();
+        self.oldest = None;
+        self.newest = None;
     }
 
     /// Every id, least-recently-used first, without disturbing the order.
     ///
-    /// For a store that sheds part of an entry before shedding the entry itself.
+    /// Only the tests walk the order now: the one production reader was the pass that
+    /// shed image payloads ahead of their entries, and there are no payloads here to
+    /// shed any more -- see [`ImageStore`](super::image::ImageStore).
+    #[cfg(test)]
     pub(crate) fn lru(&self) -> impl Iterator<Item = K> + '_ {
         std::iter::successors(self.oldest, |&id| {
             self.entries.get(&id).and_then(|entry| entry.newer)

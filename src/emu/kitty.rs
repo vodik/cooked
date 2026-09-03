@@ -217,6 +217,30 @@ impl Kitty {
         }
     }
 
+    /// Retire every client name for OURS, the picture having gone.
+    ///
+    /// Called when the store drops an image -- Emacs discarded its bytes, or the count
+    /// cap retired it. A client that places it afterwards is told `ENOENT:image`, which
+    /// is the true answer and the one it can act on by transmitting the picture again;
+    /// keeping the name would instead leave `a=p` naming geometry nothing has.
+    ///
+    /// A scan of the map rather than a reverse index: it holds one entry per id the
+    /// child has named, several clients can point at one picture (ids are
+    /// content-addressed here and not there), and this runs when an image is forgotten
+    /// rather than per transmission.
+    pub(crate) fn forget(&mut self, ours: ImageId) {
+        self.by_client.retain(|_, &mut id| id != ours);
+    }
+
+    /// Retire every client name there is, every picture having gone at once.
+    ///
+    /// The bulk case of [`Kitty::forget`], and it exists for the one thing that drops
+    /// the whole store: a cell size change. A name left behind would place a rectangle
+    /// nothing can describe any more.
+    pub(crate) fn forget_all(&mut self) {
+        self.by_client.clear();
+    }
+
     /// Take one APC payload, returning what the terminal should do about it.
     ///
     /// PAYLOAD is the whole APC body, `G` and all — the introducer is checked here
@@ -313,6 +337,9 @@ impl Kitty {
                     },
                     response(&cmd, None),
                 ),
+                // Never transmitted, or transmitted and since forgotten -- see
+                // `Kitty::forget`. The two are one answer on purpose: what the client
+                // can do about either is send the picture again.
                 None => (Outcome::Nothing, response(&cmd, Some("ENOENT:image"))),
             },
             Action::Transmit | Action::Display => (Outcome::Nothing, None),
@@ -357,12 +384,26 @@ impl Kitty {
             raw
         };
         // Raw pixels carry no dimensions of their own, so a transmission that omits them
-        // cannot be laid out, and one whose geometry outruns what actually arrived is not
-        // describing the bytes it sent. Both are checked *before* converting, because the
-        // conversion sizes its buffer from the geometry: `s=65535,v=65535` with a
+        // cannot be laid out at all, and one whose geometry runs far past what arrived is
+        // not describing the bytes it sent. Both are checked *before* converting, because
+        // the conversion sizes its buffer from the geometry: `s=65535,v=65535` with a
         // four-byte payload is a 13GB allocation asked for by anything that can write to
         // the terminal, which `cat` of a hostile file is. Bounding it against the payload
         // needs no arbitrary maximum — `MAX_PAYLOAD` already bounds that.
+        //
+        // What the check bounds is the *amplification* from payload to allocation, and it
+        // used to be spelled as exact equality, which bounds it far more tightly than it
+        // has to and refuses a picture that merely arrived short. That is not a
+        // theoretical distinction: a Ctrl-C during an animation cuts the child's blocked
+        // `write` part-way through, so the frame in flight lands a few kilobytes short of
+        // the four megabytes it declared — and a frame refused places nothing, which
+        // leaves the cursor at the picture's top-left, where the client parks it between
+        // frames, for the shell's `ED` to erase the picture from. Both encoders below
+        // already pad a short buffer rather than lie about its length, so the honest
+        // answer is the one a terminal drawing that frame character by character would
+        // have given: as much of the picture as actually arrived. A factor of two is the
+        // loosest bound that is still a bound.
+        //
         // A PNG is a file and carries its own size; only the raw layouts have geometry to
         // check. `Payload::pixels()` is `None` for exactly that case, which is what the
         // old `bytes_per_pixel = 0` sentinel was standing in for.
@@ -377,7 +418,7 @@ impl Kitty {
                 // back down to a small length that a tiny payload satisfies, while
                 // `cmd.px` itself survived unclamped into the encoder.
                 let needed = pixels.expected_len();
-                if needed == 0 || needed > pixels.data.len() as u64 {
+                if needed == 0 || needed > 2 * pixels.data.len() as u64 {
                     return (Outcome::Nothing, response(&cmd, Some("EINVAL:dimensions")));
                 }
                 pixels.encode()
@@ -439,11 +480,31 @@ fn response(cmd: &Command, error: Option<&str>) -> Option<Vec<u8>> {
     Some(format!("\x1b_Gi={};{}\x1b\\", cmd.id, body).into_bytes())
 }
 
-/// Standard base64, rejecting anything that is not.
+/// Standard base64, rejecting anything that is not — but lifting out what the *terminal*
+/// injected rather than the child.
 ///
 /// Whitespace is skipped because a payload split across chunks can pick up a newline
 /// from a shell that echoed it, and dropping the picture over that would be a worse
 /// answer than ignoring it.
+///
+/// A caret is skipped along with the byte after it, for a sharper version of the same
+/// problem. `ECHOCTL` spells a control character as `^` plus one letter, and the line
+/// discipline writes that echo into the pty's output the moment the key is pressed —
+/// which, for a child blocked part-way through a multi-megabyte `write`, is *between two
+/// pieces of that write*, and so inside the payload. Interrupting an animation is exactly
+/// that case: `viu` streams a four-megabyte frame, `^C` lands a few kilobytes into one of
+/// its 4096-byte chunks, and two bytes nobody transmitted would otherwise cost the whole
+/// frame. `^` is not in the base64 alphabet, so it identifies the echo unambiguously, and
+/// its partner byte — which usually *is* in the alphabet — goes with it, which is what
+/// makes this a repair rather than a resynchronisation: the payload decodes byte for byte
+/// as it was sent, with no shift.
+///
+/// Losing the frame is not a cosmetic matter, and this is the bug it was found through:
+/// a transmission that is refused places nothing, so the cursor stays at the picture's
+/// top-left, where the client left it between frames. The newline the client prints after
+/// each frame then moves one row *into* the picture, and the shell's own `ED` on the way
+/// to a new prompt erases everything below it. One row of the picture survives, and the
+/// prompt sits in the hole.
 ///
 /// Shared with the `OSC 1337` path in [`super::term`], which carries its image the same
 /// way. It lives here because this is where it was first needed, and a second copy would
@@ -451,7 +512,10 @@ fn response(cmd: &Command, error: Option<&str>) -> Option<Vec<u8>> {
 pub(super) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(input.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0u32);
-    for &byte in input {
+    let mut at = 0;
+    while at < input.len() {
+        let byte = input[at];
+        at += 1;
         let value = match byte {
             b'A'..=b'Z' => u32::from(byte - b'A'),
             b'a'..=b'z' => u32::from(byte - b'a') + 26,
@@ -460,6 +524,12 @@ pub(super) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
             b'/' => 63,
             b'=' => continue,
             b' ' | b'\t' | b'\r' | b'\n' => continue,
+            // Both bytes of the echo, or only the caret when it landed on the very end
+            // of a chunk and its partner is somebody else's problem.
+            b'^' => {
+                at += 1;
+                continue;
+            }
             _ => return None,
         };
         acc = (acc << 6) | value;
@@ -757,8 +827,12 @@ mod tests {
             assert_eq!(outcome, Outcome::Nothing, "{format}");
             assert_eq!(reply.unwrap(), b"\x1b_Gi=4;EINVAL:dimensions\x1b\\");
         }
-        // One pixel short is still short.
+        // Short by less than half is drawn as far as it got: a frame cut off by the
+        // signal that stopped the child is a partial picture, not a malformed one.
         let apc = format!("Ga=T,f=32,s=2,v=1,i=4;{}", b64(&[0; 7]));
+        assert!(matches!(k.feed(apc.as_bytes()).0, Outcome::Image { .. }));
+        // Half of one pixel is not most of a two-pixel picture.
+        let apc = format!("Ga=T,f=32,s=2,v=1,i=4;{}", b64(&[0; 3]));
         assert_eq!(k.feed(apc.as_bytes()).0, Outcome::Nothing);
         // Exactly enough is enough, and trailing slack is the client's business.
         let apc = format!("Ga=T,f=32,s=2,v=1,i=4;{}", b64(&[0; 8]));
@@ -852,5 +926,25 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(decode_base64(wrapped.as_bytes()).unwrap(), data);
+    }
+
+    #[test]
+    fn an_echoed_control_character_is_lifted_back_out_of_a_payload() {
+        let data: Vec<u8> = (0u8..=255).collect();
+        let encoded = b64(&data);
+        // `ECHOCTL`'s spelling of Ctrl-C, spliced in where the line discipline put it:
+        // part-way through, between two pieces of the child's blocked write. Both bytes
+        // go, so what is left decodes to the original rather than to the original
+        // shifted six bits from here down.
+        let (head, tail) = encoded.split_at(101);
+        let echoed = format!("{head}^C{tail}");
+        assert_eq!(decode_base64(echoed.as_bytes()).unwrap(), data);
+    }
+
+    #[test]
+    fn a_caret_at_the_very_end_of_a_payload_takes_nothing_with_it() {
+        let data = b"pixels".to_vec();
+        let echoed = format!("{}^", b64(&data));
+        assert_eq!(decode_base64(echoed.as_bytes()).unwrap(), data);
     }
 }

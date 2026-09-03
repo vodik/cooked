@@ -73,9 +73,6 @@ printf '\033_Ga=T,f=24,s=65535,v=65535,i=8;AAAA\033\\'    # EINVAL:dimensions
 
 ## Bounds, and why each is where it is
 
-Images are the one place a child chooses how much memory we spend, so every path has
-a limit and none of them is arbitrary.
-
 Images are the one place a child chooses how much memory we spend, so every path has a
 limit and none of them is arbitrary:
 
@@ -87,12 +84,26 @@ limit and none of them is arbitrary:
 | `MAX_PAYLOAD` (32MB) | `kitty.rs` | A transmission, compressed or not |
 | `sixel::MAX_PIXELS` | `sixel::measure` | `!` as a compressor: 11 bytes name 4G pixels |
 | geometry vs. payload | `Kitty::finish` | `s=65535,v=65535` with a four-byte payload |
-| `MAX_RETAINED_BYTES`, `MAX_TRACKED_IMAGES` | `ImageStore` | A long session, module side |
-| `cooked-image-cache-size` (64MB) | `cooked--evict-images` | A long session, Emacs side |
+| `MAX_TRACKED_IMAGES` (4096) | `ImageStore` | A long session's bookkeeping |
+| `cooked-image-cache-size` (64MB) | `cooked--evict-images` | A long session's pictures |
 
-The last one is worth reading the docstring for before changing: eviction is two passes,
-and the first only spends images with no live spec, which is free information rather than
-a guess.
+Those two bound different things, and only the second bounds any pixels. The module
+keeps no payload at all — a geometry and a 128-bit digest per image, some forty bytes —
+so its cap is on how many pictures it can still *recognise*, not on how much it holds.
+`cooked-image-cache-size` is worth reading the docstring for before changing: eviction
+spends only images with no live spec, which is free information rather than a guess.
+
+Neither cap is what a *font* change spends. That drops the module's store whole, because
+the geometry it keeps is a count of cells measured against the old one, and answering a
+retransmission with it is what makes a looping gif alternate between two sizes. See
+`Term::set_cell_metrics`.
+
+It used to keep the payloads too, under a 64MB cap of its own, so that a kitty client
+could place an image it had transmitted earlier by bare id. That is what
+[the single-owner invariant](DESIGN.md#images-have-one-owner-and-it-is-emacs) replaced:
+Emacs holds the only copy, the module is told when Emacs drops one, and a bare-id
+placement of a picture that has gone is answered `ENOENT:image` rather than drawn from a
+second cache with a policy of its own.
 
 ## What is not implemented, and why
 
@@ -130,6 +141,18 @@ A trap worth naming, because it cost an hour: the ST terminator's `\` is `0x5C`,
 is inside sixel's own data range, so a harness that hands the decoder one byte too many
 silently paints an extra column. The real parser strips the terminator; test scaffolding
 has to as well.
+
+**The terminal's own echo lands inside pictures.** Ctrl-C in `viu` was losing all but
+the first row of the animation, and neither end of that is where it looks. `ECHOCTL`
+writes `^C` into the pty's *output* the moment the key is pressed, and a child part-way
+through a four-megabyte frame is blocked in `write`, so the echo goes in between two
+pieces of that write — inside the payload — and the rest of the write is never made. So
+the frame arrives with two bytes nobody sent and several kilobytes missing. Refusing it
+over either costs far more than the frame: `viu` parks the cursor at the picture's *top*
+row between frames, so a frame that places nothing leaves it there for the newline after
+it to move one row *into* the picture, and for the shell's `ED` on the way to a new
+prompt to erase everything below. Both are repaired in `decode_base64` and `Kitty::finish`
+rather than papered over at the cursor, and the reasoning is in those two docstrings.
 
 **Untouched sixel pixels are transparent**, whatever the introducer's background mode
 says. The spec calls them "the background colour" and expects the terminal to know what

@@ -4,7 +4,7 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{ColorScheme, Delta, Term};
+use crate::emu::{ColorScheme, Delta, ImageId, Term};
 use crate::error::Result;
 use crate::pty::{AtomicMode, JobControl, Mode, Pid, Pty, Winsize};
 use nix::errno::Errno;
@@ -128,6 +128,39 @@ const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500)
 /// and again to become reapable afterwards.
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How quiet the pty must go before a frame is drawn; see [`NotifyState::hold`].
+///
+/// A client update is written in pieces — `viu` sends a cursor move, then four megabytes
+/// of image, then a newline — and drawing between two of them shows a state the client
+/// never meant anyone to see. foot names this exact bug in `term.c` and mitigates it the
+/// same way, with the same 0.5ms: "this causes screen 'flickering'."
+///
+/// Half a millisecond because it has to sit above the gaps *within* an update and below
+/// anything a person can perceive. Measured on this machine, reading a gif at 166MB over
+/// six seconds: the gap between consecutive reads is 32us at the median and 102us at the
+/// 99th percentile, while the gap *between* frames is 16ms and up. There is a factor of
+/// a hundred of daylight between the two, and this sits in the middle of it.
+const QUIESCENCE: std::time::Duration = std::time::Duration::from_micros(500);
+
+/// How long a frame may be held while the child keeps changing it; see
+/// [`NotifyState::hold`].
+///
+/// Half a 60Hz frame, which is foot's `delayed-render-time-upper`. Without a ceiling a
+/// child that writes continuously — a full-screen program repainting flat out — never
+/// gives [`QUIESCENCE`] the gap it waits for, and the buffer would stop updating for as
+/// long as it kept that up. `backlog_limit` catches the same shape only when the output
+/// scrolls; an alternate-screen repaint archives nothing and would sail past it.
+///
+/// Armed at the *second* change of a held frame rather than the first, which is the whole
+/// difference between this and a plain deadline, and is what makes the rule work on the
+/// case it was written for. One cursor move followed by a long silent transfer has
+/// nothing further to show: firing here would draw the cursor at the top of a picture
+/// that has not arrived yet, hold it there for the rest of the transfer, and reproduce
+/// the flicker at a lower rate. A client that is genuinely streaming changes has produced
+/// its second one within microseconds, so it arms this immediately and redraws at 120Hz
+/// throughout.
+const FRAME_CEILING: std::time::Duration = std::time::Duration::from_micros(8_333);
+
 /// A snapshot handed to Lisp on each drain.
 pub(crate) struct Update {
     pub delta: Delta,
@@ -160,13 +193,22 @@ struct Notifier {
     /// arrives. Without one, a program that rewrites the same line rapidly — a spinner, a
     /// progress meter — drives one full Emacs redisplay per write, which is a lot more
     /// redraws than any of them are actually meant to be seen at and shows up as flicker.
-    /// No matching ceiling is needed the way `eat-maximum-latency` provides one: `Term`
-    /// always holds the latest state regardless of whether a wakeup was sent for it, and
-    /// [`Notifier::flush`] is retried every reader-thread tick — see
+    /// A floor and not a frame clock: it says how close together two wakeups may be, and
+    /// nothing about which moment between them is worth drawing. That second question is
+    /// [`NotifyState::hold`]'s, and the two are independent — a keystroke echoed after a
+    /// quiet second passes both on the spot, while a spinner rewriting its line at 1kHz
+    /// is quiet between every write and is held here regardless.
+    ///
+    /// `Term` always holds the latest state regardless of whether a wakeup was sent for
+    /// it, and [`Notifier::flush`] is retried every reader-thread tick — see
     /// [`Notifier::poll_wait`], which shortens that tick to this interval's own
     /// remaining window rather than leaving a throttled notification to wait out the
     /// coarser `POLL_TIMEOUT_MS`.
     min_interval: std::time::Duration,
+    /// See [`QUIESCENCE`].
+    quiescence: std::time::Duration,
+    /// See [`FRAME_CEILING`].
+    frame_ceiling: std::time::Duration,
 }
 
 #[derive(Default)]
@@ -177,16 +219,52 @@ struct NotifyState {
     /// not to be drawn yet. Refreshed from `Term` under the lock the reader already holds,
     /// so no path takes an extra one.
     sync_until: Option<std::time::Instant>,
+    /// When the child last wrote anything at all, drawable or not; see [`Self::hold`].
+    ///
+    /// Every read moves it, including the ones that changed nothing: a megabyte of image
+    /// data changes no cell, and is still the loudest possible evidence that the client
+    /// is in the middle of an update.
+    last_read: Option<std::time::Instant>,
+    /// When a frame that has changed more than once stops being held; see
+    /// [`FRAME_CEILING`]. `None` while no frame is held, and while the held frame has
+    /// only the one change in it.
+    ceiling_at: Option<std::time::Instant>,
+}
+
+impl NotifyState {
+    /// How much longer this frame is being held back for the child to finish writing it,
+    /// or `None` if it is due to be drawn now.
+    ///
+    /// The quiescence rule, and the only policy in the tree that waits for a *client* to
+    /// finish rather than for the clock. It is the same shape as DEC mode 2026 — hold the
+    /// frame, keep `dirty` set, retire at a deadline — with the pty going quiet standing
+    /// in for the child's cooperation, which is what makes it work for the overwhelming
+    /// majority of clients that will never emit a 2026 sequence in their lives.
+    ///
+    /// Two deadlines, whichever comes first: [`QUIESCENCE`] since the last byte arrived,
+    /// and [`FRAME_CEILING`] since the frame's second change. `last_read` unset — which
+    /// [`Notifier::announce`] arranges — means there is nothing to wait for at all.
+    fn hold(&self, quiescence: std::time::Duration) -> Option<std::time::Duration> {
+        let quiet = remaining(self.last_read.map(|t| t + quiescence))?;
+        match self.ceiling_at {
+            None => Some(quiet),
+            // `None` here is a ceiling that has *passed*, and so a release rather than an
+            // absent deadline. The two spell the same in `Option` and mean opposite things.
+            Some(at) => remaining(Some(at)).map(|left| quiet.min(left)),
+        }
+    }
 }
 
 impl Notifier {
-    fn new(wake: OwnedFd, min_interval: std::time::Duration) -> Self {
+    fn new(wake: OwnedFd, options: &Options) -> Self {
         Self {
             wake: Mutex::new(Some(wake)),
             dirty: AtomicBool::new(false),
             notified: AtomicBool::new(false),
             state: Mutex::new(NotifyState::default()),
-            min_interval,
+            min_interval: options.min_redisplay_interval,
+            quiescence: options.quiescence,
+            frame_ceiling: options.frame_ceiling,
         }
     }
 
@@ -204,10 +282,38 @@ impl Notifier {
         }
     }
 
-    /// Mark output or a mode change pending, and flush it if the throttle allows.
+    /// Mark something pending that is not part of a frame, and flush it if the throttle
+    /// allows.
+    ///
+    /// Clearing both quiescence deadlines is what "not part of a frame" means here. A
+    /// termios change, a full backlog and a child that has exited are none of them things
+    /// the child is going to finish writing, and the one case that matters — `getpass`
+    /// turning echo off a fraction of a millisecond after printing its prompt — is
+    /// precisely one that must not wait on the rest of an update.
     fn announce(&self) -> bool {
         self.dirty.store(true, Ordering::SeqCst);
+        let mut state = self.state.held();
+        state.last_read = None;
+        state.ceiling_at = None;
+        drop(state);
         self.flush()
+    }
+
+    /// Note a read from the pty, `drawable` saying whether it changed anything Emacs
+    /// would draw.
+    ///
+    /// The entry point for output, in place of [`Self::announce`]: it marks the frame and
+    /// leaves the decision of when to draw it to [`Self::flush`], which the reader
+    /// retries on every tick. Both halves of [`NotifyState::hold`] are armed here — the
+    /// timestamp on every read, and the ceiling from the second drawable change onwards,
+    /// which is what `dirty` already being set says.
+    fn fed(&self, drawable: bool) {
+        let now = std::time::Instant::now();
+        let mut state = self.state.held();
+        state.last_read = Some(now);
+        if drawable && self.dirty.swap(true, Ordering::SeqCst) {
+            state.ceiling_at.get_or_insert(now + self.frame_ceiling);
+        }
     }
 
     /// Send the wake byte if something is pending, nothing is already in flight, and
@@ -226,7 +332,13 @@ impl Notifier {
         if state.last.is_some_and(|t| t.elapsed() < self.min_interval) {
             return true;
         }
+        // Same reasoning as the sync check above, and the same handling: the frame stays
+        // dirty and the retry machinery draws it the moment the child stops writing.
+        if state.hold(self.quiescence).is_some() {
+            return true;
+        }
         state.last = Some(std::time::Instant::now());
+        state.ceiling_at = None;
         drop(state);
         self.dirty.store(false, Ordering::SeqCst);
         self.notify()
@@ -288,7 +400,12 @@ impl Notifier {
         // thread hot for the length of every frame. Taking the later of the two deadlines
         // both fixes that and retires the sync timeout at the timeout rather than up to a
         // poll late.
-        let wait = throttle.max(remaining(state.sync_until).unwrap_or_default());
+        // The quiescence hold joins the same `max` and for the same reason: it too keeps
+        // `dirty` set with nothing to flush, so leaving it out would poll on a zero
+        // throttle for the length of every frame.
+        let wait = throttle
+            .max(remaining(state.sync_until).unwrap_or_default())
+            .max(state.hold(self.quiescence).unwrap_or_default());
         drop(state);
         wait
     }
@@ -382,6 +499,10 @@ impl Interrupt {
 pub(crate) struct Options {
     /// See [`Notifier::min_interval`].
     pub min_redisplay_interval: std::time::Duration,
+    /// See [`QUIESCENCE`].
+    pub quiescence: std::time::Duration,
+    /// See [`FRAME_CEILING`].
+    pub frame_ceiling: std::time::Duration,
     /// See [`Shared::backlog_limit`].
     pub backlog_limit: usize,
 }
@@ -390,6 +511,14 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             min_redisplay_interval: std::time::Duration::from_millis(8),
+            // Fields rather than the constants read directly, and the only caller that
+            // sets them is a test: half a millisecond is not a gap a child can be asked to
+            // produce on demand, so the tests that pin the rule widen it to something a
+            // shell can hit. Lisp does not offer these, deliberately — see
+            // `cooked-min-redisplay-interval`, which is the one redisplay knob with a
+            // taste question behind it.
+            quiescence: QUIESCENCE,
+            frame_ceiling: FRAME_CEILING,
             backlog_limit: crate::emu::BACKLOG_HIGH_WATER,
         }
     }
@@ -427,7 +556,7 @@ impl Session {
             term: Mutex::new(Term::new(size.rows.into(), size.cols.into())),
             mode: AtomicMode::new(mode),
             pending_resize: Mutex::new(None),
-            notifier: Notifier::new(wake, options.min_redisplay_interval),
+            notifier: Notifier::new(wake, &options),
             resample_at: Mutex::new(None),
             backlog_limit: options.backlog_limit,
             shutdown: AtomicBool::new(false),
@@ -545,6 +674,11 @@ impl Session {
             Err(e) if e.is(Errno::ENOTTY) => Ok(()),
             result => result,
         }
+    }
+
+    /// Emacs has dropped an image's bytes; see [`Term::forget_image`].
+    pub(crate) fn forget_image(&self, id: ImageId) {
+        self.shared.term.held().forget_image(id);
     }
 
     /// Mark the whole screen damaged, so the next drain re-sends it.
@@ -719,6 +853,13 @@ impl Shared {
         }
     }
 
+    /// Retire a notification the throttle or the quiescence rule held back earlier.
+    fn flush(&self) {
+        if !self.notifier.flush() {
+            self.shutdown.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// Copy the emulator's synchronized-output deadline where the notify path sees it.
     fn refresh_sync(&self) {
         let deadline = self.term.held().sync_deadline();
@@ -814,10 +955,14 @@ impl Shared {
             // next tick of a loop that is already running is enough — no dedicated wait needed.
             self.apply_pending_resize();
 
-            // Retries a notification `min_redisplay_interval` throttled earlier. Unconditional
-            // so a quiet period still gets the last bit of output flushed within one more poll
-            // cycle, rather than waiting on the next read that may never come.
-            self.notifier.flush();
+            // Retires a notification held back earlier, by the throttle or by the
+            // quiescence rule. Unconditional, and it is this call rather than the read
+            // below that draws the ordinary frame: a poll that came back with nothing to
+            // read is a child that has stopped writing, which is exactly what
+            // [`NotifyState::hold`] is waiting to hear. The rule lives in `flush` rather
+            // than in a condition here so that every caller obeys it — including the
+            // `drained` on Emacs' own thread.
+            self.flush();
 
             if !ready {
                 continue;
@@ -839,17 +984,27 @@ impl Shared {
             match self.pty.read(&mut buf) {
                 Ok([]) => return self.finish(Ended::ChildGone),
                 Ok(data) => {
-                    self.term.held().feed(data);
+                    let drawable = self.term.held().feed(data);
+                    self.refresh_sync();
+                    // Not `announce`: the wakeup is now the business of the `flush` at the
+                    // top of the loop, which sends it once the child has finished what it
+                    // is writing. Handing over what the read produced rather than the fact
+                    // that there was one is the other half — most reads of an image
+                    // transfer change nothing on screen, and waking Emacs to repaint an
+                    // identical grid was 55% of the drains a gif player cost us.
+                    self.notifier.fed(drawable);
                     // The child has just written, so the tty is worth asking about again
                     // shortly: the prompt of a secret read lands here, and the
                     // `tcsetattr` behind it a fraction of a millisecond later. See
                     // [`RESAMPLE_DELAY`].
                     self.arm_resample();
                     // A child that changes mode almost always writes at the same moment, so
-                    // re-sampling here is what makes the common case feel instantaneous.
-                    self.sample_mode();
-                    self.refresh_sync();
-                    self.announce();
+                    // re-sampling here is what makes the common case feel instantaneous. A
+                    // change goes out at once rather than waiting on the frame: a password
+                    // prompt is the case, and the whole of its value is being early.
+                    if self.sample_mode() {
+                        self.announce();
+                    }
                 }
                 // EIO is how Linux reports the last slave closing.
                 Err(e) if e.is(Errno::EIO) => {
@@ -1277,6 +1432,113 @@ mod tests {
             "took {elapsed:?} to retire a notification the drain found throttled; expected \
              the rest of the {THROTTLED:?} interval, not a POLL_TIMEOUT_MS (100ms) tick"
         );
+    }
+
+    /// The quiescence window the two tests below run at, hugely above its 500us default,
+    /// with the redisplay floor taken out from under it.
+    ///
+    /// Half a millisecond is not a gap a shell can be asked to produce or to avoid: a
+    /// `sleep 0.0005` is rounding error against process scheduling, and two `printf`s in a
+    /// row are usually one read anyway. Widening the window to something a `sleep` can
+    /// straddle is what makes the child's writes land on the side of it the test names.
+    /// It has to stay under `POLL_TIMEOUT_MS` (100ms) so a wakeup cannot be attributed to
+    /// the tick, and `min_redisplay_interval` goes down to 1ms so the floor is never the
+    /// thing under measurement.
+    const QUIET: Duration = Duration::from_millis(60);
+
+    fn quiescent_session(script: &str) -> (Session, OwnedFd) {
+        session_with(
+            &["/bin/sh", "-c", script],
+            Options {
+                min_redisplay_interval: Duration::from_millis(1),
+                quiescence: QUIET,
+                ..Options::default()
+            },
+        )
+    }
+
+    /// Two writes closer together than the quiescence window are one frame, and one frame
+    /// is one wakeup: the first byte Emacs ever hears about already carries both.
+    ///
+    /// This is the whole of the flicker fix. `viu` writes a cursor move, then four
+    /// megabytes of image, then a newline, and drawing between the first and the last
+    /// paints the cursor at the top of a picture that has not arrived — every frame, at
+    /// 7Hz. The gap here stands in for the transfer.
+    #[test]
+    fn writes_inside_the_quiescence_window_are_one_wakeup() {
+        let (session, read) = quiescent_session("printf a; sleep 0.02; printf b; sleep 5");
+        assert!(
+            woke_within(&read, Duration::from_secs(2)),
+            "the frame was never drawn at all"
+        );
+        assert_eq!(
+            rendered(&session.drain()).trim(),
+            "ab",
+            "the first wakeup must carry the whole of what the child wrote"
+        );
+        drop(session);
+    }
+
+    /// And two writes further apart than the window are two frames, so the first is drawn
+    /// without waiting on the second. A rule that coalesced everything would be a rule
+    /// that made the terminal feel slow.
+    #[test]
+    fn writes_outside_the_quiescence_window_are_two_wakeups() {
+        let (session, read) = quiescent_session("printf a; sleep 0.4; printf b; sleep 5");
+        assert!(
+            woke_within(&read, Duration::from_secs(2)),
+            "the first write was never drawn"
+        );
+        assert_eq!(
+            rendered(&session.drain()).trim(),
+            "a",
+            "the child had gone quiet; the first write must not wait on the second"
+        );
+        // The drain above is what clears `notified`, exactly as Emacs' filter does, so
+        // there is a second byte to be had rather than the first one's own.
+        assert!(
+            woke_within(&read, Duration::from_secs(2)),
+            "the second write was never drawn"
+        );
+        drop(session);
+    }
+
+    /// A child that never stops writing never goes quiet, so something else has to draw
+    /// the frame: [`FRAME_CEILING`], armed at the frame's second change.
+    ///
+    /// The loop overwrites one column rather than printing lines, so nothing scrolls and
+    /// `backlog_limit` — which forces a wakeup of its own — cannot be what passes this.
+    /// Bounded rather than infinite so it dies on its own if the teardown below ever
+    /// stops working, and bounded well past the patience below so that the byte this
+    /// waits for cannot be the one the child's own exit sends.
+    #[test]
+    fn a_child_that_never_pauses_is_drawn_at_the_ceiling() {
+        let (session, read) = session_with(
+            &[
+                "/bin/sh",
+                "-c",
+                "i=0; while [ $i -lt 2000000 ]; do printf 'x\r'; i=$((i+1)); done",
+            ],
+            Options {
+                // Far past anything the child will give us, so a pass cannot be the
+                // quiescence rule releasing the frame.
+                quiescence: Duration::from_secs(30),
+                frame_ceiling: Duration::from_millis(20),
+                ..Options::default()
+            },
+        );
+        // Settle first, then drain: the shell's own start-up moves the termios, and a
+        // mode change is announced rather than held (see `Notifier::announce`), so the
+        // first byte on this pipe is not the one this test is about. Draining clears
+        // `notified` exactly as Emacs' filter does, which is what leaves a second byte to
+        // be earned -- and by the ceiling alone, since the child has not paused since.
+        std::thread::sleep(Duration::from_millis(50));
+        session.drain();
+        assert!(
+            woke_within(&read, Duration::from_millis(300)),
+            "a frame held for a child that never pauses must be drawn at the ceiling"
+        );
+        drop(session);
     }
 
     #[test]

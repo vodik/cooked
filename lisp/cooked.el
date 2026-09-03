@@ -2018,8 +2018,14 @@ end is not needed: the native core always holds the latest terminal state
 regardless of whether a redisplay was requested for it, and retries a
 throttled one on every read cycle, so nothing is ever stranded behind this.
 
-Lower it if the terminal feels less responsive than it should; raise it if
-it still flickers.  Takes effect for sessions started after it is set."
+A floor on the rate, and not the answer to a half-drawn frame: the core
+already holds a frame back until the child stops writing it, which is what
+keeps a picture's cursor move from being drawn without the picture.  Raising
+this cannot improve on that and costs latency on every keystroke.
+
+Lower it if the terminal feels less responsive than it should; raise it if a
+program that rewrites one line very fast still flickers.  Takes effect for
+sessions started after it is set."
   :type 'number
   :group 'cooked)
 

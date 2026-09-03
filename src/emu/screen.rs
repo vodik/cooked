@@ -178,6 +178,8 @@ pub struct Screen {
     pub region: Region,
     pub saved: Option<Cursor>,
     dirty: Vec<bool>,
+    /// How many times a row has been marked damaged; see [`Screen::touches`].
+    touches: u64,
     tabs: Vec<bool>,
     /// Rows of row 0's logical line that have already left the grid for Emacs.
     ///
@@ -238,6 +240,7 @@ impl Screen {
             region: Region::full(rows),
             saved: None,
             dirty: vec![true; rows],
+            touches: 0,
             tabs: default_tabs(cols),
             carried: 0,
             autowrap: true,
@@ -332,6 +335,7 @@ impl Screen {
 
     fn touch(&mut self, index: usize) -> Option<&mut Row> {
         *self.dirty.get_mut(index)? = true;
+        self.touches += 1;
         self.rows.get_mut(index)
     }
 
@@ -346,11 +350,28 @@ impl Screen {
         let end = (last + 1).min(self.dirty.len());
         if let Some(span) = self.dirty.get_mut(first..end) {
             span.fill(true);
+            self.touches += 1;
         }
     }
 
     pub fn touch_all(&mut self) {
         self.dirty.fill(true);
+        self.touches += 1;
+    }
+
+    /// How many times a row has been marked damaged over this screen's life.
+    ///
+    /// The question [`Screen::drain_damage`] answers, asked without the answer being
+    /// destructive and by a caller who only wants to know whether anything happened --
+    /// see [`Term::feed`], which compares two readings of it.
+    ///
+    /// A running count rather than "is any row dirty", which is the obvious form and is
+    /// wrong in the case that matters: damage stays up until Emacs drains, so between two
+    /// reads of a program repainting flat out the flag says `true` both times and the
+    /// second read looks like it did nothing. A count saturates at `u64`, which is a
+    /// hundred years of touching a row every nanosecond.
+    pub fn touches(&self) -> u64 {
+        self.touches
     }
 
     /// Indices of rows changed since the last drain.
