@@ -260,12 +260,22 @@ it is painting and is honoured.
 
 ---
 
-## The three-file base layer
+## The base layer, and why anything sits *below* cooked.el
 
-`cooked.el` requires `cooked-face.el` and `cooked-deco.el`, so neither can require it
-back — which is why `cooked-util.el` exists. It holds the customization group, the
-session handle and the four macros the layers above reach for often enough that
-open-coding them was how they drifted apart.
+`cooked.el` requires `cooked-face.el`, `cooked-deco.el`, `cooked-link.el` and
+`cooked-command.el`, so none of them can require it back — which is why `cooked-util.el`
+exists. It holds the customization group, the session handle, the seam runners, and the
+macros the layers above reach for often enough that open-coding them was how they
+drifted apart.
+
+`cooked-command.el` is the one whose placement is worth stating, because it looks wrong:
+almost all of its readers are in `cooked-mode.el`, one level *above* `cooked.el`, so
+that is where it seems to belong. It sits below instead, and the test is what it
+depends on rather than who depends on it — nothing in it reaches for anything above it,
+so the drain can call `cooked--mark-command-end` and `cooked--running-anchor` directly.
+Placed in the middle it would have needed four `declare-function`s pointing back down
+into `cooked.el`, and the rule that block states about itself is that it carries
+notifications upward, never questions.
 
 The one coupling that crosses the other way is a cache: `cooked--flush-face-cache` has
 to drop decoration specs that were coloured against the outgoing theme, and cannot name

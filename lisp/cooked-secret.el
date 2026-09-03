@@ -206,7 +206,5 @@ space, and does not."
                (cooked--send-if-live "\C-c"))
              (signal 'quit nil))))))))
 
-;;;; Size and lifecycle
-
 (provide 'cooked-secret)
 ;;; cooked-secret.el ends here

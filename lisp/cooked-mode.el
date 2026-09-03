@@ -3,9 +3,11 @@
 ;;; Commentary:
 
 ;; The interactive half of cooked: keymaps, key encoding, input submission,
-;; history, secrets, and starting a shell.  Completion is its own file,
-;; cooked-completion.el.  See cooked.el, the main file, for what this is and how
-;; to install it.
+;; history, and the mode itself.  Four things that used to live here have their
+;; own files, each named for what it is -- cooked-completion.el,
+;; cooked-secret.el, cooked-shell-integration.el and cooked-mode-line.el -- and
+;; the command records everything here navigates by are cooked-command.el.  See
+;; cooked.el, the main file, for what this is and how to install it.
 
 ;; Two signals decide who owns the keyboard.  The kernel's line discipline
 ;; (`cooked--mode') identifies programs doing canonical reads, and OSC 133 marks
@@ -1785,7 +1787,7 @@ corrupt a redisplay cooked cannot see, let alone repair."
                                          (count-lines beg end))
                                  'face 'shadow))))))
 
-;;;; Secrets
+;;;; Size and lifecycle
 
 (defun cooked--sync-size (&optional _frame)
   "Match the emulator and child to the window size.
@@ -2080,7 +2082,7 @@ and a session that exits and is then killed goes through both."
     (let ((buffer (current-buffer)))
       (run-at-time 0 nil (lambda () (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
-;;;; Faces for what the mode line reports
+;;;; The mode
 
 (define-derived-mode cooked-mode comint-mode "cooked"
   "Major mode for a terminal that hands the keyboard back for line input.
