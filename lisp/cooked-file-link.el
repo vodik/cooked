@@ -245,20 +245,18 @@ guessed."
                  (to (match-end 0))
                  (string (match-string-no-properties 0)))
             (pcase-let ((`(,name ,_line ,_col) (cooked-file-link--split string)))
-              (unless (or (get-text-property from 'cooked-link-id)
-                          (seq-some (lambda (o) (overlay-get o 'goto-address))
-                                    (overlays-at from)))
+              ;; What the child named, and what goto-addr read out of the text,
+              ;; both outrank what this guessed from its shape; see
+              ;; `cooked-link--claimed-p'.
+              (unless (cooked-link--claimed-p from)
                 (let ((file (with-memoization (gethash name known)
                               (or (cooked-file-link--exists name) 'none))))
                   (unless (eq file 'none)
-                    (add-text-properties
+                    (cooked-link--propertize
                      from to
-                     (list 'cooked-file-link file
-                           'mouse-face 'highlight
-                           'follow-link t
-                           'help-echo "mouse-2, C-c RET: visit this file"
-                           'keymap cooked-link-map
-                           'face 'cooked-link))))))))))))
+                     'cooked-file-link file
+                     'help-echo "mouse-2, C-c RET: visit this file"
+                     'face 'cooked-link)))))))))))
 
 (add-hook 'cooked-link-follow-functions #'cooked-file-link-follow)
 (add-hook 'cooked-link-scan-functions #'cooked-file-link-scan)

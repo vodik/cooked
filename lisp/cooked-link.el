@@ -50,6 +50,7 @@
 
 ;;; Code:
 
+(require 'seq)
 (require 'goto-addr)
 (require 'browse-url)
 
@@ -236,6 +237,43 @@ whether cooked's own `C-c' map is reachable at all already decides it."
 
 ;;;; The OSC 8 pass
 
+(defun cooked-link--claimed-p (pos)
+  "Whether some other source has already made the text at POS a link.
+
+The precedence between the three sources, stated in one place so that adding a
+fourth is one edit rather than a pairwise check per existing pair:
+
+  1. An `OSC 8\=' span, because the child named the destination outright and
+     nothing here has to guess at it.
+  2. A `goto-addr\=' match, which read a URL out of the text itself.
+  3. Anything guessed from the shape of the text -- `cooked-file-link.el\='s
+     file names -- which is the only source that can be wrong about what the
+     text even is.
+
+So this answers for the two above the guessing layer, and the guessing layer
+asks it before claiming anything.  Deliberately *not* the question
+`cooked--fontify-links\=' asks when it drops a goto-addr overlay: that one is
+specifically about an `OSC 8\=' span having claimed the same characters, and
+widening it to \"claimed\" would have it delete overlays sitting over file names
+too."
+  (or (get-text-property pos 'cooked-link-id)
+      (seq-some (lambda (overlay) (overlay-get overlay 'goto-address))
+                (overlays-at pos))))
+
+(defun cooked-link--propertize (beg end &rest extra)
+  "Make BEG..END behave as a link, carrying EXTRA over the common properties.
+
+The three every link kind shares -- the highlight, `follow-link\=' for
+`mouse-1-click-follows-link\=', and the keymap that answers RET and mouse-2 --
+spelled once, so two kinds cannot drift into answering different keys.  EXTRA
+is a plist for what the caller\='s own kind adds: its id, its `help-echo\=', its
+face."
+  (add-text-properties beg end
+                       (append extra
+                               (list 'mouse-face 'highlight
+                                     'follow-link t
+                                     'keymap cooked-link-map))))
+
 (defconst cooked--link-keys "mouse-2, C-c RET: follow link"
   "How to follow an OSC 8 span, worded like goto-addr's own.")
 
@@ -281,12 +319,9 @@ claim a click the image had a better claim to."
       (let ((beg (+ start from))
             (end (+ start to)))
         (unless (eq (car-safe (get-text-property beg 'cooked-deco)) 'image)
-          (add-text-properties beg end
-                               (list 'cooked-link-id id
-                                     'mouse-face 'highlight
-                                     'follow-link t
-                                     'help-echo #'cooked--link-help-echo
-                                     'keymap cooked-link-map))
+          (cooked-link--propertize beg end
+                                   'cooked-link-id id
+                                   'help-echo #'cooked--link-help-echo)
           (unless (get-text-property beg 'face)
             (put-text-property beg end 'face 'cooked-link)))))))
 
