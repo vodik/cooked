@@ -79,7 +79,7 @@ Not loading it is not turning completion off — TAB is still `completion-at-poi
 the Emacs table answers. Making TAB drive *zsh's own* completion menu instead is a
 different feature and not one of the two: at an integrated prompt ZLE's buffer is
 empty, because the line lives in Emacs until you press RET, so forwarding TAB would
-complete the empty line and offer every command on `PATH`. See the notes in bugs.org.
+complete the empty line and offer every command on `PATH`.
 
 
 ## Talking back to Emacs

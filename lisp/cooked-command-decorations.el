@@ -22,11 +22,10 @@
 ;; has not answered it.  A third *colour* on that axis, an orange or a yellow,
 ;; would read as a third answer.  iTerm2, for comparison, paints only the two.
 ;;
-;; The reason it is a separate file is consistency rather than the argument the
-;; `Completion integration' entry in bugs.org makes for that rule: that entry's
-;; case for a separate file was specifically that a switch here cannot tell the
-;; truth, because the shell-side half of completion runs whether or not Emacs is
-;; listening.  Decorations have no shell-side half at all -- they are painted
+;; The reason it is a separate file is consistency rather than the argument that
+;; makes `cooked-shell-completion' one: there, a `defcustom' could not tell the
+;; truth, because the shell-side half of completion runs -- and shadows `compadd'
+;; for the life of the session -- whether or not Emacs is listening.  Decorations have no shell-side half at all -- they are painted
 ;; from `cooked-command-finished-functions' and re-armed from
 ;; `cooked-row-rendered-function', both of which fire only inside this Emacs,
 ;; on cooked's own bookkeeping -- so there is no announcement that could go on

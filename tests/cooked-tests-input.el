@@ -2446,7 +2446,13 @@ nothing about the prompt.  Navigation then means what it always did."
 \033]133;C\007second\n\033]133;D;0\007'; sleep 5")
     (should (cooked-tests--settle (lambda () (= (length cooked--commands) 2))))
     (should-not (cooked--command-prompt-position (car cooked--commands)))
-    (should (equal (cooked--prompt-starts) (cooked--command-starts)))))
+    ;; With no `A' mark anywhere, every record falls back to its output start,
+    ;; so the two lists coincide -- which is the whole of what "means what it
+    ;; always did" says.  Spelled out here rather than against a helper, since
+    ;; the only thing that ever wanted it was this assertion.
+    (should (equal (cooked--prompt-starts)
+                   (sort (mapcar #'cooked--command-start-position cooked--commands)
+                         #'<)))))
 
 (ert-deftest cooked-evil-command-text-objects-take-the-output-and-the-command ()
   "`ic' is what the command printed; `ac' adds the prompt it was typed at and

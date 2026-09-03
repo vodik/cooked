@@ -1757,19 +1757,11 @@ to land in, and its exit status is exactly the one worth chasing."
                   (cooked--command-end-position command)))
             cooked--commands))
 
-(defun cooked--command-starts ()
-  "Where each recorded command's output begins, in buffer order.
-
-`cooked--commands' is newest first, which is the order the records are pushed
-in and the order `cooked-last-exit-code' wants; moving through the transcript
-wants the other one."
-  (nreverse (mapcar #'cooked--command-start-position cooked--commands)))
-
 (defun cooked--prompt-starts ()
   "Where each command's prompt begins, in buffer order.
 
-What navigation moves between, and not the same list as
-`cooked--command-starts': a command that printed nothing has its output start
+What navigation moves between, and deliberately not the list of where each
+command's *output* began: a command that printed nothing has its output start
 and end at the *next* prompt, so walking output starts steps straight over it
 and reads as though the command -- very often a quiet one, or a failing one --
 were never recorded at all.  It was; only the place to stand was missing.

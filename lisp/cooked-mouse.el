@@ -334,9 +334,9 @@ into by the time it comes up."
                          (and (not pressed) (memq button cooked--mouse-held)
                               (or cooked--mouse-last-cell (cooked--cursor-cell)))))))
           (cond
-           ;; Checked before the mouse report: `cooked--alt-scroll-p' is already
-           ;; false when the child asked for the mouse, so the two can never both
-           ;; apply.
+           ;; Checked before the mouse report: `cooked--alt-scroll-active-p' is
+           ;; already false when the child asked for the mouse, so the two can
+           ;; never both apply.
            ((and here wheel button (cooked--alt-scroll-active-p))
             (cooked--send-to-child (cooked--alt-scroll-keys button)))
            ((null cell)

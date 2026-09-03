@@ -173,8 +173,10 @@ The gate is not politeness, it is a documented guarantee.  A `keymap' text or
 overlay property is consulted *before* `emulation-mode-map-alists\=', so the
 binding this command sits on outranks `cooked--mouse-map\=' — and a plain click
 while the child has grabbed the mouse belongs to the child, with Shift as the
-sanctioned escape (see the README, and the `selection confusion\=' entry in
-bugs.org).  The same holds for RET while keys are being forwarded.  So an
+sanctioned escape -- see the README.  Without that rule a click meant for the
+program underneath would follow a link instead, which is the confusion the
+shifted variant exists to settle.  The same holds for RET while keys are being
+forwarded.  So an
 unshifted invocation in either of those states forwards exactly what it would
 have forwarded had this binding not existed, and the shifted variant — `S-RET\='
 and `S-mouse-2\=' — follows the link regardless, which is what keeps a link

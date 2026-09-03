@@ -63,10 +63,12 @@ which is the ordinary \"I just ran make\" case.
 
 Refuses outright, rather than guessing, when neither exists and something is
 still running: parsing a command's output before `cooked--mark-command-end'
-has recorded where it ends would mean parsing a moving target, and unlike the
-text-object case in bugs.org (\"vic/vac\"), this is reached from an ordinary
-interactive command, so a signal here is safe -- it cannot strand evil in a
-stale visual selection the way one there did."
+has recorded where it ends would mean parsing a moving target.  Signalling is
+safe here in a way it is not in `cooked-evil--command-range\=': that one is an
+`evil\=' text-object body, and a signal from one aborts the command with evil
+still in visual state, after which no `post-command-hook\=' runs to reconcile
+the selection.  This is reached from an ordinary interactive command, where a
+`user-error\=' is just a message."
   (or (cooked--command-at (point))
       (car cooked--commands)
       (if cooked--command-start
@@ -86,9 +88,10 @@ useless for exactly the multi-screen build log it is most wanted for.
 
 The cost of that choice, worth being honest about: a command whose output has
 not yet scrolled off the live screen at all offers no safe prefix and searches
-as empty, however finished it is.  See the `bugs.org' entry this implements
-for why that is not a bug -- it is the same invariant the resize corruption
-report settled."
+as empty, however finished it is.  That is the invariant rather than a
+shortfall of it: a row at or above `cooked--screen-start-position\=' is one the
+next drain may rewrite, so a position found there names text that need not
+still be there when \\[next-error] goes to visit it."
   (let* ((region (cooked--command-region command))
          (beg (car region))
          (end (cdr region))
