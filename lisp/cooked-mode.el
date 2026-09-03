@@ -765,7 +765,7 @@ and the rest keep working."
 ;; ever fire -- a buffer suspended on the way out of emacs state and then put
 ;; into insert state stayed suspended forever.  Deriving the mode instead means
 ;; insert state selects `cooked-semi-map' and resumes on its own, whatever
-;; route got you into normal state.  See `cooked-input-mode-function', which is
+;; route got you into normal state.  See `cooked-input-mode-functions', which is
 ;; the seam `cooked-evil.el' fills in.
 
 (defvar cooked-mode-map)                ; `define-derived-mode' below makes it
@@ -1581,26 +1581,36 @@ routinely -- dragged the user out of normal state a keystroke after they pressed
 `unset' until the first refresh, so a session starting against a child that
 already owns the keyboard still counts as a change and is announced.")
 
-(defvar cooked-input-mode-function #'cooked--default-input-mode
-  "Function returning the `cooked--input-mode' for a buffer, or nil for none.
+(defvar cooked-input-mode-functions nil
+  "Abnormal hook deciding the `cooked--input-mode' for a buffer.
 
-Called with no arguments, in the session's buffer, whenever the state is
-recomputed.  It is asked for every live session, prompt included: Emacs owning
-the line takes the keyboard half of the answer away, but not the half about the
-render -- a child repainting a canonical tty is exactly the case `still' and
-`frozen' are worth having.  `cooked--suspended-p' is where the keyboard half is
+Each entry is called with no arguments, in the session's buffer, whenever
+the state is recomputed, and the first non-nil answer wins.  The hook is run
+for every live session, prompt included: Emacs owning the line takes the
+keyboard half of the answer away, but not the half about the render -- a
+child repainting a canonical tty is exactly the case `still' and `frozen'
+are worth having.  `cooked--suspended-p' is where the keyboard half is
 dropped; nothing is dropped here.
 
 This is the seam that lets `cooked-evil.el' make the mode a function of evil's
-state without cooked knowing evil exists.  A function, not a variable, because
-the mode has to be *derived* on every state change rather than latched by a
-hook -- see the commentary above `cooked-toggle-peek' for what latching it
-cost.")
+state without cooked knowing evil exists.  Derived on every recomputation
+rather than latched -- see the commentary above `cooked-toggle-peek' for what
+latching it cost -- which is a property of *when* the hook is run and survives
+it having more than one entry.
+
+`cooked--default-input-mode' sits on it at depth 90, so an entry added
+ordinarily is asked first and falls through to the default by answering nil.
+Overriding the default outright, rather than pre-empting it, means
+`remove-hook'.")
 
 (defun cooked--default-input-mode ()
   "Suspend only when `cooked-toggle-peek' says so.
 The answer for anyone not driving this from somewhere else."
   (and cooked--peek-explicit 'frozen))
+
+;; Last, so anything added ordinarily is asked first and this answers only for
+;; what nothing else claimed.
+(add-hook 'cooked-input-mode-functions #'cooked--default-input-mode 90)
 
 (defun cooked--state-keymap (mode policy)
   "The local map for input mode MODE under policy POLICY.
@@ -1634,7 +1644,7 @@ inherits it; see the QUIET argument there.")
   "Install the keymap and render mode the current state asks for.
 
 Two axes meet here: `cooked--policy', which is what the child is doing, and
-`cooked-input-mode-function', which is what the user is doing.  Both are always
+`cooked-input-mode-functions', which is what the user is doing.  Both are always
 asked; where they disagree, the policy wins over the keyboard and the mode wins
 over the render.  At a prompt that means the line stays editable however the
 mode reads -- `cooked--suspended-p' and `cooked--state-keymap' each drop the
@@ -1676,7 +1686,8 @@ are the ones left standing."
          ;; asked nothing at all; there is no state left for a mode to describe.
          (mode (progn (when settled (setq cooked--peek-explicit nil))
                       (and cooked--session
-                           (funcall cooked-input-mode-function)))))
+                           (cooked--run-seam-until-success
+                            'cooked-input-mode-functions)))))
     (setq cooked--input-mode mode)
     ;; Only ever undoes its own protection; see `cooked--read-only'.
     (cond ((cooked--suspended-p)

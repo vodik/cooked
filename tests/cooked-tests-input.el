@@ -1371,7 +1371,7 @@ said, a user navigating the buffer needs a cursor.  Gated on
 true under policy `cooked\=' at all -- the child repainting a canonical tty
 never took the keyboard to be suspended from, which is why
 `cooked-toggle-peek\=' refuses here and `evil\=' normal state is the door.  Driven
-through `cooked-input-mode-function\=', the seam evil itself uses."
+through `cooked-input-mode-functions\=', the seam evil itself uses."
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--send-input-string "printf \'GO\\033[?25l\'; sleep 3")
@@ -1381,7 +1381,7 @@ through `cooked-input-mode-function\=', the seam evil itself uses."
                              (not (cooked-cursor-visible cooked--cursor))))
              8))
     (should-not cursor-type)
-    (let ((cooked-input-mode-function (lambda () 'still)))
+    (let ((cooked-input-mode-functions (list (lambda () 'still))))
       (cooked--refresh-keymap)
       (should (eq cooked--input-mode 'still))
       (should cursor-type))
@@ -2933,13 +2933,13 @@ left it."
     (let* ((runs 0)
            (nested nil)
            (cooked-state-change-hook (list (lambda () (setq runs (1+ runs)))))
-           (cooked-input-mode-function
-            (lambda ()
-              ;; Where a nested refresh comes from in the real thing.
-              (unless nested
-                (setq nested t)
-                (cooked--refresh-keymap))
-              nil)))
+           (cooked-input-mode-functions
+            (list (lambda ()
+                    ;; Where a nested refresh comes from in the real thing.
+                    (unless nested
+                      (setq nested t)
+                      (cooked--refresh-keymap))
+                    nil))))
       (cooked--refresh-keymap t)
       (should nested)
       (should (= runs 0))

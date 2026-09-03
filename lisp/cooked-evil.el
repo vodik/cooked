@@ -189,8 +189,11 @@ back on its own."
 Derived on every transition rather than latched by a hook, which is what makes
 `i' out of normal state resume forwarding on its own -- see the commentary in
 cooked-mode.el above `cooked-toggle-peek' for the bug latching it caused."
-  (if (not (and cooked-evil-integration (bound-and-true-p evil-local-mode)))
-      (cooked--default-input-mode)
+  ;; nil rather than `cooked--default-input-mode' where evil is not driving:
+  ;; the default sits on the same hook, behind this, so answering nil is how
+  ;; this defers to it.  Calling it here as well would answer *for* it, which is
+  ;; the whole difference between an entry and a replacement.
+  (when (and cooked-evil-integration (bound-and-true-p evil-local-mode))
     (or (and cooked--peek-explicit 'frozen)
         (pcase (bound-and-true-p evil-state)
           ((or 'normal 'motion 'operator) cooked-evil-normal-state-render)
@@ -198,11 +201,10 @@ cooked-mode.el above `cooked-toggle-peek' for the bug latching it caused."
           ((or 'insert 'replace) (and cooked-evil-hybrid-insert 'semi))
           (_ nil)))))
 
-;; Only if nobody else has claimed the seam: `cooked-input-mode-function' is a
-;; public hook point, and a user who set their own answer before loading this
-;; meant it.
-(when (eq cooked-input-mode-function #'cooked--default-input-mode)
-  (setq cooked-input-mode-function #'cooked-evil--input-mode))
+;; No guard against a prior claimant any more: the seam is a hook, so adding to
+;; it is not taking it, and a user who wants their own answer asked first adds
+;; theirs rather than racing this file to a `setq'.
+(add-hook 'cooked-input-mode-functions #'cooked-evil--input-mode)
 
 (defun cooked-evil--state-changed ()
   "Recompute cooked's input mode for the state evil has just entered.
