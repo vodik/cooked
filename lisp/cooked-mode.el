@@ -3162,7 +3162,7 @@ arrives."
          ;; generated file is written at spawn and a running shell cannot
          ;; usefully retract a `compadd\' shadow afterwards.
          (capture-p (and (cooked--integration-feature-p 'completion)
-                         cooked-shell-completion-function)))
+                         cooked-shell-completion-functions)))
     (pcase (cooked--integration-shell shell)
       ('bash
        (let* ((scratch (cooked--scratch-directory))

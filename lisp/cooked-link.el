@@ -96,14 +96,18 @@ regardless is what a plain terminal does because it has nowhere else to put the
 information; here the `mouse-face' and the `help-echo' carry it."
   :group 'cooked-link)
 
-(defvar cooked-link-follow-function nil
-  "Function tried before `browse-url' when following the thing at point.
+(defvar cooked-link-follow-functions nil
+  "Abnormal hook tried before `browse-url' when following the thing at point.
 
-Called with no arguments, with point at the candidate.  Returns non-nil if it
-opened something, in which case nothing else is tried.  nil by default: this is
-the seam `cooked-file-link.el' sets to add local-file linking, and with that
-file not loaded there is no function to name and no second switch that could
-disagree with its absence.")
+Each entry is called with no arguments, with point at the candidate, and
+returns non-nil if it opened something -- at which point nothing after it is
+tried.  Run through `cooked--run-seam-until-success', so an entry that signals
+has given no answer and the next one is asked rather than the whole seam
+falling silent over one layer's bug.
+
+Empty by default: this is the seam `cooked-file-link.el' adds itself to for
+local-file linking, and with that file not loaded there is nothing on the hook
+and no second switch that could disagree with its absence.")
 
 (defvar cooked-link-scan-functions nil
   "Abnormal hook run over each batch of output that has settled into scrollback.
@@ -158,7 +162,7 @@ arrive too late for the row that needed it."
   "Open whatever at point counts as a link, in the order the sources rank.
 
 An `OSC 8\=' destination first, because the child named it and nothing here has
-to guess; then `cooked-link-follow-function\=', which is where local files are
+to guess; then `cooked-link-follow-functions\=', which is where local files are
 answered when that layer is loaded; then goto-addr\='s own
 `goto-address-at-point\=', which handles both the URL and the mail case.
 
@@ -166,8 +170,7 @@ The shared tail of `cooked-follow-link\=' and `cooked-follow-link-at-point\=',
 which differ only in what they do *before* deciding to open anything."
   (if-let* ((uri (cooked-link-uri)))
       (browse-url uri)
-    (or (and cooked-link-follow-function
-             (funcall cooked-link-follow-function))
+    (or (cooked--run-seam-until-success 'cooked-link-follow-functions)
         (goto-address-at-point))))
 
 (defun cooked-follow-link (&optional event)
@@ -211,7 +214,7 @@ The keyboard entry point that does not depend on point sitting inside a
 highlighted span: bound on `cooked-mode-map\=' under \\`C-c RET', which is
 goto-addr's own advertised key and reaches cooked's commands in every state
 where Emacs is reading them at all.  It is what answers a file name that
-nothing highlighted, since `cooked-link-follow-function\=' validates on demand."
+nothing highlighted, since `cooked-link-follow-functions\=' validates on demand."
   (interactive)
   (cooked--open-link-at-point))
 

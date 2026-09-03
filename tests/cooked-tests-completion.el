@@ -363,7 +363,7 @@ replies."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (let ((cooked-osc-completion-functions nil)
-          (cooked-shell-completion-function nil)
+          (cooked-shell-completion-functions nil)
           (sent nil))
       ;; Believed with no layer loaded: this is an ownership signal, not a
       ;; completion one.
@@ -429,8 +429,8 @@ fewer variable to explain.  The core snippet is sourced either way -- it is what
 the marks and the announcement come from, and neither is optional."
   (skip-unless (executable-find "zsh"))
   (dolist (loaded '(nil t))
-    (let ((cooked-shell-completion-function
-           (and loaded #'cooked--shell-completion-at-point)))
+    (let ((cooked-shell-completion-functions
+           (and loaded (list #'cooked--shell-completion-at-point))))
       (pcase-let ((`(,_argv ,_env ,scratch)
                    (cooked--shell-invocation (executable-find "zsh"))))
         (unwind-protect

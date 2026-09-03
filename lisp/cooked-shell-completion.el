@@ -36,7 +36,7 @@
 ;; is loaded, so that "not required" and "off" are the same state rather than two
 ;; that can disagree:
 ;;
-;;   `cooked-shell-completion-function'  the CAPF asks it before falling back
+;;   `cooked-shell-completion-functions'  the CAPF asks it before falling back
 ;;   `cooked-osc-completion-functions'    the OSC 51;C arm dispatches through it
 ;;
 ;; Both are questions the core asks, never calls the core makes into the layer,
@@ -332,7 +332,7 @@ on every letter."
 A `completion-at-point-functions' answer, or nil when the shell cannot help --
 no announcement from this prompt, no reply inside `cooked-completion-timeout',
 no candidates -- in which case `cooked-completion-at-point' falls back to the
-Emacs table.  Bound to `cooked-shell-completion-function' at the end of this
+Emacs table.  Bound to `cooked-shell-completion-functions' at the end of this
 file, which is the whole of how the core reaches it."
   (unless (eq cooked-completion-backend 'native)
     (let* ((start (car region))
@@ -393,7 +393,7 @@ file, which is the whole of how the core reaches it."
 ;; `cooked-osc-eval' makes: the seams are plain variables, so a user who wants
 ;; the layer gone can set them back to nil themselves.
 
-(setq cooked-shell-completion-function #'cooked--shell-completion-at-point)
+(add-hook 'cooked-shell-completion-functions #'cooked--shell-completion-at-point)
 (add-hook 'cooked-osc-completion-functions #'cooked--completion-handle)
 
 (provide 'cooked-shell-completion)

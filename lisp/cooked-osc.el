@@ -409,7 +409,7 @@ The announcement is deliberately not routed through here.  It is handled below,
 unconditionally, because `cooked--policy\=' reads it as a license to own the
 input line and that reading has to hold in a session that never loads the
 completion layer at all.  `cooked-shell-completion\=' sets this; see
-`cooked-shell-completion-function\=' for the other half of the same switch.")
+`cooked-shell-completion-functions\=' for the other half of the same switch.")
 
 (defun cooked--osc-announce (payload)
   "Record the prompt\='s OSC 51;CH announcement from PAYLOAD, minus its leading H.

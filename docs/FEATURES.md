@@ -50,7 +50,7 @@ setting that gates code which is loaded and running anyway is a switch in name o
 Asking the shell blocks Emacs for the length of the round trip, and the snippet
 shadows the `compadd` builtin for the whole session — inert when nothing is capturing,
 but every completion you run in that shell then goes through a shell function rather
-than a builtin. Unloaded, none of that exists: `cooked-shell-completion-function` and
+than a builtin. Unloaded, none of that exists: `cooked-shell-completion-functions` and
 `cooked-osc-completion-functions` are nil, the OSC 51;C arm drops what it is given, the
 CAPF goes straight to the Emacs table, and the child is never told to install its half.
 

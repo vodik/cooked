@@ -13,7 +13,7 @@
 ;;
 ;;   (require 'cooked-shell-completion)
 ;;
-;; It announces itself by setting `cooked-shell-completion-function' below, which
+;; It announces itself by setting `cooked-shell-completion-functions' below, which
 ;; is the only thing this file knows about it.  Unloaded, that variable is nil and
 ;; the Emacs table here is the whole of completion; loaded, it is asked first and
 ;; this answers when it cannot.  See `cooked-shell-completion.el' for what that
@@ -27,15 +27,17 @@
   "Completing at a cooked prompt."
   :group 'cooked)
 
-(defvar cooked-shell-completion-function nil
-  "Function asking the child's own completion system, or nil for none.
+(defvar cooked-shell-completion-functions nil
+  "Abnormal hook asking the child's own completion system, or empty for none.
 
-Called with the pending input's region as (START . END) and returning a
-`completion-at-point-functions' answer, or nil when the shell cannot help
--- no integration, no answer in time, no candidates -- in which case the
-Emacs table here answers instead.
+Each entry is called with the pending input's region as (START . END) and
+returns a `completion-at-point-functions' answer, or nil when the shell cannot
+help -- no integration, no answer in time, no candidates -- in which case the
+next entry is asked and the Emacs table here answers last.  The same
+first-non-nil-wins shape `completion-at-point-functions' itself has, which is
+what this seam sits inside.
 
-Nil means the layer is not loaded.  `cooked-shell-completion' sets it, and
+Empty means the layer is not loaded.  `cooked-shell-completion' sets it, and
 requiring that file is how you opt in; the point of the split is that
 asking a shell to complete costs a blocking round trip and a `compadd'
 shadow in that shell for the life of the session, so it is something you
@@ -112,8 +114,7 @@ only that a word is a word."
   (when-let* (((cooked--input-state-p))
               (region (cooked--input-region))
               ((>= (point) (car region))))
-    (or (and cooked-shell-completion-function
-             (funcall cooked-shell-completion-function region))
+    (or (cooked--run-seam-until-success 'cooked-shell-completion-functions region)
         (cooked--native-completion))))
 
 (provide 'cooked-completion)

@@ -178,7 +178,7 @@
   (declare (indent 0))
   `(progn
      (require 'cooked-file-link)
-     (let ((cooked-link-follow-function #'cooked-file-link-follow)
+     (let ((cooked-link-follow-functions (list #'cooked-file-link-follow))
            (cooked-link-scan-functions (list #'cooked-file-link-scan)))
        ,@body)))
 
@@ -192,7 +192,7 @@
   ;; are set for the rest of the session.  What changed is that the assertion has to
   ;; survive the binding instead of restating it: this used to `should-not' one of the
   ;; two variables it had just bound to nil, which holds for any `let' at all.
-  (let ((cooked-link-follow-function nil)
+  (let ((cooked-link-follow-functions nil)
         (cooked-link-scan-functions nil)
         (fell-through nil))
     (with-temp-buffer
@@ -217,7 +217,7 @@
         (let (visited)
           (cl-letf (((symbol-function 'find-file-other-window)
                      (lambda (file) (setq visited file) (set-buffer (get-buffer-create " *visit*")))))
-            (should (funcall cooked-link-follow-function))
+            (should (cooked--run-seam-until-success 'cooked-link-follow-functions))
             (should (string-suffix-p "lisp/cooked-link.el" visited))))))))
 
 (ert-deftest cooked-file-link-scan-stops-on-a-foreign-host ()

@@ -22,7 +22,7 @@
 ;; So this is lazy in both directions.  A row is examined only once it has settled
 ;; into the scrollback, where it will never be rendered again, through
 ;; `cooked-link-scan-functions'; and a candidate under point is resolved on demand when
-;; you follow it, through `cooked-link-follow-function'.  Nothing validates a live
+;; you follow it, through `cooked-link-follow-functions'.  Nothing validates a live
 ;; row.
 ;;
 ;; What is borrowed, and what is deliberately not.  `ffap-string-at-point' and
@@ -208,7 +208,7 @@ a rule that matched some other part of the line from contributing numbers."
 ;;;; The two seams
 
 (defun cooked-file-link-follow ()
-  "Open the file under point, if there is one.  `cooked-link-follow-function'."
+  "Open the file under point, if there is one.  `cooked-link-follow-functions'."
   (when-let* ((found (cooked-file-link--at-point)))
     (pcase-let ((`(,file ,line ,col) found))
       (funcall cooked-file-link-display file)
@@ -260,7 +260,7 @@ guessed."
                            'keymap cooked-link-map
                            'face 'cooked-link))))))))))))
 
-(setq cooked-link-follow-function #'cooked-file-link-follow)
+(add-hook 'cooked-link-follow-functions #'cooked-file-link-follow)
 (add-hook 'cooked-link-scan-functions #'cooked-file-link-scan)
 
 (provide 'cooked-file-link)
