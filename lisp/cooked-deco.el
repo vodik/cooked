@@ -473,22 +473,30 @@ last painted *at*, which a fresh buffer has no claim to."
 (defun cooked--install-images (images)
   "Record IMAGES, a drain's `:images\=', before anything referring to them renders.
 
-Each entry is (ID FORMAT DATA PX-WIDTH PX-HEIGHT COLS ROWS).  The module sends
-one exactly once per distinct picture however often the child transmits or
-places it, so this is where the only copy of the bytes lands -- and why the
-table holding them is not weak.
+Each entry is (ID FORMAT DATA PX-WIDTH PX-HEIGHT).  The module sends one exactly
+once per distinct picture however often the child transmits or places it, so
+this is where the only copy of the bytes lands -- and why the table holding them
+is not weak.
+
+No cell rectangle among those fields, deliberately: the bytes cross once and the
+same picture can be laid at any number of sizes afterwards, so a rectangle
+recorded here would be the first placement\='s and would go stale the moment the
+child redrew at another size.  It rides each placement instead, and reaches this
+file through `cooked--apply-image-deco\='.
 
 Called ahead of both render passes, not from the event loop: an image is a
 resource the rows of this very drain refer to by id, so it has to be here before
 they are rendered.  Events are dispatched after rendering, so an image arriving
 as one would arrive too late for the row that needed it."
   (dolist (image images)
-    (pcase-let ((`(,id ,format ,data ,px-w ,px-h ,cols ,rows) image))
+    (pcase-let ((`(,id ,format ,data ,px-w ,px-h) image))
       (unless (gethash id cooked--image-data)
         (setq cooked--image-order (nconc cooked--image-order (list id)))
         (cl-incf cooked--image-bytes (length data)))
-      (puthash id (list format data px-w px-h cols rows) cooked--image-data)))
-  (cooked--evict-images))
+      (puthash id (list format data px-w px-h) cooked--image-data)))
+  ;; Exempt from the cap the very ids just installed: nothing displays them yet,
+  ;; because the rows that will are rendered after this returns.
+  (cooked--evict-images (mapcar #'car images)))
 
 (defcustom cooked-image-cache-size (* 64 1024 1024)
   "Bytes of transmitted image data one buffer retains, or nil for no limit.
@@ -532,8 +540,21 @@ is what made the id evictable in the first place."
   :type '(choice (const :tag "No limit" nil) integer)
   :group 'cooked)
 
-(defun cooked--evict-images ()
+(defun cooked--evict-images (&optional arriving)
   "Spend oldest undisplayed images until `cooked--image-data\=' fits the cap.
+
+ARRIVING is the ids this drain has just installed, which are exempt.  They have
+to be: the rows that display them have not been rendered yet -- resources are
+installed before both render passes -- so every one of them reads as undisplayed
+and is the *most* evictable thing in the table.  Ordinarily the loop stops long
+before reaching them, but it only stops when the bytes come down, and an id it
+declines to spend does not bring them down.  A run of those walks it straight to
+the far end and spends the picture the caller is about to draw, and
+`cooked--image-spec\=' answers nil for an id with no data: the cells get a
+`cooked-deco\=' and no `display\='.  Blank rectangle, right size, right place,
+cursor exactly where it should be, and the animation recovers only when the
+collector next runs.  Nothing above is hypothetical -- it is what a 2MB-a-frame
+gif does to a 64MB cap.
 
 The backstop `cooked-image-cache-size\=' documents, and the whole of it.  One
 pass, and it will not touch an id anything is displaying: `cooked--image-specs\='
@@ -556,7 +577,7 @@ common case: ordinary eviction is `cooked--release-images\='."
       (while (and cooked--image-order
                   (> cooked--image-bytes cooked-image-cache-size))
         (let ((id (pop cooked--image-order)))
-          (if (cooked--image-displayed-p id)
+          (if (or (memq id arriving) (cooked--image-displayed-p id))
               (push id kept)
             (cooked--forget-image id))))
       ;; Whatever this declined to spend goes back on the front, still oldest
@@ -646,8 +667,8 @@ output does not."
           (unless (memq id live)
             (cooked--forget-image id)))))))
 
-(defun cooked--image-spec (id size)
-  "The `create-image\=' spec for image ID at cell SIZE, built once.
+(defun cooked--image-spec (id cells size)
+  "The `create-image\=' spec for image ID laid at CELLS, one cell being SIZE.
 
 Shared deliberately: every cell of the picture displays a slice of one spec, so
 Emacs decodes the image once rather than once per cell.  Nil when ID names
@@ -658,8 +679,17 @@ Nil too when this Emacs cannot decode the format, which is asked here rather
 than at the call site because the answer differs from image to image: a build
 without libjpeg still shows PNGs.
 
-Sized to the cell rectangle the emulator committed to, so the slices below tile
-it exactly.  `:scale 1\=' for the same reason it is on a box glyph:
+CELLS is `(COLS . ROWS)\=', the rectangle *this placement* was laid at, which
+comes from the placement rather than from the image: one picture can be on
+screen at two sizes at once, and sizing it from anything the image itself held
+would draw one of them wrong.  See `cooked--apply-image-deco\='.  So the
+rectangle is part of the memoization key too -- a reshape does not move the
+cell, so keying on SIZE alone would answer a resized placement with the spec
+built for the old one.
+
+Shared across every cell of one placement, deliberately: they all display a
+slice of one spec, so Emacs decodes the picture once rather than once per cell.
+`:scale 1\=' for the same reason it is on a box glyph:
 `image-scaling-factor\=' is `auto\=' and would resample what has already been
 scaled to fit."
   (when-let* ((entry (gethash id cooked--image-data))
@@ -667,11 +697,13 @@ scaled to fit."
     ;; Not `cooked--cached': this table is weak on its values by design -- see
     ;; `cooked--image-specs' -- and is cleared per session, so it is made by
     ;; `cooked--reset-images' rather than on first use.
-    (with-memoization (gethash (list id (car size) (cdr size)) cooked--image-specs)
-      (pcase-let ((`(,format ,data ,_px-w ,_px-h ,cols ,rows) entry))
+    (with-memoization
+        (gethash (list id (car cells) (cdr cells) (car size) (cdr size))
+                 cooked--image-specs)
+      (pcase-let ((`(,format ,data . ,_) entry))
         (create-image data format t
-                      :width (* cols (car size))
-                      :height (* rows (cdr size))
+                      :width (* (car cells) (car size))
+                      :height (* (cdr cells) (cdr size))
                       :scale 1
                       :ascent (cooked--box-glyph-ascent
                                (cooked--layout-window) (cdr size)))))))
@@ -679,10 +711,14 @@ scaled to fit."
 (defun cooked--deco-display-value (deco size window)
   "The `display\=' value DECO should carry at cell SIZE, or nil for none.
 
-DECO is the `cooked-deco\=' property: `(image ID CROW CCOL)\=' or
+DECO is the `cooked-deco\=' property: `(image ID CROW CCOL COLS ROWS)\=' or
 `(glyph BITS COLUMN ROW)\='.  WINDOW is only ever the ascent lookup\='s.  Nil
-SIZE means there is no cell rectangle to draw against yet, and the caller
-records the decoration without displaying anything.
+SIZE means there is no cell size to draw against yet, and the caller records
+the decoration without displaying anything.
+
+COLS and ROWS are the rectangle the placement was laid at, carried on the
+decoration itself so that this and `cooked--rescale-deco\=' size a picture the
+same way however long ago its row was written.
 
 The single answer to \"what does this decoration look like\", and both paths
 that can ask it go through here: `cooked--apply-image-deco\' and
@@ -693,8 +729,8 @@ places for a new decoration kind to be added and two of them easy to miss --
 the rescale path is the one that would silently go on painting the old size."
   (when size
     (pcase deco
-      (`(image ,id ,crow ,ccol)
-       (when-let* ((spec (cooked--image-spec id size)))
+      (`(image ,id ,crow ,ccol ,cols ,rows)
+       (when-let* ((spec (cooked--image-spec id (cons cols rows) size)))
          (list (list 'slice (* ccol (car size)) (* crow (cdr size))
                      (car size) (cdr size))
                spec)))
@@ -705,22 +741,30 @@ the rescale path is the one that would silently go on painting the old size."
          (cooked--box-phase bits size (car where) (cadr where))))))))
 
 (defun cooked--apply-image-deco (start packed size)
-  "Apply image decoration PACKED from START: eight bytes per character.
+  "Apply image decoration PACKED from START: twelve bytes per character.
 
-SIZE is the cell rectangle to cut slices to, or nil to record the placements
-and display nothing -- see `cooked--apply-deco\='.
+SIZE is the pixel size of one cell, or nil to record the placements and display
+nothing -- see `cooked--apply-deco\='.
 
-A `u32\=' image id, then the cell\='s row and column within that image as two
-`u16\='s, all little-endian.  One `display\=' property per character, each a
-slice of the shared spec, which is what makes the picture survive everything
-the grid does to it: text written over one cell replaces that cell\='s slice and
-leaves the rest, a scroll carries each row\='s slices into the scrollback
-independently, and a rewrap moves them with their columns.  A single image
-spanning the whole rectangle would have to be torn down and rebuilt for any of
-that."
+A `u32\=' image id, then the cell\='s row and column within that image, then the
+cell rectangle that placement was laid at, as four `u16\='s, all little-endian.
+One `display\=' property per character, each a slice of the shared spec, which
+is what makes the picture survive everything the grid does to it: text written
+over one cell replaces that cell\='s slice and leaves the rest, a scroll carries
+each row\='s slices into the scrollback independently, and a rewrap moves them
+with their columns.  A single image spanning the whole rectangle would have to
+be torn down and rebuilt for any of that.
+
+The rectangle rides every cell rather than being looked up from the image,
+because it belongs to the placement and not to the picture.  Ids are
+content-addressed, so a child that retransmits a frame at a new `c=\='/`r=\='
+after a window reshape -- which is what `viu\=' does, never rescaling the pixels
+itself -- names the id it named before.  Held against the image there was one
+field for two answers, and whichever transmission wrote it last decided how the
+other one\='s slices were cut."
   (let ((pos start))
-    (dotimes (i (/ (length packed) 8))
-      (let* ((base (* 8 i))
+    (dotimes (i (/ (length packed) 12))
+      (let* ((base (* 12 i))
              (id (logior (aref packed base)
                          (ash (aref packed (+ base 1)) 8)
                          (ash (aref packed (+ base 2)) 16)
@@ -729,7 +773,11 @@ that."
                            (ash (aref packed (+ base 5)) 8)))
              (ccol (logior (aref packed (+ base 6))
                            (ash (aref packed (+ base 7)) 8)))
-             (deco (list 'image id crow ccol)))
+             (cols (logior (aref packed (+ base 8))
+                           (ash (aref packed (+ base 9)) 8)))
+             (rows (logior (aref packed (+ base 10))
+                           (ash (aref packed (+ base 11)) 8)))
+             (deco (list 'image id crow ccol cols rows)))
         (put-text-property pos (1+ pos) 'cooked-deco deco)
         (when-let* ((display (cooked--deco-display-value deco size nil)))
           (put-text-property pos (1+ pos) 'display display)))

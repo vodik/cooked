@@ -1,7 +1,7 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
 use super::cell::{CONTINUATION, Cell, Color, Extra, MarkId, Row, Run, Style};
-use super::image::{ImageId, Placement};
+use super::image::{CellSize, ImageId, Placement};
 use super::link::LinkId;
 use unicode_width::UnicodeWidthChar;
 
@@ -546,9 +546,21 @@ impl Screen {
     ///
     /// Clipped to the screen rather than wrapped: an image is a rectangle, and a row of
     /// it that continued on the next line would not be one. The caller moves down.
-    pub fn place_image_row(&mut self, id: ImageId, cell_row: u16, cols: u16, pen: Style) -> u16 {
+    ///
+    /// CELLS is the whole rectangle, not just this row's width: every cell records it,
+    /// because the rectangle is the placement's and not the image's. See [`Placement`].
+    /// The clipping above is why it cannot be recovered from the cells themselves --
+    /// a picture laid at the right edge writes fewer columns than it was laid at, and
+    /// Emacs still has to cut its slices against the full width.
+    pub fn place_image_row(
+        &mut self,
+        id: ImageId,
+        cell_row: u16,
+        cells: CellSize,
+        pen: Style,
+    ) -> u16 {
         let (row, start) = (self.cursor.row, self.cursor.col);
-        let width = usize::from(cols).min(self.cols.saturating_sub(start));
+        let width = usize::from(cells.cols).min(self.cols.saturating_sub(start));
         if let Some(r) = self.touch(row) {
             for i in 0..width {
                 r.place(
@@ -557,6 +569,8 @@ impl Screen {
                         id,
                         cell_row,
                         cell_col: i as u16,
+                        cols: cells.cols,
+                        rows: cells.rows,
                     },
                     pen,
                 );

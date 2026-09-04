@@ -1521,21 +1521,30 @@ genuinely printed nothing."
     (logxor crc #xFFFFFFFF)))
 
 (defun cooked-tests--image-update (id cols rows &optional data)
-  "An update placing image ID as a COLS by ROWS rectangle on screen row 0."
-  (let ((packed (apply #'unibyte-string
-                       (cl-loop for c below cols
-                                append (list (logand id 255)
-                                             (logand (ash id -8) 255)
-                                             (logand (ash id -16) 255)
-                                             (logand (ash id -24) 255)
-                                             0 0
-                                             (logand c 255) (logand (ash c -8) 255))))))
+  "An update placing image ID as a COLS by ROWS rectangle on screen row 0.
+
+Twelve bytes per cell, matching `cooked--apply-image-deco\=': the id, then the
+cell\='s row and column within the picture, then the rectangle this placement was
+laid at.  The rectangle is per placement rather than per image, so it is here
+rather than in `:images\=' -- see `cooked--image-spec\='."
+  (let* ((u16 (lambda (n) (list (logand n 255) (logand (ash n -8) 255))))
+         (packed (apply #'unibyte-string
+                        (cl-loop for c below cols
+                                 append (append
+                                         (list (logand id 255)
+                                               (logand (ash id -8) 255)
+                                               (logand (ash id -16) 255)
+                                               (logand (ash id -24) 255))
+                                         (funcall u16 0)
+                                         (funcall u16 c)
+                                         (funcall u16 cols)
+                                         (funcall u16 rows))))))
     (list :scrolled nil
           :rows (list (cons 0 (list (make-string cols ?\s)
                                     nil
                                     (list (list 0 (cons 'image packed))))))
           :images (and data
-                       (list (list id 'png data (* cols 10) (* rows 20) cols rows)))
+                       (list (list id 'png data (* cols 10) (* rows 20))))
           :height 12 :used 1 :head 0
           :cursor '(0 0 t block) :alt nil
           :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
@@ -1580,7 +1589,7 @@ placement naming the same id has to find the bytes still here."
 (defun cooked-tests--install-image (id bytes)
   "Install image ID with BYTES bytes of stand-in data."
   (cooked--install-images
-   (list (list id 'png (make-string bytes ?x) 10 20 1 1))))
+   (list (list id 'png (make-string bytes ?x) 10 20))))
 
 (ert-deftest cooked-image-data-is-accounted-as-it-arrives ()
   "The running total has to match the table, or the cap bounds nothing.  Ids are
@@ -1811,20 +1820,22 @@ is what makes it a measurement against the cell size rather than a request."
           w h (base64-encode-string (make-string (* w h 3) 0) t)))
 
 (ert-deftest cooked-a-replayed-payload-follows-the-cell-it-is-replayed-at ()
-  "A resize that moves the font must not leave two rectangles for one picture.
+  "A font change must not leave two rectangles for one picture.
 
 A transmission that names no cell rectangle is measured into one from its pixels,
-once, and the id keeps that rectangle for good -- it has to, because each of those
-cells carries a slice of the picture and a row in the scrollback is never rewritten.
-Ids are content-addressed, so an animation looping past a font change used to draw
-both rectangles at once: a frame this buffer still held was recognised by the module
-and re-laid at the rectangle measured against the old cell, while a frame the cap had
-spent was retransmitted, interned afresh, and laid at the new one.  Mid-gif, the two
-alternate.
+and ids are content-addressed, so a looping animation replays bytes the module
+already knows.  The rectangle used to be recorded against the *image*, which gave
+one field two answers across a font change: whichever transmission wrote it last
+decided how every row's slices were cut, and mid-gif the frames alternated between
+the two sizes.  The module worked around it by forgetting every picture when the
+cell moved, so each frame crossed the boundary again -- megabytes apiece -- purely
+to be remeasured.
 
-So the module forgets every picture when the cell moves, and the assertion is that
-the replayed bytes arrive as a second picture whose rectangle is the new cell's.
-Resizing rows and columns alone does not move a cell and is deliberately not this."
+The rectangle rides each placement now, so both answers can be true at once: the
+replayed bytes are recognised and no payload crosses, the new placement is laid at
+the rectangle the new cell implies, and the row written before the change keeps the
+one it was written with.  Resizing rows and columns alone does not move a cell and
+is deliberately not this."
   (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; exec cat")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
     (cooked-tests--cell 10 20)
@@ -1835,8 +1846,9 @@ Resizing rows and columns alone does not move a cell and is deliberately not thi
       (cooked--send cooked--session frame)
       (should (cooked-tests--settle
                (lambda () (= (hash-table-count cooked--image-data) 1))))
-      (let ((first (car cooked--image-order)))
-        (should (equal (nthcdr 4 (gethash first cooked--image-data)) '(2 2)))
+      (let ((first (car cooked--image-order))
+            (was (point-min)))
+        (should (equal (nthcdr 4 (get-text-property was 'cooked-deco)) '(2 2)))
         ;; The font doubles.  Rows and columns reach the module by this same call
         ;; and are unchanged, which is the case the module must not spend a
         ;; retransmission on.
@@ -1848,15 +1860,17 @@ Resizing rows and columns alone does not move a cell and is deliberately not thi
         (cooked--send cooked--session (concat "\r" frame "done"))
         (should (cooked-tests--settle
                  (lambda () (string-match-p "done" (cooked-tests--text)))))
-        (should (= (hash-table-count cooked--image-data) 2))
-        (let ((again (car (last cooked--image-order))))
-          (should-not (eq again first))
-          (should (equal (nthcdr 4 (gethash again cooked--image-data)) '(1 1)))
-          ;; And the grid agrees with the transmission: one cell of the new
-          ;; rectangle on the replayed row, not two of the old.
-          (should (equal (cooked--image-ids-between (line-beginning-position)
-                                                    (line-end-position))
-                         (list again))))
+        ;; One picture, and no second copy of two megabytes of it.
+        (should (= (hash-table-count cooked--image-data) 1))
+        (should (equal cooked--image-order (list first)))
+        ;; The replayed row is laid at the new cell's rectangle, under the id it
+        ;; already had...
+        (let ((deco (get-text-property (line-beginning-position) 'cooked-deco)))
+          (should (equal (nth 1 deco) first))
+          (should (equal (nthcdr 4 deco) '(1 1))))
+        ;; ...and the row written before the change keeps the rectangle it was
+        ;; written with, which is the half that used to be overwritten.
+        (should (equal (nthcdr 4 (get-text-property was 'cooked-deco)) '(2 2)))
         (should-not (cooked-tests--image-cells-without-display))))))
 
 (ert-deftest cooked-inline-images-disabled-leaves-the-cells-alone ()
@@ -1934,7 +1948,7 @@ record still goes on the text, which is the whole of what the repair pass needs.
     (setq cooked--last-cell '(nil . nil))
     (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
     (should-not (get-text-property (point-min) 'display))
-    (should (equal (get-text-property (point-min) 'cooked-deco) '(image 7 0 0)))
+    (should (equal (get-text-property (point-min) 'cooked-deco) '(image 7 0 0 3 1)))
     ;; A window turns up; `cooked--sync-size' sees the cell move and repairs.
     (cooked-tests--cell)
     (cooked--rescale-deco)
@@ -2112,3 +2126,29 @@ a broken layer taking the echo area away from everything else Emacs has to say."
         (cl-letf (((symbol-function 'message) (lambda (&rest _) (cl-incf said))))
           (cooked--run-seam 'cooked-tests--seam))
         (should (= said 2))))))
+
+(ert-deftest cooked-the-cap-never-spends-the-picture-being-drawn ()
+  "Eviction runs from `cooked--install-images', which is called before both
+render passes -- so every id in the arriving drain reads as undisplayed, being
+displayed by rows that do not exist yet.  They are the most evictable entries in
+the table at exactly the moment they must not be touched.
+
+The loop stops when the bytes come down, and an id it declines to spend does not
+bring them down: a run of still-displayed ids walks it to the far end and spends
+the picture the caller is about to draw.  `cooked--image-spec' answers nil for an
+id with no data, so those cells get a `cooked-deco' and no `display' -- a blank
+rectangle of exactly the right size in exactly the right place, which is what a
+2MB-a-frame gif against a 64MB cap actually did."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked-tests--cell)
+    ;; A cap two frames wide, and one frame already in it that reads as displayed
+    ;; -- which is the state the collector leaves behind under any real load.
+    (let ((cooked-image-cache-size 200))
+      (cooked--apply (cooked-tests--image-update 1 3 1 (cooked-tests--png)))
+      (should (gethash 1 cooked--image-data))
+      ;; The next drain arrives with the cap already met.  The picture it carries
+      ;; must survive it, whatever eviction decides about anything older.
+      (cooked--apply (cooked-tests--image-update 2 3 1 (make-string 300 ?x)))
+      (should (gethash 2 cooked--image-data))
+      (should-not (cooked-tests--image-cells-without-display)))))

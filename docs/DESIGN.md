@@ -754,7 +754,7 @@ with it. A retransmission of forgotten bytes is then a picture the module has ne
 a fresh id, and the payload crosses again. That is what makes eviction cost a
 retransmission instead of a hole.
 
-Four consequences that are easy to get wrong separately:
+Five consequences that are easy to get wrong separately:
 
 - **`cooked-image-cache-size` is a backstop again, not the policy.** The policy is
   `cooked--release-images`/`cooked--collect-images`, driven by scrollback discard: an
@@ -764,18 +764,29 @@ Four consequences that are easy to get wrong separately:
   `ENOENT:image` — the same answer as for an id never transmitted, because the client's
   remedy is the same one: send the picture again. Retaining payloads *only* so this case
   could be honoured is what put a second cache here in the first place.
-- **A cell size that has moved forgets everything.** `Term::set_cell_metrics` drops the
-  whole store, and it is the same repair seen from the other side. A transmission naming
-  no `c=`/`r=` is measured into cells once and keeps that rectangle for the life of the
-  id, because Emacs hangs one slice of the picture on each of those cells and a row in
-  the scrollback is never rewritten. Ids being content-addressed, an animation looping
-  past a font change would otherwise draw both rectangles at once: a frame Emacs still
-  holds is recognised and re-laid at the old measurement, a frame the cap has spent is
-  retransmitted and laid at the new one, and mid-gif the two alternate. Forgetting
-  collapses them, and the rows already written keep the id, the rectangle and the bytes
-  they were drawn with — `cooked--rescale-deco` re-cuts those to the new cell. Rows and
-  columns arrive by the same call and move no cell, so an ordinary reshape spends
-  nothing.
+- **The cell rectangle belongs to the placement, not to the picture.** Every
+  `Placement` carries the `cols`/`rows` it was laid at, and it is repeated on each cell of
+  the rectangle. That looks redundant and is the load-bearing part: ids are
+  content-addressed, so one picture can be on screen at two sizes at once, and a single
+  field against the image is one answer to two questions. `viu` is the case that proves
+  it — it never rescales the pixels, sending every frame at full resolution and changing
+  only `c=`/`r=` when the window is reshaped, so after a resize *every* frame is bytes the
+  module already has and no payload crosses at all. Held against the image, the new
+  rectangle reached Emacs by no route whatever and the animation drew at its original
+  size, cropped, forever. The store keeps the pixel size and what the child asked for, and
+  derives the rectangle per placement against the cell of the moment — so a font change
+  needs no repair either, and `Term::set_cell_metrics` no longer drops anything.
+- **A frame nobody could have seen does not cross.** Transmitting is not displaying. A
+  child can draw far faster than Emacs redisplays, and the frames it drew over in between
+  are frames no cell points at by the time a drain happens — so they are shed, and the
+  store is told, which is what keeps "tracked iff Emacs has the bytes" true. Emacs'
+  redisplay rate therefore sets how many frames cross, with no timer and no configured
+  frame rate anywhere: a drain carries whatever is current when it happens. Shedding runs
+  at drain time, where it decides what crosses, and again at transmission time once two
+  payloads are queued, where it decides how much memory the queue can take. Three things
+  count as showing a picture — a cell of either grid, a row scrolled off in this same
+  delta, and a client name bound by `i=`, since a later bare `a=p` carries no bytes of its
+  own. See `State::shed_unplaced_images`.
 - **The digest is the last word on identity.** There is no payload left to compare a hash
   hit against, so `content_hash` is 128 bits wide; `src/emu/mod.rs` carries the argument
   for why that is enough here and why the hyperlink store, whose collisions a hostile

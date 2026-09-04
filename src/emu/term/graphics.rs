@@ -3,8 +3,8 @@
 //! Three producers, one pipeline: each ends at `intern_image` + `lay_image` and shares
 //! everything downstream of "here are some pixels".
 
-use super::*;
 use super::osc::rejoin;
+use super::*;
 
 /// Where the cursor is left once a picture has been laid into the grid.
 ///
@@ -56,8 +56,7 @@ impl State {
         } else {
             px
         };
-        let metrics = self.metrics;
-        let Interned { id, fresh, retired } = self.images.intern(bytes, px, metrics);
+        let Interned { id, fresh, retired } = self.images.intern(bytes, px);
         // The count cap can retire an id to make room for this one, and the client's own
         // name for that picture has to go at the same moment: an `a=p` naming it would
         // otherwise place a rectangle the store can no longer describe.
@@ -77,28 +76,38 @@ impl State {
         // loop's own backlog backpressure ever gets a turn between reads. Capping here
         // bounds that to the same order of magnitude as a screenful of images, which is
         // already far more than any picture legitimately needs.
-        let cells = match cells {
-            Some(asked) => CellSize::new(
+        let asked = cells.map(|asked| {
+            CellSize::new(
                 asked.cols.clamp(1, MAX_IMAGE_CELL_SPAN),
                 asked.rows.clamp(1, MAX_IMAGE_CELL_SPAN),
-            ),
-            // The child said nothing, so the pixels decide -- or one cell, if we have
-            // not even got those.
-            None => self
-                .images
-                .get(id)
-                .map_or(CellSize::new(1, 1), |image| image.cells),
-        };
+            )
+        });
+        // Shedding also happens at drain time, which is where it decides what *crosses*.
+        // This is the other half, and it is about memory rather than about Emacs: a child
+        // can transmit far faster than Emacs drains, and every fresh frame parks a copy
+        // of its payload here until it does. Two megabytes a frame against a display loop
+        // that is already behind is how a gif turns into hundreds of megabytes of frames
+        // nobody will ever be shown. Shedding here keeps the queue at the couple of
+        // frames actually in play.
+        //
+        // Not before every transmission: below two there is nothing a scan could find,
+        // and the frame just placed is still the one on the grid.
+        if fresh && self.pending_images.len() >= 2 {
+            self.shed_unplaced_images();
+        }
         if fresh {
             self.pending_images.push(ImageData {
                 id,
                 format,
                 bytes: bytes.to_vec(),
                 px,
-                cells,
             });
         }
-        self.images.set_cells(id, cells);
+        // What the child *said*, not what that came to in cells. Where it said nothing,
+        // the rectangle is derived from the pixels against the cell of the moment, and
+        // that derivation has to be redone every time it is asked for rather than
+        // recorded here -- `ImageStore::cells` is where it happens, and says why.
+        self.images.set_asked(id, asked);
         id
     }
 
@@ -183,15 +192,14 @@ impl State {
         // knows the rectangle, and a guessed one is worse than none: it would put a
         // picture-shaped hole of the wrong shape on the grid, under a cursor left in the
         // wrong place.
-        let Some(cells) = self.images.cells(id) else {
+        let Some(cells) = self.images.cells(id, self.metrics) else {
             return;
         };
         let pen = self.pen.erase();
         let start_col = self.screen().cursor.col;
         for cell_row in 0..cells.rows {
             self.screen_mut().cursor.col = start_col;
-            self.screen_mut()
-                .place_image_row(id, cell_row, cells.cols, pen);
+            self.screen_mut().place_image_row(id, cell_row, cells, pen);
             // The linefeed after the *last* row is what separates the two dispositions:
             // running it there is what puts the cursor on the line below the picture,
             // and skipping it is what leaves it on the picture's last row.

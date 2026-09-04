@@ -1206,6 +1206,71 @@ mod tests {
             .collect()
     }
 
+    /// The same promise for pictures, which used to be exempt from it. A child drawing
+    /// images scrolls nothing and raises no events, so its backlog was zero however many
+    /// undrained megabytes it had queued -- `BACKLOG_HIGH_WATER` was unreachable and the
+    /// reader never stopped pulling. Weighing the payload is what puts this child under
+    /// the same rule as one printing text.
+    ///
+    /// Each picture is *distinct* and each is placed where the last one is not, so none
+    /// of them can be shed: they are all still on the grid and all genuinely owed to
+    /// Emacs. That is deliberately the case shedding cannot help with, which is the case
+    /// backpressure is for.
+    #[test]
+    fn a_picture_child_is_throttled_and_loses_no_pictures() {
+        const FRAMES: usize = 8;
+        // 128x64 RGB is 24_576 bytes, 32KB of base64, so a 64KB read carries one or two
+        // of them. Small pictures would pack many complete transmissions into a single
+        // read and the reader would only stall *after* handling them all, which measures
+        // nothing. The payload is doubled up in the shell rather than written out here
+        // because eight 32KB arguments is past `ARG_MAX`.
+        //
+        // Every group is `BwcH` but the first, which varies: ids are content-addressed,
+        // so eight copies of one picture are one picture, and the test would pass on a
+        // single transmission. Each goes on its own line, so nothing overdraws anything
+        // and none of them can be shed -- all eight are on the grid and all are owed to
+        // Emacs, which is deliberately the case shedding cannot help with and so the one
+        // backpressure exists for.
+        let script = r#"
+            p=BwcH
+            i=0; while [ $i -lt 13 ]; do p=$p$p; i=$((i+1)); done
+            q=${p#????}
+            for c in A B C D E F G H; do
+              printf '\033_Ga=T,f=24,s=128,v=64,c=1,r=1;%swcH%s\033\\\n' "$c" "$q"
+            done
+        "#;
+        // A limit of 1 stalls the reader on any queued picture at all, which is the
+        // harshest version of the promise.
+        let (session, _read) = session_with_backlog(&["/bin/sh", "-c", script], 1);
+
+        // Nothing drains, so nothing may be read past the first picture or two. Weighed,
+        // the backlog is over its limit and the reader stops; the child fills the pty
+        // buffer and blocks in `write`, which is what being throttled *is*. Unweighed, a
+        // picture child raised a backlog of exactly zero -- it scrolls nothing and sends
+        // no events -- so the reader took all 256KB as fast as `sh` could write it and
+        // the child ran to completion. Still being alive is the observable difference.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            session.alive(),
+            "the child was never throttled: it wrote every picture and exited"
+        );
+
+        // ...and throttling must cost nothing but time. Every picture is still owed.
+        let mut seen = 0usize;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            seen += session.drain().delta.images.len();
+            if seen >= FRAMES {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            seen, FRAMES,
+            "backpressure dropped pictures instead of stalling the child"
+        );
+    }
+
     /// Backpressure must throttle the child, never drop its output. A limit of 1 keeps the
     /// reader stalled almost continuously, which is the harshest version of that promise.
     #[test]

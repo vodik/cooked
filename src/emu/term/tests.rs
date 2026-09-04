@@ -431,7 +431,8 @@ fn an_explicit_row_count_cannot_force_tens_of_thousands_of_linefeeds() {
     let delta = t.drain();
     assert_eq!(delta.images.len(), 1);
     assert_eq!(
-        delta.images[0].cells.rows, MAX_IMAGE_CELL_SPAN,
+        placements(&t, 0)[0].rows,
+        MAX_IMAGE_CELL_SPAN,
         "the row count is clamped rather than honoured verbatim"
     );
     // The bound above is what keeps this assertion cheap to make at all: if the
@@ -938,7 +939,10 @@ fn forgetting_an_image_takes_its_geometry_and_its_client_name_with_it() {
     t.forget_image(id);
     t.feed(b"\x1b_Ga=p,i=7\x1b\\");
     let delta = t.drain();
-    assert!(placements(&t, 0).is_empty(), "nothing to place, nothing drawn");
+    assert!(
+        placements(&t, 0).is_empty(),
+        "nothing to place, nothing drawn"
+    );
     let replies: Vec<_> = delta
         .events
         .into_iter()
@@ -2534,15 +2538,16 @@ fn batched_and_per_character_printing_agree() {
 }
 
 /// A picture the child sizes in pixels rather than in cells is measured into a cell
-/// rectangle once, and that rectangle is fixed for the life of the id. So the id has to
-/// stop outliving the measurement: Emacs reports a new cell size when the font moves,
-/// and a content-addressed id minted against the old one would go on being answered for
-/// bytes the child keeps resending.
+/// rectangle at every transmission, against the cell as it is at that moment. So a font
+/// change needs no repair: the next frame the child draws is laid at the rectangle the
+/// new cell implies, while the bytes -- which have not changed -- do not cross again.
 ///
-/// This is the flip a gif shows after a zoom. Frames Emacs still holds are recognised
-/// and re-laid at the old rectangle; frames its cache has spent are retransmitted, are
-/// fresh, and are laid at the new one -- and the two populations interleave for as long
-/// as the animation loops.
+/// This is the flip a gif used to show after a zoom. The measurement was taken once and
+/// kept against the id; ids are content-addressed, so frames Emacs still held were
+/// recognised and re-laid at the *old* rectangle while frames it had evicted were
+/// retransmitted and measured against the new one, and the two populations interleaved
+/// for as long as the animation looped. The store was dropped whole on a cell change to
+/// collapse them, at the cost of retransmitting every picture in the session.
 #[test]
 fn a_replayed_picture_is_measured_against_the_cell_it_is_replayed_at() {
     let mut t = with_metrics(10, 20);
@@ -2551,7 +2556,10 @@ fn a_replayed_picture_is_measured_against_the_cell_it_is_replayed_at() {
     let apc = format!("\x1b_Ga=T,f=24,s=20,v=40,i=1;{}\x1b\\", b64(&pixels));
     t.feed(apc.as_bytes());
     let first = t.drain().images;
-    assert_eq!(first[0].cells, CellSize::new(2, 2));
+    assert_eq!(first.len(), 1);
+    assert_eq!(placements(&t, 0)[0].cols, 2);
+    assert_eq!(placements(&t, 0)[0].rows, 2);
+    let first_id = first[0].id;
 
     // The font doubles. Rows and columns arrive by the same route and are unchanged.
     t.set_cell_metrics(CellMetrics {
@@ -2560,18 +2568,33 @@ fn a_replayed_picture_is_measured_against_the_cell_it_is_replayed_at() {
     });
     t.feed(b"\x1b[H");
     t.feed(apc.as_bytes());
-    let again = t.drain().images;
-    assert_eq!(again.len(), 1, "the same bytes are a picture again: {again:?}");
-    assert_ne!(again[0].id, first[0].id, "a new measurement is a new id");
-    assert_eq!(again[0].cells, CellSize::new(1, 1));
-    // ...and the grid says the same thing the transmission did.
-    let placed = placements(&t, 0);
-    assert_eq!(placed[0].id, again[0].id);
-    assert_eq!(
-        placed.iter().filter(|p| p.id == again[0].id).count(),
-        1,
-        "one cell of the new rectangle, not two of the old: {placed:?}"
+    let again = t.drain();
+    assert!(
+        again.images.is_empty(),
+        "the same bytes are the same picture, whatever the font: {:?}",
+        again.images
     );
+
+    // ...and the grid says the new rectangle, under the id it already had.
+    let placed = placements(&t, 0);
+    assert_eq!(placed[0].id, first_id, "no retransmission, so no new id");
+    assert_eq!(
+        (placed[0].cols, placed[0].rows),
+        (1, 1),
+        "measured against the cell it was replayed at"
+    );
+    // The old picture was two cells wide and the new one is one, so the cell beside it
+    // still holds the placement the larger picture put there. That is the case the
+    // rectangle moved onto the placement for: both are on the grid, both name the one
+    // content-addressed id, and each carries the size it was laid at, so Emacs cuts the
+    // right slice for each. A rectangle held against the *image* is a single field
+    // answering for both, and the older cells are drawn at the newer one's size.
+    assert_eq!(
+        (placed[1].cols, placed[1].rows),
+        (2, 2),
+        "the leftover cell keeps the rectangle it was laid at: {placed:?}"
+    );
+    assert_eq!(placed[1].id, first_id, "and it is the same picture");
 }
 
 /// The other half of the guard above: a resize that leaves the font alone reports the
@@ -2589,18 +2612,30 @@ fn a_reshape_that_does_not_move_the_cell_keeps_every_picture() {
     });
     t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(20, 40));
     let delta = t.drain();
-    assert!(delta.images.is_empty(), "still recognised: {:?}", delta.images);
+    assert!(
+        delta.images.is_empty(),
+        "still recognised: {:?}",
+        delta.images
+    );
     assert_eq!(placements(&t, 2)[0].id, first);
 }
 
-/// Forgetting on a cell change reaches the client's own names too, for the reason
-/// `forgetting_an_image_takes_its_geometry_and_its_client_name_with_it` gives: a bare
-/// `a=p` would otherwise place a rectangle the store can no longer describe.
+/// A client's own name for a picture survives a cell change, and the picture it names is
+/// laid at the rectangle the *new* cell implies.
+///
+/// Both halves used to go: the store was dropped whole when the font moved, so this
+/// `a=p` was answered `ENOENT:image` and the child -- which has no way to know the font
+/// changed, and every reason to think a picture it transmitted is still there -- lost it.
+/// The measurement is redone per placement now (see [`ImageStore::cells`]), so there is
+/// nothing stale to protect anyone from and the name can be kept.
 #[test]
-fn a_cell_change_retires_the_client_names_with_the_pictures() {
+fn a_client_name_survives_a_cell_change_and_is_replaced_at_the_new_size() {
     let mut t = with_metrics(10, 20);
-    let pixels = vec![0u8; 10 * 20 * 3];
-    t.feed(format!("\x1b_Ga=t,f=24,s=10,v=20,i=7;{}\x1b\\", b64(&pixels)).as_bytes());
+    // 10x20 pixels: exactly one cell at a 10x20 cell, and a quarter of one once the
+    // cell doubles -- which still rounds up to one, so the *rectangle* is the thing to
+    // watch rather than the count.
+    let pixels = vec![0u8; 40 * 60 * 3];
+    t.feed(format!("\x1b_Ga=t,f=24,s=40,v=60,i=7;{}\x1b\\", b64(&pixels)).as_bytes());
     t.drain();
 
     t.set_cell_metrics(CellMetrics {
@@ -2608,8 +2643,8 @@ fn a_cell_change_retires_the_client_names_with_the_pictures() {
         height: 40,
     });
     t.feed(b"\x1b_Ga=p,i=7\x1b\\");
-    let replies: Vec<_> = t
-        .drain()
+    let delta = t.drain();
+    let replies: Vec<_> = delta
         .events
         .into_iter()
         .filter_map(|e| match e {
@@ -2617,8 +2652,20 @@ fn a_cell_change_retires_the_client_names_with_the_pictures() {
             _ => None,
         })
         .collect();
-    assert!(placements(&t, 0).is_empty(), "nothing to place, nothing drawn");
-    assert_eq!(replies, vec!["\x1b_Gi=7;ENOENT:image\x1b\\"]);
+    assert_eq!(
+        replies,
+        vec!["\x1b_Gi=7;OK\x1b\\"],
+        "the name still resolves, where it used to be ENOENT:image"
+    );
+
+    // 40x60 against a 20x40 cell is two cells by two, where it was four by three.
+    let placed = placements(&t, 0);
+    assert!(!placed.is_empty(), "the picture is placed, not refused");
+    assert_eq!(
+        (placed[0].cols, placed[0].rows),
+        (2, 2),
+        "measured against the cell it was placed at, not the one it arrived at"
+    );
 }
 
 /// The reader thread wakes Emacs on what [`Term::feed`] reports, so a read that changed
@@ -2644,4 +2691,162 @@ fn a_read_that_changes_nothing_reports_nothing() {
     assert!(delta.rows.is_empty(), "nothing was drawn on");
     assert!(delta.events.is_empty() && delta.images.is_empty());
     assert!(delta.scrolled.is_empty() && delta.marks.is_empty());
+}
+
+/// `viu`'s window reshape, which is what sent us looking. It never rescales the pixels:
+/// every frame goes out at full resolution and the *terminal* is asked to fit it, so a
+/// reshape changes `c=`/`r=` and nothing else. Ids are content-addressed, so once the
+/// animation loops every frame is bytes the module already knows -- 270 transmissions of
+/// 61 distinct payloads, measured -- and none of them crosses the boundary again.
+///
+/// So the new rectangle can only reach Emacs on the placement. Held against the image it
+/// reached nothing at all: the module laid the smaller rectangle while Emacs went on
+/// building the spec at the size it had been told once, and the animation drew at its
+/// original size, cropped, for the rest of the session.
+#[test]
+fn a_reshape_relays_a_known_picture_at_the_new_rectangle() {
+    let mut t = with_metrics(24, 80);
+    let pixels = vec![7u8; 20 * 40 * 3];
+    let frame = |cols: u16, rows: u16| {
+        format!(
+            "\x1b_Ga=T,f=24,s=20,v=40,c={cols},r={rows};{}\x1b\\",
+            b64(&pixels)
+        )
+    };
+
+    t.feed(b"\x1b[H");
+    t.feed(frame(61, 23).as_bytes());
+    let first = t.drain().images;
+    assert_eq!(first.len(), 1, "the payload crosses once");
+    let id = first[0].id;
+    assert_eq!(
+        (placements(&t, 0)[0].cols, placements(&t, 0)[0].rows),
+        (61, 23)
+    );
+
+    // The window narrows. Same bytes, new `c=`/`r=`, and the cell has not moved.
+    t.resize(24, 40);
+    t.feed(b"\x1b[H");
+    t.feed(frame(40, 15).as_bytes());
+    let again = t.drain();
+    assert!(
+        again.images.is_empty(),
+        "the same bytes are the same picture: {:?}",
+        again.images
+    );
+
+    let placed = placements(&t, 0);
+    assert_eq!(placed[0].id, id, "and it is still that picture");
+    assert_eq!(
+        (placed[0].cols, placed[0].rows),
+        (40, 15),
+        "the placement carries the rectangle it was laid at, so Emacs can size the spec"
+    );
+}
+
+/// A frame drawn over before Emacs ever drained is a frame nobody could have seen, and
+/// its bytes do not cross. This is the whole of the pacing story: no timer and no
+/// configured rate, just the observation that a transmission is not a placement.
+#[test]
+fn a_frame_overdrawn_before_the_drain_does_not_cross() {
+    let mut t = with_metrics(24, 80);
+    let frame = |n: u8| {
+        let pixels = vec![n; 20 * 40 * 3];
+        format!("\x1b_Ga=T,f=24,s=20,v=40,c=2,r=2;{}\x1b\\", b64(&pixels))
+    };
+
+    // Three frames between drains, each drawn over the last from the same corner.
+    for n in 0..3 {
+        t.feed(b"\x1b[H");
+        t.feed(frame(n).as_bytes());
+    }
+    let delta = t.drain();
+    assert_eq!(
+        delta.images.len(),
+        1,
+        "only the frame still on the grid crosses: {:?}",
+        delta.images.iter().map(|i| i.id).collect::<Vec<_>>()
+    );
+    assert_eq!(delta.images[0].id, placements(&t, 0)[0].id);
+}
+
+/// Shedding a frame has to tell the store, or it re-creates the fault it was written to
+/// avoid. The store's invariant is that an id is tracked iff Emacs holds its bytes; a
+/// shed frame left tracked would be answered "you already have this one" the next time
+/// round the loop, and the placement would name a picture Emacs was never given.
+#[test]
+fn a_shed_frame_crosses_again_when_it_is_next_drawn() {
+    let mut t = with_metrics(24, 80);
+    let pixels = vec![9u8; 20 * 40 * 3];
+    let frame = format!("\x1b_Ga=T,f=24,s=20,v=40,c=2,r=2;{}\x1b\\", b64(&pixels));
+    let other = {
+        let bytes = vec![1u8; 20 * 40 * 3];
+        format!("\x1b_Ga=T,f=24,s=20,v=40,c=2,r=2;{}\x1b\\", b64(&bytes))
+    };
+
+    // The frame under test is drawn over by another before the drain, so it is shed.
+    t.feed(b"\x1b[H");
+    t.feed(frame.as_bytes());
+    t.feed(b"\x1b[H");
+    t.feed(other.as_bytes());
+    let delta = t.drain();
+    assert_eq!(delta.images.len(), 1, "the overdrawn frame was shed");
+
+    // The loop comes round. Those bytes must arrive as a picture Emacs has not got.
+    t.feed(b"\x1b[H");
+    t.feed(frame.as_bytes());
+    let again = t.drain();
+    assert_eq!(
+        again.images.len(),
+        1,
+        "a shed frame is not still claimed: {:?}",
+        again.images
+    );
+    assert_eq!(again.images[0].id, placements(&t, 0)[0].id);
+}
+
+/// The exception to shedding: a picture bound to an `i=` can be placed later by a bare
+/// `a=p`, which carries no bytes of its own, so the transmission that bound it is the
+/// only chance those bytes have to reach Emacs. `a=t` transmits without placing, so
+/// nothing on the grid vouches for it and the grid scan alone would shed every one.
+#[test]
+fn a_transmission_the_client_can_still_name_is_not_shed() {
+    let mut t = with_metrics(24, 80);
+    let pixels = vec![3u8; 10 * 20 * 3];
+    t.feed(format!("\x1b_Ga=t,f=24,s=10,v=20,i=7;{}\x1b\\", b64(&pixels)).as_bytes());
+    let delta = t.drain();
+    assert_eq!(
+        delta.images.len(),
+        1,
+        "transmitted but not placed, and still owed to Emacs"
+    );
+
+    // ...which is what makes the later placement drawable.
+    t.feed(b"\x1b_Ga=p,i=7\x1b\\");
+    t.drain();
+    assert_eq!(placements(&t, 0)[0].id, delta.images[0].id);
+}
+
+/// A picture is one item and several megabytes, so the backlog has to weigh it rather
+/// than count it. Counted, a child could hold a gigabyte of undrained frames without
+/// reaching a limit written for rows -- and did: `viu` scrolls nothing and raises no
+/// events, so its backlog was flatly zero however far behind Emacs got.
+#[test]
+fn a_pending_picture_weighs_on_the_backlog() {
+    let mut t = with_metrics(24, 80);
+    assert_eq!(t.backlog(), 0);
+
+    // 100x100 RGB is 30_000 bytes, which is 29 whole units of 1KB.
+    let pixels = vec![4u8; 100 * 100 * 3];
+    t.feed(format!("\x1b_Ga=T,f=24,s=100,v=100,c=2,r=2;{}\x1b\\", b64(&pixels)).as_bytes());
+    assert_eq!(
+        t.backlog(),
+        pixels.len() / IMAGE_BACKLOG_UNIT,
+        "the payload is weighed, not counted as one item"
+    );
+
+    // And it is the drain that clears it, which is what stops backpressure deadlocking:
+    // the queue empties on Emacs' say-so and needs nothing from the child.
+    t.drain();
+    assert_eq!(t.backlog(), 0);
 }

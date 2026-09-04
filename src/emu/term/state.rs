@@ -226,8 +226,75 @@ impl State {
         self.archive(evicted);
     }
 
+    /// Drop the bytes of any image transmitted this drain that nothing is left showing.
+    ///
+    /// The frame-rate governor, and the reason a 20fps animation costs Emacs 20 frames a
+    /// second rather than every frame the child managed to write. Transmitting is not
+    /// displaying: a child that draws over its own picture has produced a picture nobody
+    /// will ever see, and between two drains it may do that many times. `viu` sends
+    /// ~2MB a frame and moves the cursor back over it, so a drain that lands two frames
+    /// late holds three payloads of which exactly one is on the grid. The other two are
+    /// six megabytes on their way to a buffer that has no cell pointing at them.
+    ///
+    /// Emacs' redisplay rate is therefore what decides how many frames cross, without
+    /// anyone configuring a rate or running a timer: drains happen when Emacs is ready
+    /// for one, and each carries the frame that is current at that moment. A child
+    /// outrunning the display loses the frames nobody could have seen, which is what
+    /// dropping frames means everywhere else.
+    ///
+    /// Three things count as showing a picture, and the third is the one that is easy to
+    /// miss:
+    ///
+    ///   - a cell of either grid, since a placement is per cell;
+    ///   - a row scrolled off in *this* delta, whose runs Emacs is about to render;
+    ///   - a client name bound by `i=`, because a later bare `a=p` can still ask for it,
+    ///     and that transmission is the only chance those bytes have to cross.
+    ///
+    /// Shedding tells the store, which is not optional: the invariant on
+    /// [`ImageStore`](crate::emu::image::ImageStore) is that an id is tracked iff Emacs
+    /// has its bytes, and these bytes are not going. Left tracked, the next transmission
+    /// of the same frame -- the next time round the loop, for an animation -- would be
+    /// answered "you already have this one" and never cross, and the placement would
+    /// name a picture Emacs had never been given: correct cells, correct cursor, nothing
+    /// drawn.
+    pub(super) fn shed_unplaced_images(&mut self) {
+        if self.pending_images.is_empty() {
+            return;
+        }
+        let mut live: HashSet<ImageId> = self.kitty.bound_images().collect();
+        for screen in [&self.primary, &self.alt] {
+            for row in screen.rows() {
+                for (_, extra) in row.extras() {
+                    if let Extra::Image(place) = extra {
+                        live.insert(place.id);
+                    }
+                }
+            }
+        }
+        for scrolled in &self.pending_scrollback {
+            for run in &scrolled.runs {
+                if let Some(Deco::Images(places)) = &run.deco {
+                    live.extend(places.iter().map(|place| place.id));
+                }
+            }
+        }
+        let mut shed = Vec::new();
+        self.pending_images.retain(|image| {
+            let keep = live.contains(&image.id);
+            if !keep {
+                shed.push(image.id);
+            }
+            keep
+        });
+        for id in shed {
+            self.images.forget(id);
+            self.kitty.forget(id);
+        }
+    }
+
     pub(super) fn drain(&mut self) -> Delta {
         let damaged = self.screen_mut().drain_damage();
+        self.shed_unplaced_images();
         let images = std::mem::take(&mut self.pending_images);
         let links = std::mem::take(&mut self.pending_links);
         // `Vec::from` rather than `drain(..).collect()`: this hands the deque's own ring

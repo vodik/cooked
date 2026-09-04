@@ -217,6 +217,16 @@ impl Kitty {
         }
     }
 
+    /// Every picture the child can still name, and so still ask to be placed.
+    ///
+    /// A transmission's bytes may be shed the moment nothing on the grid shows them --
+    /// see `State::shed_unplaced_images` -- and a picture bound to an `i=` is the
+    /// exception: `a=p` names one by id alone, with no bytes of its own, so the
+    /// transmission that bound it is the only chance those bytes have to reach Emacs.
+    pub(crate) fn bound_images(&self) -> impl Iterator<Item = ImageId> + '_ {
+        self.by_client.values().copied()
+    }
+
     /// Retire every client name for OURS, the picture having gone.
     ///
     /// Called when the store drops an image -- Emacs discarded its bytes, or the count
@@ -230,15 +240,6 @@ impl Kitty {
     /// rather than per transmission.
     pub(crate) fn forget(&mut self, ours: ImageId) {
         self.by_client.retain(|_, &mut id| id != ours);
-    }
-
-    /// Retire every client name there is, every picture having gone at once.
-    ///
-    /// The bulk case of [`Kitty::forget`], and it exists for the one thing that drops
-    /// the whole store: a cell size change. A name left behind would place a rectangle
-    /// nothing can describe any more.
-    pub(crate) fn forget_all(&mut self) {
-        self.by_client.clear();
     }
 
     /// Take one APC payload, returning what the terminal should do about it.

@@ -3,7 +3,7 @@
 //! Scrollback deliberately lives in the Emacs buffer, not here. Rows that fall off the
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
-use super::cell::{Attrs, Color, MarkId, Row, Run, Style};
+use super::cell::{Attrs, Color, Deco, Extra, MarkId, Row, Run, Style};
 use super::image::{
     CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, Interned, PixelSize,
     png_dimensions,
@@ -13,7 +13,7 @@ use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
 use super::screen::{Cursor, Erase, Evicted, Resize, Screen};
 use super::sixel;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use unicode_width::UnicodeWidthChar;
 
 mod csi;
@@ -207,7 +207,8 @@ pub struct Scrolled {
 /// Everything that changed since the last drain.
 #[derive(Debug, Clone, Default)]
 pub struct Delta {
-    /// Images transmitted during this drain, in transmission order.
+    /// Pictures this delta's cells refer to and Emacs has not been given yet, in
+    /// transmission order.
     ///
     /// A field rather than an [`Event`], and the drain's third category: the level/
     /// occurrence division sorts state by *what redisplay needs* against *what Emacs
@@ -216,8 +217,16 @@ pub struct Delta {
     /// dispatched after both render passes, so a semantic mark's anchor has text to
     /// point at. An image arriving as an event would arrive after the row that needed it.
     ///
-    /// Empty on almost every drain, and each entry crosses exactly once: a placement
-    /// names an id, and rows carry placements.
+    /// Not everything the child transmitted, which is the part worth reading twice. A
+    /// transmission is not a placement: a child can draw far faster than Emacs redisplays
+    /// and the frames it drew over in between are referred to by nothing by the time this
+    /// is built, so they are dropped and the store is told to forget them. See
+    /// [`State::shed_unplaced_images`]. What is left crosses exactly once, however many
+    /// cells or drains name it afterwards — the cells carry the id, and the geometry to
+    /// draw it at travels with them on each [`Placement`](crate::emu::image::Placement)
+    /// rather than being carried here.
+    ///
+    /// Empty on almost every drain.
     pub images: Vec<ImageData>,
     /// Hyperlink destinations first seen during this drain, as `(ID, URI)`.
     ///
@@ -333,6 +342,30 @@ pub(crate) const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_m
 
 /// Backlog at which the reader stops pulling from the pty, letting the child block.
 pub const BACKLOG_HIGH_WATER: usize = 8_000;
+
+/// Bytes of pending image payload that count as one unit of [`Term::backlog`].
+///
+/// A conversion factor, because the backlog is one scalar against one limit and images
+/// are not measured in the same thing as rows and events. At 1KB a unit the cap above
+/// comes to roughly 8MB of undrained pictures, which is the figure to argue with if this
+/// is ever wrong.
+///
+/// Why that figure, and not something nearer the megabyte or two that 8000 rows come to:
+/// backpressure and shedding answer two different problems, and this must not take work
+/// away from the one that is free. An animation redrawing in place has its overdrawn
+/// frames shed — see `State::shed_unplaced_images` — which costs the child nothing and
+/// holds at most two payloads however far behind Emacs falls. Throttling that instead
+/// would block the child in `write` and slow the animation down to buy nothing: those
+/// frames were never going to be shown.
+///
+/// So the budget wants to sit above two frames of anything that sheds. `viu`, the case
+/// this was measured on, is 2.1MB a frame — two of those is 4.2MB, comfortably under the
+/// 8MB here. A producer at 4MB a frame would sit on the limit and be throttled
+/// occasionally, which is the right answer at that size rather than a failure of this
+/// one. What the budget is really for is the case shedding cannot touch: many *distinct*
+/// pictures, all still displayed, all genuinely owed to Emacs, arriving faster than they
+/// can be drained.
+pub(crate) const IMAGE_BACKLOG_UNIT: usize = 1024;
 
 /// Largest OSC payload forwarded to Lisp, in bytes. Well past any real title or
 /// hyperlink, and short of letting a single escape sequence allocate without bound.
@@ -483,29 +516,20 @@ impl Term {
     /// cannot become a cell count, and the XTWINOPS reports that tools consult before
     /// deciding whether to draw at all have nothing to say.
     ///
-    /// A cell that has actually moved also forgets every picture, which is a repair and
-    /// not housekeeping. A transmission naming no `c=`/`r=` is measured into cells here,
-    /// once, and that rectangle is then fixed for the life of the id — it has to be,
-    /// because Emacs hangs one slice of the picture on each of those cells and a row that
-    /// has reached the scrollback can never be re-laid. Ids are content-addressed, so an
-    /// animation looping past a cell change draws two rectangles at once otherwise: a
-    /// frame the store still recognises is answered with the rectangle measured against
-    /// the old font, while a frame Emacs has evicted is retransmitted, interned afresh,
-    /// and measured against the new one. Forgetting collapses the two — every frame from
-    /// here on crosses again and is measured the same way — and the rows already written
-    /// keep the id, the rectangle and the bytes they were drawn with, which
-    /// `cooked--rescale-deco' re-cuts to the new cell.
+    /// Nothing is forgotten when the cell moves, and that is worth stating because it
+    /// used to be. A transmission naming no `c=`/`r=` is measured into cells against the
+    /// metrics of the moment, and the store was dropped whole here so that no id minted
+    /// against the old font could be answered with — every picture the child redrew
+    /// crossed the boundary again, at megabytes a frame, to be remeasured.
     ///
-    /// Hence the guard, rather than forgetting on every call: rows and columns are
-    /// reported through this same path and do not move a cell, and an ordinary window
-    /// reshape must not spend a retransmission per picture.
+    /// `State::intern_image` measures against `self.metrics` at the time of each
+    /// transmission instead, so a recognised id is already laid at the rectangle the
+    /// current font implies and there is nothing stale to protect anyone from. The rows
+    /// already written keep the rectangle they were laid at — it rides every
+    /// [`Placement`](crate::emu::image::Placement) — and `cooked--rescale-deco' re-cuts
+    /// their slices to the new cell, which grows the picture with the text around it.
     pub fn set_cell_metrics(&mut self, metrics: CellMetrics) {
-        if self.state.metrics == metrics {
-            return;
-        }
         self.state.metrics = metrics;
-        self.state.images.forget_all();
-        self.state.kitty.forget_all();
     }
 
     pub fn cell_metrics(&self) -> CellMetrics {
@@ -654,8 +678,28 @@ impl Term {
         self.state.force_per_character_print = true;
     }
 
+    /// How much undrained work is queued, in the one currency backpressure understands.
+    ///
+    /// Rows and events count themselves. Pictures are counted by weight instead, at
+    /// [`IMAGE_BACKLOG_UNIT`] bytes to the unit: a pending image is one item and several
+    /// megabytes, so counting it as an item would let a child hold a gigabyte of frames
+    /// without ever troubling a limit written for rows. That is exactly what it did.
+    ///
+    /// Summed rather than kept as a running total, deliberately. It is the same fact as
+    /// the payloads themselves, and a second copy of a fact is a thing that can disagree
+    /// with the first — which is the shape of the bug the image path has already had once.
+    /// The vector is short (shedding sees to that) and this is called once per read, so
+    /// the sum costs nothing worth a bookkeeping invariant.
     pub fn backlog(&self) -> usize {
-        self.state.pending_scrollback.len() + self.state.events.len()
+        let image_bytes: usize = self
+            .state
+            .pending_images
+            .iter()
+            .map(|image| image.bytes.len())
+            .sum();
+        self.state.pending_scrollback.len()
+            + self.state.events.len()
+            + image_bytes / IMAGE_BACKLOG_UNIT
     }
 
     /// Text of the last non-blank line — the prompt a `getpass` child just printed.

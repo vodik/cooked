@@ -85,6 +85,7 @@ limit and none of them is arbitrary:
 | `sixel::MAX_PIXELS` | `sixel::measure` | `!` as a compressor: 11 bytes name 4G pixels |
 | geometry vs. payload | `Kitty::finish` | `s=65535,v=65535` with a four-byte payload |
 | `MAX_TRACKED_IMAGES` (4096) | `ImageStore` | A long session's bookkeeping |
+| `IMAGE_BACKLOG_UNIT` (1KB) | `Term::backlog` | Undrained pictures outrunning Emacs |
 | `cooked-image-cache-size` (64MB) | `cooked--evict-images` | A long session's pictures |
 
 Those two bound different things, and only the second bounds any pixels. The module
@@ -93,10 +94,13 @@ so its cap is on how many pictures it can still *recognise*, not on how much it 
 `cooked-image-cache-size` is worth reading the docstring for before changing: eviction
 spends only images with no live spec, which is free information rather than a guess.
 
-Neither cap is what a *font* change spends. That drops the module's store whole, because
-the geometry it keeps is a count of cells measured against the old one, and answering a
-retransmission with it is what makes a looping gif alternate between two sizes. See
-`Term::set_cell_metrics`.
+A *font* change spends neither, and nothing else either. The store keeps what a picture
+**is** — its pixel size — and what the child **said** about it (`c=`/`r=`, or nothing),
+never the cell rectangle those come to; that is derived at each placement against the
+cell of the moment. So a zoom needs no repair and costs no retransmission: the next frame
+is laid at the rectangle the new cell implies, and the rows already written keep the
+rectangle they were laid at, which `cooked--rescale-deco' re-cuts. See
+`ImageStore::cells`, which is where the two cases are kept apart.
 
 It used to keep the payloads too, under a 64MB cap of its own, so that a kitty client
 could place an image it had transmitted earlier by bare id. That is what
@@ -104,6 +108,36 @@ could place an image it had transmitted earlier by bare id. That is what
 Emacs holds the only copy, the module is told when Emacs drops one, and a bare-id
 placement of a picture that has gone is answered `ENOENT:image` rather than drawn from a
 second cache with a policy of its own.
+
+## Frame rate
+
+Nothing in cooked sets one, and nothing needs to. A child that transmits faster than
+Emacs redisplays has its overdrawn frames shed rather than queued: by the time a drain
+happens, a frame that was drawn over has no cell pointing at it, so its bytes never cross
+and the store is told to forget them. What reaches Emacs is one frame per drain, and
+drains happen when Emacs is ready for one.
+
+`cargo test --release --test throughput -- --ignored --nocapture kitty_animation` measures
+it on the shape `viu` sends — 826x647 RGBA, 2.1MB a frame. The bytes handed to Lisp track
+the drain count rather than the frame count:
+
+| Frames per drain | Before | After |
+| --- | --- | --- |
+| 1 | 61 MB | 61 MB |
+| 2 | 61 MB | 31 MB |
+| 4 | 61 MB | 16 MB |
+| 8 | 61 MB | 8 MB |
+
+Parse throughput is unchanged (~300 MB/s either way); the queue never holds more than a
+couple of payloads, where before it grew without bound between drains.
+
+Shedding cannot help a child sending pictures that are all *distinct* and all still on
+screen — a thumbnail grid, an image browser — because every one of them is genuinely owed
+to Emacs. That case is backpressure's, and pictures are weighed into `Term::backlog` at
+`IMAGE_BACKLOG_UNIT` bytes to the unit so that it can see them at all: a picture is one
+item and several megabytes, and counted as an item it never troubled a limit written for
+rows. A child drawing images scrolls nothing and raises no events, so its backlog used to
+be flatly zero however far behind it got.
 
 ## What is not implemented, and why
 

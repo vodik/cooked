@@ -141,19 +141,6 @@ impl<K: Id> Ledger<K> {
         true
     }
 
-    /// Drop every id held, keeping the counter that mints them.
-    ///
-    /// Not `Default::default()`, and the difference is the whole of it: an id that has
-    /// been handed out must never be handed out again. Emacs goes on displaying buffer
-    /// text naming an id long after this side has stopped recognising the picture, so a
-    /// reissued `0` would answer that text with somebody else's image.
-    pub(crate) fn clear(&mut self) {
-        self.by_hash.clear();
-        self.entries.clear();
-        self.oldest = None;
-        self.newest = None;
-    }
-
     /// Every id, least-recently-used first, without disturbing the order.
     ///
     /// Only the tests walk the order now: the one production reader was the pass that

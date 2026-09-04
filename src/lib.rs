@@ -915,8 +915,6 @@ fn images_to_lisp(env: Env, images: &[ImageData]) -> Result<Vec<Value>> {
                     image.bytes.as_slice(),
                     image.px.w,
                     image.px.h,
-                    image.cells.cols,
-                    image.cells.rows,
                 ]
             )
         })
@@ -943,8 +941,13 @@ fn links_to_lisp(env: Env, links: &[(LinkId, String)]) -> Result<Vec<Value>> {
 /// it — see [`Deco`] — which is what keeps the record narrow:
 ///
 ///   `glyph`   two bytes, a `BoxGlyph` bit pattern.
-///   `image`   eight bytes: a `u32` image id, then the cell's row and column within
-///             that image as `u16`s.
+///   `image`   twelve bytes: a `u32` image id, then the cell's row and column within
+///             that image, then the rectangle that placement was laid at, as `u16`s.
+///
+/// The rectangle is repeated on every cell rather than carried once per image because
+/// it belongs to the placement — see [`Placement`](emu::image::Placement). Four bytes a
+/// cell against a picture's own megabytes, and it is what lets two placements of one id
+/// at two sizes both draw correctly.
 ///
 /// A packed string rather than a list because this is the live-row path: box drawing is
 /// what full-screen programs are made of, so a list would cons per character of every
@@ -965,11 +968,13 @@ impl env::IntoLisp for Option<&Deco> {
                 env.cons(sym!(env, "glyph")?, env.into_lisp(packed.as_slice())?)
             }
             Deco::Images(places) => {
-                let mut packed = Vec::with_capacity(places.len() * 8);
+                let mut packed = Vec::with_capacity(places.len() * 12);
                 for place in places {
                     packed.extend_from_slice(&place.id.0.to_le_bytes());
                     packed.extend_from_slice(&place.cell_row.to_le_bytes());
                     packed.extend_from_slice(&place.cell_col.to_le_bytes());
+                    packed.extend_from_slice(&place.cols.to_le_bytes());
+                    packed.extend_from_slice(&place.rows.to_le_bytes());
                 }
                 env.cons(sym!(env, "image")?, env.into_lisp(packed.as_slice())?)
             }

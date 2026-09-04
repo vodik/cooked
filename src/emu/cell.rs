@@ -1555,6 +1555,8 @@ mod tests {
                             id: crate::emu::image::ImageId(((r >> 40) % 2) as u32),
                             cell_row: 0,
                             cell_col: 0,
+                            cols: 1,
+                            rows: 1,
                         },
                         style,
                     ),

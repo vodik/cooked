@@ -175,6 +175,181 @@ fn full_screen_repaint() {
 /// share with the image path had no gate on it -- which is how an eviction that walked
 /// every hash bucket, and so went quadratic once past `MAX_TRACKED_LINKS`, went unnoticed.
 /// Both shapes are driven past that cap deliberately.
+/// A kitty animation, in the shape `viu` actually sends: one full-resolution frame per
+/// tick, the terminal asked to fit it with `c=`/`r=`, and the cursor walked back over the
+/// picture so the next frame lands on top of it.
+///
+/// 826x647 RGBA is what the gif this was written for decodes to -- 2.1MB a frame, 2.8MB
+/// once base64 has had it -- and the frames of a loop are byte-identical the second time
+/// round, which is what makes content addressing worth anything here.
+fn animation(frames: usize, w: u32, h: u32, cols: u16, rows: u16) -> Vec<Vec<u8>> {
+    (0..frames)
+        .map(|n| {
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            // Enough to make every frame a distinct picture and no more: the payload is
+            // what is being measured, not the decoder.
+            pixels[0] = n as u8;
+            pixels[1] = (n >> 8) as u8;
+            // `\r` with the `CUU`: `a=T` leaves the cursor past the right edge of the
+            // picture, so winding the rows back without also returning to column 0 lays
+            // the next frame *beside* this one instead of over it -- which is not an
+            // animation, and quietly turns this into a benchmark of a widening grid.
+            let mut out =
+                format!("\x1b[{rows}A\r\x1b_Gf=32,a=T,t=d,s={w},v={h},c={cols},r={rows};")
+                    .into_bytes();
+            out.extend_from_slice(b64(&pixels).as_bytes());
+            out.extend_from_slice(b"\x1b\\");
+            out
+        })
+        .collect()
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut word = 0u32;
+        for (i, &byte) in chunk.iter().enumerate() {
+            word |= u32::from(byte) << (16 - 8 * i);
+        }
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[((word >> (18 - 6 * i)) & 0x3F) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// `mpv --vo=kitty`, which is a different animal from a gif player and worth its own
+/// shape. Measured from a real capture: 800x450 raw RGB (`f=24`, so it becomes a PPM
+/// rather than a PNG), 1.38MB a frame, chunked into 352 APCs of 4096 bytes, on the alt
+/// screen, with `C=1` so the cursor does not move and `q=2` so nothing is replied to.
+/// At 30fps that is 41MB/s arriving, sustained.
+fn mpv_frames(frames: usize, w: u32, h: u32) -> Vec<Vec<u8>> {
+    (0..frames)
+        .map(|n| {
+            let mut pixels = vec![0u8; (w * h * 3) as usize];
+            pixels[0] = n as u8;
+            pixels[1] = (n >> 8) as u8;
+            let payload = b64(&pixels);
+            let mut out = b"\x1b[0;0f".to_vec();
+            let mut first = true;
+            let mut rest = payload.as_str();
+            while !rest.is_empty() {
+                let take = rest.len().min(4096);
+                let (chunk, tail) = rest.split_at(take);
+                let more = u8::from(!tail.is_empty());
+                if first {
+                    out.extend_from_slice(
+                        format!("\x1b_Ga=T,f=24,s={w},v={h},C=1,q=2,m={more};").as_bytes(),
+                    );
+                    first = false;
+                } else {
+                    out.extend_from_slice(format!("\x1b_Gm={more};").as_bytes());
+                }
+                out.extend_from_slice(chunk.as_bytes());
+                out.extend_from_slice(b"\x1b\\");
+                rest = tail;
+            }
+            out
+        })
+        .collect()
+}
+
+/// Where a video's time goes on our side of the boundary, and how much of it is ours.
+///
+/// The question this answers is whether a dropped frame is cooked's fault or Emacs'. Feed
+/// alone is the parser, the base64, the PPM wrap and the content hash; feed-and-drain adds
+/// the copy that crosses. Everything after that is Emacs decoding and scaling, which this
+/// cannot see -- but if the numbers here are far above 41MB/s, it is not us.
+#[test]
+#[ignore = "benchmark"]
+fn kitty_video() {
+    let frames = mpv_frames(60, 800, 450);
+    let fed: usize = frames.iter().map(Vec::len).sum();
+
+    let mut term = Term::new(24, 80);
+    term.feed(b"\x1b[?1049h");
+    timed("mpv shape, parse only", fed, || {
+        for frame in &frames {
+            for piece in frame.chunks(READ_CHUNK) {
+                term.feed(piece);
+            }
+        }
+    });
+    term.drain();
+
+    let mut term = Term::new(24, 80);
+    term.feed(b"\x1b[?1049h");
+    let mut crossed = 0usize;
+    timed("mpv shape, drain every frame", fed, || {
+        for frame in &frames {
+            for piece in frame.chunks(READ_CHUNK) {
+                term.feed(piece);
+            }
+            crossed += term
+                .drain()
+                .images
+                .iter()
+                .map(|i| i.bytes.len())
+                .sum::<usize>();
+        }
+    });
+    let mb = crossed as f64 / (1024.0 * 1024.0);
+    println!(
+        "{:>44}({mb:.0} MB to Lisp, {:.2} MB per frame)",
+        "",
+        mb / frames.len() as f64
+    );
+}
+
+/// What an animation costs Emacs, which is the only number that matters for it.
+///
+/// The child sets the frame rate and Emacs cannot be made to keep up with a 20fps stream
+/// of two-megabyte pictures; what it can do is not be handed the frames it has already
+/// missed. `BEHIND` is how many frames the child gets out while Emacs is busy with the
+/// last one, so `behind=1` is a display keeping pace and `behind=4` is the case that
+/// actually happens. The bytes-to-Lisp column is the whole point: it should track the
+/// number of *drains*, not the number of frames.
+#[test]
+#[ignore = "benchmark"]
+fn kitty_animation() {
+    let frames = animation(30, 826, 647, 61, 23);
+    let fed: usize = frames.iter().map(Vec::len).sum();
+    for behind in [1usize, 2, 4, 8] {
+        // Two loops, so the second one measures the content-addressed path.
+        let mut term = Term::new(24, 80);
+        let (mut crossed, mut drains, mut peak) = (0usize, 0usize, 0usize);
+        timed(
+            &format!("animation, {behind} frame(s) per drain"),
+            fed * 2,
+            || {
+                for _ in 0..2 {
+                    for batch in frames.chunks(behind) {
+                        for frame in batch {
+                            for piece in frame.chunks(READ_CHUNK) {
+                                term.feed(piece);
+                            }
+                        }
+                        let delta = term.drain();
+                        crossed += delta.images.iter().map(|i| i.bytes.len()).sum::<usize>();
+                        drains += 1;
+                        peak = peak.max(delta.images.len());
+                    }
+                }
+            },
+        );
+        println!(
+            "{:>44}({drains} drains, {:.0} MB to Lisp, {peak} frames queued at worst)",
+            "",
+            crossed as f64 / (1024.0 * 1024.0)
+        );
+    }
+}
+
 #[test]
 #[ignore = "benchmark"]
 fn hyperlinks() {
