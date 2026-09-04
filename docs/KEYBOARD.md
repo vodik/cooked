@@ -95,6 +95,16 @@ the instant it's pressed (so a real terminal's Escape key has no latency), which
 nothing for a Meta chord to land on before the child sees it. `C-c M-x` is unaffected
 either way.
 
+That last sentence is a fact about *terminal* frames, where a Meta chord arrives as two
+bytes and both are forwarded. On a graphical frame `M-t` is a single event, and Emacs
+stores a Meta character under an `ESC` prefix and nowhere else — so binding the Meta
+space and forwarding `ESC` as a key of its own cannot both happen in one keymap. The
+three maps that forward everything are therefore worn through a child keymap on a
+graphical frame: `ESC` becomes the prefix there, and the Escape key keeps its
+zero-latency spelling through the `escape` event a graphical frame actually sends.
+`vterm` and `eat` both resolve it the same way, unconditionally; cooked's variant is
+chosen at the moment the map is installed, so terminal frames never pay for it.
+
 `cooked-send-literal-key` is the escape hatch in the other direction: it sends the very
 next key to the child exactly as typed, regardless of what's reserved — including `C-c`
 itself (`C-c C-q C-c` sends a literal `C-c` byte).

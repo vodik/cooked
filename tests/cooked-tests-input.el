@@ -14,7 +14,7 @@
   (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; sleep 5")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
     (should-not (cooked--input-state-p))
-    (should (eq (current-local-map) cooked-raw-map))))
+    (should (eq (current-local-map) (cooked--forwarding-map cooked-raw-map)))))
 
 (ert-deftest cooked-alt-mode-installs-the-alt-map-and-still-forwards-everything ()
   "The alternate screen means a full-screen program has taken over completely,
@@ -23,7 +23,7 @@ customizable exceptions at all."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[?1049h'; stty raw -echo; cat -v")
     (should (cooked-tests--settle (lambda () cooked--alt)))
-    (should (eq (current-local-map) cooked-alt-map))
+    (should (eq (current-local-map) (cooked--forwarding-map cooked-alt-map)))
     (dolist (key '("C-g" "C-x" "C-h" "C-u" "C-l"))
       (should (eq (lookup-key cooked-alt-map (kbd key)) #'cooked-send-key)))))
 
@@ -116,7 +116,7 @@ catches the buffer up on whatever the child produced meanwhile."
     (should-not (string-search "frozen" (cooked-tests--text)))
     (call-interactively #'cooked-toggle-peek)
     (should-not (cooked--suspended-p))
-    (should (eq (current-local-map) cooked-raw-map))
+    (should (eq (current-local-map) (cooked--forwarding-map cooked-raw-map)))
     (should-not buffer-read-only)
     (should (cooked-tests--settle
              (lambda () (string-search "frozen" (cooked-tests--text)))))))
@@ -155,6 +155,53 @@ so insert state stays a state you can leave."
   ;; And cooked's own commands are still reachable, being on the shared parent.
   (should (eq (lookup-key cooked-semi-map (kbd "C-c C-c")) #'cooked-interrupt)))
 
+(ert-deftest cooked-meta-chords-forward-on-a-graphical-frame ()
+  "A terminal frame sends a Meta chord as two bytes and the passthrough maps
+forward both, so `M-t' arrives without anyone binding it.  A graphical frame
+sends one event that no list of character codes can name, and the map worn
+there has to bind it -- through an ESC prefix, because that is the only place
+`define-key' will store a Meta character."
+  (let ((map (cooked--build-meta-overlay cooked-alt-map)))
+    (dolist (key '("M-t" "M-x" "M-SPC" "C-M-t" "M-ESC"))
+      (should (eq (lookup-key map (kbd key)) #'cooked-send-meta-key)))
+    ;; The Escape key keeps its own zero-latency spelling: `escape' is what a
+    ;; graphical frame sends, and it only decays to a bare ESC when unbound.
+    (should (eq (lookup-key map [escape]) #'cooked-send-key))
+    ;; `ESC O' and `ESC [' begin the sequences every other key arrives as.
+    (dolist (key '("M-O" "M-["))
+      (should-not (lookup-key map (kbd key))))
+    ;; And the parent still answers for everything it always did.
+    (should (eq (lookup-key map (kbd "C-a")) #'cooked-send-key))
+    (should (eq (lookup-key map (kbd "<up>")) #'cooked-send-key))
+    (should-not (eq (lookup-key map (kbd "C-c")) #'cooked-send-key))
+    (should (eq (lookup-key map (kbd "C-c C-v")) #'cooked-toggle-peek))))
+
+(ert-deftest cooked-forwarding-map-leaves-a-terminal-frame-alone ()
+  "The overlay's one cost is that ESC becomes a prefix and so has to wait for
+what follows.  A terminal frame never needed it -- the two bytes are already
+forwarded separately -- so it keeps the plain map, and the same overlay is
+reused rather than rebuilt when a graphical frame does ask."
+  (should-not (display-graphic-p))
+  (should (eq (cooked--forwarding-map cooked-alt-map) cooked-alt-map))
+  (should (eq (lookup-key cooked-alt-map (kbd "ESC")) #'cooked-send-key))
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+    (let ((cooked--meta-overlays nil))
+      (let ((first (cooked--forwarding-map cooked-alt-map)))
+        (should-not (eq first cooked-alt-map))
+        (should (eq (keymap-parent first) cooked-alt-map))
+        (should (eq (cooked--forwarding-map cooked-alt-map) first))))))
+
+(ert-deftest cooked-send-meta-key-puts-the-modifier-back ()
+  "Arriving as `ESC t' leaves `last-command-event' a bare `?t', with the
+modifier gone by the time a command runs.  Putting it back rather than simply
+sending an ESC byte is what lets a negotiated protocol spell it as a modifier
+parameter -- here, with nothing negotiated, it is the classical `ESC t'."
+  (cooked-tests--with-echoing-child ""
+    (let ((last-command-event ?t))
+      (call-interactively #'cooked-send-meta-key))
+    (should (cooked-tests--settle
+             (lambda () (string-search "^[t" (cooked-tests--text)))))))
+
 (ert-deftest cooked-evil-normal-state-keeps-the-render-live ()
   "`C-z' into normal state is the key an evil user presses to do anything at
 all -- reach a leader, scroll, get to another window -- and it used to stop
@@ -177,7 +224,7 @@ stops the view chasing the cursor; the child keeps drawing throughout."
     ;; And back: emacs state hands the keyboard over again.
     (evil-emacs-state)
     (should-not (cooked--suspended-p))
-    (should (eq (current-local-map) cooked-raw-map))
+    (should (eq (current-local-map) (cooked--forwarding-map cooked-raw-map)))
     (should-not buffer-read-only)))
 
 (ert-deftest cooked-evil-insert-state-resumes-forwarding-from-normal-state ()
@@ -221,7 +268,7 @@ into a frozen buffer that goes nowhere."
     (should (cooked--suspended-p))
     (cooked-tests--type "x")
     (should-not (cooked--suspended-p))
-    (should (eq (current-local-map) cooked-raw-map))
+    (should (eq (current-local-map) (cooked--forwarding-map cooked-raw-map)))
     (should (cooked-tests--settle
              (lambda () (string-search "x" (cooked-tests--text)))))))
 
@@ -1043,7 +1090,7 @@ as `m' rather than `M' reaches the child and is thrown away."
     (should (eq (cooked--policy) 'alt))
     ;; The alt map owns the wheel while the child does; otherwise Emacs would
     ;; scroll the buffer out from under a full-screen program.
-    (should (eq (current-local-map) cooked-alt-map))
+    (should (eq (current-local-map) (cooked--forwarding-map cooked-alt-map)))
     (should (eq (key-binding (vector 'wheel-up)) #'cooked-mouse-event))
     (should (eq (key-binding (vector 'mouse-5)) #'cooked-mouse-event))
     ;; With no cell under the pointer the notch still goes out, at the cursor,
@@ -1356,7 +1403,7 @@ has no handler and nothing drives evil at all."
     ;; `raw' -- a positive signal, so nothing is held back.
     (should (cooked-tests--settle
              (lambda () (and (eq cooked--semantic 'output)
-                             (eq (current-local-map) cooked-command-map)))))
+                             (eq (current-local-map) (cooked--forwarding-map cooked-command-map))))))
     (should (eq evil-state 'emacs))
 
     ;; ...and hands it back at the next prompt.

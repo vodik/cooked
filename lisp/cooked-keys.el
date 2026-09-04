@@ -21,7 +21,10 @@
 ;; rest of the state machine.  This file builds the maps; that file decides
 ;; which one the buffer is wearing.  Peek is where the line is easiest to see --
 ;; `cooked-peek-map' is a keymap and lives here, while `cooked-toggle-peek' and
-;; `cooked--resume-forwarding' are transitions and do not.
+;; `cooked--resume-forwarding' are transitions and do not.  `cooked--forwarding-map'
+;; sits just on this side of that line: which *spelling* of a forwarding map a
+;; frame needs is a fact about how a key is written down, not about what the
+;; child is doing.
 ;;
 ;; The maps are defined *below* the options that configure them, which reads
 ;; backwards and has to: a `defvar' that builds itself from an option's value
@@ -222,6 +225,23 @@ negotiation that never happened -- see `cooked--assumed-key-protocol'."
     (when-let* ((bytes (cooked--encode-event last-command-event)))
       (cooked--snap-to-cursor)
       (cooked--send-to-child bytes))))
+
+(defun cooked-send-meta-key ()
+  "Send the key that invoked this command to the child, with Meta applied.
+
+Bound only under the ESC prefix of `cooked--meta-overlay\=', where a Meta chord
+arrives as two events and the modifier is gone by the time a command runs:
+`M-t\=' is looked up as `ESC t\=', so `last-command-event\=' is a bare `?t\='.  Put
+the modifier back and hand the reconstructed event to `cooked-send-key\=', so
+that a negotiated protocol spells it as a modifier parameter rather than as a
+leading ESC -- which is the whole reason not to simply send \"\\e\" and the key.
+
+`event-apply-modifier\=' is what Emacs\=' own `event-apply-meta-modifier\=' uses,
+and it answers for symbols as well as characters."
+  (interactive)
+  (let ((last-command-event
+         (event-apply-modifier last-command-event 'meta 27 "M-")))
+    (cooked-send-key)))
 
 (defvar cooked-send-string-map
   (let ((map (make-sparse-keymap)))
@@ -613,6 +633,8 @@ question -- see `cooked-key-protocol-overrides'."
 Everything `cooked-raw-map' and `cooked-alt-map' cover is otherwise forwarded
 verbatim, ESC included, so \\`M-x' reaches the child as ESC x — exactly as in
 any other terminal.  \\`C-c M-x' is the way back out; see `cooked-meta-x'.
+On a graphical frame, where a Meta chord is one event rather than two bytes,
+that takes a keymap of its own -- see `cooked--build-meta-overlay'.
 
 `cooked-semi-map' is the exception, and deliberately so: it keeps ESC and the
 whole Meta space for Emacs, which is what makes evil's insert state a state you
@@ -640,6 +662,11 @@ and the rest keep working."
 ;; what is running; `raw' and `semi' keep a customizable handful, because one is
 ;; a guess and the other is a state the user chose.  `cooked--state-keymap' in
 ;; cooked-mode.el is what picks between them.
+;;
+;; The 0-127 range is the whole question only because a terminal frame spells
+;; every key inside it.  A graphical frame does not, so the three maps that
+;; forward everything are worn through `cooked--forwarding-map', which answers
+;; with a child of the map that binds the Meta space as well.
 
 (defun cooked--exception-code (key)
   "The character code KEY names, signalling an error if it does not name one.
@@ -667,7 +694,13 @@ terminal, so no list of character codes can name `M-x' in both -- while leaving
 ESC itself unbound makes Emacs' own `meta-prefix-char' handling the thing that
 answers, in whichever spelling the frame produces.  The cost is the one thing
 ESC is otherwise good for here: a forwarded ESC has no latency, and a prefix
-key waits.  See `cooked-semi-map', which is where that trade is worth making."
+key waits.  See `cooked-semi-map', which is where that trade is worth making.
+
+Without it the Meta space is not bound here either, for the same reason read
+the other way: ESC being a key of its own is what stops it being the prefix
+`M-t' would have to be stored under.  That is invisible on a terminal frame,
+where Meta chords arrive as two forwarded bytes, and is why
+`cooked--build-meta-overlay' exists for the frame where it is not."
   (let ((map (make-sparse-keymap)))
     (define-key map [remap self-insert-command] #'cooked-send-key)
     (dolist (code (number-sequence 0 127))
@@ -691,6 +724,63 @@ key waits.  See `cooked-semi-map', which is where that trade is worth making."
     (dolist (event cooked--mouse-events)
       (define-key map (vector event) #'cooked-mouse-event))
     map))
+
+(defvar cooked--meta-overlays nil
+  "Alist of (MAP . OVERLAY), the cache behind `cooked--forwarding-map\='.
+
+Keyed by the map object rather than by name, and safe to keep across a
+customization because `cooked--replace-keymap\=' rebuilds a map\='s bindings
+without replacing the map itself -- so a cached overlay\='s parent stays the
+map the user just changed.")
+
+(defun cooked--build-meta-overlay (map)
+  "A child of MAP that forwards the Meta space as well.
+
+MAP itself cannot carry that space.  `define-key\=' and `lookup-key\=' both
+translate a Meta character into ESC plus the character, so `M-t\=' is stored and
+found under an ESC prefix and nowhere else -- which means binding the Meta
+space at all and forwarding ESC as a key of its own are mutually exclusive
+within one keymap.  On a terminal frame that costs nothing: Escape and `t\=' are
+two separately-forwarded bytes there, and the child sees `ESC t\=' either way.
+On a graphical frame `M-t\=' is a single event, unbound by MAP, and reaches
+Emacs\=' own binding for it instead -- which is the bug this exists to fix.
+
+So the overlay makes ESC the prefix, and gives the Escape key back its
+zero-latency spelling through `[escape]\=' -- the symbol a graphical frame
+actually sends, which only decays to a bare ESC byte when nothing binds it.
+`ESC O\=' and `ESC [\=' are left out of the prefix map, as `vterm\=' and `eat\='
+also leave them out: they begin the escape sequences every other key arrives
+as, and a binding here would swallow one that had not been decoded yet.
+
+The whole Meta space forwards, MAP\='s exceptions included.  Those name
+unmodified control characters -- `C-g\=', `C-u\=' -- and reserving `M-C-g\='
+along with them would take a key from the child on the strength of a binding
+Emacs does not have."
+  (let ((overlay (make-sparse-keymap))
+        (esc (make-sparse-keymap)))
+    (dolist (code (number-sequence 0 127))
+      (unless (memq code '(?O ?\[))
+        (define-key esc (vector code) #'cooked-send-meta-key)))
+    (define-key overlay (vector meta-prefix-char) esc)
+    (define-key overlay [escape] #'cooked-send-key)
+    (set-keymap-parent overlay map)
+    overlay))
+
+(defun cooked--forwarding-map (map)
+  "MAP as it should be worn on the selected frame.
+
+MAP itself on a terminal frame, where it already forwards the Meta space a
+byte at a time; its `cooked--build-meta-overlay\=' child on a graphical frame,
+where it does not.  Asked at `use-local-map\=' time by `cooked--state-keymap\=',
+so a buffer shown on both frame types at once wears whichever answer the last
+refresh reached -- the alternative being to pay the overlay\='s one real cost,
+Escape waiting for a Meta chord, on the terminal frames that never needed it."
+  (if (not (display-graphic-p))
+      map
+    (or (cdr (assq map cooked--meta-overlays))
+        (let ((overlay (cooked--build-meta-overlay map)))
+          (push (cons map overlay) cooked--meta-overlays)
+          overlay))))
 
 (defun cooked--replace-keymap (map fresh)
   "Give MAP the bindings of FRESH, keeping MAP\='s own identity.
@@ -754,8 +844,10 @@ letters, which this list has no way to reach in the first place: a bare ESC
 byte is forwarded the instant it is pressed, for the sake of a real
 terminal's Escape key having no latency, so on a terminal frame `ESC' and the
 letter that follows are two independently-forwarded bytes before Emacs' own
-Meta-prefix logic ever runs.  `C-c M-x' remains the one escape hatch
-guaranteed to work regardless of frame type.
+Meta-prefix logic ever runs.  A graphical frame reaches the same place by a
+different route, `cooked--build-meta-overlay' binding the Meta space the one
+way a keymap can.  `C-c M-x' remains the one escape hatch guaranteed to work
+regardless of frame type.
 
 `cooked-send-literal-key' (\\`C-c C-q') sends any one key through to the child
 regardless of this list, for a raw program that wants one of these keys back."
@@ -827,7 +919,14 @@ are both explicit lists over an otherwise total map, for this reason.
 
 The cost is ESC's latency: unbound here, it waits to see whether a Meta chord
 follows.  That is why the full maps keep forwarding it instead, and why this
-map is not the default anywhere.")
+map is not the default anywhere.  `cooked--build-meta-overlay' makes ESC a
+prefix too, but only on a graphical frame and only for characters, where the
+Escape key arrives as `escape' and is bound alongside; here the point is for
+ESC to reach Emacs, so there is nothing to bind it to.
+
+\\`C-c C-q' is the way through for any one key this map keeps --
+`cooked-send-literal-key' reads the event itself rather than looking it up
+here.")
 
 (defvar cooked-peek-map
   (let ((map (make-sparse-keymap)))
