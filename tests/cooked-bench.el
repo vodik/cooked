@@ -16,6 +16,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'jit-lock)
 (require 'cooked)
 (require 'cooked-mode)
 
@@ -261,6 +262,81 @@ single record the encoding exists to produce."
     (cooked-bench--frames "per-frame, 24x80 with a URL per row"
                           (cooked-bench--url-rows 24 80) 200)))
 
+;;;; Cosmetic passes, and when they are paid
+;;
+;; The benchmarks above time `cooked--apply' and nothing else, which is the whole
+;; cost today because every cosmetic pass runs from inside the render: a damaged
+;; row is scanned for URLs as it is written, whether or not that row is ever
+;; displayed.
+;;
+;; That is the thing under review.  `goto-address-mode' does not work that way --
+;; it calls `jit-lock-register', so Emacs scans at redisplay, over the visible
+;; region, and text overwritten before the next redisplay is never scanned at
+;; all.  Moving cooked onto the same footing would make the scan's cost depend on
+;; how many frames actually reach the screen rather than on how many were
+;; rendered.
+;;
+;; Batch mode never redisplays, so a benchmark that only calls `cooked--apply'
+;; cannot see that difference: it would report the scan's cost dropping to zero,
+;; which is an artifact of nothing having asked for it rather than a saving.  So
+;; these drive the fontification redisplay would have driven, explicitly, once
+;; every RATIO frames -- and time it alongside the apply, so the figure is the
+;; whole cost of getting those frames onto a screen either way.
+;;
+;; Read them as a pair.  While the scan runs from the render path, RATIO changes
+;; nothing: the work is tied to frames rendered.  Once it runs from jit-lock, the
+;; ratio is the coalescing the design is meant to exploit, and the two rows
+;; should separate.
+
+(defun cooked-bench--fontify-as-redisplay (beg end)
+  "Run the fontification redisplay would run over BEG..END.
+
+Nothing at all while no jit-lock function is registered in this buffer, which
+is what makes one benchmark fair to both designs: today the scan has already
+been paid inside `cooked--apply\=' and there is nothing left here to do, so the
+figure is the render path's own cost and not an empty call added to it."
+  (when (bound-and-true-p jit-lock-mode)
+    (jit-lock-fontify-now beg end)))
+
+(defun cooked-bench--deferred-frames (label rows frames ratio)
+  "Apply ROWS FRAMES times, fontifying once every RATIO frames.
+
+RATIO stands in for coalescing: 1 is a child slow enough that every frame it
+paints is displayed, 8 is one painting eight times between two redisplays --
+which is the ordinary case for anything fast, and the case the deferral exists
+for.  The scan is driven over the screen region rather than the whole buffer,
+because that is what a window would have shown."
+  (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
+    (cooked-tests--settle-briefly)
+    ;; The primary screen: the alternate one has the URL scan off by default,
+    ;; and what is under test is when the scan is paid rather than which screen
+    ;; pays it.  See `cooked-detect-links-on-alt-screen'.
+    (let ((update (cooked-bench--update rows nil))
+          (t0 (float-time)))
+      (dotimes (frame frames)
+        (cooked--apply update)
+        (when (zerop (mod (1+ frame) ratio))
+          (cooked-bench--fontify-as-redisplay
+           (or (cooked--screen-start-position) (point-min)) (point-max))))
+      (cooked-bench--record
+       label (- (float-time) t0)
+       (format "%d frames x %d rows, 1 redisplay per %d, %.2f ms/frame"
+               frames (length rows) ratio
+               (/ (* 1000 (- (float-time) t0)) frames))))))
+
+(defun cooked-bench-deferred ()
+  "What the cosmetic passes cost against how often the screen is actually drawn."
+  (dolist (ratio '(1 8))
+    (cooked-bench--deferred-frames
+     (format "URL scan, 24x80, 1 draw per %d frames" ratio)
+     (cooked-bench--url-rows 24 80) 200 ratio))
+  ;; The floor both designs are measured against: the same frames with no
+  ;; cosmetic pass asked for at all.
+  (let ((cooked-detect-links nil))
+    (cooked-bench--deferred-frames
+     "URL scan off, 24x80 (the floor)"
+     (cooked-bench--url-rows 24 80) 200 1)))
+
 (defun cooked-bench-rescale ()
   "Cost of `cooked--rescale-deco\=', the walk a cell-size change runs.
 
@@ -320,6 +396,8 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
   (cooked-bench-box-drawing)
   (message "")
   (cooked-bench-per-frame)
+  (message "")
+  (cooked-bench-deferred)
   (message "")
   (cooked-bench-rescale)
   (cooked-bench--report))

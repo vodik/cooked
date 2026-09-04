@@ -1591,6 +1591,12 @@ costs its own contribution and neither the rest of the hook nor the drain.")
 (defun cooked--render-rows (rows &optional alt)
   "Rewrite damaged ROWS, an alist of (INDEX . BLOCK).
 
+ROWS is expected in ascending index order, which is how the drain reports
+damage.  Order is not required for correctness -- a row out of sequence is
+found by the same walk from `cooked--screen-start' that every row used to
+take -- but it is what keeps a full-height repaint from being quadratic; see
+the walk below.
+
 ALT says whether these rows belong to the alternate screen, and is passed in
 rather than read from `cooked--alt' because that variable still holds the
 *previous* drain's answer at this point in `cooked--apply' -- which would leave
@@ -1603,27 +1609,63 @@ positions stay exact while they wait: a row is rendered in place, so writing a
 later row never moves an earlier one, and nothing between here and the
 notification inserts or deletes anything either.  Nil for the alternate screen,
 which has no such seam at all."
-  (let (rendered)
+  (let (rendered
+        ;; Which row was placed last, and where it began.  The damaged rows
+        ;; arrive in ascending order -- `Screen::drain_damage' walks the dirty
+        ;; flags by index -- so each row is a short `forward-line' from the one
+        ;; before it, and only the first has to be found from
+        ;; `cooked--screen-start'.
+        ;;
+        ;; Restarting the walk per row is what made a repaint quadratic in the
+        ;; height of the screen.  `forward-line' scans characters rather than
+        ;; skipping to an index, so a full-height frame re-read most of the
+        ;; screen region once for every row in it: at 96 rows of 200 columns
+        ;; that was about half the cost of rendering the frame.
+        ;;
+        ;; Nil until the first row lands, and left alone by a row that had to
+        ;; fall back, so the next row walks from the last position actually
+        ;; known good rather than from one that was never reached.
+        (last-row nil)
+        (last-start nil))
     (save-excursion
       (pcase-dolist (`(,index . ,block) rows)
-        (cooked--goto-screen-row index 'extend)
+        ;; The short walk, or the whole one.  `bolp' is the same check
+        ;; `cooked--goto-screen-row' makes and for the same reason: `forward-line'
+        ;; counts a final line lacking a newline as a line moved, so it can
+        ;; report success while leaving point at that line's end rather than at
+        ;; the start of the row asked for.  Every row reaching here has a
+        ;; positive index -- `last-row' is only set from one already placed --
+        ;; so that check needs no row 0 exemption, which is the one case
+        ;; legitimately not at a line start.
+        (unless (and last-start
+                     (> index last-row)
+                     (progn (goto-char last-start)
+                            (and (zerop (forward-line (- index last-row)))
+                                 (bolp))))
+          (cooked--goto-screen-row index 'extend))
         (delete-region (point) (line-end-position))
         (let ((start (point)))
+          (setq last-row index
+                last-start start)
           (cooked--render-block block index)
           (cooked--guard-row-width start)
-          ;; Per freshly-rendered row, and no unfontify pass to go with it:
-          ;; goto-addr's overlays carry `evaporate t', so the `delete-region' above
-          ;; has already taken this row's previous ones with it.  Skipped on the
-          ;; alternate screen unless asked for -- see
-          ;; `cooked-detect-links-on-alt-screen'.
-          (when (or (not alt) cooked-detect-links-on-alt-screen)
-            (cooked--fontify-links start (line-end-position)))
-          ;; Links are cooked's own business and can be scanned the moment the
-          ;; text is there; the optional layers cannot, because a mark on this
-          ;; screen is not yet where it belongs.  So the bounds are only
-          ;; remembered here.
-          (when (and cooked-row-rendered-functions (not alt))
-            (push (cons start (line-end-position)) rendered)))))
+          ;; After the guard, which is the one thing here that can shorten the
+          ;; row: it trims a line Emacs laid out wider than `cooked--cols'
+          ;; assumed.  Both readers below want the row as it finally stands.
+          (let ((end (line-end-position)))
+            ;; Per freshly-rendered row, and no unfontify pass to go with it:
+            ;; goto-addr's overlays carry `evaporate t', so the `delete-region'
+            ;; above has already taken this row's previous ones with it.  Skipped
+            ;; on the alternate screen unless asked for -- see
+            ;; `cooked-detect-links-on-alt-screen'.
+            (when (or (not alt) cooked-detect-links-on-alt-screen)
+              (cooked--fontify-links start end))
+            ;; Links are cooked's own business and can be scanned the moment the
+            ;; text is there; the optional layers cannot, because a mark on this
+            ;; screen is not yet where it belongs.  So the bounds are only
+            ;; remembered here.
+            (when (and cooked-row-rendered-functions (not alt))
+              (push (cons start end) rendered))))))
     (nreverse rendered)))
 
 (defun cooked--notify-rows-rendered (bounds)
