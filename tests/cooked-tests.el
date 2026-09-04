@@ -61,6 +61,7 @@
 (require 'cooked-tests-sticky-scroll)
 (require 'cooked-tests-command-decorations)
 (require 'cooked-tests-menu)
+(require 'cooked-tests-process)
 (require 'cooked-tests-bench)
 
 (provide 'cooked-tests)
