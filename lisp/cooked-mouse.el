@@ -164,9 +164,10 @@ reader.")
 
 The four fields of the drain\='s `mouse\=' event, in the order it carries them.
 
-Called from `cooked--handle-event\=', which is in cooked.el and cannot require
-this file -- so it reaches here through a `declare-function\=', as a
-notification that something changed rather than a question asked upward."
+Called from `cooked--handle-event\=', which is in cooked-render.el and requires
+this file, so the call is an ordinary one -- but it is still a notification that
+something changed rather than a question asked upward, which is why the state
+and the keymap it gates both live on this side of it."
   (setq cooked--mouse-state (cooked--mouse-state-make
                              :enabled enabled :sgr sgr :drag drag :motion motion))
   ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this, so

@@ -128,6 +128,7 @@ pub(crate) mod intern;
 pub(crate) mod kitty;
 pub(crate) mod link;
 pub(crate) mod parser;
+pub(crate) mod png;
 pub(crate) mod screen;
 pub(crate) mod sixel;
 pub(crate) mod term;

@@ -16,9 +16,10 @@
 (require 'cooked)
 (require 'cooked-command)
 
-;; Owned by cooked-mode.el, which requires this file.  A label the foreground
-;; program supplies, a record of who last held the keyboard, and the command the
-;; state segment is a click away from.
+;; Owned by the layer that requires this file: `cooked--foreground-label' by
+;; cooked-keys.el, the rest by cooked-mode.el.  A label the foreground program
+;; supplies, a record of who last held the keyboard, and the command the state
+;; segment is a click away from.
 (defvar cooked--foreground-label)
 (defvar cooked--ownership)
 (defvar cooked-buffer-name-follows-title)

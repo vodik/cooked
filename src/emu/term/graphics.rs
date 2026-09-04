@@ -33,7 +33,7 @@ impl State {
         bytes: &[u8],
         px: PixelSize,
     ) -> ImageId {
-        let id = self.intern_image(format, bytes, px, None);
+        let id = self.intern_image(format, bytes.to_vec(), px, None);
         self.lay_image(id, CursorAfterImage::NextLine);
         id
     }
@@ -44,19 +44,36 @@ impl State {
     /// size should follow from the pixels. An empty `PX` is read out of the bytes where
     /// the format states its own size, which clients rely on: the protocol does not ask
     /// a PNG's sender to repeat dimensions the file already carries.
+    ///
+    /// **Takes the payload by value, and that is worth a paragraph.** This used to be a
+    /// `&[u8]` with a `bytes.to_vec()` on the way into `pending_images`, so every
+    /// *distinct* frame — which is every frame of an animation, ids being
+    /// content-addressed — paid a full copy of its own payload. At `viu`'s two megabytes
+    /// a frame and thirty frames a second that is sixty megabytes a second of memcpy,
+    /// spent to put bytes somewhere they already were.
+    ///
+    /// All three real producers already own a `Vec` at the call: the iTerm2 path has just
+    /// base64-decoded one, the sixel path has just had one back from `Bitmap::encode`, and
+    /// the kitty path destructures one out of `Outcome::Image`. So the copy bought nothing
+    /// but a signature. `State::place_image` is the one caller left holding a borrow, and
+    /// it copies there instead — it is reached only from `Term::place_image`, which
+    /// nothing but the tests calls.
+    ///
+    /// A recognised picture drops the payload here rather than copying it, which is the
+    /// same shape from the other side: the bytes are not wanted, because Emacs has them.
     pub(super) fn intern_image(
         &mut self,
         format: ImageFormat,
-        bytes: &[u8],
+        bytes: Vec<u8>,
         px: PixelSize,
         cells: Option<CellSize>,
     ) -> ImageId {
         let px = if px.is_empty() {
-            png_dimensions(bytes).unwrap_or(px)
+            png_dimensions(&bytes).unwrap_or(px)
         } else {
             px
         };
-        let Interned { id, fresh, retired } = self.images.intern(bytes, px);
+        let Interned { id, fresh, retired } = self.images.intern(&bytes, px);
         // The count cap can retire an id to make room for this one, and the client's own
         // name for that picture has to go at the same moment: an `a=p` naming it would
         // otherwise place a rectangle the store can no longer describe.
@@ -99,7 +116,7 @@ impl State {
             self.pending_images.push(ImageData {
                 id,
                 format,
-                bytes: bytes.to_vec(),
+                bytes,
                 px,
             });
         }
@@ -165,14 +182,14 @@ impl State {
         let Some(bytes) = decode_base64(&joined[colon + 1..]) else {
             return true;
         };
-        let Some((format, px)) = crate::emu::image::sniff(&bytes) else {
+        let Some((format, px)) = crate::emu::png::sniff(&bytes) else {
             return true;
         };
         // An axis the child named settles both: the other falls back to one cell, as it
         // did when the pair was a tuple with a zero in it.
         let cells = (cols.is_some() || rows.is_some())
             .then(|| CellSize::new(cols.unwrap_or(1), rows.unwrap_or(1)));
-        let id = self.intern_image(format, &bytes, px, cells);
+        let id = self.intern_image(format, bytes, px, cells);
         self.lay_image(id, CursorAfterImage::NextLine);
         true
     }
@@ -273,7 +290,7 @@ impl State {
         // PNG road for the reason `f=32` does rather than the cheaper P6 one.
         let px = bitmap.size;
         let (format, bytes) = bitmap.encode();
-        let id = self.intern_image(format, &bytes, px, None);
+        let id = self.intern_image(format, bytes, px, None);
         self.lay_image(id, CursorAfterImage::NextLine);
     }
 
@@ -296,7 +313,7 @@ impl State {
                 display,
                 freeze_cursor,
             } => {
-                let id = self.intern_image(format, &bytes, px, cells.asked());
+                let id = self.intern_image(format, bytes, px, cells.asked());
                 // The child's id space is not ours — ours is content-addressed — so the
                 // mapping is what makes a later `a=p` find this picture again.
                 self.kitty.bind(client_id, id);

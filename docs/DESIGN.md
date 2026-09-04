@@ -330,6 +330,18 @@ Placed in the middle it would have needed four `declare-function`s pointing back
 into `cooked.el`, and the rule that block states about itself is that it carries
 notifications upward, never questions.
 
+`cooked-render.el` is the same test read the other way, and lands on the other side.
+The redisplay pipeline — `cooked--drain-and-apply`, `cooked--apply` and the viewport
+around it — reads `cooked--grid`, the input region, the marks and the screen region, and
+calls down into the renderers, the decorations, the links and the OSC handlers. Nothing
+below it needs anything it defines, so it sits *above* `cooked.el` and is required by
+`cooked-mode.el`, exactly as `cooked-keys.el` is. `cooked-scrollback.el` sits between the
+two: the drain calls it, it calls nothing in the drain but the repaint
+`cooked-clear-scrollback` owes. What crosses back down into `cooked.el` is one
+declaration, `cooked--on-wake` — the wake pipe's filter is installed by `cooked--start`,
+because the pipe is part of spawning a child, and the filter's body is a notification
+handed to the pipeline rather than a question put to it.
+
 The one coupling that crosses the other way is a cache: `cooked--flush-face-cache` has
 to drop decoration specs that were coloured against the outgoing theme, and cannot name
 them from below. `cooked-theme-change-hook` is how the upper layer says so instead.
@@ -793,6 +805,65 @@ Five consequences that are easy to get wrong separately:
   child could actually profit from, still compares its URIs.
 
 ---
+
+## `Deco::packed`: the protocol coalesces so Lisp does not have to
+
+Rust parses at 74–422 MB/s and the Emacs apply path manages roughly 21 MB/s equivalent.
+The two halves are not close, and that asymmetry is what decides where a decoration is
+allowed to be described. Anything the core knows and does not say, Lisp has to rediscover
+— on the slow side, on every damaged row of every frame.
+
+Box drawing is where that bill came due. A 24x80 frame of it cost 9.5 ms/frame against
+0.21 ms for the same frame of plain text: 47x, for the character set htop, ranger, fzf
+and lazygit are made of. Attribution on that frame put 46% in `cooked--deco-display-value`
+— a third of it `cooked--box-phase`, a third `cooked--box-glyph-image`, the rest `pcase`
+dispatch — and 23% in the two `put-text-property` calls per character.
+
+Every one of those was asked once per character about a row that is one decision repeated.
+The core already knew: a run is homogeneous in its kind, and a border row is eighty copies
+of one `BoxGlyph`. It emitted one two-byte record per cell anyway and threw the repetition
+away. So the glyph wire format now carries `(bits, count)` per *run of identical shapes*,
+and `cooked--apply-glyph-deco` spends it: one image-spec lookup for the run, one
+`put-text-property` putting one shared `cooked-deco` record over all of it, and only the
+per-character `display` wrapper consed per cell — which must stay a fresh cons, or Emacs
+merges the run into a single image. Measured 9.5 → 2.8 ms/frame, a 3.4x cut, with the
+plain, styled and URL rows unmoved.
+
+Three things fall out of that, and each is a place where the obvious next step is wrong:
+
+- **No flag for "this shape dithers".** `BoxGlyph` knows, and a spare bit could say so.
+  But the only use for the answer is deciding whether the phase can vary down the run,
+  and run-length encoding already demotes that question from once per character to once
+  per record. `cooked--box-shade-p` keeps asking, and the count field stays a plain `u16`.
+  A field that has to mean the same thing on both sides of the boundary forever should buy
+  more than one `logand` per eighty cells.
+
+- **Images stay one record per character.** The same compression is available on the wire
+  and was declined: every cell of a picture displays its own slice, named by that cell's
+  row and column within it, so Lisp must cons a record and set a property per cell
+  whatever arrives. Sharing one record across three image cells gives all three
+  `(slice 0 0 ...)` where the second needs `(slice 12 0 ...)`, and a rewrap that split
+  such a run would leave both halves claiming the same start column. Compressing a wire
+  that has to be decompressed again immediately moves nothing off the side that is slow.
+  What `cooked--apply-image-deco` hoists instead is the *spec*, which genuinely is one
+  thing per placement — and that needed no protocol change at all.
+
+- **Sharing a record made `cooked--rescale-deco` load-bearing.** It walks with
+  `next-single-property-change`, which compares with `eq`, so a shared record is one step
+  of that walk. That the walk had reached every character was an accident of allocation,
+  not a promise, and coalescing would have broken the font tracking silently — the buffer
+  simply ceasing to follow a zoom, with nothing to point at.
+  `cooked-a-rescale-rebuilds-every-cell-of-a-shared-glyph-run` was written before the
+  coalescing landed, for exactly that reason.
+
+The derivation stayed single through all of it, which was the other constraint.
+`cooked--deco-display-value` is still the one answer to "what does this decoration look
+like", but it is now a composition of `cooked--deco-image` — the part adjacent cells may
+share — and `cooked--deco-display` — the part they must not. The render paths call the two
+halves, hoisting the first as far as the wire says they may; `cooked--rescale-deco`, which
+holds a record and knows nothing about its neighbours, calls the composition. A kind added
+to either half reaches all three callers, which is the property that mattered: this was
+three separate derivations once, and the rescale one was the easy one to miss.
 
 ## Vendored parser
 

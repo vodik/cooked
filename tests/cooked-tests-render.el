@@ -1901,6 +1901,51 @@ mismatched until this runs."
                (lambda (&rest _) (error "walked"))))
       (cooked--rescale-deco))))
 
+(ert-deftest cooked-the-image-order-tail-tracks-its-list-through-every-writer ()
+  "`cooked--image-order-tail\=' is a second copy of a fact -- which cons is last --
+and the only thing that makes it safe is that nothing sets the list without it.
+So this pins the invariant at each of the three writers rather than trusting the
+call sites: an append, a forget taking an id out of the middle, and an eviction
+pass putting back what it declined to spend.
+
+A drifted tail does not fail loudly.  It appends to a cons that is no longer in
+the list, so the id is recorded nowhere the eviction pass can see it, and the
+cap silently stops bounding anything."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cl-flet ((tail-is-true ()
+                (should (eq cooked--image-order-tail (last cooked--image-order)))))
+      (let ((cooked-image-cache-size nil))
+        (dolist (id '(1 2 3 4))
+          (cooked-tests--install-image id 400)
+          (tail-is-true)))
+      (should (equal cooked--image-order '(1 2 3 4)))
+      ;; Out of the middle, and off the end -- the end being the case that moves
+      ;; the tail, and so the one a `delq' alone would get wrong.
+      (cooked--forget-image 2)
+      (tail-is-true)
+      (should (equal cooked--image-order '(1 3 4)))
+      (cooked--forget-image 4)
+      (tail-is-true)
+      (should (equal cooked--image-order '(1 3)))
+      ;; And an append after the tail has moved lands where it belongs, which is
+      ;; the failure a drifted tail actually produces.
+      (let ((cooked-image-cache-size nil))
+        (cooked-tests--install-image 5 400))
+      (tail-is-true)
+      (should (equal cooked--image-order '(1 3 5)))
+      ;; The eviction pass detaches the queue and puts it back; the tail has to
+      ;; come back with it.
+      (let ((cooked-image-cache-size 500))
+        (cooked--evict-images))
+      (tail-is-true)
+      ;; Emptied entirely, where the tail must go back to nil rather than name a
+      ;; cons nothing holds.
+      (dolist (id (copy-sequence cooked--image-order))
+        (cooked--forget-image id))
+      (should-not cooked--image-order)
+      (tail-is-true))))
+
 (ert-deftest cooked-image-slices-follow-a-zoom-with-no-window-event ()
   "`text-scale-adjust' moves the cell without resizing anything, so no window
 event follows it and `cooked--sync-size' never hears.  The

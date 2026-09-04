@@ -16,7 +16,8 @@
 
 use std::collections::HashMap;
 
-use super::image::{CellSize, ImageFormat, ImageId, PixelFormat, PixelSize, Pixels};
+use super::image::{CellSize, ImageFormat, ImageId, PixelSize};
+use super::png::{PixelFormat, Pixels};
 
 /// Largest payload reassembled from a chunked transmission.
 ///

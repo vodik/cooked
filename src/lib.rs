@@ -291,6 +291,23 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// running program, not to a transcript.
         "cooked--clear-to-prompt" => clear_to_prompt;
 
+        /// Tell SESSION that Emacs has finished drawing the last drain.
+        ///
+        /// Re-arms the wakeup: the core sends one wake byte and then stays quiet until this
+        /// says the buffer is drawn, so the child's output accumulates in the emulator
+        /// instead of buying a redisplay per write.  That is the whole of cooked's
+        /// backpressure, and it is deliberately released here rather than at
+        /// `cooked--drain' -- taking a delta is cheap, rendering it is not, and re-arming
+        /// before the render made `cooked-min-redisplay-interval' a floor that had always
+        /// elapsed by the time it was consulted.
+        ///
+        /// Call it once per drain, from the cleanup of an `unwind-protect' rather than the
+        /// body: a render that signals must still re-arm.  Failing to call it is slow
+        /// rather than fatal -- the reader thread's own tick wakes Emacs instead, at
+        /// roughly 100ms -- which is what makes the callers that never do (the benchmark,
+        /// the tests that drain by hand) merely leisurely.
+        "cooked--ready" => ready;
+
         /// Text of the last non-blank line written by SESSION's child.
         /// Used as the minibuffer prompt when SESSION enters `secret' mode.
         "cooked--prompt-text" => trailing_text;
@@ -469,12 +486,18 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
     };
     let wake = env.open_channel(args[4])?;
     let cwd = env.opt::<String>(args, 5)?;
-    let defaults = session::Options::default();
+    // The interval through the constructor rather than as a field of a struct literal,
+    // because the frame ceiling is derived from it and update syntax would compute that
+    // from the default and then overwrite the interval it came from; see
+    // `Options::with_min_redisplay_interval`. `backlog_limit` is nobody's derivation and
+    // stays an ordinary field.
+    let defaults = match env.opt::<i64>(args, 6)? {
+        Some(ms) => session::Options::with_min_redisplay_interval(
+            std::time::Duration::from_millis(ms.max(0) as u64),
+        ),
+        None => session::Options::default(),
+    };
     let options = session::Options {
-        min_redisplay_interval: match env.opt::<i64>(args, 6)? {
-            Some(ms) => std::time::Duration::from_millis(ms.max(0) as u64),
-            None => defaults.min_redisplay_interval,
-        },
         backlog_limit: env
             .opt::<i64>(args, 7)?
             .map_or(defaults.backlog_limit, |n| n.max(1) as usize),
@@ -739,12 +762,17 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
 /// insert of one string, plus properties only where they depart from the default, beats
 /// N inserts and N property calls, and it keeps roughly a million cons cells from
 /// crossing the boundary on a flood. A plain unstyled row — the overwhelming majority on
-/// the primary screen — pays for neither span list, and a row of eight styled runs costs
-/// one insert rather than eight.
+/// the primary screen — pays for no spans at all, not even an empty string, and a row of
+/// eight styled runs costs one insert rather than eight. Sparseness survived the move to
+/// packed records precisely because it is the property the flood path rests on: an
+/// unstyled block still allocates nothing, and the `plain` benchmark row is the control
+/// that says so.
 ///
-/// A style span is `(START END FG BG ATTRS UNDERLINE)`, and it is the only one carrying
-/// a rendition. DECO-SPANS is `(START DECO)` and LINK-SPANS `(START END ID)`, both for
-/// the same reason: neither says anything about how its characters are *coloured*.
+/// STYLE-SPANS is a unibyte string of fixed-width records rather than a list, and it is
+/// the only one carrying a rendition — see [`Block::push_style`] for the layout and for
+/// why the live-row path cannot afford the conses. DECO-SPANS is `(START DECO)` and
+/// LINK-SPANS `(START END ID)`, both for the same reason: neither says anything about
+/// how its characters are *coloured*.
 /// Emacs draws a box glyph in the colours of the face at the position it sits on, which
 /// STYLE-SPANS has already put there over exactly those characters, so a decoration
 /// span repeating them would be handing Lisp a second, staler answer to a question it
@@ -752,33 +780,101 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
 /// cost. A hyperlink is the same story: whatever style it has is in STYLE-SPANS, and
 /// Lisp deliberately leaves it alone.
 ///
-/// A decoration span needs no END either, the packed record holding one entry per
-/// character it covers. The link id is resolved against the `:links` table the same
-/// drain carries.
+/// A decoration span needs no END either: its packed records account for every
+/// character it covers, whether one apiece or one per run of them — see
+/// `deco_to_lisp`. The link id is resolved against the `:links` table the same drain
+/// carries.
 #[derive(Default)]
 struct Block {
     text: String,
-    styles: Vec<Value>,
+    styles: Vec<u8>,
     decos: Vec<Value>,
     links: Vec<Value>,
     offset: usize,
 }
 
+/// Bytes in one packed style span. See [`Block::push_style`] for the field layout.
+const STYLE_RECORD: usize = 22;
+
 impl Block {
-    /// One style span: the run's extent, its rendition, and its underline colour.
-    fn span(&self, env: Env, chars: usize, style: Style, tail: Value) -> Result<Value> {
+    /// Pack one style span onto `styles`: the run's extent, its rendition, and its
+    /// underline colour, as fixed-width little-endian fields.
+    ///
+    ///   0..4    START    `u32`, character offset into [`Block::text`]
+    ///   4..8    END      `u32`, exclusive
+    ///   8..12   FG       `u32`, tagged — see [`Color::packed`]
+    ///   12..16  BG       `u32`, tagged
+    ///   16..20  UNDERLINE `u32`, tagged; `SGR 58`, the underline's own colour
+    ///   20..22  ATTRS    `u16`, the [`Attrs`](emu::cell::Attrs) bitmask
+    ///
+    /// A packed string rather than a list of lists, for the reason [`Deco::packed`]
+    /// gives at greater length: Rust parses at 74-422 MB/s while the Emacs apply path
+    /// manages roughly 21 MB/s equivalent, so anything the protocol declines to say
+    /// outright is rediscovered on the slow side, on every damaged row of every frame.
+    /// A span used to cross as `(START END FG BG ATTRS UNDERLINE)` — six conses, and up
+    /// to twelve once an RGB colour spelled itself as a three-element list.
+    ///
+    /// Measured 1.20 -> 1.03 ms/frame on a 24x80 frame of eight-run rows, three runs
+    /// either side at a background load of ~2. That is about 0.9us of the 6.5us a span
+    /// cost, and it is worth writing down that the estimate which motivated this change
+    /// was three times larger: attribution had put ~3.5us of the 6.5 in construction and
+    /// marshalling, on the reasoning that `cooked--face' was 1.1us and
+    /// `put-text-property' 1.8us. The missing three quarters are that the two of those
+    /// dominate more of the remainder than subtracting them suggested, and that building
+    /// a short list on the Rust side was never as expensive as the Lisp-side allocation
+    /// it was grouped with. The saving is real and the direction was right; the size was
+    /// not, and a microbenchmark also under-counts what it removes, since ~1500-2300
+    /// fewer cons cells per frame is collector pressure that shows up later and
+    /// elsewhere.
+    ///
+    /// **START and END are `u32`, and that is not over-provisioning.** A `u16` is the
+    /// trap here and it fails silently. [`Update::scrolled_rows`] assembles a whole
+    /// drain's scrollback into *one* `Block`, so offsets are not bounded by a row or
+    /// even by a screen: the flood benchmark reaches 200k characters in a single block
+    /// and a 20k-line paste goes past 600k. A `u16` start would wrap at 65536 and hand
+    /// Lisp a span that styles the wrong characters, with no error anywhere to point at
+    /// — the buffer would simply come out miscoloured somewhere far from the cause.
+    ///
+    /// A span whose offsets do not fit is dropped rather than truncated. It is not
+    /// reachable — 4.29 billion characters would have to arrive between two drains —
+    /// but the two failure modes are not equally bad, and the choice should be the
+    /// deliberate one: dropping loses the colour of a run that is already off the far
+    /// end of anything a user can see, while clamping would paint it over text that is
+    /// on screen. Wrong-but-plausible is the expensive kind of wrong.
+    ///
+    /// The rendition is packed inline rather than interned behind an id minted through
+    /// [`Ledger`](emu::intern::Ledger), the way `:links` and `:images` are. Interning
+    /// would save Lisp about three `u32` decodes per span and cost it an id lifetime:
+    /// ids are per-session, so Lisp would need a reset on session start — the hazard
+    /// `cooked--cached' warns about — and the ledger's cap means eviction must either
+    /// never reuse an id or announce when it does. A reused id read against a stale
+    /// Lisp cache is wrong colours with no error, which is the same silent-miscolouring
+    /// failure the `u32` offsets are chosen to avoid. Three decodes is not worth buying
+    /// that.
+    fn push_style(&mut self, chars: usize, style: Style, underline: Color) {
+        let (Ok(start), Ok(end)) = (
+            u32::try_from(self.offset),
+            u32::try_from(self.offset + chars),
+        ) else {
+            return;
+        };
         let Style { fg, bg, attrs } = style;
-        list!(
-            env,
-            [
-                self.offset,
-                self.offset + chars,
-                fg,
-                bg,
-                u32::from(attrs.bits()),
-                tail,
-            ]
-        )
+        self.styles.extend_from_slice(&start.to_le_bytes());
+        self.styles.extend_from_slice(&end.to_le_bytes());
+        self.styles.extend_from_slice(&fg.packed().to_le_bytes());
+        self.styles.extend_from_slice(&bg.packed().to_le_bytes());
+        self.styles
+            .extend_from_slice(&underline.packed().to_le_bytes());
+        self.styles.extend_from_slice(&attrs.bits().to_le_bytes());
+        // The stride is the format: Lisp walks the packed string by adding
+        // [`STYLE_RECORD`] and never by decoding a length, so a field added to the
+        // record without widening the constant would desynchronise the two sides at the
+        // second span of the first styled row.
+        debug_assert_eq!(
+            self.styles.len() % STYLE_RECORD,
+            0,
+            "a style record must be exactly {STYLE_RECORD} bytes"
+        );
     }
 
     /// Append RUNS, emitting spans only where there is something to say.
@@ -786,8 +882,7 @@ impl Block {
         for run in runs {
             let chars = run.text.chars().count();
             if run.style != Style::default() || run.underline != Color::Default {
-                let tail = env.into_lisp(run.underline)?;
-                self.styles.push(self.span(env, chars, run.style, tail)?);
+                self.push_style(chars, run.style, run.underline);
             }
             if let Some(link) = run.link {
                 self.links
@@ -811,7 +906,12 @@ impl Block {
     fn into_lisp(self, env: &Env) -> Result<Value> {
         list!(
             *env,
-            [self.text.as_str(), self.styles, self.decos, self.links]
+            [
+                self.text.as_str(),
+                self.styles.as_slice(),
+                self.decos,
+                self.links
+            ]
         )
     }
 }
@@ -936,18 +1036,27 @@ fn links_to_lisp(env: Env, links: &[(LinkId, String)]) -> Result<Vec<Value>> {
 /// `nil`, or `(KIND . PACKED)` — what a run's characters display instead of themselves.
 ///
 /// KIND is an interned symbol naming the decoration, and PACKED is a unibyte string of
-/// fixed-width records, one per character of the run's text, little-endian. The kind is
-/// carried once for the run rather than per character because a run is homogeneous in
-/// it — see [`Deco`] — which is what keeps the record narrow:
+/// fixed-width little-endian records covering the run's text. The kind is carried once
+/// for the run rather than per character because a run is homogeneous in it — see
+/// [`Deco`] — which is what keeps the record narrow:
 ///
-///   `glyph`   two bytes, a `BoxGlyph` bit pattern.
-///   `image`   twelve bytes: a `u32` image id, then the cell's row and column within
-///             that image, then the rectangle that placement was laid at, as `u16`s.
+///   `glyph`   four bytes per *run of identical shapes*: a `BoxGlyph` bit pattern and
+///             the number of consecutive characters drawing it, both `u16`. A border
+///             row is one record, not eighty.
+///   `image`   twelve bytes per *character*: a `u32` image id, then the cell's row and
+///             column within that image, then the rectangle that placement was laid at,
+///             as `u16`s.
 ///
-/// The rectangle is repeated on every cell rather than carried once per image because
-/// it belongs to the placement — see [`Placement`](emu::image::Placement). Four bytes a
-/// cell against a picture's own megabytes, and it is what lets two placements of one id
-/// at two sizes both draw correctly.
+/// That the two kinds count differently is the point rather than an inconsistency, and
+/// [`Deco::packed`] argues it: a glyph run is genuinely one decision repeated, while
+/// every cell of a picture displays its own slice and so needs its own record whatever
+/// the wire says. Compressing the wire where Lisp must decompress it again immediately
+/// would move nothing off the side that is actually slow.
+///
+/// The rectangle is repeated on every image cell rather than carried once per image
+/// because it belongs to the placement — see [`Placement`](emu::image::Placement). Four
+/// bytes a cell against a picture's own megabytes, and it is what lets two placements of
+/// one id at two sizes both draw correctly.
 ///
 /// A packed string rather than a list because this is the live-row path: box drawing is
 /// what full-screen programs are made of, so a list would cons per character of every
@@ -959,41 +1068,14 @@ impl env::IntoLisp for Option<&Deco> {
         let Some(deco) = self else {
             return Ok(env.nil());
         };
+        // The bytes are [`Deco::packed`]'s, which is where the record layouts are
+        // written down and where the tests that pin them can reach them; what belongs
+        // here is only the kind tag, because `sym!' needs its literal at the call site
+        // to do the lookup at compile time.
+        let packed = env.into_lisp(deco.packed().as_slice())?;
         match deco {
-            Deco::Glyphs(glyphs) => {
-                let mut packed = Vec::with_capacity(glyphs.len() * 2);
-                for glyph in glyphs {
-                    packed.extend_from_slice(&glyph.bits().to_le_bytes());
-                }
-                env.cons(sym!(env, "glyph")?, env.into_lisp(packed.as_slice())?)
-            }
-            Deco::Images(places) => {
-                let mut packed = Vec::with_capacity(places.len() * 12);
-                for place in places {
-                    packed.extend_from_slice(&place.id.0.to_le_bytes());
-                    packed.extend_from_slice(&place.cell_row.to_le_bytes());
-                    packed.extend_from_slice(&place.cell_col.to_le_bytes());
-                    packed.extend_from_slice(&place.cols.to_le_bytes());
-                    packed.extend_from_slice(&place.rows.to_le_bytes());
-                }
-                env.cons(sym!(env, "image")?, env.into_lisp(packed.as_slice())?)
-            }
-        }
-    }
-}
-
-impl env::IntoLisp for Color {
-    fn into_lisp(self, env: &Env) -> Result<Value> {
-        match self {
-            Color::Default => Ok(env.nil()),
-            Color::Indexed(i) => env.into_lisp(i),
-            Color::Rgb(r, g, b) => {
-                let parts = [r, g, b]
-                    .map(|c| env.into_lisp(c))
-                    .into_iter()
-                    .collect::<Result<Vec<_>>>()?;
-                env.list(&parts)
-            }
+            Deco::Glyphs(_) => env.cons(sym!(env, "glyph")?, packed),
+            Deco::Images(_) => env.cons(sym!(env, "image")?, packed),
         }
     }
 }
@@ -1065,5 +1147,119 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
         Event::DisplayCleared => list!(env, [sym!(env, "display-cleared")?]),
         // (title-stack PUSH-P)
         Event::TitleStack(push) => list!(env, [sym!(env, "title-stack")?, *push]),
+    }
+}
+
+/// [`Block::push_style`] needs no `Env`: it writes bytes into a `Vec`, and the format is
+/// the whole of what it decides. So the layout both sides have to agree on forever is
+/// pinned here, without an Emacs in the loop -- which is the same reason the rest of the
+/// crate is testable, applied to the one file that usually is not.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use emu::cell::Attrs;
+    use emu::{Color, Style};
+
+    /// The trailing fields of a record, as a `Block` holding exactly one would have them.
+    fn record(style: Style, underline: Color) -> Vec<u8> {
+        let mut block = Block {
+            offset: 0,
+            ..Default::default()
+        };
+        block.push_style(1, style, underline);
+        block.styles
+    }
+
+    fn u32_at(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    #[test]
+    fn a_style_record_is_exactly_the_stride_lisp_steps_by() {
+        let packed = record(Style::default(), Color::Default);
+        assert_eq!(
+            packed.len(),
+            STYLE_RECORD,
+            "`cooked--style-record' in cooked.el is this number: {packed:?}"
+        );
+    }
+
+    #[test]
+    fn each_colour_variant_survives_the_round_trip_through_a_record() {
+        // The three tags `cooked--color-spec' in cooked-face.el decodes, in the layout
+        // its docstring states: tag in the top byte, value in the low three.
+        for (colour, expected) in [
+            (Color::Default, 0u32),
+            (Color::Indexed(0), 1 << 24),
+            (Color::Indexed(255), (1 << 24) | 255),
+            (Color::Rgb(0x12, 0x34, 0x56), (2 << 24) | 0x123456),
+        ] {
+            let packed = record(
+                Style {
+                    fg: colour,
+                    ..Style::default()
+                },
+                Color::Default,
+            );
+            assert_eq!(u32_at(&packed, 8), expected, "fg {colour:?}: {packed:?}");
+        }
+    }
+
+    #[test]
+    fn the_underline_colour_has_its_own_field_and_does_not_alias_the_foreground() {
+        // `SGR 58' is a colour of its own, and it shared a slot with nothing before the
+        // record existed -- it rode a tail cons. A field that aliased fg would show up
+        // only on text that is both coloured and underlined, which is rare enough to
+        // ship.
+        let packed = record(
+            Style {
+                fg: Color::Indexed(1),
+                bg: Color::Indexed(2),
+                attrs: Attrs::UNDERLINE,
+            },
+            Color::Indexed(3),
+        );
+        assert_eq!(u32_at(&packed, 8), (1 << 24) | 1, "fg");
+        assert_eq!(u32_at(&packed, 12), (1 << 24) | 2, "bg");
+        assert_eq!(u32_at(&packed, 16), (1 << 24) | 3, "underline");
+        assert_eq!(
+            u16::from_le_bytes([packed[20], packed[21]]),
+            Attrs::UNDERLINE.bits(),
+            "attrs"
+        );
+    }
+
+    /// The `u16` trap the field widths exist to avoid, stated as a test rather than only
+    /// as a comment. `Update::scrolled_rows` assembles a whole drain's scrollback into
+    /// one `Block`, so an offset is bounded by the flood rather than by a row: a `u16`
+    /// start would wrap at 65536 and style the wrong characters, with nothing anywhere
+    /// to point at.
+    #[test]
+    fn an_offset_past_a_u16_packs_at_full_width_rather_than_wrapping() {
+        let mut block = Block {
+            offset: 70_000,
+            ..Default::default()
+        };
+        block.push_style(5, Style::default(), Color::Default);
+        assert_eq!(u32_at(&block.styles, 0), 70_000, "start");
+        assert_eq!(u32_at(&block.styles, 4), 70_005, "end");
+    }
+
+    /// Dropped rather than truncated, which is the deliberate half of the choice: a lost
+    /// colour is invisible off the far end of a flood, while a clamped one would paint
+    /// over text that is on screen. Unreachable in practice -- it takes four billion
+    /// characters between two drains -- so the only thing that can keep it right is this.
+    #[test]
+    fn a_span_whose_offsets_do_not_fit_is_dropped_and_never_clamped() {
+        let mut block = Block {
+            offset: usize::try_from(u32::MAX).unwrap(),
+            ..Default::default()
+        };
+        block.push_style(2, Style::default(), Color::Default);
+        assert!(
+            block.styles.is_empty(),
+            "an unrepresentable span leaves no record: {:?}",
+            block.styles
+        );
     }
 }

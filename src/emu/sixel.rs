@@ -31,7 +31,8 @@
 /// and this is [`MAX_PAYLOAD`](super::kitty::MAX_PAYLOAD) bytes of it. Sixel needs the
 /// check more than kitty does, because `!` is a compressor — five bytes of `!9999~`
 /// name ten thousand pixels — so the body's length bounds the output only weakly.
-use super::image::{PixelFormat, PixelSize, Pixels};
+use super::image::PixelSize;
+use super::png::{PixelFormat, Pixels};
 
 pub(crate) const MAX_PIXELS: usize = super::kitty::MAX_PAYLOAD / 4;
 

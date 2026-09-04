@@ -67,15 +67,11 @@
 ;; upward into cooked-mode.el listed below.  Both are notifications: something
 ;; happened, and the layer that owns the meaning should react.
 (declare-function cooked--spawn "ext:cooked-core")
-(declare-function cooked--drain "ext:cooked-core")
 (declare-function cooked--send "ext:cooked-core")
 (declare-function cooked--reply-osc "ext:cooked-core")
 (declare-function cooked--resize "ext:cooked-core")
-(declare-function cooked--forget-history "ext:cooked-core")
-(declare-function cooked--redraw "ext:cooked-core")
 (declare-function cooked--prompt-text "ext:cooked-core")
 (declare-function cooked--core-version "ext:cooked-core")
-(declare-function cooked--clear-to-prompt "ext:cooked-core")
 (declare-function cooked--signal "ext:cooked-core")
 (declare-function cooked--pid "ext:cooked-core")
 (declare-function cooked--bracketed-paste-p "ext:cooked-core")
@@ -84,8 +80,6 @@
 (declare-function cooked--set-attended "ext:cooked-core")
 (declare-function cooked--kill "ext:cooked-core")
 
-(declare-function cooked--handle-osc "cooked-osc")
-(declare-function cooked--handle-title-stack "cooked-osc")
 (declare-function cooked--sync-color-scheme "cooked-osc")
 
 ;;;; What the two ends exchange
@@ -290,19 +284,23 @@ see it for what declines and why.")
 (defvar-local cooked--mode 'cooked)
 (defvar-local cooked--exit nil)
 
-;; Everything this file calls in cooked-mode.el, which is to say everything it
-;; calls upward.  Each one is a notification that something changed and the layer
-;; that owns keymaps, buffer names or the buffer's own life should react — never a
-;; question asked of that layer, which is why the list is short and stays short.
-;; Anything cooked.el needs an *answer* to belongs at this level instead; see
-;; "Who owns the keyboard" below, which is where that rule moved the policy.
+;; Everything this file calls in the layers above it, which is to say everything
+;; it calls upward.  Each one is a notification that something changed and the
+;; layer that owns keymaps, buffer names or the buffer's own life should react —
+;; never a question asked of that layer, which is why the list is short and stays
+;; short.  Anything cooked.el needs an *answer* to belongs at this level instead;
+;; see "Who owns the keyboard" below, which is where that rule moved the policy.
+;;
+;; `cooked--on-wake' is owned by cooked-render.el and is the same shape read from
+;; the other end: `cooked--start' installs the wake pipe's filter because the
+;; pipe is part of spawning a child, and the filter's whole body is "the core has
+;; something; draw it" -- a notification handed to the pipeline, not a question
+;; put to it.  It is the only thing this file needs of that one.
 (declare-function cooked--refresh-keymap "cooked-mode")
 (declare-function cooked--update-mouse-grab "cooked-mouse")
-(declare-function cooked--set-mouse-state "cooked-mouse")
-(declare-function cooked--set-mode "cooked-mode")
-(declare-function cooked--on-exit "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
 (declare-function cooked--rename-to-title "cooked-mode")
+(declare-function cooked--on-wake "cooked-render")
 (defvar cooked-rejoin-wrapped-lines)
 (defvar cooked--last-size)
 (declare-function cooked--kill "ext:cooked-core")
@@ -332,6 +330,17 @@ declines to guess."
 
 ;;;; Putting styled text in the buffer
 
+(defconst cooked--style-record 22
+  "Bytes in one packed style span.  See `Block::push_style\=' in src/lib.rs.
+
+The stride *is* the format: `cooked--render-block\=' finds the next span by
+adding this and never by decoding a length, which is what makes a hit cost four
+`aref\='s and no arithmetic at all.  The Rust side asserts the same number under
+`debug_assert\=', so a field added to the record on one side without widening it
+on both desynchronises the two at the second span of the first styled row --
+where every span after it reads its neighbour's bytes and the buffer comes out
+miscoloured with nothing to point at.  Change it in three places or none.")
+
 (defun cooked--render-block (block &optional row)
   "Insert BLOCK at point, with its styling and decoration applied.
 
@@ -341,14 +350,16 @@ of characters, and every span carries offsets in characters into it; spans
 appear only where there is something to say, so a plain unstyled row carries no
 list at all.
 
-A STYLE-SPAN is (START END FG BG ATTRS UNDERLINE) and is the only one naming a
-rendition.  A DECO-SPAN is (START DECO), what its characters display instead of
-themselves, and a LINK-SPAN (START END ID) for an `OSC 8\=' hyperlink.  Neither
-of the last two repeats the colours, because neither is drawn in colours of its
-own: a box glyph takes them from the face at the position it sits on, which the
-style span has just put there over exactly the same characters.  Links are
-applied last, over the decorations, so they can see which cells turned out to
-be an image and leave those alone.
+STYLE-SPANS is not a list but a unibyte string of fixed-width records, one per
+run that has a rendition to name -- see `Block::push_style\=' in src/lib.rs for
+the layout and `cooked--style-record\=' for the stride.  A DECO-SPAN is (START
+DECO), what its characters display instead of themselves, and a LINK-SPAN
+(START END ID) for an `OSC 8\=' hyperlink.  Neither of the last two repeats the
+colours, because neither is drawn in colours of its own: a box glyph takes them
+from the face at the position it sits on, which the style span has just put
+there over exactly the same characters.  Links are applied last, over the
+decorations, so they can see which cells turned out to be an image and leave
+those alone.
 
 One insert plus properties, rather than an insert per run: Emacs pays for every
 `insert\=', and building a propertized string in Lisp and inserting that instead
@@ -368,10 +379,18 @@ Returns the position the text was inserted at."
   (pcase-let ((`(,text ,styles ,decos ,links) block))
     (let ((start (point)))
       (insert text)
-      (dolist (span styles)
-        (pcase-let ((`(,from ,to ,fg ,bg ,attrs ,ul) span))
-          (when-let* ((face (cooked--face fg bg attrs ul)))
-            (put-text-property (+ start from) (+ start to) 'face face))))
+      ;; Walked with an index rather than mapped, because the whole reason the spans
+      ;; arrive packed is that nothing per span should be allocated on this path: no
+      ;; cons for the span, none for its colours, and none for the cache key
+      ;; `cooked--face-packed' looks the face up by.  See `Block::push_style'.
+      (let ((i 0)
+            (limit (length styles)))
+        (while (< i limit)
+          (when-let* ((face (cooked--face-packed styles (+ i 8))))
+            (put-text-property (+ start (cooked--u32 styles i))
+                               (+ start (cooked--u32 styles (+ i 4)))
+                               'face face))
+          (setq i (+ i cooked--style-record))))
       (dolist (span decos)
         (pcase-let ((`(,from ,deco) span))
           (cooked--apply-deco (+ start from) deco (and row start) row)))
@@ -1693,7 +1712,14 @@ at all."
   (and cooked--screen-start (marker-position cooked--screen-start)
        (= (point) (cooked--cursor-position))))
 
-;;;; Session lifecycle
+;;;; Starting and stopping a session
+;;
+;; What it takes to get a child running in this buffer and to let go of one
+;; again: the size to give it, the environment to hand it, the wake pipe the
+;; native core rings, and the question of whether killing the buffer should ask
+;; first.  Drawing what the child sends is cooked-render.el and capping how much
+;; of it the buffer keeps is cooked-scrollback.el; both used to be filed here,
+;; under a heading broad enough to have accepted them.
 
 (defun cooked--window-size ()
   "Rows and columns to give the child.
@@ -1769,6 +1795,18 @@ already holds a frame back until the child stops writing it, which is what
 keeps a picture's cursor move from being drawn without the picture.  Raising
 this cannot improve on that and costs latency on every keystroke.
 
+It bounds that hold from the other side as well, and is the only number that
+does: a child writing continuously never falls quiet, so its frame is drawn
+once this interval has passed rather than waiting for a gap that is not
+coming.  One interval is therefore the whole answer to how often a busy child
+redraws the buffer -- there is no second cap underneath it.
+
+Measured against the redisplay rather than against the drain: the core sends
+one wakeup and stays quiet until Emacs has finished drawing what the last one
+brought, so a slow render (box drawing costs some 70 times what plain text
+does) paces the child by itself and this interval is the floor beneath that
+rather than a rate of its own.
+
 Lower it if the terminal feels less responsive than it should; raise it if a
 program that rewrites one line very fast still flickers.  Takes effect for
 sessions started after it is set."
@@ -1788,7 +1826,11 @@ exactly as it would against a slow terminal.  Nothing is ever dropped.
 The cost of raising it is memory, and a larger worst-case pause when a big
 backlog finally lands in one redisplay.  Tuned together with
 `cooked-min-redisplay-interval': a longer interval leaves more to accumulate
-between drains, so this fills sooner.
+between drains, so this fills sooner.  A static relationship between two
+numbers you set once, not a rate that moves underneath the child -- what
+actually paces a session is Emacs' own readiness to draw again, and the
+interval is only a floor under that -- so size this against the slowest
+cadence the pair allows and leave it alone.
 
 Takes effect for sessions started after it is set."
   :type 'natnum
@@ -1988,132 +2030,15 @@ it is a search list and a user may have their own entries on it.  See
                  collect (cons (substring entry 0 split) (substring entry (1+ split)))))))
 
 
-(defvar cooked--resyncing nil
-  "Whether a resync is already under way, so a failing one cannot loop.
-Bound for the dynamic extent of the repair rather than kept per buffer: it
-answers \"am I inside one right now\", which is not something a buffer holds.")
-
-(defvar-local cooked--draining nil
-  "Whether a drain is already running in this buffer.
-See `cooked--drain-and-apply', which is where re-entry is folded away.")
-
-(defvar-local cooked--drain-pending nil
-  "Whether a drain was asked for while one was already running.")
-
-(defun cooked--drain-and-apply ()
-  "Apply whatever the native core has accumulated since the last drain.
-
-Re-entrant calls are folded into the drain already under way rather than
-nested inside it.  `cooked--apply' decides `follow', `wandered' and the
-windows that count as following *before* it rewrites the screen, and then
-calls three things that can refresh the keymap -- `cooked--set-alt',
-`cooked--set-mode' and `cooked--handle-event' for an OSC 133 mark.  A
-refresh that lifts a freeze asks for a catch-up drain, so nesting there would
-leave the outer `cooked--apply' finishing against an update, and a set of
-captured positions, two drains stale.
-
-Nothing is dropped by refusing: the request is remembered and honoured once
-the outer drain has returned, which is also the only point at which draining
-again is safe."
-  (if cooked--draining
-      (setq cooked--drain-pending t)
-    ;; `unwind-protect' and `setq' rather than `let': `cooked--apply' runs the
-    ;; layers' own hooks, which may change the current buffer, and a `let' on a
-    ;; buffer-local restores into whichever buffer is current when the binding
-    ;; unwinds.
-    ;;
-    ;; The invariant the captured buffer keeps: *the flags are cleared in the
-    ;; buffer they were set in, whatever the current buffer has become by then*.
-    ;; A bare `setq' has the same defect as `let' from the other direction -- it
-    ;; writes wherever the buffer pointer happens to point *now* -- so a callee
-    ;; that switched buffers without restoring would clear the flag in the wrong
-    ;; buffer and leave this one draining forever, folding every later wake into
-    ;; a drain that has already returned.  That is a frozen terminal no refresh
-    ;; can mend, since `cooked-refresh' drains too.  Callees are meant not to
-    ;; wander (see `cooked--handle-osc'), but this is the drain's own guarantee
-    ;; and does not depend on their good behaviour.
-    (let ((buffer (current-buffer)))
-      (unwind-protect
-          (progn
-            (setq cooked--draining t
-                  cooked--drain-pending nil)
-            (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))
-            ;; Bounded in practice: the pending flag is set by a freeze lifting,
-            ;; and a freeze that has lifted does not lift again.
-            (while (and cooked--drain-pending cooked--session)
-              (setq cooked--drain-pending nil)
-              (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))))
-        (when (buffer-live-p buffer)
-          (with-current-buffer buffer
-            (setq cooked--draining nil
-                  cooked--drain-pending nil)
-            ;; Also in the cleanup, though `cooked--apply' ends with it: the drain
-            ;; has assertions in it (`cooked--check-seam', `cooked--guard-row-width')
-            ;; and a signal out of one leaves the screen half-rewritten with the
-            ;; input line moved and the anchor still naming where it used to be.
-            ;; Idempotent on the ordinary path, the anchor already matching by then
-            ;; -- and inside the `with-current-buffer' for the same reason as the
-            ;; flags: it is this buffer's anchor it exists to check.
-            (cooked--check-undo-anchor)))))))
-
-(defun cooked--on-wake (buffer)
-  "Drain BUFFER's session and apply what changed.
-
-An error here is otherwise invisible: Emacs swallows `process-filter' errors,
-and
-the symptom reaches the user as a buffer that stopped updating or a point that
-jumped somewhere absurd.  Name it, then repair it — a drain that signalled
-part-way through leaves the screen region disagreeing with the emulator's grid,
-and no later delta mends that, because a delta only says what changed.
-
-`cooked--resyncing' guards the repair rather than the failure: a resync that
-itself fails must report and stop, not recurse a redisplay error into a loop of
-them.  It is cleared once a resync completes, so this is once per failure and
-not once per session.
-
-Skipped entirely while `cooked--frozen-p': the native core keeps the
-authoritative grid state regardless of whether Lisp ever asks for it, so
-nothing is lost by deferring — `cooked--refresh-keymap' catches the buffer up
-with one more call to `cooked--drain-and-apply' the moment the freeze lifts.
-Note that `cooked--frozen-p' is false for a buffer whose window is not the
-selected one, so leaving a frozen buffer resumes it rather than stranding it."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (when (and cooked--session (not (cooked--frozen-p)))
-        (if cooked-debug
-            (cooked--drain-and-apply)
-          (condition-case err
-              (cooked--drain-and-apply)
-            (error
-             (message "cooked: redisplay failed: %S (point %s, cursor %S, screen-start %s)%s"
-                      err (point) cooked--cursor
-                      (cooked--screen-start-position)
-                      (if cooked--resyncing "" "; resyncing"))
-             (unless cooked--resyncing
-               (let ((cooked--resyncing t))
-                 (condition-case again
-                     (cooked-refresh)
-                   (error (message "cooked: resync failed too: %S" again))))))))))))
-
-(defcustom cooked-clear-selection-on-output t
-  "Whether output that rewrites the selected text takes the selection with it.
-
-A region is a claim about particular text, and the child rewriting that text
-makes the claim into a lie -- an invisible one, because the highlight stays.
-`cooked--render-rows\=' deletes and reinserts each damaged row whole, so a mark
-inside one collapses to that row\='s start and the region visibly warps under
-live output; the drain re-pins point (see `cooked--apply\='), and nothing ever
-did the same for the mark.  Every xterm-family terminal drops a selection whose
-cells are overwritten, for the reason this does.
-
-Only a mark in the live screen.  The scrollback is text the child has finished
-with and can no longer reach, so a region up there still means what it did when
-it was drawn.
-
-nil keeps the mark wherever it is.  Defensible if you never select the live
-screen; if you do, the region you are left holding is not the one you drew."
-  :type 'boolean
-  :group 'cooked)
+;;;; Giving up the region
+;;
+;; One function, and it is here rather than beside either of its callers because
+;; it has two: the drain clears a selection the child has overwritten
+;; (`cooked--capture-viewport', in cooked-render.el) and a mouse report clears
+;; one because the click belonged to the child (`cooked--send-mouse', in
+;; cooked-mouse.el).  Both files sit above this one and neither requires the
+;; other, so the shared answer belongs below both -- which is also the whole of
+;; why it did not travel with the pipeline it was extracted from.
 
 ;; Read and called only behind a guard that evil is loaded and on, and named
 ;; here so the byte-compiler reads them as the deliberate references they are;
@@ -2148,546 +2073,6 @@ incidental, so having none is the ordinary case rather than a failure."
               (evil-visual-state-p))
          (evil-exit-visual-state))
         (mark-active (deactivate-mark))))
-
-(defun cooked--following-windows ()
-  "Other windows on this buffer whose point should track the child's cursor.
-
-The selected window's point *is* the buffer's point for as long as it stays
-selected — Emacs keeps the two in sync on its own, which is what `follow' and
-`wandered' below ride on.  No such thing happens for any other window
-showing the same buffer: its `window-point' is a value Emacs stores and
-redisplays from independently, touched only by `set-window-point', so a
-second window on a busy cooked buffer would otherwise freeze wherever it
-last happened to be pointed, deaf to every later drain.
-
-A window's own point, not the buffer's, decides whether it is still
-following, mirroring `follow' one level down: scrolling that window with the
-wheel or a scrollbar does not move its point, so such a window is left alone
-here for the same reason `follow' would leave the buffer's point alone for
-the same case — it reads as the user choosing to look elsewhere, not as a
-window that fell behind."
-  (when-let* ((start (cooked--screen-start-position)))
-    (seq-filter (lambda (w) (>= (window-point w) start))
-                (delq (selected-window) (get-buffer-window-list nil nil t)))))
-
-(defun cooked--install-resources (update)
-  "Record the images and links UPDATE's rows refer to by id.
-
-Before any rendering: this is the drain's third category -- neither a level
-redisplay reads nor an occurrence to react to, but a resource the rows depend
-on.  Touches no buffer text, so it needs no `inhibit-read-only'."
-  (cooked--install-images (plist-get update :images))
-  (cooked--install-links (plist-get update :links)))
-
-(cl-defstruct (cooked-viewport (:constructor cooked--viewport-make) (:copier nil))
-  "What the view looked like before a drain rewrote the screen under it.
-
-Every field has to be read before the render, because afterwards the thing it
-describes is gone: the pending input has been lifted out, the rows point and the
-mark named have been deleted and reinserted, and which windows counted as
-following has already been decided by the deletion dragging their point along.
-
-Restored by `cooked--restore-viewport'."
-  (editing nil :documentation "\
-Point's offset within the pending input, or nil if it was not in there.
-
-An offset rather than a position: the input is taken out and put back verbatim
-around the child's cursor on every drain, so a buffer position cannot survive
-that but an offset into the text can.  Without it, anything that drains while
-the user is editing mid-line -- a background job printing a line, a completion
-reply -- yanks them to the end of what they were typing.")
-  (follow nil :documentation "\
-Whether to track the child's cursor, or leave point where the user put it.
-
-Asked of the mode and of where point is, not by comparing point against the
-cursor: output arriving in chunks lets the cursor overtake point for a single
-drain, which strands point at column 0 for every drain after it.")
-  (wandered nil :documentation "\
-The screen cell point sat on, when it had wandered off the cursor.
-
-A redraw deletes and reinserts whole rows, so a buffer position would be dragged
-to the start of whatever was rebuilt under it.  The cell survives that.")
-  (stale-mark nil :documentation "\
-Whether an active mark named screen text this drain is about to rewrite.
-
-Unlike point the mark cannot be re-found afterwards -- there is no cell to look
-it up by, only a claim about text that is about to stop being that text -- so
-the question is asked while it still has an answer.  See
-`cooked-clear-selection-on-output'.")
-  (others nil :documentation "\
-The other windows on this buffer that were following the child's cursor."))
-
-(defun cooked--capture-viewport ()
-  "Snapshot the view, before the render invalidates every part of it."
-  (cooked--viewport-make
-   :editing (when-let* ((region (cooked--input-region))
-                        ((<= (car region) (point) (cdr region))))
-              (- (point) (car region)))
-   :follow (and (cooked--follow-p)
-                (>= (point) (cooked--screen-start-position)))
-   :wandered (and cooked--wandered (cooked--screen-cell))
-   :stale-mark (and cooked-clear-selection-on-output
-                    mark-active (mark)
-                    (>= (mark) (cooked--screen-start-position)))
-   :others (cooked--following-windows)))
-
-(defun cooked--apply-levels (update)
-  "Adopt UPDATE's levels: the state as of this drain, for redisplay to read."
-  (setq cooked--cursor (cooked--cursor-decode (plist-get update :cursor))
-        ;; Before `cooked--fit-screen', which is shaped by it.
-        cooked--grid (cooked--grid-make :height (plist-get update :height)
-                                        :used (plist-get update :used)
-                                        :head (plist-get update :head))
-        cooked--app-cursor (plist-get update :app-cursor)
-        cooked--keys (plist-get update :keys)
-        cooked--exit (plist-get update :exit))
-  (cooked--set-alt (plist-get update :alt))
-  (cooked--set-mode (plist-get update :mode)))
-
-(defun cooked--place-point (viewport)
-  "Put point where VIEWPORT says it belongs, now that the render is done.
-
-`editing' outranks `follow' rather than sharing an arm with it: point inside the
-pending input is a claim about the line being typed, and the end of that line is
-only the right answer when point was there already.  Staying put outranks both
-once the user has taken the keyboard back -- the child keeps redrawing under
-them, and being yanked to its cursor mid-motion is what this exists to stop.
-The ghost keeps the way back visible; `cooked--snap-to-cursor' takes it."
-  (let ((editing (cooked-viewport-editing viewport)))
-    (cond ((cooked-viewport-wandered viewport)
-           (cooked--goto-screen-cell (cooked-viewport-wandered viewport)))
-          ;; Clamped for the drain that ends the prompt, where
-          ;; `cooked--restore-pending-input' declined and left no region for the
-          ;; offset to be an offset into.
-          (editing
-           (goto-char (if-let* ((start (cooked--input-start-position)))
-                          (min (+ start editing) (cooked--point-after-input))
-                        (cooked--point-after-input))))
-          ((cooked-viewport-follow viewport)
-           (goto-char (cooked--point-after-input))))))
-
-(defun cooked--scroll-windows (viewport)
-  "Scroll every window on this buffer to what VIEWPORT and the new grid want.
-
-Explicit rather than left to redisplay, and the honest reason is narrower than
-it used to be stated here.  `scroll-conservatively' *is* a guarantee for the
-selected window whatever moved its point: `redisplay_window' compares the
-window's start against its point and has no idea whether a command or a process
-filter did the moving.  What redisplay will not do is move a *non-selected*
-window, whose `window-point' nothing here has touched, and what it will not
-decide is the policy question -- whether the last line belongs at the foot of
-the window with nothing below it, which is what `comint-scroll-show-maximum-
-output' gates comint's own recentring on.
-
-The selected window belongs in none of these lists unless it is actually showing
-this buffer: output can arrive while the user's focus is elsewhere, and
-scrolling that window would be a bug rather than a courtesy."
-  (let ((here (and (eq (window-buffer (selected-window)) (current-buffer))
-                   (list (selected-window))))
-        (others (cooked-viewport-others viewport)))
-    (if cooked--alt
-        (cooked--pin-alt-screen (append here others))
-      (cooked--scroll-transcript viewport here others))))
-
-(defun cooked--pin-alt-screen (windows)
-  "Put the alternate screen back at the top of each of WINDOWS.
-
-A resize reaches the buffer in two steps: the window changes height the instant
-Emacs notices (`cooked--sync-size'), while the buffer is not re-fitted to match
-until the next drain's `cooked--fit-screen'.  Ordinary redisplay fills that gap
-by pushing `window-start' down to keep point on screen, and nothing corrected
-that once the buffer caught up -- so the window kept a scroll a now-irrelevant
-redisplay had chosen, clipping the top of the screen.
-
-Unconditional, and the restriction `cooked--apply-alt-pin' re-applies is what
-makes that safe: every window here shows the screen region and nothing else, so
-the region's top is the only start any of them can hold.  NOFORCE stays, because
-forcing would drag point along with it."
-  (let ((top (cooked--screen-start-position)))
-    (cooked--dolist-windows w windows
-      (set-window-start w top t))))
-
-(defun cooked--pin-transcript-bottom (windows &optional pos)
-  "Follow POS, defaulting to `point-max\=', with the bottom row of each of WINDOWS.
-
-Factored out of `cooked--scroll-transcript\=' because a drain is not the only
-thing that can grow the buffer\='s true end.  `cooked--on-exit\=' does too,
-appending the \"[exited N]\=\" line from outside `cooked--scroll-windows\='
-entirely, and it needs exactly this rather than a second copy of it.
-
-Computed and NOFORCE, rather than the `recenter\=' this used to be.
-`recenter\=' sets a forced start that redisplay then overrules through
-`make-cursor-line-fully-visible\=', so the window landed where neither of them
-had chosen; and it counts every screen line as the default font\='s height, so a
-row taller than that -- an image slice, a Nerd Font prompt separator -- had to
-be paid back afterwards in whole lines of scroll.  A NOFORCE start is a
-suggestion redisplay may settle against instead, and the pixels are
-`make-cursor-line-fully-visible\='s business, which is where they were always
-handled correctly.  No `with-selected-window\=' either: nothing here needs the
-window selected, and `select-window\=' is advised -- by `evil\=', to refresh its
-cursor -- so a pair of them per window per drain was arbitrary code running in
-the middle of a render.
-
-Monotone, which is what stops this jittering.  The follow direction is taken
-whenever the tail has grown, and the equality is the common case: a steady
-stream whose tail is the same length leaves TOP exactly where it already is and
-this writes nothing at all, at a drain rate whose floor is
-`cooked-min-redisplay-interval\='.  The shrink direction is the one thing the
-two-way pin was buying -- `comint-scroll-show-maximum-output\='s actual
-semantics, no blank space below the last line -- and is taken only when the
-*last* redisplay had the buffer\='s end on screen, so it fires when the grid
-really has fewer used rows than before rather than every time
-`vertical-motion\='s whole-line count disagrees with what redisplay laid out in
-pixels.  That disagreement is permanent on a window whose rows differ in height,
-and correcting for it once per drain is the oscillation itself."
-  (let ((target (or pos (point-max))))
-    (cooked--dolist-windows w windows
-      (set-window-point w target)
-      (let ((top (save-excursion
-                   (goto-char target)
-                   (vertical-motion (- (1- (window-body-height w))) w)
-                   (point))))
-        (when (or (> top (window-start w))
-                  (and (< top (window-start w))
-                       (let ((end (window-end w)))
-                         (and end (>= end (point-max))))))
-          (set-window-start w top t))))))
-
-(defun cooked--scroll-transcript (viewport here others)
-  "Scroll the transcript in HERE and OTHERS as VIEWPORT asks."
-  (let* ((target (cooked--point-after-input))
-         ;; Slack of one, because whether the last rendered row carries a
-         ;; terminating newline depends on how the region was last shaped: rows
-         ;; are made to exist by the newline ending the row above them, so the
-         ;; bottom one has one only when `cooked--fit-screen' trimmed something
-         ;; below it.  So this can flip from drain to drain, which used to mean
-         ;; the pin alternated with whatever redisplay chose for itself.  It no
-         ;; longer costs anything: a drain that declines to pin leaves point at
-         ;; the buffer's end under `scroll-conservatively' 101 and
-         ;; `scroll-margin' 0, and the minimal scroll redisplay makes to keep it
-         ;; visible is the same start `cooked--pin-transcript-bottom' computes.
-         (at-end (>= target (1- (point-max)))))
-    ;; Only while the view is following at all: suspending exists to stop the
-    ;; child's output moving what is being read, and a second window on the same
-    ;; buffer is being read on the same terms.
-    (when (cooked--follow-p)
-      (cooked--dolist-windows w others
-        (set-window-point w target)))
-    (cond
-     ;; The child cleared the display.  Its rows were archived rather than
-     ;; dropped, so nothing scrolls out of view on its own, and recentring on the
-     ;; cursor would leave the transcript filling the window above a blank screen
-     ;; -- which is `clear' looking like it did nothing.
-     ((and (cooked-viewport-follow viewport) cooked--pin-screen-top)
-      (let ((top (cooked--screen-start-position)))
-        (cooked--dolist-windows w (append here others)
-          (set-window-start w top t))))
-     ((and (cooked-viewport-follow viewport) at-end)
-      (cooked--pin-transcript-bottom (append here others) target)))))
-
-(defun cooked--apply (update)
-  "Apply UPDATE, the plist returned by `cooked--drain'.
-
-The order below is the whole of it, and every step depends on the one above:
-resources before the rows that name them, the viewport before the render that
-invalidates it, the render before the marks resolved against the text it wrote,
-and the region shaped before anything measures it."
-  (cooked--install-resources update)
-  ;; `let*', emphatically: these initialisers delete and insert, and under plain
-  ;; `let' they would run before the two bindings above them took effect -- so a
-  ;; protected buffer would abort the redisplay half-done from inside the process
-  ;; filter, and lifting the pending input would land in the undo history.  They
-  ;; are the pair `cooked--with-child-edit' binds, spelled out because a body this
-  ;; long is not worth nesting one level deeper.
-  (let* ((inhibit-read-only t)
-         (buffer-undo-list t)
-         (viewport (cooked--capture-viewport))
-         (pending (cooked--take-pending-input))
-         ;; Where this drain's scrollback landed, for resolving a `scrolled'
-         ;; anchor against.  nil when the drain evicted nothing.
-         (batch-start (when-let* ((scrolled (plist-get update :scrolled)))
-                        (cooked--render-scrolled scrolled)))
-         (rendered (cooked--render-rows (plist-get update :rows)
-                                        (plist-get update :alt))))
-    (cooked--apply-levels update)
-    ;; Cleared before the events, so a drain that both scrolls and then clears
-    ;; stays pinned.
-    (when batch-start (setq cooked--pin-screen-top nil))
-    ;; After both render passes and before the events: a mark's anchor is
-    ;; resolved against text that has to be in the buffer before it can be
-    ;; pointed at, and a drain that both resizes and carries a fresh mark should
-    ;; end with the fresh mark's own anchor.
-    (cooked--relocate-marks (plist-get update :marks) batch-start)
-    (dolist (event (plist-get update :events))
-      (cooked--handle-event event batch-start))
-    ;; After both, which is the ordering `cooked-row-rendered-functions' is
-    ;; documented against.
-    (cooked--notify-rows-rendered rendered)
-    (cooked--fit-screen)
-    (cooked--pad-to-cursor)
-    (when cooked-debug (cooked--check-seam))
-    (cooked--restore-pending-input pending)
-    (cooked--protect (or (and (cooked--input-state-p) (cooked--input-start-position))
-                         (point-max)))
-    (cooked--apply-alt-pin)
-    ;; Before the point block, not after it: under evil this leaves visual state,
-    ;; and evil adjusts point on the way into normal state -- so cooked's own pin
-    ;; has to be the last thing to speak about where point ends up.
-    (when (cooked-viewport-stale-mark viewport) (cooked--deactivate-mark))
-    (cooked--place-point viewport)
-    ;; Recorded, not merely left in the buffer: a window not showing this buffer
-    ;; has a stale point marker Emacs will restore on the way back, over the top
-    ;; of this.  See `cooked--point'.
-    (setq cooked--point (point))
-    (cooked--scroll-windows viewport)
-    ;; After the window block, not before it: see `cooked--sync-cursor-type'.
-    (cooked--sync-cursor-type)
-    (cooked--update-ghost-cursor)
-    (when cooked--exit (cooked--on-exit cooked--exit)))
-  ;; Both outside the `let*', and in this order.  The binding above is what kept
-  ;; this drain out of the undo history, and a discard has to reach the buffer's
-  ;; own list rather than that binding -- which is also why the trim cannot run
-  ;; inside: it moves the input line, and the `cooked--check-undo-anchor' it does
-  ;; for itself would then update the anchor against a discard that was thrown
-  ;; away with the binding, leaving the history vouched for by an anchor nothing
-  ;; ever cleared.  See `cooked--with-child-edit'.
-  (cooked--trim-scrollback)
-  (cooked--check-undo-anchor))
-
-(defun cooked--handle-event (event batch-start)
-  "Dispatch a single EVENT from the emulator.
-
-BATCH-START is where this drain's scrollback was inserted, which the semantic
-marks need to place their anchors; see `cooked--anchor-position'.
-
-Events are occurrences only.  State the redisplay depends on rides the drain's
-own fields instead — `:alt' and the rest — so that nothing arrives twice with
-two chances to disagree."
-  (pcase event
-    (`(bell) (ding))
-    (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
-    (`(reply . ,bytes) (cooked--send-if-live bytes))
-    (`(title-stack ,push) (cooked--handle-title-stack push))
-    ;; `CSI 3 J', the tail of what `clear' sends.  Honoured unconditionally: it is
-    ;; only reachable by something already holding the terminal, every other terminal
-    ;; honours it, and it is precisely what the user typed `clear' to get.  The
-    ;; command history is not lost with it: that lives in comint's ring, not here.
-    (`(erase-scrollback)
-     (cooked--discard-scrollback (cooked--screen-start-position)))
-    (`(display-cleared) (setq cooked--pin-screen-top t))
-    ;; Decoded into a record at the boundary, like the cursor and the grid; see
-    ;; `cooked-mouse-state'.  cooked-mouse.el owns it because it is the only
-    ;; reader, and re-gates its own keymap on the way through.
-    (`(mouse ,enabled ,sgr ,drag ,motion)
-     (cooked--set-mouse-state enabled sgr drag motion))
-    ((or `(prompt-start ,_ . ,_) `(prompt-continuation ,_ . ,_)
-         `(prompt-end ,_ . ,_)
-         `(command-start ,_ ,_ . ,_) `(command-end ,_ ,_ . ,_))
-     (cooked--handle-semantic event batch-start))
-    (_ nil)))
-
-(defcustom cooked-scrollback-lines 10000
-  "How many lines of transcript to keep above the live screen, or nil for all.
-
-Rows that scroll off the emulator\='s screen become ordinary buffer text and are
-never taken back, so without a cap a session grows for as long as it runs: one
-`yes\=', one chatty build, one `tail -f\=' left overnight, and the buffer is the
-largest thing in your Emacs.  Every other terminal emulator caps this, and this
-is cooked\='s version of `vterm-max-scrollback\=' or `eat-term-scrollback-size\='.
-
-Counted in lines of the buffer above `cooked--screen-start\=', which is not
-quite the same as rows the child printed: `cooked-rejoin-wrapped-lines\=' joins
-a wrapped row onto the line above, so one long line of output is one line here
-however many screen rows it took.  That is the honest unit, being the one the
-buffer is actually made of.
-
-Trimming is not free -- it releases images, prunes command records and tells the
-emulator its seam moved -- so it happens in batches once the buffer is over the
-cap by a margin rather than a line at a time.  A little over the cap is normal
-and expected.
-
-nil keeps everything, which is what you want if the session is a transcript you
-mean to save, and is a decision to make deliberately."
-  :type '(choice (const :tag "Keep everything" nil) natnum)
-  :group 'cooked)
-
-(defconst cooked--scrollback-slack 0.1
-  "How far over `cooked-scrollback-lines\=' the buffer may go before a trim.
-
-A fraction of the cap.  Trimming on the very first line over would delete on
-almost every drain of a flood, and each deletion costs a walk of the text being
-cut to find the images in it -- so the buffer is allowed to overshoot and the
-cost is paid once for many lines instead of many times for one.")
-
-(defun cooked--trim-scrollback ()
-  "Cut the transcript back to `cooked-scrollback-lines\=' if it has outgrown it.
-
-Runs at the end of every drain, and does nothing on all but a few of them: the
-line count is only taken once the buffer holds enough characters to have that
-many lines at all, and the deletion only happens once it is over the cap by
-`cooked--scrollback-slack\='.
-
-Cuts at a line beginning, because `cooked--discard-scrollback\=' hands the
-emulator a seam and half a line is not one."
-  (save-restriction
-    (widen)
-    (when-let* ((cap cooked-scrollback-lines)
-                (screen (cooked--screen-start-position))
-                (threshold (+ cap (max 1 (round (* cap cooked--scrollback-slack)))))
-                ;; A line above the screen carries at least its own newline, so
-                ;; there cannot be THRESHOLD of them in fewer than THRESHOLD
-                ;; characters.  That makes this a sound way to skip the count
-                ;; rather than a guess at how wide a line is: the gate this
-                ;; replaced asked for `(* cap 40)' characters, which for anything
-                ;; narrower than 40 columns never opened, and the cap it is here
-                ;; to enforce simply did not hold -- a flood of `line1234' sat at
-                ;; five times the cap and was never trimmed.
-                ((>= (- screen (point-min)) threshold))
-                ;; `line-number-at-pos' walks from `point-min', which is affordable
-                ;; precisely because the cap bounds what it walks: the buffer this
-                ;; runs against is a capped one, and an uncapped session never
-                ;; reaches here at all.  Measured at 15us for a cap of 1000 against
-                ;; the 8ms redisplay floor, and a bounded `forward-line' walk back
-                ;; from the screen -- O(cap) rather than O(buffer) -- was tried and
-                ;; is five times slower, this being a C-level scan for newlines.
-                ((> (line-number-at-pos screen t) threshold)))
-      (save-excursion
-        (goto-char screen)
-        (forward-line (- cap))
-        (when (> (point) (point-min))
-          (cooked--discard-scrollback (point)))))))
-
-(defun cooked--discard-scrollback (end)
-  "Delete scrollback from `point-min' up to END, and tell the emulator.
-
-The only sanctioned way to delete above `cooked--screen-start', and worth
-routing every future caller — a scrollback cap, a `clear' handler — through
-rather than open-coding.  The scrollback is the one piece of state the two ends
-co-own: Emacs holds the text, while the emulator holds a count of how much of
-its top row's line already left for Emacs, so that a rewrap resumes that line
-where the buffer wraps it.  A wrapped line can span the boundary being cut, so
-a deletion that does not say so leaves the emulator continuing a line that is
-no longer there — and the desync is silent until the next resize.
-
-Widens first, so it still clears while a full-screen program has the buffer
-narrowed to the alt screen — where `point-min' is the top of the screen and
-this would otherwise quietly do nothing."
-  ;; Before the deletion, while the positions still mean something.  A record whose
-  ;; whole region is in the text being cut would survive as an empty region sitting
-  ;; at the cut -- indistinguishable from a command that genuinely printed nothing,
-  ;; which is exactly what the records exist to describe -- and `\[cooked-previous-command]'
-  ;; and folding walk them.
-  (setq cooked--commands
-        (seq-filter (lambda (command) (> (cooked--command-end-position command) end))
-                    cooked--commands))
-  ;; Same shape, one line down: an image belongs to the rows displaying it, so
-  ;; the ids in the text about to go are the candidates and the walk afterwards
-  ;; decides which of them this was the last of.
-  (let (images)
-    (save-restriction
-      (widen)
-      (setq images (cooked--release-images (point-min) end))
-      (cooked--with-child-edit
-        (delete-region (point-min) end)))
-    (cooked--collect-images images))
-  ;; Everything below just moved up by the length of what went.
-  (cooked--check-undo-anchor)
-  (when cooked--session
-    (cooked--forget-history cooked--session)
-    ;; `cooked--grid' is a snapshot of the last drain, and this is the one thing that
-    ;; changes the emulator's seam without one.  Left stale it describes a head that was
-    ;; just deleted, which `cooked--check-seam' would rightly call a desync — and which
-    ;; anything else reading the seam before the next drain would believe.
-    (setf (cooked-grid-head cooked--grid) 0)))
-
-(defun cooked--discard-scrollback-region (beg end)
-  "Delete scrollback between BEG and END, telling the emulator only if it must.
-
-The narrower sibling of `cooked--discard-scrollback\=', for deleting one
-command\='s output out of the middle rather than everything above a point.
-
-What the two ends co-own is exactly one number: how much of the emulator\='s top
-row\='s line has already left for Emacs.  A cut that finishes short of
-`cooked--screen-start\=' cannot change it -- the text row 0 continues is still
-there, still ending where it did -- so it needs no bookkeeping at all, and
-saying so is what makes deleting scrolled-off output possible.  A cut that
-reaches the seam does remove that head, and then this owes the emulator the same
-news `cooked--discard-scrollback\=' gives it."
-  (when-let* ((screen (cooked--screen-start-position))
-              ((< beg end)))
-    (let ((end (min end screen)))
-      (when (< beg end)
-        (let ((at-seam (= end screen))
-              images)
-          (save-restriction
-            (widen)
-            (setq images (cooked--release-images beg end))
-            (cooked--with-child-edit
-              (delete-region beg end)))
-          (cooked--collect-images images)
-          (cooked--check-undo-anchor)
-          (when (and at-seam cooked--session)
-            (cooked--forget-history cooked--session)
-            (setf (cooked-grid-head cooked--grid) 0)))))))
-
-(defun cooked-clear-scrollback ()
-  "Delete everything above the current prompt.
-
-comint's \\[cooked-clear-scrollback] read literally, and the seam between the emulator's grid
-and Emacs\=' scrollback is not the user's business: whether what is above the
-prompt has scrolled off the grid yet or is still on it, it goes.  Scrollback
-alone was the old behaviour and looked inert at exactly the moment it is reached
-for -- a few commands into a session nothing has scrolled off at all, and every
-line on screen is a row the emulator still holds.
-
-Each side is asked for its own half.  `cooked--clear-to-prompt\=' removes the
-rows, because rows have one owner and only the emulator knows which of them are
-above the prompt; the scrollback is buffer text, so Emacs deletes that itself;
-and the drain repaints what moved -- the shape of `cooked-delete-output\='.
-
-The prompt line and anything typed at it stay, and end up at the top.  comint
-deletes its prompt because there it is only text; here it is a row the shell is
-still drawing on, and taking it would corrupt a redisplay cooked cannot repair.
-
-On the alternate screen the grid belongs to a running program rather than to a
-transcript, so only the scrollback goes -- see `cooked--clear-to-prompt\='."
-  (interactive)
-  (when cooked--session
-    (cooked--clear-to-prompt cooked--session))
-  (cooked--discard-scrollback (cooked--screen-start-position))
-  (when cooked--session
-    (cooked--drain-and-apply)))
-
-(defun cooked-refresh ()
-  "Rebuild the live screen from the emulator.
-
-The way back from a redisplay that failed part-way.  An ordinary drain only
-reports what changed since the last one, so it cannot repair a buffer holding
-some rows of a drain that signalled halfway through applying them — the screen
-region and the emulator's grid simply stay out of step, and every later delta is
-applied on top of the disagreement.  This throws the screen region away and asks
-the native core to re-send all of it.
-
-The scrollback above is untouched, and so is the emulator's carry count with it:
-only the region below `cooked--screen-start' is rebuilt."
-  (interactive)
-  (when cooked--session
-    (save-restriction
-      (widen)
-      (cooked--with-child-edit
-        (cooked--release-alt-pin)
-        (delete-region (cooked--screen-start-position) (point-max))
-        ;; They pointed into the text just deleted; `cooked--restore-pending-input'
-        ;; puts them back at the cursor on the drain below.
-        (cooked--clear-input-region)))
-    ;; Here rather than left to the drain below, which would see the rebuilt
-    ;; input line start where the old one did and conclude that nothing moved --
-    ;; while every entry in the history was recorded against text this has just
-    ;; deleted and the child is about to re-send.  Outside the macro, for the
-    ;; reason given there.
-    (cooked--check-undo-anchor)
-    (cooked--redraw cooked--session)
-    (cooked--drain-and-apply)))
 
 
 ;;;; Entry points

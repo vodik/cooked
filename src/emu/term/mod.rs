@@ -6,11 +6,11 @@
 use super::cell::{Attrs, Color, Deco, Extra, MarkId, Row, Run, Style};
 use super::image::{
     CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, Interned, PixelSize,
-    png_dimensions,
 };
 use super::kitty::{Kitty, Outcome, decode_base64};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
+use super::png::png_dimensions;
 use super::screen::{Cursor, Erase, Evicted, Resize, Screen};
 use super::sixel;
 use std::collections::{HashSet, VecDeque};

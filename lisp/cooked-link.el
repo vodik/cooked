@@ -58,7 +58,7 @@
 (declare-function cooked--suspended-p "cooked")
 (declare-function cooked--child-owns-keyboard-p "cooked")
 (declare-function cooked-mouse-event "cooked-mouse")
-(declare-function cooked-send-key "cooked-mode")
+(declare-function cooked-send-key "cooked-keys")
 (defvar cooked--mouse-grab)
 
 (defgroup cooked-link nil

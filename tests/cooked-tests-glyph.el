@@ -60,6 +60,116 @@ engine merged them."
                (lambda () (string-match-p "┌" (cooked-tests--text)))))
       (should-not (get-text-property (point-min) 'display)))))
 
+(ert-deftest cooked-a-run-of-identical-glyphs-shares-one-deco-record ()
+  "The point of the run-length wire format, seen from the buffer.
+
+`Deco::packed\=' in src/emu/cell.rs sends `(BITS COUNT)\=' per run of one shape, so
+`cooked--apply-glyph-deco\=' can look the image spec up once and put one
+`cooked-deco\=' record over the whole run with a single `put-text-property\='.
+What is asserted is the sharing itself -- `next-single-property-change\=' compares
+with `eq\=', so a run that shares its record is one step of that walk -- because
+that is the observable the saving is made of, and it is also exactly what
+`cooked--rescale-deco\=' had to be taught to expect.
+
+The `display\=' values must still be distinct objects, and that is not a separate
+concern bolted on: sharing the record and sharing the display value look alike
+in batch and only one of them is safe.  See
+`cooked-adjacent-box-glyphs-do-not-share-a-display-property\='."
+  (cooked-tests--with-session
+      ;; Four of the same character in a row, which is what a border is.
+      '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'")
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((beg (point-min)))
+      (should (get-text-property beg 'cooked-deco))
+      ;; One step of the walk covers all four cells: one record, not four.
+      (should (>= (or (next-single-property-change beg 'cooked-deco) (point-max))
+                  (+ beg 4)))
+      (dotimes (i 4)
+        (should (eq (get-text-property (+ beg i) 'cooked-deco)
+                    (get-text-property beg 'cooked-deco))))
+      ;; ...while every cell still owns its `display' value.
+      (should-not (eq (get-text-property beg 'display)
+                      (get-text-property (1+ beg) 'display))))))
+
+(ert-deftest cooked-a-run-of-shades-keeps-a-record-per-cell ()
+  "A shade dithers, so its phase is a function of the cell's own pixel origin --
+see `cooked--box-phase\='.  The shapes are identical and so cross as one
+run-length record like any other repeat, but `cooked--apply-glyph-deco\=' expands
+that record per cell rather than sharing it: a shared record carries one column
+for the whole run, and `cooked--rescale-deco\=' rebuilding from it would phase
+every cell as though it sat where the first one does, drawing a doubled column
+down each seam at an odd cell width.
+
+The distinction is in the reader and not in the wire, which is the decision
+`Deco::packed\=' argues: run-length encoding already moved the shade test from
+once per character to once per record, so a flag bit would have bought one
+`logand\=' per run."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\226\\222\\342\\226\\222\\342\\226\\222\\n'") ; ▒▒▒
+    (cooked-tests--cell 9 20)             ; odd width, where the phase can differ
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'cooked-deco))))
+    (let ((beg (point-min)))
+      (should (cooked--box-shade-p (nth 1 (get-text-property beg 'cooked-deco))))
+      ;; Each cell its own record, so each carries its own column.
+      (dotimes (i 3)
+        (should (equal (nth 2 (get-text-property (+ beg i) 'cooked-deco)) i)))
+      (should-not (eq (get-text-property beg 'cooked-deco)
+                      (get-text-property (1+ beg) 'cooked-deco))))))
+
+(ert-deftest cooked-a-rescale-rebuilds-every-cell-of-a-shared-glyph-run ()
+  "`cooked--rescale-deco\=' walks with `next-single-property-change\=', which
+compares values with `eq\=' -- so cells sharing one `cooked-deco\=' record are a
+single step of that walk, and rebuilding only the step\='s first character would
+leave the rest of the run drawn at the old cell size for as long as the buffer
+lives.
+
+That the walk reached every character was an accident of allocation rather than
+anything the property promised: `cooked--apply-deco\=' consed a fresh record per
+cell, so no two were ever `eq\=' and no run was ever longer than one.  A run of
+identical glyphs is exactly what a border is made of, so sharing one record
+across it is the obvious saving to make on the render path -- and making it
+would have broken this silently, the buffer simply ceasing to track the font
+with nothing to point at.  So the walk is pinned to the property\='s semantics
+here rather than to that accident.
+
+Glyphs and not an image placement, and the difference is the point: an image
+record carries the cell\='s own row and column within the picture, so no two
+cells of one placement can share it.  A glyph record for a shape that does not
+dither carries nothing cell-specific at all."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'") ; ───
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let* ((inhibit-read-only t)
+           (buffer-undo-list t)
+           (beg (point-min))
+           (end (+ beg 3)))
+      ;; One record across the run, which is what a run-length-encoded deco span
+      ;; arrives as.  The three cells hold the same shape, so the record they
+      ;; share is the record each already had.
+      (put-text-property beg end 'cooked-deco (get-text-property beg 'cooked-deco))
+      (should (equal (or (next-single-property-change beg 'cooked-deco) end) end))
+      ;; Clobbered rather than compared afterwards, for the reason
+      ;; `cooked-box-drawing-rescales-on-zoom' gives: batch Emacs reports one
+      ;; cell size at every zoom level, so a regenerated spec is `equal' to the
+      ;; one it replaced and neither identity nor value distinguishes them.
+      (dotimes (i 3)
+        (put-text-property (+ beg i) (+ beg i 1) 'display 'clobbered))
+      (cooked-tests--cell 12 26)
+      (cooked--rescale-deco)
+      ;; Every cell of the run, not just the one the walk landed on.
+      (dotimes (i 3)
+        (should (eq (car-safe (cooked-tests--glyph-image (+ beg i))) 'image)))
+      ;; And each cell's `display' is still its own object: Emacs merges a run of
+      ;; `eq' display values into a single image, so a rescale that shared one
+      ;; would collapse the border it just rebuilt.  See `cooked--deco-display'.
+      (should-not (eq (get-text-property beg 'display)
+                      (get-text-property (1+ beg) 'display))))))
+
 (ert-deftest cooked-box-drawing-rescales-on-zoom ()
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐

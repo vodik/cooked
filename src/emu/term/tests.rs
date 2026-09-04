@@ -4,7 +4,8 @@ use super::*;
 
 /// An RGBA buffer encoded the way the emulator would encode it.
 fn rgba_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
-    use crate::emu::image::{PixelFormat, PixelSize, Pixels};
+    use crate::emu::image::PixelSize;
+    use crate::emu::png::{PixelFormat, Pixels};
     Pixels::new(PixelSize::new(w, h), PixelFormat::Rgba, rgba.to_vec())
         .encode()
         .1
@@ -2362,6 +2363,108 @@ fn diagonal_and_stub_bytes_also_produce_glyphs() {
         !glyphs[3].is_diagonal(),
         "the stub is edge-based, not a diagonal"
     );
+}
+
+/// The wire format's whole reason to exist: a border row is one decision repeated, and
+/// saying so once is what lets `cooked--apply-glyph-deco' look the image spec up once
+/// and hang one shared record over the run instead of doing both per character.
+#[test]
+fn a_run_of_identical_glyphs_packs_into_a_single_run_length_record() {
+    let mut t = term(2, 10, "\u{2500}\u{2500}\u{2500}\u{2500}".as_bytes());
+    let delta = t.drain();
+    let (_, runs) = delta
+        .rows
+        .iter()
+        .find(|(i, _)| *i == 0)
+        .expect("row 0 is damaged");
+    let packed = runs[0].deco.as_ref().expect("box-glyph run").packed();
+    assert_eq!(
+        packed.len(),
+        4,
+        "four identical shapes, one record: {packed:?}"
+    );
+    // U+2500 ─ is a light horizontal: left and right edges at weight 1, 0x0050.
+    assert_eq!(packed, vec![0x50, 0x00, 4, 0], "{packed:?}");
+}
+
+/// The other half of the same claim: only *adjacent equal* shapes collapse, so a run
+/// whose shapes differ still arrives with every character accounted for. A corner, a
+/// stretch of horizontal and the other corner is what a real border row looks like.
+#[test]
+fn a_run_of_differing_glyphs_packs_one_record_per_distinct_shape() {
+    let mut t = term(2, 10, "\u{250C}\u{2500}\u{2500}\u{2510}".as_bytes());
+    let delta = t.drain();
+    let (_, runs) = delta
+        .rows
+        .iter()
+        .find(|(i, _)| *i == 0)
+        .expect("row 0 is damaged");
+    let deco = runs[0].deco.as_ref().expect("box-glyph run");
+    let packed = deco.packed();
+    assert_eq!(packed.len(), 12, "three records: {packed:?}");
+    let counts: Vec<u16> = packed
+        .chunks_exact(4)
+        .map(|record| u16::from_le_bytes([record[2], record[3]]))
+        .collect();
+    assert_eq!(counts, vec![1, 2, 1]);
+    assert_eq!(
+        counts.iter().sum::<u16>() as usize,
+        deco.glyphs().len(),
+        "the counts must cover every character of the run"
+    );
+    // The middle record is the pair of horizontals, and it carries their bits.
+    assert_eq!(
+        u16::from_le_bytes([packed[4], packed[5]]),
+        deco.glyphs()[1].bits()
+    );
+}
+
+/// A shade dithers, so its phase depends on the column it lands in and Lisp has to
+/// rebuild the `display' value per cell however the wire arrived. That is deliberately
+/// *not* said in the record: the shapes are identical, so they collapse like any other
+/// repeat, and `cooked--box-shade-p' asks once per record rather than once per cell.
+/// Adding a flag bit would have saved one `logand' per run — see [`Deco::packed`].
+#[test]
+fn a_run_of_shades_collapses_like_any_other_repeat_and_is_not_flagged() {
+    let mut t = term(2, 10, "\u{2592}\u{2592}\u{2592}".as_bytes());
+    let delta = t.drain();
+    let (_, runs) = delta
+        .rows
+        .iter()
+        .find(|(i, _)| *i == 0)
+        .expect("row 0 is damaged");
+    let deco = runs[0].deco.as_ref().expect("box-glyph run");
+    let packed = deco.packed();
+    // ▒ U+2592, medium shade: block kind, direction `Shade', density 2 -- 0x8015, the
+    // same literal `cooked-box-glyph-bits-match-the-rust-side-encoding' mirrors.
+    assert_eq!(packed, vec![0x15, 0x80, 3, 0], "{packed:?}");
+    // Nothing in the count field but the count: no bit is reserved to say "dithers".
+    assert_eq!(u16::from_le_bytes([packed[2], packed[3]]), 3);
+}
+
+/// Image cells keep one record each, and this is the pin on that staying true: every
+/// cell of a picture displays its own slice, named by the row and column *in that
+/// record*, so a run-length record would hand three cells one start column and draw the
+/// same slice three times. See `cooked--apply-image-deco'.
+#[test]
+fn image_placements_still_pack_one_record_per_character() {
+    let mut t = with_metrics(10, 20);
+    t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(30, 20));
+    let runs = t.screen().row(0).unwrap().runs();
+    let deco = runs[0]
+        .deco
+        .as_ref()
+        .expect("an image placement decorates row 0");
+    let packed = deco.packed();
+    assert_eq!(deco.len(), 3);
+    assert_eq!(packed.len(), 12 * 3, "one record per cell: {packed:?}");
+    // Every cell names its own column within the picture, which is exactly what a
+    // record shared across the run could not do.
+    let columns: Vec<u16> = packed
+        .chunks_exact(12)
+        .map(|record| u16::from_le_bytes([record[6], record[7]]))
+        .collect();
+    assert_eq!(columns, vec![0, 1, 2]);
 }
 
 /// The alt screen produces no history of its own, but the primary's rows are still

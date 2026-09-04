@@ -168,16 +168,40 @@ no span list at all, which is the case the sparse shape is built around."
   (let ((text (make-string cols ?x)))
     (cl-loop for i below count collect (cons i (list text nil nil nil)))))
 
+(defun cooked-bench--le (value bytes)
+  "VALUE as BYTES little-endian bytes, as a list."
+  (cl-loop for b below bytes collect (logand (ash value (* -8 b)) 255)))
+
+(defun cooked-bench--style-record (start end fg bg ul attrs)
+  "One packed style span, as `Block::push_style\=' in src/lib.rs lays it out.
+
+START and END are character offsets, FG, BG and UL already-packed colours in
+`Color::packed\=''s tagged encoding, and ATTRS the bitmask.  Hand-built here
+because the point of these fixtures is to hand `cooked--apply\=' exactly what the
+module would, without a child having to produce it -- so the layout is spelled
+out on this side too, and `cooked--style-record\=' is the number that has to
+agree."
+  (append (cooked-bench--le start 4) (cooked-bench--le end 4)
+          (cooked-bench--le fg 4) (cooked-bench--le bg 4)
+          (cooked-bench--le ul 4) (cooked-bench--le attrs 2)))
+
 (defun cooked-bench--styled-rows (count cols)
-  "COUNT damaged rows split into eight differently-styled spans."
+  "COUNT damaged rows split into eight differently-styled spans.
+
+The spans arrive packed, not as lists -- see `cooked-bench--style-record\='.  An
+indexed foreground and a default background, which is what a shell or a build
+log actually emits and so the case the encoding is tuned for."
   (let ((width (/ cols 8)))
     (cl-loop for i below count
              collect (cons i (list (make-string (* 8 width) ?x)
-                                   (cl-loop for r below 8
-                                            collect (list (* r width)
-                                                          (* (1+ r) width)
-                                                          (mod (+ i r) 8) nil
-                                                          (if (cl-evenp r) 1 0) nil))
+                                   (apply #'unibyte-string
+                                          (cl-loop for r below 8
+                                                   append (cooked-bench--style-record
+                                                           (* r width)
+                                                           (* (1+ r) width)
+                                                           (logior (ash 1 24) (mod (+ i r) 8))
+                                                           0 0
+                                                           (if (cl-evenp r) 1 0))))
                                    nil nil)))))
 
 (defun cooked-bench--url-rows (count cols)
@@ -192,12 +216,14 @@ of what `cooked--fontify-links\=' spends on a row that has something to find."
 (defun cooked-bench--box-rows (count cols)
   "COUNT damaged rows of box drawing, every cell taking the bitmap path.
 
-The decoration is `(glyph . PACKED)\=' as the module hands it over, PACKED being
-two little-endian bytes per character.  0x0050 is a plain light horizontal —
-left and right edges at weight 1 — which is what a border is made of."
+The decoration is `(glyph . PACKED)\=' as the module hands it over: four
+little-endian bytes per run of one shape, the `BoxGlyph\=' bits and the number of
+characters drawing them.  0x0050 is a plain light horizontal — left and right
+edges at weight 1 — which is what a border is made of, and a row of them is the
+single record the encoding exists to produce."
   (let* ((text (make-string cols ?─))
-         (deco (cons 'glyph (apply #'unibyte-string
-                                   (cl-loop repeat cols append (list #x50 #x00)))))
+         (deco (cons 'glyph (unibyte-string #x50 #x00
+                                            (logand cols #xff) (ash cols -8))))
          (spans (list (list 0 deco))))
     (cl-loop for i below count collect (cons i (list text nil spans)))))
 

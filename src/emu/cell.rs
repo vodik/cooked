@@ -15,6 +15,44 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
+impl Color {
+    /// This colour as the tagged `u32` a style span carries. `cooked--color-spec' in
+    /// lisp/cooked-face.el is the only reader, and its docstring restates this layout.
+    ///
+    /// The tag is the *top* byte, which is the whole point of the arrangement rather
+    /// than an arbitrary choice of where to put it. Records go over the boundary
+    /// little-endian, so the tag lands at byte 3 of the field and Lisp can dispatch on a
+    /// single `aref' — and for the two common variants it never has to assemble the
+    /// other three bytes at all. `Default' reads one byte and stops; `Indexed' reads the
+    /// tag and byte 0. Only `Rgb', which is rare in practice because the palette is what
+    /// shells and TUIs actually emit, pays for three more.
+    ///
+    ///   tag 0  `Default' — the remaining bytes are zero, so the whole field is zero
+    ///   tag 1  `Indexed' — the index in bits 0-7
+    ///   tag 2  `Rgb'     — r in bits 16-23, g in 8-15, b in 0-7
+    ///
+    /// A fixed four bytes rather than a variable-length spelling, because the span
+    /// record it sits in has to be steppable by a constant: Lisp walks the packed string
+    /// by adding a stride, and a colour that changed the stride would force it to decode
+    /// every field of every span merely to find the next one. Four bytes is also the
+    /// narrowest fixed width that can hold all three variants — `Rgb' alone needs 24
+    /// bits of value — so nothing is being spent here that a smaller field would save.
+    ///
+    /// `Default' encoding as all-zero is worth the byte ordering it costs: it is by far
+    /// the commonest value, appearing as the underline colour of essentially every span
+    /// and as the background of most, and it makes the Lisp fast path a comparison
+    /// against a byte that is already in hand.
+    pub fn packed(self) -> u32 {
+        match self {
+            Self::Default => 0,
+            Self::Indexed(i) => (1 << 24) | u32::from(i),
+            Self::Rgb(r, g, b) => {
+                (2 << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Attrs(u16);
 
@@ -185,8 +223,8 @@ pub(crate) enum DecoCell {
 ///
 /// A run is homogeneous in its kind: [`Row::build_runs`] will not merge characters
 /// decorated differently into one run. That is what lets the wire format carry a single
-/// kind tag plus a fixed-width record per character, instead of tagging every character
-/// — and it is why the box-drawing case still crosses at exactly two bytes each.
+/// kind tag plus fixed-width records, instead of tagging every character — see
+/// [`Deco::packed`] for what those records are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Deco {
     Glyphs(Vec<BoxGlyph>),
@@ -243,6 +281,82 @@ impl Deco {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// The run's decoration as the unibyte string Lisp decodes, little-endian
+    /// throughout. `cooked--apply-deco' in lisp/cooked-deco.el is the only reader.
+    ///
+    /// Packed rather than a list of Lisp objects because this is on the path every
+    /// damaged row of every frame takes, and box drawing is what full-screen programs
+    /// are made of. The two kinds pack differently, and the difference is not an
+    /// accident of how each grew:
+    ///
+    /// **Glyphs** are `(bits: u16, count: u16)` per *run of identical shapes* — four
+    /// bytes for a whole border row rather than two bytes eighty times. The saving that
+    /// matters is not the bytes: it is that Rust already knows the shape repeats, and
+    /// emitting it once per character threw that away and left `cooked--apply-glyph-deco'
+    /// to rediscover it by comparison. Emacs is the bottleneck here — the parser runs at
+    /// 74-422 MB/s while the apply path manages roughly 21 MB/s equivalent — so work the
+    /// protocol leaves for Lisp to reconstruct is work in the wrong place. With the count
+    /// in hand Lisp looks the image spec up once for the run and hangs one shared
+    /// `cooked-deco' record over all of it, instead of once and one per cell.
+    ///
+    /// No flag rides along to say a shape dithers, though [`BoxGlyph`] knows: the only
+    /// thing Lisp does with that answer is decide whether a cell's dither phase can vary
+    /// down the run, and run-length encoding already demotes that question from once per
+    /// character to once per record. A bit that saves one `logand` per eighty cells is
+    /// not worth a field that has to mean the same thing on both sides of the boundary
+    /// forever. `cooked--box-shade-p' keeps asking, and the count field stays a plain
+    /// u16 with no reserved bits.
+    ///
+    /// **Images** stay one 12-byte record per character — `(id: u32, cell_row: u16,
+    /// cell_col: u16, cols: u16, rows: u16)` — because the Lisp side genuinely needs one
+    /// per character: each cell displays its own slice of the picture, named by that
+    /// cell's row and column within it, and `cooked--apply-image-deco' explains why that
+    /// per-cell model is what survives a scroll, an overwrite and a rewrap. A run-length
+    /// record would compress the wire and buy nothing on the far side, which is the half
+    /// that costs.
+    ///
+    /// A count is never zero, and is capped at [`u16::MAX`] by splitting the record —
+    /// unreachable at any terminal width, since a run cannot outlast its row, but the
+    /// format is total rather than merely adequate for the widths that exist.
+    pub fn packed(&self) -> Vec<u8> {
+        match self {
+            Self::Glyphs(glyphs) => {
+                let mut packed = Vec::with_capacity(glyphs.len().min(8) * 4);
+                let mut run: Option<(u16, u16)> = None;
+                let flush = |packed: &mut Vec<u8>, bits: u16, count: u16| {
+                    packed.extend_from_slice(&bits.to_le_bytes());
+                    packed.extend_from_slice(&count.to_le_bytes());
+                };
+                for glyph in glyphs {
+                    let bits = glyph.bits();
+                    run = match run {
+                        Some((b, count)) if b == bits && count < u16::MAX => Some((b, count + 1)),
+                        Some((b, count)) => {
+                            flush(&mut packed, b, count);
+                            Some((bits, 1))
+                        }
+                        None => Some((bits, 1)),
+                    };
+                }
+                if let Some((bits, count)) = run {
+                    flush(&mut packed, bits, count);
+                }
+                packed
+            }
+            Self::Images(places) => {
+                let mut packed = Vec::with_capacity(places.len() * 12);
+                for place in places {
+                    packed.extend_from_slice(&place.id.0.to_le_bytes());
+                    packed.extend_from_slice(&place.cell_row.to_le_bytes());
+                    packed.extend_from_slice(&place.cell_col.to_le_bytes());
+                    packed.extend_from_slice(&place.cols.to_le_bytes());
+                    packed.extend_from_slice(&place.rows.to_le_bytes());
+                }
+                packed
+            }
+        }
     }
 
     /// The shapes, for tests that assert against the classifier's output.

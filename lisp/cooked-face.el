@@ -132,11 +132,140 @@ that was just computed — are handled separately in `cooked--face'.")
   "Whether BIT is set in the ATTRS bitmask."
   (/= 0 (logand attrs bit)))
 
+(defconst cooked--color-tag-default 0)
+(defconst cooked--color-tag-indexed 1)
+(defconst cooked--color-tag-rgb 2)
+
+(defsubst cooked--color-spec (packed i)
+  "Decode the four-byte colour field at offset I of PACKED.
+
+Returns what `cooked--color\=' takes: nil for the terminal default, an integer
+for a palette index, or a list of R G B.  The encoding is `Color::packed\=' in
+src/emu/cell.rs, little-endian, and the two sides must agree on it forever:
+
+  tag 0  default  -- the whole field is zero
+  tag 1  indexed  -- the index in bits 0-7
+  tag 2  rgb      -- r in bits 16-23, g in 8-15, b in 0-7
+
+The tag is the top byte, so little-endian order puts it at I+3 and the two
+common variants never assemble the other three bytes at all.  Only rgb pays for
+the full decode, and it is the rare one: palette colours are what shells and
+TUIs actually emit."
+  (let ((tag (aref packed (+ i 3))))
+    (cond ((eq tag cooked--color-tag-default) nil)
+          ((eq tag cooked--color-tag-indexed) (aref packed i))
+          (t (list (aref packed (+ i 2)) (aref packed (+ i 1)) (aref packed i))))))
+
+(defsubst cooked--color-code (packed i)
+  "Cache-key code for the colour field at offset I of PACKED, or nil for rgb.
+
+0 for the terminal default and 1+INDEX for a palette index, so the codes of the
+256 palette colours and the default occupy 0-256 and fit in nine bits.  Nil for
+an rgb colour, which has 24 bits of value and cannot be squeezed alongside two
+more of its kind -- see `cooked--face-key\=' for what that nil is for."
+  (let ((tag (aref packed (+ i 3))))
+    (cond ((eq tag cooked--color-tag-default) 0)
+          ((eq tag cooked--color-tag-indexed) (1+ (aref packed i)))
+          (t nil))))
+
+(defun cooked--face-key (fgc bgc ulc attrs)
+  "Cache key for colour codes FGC, BGC and ULC with the ATTRS bitmask.
+
+A single fixnum whenever all three codes are non-nil, which is to say whenever
+no colour is rgb -- and that is the overwhelmingly common case, since the
+palette is what shells and TUIs emit.  Nil when any code is nil, and the caller
+falls back to a consed list.
+
+The key exists because building one used to cost more than answering with it.
+`cooked--face\=' consed a fresh four-element list per span and looked it up in an
+`equal\=' table; 192 lookups on a styled frame measured 0.220 ms that way against
+0.049 ms for a fixnum.  Almost none of that is the hash: it is the allocation
+and the element-by-element `equal\=' walk, neither of which a fixnum has.
+
+The layout packs into 43 bits -- ATTRS is 16, each code is 9 -- which a 64-bit
+Emacs holds in a fixnum with 18 to spare.  On a 32-bit build the shifts spill
+into a bignum instead, which is slower but still a perfectly good `equal\=' key,
+so nothing here has to check the word size to stay correct.  That is the reason
+the fallback below is chosen for rgb rather than for narrow fixnums: the first
+is a real limit of the encoding, the second is only a matter of speed."
+  (and fgc bgc ulc
+       (logior attrs (ash fgc 16) (ash bgc 25) (ash ulc 34))))
+
+(defun cooked--face-packed (packed i)
+  "Face plist for the rendition packed at offset I of PACKED.
+
+I points at the FG field of a style record -- see `Block::push_style\=' in
+src/lib.rs for the layout, of which this reads the trailing fourteen bytes: FG,
+BG and UNDERLINE as four-byte tagged colours, then ATTRS as a `u16\='.
+
+The whole point is that a hit decodes nothing.  The key is built from four
+`aref\='s of the two low bytes of each colour field, and the specs the face is
+actually built from are decoded only inside the memoized body, on the miss --
+which a full-screen repaint takes a few dozen times and then never again.
+
+Memoized per buffer in `cooked--face-cache\=', the same table and the same
+lifetime as before, so `cooked--flush-face-cache\=' still reaches every resolved
+colour with one `clrhash\=' when the theme changes."
+  (let* ((attrs (logior (aref packed (+ i 12)) (ash (aref packed (+ i 13)) 8)))
+         (key (or (cooked--face-key (cooked--color-code packed i)
+                                    (cooked--color-code packed (+ i 4))
+                                    (cooked--color-code packed (+ i 8))
+                                    attrs)
+                  ;; An rgb colour somewhere in the rendition, so there is no fixnum
+                  ;; to be had -- and the key becomes the record's own fourteen
+                  ;; rendition bytes -- I points at FG, so that is I through I+14,
+                  ;; the four-byte colour triple plus the two of ATTRS -- which is the
+                  ;; one thing that always identifies it exactly.  One short unibyte string, compared by `equal' as a
+                  ;; memcmp rather than walked.
+                  ;;
+                  ;; It was a consed list of decoded specs, and that made truecolor
+                  ;; the slowest thing in the renderer: a `(list r g b)' per colour
+                  ;; field, then a four-element key holding them, then an `equal'
+                  ;; hash descending into the nesting -- 14.6us against 2.6us for a
+                  ;; palette span, where before the packed format the lists at least
+                  ;; arrived ready-made from Rust.  `flood, 20k styled lines' has one
+                  ;; truecolor span per line and went from 117ms to 225ms on it.
+                  ;; Optimising the palette case is no excuse for pessimising the
+                  ;; other one; `ls --color' is not the only thing that emits colour,
+                  ;; and a build log full of `38;2' is exactly the flood this path is
+                  ;; for.
+                  ;; Never `equal' to a fixnum, so the two kinds of key share one
+                  ;; table with no chance of colliding -- which is what keeps
+                  ;; `cooked--flush-face-cache' a single `clrhash' over everything
+                  ;; holding a resolved colour.
+                  (substring packed i (+ i 14)))))
+    (cooked--cached cooked--face-cache key
+      ;; Decoded on the miss only, which a full-screen repaint takes a few dozen
+      ;; times and then never again.  The old fallback decoded before it had even
+      ;; looked, and then handed the specs to `cooked--face' to build a second key
+      ;; out of.
+      (cooked--face-build (cooked--color-spec packed i)
+                          (cooked--color-spec packed (+ i 4))
+                          attrs
+                          (cooked--color-spec packed (+ i 8))))))
+
 (defun cooked--face (fg bg attrs &optional ul)
   "Face plist for FG, BG, the ATTRS bitmask and underline colour UL.
-Memoized per buffer."
-  (cooked--cached cooked--face-cache (list fg bg attrs ul)
-    (cooked--face-build fg bg attrs ul)))
+
+FG, BG and UL are in `cooked--color\=''s spelling: nil, an index, or a list of
+R G B.  Memoized per buffer.
+
+The entry point for callers holding decoded colours -- tests, and
+`cooked--face-packed\=''s rgb fallback.  The render path does not come through
+here; it calls `cooked--face-packed\=' and never spells a colour out at all
+unless the cache misses.  Both share one table and must therefore agree on the
+key for a rendition they can both describe, or the same face would be built
+twice and compare non-`eq\=' -- which
+`cooked-a-packed-span-and-a-spelled-out-one-share-a-face\=' pins."
+  (let ((code (lambda (spec) (cond ((null spec) 0)
+                                   ((consp spec) nil)
+                                   (t (1+ spec))))))
+    (if-let* ((key (cooked--face-key (funcall code fg) (funcall code bg)
+                                     (funcall code ul) attrs)))
+        (cooked--cached cooked--face-cache key
+          (cooked--face-build fg bg attrs ul))
+      (cooked--cached cooked--face-cache (list fg bg attrs ul)
+        (cooked--face-build fg bg attrs ul)))))
 
 (defun cooked--face-build (fg bg attrs ul)
   "Build the face plist `cooked--face' memoizes for FG, BG, ATTRS and UL."

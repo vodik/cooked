@@ -41,6 +41,8 @@
 ;;; Code:
 
 (require 'cooked)
+;; `cooked-clear-scrollback', which the `K' verb is a remote way of typing.
+(require 'cooked-scrollback)
 
 (declare-function magit-status "ext:magit-status")
 

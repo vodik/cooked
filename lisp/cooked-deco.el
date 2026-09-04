@@ -118,7 +118,31 @@ case the cap exists for.")
 
 Insertion order rather than use order.  Emacs never reuses an id -- they are
 content-addressed in the module -- so this is a queue that only ever grows at
-one end, and the far end is what `cooked--evict-images\=' spends.")
+one end, and the far end is what `cooked--evict-images\=' spends.
+
+Maintained through `cooked--image-order-append\=' and
+`cooked--image-order-set\=' rather than written to directly, because the tail
+below has to move with it.")
+
+(defvar-local cooked--image-order-tail nil
+  "The last cons of `cooked--image-order\=', so an append costs nothing.
+
+A queue whose oldest end is its head is the right shape for eviction and the
+wrong one for insertion: appending to a list means walking it, so a session
+holding N pictures paid N conses to record the next one and O(N^2) to fill its
+cache.  That is not a hypothetical size.  The cap is measured in bytes, so what
+bounds the list is the *size* of the pictures -- a child drawing multi-megabyte
+frames holds a few dozen ids, while one drawing 4KB icons holds sixteen
+thousand under the same 64MB, and the second is the one that spends seconds in
+`cooked--install-images\='.
+
+The same fix the module made on its own side, and for the same reason: see the
+`Ledger\=' in src/emu/intern.rs, whose ordering is an intrusive list rather than
+a deque precisely so that neither end costs a scan.
+
+A second copy of a fact, and therefore a thing that can disagree with the first
+-- which is why nothing sets `cooked--image-order\=' in place.  The two writers
+are the append and the wholesale replacement, and both live next to this.")
 
 (defvar-local cooked--image-specs nil
   "(ID CELL-WIDTH CELL-HEIGHT) -> the `create-image' spec, weakly.
@@ -278,24 +302,6 @@ would be stale the moment the buffer is zoomed."
     (logior (logand (* column (car size)) 1)
             (ash (logand (* (or row 0) (cdr size)) 1) 1))))
 
-(defun cooked--deco-display (image)
-  "Wrap IMAGE as a `display\=' value that stands for exactly one character.
-
-Emacs merges a run of characters whose `display\=' properties are `eq\=' into a
-single displayed image -- that is what makes (propertize \"xx\" \='display IMG)
-show one image rather than two.  So sharing one memoized spec across adjacent
-cells, which is otherwise exactly what you want, collapses a run of box drawing
-to a single glyph.
-
-A fresh one-element list per character is enough to keep them distinct, and is
-a list of display specifications, which is a shape `display\=' already accepts.
-One cons per character against rebuilding the spec: `create-image\=' allocates a
-fourteen-element plist and searches Emacs\=' image cache, and skipping that is
-worth roughly half the box-drawing frame time.
-
-The image itself stays shared, so Emacs still decodes it once."
-  (list image))
-
 (defun cooked--box-glyph-image (bits window size phase)
   "Image spec for glyph BITS at cell SIZE.
 
@@ -398,15 +404,23 @@ now hiding a box glyph as it always did the text beside it."
 
 DECO is `(KIND . PACKED)\=', what `deco_to_lisp\=' in src/lib.rs hands over: KIND
 names what the run\='s characters display instead of themselves, and PACKED is a
-unibyte string of fixed-width little-endian records, one per character.  Packed
-rather than a list because this runs on every damaged row of every frame, and
-box drawing is what full-screen programs are made of.
+unibyte string of fixed-width little-endian records.  Packed rather than a list
+because this runs on every damaged row of every frame, and box drawing is what
+full-screen programs are made of.
 
-One property per character rather than one spanning the run: a decorated
-character is always single-column, and a merged run can mix shapes.  Also
-stashes `cooked-deco\=', the record plus its colors and its place on the screen,
-so `cooked--rescale-deco\=' can regenerate at a new zoom level without asking the
-native core for anything.
+How much a record covers is the kind\='s own business, and the two kinds differ.
+A glyph record covers a *run* of characters drawing one shape -- a border row is
+one record -- because the core already knew the shape repeated and leaving Lisp
+to rediscover it by comparison put the work on the slower side of the boundary.
+An image record covers one character, because each cell of a picture displays
+its own slice of it.  `cooked--apply-glyph-deco\=' and
+`cooked--apply-image-deco\=' each explain their end of that.
+
+Also stashes `cooked-deco\=', the record and its place on the screen, so
+`cooked--rescale-deco\=' can regenerate at a new zoom level without asking the
+native core for anything.  One such property per character, except where a whole
+glyph run can share one -- which it can exactly when nothing in it is
+cell-specific, and which `cooked--rescale-deco\=' is written to expect.
 
 ORIGIN is the buffer position of screen column 0 on this row, and ROW the row\='s
 index; together they place a shade glyph\='s dither in absolute screen space.
@@ -468,7 +482,29 @@ last painted *at*, which a fresh buffer has no claim to."
         cooked--image-specs (make-hash-table :test #'equal :weakness 'value)
         cooked--image-bytes 0
         cooked--image-order nil
+        cooked--image-order-tail nil
         cooked--deco-cell nil))
+
+(defun cooked--image-order-append (id)
+  "Record ID as the newest image this buffer holds, in constant time.
+
+Splices onto `cooked--image-order-tail\=' rather than walking
+`cooked--image-order\=' to its end; see that variable for what the walk cost."
+  (let ((cell (list id)))
+    (if cooked--image-order-tail
+        (setcdr cooked--image-order-tail cell)
+      (setq cooked--image-order cell))
+    (setq cooked--image-order-tail cell)))
+
+(defun cooked--image-order-set (order)
+  "Replace `cooked--image-order\=' with ORDER, keeping the tail pointer true.
+
+For the two callers that rebuild the queue rather than extend it -- a forget
+taking an id out of the middle, and an eviction pass putting back what it
+declined to spend.  Neither can leave the tail where it was: the cons it names
+may be the one that just went."
+  (setq cooked--image-order order
+        cooked--image-order-tail (last order)))
 
 (defun cooked--install-images (images)
   "Record IMAGES, a drain's `:images\=', before anything referring to them renders.
@@ -491,7 +527,7 @@ as one would arrive too late for the row that needed it."
   (dolist (image images)
     (pcase-let ((`(,id ,format ,data ,px-w ,px-h) image))
       (unless (gethash id cooked--image-data)
-        (setq cooked--image-order (nconc cooked--image-order (list id)))
+        (cooked--image-order-append id)
         (cl-incf cooked--image-bytes (length data)))
       (puthash id (list format data px-w px-h) cooked--image-data)))
   ;; Exempt from the cap the very ids just installed: nothing displays them yet,
@@ -540,6 +576,33 @@ is what made the id evictable in the first place."
   :type '(choice (const :tag "No limit" nil) integer)
   :group 'cooked)
 
+(defvar cooked--displayed-images nil
+  "Ids known to be displayed, as a set, or nil to read the spec table per id.
+
+Bound by `cooked--evict-images\=' for the length of one pass, because that pass
+asks the question once per candidate and the honest answer is a walk of every
+spec in the buffer.  One walk answers all of them: the specs do not change while
+the pass runs, since nothing in it renders anything.
+
+Left nil everywhere else, so `cooked--image-displayed-p\=' remains a function of
+the buffer rather than of whatever a caller last computed.  There is exactly one
+pass that can afford to precompute, and it is the one that binds this.
+
+A dynamic binding rather than an argument, for the reason
+`cooked--seam-running\=' gives for the same shape: the predicate is stubbed by
+name in the tests that pin the eviction rule, and widening its signature would
+break them for no gain the callers can see.")
+
+(defun cooked--displayed-image-table ()
+  "The set of image ids some live spec still displays.
+
+One walk of `cooked--image-specs\=' answering for every id at once, for
+`cooked--displayed-images\=' to be bound to."
+  (let ((displayed (make-hash-table :test #'eq)))
+    (maphash (lambda (key _spec) (puthash (car key) t displayed))
+             cooked--image-specs)
+    displayed))
+
 (defun cooked--evict-images (&optional arriving)
   "Spend oldest undisplayed images until `cooked--image-data\=' fits the cap.
 
@@ -573,24 +636,37 @@ guaranteed byte limit is not worth that, and it is no longer needed for the
 common case: ordinary eviction is `cooked--release-images\='."
   (when (and cooked-image-cache-size
              (> cooked--image-bytes cooked-image-cache-size))
-    (let ((kept nil))
-      (while (and cooked--image-order
-                  (> cooked--image-bytes cooked-image-cache-size))
-        (let ((id (pop cooked--image-order)))
+    ;; Asked once for the whole pass rather than once per candidate.  Nothing
+    ;; here renders, so no spec can come or go while it runs and the one answer
+    ;; stays true throughout; see `cooked--displayed-images'.
+    (let ((cooked--displayed-images (cooked--displayed-image-table))
+          (order cooked--image-order)
+          (kept nil))
+      ;; Detached for the length of the pass, which owns it and puts it back
+      ;; below.  Not tidiness: `cooked--forget-image' takes its id out of the
+      ;; queue, and with the queue still installed that is a search of the rest
+      ;; of the list for something this loop has already popped off it -- so
+      ;; spending N pictures cost N^2 walks to find N nothings.
+      (setq cooked--image-order nil
+            cooked--image-order-tail nil)
+      (while (and order (> cooked--image-bytes cooked-image-cache-size))
+        (let ((id (pop order)))
           (if (or (memq id arriving) (cooked--image-displayed-p id))
               (push id kept)
             (cooked--forget-image id))))
       ;; Whatever this declined to spend goes back on the front, still oldest
       ;; first, so the next call sees the same queue rather than a reversed one.
-      (setq cooked--image-order (nconc (nreverse kept) cooked--image-order)))))
+      (cooked--image-order-set (nconc (nreverse kept) order)))))
 
 (defun cooked--image-displayed-p (id)
   "Whether any spec for image ID is still alive, and so still being shown."
-  (catch 'found
-    (maphash (lambda (key _spec)
-               (when (eq (car key) id) (throw 'found t)))
-             cooked--image-specs)
-    nil))
+  (if cooked--displayed-images
+      (and (gethash id cooked--displayed-images) t)
+    (catch 'found
+      (maphash (lambda (key _spec)
+                 (when (eq (car key) id) (throw 'found t)))
+               cooked--image-specs)
+      nil)))
 
 (defun cooked--forget-image (id)
   "Drop image ID\='s transmitted bytes, and the bookkeeping that names them.
@@ -617,7 +693,7 @@ can arrive, so a dead session is left alone."
   (when-let* ((entry (gethash id cooked--image-data)))
     (cl-decf cooked--image-bytes (length (nth 1 entry)))
     (remhash id cooked--image-data)
-    (setq cooked--image-order (delq id cooked--image-order))
+    (cooked--image-order-set (delq id cooked--image-order))
     (when-let* ((session (cooked--live-session)))
       (cooked--image-forget session id))))
 
@@ -708,6 +784,71 @@ scaled to fit."
                       :ascent (cooked--box-glyph-ascent
                                (cooked--layout-window) (cdr size)))))))
 
+(defun cooked--deco-image (deco size window)
+  "The image DECO displays at cell SIZE, or nil if there is none to be had.
+
+Half of `cooked--deco-display-value\=', split at the seam the render path cares
+about: this is the part adjacent cells may share, and `cooked--deco-display\=' is
+the part they must not.  A box glyph\='s bitmap is a function of the shape, the
+cell size and the dither phase alone, so a whole border row wants one spec; a
+picture\='s spec is shared by every cell of the placement already, each cutting
+its own slice out of it.
+
+Hoistable out of a per-character loop exactly where the `cooked-deco\=' record
+itself is shareable, which is not a coincidence: both are shareable when nothing
+in the answer depends on the column.  For a shade that is false -- the phase is
+a function of the cell\='s own pixel origin, see `cooked--box-phase\=' -- so
+`cooked--apply-glyph-deco\=' asks per cell there and per run everywhere else.
+
+Both branches memoize underneath, and the hoist still pays: the memo key is a
+freshly consed list and the lookup a hash of it, so eighty identical glyphs cost
+eighty conses and eighty hashes to be told what they were told the first time.
+
+WINDOW is only ever the ascent lookup\='s.  SIZE must be non-nil; a caller with
+no cell size to draw against stops before here -- see `cooked--apply-deco\='."
+  (pcase deco
+    (`(image ,id ,_crow ,_ccol ,cols ,rows)
+     (cooked--image-spec id (cons cols rows) size))
+    (`(glyph ,bits . ,where)
+     (cooked--box-glyph-image
+      bits window size
+      (cooked--box-phase bits size (car where) (cadr where))))))
+
+(defun cooked--deco-display (deco image size)
+  "Wrap IMAGE as a `display\=' value standing for exactly one character of DECO.
+
+The other half of `cooked--deco-display-value\=', and the half that must be run
+once per character however much of the run agrees.  Emacs merges a run of
+characters whose `display\=' properties are `eq\=' into a single displayed image
+-- that is what makes (propertize \"xx\" \='display IMG) show one image rather
+than two.  So sharing one value across adjacent cells, which is otherwise
+exactly what you want, collapses a border to a single glyph.  The value has to
+be a fresh cons per character; the IMAGE inside it does not, and is shared, so
+Emacs still decodes and rasterizes it once.  The test
+`cooked-adjacent-box-glyphs-do-not-share-a-display-property\=' pins that, and it
+is not visible in batch, where nothing is drawn.
+
+One cons per character against rebuilding the spec: `create-image\=' allocates a
+fourteen-element plist and searches Emacs\=' image cache, and skipping that is
+worth roughly half the box-drawing frame time.
+
+An image cell adds its own `slice\=' to the wrapper, which is why this takes DECO
+and not just IMAGE: the slice names the cell\='s row and column *within the
+picture*, so it is per-cell by nature -- see `cooked--apply-image-deco\='.  SIZE
+is what converts those cell coordinates to pixels, and is unread on the glyph
+side.
+
+Dispatches on the head with `eq\=' rather than by destructuring the record,
+because this is the one thing in the decoration path that is still per
+character: the glyph arm reads nothing out of DECO, and should not pay a
+`pcase\=' to find that out eighty times a row."
+  (if (eq (car deco) 'image)
+      (pcase-let ((`(,_ ,_id ,crow ,ccol . ,_) deco))
+        (list (list 'slice (* ccol (car size)) (* crow (cdr size))
+                    (car size) (cdr size))
+              image))
+    (list image)))
+
 (defun cooked--deco-display-value (deco size window)
   "The `display\=' value DECO should carry at cell SIZE, or nil for none.
 
@@ -720,25 +861,22 @@ COLS and ROWS are the rectangle the placement was laid at, carried on the
 decoration itself so that this and `cooked--rescale-deco\=' size a picture the
 same way however long ago its row was written.
 
-The single answer to \"what does this decoration look like\", and both paths
-that can ask it go through here: `cooked--apply-image-deco\' and
-`cooked--apply-glyph-deco\' when a row is first rendered, and
-`cooked--rescale-deco\' when the cell size moves under text already in the
-buffer.  That was three derivations of the same two shapes, which is three
-places for a new decoration kind to be added and two of them easy to miss --
-the rescale path is the one that would silently go on painting the old size."
+The single answer to \"what does this decoration look like\", and every path
+that can ask it goes through here or through the two halves it is composed of.
+That was three separate derivations of the same two shapes once, which is three
+places for a new decoration kind to be added and two of them easy to miss -- the
+rescale path being the one that would silently go on painting the old size.
+
+The composition is what the halves are for rather than a second answer beside
+them.  `cooked--rescale-deco\=' calls this, having only a record and no idea
+which of its neighbours agree with it; the two render paths call
+`cooked--deco-image\=' once for as much of a run as can share it and
+`cooked--deco-display\=' per character, because the wire tells them what agrees.
+Neither derives anything the other does not: a kind added to one of the halves
+reaches all three callers, which is the property that mattered."
   (when size
-    (pcase deco
-      (`(image ,id ,crow ,ccol ,cols ,rows)
-       (when-let* ((spec (cooked--image-spec id (cons cols rows) size)))
-         (list (list 'slice (* ccol (car size)) (* crow (cdr size))
-                     (car size) (cdr size))
-               spec)))
-      (`(glyph ,bits . ,where)
-       (cooked--deco-display
-        (cooked--box-glyph-image
-         bits window size
-         (cooked--box-phase bits size (car where) (cadr where))))))))
+    (when-let* ((image (cooked--deco-image deco size window)))
+      (cooked--deco-display deco image size))))
 
 (defun cooked--apply-image-deco (start packed size)
   "Apply image decoration PACKED from START: twelve bytes per character.
@@ -755,6 +893,23 @@ each row\='s slices into the scrollback independently, and a rewrap moves them
 with their columns.  A single image spanning the whole rectangle would have to
 be torn down and rebuilt for any of that.
 
+One record per character, where a glyph run crosses run-length encoded, and the
+asymmetry is deliberate: a glyph run repeats one decision, while every cell here
+carries its own row and column within the picture and so wants its own record
+whatever the wire could have said.  A record shared across three cells hands all
+three `(slice 0 0 ...)\=' where the second needed `(slice 12 0 ...)\=', and a
+rewrap that split such a run would leave both halves claiming the same start
+column.
+Compressing the wire where Lisp has to decompress it again immediately would
+have moved nothing off the side that is actually slow.
+
+What is hoisted instead is the spec, which genuinely is one thing per placement:
+consecutive cells almost always name the same picture at the same rectangle, and
+`cooked--image-spec\=' conses a five-element key and hashes it on every ask.  The
+previous cell\='s answer is kept and reused while the triple that identifies it
+holds, so a full-screen picture looks its spec up once rather than nineteen
+hundred times.
+
 The rectangle rides every cell rather than being looked up from the image,
 because it belongs to the placement and not to the picture.  Ids are
 content-addressed, so a child that retransmits a frame at a new `c=\='/`r=\='
@@ -762,7 +917,9 @@ after a window reshape -- which is what `viu\=' does, never rescaling the pixels
 itself -- names the id it named before.  Held against the image there was one
 field for two answers, and whichever transmission wrote it last decided how the
 other one\='s slices were cut."
-  (let ((pos start))
+  (let ((pos start)
+        (key nil)
+        (image nil))
     (dotimes (i (/ (length packed) 12))
       (let* ((base (* 12 i))
              (id (logior (aref packed base)
@@ -779,26 +936,75 @@ other one\='s slices were cut."
                            (ash (aref packed (+ base 11)) 8)))
              (deco (list 'image id crow ccol cols rows)))
         (put-text-property pos (1+ pos) 'cooked-deco deco)
-        (when-let* ((display (cooked--deco-display-value deco size nil)))
-          (put-text-property pos (1+ pos) 'display display)))
+        (when size
+          ;; The picture, not the cell: `cooked--deco-image' reads nothing but
+          ;; the id and the rectangle, so the answer stands until one of them
+          ;; moves.  Nil is cached too -- a format this Emacs cannot decode is
+          ;; still nil for the next cell of the same placement.
+          (unless (and key
+                       (eq id (car key))
+                       (eq cols (nth 1 key))
+                       (eq rows (nth 2 key)))
+            (setq key (list id cols rows)
+                  image (cooked--deco-image deco size nil)))
+          (when image
+            (put-text-property pos (1+ pos) 'display
+                               (cooked--deco-display deco image size)))))
       (setq pos (1+ pos)))))
 
 (defun cooked--apply-glyph-deco (start packed window size origin row)
-  "Apply box-glyph decoration PACKED at START, two bytes per character.
+  "Apply box-glyph decoration PACKED at START: four bytes per run of one shape.
 
-PACKED is little-endian.  ORIGIN and ROW locate the shapes, as in
-`cooked--apply-deco\='.  SIZE nil records them and displays nothing; WINDOW is
-only ever the ascent lookup\='s, and is nil in the same case."
-  (let ((pos start))
-    (dotimes (i (/ (length packed) 2))
-      (let* ((bits (logior (aref packed (* 2 i))
-                           (ash (aref packed (1+ (* 2 i))) 8)))
-             (column (and origin (- pos origin)))
-             (deco (list 'glyph bits column row)))
-        (put-text-property pos (1+ pos) 'cooked-deco deco)
-        (when-let* ((display (cooked--deco-display-value deco size window)))
-          (put-text-property pos (1+ pos) 'display display)))
-      (setq pos (1+ pos)))))
+PACKED is `(BITS COUNT)\=' pairs of little-endian `u16\='s -- a `BoxGlyph\=' bit
+pattern and how many consecutive characters draw it, so a border row arrives as
+one record rather than eighty.  See `Deco::packed\=' in src/emu/cell.rs for why
+the core counts them rather than leaving this to work it out again: it already
+knew, and Emacs is the half with no time to spare.
+
+ORIGIN and ROW locate the shapes, as in `cooked--apply-deco\='.  SIZE nil records
+them and displays nothing; WINDOW is only ever the ascent lookup\='s, and is nil
+in the same case.
+
+A run that does not dither takes the whole point of the encoding: its image spec
+is looked up once and one `cooked-deco\=' record is put over the entire run with
+a single `put-text-property\=', leaving only the `display\=' wrapper to be consed
+per character -- which it must be, or Emacs merges the run into one glyph, see
+`cooked--deco-display\='.  Sharing the record is safe because nothing in it is
+cell-specific: COLUMN is fed to `cooked--box-phase\=' and nowhere else, and that
+answers 0 for every shape but a shade, so the run\='s start column stands for all
+of it.  `cooked--rescale-deco\=' is written to that sharing rather than to the
+per-cell allocation that preceded it, and
+`cooked-a-rescale-rebuilds-every-cell-of-a-shared-glyph-run\=' pins it.
+
+A shade is the exception and stays per cell, because its dither phase is a
+function of the cell\='s own pixel origin: two adjacent ▒ at an odd cell width
+are genuinely different bitmaps, and one shared record would put the same phase
+on both and draw a doubled column down the seam.  `cooked--box-shade-p\=' is
+asked once per record rather than once per character, which is why the wire
+carries no flag for it -- see `Deco::packed\='."
+  (let ((pos start)
+        (i 0)
+        (limit (length packed)))
+    (while (< i limit)
+      (let* ((bits (logior (aref packed i) (ash (aref packed (1+ i)) 8)))
+             (count (logior (aref packed (+ i 2)) (ash (aref packed (+ i 3)) 8)))
+             (end (+ pos count)))
+        (if (cooked--box-shade-p bits)
+            (while (< pos end)
+              (let ((deco (list 'glyph bits (and origin (- pos origin)) row)))
+                (put-text-property pos (1+ pos) 'cooked-deco deco)
+                (when-let* ((display (cooked--deco-display-value deco size window)))
+                  (put-text-property pos (1+ pos) 'display display)))
+              (setq pos (1+ pos)))
+          (let ((deco (list 'glyph bits (and origin (- pos origin)) row)))
+            (put-text-property pos end 'cooked-deco deco)
+            (when-let* ((image (and size (cooked--deco-image deco size window))))
+              (while (< pos end)
+                (put-text-property pos (1+ pos) 'display
+                                   (cooked--deco-display deco image size))
+                (setq pos (1+ pos)))))
+          (setq pos end)))
+      (setq i (+ i 4)))))
 
 (defun cooked--rescale-deco ()
   "Rebuild every decoration in the buffer at the current cell size.
@@ -842,11 +1048,33 @@ stuck at the previous font size, visibly mismatched once the pin is released."
             (let ((deco (get-text-property (point) 'cooked-deco))
                   (next (or (next-single-property-change (point) 'cooked-deco)
                             (point-max))))
+              ;; Every character of the run, not just the one the walk landed on.
+              ;; `next-single-property-change' compares values with `eq', so a run
+              ;; of cells sharing one `cooked-deco' object is a single step here --
+              ;; and rebuilding only its first character would leave the rest of
+              ;; the run displaying the old cell size for as long as the buffer
+              ;; lives, which is the mismatch this whole function exists to repair.
+              ;;
+              ;; That the walk visited every character anyway was an accident of
+              ;; allocation rather than anything stated: `cooked--apply-deco' consed
+              ;; a fresh record per cell, so no two were ever `eq' and no run was
+              ;; ever longer than one.  Sharing a record between cells that agree is
+              ;; the obvious saving to make on the render path, and making it would
+              ;; have broken this silently -- the buffer would simply have stopped
+              ;; tracking the font, with nothing to point at.  So the loop is
+              ;; written to the property's semantics rather than to that accident.
+              ;;
               ;; The slice geometry is in cells and a glyph's bitmap is rendered
               ;; at the cell size, so both shapes move; asking the one derivation
               ;; is what keeps this in step with how they were drawn originally.
-              (when-let* ((display (cooked--deco-display-value deco size window)))
-                (put-text-property (point) (1+ (point)) 'display display))
+              ;; Asked once per character rather than once per run, because the
+              ;; answer must not be shared even where the question is: a `display'
+              ;; value repeated by `eq' across adjacent characters is how Emacs is
+              ;; told they are one image, which would collapse a run of glyphs to a
+              ;; single one -- see `cooked--deco-display'.
+              (dotimes (i (- next (point)))
+                (when-let* ((display (cooked--deco-display-value deco size window)))
+                  (put-text-property (+ (point) i) (+ (point) i 1) 'display display)))
               (goto-char next)))
           (setq cooked--deco-cell size))))))
 

@@ -203,6 +203,35 @@ being gone by the time it is reached is ordinary rather than exceptional."
      (when (window-live-p ,var)
        ,@body)))
 
+;;;; Reading the packed records the native core sends
+;;
+;; Three of the drain's fields arrive as unibyte strings of fixed-width little-endian
+;; records rather than as lists -- style spans, box-glyph runs and image placements --
+;; for the reason `Block::push_style' and `Deco::packed' give at length: Rust parses far
+;; faster than Emacs renders, so a list would cons per record on the path that redraws
+;; continuously.  What that buys on the wire it costs at the far end in decoding, and
+;; these are the two functions that decoding is made of.
+;;
+;; Here rather than in any one reader because all three are in different files, and each
+;; had spelled the same `logior'/`ash' ladder out for itself -- which is the shape this
+;; file exists to stop.  `defsubst' rather than `defun' because they are called per
+;; record on the render path, where a function call is a real fraction of the work.
+
+(defsubst cooked--u16 (packed i)
+  "The little-endian 16-bit integer at byte offset I of unibyte string PACKED."
+  (logior (aref packed i) (ash (aref packed (1+ i)) 8)))
+
+(defsubst cooked--u32 (packed i)
+  "The little-endian 32-bit integer at byte offset I of unibyte string PACKED.
+
+Always a fixnum: 32 bits fit with room to spare on a 64-bit Emacs, and on a
+32-bit build the top bits spill into a bignum, which is slower to add to a
+buffer position but no less correct."
+  (logior (aref packed i)
+          (ash (aref packed (+ i 1)) 8)
+          (ash (aref packed (+ i 2)) 16)
+          (ash (aref packed (+ i 3)) 24)))
+
 (defmacro cooked--cached (table key &rest body)
   "Value of BODY for KEY, memoized in the hash table held in TABLE.
 
