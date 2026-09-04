@@ -35,7 +35,7 @@
 ;; Defined by the native core at `module-load' time, so the byte-compiler cannot
 ;; see it; cooked.el and cooked-mode.el declare what they need of that set the
 ;; same way.
-(declare-function cooked--alt-scroll-p "cooked-core")
+(declare-function cooked--alt-scroll-p "ext:cooked-core")
 
 (defconst cooked--mouse-buttons
   '((mouse-1 . 0) (mouse-2 . 1) (mouse-3 . 2)

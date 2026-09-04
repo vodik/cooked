@@ -23,9 +23,9 @@
 
 (defvar cooked-debug nil
   "When non-nil, re-signal redisplay errors instead of reporting them.")
-(declare-function cooked--pid "cooked-core")
-(declare-function cooked--live-p "cooked-core")
-(declare-function cooked--send "cooked-core")
+(declare-function cooked--pid "ext:cooked-core")
+(declare-function cooked--live-p "ext:cooked-core")
+(declare-function cooked--send "ext:cooked-core")
 ;; `signal' refuses a symbol with no `error-conditions' property, so the native
 ;; core's `io_error' would otherwise itself fail with "Invalid error symbol"
 ;; the first time a pty operation errors.

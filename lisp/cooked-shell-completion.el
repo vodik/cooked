@@ -61,7 +61,7 @@
 (require 'cl-lib)
 (require 'seq)
 
-(declare-function cooked--send "cooked-core")
+(declare-function cooked--send "ext:cooked-core")
 
 (defcustom cooked-completion-backend 'shell
   "Where candidates come from at a cooked prompt.

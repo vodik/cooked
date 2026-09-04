@@ -76,8 +76,8 @@
 
 (defvar evil-state)
 (defvar evil-previous-state)
-(declare-function evil-insert-state "evil-states")
-(declare-function evil-emacs-state "evil-states")
+(declare-function evil-insert-state "ext:evil-states")
+(declare-function evil-emacs-state "ext:evil-states")
 
 (defcustom cooked-evil-integration t
   "Whether to drive evil's state from who owns the keyboard.
@@ -258,12 +258,16 @@ you are editing and meaningless on one you are not."
   :type 'boolean
   :group 'cooked)
 
-(declare-function evil-paste-after "evil-commands")
-(declare-function evil-paste-before "evil-commands")
-(declare-function evil-define-key* "evil-core")
-(declare-function evil-range "evil-common")
-(declare-function cooked-evil-inner-command "cooked-evil")
-(declare-function cooked-evil-outer-command "cooked-evil")
+(declare-function evil-paste-after "ext:evil-commands")
+(declare-function evil-paste-before "ext:evil-commands")
+(declare-function evil-define-key* "ext:evil-core")
+(declare-function evil-range "ext:evil-common")
+;; Defined below by `evil-define-text-object', inside the `with-eval-after-load'
+;; block -- a macro `check-declare' cannot see a definition through, which is what
+;; the FILEONLY argument is for.  ARGLIST is `t' only as the placeholder that lets
+;; FILEONLY be supplied after it.
+(declare-function cooked-evil-inner-command "cooked-evil" t t)
+(declare-function cooked-evil-outer-command "cooked-evil" t t)
 
 (defun cooked-evil-paste ()
   "Paste, as normal state should here.
@@ -276,13 +280,13 @@ is ordinary editable text.  See `cooked-evil-normal-state-pastes'."
        (if (eq last-command-event ?P) #'evil-paste-before #'evil-paste-after))
     (cooked-paste)))
 
-(declare-function evil-undo "evil-commands")
-(declare-function evil-downcase "evil-commands")
-(declare-function evil-upcase "evil-commands")
-(declare-function evil-invert-char "evil-commands")
-(declare-function evil-visual-range "evil-states")
-(declare-function evil-range-beginning "evil-common")
-(declare-function evil-range-end "evil-common")
+(declare-function evil-undo "ext:evil-commands")
+(declare-function evil-downcase "ext:evil-commands")
+(declare-function evil-upcase "ext:evil-commands")
+(declare-function evil-invert-char "ext:evil-commands")
+(declare-function evil-visual-range "ext:evil-states")
+(declare-function evil-range-beginning "ext:evil-common")
+(declare-function evil-range-end "ext:evil-common")
 
 (defun cooked-evil-undo (count)
   "Undo COUNT changes to the line being typed, there being nothing else to undo.
@@ -351,9 +355,10 @@ is read-only\" over a program\='s screen is a true thing to say."
                  "the buffer is read-only while the render is suspended"
                "that is the child's text, not yours to edit"))))
 
-(declare-function evil-first-non-blank "evil-commands")
-(declare-function evil-insert-line "evil-commands")
-(declare-function cooked-evil-first-non-blank "cooked-evil")
+(declare-function evil-first-non-blank "ext:evil-commands")
+(declare-function evil-insert-line "ext:evil-commands")
+;; `evil-define-motion', below; see `cooked-evil-inner-command' for the FILEONLY.
+(declare-function cooked-evil-first-non-blank "cooked-evil" t t)
 
 (defun cooked-evil--goto-input-first-non-blank ()
   "Put point on the first non-blank character of the command being typed.
@@ -456,7 +461,7 @@ state has to return or `message'."
         (evil-range (car region) (cdr region) 'exclusive)
       (evil-range (car region) (cdr region) 'line))))
 
-(declare-function evil-collection-define-key "evil-collection")
+(declare-function evil-collection-define-key "ext:evil-collection")
 
 (with-eval-after-load 'evil
   ;; `eval' at load time, quoted so the byte-compiler leaves it alone:

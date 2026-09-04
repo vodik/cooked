@@ -28,8 +28,8 @@
 
 ;; Calls upward into cooked-mode.el, and into the core for the handlers that
 ;; answer a query rather than merely observing it.
-(declare-function cooked--reply-osc "cooked-core")
-(declare-function cooked--set-color-scheme "cooked-core")
+(declare-function cooked--reply-osc "ext:cooked-core")
+(declare-function cooked--set-color-scheme "ext:cooked-core")
 (declare-function cooked--rename-to-title "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
 

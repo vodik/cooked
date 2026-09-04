@@ -890,12 +890,13 @@ impl Row {
 
     /// Style-grouped runs with trailing default-styled blanks trimmed.
     ///
-    /// Dispatches to two specialisations of [`Row::build_runs`]. Underline colours live
-    /// in a side table and are rare, and looking one up per cell measured as ~2% of the
+    /// Dispatches on whether the row has a side table at all: [`Row::build_plain_runs`]
+    /// when it has none, which is nearly every row, and [`Row::build_runs`] when it has.
+    /// Attachments are rare and looking one up per cell measured as ~2% of the
     /// full-screen repaint benchmark — this is the hottest read in the emulator, run
-    /// over every damaged row of every frame. Passing the lookup as a closure keeps one
-    /// copy of the merge rules while letting the ordinary row compile down to a version
-    /// with no side table in it at all.
+    /// over every damaged row of every frame, so the ordinary row is answered by a
+    /// function with no side table in it at all rather than by a branch it retakes per
+    /// cell.
     pub fn runs(&self) -> Vec<Run> {
         self.runs_to(self.content_len())
     }
@@ -988,7 +989,7 @@ impl Row {
 
     fn runs_to(&self, end: usize) -> Vec<Run> {
         match self.extras.as_deref() {
-            Some(extras) => self.build_runs::<true>(end, &extras.entries),
+            Some(extras) => self.build_runs(end, &extras.entries),
             None => self.build_plain_runs(end),
         }
     }
@@ -1075,20 +1076,20 @@ impl Row {
         runs
     }
 
-    /// The row's cells as runs, reading attachments only when there are any.
+    /// The row's cells as runs, for a row that has attachments to read.
     ///
-    /// `EXTRAS` is a const parameter rather than a runtime test because this is the
-    /// hottest read in the emulator — every cell of every damaged row of every frame —
-    /// and the row with no attachments is the overwhelming case. At `false` the whole
-    /// lookup is compiled out, so that row pays literally nothing for a feature it is
-    /// not using; a closure returning an empty slice was not enough, and measured ~4% of
-    /// the full-screen repaint benchmark.
+    /// The attachment-free row does not come here at all: [`Row::build_plain_runs`]
+    /// answers it, because it is a different shape rather than this one with the lookup
+    /// switched off. That split replaced a `const EXTRAS: bool` parameter on this
+    /// function, which had become dead once the plain form existed to take the `false`
+    /// case -- so ENTRIES is never empty here in practice and the lookup is never
+    /// skipped.
     ///
     /// ENTRIES is walked with a cursor rather than searched per column. Both sides
     /// advance through columns in order, so the whole row costs one pass over the table
     /// rather than a lookup per character — which the per-column form pays whether or not
     /// the row has a single mark on it.
-    fn build_runs<const EXTRAS: bool>(&self, end: usize, entries: &[(u16, Extra)]) -> Vec<Run> {
+    fn build_runs(&self, end: usize, entries: &[(u16, Extra)]) -> Vec<Run> {
         // Four, not `end`: the row's dominant shapes are one run of plain text and a
         // handful for a coloured prompt, so a capacity of one per column would be a far
         // bigger allocation than the growth it saves.
@@ -1102,25 +1103,23 @@ impl Row {
             let mut marks = None;
             let mut placed = None;
             let mut link = None;
-            if EXTRAS {
-                while at < entries.len() && usize::from(entries[at].0) < col {
-                    at += 1;
-                }
-                for (_, extra) in entries[at..]
-                    .iter()
-                    .take_while(|(c, _)| usize::from(*c) == col)
-                {
-                    match extra {
-                        Extra::Underline(color) => underline = *color,
-                        Extra::Marks(text) => marks = Some(&**text),
-                        Extra::Image(p) => placed = Some(*p),
-                        Extra::Link(id) => link = Some(*id),
-                        // Nothing to draw and nothing to split a run on: a mark is a
-                        // position, not a property of the characters. Silently skipping
-                        // it here is what keeps `Row::runs' byte-identical to what it
-                        // was before marks existed.
-                        Extra::Mark(_) => {}
-                    }
+            while at < entries.len() && usize::from(entries[at].0) < col {
+                at += 1;
+            }
+            for (_, extra) in entries[at..]
+                .iter()
+                .take_while(|(c, _)| usize::from(*c) == col)
+            {
+                match extra {
+                    Extra::Underline(color) => underline = *color,
+                    Extra::Marks(text) => marks = Some(&**text),
+                    Extra::Image(p) => placed = Some(*p),
+                    Extra::Link(id) => link = Some(*id),
+                    // Nothing to draw and nothing to split a run on: a mark is a
+                    // position, not a property of the characters. Silently skipping
+                    // it here is what keeps `Row::runs' byte-identical to what it
+                    // was before marks existed.
+                    Extra::Mark(_) => {}
                 }
             }
             // A placement wins over the character's own shape: it is state attached to

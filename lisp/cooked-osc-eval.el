@@ -42,7 +42,7 @@
 
 (require 'cooked)
 
-(declare-function magit-status "magit-status")
+(declare-function magit-status "ext:magit-status")
 
 (defconst cooked-osc-eval-protocol-version 1
   "Wire version this file speaks, sent as `OSC 51;E<version>;...'.

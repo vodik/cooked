@@ -2126,7 +2126,7 @@ different key; `cl-block' is what makes a hit terminal instead."
     (should-not (cooked--encode-event 'wheel-up))
     (should-not (cooked--encode-event 'f20))
     ;; Including with modifiers, which is the case that would otherwise have
-    ;; found a code point in `cooked--literal-codes' on the way past.
+    ;; found a code point in a `literal' `cooked--key-encodings' entry on the way past.
     (should-not (cooked--encode-event 'C-f20))))
 
 (ert-deftest cooked-modified-arrows-use-xterm-parameters ()

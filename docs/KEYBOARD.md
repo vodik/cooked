@@ -34,7 +34,8 @@ That is the default. The condition matches the name of the program in the child'
 **foreground process group**, so it catches a `claude` typed at a cooked shell, not just
 one started as the session's command; a function of no arguments works too, for a test the
 process name cannot express. With it matching, cooked spells *every* modified key in
-`cooked--literal-codes` — Return, Tab, Escape, Backspace, Shift+Tab among them — exactly as
+the `literal` keys of `cooked--key-encodings` — Return, Tab, Escape, Backspace, Shift+Tab
+among them — exactly as
 if PROTOCOL had actually been negotiated, so nothing has to be named one key at a time; a
 real negotiation is still believed over the guess whenever one actually happens.
 
