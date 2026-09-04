@@ -125,6 +125,50 @@ marker silently drew nothing at all.
 
 ---
 
+## The alternate screen is a rectangle, not a transcript
+
+One sentence, and the reason behind eight decisions spread across five files. It was
+written out at each of them, in each one's own words, which is the expensive kind of
+duplication in a tree where the reasoning *is* the artifact: eight places to correct if
+the sentence ever changes, and nowhere that states it.
+
+**The primary screen is a transcript Emacs owns.** It grows downward, rows leave the top
+and become ordinary buffer text, and what is on screen is the live end of something with
+a history behind it.
+
+**The alternate screen is a rectangle the child owns.** It is exactly `height` rows,
+always, whether or not the program has drawn on all of them. Nothing scrolls off it,
+nothing accumulates, and there is no history behind it — the transcript is still there in
+the buffer, but it belongs to the primary screen and the alt screen is drawn over the
+same buffer positions the live primary rows occupied.
+
+Everything below follows from that, and none of it is an independent decision:
+
+| Where | What it does | Because |
+|---|---|---|
+| `cooked--apply-alt-pin` | narrows to the screen region | the rectangle is all there is to look at, and the transcript above it is not the child's |
+| `cooked--fit-screen` | extends to `height`, not `used` | a rectangle is exactly that tall even where nothing was drawn; a transcript is trimmed to content |
+| `cooked--scroll-windows` | pins to the window top rather than following the bottom | there is no bottom to follow; the whole rectangle is the viewport |
+| `cooked--pin-alt-windows` | keeps that pin against the wheel | same, continuously — see the section below |
+| `cooked--sticky-header` | renders nothing | a sticky header names the command a scrollback row belongs to, and there is no scrollback |
+| `cooked-command-decorations--clear-live` | takes the fringe markers down | they name rows the program is now drawn over |
+| `cooked--fontify-region` | declines outright | the guesses are cosmetic passes over text about to be overwritten, and the child very likely holds the mouse |
+| `Term::clear_to_prompt` | returns 0 | there is no prompt on it, and no transcript to clear back to |
+
+The one that is *not* on this list is worth naming too. `cooked--render-rows` takes `alt`
+as an argument rather than reading `cooked--alt`, because `cooked--apply` adopts the
+drain's levels *after* it renders — so during the render the variable still holds the
+previous drain's answer. That is an ordering hazard rather than a consequence of the
+rectangle, and it is why the frame that restores the primary screen would otherwise be
+rendered as though the alt screen were still up. Every other site above runs outside that
+window and reads the variable directly.
+
+Reflow is the deliberate exception at the other end: the primary screen and its
+scrollback rewrap on a width change, and the alternate screen is clamped instead. Not a
+gap — a rewrap re-lays logical lines, and a rectangle has none to re-lay.
+
+---
+
 ## `cooked--pin-alt-windows`: why the alt screen needs a continuous invariant
 
 `cooked--apply` pins the alternate screen to the top of its windows at the end of every

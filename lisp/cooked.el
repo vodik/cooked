@@ -1248,7 +1248,13 @@ damaged, and a layer that re-applies per render is repainted by that."
 The keymap has to follow this and not only the line discipline: a program can
 take the screen while the shell's last OSC 133 mark still says `prompt-end',
 and Emacs would otherwise keep editing an input region that no longer exists
-and swallow the keys the program was waiting for."
+and swallow the keys the program was waiting for.
+
+This flag is read at eight places across five files, and they are one decision
+rather than eight: the alternate screen is a rectangle the child owns, where the
+primary screen is a transcript Emacs owns.  Narrowing, fitting, scrolling, the
+sticky header, the fringe markers and the link guesses all follow from that.
+See docs/DESIGN.md."
   (let ((on (and on t)))
     (unless (eq on cooked--alt)
       (setq cooked--alt on)
@@ -1381,7 +1387,8 @@ copy of the live screen, and a blankness test leaves the screen showing twice."
       (if (and cooked--alt (> rows 0))
           ;; `extend' on the alt screen only: the rectangle must be exactly that
           ;; tall even where the program has drawn nothing, while the primary is
-          ;; trimmed to content and has no business growing here.
+          ;; trimmed to content and has no business growing here.  One of the
+          ;; eight consequences of that distinction; see `cooked--set-alt'.
           ;;
           ;; Extend to the *last* row and trim from its end, rather than
           ;; walking one row past the last and trimming from its start.  A row
