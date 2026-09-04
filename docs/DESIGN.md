@@ -897,6 +897,29 @@ reader's poll to whatever is left of the throttle window, so a notification defe
 `POLL_TIMEOUT_MS`. That is avoiding an accidental hundred milliseconds, not going faster
 than the floor.
 
+**Input is not a case the pace declines to special-case; it is not a category the pace
+can see.** `Session::send` is one line — it writes the bytes to the pty and touches
+nothing else. Every call into the notifier is on the reader thread or the drain. So a
+wheel notch is bytes to the child, and whatever the child writes back arrives on the same
+read loop as a build log: input to process, standard pace, process and draw. There is no
+input path to give an exception to.
+
+Which is why the mouse wheel appears in `poll_wait` as a *symptom* rather than as an
+exception. Scrolling a full-screen program was simply the workload where an accidental
+hundred milliseconds on the tail of a burst was noticeable — the throttle deferring a
+notification, the child then falling quiet, and nothing waking the loop until the coarse
+`POLL_TIMEOUT_MS` tick. That is a bug in the standard path, and it was fixed in the
+standard path, for every workload at once.
+
+Nor would an exception buy anything if one were written. The 8ms default is half a 60Hz
+frame, so the most it could save is under one frame on any display anyone owns, and it
+would fire exactly when a full-screen program is repainting hardest — the one moment the
+throttle is earning its keep. What makes typing feel instant is not an exception but the
+floor failing to bite where anyone would notice: a keystroke echoed after a quiet moment
+passes every gate on the spot, the throttle having long since elapsed and quiescence
+being half a millisecond. The interval only constrains a child that is already writing
+continuously, which is the case where no single frame is worth anything.
+
 **And the backlog limit is not part of any of this.** `cooked-backlog-limit` sets no rate.
 It is backpressure: how much may pile up while Emacs falls behind before `read_loop`
 stops taking bytes off the pty, at which point the pty's buffer fills and the child blocks
