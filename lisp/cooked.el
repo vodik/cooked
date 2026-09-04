@@ -19,7 +19,7 @@
 ;;     :commands (cooked cooked-other-window
 ;;                cooked-project cooked-project-other-window
 ;;                cooked-here cooked-here-other-window)
-;;     :custom (cooked-buffer-name "*cooked: %s*")
+;;     :custom (cooked-buffer-name "*cooked: %p*")
 ;;     :config
 ;;     (require 'cooked-evil)             ; opt in to evil state syncing
 ;;     (require 'cooked-osc-eval)         ; opt in to the OSC 51 command channel
@@ -301,7 +301,7 @@ see it for what declines and why.")
 (declare-function cooked--refresh-keymap "cooked-mode")
 (declare-function cooked--update-mouse-grab "cooked-mouse")
 (declare-function cooked--defer "cooked-mode")
-(declare-function cooked--rename-to-title "cooked-mode")
+(declare-function cooked--update-buffer-name "cooked-mode")
 (declare-function cooked--on-wake "cooked-render")
 (defvar cooked-rejoin-wrapped-lines)
 (defvar cooked--last-size)

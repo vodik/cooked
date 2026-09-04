@@ -22,8 +22,8 @@
 ;; segment is a click away from.
 (defvar cooked--foreground-label)
 (defvar cooked--ownership)
-(defvar cooked-buffer-name-follows-title)
 (declare-function cooked-toggle-peek "cooked-mode")
+(declare-function cooked--buffer-name-shows-title-p "cooked-mode")
 
 (defface cooked-failure '((t :inherit error))
   "Face for a non-zero exit status in the mode line."
@@ -172,10 +172,11 @@ the `bare\=' session where there is no title to have.  That is what tells `htop\
 from a shell editing its own line, which the state word alone cannot.
 
 Never both.  They are two accounts of one thing, and the mode line has room for
-the better one.  The title also stands down entirely under
-`cooked-buffer-name-follows-title\=', where the buffer is already named after it
-and printing it again spends columns on a word already on screen."
-  (or (and (not cooked-buffer-name-follows-title)
+the better one.  The title also stands down when
+`cooked--buffer-name-shows-title-p\=' says the buffer is already named after
+it, so printing it again would only spend columns on a word already on
+screen."
+  (or (and (not (cooked--buffer-name-shows-title-p))
            cooked--title
            (not (string-empty-p cooked--title))
            cooked--title)

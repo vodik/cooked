@@ -1069,15 +1069,16 @@ full-screen program keeps its startup geometry and never honours SIGWINCH."
       (kill-buffer buffer))))
 
 (ert-deftest cooked-buffer-names-are-configurable-and-unique ()
-  (let ((cooked-buffer-name "*cooked: %s*"))
+  (let ((cooked-buffer-name "*cooked: %p*"))
     (should (string-match-p "\\*cooked: .+\\*" (cooked--buffer-name "/tmp/")))
     (let ((buffer (generate-new-buffer (cooked--buffer-name "/tmp/"))))
       (unwind-protect
           ;; A second session in the same directory must not collide.
           (should-not (equal (buffer-name buffer) (cooked--buffer-name "/tmp/")))
         (kill-buffer buffer))))
-  (let ((cooked-buffer-name (lambda (dir) (format "term[%s]" dir))))
-    (should (equal (cooked--buffer-name "/tmp/") "term[/tmp/]"))))
+  ;; A new session has no title or host yet, so both come through empty.
+  (let ((cooked-buffer-name (lambda (dir title host) (format "term[%s/%s/%s]" dir title host))))
+    (should (equal (cooked--buffer-name "/tmp/") "term[/tmp///]"))))
 
 (ert-deftest cooked-live-buffers-finds-running-sessions ()
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")

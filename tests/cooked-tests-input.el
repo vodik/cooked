@@ -420,8 +420,15 @@ to separate, and the one this whole indicator is judged on."
     ;; Never both -- two accounts of one thing, and only room for the better.
     (should-not (string-search "htop" (cooked--mode-line)))
     ;; And no title at all when the buffer is already named after it.
-    (let ((cooked-buffer-name-follows-title t))
-      (should (equal (substring-no-properties (cooked--mode-line)) " raw htop")))))
+    (let ((cooked-buffer-name-auto-update t)
+          (cooked-buffer-name "*cooked: %t*"))
+      (should (equal (substring-no-properties (cooked--mode-line)) " raw htop")))
+    ;; But turning auto-update on buys nothing if the template never shows the
+    ;; title -- suppressing it here would just lose it from both places.
+    (let ((cooked-buffer-name-auto-update t)
+          (cooked-buffer-name "*cooked: %p*"))
+      (should (equal (substring-no-properties (cooked--mode-line))
+                     " raw make -j8 world")))))
 
 (ert-deftest cooked-mode-line-names-a-job-but-not-the-shell-itself ()
   "The suppression is keyed on which process, not on which policy.

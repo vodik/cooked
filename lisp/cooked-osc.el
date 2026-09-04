@@ -30,7 +30,7 @@
 ;; answer a query rather than merely observing it.
 (declare-function cooked--reply-osc "ext:cooked-core")
 (declare-function cooked--set-color-scheme "ext:cooked-core")
-(declare-function cooked--rename-to-title "cooked-mode")
+(declare-function cooked--update-buffer-name "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
 
 ;;;; OSC dispatch
@@ -98,7 +98,7 @@ hypothetical -- `cooked--osc-emacs' can reach `find-file', which
 (defun cooked--set-title (title)
   "Set the child's title to TITLE and show it."
   (setq cooked--title title)
-  (cooked--rename-to-title)
+  (cooked--update-buffer-name)
   (force-mode-line-update))
 
 (defconst cooked--title-stack-limit 8
@@ -557,14 +557,20 @@ The path is percent-encoded, because that is what a URL is: a directory called
 `100%20cake\=' has to arrive as `100%2520cake\=' or it decodes to a different
 directory that does not exist.  Both emitters that reach this parser --
 cooked\='s own snippets and a fish 4 doing its own reporting -- encode that way,
-so there is one encoding on the wire and one decoding here."
+so there is one encoding on the wire and one decoding here.
+
+Ends by offering the buffer a rename, foreign host or not: `cooked--host\='
+changed either way, and a `cooked-buffer-name\=' with %h or %p in it wants to
+know about both kinds of move, not just the ones that touch
+`default-directory\='."
   (when (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url)
     (setq cooked--host (url-unhex-string (match-string 1 url)))
     (unless (cooked--foreign-host-p)
       (when-let* ((name (cooked--local-name (url-unhex-string (match-string 2 url))))
                   (dir (file-name-as-directory name)))
         (when (file-directory-p dir)
-          (setq default-directory dir))))))
+          (setq default-directory dir))))
+    (cooked--update-buffer-name)))
 
 (provide 'cooked-osc)
 ;;; cooked-osc.el ends here

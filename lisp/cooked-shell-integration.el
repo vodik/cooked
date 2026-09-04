@@ -90,7 +90,7 @@ snippet by hand.
                   too -- `(require \\='cooked-shell-completion)\=' -- and does
                   nothing without it.
   `title\='         report the running command as the title.  cooked shows it in
-                  the mode line, and `cooked-buffer-name-follows-title\=' can
+                  the mode line, and `cooked-buffer-name-auto-update\=' can
                   put it in the buffer name.  If your prompt already writes
                   `OSC 2\=' this is a redundant write rather than a conflict --
                   last one wins, and ours runs last -- so drop it if you would
