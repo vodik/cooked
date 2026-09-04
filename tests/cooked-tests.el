@@ -18,6 +18,7 @@
 ;;   cooked-tests-sticky-scroll.el       the sticky-scroll header line
 ;;   cooked-tests-command-decorations.el the fringe dot per command
 ;;   cooked-tests-menu.el        the menu, and the commands it names
+;;   cooked-tests-bench.el       the benchmark's fixtures, against the protocol
 ;;
 ;; Run them all:
 ;;
@@ -60,6 +61,7 @@
 (require 'cooked-tests-sticky-scroll)
 (require 'cooked-tests-command-decorations)
 (require 'cooked-tests-menu)
+(require 'cooked-tests-bench)
 
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here
