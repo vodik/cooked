@@ -183,6 +183,23 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// deleted, and archiving would return them to the buffer as scrollback.
         "cooked--remove-rows" 3..=3 => remove_rows;
 
+        /// Set SESSION's redisplay interval to MILLISECONDS and its backlog to LIMIT.
+        ///
+        /// The two knobs `cooked--spawn' takes, on a session already running, so
+        /// `cooked-min-redisplay-interval' and `cooked-backlog-limit' mean the same thing
+        /// whether they are set before a session starts or while it is going.  Both are
+        /// taken in one call because they are tuned as a pair: a longer interval leaves
+        /// more to accumulate between drains, so the queue fills sooner.
+        ///
+        /// The frame ceiling follows the interval, derived here exactly as it is at spawn,
+        /// so the rule that a held frame is never held longer than one redisplay interval
+        /// cannot come apart between the two paths.
+        ///
+        /// Nothing is woken and nothing already in flight is retired: a frame being held
+        /// keeps the deadline it was given, which is at most one old interval, and the
+        /// reader picks the new values up on its next turn through the loop.
+        "cooked--set-pacing" 3..=3 => set_pacing;
+
         /// Tell SESSION whether anyone is looking at its buffer, as ATTENDED.
         ///
         /// Sets how often the reader thread re-reads the child's termios while the child
@@ -472,6 +489,13 @@ impl<T> OrSignal<T> for std::result::Result<T, crate::error::Error> {
     fn or_signal(self, env: Env) -> Result<T> {
         self.map_err(|e| env.signal("cooked-error", &e.to_string()))
     }
+}
+
+fn set_pacing(env: Env, args: &[Value]) -> Result<Value> {
+    let ms = env.from_lisp::<i64>(args[1])?.max(0) as u64;
+    let limit = env.from_lisp::<i64>(args[2])?.max(1) as usize;
+    handle(env, args[0])?.set_pacing(std::time::Duration::from_millis(ms), limit);
+    Ok(env.nil())
 }
 
 fn spawn(env: Env, args: &[Value]) -> Result<Value> {

@@ -1187,5 +1187,34 @@ window, or one the user pinned) must still land somewhere rather than
                                                (get-buffer-window-list buffer nil t))))))
         (delete-window other)))))
 
+(ert-deftest cooked-the-pacing-options-reach-a-running-session ()
+  "Both used to be read once, at spawn, and said so in their docstrings -- which
+made them the only options a running session could not be told about, and meant
+tuning the one knob with a taste question behind it began by killing the
+terminal you were tuning it for."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((cooked-min-redisplay-interval cooked-min-redisplay-interval)
+          (cooked-backlog-limit cooked-backlog-limit))
+      ;; Through `customize-set-variable', which is what runs the `:set' a user
+      ;; setting this from the customize interface would run.
+      (customize-set-variable 'cooked-min-redisplay-interval 0.04)
+      (customize-set-variable 'cooked-backlog-limit 99)
+      ;; The core has no reader for either, by design -- they are write-only
+      ;; tuning -- so what is asserted is that the call went through without
+      ;; signalling and that the session is still drawing afterwards.
+      (should (cooked--live-p cooked--session))
+      (cooked--send cooked--session "printf 'after\\n'\n")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "after" (cooked-tests--text))))))))
+
+(ert-deftest cooked-setting-pacing-without-a-session-is-harmless ()
+  "The `:set' walks every cooked buffer, and a buffer whose child has gone is an
+ordinary one to walk past -- as is having no cooked buffers at all, which is the
+state a user setting this in their init file is in."
+  (let ((cooked-min-redisplay-interval cooked-min-redisplay-interval))
+    (customize-set-variable 'cooked-min-redisplay-interval 0.02)
+    (should (= cooked-min-redisplay-interval 0.02))
+    (customize-set-variable 'cooked-min-redisplay-interval 0.008)))
+
 (provide 'cooked-tests-session)
 ;;; cooked-tests-session.el ends here

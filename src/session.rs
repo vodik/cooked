@@ -13,7 +13,7 @@ use nix::sys::signal::{SigSet, Signal};
 use std::ffi::OsStr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
@@ -170,13 +170,18 @@ struct Notifier {
     /// costs one write and one Lisp callback rather than thousands.
     notified: AtomicBool,
     state: Mutex<NotifyState>,
+    /// See [`QUIESCENCE`].
+    quiescence: std::time::Duration,
+}
+
+struct NotifyState {
     /// Floor on how often the wake pipe is written to, regardless of how fast output
     /// arrives. Without one, a program that rewrites the same line rapidly — a spinner, a
     /// progress meter — drives one full Emacs redisplay per write, which is a lot more
     /// redraws than any of them are actually meant to be seen at and shows up as flicker.
     /// A floor and not a frame clock: it says how close together two wakeups may be, and
     /// nothing about which moment between them is worth drawing. That second question is
-    /// [`NotifyState::hold`]'s, and the two are independent — a keystroke echoed after a
+    /// [`Self::hold`]'s, and the two are independent — a keystroke echoed after a
     /// quiet second passes both on the spot, while a spinner rewriting its line at 1kHz
     /// is quiet between every write and is held here regardless.
     ///
@@ -185,14 +190,17 @@ struct Notifier {
     /// [`Notifier::poll_wait`], which shortens that tick to this interval's own
     /// remaining window rather than leaving a throttled notification to wait out the
     /// coarser `POLL_TIMEOUT_MS`.
+    ///
+    /// In here rather than on [`Notifier`] because it is not a constant: Emacs may set
+    /// `cooked-min-redisplay-interval' on a session already running, and every reader of
+    /// this already holds this lock. Under it, the interval and the `last` it is compared
+    /// against cannot be read from either side of a change.
     min_interval: std::time::Duration,
-    /// See [`QUIESCENCE`].
-    quiescence: std::time::Duration,
     /// How long a frame may be held while the child keeps changing it; see
-    /// [`NotifyState::hold`].
+    /// [`Self::hold`].
     ///
     /// One `min_interval`, *derived* from it by [`Options::with_min_redisplay_interval`]
-    /// rather than chosen beside it, because the two compose rather than add: [`Self::flush`]
+    /// rather than chosen beside it, because the two compose rather than add: [`Notifier::flush`]
     /// consults the throttle before the hold, so what a continuously-writing child is
     /// actually redrawn at is the longer of the pair. A second, independent number can
     /// therefore only be dead weight (below the interval), or a floor overruling a user who
@@ -217,10 +225,6 @@ struct Notifier {
     /// has produced its second one within microseconds, so it arms this immediately and is
     /// then redrawn at the redisplay interval throughout.
     frame_ceiling: std::time::Duration,
-}
-
-#[derive(Default)]
-struct NotifyState {
     /// When the wake pipe was last actually written to, for `min_interval`.
     last: Option<std::time::Instant>,
     /// While set and unexpired, the child is mid-frame under DEC mode 2026 and has asked
@@ -234,7 +238,7 @@ struct NotifyState {
     /// is in the middle of an update.
     last_read: Option<std::time::Instant>,
     /// When a frame that has changed more than once stops being held; see
-    /// [`Notifier::frame_ceiling`]. `None` while no frame is held, and while the held frame has
+    /// [`Self::frame_ceiling`]. `None` while no frame is held, and while the held frame has
     /// only the one change in it.
     ceiling_at: Option<std::time::Instant>,
 }
@@ -250,7 +254,7 @@ impl NotifyState {
     /// majority of clients that will never emit a 2026 sequence in their lives.
     ///
     /// Two deadlines, whichever comes first: [`QUIESCENCE`] since the last byte arrived,
-    /// and [`Notifier::frame_ceiling`] since the frame's second change. `last_read` unset — which
+    /// and [`Self::frame_ceiling`] since the frame's second change. `last_read` unset — which
     /// [`Notifier::announce`] arranges — means there is nothing to wait for at all.
     fn hold(&self, quiescence: std::time::Duration) -> Option<std::time::Duration> {
         let quiet = remaining(self.last_read.map(|t| t + quiescence))?;
@@ -269,11 +273,33 @@ impl Notifier {
             wake: Mutex::new(Some(wake)),
             dirty: AtomicBool::new(false),
             notified: AtomicBool::new(false),
-            state: Mutex::new(NotifyState::default()),
-            min_interval: options.min_redisplay_interval,
+            state: Mutex::new(NotifyState {
+                min_interval: options.min_redisplay_interval,
+                frame_ceiling: options.frame_ceiling,
+                last: None,
+                sync_until: None,
+                last_read: None,
+                ceiling_at: None,
+            }),
             quiescence: options.quiescence,
-            frame_ceiling: options.frame_ceiling,
         }
+    }
+
+    /// Adopt a new redisplay interval, and the ceiling that derives from it.
+    ///
+    /// The far end of `cooked-min-redisplay-interval''s `:set'. Taken under the lock its
+    /// readers already hold, so a change cannot land between [`Self::flush`] reading the
+    /// interval and reading the `last` it compares against.
+    ///
+    /// Nothing is retired or rescheduled. A frame already being held keeps the deadline
+    /// it was given -- at most one old interval late, by a change the user made by hand --
+    /// and every frame after it is held by the new one. Recomputing `ceiling_at` here
+    /// would be the tidier-looking option and is wrong: it would let a user dragging a
+    /// customize slider repeatedly re-arm the hold on a frame that was ready to draw.
+    fn set_pacing(&self, min_interval: std::time::Duration, frame_ceiling: std::time::Duration) {
+        let mut state = self.state.held();
+        state.min_interval = min_interval;
+        state.frame_ceiling = frame_ceiling;
     }
 
     /// Unconditionally send the wake byte if none is already in flight.
@@ -320,7 +346,8 @@ impl Notifier {
         let mut state = self.state.held();
         state.last_read = Some(now);
         if drawable && self.dirty.swap(true, Ordering::SeqCst) {
-            state.ceiling_at.get_or_insert(now + self.frame_ceiling);
+            let ceiling = state.frame_ceiling;
+            state.ceiling_at.get_or_insert(now + ceiling);
         }
     }
 
@@ -337,7 +364,7 @@ impl Notifier {
         if remaining(state.sync_until).is_some() {
             return true;
         }
-        if state.last.is_some_and(|t| t.elapsed() < self.min_interval) {
+        if state.last.is_some_and(|t| t.elapsed() < state.min_interval) {
             return true;
         }
         // Same reasoning as the sync check above, and the same handling: the frame stays
@@ -415,7 +442,7 @@ impl Notifier {
         let state = self.state.held();
         let throttle = state
             .last
-            .map(|t| self.min_interval.saturating_sub(t.elapsed()))
+            .map(|t| state.min_interval.saturating_sub(t.elapsed()))
             .unwrap_or_default();
         // A frame held by DEC mode 2026 keeps `dirty` set with nothing to flush, so the
         // throttle's own remainder is typically zero — polling on that would spin this
@@ -467,7 +494,12 @@ struct Shared {
     /// a session is Emacs' own readiness -- the wake byte is not re-armed until
     /// [`Session::ready`] -- and the interval is only a floor under that. So this is sized
     /// against the slowest cadence those two constants allow, and nothing recomputes it.
-    backlog_limit: usize,
+    ///
+    /// Atomic because Emacs may set `cooked-backlog-limit' on a session already running.
+    /// Relaxed: it is a threshold the reader compares its own queue against once per read,
+    /// with no other state ordered against it, so the worst a stale read can do is let one
+    /// more chunk through before the new limit applies.
+    backlog_limit: AtomicUsize,
     shutdown: AtomicBool,
     /// Whether anyone is looking at this session's buffer; see [`Session::set_attended`].
     /// Starts true, so a session Emacs never reports on — a test, a buffer driven from
@@ -602,7 +634,7 @@ impl Session {
             pending_resize: Mutex::new(None),
             notifier: Notifier::new(wake, &options),
             resample_at: Mutex::new(None),
-            backlog_limit: options.backlog_limit,
+            backlog_limit: AtomicUsize::new(options.backlog_limit),
             shutdown: AtomicBool::new(false),
             attended: AtomicBool::new(true),
             interrupt: Interrupt::new()?,
@@ -844,6 +876,31 @@ impl Session {
         }
     }
 
+    /// Adopt a new redisplay interval and backlog limit on a session already running.
+    ///
+    /// The two are set together because they are tuned together: a longer interval leaves
+    /// more to accumulate between drains, so the queue fills sooner. Taking them in one
+    /// call is what stops a caller from setting half a pair.
+    ///
+    /// `frame_ceiling` is not a third parameter. It is one `min_redisplay_interval` and is
+    /// derived here through the same [`Options`] constructor spawn uses, so the rule that
+    /// a held frame is never held longer than one redisplay interval cannot be true at
+    /// spawn and false after a `setq`. See [`Options::with_min_redisplay_interval`].
+    ///
+    /// Nothing is woken. A pacing change is the user adjusting a number, not the child
+    /// producing output: the reader picks the new values up on its next turn through the
+    /// loop, which is at most one poll tick away, and until then the old interval is the
+    /// worst that can apply.
+    pub(crate) fn set_pacing(&self, min_redisplay_interval: std::time::Duration, backlog_limit: usize) {
+        let options = Options::with_min_redisplay_interval(min_redisplay_interval);
+        self.shared
+            .notifier
+            .set_pacing(options.min_redisplay_interval, options.frame_ceiling);
+        self.shared
+            .backlog_limit
+            .store(backlog_limit, Ordering::Relaxed);
+    }
+
     pub(crate) fn pid(&self) -> Pid {
         self.shared.pty.pid()
     }
@@ -1039,7 +1096,7 @@ impl Shared {
             // Backpressure: with a full backlog, leave the bytes in the pty. Its buffer
             // fills and the child blocks in `write`, so output waits instead of being
             // dropped or piling up in memory faster than Emacs can render it.
-            if self.term.held().backlog() >= self.backlog_limit {
+            if self.term.held().backlog() >= self.backlog_limit.load(Ordering::Relaxed) {
                 // A child that filled the backlog inside one frame has forfeited atomicity:
                 // holding the wakeup here would deadlock the backlog against its own blocked
                 // write, waiting on a frame it cannot finish because we are not reading.
@@ -1541,6 +1598,44 @@ mod tests {
             "the throttled notification never arrived at all"
         );
         start.elapsed()
+    }
+
+    /// The interval reaches a session already running, and takes the frame ceiling with
+    /// it.
+    ///
+    /// The pair is the point. `frame_ceiling` is not a parameter anywhere on this path --
+    /// it is derived from the interval by the same constructor `spawn` goes through -- so
+    /// this asserts that a session set to a new interval holds a frame by the new one too,
+    /// rather than by whatever it was spawned with. Reading them back through the lock is
+    /// the whole test: what could go wrong is one of the two being left behind.
+    #[test]
+    fn set_pacing_moves_the_interval_and_the_ceiling_together() {
+        let (session, _read) = session_with(
+            &["/bin/sh", "-c", "sleep 5"],
+            Options::with_min_redisplay_interval(Duration::from_millis(8)),
+        );
+
+        {
+            let state = session.shared.notifier.state.held();
+            assert_eq!(state.min_interval, Duration::from_millis(8));
+            assert_eq!(state.frame_ceiling, Duration::from_millis(8));
+        }
+
+        session.set_pacing(Duration::from_millis(40), 99);
+
+        let state = session.shared.notifier.state.held();
+        assert_eq!(state.min_interval, Duration::from_millis(40));
+        assert_eq!(
+            state.frame_ceiling,
+            Duration::from_millis(40),
+            "the ceiling stayed at the interval the session was spawned with"
+        );
+        drop(state);
+        assert_eq!(
+            session.shared.backlog_limit.load(Ordering::Relaxed),
+            99,
+            "the backlog limit is set by the same call and was not"
+        );
     }
 
     /// A write that lands inside `min_redisplay_interval` of the previous one gets its
