@@ -90,7 +90,7 @@ without borrowing a real seam and having its own listeners in the way.")
     (cooked--refresh-keymap)
     (should (eq (current-local-map) cooked-input-map))
     (cooked--set-alt t)
-    (should (eq (current-local-map) cooked-alt-map))
+    (should (eq (current-local-map) (cooked--forwarding-map cooked-alt-map)))
     (cooked--set-alt nil)
     (should (eq (current-local-map) cooked-input-map))))
 
@@ -2128,6 +2128,9 @@ allowed to touch the filesystem from."
                   (lambda (_beg _end) (cl-incf scanned)))))
       (should (cooked-tests--settle
                (lambda () (string-match-p "line 60" (cooked-tests--text)))))
+      ;; The scan hook runs from `cooked--fontify-region' now, so it is
+      ;; redisplay that asks for it -- and batch mode does not redisplay.
+      (cooked-tests--fontify)
       (should (> scanned 0)))))
 
 (ert-deftest cooked-a-signalling-seam-entry-costs-only-its-own-contribution ()

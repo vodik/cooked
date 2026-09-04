@@ -814,15 +814,21 @@ render half of the mode, which no keymap carries."
   (pcase (and (not (eq policy 'cooked)) mode)
     ((or 'still 'frozen) cooked-peek-map)
     ('semi cooked-semi-map)
+    ;; The three that forward everything go through `cooked--forwarding-map',
+    ;; which is where the frame gets a say: on a graphical frame a Meta chord is
+    ;; one event that no list of character codes can name, and the map worn there
+    ;; is a child that binds it.  `cooked-input-map' is not asked -- Emacs owns
+    ;; the line, so there is nothing to forward -- and neither is
+    ;; `cooked-semi-map', which holds the Meta space back on purpose.
     (_ (pcase policy
          ('cooked cooked-input-map)
-         ('alt cooked-alt-map)
+         ('alt (cooked--forwarding-map cooked-alt-map))
          ;; A marked prompt with no license reads exactly like a running command
          ;; as far as the keyboard is concerned: the shell said where it is, so
          ;; there is nothing left to hedge and `cooked-raw-exceptions' would only
          ;; take keys away from a line editor that wants them.
-         ((or 'command 'prompt) cooked-command-map)
-         (_ cooked-raw-map)))))
+         ((or 'command 'prompt) (cooked--forwarding-map cooked-command-map))
+         (_ (cooked--forwarding-map cooked-raw-map))))))
 
 (defvar cooked--quiet-refresh nil
   "Whether the refresh under way was asked for quietly.
@@ -1353,6 +1359,16 @@ to the child verbatim."
   ;; bare `face' property -- which would force the renderer to set `font-lock-face'
   ;; alongside every `face' it applies.  Clearing it lets one property carry a run.
   (setq-local font-lock-defaults nil)
+  ;; Which leaves jit-lock free to carry the cosmetic passes on its own.  It is
+  ;; not font-lock and does not need it: `jit-lock-register' turns jit-lock on by
+  ;; itself, and with `font-lock-defaults' nil the only entry in
+  ;; `jit-lock-functions' is ours, so nothing runs a fontification that would
+  ;; strip the bare `face' the line above exists to protect.
+  ;;
+  ;; Through `cooked--sync-fontification' rather than registered outright: the
+  ;; hook jit-lock installs costs real time on the render path even when nothing
+  ;; is ever scanned, so it follows whether there is anything to scan.  See there.
+  (cooked--sync-fontification)
   ;; Above every minor mode, so a program that asked for the wheel gets it even
   ;; where `pixel-scroll-precision-mode' has claimed the same events.
   (add-to-list 'emulation-mode-map-alists 'cooked--mouse-map-alist)

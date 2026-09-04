@@ -53,6 +53,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'jit-lock)
 (require 'comint)
 (require 'face-remap)
 (require 'cooked-util)
@@ -1043,21 +1044,17 @@ that one glyph kind, exactly as a live row rendered without a known origin does.
         (add-text-properties start (point)
                              '(cooked-scrollback t read-only t
                                front-sticky (read-only) rear-nonsticky (read-only)))
-        ;; Once per batch, over the whole of it, and this is the pass that sees a
-        ;; wrapped URL whole: `cooked-rejoin-wrapped-lines' has just joined a
-        ;; continuation row onto the line above it, so the two halves the live
-        ;; screen showed as two rows are one string here.
-        (cooked--fontify-links start (point))
-        ;; The optional file layer's seam, and the reason it is here rather than
-        ;; in the row path: this text is settled and will never be rendered
-        ;; again, so an answer that costs a `file-exists-p' is paid once instead
-        ;; of once per redraw.
-        ;; An optional layer touching the filesystem from inside the drain is
-        ;; exactly the kind of extension point that must not be able to end a
-        ;; redisplay -- the same containment `cooked--handle-osc' gives a
-        ;; handler, for the same reason.
-        (when cooked-link-scan-functions
-          (cooked--run-seam 'cooked-link-scan-functions start (point)))
+        ;; Neither link pass runs here.  Both are `cooked--fontify-region''s
+        ;; now, so a batch that scrolls past without ever being displayed --
+        ;; which is what a flood is -- costs nothing to scan, and the file
+        ;; layer's `file-exists-p' is paid only for text somebody looks at.
+        ;;
+        ;; What the batch still buys them is the shape they see it in: this text
+        ;; is inserted with `cooked-rejoin-wrapped-lines' having joined a
+        ;; continuation row onto the line above it, so a URL the live screen
+        ;; broke across two rows is one string by the time anything scans it.
+        ;; That was true when the scan happened here and stays true, the joining
+        ;; being a property of the text rather than of when it is read.
         (set-marker cooked--screen-start (point))
         ;; After the marker moves, so it names the seam these marks are now above.
         (cooked--prune-marks)
@@ -1254,8 +1251,39 @@ and swallow the keys the program was waiting for."
   (let ((on (and on t)))
     (unless (eq on cooked--alt)
       (setq cooked--alt on)
+      (cooked--sync-fontification)
       (cooked--refresh-keymap)
       (run-hooks 'cooked-alt-change-hook))))
+
+(defun cooked--sync-fontification ()
+  "Register or drop the jit-lock pass, following whether it has work to do.
+
+Registration is not free and the cost is not at redisplay, which is the part
+worth knowing: jit-lock hangs `jit-lock-after-change\=' on
+`after-change-functions\=', and that fires for every text property applied as
+well as for every insertion.  A row of box drawing sets a `display\=' property
+per cell, so a frame of it pays the hook some hundreds of times to be told
+something it could have been told once.  Measured at +21% on plain rows, +55%
+on box drawing, with `cooked--fontify-region\=' never once being called.
+
+So the registration follows the work rather than the mode.  Two things can make
+it worthless, and both are ordinary.  The alternate screen is one: that grid is
+a rectangle the child owns, `cooked--fontify-region\=' declines it outright, and
+a full-screen program repainting flat out is exactly the thing that would pay
+the hook most and get nothing.  A session with the URL guess switched off and
+no scan layer loaded is the other.
+
+Idempotent, and cheap enough to call on any transition -- `jit-lock-register\='
+and `jit-lock-unregister\=' both go through `add-hook\='/`remove-hook\=' on a
+buffer-local hook.  What it must not do is run *between* a row being rewritten
+and that row being displayed, because unregistering drops jit-lock's record of
+what is still unfontified: the screen the alt flag has just turned off is
+rewritten by the drain that turned it off, and rewriting is what marks text
+unfontified again."
+  (if (and (not cooked--alt)
+           (or cooked-detect-links cooked-link-scan-functions))
+      (jit-lock-register #'cooked--fontify-region)
+    (jit-lock-unregister #'cooked--fontify-region)))
 
 (defun cooked--apply-alt-pin ()
   "Confine the buffer to the screen region while the alt screen is up.
@@ -1649,23 +1677,20 @@ which has no such seam at all."
                 last-start start)
           (cooked--render-block block index)
           (cooked--guard-row-width start)
-          ;; After the guard, which is the one thing here that can shorten the
-          ;; row: it trims a line Emacs laid out wider than `cooked--cols'
-          ;; assumed.  Both readers below want the row as it finally stands.
-          (let ((end (line-end-position)))
-            ;; Per freshly-rendered row, and no unfontify pass to go with it:
-            ;; goto-addr's overlays carry `evaporate t', so the `delete-region'
-            ;; above has already taken this row's previous ones with it.  Skipped
-            ;; on the alternate screen unless asked for -- see
-            ;; `cooked-detect-links-on-alt-screen'.
-            (when (or (not alt) cooked-detect-links-on-alt-screen)
-              (cooked--fontify-links start end))
-            ;; Links are cooked's own business and can be scanned the moment the
-            ;; text is there; the optional layers cannot, because a mark on this
-            ;; screen is not yet where it belongs.  So the bounds are only
-            ;; remembered here.
-            (when (and cooked-row-rendered-functions (not alt))
-              (push (cons start end) rendered))))))
+          ;; Nothing scans the row here.  Rewriting the text is what tells
+          ;; jit-lock the row is no longer fontified, so redisplay asks
+          ;; `cooked--fontify-region' for it -- and only if this frame is one
+          ;; that reaches the screen.  See there.
+          ;;
+          ;; The bounds are read after the guard, which is the one thing in this
+          ;; loop that can shorten a row: it trims a line Emacs laid out wider
+          ;; than `cooked--cols' assumed.
+          ;;
+          ;; The optional layers are still announced from here rather than from
+          ;; redisplay, because a mark on this screen is not yet where it
+          ;; belongs; `cooked--notify-rows-rendered' is the other half of that.
+          (when (and cooked-row-rendered-functions (not alt))
+            (push (cons start (line-end-position)) rendered)))))
     (nreverse rendered)))
 
 (defun cooked--notify-rows-rendered (bounds)
@@ -1681,6 +1706,53 @@ cosmetic pass must not be able to end a redisplay."
   (when cooked-row-rendered-functions
     (pcase-dolist (`(,beg . ,end) bounds)
       (cooked--run-seam 'cooked-row-rendered-functions beg end))))
+
+(defun cooked--fontify-region (beg end)
+  "Run the cosmetic link passes over BEG..END.  cooked\\='s jit-lock entry point.
+
+Registered by `cooked-mode\=' and called by redisplay, which is the whole point
+of it.  Both passes here are guesses about text -- what looks like a URL, what
+looks like a file name -- and a guess is only worth making about text somebody
+is about to read.  Running them from the render path instead meant scanning
+every damaged row whether or not that row was ever displayed, which for a child
+painting faster than Emacs redraws is most of them.  `goto-address-mode\=' has
+always worked this way; this is cooked wearing the same clothes, with the four
+bindings `cooked--fontify-links\=' makes on top.
+
+One entry point for two passes because they are one question asked twice, and
+the order between them is the precedence `cooked-link--claimed-p\=' states: a
+`goto-addr\=' match is settled before the file layer looks, so the file layer can
+decline text already spoken for.
+
+`inhibit-read-only\=' because scrollback carries `read-only\=', and the file layer
+answers by adding text properties to it.  The render path had this for free from
+`cooked--apply\='; redisplay does not.
+
+Rounded out to whole lines.  jit-lock hands over chunks of
+`jit-lock-chunk-size\=' characters and a chunk boundary falls wherever it falls,
+so a candidate straddling one would be matched by neither half.  goto-addr
+rounds for itself -- see `goto-address-fontify-region\=' -- and the scan hook
+would not.
+
+Nothing at all on the alternate screen, which is what
+`cooked-detect-links-on-alt-screen\=' asks for and is safe to answer by simply
+returning: that grid is rewritten row by row on the way back to the primary
+screen, and rewriting text is what marks it unfontified again, so nothing is
+stranded by having been skipped here."
+  (when (and cooked--session (not cooked--alt))
+    (let ((inhibit-read-only t)
+          (from (save-excursion (goto-char beg) (line-beginning-position)))
+          (to (save-excursion (goto-char end) (line-end-position))))
+      (cooked--fontify-links from to)
+      ;; Only the settled half.  The live screen is rewritten from the next
+      ;; drain's damage, so an answer about it that cost a `file-exists-p' would
+      ;; be paid again at the next redraw -- which is the whole reason this hook
+      ;; was never on the row path.  Scrollback is final, and one scan of it
+      ;; stands.
+      (when cooked-link-scan-functions
+        (let ((settled (min to (or (cooked--screen-start-position) to))))
+          (when (< from settled)
+            (cooked--run-seam 'cooked-link-scan-functions from settled)))))))
 
 ;;;; Cells, anchors and positions
 

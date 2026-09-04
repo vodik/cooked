@@ -1043,7 +1043,16 @@ stuck at the previous font size, visibly mismatched once the pin is released."
                ;; The pair `cooked--with-child-edit' binds, spelled out to keep
                ;; this in one `let*' with the sizes it needs.
                (inhibit-read-only t)
-               (buffer-undo-list t))
+               (buffer-undo-list t)
+               ;; And a third, for the same reason the other two are here: this
+               ;; walk is not an edit.  It re-cuts the `display' slices of text
+               ;; that has not changed and will not, so there is nothing for a
+               ;; change hook to react to -- while `put-text-property' runs them
+               ;; regardless, once per decorated run over the whole transcript.
+               ;; With jit-lock registered that is `jit-lock-after-change'
+               ;; marking settled scrollback unfontified so it can be rescanned
+               ;; for links it already has, at +28% on the walk.
+               (inhibit-modification-hooks t))
           (while (< (point) (point-max))
             (let ((deco (get-text-property (point) 'cooked-deco))
                   (next (or (next-single-property-change (point) 'cooked-deco)

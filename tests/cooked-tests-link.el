@@ -68,6 +68,8 @@
       '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
     (should (cooked-tests--settle
              (lambda () (string-match-p "example.com" (cooked-tests--text)))))
+    ;; The scan is redisplay's now, and batch mode does not redisplay.
+    (cooked-tests--fontify)
     (let* ((at (cooked-tests--link-at "https://example.com/"))
            (overlay (seq-find (lambda (o) (overlay-get o 'goto-address))
                               (overlays-at at))))
@@ -321,6 +323,63 @@ gone remote would make even a relative name resolve over the wire."
     ;; have been narrowed into uselessness.
     (should (string-match-p (concat "\\`" cooked-file-link--candidate-regexp "\\'")
                             "src/main.rs:12:3"))))
+
+(ert-deftest cooked-a-bare-url-waits-for-something-to-look-at-it ()
+  "The other half of `cooked-a-bare-url-is-fontified-by-goto-addr\='.
+
+The guess is redisplay\='s work now, not the drain\='s, which is what stops a
+child painting faster than Emacs redraws from being scanned once per frame it
+paints.  Nothing has displayed this buffer, so nothing has guessed yet."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "example.com" (cooked-tests--text)))))
+    (should-not (seq-find (lambda (o) (overlay-get o 'goto-address))
+                          (overlays-in (point-min) (point-max))))
+    ;; And it is only the looking that was missing.
+    (cooked-tests--fontify)
+    (should (seq-find (lambda (o) (overlay-get o 'goto-address))
+                      (overlays-in (point-min) (point-max))))))
+
+(ert-deftest cooked-the-scan-is-not-armed-when-it-has-nothing-to-scan ()
+  "Registering jit-lock is not free: it hangs `jit-lock-after-change\=' on every
+text property the renderer applies, which measured at +21% on plain rows and
++55% on box drawing with nothing ever being scanned.  So the registration
+follows the work -- see `cooked--sync-fontification\='."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (memq #'cooked--fontify-region jit-lock-functions))
+    ;; The alternate screen is a rectangle the child owns; the guess declines it
+    ;; outright, so tracking its changes buys nothing at all.
+    (cooked--set-alt t)
+    (should-not (memq #'cooked--fontify-region jit-lock-functions))
+    (cooked--set-alt nil)
+    (should (memq #'cooked--fontify-region jit-lock-functions))
+    ;; And a session with the guess switched off and no scan layer loaded.
+    (let ((cooked-detect-links nil)
+          (cooked-link-scan-functions nil))
+      (cooked--sync-fontification)
+      (should-not (memq #'cooked--fontify-region jit-lock-functions)))
+    (cooked--sync-fontification)
+    (should (memq #'cooked--fontify-region jit-lock-functions))))
+
+(ert-deftest cooked-the-scan-hook-sees-only-settled-text ()
+  "`cooked-link-scan-functions\=' is the seam an optional layer may touch the
+filesystem from, which is affordable only because scrollback is final.  The
+live screen is rewritten by the next drain, so an answer about it would be
+bought again every redraw."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "for i in $(seq 40); do echo line $i; done; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "line 40" (cooked-tests--text)))))
+    (let* ((seen nil)
+           (cooked-link-scan-functions
+            (list (lambda (beg end) (push (cons beg end) seen)))))
+      (cooked-tests--fontify)
+      (should seen)
+      (let ((screen (cooked--screen-start-position)))
+        (should screen)
+        (pcase-dolist (`(,_beg . ,end) seen)
+          (should (<= end screen)))))))
 
 (provide 'cooked-tests-link)
 ;;; cooked-tests-link.el ends here

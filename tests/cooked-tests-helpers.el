@@ -158,6 +158,21 @@ draining here."
   "Visible buffer text with trailing blank lines removed."
   (string-trim-right (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun cooked-tests--fontify ()
+  "Run the fontification redisplay would run over this buffer.
+
+Batch mode never redisplays, so `fontification-functions' never fire and
+`cooked--fontify-region' is never asked for anything.  That is exactly right
+for the code under test -- the passes it drives are cosmetic and deferred on
+purpose -- and it means a test asserting that a URL ended up highlighted has to
+say when the looking happens, because in batch nobody ever looks.
+
+Call it after the output has settled and before asserting on an overlay or a
+link property.  A test that does not call it is asserting the other half: that
+nothing was scanned for a buffer nobody displayed."
+  (when (bound-and-true-p jit-lock-mode)
+    (jit-lock-fontify-now (point-min) (point-max))))
+
 (defmacro cooked-tests--with-fake-zdotdir (files &rest body)
   "Run BODY with ZDOTDIR pointing at a directory built from FILES.
 FILES is an alist of (NAME . CONTENTS)."
