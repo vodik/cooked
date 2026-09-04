@@ -878,9 +878,20 @@ impl Session {
 
     /// Adopt a new redisplay interval and backlog limit on a session already running.
     ///
-    /// The two are set together because they are tuned together: a longer interval leaves
-    /// more to accumulate between drains, so the queue fills sooner. Taking them in one
-    /// call is what stops a caller from setting half a pair.
+    /// Not `set_pacing`, and the distinction is the one thing worth getting right here:
+    /// only the interval is a pace. There is exactly one of those, the ceiling derives from
+    /// it, and together they are the whole of how fast a session draws.
+    ///
+    /// The backlog limit is backpressure, which is a different question with a different
+    /// answer: not how often to redraw, but how much may pile up while Emacs falls behind
+    /// before [`Self::read_loop`] stops taking bytes off the pty -- at which point its
+    /// buffer fills and the child blocks in `write`. One paces, the other pauses. Naming
+    /// the pair after the half that paces would assert a second pace mechanism that
+    /// deliberately does not exist; [`Notifier::set_pacing`] is the one that earns the word.
+    ///
+    /// They travel together because they are tuned together: a longer interval leaves more
+    /// to accumulate between drains, so the queue fills sooner. One call is what stops a
+    /// caller setting half of a pair whose relationship is the point.
     ///
     /// `frame_ceiling` is not a third parameter. It is one `min_redisplay_interval` and is
     /// derived here through the same [`Options`] constructor spawn uses, so the rule that
@@ -891,7 +902,7 @@ impl Session {
     /// producing output: the reader picks the new values up on its next turn through the
     /// loop, which is at most one poll tick away, and until then the old interval is the
     /// worst that can apply.
-    pub(crate) fn set_pacing(&self, min_redisplay_interval: std::time::Duration, backlog_limit: usize) {
+    pub(crate) fn set_tuning(&self, min_redisplay_interval: std::time::Duration, backlog_limit: usize) {
         let options = Options::with_min_redisplay_interval(min_redisplay_interval);
         self.shared
             .notifier
@@ -1609,7 +1620,7 @@ mod tests {
     /// rather than by whatever it was spawned with. Reading them back through the lock is
     /// the whole test: what could go wrong is one of the two being left behind.
     #[test]
-    fn set_pacing_moves_the_interval_and_the_ceiling_together() {
+    fn set_tuning_moves_the_interval_and_the_ceiling_together() {
         let (session, _read) = session_with(
             &["/bin/sh", "-c", "sleep 5"],
             Options::with_min_redisplay_interval(Duration::from_millis(8)),
@@ -1621,7 +1632,7 @@ mod tests {
             assert_eq!(state.frame_ceiling, Duration::from_millis(8));
         }
 
-        session.set_pacing(Duration::from_millis(40), 99);
+        session.set_tuning(Duration::from_millis(40), 99);
 
         let state = session.shared.notifier.state.held();
         assert_eq!(state.min_interval, Duration::from_millis(40));

@@ -185,6 +185,10 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 
         /// Set SESSION's redisplay interval to MILLISECONDS and its backlog to LIMIT.
         ///
+        /// Only the first is a pace, and cooked has exactly one of those: the frame ceiling
+        /// derives from it and nothing else in the tree sets a rate.  LIMIT is not a rate --
+        /// it decides who waits once Emacs has fallen behind, not how fast anything is drawn.
+        ///
         /// The two knobs `cooked--spawn' takes, on a session already running, so
         /// `cooked-min-redisplay-interval' and `cooked-backlog-limit' mean the same thing
         /// whether they are set before a session starts or while it is going.  Both are
@@ -198,7 +202,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Nothing is woken and nothing already in flight is retired: a frame being held
         /// keeps the deadline it was given, which is at most one old interval, and the
         /// reader picks the new values up on its next turn through the loop.
-        "cooked--set-pacing" 3..=3 => set_pacing;
+        "cooked--set-tuning" 3..=3 => set_tuning;
 
         /// Tell SESSION whether anyone is looking at its buffer, as ATTENDED.
         ///
@@ -491,10 +495,10 @@ impl<T> OrSignal<T> for std::result::Result<T, crate::error::Error> {
     }
 }
 
-fn set_pacing(env: Env, args: &[Value]) -> Result<Value> {
+fn set_tuning(env: Env, args: &[Value]) -> Result<Value> {
     let ms = env.from_lisp::<i64>(args[1])?.max(0) as u64;
     let limit = env.from_lisp::<i64>(args[2])?.max(1) as usize;
-    handle(env, args[0])?.set_pacing(std::time::Duration::from_millis(ms), limit);
+    handle(env, args[0])?.set_tuning(std::time::Duration::from_millis(ms), limit);
     Ok(env.nil())
 }
 
