@@ -284,9 +284,25 @@ single record the encoding exists to produce."
 ;; whole cost of getting those frames onto a screen either way.
 ;;
 ;; Read them as a pair.  While the scan runs from the render path, RATIO changes
-;; nothing: the work is tied to frames rendered.  Once it runs from jit-lock, the
-;; ratio is the coalescing the design is meant to exploit, and the two rows
-;; should separate.
+;; nothing: the work is tied to frames rendered.  Once it runs from jit-lock the
+;; two rows separate, which is what the URL rows now show.
+;;
+;; What RATIO is *not* is a claim about a real session, and this is worth stating
+;; because the figure invites the mistake.  Measured in a live frame -- an Emacs
+;; sitting in its command loop while `yes' floods a buffer -- `cooked--apply' runs
+;; 40 times against 91 redisplays, and a spinner rewriting one line 155 against
+;; 215.  Renders never outrun redisplays: the wake byte is not re-armed until
+;; `cooked--ready', and the core coalesces everything that arrives in between, so
+;; Emacs already renders about what it is going to draw.  A RATIO of 8 does not
+;; happen, and the live screen therefore saves almost nothing by deferring.
+;;
+;; The win is the scrollback, and it does not depend on RATIO at all.  A flood
+;; pushes megabytes through the buffer that scroll past between two redisplays
+;; and are never displayed at all; the eager passes scanned every one of those
+;; lines, and jit-lock scans only what a window shows.  Over six seconds of
+;; `yes' emitting a URL per line, that is 33 thousand characters scanned against
+;; 12 million -- 361x less text.  None of which this benchmark can see, because
+;; the frames here are handed over one at a time with no scrollback in them.
 
 (defun cooked-bench--fontify-as-redisplay (beg end)
   "Run the fontification redisplay would run over BEG..END.
@@ -335,7 +351,28 @@ because that is what a window would have shown."
   (let ((cooked-detect-links nil))
     (cooked-bench--deferred-frames
      "URL scan off, 24x80 (the floor)"
-     (cooked-bench--url-rows 24 80) 200 1)))
+     (cooked-bench--url-rows 24 80) 200 1))
+  ;; Box drawing is not deferred -- `cooked--apply-deco' runs from the render,
+  ;; where every other cosmetic pass used to.  These two rows are what deferring
+  ;; it could be worth, and they are here to be read against each other rather
+  ;; than as a result: while the decoration is applied per rendered row, the
+  ;; ratio changes nothing, which is exactly what the URL rows said before the
+  ;; scan moved.  The gap to the plain figure -- some 2.8ms of the 2.9 -- is the
+  ;; whole of what a frame that is rendered and never displayed currently pays
+  ;; for a picture nobody sees.
+  ;;
+  ;; What the ratio cannot say is how often that actually happens in a live
+  ;; session, and it is the whole question: cooked's backpressure holds the next
+  ;; wakeup until `cooked--ready', so renders and redisplays are far closer to
+  ;; 1:1 here than a synthetic ratio of 8 suggests.  Deferring only ever pays for
+  ;; the frames in between.
+  (dolist (ratio '(1 8))
+    (cooked-bench--deferred-frames
+     (format "box drawing, 24x80, 1 draw per %d frames" ratio)
+     (cooked-bench--box-rows 24 80) 200 ratio))
+  (cooked-bench--deferred-frames
+   "plain, 24x80 (the floor box drawing would fall to)"
+   (cooked-bench--plain-rows 24 80) 200 1))
 
 (defun cooked-bench-rescale ()
   "Cost of `cooked--rescale-deco\=', the walk a cell-size change runs.
