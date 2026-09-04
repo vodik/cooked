@@ -850,6 +850,62 @@ Five consequences that are easy to get wrong separately:
 
 ---
 
+## The pace is a floor, not a clock
+
+`cooked-min-redisplay-interval` is the one number in the tree that sets a rate, and the
+thing most worth knowing about it is what it *cannot* do: nothing ever draws faster than
+it. Every gate in `Notifier::flush` can only push a redraw later. There is no urgent
+path, no bypass, no "this one matters, send it now" — the floor is absolute.
+
+**What actually paces a session is Emacs, and the interval is the floor beneath that.**
+The core sends one wake byte and then stays quiet until `cooked--ready` says the buffer
+has been drawn, so a slow render paces the child by itself. Measured in a live frame,
+`cooked--apply` runs 40 times against 91 redisplays while `yes` floods a buffer, and 155
+against 215 for a spinner rewriting one line. Renders never outrun redisplays. The
+interval is what stops a *fast* render from being asked for a thousand times a second;
+it is not what decides the rate in the ordinary case.
+
+Four things delay a redraw, and `flush` consults them in this order:
+
+| Gate | Holds the frame while | Retired by |
+|---|---|---|
+| `notified` | a wake byte is already in flight | `Session::ready`, i.e. Emacs having drawn |
+| `sync_until` | the child is mid-frame under **DEC mode 2026** (`CSI ? 2026 h`) | the child's own `2026 l`, or the deadline |
+| `min_interval` | less than one interval has passed since the last wake | the clock |
+| `hold(quiescence)` | the child wrote something under 0.5ms ago | the pty going quiet, or `frame_ceiling` |
+
+The mode-2026 gate is a **DEC private mode**, not an OSC — it arrives through `csi.rs`
+alongside the other `CSI ?` modes. Worth stating because the child has no OSC by which to
+ask for this, and looking for one is a wasted afternoon.
+
+**The one thing that looks like speeding up, and what it actually skips.**
+`Notifier::announce` clears `last_read` and `ceiling_at` before flushing, which is the
+quiescence gate stood down: a termios change, a full backlog and a child that has exited
+are none of them things the child is going to finish writing, so waiting for it to stop
+writing would wait forever. The case that earns this is `getpass` turning echo off a
+fraction of a millisecond after printing its prompt — a secret read must not sit behind
+the rest of an update. But `announce` goes *through* `flush`, so it clears two gates of
+the four and passes the throttle like everything else. It never draws early; it only
+declines to wait for a frame that is not coming. `sync_until` it does not touch at all —
+the backlog-full path clears that separately, with `set_sync(None)`, because a child that
+filled the backlog inside one frame would otherwise deadlock against its own blocked
+write.
+
+**`poll_wait` is not a speed-up either**, though it reads like one. It shortens the
+reader's poll to whatever is left of the throttle window, so a notification deferred by
+`min_interval` retires at the interval's own cadence instead of waiting out the coarser
+`POLL_TIMEOUT_MS`. That is avoiding an accidental hundred milliseconds, not going faster
+than the floor.
+
+**And the backlog limit is not part of any of this.** `cooked-backlog-limit` sets no rate.
+It is backpressure: how much may pile up while Emacs falls behind before `read_loop`
+stops taking bytes off the pty, at which point the pty's buffer fills and the child blocks
+in its own `write`. One paces, the other pauses. They are tuned together — a longer
+interval leaves more to accumulate between drains, so the queue fills sooner — which is
+why `Session::set_tuning` takes them in one call, and why it is not called `set_pacing`.
+
+---
+
 ## `Deco::packed`: the protocol coalesces so Lisp does not have to
 
 Rust parses at 74–422 MB/s and the Emacs apply path manages roughly 21 MB/s equivalent.

@@ -1965,6 +1965,12 @@ brought, so a slow render (box drawing costs some 70 times what plain text
 does) paces the child by itself and this interval is the floor beneath that
 rather than a rate of its own.
 
+A floor and never a clock: nothing in cooked draws faster than this, and no
+urgent path bypasses it.  Four things can make a redraw *later* -- Emacs
+not having finished the last one, DEC mode 2026, this interval, and the child
+still writing -- and only the first is what usually decides the rate.  See
+docs/DESIGN.md.
+
 Lower it if the terminal feels less responsive than it should; raise it if a
 program that rewrites one line very fast still flickers.  Takes effect at once,
 on sessions already running as well as on the next one."
