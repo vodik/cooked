@@ -107,6 +107,31 @@ const POLL_TIMEOUT_MS: u8 = 100;
 /// with none of the new failure modes.
 const UNATTENDED_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
 
+/// How long input keeps the eager tick on a session nobody is looking at.
+///
+/// `set_attended` reads "nobody is looking" off which window is selected, which is the
+/// right answer for the question it was written for and half an answer to this one: a
+/// terminal in an unselected window is still a terminal the user can scroll, and a wheel
+/// notch over one is forwarded to the child without the window ever being selected — so
+/// the session is interacted with for the whole of a gesture and unattended throughout
+/// it. Everything the stretch was allowed to make stale is exactly what that gesture
+/// then depends on being fresh, the termios sample above all: `cooked--mouse-state` and
+/// the keymap are read from a mode the tick is the only sampler of, and a second of it
+/// is a second of the wrong answer to "who owns the keyboard" while the user is asking.
+///
+/// So input restores the eager tick for this long past the last byte written to the
+/// child, and attention is left to mean what it meant. It is a floor coming back up to
+/// [`POLL_TIMEOUT_MS`] and never past it: interaction buys back the ordinary tick, not a
+/// faster one, because there is no faster one to buy — the pace a session draws at is
+/// `min_redisplay_interval` and Emacs' own readiness, neither of which this touches.
+///
+/// Half a second because it has to span the gaps *within* a gesture rather than the
+/// gesture: wheel notches arrive tens of milliseconds apart and a hand pauses between
+/// flicks, so anything shorter drops back to the long tick mid-scroll and buys the
+/// staleness back one notch later. It costs, at worst, half a second of eager ticking
+/// after the last thing anyone did to a buffer they are not looking at.
+const INTERACTION_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// How long after a burst of output to take one extra termios sample.
 ///
 /// The common secret read does not arrive silently: `read -s -p`, `getpass` and `sudo`
@@ -537,6 +562,14 @@ struct Shared {
     /// Starts true, so a session Emacs never reports on — a test, a buffer driven from
     /// Lisp — keeps the eager tick it has always had.
     attended: AtomicBool,
+    /// When the eager tick, restored by input, stops being owed to an unattended session;
+    /// see [`INTERACTION_WINDOW`]. `None` until something is sent to the child.
+    ///
+    /// A deadline rather than a flag for the reason every other deadline here is one:
+    /// nothing has to remember to clear it, so a gesture that ends because the user let
+    /// go — which is every gesture — decays on its own rather than leaving the session
+    /// eager until the next thing happens to touch it.
+    interacted_until: Mutex<Option<std::time::Instant>>,
     interrupt: Interrupt,
     exited: Mutex<Option<i32>>,
 }
@@ -669,6 +702,7 @@ impl Session {
             backlog_limit: AtomicUsize::new(options.backlog_limit),
             shutdown: AtomicBool::new(false),
             attended: AtomicBool::new(true),
+            interacted_until: Mutex::new(None),
             interrupt: Interrupt::new()?,
             exited: Mutex::new(None),
         });
@@ -752,7 +786,10 @@ impl Session {
         }
     }
 
+    /// Write BYTES to the child, and count that as the user interacting with this
+    /// session; see [`Shared::interacted`].
     pub(crate) fn send(&self, bytes: &[u8]) -> Result<()> {
+        self.shared.interacted();
         self.shared.pty.write(bytes)
     }
 
@@ -890,6 +927,13 @@ impl Session {
     /// change and there is nobody to tell. Emacs decides what "looking" means — its
     /// `cooked--attention` already answers that for the render freeze — and this only
     /// spends the answer.
+    ///
+    /// It is not the only thing that sets the tick, and deliberately not: [`Shared::interacted`]
+    /// restores the eager one for [`INTERACTION_WINDOW`] whenever anything is sent to the
+    /// child, so being unattended is a *resting* state rather than one the user can be
+    /// stuck in while scrolling an unselected window. Nothing here has to know about that
+    /// — the two are read together in [`Shared::base_poll_wait`] and neither clears the
+    /// other.
     ///
     /// Regaining attention raises the interrupt rather than waiting for the long poll
     /// already in progress to expire. Without that, coming back to a buffer would leave
@@ -1059,11 +1103,50 @@ impl Shared {
     }
 
     /// How long a quiet tick lasts, which is the whole of what attention changes.
+    ///
+    /// Two ways to earn the eager tick and they are deliberately different questions:
+    /// attention is Emacs saying the buffer is under the user's eyes, and
+    /// [`INTERACTION_WINDOW`] is this session saying it was being used regardless — which
+    /// a terminal scrolled in an unselected window is, and which attention alone answers
+    /// no for.
     fn base_poll_wait(&self) -> std::time::Duration {
-        if self.attended.load(Ordering::Relaxed) {
+        if self.attended.load(Ordering::Relaxed) || self.interacting() {
             std::time::Duration::from_millis(u64::from(POLL_TIMEOUT_MS))
         } else {
             UNATTENDED_POLL_TIMEOUT
+        }
+    }
+
+    /// Whether input has been sent recently enough to owe this session the eager tick.
+    fn interacting(&self) -> bool {
+        remaining(*self.interacted_until.held()).is_some()
+    }
+
+    /// Note that the user just did something to this session, whoever is looking at it.
+    ///
+    /// Called from the one place every byte bound for the child passes through, so no
+    /// caller has to remember it and no future input path can forget it — the same reason
+    /// [`Notifier::flush`] holds the throttle rule rather than each of its callers. The
+    /// automatic writes go through it too (a device-status reply, a focus notification):
+    /// they are rarer than keystrokes by orders of magnitude, and a session whose child
+    /// is asking questions is one worth ticking eagerly anyway.
+    ///
+    /// Raises the interrupt only on the edge into the window, and only while unattended.
+    /// That is where the whole value is: the reader is asleep on a timeout it computed
+    /// before any of this happened, so without the interrupt the first notch of a gesture
+    /// buys a fast tick that starts up to a second late — and every notch after it would
+    /// raise an interrupt the reader has no use for, the tick it would ask for being the
+    /// one already running.
+    fn interacted(&self) {
+        if self.attended.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut until = self.interacted_until.held();
+        let was_interacting = remaining(*until).is_some();
+        *until = Some(std::time::Instant::now() + INTERACTION_WINDOW);
+        drop(until);
+        if !was_interacting {
+            self.interrupt.raise();
         }
     }
 
@@ -1884,10 +1967,17 @@ mod tests {
     /// would otherwise send the byte itself well inside the patience below, which is the
     /// graceful degradation a caller that never re-arms relies on and exactly what must
     /// not be mistaken for the re-arm here. The second write is driven by input rather
-    /// than by a sleep so it cannot land before the first wakeup has been read, and the
-    /// wait after it is past [`RESAMPLE_DELAY`] so no armed resample is left to bring a
-    /// tick forward. Nothing can escape onto the pipe during it: every path to the wake
-    /// descriptor is gated on `notified`, which only the drain below clears.
+    /// than by a sleep so it cannot land before the first wakeup has been read.
+    ///
+    /// The wait after that input is what buys the long tick back, and is the one part of
+    /// this that is arithmetic rather than protocol: input restores the eager tick for
+    /// [`INTERACTION_WINDOW`] (see [`Shared::interacted`]), so the drain has to happen
+    /// after that has expired *and* after the reader has computed a fresh timeout past
+    /// it, or the 100ms tick lands inside the patience below and is read as the drain
+    /// having flushed. Past [`RESAMPLE_DELAY`] by construction, so no armed resample is
+    /// left to bring a tick forward either. Nothing can escape onto the pipe during the
+    /// wait: every path to the wake descriptor is gated on `notified`, which only the
+    /// drain below clears.
     #[test]
     fn a_drain_earns_no_second_wakeup_until_ready_says_the_frame_is_drawn() {
         let (session, read) = session_with(
@@ -1905,7 +1995,9 @@ mod tests {
         );
 
         session.send(b"\n").expect("release the second write");
-        std::thread::sleep(RESAMPLE_DELAY * 2);
+        // The window itself, plus a couple of eager ticks' slack for the reader to have
+        // settled back onto the long one.
+        std::thread::sleep(INTERACTION_WINDOW + Duration::from_millis(250));
         session.drain();
         assert!(
             !woke_within(&read, Duration::from_millis(200)),
@@ -1977,6 +2069,80 @@ mod tests {
             "took {elapsed:?} to notice the mode after attention returned; expected the \
              interrupt to wake the reader, not the rest of a 1s unattended tick"
         );
+    }
+
+    /// Input restores the eager tick to a session nobody is looking at, and does it
+    /// without waiting out the long poll already in progress.
+    ///
+    /// The gesture this is written for is a wheel notch over an unselected terminal:
+    /// `cooked-mouse-event` forwards it to the child without selecting the window, so the
+    /// session is being used and unattended at the same time, and everything the stretch
+    /// was allowed to make stale is what the next notch depends on. Same shape as
+    /// `regaining_attention_interrupts_the_long_poll`, and the same 250ms of settling
+    /// first so a pass cannot be the unattended tick expiring on its own — but nothing
+    /// here tells the session anyone is looking, because in the case it stands in for,
+    /// nobody is.
+    #[test]
+    fn input_restores_the_eager_tick_to_an_unattended_session() {
+        // Raw first so the write below cannot be echoed: the mode change has to be
+        // noticed by the tick under test rather than announced by output the child made
+        // out of the very byte that is supposed to have bought the tick.
+        let (session, _read) = session(&["/bin/sh", "-c", "stty raw -echo; sleep 5"]);
+        session.set_attended(false);
+        std::thread::sleep(Duration::from_millis(250));
+        let start = Instant::now();
+        session.send(b"j").expect("send");
+        let update = wait_for(&session, |u| u.mode == Mode::Raw);
+        assert_eq!(update.mode, Mode::Raw);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "took {elapsed:?} to notice the mode after input; expected the interaction \
+             window to raise the interrupt, not the rest of a 1s unattended tick"
+        );
+    }
+
+    /// The window is a window: an unattended session that stops being used goes back to
+    /// the long tick on its own, with nothing to un-tell it.
+    ///
+    /// White-box on `base_poll_wait` rather than timed, because what is being asserted is
+    /// the decay itself and a timing test for it could only be a sleep watching a tick
+    /// that has nothing to do — slow, and green either way on a loaded machine.
+    #[test]
+    fn the_interaction_window_decays_back_to_the_long_tick() {
+        let (session, _read) = session(&["/bin/sh", "-c", "sleep 5"]);
+        session.set_attended(false);
+        assert_eq!(
+            session.shared.base_poll_wait(),
+            UNATTENDED_POLL_TIMEOUT,
+            "an unattended session nobody has touched must rest on the long tick"
+        );
+
+        session.send(b"j").expect("send");
+        assert_eq!(
+            session.shared.base_poll_wait(),
+            Duration::from_millis(u64::from(POLL_TIMEOUT_MS)),
+            "input must buy the eager tick back"
+        );
+
+        std::thread::sleep(INTERACTION_WINDOW + Duration::from_millis(50));
+        assert_eq!(
+            session.shared.base_poll_wait(),
+            UNATTENDED_POLL_TIMEOUT,
+            "the window must expire on its own once the gesture is over"
+        );
+    }
+
+    /// Interaction buys the ordinary tick back and never a faster one. There is no
+    /// faster one: what paces a session is `min_redisplay_interval` and Emacs' readiness,
+    /// and a burst that outran `POLL_TIMEOUT_MS` would be a second pace mechanism.
+    #[test]
+    fn interaction_never_ticks_faster_than_an_attended_session() {
+        let (session, _read) = session(&["/bin/sh", "-c", "sleep 5"]);
+        let attended = session.shared.base_poll_wait();
+        session.set_attended(false);
+        session.send(b"j").expect("send");
+        assert_eq!(session.shared.base_poll_wait(), attended);
     }
 
     /// Attention changes the tick and nothing else. The pty is read on `POLLIN`, which
@@ -2161,3 +2327,4 @@ mod tests {
         assert!(rendered(&update).contains("12 40"));
     }
 }
+

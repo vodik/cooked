@@ -213,6 +213,12 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// raising a password prompt and swapping a keymap, neither of which is worth
         /// anything to a buffer in no window.
         ///
+        /// The stretch is not the last word on it.  Anything sent to the child restores
+        /// the eager tick for half a second regardless of this, because a terminal in an
+        /// unselected window is still one the user can scroll -- see `INTERACTION_WINDOW'
+        /// in session.rs.  So the slow tick is what an *idle* unwatched session settles
+        /// to, and nothing has to un-tell this to interact with a buffer.
+        ///
         /// Safe to leave alone.  A session that is never told stays on the eager tick,
         /// and no keystroke depends on this either way: `cooked--sample-mode' reads the
         /// tty on the input path, which is the guarantee that a stale mode can never
