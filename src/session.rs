@@ -167,6 +167,28 @@ const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
 /// a hundred of daylight between the two, and this sits in the middle of it.
 const QUIESCENCE: std::time::Duration = std::time::Duration::from_micros(500);
 
+/// The longest a frame may be held for a client that will not stop writing.
+///
+/// [`QUIESCENCE`] waits for the pty to go quiet and [`NotifyState::frame_ceiling`] bounds
+/// that wait for a client that keeps *changing* the screen. Neither covers the client that
+/// keeps writing without changing anything: every read pushes `last_read` forward, and the
+/// ceiling is armed by a second drawable change that never comes, so the hold renews itself
+/// for as long as the noise lasts. Measured: a child that prints one line and then writes
+/// `ESC [ 0 m` flat out is never drawn at all.
+///
+/// That the noise is usually meaningful is the reason the wait exists — `viu` sends a
+/// cursor move, then four megabytes of image, then a newline, and drawing between them
+/// shows a cursor sitting on a picture that has not arrived. So this is a backstop rather
+/// than a rule: long enough that an ordinary transfer finishes inside it, short enough that
+/// nobody watching calls it a freeze.
+///
+/// [`SYNC_TIMEOUT`](crate::emu::term::SYNC_TIMEOUT) exactly, because it is the same promise made
+/// to a different client. A client that speaks DEC mode 2026 may hold the frame for 150ms
+/// and is then drawn regardless; a client that merely keeps writing gets the same 150ms and
+/// the same answer. One number for "how long anything may hold the buffer still", rather
+/// than two that would drift.
+const HOLD_CEILING: std::time::Duration = crate::emu::term::SYNC_TIMEOUT;
+
 /// A snapshot handed to Lisp on each drain.
 pub(crate) struct Update {
     pub delta: Delta,
@@ -267,6 +289,11 @@ struct NotifyState {
     /// [`Self::frame_ceiling`]. `None` while no frame is held, and while the held frame has
     /// only the one change in it.
     ceiling_at: Option<std::time::Instant>,
+    /// When the frame currently being held first became one, for [`HOLD_CEILING`]. `None`
+    /// while nothing is held. Distinct from `ceiling_at`, which is armed by a *second*
+    /// change and is the pace a busy client is drawn at; this is armed by the first and is
+    /// the outer bound on the whole hold, however quiet or noisy the client turns out to be.
+    held_since: Option<std::time::Instant>,
 }
 
 impl NotifyState {
@@ -283,13 +310,18 @@ impl NotifyState {
     /// and [`Self::frame_ceiling`] since the frame's second change. `last_read` unset — which
     /// [`Notifier::announce`] arranges — means there is nothing to wait for at all.
     fn hold(&self, quiescence: std::time::Duration) -> Option<std::time::Duration> {
-        let quiet = remaining(self.last_read.map(|t| t + quiescence))?;
-        match self.ceiling_at {
-            None => Some(quiet),
-            // `None` here is a ceiling that has *passed*, and so a release rather than an
-            // absent deadline. The two spell the same in `Option` and mean opposite things.
-            Some(at) => remaining(Some(at)).map(|left| quiet.min(left)),
+        let mut wait = remaining(self.last_read.map(|t| t + quiescence))?;
+        // `None` from either deadline below is one that has *passed*, and so a release
+        // rather than an absent deadline. The two spell the same in `Option` and mean
+        // opposite things, which is why each is asked for separately rather than folded
+        // into the `min` with a default.
+        if let Some(at) = self.ceiling_at {
+            wait = wait.min(remaining(Some(at))?);
         }
+        if let Some(since) = self.held_since {
+            wait = wait.min(remaining(Some(since + HOLD_CEILING))?);
+        }
+        Some(wait)
     }
 }
 
@@ -303,6 +335,7 @@ impl Notifier {
                 min_interval: options.min_redisplay_interval,
                 frame_ceiling: options.frame_ceiling,
                 last: None,
+            held_since: None,
                 sync_until: None,
                 last_read: None,
                 ceiling_at: None,
@@ -355,6 +388,7 @@ impl Notifier {
         let mut state = self.state.held();
         state.last_read = None;
         state.ceiling_at = None;
+        state.held_since = None;
         drop(state);
         self.flush()
     }
@@ -371,9 +405,17 @@ impl Notifier {
         let now = std::time::Instant::now();
         let mut state = self.state.held();
         state.last_read = Some(now);
-        if drawable && self.dirty.swap(true, Ordering::SeqCst) {
-            let ceiling = state.frame_ceiling;
-            state.ceiling_at.get_or_insert(now + ceiling);
+        if drawable {
+            if self.dirty.swap(true, Ordering::SeqCst) {
+                let ceiling = state.frame_ceiling;
+                state.ceiling_at.get_or_insert(now + ceiling);
+            } else {
+                // The first change of a frame: what [`HOLD_CEILING`] is measured from, and
+                // the only thing armed here, because one change is not yet evidence that
+                // more are coming -- which is the whole difference between this and
+                // `ceiling_at`.
+                state.held_since = Some(now);
+            }
         }
     }
 
@@ -400,6 +442,7 @@ impl Notifier {
         }
         state.last = Some(std::time::Instant::now());
         state.ceiling_at = None;
+        state.held_since = None;
         drop(state);
         self.dirty.store(false, Ordering::SeqCst);
         self.notify()
@@ -1629,6 +1672,54 @@ mod tests {
         drop(session);
     }
 
+    /// Noise is not a reason to hold a frame forever.
+    ///
+    /// [`QUIESCENCE`] waits for the pty to go quiet, and every read refreshes that wait —
+    /// including the reads that change nothing, which is deliberate: `viu` sends a cursor
+    /// move, then megabytes of image, then a newline, and the picture is what the wait is
+    /// for. [`NotifyState::frame_ceiling`] bounds the wait for a client that keeps
+    /// *changing* the screen, but it is armed by a second drawable change, so a client
+    /// whose noise is never drawable arms nothing and renews the hold on every read.
+    ///
+    /// Measured against a child that prints one line and then writes `ESC [ 0 m` flat out
+    /// — SGR is not part of `Pending`, so every read after the first changes nothing:
+    /// zero wakeups in two seconds, against one immediately for the same child falling
+    /// silent instead. Driven through the notifier here rather than through that child,
+    /// for the reason `a_renewed_sync_marker_cannot_push_a_held_frame_past_its_cap` is:
+    /// whether the line and the noise land in the same read is the reader's chunking, and
+    /// a test that samples it passes for the wrong reason as often as not.
+    #[test]
+    fn noise_from_a_client_cannot_hold_a_drawn_frame_back() {
+        let (read, write) = pipe();
+        let notifier = Notifier::new(write, &Options::default());
+        // One drawable change -- the frame -- and then nothing but reads.
+        notifier.fed(true);
+        let start = Instant::now();
+        let mut held_for = None;
+        while start.elapsed() < HOLD_CEILING * 2 {
+            notifier.fed(false);
+            notifier.flush();
+            if woke_within(&read, Duration::ZERO) {
+                held_for = Some(start.elapsed());
+                break;
+            }
+            // Closer together than `QUIESCENCE`, which is what makes the pty never quiet.
+            std::thread::sleep(QUIESCENCE / 2);
+        }
+        let held_for = held_for.unwrap_or_else(|| {
+            panic!(
+                "a client writing nothing drawable held its one drawn frame for the whole \
+                 of {:?}; the hold must be bounded from the frame's first change, not \
+                 from the last read",
+                start.elapsed()
+            )
+        });
+        assert!(
+            held_for < HOLD_CEILING + Duration::from_millis(50),
+            "the frame was held {held_for:?}, past the {HOLD_CEILING:?} backstop"
+        );
+    }
+
     /// A client that never stops starting frames must still be drawn.
     ///
     /// The bug this pins: [`SYNC_TIMEOUT`] is armed by the emulator at every BSU, so a
@@ -2327,4 +2418,5 @@ mod tests {
         assert!(rendered(&update).contains("12 40"));
     }
 }
+
 
