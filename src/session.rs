@@ -229,7 +229,8 @@ struct NotifyState {
     last: Option<std::time::Instant>,
     /// While set and unexpired, the child is mid-frame under DEC mode 2026 and has asked
     /// not to be drawn yet. Refreshed from `Term` under the lock the reader already holds,
-    /// so no path takes an extra one.
+    /// so no path takes an extra one — and never *extended* while the frame it is holding
+    /// is still undrawn; see [`Notifier::set_sync`].
     sync_until: Option<std::time::Instant>,
     /// When the child last wrote anything at all, drawable or not; see [`Self::hold`].
     ///
@@ -409,8 +410,39 @@ impl Notifier {
     }
 
     /// Copy the emulator's synchronized-output deadline where the notify path can see it.
+    ///
+    /// Adopted only when no frame is being held by an earlier one, which is the whole of
+    /// what stops a client from holding the buffer still indefinitely. [`SYNC_TIMEOUT`]
+    /// is armed by the emulator at every BSU, so taking the newest deadline each time
+    /// makes the cap a per-marker one: a client that begins its next frame before the
+    /// reader has drawn the last — which is every client repainting flat out, and is
+    /// exactly what a full-screen program under a stream of wheel notches does — pushes
+    /// the deadline out by another 150ms on every read, and the frame is never drawn at
+    /// all. Measured on a child repainting with no gap between frames: 21 wakeups in
+    /// three seconds against 152 for the same child without the markers, and stalls of
+    /// several seconds in a real session.
+    ///
+    /// So the first deadline of a held frame is the one that counts, and a later BSU can
+    /// only leave it where it is. `None` still clears it on the spot, because that is ESU
+    /// — the client saying the frame is finished, which is the one thing that should be
+    /// able to shorten the hold. Once a flush clears `dirty` the next BSU is starting a
+    /// frame nobody is waiting on, and is adopted as usual.
+    ///
+    /// The same shape as [`NotifyState::frame_ceiling`], and for the same reason: a hold
+    /// that the child can renew is not a hold with a timeout, it is a hold. Both are
+    /// bounded from the moment the frame started being held rather than from the last
+    /// thing the child said.
     fn set_sync(&self, deadline: Option<std::time::Instant>) {
-        self.state.held().sync_until = deadline;
+        let mut state = self.state.held();
+        match deadline {
+            None => state.sync_until = None,
+            Some(deadline) => {
+                let held = self.dirty.load(Ordering::SeqCst) && state.sync_until.is_some();
+                if !held {
+                    state.sync_until = Some(deadline);
+                }
+            }
+        }
     }
 
     /// How long the reader thread may sleep in `poll`.
@@ -1512,6 +1544,58 @@ mod tests {
             "the held frame must be drawn once the cap expires"
         );
         drop(session);
+    }
+
+    /// A client that never stops starting frames must still be drawn.
+    ///
+    /// The bug this pins: [`SYNC_TIMEOUT`] is armed by the emulator at every BSU, so a
+    /// client that begins its next frame before the reader has drawn the last renews the
+    /// hold on every read, and the buffer stops updating for as long as it keeps that up.
+    /// Not a hypothetical shape — it is what a full-screen program repainting under a
+    /// stream of wheel notches does, and it was measured in a real session as stalls of
+    /// several seconds with the child scrolling throughout. Against the same child
+    /// without the markers, where [`NotifyState::frame_ceiling`] is the cap, the
+    /// difference was 21 wakeups in three seconds against 152.
+    ///
+    /// Driven through the notifier in the read loop's own order — feed, copy the
+    /// emulator's deadline, flush — rather than through a child, because whether a real
+    /// child reproduces it depends on where its writes fall relative to the reader's
+    /// chunks: the same script stalls for 300ms on this machine and for seconds in a
+    /// session, and a test that samples that alignment asserts nothing in particular.
+    /// What is being asserted is the invariant underneath: a marker renewed on every read
+    /// may not move the deadline the first one set.
+    #[test]
+    fn a_renewed_sync_marker_cannot_push_a_held_frame_past_its_cap() {
+        let (read, write) = pipe();
+        let notifier = Notifier::new(write, &Options::default());
+        let start = Instant::now();
+        let mut held_for = None;
+        // Twice the cap: long enough that a deadline being renewed never expires inside
+        // it, short enough to fail quickly when one is.
+        while start.elapsed() < emu::term::SYNC_TIMEOUT * 2 {
+            // A read that is drawable, is inside a frame, and begins another one.
+            notifier.fed(true);
+            notifier.set_sync(Some(Instant::now() + emu::term::SYNC_TIMEOUT));
+            notifier.flush();
+            if woke_within(&read, Duration::ZERO) {
+                held_for = Some(start.elapsed());
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let held_for = held_for.unwrap_or_else(|| {
+            panic!(
+                "a client that kept beginning frames held the buffer for the whole of \
+                 {:?} and was never drawn",
+                start.elapsed()
+            )
+        });
+        assert!(
+            held_for < emu::term::SYNC_TIMEOUT + Duration::from_millis(50),
+            "the frame was held {held_for:?}, past the {:?} cap its first marker set; a \
+             later marker must leave that deadline where it is",
+            emu::term::SYNC_TIMEOUT
+        );
     }
 
     #[test]

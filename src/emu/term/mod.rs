@@ -338,6 +338,12 @@ impl Pending {
 /// to freeze the buffer. A child killed mid-frame never sends the end marker, so without
 /// a cap the last thing the user sees is a partial screen. xterm and contour use 150ms,
 /// kitty 100; the longer of the two is the safer choice on a loaded machine.
+///
+/// Armed here at every BSU, which makes this a cap on one marker rather than on the frame
+/// a marker is holding. `Notifier::set_sync` is where the difference is settled: a client
+/// that begins its next frame before the last was drawn cannot push the deadline out
+/// again, so this stays the longest the buffer can be held still no matter how the
+/// markers arrive.
 pub(crate) const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Backlog at which the reader stops pulling from the pty, letting the child block.
