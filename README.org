@@ -71,7 +71,7 @@ for the full comparison against comint.
 
 ** Eat
 
-Eat is the most portable of the three: pure Emacs Lisp, nothing to compile, and it works
+Eat is the most portable of the four: pure Emacs Lisp, nothing to compile, and it works
 wherever Emacs does. It's also a rectangle of characters like any other terminal, with no
 idea where one command ends and the next begins, and it runs on Emacs' own thread, so
 heavy output competes with redisplay. If portability matters more than throughput, or you
@@ -86,6 +86,15 @@ prompt regexps and directory tracking are all guesses at structure the terminal 
 told — and getting an editable line back means leaving the terminal for a separate,
 read-only mode. If you need raw throughput and don't need cooked's structure, vterm is
 mature and fast.
+
+** Ghostel
+
+Ghostel embeds libghostty — the same engine behind the Ghostty app — and it's the fastest
+of the four on raw throughput. Like eat and vterm, its terminal is a rectangle of
+characters with no idea where a command starts or ends; what it calls "comint support" is
+a minor mode that drops libghostty's colour handling into somebody else's =shell-mode=
+buffer, not a comint-derived terminal. If a native rendering engine is what you're after
+and you don't need cooked's structure, ghostel is newer and worth a look.
 
 ** cooked
 
