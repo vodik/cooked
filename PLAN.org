@@ -95,12 +95,12 @@ Benchmarking and fuzzing first: both are cheap, both are informative before any
 code changes, and one of them can *delete* work. Nothing here is gated on
 anything else, so these can run in parallel.
 
-** WIP [#A] =make bench= must byte-compile
+** REVIEW [#A] =make bench= must byte-compile
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §9 D — found by auditing the UNSTABLE rule, not by the report
 :GAIN:     every number already recorded in Waves 0 and 1 is re-taken and some change by 3x
-:BRANCH:   cooked/bench-compile
+:BRANCH:   a681ce2
 :END:
 *Every published bench number in this file was measured on interpreted Lisp that
 no user ever runs.* =BATCH= is =emacs -Q --batch -L lisp -L tests=, the =bench=
@@ -132,6 +132,39 @@ Done when: the bench target compiles first — with a step of its own, *not* the
 =compile= gate, which deletes its own =.elc= — and every figure recorded in
 Waves 0 and 1 has been re-taken. Leave =lisp-test= interpreted: a readable
 backtrace is worth more there than speed.
+
+*** Landed, and the numbers re-taken
+
+The =.elc= are removed again from a =trap= — on failure and on interrupt too, so
+a stale one cannot follow you into the next test run, which is the hazard the
+=compile= gate's own =rm= exists to avoid in the other direction.
+
+Re-taken on a quiet machine (load 0.86, no case flagged UNSTABLE), p50 in ms:
+
+| case                        | as recorded | now   |
+|-----------------------------+-------------+-------|
+| per-frame plain             |       0.150 | 0.019 |
+| per-frame styled            |       0.575 | 0.144 |
+| per-frame box drawing       |       0.512 | 0.255 |
+| per-frame URL per row       |       0.152 | 0.020 |
+| URL scan, 1 draw per 1      |       0.618 | 0.365 |
+| URL scan off (the floor)    |       0.169 | 0.029 |
+| box drawing, 1 draw per 1   |       0.685 | 0.356 |
+| rescale-deco, 944 rows      |       2.781 | 0.843 |
+| flood, 20k plain            |       4.472 | 3.241 |
+
+*This is not a clean compiled-vs-interpreted comparison and must not be quoted
+as one.* Coalescing (de55e35) and the run-wide image slice (94b43e6) landed in
+between, so the column mixes three changes. What it does establish is the thing
+that matters: *every figure recorded in Waves 0 and 1 was taken on Lisp nobody
+runs, and the true cost of a frame is several times smaller than any of them.*
+The isolated compiled-vs-interpreted figures are in the audit's own drawer.
+
+Two consequences worth carrying forward. *No case flagged UNSTABLE on a quiet
+machine* — the GC-aware rule plus compilation between them have taken the false
+positives to zero, where the literal §9 D rule fired on 8 of 18. And the
+per-frame floor is now ~19 µs, which is small enough that the remaining Wave 2
+items should be judged on the redisplay-driven rows rather than on =apply=.
 
 ** REVIEW [#A] Measure the scroll ceiling with rejoining off
 :PROPERTIES:
