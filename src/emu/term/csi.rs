@@ -220,55 +220,13 @@ impl State {
         }
     }
 
+    /// `CSI Ps m`, decoded by the one decoder both performers share.
+    ///
+    /// The arm itself is [`sgr::apply`](crate::emu::sgr::apply): the grid is not the only
+    /// thing in this crate that keeps a pen, and a second copy of this table is a
+    /// divergence waiting to be discovered by a user rather than by a test.
     pub(super) fn sgr(&mut self, params: &Params) {
-        if params.is_empty() {
-            self.pen = Style::default();
-            self.underline = Color::Default;
-            return;
-        }
-        let mut iter = params.iter();
-        while let Some(param) = iter.next() {
-            let Some(&code) = param.first() else { continue };
-            match code {
-                0 => {
-                    self.pen = Style::default();
-                    self.underline = Color::Default;
-                }
-                1 => self.pen.attrs |= Attrs::BOLD,
-                2 => self.pen.attrs |= Attrs::FAINT,
-                3 => self.pen.attrs |= Attrs::ITALIC,
-                // `SGR 4` is single; `4:0`-`4:5` name a style. Only the first
-                // subparameter is read, which is all the protocol defines.
-                4 => match param.get(1) {
-                    None => self.pen.attrs.set_underline_style(1),
-                    Some(&style) => self.pen.attrs.set_underline_style(style.min(5) as u8),
-                },
-                5 | 6 => self.pen.attrs |= Attrs::BLINK,
-                7 => self.pen.attrs |= Attrs::REVERSE,
-                8 => self.pen.attrs |= Attrs::CONCEAL,
-                9 => self.pen.attrs |= Attrs::STRIKE,
-                21 | 22 => self.pen.attrs.remove(Attrs::BOLD | Attrs::FAINT),
-                23 => self.pen.attrs.remove(Attrs::ITALIC),
-                24 => self.pen.attrs.set_underline_style(0),
-                25 => self.pen.attrs.remove(Attrs::BLINK),
-                27 => self.pen.attrs.remove(Attrs::REVERSE),
-                28 => self.pen.attrs.remove(Attrs::CONCEAL),
-                29 => self.pen.attrs.remove(Attrs::STRIKE),
-                30..=37 => self.pen.fg = Color::Indexed((code - 30) as u8),
-                38 => self.pen.fg = extended(param, &mut iter).unwrap_or(self.pen.fg),
-                39 => self.pen.fg = Color::Default,
-                40..=47 => self.pen.bg = Color::Indexed((code - 40) as u8),
-                48 => self.pen.bg = extended(param, &mut iter).unwrap_or(self.pen.bg),
-                49 => self.pen.bg = Color::Default,
-                // `SGR 58`/`59`: the underline's own colour, parsed by the same
-                // `extended` as 38 and 48, so `58:2::r:g:b` and `58:5:n` come free.
-                58 => self.underline = extended(param, &mut iter).unwrap_or(self.underline),
-                59 => self.underline = Color::Default,
-                90..=97 => self.pen.fg = Color::Indexed((code - 90 + 8) as u8),
-                100..=107 => self.pen.bg = Color::Indexed((code - 100 + 8) as u8),
-                _ => {}
-            }
-        }
+        crate::emu::sgr::apply(params, &mut self.pen, &mut self.underline);
     }
 
     /// Dispatch one `CSI` sequence.

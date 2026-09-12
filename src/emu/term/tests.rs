@@ -1,6 +1,9 @@
 //! The VT front end, end to end.
 
 use super::*;
+// Not in the parent's imports: the SGR arm that used to set these bits moved to
+// `emu::sgr`, so nothing outside these tests names the type any more.
+use crate::emu::cell::Attrs;
 
 /// An RGBA buffer encoded the way the emulator would encode it.
 fn rgba_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {

@@ -3,7 +3,7 @@
 //! Scrollback deliberately lives in the Emacs buffer, not here. Rows that fall off the
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
-use super::cell::{Attrs, Color, Deco, Extra, MarkId, Row, Run, Style};
+use super::cell::{Color, Deco, Extra, MarkId, Row, Run, Style};
 use super::image::{
     CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, Interned, PixelSize,
 };
@@ -995,27 +995,6 @@ struct State {
     evicted_marks: Vec<(MarkId, Anchor)>,
     /// Everything DECSTR and RIS put back; see [`Modes`].
     modes: Modes,
-}
-
-/// `38;5;n` / `38;2;r;g;b` and their colon-subparameter spellings.
-fn extended(param: &[u16], iter: &mut super::parser::ParamsIter<'_>) -> Option<Color> {
-    let mut subs = param[1..].iter().copied();
-    let mut next = || {
-        subs.next()
-            .or_else(|| iter.next().and_then(|p| p.first().copied()))
-    };
-    match next()? {
-        5 => Some(Color::Indexed(next()? as u8)),
-        // The colon form permits an empty color-space id: 38:2::R:G:B
-        2 => {
-            let (a, b, c) = (next()?, next()?, next()?);
-            match (param.len() >= 6, next()) {
-                (true, Some(d)) => Some(Color::Rgb(b as u8, c as u8, d as u8)),
-                _ => Some(Color::Rgb(a as u8, b as u8, c as u8)),
-            }
-        }
-        _ => None,
-    }
 }
 
 /// DEC Special Graphics, for the box-drawing characters TUIs still emit.

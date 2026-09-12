@@ -130,6 +130,7 @@ pub(crate) mod link;
 pub(crate) mod parser;
 pub(crate) mod png;
 pub(crate) mod screen;
+pub(crate) mod sgr;
 pub(crate) mod sixel;
 pub(crate) mod term;
 pub(crate) mod text;
