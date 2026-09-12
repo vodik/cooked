@@ -880,6 +880,16 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
             env.cons(env.into_lisp(run[0].0)?, block.into_lisp(&env)?)
         })
         .collect::<Result<Vec<_>>>()?;
+    // `(TOP BOTTOM COUNT UP)` per move, in the order they happened; see [`Shift`]. A list
+    // per move rather than a packed record because there is at most a handful of them in
+    // a drain and usually none: the packing idiom earns its keep at one record per
+    // character, not at one per scroll region per frame.
+    let shifts = update
+        .delta
+        .shifts
+        .iter()
+        .map(|s| list!(env, [s.top, s.bottom, s.count, s.up]))
+        .collect::<Result<Vec<_>>>()?;
     let cursor = list!(
         env,
         [
@@ -911,6 +921,7 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
 
     plist!(env, {
         ":scrolled"   => scrolled,
+        ":shifts"     => shifts,
         ":rows"       => rows,
         ":height"     => update.delta.height,
         ":used"       => update.delta.used,

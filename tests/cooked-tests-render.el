@@ -898,6 +898,110 @@ pick up newlines nobody typed, and a wider window re-wraps it for free."
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
 
+;;; The ordinary scroll, expressed as a scroll
+;;
+;; A scroll used to damage every row of the region, because after the emulator rotates
+;; its rows every index does hold different text.  It now reports the move as a
+;; `:shifts' entry and damages only the rows it recycled, and `cooked--apply-shifts'
+;; moves the buffer text to match.  The three tests below are the three things that has
+;; to be true of: the text ends up right, and the two kinds of thing anchored *in* that
+;; text survive.  The marker and the overlay are the point of the change rather than a
+;; side effect of it -- a rewritten row loses both, which is why a prompt marker used to
+;; walk away from its prompt on every line of output.
+
+(defmacro cooked-tests--with-scrolling-screen (script &rest body)
+  "Run BODY over a six-row screen driven by SCRIPT, a `sh -c' string.
+
+Six rows and six lines, the last written without a newline, so the grid is
+exactly full and the cursor sits at the end of the bottom row: the very next
+line feed is an ordinary scroll and nothing else.  SCRIPT is appended to that
+setup and is where a test does the thing it is measuring."
+  (declare (indent 1))
+  `(let ((buffer (generate-new-buffer "*cooked-scroll*")))
+     (unwind-protect
+         (with-current-buffer buffer
+           (cooked-mode)
+           (setq cooked--rows 6 cooked--cols 20 cooked--last-size '(6 . 20))
+           (cooked--start
+            (list "/bin/sh" "-c"
+                  (concat "printf 'l0\\nl1\\nl2\\nl3\\nl4\\nl5'; sleep 0.4; "
+                          ,script "; sleep 5")))
+           (cooked--refresh-keymap)
+           (should (cooked-tests--settle
+                    (lambda () (string-match-p "l5" (cooked-tests--text)))))
+           ,@body)
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer))))
+
+(defun cooked-tests--row-marker (text)
+  "A marker at the start of the screen row reading TEXT."
+  (save-excursion
+    (goto-char (point-min))
+    (should (search-forward text nil t))
+    (copy-marker (match-beginning 0))))
+
+(ert-deftest cooked-a-scroll-carries-a-marker-in-the-viewport-with-it ()
+  "The whole reason for expressing a scroll as a scroll.
+
+A marker two rows up from the bottom is a prompt marker, a command's start, a
+`next-error' position or a user's own; before this it was destroyed by every
+line of output the child printed, because the row it sat in was deleted and
+reinserted for holding text one row further up.  Now the row's text is *moved*,
+so the marker rides with it and still points at the same characters."
+  (cooked-tests--with-scrolling-screen "printf '\\nl6'"
+    (let ((mark (cooked-tests--row-marker "l3")))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "l6" (cooked-tests--text)))))
+      ;; Still pointing at `l3', and at the start of it: a marker dragged to the
+      ;; deletion point would be sitting on whatever row now begins there.
+      (should (equal (buffer-substring-no-properties mark (+ mark 2)) "l3"))
+      (should (save-excursion (goto-char mark) (bolp))))))
+
+(ert-deftest cooked-a-scroll-carries-an-overlay-in-the-viewport-with-it ()
+  "The other half, and the one the report's ghostel hazard is about.
+
+An overlay over a scrolled row is a command decoration, a highlight, a
+`hl-line' -- and `delete-region' collapses one to a point rather than moving
+it, so a whole-region repaint destroys every overlay in the viewport."
+  (cooked-tests--with-scrolling-screen "printf '\\nl6'"
+    (let* ((mark (cooked-tests--row-marker "l3"))
+           (overlay (make-overlay mark (+ mark 2))))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "l6" (cooked-tests--text)))))
+      (should (buffer-live-p (overlay-buffer overlay)))
+      (should (equal (buffer-substring-no-properties (overlay-start overlay)
+                                                     (overlay-end overlay))
+                     "l3")))))
+
+(ert-deftest cooked-a-scroll-leaves-the-buffer-saying-what-the-grid-says ()
+  "Correctness, for the three shapes of move the emulator can report.
+
+Each case ends with `cooked--check-seam' having run over it -- `cooked-debug'
+is bound throughout the suite -- so the assertions here are about the visible
+text rather than about the seam, which is watched on every drain anyway.
+
+The scroll region is the case worth having twice over.  cooked was already
+ahead of ghostel here, whose page-dirty flag turns a three-row status area into
+a whole-viewport repaint, and the rows *outside* the region must not move: that
+is what makes a shift two edits placed by index rather than a rotation."
+  ;; An ordinary scroll: `l0' leaves for scrollback, everything else moves up one.
+  (cooked-tests--with-scrolling-screen "printf '\\nl6'"
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "l6" (cooked-tests--text)))))
+    (should (equal (cooked-tests--text) "l0\nl1\nl2\nl3\nl4\nl5\nl6")))
+  ;; A `DECSTBM' region over rows 2..4 (one-based), scrolled from its bottom. Rows 0
+  ;; and 4..5 of the grid are outside it and must be exactly where they were.
+  (cooked-tests--with-scrolling-screen "printf '\\033[2;4r\\033[4;1H\\nl6'"
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "l6" (cooked-tests--text)))))
+    (should (equal (cooked-tests--text) "l0\nl2\nl3\nl6\nl4\nl5")))
+  ;; `RI' at the top of the screen: the same trade in the other direction, which a
+  ;; pager scrolling backwards does on every keystroke.
+  (cooked-tests--with-scrolling-screen "printf '\\033[1;1H\\033Mtop'"
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "top" (cooked-tests--text)))))
+    (should (equal (cooked-tests--text) "top\nl0\nl1\nl2\nl3\nl4"))))
+
 (ert-deftest cooked-a-line-straddling-the-scrollback-seam-keeps-its-head ()
   "A wrapped row that scrolls off is the start of a line whose rest is still on
 the grid, so it is handed over without a newline and screen row 0 continues it.

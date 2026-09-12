@@ -35,6 +35,38 @@ impl Region {
     }
 }
 
+/// Rows moved wholesale to a different index, so Emacs can move its own text rather than
+/// be handed all of it again.
+///
+/// The scroll is the one operation where "which rows changed" and "how much work Emacs
+/// has to do" come apart. After a `rotate_left` every index in the region genuinely holds
+/// different text, so damage tracking is *right* to report the whole region — and yet the
+/// text itself did not change at all: it moved, and the buffer can move it the same way
+/// with two edits, keeping every marker, overlay and fontification anchored in the rows
+/// that survived. So the region's rows are reported as a shift rather than as damage, and
+/// only the recycled rows at the far end — the ones that really do hold new text — are
+/// damaged.
+///
+/// Applying a shift is what makes the *undamaged* rows correct, so a shift may never be
+/// dropped in favour of nothing. It may always be dropped in favour of damaging every row
+/// it covers, which is what [`Screen::touch_all`] does: a row rewritten whole does not
+/// care where its text used to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shift {
+    /// The scroll region the rows moved within, inclusive at both ends.
+    pub top: usize,
+    pub bottom: usize,
+    /// How far they moved. As reported to Emacs, always at least one and always *less*
+    /// than the region's height: at the height the region turned over completely, every
+    /// row in it is damaged anyway, and a shift would be a whole-region delete and insert
+    /// bought for nothing. See [`Screen::drain_shifts`], which is where such an entry is
+    /// dropped, and [`Screen::shift`] for why it is kept in the log until then.
+    pub count: usize,
+    /// Towards `top` (`IND`, `SU`, `DL`, and the ordinary line feed) rather than towards
+    /// `bottom` (`RI`, `SD`, `IL`).
+    pub up: bool,
+}
+
 /// What a width change does to the rows already on the grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resize {
@@ -177,6 +209,16 @@ pub struct Screen {
     pub region: Region,
     pub saved: Option<Cursor>,
     dirty: Vec<bool>,
+    /// Row moves since the last drain, in the order they happened; see [`Shift`].
+    ///
+    /// A log rather than one accumulated move, because a drain can hold scrolls in two
+    /// different regions — a TUI with a `DECSTBM` status area alternates between the
+    /// region and the whole screen — and the buffer has to replay them in order for the
+    /// rows *outside* each region to end up where they started. Consecutive moves of the
+    /// same rows in the same direction do coalesce, which is the case that matters: a
+    /// flood scrolls once per line, and a thousand-line `cat` must not become a thousand
+    /// pairs of buffer edits.
+    shifts: Vec<Shift>,
     /// How many times a row has been marked damaged; see [`Screen::touches`].
     touches: u64,
     tabs: Vec<bool>,
@@ -247,6 +289,7 @@ impl Screen {
             region: Region::full(rows),
             saved: None,
             dirty: vec![true; rows],
+            shifts: Vec::new(),
             touches: 0,
             tabs: default_tabs(cols),
             carried: 0,
@@ -364,9 +407,12 @@ impl Screen {
     /// are all of them deliberate: [`Screen::touch_all`] (Emacs asked for the screen back
     /// whether or not it changed), the row-shifting operations
     /// ([`Screen::scroll_up`]/[`Screen::scroll_down`]/[`Screen::remove_rows`], which move
-    /// rows rather than write cells, so every row from the top of the region down has new
-    /// text at its own index), [`Screen::clear_rows`] (see [`Row::clear`], which declines
-    /// to answer because the scroll path would pay for the answer and discard it), the
+    /// rows rather than write cells, so a row has new text at its own index without any
+    /// writer having been asked anything — though the two scrolls now damage only the
+    /// rows they *recycled* and report the rest as a [`Shift`], which is the same claim
+    /// made more precisely rather than a weaker one), [`Screen::clear_rows`] (see
+    /// [`Row::clear`], which declines to answer because the scroll path would pay for
+    /// the answer and discard it), the
     /// image and attachment writers, and the combining-mark path. The cursor needs none of this: it rides the [`Delta`](super::term) on every
     /// drain and never depended on its row being damaged.
     ///
@@ -393,10 +439,11 @@ impl Screen {
 
     /// Mark every row in an inclusive range damaged.
     ///
-    /// A slice fill rather than a loop of `dirty.get_mut(i)`: `scroll_up` calls this for
-    /// the whole scroll region on *every* scrolled line, so the per-index bounds check was
-    /// one branch per row per line of output. Clamping once and filling lets this be the
-    /// memset it always was.
+    /// A slice fill rather than a loop of `dirty.get_mut(i)`: `scroll_up` calls this on
+    /// *every* scrolled line, so the per-index bounds check was one branch per row per
+    /// line of output. Clamping once and filling lets this be the memset it always was.
+    /// The range it is called with there is now the recycled rows rather than the whole
+    /// region — see [`Shift`] — which does not change the argument, only its scale.
     fn touch_range(&mut self, range: std::ops::RangeInclusive<usize>) {
         let (first, last) = range.into_inner();
         let end = (last + 1).min(self.dirty.len());
@@ -409,6 +456,71 @@ impl Screen {
     pub fn touch_all(&mut self) {
         self.dirty.fill(true);
         self.touches += 1;
+        // Every row is about to be sent whole, so the buffer text a pending shift would
+        // have moved is about to be overwritten anyway — see [`Shift`] on the one
+        // direction the trade goes. Dropping the log is not merely an optimisation here:
+        // `resize` damages everything precisely because it changed the row count, and a
+        // shift naming a `bottom` the grid no longer has is a shift Lisp cannot apply.
+        self.shifts.clear();
+    }
+
+    /// Row moves since the last drain, taken with the damage they go with.
+    ///
+    /// Ordered, and Lisp must apply them in this order and *before* it renders the
+    /// damaged rows: the damage indices are in post-shift coordinates, because the dirty
+    /// flags travel with their rows through every move (see [`Screen::scroll_up`]).
+    ///
+    /// Saturated entries are dropped here rather than at the moment they saturate; see
+    /// [`Screen::shift`] for why they have to stay in the log until then. A region that
+    /// turned over completely has every row damaged, so moving its text would be work
+    /// spent on lines that are about to be rewritten from the grid regardless.
+    pub fn drain_shifts(&mut self) -> Vec<Shift> {
+        let mut shifts = std::mem::take(&mut self.shifts);
+        shifts.retain(|s| s.count < s.bottom + 1 - s.top);
+        shifts
+    }
+
+    /// Record that `n` rows moved within `top..=bottom`, returning whether it was worth
+    /// recording; see [`Shift`].
+    ///
+    /// Coalescing is by identity of the region and the direction rather than by any
+    /// arithmetic on overlapping ranges, and only against the immediately preceding
+    /// entry. Two moves of the same rows the same way compose into one move of their
+    /// sum — that much is arithmetic — and it is the only composition worth having,
+    /// because it is the only one a flood produces. Anything else stays a separate entry
+    /// and costs Emacs a pair of buffer edits, which is what an interleaved pair of
+    /// scroll regions genuinely costs.
+    ///
+    /// **False once the accumulated move reaches the region's height**, and that is the
+    /// case to get right rather than the elegant one. A `cat` of a thousand lines turns a
+    /// 24-row screen over forty times: every row is recycled, so every row is damaged and
+    /// rewritten anyway, and a shift on top of that would be a whole-region delete and
+    /// insert bought for nothing — the old cost plus the new one. So the caller damages
+    /// the whole region, which is exactly what it did before this change, and
+    /// [`Screen::drain_shifts`] drops the entry on the way out.
+    ///
+    /// The entry is *kept* meanwhile, saturated at the height, rather than removed here.
+    /// Removing it looks tidier and is the version to avoid: the next line feed would find
+    /// no entry to coalesce with, push a fresh one, and climb back to the height — so a
+    /// flood would spend twenty-three scrolls out of every twenty-four with a live entry
+    /// in the log, and hand Emacs a pair of buffer edits per drain for rows it is about to
+    /// rewrite anyway. Saturated and kept, the log holds one entry for the whole flood and
+    /// every subsequent scroll answers false in two comparisons.
+    fn shift(&mut self, top: usize, bottom: usize, n: usize, up: bool) -> bool {
+        let height = bottom + 1 - top;
+        if let Some(last) = self.shifts.last_mut() {
+            if last.top == top && last.bottom == bottom && last.up == up {
+                last.count = (last.count + n).min(height);
+                return last.count < height;
+            }
+        }
+        self.shifts.push(Shift {
+            top,
+            bottom,
+            count: n.min(height),
+            up,
+        });
+        n < height
     }
 
     /// How many times a row has been marked damaged over this screen's life.
@@ -823,10 +935,29 @@ impl Screen {
             Evicted::none()
         };
         self.rows[top..=bottom].rotate_left(n);
+        // The dirty flags rotate with the rows they belong to, which is what lets the
+        // damage this drain reports be read in post-shift coordinates. Without it a row
+        // written before the scroll and moved by it would be reported at the index it
+        // used to have, and Emacs would repaint the wrong line with it.
+        //
+        // Under the old unconditional `touch_range(top..=bottom)` the question could not
+        // arise, every row in the region being damaged either way. It arises now.
+        self.dirty[top..=bottom].rotate_left(n);
         for row in &mut self.rows[bottom + 1 - n..=bottom] {
             row.clear(pen.erase());
         }
-        self.touch_range(top..=bottom);
+        // The whole of this change. The rows above the recycled ones hold text they
+        // already held, at a different index, and Emacs can move buffer text far more
+        // cheaply than it can be handed it again — and moving it is what keeps the
+        // markers, overlays and fontification anchored in those rows alive. Only the
+        // blanks rotated in at the bottom are genuinely new. The `else` is the region
+        // having turned over completely, where there is nothing left to move; see
+        // [`Screen::shift`].
+        if self.shift(top, bottom, n, true) {
+            self.touch_range(bottom + 1 - n..=bottom);
+        } else {
+            self.touch_range(top..=bottom);
+        }
         self.carry(&evicted);
         evicted
     }
@@ -859,6 +990,14 @@ impl Screen {
         if count == 0 {
             return;
         }
+        // No [`Shift`] and no rotation of the dirty flags, unlike the scroll paths, and
+        // both omissions rest on the `touch_range` at the bottom of this function: every
+        // row from `first` down is damaged unconditionally, so a flag left at the index
+        // its row used to have is subsumed rather than lost, and there is no undamaged
+        // row below the cut whose text Emacs would have to move to keep correct. A shift
+        // already logged by a scroll earlier in the same drain stays in the log and is
+        // still right to apply — it moves text that is then repainted from `first` down,
+        // and a shift preserves the region's line count either way.
         self.rows.drain(first..first + count);
         let pen = Style::default();
         self.rows.resize(height, Row::new(self.cols));
@@ -887,10 +1026,16 @@ impl Screen {
             return;
         }
         self.rows[top..=bottom].rotate_right(n);
+        // With the rows, for the reason spelled out in `scroll_up`.
+        self.dirty[top..=bottom].rotate_right(n);
         for row in &mut self.rows[top..top + n] {
             row.clear(pen.erase());
         }
-        self.touch_range(top..=bottom);
+        if self.shift(top, bottom, n, false) {
+            self.touch_range(top..=top + n - 1);
+        } else {
+            self.touch_range(top..=bottom);
+        }
     }
 
     pub fn set_region(&mut self, top: usize, bottom: usize) {
@@ -1189,6 +1334,10 @@ impl Screen {
             .min(rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         self.dirty = vec![true; rows];
+        // Every row is damaged, and the row count has just changed under any pending
+        // shift's indices; see `Screen::touch_all`, which drops the log for the same
+        // two reasons.
+        self.shifts.clear();
         self.reset_region();
         evicted
     }
@@ -1306,6 +1455,10 @@ impl Screen {
             ..cursor
         };
         self.dirty = vec![true; rows];
+        // Every row is damaged, and the row count has just changed under any pending
+        // shift's indices; see `Screen::touch_all`, which drops the log for the same
+        // two reasons.
+        self.shifts.clear();
         self.reset_region();
         Evicted(history)
     }

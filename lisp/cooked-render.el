@@ -535,6 +535,14 @@ and the region shaped before anything measures it."
          ;; anchor against.  nil when the drain evicted nothing.
          (batch-start (when-let* ((scrolled (plist-get update :scrolled)))
                         (cooked--render-scrolled scrolled)))
+         ;; Between the two render passes, and it has to be exactly here.  After the
+         ;; scrollback, because the rows a scroll pushed off the top are inserted above
+         ;; `cooked--screen-start' and the shift's first row is measured from the marker
+         ;; once that insertion has moved it.  Before the damaged rows, because their
+         ;; indices are in post-shift coordinates -- the emulator's dirty flags travel
+         ;; with their rows through every move precisely so that they can be.  See
+         ;; `cooked--apply-shifts'.
+         (_ (cooked--apply-shifts (plist-get update :shifts)))
          (rendered (cooked--render-rows (plist-get update :rows)
                                         (plist-get update :alt))))
     (cooked--apply-levels update)

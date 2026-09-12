@@ -1149,6 +1149,107 @@ because row 0 owns the remainder of the shared one."
       (insert (make-string missing ?\n)))
     missing))
 
+;;;; Moving rows the emulator moved
+;;
+;; A scroll is the one grid operation where "which rows changed" and "how much work
+;; Emacs has to do" come apart.  After the emulator rotates its rows every index in the
+;; region genuinely holds different text, so the damage report is right to name them
+;; all -- and yet the text did not change, it *moved*, and the buffer can move it the
+;; same way for two edits.  What that buys is not mainly the edits: it is that a row
+;; whose text was moved rather than rewritten keeps its markers, its overlays and its
+;; fontification, where a rewritten one loses all three.  A prompt marker, a command
+;; decoration, a linkified URL and a live `next-error' position all used to be destroyed
+;; by every single line of output; now they survive until the row they sit on is
+;; genuinely recycled or scrolls off the top into scrollback, where they are pinned
+;; anyway.
+;;
+;; The emulator reports the moves as `:shifts', and the row indices in `:rows' are in
+;; the coordinates the moves leave behind -- so these run first, before
+;; `cooked--render-rows', and in order.  See `Shift' in src/emu/screen.rs.
+
+(defun cooked--delete-screen-rows (first count)
+  "Delete COUNT screen rows starting at index FIRST.
+
+Nothing is deleted when FIRST is past the end of the screen region, which is
+the ordinary state of a primary screen trimmed to its content: rows that have
+no buffer line yet have no text to move, and the render pass creates them with
+`cooked--goto-screen-row''s EXTEND if it needs them.
+
+The awkward case is a run that reaches the end of the region.  The last screen
+row is deliberately left unterminated -- see `cooked--fit-screen' -- so deleting
+from the start of the first doomed row to `point-max' would leave the row
+*above* it newline-terminated and the region one line longer than it should be.
+Taking the newline that ends that row along with them keeps the last surviving
+row unterminated, which is the shape every other path in this file expects."
+  (let ((start (cooked--screen-start-position)))
+    (when (zerop (cooked--goto-screen-row first))
+      (let ((beg (point)))
+        (if (zerop (cooked--goto-screen-row (+ first count)))
+            (delete-region beg (point))
+          (delete-region (if (and (> beg start) (eq (char-before beg) ?\n))
+                             (1- beg)
+                           beg)
+                         (point-max)))))))
+
+(defun cooked--open-screen-rows (at count)
+  "Insert COUNT blank screen rows before index AT.
+
+Without EXTEND, and deliberately: AT past the end of the region means the rows
+below the move were never in the buffer to begin with, so there is nothing for
+these blanks to hold apart and the render pass will extend to whatever it
+actually writes.  Extending here instead would leave a screenful of empty lines
+under the prompt for `cooked--fit-screen' to take straight back out."
+  (when (zerop (cooked--goto-screen-row at))
+    (insert (make-string count ?\n))))
+
+(defun cooked--apply-shift (top bottom count up)
+  "Move the buffer text for a scroll of COUNT rows within TOP..BOTTOM.
+
+UP means towards TOP: an ordinary line feed, `SU', `DL'.  Nil means towards
+BOTTOM: `RI', `SD', `IL'.
+
+Expressed as one deletion and one insertion rather than as a rotation, because
+that is what makes the surviving rows survive: their text is never touched, so
+every marker and overlay in it rides along and Emacs' own redisplay sees a
+line-count change rather than a screenful of modified text.
+
+Deleting first and inserting second, and each half locating its row afresh: the
+deletion moves every row below it, so the index the blanks belong at is read
+from the buffer as it stands after the delete rather than computed from where
+the rows used to be.  For UP that index is BOTTOM+1-COUNT in the new numbering,
+which is the same line the rows below the region begin at -- so a scroll region
+leaves everything under it exactly where it was, which is the whole point of
+there being a region.
+
+One thing a moved row keeps that it arguably should not: a shade glyph's dither
+phase, which `cooked--box-phase' takes from the cell's pixel origin and so from
+its screen *row*.  A row that moved up by one and is not re-rendered keeps the
+phase it was drawn at, and at an odd cell height that is a one-pixel horizontal
+seam across ░▒▓ cells until something damages the row for its own reasons.  The
+alternative is damaging every row carrying a shade, which is every row of a TUI
+that shades its background, so the seam is accepted -- as it already is on the
+way out to scrollback, which `cooked--render-scrolled' renders with no row index
+at all for the same reason."
+  (save-excursion
+    (if up
+        (progn (cooked--delete-screen-rows top count)
+               (cooked--open-screen-rows (- (1+ bottom) count) count))
+      (cooked--delete-screen-rows (- (1+ bottom) count) count)
+      (cooked--open-screen-rows top count))))
+
+(defun cooked--apply-shifts (shifts)
+  "Apply SHIFTS, the drain's `:shifts', in order.
+
+In order and not merged: two of them in one drain means the child alternated
+between two scroll regions, and replaying them out of order would land the rows
+between the regions in the wrong place.  The core already coalesces the case
+that repeats -- a flood scrolling once per line arrives as one shift, or as
+none at all when the region turned over completely and every row of it is
+damaged anyway."
+  (dolist (shift shifts)
+    (pcase-let ((`(,top ,bottom ,count ,up) shift))
+      (cooked--apply-shift top bottom count up))))
+
 (defun cooked--pad-to-cursor ()
   "Extend the cursor's row so it can hold the cursor column.
 

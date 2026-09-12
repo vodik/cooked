@@ -294,6 +294,11 @@ impl State {
 
     pub(super) fn drain(&mut self) -> Delta {
         let damaged = self.screen_mut().drain_damage();
+        // Taken from the same screen and in the same breath as the damage, because the
+        // two are one answer: the damage indices are in the coordinates the shifts leave
+        // behind. Reading one without the other would hand Lisp rows to repaint at
+        // indices it had not yet moved its text to.
+        let shifts = self.screen_mut().drain_shifts();
         self.shed_unplaced_images();
         let images = std::mem::take(&mut self.pending_images);
         let links = std::mem::take(&mut self.pending_links);
@@ -323,6 +328,7 @@ impl State {
             links,
             scrolled,
             scrolled_base,
+            shifts,
             rows: damaged
                 .into_iter()
                 .filter_map(|i| screen.row(i).map(|r| (i, r.runs())))

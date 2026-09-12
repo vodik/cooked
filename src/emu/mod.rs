@@ -154,4 +154,5 @@ pub(crate) use term::{Anchor, ColorScheme, CursorShape, Event, KeyEncoding, osc_
 // concession — these are already the wire format the Lisp side is written against, so
 // nothing here is more exposed than `cooked--apply' already assumes.
 pub use cell::Run;
+pub use screen::Shift;
 pub use term::{BACKLOG_HIGH_WATER, Delta, Scrolled, Term};

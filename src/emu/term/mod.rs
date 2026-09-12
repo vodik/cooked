@@ -11,7 +11,7 @@ use super::kitty::{Kitty, Outcome, decode_base64};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
 use super::png::png_dimensions;
-use super::screen::{Cursor, Erase, Evicted, Resize, Screen};
+use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
 use super::text::{self, Segmenter, Step};
 use std::collections::{HashSet, VecDeque};
@@ -255,6 +255,16 @@ pub struct Delta {
     /// Absolute index of `scrolled`'s first line, so an [`Anchor`] can be told apart
     /// into "in this batch of scrollback" and "still on the grid".
     pub scrolled_base: usize,
+    /// Rows that *moved* during this drain, in the order they moved; see [`Shift`].
+    ///
+    /// [`Delta::rows`]'s counterpart, and the two are read together: a shift says which
+    /// buffer text to move where, `rows` says which lines to rewrite afterwards, and the
+    /// indices in `rows` are in *post-shift* coordinates. Applying the shifts first is
+    /// therefore not an optimisation but the contract — the dirty flags travelled with
+    /// their rows through each move so that it could be.
+    ///
+    /// Empty on every drain that did not scroll, which is most of them.
+    pub shifts: Vec<Shift>,
     pub rows: Vec<(usize, Vec<Run>)>,
     /// The grid's shape as of this drain, so the buffer never has to hold a second opinion
     /// of it: how tall it is, how many rows of it are occupied ([`Screen::used`]), and how

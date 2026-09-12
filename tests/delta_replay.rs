@@ -35,7 +35,7 @@
 //! decoration and the link id, and a stale face over correct characters is exactly the
 //! class of miss a text-only oracle waves through.
 
-use cooked::emu::{Delta, Run, Scrolled, Term};
+use cooked::emu::{Delta, Run, Scrolled, Shift, Term};
 use proptest::prelude::*;
 
 /// The upper bound on a generated grid, in both directions.
@@ -366,6 +366,15 @@ impl Replay {
     /// the new shape arrives in this same delta.
     fn absorb(&mut self, delta: Delta) {
         self.shadow.resize(delta.height, Vec::new());
+        // Before the rows and after the resize, which is the order `cooked--apply' works
+        // in and the order the contract requires: a scroll reports the rows it *moved*
+        // rather than damaging them, and the damage indices that follow are in the
+        // coordinates the moves leave behind. This is the half of the change the oracle
+        // is actually watching — if `Screen::scroll_up' narrows its damage by one row too
+        // many, the shadow keeps the row the grid recycled and property 1 fails.
+        for shift in delta.shifts {
+            Self::shift(&mut self.shadow, shift);
+        }
         for (index, runs) in delta.rows {
             if let Some(row) = self.shadow.get_mut(index) {
                 *row = runs;
@@ -376,6 +385,45 @@ impl Replay {
                 lines: delta.scrolled,
                 alt: delta.alt,
             });
+        }
+    }
+
+    /// Move a block of shadow rows, as `cooked--apply-shifts' moves the buffer text.
+    ///
+    /// The rows rotated *out* are blanked rather than left holding what they held, which
+    /// is what Emacs does: it deletes those buffer lines and inserts empty ones in their
+    /// place, and only then renders whatever damage the delta reported over the top. A
+    /// recycled row the emulator forgot to damage therefore shows up as an empty shadow
+    /// row against a grid row with text in it, which is precisely the failure worth
+    /// catching — leaving the stale text here would hide it whenever the scroll happened
+    /// to recycle a row that was already blank.
+    ///
+    /// Asserted rather than clamped, which is the difference between an oracle and a
+    /// second implementation quietly agreeing to skip the same case: a move naming a row
+    /// the delta's own height does not have would leave the shadow untouched and every
+    /// comparison after it meaningless. It cannot arise — a resize is the only thing that
+    /// changes the row count, and it clears the log — so say so here.
+    fn shift(shadow: &mut [Vec<Run>], shift: Shift) {
+        assert!(
+            shift.bottom < shadow.len(),
+            "shift past the grid: {shift:?}"
+        );
+        assert!(
+            (1..=shift.bottom + 1 - shift.top).contains(&shift.count),
+            "shift of {} in a region {} tall",
+            shift.count,
+            shift.bottom + 1 - shift.top
+        );
+        let span = &mut shadow[shift.top..=shift.bottom];
+        let recycled = if shift.up {
+            span.rotate_left(shift.count);
+            span.len() - shift.count..span.len()
+        } else {
+            span.rotate_right(shift.count);
+            0..shift.count
+        };
+        for row in &mut span[recycled] {
+            *row = Vec::new();
         }
     }
 
