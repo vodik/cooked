@@ -1989,6 +1989,58 @@ records it is handed."
       (should (equal (next-single-property-change (+ beg 3) 'display)
                      (+ beg 5))))))
 
+(defun cooked-tests--image-update-twice (id cols rows &optional data)
+  "One span holding TWO adjacent placements of ID, each COLS wide.
+
+The case that makes the run-break check load-bearing rather than defensive.  A
+decoration span\='s records cover every character it covers, so a *gap* inside one
+cannot arise -- but two placements of the same picture side by side on one row
+are contiguous characters, and therefore one span, whose column sequence
+*restarts*: 0 1 2 0 1 2.  Every other field agrees across the seam, so the
+column is the only thing that can find it."
+  (let* ((u16 (lambda (n) (list (logand n 255) (logand (ash n -8) 255))))
+         (cell (lambda (c)
+                 (append (list (logand id 255) (logand (ash id -8) 255)
+                               (logand (ash id -16) 255) (logand (ash id -24) 255))
+                         (funcall u16 0) (funcall u16 c)
+                         (funcall u16 cols) (funcall u16 rows))))
+         (packed (apply #'unibyte-string
+                        (append (cl-loop for c below cols append (funcall cell c))
+                                (cl-loop for c below cols append (funcall cell c))))))
+    (list :scrolled nil
+          :rows (list (cons 0 (list (make-string (* 2 cols) ?\s)
+                                    nil
+                                    (list (list 0 (cons 'image packed))))))
+          :images (and data (list (list id 'png data (* cols 10) (* rows 20))))
+          :height 12 :used 1 :head 0
+          :cursor '(0 0 t block) :alt nil)))
+
+(ert-deftest cooked-two-placements-of-one-picture-do-not-merge-into-one-run ()
+  "The run break has to find a column that restarts, not only one that skips.
+
+`cooked-an-image-run-broken-by-text-is-two-runs-at-their-own-columns\=' does not
+reach this, and that is worth saying plainly: text over the middle of a picture
+ends the *span*, so the two fragments arrive as two record arrays and the
+coalescing loop never sees the discontinuity at all.  Two placements side by
+side are one span, one array, and the only field that differs across the seam is
+the column -- which is exactly the comparison this pins.
+
+Merged, the second placement would be sliced as though it were columns 3-5 of
+the first: one six-cell run at `(slice 0 0 60 20)\=', drawing the left half of the
+picture stretched across both copies."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked-tests--cell)
+    (cooked--apply (cooked-tests--image-update-twice 7 3 1 (cooked-tests--png)))
+    (let ((beg (point-min)))
+      ;; Two runs of three, not one of six.
+      (should (equal (next-single-property-change beg 'display) (+ beg 3)))
+      (should (equal (next-single-property-change (+ beg 3) 'display) (+ beg 6)))
+      ;; And each is sliced from the picture's own left edge.
+      (should (equal (car (get-text-property beg 'display)) '(slice 0 0 30 20)))
+      (should (equal (car (get-text-property (+ beg 3) 'display))
+                     '(slice 0 0 30 20))))))
+
 (ert-deftest cooked-image-cells-share-one-decoded-spec ()
   "Every cell slices the same spec, so Emacs decodes the picture once."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
