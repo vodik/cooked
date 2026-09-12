@@ -771,15 +771,47 @@ Hazard from ghostel: their span breaks only on a *clean* row, so page-granularit
 false positives get amplified into one giant reinsert that destroys every marker
 in the viewport. Coalesce runs of *genuinely* damaged rows.
 
-** WIP [#A] Row-range =display= properties for images
+** DONE [#A] Row-range =display= properties for images
 :PROPERTIES:
 :EFFORT:   2d
 :REPORT:   §2 "The mechanism, confirmed"
 :GATE:     Coalesce contiguous damaged rows into one Block — satisfied, de55e35
 :GAIN:     the 20x
-:BRANCH:   cooked/row-range-images
-:AGENT:    yes
+:BRANCH:   94b43e6, 8246229
 :END:
+*A 24x80 frame of picture: 1944 intervals → 48*, one per row plus the newlines
+between them. Both properties had to move: intervals are shared across all text
+properties, so a per-cell =cooked-deco= would have left the tree 1944 long
+however few =display= values sat on it, and the redisplay win would not have
+been there.
+
+The hybrid held. The fallback is not a separate path — it is the same loop with
+a run of one, reached wherever any of four comparisons breaks. Per-cell
+*addressing* survives; per-cell *intervals* were the cost, and =docs/FEATURES.md=
+was conflating the two.
+
+*The run-break comparison was untested, and the test named for it did not reach
+it.* Worth recording because the reasoning generalises: a decoration span's
+records cover every character it covers, so text over the middle of a picture
+ends the *span* — the fragments arrive as two record arrays and the loop never
+sees a discontinuity. A gap inside one array cannot arise. What can is *two
+placements of one picture side by side on a row*: contiguous characters,
+therefore one span, whose column sequence restarts 0 1 2 0 1 2 while every other
+field agrees across the seam. Merged, the second copy is sliced as columns 3–5
+of the first. Caught on merge by deleting the comparison and finding all 605
+tests still green; now pinned by a test that fails when it is.
+
+*Correction to §2*: its wire-format consequence is unnecessary. The 12-byte
+per-character record does *not* need to become a per-row-run record. Coalescing
+in Lisp costs four integer comparisons against values the decode loop has
+already read; the expensive half is entirely Lisp-side, so a second wire shape
+both ends must keep meaning the same thing forever would buy only the decode
+loop.
+
+*Also*: =make bench= has no image fixture at all — every case is box drawing or
+plain text — so it cannot measure this and the flat before/after is
+non-regression rather than evidence. An image case is the natural gate for the
+rest of Wave 2; see the task below.
 Hybrid, not a copy: coalesce runs of contiguous same-image/same-rectangle/
 same-slice-row cells into one interval, fall back to per-cell where the grid
 actually broke the run. Per-cell addressing is what makes text-overwrite,
@@ -788,6 +820,21 @@ scroll-seam and rewrap work for free, and must survive.
 The merge hazard =cooked-adjacent-box-glyphs-do-not-share-a-display-property=
 guards does *not* apply: a spec sized to exactly the range it covers is meant to
 merge.
+
+** NEXT [#B] An image case in the bench suite
+:PROPERTIES:
+:EFFORT:   2h
+:REPORT:   none — found while landing the row-range image work
+:BRANCH:
+:END:
+=cooked-bench.el= has no image fixture: every case is box drawing or plain text.
+So the change that took a frame of picture from 1944 =display= intervals to 48
+could only be shown by counting intervals, and its before/after on the bench was
+flat by construction — non-regression, not evidence.
+
+Wants the same treatment the box fixtures got in 116572d: the six-element block
+shape, and a pinned cell size so =cooked--deco-cell-size= does not answer from a
+1x1 batch window.
 
 ** TODO [#B] Express the ordinary scroll as a scroll
 :PROPERTIES:
