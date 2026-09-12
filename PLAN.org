@@ -371,6 +371,36 @@ Landed with the property test rather than after it:
 =tests/delta_replay.regressions= holds the two genuine shrunk seeds and is
 replayed ahead of the random cases on every run.
 
+** NEXT [#B] A =make= target that checks cited symbol names
+:PROPERTIES:
+:EFFORT:   1h
+:REPORT:   none — found by the stale-prose sweep
+:GAIN:     nine of eleven stale citations caught mechanically, forever
+:BRANCH:
+:END:
+The stale-prose sweep found eleven comments citing a function, variable or test
+that does not exist, and *nine of the eleven were mechanically detectable*: pull
+every =cooked-*= token out of comments and docstrings, diff against every
+=defun= / =defvar= / =defvar-local= / =defcustom= / =defconst= / =cl-defstruct=
+/ =ert-deftest= / =define-*= name plus the symbols =src/lib.rs= registers, and
+report the difference. About fifteen lines of shell.
+
+*The category that recurs is a cited test name.* Everything else in this tree
+that pins a claim gets checked by a build step; =`some-test-name'= in a
+docstring is the one assertion nothing runs — and
+=cooked-adjacent-box-glyphs-share-only-a-run-wide-image= has now been wrong in
+*both* directions inside a month, first cited before it existed and then
+briefly cited after being renamed away.
+
+Watch for false positives before making it a gate: =cl-defstruct= accessors
+(=cooked-viewport-stale-mark=) and =defvar-local= are the two that bit the
+sweep. Advisory like =checkdoc= is a reasonable first form.
+
+Also worth doing while in here: rustdoc reports about twenty "public
+documentation links to private item" warnings, so a genuinely broken intra-doc
+link is invisible in the noise. One of the eleven was a Rust one and rustdoc
+did not flag it.
+
 ** TODO [#C] Test-suite ergonomics
 :PROPERTIES:
 :EFFORT:   4h
