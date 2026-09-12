@@ -1548,7 +1548,9 @@ invalidating it undoes."
                  (lambda (&rest _) (setq measured (1+ measured)) (forward-line 1)))
                 ((symbol-function 'frame-char-width) (lambda (&rest _) width)))
         (let ((probe (lambda ()
-                       (pcase-let ((`(,_ . ,memo)
+                       ;; (FIXED-PITCH WRAPS METRICS) since glyph scaling gave
+                       ;; the cache a third slot; the wrap memo is the second.
+                       (pcase-let ((`(,_ ,memo ,_)
                                     (cooked--wrap-cache (selected-window))))
                          (cooked--row-wraps-p (point-min) (line-end-position)
                                               nil memo)))))
@@ -1595,7 +1597,9 @@ notice."
                   (lambda (frame parameter)
                     (if (eq parameter 'font) font (funcall real frame parameter)))))
         (let ((probe (lambda ()
-                       (pcase-let ((`(,_ . ,memo)
+                       ;; (FIXED-PITCH WRAPS METRICS) since glyph scaling gave
+                       ;; the cache a third slot; the wrap memo is the second.
+                       (pcase-let ((`(,_ ,memo ,_)
                                     (cooked--wrap-cache (selected-window))))
                          (cooked--row-wraps-p (point-min) (line-end-position)
                                               nil memo)))))
@@ -1902,6 +1906,65 @@ genuinely printed nothing."
         (dolist (command cooked--commands)
           (should (> (cooked--command-end-position command) (point-min)))
           (should (<= (cooked--command-end-position command) (max screen (point-max)))))))))
+
+(ert-deftest cooked-glyph-scale-clamps-each-side-not-the-sum ()
+  "The three-way min, which is the detail an implementation skips.
+
+A row realises `max(ascent) + max(descent)\=' across every glyph sharing its
+baseline, so a glyph overflows if *either* side is over and scaling by the ratio
+of the sums can leave one side over the line.
+
+The numbers are this machine\='s, measured in a real frame: default ascent 15,
+descent 5, and a CJK glyph at ascent 18, descent 5, pixel size 15.  The sum
+ratio is 20/23 = 0.869; the ascent ratio is 15/18 = 0.833.  Take the sum and the
+row is still too tall."
+  (let* ((default '(15 5))
+         (cjk '(15 18 5 15))
+         (scale (cooked--glyph-scale cjk 18 default)))
+    (should scale)
+    ;; Strictly below the sum ratio, which is what proves it did not use it.
+    (should (< scale (/ 20.0 23.0)))
+    ;; And no greater than the ascent ratio, which is the binding one.
+    (should (<= scale (/ 15.0 18.0)))))
+
+(ert-deftest cooked-glyph-scale-quantizes-down-to-a-whole-pixel ()
+  "`height\=' scales the font\='s pixel size and Emacs rounds the result, so a
+mathematically exact scale rounds back up and the cell overflows anyway.
+
+Asserted as the property rather than the value: whatever scale comes back, the
+pixel size multiplied by it must already be a whole number, or the flooring did
+not happen."
+  (dolist (case '(((15 18 5 15) 18 (15 5))
+                  ((19 14 4 15) 18 (15 5))
+                  ((30 30 10 15) 9 (15 5))))
+    (pcase-let ((`(,measured ,slot ,default) case))
+      (when-let* ((scale (cooked--glyph-scale measured slot default))
+                  (pixel (nth 3 measured)))
+        (should (= (* pixel scale) (ffloor (* pixel scale))))))))
+
+(ert-deftest cooked-glyph-scale-leaves-a-glyph-that-fits-alone ()
+  "nil, not 1.0: the caller puts no property on at all, and a `display\=' property
+per cell is exactly the cost the run-wide image work went to remove."
+  (let ((default '(15 5)))
+    ;; Exactly its slot in every dimension.
+    (should-not (cooked--glyph-scale '(9 15 5 15) 9 default))
+    ;; Comfortably inside it.
+    (should-not (cooked--glyph-scale '(7 12 3 15) 9 default))
+    ;; A wide glyph inside a two-cell slot.
+    (should-not (cooked--glyph-scale '(15 15 5 15) 18 default))))
+
+(ert-deftest cooked-glyph-scale-catches-a-glyph-that-is-only-too-tall ()
+  "The case the plan this came from could not reach.
+
+Hanging the repair off `cooked--row-wraps-p\=' only ever finds glyphs too
+*wide*.  A glyph whose width fits and whose ascent does not makes the row deeper
+without wrapping it, and the wrap check answers nil -- so this has to be decided
+from the metrics rather than from the symptom."
+  (let ((default '(15 5)))
+    ;; Width fits in an 18px slot; ascent does not.
+    (should (cooked--glyph-scale '(15 18 5 15) 18 default))
+    ;; Width fits; descent does not.
+    (should (cooked--glyph-scale '(9 15 9 15) 9 default))))
 
 (provide 'cooked-tests-render)
 ;;; cooked-tests-render.el ends here

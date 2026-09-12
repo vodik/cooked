@@ -1964,18 +1964,26 @@ as a real answer instead of a blanket assumption."
               '(default (:weight bold) (:weight light) (:slant italic)))))))
 
 (defun cooked--wrap-cache (window)
-  "This buffer's (FIXED-PITCH . TABLE) for WINDOW, rebuilt if the layout moved.
+  "This buffer's (FIXED-PITCH WRAPS METRICS) for WINDOW, rebuilt when it moves.
 
 The whole of `cooked--wrap-cache\=''s invalidation: one comparison against
 `cooked--layout-stamp\=', and a new table and a fresh font probe when it
 differs.  Nothing is invalidated piecemeal, because nothing here outlives the
-font it was measured under."
+font it was measured under.
+
+Three slots rather than two since glyph scaling: WRAPS memoises which rows Emacs
+lays out on one line, METRICS memoises what a cluster actually measures.  They
+share one cache because they are invalidated by exactly the same events and
+because the stamp is the expensive part -- 44us to build, against the ~20us the
+whole guard is trying to get down to -- so a second cache with a second stamp
+would cost more than either table saves."
   (let ((stamp (cooked--layout-stamp window)))
     (if (equal (car cooked--wrap-cache) stamp)
         (cdr cooked--wrap-cache)
       (cdr (setq cooked--wrap-cache
                  (cons stamp
-                       (cons (cooked--ascii-fixed-pitch-p window)
+                       (list (cooked--ascii-fixed-pitch-p window)
+                             (make-hash-table :test #'equal :size 64)
                              (make-hash-table :test #'equal :size 64))))))))
 
 (defun cooked--row-mismeasured-p (width uniform fixed-pitch)
@@ -2080,6 +2088,164 @@ of it -- and the loop then eats the newline above START and the row below."
       (delete-region (1- eol) eol))
     trimmed))
 
+(defcustom cooked-glyph-scale-floor 0.5
+  "How far a glyph may be shrunk to make it fit its cell.
+
+A glyph needing more than this is left alone and the row is trimmed instead.
+Scaling is a repair, and a repair that renders a character at half size has
+stopped repairing and started hiding: below some ratio an unreadable glyph in
+the right place is worse than a truncation arrow saying plainly that something
+did not fit.
+
+nil disables scaling entirely and restores the trim-only behaviour."
+  :type '(choice (const :tag "Never scale, only trim" nil) number)
+  :group 'cooked)
+
+(defun cooked--glyph-metrics (beg end window metrics)
+  "What the cluster in BEG..END actually measures, as (WIDTH ASCENT DESCENT PIXEL).
+
+Memoised in METRICS, `cooked--wrap-cache\='s third slot, on the cluster's own
+text -- so a border row of five hundred identical characters is one measurement
+and four hundred and ninety-nine hash lookups.  That is the whole reason a cache
+is a prerequisite rather than an optimisation: without one this is a `font-at\='
+and a shaping call per cell per drain, which is the trap
+`cooked--row-wraps-p\=' already fell into with `vertical-motion\=' at 445us a row.
+
+The shaping is asked for the way the display engine asks: a composition if there
+is one -- `find-composition\=' answers for a ligature or a base plus combining
+marks, and its gstring is what will actually be drawn -- and otherwise a gstring
+shaped from the font at BEG.  Measuring the characters separately would answer a
+question nobody is rendering.
+
+Two indices that are easy to get wrong and silent when they are.  The glyph sits
+at index *2* of the gstring, not 1.  And the font's own metrics come from
+`query-font\=' -- pixel size 2, ascent 4, descent 5 -- not from `font-info\=',
+which is a different vector whose slots 4 and 5 are a baseline offset and a
+compose rule, and which therefore answers 0 for both without complaining."
+  (let ((key (buffer-substring-no-properties beg end)))
+    (or (gethash key metrics)
+        (puthash
+         key
+         (when-let*
+             ((gstring
+               (if-let* ((composition (find-composition beg end nil t)))
+                   (nth 2 composition)
+                 (when-let* ((font (font-at beg window)))
+                   (font-shape-gstring
+                    (composition-get-gstring beg end font nil) nil))))
+              ((vectorp gstring))
+              ((> (length gstring) 2))
+              (header (aref gstring 0))
+              ((vectorp header))
+              (font (aref header 0))
+              (glyph (aref gstring 2))
+              ((vectorp glyph))
+              (info (query-font font)))
+           (list (aref glyph 4) (aref info 4) (aref info 5) (aref info 2)))
+         metrics))))
+
+(defun cooked--glyph-scale (measured slot default)
+  "The scale that fits MEASURED into SLOT pixels, or nil if it already fits.
+
+MEASURED is `cooked--glyph-metrics\='s answer, SLOT is how many pixels wide the
+grid budgeted for it, and DEFAULT is `cooked--default-metrics\='s.
+
+Pixels rather than cells so that this is arithmetic and nothing else: taking
+cells would mean asking `frame-char-width\=', which answers 1 on a terminal
+frame and would make the whole function untestable in batch for a reason having
+nothing to do with what it computes.
+
+The minimum of three ratios, and the third one is the one an implementation
+skips.  A row realises `max(ascent) + max(descent)\=' across every glyph sharing
+its baseline, so a glyph overflows if *either* side is over, and scaling by the
+ratio of the sums can leave one side over the line.  Measured on this machine's
+default font: a CJK glyph has ascent 18 against the default 15 and descent 5
+against 5, so the sum ratio is 20/23 = 0.87 while the ascent ratio is 0.83.
+Scale by 0.87 and the row is still too tall.
+
+Quantized, because `height\=' is applied as a scale of the font's pixel size and
+Emacs rounds the result -- so a mathematically exact scale rounds back up and
+the cell overflows anyway.  Flooring at the pixel is what makes the fit
+hold."
+  (pcase-let ((`(,width ,ascent ,descent ,pixel) measured)
+              (`(,default-ascent ,default-descent) default))
+    (when (and default-ascent default-descent (> pixel 0)
+               (or (> width slot) (> ascent default-ascent) (> descent default-descent)))
+      (let* ((scale (min (if (> width 0) (/ (float slot) width) 1.0)
+                         (if (> ascent 0) (/ (float default-ascent) ascent) 1.0)
+                         (if (> descent 0) (/ (float default-descent) descent) 1.0)))
+             (quantized (/ (ffloor (* pixel scale)) pixel)))
+        (and (< quantized 1.0) quantized)))))
+
+(defun cooked--default-metrics (window metrics)
+  "The default face\='s (ASCENT DESCENT) in WINDOW, or nil if it cannot be had.
+
+What a row is laid out *against*, and therefore what a glyph has to fit inside.
+
+`face-attribute\=' with INHERIT t rather than `font-at\=', and the difference is
+not pedantic: `font-at\=' answers about the font covering that position, which
+for a CJK character is the *fallback* font it was drawn from -- measured at
+ascent 18 where the default is 15.  Asking `font-at\=' would compare the
+offender against itself and conclude everything fits.
+
+Cached in METRICS under a key no cluster can collide with, because it is a fact
+about the same font and geometry the rest of that table is keyed on and is
+thrown away with them."
+  (let ((key 'cooked--default))
+    (or (gethash key metrics)
+        (puthash key
+                 (when-let* ((font (face-attribute 'default :font
+                                                   (window-frame window) t))
+                             ((fontp font))
+                             (info (query-font font)))
+                   (list (aref info 4) (aref info 5)))
+                 metrics))))
+
+(defun cooked--scale-offenders (start end window metrics)
+  "Shrink any glyph in START..END that does not fit the cells it was given.
+
+The non-destructive half of the guard, and the reason the destructive half is
+now a backstop rather than the whole answer: a glyph a pixel too wide used to
+cost the characters at the end of the row, and now costs the glyph a few percent
+of its size.
+
+Walks clusters rather than characters, because a cluster is what gets shaped and
+therefore what has a width: a base plus its combining marks is one glyph in one
+cell, and measuring the base alone would answer about something nobody draws.
+
+Nothing is measured on a row that got here uniform and fixed-pitch -- the caller
+has already refused those, which is the whole cost control.  What reaches here
+is a row the grid thinks may be mismeasured, and on such a row each *distinct*
+cluster costs one shaping call for the life of the font.
+
+`min-width\=' as well as `height\=' because the two answer different halves: the
+scale shrinks the glyph, and `min-width\=' holds the cell it sits in at the size
+the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
+  (when cooked-glyph-scale-floor
+    (save-excursion
+      (goto-char start)
+      (while (< (point) end)
+        (let* ((from (point))
+               (to (min end (save-excursion
+                              (goto-char from)
+                              ;; One grapheme cluster, the unit the shaper works
+                              ;; in.  `forward-char' would split a base from its
+                              ;; combining marks and measure a glyph that is
+                              ;; never drawn on its own.
+                              (forward-char 1)
+                              (point))))
+               (cells (string-width (buffer-substring-no-properties from to)))
+               (measured (and (> cells 0)
+                              (cooked--glyph-metrics from to window metrics)))
+               (scale (and measured
+                           (cooked--glyph-scale
+                            measured (* (frame-char-width) cells)
+                            (cooked--default-metrics window metrics)))))
+          (when (and scale (>= scale cooked-glyph-scale-floor))
+            (put-text-property from to 'display
+                               `((min-width (,cells)) (height ,scale))))
+          (goto-char to))))))
+
 (defun cooked--guard-row-width (start width &optional window uniform cache)
   "Keep the screen row beginning at START to one screen line.
 
@@ -2154,12 +2320,21 @@ was mismeasured rather than an adjacent one."
     (when (and cooked-rejoin-wrapped-lines window (< start (line-end-position)))
       (goto-char start)
       (pcase-let* ((end (line-end-position))
-                   (`(,fixed-pitch . ,memo) (or cache (cooked--wrap-cache window))))
-        (when (and (cooked--row-mismeasured-p width uniform fixed-pitch)
-                   (cooked--row-wraps-p start end window memo)
-                   (cooked--trim-to-one-line start window))
-          (goto-char start)
-          (cooked--mark-truncation start (1- (line-end-position)) window))))))
+                   (`(,fixed-pitch ,memo ,metrics)
+                    (or cache (cooked--wrap-cache window))))
+        (when (cooked--row-mismeasured-p width uniform fixed-pitch)
+          ;; Step 2.5, and it runs before the wrap question rather than after
+          ;; it, which is a correction to the plan this came from.  Hanging the
+          ;; repair off `cooked--row-wraps-p' would only ever reach glyphs too
+          ;; *wide*; a glyph too *tall* makes the row 15% deeper -- measured, a
+          ;; CJK ascent of 18 against a default of 15 -- while the width fits
+          ;; comfortably and the wrap check answers nil.  That case has no
+          ;; repair at all today and is invisible from where the plan put this.
+          (cooked--scale-offenders start end window metrics)
+          (when (and (cooked--row-wraps-p start end window memo)
+                     (cooked--trim-to-one-line start window))
+            (goto-char start)
+            (cooked--mark-truncation start (1- (line-end-position)) window)))))))
 
 (defcustom cooked-truncation-bitmap nil
   "Fringe bitmap `cooked--truncation-bitmap' draws for a trimmed row.
