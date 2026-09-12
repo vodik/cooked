@@ -721,11 +721,11 @@ cooked strips only the bracketed end marker, so a pasted =ESC=, =C-c= or =C-u=
 reaches the child verbatim. xterm's list applies *regardless* of bracketed mode.
 Keep cooked's newline confirmation, which is the better half.
 
-** TODO [#B] Scrollback eviction counts lines, not text
+** WIP [#B] Scrollback eviction counts lines, not text
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §7 — found by the scroll-ceiling measurement, not by the report
-:BRANCH:
+:BRANCH:   cooked/eviction-units
 :END:
 Measured while answering the rejoin question: for one identical byte stream at
 ten screen rows per logical line, the buffer held 2,670,358 chars under
