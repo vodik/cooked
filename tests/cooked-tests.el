@@ -10,6 +10,7 @@
 ;;   cooked-tests-session.el     spawning, shell integration, sizing, exit
 ;;   cooked-tests-render.el      the grid becoming buffer text, and the seam
 ;;   cooked-tests-input.el       keys, mouse, paste, keyboard ownership
+;;   cooked-tests-dnd.el         drops and yank-media, the optional layer
 ;;   cooked-tests-osc.el         the sequences answered in Lisp
 ;;   cooked-tests-link.el        URLs, OSC 8 hyperlinks, the optional file layer
 ;;   cooked-tests-completion.el  both completion backends
@@ -55,6 +56,7 @@
 (require 'cooked-tests-session)
 (require 'cooked-tests-render)
 (require 'cooked-tests-input)
+(require 'cooked-tests-dnd)
 (require 'cooked-tests-osc)
 (require 'cooked-tests-link)
 (require 'cooked-tests-completion)
