@@ -500,6 +500,16 @@ echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")
 ;; frame at a time, against a child that is asleep and sending nothing.  No
 ;; scheduling noise, no coalescing, and reproducible run to run.
 
+(defun cooked-bench--row-count (rows)
+  "How many *screen rows* ROWS covers.
+
+Not `length\=': an entry is a run of contiguous damaged rows and its block\='s row
+table is what says how many of them there are.  Every figure in this file that
+is per row rather than per frame reads this, and the grid height does too --
+`:height\=' taken as the entry count declared a one-row screen, which
+`cooked--fit-screen\=' then trimmed the other twenty-three rows down to."
+  (cl-loop for (_first . block) in rows sum (length (nth 4 block))))
+
 (defun cooked-bench--update (rows &optional alt)
   "An update plist of ROWS, shaped exactly as `cooked--drain' returns one.
 
@@ -508,7 +518,7 @@ echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")
 plist without them fails on a nil rather than benchmarking anything.  They were
 missing here from the moment the drain grew them, which is how
 `cooked-bench-per-frame' came to error out instead of reporting."
-  (let ((height (length rows)))
+  (let ((height (cooked-bench--row-count rows)))
     (list :scrolled nil :rows rows
           :height height :used height :head 0
           :cursor '(0 0 t block) :alt alt
@@ -651,7 +661,7 @@ declared count is never lower than what the recorded numbers were taken at."
       (cooked-bench--measure label 1
                              (lambda () (cooked--apply update))
                              (or frames 200))
-      (message "  %-40s   %d rows/frame" "" (length rows)))))
+      (message "  %-40s   %d rows/frame" "" (cooked-bench--row-count rows)))))
 
 (defun cooked-tests--settle-briefly ()
   "Let the child start and the first drain land."
@@ -757,7 +767,7 @@ shape reported."
           (or (cooked--screen-start-position) (point-min)) (point-max)))
        (max 1 (/ frames ratio)))
       (message "  %-40s   %d rows/frame, 1 redisplay per %d frames"
-               "" (length rows) ratio))))
+               "" (cooked-bench--row-count rows) ratio))))
 
 (defun cooked-bench-deferred ()
   "What the cosmetic passes cost against how often the screen is actually drawn."
