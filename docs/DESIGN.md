@@ -242,8 +242,9 @@ the check the docstring called "a fast path" made the predicate unconditionally 
 every graphical frame — the slow path, dressed as the fast one.
 
 **The width is carried, not re-derived.** `Run::cols` counts the cells a run stands on as
-the run is built, `Block::push_runs` sums it, and the block hands Emacs a WIDTH element
-alongside its text. Nothing measures anything to produce it: the grid materialised the
+the run is built, `Block::push_run` sums it per row, and the block hands Emacs a row
+table — one `(START WIDTH UNIFORM)` per screen row it covers, since a block is a whole
+run of contiguous damaged rows — alongside its text. Nothing measures anything to produce it: the grid materialised the
 answer when it placed the row's continuation cells, so counting cells *is* reading the
 width back, and the count comes off a loop that was walking those cells anyway. The
 by-product also settles an equivalence that was previously asserted in a docstring and
