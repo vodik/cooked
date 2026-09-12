@@ -208,6 +208,186 @@ the same configured scrollback. Anyone arguing for the split-row bet has to
 answer this, because the same setting would then mean two different amounts of
 history.
 
+** DONE [#A] Bench measurement primitive
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §9 "The plan for cooked's bench suite" A
+:GAIN:     every later number becomes trustworthy
+:BRANCH:   05cfa61
+:END:
+=cooked-bench--measure=: one discarded warmup, =garbage-collect= ×3, a
+3-iteration trial that raises the count to hit =min-duration= with the declared
+count as a *floor*, loop while =(or (< done n) (< elapsed min-duration))=. Keep
+per-iteration times and report min/median/p99/max *and* mean — diverging from
+ghostel, which reports means everywhere but typing latency.
+
+Done when: existing benchmarks report a distribution; medians are the headline.
+
+*** Landed
+Two departures, both forced by cooked rather than chosen:
+
+- *The trial scales on wall time; the sample is what the body charges.* The
+  real-child cases spend their wall clock in =accept-process-output= and charge
+  only drain+apply, so scaling on the charged time divides 0.5 s by a 4 ms
+  sample and asks for ~120 child processes.
+- *A GC count per row*, load-bearing for the variance flag below. Collection is
+  left running — a flood should pay for its garbage — so an allocating case has
+  a p99 15× its median as a matter of course.
+
+What it immediately exposed: *the old means were tail-smeared*. =per-frame 24x80
+styled= reported 0.99 ms/frame against a median of 0.62; box drawing 2.87 →
+1.69. Nothing got faster.
+
+** DONE [#A] Load guard and variance flag
+:PROPERTIES:
+:EFFORT:   2h
+:REPORT:   §9 "D. Keep it honest"
+:GATE:     Bench measurement primitive — satisfied
+:BRANCH:   370c21f
+:END:
+=load-average= / =num-processors= check before the run, refused unless
+=COOKED_BENCH_FORCE=; sample once, never mid-run. Then per case, flag
+=p99 > 3×median= as UNSTABLE. Print the load in the header regardless.
+
+Done when: a run on a deliberately busy machine refuses, and an interfered case
+is marked rather than silently reported.
+
+*** Landed
+Both halves demonstrated: forty spinners took the average to 22.55 and the run
+refused; forced under the same load a case was marked =UNSTABLE (p99 20.1x
+median over 369 gc-free samples)=. Quiet runs flag nothing.
+
+*§9 D's rule is unusable exactly as written* — p99 against the median of
+everything fires on 8 of 18 rows on a *quiet* machine, purely on GC. The check
+therefore runs over collection-free samples only. The obvious alternative (flag
+when more samples exceed 3× median than there were collections) was implemented
+and measured too: 6 of 10 quiet false positives against none.
+
+Also worth recording, because §9 D undersells it in the other direction: *the
+ratio check cannot catch what loadavg can*. A uniform slowdown moves median and
+p99 together and divides out — under load the styled median went 0.6 → 7.5 ms,
+twelve times slower on every iteration, and the ratio barely moved. The two
+guards are complementary in *both* directions, not one covering for the other.
+
+** NEXT [#A] Typing latency benchmark, three configurations
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §9 "C. Typing latency"; §7 for what it settles
+:GATE:     Load guard and variance flag — satisfied, 370c21f
+:GAIN:     settles cooked-vs-ghostel interactivity; sees the decorated-buffer risk
+:BRANCH:
+:END:
+Child: =sh -c "stty raw -echo; printf READY; exec cat"=. Detect arrival with
+=buffer-chars-modified-tick= (O(1), unaffected by buffer growth), not by
+searching. 30 discarded warmups, GC pinned for the run. cooked-specific: the
+spin loop calls =cooked--apply (cooked--drain …)=, so this measures
+send→drawn rather than send→filter-fired.
+
+Run plain / box-drawing / =mouse-face=. Report min/median/p99/max.
+
+Done when: three distributions recorded, and the idle-prompt case is confirmed
+*unchanged* by any later pacing work.
+
+Note now that the gate is satisfied: this is the one Wave 0 task that wants the
+*graphical* harness, not batch — see "Measuring in a real graphical frame", and
+keep =emacs -nw= under foot as the control.
+
+** DONE [#B] Attach a window to the bench buffer
+:PROPERTIES:
+:EFFORT:   30m
+:REPORT:   §9 "B. Attach a window"
+:BRANCH:   116572d
+:END:
+=set-window-buffer= in =cooked-bench--with-session=. Window-dependent paths
+(bottom anchoring, sticky scroll) currently short-circuit in batch.
+
+Done when: a before/after diff shows which numbers move.
+
+*** Landed
+*It crashed rather than moving numbers, and that is the finding.* The synthetic
+fixtures built 4-element blocks where =cooked--render-block= documents six —
+=WIDTH= and =UNIFORM= missing. Nothing read them, because the guard is the only
+thing that does and it never ran without a window. A fixture claiming =UNIFORM=
+=t= would have run fine and reported the *fast* path's cost for box rows.
+
+Second confound: batch's window reports a *1×1 pixel cell* and
+=cooked--deco-cell-size= prefers the window to =cooked--last-cell=, so
+=set-window-buffer= alone silently shrank every box glyph to one pixel and made
+the rescale case report the gate closing, labelled as the walk. §9 B's "diff a
+run before and after to find out" is not readable without pinning the cell too.
+
+With both fixed the diff is +20–30%, and it *tracks =UNIFORM=, not row count*:
+uniform rows finish at guard step 1 at ~1.3 µs/row, the box rows alone reach the
+wrap cache and =vertical-motion= at ~25 µs/row. The old box-drawing figures
+understated production by about a third — and this is the same guard the
+scroll-ceiling measurement found costs pgtk 2.4× what it costs a tty.
+
+** DONE [#A] Property test: deltas replay ≡ full grid
+:PROPERTIES:
+:EFFORT:   3h
+:REPORT:   §12 "Correctness"; §9 "Property-based testing"
+:GAIN:     unblocks the whole redisplay wave
+:BRANCH:   2b1e02a
+:END:
+*Wave 2 is now ungated.* =tests/delta_replay.rs=, 1024 cases in =make rust-test=,
+=PROPTEST_CASES= to soak, shrunk seeds committed and replayed first.
+
+*Two properties, and neither is sufficient alone* — worth knowing before anyone
+trims one. Replay ≡ grid compares the grid with itself, so it cannot catch a
+parser bug; "fragmenting changes nothing" runs the same script through a term
+whose writes are not cut, so both terms miss a lost dirty bit identically.
+
+*It found two real bugs in the vendored vte 0.15.0*, both in
+=advance_partial_utf8=, both the resumed path disagreeing with the whole-read
+path — so both are upstream bugs rather than adaptations, and a re-sync must
+carry the fixes forward:
+
+1. =return valid_bytes - old_bytes= skipped the caller past *every* byte that
+   parsed rather than the character emitted, so text between a split codepoint
+   and the next partial one was *silently dropped*. By hand: =ĸaĸ= cut after
+   byte 1 loses the =a=.
+2. A completed codepoint was always =print=ed, but =ground_dispatch= *executes*
+   U+0080–U+009F — so a C1 control split across two reads (=CSI= as =\u{9b}=)
+   was painted as a glyph and its escape sequence lost.
+
+Verified independently on merge: reverting either fix fails its own regression
+test.
+
+The mutation gate was met and then sharpened. Breaking =Row::fill_run='s return
+value is caught. Dropping =style= from its comparison — *the exact ghostel blind
+spot* — is caught only by the second property, and *was not caught at all* until
+a =repaint()= motif was added that rewrites fixed text under a new pen: two
+independently generated random strings essentially never collide on the same
+cells, so "same characters, new colour" has to be generated deliberately.
+
+** DONE [#B] Commit the shrunk-case corpus as a fast suite
+:PROPERTIES:
+:EFFORT:   1h
+:REPORT:   §9 "Property-based testing"
+:GATE:     Property test: deltas replay ≡ full grid — satisfied
+:BRANCH:   2b1e02a
+:END:
+Landed with the property test rather than after it:
+=tests/delta_replay.regressions= holds the two genuine shrunk seeds and is
+replayed ahead of the random cases on every run.
+
+** TODO [#C] Test-suite ergonomics
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §9 "Makefile and CI mechanics"
+:BRANCH:
+:END:
+ERT tags as the platform/dependency axis; per-file parallel stamp targets;
+=COOKED_TEST_TIMEOUT_SCALE= (CI-default 4, *positive numeric parse only* — an
+empty env var otherwise zeroes every timeout); =COOKED_DEBUG_TESTS= per-test
+name logging. Plus =make bench-quick= under ten seconds.
+
+Two things found since that belong here. =src/session.rs::resize_reaches_the_child=
+is *load-flaky* — it failed at loadavg 38 and passes in isolation, on stock main
+— so it wants either the timeout scale or a tag. And =make compile= now removes
+its own =.elc= files (a6a061b), which had been producing bogus arity errors on
+every subsequent run.
+
 * Wave 0.5 — the baseline was not green                            :repair:
 :PROPERTIES:
 :VISIBILITY: children
@@ -247,24 +427,44 @@ and would have inherited a red tree.
 
 No gates, no invariants touched. Ship whenever.
 
-** TODO [#A] Fix =clear-string= on an auth-source secret
+** DONE [#A] Fix =clear-string= on an auth-source secret
 :PROPERTIES:
 :EFFORT:   30m
 :REPORT:   §6 "Secrets: cooked wins, with one bug"
-:BRANCH:
+:BRANCH:   803396a
 :END:
+Landed the fix rather than the documentation alternative. =cooked--prompt-secret=
+keeps what =cooked-password-function= returned separate from the wire copy;
+only the copy is zeroed, in an =unwind-protect= *nested inside* the outer one so
+a PTY write that throws still clears it. The source is cleared only when it came
+from cooked's own =cooked--read-passwd=. Both tests were checked to fail against
+the original — one reads ="\\0\\0\\0\\0\\0\\0\\0"= out of a real cache alist,
+the other pins the nesting.
 cooked zeroes whatever =cooked-password-function= returns; an auth-source
 backend may hand out a string shared with its cache. Clear only the freshly
 allocated wire copy, in a nested =unwind-protect= so it happens even if the PTY
 write throws — or document that sources must =copy-sequence=.
 
-** TODO [#A] Land the run-wide glyph image
+** DONE [#A] Land the run-wide glyph image
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §2 "The cheaper half"
 :GAIN:     664ms → 10.5ms measured ceiling
-:BRANCH:
+:BRANCH:   b7a60ff
 :END:
+*Measured, deterministically*: =display= intervals on a 24×80 box-drawing frame
+go *1920 → 24*, one per row, matching the deco records — and still 24 after a
+rescale. Timings alongside: 3.0 → 0.43 ms/frame.
+
+*The phantom test: renamed, not written.*
+=cooked-adjacent-box-glyphs-do-not-share-a-display-property= asserted the
+*symptom*, which correct run-wide code violates. The hazard is real but the
+invariant was mis-stated: the danger was never sharing, it was sharing a
+*cell-wide* bitmap across a *four-cell* span. So it now carries the name the
+docstrings already cited and asserts the real invariant — one =display= interval
+*and* a bitmap reporting =:data-width= of four cells. Reading the width back off
+the spec is the only way the merge is observable in batch at all, which is
+precisely why the original defect passed a green suite.
 Verified in-tree: =cooked--deco-image= takes an optional =COUNT=
 (=cooked-deco.el:838=, plumbed to =:312=/=:256=) and the call site at =:1057=
 passes three args. =cooked-deco= is *already* run-wide one line above; only
@@ -277,13 +477,33 @@ exist. Either write it or rename the claim.
 Done when: a 24×80 box-drawing frame shows the property-interval count drop from
 per-cell to per-run, and the existing glyph tests still pass.
 
-** TODO [#A] =inhibit-modification-hooks= around the property loops
+** DONE [#A] =inhibit-modification-hooks= around the property loops
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §7 ranked borrowables, item 1
 :GAIN:     +21% plain / +55% box drawing, by cooked's own measurement
-:BRANCH:
+:BRANCH:   7170741
 :END:
+Measured on the *primary* screen, interleaved A/B, medians: box drawing −38%
+(4.45 → 2.77 ms/frame), styled −11%, plain −12%, URL rows −18%. Box drawing
+lands on REPORT's +55%; plain comes in at about half its +21%.
+
+*The stated subtlety is wrong, and this is the correction that matters.* The
+plan — and =cooked.el:2180= — say the rewrite must stay outside the binding
+because =jit-lock-after-change= is what marks the row unfontified. A blanket
+inhibit was tried three ways (inside =cooked--render-block=, around all of
+=cooked--render-rows=, and around the whole of =cooked--apply= by advice) and
+*none of them breaks link detection*: Emacs' =insert= inherits no text
+properties, so a rewritten row carries no =fontified= property by construction
+and reads as unfontified whether or not the hook ever ran. The notification is
+belt-and-braces, not the only thread the scan hangs from. The rewrite is still
+left outside — the saving is entirely in the loops, so there is nothing to buy
+by moving the line, and a user's own change hook is entitled to see the edit.
+
+Second correction: *§7 item 1's figure is primary-screen-only now.*
+=cooked--sync-fontification= post-dates the measurement and already unregisters
+jit-lock on the alt screen — so the gain is *zero* exactly where a full-screen
+TUI repaints hardest.
 *Only* around the property loops — the style-span walk, =cooked--apply-deco=,
 =cooked--render-link-spans=. Leave =insert=/=delete-region= outside the binding,
 because =cooked--render-rows= relies on the row rewrite firing
@@ -291,12 +511,19 @@ because =cooked--render-rows= relies on the row rewrite firing
 
 Done when: the per-frame benchmark moves and fontification still happens.
 
-** TODO [#B] xterm control-byte strip on outbound paste
+** DONE [#B] xterm control-byte strip on outbound paste
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §6 "Paste hygiene: a real gap"
-:BRANCH:
+:BRANCH:   d2109f4
 :END:
+=cooked--strip-paste-controls= at the top of =cooked--send-paste=, so all three
+branches get it regardless of bracketed mode. Bytes become *spaces*, as xterm
+does. The list is xterm's =disallowedPasteControls= default —
+=BS,DEL,ENQ,EOT,ESC,NUL,STTY= from =DEF_DISALLOWED_PASTE_CONTROLS= — expanded to
+sixteen bytes, the termios =c_cc= ones at conventional values because cooked's
+core samples the child's termios but exposes only the derived =Mode=. TAB, LF
+and CR deliberately pass. The newline confirmation is untouched.
 cooked strips only the bracketed end marker, so a pasted =ESC=, =C-c= or =C-u=
 reaches the child verbatim. xterm's list applies *regardless* of bracketed mode.
 Keep cooked's newline confirmation, which is the better half.
@@ -323,12 +550,29 @@ Done when: the retained *text* for a given stream is within a few percent across
 both settings of =cooked-rejoin-wrapped-lines=, or the docstring states the
 coupling plainly and says which way it goes.
 
-** TODO [#C] Small corrections
+** DONE [#C] Small corrections
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §4 "Correction to the ROADMAP"; §7; §10
-:BRANCH:
+:BRANCH:   a6a061b
 :END:
+Three done, one *refuted with evidence*:
+
+- ROADMAP's entry now reads "pointer motion with no button held (the other half
+  of 1003)" and names hover as the actual gap.
+- =auto-hscroll-mode= and =default-text-properties= nil buffer-locally, the
+  latter with §7's reason in a comment and a test that sets the global first, so
+  it proves clearing rather than inheritance.
+- Terminfo round-trip in the Makefile — through *files*, not a pipe: =infocmp …
+  | tic -x -c -= exits *0* when infocmp cannot find the entry, so the obvious
+  one-liner is a gate that cannot fail.
+- *=symbols.map= does not apply here.* The shipped cdylib already exports only
+  =emacs_module_init= and =plugin_is_GPL_compatible=. The full apparatus was
+  built anyway and probed with a deliberate =#[unsafe(no_mangle)]= export: the
+  probe is exported *with and without* the script, because rustc emits its own
+  version script for a cdylib and ld unions them — an explicit =global= beats a
+  wildcard =local=. The script could only ever *add* exports. §10's "3-line
+  change" should be dropped or restated as "verified: nothing to do".
 - =docs/ROADMAP.md='s "mouse drag and motion" known-gap entry is stale —
   =cooked--mouse-track= exists and handles the drag half of 1003.
 - =auto-hscroll-mode nil= and =default-text-properties nil= buffer-locally.
@@ -341,14 +585,21 @@ coupling plainly and says which way it goes.
 :VISIBILITY: children
 :END:
 
-*Every task here is gated on the property test.* These are exactly the changes
-that produce stale cells.
+*Every task here is gated on the property test* — which is now =DONE= (2b1e02a),
+so *the whole wave is open*. These are exactly the changes that produce stale
+cells, and the oracle that catches them is in =make rust-test=.
+
+Before starting any of them, read the property test's two findings: it takes
+*both* properties to catch anything (one compares the grid with itself), and the
+style comparison — the ghostel blind spot these tasks would trip — is only
+caught because a =repaint()= motif rewrites fixed text under a new pen. A change
+here that alters run boundaries should soak with =PROPTEST_CASES=100000=.
 
 ** TODO [#A] Coalesce contiguous damaged rows into one Block
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §12 "The finding that matters most for cooked"; §7 item 2
-:GATE:     Property test: deltas replay ≡ full grid
+:GATE:     Property test: deltas replay ≡ full grid — satisfied, 2b1e02a
 :GAIN:     a 24-row repaint: 48 Emacs edits → 2
 :BRANCH:
 :END:
@@ -412,21 +663,42 @@ other windows in the live screen that are not semantically following.
 :VISIBILITY: children
 :END:
 
-** TODO [#A] Deferred, coalesced link detection
+** DONE [#A] Deferred, coalesced link detection
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §6 "Deferred detection"; §7 suspect (iii)
 :GAIN:     the third scroll cause
-:BRANCH:
+:BRANCH:   d119d0b, 95032ba
 :END:
-Independent of Wave 2 — rides the existing =cooked-row-rendered-functions=,
-which already delivers exact bounds. Four parts: text properties instead of
-goto-addr *overlays*; a debounced pass over the union of damaged regions, held in
-markers so it survives eviction; skip the cursor's row and the prompt; and gate
-re-application on the stored match text still being =equal=.
+*Two of the four parts were already true when the task was written, and saying
+so is most of the value here.* §7 suspect (iii) describes cooked as running the
+scan "from inside the drain, per damaged row, every frame". It does not:
+=cooked--fontify-region= is registered with =jit-lock-register=
+(=cooked.el:1397=) and =cooked--sync-fontification= even unregisters it when
+there is nothing to scan. The deferral the task asks for exists, and in the
+*better* form REPORT itself notes — over the visible region, where ghostel
+scans every repainted row including ones a flood pushed past the viewport.
 
-Done when: the repaint count during a gesture drops, and
-=cooked-detect-links-on-alt-screen= stops being a necessary defence.
+So:
+
+- *Part 2, "a debounced pass over the union of damaged regions held in markers",
+  is obsolete.* jit-lock already defers, and over less.
+- *Part 4, "gate re-application on the stored match text still being =equal=",
+  cannot apply.* It presumes the text survives between scans. In cooked a
+  repainted row is deleted and reinserted, so the old properties go with the old
+  text and there is nothing to compare against. The case it was meant to fix —
+  a spinner rescanned every frame — is answered by part 3 instead.
+- *Part 1 landed* (d119d0b): the detected-URL path uses text properties, so
+  =goto-address-fontify-region= is reproduced rather than called. An =OSC 8=
+  span now wins by being *asked* per match, instead of by having overlays
+  deleted after the fact.
+- *Part 3 landed* (95032ba), and needed bookkeeping the task did not mention:
+  jit-lock marks a whole chunk fontified regardless of what was looked at, so a
+  declined row must be remembered and asked for again or a URL printed with no
+  newline after it is never linkified at all.
+
+=cooked-detect-links-on-alt-screen= was already not a necessary defence —
+=cooked--sync-fontification= handles the alt screen one level up.
 
 ** DONE [#A] Fix =cooked-link.el='s upward ownership questions
 :PROPERTIES:
@@ -604,7 +876,7 @@ lone-ESC =input-decode-map= filter · pixel-delta wheel accumulation.
 :PROPERTIES:
 :EFFORT:   3d
 :REPORT:   §1 (the whole section)
-:GATE:     Property test: deltas replay ≡ full grid
+:GATE:     Property test: deltas replay ≡ full grid — satisfied, 2b1e02a
 :AGENT:    yes
 :GAIN:     the only item that answers "why cooked and not vterm" for someone who never opens a terminal
 :BRANCH:
