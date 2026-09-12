@@ -309,6 +309,26 @@ see it for what declines and why.")
 (defvar cooked--last-size)
 (declare-function cooked--kill "ext:cooked-core")
 
+(defun cooked--same-host-p (a b)
+  "Whether host names A and B name the same machine, as far as anyone can tell.
+
+Nil if either is nil, so an absent name never matches a present one.
+
+Deliberately generous about spelling and about nothing else.  `HOST\=' from zsh
+is usually short where `system-name\=' and a TRAMP prefix are fully qualified,
+and the two spellings of one machine must not read as a move; but anything
+beyond a shared first label is treated as a different machine, because both
+callers would rather ask again than guess.  The generosity is one-sided in a
+useful way -- it can only ever say `same\=' about two names sharing their first
+label, never about two that do not."
+  (and a b
+       (let ((a (downcase a))
+             (b (downcase b)))
+         (or (equal a b)
+             ;; Either side may carry the domain the other omits.
+             (equal a (car (split-string b "\\.")))
+             (equal (car (split-string a "\\.")) b)))))
+
 (defun cooked--foreign-host-p ()
   "Whether the child last said it was somewhere other than this machine.
 
@@ -322,15 +342,16 @@ same machine must not read as a move.  It is deliberately ungenerous about
 everything else: anything that is not recognisably here is treated as
 elsewhere, because the cost of a false negative is a local file opened in place
 of a remote one, and the cost of a false positive is a completion table that
-declines to guess."
+declines to guess.
+
+The spelling half of that comparison is `cooked--same-host-p\=', shared with the
+TRAMP prefix in `cooked--remote-directory\=' so the two cannot drift apart: one
+deciding a host has changed while the other decides it has not is exactly how a
+path ends up sent down the wrong connection."
   (and cooked--host
-       (let ((host (downcase cooked--host))
-             (self (downcase (system-name))))
-         (not (or (member host '("" "localhost" "localhost.localdomain"))
-                  (equal host self)
-                  ;; Either side may carry the domain the other omits.
-                  (equal host (car (split-string self "\\.")))
-                  (equal (car (split-string host "\\.")) self))))))
+       (not (or (member (downcase cooked--host)
+                        '("" "localhost" "localhost.localdomain"))
+                (cooked--same-host-p cooked--host (system-name))))))
 
 (defun cooked--csi (final &rest params)
   "The control sequence `ESC [ PARAMS FINAL\=', with PARAMS joined by `;\='.

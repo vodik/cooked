@@ -250,19 +250,26 @@ in front of it, which makes this the one that matters most."
         (cooked--osc-cwd '("file:///tmp/somewhere"))
         (should (equal default-directory "/tmp/somewhere/"))))))
 
-(ert-deftest cooked-osc-7-keeps-a-foreign-host-out-of-default-directory ()
+(ert-deftest cooked-osc-7-keeps-a-foreign-host-out-of-a-local-default-directory ()
   "The authority half of the OSC 7 URL used to be matched and thrown away.
 
 Throwing it away is what makes the remote case dangerous rather than merely
 useless: after an `ssh\=' the far shell reports its directory perfectly
 honestly, and a tree kept in step with the local one turns that honest report
-into a local path that exists.  So a foreign host has to stop at
-`cooked--host\=', leaving `default-directory\=' where it was."
+into a local path that exists.  So the one thing a foreign host may never
+produce is a *local* `default-directory\='.
+
+What it produces instead is a remote one -- see
+`cooked-osc-7-maps-a-foreign-host-onto-a-tramp-path\=' -- which is the same
+answer to the same question: a name that says which machine it is on.  This test
+is about the spellings of *this* machine that must not be read as a move at all,
+and it is those that this file's `system-name\=' games are for."
   (let* ((here (make-temp-file "cooked-osc7-" t))
          (there (file-name-as-directory here)))
     (unwind-protect
         (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-          (let ((default-directory "/tmp/"))
+          (let ((default-directory "/tmp/")
+                (cooked-tramp-default-method "ssh"))
             (cooked--osc-cwd (list (format "file://%s%s" (system-name) here)))
             (should-not (cooked--foreign-host-p))
             (should (equal default-directory there))
@@ -275,11 +282,12 @@ into a local path that exists.  So a foreign host has to stop at
             (cooked--osc-cwd (list (format "file://%s" here)))
             (should-not (cooked--foreign-host-p))
             (should (equal default-directory there))
-            ;; And somewhere else stops at the host, leaving the last directory
-            ;; we could actually vouch for in place.
+            ;; And somewhere else is somewhere else: the path is rewritten onto
+            ;; the host that reported it, and what it must never be is the local
+            ;; `/tmp/' that also exists and is not the directory in question.
             (cooked--osc-cwd '("file://other.example/tmp"))
             (should (cooked--foreign-host-p))
-            (should (equal default-directory there))))
+            (should (equal default-directory "/ssh:other.example:/tmp/"))))
       (delete-directory here t))))
 
 (ert-deftest cooked-osc-7-decodes-a-percent-in-the-path ()
@@ -302,6 +310,134 @@ snippets sent the path raw while this decoded it, so that directory arrived as
                              (replace-regexp-in-string "%" "%25" awkward t t))))
               (should (equal default-directory (file-name-as-directory awkward))))))
       (delete-directory parent t))))
+
+;; The OSC 7 remote branch.  Every test here asserts about a *string*: setting
+;; `default-directory' to a TRAMP name opens nothing, and `file-remote-p' is pure
+;; parsing, so the whole group runs without a network and must keep doing so --
+;; the one call that would connect is the `file-directory-p' the branch does not
+;; make, and the first test below is what holds it out.
+
+(ert-deftest cooked-osc-7-maps-a-foreign-host-onto-a-tramp-path ()
+  "ROADMAP §5's scenario: after an outbound `ssh\=', the shell's own report of
+where it is becomes a `default-directory\=' Emacs can act on, so \\[find-file]
+opens the file the prompt meant instead of a same-named local one.
+
+No `file-directory-p\=', and that is the load-bearing half.  Validating the name
+would open a synchronous TRAMP connection on every `cd\=' -- the shell's report
+is trusted precisely because it is the only account available for free."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/tmp/")
+          (cooked-tramp-default-method "ssh")
+          (asked nil))
+      (cl-letf (((symbol-function 'file-directory-p)
+                 (lambda (&rest _) (setq asked t) t)))
+        (cooked--osc-cwd '("file://other.example/srv/app"))
+        (should (equal default-directory "/ssh:other.example:/srv/app/"))
+        (should-not asked)
+        ;; And it tracks, rather than landing once: a second `cd' is a second
+        ;; rewrite and still not a connection.
+        (cooked--osc-cwd '("file://other.example/srv/app/lib"))
+        (should (equal default-directory "/ssh:other.example:/srv/app/lib/"))
+        (should-not asked)))))
+
+(ert-deftest cooked-osc-7-takes-the-tramp-host-from-the-report-never-the-payload ()
+  "The hostile-`cat\=' defence, on the branch that cannot use `cooked--local-name\='.
+
+OSC 7 is always on, so any program that can write to the terminal can send one,
+and a TRAMP name assembled out of the payload is a way to make Emacs dial a
+machine the sender chose.  Both halves of the URL are attacker-chosen strings and
+TRAMP's syntax is punctuation, so both halves are checked here.
+
+The path half may say whatever it likes: appended after a complete
+`/method:host:\=' prefix it is a localname, so `/ssh:evil.example:/etc\=' names a
+file that does not exist on the host we were already talking about, and not a
+hop to `evil.example\='.
+
+The authority half is the one that could choose a method, and it is refused
+outright rather than quoted.  `a|sudo:\=' is a perfectly good `[^/]*\=' match and
+percent-decodes out of an innocent-looking URL; formatted into `/ssh:%s:\=' it
+would read as a second hop to root.  A host containing TRAMP punctuation is not
+a host anyone has, so there is nothing to lose by declining it."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/tmp/")
+          (cooked-tramp-default-method "ssh"))
+      ;; The path half is attacker-chosen and that is allowed to be true.
+      (cooked--osc-cwd '("file://other.example/ssh:evil.example:/etc"))
+      (should (equal (file-remote-p default-directory 'host) "other.example"))
+      (should (equal default-directory
+                     "/ssh:other.example:/ssh:evil.example:/etc/"))
+      ;; A `sudo' hop written into the authority, percent-encoded so that the URL
+      ;; on the wire looks like nothing at all.  Declined, leaving the last
+      ;; directory cooked could vouch for.
+      (setq default-directory "/tmp/")
+      (cooked--osc-cwd '("file://a%7Csudo%3A/etc"))
+      (should (equal default-directory "/tmp/"))
+      ;; Same move without the encoding, and the same answer.
+      (cooked--osc-cwd '("file://evil.example|sudo:/etc"))
+      (should (equal default-directory "/tmp/"))
+      ;; A bare method separator is no better: `/ssh:a:b::/etc' is a host `a'
+      ;; with a port, reached by a method the payload named.
+      (cooked--osc-cwd '("file://a:b:/etc"))
+      (should (equal default-directory "/tmp/"))
+      ;; Refusing is about the punctuation, not about being unfriendly: an
+      ;; ordinary name with dots, hyphens and digits still maps.
+      (cooked--osc-cwd '("file://build-07.ci.example/srv"))
+      (should (equal default-directory "/ssh:build-07.ci.example:/srv/")))))
+
+(ert-deftest cooked-osc-7-keeps-a-multi-hop-connection-across-a-cd ()
+  "Reuse the prefix that is already there, rather than formatting a fresh one.
+
+A buffer reached through a bastion is at `/ssh:jump|ssh:host:\=', and a `cd\=' on
+the far side must not flatten that to `/ssh:host:\=' -- the whole reason the jump
+is in the name is that the host is not reachable without it.  Reusing the prefix
+keeps the user and the method that were actually connected with, too."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/ssh:jump.example|ssh:me@other.example:/tmp/")
+          (cooked-tramp-default-method "ssh"))
+      (cooked--osc-cwd '("file://other.example/srv/app"))
+      (should (equal default-directory
+                     "/ssh:jump.example|ssh:me@other.example:/srv/app/"))
+      ;; The short spelling the far shell's `HOST' actually sends is the same
+      ;; machine as the qualified one in the prefix, and must not read as a move.
+      (cooked--osc-cwd '("file://other/srv/lib"))
+      (should (equal default-directory
+                     "/ssh:jump.example|ssh:me@other.example:/srv/lib/")))))
+
+(ert-deftest cooked-osc-7-rebuilds-the-prefix-when-the-far-shell-moves-on ()
+  "An `ssh\=' *from* the far shell moves `cooked--host\=' and leaves the prefix
+behind.  Inheriting it then would hang the new host's paths off the old host's
+connection -- the wrong-file error this handler exists to avoid, arrived at from
+the other side."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/ssh:first.example:/tmp/")
+          (cooked-tramp-default-method "ssh"))
+      (cooked--osc-cwd '("file://second.example/srv"))
+      (should (equal default-directory "/ssh:second.example:/srv/")))))
+
+(ert-deftest cooked-osc-7-remote-mapping-can-be-turned-off ()
+  "`cooked-remote-directory\=' nil is what cooked did before the mapping existed:
+stop at `cooked--host\=', leaving `default-directory\=' where it was.  Still the
+right answer for anyone who would rather a foreign prompt resolve nothing."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/tmp/")
+          (cooked-remote-directory nil))
+      (cooked--osc-cwd '("file://other.example/srv/app"))
+      (should (equal default-directory "/tmp/"))
+      ;; The host still moved, because that is what the mode line and the
+      ;; buffer name are reading.
+      (should (cooked--foreign-host-p))
+      (should (equal cooked--host "other.example")))))
+
+(ert-deftest cooked-osc-7-falls-back-to-tramps-own-default-method ()
+  "`cooked-tramp-default-method\=' nil defers to TRAMP rather than picking a
+method of cooked's own, so a user who has already chosen one chooses once."
+  (require 'tramp)
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/tmp/")
+          (cooked-tramp-default-method nil))
+      (cooked--osc-cwd '("file://other.example/srv"))
+      (should (equal default-directory
+                     (format "/%s:other.example:/srv/" tramp-default-method))))))
 
 (ert-deftest cooked-command-start-takes-the-shells-own-command-line ()
   "`OSC 133;C;cmdline_url=\=' is the shell saying what it is about to run.

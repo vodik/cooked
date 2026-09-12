@@ -612,6 +612,37 @@ gone remote would make even a relative name resolve over the wire."
     (should (string-match-p (concat "\\`" cooked-file-link--candidate-regexp "\\'")
                             "src/main.rs:12:3"))))
 
+(ert-deftest cooked-file-links-decline-against-a-remote-default-directory ()
+  "The cost guard, distinct from the foreign-host correctness guard beside it.
+
+Every candidate the scan produces becomes an `ffap-file-exists-string\=', and
+against a TRAMP `default-directory\=' each one of those is a round trip.
+Scrollback settles in batches of hundreds of lines, so a single remote
+`default-directory\=' turns every batch for the rest of the session into a stall.
+
+Asserted here without a foreign host in play, because that is the case the other
+guard does not cover: \\[cooked] from a buffer visiting a remote file starts with
+a remote `default-directory\=' and no OSC 7 at all.  The names used are ones that
+would resolve locally, so a regression shows up as a link appearing rather than
+as one silently still missing."
+  (cooked-tests--with-file-links
+   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+     (let ((asked nil))
+       (cl-letf (((symbol-function 'ffap-file-exists-string)
+                  (lambda (&rest _) (setq asked t) nil)))
+         (setq default-directory "/ssh:other.example:/srv/app/")
+         (should-not cooked--host)
+         (should-not (cooked--foreign-host-p))
+         (should-not (cooked-file-link--exists "lib.rs"))
+         (should-not (cooked-file-link--exists "/etc/passwd"))
+         ;; Nothing was even asked, which is the point: the guard has to come
+         ;; before the filesystem call, not filter its answer.
+         (should-not asked)
+         ;; And a local `default-directory' is untouched by any of this.
+         (setq default-directory "/tmp/")
+         (should-not (cooked-file-link--exists "lib.rs"))
+         (should asked))))))
+
 (ert-deftest cooked-a-bare-url-waits-for-something-to-look-at-it ()
   "The other half of `cooked-a-bare-url-is-fontified-by-goto-addr\='.
 

@@ -33,6 +33,11 @@
 (declare-function cooked--update-buffer-name "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
 
+;; Loaded on demand by `cooked--remote-directory' and nowhere else: requiring
+;; TRAMP at load time would put a large library into every session that only
+;; ever runs a local shell, for a branch most of them never take.
+(defvar tramp-default-method)
+
 ;;;; OSC dispatch
 ;;
 ;; Everything except OSC 133 arrives here verbatim, so a new integration is a
@@ -540,25 +545,170 @@ much of the kill ring a runaway or hostile stream can take over."
           (kill-new (decode-coding-string text 'utf-8))
           (message "cooked: copied %d characters" (length text)))))))
 
+;;;; OSC 7 — the working directory
+;;
+;; The one handler that has to answer a question about somebody else's machine.
+;; A shell you have ssh'd out to goes on reporting its directory faithfully, and
+;; the names it sends are real -- on the other host.  Resolving them here names a
+;; different file, or, worse and far more often, a local file of the same name
+;; that does exist, in a checkout kept deliberately in step with the remote one.
+;;
+;; So there are two branches below and they trust different things.  The local
+;; branch trusts nothing about the payload and checks the directory is there.
+;; The remote branch cannot check anything without paying for a connection, so it
+;; instead refuses to let the payload decide *where* the connection would go.
+
+(defcustom cooked-remote-directory 'tramp
+  "What an OSC 7 report from another host does to `default-directory\='.
+
+`tramp\=' rewrites the reported path into a TRAMP name for the host the child
+says it is on, so \\[find-file] at a shell you ssh\='d out to opens the file you
+meant -- in this Emacs, with your own configuration and your own language server
+-- instead of a same-named local file or nothing at all.
+
+nil leaves `default-directory\=' at the last place cooked could vouch for, which
+is what it did before this existed and is still the right answer if you would
+rather a foreign prompt resolve nothing.
+
+Neither setting lets the byte stream choose the host or the method: see
+`cooked--remote-directory\=' for what is and is not taken from the payload."
+  :type '(choice (const :tag "Rewrite as a TRAMP path" tramp)
+                 (const :tag "Leave `default-directory' alone" nil))
+  :group 'cooked)
+
+(defcustom cooked-tramp-default-method nil
+  "TRAMP method for a name built from an OSC 7 report, or nil for TRAMP\='s own.
+
+Only consulted when there is no remote connection to inherit one from -- an
+ordinary outbound `ssh\=' from a local buffer.  A `cd\=' reported by a shell we
+are already talking to over TRAMP keeps that connection\='s method, and its hops.
+
+nil means `tramp-default-method\=', which is \"scp\" in a stock Emacs.  \"ssh\"
+is the usual reason to set this: it multiplexes over one connection where scp
+opens a new one per file."
+  :type '(choice (const :tag "`tramp-default-method'" nil) string)
+  :group 'cooked)
+
+(defconst cooked--host-name-regexp
+  (rx bos (any alnum) (opt (* (any alnum ?. ?- ?_)) (any alnum)) eos)
+  "A host name cooked is willing to write into a TRAMP file name.
+
+Letters, digits, dots, hyphens and underscores, and it may not start or end with
+punctuation.  Not an attempt to validate a host name -- resolution is TRAMP\='s
+problem and a name that does not resolve merely fails.  It is there to keep
+TRAMP\='s *own* syntax out of a position where it would be read as syntax; see
+`cooked--remote-directory\='.  An IPv6 literal does not match and is declined,
+which costs a rare case a rewrite it would otherwise have got.")
+
+(defun cooked--remote-directory (path)
+  "PATH on the host the child last reported, as a TRAMP directory name, or nil.
+
+*The host comes from `cooked--host\=' and the method never comes from the
+payload.*  That is the hostile-`cat\=' defence carried across rather than
+dropped.  OSC 7 is always on -- no `require\=' in front of it, unlike the
+command channel -- so any program that can write to the terminal can send one,
+and a name assembled out of what it sent would be a way to make Emacs dial a
+machine
+of the sender\='s choosing.  `cooked--local-name\=' is what refuses that on the
+local branch, and cannot be what refuses it here, because here the answer is a
+remote name by construction.
+
+`cooked--host\=' is not payload-free either -- it is the authority half of the
+same URL -- and the point is that it does not need to be.  It is the host the
+child is *claiming to be*, which cooked has already told the rest of the buffer
+to distrust: `cooked--foreign-host-p\=' is what makes the mode line say so,
+makes completion decline, and makes `cooked-file-link\=' resolve nothing.  A
+hostile
+stream therefore buys exactly one thing it did not have before, a TRAMP name
+pointing at the host it already announced, and pays for it by announcing it.
+
+What it must not buy is a *method*, and that is the whole of what the two guards
+below are for.  Both halves of the URL are attacker-chosen strings, and TRAMP
+file-name syntax is punctuation:
+
+- The authority is matched as `[^/]*\=' and percent-decoded, so `file://
+  a%7Csudo%3A/etc\=' would arrive as the host `a|sudo:\=' and, formatted
+  straight into `/ssh:%s:\=', produce `/ssh:a|sudo::/etc\=' -- a second hop to
+  root that nothing in the path half was needed for.  The regexp
+  `cooked--host-name-regexp\=' is what stops that, and declining outright is the
+  answer rather than quoting,
+  because a host containing TRAMP punctuation is not a host anyone has.
+- The path is appended after a *complete* `/method:host:\=' prefix, which is the
+  position where TRAMP stops parsing and starts taking bytes: a payload path of
+  `/ssh:evil:/tmp\=' becomes the localname `/ssh:evil:/tmp\=' on our host, a
+  file that merely does not exist, and not a hop to `evil\='.
+
+An existing remote prefix is reused rather than rebuilt, and that is the whole
+of what keeps a multi-hop connection alive.  A buffer already at
+`/ssh:jump|ssh:host:\=' has to stay two hops across a `cd\=': formatting a fresh
+`/ssh:host:\=' would flatten it to one and dial a machine that is very likely
+not reachable directly, which is the failure that makes a bastion setup useless
+rather than merely slower.  Reusing it also keeps the user and the method the
+user actually connected with.
+
+The prefix is taken as `default-directory\=' *minus its localname*, and not as
+`file-remote-p\=' of it, which is the obvious spelling and is wrong: TRAMP
+reassembles that return value from the dissected name and leaves the `hop\='
+slot out, so `/ssh:jump|ssh:host:/tmp/\=' comes back as plain `/ssh:host:\='.
+The
+flattening is silent and the result is a perfectly well-formed name for a
+machine the bastion exists because you cannot reach.  Subtracting the localname
+keeps whatever was actually there, hops and all, without cooked having to know
+how TRAMP spells any of it.
+
+Reused only while that prefix still names the host the child does, though.  An
+`ssh\=' *from* the far shell moves `cooked--host\=' on and leaves the prefix
+where it was, and inheriting it then would hang the new host\='s paths off the
+old host\='s connection -- the same class of wrong-file error this whole handler
+exists to avoid, arrived at from the other side.  `cooked--same-host-p\=' is the
+comparison, shared with `cooked--foreign-host-p\=' so that a short name from zsh
+and a fully qualified one in the prefix agree about being one machine."
+  (when-let* ((prefix
+               (or (and (cooked--same-host-p (file-remote-p default-directory 'host)
+                                             cooked--host)
+                        (when-let* ((local (file-remote-p default-directory 'localname)))
+                          (substring default-directory
+                                     0 (- (length default-directory) (length local)))))
+                   (and (string-match-p cooked--host-name-regexp cooked--host)
+                        ;; Only here, and only on this branch: reading
+                        ;; `tramp-default-method' is the one thing that needs the
+                        ;; library, and an inherited prefix already carries a method.
+                        (progn
+                          (require 'tramp)
+                          (format "/%s:%s:"
+                                  (or cooked-tramp-default-method tramp-default-method)
+                                  cooked--host))))))
+    ;; The trailing slash is appended as a string operation, and
+    ;; `file-name-as-directory' is not used on either half, because both would
+    ;; dispatch to TRAMP.  On the finished name that is the same reassembly
+    ;; described above and it would undo the prefix reuse two lines up -- the hop
+    ;; survives being carried across and then vanishes on the way out.  On PATH
+    ;; alone it hands a handler a string the payload wrote, which is the one thing
+    ;; this function exists not to do.  A slash needs neither.
+    (concat prefix path (unless (string-suffix-p "/" path) "/"))))
+
 (defun cooked--set-directory (url)
   "Track the child's directory from an OSC 7 URL.
 
-The name is refused if it is remote, and refused *before* `file-directory-p\='
-rather than after.  That order is the whole point: this handler is always on --
-OSC 7 needs no `require\=', unlike the command channel -- so a `cat\=' of a
-hostile file can put a TRAMP name here, and asking whether that directory exists
-is itself the connection.  A `default-directory\=' that has gone remote is also
-not the end of it: `cooked-file-link\=' resolves the names it finds against it,
-so one poisoned value turns every settled batch of scrollback into remote stats.
-See `cooked--local-name\='.
+On this machine, the name is refused if it is remote, and refused *before*
+`file-directory-p\=' rather than after.  That order is the whole point: a `cat\='
+of a hostile file can put a TRAMP name in the path half, and asking whether that
+directory exists is itself the connection.  See `cooked--local-name\='.
 
-The URL\='s authority is kept rather than skipped, in `cooked--host\='.  A shell
-on another host reports its directory perfectly honestly and the path it sends
-is perfectly real, which is exactly the problem: resolved here it names a
-different file, or -- worse and more often -- a local file of the same name that
-does exist, on a machine whose tree is kept in step with the one you ssh\='d to.
-So a foreign host updates `cooked--host\=' and stops there, leaving
-`default-directory\=' at the last place we could actually vouch for.
+On another machine the path is rewritten into a TRAMP name -- see
+`cooked-remote-directory\=' for turning that off, and `cooked--remote-directory\='
+for why the payload can choose the path but not the host or the method.  There
+is deliberately *no* `file-directory-p\=' on that branch, and it is not an
+oversight to be tidied up later: validating would open a synchronous TRAMP
+connection on every single `cd\=', which is the difference between a feature that
+costs nothing and one that stalls the shell.  The shell\='s report is trusted
+instead, on the grounds that it is the one party that actually knows -- and a
+wrong `default-directory\=' costs a failed `find-file\=', where a connection per
+`cd\=' costs every prompt.
+
+Which branch runs is `cooked--foreign-host-p\=', so the URL\='s authority is kept
+rather than skipped: it is not decoration, it is the thing that decides whether
+a path means a file here or a file somewhere else.
 
 The path is percent-encoded, because that is what a URL is: a directory called
 `100%20cake\=' has to arrive as `100%2520cake\=' or it decodes to a different
@@ -572,11 +722,18 @@ know about both kinds of move, not just the ones that touch
 `default-directory\='."
   (when (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url)
     (setq cooked--host (url-unhex-string (match-string 1 url)))
-    (unless (cooked--foreign-host-p)
-      (when-let* ((name (cooked--local-name (url-unhex-string (match-string 2 url))))
-                  (dir (file-name-as-directory name)))
-        (when (file-directory-p dir)
-          (setq default-directory dir))))
+    (let ((path (url-unhex-string (match-string 2 url))))
+      (if (cooked--foreign-host-p)
+          (when-let* (((eq cooked-remote-directory 'tramp))
+                      ;; Already a directory name: see the end of
+                      ;; `cooked--remote-directory' for why the slash cannot be
+                      ;; put on here with `file-name-as-directory'.
+                      (name (cooked--remote-directory path)))
+            (setq default-directory name))
+        (when-let* ((name (cooked--local-name path))
+                    (dir (file-name-as-directory name)))
+          (when (file-directory-p dir)
+            (setq default-directory dir)))))
     (cooked--update-buffer-name)))
 
 (provide 'cooked-osc)

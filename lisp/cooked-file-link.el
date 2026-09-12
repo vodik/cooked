@@ -150,9 +150,21 @@ Nothing resolves once the child has said it is on another host.  A build log
 from a remote tree is full of names that exist here too, at the same paths, in
 a checkout that is not the one that produced the log -- so the link would open,
 land in a real file, and be the wrong file.  Highlighting nothing says less
-than cooked knows, and everything it says is true."
+than cooked knows, and everything it says is true.
+
+Nothing resolves against a remote `default-directory\=' either, and that is a
+second condition rather than a restatement of the first.  It is the cost guard
+where the host check is the correctness one: every candidate on this path is a
+`file-exists-p\=' in disguise, and against a TRAMP name each one is a round trip
+to another machine.  Scrollback settles in batches of hundreds of lines, so what
+that buys is a stall per batch for the rest of the session.  The two conditions
+also do not imply each other in either direction -- \\[cooked] from a buffer
+visiting a remote file starts with a remote `default-directory\=' and no OSC 7 at
+all, and `cooked-remote-directory\=' set to nil leaves a foreign host with a
+local one."
   (and (not (string-empty-p name))
        (not (cooked--foreign-host-p))
+       (not (file-remote-p default-directory))
        ;; Expanded, and that is a fix rather than a tidy-up.  `ffap-file-exists-string'
        ;; returns the name it was *given*, not where it found it -- so the project-root
        ;; branch below used to hand back a bare `src/lib.rs' that the caller then
