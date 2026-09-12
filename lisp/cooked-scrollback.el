@@ -70,7 +70,25 @@ Counted in lines of the buffer above `cooked--screen-start\=', which is not
 quite the same as rows the child printed: `cooked-rejoin-wrapped-lines\=' joins
 a wrapped row onto the line above, so one long line of output is one line here
 however many screen rows it took.  That is the honest unit, being the one the
-buffer is actually made of.
+buffer is actually made of, and it is the unit every other emulator caps in.
+
+*It does mean this setting alone does not decide how much memory a session
+uses*, and the size of that is worth stating rather than leaving to be
+discovered.  Measured on one identical byte stream at a cap of 500: 80-column
+output, which wraps nowhere, retains 39,914 characters with rejoining on and
+40,553 with it off -- the same, as it should be.  800-column output retains
+*407,741 characters with rejoining on against 44,805 with it off*, a factor of
+nine, because each of those 500 retained lines is ten screen rows of text rather
+than one.
+
+Which is arithmetic rather than a bug: you asked for 500 lines and got 500
+lines, for whichever meaning of a line the other setting chose.  It is written
+down here because the coupling runs between two settings that look unrelated,
+and
+because the surprising direction is the counter-intuitive one -- turning
+rejoining *off* is what shrinks your history.  Cap in characters instead and the
+failure inverts: one pathological line evicts the entire transcript, which is
+worse and is why this is not counted that way.
 
 Trimming is not free -- it releases images, prunes command records and tells the
 emulator its seam moved -- so it happens in batches once the buffer is over the
