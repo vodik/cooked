@@ -721,12 +721,36 @@ cooked strips only the bracketed end marker, so a pasted =ESC=, =C-c= or =C-u=
 reaches the child verbatim. xterm's list applies *regardless* of bracketed mode.
 Keep cooked's newline confirmation, which is the better half.
 
-** WIP [#B] Scrollback eviction counts lines, not text
+** DONE [#B] Scrollback eviction counts lines, not text
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §7 — found by the scroll-ceiling measurement, not by the report
-:BRANCH:   cooked/eviction-units
+:BRANCH:   86bc0f3
 :END:
+*Documented rather than fixed, and the choice is the finding.*
+
+Re-measured properly rather than reusing the flood figure, one identical byte
+stream at a cap of 500 lines:
+
+| content    | rejoin=t retains | rejoin=nil retains | ratio |
+|------------+------------------+--------------------+-------|
+| 80 columns |     39,914 chars |       40,553 chars |  1.0  |
+| 800 columns |   407,741 chars |       44,805 chars | *9.1* |
+
+Worse than the 2.3x the flood suggested, and flat where nothing wraps — which
+is the shape that says it is the wrap factor and nothing else.
+
+It is arithmetic rather than a bug: you asked for 500 lines and got 500 lines,
+for whichever meaning of a line the other setting chose. Lines are the unit
+every other emulator caps in and the one the buffer is made of, and capping in
+characters *inverts* the failure — one pathological line evicts the whole
+transcript, which is worse. So the =Done when='s second branch is the right one.
+
+What made it worth writing down is that the coupling runs between two settings a
+user would never connect, and that *the counter-intuitive direction is the one
+that bites*: turning rejoining off, which sounds like the more literal and
+conservative choice, is what shrinks history. Said in both docstrings, since
+either is where someone will be standing when it matters.
 Measured while answering the rejoin question: for one identical byte stream at
 ten screen rows per logical line, the buffer held 2,670,358 chars under
 =rejoin=t= against 1,176,739 under =nil=, while a short probe with no eviction
