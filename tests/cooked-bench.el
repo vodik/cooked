@@ -44,6 +44,91 @@ is that `float-time' resolution and scheduler granularity are fixed costs, so
 a loop that finishes in 5 ms is mostly measuring them.  Half a second is
 ghostel's figure and there is no reason to differ.")
 
+;;;; Two guards, because a timing result is only as good as the machine
+;;
+;; Neither of these makes a number more accurate.  What they do is refuse to
+;; let a number that is *not* a measurement of cooked be read as one, and they
+;; catch different things: the load check looks at the machine before the run,
+;; and the stability check looks at the samples afterwards.  A build that was
+;; already running when the suite started is caught by the first; a build that
+;; starts halfway through is caught only by the second.
+
+(defvar cooked-bench-load-fraction 0.5
+  "Fraction of the CPUs that may already be busy before a run is refused.
+
+Half is the figure ghostel's plan settled on, and the reasoning is that the
+benchmark wants a core to itself with room for the child processes it spawns.
+Set `COOKED_BENCH_FORCE' in the environment to run anyway.")
+
+(defvar cooked-bench-unstable-ratio 3.0
+  "How far a case's p99 may exceed its median before it is called unstable.
+
+Self-relative on purpose, so it needs no per-machine calibration -- a wall
+clock threshold would have to be retuned for every machine the suite runs on
+and would be silently wrong on the ones nobody retuned it for.")
+
+(defvar cooked-bench-min-clean-samples 3
+  "Fewest collection-free samples a case needs before stability is judged.
+
+Below this there is no distribution to speak of and the check would be reading
+noise.  The real-child cases sit near this line by nature: an iteration there
+is a whole session, so there are five or six of them, not five thousand.")
+
+(defvar cooked-bench--load nil
+  "The (ONE-MINUTE . CPUS) load sampled once at the start of the run.
+
+Sampled once and never again, which is not laziness.  The suite spawns child
+processes and burns a core for the better part of a minute, so it raises the
+very number it would be reading; a mid-run re-check would find the load the
+benchmark itself created and refuse in the middle of its own work.")
+
+(defun cooked-bench--load-sample ()
+  "The (ONE-MINUTE . CPUS) load right now, or nil if the system will not say."
+  (condition-case nil
+      (cons (/ (car (load-average)) 100.0) (num-processors))
+    (error nil)))
+
+(defun cooked-bench--load-ok-p (sample)
+  "Non-nil when SAMPLE is quiet enough for a timing result to be trusted.
+
+Nil SAMPLE -- a system with no `load-average' -- is not a busy machine, it is
+an unknown one, and a guard that cannot tell should not block."
+  (or (null sample)
+      (< (car sample) (* cooked-bench-load-fraction (cdr sample)))))
+
+(defun cooked-bench--check-load ()
+  "Print the sampled load, and refuse to run on a machine that is already busy.
+
+The one-minute average lags by design, so a run started twenty seconds after a
+big build still reads high and is still refused.  That is the conservative
+direction: the cost is a rerun, and the cost of the other direction is a
+number in a commit message that nothing in the code explains."
+  (setq cooked-bench--load (cooked-bench--load-sample))
+  (let ((forced (getenv "COOKED_BENCH_FORCE")))
+    (if (null cooked-bench--load)
+        (message "load: unavailable on this system -- guard cannot judge, running anyway")
+      (message "load: %.2f over %d cpus (limit %.2f)%s"
+               (car cooked-bench--load) (cdr cooked-bench--load)
+               (* cooked-bench-load-fraction (cdr cooked-bench--load))
+               (cond ((cooked-bench--load-ok-p cooked-bench--load) "")
+                     (forced " -- BUSY, forced by COOKED_BENCH_FORCE")
+                     (t " -- BUSY"))))
+    (unless (or (cooked-bench--load-ok-p cooked-bench--load) forced)
+      (let ((complaint
+             (format "machine is busy (load %.2f over %d cpus) -- quieten it, or set COOKED_BENCH_FORCE=1 to measure anyway"
+                     (car cooked-bench--load) (cdr cooked-bench--load))))
+        ;; A refusal is not a bug, and in batch a `user-error' is printed with
+        ;; a full backtrace anyway -- `backtrace-on-error-noninteractive' is
+        ;; consulted by the top-level handler, after any binding here has
+        ;; unwound, so it cannot be suppressed from inside.  Ten lines of
+        ;; internals in front of one sentence of advice trains the reader to
+        ;; scroll past both.  So batch exits non-zero with the sentence, which
+        ;; is what `make bench' needs, and a caller with a Lisp stack to unwind
+        ;; gets the error it can handle.
+        (if noninteractive
+            (progn (message "cooked-bench: %s" complaint) (kill-emacs 1))
+          (user-error "cooked-bench: %s" complaint))))))
+
 ;;;; The measured primitive
 ;;
 ;; One place where iteration, warmup, GC and statistics are decided, so that
@@ -82,11 +167,58 @@ number no iteration ever took.  Same rule as `ceil--pct' in
 scripts/bench-scroll-ceiling.el."
   (nth (min (1- (length sorted)) (floor (* p (length sorted)))) sorted))
 
-(defun cooked-bench--record (label samples &optional gcs detail)
+(defun cooked-bench--flag-instability (label clean)
+  "Say so, loudly, if CLEAN's spread says LABEL was interfered with.
+
+CLEAN is the samples from iterations during which no garbage collection
+happened, and using only those is the whole trick.  The obvious check -- p99
+against the median of everything -- fires on nearly every case in this file,
+because collection is deliberately left running and an allocating workload
+therefore has a p99 fifteen times its median as a matter of course.  A flag
+that fires on eight rows out of eighteen tells the reader nothing.  Among
+iterations that did not collect, though, there is no reason for one to take
+three times as long as the typical one except that something else on the
+machine took the CPU, which is exactly the condition worth shouting about and
+the one loadavg cannot see because it starts *during* the run.
+
+The alternative considered was to keep every sample and ask whether the tail
+is larger than collection can account for -- flag when more iterations exceed
+three times the median than there were collections.  It was tried and it is
+worse: on a quiet machine it fired on six of ten cases, because a case that
+collects fifteen times has a few more than fifteen samples over the line for
+ordinary reasons, while dropping the collecting iterations outright fired on
+none.  Under load the two agreed row for row, so the extra sensitivity bought
+nothing to pay for the false alarms with.
+
+What it cannot see is a *uniform* slowdown, and this is the reason the two
+guards are not redundant.  Measured under forty spinners on sixteen cores, the
+median of the styled per-frame case moved from 0.6 ms to 7.5 ms -- twelve
+times slower, every iteration of it -- and the ratio barely moved, because a
+self-relative test divides the interference out of both halves.  Three of the
+ten cases in that run were flagged and the rest reported inflated numbers with
+no complaint at all.  Only the load check refuses that run, and it did; the
+figures above exist because `COOKED_BENCH_FORCE' was set to get them.  Nor is
+the converse redundant: the load check samples once at the start and cannot
+see a build that begins in the middle.
+
+Marked rather than failed: an interfered case is still evidence, and a suite
+that errors out on a laptop that woke up to index something is a suite people
+stop running."
+  (when (>= (length clean) cooked-bench-min-clean-samples)
+    (let* ((sorted (sort (copy-sequence clean) #'<))
+           (median (cooked-bench--pct sorted 0.50))
+           (p99 (cooked-bench--pct sorted 0.99))
+           (ratio (if (> median 0) (/ p99 median) 0)))
+      (when (> ratio cooked-bench-unstable-ratio)
+        (message "  %-40s UNSTABLE (p99 %.1fx median over %d gc-free samples) -- rerun"
+                 label ratio (length sorted))))))
+
+(defun cooked-bench--record (label samples &optional clean gcs detail)
   "Record and print SAMPLES, a list of per-iteration seconds, under LABEL.
 
-GCS is how many garbage collections happened inside the measured loop and
-DETAIL is appended to the printed row.
+CLEAN is the subset of SAMPLES whose iterations collected no garbage, GCS is
+how many collections happened inside the measured loop, and DETAIL is appended
+to the printed row.
 
 The GC count is printed rather than kept to one side because it is what makes
 the tail readable.  Collection is deliberately not suppressed during a loop --
@@ -95,7 +227,7 @@ case that allocates heavily can have a p99 twenty times its median with
 nothing wrong: the slow iterations are the ones that collected.  Without the
 count there is no way to tell that apart from another process having taken the
 CPU, which is a different problem with a different fix."
-  (push (list label samples gcs detail) cooked-bench-results)
+  (push (list label samples clean gcs detail) cooked-bench-results)
   (let* ((sorted (sort (copy-sequence samples) #'<))
          (n (length sorted))
          (mean (/ (apply #'+ sorted) (float n))))
@@ -107,7 +239,8 @@ CPU, which is a different problem with a different fix."
              (* 1000 (car (last sorted)))
              (* 1000 mean)
              (or gcs 0)
-             (or detail ""))))
+             (or detail "")))
+  (cooked-bench--flag-instability label clean))
 
 (defun cooked-bench--measure (label unit-count body-fn &optional iterations)
   "Time BODY-FN repeatedly and record its distribution under LABEL.
@@ -152,15 +285,25 @@ than its trial estimate still runs long enough to be timed."
     ;; garbage some earlier case left behind.
     (let ((start (float-time))
           (collections gcs-done)
+          (clean nil)
           (done 0))
       (while (or (< done n) (< (- (float-time) start) cooked-bench-min-duration))
-        (let* ((t0 (float-time))
-               (charged (funcall body-fn)))
-          (push (if (floatp charged) charged (- (float-time) t0)) samples)
+        ;; `gcs-done' is read across the whole call rather than across the
+        ;; charged region, which for the real-child cases includes the wait in
+        ;; `accept-process-output'.  So an iteration that collected only while
+        ;; waiting is dropped from CLEAN although its charged time was
+        ;; untouched.  That errs towards judging fewer samples, which is the
+        ;; direction a guard against false alarms should err in.
+        (let* ((gc-before gcs-done)
+               (t0 (float-time))
+               (charged (funcall body-fn))
+               (sample (if (floatp charged) charged (- (float-time) t0))))
+          (push sample samples)
+          (when (= gcs-done gc-before) (push sample clean))
           (setq done (1+ done))))
       (setq collections (- gcs-done collections))
       (cooked-bench--record
-       label samples collections
+       label samples clean collections
        (when (> unit-count 1)
          (let ((sorted (sort (copy-sequence samples) #'<)))
            (format "%d units/iter, %.3f ms/unit at p50"
@@ -629,7 +772,11 @@ a result."
   "Run every benchmark in this file."
   (setq cooked-bench-results nil)
   (message "cooked: Emacs-side cost per workload (drain + apply only)")
-  (message "per-iteration distribution; read the p50 -- see the Commentary\n")
+  (message "per-iteration distribution; read the p50 -- see the Commentary")
+  ;; Before anything is timed, and before the header is complete: the load is
+  ;; part of the run's provenance, so it is printed whether or not it passes.
+  (cooked-bench--check-load)
+  (message "")
   (cooked-bench-marshalling)
   (cooked-bench-flood)
   (cooked-bench-styled)
