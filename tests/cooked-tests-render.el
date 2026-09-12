@@ -1966,6 +1966,43 @@ from the metrics rather than from the symptom."
     ;; Width fits; descent does not.
     (should (cooked--glyph-scale '(9 15 9 15) 9 default))))
 
+(ert-deftest cooked-a-lone-wide-glyph-claims-the-cell-after-it ()
+  "ghostel\='s `adjustWidth\=', and the idea is better than shrinking.
+
+A glyph too wide for its cell does not have to be made smaller if there is
+somewhere for it to go.  Three conditions, each with its own way of failing."
+  (let ((default '(15 5)))
+    (with-temp-buffer
+      ;; Relatively wider than the cell, standing alone with spaces both sides.
+      (insert "a X b")
+      (let ((from (+ (point-min) 2)))
+        (should (cooked--glyph-claims-next-cell-p
+                 '(20 15 5 15) from (1+ from) (point-max) default 9))
+        ;; A glyph narrower *in proportion* than its cell has no use for more
+        ;; room: whatever overflows is its height, and a wider slot cannot help.
+        (should-not (cooked--glyph-claims-next-cell-p
+                     '(2 15 5 15) from (1+ from) (point-max) default 9))))
+    (with-temp-buffer
+      ;; A character after it, so claiming would draw two glyphs on one cell.
+      (insert "a Xb")
+      (let ((from (+ (point-min) 2)))
+        (should-not (cooked--glyph-claims-next-cell-p
+                     '(20 15 5 15) from (1+ from) (point-max) default 9))))
+    (with-temp-buffer
+      ;; A character before it: claiming only where a glyph stands alone is what
+      ;; stops one instance being widened and the next not, which reads worse
+      ;; than either answer applied evenly.
+      (insert "aX b")
+      (let ((from (+ (point-min) 1)))
+        (should-not (cooked--glyph-claims-next-cell-p
+                     '(20 15 5 15) from (1+ from) (point-max) default 9))))
+    (with-temp-buffer
+      ;; Nowhere to go: the glyph is the last thing on the row.
+      (insert "a X")
+      (let ((from (+ (point-min) 2)))
+        (should-not (cooked--glyph-claims-next-cell-p
+                     '(20 15 5 15) from (1+ from) (point-max) default 9))))))
+
 (provide 'cooked-tests-render)
 ;;; cooked-tests-render.el ends here
 

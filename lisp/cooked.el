@@ -2105,8 +2105,11 @@ nil disables scaling entirely and restores the trim-only behaviour."
   "What the cluster in BEG..END actually measures, as (WIDTH ASCENT DESCENT PIXEL).
 
 Memoised in METRICS, `cooked--wrap-cache\='s third slot, on the cluster's own
-text -- so a border row of five hundred identical characters is one measurement
-and four hundred and ninety-nine hash lookups.  That is the whole reason a cache
+text *and its face* -- so a border row of five hundred identical characters is
+one measurement and four hundred and ninety-nine hash lookups, while the same
+character in bold is measured again, which it must be: a bold face is a
+different font and so a different glyph with different metrics.  ghostel keys on
+its `style_id\=' for the same reason.  That is the whole reason a cache
 is a prerequisite rather than an optimisation: without one this is a `font-at\='
 and a shaping call per cell per drain, which is the trap
 `cooked--row-wraps-p\=' already fell into with `vertical-motion\=' at 445us a row.
@@ -2122,7 +2125,8 @@ at index *2* of the gstring, not 1.  And the font's own metrics come from
 `query-font\=' -- pixel size 2, ascent 4, descent 5 -- not from `font-info\=',
 which is a different vector whose slots 4 and 5 are a baseline offset and a
 compose rule, and which therefore answers 0 for both without complaining."
-  (let ((key (buffer-substring-no-properties beg end)))
+  (let ((key (cons (get-text-property beg 'face)
+                   (buffer-substring-no-properties beg end))))
     (or (gethash key metrics)
         (puthash
          key
@@ -2201,6 +2205,46 @@ thrown away with them."
                    (list (aref info 4) (aref info 5)))
                  metrics))))
 
+(defun cooked--glyph-claims-next-cell-p (measured from to end default cell)
+  "Whether the glyph at FROM..TO may take the cell after it instead of shrinking.
+
+Ported from ghostel\='s `adjustWidth\=', and the idea is better than the one it
+replaces: a glyph too wide for its cell does not have to be made smaller if
+there is somewhere for it to go.  Giving it two cells means it is scaled less,
+or not at all, and less scaling is less of the gap that scaling leaves behind.
+
+Three conditions, all of them ghostel\='s and all of them load-bearing.
+
+The glyph must be *relatively wider than the cell* -- aspect against aspect,
+not width against width.  A glyph narrower in proportion than the cell it sits
+in has no use for more room: whatever is making it overflow is its height, and
+a wider slot does not help.
+
+It must *stand alone*, with a space or a row edge on both sides.  Claiming a
+cell that holds a character would draw two glyphs on top of each other, and
+claiming inconsistently -- this instance widened because of what happened to be
+beside it, the next one not -- looks worse than either answer applied evenly.
+
+And there must *be* a next cell: a glyph in the last column has nowhere to go.
+
+CELL is the frame's character width in pixels, passed in for the same reason
+`cooked--glyph-scale\=' takes a slot in pixels: `frame-char-width\=' answers 1
+on a terminal frame, which would make every glyph relatively narrow and this
+untestable in batch for a reason having nothing to do with what it decides.
+
+The claimed space is hidden by the caller rather than overwritten, which is
+what keeps this non-destructive.  A space rendered at zero width is still a
+space in the buffer, so yanking the row, searching it, and the seam assertion
+all still see the text the child sent."
+  (pcase-let ((`(,width ,ascent ,descent ,_) measured)
+              (`(,default-ascent ,default-descent) default))
+    (and (> (+ ascent descent) 0)
+         (>= (/ (float width) (+ ascent descent))
+             (/ (float cell) (+ default-ascent default-descent)))
+         (< to end)
+         (eq (char-after to) ?\s)
+         (or (= from (line-beginning-position)) (eq (char-before from) ?\s)))))
+
 (defun cooked--scale-offenders (start end window metrics)
   "Shrink any glyph in START..END that does not fit the cells it was given.
 
@@ -2237,13 +2281,30 @@ the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
                (cells (string-width (buffer-substring-no-properties from to)))
                (measured (and (> cells 0)
                               (cooked--glyph-metrics from to window metrics)))
-               (scale (and measured
+               (default (and measured (cooked--default-metrics window metrics)))
+               ;; ghostel's move, and it comes before the scaling rather than
+               ;; instead of it: widen the slot where that is free, then scale
+               ;; whatever is still over.  A glyph given two cells is scaled
+               ;; less, or not at all, and the leftover gap is what scaling
+               ;; costs -- so the cheapest gap is the one never opened.
+               (claim (and measured default
+                           (= cells 1)
+                           (cooked--glyph-claims-next-cell-p
+                            measured from to end default (frame-char-width))))
+               (cells (if claim 2 cells))
+               (scale (and measured default
                            (cooked--glyph-scale
-                            measured (* (frame-char-width) cells)
-                            (cooked--default-metrics window metrics)))))
-          (when (and scale (>= scale cooked-glyph-scale-floor))
+                            measured (* (frame-char-width) cells) default))))
+          (when (or claim (and scale (>= scale cooked-glyph-scale-floor)))
             (put-text-property from to 'display
-                               `((min-width (,cells)) (height ,scale))))
+                               (if (and scale (>= scale cooked-glyph-scale-floor))
+                                   `((min-width (,cells)) (height ,scale))
+                                 `((min-width (,cells)))))
+            (when claim
+              ;; Hidden, not deleted.  A space rendered at zero width is still a
+              ;; space in the buffer, so the yank, the search and
+              ;; `cooked--check-seam' all still see what the child sent.
+              (put-text-property to (1+ to) 'display '(space :width 0))))
           (goto-char to))))))
 
 (defun cooked--guard-row-width (start width &optional window uniform cache)
