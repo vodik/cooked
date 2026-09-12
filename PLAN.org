@@ -1,0 +1,599 @@
+#+TITLE: cooked: work picked up from the ghostel survey
+#+CATEGORY: cooked
+#+STARTUP: overview logdrawer
+#+TODO: TODO(t) NEXT(n) WIP(w!) REVIEW(r!) | DONE(d!) DROPPED(x@)
+#+PRIORITIES: A C B
+#+COLUMNS: %40ITEM %TODO %PRIORITY %EFFORT{:} %BRANCH %GATE
+#+PROPERTY: Effort_ALL 15m 30m 1h 2h 4h 1d 2d 3d
+
+Punchlist for [[file:REPORT.org][REPORT.org]]. Each task cites its section; the
+reasoning lives there, not here.
+
+* Operating protocol
+:PROPERTIES:
+:VISIBILITY: content
+:END:
+
+For an agent picking up work from this file.
+
+1. *Pick.* Take the highest =NEXT= whose =:GATE:= is empty or satisfied. Never
+   start a =TODO= that still has an unsatisfied gate — the gates exist because
+   the change is unsafe without them. If nothing is =NEXT=, promote the first
+   unblocked =TODO= in file order.
+2. *Claim.* Set the task to =WIP= (this stamps a timestamp into =LOGBOOK=).
+3. *Branch.* =git switch -c cooked/<short-slug>= off =main=, and record it in
+   the =:BRANCH:= property immediately — before any code — so an interrupted
+   session can be resumed.
+4. *Work.* Read the cited =REPORT.org= section first. Launch a subagent only
+   when the task says =:AGENT: yes=; otherwise do it inline.
+5. *Verify.* Run what the task's =Done when= line names. A task with no
+   verifiable outcome is not ready to start — say so rather than guessing.
+6. *Hand back.* Set =REVIEW= and stop. Summarise: what changed, what the
+   measurement said, and anything the report got wrong.
+7. *Land.* Only on explicit say-so: =git switch main && git merge --ff-only
+   cooked/<slug>=. If the fast-forward is refused, rebase the branch and ask
+   again — never merge with a commit. Then set =DONE= and clear =:BRANCH:= to
+   the merged SHA.
+
+** Measuring in a real graphical frame
+
+Batch mode measures spec construction and property application, never
+rasterization — §7 item 8. Anything whose =Done when= line mentions a real
+frame, a scroll, or redisplay needs a live pgtk frame, and this box can produce
+one *headlessly*, so a measurement task does not need the user at the keyboard:
+
+#+begin_src sh
+gamescope --backend headless -W 1920 -H 1080 --expose-wayland -- \
+  emacs -Q -l /path/to/script.el
+#+end_src
+
+=--expose-wayland= is load-bearing: without it gamescope offers only Xwayland
+and an Emacs built =--with-pgtk= has no xdg-shell to bind. With it,
+=display-graphic-p= is =t= and =framep= is =pgtk=. The script must end in
+=kill-emacs=, and must write its numbers to a *file* — nothing on stdout
+survives the compositor's own logging.
+
+Two cautions. The frame comes up at Emacs' default size, not =-W/-H=, so call
+=set-frame-size= explicitly and record the size next to the numbers. And
+=(redisplay t)= — the =t= is required — is what actually costs time; a bare
+=(redisplay)= is free to decide it has nothing to do. A 199×49 full-width
+repaint calibrates at p50 ≈ 3.6 ms, so a no-op reading of ~0 ms means the
+harness is wrong rather than the code being fast.
+
+Two things to raise the rate for. gamescope's own frame callback becomes the
+thing under measurement at the default refresh: every =max= pins to ~33 ms
+(30 Hz) and p90 runs 3x p50 no matter what the code does. =-r 1000= moves the
+tail to ~23 ms and leaves the median untouched — which is *why* medians are the
+headline here, an instrument reason on top of the §9 A reason. Where it matters,
+time the drain/apply separately from =(redisplay t)=; only the first half is
+cooked's, and the split is what makes the compositor's contribution visible
+rather than smeared through the number.
+
+*pgtk is among the slowest Emacs redraw backends* — slow enough that smooth
+scrolling is not reliably smooth on it. This cuts one way only, and it is worth
+being explicit about the direction. A redisplay cost measured here is an *upper
+bound*, so a *flat* redisplay result is conservative and a real regression would
+show up here first and largest. What it does *not* license is reading a
+redisplay figure from this harness as the cost a user on another backend pays,
+or attributing a gap to cooked when the backend is a candidate. Any conclusion
+of the form "redisplay is the bottleneck" needs a second backend before it is
+load-bearing; "redisplay is *not* the bottleneck" is safe from here.
+
+The load guard applies here more than anywhere: quiet the machine, and do not
+fan out agents across a measurement task.
+
+Conventions: =:GATE:= names a task that must be =DONE= first. =:GAIN:= is the
+expected payoff, so a flat result is a finding rather than a failure. Waves are
+=ORDERED= where the order is load-bearing; inside an unordered wave, pick freely.
+
+* Wave 0 — instruments                                          :bench:fuzz:
+:PROPERTIES:
+:VISIBILITY: children
+:END:
+
+Benchmarking and fuzzing first: both are cheap, both are informative before any
+code changes, and one of them can *delete* work. Nothing here is gated on
+anything else, so these can run in parallel.
+
+** REVIEW [#A] Measure the scroll ceiling with rejoining off
+:PROPERTIES:
+:EFFORT:   1h
+:REPORT:   §7 "The highest-information measurement available right now"
+:GAIN:     may delete the guard/wrap-cache/mark-truncation subsystem
+:BRANCH:   cooked/scroll-ceiling
+:RESULT:   ceiling does not move on realistic content — §7 suspect (ii) not confirmed
+:END:
+No code. =cooked-toggle-rejoin-wrapped-lines= already exists
+(=cooked-mode.el:147=). The three scroll causes are not independent: =rejoin=t=
+forces =truncate-lines nil=, which is what makes =cooked--guard-row-width=,
+=cooked--wrap-cache= and =cooked--mark-truncation= necessary at all.
+
+Done when: p50/p90 per 10-line scroll recorded for rejoin on vs off, on the same
+content, in a real pgtk frame. Record the numbers in this drawer.
+
+*** Measurement
+
+Harness =scripts/bench-scroll-ceiling.el=. =awk= child emitting ten lines per
+burst on demand, 30 discarded warmups then 200 timed bursts, GC pinned. Per
+burst the pump charges Emacs' own work only — never the wait on the child — and
+splits it in two, because only the first half is cooked's:
+
+- *apply* = =cooked--drain= + =cooked--apply=. Not backend-free, and that turns
+  out to be the interesting part: =cooked--guard-row-width= and
+  =cooked--wrap-cache= measure a row against the *window layout*, which on a
+  graphical frame means font metrics and on a tty means counting characters.
+- *redisplay* = =(redisplay t)=, which on pgtk includes the compositor's frame
+  callback.
+
+Four runs, two backends. pgtk under the gamescope recipe above at =-r 1000=;
+tty under =foot -W 100x32 -- emacs -nw= (foot will not start *inside* gamescope
+— it needs =wl_subcompositor=, which gamescope does not expose — so the tty runs
+are on the host compositor).
+
+Milliseconds per ten-line scroll, p50, and the ratio that is actually the
+question:
+
+| backend | geometry | content     | apply t | apply nil | t/nil | redisp t | redisp nil | t/nil |
+|---------+----------+-------------+---------+-----------+-------+----------+------------+-------|
+| pgtk    | 25x99    | no wrapping |    2.03 |      1.94 |  1.05 |     1.90 |       1.91 |  0.99 |
+| pgtk    | 29x99    | no wrapping |    2.28 |      2.48 |  0.92 |     1.99 |       2.03 |  0.98 |
+| pgtk    | 64x115   | no wrapping |   11.39 |     11.02 |  1.03 |     5.89 |       6.31 |  0.93 |
+| tty     | 65x115   | no wrapping |    4.80 |      4.75 |  1.01 |     1.66 |       1.63 |  1.02 |
+|---------+----------+-------------+---------+-----------+-------+----------+------------+-------|
+| pgtk    | 25x99    | 3x-wrapped  |    2.57 |      2.32 |  1.11 |     2.06 |       2.04 |  1.01 |
+| pgtk    | 29x99    | 3x-wrapped  |    1.85 |      1.95 |  0.95 |     1.75 |       1.81 |  0.97 |
+| pgtk    | 64x115   | 3x-wrapped  |    7.62 |      9.70 |  0.79 |     9.13 |       9.46 |  0.97 |
+| tty     | 65x115   | 3x-wrapped  |    4.24 |      4.69 |  0.91 |     1.56 |       1.60 |  0.97 |
+|---------+----------+-------------+---------+-----------+-------+----------+------------+-------|
+| pgtk    | 25x99    | 10x-wrapped |    4.15 |      2.69 |  1.54 |     2.58 |       2.19 |  1.18 |
+| pgtk    | 29x99    | 10x-wrapped |    4.27 |      3.01 |  1.42 |     2.52 |       2.34 |  1.08 |
+| pgtk    | 64x115   | 10x-wrapped |   11.42 |     11.80 |  0.97 |     5.75 |       5.63 |  1.02 |
+| tty     | 65x115   | 10x-wrapped |    4.87 |      5.22 |  0.93 |     1.70 |       1.82 |  0.93 |
+
+*** What it says
+
+*The ceiling does not move.* Suspect (ii) is not confirmed. Across twelve
+comparisons the t/nil ratio sits on 1.0, wandering to either side of it — nine
+of the twelve are within ±10%, and the direction is not consistent even for one
+content shape at one geometry.
+
+The one apparent effect, +54% and +42% on 10x-wrapped apply, *did not survive a
+change of geometry*: the same content at 64x115 gives 0.97, and on a tty 0.93.
+Two runs agreeing is not two runs replicating when they share a configuration.
+Treat it as unexplained and *not established* — if it is ever worth chasing, the
+place to start is that it appeared only at ~29 rows on pgtk.
+
+So =cooked--guard-row-width=, =cooked--wrap-cache= and =cooked--mark-truncation=
+cannot be removed on a performance argument. If they go it must be on the
+complexity argument, which is a different case and has to be made separately.
+The =:GAIN:= is flat, which the conventions call a finding rather than a
+failure. *Wave 2 should not be re-ordered around this, and ghostel's split-row
+bet buys cooked nothing measurable.*
+
+*** What the tty comparison found instead
+
+Worth more than the thing it was run to check. At matched geometry (~65x115,
+identical content):
+
+| | pgtk | tty | pgtk/tty |
+|-----------+-------+------+----------|
+| apply | 11.4 | 4.8 | *2.4x* |
+| redisplay | 5.9 | 1.7 | *3.5x* |
+
+Both halves are the backend, and *apply is not supposed to be a backend cost at
+all* — it is buffer manipulation. The 2.4x is the pixel-measuring inside it:
+=cooked--guard-row-width= and =cooked--wrap-cache= ask the window for font
+metrics on a graphical frame and get character counts for free on a tty. That is
+where the subsystem's cost actually lives, and it is paid whether or not
+anything is wrapped — the "no wrapping" row shows the same 2.4x.
+
+*This relocates the optimisation target.* The question is not rejoin-vs-split,
+it is whether the guard can answer from a cheaper source on a graphical frame.
+Note also that pgtk apply scales hard with row count (2.3 ms at 29 rows, 11.4 ms
+at 64) where tty does not — consistent with a per-row measurement, and a good
+sanity check on the reading.
+
+Keep =emacs -nw= under foot as a standing comparison point for anything that
+touches the guard or the wrap cache: it is the control that says whether a cost
+is cooked's or the backend's.
+
+*** An unrelated finding, worth its own task
+
+Every run held roughly *twice* the buffer chars under =rejoin=t= as under =nil=
+for the identical byte stream at 10x wrapping — 2,670,358 vs 1,176,739 in the
+tty run — while a 20-burst probe with no eviction showed 198,221 vs 200,000. So
+*scrollback eviction is counted in lines*, and hard-splitting multiplies the
+line count by the wrap factor: =rejoin=nil= retains about half the *text* for
+the same configured scrollback. Anyone arguing for the split-row bet has to
+answer this, because the same setting would then mean two different amounts of
+history.
+
+* Wave 1 — free wins                                              :lisp:core:
+:PROPERTIES:
+:VISIBILITY: children
+:END:
+
+No gates, no invariants touched. Ship whenever.
+
+** TODO [#A] Fix =clear-string= on an auth-source secret
+:PROPERTIES:
+:EFFORT:   30m
+:REPORT:   §6 "Secrets: cooked wins, with one bug"
+:BRANCH:
+:END:
+cooked zeroes whatever =cooked-password-function= returns; an auth-source
+backend may hand out a string shared with its cache. Clear only the freshly
+allocated wire copy, in a nested =unwind-protect= so it happens even if the PTY
+write throws — or document that sources must =copy-sequence=.
+
+** TODO [#A] Land the run-wide glyph image
+:PROPERTIES:
+:EFFORT:   2h
+:REPORT:   §2 "The cheaper half"
+:GAIN:     664ms → 10.5ms measured ceiling
+:BRANCH:
+:END:
+Verified in-tree: =cooked--deco-image= takes an optional =COUNT=
+(=cooked-deco.el:838=, plumbed to =:312=/=:256=) and the call site at =:1057=
+passes three args. =cooked-deco= is *already* run-wide one line above; only
+=display= loops per character. Pass the count and apply =display= run-wide.
+
+Also fix the docstring at =:887=, which cites
+=cooked-adjacent-box-glyphs-share-only-a-run-wide-image= — a test that does not
+exist. Either write it or rename the claim.
+
+Done when: a 24×80 box-drawing frame shows the property-interval count drop from
+per-cell to per-run, and the existing glyph tests still pass.
+
+** TODO [#A] =inhibit-modification-hooks= around the property loops
+:PROPERTIES:
+:EFFORT:   2h
+:REPORT:   §7 ranked borrowables, item 1
+:GAIN:     +21% plain / +55% box drawing, by cooked's own measurement
+:BRANCH:
+:END:
+*Only* around the property loops — the style-span walk, =cooked--apply-deco=,
+=cooked--render-link-spans=. Leave =insert=/=delete-region= outside the binding,
+because =cooked--render-rows= relies on the row rewrite firing
+=jit-lock-after-change= to mark the row unfontified (=cooked.el:2180=).
+
+Done when: the per-frame benchmark moves and fontification still happens.
+
+** TODO [#B] xterm control-byte strip on outbound paste
+:PROPERTIES:
+:EFFORT:   1h
+:REPORT:   §6 "Paste hygiene: a real gap"
+:BRANCH:
+:END:
+cooked strips only the bracketed end marker, so a pasted =ESC=, =C-c= or =C-u=
+reaches the child verbatim. xterm's list applies *regardless* of bracketed mode.
+Keep cooked's newline confirmation, which is the better half.
+
+** TODO [#C] Small corrections
+:PROPERTIES:
+:EFFORT:   1h
+:REPORT:   §4 "Correction to the ROADMAP"; §7; §10
+:BRANCH:
+:END:
+- =docs/ROADMAP.md='s "mouse drag and motion" known-gap entry is stale —
+  =cooked--mouse-track= exists and handles the drag half of 1003.
+- =auto-hscroll-mode nil= and =default-text-properties nil= buffer-locally.
+- Terminfo round-trip verification in the Makefile (one =infocmp= line).
+- A =-C link-arg=-Wl,--version-script== equivalent of =symbols.map=.
+
+* Wave 2 — redisplay                                              :perf:core:
+:PROPERTIES:
+:ORDERED:  t
+:VISIBILITY: children
+:END:
+
+*Every task here is gated on the property test.* These are exactly the changes
+that produce stale cells.
+
+** TODO [#A] Coalesce contiguous damaged rows into one Block
+:PROPERTIES:
+:EFFORT:   1d
+:REPORT:   §12 "The finding that matters most for cooked"; §7 item 2
+:GATE:     Property test: deltas replay ≡ full grid
+:GAIN:     a 24-row repaint: 48 Emacs edits → 2
+:BRANCH:
+:END:
+Verified: =drain_damage= is ascending by construction, =RowSpan= already exists
+(=src/lib.rs:1013=) and =Update::scrolled_rows= already proves one =Block= can
+carry many rows with a correct per-row span table. Offsets are already =u32= for
+exactly this. *No protocol change needed.*
+
+Hazard from ghostel: their span breaks only on a *clean* row, so page-granularity
+false positives get amplified into one giant reinsert that destroys every marker
+in the viewport. Coalesce runs of *genuinely* damaged rows.
+
+** TODO [#A] Row-range =display= properties for images
+:PROPERTIES:
+:EFFORT:   2d
+:REPORT:   §2 "The mechanism, confirmed"
+:GATE:     Coalesce contiguous damaged rows into one Block
+:GAIN:     the 20x
+:BRANCH:
+:END:
+Hybrid, not a copy: coalesce runs of contiguous same-image/same-rectangle/
+same-slice-row cells into one interval, fall back to per-cell where the grid
+actually broke the run. Per-cell addressing is what makes text-overwrite,
+scroll-seam and rewrap work for free, and must survive.
+
+The merge hazard =cooked-adjacent-box-glyphs-do-not-share-a-display-property=
+guards does *not* apply: a spec sized to exactly the range it covers is meant to
+merge.
+
+** TODO [#B] Express the ordinary scroll as a scroll
+:PROPERTIES:
+:EFFORT:   3d
+:REPORT:   §12 "Scroll is where the models genuinely differ"
+:GATE:     Coalesce contiguous damaged rows into one Block
+:GAIN:     25 rows of damage → 2, on the most common terminal operation
+:BRANCH:
+:END:
+The largest single win and the riskiest change in the report. Damage only the
+recycled rows rather than =touch_range(top..=bottom)=; the departing rows are
+already the scrollback text =cooked--render-scrolled= just inserted.
+Ring-buffering =Screen::rows= instead of =rotate_left= makes it cheap Rust-side.
+
+Note cooked already *beats* ghostel under a scroll region and on the alt screen,
+where their page-dirty flag degrades to a whole-viewport repaint. Do not
+regress that.
+
+** TODO [#B] =adjustRegion= mechanical floor
+:PROPERTIES:
+:EFFORT:   1d
+:REPORT:   §7 "Marker preservation"
+:GATE:     Coalesce contiguous damaged rows into one Block
+:BRANCH:
+:END:
+Keep =editing=/=wandered=/=follow= exactly as they are — they answer questions
+arithmetic cannot. Add the floor underneath for the two cases that have no
+rescue today: the *mark* (currently just deactivated) and the =window-point= of
+other windows in the live screen that are not semantically following.
+
+* Wave 3 — links, and the seams they need                              :lisp:
+:PROPERTIES:
+:VISIBILITY: children
+:END:
+
+** TODO [#A] Deferred, coalesced link detection
+:PROPERTIES:
+:EFFORT:   1d
+:REPORT:   §6 "Deferred detection"; §7 suspect (iii)
+:GAIN:     the third scroll cause
+:BRANCH:
+:END:
+Independent of Wave 2 — rides the existing =cooked-row-rendered-functions=,
+which already delivers exact bounds. Four parts: text properties instead of
+goto-addr *overlays*; a debounced pass over the union of damaged regions, held in
+markers so it survives eviction; skip the cursor's row and the prompt; and gate
+re-application on the stored match text still being =equal=.
+
+Done when: the repaint count during a gesture drops, and
+=cooked-detect-links-on-alt-screen= stops being a necessary defence.
+
+** TODO [#A] Fix =cooked-link.el='s upward ownership questions
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §11 "cooked-link / cooked-file-link — the one real finding"
+:BRANCH:
+:END:
+The base layer asks =cooked--suspended-p= and =cooked--child-owns-keyboard-p=
+upward, which its own stated rule forbids, and =cooked-link--claimed-p=
+arbitrates a category ("guessed shape") only an optional layer produces. Add
+=cooked-link-claim-functions= and move the ownership decision to where input
+ownership already lives.
+
+** TODO [#A] thing-at-point providers — ROADMAP §3 without embark
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §6 "ROADMAP §3 is already solved, one layer below embark"
+:GATE:     Fix =cooked-link.el='s upward ownership questions
+:BRANCH:
+:END:
+=thing-at-point-provider-alist= for =url= / =filename= / =existing-filename=,
+the matching bounds alist, and =file-name-at-point-functions=. Installed from
+=cooked-mode.el= setup with each link layer contributing its own — the tier
+straddle is the point. embark, =browse-url-at-point=, ffap and =find-file='s
+=M-n= all light up with no embark dependency.
+
+** TODO [#B] Soft-wrap joining for detection
+:PROPERTIES:
+:EFFORT:   1d
+:REPORT:   §6 detection matrix
+:GATE:     Deferred, coalesced link detection
+:BRANCH:
+:END:
+Closes cooked's one documented detection gap: a URL wrapped across a live row.
+Prerequisite — =Row::wrapped= exists (=screen.rs:99=) but is used only for the
+eviction rejoin, so it needs exposing in the drain blocks.
+
+* Wave 4 — features                                                :feature:
+:PROPERTIES:
+:VISIBILITY: children
+:END:
+
+Unordered. Each names its own gate where it has one.
+
+** TODO [#A] OSC 7 → TRAMP path mapping
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §5 "TRAMP is much cheaper than the ROADMAP bills it"
+:GATE:     Deferred, coalesced link detection
+:GAIN:     ROADMAP §5's scenario, in ~20 lines
+:BRANCH:
+:END:
+Reuse the existing =file-remote-p= prefix so multi-hop survives, and *skip
+=file-directory-p= on the remote branch* — validating opens a TRAMP connection
+on every =cd=. Three follow-ons: keep the hostile-=cat= defence on the local
+branch only (construct the TRAMP name from =cooked--host=, never from the
+payload); guard =cooked-file-link= off when =default-directory= is remote; have
+=cooked--native-completion= decline on a foreign host.
+
+*Ship the mapping alone.* The remote spawn is architectural — see §5.
+
+** TODO [#B] Shell history via the shell's own command
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §5 "Shell history for free"
+:BRANCH:
+:END:
+New =lisp/cooked-history.el=. Four lines of data through =process-file=, so a
+remote buffer queries the remote host for free once TRAMP lands. NUL-split for
+fish. A function value replaces the string, which is how atuin/histdb plug in.
+Composes with =cooked-delegate-key= rather than competing.
+
+** TODO [#B] Path/URL-aware syntax table
+:PROPERTIES:
+:EFFORT:   2h
+:REPORT:   §4 "Word boundaries and copy"
+:BRANCH:
+:END:
+=.= and =/= as word constituents so double-click takes =~/src/foo/bar.txt=
+whole; U+2502 a boundary so TUI panes do not merge. Rebuilt in place so a
+customize reaches live buffers. Test through *both* =thing-at-point= and
+=mouse-start-end= — they classify differently.
+
+** TODO [#B] Selection protection for non-evil users
+:PROPERTIES:
+:EFFORT:   2h
+:REPORT:   §4 "Explicit modes vs derived policy"
+:BRANCH:
+:END:
+cooked freezes only in evil visual state, so a plain =C-SPC= or =consult-line=
+selection gets clobbered. Rides the existing =cooked-input-mode-functions=.
+
+** TODO [#B] OSC 9;4 progress → mode line
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §8 "Gaps worth closing"
+:BRANCH:
+:END:
+The largest functional gap on the bidirectional axis — agents and modern build
+tools all emit it. Add =cooked-progress-function= so a zero-dependency renderer
+and a spinner.el one are interchangeable. RIS must clear it.
+
+** TODO [#B] =cooked-dnd.el= — drag-and-drop and yank-media
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §6 "Drag-and-drop and yank-media"
+:BRANCH:
+:END:
+~40 lines, pure Lisp, new optional layer. The insight: a PTY has no inbound
+image channel, so write a temp file and paste the shell-quoted path.
+=file-remote-p … 'localname= makes it TRAMP-correct for free. Two delivery
+paths, because Emacs ports disagree — =dnd-protocol-alist= for X11/pgtk,
+=[drag-n-drop]= for NS/w32 — plus an emulation keymap for mode-line and fringe
+drops.
+
+** TODO [#C] Glyph scaling before trimming
+:PROPERTIES:
+:EFFORT:   2d
+:REPORT:   §2 "The framing that matters: repair vs destroy"
+:BRANCH:
+:END:
+Turns a destructive repair into a non-destructive one. Needs a metrics cache
+first, or it will =font-at= per cell per drain. Use ghostel's key shape with
+cooked's stamp invalidation — =cooked--wrap-cache= is already stamped on font,
+=face-remapping-alist= and geometry. Load-bearing details: the three-way min of
+width/ascent/descent ratios, and the =floor(pixel_size × scale) / pixel_size=
+quantization.
+
+** TODO [#C] Remaining smaller items
+:PROPERTIES:
+:REPORT:   §4, §5, §6, §8, §10
+:BRANCH:
+:END:
+Kitty flags beyond bit 1 (or stop claiming them in =CSI ? u=) · remote-gated
+password regex fallback · =cooked-password-functions= as a chain · prompts as an
+imenu index (in =cooked-command-decorations.el=) · =around-font-scale= advice ·
+minibuffer resize exception · medium gating defcustom · bash < 4.4 DEBUG-trap
+fallback · nushell arm · picker annotations (wants =cooked--title= public) ·
+lone-ESC =input-decode-map= filter · pixel-delta wheel accumulation.
+
+* Wave 5 — the big ones                                        :core:feature:
+:PROPERTIES:
+:VISIBILITY: children
+:END:
+
+** TODO [#A] =cooked-comint.el= — a VT filter for any comint buffer
+:PROPERTIES:
+:EFFORT:   3d
+:REPORT:   §1 (the whole section)
+:GATE:     Property test: deltas replay ≡ full grid
+:AGENT:    yes
+:GAIN:     the only item that answers "why cooked and not vterm" for someone who never opens a terminal
+:BRANCH:
+:END:
+New =src/emu/stream.rs= (a second =Perform= impl) + =lisp/cooked-comint.el=.
+
+Three decisions already made in §1: it is a *sibling* of =cooked-process.el=,
+not a layer — it must sit on =cooked-util= + =cooked-face= and must *not*
+=require 'cooked=. It resolves CR/BS/erase in a *one-row line buffer* rather
+than passing them through (ghostel's bug, which =cooked-process.el:28-42=
+documented first) — no grid, so no retirement latency. And it sets both =face=
+and =font-lock-face= unconditionally, per =cooked-process.el:350=.
+
+Factor the =set_attribute= arm out of =term/csi.rs= so grid and stream share SGR
+decoding — the same instinct as ghostel's =style_face.zig=, on the Rust side.
+
+** TODO [#C] Prebuilt module download
+:PROPERTIES:
+:EFFORT:   2d
+:REPORT:   §3 "Prebuilt module download"; "The artifact has to carry terminfo"
+:BRANCH:
+:END:
+Port the sidecar read *before* =module-load= (so a stale =.so= is refused),
+atomic install-by-rename, never prompting at load time. Then do what ghostel
+did not: publish =SHA256SUMS= and verify against digests compiled into the
+=.el=, so the trust root is the package rather than the CDN.
+
+*The artifact must carry terminfo*, and that changes staleness from
+mtime-vs-source to version-vs-sidecar — a downloaded install has no
+=terminfo/cooked.ti= to compare against.
+
+** TODO [#C] =TERMINFO=b64:…= for the remote spawn only
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §3 "b64 comes back, scoped"
+:GATE:     Prebuilt module download
+:BRANCH:
+:END:
+Commit 83206c1's argument stands for the *local* child and is untouched. The
+remote case is the one a directory cannot reach: zero filesystem writes on the
+far end, which deletes ghostel's whole remote-terminfo apparatus. Directory
+always; =b64:= only where no directory is reachable.
+
+** TODO [#C] Throughput: the vte parse loop
+:PROPERTIES:
+:EFFORT:   3d
+:REPORT:   §"Why this document"; §13
+:GATE:     Typing latency benchmark, three configurations
+:BRANCH:
+:END:
+Only if the Wave 0 numbers say this is where the remaining gap is. §13's
+conclusion: the gap is the parse rate, not the architecture — cooked's
+per-drain marshalling is already *cheaper* than ghostel's per-redraw property
+application.
+
+* Deliberately not doing
+:PROPERTIES:
+:VISIBILITY: folded
+:END:
+
+See the appendix of [[file:REPORT.org][REPORT.org]] for the reasoning.
+
+- DROPPED ConPTY / Windows — no termios on a pseudoconsole, so
+  =Mode::{Cooked,Raw,Secret}= cannot exist there.
+- DROPPED =desktop= registration — ghostel's four-branch skip list plus a
+  =run-at-time 0= shield is the evidence the refusal is right.
+- DROPPED =ghostel-compile.el= wholesale — =cooked-next-error.el= is the better
+  answer and covers every command.
+- DROPPED Cross-emulator throughput benchmark — marketing, not engineering; you
+  cannot profile vterm's internals from here.
+- DROPPED Python + Hypothesis as the first property-testing implementation — the
+  highest-value property needs no Emacs at all.
+- DROPPED texinfo/Pages pipeline, dual READMEs, badges, melpazoid before a
+  submission, =AGENTS.md= duplicated as =CLAUDE.md=.
