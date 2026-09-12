@@ -1132,23 +1132,45 @@ remote buffer queries the remote host for free once TRAMP lands. NUL-split for
 fish. A function value replaces the string, which is how atuin/histdb plug in.
 Composes with =cooked-delegate-key= rather than competing.
 
-** WIP [#B] Path/URL-aware syntax table
+** DONE [#B] Path/URL-aware syntax table
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §4 "Word boundaries and copy"
-:BRANCH:   cooked/syntax-table
+:BRANCH:   bc60b69
 :END:
+Two findings recorded rather than papered over. The *box-drawing half of the
+boundary default is belt-and-braces*: those characters are already =_= (symbol)
+in Emacs' own table, so they end a word without help, and the test covering them
+passes with the custom emptied. And \\[forward-word] consults
+=find-word-boundary-function-table= as well as the syntax table, which puts a
+boundary at every *script* change — so a box-drawing character ends a word even
+with syntax class =w=, and syntax alone is not the whole story for anything
+non-ASCII. What the file genuinely owns is the *ordering*: boundaries are
+applied after constituents, so a character named in both is a boundary, and that
+now has a test using an ASCII character where it can actually be demonstrated.
 =.= and =/= as word constituents so double-click takes =~/src/foo/bar.txt=
 whole; U+2502 a boundary so TUI panes do not merge. Rebuilt in place so a
 customize reaches live buffers. Test through *both* =thing-at-point= and
 =mouse-start-end= — they classify differently.
 
-** WIP [#B] Selection protection for non-evil users
+** DONE [#B] Selection protection for non-evil users
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §4 "Explicit modes vs derived policy"
-:BRANCH:   cooked/selection-protection
+:BRANCH:   dea666a
 :END:
+*=activate-mark-hook= is the obvious wiring and does not work*:
+\\[set-mark-command] activates the mark while point is still on it, so the
+region is empty and =use-region-p= is nil at exactly the moment the hook runs —
+everything that makes it a selection happens afterwards as ordinary motion, with
+no hook of its own. Asked once per command with the answer cached instead, which
+picks up the mouse drag and =consult-line= for free.
+
+One change in cooked-evil.el, which is where evil knowledge belongs: its
+insert-state arm answered =semi= unconditionally and so ran ahead of this for
+every evil user, leaving a mouse selection in insert state unprotected. Visual
+state is deliberately left alone — =cooked-evil-visual-state-render= is the more
+specific answer and may have been set to nil on purpose.
 cooked freezes only in evil visual state, so a plain =C-SPC= or =consult-line=
 selection gets clobbered. Rides the existing =cooked-input-mode-functions=.
 
