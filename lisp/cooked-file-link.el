@@ -153,11 +153,17 @@ land in a real file, and be the wrong file.  Highlighting nothing says less
 than cooked knows, and everything it says is true."
   (and (not (string-empty-p name))
        (not (cooked--foreign-host-p))
-       (or (ffap-file-exists-string name)
+       ;; Expanded, and that is a fix rather than a tidy-up.  `ffap-file-exists-string'
+       ;; returns the name it was *given*, not where it found it -- so the project-root
+       ;; branch below used to hand back a bare `src/lib.rs' that the caller then
+       ;; resolved against the child's `default-directory', which is the one directory
+       ;; it is already known not to be in.  Expanding here makes the answer say which
+       ;; of the two searches succeeded, which is the whole point of having two.
+       (or (when (ffap-file-exists-string name) (expand-file-name name))
            (when-let* ((project (project-current nil))
                        (root (project-root project))
                        (default-directory root))
-             (ffap-file-exists-string name)))))
+             (when (ffap-file-exists-string name) (expand-file-name name))))))
 
 (defun cooked-file-link--at-point ()
   "The file under point as (FILE LINE COL), or nil.
@@ -281,6 +287,67 @@ guessed."
   (setq cooked-link-claim-functions
         (append cooked-link-claim-functions
                 (list (cons 'guessed #'cooked-file-link--claim-p)))))
+
+;;;; thing-at-point, the half only this layer can supply
+
+;; `filename' and `existing-filename' cannot be contributed from cooked-link.el:
+;; deciding that `src/lib.rs' is a file rather than a word means asking the
+;; filesystem, which is exactly the feature this optional layer *is*.  So the two
+;; alists get their entries from two different tiers, and cooked-mode.el installs
+;; whatever is present when a buffer is set up.  Nothing here is conditional on
+;; embark: embark's file finder goes through `thing-at-point', so it and
+;; `browse-url-at-point', ffap and `find-file's `M-n' all light up together.
+
+(defun cooked-file-link--filename-at-point ()
+  "The file name under point, whether or not it exists.
+
+`filename\=' rather than `existing-filename\=': the caller asked what the text
+*is*, not whether it resolves, so the split is done and the name returned
+without a `stat\='.  `cooked-file-link--exists\=' is the other provider\='s job."
+  (when-let* ((string (ffap-string-at-point 'file)))
+    (car (cooked-file-link--split string))))
+
+(defun cooked-file-link--existing-filename-at-point ()
+  "The file under point, resolved, or nil if nothing there is a file.
+
+Returns the *resolved* name -- `cooked-file-link--exists\=' has already tried
+`default-directory\=' and then the project root -- because a bare `src/lib.rs\='
+handed to `find-file\=' from some other buffer would not find anything.  What
+makes the answer useful is that it is absolute."
+  (car (cooked-file-link--at-point)))
+
+(defun cooked-file-link--filename-bounds-at-point ()
+  "Bounds of the file name under point, or nil.
+
+`ffap-string-at-point\=' records what it matched in
+`ffap-string-at-point-region\=', so the bounds come from the same pass that
+produced the string rather than from a second, possibly disagreeing, one.  The
+trailing `:LINE:COL\=' is included: it is part of the thing the user pointed at,
+and a caller wanting only the name has the `filename\=' provider for that."
+  (when (ffap-string-at-point 'file)
+    (let ((region ffap-string-at-point-region))
+      (when (and (car region) (cadr region))
+        (cons (car region) (cadr region))))))
+
+(defun cooked-file-link--file-name-at-point ()
+  "Entry for `file-name-at-point-functions\='.
+
+What `find-file\=' offers as the `M-n\=' default, and what ffap consults.  The
+existing file rather than the guess, because this hook\='s callers use the answer
+to *open* something."
+  (cooked-file-link--existing-filename-at-point))
+
+(dolist (entry (list (cons 'filename #'cooked-file-link--filename-at-point)
+                     (cons 'existing-filename
+                           #'cooked-file-link--existing-filename-at-point)))
+  (add-to-list 'cooked-thing-at-point-providers entry))
+
+(dolist (thing '(filename existing-filename))
+  (add-to-list 'cooked-bounds-of-thing-at-point-providers
+               (cons thing #'cooked-file-link--filename-bounds-at-point)))
+
+(add-to-list 'cooked-file-name-at-point-functions
+             #'cooked-file-link--file-name-at-point)
 
 (provide 'cooked-file-link)
 

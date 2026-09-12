@@ -433,6 +433,74 @@ cheap and this only ever runs over a row or a batch."
                    (get-text-property (overlay-start overlay) 'cooked-link-id))
           (delete-overlay overlay))))))
 
+;;;; thing-at-point, which is how everything else finds a link
+
+;; ROADMAP §3 asked for `embark-target-finders' entries.  This is the same feature
+;; one layer down and without the dependency: embark's file and URL finders go
+;; through `thing-at-point', so a provider installed here answers `embark-act',
+;; `browse-url-at-point', ffap and `find-file's `M-n' at once, and answers them in
+;; a plain Emacs with no embark installed.
+;;
+;; The providers are *collected* rather than installed here.  `url' is this file's
+;; to contribute and `filename'/`existing-filename' are cooked-file-link.el's, which
+;; is an optional layer above cooked.el -- so the installation point straddles the
+;; tier boundary and belongs in cooked-mode.el's setup, with each layer contributing
+;; its own.  That straddle is the point, not an awkwardness to design around: the
+;; alternative is the base layer naming a provider only an upper layer can supply,
+;; which is the same mistake `cooked-link-claim-functions' exists to undo.
+
+(defvar cooked-thing-at-point-providers nil
+  "Entries for `thing-at-point-provider-alist\=', contributed by each link layer.
+An alist of (THING . FUNCTION); cooked-mode.el installs them buffer-locally.")
+
+(defvar cooked-bounds-of-thing-at-point-providers nil
+  "Entries for `bounds-of-thing-at-point-provider-alist\=', as above.
+
+Kept separate rather than derived, because the two alists are consulted
+independently: a caller asking only for bounds -- which is what embark does to
+highlight a target -- must not fall back to thingatpt's own idea of where a
+thing ends when this layer knows better.")
+
+(defvar cooked-file-name-at-point-functions nil
+  "Entries for `file-name-at-point-functions\=', contributed by each link layer.
+
+Empty unless cooked-file-link.el is loaded -- naming a file is that layer's
+whole job -- but the variable lives here so cooked-mode.el has one place to
+install from whether or not the layer is present.")
+
+(defun cooked-link--osc-8-bounds (&optional pos)
+  "Bounds of the `OSC 8\=' span covering POS, or nil.
+
+The span is delimited by the `cooked-link-id\=' property rather than by
+anything in the text, which is what makes it correct across a soft wrap and
+across a row boundary: the id travels with the row through eviction, so a
+destination broken over three screen rows still answers as one thing."
+  (let ((pos (or pos (point))))
+    (when-let* ((id (get-text-property pos 'cooked-link-id)))
+      (cons (or (previous-single-property-change (1+ pos) 'cooked-link-id) (point-min))
+            (or (next-single-property-change pos 'cooked-link-id) (point-max))))))
+
+(defun cooked-link--url-at-point ()
+  "The `OSC 8\=' destination at point, for `thing-at-point-provider-alist\='.
+
+Only the OSC 8 case is answered here, and returning nil for everything else is
+deliberate: thingatpt\='s own `url\=' thing already reads a bare URL out of the
+text, and it reads more schemes than goto-addr does.  What it cannot know is
+that these particular characters carry a destination that is not written in
+them -- an `OSC 8\=' span\='s text is frequently a label, so the URL is nowhere
+on screen.  Answering only that case adds the knowledge without displacing
+anything."
+  (cooked-link-uri))
+
+(defun cooked-link--url-bounds-at-point ()
+  "Bounds of the `OSC 8\=' span at point, for the bounds provider alist."
+  (and (cooked-link-uri) (cooked-link--osc-8-bounds)))
+
+(add-to-list 'cooked-thing-at-point-providers
+             (cons 'url #'cooked-link--url-at-point))
+(add-to-list 'cooked-bounds-of-thing-at-point-providers
+             (cons 'url #'cooked-link--url-bounds-at-point))
+
 (provide 'cooked-link)
 
 ;;; cooked-link.el ends here

@@ -1737,6 +1737,75 @@ else."
 
 ;;;; The mode
 
+(defconst cooked--thing-at-point-things '(url filename existing-filename)
+  "Every `thing-at-point' kind a cooked layer can ever answer.
+
+Fixed rather than derived from `cooked-thing-at-point-providers', and that is
+what makes late loading work: cooked-file-link.el is `require'-to-enable, so a
+user may load it long after their first cooked buffer exists, and a list read
+at mode time would have missed it forever.  A thing nothing contributes an
+answer for returns nil, which is exactly the \"no provider\" signal thingatpt
+wants -- so claiming all three up front costs nothing and displaces nothing.")
+
+(defun cooked--thing-at-point (thing)
+  "Ask each layer's provider for THING at point, first answer winning.
+
+Resolved at call time against `cooked-thing-at-point-providers', never
+snapshotted -- see `cooked--thing-at-point-things'."
+  (cl-loop for (kind . function) in cooked-thing-at-point-providers
+           when (eq kind thing)
+           thereis (funcall function)))
+
+(defun cooked--bounds-of-thing-at-point (thing)
+  "Bounds for THING at point from the layer that claims it, or nil.
+
+Kept separate from `cooked--thing-at-point' rather than derived, because the
+two alists are consulted independently: embark asks only for bounds when it
+highlights a target, and must not fall back to thingatpt's idea of where a
+thing ends when a layer here knows better."
+  (cl-loop for (kind . function) in cooked-bounds-of-thing-at-point-providers
+           when (eq kind thing)
+           thereis (funcall function)))
+
+(defun cooked--install-thing-at-point-providers ()
+  "Install cooked's `thing-at-point' providers in this buffer.
+
+The contribution point straddles a tier boundary on purpose.  `url' comes from
+cooked-link.el, which is base tier; `filename' and `existing-filename' come
+from cooked-file-link.el, which is an optional layer the user `require's.
+Neither file can install the other's, and the base layer must not name a
+provider only an upper layer can supply -- so both merely contribute, and this
+function, in the mode that sits above both, installs a dispatcher that asks
+whoever is present at the moment of the question.
+
+Buffer-locally, because these alists are global and a cooked provider answering
+elsewhere would be wrong: `cooked-link-uri' reads a table that exists only here.
+
+What it buys is out of proportion to its size.  ROADMAP §3 asked for
+`embark-target-finders' entries; embark's own file and URL finders go through
+`thing-at-point', so this answers `embark-act' without cooked depending on
+embark at all -- and answers `browse-url-at-point', ffap and `find-file's
+`M-n' in the same stroke, in an Emacs that has never heard of embark."
+  (setq-local thing-at-point-provider-alist
+              (append (mapcar (lambda (thing)
+                                (cons thing (lambda () (cooked--thing-at-point thing))))
+                              cooked--thing-at-point-things)
+                      thing-at-point-provider-alist))
+  (setq-local bounds-of-thing-at-point-provider-alist
+              (append (mapcar (lambda (thing)
+                                (cons thing
+                                      (lambda () (cooked--bounds-of-thing-at-point thing))))
+                              cooked--thing-at-point-things)
+                      bounds-of-thing-at-point-provider-alist))
+  (add-hook 'file-name-at-point-functions #'cooked--file-name-at-point nil t))
+
+(defun cooked--file-name-at-point ()
+  "Entry on `file-name-at-point-functions', dispatching to whichever layer answers.
+
+What `find-file' offers as its `M-n' default and what ffap consults.  Empty
+unless cooked-file-link.el is loaded, naming a file being that layer's job."
+  (run-hook-with-args-until-success 'cooked-file-name-at-point-functions))
+
 (define-derived-mode cooked-mode comint-mode "cooked"
   "Major mode for a terminal that hands the keyboard back for line input.
 
@@ -1855,6 +1924,7 @@ to the child verbatim."
   ;; Above the state maps for the same reason, and above `cooked--mouse-map-alist'
   ;; only incidentally -- the two never bind the same event.
   (add-to-list 'emulation-mode-map-alists 'cooked--override-map-alist)
+  (cooked--install-thing-at-point-providers)
   (cooked--install-global-hooks)
   ;; Negative depth so it runs ahead of the snap: the guard can substitute
   ;; `this-command', and the snap reads `this-command' to decide whether to move

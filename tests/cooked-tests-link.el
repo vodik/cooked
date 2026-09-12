@@ -217,6 +217,118 @@ position itself, and a source is not blocked by one it outranks."
     (load "cooked-file-link" nil t)
     (should (= (length cooked-link-claim-functions) before))))
 
+(ert-deftest cooked-thing-at-point-answers-an-osc-8-destination ()
+  "`thing-at-point\=' `url\=' returns what the child named, not what is on screen.
+
+The case no generic provider can get right: an `OSC 8\=' span\='s *text* is
+usually a label, so the destination appears nowhere in the buffer.  This is
+also what makes ROADMAP §3 fall out with no embark dependency -- embark\='s URL
+finder goes through `thing-at-point\=', so answering here answers there."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\033]8;;https://example.com/deep\\033\\\\LABEL\\033]8;;\\033\\\\\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "LABEL" (cooked-tests--text)))))
+    (goto-char (cooked-tests--link-at "LABEL"))
+    ;; The destination is not in the buffer text at all, which is the point.
+    (should-not (string-match-p "example.com" (cooked-tests--text)))
+    (should (equal (thing-at-point 'url) "https://example.com/deep"))
+    ;; And the bounds are the whole span, so a caller highlighting the target
+    ;; gets all of LABEL rather than a word of it.
+    (pcase-let ((`(,beg . ,end) (bounds-of-thing-at-point 'url)))
+      (should (equal (buffer-substring-no-properties beg end) "LABEL")))))
+
+(ert-deftest cooked-thing-at-point-providers-are-buffer-local ()
+  "The alists are global, so a cooked provider must not answer elsewhere.
+
+`cooked-link--url-at-point\=' reads `cooked--link-uris\=', a table that exists
+only in a cooked buffer; left installed globally it would be consulted for
+every `thing-at-point\=' call in the session."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (assq 'url thing-at-point-provider-alist))
+    (should (local-variable-p 'thing-at-point-provider-alist)))
+  (with-temp-buffer
+    (should-not (local-variable-p 'thing-at-point-provider-alist))
+    (should-not (assq 'url (default-value 'thing-at-point-provider-alist)))))
+
+(ert-deftest cooked-thing-at-point-providers-straddle-the-tier-boundary ()
+  "`url\=' is the base layer\='s to give and the file things are the optional layer\='s.
+
+The straddle is the finding REPORT.org §11 turned up, not an accident: the base
+layer must not name a provider only an upper layer can supply, so both merely
+contribute and cooked-mode.el installs what is present."
+  ;; The base layer's, present whether or not anything is loaded above it.
+  (should (assq 'url cooked-thing-at-point-providers))
+  (cooked-tests--with-file-links
+    (should (assq 'filename cooked-thing-at-point-providers))
+    (should (assq 'existing-filename cooked-thing-at-point-providers))
+    (should (memq #'cooked-file-link--file-name-at-point
+                  cooked-file-name-at-point-functions))
+    ;; Contributed once however many times the layer is loaded.
+    (let ((before (length cooked-thing-at-point-providers)))
+      (load "cooked-file-link" nil t)
+      (should (= (length cooked-thing-at-point-providers) before)))))
+
+(ert-deftest cooked-existing-filename-at-point-resolves-against-the-child ()
+  "`existing-filename\=' answers with an absolute path, which is what openers need.
+
+A bare `src/lib.rs\=' handed to `find-file\=' from another buffer finds nothing;
+`cooked-file-link--exists\=' has already tried `default-directory\=' -- which
+OSC 7 keeps on the child\='s own working directory -- and then the project root."
+  (let* ((dir (make-temp-file "cooked-tap" t))
+         (file (expand-file-name "here.txt" dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "x"))
+          (cooked-tests--with-file-links
+           (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+            (setq default-directory dir)
+            (erase-buffer)
+            (insert "see here.txt for details")
+            (goto-char (point-min))
+            (search-forward "here.tx")
+            (should (equal (thing-at-point 'existing-filename) file))
+            (should (equal (thing-at-point 'filename) "here.txt"))
+            ;; `file-name-at-point-functions' is the same answer by the route
+            ;; `find-file's `M-n' and ffap take.
+            (should (equal (run-hook-with-args-until-success
+                            'file-name-at-point-functions)
+                           file)))))
+      (delete-directory dir t))))
+
+(ert-deftest cooked-a-file-found-under-the-project-root-resolves-there ()
+  "The project-root fallback has to say *where* it found the file.
+
+`ffap-file-exists-string\=' returns the name it was given, not the directory it
+found it in, so `cooked-file-link--exists\=' used to answer a bare `sub/f.txt\='
+for a file that exists only under the project root -- and the caller then
+resolved that against the child\='s `default-directory\=', which is the one
+directory it had just been established not to be in.  A `make\=' log naming a
+path relative to the top of the tree, read from a prompt in a subdirectory, is
+the everyday shape of this."
+  (cooked-tests--with-file-links
+    (let* ((root (make-temp-file "cooked-proj" t))
+           (sub (expand-file-name "deep/down" root))
+           (target (expand-file-name "sub/f.txt" root)))
+      (unwind-protect
+          (progn
+            (make-directory sub t)
+            (make-directory (expand-file-name "sub" root) t)
+            (with-temp-file target (insert "x"))
+            ;; A project is whatever `project-current' finds; a .git makes one
+            ;; without depending on which backends happen to be loaded.
+            (make-directory (expand-file-name ".git" root) t)
+            (with-temp-buffer
+              ;; Standing in a subdirectory, where the name does *not* resolve.
+              (setq-local default-directory (file-name-as-directory sub))
+              (should-not (ffap-file-exists-string "sub/f.txt"))
+              (let ((found (cooked-file-link--exists "sub/f.txt")))
+                (should found)
+                ;; The answer names the project root, not where we are standing.
+                (should (file-equal-p found target))
+                (should (file-name-absolute-p found)))))
+        (delete-directory root t)))))
+
 (ert-deftest cooked-a-link-survives-scrolling-into-the-scrollback ()
   ;; The id travels with the row through eviction, because both live and scrolled
   ;; rows go through the same `Row::runs' -- which is also why `Extra::Link' needed no
