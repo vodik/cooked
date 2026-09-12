@@ -133,13 +133,13 @@ Done when: the bench target compiles first — with a step of its own, *not* the
 Waves 0 and 1 has been re-taken. Leave =lisp-test= interpreted: a readable
 backtrace is worth more there than speed.
 
-** WIP [#A] Measure the scroll ceiling with rejoining off
+** REVIEW [#A] Measure the scroll ceiling with rejoining off
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §7 "The highest-information measurement available right now"
 :GAIN:     may delete the guard/wrap-cache/mark-truncation subsystem
 :BRANCH:   16b9be2
-:RESULT:   *provisional and probably wrong* — the recorded run measured output arriving, not a gesture; re-measuring
+:RESULT:   confirmed on a gesture — flat at ordinary wrapping, p90 doubles at 10x
 :END:
 No code. =cooked-toggle-rejoin-wrapped-lines= already exists
 (=cooked-mode.el:147=). The three scroll causes are not independent: =rejoin=t=
@@ -204,12 +204,68 @@ question:
 | pgtk    | 64x115   | 10x-wrapped |   11.42 |     11.80 |  0.97 |     5.75 |       5.63 |  1.02 |
 | tty     | 65x115   | 10x-wrapped |    4.87 |      5.22 |  0.93 |     1.70 |       1.82 |  0.93 |
 
+*** Measurement (gesture: the viewport moving)
+
+Same harness, =COOKED_CEILING_ONLY=gesture=, 250x47 frame → 44x249 terminal,
+=scroll-up=/=scroll-down= 10 screen lines, 20 discarded warmups then 60 timed
+gestures — the shape of the 2026-09-05 run. Nothing drains during a gesture, so
+this is redisplay and nothing else. Two runs, load 0.64 and 1.04.
+
+| content     | run | p50 t | p50 nil | p50 t/nil | p90 t | p90 nil | *p90 t/nil* |
+|-------------+-----+-------+---------+-----------+-------+---------+-------------|
+| no wrapping |   1 |  5.89 |    5.61 |      1.05 |  8.87 |    8.61 |        1.03 |
+| no wrapping |   2 |  5.60 |    5.99 |      0.93 |  8.80 |    8.94 |        0.98 |
+| 3x-wrapped  |   1 |  5.98 |    5.78 |      1.04 |  8.67 |    8.37 |        1.04 |
+| 3x-wrapped  |   2 |  5.72 |    5.91 |      0.97 |  9.34 |    9.43 |        0.99 |
+| 10x-wrapped |   1 |  8.91 |    6.83 |      1.30 | 20.95 |    9.69 |      *2.16* |
+| 10x-wrapped |   2 | 12.63 |    6.70 |      1.88 | 21.60 |   10.07 |      *2.14* |
+
 *** What it says
 
-*The ceiling does not move.* Suspect (ii) is not confirmed. Across twelve
-comparisons the t/nil ratio sits on 1.0, wandering to either side of it — nine
-of the twelve are within ±10%, and the direction is not consistent even for one
-content shape at one geometry.
+*Rejoining costs nothing at ordinary wrapping and roughly doubles the p90 at
+deep wrapping.* Both halves matter, and only the gesture harness can see either.
+
+At no wrapping and at three screen rows per logical line the ratio sits on 1.0
+and changes sign between runs — flat, on the same reading as the append cases
+below. At ten rows per line the effect is unmistakable and it is *in the tail*:
+the p90 ratio is 2.16 and 2.14 across two runs, stable to within a percent,
+while the p50 ratio wanders from 1.30 to 1.88. *Report the p90 here* — the
+median understates it and is the noisier statistic, which is the reverse of the
+append case and of the §9 A default.
+
+That tail *is* the symptom. Redisplay lays a continued line out from its start,
+so most gestures move within a logical line and cost the same either way, and
+every so often one crosses into a new one and pays for the whole thing. A
+uniform 9 ms would not read as jerky; 9 ms with a 21 ms hitch every few gestures
+does — which is what the 2026-09-05 note described as "the periodic ~19 ms hitch
+as a scroll crosses into each new logical line".
+
+*Reconciling with 2026-09-05*, which measured p50 7.42 / p90 19.81 on against
+1.94 / 2.33 off: the p90 pair matches this closely and the effect is confirmed.
+What does *not* reproduce is its size at *three* rows per line — that run's
+"styled long prose" showed it where this content shows nothing. Either its lines
+were longer than 3x, or face density does contribute after all, which its own
+diff-hunk control was read as ruling out. *Unresolved, and the one thing worth
+settling before acting on this.*
+
+*** What this means for the subsystem
+
+The =:GAIN:= — deleting =cooked--guard-row-width=, =cooked--wrap-cache= and
+=cooked--mark-truncation= — is *live again*, but narrower than the report hoped.
+The case for hard-splitting rows is a *tail-latency* case at deep wrapping, not
+a throughput case: nothing measurable is lost at the wrapping a shell session
+actually produces. Anyone making it should argue about the hitch, and should
+settle the three-rows question above first.
+
+*** Superseded: the append run, and why it answered the wrong question
+
+*For output arriving, the ceiling does not move.* Across twelve comparisons the
+t/nil ratio sits on 1.0, wandering to either side of it — nine of the twelve are
+within ±10%, and the direction is not consistent even for one content shape at
+one geometry. This was first recorded as "suspect (ii) is not confirmed", which
+was wrong: it is an answer about *appending*, and suspect (ii) is about
+*scrolling*. Kept because it is a real answer to a real question, and because
+the pgtk-vs-tty finding below came out of it.
 
 The one apparent effect, +54% and +42% on 10x-wrapped apply, *did not survive a
 change of geometry*: the same content at 64x115 gives 0.97, and on a tty 0.93.
@@ -217,12 +273,9 @@ Two runs agreeing is not two runs replicating when they share a configuration.
 Treat it as unexplained and *not established* — if it is ever worth chasing, the
 place to start is that it appeared only at ~29 rows on pgtk.
 
-So =cooked--guard-row-width=, =cooked--wrap-cache= and =cooked--mark-truncation=
-cannot be removed on a performance argument. If they go it must be on the
-complexity argument, which is a different case and has to be made separately.
-The =:GAIN:= is flat, which the conventions call a finding rather than a
-failure. *Wave 2 should not be re-ordered around this, and ghostel's split-row
-bet buys cooked nothing measurable.*
+That conclusion — that the subsystem cannot be removed on a performance
+argument — *stood only for appending*, and the gesture measurement above
+supersedes it.
 
 *** What the tty comparison found instead
 
