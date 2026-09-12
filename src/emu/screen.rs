@@ -105,7 +105,7 @@ impl Erase {
 ///
 /// A newtype rather than a bare `Vec<Row>` because dropping one is silent data loss: these
 /// rows *are* the session's scrollback, and a caller that forgets to hand them to
-/// [`State::archive`] loses that much history with nothing to show for it. `#[must_use]`
+/// `State::archive` loses that much history with nothing to show for it. `#[must_use]`
 /// turns forgetting into a compiler warning.
 ///
 /// Two callers discard deliberately -- a screen switch throwing away a full-screen
@@ -258,7 +258,7 @@ pub struct Screen {
 }
 
 impl Default for Screen {
-    /// A 1x1 grid. Only [`State::new`] ever sees one, and it overwrites both screens with
+    /// A 1x1 grid. Only `State::new` ever sees one, and it overwrites both screens with
     /// real sizes immediately; `Screen::new` floors both dimensions at 1 regardless.
     fn default() -> Self {
         Self::new(1, 1)
@@ -302,7 +302,7 @@ impl Screen {
     /// A grid whose departing rows are not history: the alternate screen.
     ///
     /// A constructor rather than a field left for the caller to clear, because the two
-    /// grids are built side by side in [`State::new`](super::term) and a flag assigned
+    /// grids are built side by side in `State::new` and a flag assigned
     /// after the fact is one a later edit can drop without anything failing — the symptom
     /// would be wasted work, which no test asserts the absence of. Saying it in the name
     /// makes it structural. See [`Screen::history`].
@@ -527,7 +527,7 @@ impl Screen {
     ///
     /// The question [`Screen::drain_damage`] answers, asked without the answer being
     /// destructive and by a caller who only wants to know whether anything happened --
-    /// see [`Term::feed`], which compares two readings of it.
+    /// see `Term::feed`, which compares two readings of it.
     ///
     /// A running count rather than "is any row dirty", which is the obvious form and is
     /// wrong in the case that matters: damage stays up until Emacs drains, so between two

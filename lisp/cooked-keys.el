@@ -148,7 +148,7 @@
 One table rather than the five parallel ones this replaced, and the reason is
 worth stating because the five looked like a reasonable decomposition.  Four of
 them named how a key is spelled *modified* -- CSI final, SS3 final, tilde
-number, code point -- and the fifth, `cooked--special-keys\=', listed the
+number, code point -- and the fifth, cooked--special-keys, listed the
 unmodified spelling for all twenty-seven.  But that fifth table was derivable
 from the other four in every single entry, so it was a denormalization
 maintained by hand; and because `cooked--encode-event\=' consulted it last, after
@@ -186,7 +186,7 @@ for each of the maps it builds -- which is the table\='s other consumer.")
   "The unmodified, un-negotiated escape sequence ENTRY names.
 
 ENTRY is a `cooked--key-encodings\=' row.  This is what used to be written out a
-second time in `cooked--special-keys\='; deriving it is what keeps the two
+second time in cooked--special-keys; deriving it is what keeps the two
 spellings of one key from drifting apart."
   (pcase entry
     (`(,_ csi ,final) (cooked--csi final))

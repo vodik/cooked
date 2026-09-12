@@ -517,7 +517,7 @@ impl Stream {
 
     /// `OSC 8 ; params ; uri` -- open or close a hyperlink.
     ///
-    /// The same shape as the grid's [`State::hyperlink`](super::term::State), including
+    /// The same shape as the grid's `State::hyperlink`, including
     /// the refusal of a URI carrying control characters, which is what stops a
     /// destination from smuggling an escape sequence into whatever displays it.
     fn hyperlink(&mut self, params: &[&[u8]]) {
