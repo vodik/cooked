@@ -629,6 +629,68 @@ paints.  Nothing has displayed this buffer, so nothing has guessed yet."
     (should (text-property-not-all (point-min) (point-max)
                                    'cooked-link-url nil))))
 
+(ert-deftest cooked-rewriting-a-row-still-gets-it-scanned ()
+  "The outcome `cooked--render-block's `inhibit-modification-hooks' binding has
+to leave standing: a row the child repaints is looked at again.
+
+The binding covers the three property loops and stops at the row rewrite, which
+is where `cooked--render-rows' says the notification lives -- rewriting the text
+is what marks the row unfontified, and the property loops only fire the same
+`after-change-functions' a few hundred more times a frame to say it again.  So
+what is asserted here is the end of that chain rather than the hook: after a
+repaint the rows read as unfontified, and the scan that redisplay would drive
+finds the URLs that are there now rather than the ones that were.
+
+It is a *re*paint and not a first render because only a repaint can tell the two
+apart.  Freshly inserted text carries no `fontified' property at all and so
+already reads as unfontified whatever hooks ran, which is why a first render and
+scrollback would both pass this with the notification removed entirely.
+
+Worth saying outright, since the binding was made with the opposite belief: a
+blanket inhibit across the rewrite does *not* fail this test.  Emacs' `insert'
+inherits no properties, so the new row is unmarked by construction and jit-lock
+learns nothing from its own hook that the fresh text did not already say.  The
+rewrite is still left outside the binding, because that is what
+`cooked--render-rows' documents as the notification and a change hook a user has
+added is entitled to see the edit -- but the safety is belt-and-braces rather
+than the load-bearing thing the plan for this took it to be.
+
+Both shapes of row, because they take different amounts of the inhibited path:
+plain text applies style spans and nothing else, while box drawing also runs
+`cooked--apply-deco' and is the case the hook cost was measured on -- see
+`cooked--sync-fontification'."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'go to https://one.example/ now\\n'; \
+printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 https://two.example/\\n'; \
+read x; \
+printf '\\033[1;1Hgo to https://three.example/ now'; \
+printf '\\033[2;1H\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 https://four.example/'; \
+sleep 5")
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "two.example" (cooked-tests--text)))))
+    ;; Look once, so both rows are marked fontified and the repaint has
+    ;; something to take back.
+    (cooked-tests--fontify)
+    (should-not (text-property-any (point-min) (point-max) 'fontified nil))
+    ;; Let the child repaint the two rows in place.
+    (cooked--send-to-child "\n")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "four.example" (cooked-tests--text)))))
+    ;; The decorated row really did take the property loops.
+    (should (get-text-property (cooked-tests--link-at "─") 'display))
+    (dolist (text '("three.example" "four.example"))
+      (let ((pos (cooked-tests--link-at text)))
+        (should pos)
+        (should-not (get-text-property pos 'fontified))))
+    ;; And the looking, when it happens, finds what is there now.
+    (cooked-tests--fontify)
+    (dolist (text '("three.example" "four.example"))
+      (let ((pos (cooked-tests--link-at text)))
+        (should (seq-find (lambda (o) (overlay-get o 'goto-address))
+                          (overlays-in pos (1+ pos))))))))
+
 (ert-deftest cooked-the-scan-is-not-armed-when-it-has-nothing-to-scan ()
   "Registering jit-lock is not free: it hangs `jit-lock-after-change\=' on every
 text property the renderer applies, which measured at +21% on plain rows and

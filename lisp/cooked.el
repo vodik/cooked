@@ -463,23 +463,53 @@ Returns the position the text was inserted at."
   (pcase-let ((`(,text ,styles ,decos ,links) block))
     (let ((start (point)))
       (insert text)
-      ;; Walked with an index rather than mapped, because the whole reason the spans
-      ;; arrive packed is that nothing per span should be allocated on this path: no
-      ;; cons for the span, none for its colours, and none for the cache key
-      ;; `cooked--face-packed' looks the face up by.  See `Block::push_style'.
-      (let ((i 0)
-            (limit (length styles)))
-        (while (< i limit)
-          (when-let* ((face (cooked--face-packed styles (+ i 8))))
-            (put-text-property (+ start (cooked--u32 styles i))
-                               (+ start (cooked--u32 styles (+ i 4)))
-                               'face face))
-          (setq i (+ i cooked--style-record))))
-      (dolist (span decos)
-        (pcase-let ((`(,from ,deco) span))
-          (cooked--apply-deco (+ start from) deco (and row start) row)))
-      (when links
-        (cooked--render-link-spans start links))
+      ;; The `insert' is outside the binding below and the three property phases
+      ;; are inside it, and the line between them is the whole of the care this
+      ;; needs.  Emacs runs `after-change-functions' for a text property change
+      ;; exactly as it does for an insertion, and jit-lock puts
+      ;; `jit-lock-after-change' there -- so a row of box drawing paid the hook
+      ;; once per decorated run and once per style span to be told what the
+      ;; `insert' had already told it, that this row is unfontified.  Measured
+      ;; at +21% on plain rows and +55% on box drawing; see
+      ;; `cooked--sync-fontification', which is the other half of the same
+      ;; finding and drops the hook entirely for a buffer with no scan to run.
+      ;;
+      ;; The `insert' stays outside because that call, and the `delete-region'
+      ;; in `cooked--render-rows' above it, are the row rewrite itself: they are
+      ;; what that function offers jit-lock in place of scanning anything, and a
+      ;; change hook a user has added is entitled to see an edit whatever we
+      ;; think of the one hook we are here about.
+      ;;
+      ;; One correction to the belief this was made on, since it is the sort of
+      ;; thing that gets restated as a hazard: inhibiting across the rewrite as
+      ;; well does *not* in fact stop links being found, and it was worth
+      ;; checking rather than assuming.  `insert' inherits no properties, so a
+      ;; rewritten row carries no `fontified' property by construction and reads
+      ;; as unfontified whether or not `jit-lock-after-change' ever ran on it.
+      ;; The notification is belt-and-braces, not the only thread the scan hangs
+      ;; from -- see `cooked-rewriting-a-row-still-gets-it-scanned', which says
+      ;; the same thing from the other side.  The line is drawn here anyway,
+      ;; because the saving is entirely in the loops and there is nothing to buy
+      ;; by moving it.
+      (let ((inhibit-modification-hooks t))
+        ;; Walked with an index rather than mapped, because the whole reason
+        ;; the spans arrive packed is that nothing per span should be allocated
+        ;; on this path: no cons for the span, none for its colours, and none
+        ;; for the cache key `cooked--face-packed' looks the face up by.  See
+        ;; `Block::push_style'.
+        (let ((i 0)
+              (limit (length styles)))
+          (while (< i limit)
+            (when-let* ((face (cooked--face-packed styles (+ i 8))))
+              (put-text-property (+ start (cooked--u32 styles i))
+                                 (+ start (cooked--u32 styles (+ i 4)))
+                                 'face face))
+            (setq i (+ i cooked--style-record))))
+        (dolist (span decos)
+          (pcase-let ((`(,from ,deco) span))
+            (cooked--apply-deco (+ start from) deco (and row start) row)))
+        (when links
+          (cooked--render-link-spans start links)))
       start)))
 
 ;;;; Who owns the keyboard
