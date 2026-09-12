@@ -1,2 +1,7 @@
 target/
 *.elc
+
+# Claude Code's per-project state: agent worktrees and local settings.  The
+# worktrees in particular are checkouts of this same repository, so leaving them
+# untracked means `git status' reports the whole tree twice over.
+.claude/
