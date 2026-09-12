@@ -208,6 +208,38 @@ the same configured scrollback. Anyone arguing for the split-row bet has to
 answer this, because the same setting would then mean two different amounts of
 history.
 
+* Wave 0.5 — the baseline was not green                            :repair:
+:PROPERTIES:
+:VISIBILITY: children
+:END:
+
+Neither of these is in REPORT.org. Both were found by trying to *verify* Wave 0
+work and discovering there was nothing to verify against.
+
+** DONE [#A] =make compile= was broken on main
+:PROPERTIES:
+:BRANCH:   fe9f77c
+:END:
+One 82-column docstring line in =cooked--guard-row-width=, and
+=byte-compile-error-on-warn= is =t=, so =compile= failed — and =lint= and =test=
+both depend on it. Every agent working from this roadmap would have hit it.
+
+** DONE [#A] =make test= had never passed in this repository
+:PROPERTIES:
+:BRANCH:   e096a65
+:END:
+=cooked-new-output-scrolls-a-following-window= failed identically (139 vs 132) at
+*every commit in history*, including the initial one. The test was wrong, not the
+pin: =cooked--pin-transcript-bottom= anchors a windowful up from =BOTTOM=, the
+drain passes the cursor as =POS= and =point-max= as =BOTTOM=, and a transcript
+ending in a newline puts =point-max= one screen line below the cursor
+(instrumented: pos=278, bottom=279). Deriving the expectation from =POS=
+asserted the contract the function had before =BOTTOM= existed.
+
+*The lesson for this roadmap*: establish the green baseline before trusting any
+=Done when= line. Two Wave 0 tasks name =make bench= and CI as their verification
+and would have inherited a red tree.
+
 * Wave 1 — free wins                                              :lisp:core:
 :PROPERTIES:
 :VISIBILITY: children
@@ -396,23 +428,34 @@ re-application on the stored match text still being =equal=.
 Done when: the repaint count during a gesture drops, and
 =cooked-detect-links-on-alt-screen= stops being a necessary defence.
 
-** TODO [#A] Fix =cooked-link.el='s upward ownership questions
+** DONE [#A] Fix =cooked-link.el='s upward ownership questions
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §11 "cooked-link / cooked-file-link — the one real finding"
-:BRANCH:
+:BRANCH:   ff4b154
 :END:
+Landed. =cooked-link-delegate-function= replaces the four =declare-function='s
+and the =cooked--mouse-grab= defvar; cooked-keys.el fills the slot, being where
+the grab, the forwarding state and suspension already live.
+=cooked-link-claim-functions= makes the precedence data the layers contribute,
+and =cooked-link--claimed-p= takes the asking source so a layer is neither told
+it claimed its own span nor blocked by one it outranks — both of which the
+one-argument version got wrong as soon as a third source existed.
+
+The two existing ownership tests pass *unchanged*, which is the evidence this is
+a re-layering rather than a behaviour change. Three new tests, all
+mutation-tested.
 The base layer asks =cooked--suspended-p= and =cooked--child-owns-keyboard-p=
 upward, which its own stated rule forbids, and =cooked-link--claimed-p=
 arbitrates a category ("guessed shape") only an optional layer produces. Add
 =cooked-link-claim-functions= and move the ownership decision to where input
 ownership already lives.
 
-** TODO [#A] thing-at-point providers — ROADMAP §3 without embark
+** NEXT [#A] thing-at-point providers — ROADMAP §3 without embark
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §6 "ROADMAP §3 is already solved, one layer below embark"
-:GATE:     Fix =cooked-link.el='s upward ownership questions
+:GATE:     Fix =cooked-link.el='s upward ownership questions — satisfied, ff4b154
 :BRANCH:
 :END:
 =thing-at-point-provider-alist= for =url= / =filename= / =existing-filename=,
