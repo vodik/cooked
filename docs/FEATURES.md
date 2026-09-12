@@ -409,17 +409,24 @@ a bitmap whose second colour is the cell it stands in. With it left in place, `n
 Falls back to plain coloured text if Emacs has no XBM support or a glyph fails to
 rasterize, which is also exactly what `cooked-box-drawing-images` set to nil does.
 
-**The trap worth writing down: the image may be shared, the property may not.** Emacs
-merges a run of characters whose `display` properties are `eq` into a single displayed
-image — so memoizing one spec and hanging it on every cell that wants it, which is
-otherwise precisely what you want and is why a picture is rasterized once, made a run of
-four `─` render as one glyph. The fix is that each character gets a fresh one-element
-list wrapping the shared spec. None of this is visible in batch, where nothing is drawn
-and every character had a correct `display` property throughout; the suite was green for
-a commit. `cooked-adjacent-box-glyphs-do-not-share-a-display-property` guards it now, and
-the geometry is tested against pixel grids directly, without a session, because a test
-that only checks a `display` property exists cannot see a dash that is not dashed or a
-diagonal that misses the corner its neighbour has to meet.
+**The trap worth writing down: an image may be shared exactly as far as it is wide.**
+Emacs merges a run of characters whose `display` properties are `eq` into a single
+displayed image — so memoizing one spec and hanging it on every cell that wants it,
+which is otherwise precisely what you want and is why a picture is rasterized once, made
+a run of four `─` render as one glyph. What was wrong there was the *width*, not the
+sharing: the bitmap was one cell wide and the span was four. So the merge is now asked
+for on purpose. A run of identical shapes is rasterized once at the run's full width and
+carries one `display` property over exactly the cells it was built for, which is one
+interval where there were eighty — a 24x80 frame of border drops from 1920 `display`
+intervals to 24, and redisplay parses one image spec per run rather than one per column.
+A shade stays per cell, its dither phase being a function of the cell's own pixel origin.
+None of this is visible in batch, where nothing is drawn and every character had a
+correct `display` property throughout; the suite was green for a commit.
+`cooked-adjacent-box-glyphs-share-only-a-run-wide-image` guards it now by reading the
+bitmap's `:data-width` back off the spec, which is the one way the merge is observable
+without a display. The geometry is tested against pixel grids directly, without a
+session, because a test that only checks a `display` property exists cannot see a dash
+that is not dashed or a diagonal that misses the corner its neighbour has to meet.
 
 ## UI notes
 

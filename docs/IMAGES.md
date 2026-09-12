@@ -160,9 +160,12 @@ untouched pixels are transparent whatever it says. DECSDM is unimplemented.
 **Batch Emacs draws nothing.** A run of box drawing rendered as a single glyph for one
 commit because the memoized image spec made adjacent `display` properties `eq`, and
 Emacs merges those into one image. Every character had a correct property throughout, so
-the suite was green. `cooked-adjacent-box-glyphs-do-not-share-a-display-property` guards
-it now. If you touch the decoration path, ask what the display engine does that a text
-property assertion cannot see.
+the suite was green. The merge is now used deliberately — one run-wide bitmap over the
+whole run, a 24x80 border frame falling from 1920 `display` intervals to 24 — and
+`cooked-adjacent-box-glyphs-share-only-a-run-wide-image` guards the thing that actually
+has to hold: the image is as wide as the span its property covers. If you touch the
+decoration path, ask what the display engine does that a text property assertion cannot
+see.
 
 **The decoders were checked against other people's implementations, not their own
 tests.** Sixel decodes pixel-for-pixel identically to `sixel2png` on chafa's output

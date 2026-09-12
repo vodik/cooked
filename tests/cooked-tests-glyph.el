@@ -21,29 +21,79 @@ the image itself -- see `cooked--deco-display' for why it has to be a fresh list
 per character."
   (car-safe (get-text-property pos 'display)))
 
-(ert-deftest cooked-adjacent-box-glyphs-do-not-share-a-display-property ()
+(ert-deftest cooked-adjacent-box-glyphs-share-only-a-run-wide-image ()
   "Emacs merges a run of characters whose `display' properties are `eq' into one
-displayed image.  Sharing a memoized spec across cells is otherwise exactly what
-is wanted -- it is why the picture is decoded once -- but it made a run of box
-drawing render as a single glyph.  The image may be shared; the property may not.
+displayed image, and whether that is the bug or the point depends entirely on
+how wide the image is.
 
-Not observable in batch, where nothing is drawn, which is how it got through:
-every character still had a correct `display' property, and only the display
-engine merged them."
+Shared with a *cell-wide* bitmap it is the bug, and it is the one this test was
+originally written for: a border rendered as a single glyph and the row lost the
+width of everything the merge swallowed.  Shared with a bitmap built for exactly
+the run it is put over -- `cooked--deco-image's COUNT -- it is the point: one
+interval, one image, and the run occupies precisely the pixels its characters
+did.  That is what `cooked--apply-glyph-deco' now does, and it is where nearly
+all of the box-drawing redisplay cost went, a 24x80 frame of border falling from
+1920 `display' intervals to 24.
+
+So the invariant is not \"never share\" but *the image is as wide as the span
+its `display' property covers*, and that is what is asserted: the four
+cells share one property, and the bitmap under it is four cells wide rather
+than one.
+Asserting the sharing alone would pass just as happily for the old bug.
+
+Nothing here is observable in batch, where nothing is drawn, which is how the
+original defect got through: every character had a correct `display' property
+and only the display engine merged them.  Reading the width off the spec is what
+makes the merge visible from batch at all."
   (cooked-tests--with-session
       ;; Four of the same character in a row, which is what a border is.
       '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'")
-    (cooked-tests--cell)
+    (cooked-tests--cell 10 20)
     (should (cooked-tests--settle
              (lambda () (get-text-property (point-min) 'display))))
-    (let ((first (get-text-property (point-min) 'display))
-          (second (get-text-property (1+ (point-min)) 'display)))
-      (should first)
-      (should second)
-      (should-not (eq first second))
-      ;; ...while the image underneath is shared, so it is rasterized once.
-      (should (eq (cooked-tests--glyph-image (point-min))
-                  (cooked-tests--glyph-image (1+ (point-min))))))))
+    (let ((beg (point-min)))
+      ;; One `display' interval over the whole run, which is the saving.
+      (should (get-text-property beg 'display))
+      (should (>= (or (next-single-property-change beg 'display) (point-max))
+                  (+ beg 4)))
+      (dotimes (i 4)
+        (should (eq (get-text-property (+ beg i) 'display)
+                    (get-text-property beg 'display))))
+      ;; And the image it shares is four cells wide, so the merge draws the run
+      ;; at the width it had.  `:data-width' rather than `image-size', which
+      ;; needs a graphic display -- see
+      ;; `cooked-box-drawing-image-spec-is-a-valid-inline-xbm'.
+      (let ((image (cooked-tests--glyph-image beg)))
+        (should (eq (car image) 'image))
+        (should (equal (plist-get (cdr image) :data-width) (* 4 10)))
+        (should (equal (plist-get (cdr image) :data-height) 20))))))
+
+(ert-deftest cooked-a-box-glyph-run-broken-by-text-narrows-its-image ()
+  "The other half of the invariant above, and the case that would have made
+sharing unsafe: a run is only run-wide where the shapes actually run.
+
+A border with a letter dropped in the middle of it is three decoration spans on
+the wire, not one, because `Deco::packed' counts consecutive cells of one shape.
+So each span gets a bitmap of its own width and the letter keeps its cell.  A
+single count taken from the row rather than from the run would have drawn the
+first glyph over the text beside it."
+  (cooked-tests--with-session
+      ;; ──x── : two runs of two, with a plain character between them.
+      '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200x\\342\\224\\200\\342\\224\\200\\n'")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((beg (point-min)))
+      (should (equal (char-after (+ beg 2)) ?x))
+      ;; The letter displays as itself: no decoration reaches it.
+      (should-not (get-text-property (+ beg 2) 'display))
+      ;; Two cells each side, two cells of bitmap each side.
+      (dolist (start (list beg (+ beg 3)))
+        (should (equal (plist-get (cdr (cooked-tests--glyph-image start))
+                                  :data-width)
+                       (* 2 10)))
+        (should (eq (get-text-property start 'display)
+                    (get-text-property (1+ start) 'display)))))))
 
 (ert-deftest cooked-box-drawing-gets-a-display-property ()
   (cooked-tests--with-session
@@ -71,10 +121,11 @@ with `eq\=', so a run that shares its record is one step of that walk -- because
 that is the observable the saving is made of, and it is also exactly what
 `cooked--rescale-deco\=' had to be taught to expect.
 
-The `display\=' values must still be distinct objects, and that is not a separate
-concern bolted on: sharing the record and sharing the display value look alike
-in batch and only one of them is safe.  See
-`cooked-adjacent-box-glyphs-do-not-share-a-display-property\='."
+The `display\=' value is shared across the same run, and that is a second claim
+rather than the same one restated: sharing the record is safe because nothing in
+it is cell-specific, while sharing the value is safe only because the image
+under it was built COUNT cells wide.  See
+`cooked-adjacent-box-glyphs-share-only-a-run-wide-image\='."
   (cooked-tests--with-session
       ;; Four of the same character in a row, which is what a border is.
       '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'")
@@ -89,9 +140,10 @@ in batch and only one of them is safe.  See
       (dotimes (i 4)
         (should (eq (get-text-property (+ beg i) 'cooked-deco)
                     (get-text-property beg 'cooked-deco))))
-      ;; ...while every cell still owns its `display' value.
-      (should-not (eq (get-text-property beg 'display)
-                      (get-text-property (1+ beg) 'display))))))
+      ;; ...and one `display' interval covers the same four cells, the image
+      ;; under it being four cells wide.
+      (should (eq (get-text-property beg 'display)
+                  (get-text-property (+ beg 3) 'display))))))
 
 (ert-deftest cooked-a-run-of-shades-keeps-a-record-per-cell ()
   "A shade dithers, so its phase is a function of the cell's own pixel origin --
@@ -164,11 +216,17 @@ dither carries nothing cell-specific at all."
       ;; Every cell of the run, not just the one the walk landed on.
       (dotimes (i 3)
         (should (eq (car-safe (cooked-tests--glyph-image (+ beg i))) 'image)))
-      ;; And each cell's `display' is still its own object: Emacs merges a run of
-      ;; `eq' display values into a single image, so a rescale that shared one
-      ;; would collapse the border it just rebuilt.  See `cooked--deco-display'.
-      (should-not (eq (get-text-property beg 'display)
-                      (get-text-property (1+ beg) 'display))))))
+      ;; And the rebuilt value is shared across exactly the run the walk found,
+      ;; because the bitmap under it was rebuilt at that run's width.  A rescale
+      ;; that shared a *cell-wide* image would collapse the border it just
+      ;; rebuilt; one that shared a run-wide one draws it at full width.  See
+      ;; `cooked--deco-display' and
+      ;; `cooked-adjacent-box-glyphs-share-only-a-run-wide-image'.
+      (should (eq (get-text-property beg 'display)
+                  (get-text-property (+ beg 2) 'display)))
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image beg))
+                                :data-width)
+                     (* 3 12))))))
 
 (ert-deftest cooked-box-drawing-rescales-on-zoom ()
   (cooked-tests--with-session
