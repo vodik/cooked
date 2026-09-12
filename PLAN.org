@@ -269,6 +269,28 @@ cooked strips only the bracketed end marker, so a pasted =ESC=, =C-c= or =C-u=
 reaches the child verbatim. xterm's list applies *regardless* of bracketed mode.
 Keep cooked's newline confirmation, which is the better half.
 
+** TODO [#B] Scrollback eviction counts lines, not text
+:PROPERTIES:
+:EFFORT:   2h
+:REPORT:   §7 — found by the scroll-ceiling measurement, not by the report
+:BRANCH:
+:END:
+Measured while answering the rejoin question: for one identical byte stream at
+ten screen rows per logical line, the buffer held 2,670,358 chars under
+=rejoin=t= against 1,176,739 under =nil=, while a short probe with no eviction
+showed 198,221 vs 200,000. Eviction is counted in *lines*, so hard-splitting
+multiplies the line count by the wrap factor and =rejoin=nil= keeps roughly half
+the history for the same configured scrollback.
+
+The bug is that one setting means two different amounts of text depending on a
+second, unrelated setting the user may not connect to it. Decide whether the cap
+should be expressed in lines, characters, or both — a character cap alone has
+the opposite failure, where one pathological line evicts everything.
+
+Done when: the retained *text* for a given stream is within a few percent across
+both settings of =cooked-rejoin-wrapped-lines=, or the docstring states the
+coupling plainly and says which way it goes.
+
 ** TODO [#C] Small corrections
 :PROPERTIES:
 :EFFORT:   1h
