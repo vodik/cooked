@@ -728,11 +728,22 @@ and the rendered effect is the thing worth asserting anyway."
         ;; transcript only ever grew here.
         (should (= (window-point window) (point)))
         (should (>= (window-start window) before))
-        ;; And the start is where the pin computes it: the target's own screen
-        ;; line, a windowful from the top.
+        ;; And the start is where the pin computes it: a windowful up from the
+        ;; transcript's *foot*, not from the target.
+        ;;
+        ;; The distinction is the whole of `cooked--pin-transcript-bottom's
+        ;; BOTTOM argument, and it is invisible until the two land on different
+        ;; screen lines -- which is the normal case here, because the drain
+        ;; passes the cursor as POS and `point-max' as BOTTOM, and a transcript
+        ;; ending in a newline puts `point-max' one screen line below the
+        ;; cursor.  Deriving the expectation from POS instead asserted the
+        ;; contract the function had before BOTTOM existed, and was wrong by
+        ;; exactly that one line every time.  What BOTTOM buys is
+        ;; `comint-scroll-show-maximum-output's actual semantics: no blank space
+        ;; below the last line.
         (should (= (window-start window)
                    (save-excursion
-                     (goto-char (point))
+                     (goto-char (point-max))
                      (vertical-motion (- (1- (window-body-height window))) window)
                      (point))))))))
 
