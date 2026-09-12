@@ -829,12 +829,27 @@ The largest functional gap on the bidirectional axis — agents and modern build
 tools all emit it. Add =cooked-progress-function= so a zero-dependency renderer
 and a spinner.el one are interchangeable. RIS must clear it.
 
-** TODO [#B] =cooked-dnd.el= — drag-and-drop and yank-media
+** DONE [#B] =cooked-dnd.el= — drag-and-drop and yank-media
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §6 "Drag-and-drop and yank-media"
-:BRANCH:
+:BRANCH:   3dc6e23
 :END:
+Landed at roughly the estimated size. Two things the task did not say:
+
+- *The plain =[drag-n-drop]= binding cannot go in =cooked-mode-map= either*, so
+  all seven prefixes share one emulation keymap. =local-set-key= is the obvious
+  way and it is wrong: it mutates =current-local-map=, which for a derived mode
+  *is* the shared mode map, so an optional layer would switch itself on for
+  every cooked buffer including ones made before it was loaded.
+- *The paste path is reused rather than =cooked--send-to-child=*, so a drop gets
+  the control-byte strip that landed in d2109f4. =shell-quote-argument= protects
+  the *shell* from an ESC in a file name; it does nothing for the terminal, and
+  a name is attacker-controlled far more often than a paste is.
+
+The quoting is asserted against a real =sh= over a command separator, both
+substitution forms, a quote and a glob — a regexp is not evidence about how the
+shell parses something.
 ~40 lines, pure Lisp, new optional layer. The insight: a PTY has no inbound
 image channel, so write a temp file and paste the shell-quoted path.
 =file-remote-p … 'localname= makes it TRAMP-correct for free. Two delivery
