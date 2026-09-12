@@ -6,6 +6,25 @@ rust-version = "1.85"
 license = "GPL-3.0-or-later"
 description = "Terminal emulator core for Emacs, with termios and OSC 133 awareness"
 
+# The `cdylib` is what Emacs dlopens; the `rlib` is what the integration tests and the
+# throughput benchmark link against.
+#
+# No `-Wl,--version-script` here, and that is a finding rather than an omission. A
+# module dlopened into Emacs should export exactly `emacs_module_init` and
+# `plugin_is_GPL_compatible` and nothing that could collide with another loaded module,
+# and it already does: `nm -D --defined-only target/release/libcooked.so` lists those
+# two and no more. rustc builds a cdylib's export list itself, from the
+# `#[unsafe(no_mangle)]` items, and hands it to the linker as a version script of its
+# own.
+#
+# Adding a second one cannot narrow that. Tried, on this platform, with a `symbols.map`
+# naming the two symbols and `local: *;`: with a deliberately added `#[unsafe(no_mangle)]
+# pub extern "C" fn cooked_probe_symbol` the probe was exported both with and without the
+# script, because ld unions the version scripts it is given and an explicit `global` in
+# rustc's wins over a wildcard `local` in ours. So the script would have been decoration
+# that looked like a guarantee. What does hold is rustc's own list, narrowed further by
+# the `unreachable_pub` lint below: a new export takes a new `no_mangle` to write, and
+# writing one is a visible thing to do.
 [lib]
 crate-type = ["cdylib", "rlib"]
 

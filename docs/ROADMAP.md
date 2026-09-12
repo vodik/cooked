@@ -212,8 +212,18 @@ there already — the module boundary is a session handle and a wakeup pipe.
 
 Things that are missing rather than ideas:
 
-- **Mouse drag and motion.** Press, release and wheel work; modes 1002/1003 are tracked but
-  Emacs drag events are not forwarded.
+- **Pointer motion with no button held (the other half of mode 1003).** Drags do reach
+  the child: `cooked--mouse-track` runs `track-mouse` from inside the press command for
+  as long as the gesture lasts, reports each new cell once with the held button plus the
+  motion bit, and keeps enough bookkeeping that a release past the last row or over
+  another window still arrives. That is mode 1002 in full, and it is the half of 1003
+  every 1003 client also gets from 1002. What is missing is hover: a child that asked for
+  1003 wants the pointer reported while nothing is held, which means tracking it across
+  the frame for as long as the child is running, at an event per pixel whether or not the
+  user is doing anything — so a 1003 client that highlights under the pointer highlights
+  nothing until a button goes down. Relatedly, a drag that wanders into another window
+  reports nothing while it is away, on purpose: the cells under it belong to somebody
+  else's buffer.
 - **Reflow under a scroll region.** Both scrollback and the live screen rewrap on a width
   change now — `Screen::reflow` recovers the logical lines from `Row::wrapped` and chunks
   them again, preserving the round trip. A set scroll region still falls back to clamping,

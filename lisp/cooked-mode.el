@@ -1840,6 +1840,30 @@ to the child verbatim."
               ;; just computed, once per drain.
               scroll-margin 0
               hscroll-margin 0
+              ;; Nothing may slide the grid sideways.  With `truncate-lines'
+              ;; on, Emacs hscrolls a window to keep point visible, and point
+              ;; here is put wherever the child's cursor is on every drain --
+              ;; so a cursor at column 200 of a 190-column row would scroll the
+              ;; whole viewport, and column 0 would stop being the left edge.
+              ;; Every place that turns a pixel or a column back into a cell
+              ;; (`cooked--mouse-cell', the ghost cursor, `cooked--guard-row-width')
+              ;; would then be naming a cell the user is not pointing at, and
+              ;; the child would never be told, because a horizontal scroll is
+              ;; Emacs' idea and not part of any terminal protocol.
+              auto-hscroll-mode nil
+              ;; `default-text-properties' is a *global* fallback consulted for
+              ;; every character that does not carry the property itself, so a
+              ;; user who put `line-spacing' or `line-height' in it has silently
+              ;; made every row in this buffer taller than the default line
+              ;; height.  `cooked--window-rows' divides the window's pixel
+              ;; height by `window-default-line-height', which reads the
+              ;; `line-spacing' *variable* and the default face and cannot see
+              ;; that fallback -- so cooked would tell the child more rows than
+              ;; the window can show, and the child would draw its bottom rows
+              ;; off screen with nothing anywhere reporting an error.  Cleared
+              ;; buffer-locally rather than worked around: a terminal grid has
+              ;; no use for a default text property of any kind.
+              default-text-properties nil
               ;; A grid, not prose.  Cell (ROW . COL) is the COLth character of
               ;; the ROWth line and nothing may make it otherwise: `cooked--mouse-cell'
               ;; turns a click's column back into a cell, the ghost cursor is

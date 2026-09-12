@@ -136,6 +136,30 @@ under all three at once."
     ;; which switches off character-level shaping that is not in anyone's way.
     (should-not (local-variable-p 'bidi-display-reordering))))
 
+(ert-deftest cooked-mode-refuses-a-global-that-would-move-the-grid ()
+  "Two globals a user is free to set that a terminal grid cannot survive.
+
+`auto-hscroll-mode' would slide the viewport sideways to keep point visible,
+and point here is put wherever the child's cursor is on every drain -- so the
+column a click maps to would stop being the column the child named, and
+nothing in any terminal protocol could tell the child about it.
+
+`default-text-properties' is the subtler one, and it is why this is asserted
+buffer-locally rather than assumed: it is a global fallback consulted for every
+character that lacks the property, so a `line-spacing' or `line-height' left in
+it makes every row taller than `window-default-line-height' reports.
+`cooked--window-rows' divides by exactly that, so the child would be told more
+rows than the window can show and would draw its last rows off screen with
+nothing raising an error anywhere.  Set globally here to prove the mode clears
+it rather than merely inheriting a nil nobody had touched."
+  (let ((default-text-properties '(line-spacing 5)))
+    (with-temp-buffer
+      (cooked-mode)
+      (should (local-variable-p 'auto-hscroll-mode))
+      (should-not auto-hscroll-mode)
+      (should (local-variable-p 'default-text-properties))
+      (should-not default-text-properties))))
+
 (ert-deftest cooked-mode-tears-sessions-down-when-emacs-exits ()
   "Killing the buffer reaps the child; exiting Emacs kills no buffers, so
 without this hook `Session::shutdown''s SIGHUP-then-SIGKILL escalation never

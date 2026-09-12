@@ -79,8 +79,26 @@ lisp-test: module
 # for its hex code, and which one this `tic' chose says nothing about the ncurses
 # that will read it.  Regenerate whenever terminfo/cooked.ti changes -- though
 # `cooked--terminfo-usable-p' notices if you forget, and rebuilds locally.
+#
+# The `infocmp' loop is the verification, and it is not ceremony.  `tic' reports
+# on the source it was handed; everything after it here is this Makefile copying
+# compiled files around by hand, and a `tic' that exited 0 says nothing about
+# whether ncurses can still find and read what we ship.  So each entry is looked
+# up again by name in `terminfo/db', decompiled, recompiled into a scratch
+# database, and decompiled a second time: the two decompilations must be
+# identical.  A truncated copy, or a directory named in a spelling this ncurses
+# will not look in, fails the first `infocmp'; an extended capability that does
+# not survive a compile -- and cooked's description is full of them, `-x' being
+# load-bearing here -- shows up as a diff.  Either way it fails now rather than
+# on a user's machine, where the symptom is a terminal that mostly works.
+#
+# `sed 1d' drops infocmp's header comment, which names the file it read and so
+# differs between the two runs by construction.  Every entry is checked and not
+# just `cooked': the two colour variants are what most sessions actually run
+# under.  `terminfo/rt.*' is scratch, cleared on the way in and removed on the
+# way out, so an interrupted run leaves nothing behind for the next one to trust.
 terminfo:
-	@rm -rf terminfo/db && mkdir -p terminfo/db && \
+	@rm -rf terminfo/db terminfo/rt.ti terminfo/rt.db && mkdir -p terminfo/db && \
 	  tic -x -o terminfo/db terminfo/cooked.ti && \
 	  for dir in terminfo/db/*/; do \
 	    for entry in "$$dir"*; do \
@@ -89,6 +107,12 @@ terminfo:
 	      mkdir -p "terminfo/db/$$hex" && cp "$$entry" "terminfo/db/$$hex/$$name"; \
 	    done; \
 	  done; \
+	  for name in $$(find terminfo/db -type f | sed 's|.*/||' | sort -u); do \
+	    infocmp -A terminfo/db -x -1 "$$name" | sed 1d > terminfo/rt.ti && \
+	    tic -x -o terminfo/rt.db terminfo/rt.ti && \
+	    infocmp -A terminfo/rt.db -x -1 "$$name" | sed 1d | \
+	      diff -u terminfo/rt.ti - || exit 1; \
+	  done && rm -rf terminfo/rt.ti terminfo/rt.db && \
 	  find terminfo/db -type f | sort | sed 's/^/  /'
 
 lint: compile checkdoc
