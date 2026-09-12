@@ -1491,6 +1491,49 @@ for a reason unrelated to what it computes. The three-way min and the pixel
 quantization are unit-tested there; the rendering is verified by script, since
 batch has no glyphs.
 
+*** The drawing half is not done, and the geometry hid that
+
+Rendered to PNG and *looked at*, which the pixel measurements could not
+substitute for. The box aligns now — the =│= separators line up with the =┬=
+and =┴= where before they did not, and every row is the same height. But a
+shrunk glyph is *left-aligned in its slot*, so =abc文def= draws with a visible
+gap between 文 and =def=.
+
+The arithmetic says why, and it is not a tuning problem. The three-way min picks
+the *ascent* ratio for CJK, 0.83, because that is the binding constraint — but
+=height= scales the font *uniformly*, there being no vertical-only scale in
+Emacs, so a height-bound glyph necessarily comes out narrower than its slot.
+15px becomes ~12.5px inside 18px, and =min-width= pads the difference entirely
+on the right.
+
+So the trade actually made is: *the gap after a CJK character grows from 3px to
+5.5px, in exchange for the row no longer being 15% too tall.* Better, and not
+right.
+
+*ghostel has the same artifact*: its display spec is the same two properties
+with no centring. Its =adjustWidth= sidesteps the *width* case differently — a
+lone glyph claims the next cell rather than shrinking, hiding the following
+space — but that does nothing for the height-bound case, which is the one live
+on this font.
+
+What is needed is a *position*, and Emacs offers no way to centre a glyph inside
+its own =display= spec. The candidates, none tried:
+
+1. Pad symmetrically by putting a =(space :width …)= display on the *neighbouring*
+   cells rather than on the glyph. cooked owns the whole row, so it can — but a
+   cell is only free if it holds a space, and cooked would then be rewriting
+   cells the grid did not damage.
+2. =:align-to= on a zero-width space inserted before the glyph. Adds a character
+   to the buffer, which breaks the one-buffer-character-per-cell invariant the
+   guard and the seam both depend on.
+3. Accept left alignment and *reduce how much shrinking happens*, by taking
+   ghostel's claim-the-next-cell path so the slot grows instead of the glyph
+   shrinking. Helps the width case; the CJK ascent case still shrinks.
+4. Leave it, and treat the gap as the price of alignment.
+
+*Do not close this task on the geometry alone.* That is what nearly happened
+here: every pixel measurement said it worked.
+
 *** Still open
 
 - *No bench case.* Same gap the image and scroll work hit: the guard's cost with
