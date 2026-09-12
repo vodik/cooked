@@ -1145,11 +1145,11 @@ payload); guard =cooked-file-link= off when =default-directory= is remote; have
 
 *Ship the mapping alone.* The remote spawn is architectural — see §5.
 
-** TODO [#B] Shell history via the shell's own command
+** WIP [#B] Shell history via the shell's own command
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §5 "Shell history for free"
-:BRANCH:
+:BRANCH:   cooked/history
 :END:
 New =lisp/cooked-history.el=. Four lines of data through =process-file=, so a
 remote buffer queries the remote host for free once TRAMP lands. NUL-split for
