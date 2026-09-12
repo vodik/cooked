@@ -55,6 +55,7 @@
     (112 . cooked--osc-color-reset)
     (51 . cooked--osc-emacs)
     (52 . cooked--osc-clipboard)
+    (9 . cooked--osc-progress)
     (99 . cooked--osc-notify)
     (777 . cooked--osc-notify-777))
   "Alist of OSC code to a function taking the remaining payload parts.
@@ -258,6 +259,128 @@ the payload is its title or its body, and `d=0\=' means more chunks follow."
   (when (equal (car parts) "notify")
     (when cooked-allow-notifications
       (cooked--notify (nth 1 parts) (string-join (nthcdr 2 parts) ";")))))
+
+;;;; OSC 9;4 — how far along the child says it is
+;;
+;; ConEmu's progress report, and the one sequence on this axis that everything
+;; modern emits: cargo, npm, winget, and every coding agent that has grown a
+;; progress bar.  `ESC ] 9 ; 4 ; STATE ; PERCENT ST', where STATE is a single
+;; digit and PERCENT is an optional 0-100.
+;;
+;; OSC 9 with anything else after it is iTerm2's one-shot desktop notification,
+;; which cooked does not implement; the `4' test below is what keeps the two
+;; apart, and it is the reason this handler is registered for the whole of OSC 9
+;; rather than for some sub-code the dispatch does not have.
+;;
+;; Nothing the child sends reaches the mode line as text.  The payload is parsed
+;; down to a symbol from a closed set and an integer, and `cooked--progress' can
+;; hold nothing else -- so the rendering in cooked-mode-line.el is built out of
+;; cooked's own vocabulary, and a hostile payload's only reachable outcome is
+;; that it is refused.  That is a stronger guarantee than sanitising would be,
+;; and it is deliberate: this is the same shape of channel as the OSC 7 payload
+;; that turned out to be able to name a TRAMP host.
+
+(defconst cooked--progress-states
+  '(("0" . nil) ("1" . set) ("2" . error) ("3" . indeterminate) ("4" . paused))
+  "ConEmu's `st' digit mapped onto the state cooked records.
+
+Keyed by the string rather than by a number, so that `01', `1.0', ` 1' and the
+empty string are all simply absent from the table instead of being rounded into
+a state by `string-to-number' -- which answers 0, \"remove the indicator\", for
+every one of them and for `not-a-number' besides.
+
+`0' maps to nil because \"remove\" is not a fifth thing to display: it is the
+absence of the other four, and giving it a symbol of its own would mean every
+reader downstream had to know to treat that symbol as nothing.")
+
+(defvar-local cooked--progress nil
+  "What the child last said about its progress, or nil if it said nothing.
+
+A cons of STATE and PERCENT.  STATE is one of `set\=', `error\=',
+`indeterminate\=' or `paused\=' -- never a string, and never anything the child
+chose.  PERCENT is an integer from 0 to 100, or nil when there is no number to
+show: `indeterminate\=' never carries one, and `error\=' and `paused\=' need
+not.
+
+Read by `cooked--mode-line-progress\=', which is the only consumer.  Buffer-local
+because a progress report is one session's news and the mode line is per
+buffer.")
+
+(defun cooked--progress-percent (field)
+  "PERCENT from FIELD, ConEmu's `pr', or the symbol `bad' if it is not a number.
+
+Three answers rather than two.  nil means the child sent no number, which is
+legal for every state that takes one and is how `ESC ] 9 ; 4 ; 2 ST' says \"the
+thing I was doing failed\" without restating how far it had got.  `bad\=' means
+it sent something that is not a number, which is a different situation entirely
+and one the caller refuses outright.
+
+`string-to-number\=' cannot tell those apart -- it answers 0 for the empty
+string, for `nan\=', and for a megabyte of NUL bytes -- so the digits are
+checked before it is asked.  Out of range is clamped rather than refused, on
+rockorager.dev's rule for the sequence and because a build tool that computes
+101% has a rounding bug, not a hostile intent."
+  (cond
+   ((or (null field) (string-empty-p field)) nil)
+   ((string-match-p (rx bos (+ digit) eos) field)
+    (min 100 (string-to-number field)))
+   (t 'bad)))
+
+(defun cooked--osc-progress (parts)
+  "Record the child's progress from PARTS, the OSC 9 payload after the code.
+
+PARTS is ConEmu's `4', the state digit, and an optional percentage.  Anything
+else -- a fifth field, a state outside 0-4, a percentage that is not a number --
+leaves `cooked--progress\=' exactly as it was rather than guessing at what was
+meant.  Refusing to act is the only safe reading of a malformed report: the
+alternative is a stream that can park a wrong number in the mode line and then
+stop sending, leaving it there.
+
+A state that takes a percentage and arrives without one keeps the percentage
+already on show.  That is what makes the two-sequence idiom work -- `1;70\='
+while the work runs, then a bare `2\=' when it fails -- and it reads as
+`[err 70%]\=', which says more than `[err]\=' does.  `indeterminate\=' drops it
+instead, because a pulsing state with a stale number beside it is a lie about
+which of the two the child meant."
+  (when (and (equal (car parts) "4") (<= 2 (length parts) 3))
+    (let ((state (assoc (nth 1 parts) cooked--progress-states))
+          (percent (cooked--progress-percent (nth 2 parts))))
+      (when (and state (not (eq percent 'bad)))
+        (let ((carried (or percent (cdr cooked--progress))))
+          (cooked--set-progress
+           (cdr state)
+           (pcase (cdr state)
+             ('indeterminate nil)
+             ;; `set' is the one state whose whole content is the number, so it
+             ;; is the one that cannot be left without one.  Zero rather than a
+             ;; refusal, which is what Windows Terminal does with the same
+             ;; report, and it is only reachable at all when a child opens with
+             ;; a bare `9;4;1' -- having said it is making progress before it
+             ;; has made any.
+             ('set (or carried 0))
+             (_ carried))))))))
+
+(defun cooked--set-progress (state percent)
+  "Show STATE and PERCENT as this buffer's progress, or clear it when STATE is nil.
+
+The mode line is asked to repaint here rather than left to notice on its own: a
+child that reports 100% and then goes quiet produces no further output, so
+nothing else would ever wake redisplay and the last number the user saw would be
+whatever happened to be on screen when something else last changed."
+  (setq cooked--progress (and state (cons state percent)))
+  (force-mode-line-update))
+
+(defun cooked--reset-progress ()
+  "Drop any progress indicator, on RIS.
+
+Called from the `reset\=' event rather than from anything in this file, because
+RIS is `ESC c\=' and not an OSC at all.  It has to be reachable from Lisp: the
+indicator is the one piece of a session's visible state that lives entirely in
+Emacs, so a reset that Rust handled by itself would clear the screen and leave
+the mode line still claiming a build was 60% through -- and there would be no
+second thing for the user to type, `reset\=' being the thing you type when
+something is stuck."
+  (cooked--set-progress nil nil))
 
 (defvar-local cooked--color-remaps nil
   "Alist of color kind to face remapping cookie, so OSC 110/111/112 can undo a set.")

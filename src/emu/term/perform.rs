@@ -184,6 +184,11 @@ impl Perform for State {
                 self.evicted(evicted);
                 self.cleared_display();
                 self.screen_mut().goto(0, 0);
+                // Last, and after the erase, so that a Lisp handler reading the buffer
+                // from this event sees the reset already done rather than half done.
+                // See [`Event::Reset`] for why the event exists at all when everything
+                // above it is state Rust already put back by itself.
+                self.events.push(Event::Reset);
             }
             _ => {}
         }

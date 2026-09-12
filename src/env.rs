@@ -281,6 +281,7 @@ symbols! {
     Reply => "reply",
     EraseScrollback => "erase-scrollback",
     DisplayCleared => "display-cleared",
+    Reset => "reset",
     TitleStack => "title-stack",
     PromptStart => "prompt-start",
     PromptContinuation => "prompt-continuation",

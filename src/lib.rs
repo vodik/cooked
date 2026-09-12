@@ -1472,6 +1472,7 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
         Event::Reply(bytes) => env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?),
         Event::EraseScrollback => list!(env, [sym!(env, "erase-scrollback")?]),
         Event::DisplayCleared => list!(env, [sym!(env, "display-cleared")?]),
+        Event::Reset => list!(env, [sym!(env, "reset")?]),
         // (title-stack PUSH-P)
         Event::TitleStack(push) => list!(env, [sym!(env, "title-stack")?, *push]),
     }

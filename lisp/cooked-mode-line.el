@@ -22,6 +22,12 @@
 ;; segment is a click away from.
 (defvar cooked--foreground-label)
 (defvar cooked--ownership)
+;; And `cooked--progress' by cooked-osc.el, which parses OSC 9;4 down to the two
+;; values `cooked-progress-function' is handed.  Declared rather than required
+;; for the same reason as the two above: this file reads that state, it does not
+;; keep it, and a `require' would only assert a load order cooked-mode.el
+;; already fixes.
+(defvar cooked--progress)
 (declare-function cooked-toggle-peek "cooked-mode")
 (declare-function cooked--buffer-name-shows-title-p "cooked-mode")
 
@@ -129,6 +135,29 @@ as long as the state lasts."
                     (not cooked--semantic-seen))
            (message "cooked: %s" cooked--integration-hint)))))))
 
+(defun cooked--mode-line-quote (text)
+  "TEXT with every `%\=' doubled, so the mode line prints it and never reads it.
+
+The result of a `:eval\=' is not text, it is another mode-line construct, so a
+string handed back from one is scanned again for `%\='-specifiers before it is
+displayed.  Almost everything this file puts in the mode line is therefore an
+injection site, and two of them take the child\='s own bytes: `%b\=' in a window
+title becomes the buffer name, and a `%\=' before the truncation cut can leave a
+lone specifier character that swallows whatever the next segment starts with.
+Neither is a security hole on its own -- the specifier set is a fixed list of
+things about this frame -- but it is a child choosing what the mode line says,
+and it is the same shape of mistake as an OSC 7 payload choosing a TRAMP host.
+
+It also has to be applied to cooked\='s *own* text, which is the part that is
+easy to miss: `cooked-progress-label\=' writes a literal percentage, and `%]\='
+is a real specifier -- the one closing a nested group -- so an unescaped
+`[42%]\=' displays as `[42\=', with nothing to say where the rest went.
+
+`replace-regexp-in-string\=' rather than a hand-rolled walk because it carries
+the text properties of the parts it keeps, and every caller here is passing
+something already propertized with a face."
+  (replace-regexp-in-string "%" "%%" text t t))
+
 (defun cooked--mode-line-click (command help)
   "Property list making mode-line text run COMMAND on a click, described by HELP.
 
@@ -200,7 +229,8 @@ screen."
        ;; state word starts meaning something different, and saying which host
        ;; is what keeps that from reading as cooked being erratic across hosts.
        (when (cooked--foreign-host-p)
-         (propertize (format " @%s" (car (split-string cooked--host "\\.")))
+         (propertize (concat " @" (cooked--mode-line-quote
+                                   (car (split-string cooked--host "\\."))))
                      'face 'shadow))
        ;; The separator space stays outside the `propertize', so the
        ;; `mouse-face' run covers the word and not the gap before it -- the
@@ -216,9 +246,16 @@ screen."
          ('semi (propertize " semi" 'face 'shadow))
          ('still (propertize " still" 'face 'cooked-still))
          ('frozen (propertize " frozen" 'face 'cooked-peek)))
+       ;; Quoted, not formatted: both of `cooked--mode-line-subject''s sources are
+       ;; the child's own bytes -- a title it set, or the name of the program it
+       ;; is running -- so a `%' in either is a specifier unless it is doubled
+       ;; here.  Truncation happens first, so the two characters a doubled `%'
+       ;; costs are not charged against the 24 columns the user asked for.
        (when subject
-         (propertize (format " %s" (truncate-string-to-width subject 24 nil nil t))
+         (propertize (concat " " (cooked--mode-line-quote
+                                  (truncate-string-to-width subject 24 nil nil t)))
                      'face 'shadow))
+       (cooked--mode-line-progress)
        (when code
          (concat
           " "
@@ -227,6 +264,110 @@ screen."
                  (cooked--mode-line-click
                   #'cooked-goto-last-command
                   "cooked: last exit status.  mouse-1: go to that command"))))))))
+
+;;;; Progress
+;;
+;; What OSC 9;4 turns into on screen.  `cooked-osc.el' owns the parsing and the
+;; state; this owns the only thing anybody sees, and it is a separate function
+;; from the mode line proper so that swapping it out does not mean rewriting the
+;; rest of the segment.
+
+(defface cooked-progress '((t :inherit shadow))
+  "Face for a running OSC 9;4 progress indicator in the mode line.
+
+As quiet as the other things the mode line merely reports.  A progress bar is
+already the most eye-catching thing a child can put on screen by sheer rate of
+change, and colouring it as well would make an ordinary build look like a
+warning.  `error\=' and `paused\=' do get their own faces, because those *are*
+the states worth looking at."
+  :group 'cooked)
+
+(defcustom cooked-progress-function #'cooked-progress-label
+  "Function rendering the child's progress, or nil to show none.
+
+Called with two arguments, STATE and PERCENT -- see `cooked--progress\=' for
+what each may be -- and returns a string for the mode line, or nil for nothing.
+Called on *every* redisplay of a cooked buffer, including with STATE nil when
+there is no progress to show, which is what gives an animated renderer somewhere
+to stop itself.
+
+The default needs nothing that is not already in Emacs, and that is the point of
+the indirection rather than an accident of it: progress is exactly the sort of
+thing a user already has a package for -- spinner.el, or a graphical bar built
+out of `:align-to\=' -- and a terminal emulator that shipped one of those as a
+hard dependency would be spending everybody's install on a garnish.  A
+replacement is free to ignore the mode line entirely and return nil, having put
+the state wherever it would rather have it.
+
+Two obligations, both from being called out of redisplay.  It must not
+`message\=', prompt, or otherwise take the echo area, and it must not depend on
+being called a particular number of times: redisplay runs when Emacs feels like
+it, several times for one change and not at all for the next.  Signalling is
+survivable -- `cooked--mode-line-progress\=' catches it and shows nothing -- but
+it is caught silently, so a renderer under development wants testing outside
+redisplay first.
+
+Any `%\=' in the returned string is escaped before it reaches the mode line, so
+a renderer writes `42%\=' and means it."
+  :type '(choice (const :tag "Plain text, no packages needed" cooked-progress-label)
+                 (const :tag "Nothing" nil)
+                 function)
+  :group 'cooked)
+
+(defun cooked-progress-label (state percent)
+  "Render STATE and PERCENT as text: the default `cooked-progress-function\='.
+
+Four states and one number between them, so the whole vocabulary is here:
+`[42%]\=', `[...]\=', `[err 73%]\=', `[paused 25%]\='.  Bracketed because the
+mode line is a row of unlabelled fragments and a bare `42%\=' beside an exit
+status reads as one more of them; the brackets are what say the number belongs
+to something still happening.
+
+The percentage is optional on every state that can carry one at all, and the
+word alone is the answer when it is missing -- `[err]\=' rather than `[err
+0%]\=', which would claim the child had told us something it did not."
+  (when state
+    ;; Built as a word and a number joined by a space, rather than four format
+    ;; strings, because the number is optional on three of the four states and
+    ;; the alternative is either eight format strings or a `[err ]' with the gap
+    ;; still in it.
+    (let* ((word (pcase state
+                   ('indeterminate "...")
+                   ('error "err")
+                   ('paused "paused")))
+           (number (and percent
+                        (not (eq state 'indeterminate))
+                        (format "%d%%" percent)))
+           (face (pcase state
+                   ('error 'cooked-failure)
+                   ('paused 'cooked-peek)
+                   (_ 'cooked-progress))))
+      (propertize (format "[%s]" (string-join (delq nil (list word number)) " "))
+                  'face face))))
+
+(defun cooked--mode-line-progress ()
+  "The progress segment, or nil.
+
+`cooked-progress-function\=' is a user-supplied function running inside
+redisplay, which is the one place in Emacs where a failure is genuinely
+expensive: the mode line is redrawn for every frame of every window showing this
+buffer, so a renderer that signals once signals continuously.
+
+Hence a bare `condition-case\=' and not `cooked--protect-seam\='.  The seam
+wrapper is the right tool everywhere else and the wrong one here for its best
+feature -- it `message\='s what went wrong -- and a `message\=' from redisplay
+is a side effect in a function that is supposed to be a rendering, the same
+objection `cooked--schedule-integration-hint\=' exists to answer.  A broken
+renderer shows nothing, and `cooked-debug\=' is where you go to see why."
+  (when cooked-progress-function
+    (when-let* ((text (if cooked-debug
+                          (funcall cooked-progress-function
+                                   (car cooked--progress) (cdr cooked--progress))
+                        (condition-case nil
+                            (funcall cooked-progress-function
+                                     (car cooked--progress) (cdr cooked--progress))
+                          (error nil)))))
+      (concat " " (cooked--mode-line-quote text)))))
 
 ;;;; Sticky scroll
 ;;

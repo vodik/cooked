@@ -156,6 +156,21 @@ pub enum Event {
     /// viewport of its own to scroll — the transcript and the live screen are one buffer
     /// — so the window is what moves, and this is the event that asks it to.
     DisplayCleared,
+    /// `ESC c` -- RIS, a full reset of the terminal.
+    ///
+    /// Everything RIS puts back inside the emulator it puts back itself, so this event
+    /// says nothing the grid needs; it exists for the state that is *not* in the grid.
+    /// Emacs keeps some of a session's state in Lisp because it is Emacs' to keep --
+    /// OSC 9;4 progress is the current one -- and a reset that cleared the screen while
+    /// leaving a progress indicator pinned to the mode line would be exactly the sort of
+    /// stuck state `reset` is the cure for. Nothing in Rust can clear it, so RIS has to
+    /// be sayable.
+    ///
+    /// Deliberately not raised by DECSTR (`CSI ! p`), which every `rs2` and `is2` sends
+    /// on the way past: a soft reset is a program tidying the modes up after itself, and
+    /// a build still running underneath it has not stopped reporting progress. RIS is the
+    /// one that means "forget this session's state", and it is what `reset`'s `rs1` is.
+    Reset,
     /// XTWINOPS 22/23: push or pop the window title. `smcup`/`rmcup` end in these, so a
     /// full-screen program that sets a title expects it restored when it leaves.
     TitleStack(bool),

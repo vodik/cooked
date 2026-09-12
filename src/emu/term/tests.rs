@@ -2145,6 +2145,23 @@ fn a_reset_clears_the_display_like_any_other() {
 }
 
 #[test]
+fn a_reset_says_so_where_a_soft_reset_does_not() {
+    // The event Emacs needs in order to drop the state it holds on the emulator's
+    // behalf, which is why the distinction below is load-bearing rather than pedantic:
+    // every `rs2` and `is2` sends DECSTR, so a soft reset firing this would clear a
+    // running build's progress every time a full-screen program tidied up after itself.
+    let mut t = term(3, 8, b"aaa");
+    t.drain();
+    t.feed(b"\x1b[!p");
+    assert!(
+        !t.drain().events.contains(&Event::Reset),
+        "DECSTR is not RIS"
+    );
+    t.feed(b"\x1bc");
+    assert!(t.drain().events.contains(&Event::Reset));
+}
+
+#[test]
 fn the_alt_screen_never_reports_a_cleared_display() {
     // It archives nothing and is pinned to the top of the window already, so there is
     // no transcript for a window to scroll away from.

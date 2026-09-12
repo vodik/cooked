@@ -1329,5 +1329,150 @@ whole construct would say only its last line."
                   (goto-char (cooked--command-prompt-position command))
                   (line-end-position))))))))
 
+;;;; OSC 9;4 -- progress
+
+;; ConEmu's `ESC ] 9 ; 4 ; STATE ; PERCENT ST'.  Driven through
+;; `cooked--osc-progress' rather than through a child for everything except the
+;; end-to-end case below, because what is being asserted is a state machine and
+;; a child can only ever show it one path through at a time.
+
+(defun cooked-tests--progress (&rest payloads)
+  "Feed each of PAYLOADS to the OSC 9 handler and return the resulting state."
+  (dolist (parts payloads)
+    (cooked--osc-progress parts))
+  cooked--progress)
+
+(ert-deftest cooked-progress-tracks-every-state ()
+  (with-temp-buffer
+    (cooked-mode)
+    ;; 1, set: the ordinary case, and the one that carries a number.
+    (should (equal (cooked-tests--progress '("4" "1" "42")) '(set . 42)))
+    ;; 3, indeterminate: no number at all, and it drops the one already showing
+    ;; rather than leaving a stale percentage beside a pulsing state.
+    (should (equal (cooked-tests--progress '("4" "3")) '(indeterminate)))
+    (should (equal (cooked-tests--progress '("4" "3" "42")) '(indeterminate)))
+    ;; 2, error, and 4, paused: a number if one is sent.
+    (should (equal (cooked-tests--progress '("4" "2" "73")) '(error . 73)))
+    (should (equal (cooked-tests--progress '("4" "4" "25")) '(paused . 25)))
+    ;; And, if none is, the one already showing -- which is the whole point of
+    ;; the percentage being optional: `1;70' while the work runs, a bare `2'
+    ;; when it fails, and the mode line says how far it had got.
+    (should (equal (cooked-tests--progress '("4" "1" "70") '("4" "2")) '(error . 70)))
+    (should (equal (cooked-tests--progress '("4" "1" "70") '("4" "4")) '(paused . 70)))
+    ;; 0, remove: the absence of the other four, not a fifth of them.
+    (should (null (cooked-tests--progress '("4" "1" "42") '("4" "0"))))
+    ;; A bare `2' with nothing to carry says the state and no number.
+    (should (equal (cooked-tests--progress '("4" "2")) '(error)))
+    ;; A bare `1' has to invent one, since a set is nothing but its number.
+    (should (equal (cooked-tests--progress '("4" "0") '("4" "1")) '(set . 0)))))
+
+(ert-deftest cooked-progress-refuses-what-it-cannot-parse ()
+  "A malformed report leaves the indicator exactly as it was.
+
+The alternative -- guessing -- is what lets a stream park a wrong number in the
+mode line and then go quiet, leaving it there."
+  (with-temp-buffer
+    (cooked-mode)
+    (dolist (bad '(("4")                    ; no state at all
+                   ("4" "5")                ; state outside 0-4
+                   ("4" "01")               ; not the digit, however it reads
+                   ("4" "1.0")
+                   ("4" " 1")
+                   ("4" "-1")
+                   ("4" "1" "nan")          ; `string-to-number' answers 0 to all
+                   ("4" "1" "0x40")         ; of these; the digit check is what
+                   ("4" "1" "1e2")          ; keeps them from becoming a number
+                   ("4" "1" "4 2")
+                   ("4" "1" "42" "43")      ; a field ConEmu does not define
+                   ("9" "1" "42")           ; not 9;4 at all
+                   ()))
+      (should (null (cooked-tests--progress bad))))
+    ;; Nor does a bad report clear a good one.
+    (should (equal (cooked-tests--progress '("4" "1" "42") '("4" "1" "eek"))
+                   '(set . 42)))
+    ;; Out of range is clamped rather than refused: a build tool that computes
+    ;; 101% has a rounding bug, not an intent.
+    (should (equal (cooked-tests--progress '("4" "1" "999")) '(set . 100)))
+    (should (equal (cooked-tests--progress '("4" "1" "99999999999999999999"))
+                   '(set . 100)))))
+
+(ert-deftest cooked-progress-cannot-inject-a-mode-line-specifier ()
+  "The mode line prints what a child sends; it never reads it.
+
+Two halves, and the second is the one that is easy to miss.  A `:eval''s string
+result is itself a mode-line construct, so it is rescanned for `%'-specifiers --
+which makes the child's title an injection site, and makes cooked's *own*
+`[42%]' one too, `%]' being the specifier that closes a recursion group."
+  (with-temp-buffer
+    (cooked-mode)
+    ;; Asserted on the escaped string rather than on `format-mode-line''s
+    ;; output, which answers the empty string under `--batch': there is no
+    ;; window for it to measure against, so the one rendering call that would
+    ;; close this loop is the one thing the suite cannot make.  `%%' is the
+    ;; escape that displays as a single `%', so an even run is the property.
+    (cooked--osc-progress '("4" "1" "100"))
+    (should (string-match-p (regexp-quote "[100%%]") (cooked--mode-line)))
+    ;; And a title full of specifiers is passed through doubled, so it is shown
+    ;; rather than obeyed: `%b' would otherwise become the buffer name and `%-'
+    ;; a run of dashes out to the margin.
+    (setq cooked--title "%b%-%%")
+    (should (string-match-p (regexp-quote "%%b%%-%%%%") (cooked--mode-line)))
+    ;; The general form of both: nothing reaches the mode line holding an odd
+    ;; number of `%' in a row, which is the only way a specifier can survive.
+    (should-not (string-match-p "\\(?:\\`\\|[^%]\\)\\(?:%%\\)*%\\(?:[^%]\\|\\'\\)"
+                                (cooked--mode-line)))))
+
+(ert-deftest cooked-progress-is-cleared-by-a-reset ()
+  "RIS clears the indicator, which nothing in Rust can do for us.
+
+Pinned at the seam rather than by feeding `ESC c' to a child, because the two
+halves fail independently: that the emulator raises `reset' for RIS and for
+nothing else is a Rust test (`a_reset_says_so_where_a_soft_reset_does_not'), and
+this is the other half -- that the event, once raised, reaches the one piece of
+session state Emacs holds on the emulator's behalf."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked--osc-progress '("4" "1" "60"))
+    (should cooked--progress)
+    (cooked--handle-event '(reset) (point-min))
+    (should (null cooked--progress))
+    (should-not (string-match-p "%" (cooked--mode-line)))))
+
+(ert-deftest cooked-progress-function-is-the-whole-of-the-rendering ()
+  "A replacement renderer needs nothing from cooked but the two values.
+
+The default has to be what somebody with no extra packages gets, so the
+indirection is only worth having if a substitute is genuinely interchangeable --
+including one that renders nothing and puts the state somewhere else entirely."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked--osc-progress '("4" "2" "73"))
+    (should (string-match-p (regexp-quote "[err 73%%]") (cooked--mode-line)))
+    (let* ((seen nil)
+           (cooked-progress-function
+            (lambda (state percent) (push (cons state percent) seen) "<spin>")))
+      (should (string-match-p "<spin>" (cooked--mode-line)))
+      ;; Called with the state, and called again with nil once there is none --
+      ;; which is where an animated renderer stops its timer.
+      (cooked--osc-progress '("4" "0"))
+      (cooked--mode-line)
+      (should (equal (car seen) '(nil))))
+    ;; nil is a supported value, not an unconfigured one.
+    (let ((cooked-progress-function nil))
+      (cooked--osc-progress '("4" "1" "50"))
+      (should-not (string-match-p "50" (cooked--mode-line))))
+    ;; A renderer that signals shows nothing and does not take the mode line
+    ;; down with it.  `cooked-debug' is bound off because it is exactly the
+    ;; switch that turns the guard back into a re-signal.
+    (let ((cooked-debug nil)
+          (cooked-progress-function (lambda (&rest _) (error "Boom"))))
+      (should (cooked--mode-line)))))
+
+(ert-deftest cooked-progress-reaches-the-mode-line-from-a-real-child ()
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033]9;4;1;37\\007'; sleep 5")
+    (should (cooked-tests--settle (lambda () (equal cooked--progress '(set . 37)))))
+    (should (string-match-p (regexp-quote "[37%%]") (cooked--mode-line)))))
+
 (provide 'cooked-tests-osc)
 ;;; cooked-tests-osc.el ends here
