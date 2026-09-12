@@ -62,6 +62,60 @@ where a flood would interleave the child's writes with the measurement.")
                   (ceil--pct s 0.99) (car (last s)) mean extra)
           ceil--log)))
 
+(defun ceil--gesture (label rejoin width lines scrolls warmup)
+  "Time SCROLLS gestures of LINES screen lines over settled WIDTH-column content.
+
+*This is the measurement the task actually asks for, and the one the earlier
+harness in this file got wrong.* Timing output as it *arrives* is a different
+operation: fresh rows are appended at the bottom and redisplay draws them once.
+A gesture moves the *viewport* over text that is already there, and redisplay
+lays a continued line out **from its start** -- so a window crossing into a
+700-character logical line pays for the whole line, every time, and that cost
+exists only when `cooked-rejoin-wrapped-lines\=' has made long lines to cross.
+An append-only harness cannot see it, which is why it reported a flat result.
+
+The child fills the buffer and exits; nothing is drained during the gesture, so
+what is timed is redisplay and nothing else."
+  (let* ((cooked-rejoin-wrapped-lines rejoin)
+         (buffer (generate-new-buffer (format "*gesture %s*" label)))
+         (samples nil))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (set-window-buffer (selected-window) buffer)
+          (cooked--start
+           (list "/bin/sh" "-c"
+                 (format "stty raw -echo; awk -v WIDTH=%d -v CHARS=%s -f %s </dev/null; \
+                          for i in $(seq 400); do :; done"
+                         width "abcdefghijklmnopqrstuvwxyz0123456789 " ceil--awk)))
+          (cooked--refresh-keymap)
+          ;; Fill: ask for enough bursts that the scrollback is deep enough to
+          ;; scroll back through without hitting the top.
+          (dotimes (_ 120)
+            (cooked--send-to-child "\n")
+            (dotimes (_ 3) (accept-process-output nil 0.005)
+              (when cooked--session
+                (cooked--apply (cooked--drain cooked--session rejoin)))))
+          (redisplay t)
+          (let ((window (selected-window)))
+            (dotimes (i (+ warmup scrolls))
+              ;; Alternate direction so the gesture stays inside the buffer for
+              ;; as long as it takes, rather than pinning at one end and timing
+              ;; a scroll that does not move.
+              (let ((up (zerop (% (/ i 8) 2)))
+                    (t0 nil))
+                (goto-char (window-point window))
+                (setq t0 (float-time))
+                (ignore-errors (if up (scroll-up lines) (scroll-down lines)))
+                (redisplay t)
+                (when (>= i warmup)
+                  (push (* 1000 (- (float-time) t0)) samples)))))
+          (ceil--report label samples
+                        (format "%dx%d term, %d cols content, %d chars, %d lines/scroll"
+                                cooked--rows cooked--cols width (buffer-size) lines)))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer))))
+
 (defun ceil--run (label rejoin width bursts warmup)
   "Time BURSTS ten-line scrolls at WIDTH columns of content, REJOIN in force."
   (let* ((cooked-rejoin-wrapped-lines rejoin)
@@ -139,6 +193,12 @@ where a flood would interleave the child's writes with the measurement.")
                 (framep (selected-frame))
                 (display-graphic-p))
         ceil--log)
+  ;; Two different operations, and the distinction is the whole point of the
+  ;; file -- see `ceil--gesture'.  COOKED_CEILING_ONLY selects one:
+  ;; "append" for output arriving, "gesture" for the viewport moving over
+  ;; content already there, unset for both.  They are separated because a run of
+  ;; both is long enough that people take the first answer they get.
+  (unless (equal (getenv "COOKED_CEILING_ONLY") "gesture")
   ;; Control: nothing wraps, so rejoining has nothing to do and the two rows
   ;; should agree.  If they do not, the harness is measuring something else.
   (ceil--run "short lines, rejoin=t"  t   (- cols 6) 200 30)
@@ -150,6 +210,14 @@ where a flood would interleave the child's writes with the measurement.")
   ;; Ten screen rows per logical line: Emacs' long-line paths in earnest.
   (ceil--run "10x-wrapped, rejoin=t"  t   (* 10 cols) 200 30)
   (ceil--run "10x-wrapped, rejoin=nil" nil (* 10 cols) 200 30))
+  ;; And the gesture, which is the operation the question was actually about.
+  (unless (equal (getenv "COOKED_CEILING_ONLY") "append")
+  (ceil--gesture "GESTURE short lines, rejoin=t"   t   (- cols 6) 10 200 30)
+  (ceil--gesture "GESTURE short lines, rejoin=nil" nil (- cols 6) 10 200 30)
+  (ceil--gesture "GESTURE 3x-wrapped, rejoin=t"    t   (* 3 cols)  10 200 30)
+  (ceil--gesture "GESTURE 3x-wrapped, rejoin=nil"  nil (* 3 cols)  10 200 30)
+  (ceil--gesture "GESTURE 10x-wrapped, rejoin=t"   t   (* 10 cols) 10 200 30)
+  (ceil--gesture "GESTURE 10x-wrapped, rejoin=nil" nil (* 10 cols) 10 200 30)))
 
 (with-temp-file ceil--out
   (insert (format "load-average %s\n" (load-average))
