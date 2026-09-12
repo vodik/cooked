@@ -640,7 +640,7 @@ unsafe extern "C" fn trampoline(
     let env = unsafe { Env::from_raw(raw) };
     let f: Defun = unsafe { std::mem::transmute(data) };
     let args = match n {
-        0 => &[][..],
+        0 => &[],
         n => unsafe { slice::from_raw_parts(args, n as usize) },
     };
     match catch_unwind(AssertUnwindSafe(|| f(env, args))) {
