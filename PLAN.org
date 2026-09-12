@@ -409,7 +409,7 @@ p99 together and divides out — under load the styled median went 0.6 → 7.5 m
 twelve times slower on every iteration, and the ratio barely moved. The two
 guards are complementary in *both* directions, not one covering for the other.
 
-** WIP [#A] Typing latency benchmark, three configurations
+** REVIEW [#A] Typing latency benchmark, three configurations
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §9 "C. Typing latency"; §7 for what it settles
@@ -431,6 +431,48 @@ Done when: three distributions recorded, and the idle-prompt case is confirmed
 Note now that the gate is satisfied: this is the one Wave 0 task that wants the
 *graphical* harness, not batch — see "Measuring in a real graphical frame", and
 keep =emacs -nw= under foot as the control.
+
+*** Measured
+
+=scripts/bench-typing-latency.el=, 30 discarded warmups then 200 keystrokes, at
+a matched 115-column, 65/66-row terminal. Two runs per backend; load 0.9–2.2
+with agents running, and the runs agree to within a few percent, so the
+numbers are load-tolerant rather than load-free.
+
+| config | tty p50 | tty p99 | pgtk p50 | pgtk p99 |
+|--------+---------+---------+----------+----------|
+| plain  |    1.98 |    2.76 |     1.99 |     8.97 |
+| box    |    5.40 |    7.43 |     5.32 |    12.63 |
+| link   |    3.89 |    5.48 |     5.47 |    12.49 |
+
+(p50 and p99 averaged over the two runs; every individual figure is within 10%
+of its pair except pgtk box p50, 4.80 and 5.85.)
+
+*** What it settles
+
+*The median is backend-independent and the tail is entirely the backend.* Plain
+p50 is 1.98 ms on a tty and 1.99 on pgtk — indistinguishable — while plain p99
+is 2.76 against 8.97, a factor of 3.3. This is the *opposite* shape to the
+scroll gesture, where pgtk cost 3.5x at the median too. So a keystroke's typical
+cost is Emacs and cooked; its worst case is the compositor waiting for a frame.
+Anyone quoting a single latency figure for cooked should quote the median and
+say which backend the tail came from.
+
+*The decorated-buffer risk is real and it is the largest effect here.* A
+keystroke into a screen full of box drawing costs *2.7x* one into a plain screen
+(5.40 vs 1.98 on the tty, where there is no compositor to blame), and a screen
+of URLs costs 2.0x. One character changed, and the cost tracks what the rest of
+the screen is wearing — which is exactly what §9 C went looking for and is the
+strongest argument yet for the remaining Wave 2 items.
+
+Everything is inside the perceptible threshold at the median. pgtk's 12–13 ms
+p99 on a decorated screen is not comfortably so, and that is the figure to watch.
+
+*** The baseline the second half of "Done when" needs
+
+*Plain, idle prompt, tty p50 1.98 ms / p99 2.76 ms.* Any later pacing work has
+to leave that unchanged; it is the number to re-take, and the tty column is the
+one to compare because it has no compositor tail to hide a regression in.
 
 ** DONE [#B] Attach a window to the bench buffer
 :PROPERTIES:
