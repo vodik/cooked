@@ -409,13 +409,13 @@ p99 together and divides out — under load the styled median went 0.6 → 7.5 m
 twelve times slower on every iteration, and the ratio barely moved. The two
 guards are complementary in *both* directions, not one covering for the other.
 
-** NEXT [#A] Typing latency benchmark, three configurations
+** WIP [#A] Typing latency benchmark, three configurations
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §9 "C. Typing latency"; §7 for what it settles
 :GATE:     Load guard and variance flag — satisfied, 370c21f
 :GAIN:     settles cooked-vs-ghostel interactivity; sees the decorated-buffer risk
-:BRANCH:
+:BRANCH:   cooked/typing-latency
 :END:
 Child: =sh -c "stty raw -echo; printf READY; exec cat"=. Detect arrival with
 =buffer-chars-modified-tick= (O(1), unaffected by buffer growth), not by
@@ -970,6 +970,14 @@ Keep =editing=/=wandered=/=follow= exactly as they are — they answer questions
 arithmetic cannot. Add the floor underneath for the two cases that have no
 rescue today: the *mark* (currently just deactivated) and the =window-point= of
 other windows in the live screen that are not semantically following.
+
+*Two notes since this was written.* The mark half is less urgent than it reads:
+selection protection (dea666a) freezes the render while a selection is active,
+so the common case no longer reaches a drain at all — what is left is the mark
+surviving a freeze *lifting*, which is narrower and worth measuring before
+building for. And this wants =cooked--render-rows='s per-row =(old-start,
+old-len, new-len)=, which the scroll-as-scroll task is rewriting; *do not start
+this while that is in flight.*
 
 * Wave 3 — links, and the seams they need                              :lisp:
 :PROPERTIES:
