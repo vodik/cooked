@@ -430,17 +430,6 @@ by the keyboard and the other by the mouse."
 
 ;;;; Putting styled text in the buffer
 
-(defconst cooked--style-record 22
-  "Bytes in one packed style span.  See `Block::push_style\=' in src/lib.rs.
-
-The stride *is* the format: `cooked--render-block\=' finds the next span by
-adding this and never by decoding a length, which is what makes a hit cost four
-`aref\='s and no arithmetic at all.  The Rust side asserts the same number under
-`debug_assert\=', so a field added to the record on one side without widening it
-on both desynchronises the two at the second span of the first styled row --
-where every span after it reads its neighbour's bytes and the buffer comes out
-miscoloured with nothing to point at.  Change it in three places or none.")
-
 (defun cooked--render-block (block &optional row)
   "Insert BLOCK at point, with its styling and decoration applied.
 

@@ -168,6 +168,22 @@ that was just computed — are handled separately in `cooked--face'.")
   "Whether BIT is set in the ATTRS bitmask."
   (/= 0 (logand attrs bit)))
 
+(defconst cooked--style-record 22
+  "Bytes in one packed style span.  See `Block::push_style\=' in src/lib.rs.
+
+The stride *is* the format: a reader finds the next span by adding this and
+never by decoding a length, which is what makes a hit cost four `aref\='s and no
+arithmetic at all.  The Rust side asserts the same number under `debug_assert\=',
+so a field added to the record on one side without widening it on both
+desynchronises the two at the second span of the first styled row -- where every
+span after it reads its neighbour\='s bytes and the buffer comes out miscoloured
+with nothing to point at.  Change it in three places or none.
+
+Here rather than beside `cooked--render-block\=', which was the only reader when
+it was written and is now one of two: `cooked-comint.el\=' walks the same records
+with the same stride and cannot require cooked.el.  The stride belongs with the
+decoder it steps between calls to, which is `cooked--face-packed\=' below.")
+
 (defconst cooked--color-tag-default 0)
 (defconst cooked--color-tag-indexed 1)
 (defconst cooked--color-tag-rgb 2)

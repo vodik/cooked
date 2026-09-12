@@ -21,6 +21,7 @@
 ;;   cooked-tests-menu.el        the menu, and the commands it names
 ;;   cooked-tests-display.el     where a session lands, and the Emacs
 ;;                               subsystems `cooked-mode' answers for
+;;   cooked-tests-comint.el      the VT filter on somebody else's comint buffer
 ;;   cooked-tests-bench.el       the benchmark's fixtures, against the protocol
 ;;
 ;; Run them all:
@@ -67,6 +68,7 @@
 (require 'cooked-tests-menu)
 (require 'cooked-tests-display)
 (require 'cooked-tests-process)
+(require 'cooked-tests-comint)
 (require 'cooked-tests-bench)
 
 (provide 'cooked-tests)
