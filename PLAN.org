@@ -964,15 +964,45 @@ eviction rejoin, so it needs exposing in the drain blocks.
 
 Unordered. Each names its own gate where it has one.
 
-** WIP [#A] OSC 7 → TRAMP path mapping
+** DONE [#A] OSC 7 → TRAMP path mapping
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §5 "TRAMP is much cheaper than the ROADMAP bills it"
 :GATE:     Deferred, coalesced link detection — satisfied, d119d0b/95032ba
 :GAIN:     ROADMAP §5's scenario, in ~20 lines
-:BRANCH:   cooked/osc7-tramp
-:AGENT:    yes
+:BRANCH:   3365191
 :END:
+Landed. *§5's "take verbatim" sketch is wrong in three ways, two of them
+silent and one of them a hole*, and all three were found by tests rather than by
+reading. Verified independently on merge.
+
+1. *"Reuse the existing =file-remote-p= prefix so multi-hop survives" does the
+   opposite.* =(file-remote-p "/ssh:jump|ssh:host:/tmp/")= returns =/ssh:host:=
+   — TRAMP rebuilds the prefix from the dissected name and drops the =hop= slot.
+   So the advice flattens a bastion connection to a direct one, silently, into a
+   perfectly well-formed name for a host you cannot reach. Take
+   =default-directory= minus its ='localname= instead.
+2. *=file-name-as-directory= undoes the fix.* On a remote name it dispatches to
+   the same handler and drops the hop again, so the trailing slash has to be
+   plain string concatenation.
+3. *The sketch's =(format "/%s:%s:" method cooked--host)= is a method-injection
+   hole, and ghostel has it too.* "Construct from =cooked--host=, never from the
+   payload" is necessary and *not sufficient*, because =cooked--host= *is*
+   payload — it is =[^/]*=, percent-decoded, from an escape sequence any =cat=
+   of a hostile file can emit. Measured: a reported host of =a|sudo:= gives
+   =/ssh:a|sudo::/etc/=, which TRAMP reads as method =sudo=, user =root=, host
+   =a= — a *root hop*. What makes it safe is the character-set check in
+   =cooked--host-name-regexp=, and declining outright rather than quoting: a
+   host containing TRAMP punctuation is not a host anyone has.
+
+Mutation-tested both ways on merge: widening the regexp to =.*= fails the
+payload test, and dropping the guard entirely reproduces the root hop.
+
+Follow-ons: =cooked--native-completion= already declined on a foreign host, with
+a test. =cooked-file-link= was only *partly* guarded — =cooked--foreign-host-p=
+is not the same condition as a remote =default-directory=, which you get from
+=M-x cooked= in a buffer visiting a remote file with no OSC 7 involved at all;
+second guard added.
 Reuse the existing =file-remote-p= prefix so multi-hop survives, and *skip
 =file-directory-p= on the remote branch* — validating opens a TRAMP connection
 on every =cd=. Three follow-ons: keep the hostile-=cat= defence on the local
