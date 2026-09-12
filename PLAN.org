@@ -511,12 +511,13 @@ Landed with the property test rather than after it:
 =tests/delta_replay.regressions= holds the two genuine shrunk seeds and is
 replayed ahead of the random cases on every run.
 
-** NEXT [#B] A =make= target that checks cited symbol names
+** WIP [#B] A =make= target that checks cited symbol names
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   none — found by the stale-prose sweep
 :GAIN:     nine of eleven stale citations caught mechanically, forever
-:BRANCH:
+:BRANCH:   cooked/citation-check
+:AGENT:    yes
 :END:
 The stale-prose sweep found eleven comments citing a function, variable or test
 that does not exist, and *nine of the eleven were mechanically detectable*: pull
@@ -896,13 +897,14 @@ Wants the same treatment the box fixtures got in 116572d: the six-element block
 shape, and a pinned cell size so =cooked--deco-cell-size= does not answer from a
 1x1 batch window.
 
-** TODO [#B] Express the ordinary scroll as a scroll
+** WIP [#B] Express the ordinary scroll as a scroll
 :PROPERTIES:
 :EFFORT:   3d
 :REPORT:   §12 "Scroll is where the models genuinely differ"
 :GATE:     Coalesce contiguous damaged rows into one Block
 :GAIN:     25 rows of damage → 2, on the most common terminal operation
-:BRANCH:
+:BRANCH:   cooked/scroll-as-scroll
+:AGENT:    yes
 :END:
 The largest single win and the riskiest change in the report. Damage only the
 recycled rows rather than =touch_range(top..=bottom)=; the departing rows are
@@ -1130,31 +1132,32 @@ remote buffer queries the remote host for free once TRAMP lands. NUL-split for
 fish. A function value replaces the string, which is how atuin/histdb plug in.
 Composes with =cooked-delegate-key= rather than competing.
 
-** TODO [#B] Path/URL-aware syntax table
+** WIP [#B] Path/URL-aware syntax table
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §4 "Word boundaries and copy"
-:BRANCH:
+:BRANCH:   cooked/syntax-table
 :END:
 =.= and =/= as word constituents so double-click takes =~/src/foo/bar.txt=
 whole; U+2502 a boundary so TUI panes do not merge. Rebuilt in place so a
 customize reaches live buffers. Test through *both* =thing-at-point= and
 =mouse-start-end= — they classify differently.
 
-** TODO [#B] Selection protection for non-evil users
+** WIP [#B] Selection protection for non-evil users
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §4 "Explicit modes vs derived policy"
-:BRANCH:
+:BRANCH:   cooked/selection-protection
 :END:
 cooked freezes only in evil visual state, so a plain =C-SPC= or =consult-line=
 selection gets clobbered. Rides the existing =cooked-input-mode-functions=.
 
-** TODO [#B] OSC 9;4 progress → mode line
+** WIP [#B] OSC 9;4 progress → mode line
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §8 "Gaps worth closing"
-:BRANCH:
+:BRANCH:   cooked/osc-progress
+:AGENT:    yes
 :END:
 The largest functional gap on the bidirectional axis — agents and modern build
 tools all emit it. Add =cooked-progress-function= so a zero-dependency renderer
