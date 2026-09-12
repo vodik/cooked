@@ -83,15 +83,18 @@ what is timed is redisplay and nothing else."
         (with-current-buffer buffer
           (cooked-mode)
           (set-window-buffer (selected-window) buffer)
+          ;; The same on-demand child the append cases use.  It must *not* be
+          ;; given `</dev/null': awk would read EOF, exit before the first burst
+          ;; was asked for, and the fill loop would spin against a dead session
+          ;; and scroll an empty buffer.
           (cooked--start
            (list "/bin/sh" "-c"
-                 (format "stty raw -echo; awk -v WIDTH=%d -v CHARS=%s -f %s </dev/null; \
-                          for i in $(seq 400); do :; done"
-                         width "abcdefghijklmnopqrstuvwxyz0123456789 " ceil--awk)))
+                 (format "stty raw -echo; exec awk -v WIDTH=%d -v CHARS=abcdefghijklmnopqrstuvwxyz0123456789 -f %s"
+                         width (shell-quote-argument ceil--awk))))
           (cooked--refresh-keymap)
           ;; Fill: ask for enough bursts that the scrollback is deep enough to
           ;; scroll back through without hitting the top.
-          (dotimes (_ 120)
+          (dotimes (_ 60)
             (cooked--send-to-child "\n")
             (dotimes (_ 3) (accept-process-output nil 0.005)
               (when cooked--session
@@ -212,12 +215,12 @@ what is timed is redisplay and nothing else."
   (ceil--run "10x-wrapped, rejoin=nil" nil (* 10 cols) 200 30))
   ;; And the gesture, which is the operation the question was actually about.
   (unless (equal (getenv "COOKED_CEILING_ONLY") "append")
-  (ceil--gesture "GESTURE short lines, rejoin=t"   t   (- cols 6) 10 200 30)
-  (ceil--gesture "GESTURE short lines, rejoin=nil" nil (- cols 6) 10 200 30)
-  (ceil--gesture "GESTURE 3x-wrapped, rejoin=t"    t   (* 3 cols)  10 200 30)
-  (ceil--gesture "GESTURE 3x-wrapped, rejoin=nil"  nil (* 3 cols)  10 200 30)
-  (ceil--gesture "GESTURE 10x-wrapped, rejoin=t"   t   (* 10 cols) 10 200 30)
-  (ceil--gesture "GESTURE 10x-wrapped, rejoin=nil" nil (* 10 cols) 10 200 30)))
+  (ceil--gesture "GESTURE short lines, rejoin=t"   t   (- cols 6) 10 60 20)
+  (ceil--gesture "GESTURE short lines, rejoin=nil" nil (- cols 6) 10 60 20)
+  (ceil--gesture "GESTURE 3x-wrapped, rejoin=t"    t   (* 3 cols)  10 60 20)
+  (ceil--gesture "GESTURE 3x-wrapped, rejoin=nil"  nil (* 3 cols)  10 60 20)
+  (ceil--gesture "GESTURE 10x-wrapped, rejoin=t"   t   (* 10 cols) 10 60 20)
+  (ceil--gesture "GESTURE 10x-wrapped, rejoin=nil" nil (* 10 cols) 10 60 20)))
 
 (with-temp-file ceil--out
   (insert (format "load-average %s\n" (load-average))

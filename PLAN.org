@@ -133,13 +133,13 @@ Done when: the bench target compiles first — with a step of its own, *not* the
 Waves 0 and 1 has been re-taken. Leave =lisp-test= interpreted: a readable
 backtrace is worth more there than speed.
 
-** DONE [#A] Measure the scroll ceiling with rejoining off
+** WIP [#A] Measure the scroll ceiling with rejoining off
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §7 "The highest-information measurement available right now"
 :GAIN:     may delete the guard/wrap-cache/mark-truncation subsystem
 :BRANCH:   16b9be2
-:RESULT:   ceiling does not move — §7 suspect (ii) not confirmed; real cost is pgtk-vs-tty, not rejoin
+:RESULT:   *provisional and probably wrong* — the recorded run measured output arriving, not a gesture; re-measuring
 :END:
 No code. =cooked-toggle-rejoin-wrapped-lines= already exists
 (=cooked-mode.el:147=). The three scroll causes are not independent: =rejoin=t=
@@ -149,7 +149,23 @@ forces =truncate-lines nil=, which is what makes =cooked--guard-row-width=,
 Done when: p50/p90 per 10-line scroll recorded for rejoin on vs off, on the same
 content, in a real pgtk frame. Record the numbers in this drawer.
 
-*** Measurement
+*** The recorded result answers the wrong question
+
+Reopened. Everything below timed output *arriving* — rows appended at the
+bottom, drawn once. The task, and the 2026-09-05 measurement it extends, are
+about the *viewport moving over content already there*. Those differ exactly
+where rejoining costs: redisplay lays a continued line out **from its start**,
+so a window crossing into a 700-character logical line pays for the whole line
+every time. An append-only harness never crosses one, which is why it reported
+flat.
+
+The prior run, which this must be reconciled against: 45x248, =scroll-up= 10
+screen lines x 60, styled long prose — *p50 7.42 / p90 19.81 with rejoin on,
+against p50 1.94 / p90 2.33 with it off*. That is a real effect this harness
+could not see. The append figures below stand as an answer to a *different*
+question and are kept for that reason.
+
+*** Measurement (append: output arriving)
 
 Harness =scripts/bench-scroll-ceiling.el=. =awk= child emitting ten lines per
 burst on demand, 30 discarded warmups then 200 timed bursts, GC pinned. Per
@@ -894,13 +910,14 @@ eviction rejoin, so it needs exposing in the drain blocks.
 
 Unordered. Each names its own gate where it has one.
 
-** TODO [#A] OSC 7 → TRAMP path mapping
+** WIP [#A] OSC 7 → TRAMP path mapping
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §5 "TRAMP is much cheaper than the ROADMAP bills it"
-:GATE:     Deferred, coalesced link detection
+:GATE:     Deferred, coalesced link detection — satisfied, d119d0b/95032ba
 :GAIN:     ROADMAP §5's scenario, in ~20 lines
-:BRANCH:
+:BRANCH:   cooked/osc7-tramp
+:AGENT:    yes
 :END:
 Reuse the existing =file-remote-p= prefix so multi-hop survives, and *skip
 =file-directory-p= on the remote branch* — validating opens a TRAMP connection
