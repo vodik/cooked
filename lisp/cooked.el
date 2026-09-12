@@ -1937,7 +1937,8 @@ step exists to keep the next one from running:
   1. A row whose width the grid already accounts for and whose characters no
      font can widen is finished here, with nothing measured at all.  That is
      a uniform row in a fixed-pitch font, which is the overwhelming majority
-     of rows -- see `cooked--row-mismeasured-p' and `cooked--ascii-fixed-pitch-p'.
+     of rows -- see `cooked--row-mismeasured-p' and
+     `cooked--ascii-fixed-pitch-p'.
   2. A row whose text was already seen to fit under this font and this geometry
      is finished at a hash lookup -- see `cooked--row-wraps-p'.
   3. Only what is left reaches `vertical-motion', and only what that says wraps
