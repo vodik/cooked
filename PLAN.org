@@ -1402,11 +1402,11 @@ paths, because Emacs ports disagree — =dnd-protocol-alist= for X11/pgtk,
 =[drag-n-drop]= for NS/w32 — plus an emulation keymap for mode-line and fringe
 drops.
 
-** WIP [#C] Glyph scaling before trimming
+** REVIEW [#C] Glyph scaling before trimming
 :PROPERTIES:
 :EFFORT:   2d
 :REPORT:   §2 "The framing that matters: repair vs destroy"
-:BRANCH:   cooked/glyph-scaling
+:BRANCH:   d7007db
 :END:
 Turns a destructive repair into a non-destructive one. Needs a metrics cache
 first, or it will =font-at= per cell per drain. Use ghostel's key shape with
@@ -1456,6 +1456,51 @@ Not "did the row wrap" but "does this row hold a glyph exceeding its slot in
 the overwhelming majority and cannot hold an offender. Only what survives that
 gate needs a per-cluster measurement, and only the first sighting of each
 cluster needs a real one.
+
+*** Landed, and what it does
+
+Measured live in a pgtk frame, same 9x20 cell:
+
+| input      | height  | width               |
+|------------+---------+---------------------|
+| =abc文def= | 23 → 20 | 69 → 72             |
+| =abc🙂def= | 20      | 73 → 72             |
+| =abcdef=   | 20      | 54, untouched       |
+
+The CJK width *rising* is correct rather than a regression: =min-width= holds
+the glyph at the two cells the grid budgeted, where before it under-filled them
+at 15px. Eight cells of grid is now 72 pixels of display, which is the alignment
+the guard exists to keep.
+
+Step 2.5 runs *before* the wrap question rather than after it, per the finding
+above. =cooked-glyph-scale-floor= (0.5) is the point at which the repair stops
+repairing and starts hiding — below it, an unreadable glyph in the right place
+is worse than a truncation arrow saying plainly that something did not fit. nil
+restores the old trim-only behaviour.
+
+The metrics cache shares =cooked--wrap-cache='s stamp rather than keeping its
+own: the stamp is the expensive part, 44 µs against the ~20 µs the guard is
+trying to get down to, so a second cache with a second stamp would cost more
+than either table saves. A border row of 500 identical characters is one shaping
+call and 499 hash lookups.
+
+=cooked--glyph-scale= takes a slot in *pixels* rather than cells, so it is
+arithmetic and nothing else — cells would mean asking =frame-char-width=, which
+answers 1 on a terminal frame and would make the function untestable in batch
+for a reason unrelated to what it computes. The three-way min and the pixel
+quantization are unit-tested there; the rendering is verified by script, since
+batch has no glyphs.
+
+*** Still open
+
+- *No bench case.* Same gap the image and scroll work hit: the guard's cost with
+  scaling on is unmeasured, and the interesting number is a row of *distinct*
+  offenders, where the cache cannot help.
+- *Only the first cluster of a run is measured*, which is right for a border row
+  and wrong for a row of mixed CJK — each distinct cluster still costs a shaping
+  call the first time it is seen under a given font.
+- =cooked--around-font-scale= (§2's smaller items) is still not done, so a
+  =text-scale-adjust= invalidates the cache correctly but does not re-anchor.
 
 *** The metrics recipe, and two details a Lisp port gets wrong
 
