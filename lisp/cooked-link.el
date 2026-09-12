@@ -13,24 +13,39 @@
 ;; guessed, because nothing has to be.
 ;;
 ;; Or the text may merely *look* like a link, which is the overwhelmingly common case
-;; and is a guess.  Emacs has made that guess well for thirty years, so this makes it
-;; by calling `goto-address-fontify-region' over freshly-rendered rows rather than by
-;; growing a regexp of its own.  What that buys, beyond the two regexps: `follow-link'
-;; (so `mouse-1-click-follows-link' works with no help from us), `help-echo', the
-;; `goto-address' context-menu entry, and the user's own customisations of
-;; `goto-address-url-face' and friends, all of which a private implementation would
-;; have had to reproduce and would have reproduced worse.
+;; and is a guess.  Emacs has made that guess well for thirty years, so the guess is
+;; goto-addr's rather than a regexp of this file's own: `goto-address-url-regexp' and
+;; `goto-address-mail-regexp', `goto-address-fontify-p',
+;; `goto-address-fontify-maximum-size', and the four faces the user may have
+;; customised, all of which a private implementation would have had to reproduce and
+;; would have reproduced worse.  `follow-link' and `help-echo' are set here, so
+;; `mouse-1-click-follows-link' and the tooltip work as they do under
+;; `goto-address-mode'.
 ;;
-;; Why calling it per row is safe, which is the only thing about the adapter that
-;; needed checking.  goto-addr makes *overlays*, and every one of them carries
-;; `evaporate t'.  `cooked--render-rows' deletes a damaged row before rewriting it, so
-;; that row's overlays collapse to zero length and Emacs deletes them itself; nothing
-;; is left behind as a husk, and there is no unfontify pass to own.  A row that is
-;; redrawn is rescanned, which is what makes a link appear the moment the text does.
+;; What is *not* borrowed is the scan.  `cooked--fontify-links' reproduces
+;; `goto-address-fontify-region' rather than calling it, because a match has to be
+;; filtered -- an explicit `OSC 8' span outranks a guess about the same characters --
+;; and goto-addr offers no hook to filter with; and because what it leaves behind is
+;; text properties where goto-addr makes an overlay per match, which on a live
+;; terminal row is the expensive form twice over.  See `cooked--fontify-links' for
+;; both, and for the button.el wiring that is deliberately dropped.  Two further
+;; things follow from owning the scan.  `goto-address-prog-mode' is not consulted at
+;; all, which is the answer this file always wanted: it asks `(nth 8 (syntax-ppss))'
+;; per candidate, a question with no meaning over raw terminal output and a parse the
+;; buffer cannot answer.  And nothing here ever enables `goto-address-mode', so its
+;; context-menu entry is not among what this buys.
 ;;
-;; `goto-address-prog-mode' is deliberately left off: it asks `(nth 8 (syntax-ppss))'
-;; per candidate, which over raw terminal output is a question with no meaning and a
-;; parse the buffer cannot answer.
+;; When the scan runs, which is the only thing about the arrangement that needed
+;; checking.  `cooked--fontify-region' is handed to `jit-lock-register', so the scan
+;; happens at redisplay over the chunk jit-lock asks about: rows a flood pushed past
+;; unseen are never scanned at all.  A row that is rewritten is unfontified again, so
+;; jit-lock comes back for it the next time it is displayed, which is what makes a
+;; link appear the moment the text does -- and because the marks are properties on
+;; that row's own characters, `cooked--render-rows' deleting the row takes them with
+;; it.  Text that stays put and is merely rescanned is cleared first by
+;; `cooked-link--unfontify-urls', narrowly, so that an `OSC 8' span sharing those
+;; property names survives.  `cooked--sync-fontification' has why this moved off the
+;; render path and what registering jit-lock costs when there is nothing to scan.
 ;;
 ;; The one accepted gap, stated plainly because it is visible: a URL that the child
 ;; wrapped across a column boundary is not matched while it is on screen.  Each live
@@ -99,8 +114,9 @@ sanctioned escape and must keep working whatever the child has grabbed.")
 
 The guess, not the `OSC 8' sequences — those are what the child actually said,
 and are always honoured.  Turning this off leaves a real hyperlink clickable
-and stops cooked running `goto-address-fontify-region' over rows as they are
-drawn."
+and stops `cooked--fontify-links' scanning at all; with no scan layer loaded
+either, `cooked--sync-fontification' then drops the jit-lock registration, so
+nothing about the guess is paid for."
   :type 'boolean
   :group 'cooked-link)
 
@@ -108,8 +124,8 @@ drawn."
   "Whether to scan the alternate screen for URLs as well.
 
 Off, and the reasoning is worth having.  The alternate screen is a full-screen
-program repainting continuously — the one place where a per-row regexp scan is
-paid over and over for text that is about to be overwritten — and it is also
+program repainting continuously — the one place where a regexp scan is paid
+over and over for text that is about to be overwritten — and it is also
 where the child is most likely to have grabbed the mouse for itself, so a link
 under the pointer is the last thing a click there should mean.  A program that
 wants a hyperlink on its own screen can say so with `OSC 8', which is honoured
@@ -244,12 +260,16 @@ nothing highlighted, since `cooked-link-follow-functions\=' validates on demand.
 (defvar-keymap cooked-link-map
   :doc "Bindings carried by the text of a link.
 
-Hung on the text as a `keymap' property for an `OSC 8' span, and substituted
-for `goto-address-highlight-keymap' over goto-addr's own overlays, so both
-kinds of link answer the same keys.  `C-c RET' is deliberately absent even
-though goto-addr binds it and its `help-echo' advertises it: `C-c' is forwarded
-to the child as the interrupt character, and a `C-c' prefix in a property at
-point would make Emacs wait for a second key before letting SIGINT through.
+Hung on the text as a `keymap' property by `cooked-link--propertize', which is
+what marks an `OSC 8' span and a detected URL alike, so both kinds of link
+answer the same keys.  It stands where `goto-address-highlight-keymap' would
+have: the detected-URL pass sets its own properties rather than making
+goto-addr's overlays, so that variable is never consulted.
+
+`C-c RET' is deliberately absent even though goto-addr binds it and its
+`help-echo' advertises it: `C-c' is forwarded to the child as the interrupt
+character, and a `C-c' prefix in a property at point would make Emacs wait for
+a second key before letting SIGINT through.
 The command lives on `cooked-mode-map' instead, where the state that decides
 whether cooked's own `C-c' map is reachable at all already decides it."
   "<mouse-2>"   #'cooked-follow-link

@@ -502,12 +502,15 @@ close one, only an explicit empty `OSC 8;;` or a terminal reset does, which is w
 a link a program colours as it prints it work at all.
 
 Anything else that merely *looks* like a URL is a guess, and the guess is Emacs' own:
-`goto-address-fontify-region` runs over each row as it is rendered and each batch as it
-settles into the scrollback, so you get goto-addr's regexps, its faces, its `help-echo`,
-its context-menu entry and `mouse-1-click-follows-link` support without cooked
-reimplementing any of it. `cooked-detect-links` turns it off; `cooked-detect-links-on-alt-screen`
-turns it on for a full-screen program, which is off by default because that screen
-repaints continuously and is usually where the child wants the mouse for itself.
+cooked scans with goto-addr's regexps and paints with goto-addr's faces, so you get its
+matches, its `help-echo` and `mouse-1-click-follows-link` support without cooked
+inventing a regexp. The scan itself is cooked's, run from `jit-lock` over the text a
+window is about to show rather than over every row as it is drawn — so a program
+painting faster than Emacs redraws costs nothing here — and it marks what it finds with
+text properties rather than goto-addr's overlays. `cooked-detect-links` turns it off;
+`cooked-detect-links-on-alt-screen` turns it on for a full-screen program, which is off
+by default because that screen repaints continuously and is usually where the child
+wants the mouse for itself.
 
 One visible gap, and it is accepted rather than hidden: a URL the child *wrapped* across
 a column boundary is not matched while it is on screen, because every live row is its own
