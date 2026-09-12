@@ -1174,13 +1174,48 @@ specific answer and may have been set to nil on purpose.
 cooked freezes only in evil visual state, so a plain =C-SPC= or =consult-line=
 selection gets clobbered. Rides the existing =cooked-input-mode-functions=.
 
-** WIP [#B] OSC 9;4 progress → mode line
+** DONE [#B] OSC 9;4 progress → mode line
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §8 "Gaps worth closing"
-:BRANCH:   cooked/osc-progress
-:AGENT:    yes
+:BRANCH:   e3bb9a9
 :END:
+Grammar =ESC ] 9 ; 4 ; STATE ; PERCENT ST= from ConEmu's escape-code page plus
+rockorager.dev's write-up. The carry rule is what makes the real idiom work:
+=1;70= while the work runs, then a bare =2= when it fails, rendering =[err 70%]=.
+Indeterminate drops any stale number outright — a pulsing state beside a number
+is a lie about which the child meant. OSC 9 *without* =;4= is iTerm2's
+notification and is deliberately left unclaimed.
+
+*The payload never becomes text*, which is the strongest form of the defence: it
+is parsed to a symbol from a closed set plus an integer, so the rendering is
+built entirely from cooked's own vocabulary. Anything unparseable leaves the
+indicator as it was — refusing beats guessing, since guessing lets a stream park
+a wrong number and go quiet.
+
+*§8 is wrong about RIS being a Lisp-only change.* There was no Lisp-visible RIS
+at all, and =display-cleared= does not distinguish it from =CSI 2J= — hanging
+the clear off that would have made a plain =clear= kill a running build's bar.
+=Event::Reset= is new, raised by =ESC c= and deliberately *not* by DECSTR, since
+every =rs2=/=is2= sends a soft reset and a build running under a full-screen
+program tidying up has not stopped.
+
+*** A pre-existing bug this turned up, and the pattern behind it
+
+=cooked--mode-line= passed the child's title and the OSC 7 host through
+=format " %s"= unescaped. =mode-line-process= is ='(:eval (cooked--mode-line))=
+and *a =:eval= result string is itself rescanned as a mode-line construct*, so a
+title of =%b= became the buffer name and =%-= a run of dashes to the margin.
+Anything that can print can set its own title. Confirmed on main before the fix.
+cooked's own =[42%]= would have been eaten by =%]= too.
+
+That is the *third* payload-reaching-an-interpreter bug found today — the others
+being OSC 7's TRAMP method injection and the outbound paste control bytes — and
+*none of the three is named as a hazard in REPORT.org*. The shape is worth
+carrying as a review question rather than three separate fixes: **which
+interpreter does this byte stream eventually reach, and what is its
+metacharacter?** TRAMP's is =|= and =:=; the mode line's is =%=; the terminal's
+is =ESC=.
 The largest functional gap on the bidirectional axis — agents and modern build
 tools all emit it. Add =cooked-progress-function= so a zero-dependency renderer
 and a spinner.el one are interchangeable. RIS must clear it.
