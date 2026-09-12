@@ -1383,8 +1383,10 @@ lisp/            cooked-util.el is the floor everything else requires; cooked.el
                  the state and the policy derived from it; cooked-mode.el binds keys
                  to it and pulls in the rest. The opt-in files (cooked-evil,
                  cooked-osc-eval, cooked-shell-completion, cooked-file-link,
-                 cooked-next-error, cooked-command-decorations, cooked-project) sit on
-                 top and are `require`d, not toggled by a variable
+                 cooked-next-error, cooked-command-decorations, cooked-project,
+                 cooked-dnd) sit on top and are `require`d, not toggled by a
+                 variable. cooked-process.el is opt-in too, but as an autoloaded
+                 minor mode rather than by being loaded
 shell-integration/  bash, zsh, fish, plus zsh's completion capture
 docs/            this file, plus KEYBOARD, FEATURES, SHELL, TERMINFO, IMAGES, ROADMAP
 tests/           cooked-tests.el loads the suite; the rest are split by subject

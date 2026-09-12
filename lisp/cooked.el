@@ -29,10 +29,12 @@
 ;; Emulation happens in a Rust module, built on first use with cargo.
 ;;
 ;; This file is the core: rendering, colours, and the OSC handlers that are inert
-;; enough to be on by default.  `cooked-mode' has the interaction; `cooked-evil',
-;; `cooked-osc-eval', `cooked-shell-completion' and `cooked-project' are separate
-;; because you should
-;; choose them.
+;; enough to be on by default.  `cooked-mode' has the interaction.  The layers above
+;; it are separate because you should choose them, and choosing one is `require'ing
+;; its file rather than setting a variable: `cooked-evil', `cooked-osc-eval',
+;; `cooked-shell-completion', `cooked-project', `cooked-file-link',
+;; `cooked-next-error', `cooked-command-decorations' and `cooked-dnd'.  The snippet
+;; above names only the four most people want; the other four load the same way.
 
 ;; The buffer is the scrollback.  Rows that scroll off the emulator's screen are
 ;; handed over once and become ordinary buffer text; the lines after
@@ -592,7 +594,7 @@ corroboration available once termios has gone dark behind an `ssh\='.  The
 second reading has to work whether or not anyone loaded the first, so the
 announcement is believed unconditionally and only the requests are opt-in.
 
-Cleared at `command-start\=' by `cooked--apply-semantic\=', which is what keeps
+Cleared at `command-start\=' by `cooked--handle-semantic\=', which is what keeps
 it a claim about the present.  Without that, `ssh host\=' would leave the local
 shell\='s nonce standing and the bare remote prompt would inherit a license
 nothing on that host ever issued -- the precise failure the license exists to
@@ -2420,7 +2422,7 @@ looks like a file name -- and a guess is only worth making about text somebody
 is about to read.  Running them from the render path instead meant scanning
 every damaged row whether or not that row was ever displayed, which for a child
 painting faster than Emacs redraws is most of them.  `goto-address-mode\=' has
-always worked this way; this is cooked wearing the same clothes, with the four
+always worked this way; this is cooked wearing the same clothes, with the two
 bindings `cooked--fontify-links\=' makes on top.
 
 One entry point for two passes because they are one question asked twice, and
@@ -2434,9 +2436,11 @@ answers by adding text properties to it.  The render path had this for free from
 
 Rounded out to whole lines.  jit-lock hands over chunks of
 `jit-lock-chunk-size\=' characters and a chunk boundary falls wherever it falls,
-so a candidate straddling one would be matched by neither half.  goto-addr
-rounds for itself -- see `goto-address-fontify-region\=' -- and the scan hook
-would not.
+so a candidate straddling one would be matched by neither half.  Rounded here
+rather than in either pass, because neither does it for itself: the URL scan is
+a reproduction of `goto-address-fontify-region\=' with the filtering added and
+the rounding left out -- see `cooked--fontify-links\=' -- and the scan hook
+never rounded.
 
 Nothing at all on the alternate screen, which is what
 `cooked-detect-links-on-alt-screen\=' asks for and is safe to answer by simply
