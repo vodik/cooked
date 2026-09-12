@@ -18,7 +18,7 @@ use std::collections::{HashSet, VecDeque};
 
 mod csi;
 mod graphics;
-mod osc;
+pub(crate) mod osc;
 mod perform;
 mod state;
 #[cfg(test)]

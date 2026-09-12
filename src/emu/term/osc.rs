@@ -5,9 +5,10 @@ use super::*;
 
 /// Undoes the parser's `;`-splitting of a payload that legitimately contains
 /// semicolons of its own -- a URI, or iTerm2's `File=` argument string. Shared
-/// because two OSC producers ([`State::hyperlink`] and [`State::iterm_file`]) both
-/// need it and would otherwise drift apart one length cap or edge case at a time.
-pub(super) fn rejoin(parts: &[&[u8]]) -> Vec<u8> {
+/// because three OSC producers -- [`State::hyperlink`], [`State::iterm_file`] and the
+/// grid-less [`Filter`](crate::emu::stream::Filter) -- all need it and would otherwise
+/// drift apart one length cap or edge case at a time.
+pub(crate) fn rejoin(parts: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
     for (at, part) in parts.iter().enumerate() {
         if at != 0 {

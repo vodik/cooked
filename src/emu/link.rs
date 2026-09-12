@@ -108,9 +108,14 @@ impl LinkStore {
         (id, true)
     }
 
-    /// The URI behind an id. Only the eviction tests ask: a drain sends each URI once
-    /// and Lisp holds the table thereafter, so the crate never looks one back up.
-    #[cfg(test)]
+    /// The URI behind an id.
+    ///
+    /// A session's drain never asks: it sends each URI once, as `:links', and Lisp holds
+    /// the table thereafter. The grid-less [`Filter`](crate::emu::stream::Filter) does,
+    /// on every link span it emits, because the consumer on its side is a comint buffer
+    /// with no session to hold such a table -- so the destination crosses the boundary
+    /// as text rather than as an id. See `cooked-process--text', which is where the
+    /// reasoning about ids that resolve only inside a session is written out.
     pub(crate) fn get(&self, id: LinkId) -> Option<&str> {
         self.uris.get(&id).map(String::as_str)
     }

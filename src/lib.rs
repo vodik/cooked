@@ -158,6 +158,32 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Write STRING to the pty of SESSION.
         "cooked--send" 2..=2 => send;
 
+        /// A VT filter with no terminal behind it, for a comint buffer.
+        /// Holds a resumable parser, a pen and one line of cells; see `cooked--filter-feed'.
+        /// Unrelated to a session: it spawns nothing, owns no pty, and is fed by whatever
+        /// already has one.
+        "cooked--make-filter" 0..=0 => make_filter;
+
+        /// Resolve STRING through FILTER, returning (RETRACT TEXT STYLES LINKS DIRECTORY).
+        ///
+        /// Nil when the chunk asked for nothing -- an escape sequence with no text to show
+        /// for it, which is what a shell sends around every prompt.
+        ///
+        /// TEXT is what the child's bytes actually said once carriage returns, backspaces,
+        /// tabs and erases have been applied to the line they addressed -- a `\r' overwrites
+        /// rather than deleting, which is the whole difference from `comint-carriage-motion'
+        /// and from `ansi-color'. STYLES is the same packed span format a drain's blocks
+        /// carry, so `cooked--face-packed' decodes both. LINKS is (START END URI) per `OSC 8'
+        /// span, carrying the destination itself because there is no session here to resolve
+        /// an id through. DIRECTORY is the last `OSC 7' URL of the chunk, or nil.
+        ///
+        /// RETRACT is how many characters immediately before the insertion point are no
+        /// longer true and must be deleted before TEXT is inserted -- a line already handed
+        /// over that the child has since rewritten. RETRACT-P is the caller's promise that
+        /// those characters are still where it put them; with it nil the filter appends only
+        /// what is new and takes nothing back.
+        "cooked--filter-feed" 3..=3 => filter_feed;
+
         /// Answer an OSC query on SESSION with CODE, PAYLOAD and BELL.
         /// Writes `ESC ] CODE ; PAYLOAD' terminated by BEL when BELL is non-nil and by ST
         /// otherwise; pass the BELL-P the `osc' event carried, since a client that queried with
@@ -716,6 +742,90 @@ fn foreground_pid(env: Env, args: &[Value]) -> Result<Value> {
         Ok(pid) => env.into_lisp(pid),
         Err(_) => Ok(env.nil()),
     }
+}
+
+/// A grid-less VT filter, for a comint buffer that is not a terminal.
+///
+/// Wrapped in a `RefCell` because [`Env::get_user_ptr`] hands back a shared reference --
+/// a session is behind a mutex and needs no more than that -- while a filter is plain
+/// single-threaded state that a feed mutates. The cell is also the type tag Emacs
+/// carries: a user-pointer holding a `Session` cannot be passed to these, because the
+/// finalizer it was made with is a different function. See [`Env::get_user_ptr`].
+type FilterCell = std::cell::RefCell<emu::stream::Filter>;
+
+fn make_filter(env: Env, _args: &[Value]) -> Result<Value> {
+    env.user_ptr(FilterCell::new(emu::stream::Filter::new()))
+}
+
+/// `(RETRACT TEXT STYLES LINKS DIRECTORY)` for one chunk of a child's output.
+///
+/// TEXT and STYLES are the first two fields of the block shape the grid's renderer
+/// already takes -- see [`Block::push_style`] for the packed layout, which Lisp decodes
+/// with the very same `cooked--face-packed' the terminal uses. That sharing is the point:
+/// one face cache, one decoder, one set of colours, whether the text came off a grid or
+/// out of this.
+///
+/// LINKS carries the destination itself rather than the `LinkId` the grid's `:links`
+/// alist carries. An id resolves through a table that is buffer-local to a *session*,
+/// and there is no session here -- `cooked-process--text' already refused to send ids
+/// into a consumer's buffer for exactly that reason. A URI is a string a comint buffer
+/// can act on with nothing else to hold.
+///
+/// RETRACT is how many characters immediately before the insertion point the filter is
+/// taking back, and is nonzero only when the caller said its provisional text was still
+/// there. The whole reconciliation is [`Stream::flush`](emu::stream); the caller's half
+/// is `cooked-comint--emit'.
+fn filter_feed(env: Env, args: &[Value]) -> Result<Value> {
+    let filter = env.get_user_ptr::<FilterCell>(args[0])?;
+    // The chunk arrives as an Emacs string rather than as bytes, because
+    // `comint-preoutput-filter-functions' is handed output that the process coding
+    // system has already decoded -- and it is decoded there rather than here for a good
+    // reason, since Emacs is the one holding back a multibyte character split across two
+    // reads. `copy_string_contents' re-encodes it as UTF-8, which is what the parser
+    // wants; a byte the coding system could not decode makes the round trip as itself
+    // and reaches the parser as the invalid sequence it is.
+    let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
+    let retract = !env.is_nil(args[2]);
+    let mut filter = filter
+        .try_borrow_mut()
+        .map_err(|_| env.signal("error", "cooked: this filter is already running"))?;
+    filter.feed(&bytes, retract);
+    let filter = &*filter;
+    let emission = filter.emission();
+    // Nothing to say, which is a real and common case rather than a defensive check: a
+    // chunk can be nothing but escape sequences -- the bracketed-paste mode set that
+    // brackets every prompt bash prints, a rendition change with no text after it yet --
+    // and answering nil lets the Lisp side return without touching the buffer at all.
+    if emission.is_empty() {
+        return Ok(env.nil());
+    }
+    let mut block = Block::default();
+    let mut links = Vec::new();
+    for run in &emission.runs {
+        let chars = run.text.chars().count();
+        // Before `push_run`, which is what advances the offset the span is measured
+        // from -- the same order `Block::push_runs` takes them in.
+        if let Some(id) = run.link
+            && let Some(uri) = filter.uri(id)
+        {
+            links.push(list!(env, [block.offset, block.offset + chars, uri])?);
+        }
+        block.push_run(run, chars);
+    }
+    let directory = match &emission.directory {
+        Some(url) => env.into_lisp(url.as_str())?,
+        None => env.nil(),
+    };
+    list!(
+        env,
+        [
+            emission.retract,
+            block.text.as_str(),
+            block.styles.as_slice(),
+            links,
+            directory
+        ]
+    )
 }
 
 /// The damaged rows split into maximal runs of *consecutive* indices.
