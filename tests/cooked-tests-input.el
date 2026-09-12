@@ -619,13 +619,69 @@ the other path."
 (ert-deftest cooked-paste-cannot-be-made-to-close-its-own-bracket ()
   "An end marker inside the pasted text would close the bracket early and hand
 what followed to the child as if it had been typed — how a copied line runs
-something nobody read.  It is dropped."
+something nobody read.  It cannot survive.
+
+Two guards now stand between the marker and the child and the outer one fires
+first: `cooked--strip-paste-controls' turns the ESC into a space, so what the
+child sees is the harmless remains of the sequence rather than nothing at all.
+`cooked--bracketed-paste' would still drop a marker that reached it, which is
+what the assertion below is about — no second `^[[201~' before cooked's own."
   (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
     (cooked-tests--with-kill "a\e[201~; rm -rf /" (cooked-paste))
     (should (cooked-tests--settle
              (lambda ()
-               (string-search "^[[200~a; rm -rf /^[[201~" (cooked-tests--text)))))
+               (string-search "^[[200~a [201~; rm -rf /^[[201~"
+                              (cooked-tests--text)))))
     (should-not (string-search "^[[201~; rm" (cooked-tests--text)))))
+
+(ert-deftest cooked-paste-strips-the-control-bytes-xterm-strips ()
+  "Every byte on xterm's list becomes a space; tab, newline and CR do not.
+
+The list is xterm's `disallowedPasteControls' default -- NUL BS ENQ EOT ESC
+DEL, plus the tty driver's own special characters -- and this pins it as a
+list rather than as one example of it, because the whole point is that no
+member of it reaches the child.  Tab, LF and CR are on the other side of the
+line on purpose: a paste is expected to carry lines and indentation, and the
+newline hazard is answered by confirming rather than by mangling."
+  (let ((strip "\000\010\005\004\033\177\003\034\025\032\027\026\022\017\021\023"))
+    (should (equal (cooked--strip-paste-controls strip)
+                   (make-string (length strip) ?\s)))
+    (should (equal (cooked--strip-paste-controls "a\tb\nc\rd") "a\tb\nc\rd"))
+    ;; Replaced rather than dropped, so the length is a tell that something
+    ;; was in the text at all.
+    (should (equal (cooked--strip-paste-controls "rm\033x\003y") "rm x y"))))
+
+(ert-deftest cooked-paste-does-not-hand-the-child-an-escape-or-an-interrupt ()
+  "A pasted ESC or C-c must not reach a child that did not ask for bracketing.
+
+`cat -v' spells both out, so their absence from the buffer is the assertion:
+what arrives is spaces where they were.  Unbracketed is the dangerous case --
+the child is reading the paste as if it were typing, and an ESC in a copied
+line is how a paste turns into key presses nobody read."
+  (cooked-tests--with-echoing-child ""
+    (should-not (cooked--bracketed-paste-p cooked--session))
+    (cooked-tests--with-kill "a\e[Ab\C-cc" (cooked-paste))
+    (should (cooked-tests--settle
+             (lambda () (string-search "a [Ab c" (cooked-tests--text)))))
+    (should-not (string-search "^[" (cooked-tests--text)))
+    (should-not (string-search "^C" (cooked-tests--text)))))
+
+(ert-deftest cooked-paste-strips-control-bytes-under-bracketed-paste-too ()
+  "Bracketing does not make the bytes safe, so the strip is not conditional.
+
+xterm strips regardless of the mode, and the reason is that the bracket is a
+promise to a *cooperating reader*: it says nothing to the tty driver, which
+acts on an interrupt byte before any reader sees it, and nothing to a program
+that never implemented the protocol but is being pasted into anyway.  The
+markers cooked writes itself are of course still there -- they are the only
+ESCs in the buffer afterwards."
+  (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
+    (should (cooked--bracketed-paste-p cooked--session))
+    (cooked-tests--with-kill "a\e[Ab\C-cc" (cooked-paste))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-search "^[[200~a [Ab c^[[201~" (cooked-tests--text)))))
+    (should-not (string-search "^C" (cooked-tests--text)))))
 
 (ert-deftest cooked-paste-confirms-lines-the-child-would-run ()
   "Without bracketed paste an embedded newline is Enter, so a refused

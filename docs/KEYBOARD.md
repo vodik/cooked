@@ -109,6 +109,18 @@ chosen at the moment the map is installed, so terminal frames never pay for it.
 next key to the child exactly as typed, regardless of what's reserved — including `C-c`
 itself (`C-c C-q C-c` sends a literal `C-c` byte).
 
+**Pasted control bytes are turned into spaces**, whether or not the child asked for
+bracketed paste. The list is xterm's, whose `disallowedPasteControls` resource defaults
+to `BS,DEL,ENQ,EOT,ESC,NUL,STTY` — NUL, backspace, ENQ, EOT, ESC and DEL, plus the tty
+driver's own special characters (`C-c`, `C-\`, `C-u`, `C-z`, `C-q`, `C-s`, `C-w`, `C-v`,
+`C-r`, `C-o`). Bracketing is a promise to a cooperating *reader*; it says nothing to the
+tty driver, which acts on an interrupt byte before any reader sees it, and nothing at
+all to a program that never implemented the protocol but is being pasted into anyway. So
+the strip is not conditional on the mode. Tab, newline and carriage return go through
+untouched, because a paste is expected to carry lines and indentation — the newline
+hazard is answered by `cooked-paste-confirm-lines`, which names the line count and asks,
+rather than by mangling the text.
+
 **Middle-click pastes**, as it does in every other terminal: `mouse-2` sends the head of
 the kill ring to the child. comint binds that key to `comint-insert-input`, which looks
 for the input field under the click and, finding none, fell through to the global binding
