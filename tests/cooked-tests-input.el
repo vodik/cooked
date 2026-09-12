@@ -3698,5 +3698,60 @@ and it is the half a naive in-place realization gets wrong."
       (customize-set-variable 'cooked-word-constituent-string constituents)
       (customize-set-variable 'cooked-word-boundary-string boundaries))))
 
+(ert-deftest cooked-a-plain-selection-freezes-the-render ()
+  "cooked froze for evil\='s visual state and for nothing else.
+
+So a plain \\[set-mark-command], a `consult-line\=' selection or a mouse drag
+was clobbered by the next drain -- the case this covers, and the reason the
+freeze cannot be evil\='s to own: the claim a selection makes about a region is
+the same claim whatever put it there."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (should-not (eq cooked--input-mode 'frozen))
+    (let ((transient-mark-mode t))
+      (goto-char (point-min))
+      (push-mark (point) t t)
+      (goto-char (point-max))
+      (should (use-region-p))
+      ;; Driven through `cooked--track-selection' rather than asserted straight
+      ;; off `use-region-p', because the wiring is the half that was missing:
+      ;; the input mode is derived rather than latched, so it is only right as
+      ;; often as something recomputes it, and `activate-mark-hook' fires while
+      ;; the region is still empty.
+      (cooked--track-selection)
+      (should (eq cooked--input-mode 'frozen))
+      (deactivate-mark)
+      (cooked--track-selection)
+      (should-not (eq cooked--input-mode 'frozen)))))
+
+(ert-deftest cooked-selection-protection-can-be-switched-off ()
+  "nil is the old behaviour, for anyone who only selects finished output."
+  (let ((cooked-selection-render nil))
+    (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+      (should (cooked-tests--settle (lambda () cooked--session)))
+      (let ((transient-mark-mode t))
+        (goto-char (point-min))
+        (push-mark (point) t t)
+        (goto-char (point-max))
+        (should (use-region-p))
+        (cooked--track-selection)
+        (should-not (eq cooked--input-mode 'frozen))))))
+
+(ert-deftest cooked-an-inactive-mark-is-not-a-selection ()
+  "`use-region-p\=', not `mark-active\='.
+
+With `transient-mark-mode\=' off a mark is permanently active and is not a
+selection anyone is looking at; freezing the render for it would freeze the
+terminal for the rest of the session."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((transient-mark-mode nil))
+      (goto-char (point-min))
+      (push-mark (point) t t)
+      (goto-char (point-max))
+      (should-not (use-region-p))
+      (cooked--track-selection)
+      (should-not (eq cooked--input-mode 'frozen)))))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

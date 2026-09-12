@@ -952,6 +952,70 @@ The answer for anyone not driving this from somewhere else."
 
 ;; Last, so anything added ordinarily is asked first and this answers only for
 ;; what nothing else claimed.
+(defcustom cooked-selection-render 'frozen
+  "What the render does while an ordinary Emacs selection is active.
+
+The same claim `cooked-evil-visual-state-render\=' makes, for everyone who is
+not running evil: a selection says something about a region of text, and text
+being rewritten underneath it turns the claim into a lie.  Until this existed
+cooked froze for evil's visual state and for nothing else, so a plain
+\\[set-mark-command] -- or a `consult-line\=', or a mouse drag -- was clobbered
+by the next drain.
+
+nil is the old behaviour and is a reasonable choice for anyone who selects in a
+terminal only to copy something that has already finished printing.
+
+The freeze cannot strand a buffer: it lifts when the selection goes away, and a
+drain that invalidates the region deactivates the mark anyway -- see
+`cooked--deactivate-mark\='."
+  :type '(choice (const :tag "Defer the render" frozen)
+                 (const :tag "Live, but the view stays put" still)
+                 (const :tag "Keep following the cursor" nil))
+  :group 'cooked)
+
+(defun cooked--selection-input-mode ()
+  "Freeze while a plain Emacs selection is active.  `cooked-selection-render\='.
+
+`use-region-p\=' rather than `mark-active\=': it is the question every command
+that acts on a region asks, so this freezes exactly when something would have
+been operated on.  Under `transient-mark-mode\=' off it answers nil, which is
+right -- a permanently active mark is not a selection anyone is looking at."
+  (and cooked-selection-render
+       (use-region-p)
+       cooked-selection-render))
+
+(defvar-local cooked--selection-active nil
+  "Whether `use-region-p\=' was true after the last command.")
+
+(defun cooked--track-selection ()
+  "Recompute the input mode when a selection appears or goes away.
+
+The input mode is *derived* rather than latched -- see
+`cooked-input-mode-functions\=' -- so it is only right as often as something
+recomputes it, and nothing recomputed it for a selection.
+
+`activate-mark-hook\=' is the obvious place and it is not enough:
+\\[set-mark-command] activates the mark while point is still on it, so the
+region is empty and `use-region-p\=' is nil at exactly the moment the hook
+runs.  Everything that makes it a selection happens afterwards, as ordinary
+motion, with no hook of its own.  So the question is asked once per command and
+the answer cached, which also covers the mouse drag and the `consult-line\='
+case for free.
+
+One `use-region-p\=' per command, and a refresh only on a *change* -- the
+refresh rebuilds a keymap and must not run on every keystroke."
+  (let ((active (use-region-p)))
+    (unless (eq active cooked--selection-active)
+      (setq cooked--selection-active active)
+      (cooked--refresh-keymap))))
+
+;; At 50: behind `cooked-evil--input-mode' at the default depth and ahead of
+;; `cooked--default-input-mode' at 90.  Under evil the visual-state answer is
+;; the more specific one and should win -- it distinguishes visual from normal,
+;; where this cannot -- and evil's own selection makes `use-region-p' true too,
+;; so without the ordering the two would answer the same question twice.
+(add-hook 'cooked-input-mode-functions #'cooked--selection-input-mode 50)
+
 (add-hook 'cooked-input-mode-functions #'cooked--default-input-mode 90)
 
 (defun cooked--state-keymap (mode policy)
@@ -2058,6 +2122,7 @@ to the child verbatim."
   ;; Above the state maps for the same reason, and above `cooked--mouse-map-alist'
   ;; only incidentally -- the two never bind the same event.
   (add-to-list 'emulation-mode-map-alists 'cooked--override-map-alist)
+  (add-hook 'post-command-hook #'cooked--track-selection nil t)
   (cooked--install-thing-at-point-providers)
   (cooked--install-global-hooks)
   ;; Negative depth so it runs ahead of the snap: the guard can substitute

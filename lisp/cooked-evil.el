@@ -198,7 +198,18 @@ cooked-mode.el above `cooked-toggle-peek' for the bug latching it caused."
         (pcase (bound-and-true-p evil-state)
           ((or 'normal 'motion 'operator) cooked-evil-normal-state-render)
           ('visual cooked-evil-visual-state-render)
-          ((or 'insert 'replace) (and cooked-evil-hybrid-insert 'semi))
+          ;; Not while something is selected.  Insert state forwards to the
+          ;; child, and a drain rewriting the text under a selection makes the
+          ;; selection a lie -- the same argument
+          ;; `cooked-evil-visual-state-render' is made of, and it does not stop
+          ;; being true because the selection arrived from a mouse drag or a
+          ;; `consult-line' rather than from `v'.  Answering nil here defers to
+          ;; `cooked--selection-input-mode', which sits behind this one and
+          ;; makes exactly that claim; visual state is left alone because
+          ;; `cooked-evil-visual-state-render' is the more specific answer and
+          ;; the user may have set it to nil deliberately.
+          ((or 'insert 'replace)
+           (and cooked-evil-hybrid-insert (not (use-region-p)) 'semi))
           (_ nil)))))
 
 ;; No guard against a prior claimant any more: the seam is a hook, so adding to
