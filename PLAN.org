@@ -95,6 +95,44 @@ Benchmarking and fuzzing first: both are cheap, both are informative before any
 code changes, and one of them can *delete* work. Nothing here is gated on
 anything else, so these can run in parallel.
 
+** NEXT [#A] =make bench= must byte-compile
+:PROPERTIES:
+:EFFORT:   1h
+:REPORT:   §9 D — found by auditing the UNSTABLE rule, not by the report
+:GAIN:     every number already recorded in Waves 0 and 1 is re-taken and some change by 3x
+:BRANCH:
+:END:
+*Every published bench number in this file was measured on interpreted Lisp that
+no user ever runs.* =BATCH= is =emacs -Q --batch -L lisp -L tests=, the =bench=
+target has no =compile= prerequisite, and the =compile= target *ends in*
+=@rm -f lisp/*.elc=. So there is never a =.elc= present when the bench runs.
+
+Byte-compiled, on the same suite:
+
+| case             | interpreted p50 | compiled p50 | interp p99/p50 | compiled p99/p50 |
+|------------------+-----------------+--------------+----------------+------------------|
+| per-frame plain  |           0.150 |    *0.063*   |            1.7 |              1.5 |
+| per-frame styled |           0.575 |    *0.183*   |           18.6 |              1.5 |
+| per-frame box    |           0.512 |    *0.296*   |           18.8 |              1.3 |
+| flood 20k styled |            75.2 |     *22.1*   |            1.3 |              2.3 |
+| rescale-deco     |           3.307 |    *0.891*   |            6.7 |              1.6 |
+
+Allocation per styled apply: *14,112 conses interpreted against 1,858
+compiled*. =cooked--face-packed= on a cache hit conses 42 net interpreted and
+*0* compiled — its docstring's "a hit decodes nothing" is true, and only true,
+when compiled.
+
+This lands ahead of everything else in Wave 0 because it changes what the other
+measurements were looking at: §9 D's literal UNSTABLE rule fires on *3* rows
+compiled where it fires on 8 interpreted, so most of the fat tail the variance
+flag was built to filter is an artifact of the harness rather than a fact about
+cooked.
+
+Done when: the bench target compiles first — with a step of its own, *not* the
+=compile= gate, which deletes its own =.elc= — and every figure recorded in
+Waves 0 and 1 has been re-taken. Leave =lisp-test= interpreted: a readable
+backtrace is worth more there than speed.
+
 ** DONE [#A] Measure the scroll ceiling with rejoining off
 :PROPERTIES:
 :EFFORT:   1h
@@ -530,10 +568,32 @@ belt-and-braces, not the only thread the scan hangs from. The rewrite is still
 left outside — the saving is entirely in the loops, so there is nothing to buy
 by moving the line, and a user's own change hook is entitled to see the edit.
 
-Second correction: *§7 item 1's figure is primary-screen-only now.*
-=cooked--sync-fontification= post-dates the measurement and already unregisters
-jit-lock on the alt screen — so the gain is *zero* exactly where a full-screen
-TUI repaints hardest.
+Second correction, and *the first draft of this one was wrong*, so it is
+restated rather than trimmed. =cooked--sync-fontification= does *not* post-date
+the measurement — it is in the initial commit, and the +21%/+55% figure is its
+*own* docstring's, measured for dropping the jit-lock registration with
+=cooked--fontify-region= never once called. §7 item 1 reused that figure as the
+predicted gain from the inhibit binding, and that reuse is the actual error.
+
+Nor is the alt-screen gain zero. Interleaved A/B, 4000 iterations per arm, with
+the registration asserted in each state:
+
+| screen  | styled | box   | plain |
+|---------+--------+-------+-------|
+| primary | −36.4% | −8.6% | 0.0%  |
+| alt     | −20.2% | −3.7% | 0.0%  |
+
+About *half* survives on the alt screen, because the binding also short-circuits
+Emacs' own =prepare_to_modify_buffer= / =signal_after_change= bookkeeping with
+no Lisp hook attached at all.
+
+Two things fell out of measuring it properly. *Plain rows gain nothing and
+cannot*: =cooked-bench--plain-rows= carries no style spans, so nothing runs
+inside the binding — whatever produced the "plain −12%" above, it was not that
+fixture. And *box drawing now gains 8.6% rather than 55%* because the run-wide
+glyph task (b7a60ff) landed first and had already removed most of the per-cell
+property applications. The two Wave 1 tasks overlap, and the second inherited a
+much smaller frame.
 *Only* around the property loops — the style-span walk, =cooked--apply-deco=,
 =cooked--render-link-spans=. Leave =insert=/=delete-region= outside the binding,
 because =cooked--render-rows= relies on the row rewrite firing
@@ -676,6 +736,26 @@ Note cooked already *beats* ghostel under a scroll region and on the alt screen,
 where their page-dirty flag degrades to a whole-viewport repaint. Do not
 regress that.
 
+** TODO [#B] Allocation per frame
+:PROPERTIES:
+:EFFORT:   1d
+:REPORT:   §9 — the lever the =gc-cons-threshold= bracket was reaching for
+:GATE:     =make bench= must byte-compile
+:BRANCH:
+:END:
+Refusing the GC bracket above leaves the real question standing: *the only thing
+that removes a collection is not allocating.* Compiled, a styled 24x80 apply
+still conses 1,858 cells and a box frame 432 vec-slots, and the residual p99
+spikes in the URL and box redisplay rows are collections.
+
+Gated on the compiled numbers because it may turn out there is nothing left to
+win — which is a perfectly good outcome and should be recorded as one.
+
+One loose end to start from: compiled, =cooked--render-rows= on styled rows
+conses 683 against plain's 299, about *two conses per style span* on a path
+whose docstring describes it as allocation-free per span. Either a real leak in
+the packed walk or a docstring that overstates; find out which.
+
 ** TODO [#B] =adjustRegion= mechanical floor
 :PROPERTIES:
 :EFFORT:   1d
@@ -701,13 +781,21 @@ other windows in the live screen that are not semantically following.
 :BRANCH:   d119d0b, 95032ba
 :END:
 *Two of the four parts were already true when the task was written, and saying
-so is most of the value here.* §7 suspect (iii) describes cooked as running the
-scan "from inside the drain, per damaged row, every frame". It does not:
-=cooked--fontify-region= is registered with =jit-lock-register=
-(=cooked.el:1397=) and =cooked--sync-fontification= even unregisters it when
-there is nothing to scan. The deferral the task asks for exists, and in the
-*better* form REPORT itself notes — over the visible region, where ghostel
-scans every repainted row including ones a flood pushed past the viewport.
+so is most of the value here.*
+
+*§6 "Deferred detection"* — not §7, which an earlier draft of this blamed —
+describes cooked as running the scan "from inside the drain, per damaged row,
+every frame" (=cooked-link.el:349=). It does not, and *§7 suspect (iii) says so
+correctly two sections later*: the report contradicts itself and §6 is the wrong
+half. =cooked--fontify-region= is registered with =jit-lock-register= and
+=cooked--sync-fontification= even unregisters it when there is nothing to scan;
+the =:349= cite is the *definition* of =cooked--fontify-links=, not a call site.
+
+§6 does describe a real state of the code, just not =main='s: branch =links=
+(464daf7) scanned per rendered row from the drain and once per batch from the
+scrollback append. The deferral the task asks for exists on main, and in the
+*better* form — over the visible region, where ghostel scans every repainted row
+including ones a flood pushed past the viewport.
 
 So:
 
@@ -717,7 +805,12 @@ So:
   cannot apply.* It presumes the text survives between scans. In cooked a
   repainted row is deleted and reinserted, so the old properties go with the old
   text and there is nothing to compare against. The case it was meant to fix —
-  a spinner rescanned every frame — is answered by part 3 instead.
+  a spinner rescanned every frame — is answered by part 3 instead. Checked for a
+  target in the *scrollback* too, which is the one place text does survive:
+  there is none. Scrollback is scanned once and never re-marked unfontified, the
+  only writer over settled text (=cooked--rescale-deco=) inhibits hooks
+  deliberately, and =cooked--trim-scrollback='s deletion does not unfontify the
+  survivors.
 - *Part 1 landed* (d119d0b): the detected-URL path uses text properties, so
   =goto-address-fontify-region= is reproduced rather than called. An =OSC 8=
   span now wins by being *asked* per match, instead of by having overlays
@@ -984,6 +1077,21 @@ application.
 
 See the appendix of [[file:REPORT.org][REPORT.org]] for the reasoning.
 
+- DROPPED =gc-cons-threshold= bracketing around =cooked--apply=. ghostel binds
+  it =most-positive-fixnum= around its whole native redraw (§7,
+  =ghostel.el:4645-4649=) and cooked binds it nowhere, so this reads like a
+  production behaviour cooked is missing — and §9 A's "as production does" means
+  *ghostel's* production, which is easy to misread. Measured before copying, and
+  it should not be copied. The pin does keep collection out of the apply (styled
+  p99 18.8 → 1.5 ms), but the collection then lands at the *unbind*,
+  microseconds later and still before the frame reaches the screen — p99 across
+  the whole bracket is 21.2 ms. It is *moved, not deferred*. It also costs 112
+  collections against 71 and 20% more wall, and at an interactive
+  =gc-cons-percentage= of 0.1 it forces a collection on *every* unbind: 1500
+  against 0 over 3000 frames, in both arm orders. The cause is Emacs' watcher on
+  the variable — the restore recomputes the collection budget against consing
+  already done. A session-wide raise is the only form that works, and that is a
+  policy change rather than a redraw binding.
 - DROPPED ConPTY / Windows — no termios on a pseudoconsole, so
   =Mode::{Cooked,Raw,Secret}= cannot exist there.
 - DROPPED =desktop= registration — ghostel's four-branch skip list plus a
