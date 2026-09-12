@@ -1221,15 +1221,58 @@ lone-ESC =input-decode-map= filter · pixel-delta wheel accumulation.
 :VISIBILITY: children
 :END:
 
-** WIP [#A] =cooked-comint.el= — a VT filter for any comint buffer
+** DONE [#A] =cooked-comint.el= — a VT filter for any comint buffer
 :PROPERTIES:
 :EFFORT:   3d
 :REPORT:   §1 (the whole section)
 :GATE:     Property test: deltas replay ≡ full grid — satisfied, 2b1e02a
 :AGENT:    yes
 :GAIN:     the only item that answers "why cooked and not vterm" for someone who never opens a terminal
-:BRANCH:   cooked/comint
+:BRANCH:   f1372d5, 7bc3e84, ae08ec1, 946ded7
 :END:
+Landed. =src/emu/stream.rs= (~700 lines, 34 tests) + =lisp/cooked-comint.el=
+(~300). Verified against a live child on merge, and the documented contract
+holds exactly:
+
+| input                     | stock comint      | cooked-comint    |
+|---------------------------+-------------------+------------------|
+| =abcdefghij\rXYZ=         | =XYZ= (deleted)   | *=XYZdefghij=*   |
+| =abcdefghij\033[5GZZ=     | =abcdefghijZZ=    | *=abcdZZghij=*   |
+| =abcdefghij\r\033[3XQ=    | =Q=               | *=Q  defghij=*   |
+
+Layering pinned by a test that launches a fresh =emacs -Q= and asserts
+=(featurep 'cooked)= is nil while =cooked-face= and =cooked-util= are =t= —
+transitive, where a grep of the requires would not be. Confirmed independently
+on merge. One consequence: =cooked--style-record= moved to =cooked-face.el=, the
+only place both readers can reach.
+
+*§1's continuation-count design does not work, and the correction is the
+interesting part.* §1 prescribes a =head=-style count — emit the partial line,
+remember how many characters were handed over, re-emit only the delta. That
+handles *appends* and not the case the file exists for: a =\r= rewriting text
+Emacs already holds is not expressible as a delta. So =feed= reports a
+*retraction* instead — characters to delete before the insertion point, from the
+longest common prefix of the old and new line, so a bar going =42%= → =51%=
+retracts eight characters rather than the line.
+
+And the retraction is *offered, not taken*: Lisp checks those characters are
+still immediately before =process-mark= and passes the answer back in, so with
+=retract= nil the core appends. That case is universal rather than exotic — at
+every prompt comint has already inserted the user's input, and re-sending the
+prompt to close its line would double it. *Losing a rewrite is recoverable; a
+doubled prompt is not.*
+
+Two smaller §1 errors: =comint-carriage-motion= is not an entry on
+=comint-output-filter-functions= but a direct call gated by
+=comint-inhibit-carriage-motion=; and =ansi-color-process-output= lives in
+comint's *global* default hook value, so "remove it on enable" is not reachable
+buffer-locally — =ansi-color-for-comint-mode= set locally to nil is the only
+per-buffer switch.
+
+*A caution for anyone measuring this*: stock comint already handles a CR or a
+backspace *within one chunk*, and even across chunks on the same buffer line, so
+a naive A/B shows no difference at all. The cases above are the ones that
+separate them.
 New =src/emu/stream.rs= (a second =Perform= impl) + =lisp/cooked-comint.el=.
 
 Three decisions already made in §1: it is a *sibling* of =cooked-process.el=,
