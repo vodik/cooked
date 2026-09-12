@@ -829,6 +829,52 @@ because cooked's input mark is the process mark comint asks for."
     (should-not (string-match-p "hunter2" (buffer-substring-no-properties
                                            (point-min) (point-max))))))
 
+(ert-deftest cooked-a-source-supplied-secret-is-not-cleared-in-place ()
+  "The string `cooked-password-function\=' hands over must come back unharmed.
+
+An auth-source backend caches plaintext by design, and is free to answer a
+lookup with the very string sitting in that cache rather than a copy of it.
+Zeroing that string does not destroy a secret -- it destroys the cache, in
+place, and the next lookup for the same host answers with NULs, which is a
+failure the user gets to debug somewhere else entirely.
+
+So the cache here is a real one: the same string object is handed out and then
+looked at again afterwards.  Before the split, this test read seven NULs."
+  (let* ((cache (list (cons "sudo" (copy-sequence "hunter2"))))
+         (cooked-password-function (lambda (_prompt) (cdr (assoc "sudo" cache)))))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c"
+          "printf 'Password: '; stty -echo; read p; stty echo; \
+           if [ \"$p\" = hunter2 ]; then printf '\\nACCEPTED\\n'; else printf '\\nDENIED\\n'; fi; sleep 5")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+      (cooked--prompt-secret (current-buffer))
+      ;; The child really got the password: the copy is what went out, so this
+      ;; also rules out the fix having sent the wrong string.
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "ACCEPTED" (cooked-tests--text)))))
+      (should (equal (cdr (assoc "sudo" cache)) "hunter2")))))
+
+(ert-deftest cooked-the-wire-copy-is-cleared-even-when-the-write-throws ()
+  "The other half of the split: what cooked allocated is zeroed regardless.
+
+A child that exited between the prompt and the answer makes the PTY write
+signal, and the copy is live at that moment, so the clear has to be in an
+`unwind-protect\=' nested inside the one guarding the source string rather than
+sequenced after the writes.  Stubbing the write is the only way to see both at
+once: the copy handed to it comes back all NULs, and the source string the
+password function supplied comes back intact."
+  (let* ((source (copy-sequence "hunter2"))
+         (wire nil)
+         (cooked-password-function (lambda (_prompt) source)))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "printf 'Password: '; stty -echo; sleep 5")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (text) (setq wire text) (error "The child is gone"))))
+        (should-error (cooked--prompt-secret (current-buffer))))
+      (should (equal wire (make-string 7 0)))
+      (should (equal source "hunter2")))))
+
 (ert-deftest cooked-a-secret-prompt-is-held-back-while-the-user-is-elsewhere ()
   "A password read must not seize the minibuffer of a buffer nobody is in.
 

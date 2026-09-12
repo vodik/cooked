@@ -23,7 +23,12 @@
 (defcustom cooked-password-function nil
   "Function called with the prompt string to supply a password non-interactively.
 Should return a string, or nil to fall back to `read-passwd'.  Lets auth-source
-or `pass' answer a prompt no ordinary terminal could even detect."
+or `pass' answer a prompt no ordinary terminal could even detect.
+
+The returned string is not modified: cooked copies it before writing it to the
+child and clears only that copy, because a backend is free to return the very
+string its own cache holds.  A source that would rather cooked did not keep the
+plaintext alive at all can return a `copy-sequence' and clear its own."
   :type '(choice (const nil) function) :group 'cooked)
 
 (defcustom cooked-secret-debounce 0.03
@@ -56,7 +61,7 @@ and the second is what this used to do.
 
 So the read is held instead, and `cooked--resume-secret\=' raises it when
 attention comes back.  Nothing else is deferred with it: `cooked--mode\=' is
-already `secret\=', the keymap has already been swapped, and the child is
+already `secret', the keymap has already been swapped, and the child is
 blocked in a `getpass\=' that will wait as long as it takes.
 
 Said out loud rather than held silently, because the buffer is off screen and
@@ -169,6 +174,12 @@ are cleared: it is sent as two writes rather than one `concat', which a
 child reading canonically cannot distinguish, and the native core zeroes
 its byte buffer after writing.
 
+Only cooked's own copies, though.  A string handed over by
+`cooked-password-function' belongs to whoever supplied it -- an
+auth-source backend may return the plaintext its cache is holding -- so
+zeroing that one would corrupt the cache rather than the secret.  The
+copy written to the child is made here for exactly that reason.
+
 That is the honest limit of it.  `read-passwd' builds the string in
 Emacs' own heap, the garbage collector relocates and compacts small
 strings so earlier copies survive in freed blocks that `clear-string'
@@ -185,15 +196,33 @@ space, and does not."
                ;; the answered and the quit branch below.
                (epoch cooked--secret-epoch))
           (condition-case nil
-              (let ((secret (or (and cooked-password-function
-                                     (funcall cooked-password-function prompt))
-                                (cooked--read-passwd prompt))))
+              ;; `supplied' is kept separate from `secret' because only one of
+              ;; the two is ours to destroy; see the comments on the two
+              ;; `clear-string' calls below.
+              (let* ((supplied (and cooked-password-function
+                                    (funcall cooked-password-function prompt)))
+                     (secret (or supplied (cooked--read-passwd prompt))))
                 (unwind-protect
-                    (if (/= epoch cooked--secret-epoch)
-                        (message "Nothing is asking for that any more; not sent")
-                      (cooked--send-to-child secret)
-                      (cooked--send-to-child "\n"))
-                  (clear-string secret)))
+                    ;; The wire copy is freshly allocated here and nothing else
+                    ;; can be holding it, so zeroing it is unconditionally safe.
+                    ;; Its `unwind-protect' is nested inside the outer one so
+                    ;; that a PTY write which throws -- a child that exited
+                    ;; between the prompt and the answer is enough -- still
+                    ;; clears it on the way out.
+                    (let ((wire (copy-sequence secret)))
+                      (unwind-protect
+                          (if (/= epoch cooked--secret-epoch)
+                              (message "Nothing is asking for that any more; not sent")
+                            (cooked--send-to-child wire)
+                            (cooked--send-to-child "\n"))
+                        (clear-string wire)))
+                  ;; What `read-passwd' returns was allocated for this call and
+                  ;; nobody else has a reference, so it is ours to zero.  What
+                  ;; `cooked-password-function' returns is not: an auth-source
+                  ;; backend caches plaintext by design and may hand out the very
+                  ;; string sitting in that cache, so zeroing it corrupts the
+                  ;; cache in place and the next lookup answers with NULs.
+                  (unless supplied (clear-string secret))))
             ;; C-g or C-c C-c at the prompt should interrupt the child's read
             ;; rather than leave it blocked on a `getpass' nobody is going to
             ;; answer -- but only while it is still that read we would be
