@@ -2215,6 +2215,76 @@ cosmetic pass must not be able to end a redisplay."
     (pcase-dolist (`(,beg . ,end) bounds)
       (cooked--run-seam 'cooked-row-rendered-functions beg end))))
 
+(defvar-local cooked--held-link-row nil
+  "Bounds the URL guess last declined to scan, as a pair of markers, or nil.
+
+Markers rather than positions because the buffer moves underneath them: the row
+is by definition the one being rewritten, and scrollback eviction shifts
+everything above it.
+
+Both have the default insertion type.  Type t on the end marker is the obvious
+thing to reach for -- the row grows as the spinner writes -- and is wrong: text
+arriving after the row, which is every subsequent row, would be swallowed into
+the held region and the cursor would appear never to leave it.  The row growing
+to the right needs no marker help, because the extent is recomputed from the
+line itself when the hold is released.")
+
+(defun cooked--link-hold-bounds ()
+  "The region the URL guess should decline to scan right now, or nil.
+
+The cursor\='s row always, and the whole input region on top of it when the user
+is typing -- the two are usually the same row and the `max\=' costs nothing when
+they are.  Returns buffer positions, not markers.
+
+This lives in cooked.el rather than cooked-link.el on purpose.  Where the cursor
+is and whether input is being edited are session state, and cooked-link.el is
+base tier: it was asking questions upward until recently and must not start
+again.  The link layer is told what range to scan; it does not ask why."
+  (when-let* ((cursor (cooked--cursor-position)))
+    (let ((beg (save-excursion (goto-char cursor) (line-beginning-position)))
+          (end (save-excursion (goto-char cursor) (line-end-position))))
+      (when-let* (((cooked--input-state-p))
+                  (start (cooked--input-start-position)))
+        (setq beg (min beg (save-excursion
+                             (goto-char start) (line-beginning-position)))
+              end (max end (point-max))))
+      (cons beg end))))
+
+(defun cooked--hold-link-row (beg end)
+  "Remember BEG..END as declined by the URL guess, for a later rescan."
+  (let ((from (or (car cooked--held-link-row) (make-marker)))
+        (to (or (cdr cooked--held-link-row) (make-marker))))
+    (set-marker from beg)
+    (set-marker to end)
+    (setq cooked--held-link-row (cons from to))))
+
+(defun cooked--release-held-link-row ()
+  "Ask for the held row again once the cursor has left it.
+
+Called from `cooked--apply\=', which is the moment the cursor can have moved.
+`jit-lock-refontify\=' rather than a direct scan: the row may not be on screen,
+and the whole point of the deferral is that an invisible row costs nothing."
+  (when-let* ((held cooked--held-link-row)
+              (from (car held))
+              (to (cdr held))
+              ((marker-position from))
+              ((marker-position to))
+              (cursor (cooked--cursor-position))
+              ;; Still the cursor\='s row?  Then it is still being rewritten and
+              ;; there is nothing to reconsider.
+              ((not (and (<= from cursor) (<= cursor to)))))
+    (let* ((beg (marker-position from))
+           ;; Recomputed rather than taken from the marker: a spinner rewrites
+           ;; its row by deleting and reinserting it, which collapses a pair of
+           ;; plain markers onto the same position.  What is wanted is the row as
+           ;; it now stands, so ask the line.
+           (end (max (marker-position to)
+                     (save-excursion (goto-char beg) (line-end-position)))))
+      (setq cooked--held-link-row nil)
+      (set-marker from nil)
+      (set-marker to nil)
+      (when (< beg end) (jit-lock-refontify beg end)))))
+
 (defun cooked--fontify-region (beg end)
   "Run the cosmetic link passes over BEG..END.  cooked\\='s jit-lock entry point.
 
@@ -2248,15 +2318,35 @@ returning: that grid is rewritten row by row on the way back to the primary
 screen, and rewriting text is what marks it unfontified again, so nothing is
 stranded by having been skipped here."
   (when (and cooked--session (not cooked--alt))
-    (let ((inhibit-read-only t)
-          (from (save-excursion (goto-char beg) (line-beginning-position)))
-          (to (save-excursion (goto-char end) (line-end-position))))
-      (cooked--fontify-links from to)
+    (let* ((inhibit-read-only t)
+           (from (save-excursion (goto-char beg) (line-beginning-position)))
+           (to (save-excursion (goto-char end) (line-end-position)))
+           (held (cooked--link-hold-bounds)))
+      ;; The one row worth declining, and why declining it is not a corner case.
+      ;; A spinner or a progress bar rewrites the cursor's row tens to a hundred
+      ;; times a second; each rewrite marks it unfontified, so the guess is made
+      ;; again on every one of them, over text nobody has finished writing.  The
+      ;; prompt is the same shape -- what is being typed there is not output, and
+      ;; linkifying a half-typed URL under the cursor is worse than not.
+      ;;
+      ;; Split rather than shrunk: text on both sides of the held row is still
+      ;; scanned, so a URL in the line above a spinner appears at once.
+      (if (not held)
+          (cooked--fontify-links from to)
+        (when (< from (car held)) (cooked--fontify-links from (car held)))
+        (when (> to (cdr held)) (cooked--fontify-links (cdr held) to))
+        ;; jit-lock marks the whole chunk fontified regardless of what was
+        ;; actually looked at, so the held part has to be remembered and asked
+        ;; for again -- see `cooked--release-held-link-row'.  Without this a URL
+        ;; printed on the cursor's own row, with no newline after it, would never
+        ;; be linkified at all.
+        (cooked--hold-link-row (car held) (cdr held)))
       ;; Only the settled half.  The live screen is rewritten from the next
       ;; drain's damage, so an answer about it that cost a `file-exists-p' would
       ;; be paid again at the next redraw -- which is the whole reason this hook
       ;; was never on the row path.  Scrollback is final, and one scan of it
-      ;; stands.
+      ;; stands.  No hold is needed here for the same reason: the cursor's row is
+      ;; never settled.
       (when cooked-link-scan-functions
         (let ((settled (min to (or (cooked--screen-start-position) to))))
           (when (< from settled)

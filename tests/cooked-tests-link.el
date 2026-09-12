@@ -136,6 +136,53 @@ may be cleared."
                                         'cooked-link-url)
                      "https://guess.example/")))))
 
+(ert-deftest cooked-the-url-guess-declines-the-cursors-own-row ()
+  "A spinner rewrites its row a hundred times a second; do not guess at it.
+
+Each rewrite marks the row unfontified, so without this the scan is made again
+on every frame, over text nobody has finished writing.  What must still hold is
+that declining is a *deferral*: the text on the rows above is scanned as
+normal."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'settled https://above.example/\\n'; printf 'live https://cursor.example/'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "cursor.example" (cooked-tests--text)))))
+    (cooked-tests--fontify)
+    ;; The finished row above was scanned.
+    (should (equal (get-text-property (cooked-tests--link-at "https://above.example/")
+                                      'cooked-link-url)
+                   "https://above.example/"))
+    ;; The cursor is sitting on the second row, so it was declined -- and
+    ;; remembered, which is what makes the deferral safe.
+    (should-not (get-text-property (cooked-tests--link-at "https://cursor.example/")
+                                   'cooked-link-url))
+    (should cooked--held-link-row)))
+
+(ert-deftest cooked-a-held-row-is-scanned-once-the-cursor-leaves-it ()
+  "The deferral must not become a loss.
+
+A URL printed with no newline after it sits on the cursor\='s own row, so it is
+declined -- and if nothing ever asked again it would never be a link at all.
+`cooked--release-held-link-row\=' runs from `cooked--apply\=', the moment the
+cursor can have moved, and puts the row back on jit-lock\='s unfontified list."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'here https://later.example/'; sleep 0.3; printf '\\nand on\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "later.example" (cooked-tests--text)))))
+    (cooked-tests--fontify)
+    (let ((at (cooked-tests--link-at "https://later.example/")))
+      (should-not (get-text-property at 'cooked-link-url))
+      ;; The newline arrives, the cursor moves to the next row, and the drain
+      ;; releases the hold.
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "and on" (cooked-tests--text)))))
+      (should-not cooked--held-link-row)
+      (cooked-tests--fontify)
+      (should (equal (get-text-property at 'cooked-link-url)
+                     "https://later.example/")))))
+
 (ert-deftest cooked-an-explicit-link-wins-over-the-guess ()
   ;; The text is a URL *and* an OSC 8 span pointing somewhere else.  What the child
   ;; said wins, and the guess is dropped rather than layered underneath it.

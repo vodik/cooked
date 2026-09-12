@@ -551,6 +551,10 @@ and the region shaped before anything measures it."
     ;; After both, which is the ordering `cooked-row-rendered-functions' is
     ;; documented against.
     (cooked--notify-rows-rendered rendered)
+    ;; After the render, so the cursor is where this drain put it: a row the URL
+    ;; guess declined while the cursor sat on it has to be asked for again once
+    ;; the cursor has moved on.
+    (cooked--release-held-link-row)
     (cooked--fit-screen)
     (cooked--pad-to-cursor)
     ;; Immediately before the assertion, which is the whole reason it is here
