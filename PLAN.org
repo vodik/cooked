@@ -771,13 +771,14 @@ Hazard from ghostel: their span breaks only on a *clean* row, so page-granularit
 false positives get amplified into one giant reinsert that destroys every marker
 in the viewport. Coalesce runs of *genuinely* damaged rows.
 
-** TODO [#A] Row-range =display= properties for images
+** WIP [#A] Row-range =display= properties for images
 :PROPERTIES:
 :EFFORT:   2d
 :REPORT:   §2 "The mechanism, confirmed"
-:GATE:     Coalesce contiguous damaged rows into one Block
+:GATE:     Coalesce contiguous damaged rows into one Block — satisfied, de55e35
 :GAIN:     the 20x
-:BRANCH:
+:BRANCH:   cooked/row-range-images
+:AGENT:    yes
 :END:
 Hybrid, not a copy: coalesce runs of contiguous same-image/same-rectangle/
 same-slice-row cells into one interval, fall back to per-cell where the grid
@@ -1080,14 +1081,14 @@ lone-ESC =input-decode-map= filter · pixel-delta wheel accumulation.
 :VISIBILITY: children
 :END:
 
-** TODO [#A] =cooked-comint.el= — a VT filter for any comint buffer
+** WIP [#A] =cooked-comint.el= — a VT filter for any comint buffer
 :PROPERTIES:
 :EFFORT:   3d
 :REPORT:   §1 (the whole section)
 :GATE:     Property test: deltas replay ≡ full grid — satisfied, 2b1e02a
 :AGENT:    yes
 :GAIN:     the only item that answers "why cooked and not vterm" for someone who never opens a terminal
-:BRANCH:
+:BRANCH:   cooked/comint
 :END:
 New =src/emu/stream.rs= (a second =Perform= impl) + =lisp/cooked-comint.el=.
 
