@@ -3590,5 +3590,113 @@ state something the user can still see out of."
     (cooked-tests--type "v $ u")
     (should (equal "alpha" (cooked--pending-input)))))
 
+(ert-deftest cooked-a-path-is-one-word-through-both-chains ()
+  "Asserted through `thing-at-point\=' *and* `mouse-start-end\=', which disagree.
+
+Stolen wholesale from ghostel, and the discipline is the point rather than the
+two functions: a double-click does not go through `thing-at-point\=' at all.  It
+goes through `mouse-start-end\=' with a click count of 1, which classifies by
+syntax class directly and has its own rules about which classes extend.  A
+syntax table that satisfies one and not the other is the normal way to get this
+half right and ship it broken."
+  (with-temp-buffer
+    (set-syntax-table cooked-mode-syntax-table)
+    (dolist (subject '("~/src/foo/bar.txt" "api.example.com" "a-b_c.d" "/etc/passwd"))
+      (erase-buffer)
+      (insert "before " subject " after")
+      (let ((beg (+ (point-min) (length "before ")))) 
+        (goto-char (1+ beg))
+        ;; The keyboard/programmatic chain.
+        (should (equal (thing-at-point 'word t) subject))
+        ;; The actual double-click chain: `mouse-start-end' with count 1.
+        (pcase-let ((`(,from ,to) (mouse-start-end (point) (point) 1)))
+          (should (equal (buffer-substring-no-properties from to) subject)))))))
+
+(ert-deftest cooked-a-box-border-does-not-join-two-panes ()
+  "A copy out of a two-pane TUI must not take the border with it.
+
+Worth saying that this passes with `cooked-word-boundary-string\=' emptied, and
+is kept anyway: box-drawing characters are *symbol* constituents in Emacs\= own
+table, so they already end a word and cooked is agreeing rather than fixing.
+The test guards the outcome against a future default -- or a user\='s own wider
+`cooked-word-constituent-string\=' -- quietly making furniture part of a word.
+The next test is the one that pins cooked\='s own behaviour."
+  (with-temp-buffer
+    (set-syntax-table cooked-mode-syntax-table)
+    (dolist (border '(?│ ?─ ?├ ?┼))
+      (erase-buffer)
+      (insert (format "left%cright" border))
+      (goto-char (+ (point-min) 2))
+      (should (equal (thing-at-point 'word t) "left"))
+      (pcase-let ((`(,from ,to) (mouse-start-end (point) (point) 1)))
+        (should (equal (buffer-substring-no-properties from to) "left"))))))
+
+(ert-deftest cooked-a-boundary-beats-a-constituent ()
+  "The ordering between the two customs, which is the only thing arbitrating them.
+
+A character named in both strings must end up a boundary, or the defaults are a
+trap: widening `cooked-word-constituent-string\=' would silently swallow
+furniture, and there would be no way to take a character back once the
+constituent set had claimed it.  `cooked--realize-syntax-table\=' gets this by
+applying the boundaries second, and nothing else says so."
+  (let ((constituents cooked-word-constituent-string)
+        (boundaries cooked-word-boundary-string))
+    (unwind-protect
+        (with-temp-buffer
+          (set-syntax-table cooked-mode-syntax-table)
+          ;; `$', not a box-drawing character, and the reason is a finding in
+          ;; its own right: `forward-word' consults
+          ;; `find-word-boundary-function-table' as well as the syntax table,
+          ;; and that inserts a boundary wherever the *script* changes.  U+2502
+          ;; is a different script from `a', so it ends a word even when its
+          ;; syntax class is `w' -- making the box-drawing half of
+          ;; `cooked-word-boundary-string' doubly belt-and-braces, and making it
+          ;; useless for demonstrating an ordering that is about syntax alone.
+          (insert "a$b")
+          (goto-char (point-min))
+          ;; Claim it as a word constituent, with nothing taking it back.
+          ;; Boundaries are cleared *first*: they are applied second and would
+          ;; otherwise still be holding `$' from the default.
+          (customize-set-variable 'cooked-word-boundary-string "")
+          (customize-set-variable 'cooked-word-constituent-string "./~-_$")
+          (should (equal (thing-at-point 'word t) "a$b"))
+          ;; ...and naming it a boundary as well must take it straight back.
+          (customize-set-variable 'cooked-word-boundary-string "$")
+          (should (equal (thing-at-point 'word t) "a"))
+          (pcase-let ((`(,from ,to) (mouse-start-end (point) (point) 1)))
+            (should (equal (buffer-substring-no-properties from to) "a"))))
+      (customize-set-variable 'cooked-word-constituent-string constituents)
+      (customize-set-variable 'cooked-word-boundary-string boundaries))))
+
+(ert-deftest cooked-a-boundary-customize-reaches-a-live-buffer ()
+  "Realized into the table object, not rebuilt, or a preference means nothing.
+
+A rebuilt table would be picked up by the *next* `cooked-mode\=', which is not
+what changing a setting should mean.  The other half is that removing a
+character has to work too -- that is what `cooked--syntax-overridden\=' is for,
+and it is the half a naive in-place realization gets wrong."
+  (let ((constituents cooked-word-constituent-string)
+        (boundaries cooked-word-boundary-string))
+    (unwind-protect
+        (with-temp-buffer
+          (set-syntax-table cooked-mode-syntax-table)
+          (insert "a.b")
+          (goto-char (point-min))
+          (should (equal (thing-at-point 'word t) "a.b"))
+          ;; Take `.' out of the constituents; this very buffer must follow.
+          (customize-set-variable 'cooked-word-constituent-string "/~-_")
+          (should (equal (thing-at-point 'word t) "a"))
+          ;; And putting it back must restore it, rather than leaving `.'
+          ;; stranded in whatever class the removal left behind.
+          (customize-set-variable 'cooked-word-constituent-string "./~-_")
+          (should (equal (thing-at-point 'word t) "a.b"))
+          ;; Same for a boundary going away.
+          (erase-buffer) (insert "a$b") (goto-char (point-min))
+          (should (equal (thing-at-point 'word t) "a"))
+          (customize-set-variable 'cooked-word-boundary-string "│")
+          (should (equal (thing-at-point 'word t) "a$b")))
+      (customize-set-variable 'cooked-word-constituent-string constituents)
+      (customize-set-variable 'cooked-word-boundary-string boundaries))))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

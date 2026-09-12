@@ -132,6 +132,116 @@ column is not the user's choice about buffer names."
       (unless (equal name (buffer-name))
         (rename-buffer (generate-new-buffer-name name))))))
 
+(defvar cooked-mode-syntax-table (make-syntax-table comint-mode-syntax-table)
+  "Syntax table for `cooked-mode\='.
+
+Realized from `cooked-word-constituent-string\=' and
+`cooked-word-boundary-string\=' by `cooked--realize-syntax-table\=', and realized
+*into this very object* rather than rebuilt, so a customize reaches buffers that
+already exist.  A rebuilt table would only be picked up by the next
+`cooked-mode\=', which is not what changing a preference should mean.
+
+Made with `comint-mode-syntax-table\=' as its *parent* rather than as a copy, and
+that is what makes re-realizing possible at all: a character this file has not
+spoken about is `nil\=' here and inherits, so undoing a previous realization is
+setting those characters back to `nil\=' rather than trying to remember what
+class they used to have.")
+
+(defvar cooked--syntax-overridden nil
+  "Characters `cooked--realize-syntax-table\=' has given a class of their own.
+
+Kept so the next realization can hand them back to the parent table.  Without
+it, removing a character from `cooked-word-boundary-string\=' would leave it a
+boundary forever.")
+
+(defun cooked--realize-syntax-table ()
+  "Put the two boundary customs into `cooked-mode-syntax-table\=', in place."
+  (let ((table cooked-mode-syntax-table))
+    ;; Hand back everything the last realization claimed.  `nil' means "ask the
+    ;; parent", which is exactly the state these characters were in before.
+    (dolist (ch cooked--syntax-overridden) (aset table ch nil))
+    (setq cooked--syntax-overridden nil)
+    (dolist (ch (string-to-list cooked-word-constituent-string))
+      (modify-syntax-entry ch "w" table)
+      (push ch cooked--syntax-overridden))
+    (dolist (ch (string-to-list cooked-word-boundary-string))
+      ;; Punctuation, not whitespace.  Both end a word, but whitespace is a
+      ;; claim about layout that `skip-syntax-forward' users act on, and a box
+      ;; corner is not a space.  Characters that already *are* whitespace are
+      ;; left to the parent -- overriding them would be a no-op that this
+      ;; function would then have to remember to undo.
+      (unless (eq (char-syntax ch) ?\s)
+        (modify-syntax-entry ch "." table)
+        (push ch cooked--syntax-overridden)))))
+
+(defcustom cooked-word-constituent-string "./~-_"
+  "Characters a word may run through in a cooked buffer.
+
+Terminal output is mostly paths, URLs and identifiers, and Emacs' defaults cut
+all three up: without this a double-click on `~/src/foo/bar.txt\=' takes `foo\='
+and \\[forward-word] over `api.example.com\=' stops four times.  The whole name
+is almost always the thing being pointed at.
+
+Set through customize and it reaches live buffers; see
+`cooked-mode-syntax-table\='."
+  :type 'string
+  :group 'cooked
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         ;; `custom-declare-variable' calls the setter to establish the default
+         ;; when the variable is not already bound, so this runs once at load
+         ;; *before* its sibling below exists.  Guard on the variables rather
+         ;; than on the function: the function is defined first and being
+         ;; `fboundp' says nothing about whether it can run yet.  The explicit
+         ;; call after both defcustoms does the first real realization.
+         (when (and (boundp 'cooked-word-constituent-string)
+                    (boundp 'cooked-word-boundary-string))
+           (cooked--realize-syntax-table))))
+
+(defcustom cooked-word-boundary-string "\"'`|:;,()[]{}<>$│─┌┐└┘├┤┬┴┼"
+  "Characters that end a word in a cooked buffer, whatever else says otherwise.
+
+Applied *after* `cooked-word-constituent-string\=', so a character named in both
+is a boundary.  That ordering is the whole job of this variable, and it is worth
+being plain about what the default does and does not buy.
+
+Every character in the default is *already* a boundary in Emacs\=' own table --
+the box-drawing ones are symbol constituents, not word constituents, so
+\\[forward-word] and a double-click stop at them without help.  The list is
+therefore belt-and-braces, and it earns its place in two ways rather than one:
+it keeps them boundaries when someone widens
+`cooked-word-constituent-string\=', and it says in one readable place which
+characters a terminal buffer treats as furniture.  A copy out of a TUI with two
+panes side by side must not take the border with it, and U+2502 is furniture,
+not text -- that is the intent this records even where Emacs already agrees.
+
+One further reason the box-drawing entries cannot do harm and cannot do much
+good: \\[forward-word] consults `find-word-boundary-function-table\\=' as well as
+the syntax table, and that puts a boundary wherever the *script* changes.  A
+box-drawing character is a different script from Latin text, so it ends a word
+even when its syntax class says `w\\='.  Syntax is not the whole story for
+anything non-ASCII, which is worth knowing before adding a character here and
+expecting it to be load-bearing.
+
+Whitespace characters are ignored: they already end a word, and claiming them
+would be a no-op this then has to remember to undo.  Set through customize and
+it reaches live buffers; see `cooked-mode-syntax-table\='."
+  :type 'string
+  :group 'cooked
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         ;; `custom-declare-variable' calls the setter to establish the default
+         ;; when the variable is not already bound, so this runs once at load
+         ;; *before* its sibling below exists.  Guard on the variables rather
+         ;; than on the function: the function is defined first and being
+         ;; `fboundp' says nothing about whether it can run yet.  The explicit
+         ;; call after both defcustoms does the first real realization.
+         (when (and (boundp 'cooked-word-constituent-string)
+                    (boundp 'cooked-word-boundary-string))
+           (cooked--realize-syntax-table))))
+
+(cooked--realize-syntax-table)
+
 (defcustom cooked-rejoin-wrapped-lines t
   "Whether a line the terminal wrapped becomes one buffer line again.
 
