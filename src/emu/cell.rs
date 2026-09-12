@@ -151,7 +151,7 @@ impl Style {
     /// to the background means that when no background is set the result is
     /// `Style::default()`, and the common case stays exactly as it was.
     ///
-    /// Reverse video survives because it is resolved in `cooked--build-face`, where the
+    /// Reverse video survives because it is resolved in `cooked--face-build`, where the
     /// bar's colour is then the foreground; dropping the flag would erase the drawing.
     pub fn erase(self) -> Self {
         if self.attrs.contains(Attrs::REVERSE) {
@@ -382,7 +382,8 @@ pub struct Run {
     /// [`Row::build_plain_runs`] — because the whole point is that nobody downstream
     /// should have to ask a width table a second time. `Block::push_runs` in the crate
     /// root sums it per row and hands the total to Emacs, which would otherwise call
-    /// `string-width' on every rendered row of every frame; see `cooked--row-cells'.
+    /// `string-width' on every rendered row of every frame; see
+    /// `cooked--row-mismeasured-p', which is what the total is asked for.
     pub cols: usize,
     pub style: Style,
     /// One decoration per character in `text`, index-aligned with `text.chars()`;

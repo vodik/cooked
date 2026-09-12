@@ -2303,7 +2303,7 @@ turned every capital letter into a lowercase one."
   "An event no table spells has no encoding, and nil is how that is said.
 
 The contract the fall-through rests on, pinned rather than assumed: nil means
-`cooked--send-key' has nothing to forward, and the tables are searched in order
+`cooked-send-key' has nothing to forward, and the tables are searched in order
 on the understanding that the first one holding a key answers for it.  Written
 as a `cond' whose clauses were the lookups themselves, a table that hit but
 produced nil would have carried on to the next one and encoded the key as a

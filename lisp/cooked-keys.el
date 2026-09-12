@@ -178,8 +178,9 @@ KIND says both how the key is spelled and what a modifier does to it:
               `cooked--app-keypad-p\=' for which of the two is sent.
 
 `cooked--key-sequence\=' derives the unmodified spelling, so the two can no
-longer disagree.  The symbols are also exactly the set `cooked--raw-keymap\='
-binds explicitly, which is the table\='s other consumer.")
+longer disagree.  The symbols are also exactly the set
+`cooked--build-passthrough-map\=' binds explicitly, in every modified spelling,
+for each of the maps it builds -- which is the table\='s other consumer.")
 
 (defun cooked--key-sequence (entry)
   "The unmodified, un-negotiated escape sequence ENTRY names.
@@ -331,12 +332,13 @@ negotiation that never happened -- see `cooked--assumed-key-protocol'."
 (defun cooked-send-meta-key ()
   "Send the key that invoked this command to the child, with Meta applied.
 
-Bound only under the ESC prefix of `cooked--meta-overlay\=', where a Meta chord
-arrives as two events and the modifier is gone by the time a command runs:
-`M-t\=' is looked up as `ESC t\=', so `last-command-event\=' is a bare `?t\='.  Put
-the modifier back and hand the reconstructed event to `cooked-send-key\=', so
-that a negotiated protocol spells it as a modifier parameter rather than as a
-leading ESC -- which is the whole reason not to simply send \"\\e\" and the key.
+Bound only under the ESC prefix `cooked--build-meta-overlay\=' makes, where a
+Meta chord arrives as two events and the modifier is gone by the time a command
+runs: `M-t\=' is looked up as `ESC t\=', so `last-command-event\=' is a bare
+`?t\='.  Put the modifier back and hand the reconstructed event to
+`cooked-send-key\=', so that a negotiated protocol spells it as a modifier
+parameter rather than as a leading ESC -- which is the whole reason not to
+simply send \"\\e\" and the key.
 
 `event-apply-modifier\=' is what Emacs\=' own `event-apply-meta-modifier\=' uses,
 and it answers for symbols as well as characters."

@@ -120,7 +120,8 @@ pub enum Event {
     /// Its own event rather than a flag on [`Event::PromptStart`] because the two differ
     /// in what they mean to Emacs rather than in degree: this one opens no command and
     /// moves no prompt marker, it only says that the line about to be read continues the
-    /// one already submitted. See [`State::continues_prompt`].
+    /// one already submitted. See [`State::prompt_kind`], which is where `k=` is read
+    /// and a continuation told apart from an initial or a right-hand prompt.
     PromptContinuation(Anchor, MarkId),
     /// OSC 133;B — user input begins; this is where comint takes over.
     PromptEnd(Anchor, MarkId),

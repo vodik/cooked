@@ -449,8 +449,10 @@ f=$((f+1)); done; printf '\\033[?1049l'")))
 
 The reason this is separate from `cooked-bench-repaint': every cell here gets a
 `display' property and an image spec of its own, so it is the workload that
-tells you whether `cooked--box-image-cache' is earning its keep.  Compare the
-two figures — the gap is what box drawing costs over plain text."
+tells you whether the three tiers of box-glyph cache are earning their keep --
+`cooked--deco-image-cache' in front of `cooked--box-glyph-cache', with
+`cooked--box-glyph-cell-cache' under both.  Compare the two figures — the gap is
+what box drawing costs over plain text."
   (cooked-bench--session
    "repaint, 400 frames of box drawing"
    '("/bin/sh" "-c" "printf '\\033[?1049h'; f=0; while [ $f -lt 400 ]; do \

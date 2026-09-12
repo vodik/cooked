@@ -291,8 +291,12 @@ The entry point for callers holding decoded colours -- tests, and
 here; it calls `cooked--face-packed\=' and never spells a colour out at all
 unless the cache misses.  Both share one table and must therefore agree on the
 key for a rendition they can both describe, or the same face would be built
-twice and compare non-`eq\=' -- which
-`cooked-a-packed-span-and-a-spelled-out-one-share-a-face\=' pins."
+twice and compare non-`eq\='.  The test that walks both paths for one rendition
+is `cooked-bench-style-records-decode-to-the-rendition-they-name\=', and it is
+worth knowing how far it reaches: it compares the two results with `equal\=', so
+it catches the two paths disagreeing about the *rendition* and would not catch
+them agreeing about it under two different keys.  The sharing itself rests on
+the key being computed in one place, here."
   (let ((code (lambda (spec) (cond ((null spec) 0)
                                    ((consp spec) nil)
                                    (t (1+ spec))))))
