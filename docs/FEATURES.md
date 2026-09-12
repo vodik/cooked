@@ -338,15 +338,23 @@ Emacs — and OSC 110/111/112 put the theme's colours back.
 
 Three protocols arrive and all of them end in the same place: the kitty graphics
 protocol (including `o=z` compression), sixel, and iTerm2's `OSC 1337` inline images.
-Whatever comes in becomes a real Emacs image, hung on the buffer as one `display` slice
-per cell it covers. The command lines that produce each are in
+Whatever comes in becomes a real Emacs image, hung on the buffer as `display` slices cut
+from one shared spec. The command lines that produce each are in
 [IMAGES.md](IMAGES.md).
 
-The per-cell slicing is what makes everything downstream behave, and it is the whole
+The per-cell *addressing* is what makes everything downstream behave, and it is the whole
 design. Text can overwrite part of a picture and the rest stays; the picture scrolls
 into scrollback as ordinary rows; a rewrap carries it along, because there is nothing to
 carry except text properties. A terminal that blits pixels into a rectangle has to
 answer all three of those questions separately. cooked never asks them.
+
+Addressing is not the same as *intervals*, though, and conflating the two cost a great
+deal. A row of one picture reaches the buffer as a single `display` interval slicing
+that row's whole column range, because Emacs' redisplay pays `find_interval` and
+`parse_image_spec` once per interval — a 24x80 frame is 48 of them rather than 1944.
+The run is broken exactly where the grid broke it: a character written over the middle
+of a picture leaves two runs, each slicing from its own column, so the per-cell answers
+are still all available and nothing above has to know.
 
 `cooked-inline-images` turns the picture off without turning the *layout* off. Those
 cells were blanks on the grid before an image was hung on them and they are blanks

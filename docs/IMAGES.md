@@ -163,9 +163,13 @@ Emacs merges those into one image. Every character had a correct property throug
 the suite was green. The merge is now used deliberately — one run-wide bitmap over the
 whole run, a 24x80 border frame falling from 1920 `display` intervals to 24 — and
 `cooked-adjacent-box-glyphs-share-only-a-run-wide-image` guards the thing that actually
-has to hold: the image is as wide as the span its property covers. If you touch the
-decoration path, ask what the display engine does that a text property assertion cannot
-see.
+has to hold: the image is as wide as the span its property covers. Pictures take the
+same merge, a row of one placement being one interval whose slice is as wide as the run
+(a 24x80 frame of image cells, 1944 intervals down to 48), pinned by
+`cooked-a-row-of-image-cells-shares-one-run-wide-slice`. If you touch the decoration
+path, ask what the display engine does that a text property assertion cannot see — and
+note what makes the merge checkable from batch in both cases: the *width* is read back
+off the spec, since nothing here rasterizes.
 
 **The decoders were checked against other people's implementations, not their own
 tests.** Sixel decodes pixel-for-pixel identically to `sixel2png` on chafa's output

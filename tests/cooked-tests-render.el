@@ -1877,21 +1877,117 @@ rather than in `:images\=' -- see `cooked--image-spec\='."
           :cursor '(0 0 t block) :alt nil
           :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
 
-(ert-deftest cooked-image-cells-each-get-their-own-slice ()
-  "Per cell rather than one spec over the rectangle: that is what lets text
-overwrite part of a picture, and a scroll split it, without special-casing."
+(defun cooked-tests--image-cell (id crow ccol cols rows)
+  "The twelve bytes `cooked--apply-image-deco\=' reads for one cell."
+  (let ((u16 (lambda (n) (list (logand n 255) (logand (ash n -8) 255)))))
+    (apply #'unibyte-string
+           (append (list (logand id 255) (logand (ash id -8) 255)
+                         (logand (ash id -16) 255) (logand (ash id -24) 255))
+                   (funcall u16 crow) (funcall u16 ccol)
+                   (funcall u16 cols) (funcall u16 rows)))))
+
+(defun cooked-tests--image-update-broken (id cols rows hole &optional data)
+  "Like `cooked-tests--image-update\=', with column HOLE overwritten by a letter.
+
+What the grid does to a picture when a program writes over the middle of it: the
+overwritten cell holds a character of its own and is no longer part of the
+placement, so it contributes no record and the run arrives as *two* decoration
+spans at their own offsets.  Reproducing that shape here rather than driving a
+child is the point -- it is the input `cooked--apply-image-deco\=' has to break
+its runs against."
+  (let ((text (make-string cols ?\s))
+        (left nil)
+        (right nil))
+    (aset text hole ?X)
+    (dotimes (c cols)
+      (unless (= c hole)
+        (let ((bytes (cooked-tests--image-cell id 0 c cols rows)))
+          (if (< c hole) (push bytes left) (push bytes right)))))
+    (list :scrolled nil
+          :rows (list (cons 0 (list text
+                                    nil
+                                    (list (list 0 (cons 'image (apply #'concat (nreverse left))))
+                                          (list (1+ hole)
+                                                (cons 'image (apply #'concat (nreverse right))))))))
+          :images (and data (list (list id 'png data (* cols 10) (* rows 20))))
+          :height 12 :used 1 :head 0
+          :cursor '(0 0 t block) :alt nil
+          :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
+
+(ert-deftest cooked-a-row-of-image-cells-shares-one-run-wide-slice ()
+  "One `display\=' interval over the row, cutting a slice as wide as the run.
+
+The invariant, and it is the same one
+`cooked-adjacent-box-glyphs-share-only-a-run-wide-image\=' pins for glyphs.
+Emacs merges a span of characters whose `display\=' values are `eq\=' into a
+single displayed image, and whether that is a hazard or the point depends
+entirely on how wide the image is: a *cell*-wide slice shared across three cells
+would collapse the row to one cell of picture, while a slice sized to exactly
+the three cells it is put over draws one image occupying precisely the pixels
+those three cells did.  So the merge is asked for here rather than avoided.
+
+The old spelling of this test asserted the opposite -- that each cell carried
+its own slice advancing a cell per column -- and it was reading the mechanism
+for the requirement.  What must survive is that the *grid* addresses the picture
+one cell at a time, so that an overwrite, a scroll and a rewrap need no special
+case; that is a property of the wire records and of where the runs break, not of
+how many `put-text-property\=' calls the buffer ends up with.
+`cooked-an-image-run-broken-by-text-is-two-runs-at-their-own-columns\=' is the
+half that actually pins it, and this one is what a full-screen picture costs:
+1944 `display\=' intervals over a 24x80 frame become 48.
+
+Read the width back off the slice, which is what makes the merge observable from
+batch at all -- nothing here rasterizes, so the only evidence a run is drawn
+run-wide is that it says it is."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
     (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
-    (goto-char (point-min))
-    (dotimes (col 3)
-      (let ((display (get-text-property (+ (point-min) col) 'display)))
-        (should (eq (car-safe (car-safe display)) 'slice))
-        ;; (slice X Y W H) -- X advances a cell per column, Y stays on row 0.
-        (should (= (nth 1 (car display)) (* col 10)))
-        (should (= (nth 2 (car display)) 0))
+    (let ((beg (point-min)))
+      ;; One step of the walk covers all three cells, for both properties.
+      (should (equal (next-single-property-change beg 'display) (+ beg 3)))
+      (should (equal (next-single-property-change beg 'cooked-deco) (+ beg 3)))
+      (dotimes (col 3)
+        (should (eq (get-text-property (+ beg col) 'display)
+                    (get-text-property beg 'display)))
+        (should (eq (get-text-property (+ beg col) 'cooked-deco)
+                    (get-text-property beg 'cooked-deco))))
+      ;; ...and the slice under it is three cells wide and one tall, at the
+      ;; run's own origin in the picture.  (slice X Y W H), the cell being 10x20.
+      (let ((display (get-text-property beg 'display)))
+        (should (equal (car display) '(slice 0 0 30 20)))
         (should (eq (car-safe (cadr display)) 'image))))))
+
+(ert-deftest cooked-an-image-run-broken-by-text-is-two-runs-at-their-own-columns ()
+  "The half of the per-cell model that has to survive the coalescing.
+
+A picture with a character written over the middle of it is three spans, not
+one: the overwritten cell is no longer part of the placement and so sends no
+record at all, and the cells either side of it are runs whose columns within the
+picture skip past it.  Each has to be drawn at its *own* start column, or the
+right-hand fragment repaints the left of the picture over itself -- which is
+exactly what a run-wide slice gets wrong if the runs are not cut where the grid
+cut them.
+
+Driven from the wire rather than through a child, because what is under test is
+where `cooked--apply-image-deco\=' breaks a run and that is a property of the
+records it is handed."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked-tests--cell)
+    (cooked--apply (cooked-tests--image-update-broken 7 5 1 2 (cooked-tests--png)))
+    (let ((beg (point-min)))
+      ;; Columns 0-1, then the letter, then columns 3-4.
+      (should (equal (next-single-property-change beg 'display) (+ beg 2)))
+      (should-not (get-text-property (+ beg 2) 'display))
+      (should (equal (car (get-text-property beg 'display))
+                     '(slice 0 0 20 20)))
+      ;; The second run's slice starts at column 3 of the picture -- 30 pixels
+      ;; in -- and not at 0, which is the whole point of cutting it here.
+      (should (equal (car (get-text-property (+ beg 3) 'display))
+                     '(slice 30 0 20 20)))
+      (should (equal (next-single-property-change (+ beg 3) 'display)
+                     (+ beg 5))))))
 
 (ert-deftest cooked-image-cells-share-one-decoded-spec ()
   "Every cell slices the same spec, so Emacs decodes the picture once."
@@ -2214,17 +2310,22 @@ is deliberately not this."
   "The slice geometry is in cells, so a new cell size moves every slice as well
 as resizing the spec they cut from -- and nothing else in cooked ever rewrites a
 row once it is written, so a picture whose halves were built at two sizes stays
-mismatched until this runs."
+mismatched until this runs.
+
+Read at the *second* cell of the three, which is a second claim riding along:
+the run's `display\=' value covers the whole run, so the middle cell answers with
+the run's slice -- 3 cells wide and one tall -- rather than with one of its own.
+Both numbers in it move with the cell size, which is what is under test here."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
     (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
     (should (equal (car (get-text-property (1+ (point-min)) 'display))
-                   '(slice 10 0 10 20)))
+                   '(slice 0 0 30 20)))
     (cooked-tests--cell 12 26)
     (cooked--rescale-deco)
     (should (equal (car (get-text-property (1+ (point-min)) 'display))
-                   '(slice 12 0 12 26)))
+                   '(slice 0 0 36 26)))
     ;; And declines to walk the buffer again for a size it is already at.
     (cl-letf (((symbol-function 'next-single-property-change)
                (lambda (&rest _) (error "walked"))))
@@ -2289,7 +2390,7 @@ for this case."
     (cl-letf (((symbol-function 'cooked--deco-cell-size) (lambda () '(12 . 26))))
       (text-scale-increase 1))
     (should (equal (car (get-text-property (1+ (point-min)) 'display))
-                   '(slice 12 0 12 26)))))
+                   '(slice 0 0 36 26)))))
 
 (ert-deftest cooked-image-cells-are-sized-from-the-buffer-not-the-selected-window ()
   "The reported corruption, at its source.  With the buffer displayed in no
@@ -2306,11 +2407,11 @@ half at another, permanently, because nothing re-renders scrollback."
     (should-not (equal (cooked--cell-size (selected-window)) '(10 . 20)))
     (cooked--apply (cooked-tests--image-update 7 3 1 (cooked-tests--png)))
     (should (equal (car (get-text-property (1+ (point-min)) 'display))
-                   '(slice 10 0 10 20)))
+                   '(slice 0 0 30 20)))
     ;; And the same on every later drain: one picture, one scale.
     (cooked--apply (cooked-tests--image-update 7 3 1 nil))
     (should (equal (car (get-text-property (1+ (point-min)) 'display))
-                   '(slice 10 0 10 20)))))
+                   '(slice 0 0 30 20)))))
 
 (ert-deftest cooked-image-cells-with-no-measurement-wait-for-one ()
   "No window and no last known cell -- a terminal frame, or a session nothing
@@ -2327,7 +2428,7 @@ record still goes on the text, which is the whole of what the repair pass needs.
     (cooked-tests--cell)
     (cooked--rescale-deco)
     (should (equal (car (get-text-property (1+ (point-min)) 'display))
-                   '(slice 10 0 10 20)))))
+                   '(slice 0 0 30 20)))))
 
 (ert-deftest cooked-a-cell-size-change-rescales-and-a-plain-resize-does-not ()
   "`cooked--sync-size' is the one place that notices the cell moving, so it is

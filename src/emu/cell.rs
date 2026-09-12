@@ -310,12 +310,26 @@ impl Deco {
     /// u16 with no reserved bits.
     ///
     /// **Images** stay one 12-byte record per character — `(id: u32, cell_row: u16,
-    /// cell_col: u16, cols: u16, rows: u16)` — because the Lisp side genuinely needs one
-    /// per character: each cell displays its own slice of the picture, named by that
-    /// cell's row and column within it, and `cooked--apply-image-deco' explains why that
-    /// per-cell model is what survives a scroll, an overwrite and a rewrap. A run-length
-    /// record would compress the wire and buy nothing on the far side, which is the half
-    /// that costs.
+    /// cell_col: u16, cols: u16, rows: u16)` — and this is the one place the two kinds
+    /// are asymmetric for a reason that is *not* about what the far side wants.
+    ///
+    /// A glyph run is one decision repeated, and the run-length record exists because
+    /// Rust already knew it repeated: emitting it per character threw that knowledge
+    /// away and left Lisp to rediscover it by comparison. An image placement is not one
+    /// decision repeated. Every cell carries its own row and column within the picture,
+    /// which is what makes the grid's per-cell addressing survive a scroll, an overwrite
+    /// and a rewrap — so there is nothing here Rust knows and Lisp would have to
+    /// rediscover. The records *are* the knowledge.
+    ///
+    /// Lisp nonetheless coalesces them into runs before they reach the buffer, one
+    /// `display' interval per row of a placement instead of one per column, and that is
+    /// where the redisplay cost was — see `cooked--apply-image-deco'. Sending the runs
+    /// from here instead would save that loop four integer comparisons per cell and cost
+    /// a second wire shape both ends have to keep meaning the same thing forever. The
+    /// comparisons are not the expensive half; `put-text-property' is, and Lisp saves
+    /// that either way. REPORT.org §2 expected this record to become
+    /// `(id, crow, start-col, ncols, cols, rows)'; it does not need to, and the run
+    /// boundary is better derived where the properties are actually put.
     ///
     /// A count is never zero, and is capped at [`u16::MAX`] by splitting the record —
     /// unreachable at any terminal width, since a run cannot outlast its row, but the

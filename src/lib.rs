@@ -1264,9 +1264,11 @@ fn links_to_lisp(env: Env, links: &[(LinkId, String)]) -> Result<Vec<Value>> {
 ///
 /// That the two kinds count differently is the point rather than an inconsistency, and
 /// [`Deco::packed`] argues it: a glyph run is genuinely one decision repeated, while
-/// every cell of a picture displays its own slice and so needs its own record whatever
-/// the wire says. Compressing the wire where Lisp must decompress it again immediately
-/// would move nothing off the side that is actually slow.
+/// every cell of a picture carries its own place within it and so needs its own record
+/// whatever the wire says. What reaches the *buffer* is a run either way —
+/// `cooked--apply-image-deco' coalesces the cells of a row back into one `display'
+/// interval, which is where the redisplay cost was, and does it against the records it
+/// has already decoded rather than against a second wire shape.
 ///
 /// The rectangle is repeated on every image cell rather than carried once per image
 /// because it belongs to the placement — see [`Placement`](emu::image::Placement). Four
