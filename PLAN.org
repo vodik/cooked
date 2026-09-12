@@ -787,14 +787,41 @@ style comparison — the ghostel blind spot these tasks would trip — is only
 caught because a =repaint()= motif rewrites fixed text under a new pen. A change
 here that alters run boundaries should soak with =PROPTEST_CASES=100000=.
 
-** TODO [#A] Coalesce contiguous damaged rows into one Block
+** DONE [#A] Coalesce contiguous damaged rows into one Block
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §12 "The finding that matters most for cooked"; §7 item 2
 :GATE:     Property test: deltas replay ≡ full grid — satisfied, 2b1e02a
 :GAIN:     a 24-row repaint: 48 Emacs edits → 2
-:BRANCH:
+:BRANCH:   de55e35, ce3bd78, 2d0a65d
 :END:
+*Counted, not estimated: a 24-row repaint goes from 24 blocks and 47 buffer
+changes to 1 and 3.* Verified independently on merge.
+
+*§12's "with no protocol change" is wrong, and it contradicts §7 item 2, which
+says so.* Per-row WIDTH and UNIFORM had to become a table — §7 predicted that —
+and *per-row START had to join them*, which neither section saw:
+=cooked--apply-deco= phases a shade glyph's dither against absolute screen
+position, so without per-row offsets every row below the first in a run would be
+phased against the first row's origin and draw a doubled column. The table's
+length is also how Lisp learns the run length, so nothing counts newlines.
+
+*=RowSpan= is not reusable here*, contrary to §12's "the machinery already
+exists": it answers a different question (start and length, so a mark can point
+into the middle of a scrolled row) and carries no width or uniformity.
+=Update::scrolled_rows= is still the right worked example for newline placement.
+
+*The property test does not cover this change*, and the wave preamble's framing
+was too broad: =tests/delta_replay.rs= exercises =src/emu= and never reaches
+=update_to_lisp=, where this lives. The Lisp suite and the new tests are the
+oracle here. The hazard is pinned on both sides — a gap of even one row breaks
+the run, and an undamaged row between two damaged ones keeps its markers and its
+overlay — and all three tests fail when the grouping condition is widened.
+
+Found on the way: =cooked-bench--update= took =:height= from =(length rows)=,
+which was one per screen row and is now one per *run*, so a 24-row fixture
+declared a one-row grid and =cooked--fit-screen= trimmed 23 rows away. Every
+figure in the file would have been taken against the wrong screen.
 Verified: =drain_damage= is ascending by construction, =RowSpan= already exists
 (=src/lib.rs:1013=) and =Update::scrolled_rows= already proves one =Block= can
 carry many rows with a correct per-row span table. Offsets are already =u32= for
