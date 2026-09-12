@@ -322,8 +322,11 @@ one `compilation-start' rather than advising every caller of it."
   "BLOCK\='s text, carrying the child\='s colours when they are wanted.
 
 BLOCK is what `cooked--drain\=' hands back for a run of rendered text --
-`(TEXT STYLE-SPANS DECO-SPANS LINK-SPANS)\=', the shape `cooked--render-block\='
-takes.  Only the first two are used, and that is a decision each:
+`(TEXT STYLE-SPANS DECO-SPANS LINK-SPANS ROWS)\=', the shape
+`cooked--render-block\=' takes.  Only the first two are used, and that is a
+decision each.  The text can be several screen rows separated by newlines, since
+the core coalesces contiguous damaged rows into one block;
+`cooked-process--remember-rows\=' is where they are told apart again.
 
 Decorations are dropped because they are a *terminal\='s* answer to a glyph the
 font cannot draw -- a box character composed out of overlays, a shade dithered
@@ -396,14 +399,23 @@ new one."
   (unless (and cooked-process--live
                (eql (length cooked-process--live) height))
     (setq cooked-process--live (make-vector height "")))
-  (pcase-dolist (`(,index . ,block) rows)
-    (when (< index height)
-      (aset cooked-process--live index
-            ;; Right-trimmed because a bar is padded out to the terminal's width
-            ;; with spaces, and an overlay is not a screen: nothing here has to
-            ;; reach the right margin, and the trailing run would only widen the
-            ;; window for a line whose visible text stops well short of it.
-            (string-trim-right (or (cooked-process--text block) ""))))))
+  (pcase-dolist (`(,first . ,block) rows)
+    ;; One entry is a *run* of contiguous damaged rows, joined by newlines --
+    ;; see `cooked--render-rows'.  The vector is per screen row, so the run is
+    ;; split back apart on the newlines the core put between its rows.  Splitting
+    ;; the rendered text rather than the raw text is what keeps the styling: a
+    ;; substring carries the text properties `cooked-process--text' just applied.
+    (let ((row first))
+      (dolist (text (split-string (or (cooked-process--text block) "") "\n"))
+        (when (< row height)
+          (aset cooked-process--live row
+                ;; Right-trimmed because a bar is padded out to the terminal's
+                ;; width with spaces, and an overlay is not a screen: nothing
+                ;; here has to reach the right margin, and the trailing run would
+                ;; only widen the window for a line whose visible text stops well
+                ;; short of it.
+                (string-trim-right text)))
+        (setq row (1+ row))))))
 
 (defun cooked-process--tail-text ()
   "`cooked-process--live\=' as text, or nil when the grid says nothing.
@@ -514,6 +526,9 @@ whether it continues the line above rather than starting one."
              (scrolled (cooked-process--text (plist-get update :scrolled)))
              (head (plist-get update :head))
              (rows (plist-get update :rows))
+             ;; A `:rows' entry is a run of contiguous damaged rows, but the grid
+             ;; has just been shrunk to one, so the run starting at row 0 is that
+             ;; row and nothing else -- there is no second row for it to reach.
              (block (cdr (assq 0 rows)))
              (last (car block))
              (tail (unless (or (null last) (string-empty-p last))

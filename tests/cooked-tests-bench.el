@@ -118,34 +118,57 @@ the one call under test."
           (setq pos (1+ pos))))
       (should (= decorated 40)))))
 
-(ert-deftest cooked-bench-rows-carry-the-width-and-uniform-the-guard-reads ()
-  "A block is (TEXT STYLE-SPANS DECO-SPANS LINK-SPANS WIDTH UNIFORM), and every
-fixture here has to supply all six.
+(ert-deftest cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need ()
+  "A fixture is one run -- `(0 . BLOCK)\=' -- and a block is (TEXT STYLE-SPANS
+DECO-SPANS LINK-SPANS ROWS), where ROWS has one (START WIDTH UNIFORM) per screen
+row.  Every generator here has to supply it, and the row table has to describe
+the text it rides on.
 
-The last two are the ones that went stale, and they went stale in the quietest
-way this file has yet seen.  Nothing reads them in `cooked--render-block\=';
-`cooked--render-rows\=' reads them off the block afterwards and hands them to
-`cooked--guard-row-width\=', which does nothing at all unless the buffer is
-displayed.  The benchmark displayed nothing, so four-element blocks drove every
-figure in the file for as long as they existed, and the moment a window was
-attached the guard got a nil WIDTH and the run died in
+The measurements are the ones that went stale before, and they went stale in the
+quietest way this file has yet seen.  Nothing reads them in
+`cooked--render-block\='; `cooked--render-rows\=' reads them off the block
+afterwards and hands them to `cooked--guard-row-width\=', which does nothing at
+all unless the buffer is displayed.  The benchmark displayed nothing, so blocks
+missing them drove every figure in the file for as long as they existed, and the
+moment a window was attached the guard got a nil WIDTH and the run died in
 `cooked--row-mismeasured-p\='.  A crash was the lucky outcome: had the fixture
-said WIDTH the guard could work with and UNIFORM t, it would have reported the
+said a WIDTH the guard could work with and UNIFORM t, it would have reported the
 fast path's cost for rows that in production take the slow one.
 
-So the arity is asserted for every generator, and UNIFORM is asserted against
-the text rather than against a literal -- it means every character is one byte
-on one cell, so it is the box row, whose characters are three bytes each, that
-has to answer nil."
+So the table is asserted against the *text*, row by row: START must be where
+that row actually begins, WIDTH its cell count, and UNIFORM whether every
+character of it is one byte on one cell -- which makes the box row, whose
+characters are three bytes each, the one that has to answer nil.  The style and
+decoration offsets are checked to land inside the row they were written for,
+since re-basing them onto the assembled text is the one thing
+`cooked-bench--run\=' does that a per-row fixture never had to."
   (dolist (rows (list (cooked-bench--plain-rows 2 80)
                       (cooked-bench--styled-rows 2 80)
                       (cooked-bench--url-rows 2 80)
                       (cooked-bench--box-rows 2 80)))
-    (pcase-dolist (`(,_index . ,block) rows)
-      (should (= (length block) 6))
-      (pcase-let ((`(,text ,_styles ,_deco ,_links ,width ,uniform) block))
-        (should (= width (string-width text)))
-        (should (eq uniform (= (string-bytes text) (length text))))))))
+    (should (= (length rows) 1))
+    (pcase-let ((`((,first . ,block)) rows))
+      (should (= first 0))
+      (should (= (length block) 5))
+      (pcase-let* ((`(,text ,styles ,decos ,_links ,table) block)
+                   (lines (split-string text "\n")))
+        (should (= (length table) 2))
+        (should (= (length lines) 2))
+        (let ((offset 0))
+          (cl-loop for line in lines
+                   for row in table
+                   do (pcase-let ((`(,start ,width ,uniform) row))
+                        (should (= start offset))
+                        (should (= width (string-width line)))
+                        (should (eq (and uniform t)
+                                    (= (string-bytes line) (length line))))
+                        (setq offset (+ offset (length line) 1)))))
+        ;; The last row ends the text, so nothing may be addressed past it.
+        (let ((limit (length text)))
+          (cl-loop for i from 0 below (length styles) by cooked--style-record
+                   do (should (<= (cooked--u32 styles (+ i 4)) limit)))
+          (pcase-dolist (`(,from ,_deco) decos)
+            (should (< from limit))))))))
 
 (provide 'cooked-tests-bench)
 ;;; cooked-tests-bench.el ends here

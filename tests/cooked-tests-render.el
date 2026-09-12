@@ -335,6 +335,69 @@ output with the prompt that followed it."
       (should (member "ccc" lines))
       (should-not (seq-find (lambda (l) (string-match-p "aaabbb\\|bbbccc" l)) lines)))))
 
+(ert-deftest cooked-an-undamaged-row-between-two-damaged-ones-is-not-rewritten ()
+  "The hazard coalescing brings with it, pinned from the Emacs side.
+
+Contiguous damaged rows arrive as one block and are rewritten with one
+`delete-region\=' and one `insert\=' -- see `cooked--render-rows\='.  The version of
+that idea worth refusing is the one that breaks a run only where a row is
+*known* to be clean: a damage tracker with page granularity then reports the
+whole viewport, the coalescer faithfully turns it into a single reinsert, and
+every marker and overlay anchored anywhere in it dies.  cooked breaks a run on
+any row it was not told about, which is a strictly narrower claim and the one
+this asserts.
+
+Rows 0 and 2 are rewritten with text of exactly their own width, so a marker on
+row 1 must come back at exactly the position it went in at.  Had the run been
+coalesced across row 1, the marker would not merely have moved -- a deletion
+spanning it leaves it collapsed at the start of row 0, which is what makes this
+a sharp test rather than an approximate one.  The wire shape is asserted
+alongside it, because a Lisp-side test that only looked at the marker would
+still pass if the core stopped coalescing altogether."
+  (cooked-tests--with-session
+      ;; `stty -echo\=' and a `read\=' rather than a sleep: the rewrite has to
+      ;; land in a *later* drain than the text it rewrites, since the marker
+      ;; goes in between, and echo would otherwise have the line discipline
+      ;; print the escape sequence as `^[[1;1H\=' on the cursor\='s row instead of
+      ;; the child ever executing it.
+      '("/bin/sh" "-c"
+        "stty -echo; printf 'aaa\\nbbb\\nccc\\n'; read x; printf '\\033[1;1HXXX\\033[3;1HZZZ'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "ccc" (cooked-tests--text)))))
+    (let* ((middle (save-excursion
+                     (goto-char (point-min))
+                     (search-forward "bbb")
+                     (match-beginning 0)))
+           (mark (copy-marker (1+ middle)))
+           (overlay (make-overlay middle (+ middle 3)))
+           (runs nil)
+           (capture (lambda (rows &rest _)
+                      (push (mapcar (lambda (entry)
+                                      ;; (FIRST . ROWS-IN-THE-BLOCK), which is
+                                      ;; the length of the block's row table.
+                                      (cons (car entry) (length (nth 4 (cdr entry)))))
+                                    rows)
+                            runs))))
+      (advice-add 'cooked--render-rows :before capture)
+      (unwind-protect
+          (progn
+            ;; Releases the child\='s `read\=', which then addresses rows 0 and 2
+            ;; and nothing else -- row 1 is written by neither.
+            (cooked--send cooked--session "\n")
+            (should (cooked-tests--settle
+                     (lambda () (string-match-p "ZZZ" (cooked-tests--text))))))
+        (advice-remove 'cooked--render-rows capture))
+      (should (member '((0 . 1) (2 . 1)) runs))
+      (should (= (marker-position mark) (1+ middle)))
+      (should (equal (buffer-substring-no-properties middle (+ middle 3)) "bbb"))
+      (should (overlay-buffer overlay))
+      (should (= (overlay-start overlay) middle))
+      (should (= (overlay-end overlay) (+ middle 3)))
+      (let ((lines (split-string (cooked-tests--text) "\n")))
+        (should (member "XXX" lines))
+        (should (member "bbb" lines))
+        (should (member "ZZZ" lines))))))
+
 (ert-deftest cooked-prompt-lands-on-its-own-line-after-a-command ()
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh" :settle (lambda () (eq cooked--semantic 'input)))
@@ -1465,11 +1528,27 @@ that same block's own text."
     (let ((rows (plist-get (cooked--drain cooked--session) :rows))
           (checked 0))
       (should rows)
-      (pcase-dolist (`(,_index . ,block) rows)
-        (pcase-let ((`(,text ,_styles ,_decos ,_links ,width ,uniform) block))
-          (should (equal width (string-width text)))
-          (should (eq (not (null uniform)) (not (string-match-p (rx (not ascii)) text))))
-          (unless (string-empty-p text) (setq checked (1+ checked)))))
+      ;; A redraw damages every row, and every row is contiguous with the next,
+      ;; so the whole grid arrives as one block with one row table.  That is the
+      ;; coalescing itself, read off the wire rather than asserted about the
+      ;; grouping function -- see `contiguous_runs' in src/lib.rs.
+      (should (= (length rows) 1))
+      (should (= (caar rows) 0))
+      (pcase-dolist (`(,_first . ,block) rows)
+        (pcase-let* ((`(,text ,_styles ,_decos ,_links ,table) block)
+                     (lines (split-string text "\n")))
+          (should (= (length table) (length lines)))
+          (cl-loop for line in lines
+                   for row in table
+                   do (pcase-let ((`(,start ,width ,uniform) row))
+                        ;; START addresses the row's own text, which is what the
+                        ;; two numbers beside it are about.
+                        (should (equal line (substring text start (+ start (length line)))))
+                        (should (equal width (string-width line)))
+                        (should (eq (not (null uniform))
+                                    (not (string-match-p (rx (not ascii)) line))))
+                        (unless (string-empty-p line)
+                          (setq checked (1+ checked)))))))
       ;; The corpus really did arrive: five non-empty rows, not an empty grid
       ;; agreeing with itself.
       (should (>= checked 5)))))

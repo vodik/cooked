@@ -514,16 +514,59 @@ missing here from the moment the drain grew them, which is how
           :cursor '(0 0 t block) :alt alt
           :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
 
+(defun cooked-bench--run (rows)
+  "ROWS, each a description of one screen row, as the single run the module sends.
+
+The fixtures here hand `cooked--apply\=' what a full-screen repaint actually
+produces, and since the core coalesces contiguous damaged rows that is *one*
+entry -- `(0 . BLOCK)\=' -- whose block holds every row, joined by newlines, with
+a row table saying where each of them begins.  See `contiguous_runs\=' in
+src/lib.rs, and `cooked--render-block\=' for the block's shape.  A fixture still
+sending a block per row would measure a path the module no longer takes.
+
+Each element of ROWS is (TEXT SPANS DECOS UNIFORM): the row's characters, its
+style spans as (START END FG BG UNDERLINE ATTRS) with offsets *within the row*,
+its (START DECO) decoration spans likewise, and its answer to the guard's
+uniformity question.  Offsets are given per row and re-based here because that
+is the only place that knows where a row landed in the assembled text, and
+getting it wrong is a miscolouring rather than an error -- see
+`cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need\='."
+  (let ((text nil)
+        (styles nil)
+        (decos nil)
+        (table nil)
+        (offset 0))
+    (dolist (row rows)
+      (pcase-let ((`(,row-text ,spans ,row-decos ,uniform) row))
+        (when text
+          ;; Between the rows and not after the last one, exactly as
+          ;; `Block::push_newline\=' places it: a damaged row is written into a
+          ;; line that already exists.
+          (push "\n" text)
+          (setq offset (1+ offset)))
+        (push (list offset (string-width row-text) uniform) table)
+        (pcase-dolist (`(,from ,to ,fg ,bg ,ul ,attrs) spans)
+          (setq styles (append styles (cooked-bench--style-record
+                                       (+ offset from) (+ offset to)
+                                       fg bg ul attrs))))
+        (pcase-dolist (`(,from ,deco) row-decos)
+          (push (list (+ offset from) deco) decos))
+        (push row-text text)
+        (setq offset (+ offset (length row-text)))))
+    (list (cons 0 (list (apply #'concat (nreverse text))
+                        (and styles (apply #'unibyte-string styles))
+                        (nreverse decos)
+                        nil
+                        (nreverse table))))))
+
 (defun cooked-bench--plain-rows (count cols)
   "COUNT damaged rows of unstyled text, the cheapest thing to render.
 
-A row is (INDEX . BLOCK), and a block is (TEXT STYLE-SPANS DECO-SPANS
-LINK-SPANS WIDTH UNIFORM) with offsets in characters -- see
-`cooked--render-block'.  Unstyled text carries no span list at all, which is
-the case the sparse shape is built around.  WIDTH is the cell count and
-UNIFORM is t here because every character is one ASCII byte on one cell."
+Unstyled text carries no span list at all, which is the case the sparse shape is
+built around, and UNIFORM is t because every character is one ASCII byte
+standing on one cell."
   (let ((text (make-string cols ?x)))
-    (cl-loop for i below count collect (cons i (list text nil nil nil cols t)))))
+    (cooked-bench--run (cl-loop repeat count collect (list text nil nil t)))))
 
 (defun cooked-bench--le (value bytes)
   "VALUE as BYTES little-endian bytes, as a list."
@@ -547,19 +590,19 @@ agree."
 
 The spans arrive packed, not as lists -- see `cooked-bench--style-record\='.  An
 indexed foreground and a default background, which is what a shell or a build
-log actually emits and so the case the encoding is tuned for."
+log actually emits and so the case the encoding is tuned for.  The colour is
+rotated by row so that a screenful is not eight faces looked up once and cached
+for the rest of the frame."
   (let ((width (/ cols 8)))
-    (cl-loop for i below count
-             collect (cons i (list (make-string (* 8 width) ?x)
-                                   (apply #'unibyte-string
-                                          (cl-loop for r below 8
-                                                   append (cooked-bench--style-record
-                                                           (* r width)
-                                                           (* (1+ r) width)
-                                                           (logior (ash 1 24) (mod (+ i r) 8))
-                                                           0 0
-                                                           (if (cl-evenp r) 1 0))))
-                                   nil nil (* 8 width) t)))))
+    (cooked-bench--run
+     (cl-loop for i below count
+              collect (list (make-string (* 8 width) ?x)
+                            (cl-loop for r below 8
+                                     collect (list (* r width) (* (1+ r) width)
+                                                   (logior (ash 1 24) (mod (+ i r) 8))
+                                                   0 0
+                                                   (if (cl-evenp r) 1 0)))
+                            nil t)))))
 
 (defun cooked-bench--url-rows (count cols)
   "COUNT damaged rows each carrying a URL, which is what the goto-addr scan costs.
@@ -568,28 +611,27 @@ Plain text otherwise, so the gap against `cooked-bench--plain-rows\=' is the who
 of what `cooked--fontify-links\=' spends on a row that has something to find."
   (let* ((url "curl https://example.com/some/long/path ")
          (text (truncate-string-to-width (concat url (make-string cols ?x)) cols)))
-    (cl-loop for i below count collect (cons i (list text nil nil nil cols t)))))
+    (cooked-bench--run (cl-loop repeat count collect (list text nil nil t)))))
 
 (defun cooked-bench--box-rows (count cols)
   "COUNT damaged rows of box drawing, every cell taking the bitmap path.
 
 The decoration is `(glyph . PACKED)\=' as the module hands it over: four
 little-endian bytes per run of one shape, the `BoxGlyph\=' bits and the number of
-characters drawing them.  0x0050 is a plain light horizontal — left and right
-edges at weight 1 — which is what a border is made of, and a row of them is the
+characters drawing them.  0x0050 is a plain light horizontal -- left and right
+edges at weight 1 -- which is what a border is made of, and a row of them is the
 single record the encoding exists to produce."
-  (let* ((text (make-string cols ?─))
-         (deco (cons 'glyph (unibyte-string #x50 #x00
-                                            (logand cols #xff) (ash cols -8))))
-         (spans (list (list 0 deco))))
+  (let ((text (make-string cols ?─))
+        (deco (cons 'glyph (unibyte-string #x50 #x00
+                                           (logand cols #xff) (ash cols -8)))))
     ;; UNIFORM is nil, unlike every other fixture here: the box-drawing
     ;; character is three bytes, and UNIFORM asks about bytes as well as cells.
     ;; That is not a detail -- it is the flag that decides whether
     ;; `cooked--guard-row-width' can finish without measuring anything, so a
     ;; fixture claiming t would make the box rows look like the cheap case and
     ;; measure the one path this row exists to exercise.
-    (cl-loop for i below count
-             collect (cons i (list text nil spans nil cols nil)))))
+    (cooked-bench--run
+     (cl-loop repeat count collect (list text nil (list (list 0 deco)) nil)))))
 
 (defun cooked-bench--frames (label rows &optional frames)
   "Apply ROWS as a damaged-row update, one frame per iteration.

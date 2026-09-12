@@ -421,18 +421,23 @@ miscoloured with nothing to point at.  Change it in three places or none.")
 (defun cooked--render-block (block &optional row)
   "Insert BLOCK at point, with its styling and decoration applied.
 
-BLOCK is (TEXT STYLE-SPANS DECO-SPANS LINK-SPANS WIDTH UNIFORM), the one shape
-rendered text crosses the module boundary in -- see `cooked--drain\='.  TEXT is
-the whole run of characters, and every span carries offsets in characters into
-it; spans appear only where there is something to say, so a plain unstyled row
-carries no list at all.
+BLOCK is (TEXT STYLE-SPANS DECO-SPANS LINK-SPANS ROWS), the one shape rendered
+text crosses the module boundary in -- see `cooked--drain\='.  TEXT is the whole
+run of characters, and every span carries offsets in characters into it; spans
+appear only where there is something to say, so a plain unstyled row carries no
+list at all.
 
-Nothing here reads the last two.  WIDTH is how many grid cells TEXT occupies
-and UNIFORM whether every character of it takes one byte and stands on one
-cell, both by-products of the core building the row, for
-`cooked--guard-row-width\=' to use once this text is in the buffer.  They ride
-on the block rather than beside it because the block is the only thing that
-crosses per row.
+ROWS is the block\='s row table: one (START WIDTH UNIFORM) per *screen row* the
+block covers, in order.  A block is a run of contiguous damaged rows joined by
+newlines -- see `cooked--render-rows\=' -- so START is where that row\='s text
+begins in TEXT, WIDTH how many grid cells it occupies, and UNIFORM whether
+every character of it takes one byte and stands on one cell.  The last two are
+by-products of the core building the row, for `cooked--guard-row-width\=' to use
+once this text is in the buffer, and are read by `cooked--render-rows\=' rather
+than here; START is read here, and only for a decoration, which is the one
+thing that has to know which row of the run it landed on.  Scrollback carries
+no table at all: its lines are ordinary buffer text that is allowed to wrap, so
+there is nothing to guard and no screen row to phase against.
 
 STYLE-SPANS is not a list but a unibyte string of fixed-width records, one per
 run that has a rendition to name -- see `Block::push_style\=' in src/lib.rs for
@@ -454,13 +459,20 @@ Colour rides on `face\=' alone.  `cooked-mode\=' clears `font-lock-defaults\=',
 which comint leaves at (nil t) -- under that setting any fontification of the
 buffer unfontifies it first and strips a bare `face\='.
 
-ROW is the screen row BLOCK makes up, where the caller knows it: the live screen
-does, scrollback does not.  It also stands in for the origin a shade glyph\='s
-dither is phased against.  Scrollback passes neither and loses at most a seam on
-that one glyph kind.
+ROW is the screen row BLOCK\='s *first* row is, where the caller knows it: the
+live screen does, scrollback does not.  It also stands in for the origin a shade
+glyph\='s dither is phased against.  Scrollback passes neither and loses at most
+a seam on that one glyph kind.
+
+Each further row of the run is ROW plus its place in the row table, and its
+origin is where the table says its text begins.  That bookkeeping is why the
+table carries START at all: a shade\='s dither phase is a function of the cell\='s
+absolute screen position, so phasing every row of a coalesced run against the
+first row\='s origin would draw a doubled column down each row below the first --
+the very seam the per-cell record exists to avoid.
 
 Returns the position the text was inserted at."
-  (pcase-let ((`(,text ,styles ,decos ,links) block))
+  (pcase-let ((`(,text ,styles ,decos ,links ,table) block))
     (let ((start (point)))
       (insert text)
       ;; The `insert' is outside the binding below and the three property phases
@@ -505,9 +517,20 @@ Returns the position the text was inserted at."
                                  (+ start (cooked--u32 styles (+ i 4)))
                                  'face face))
             (setq i (+ i cooked--style-record))))
-        (dolist (span decos)
-          (pcase-let ((`(,from ,deco) span))
-            (cooked--apply-deco (+ start from) deco (and row start) row)))
+        ;; The row table and the decoration spans are both in ascending offset
+        ;; order, so which row a span fell on is a pointer walked forward once
+        ;; across the whole block rather than a search per span.  `rest' is the
+        ;; table from the current row on, and `seen' how many rows have gone by.
+        (let ((rest table)
+              (seen 0))
+          (dolist (span decos)
+            (pcase-let ((`(,from ,deco) span))
+              (while (and (cdr rest) (>= from (car (cadr rest))))
+                (setq rest (cdr rest)
+                      seen (1+ seen)))
+              (cooked--apply-deco (+ start from) deco
+                                  (and row (+ start (if rest (caar rest) 0)))
+                                  (and row (+ row seen))))))
         (when links
           (cooked--render-link-spans start links)))
       start)))
@@ -2124,11 +2147,53 @@ outright, with no scrollback and no command records of Emacs\=' own to re-apply.
 Empty by default, and run through `cooked--run-seam\=', so an entry that signals
 costs its own contribution and neither the rest of the hook nor the drain.")
 
+(defun cooked--goto-screen-run-end (start first count)
+  "End of the last of COUNT screen rows, the first of them row FIRST at START.
+
+The far edge of the region `cooked--render-rows\=' deletes before writing a
+coalesced run of damaged rows into it, and the rows below the first may not
+exist yet: the screen region is trimmed to its content, so a run reaching past
+what the buffer holds has to extend it exactly as a single row does.
+
+The cheap path is a `forward-line\=' from START, since the rows of a run are
+adjacent lines by construction.  It is trusted only when it both moved the whole
+way and landed at a line start -- `forward-line\=' counts a final line lacking a
+newline as a line moved, so it can report success while sitting at that line\='s
+end, which would put the far edge of the deletion a whole row short.  Anything
+else falls back to `cooked--goto-screen-row\=', which is the one place that knows
+how to add the missing lines.
+
+COUNT of one is answered without moving at all, and not merely as an
+optimisation: screen row 0 does not always begin a buffer line -- it continues
+the wrapped row handed to scrollback before it -- so the `bolp\=' test above
+would send the ordinary single-row case down the fallback for no reason."
+  (goto-char start)
+  (if (or (= count 1)
+          (and (zerop (forward-line (1- count))) (bolp)))
+      (line-end-position)
+    (cooked--goto-screen-row (+ first count -1) 'extend)
+    (line-end-position)))
+
 (defun cooked--render-rows (rows &optional alt)
-  "Rewrite damaged ROWS, an alist of (INDEX . BLOCK).
+  "Rewrite damaged ROWS, an alist of (FIRST . BLOCK).
+
+Each entry is a *run* of contiguous damaged rows: FIRST is the index of its
+first row, and BLOCK holds them all as one string with newlines between them
+and a row table saying where each begins -- see `cooked--render-block\='.  The
+core coalesces the run; a run of one row is the ordinary case and the same code
+path.
+
+That is where the win is.  Emacs pays per edit rather than per character, so a
+24-row repaint that was 24 `delete-region\='s and 24 `insert\='s is one of each,
+and the style and decoration loops in `cooked--render-block\=' run once across
+the whole run instead of once per row.  What the core will not do is coalesce
+across a row it was not told about: an undamaged row between two damaged ones
+breaks the run, because deleting and reinserting it would destroy every marker
+and overlay anchored in text nothing asked to have rewritten.  See
+`contiguous_runs\=' in src/lib.rs, which is where that decision lives.
 
 ROWS is expected in ascending index order, which is how the drain reports
-damage.  Order is not required for correctness -- a row out of sequence is
+damage.  Order is not required for correctness -- a run out of sequence is
 found by the same walk from `cooked--screen-start' that every row used to
 take -- but it is what keeps a full-height repaint from being quadratic; see
 the walk below.
@@ -2202,33 +2267,64 @@ which has no such seam at all."
                             (and (zerop (forward-line (- index last-row)))
                                  (bolp))))
           (cooked--goto-screen-row index 'extend))
-        (delete-region (point) (line-end-position))
-        (let ((start (point)))
-          (setq last-row index
-                last-start start)
+        (let* ((start (point))
+               ;; One entry per row of the run, and the only thing that says how
+               ;; many rows this block covers.  A block that arrived without a
+               ;; table is one row and no measurements -- nothing the core
+               ;; produces is shaped that way, but the guard must not be handed
+               ;; a nil width, which is a `wrong-type-argument' several layers
+               ;; from anything that would explain it.
+               (table (or (nth 4 block) '((0 nil nil))))
+               (end (cooked--goto-screen-run-end start index (length table))))
+          ;; The two edits the whole change is about: one deletion spanning the
+          ;; run and one insertion of its text.  The trailing newline of the
+          ;; run's last row is left where it is -- a damaged row is written into
+          ;; a line that already exists, and the block carries newlines only
+          ;; *between* its rows for exactly that reason.
+          (delete-region start end)
+          (goto-char start)
           (cooked--render-block block index)
-          ;; The block's own last two elements: how many cells the row occupies
-          ;; on the grid, and whether every character of it takes one byte and
-          ;; stands on one cell.  Both are by-products of the core building the
-          ;; row, and both are answers the guard used to work out for itself,
-          ;; per row per drain -- see `cooked--guard-row-width'.
-          (when layout
-            (cooked--guard-row-width start (nth 4 block) layout (nth 5 block)
-                                     cache))
-          ;; Nothing scans the row here.  Rewriting the text is what tells
-          ;; jit-lock the row is no longer fontified, so redisplay asks
-          ;; `cooked--fontify-region' for it -- and only if this frame is one
-          ;; that reaches the screen.  See there.
-          ;;
-          ;; The bounds are read after the guard, which is the one thing in this
-          ;; loop that can shorten a row: it trims a line Emacs laid out wider
-          ;; than `cooked--cols' assumed.
-          ;;
-          ;; The optional layers are still announced from here rather than from
-          ;; redisplay, because a mark on this screen is not yet where it
-          ;; belongs; `cooked--notify-rows-rendered' is the other half of that.
-          (when (and cooked-row-rendered-functions (not alt))
-            (push (cons start (line-end-position)) rendered)))))
+          ;; Now walk the rows just written.  Two things are per row and neither
+          ;; can be done from the offsets in the table: the guard measures a row
+          ;; against Emacs' own layout of it, and it can *shorten* the row it is
+          ;; given, so every position after it has to be read from the buffer
+          ;; rather than computed from where the text was put.
+          (let ((pos start)
+                (i 0))
+            (dolist (row table)
+              (pcase-let ((`(,_ ,cells ,uniform) row))
+                (goto-char pos)
+                ;; The row table's own two measurements: how many cells the row
+                ;; occupies on the grid, and whether every character of it takes
+                ;; one byte and stands on one cell.  Both are by-products of the
+                ;; core building the row, and both are answers the guard used to
+                ;; work out for itself, per row per drain -- see
+                ;; `cooked--guard-row-width'.
+                (when (and layout cells)
+                  (cooked--guard-row-width pos cells layout uniform cache))
+                (goto-char pos))
+              ;; Nothing scans the row here.  Rewriting the text is what tells
+              ;; jit-lock the row is no longer fontified, so redisplay asks
+              ;; `cooked--fontify-region' for it -- and only if this frame is one
+              ;; that reaches the screen.  See there.
+              ;;
+              ;; The bounds are read after the guard, which is the one thing in
+              ;; this loop that can shorten a row: it trims a line Emacs laid out
+              ;; wider than `cooked--cols' assumed.
+              ;;
+              ;; The optional layers are still announced from here rather than
+              ;; from redisplay, because a mark on this screen is not yet where
+              ;; it belongs; `cooked--notify-rows-rendered' is the other half of
+              ;; that.
+              (let ((eol (line-end-position)))
+                (when (and cooked-row-rendered-functions (not alt))
+                  (push (cons pos eol) rendered))
+                ;; The next run walks from the last row of this one, which is
+                ;; where this loop leaves off rather than where it started.
+                (setq last-row (+ index i)
+                      last-start pos
+                      i (1+ i)
+                      pos (min (1+ eol) (point-max)))))))))
     (nreverse rendered)))
 
 (defun cooked--notify-rows-rendered (bounds)
