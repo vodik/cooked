@@ -451,13 +451,30 @@ arbitrates a category ("guessed shape") only an optional layer produces. Add
 =cooked-link-claim-functions= and move the ownership decision to where input
 ownership already lives.
 
-** NEXT [#A] thing-at-point providers — ROADMAP §3 without embark
+** DONE [#A] thing-at-point providers — ROADMAP §3 without embark
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §6 "ROADMAP §3 is already solved, one layer below embark"
 :GATE:     Fix =cooked-link.el='s upward ownership questions — satisfied, ff4b154
-:BRANCH:
+:BRANCH:   fda7914
 :END:
+Landed. Two departures from the plan, both deliberate:
+
+- *A dispatcher, not a snapshot.* Installing the contributed alist at mode time
+  would have missed a =cooked-file-link= loaded after the first buffer exists —
+  and it is =require=-to-enable, so that is the normal way to load it.
+  =cooked--thing-at-point-things= is fixed and all three kinds are claimed up
+  front; a kind nothing answers returns nil, which is thingatpt's own
+  "no provider" signal, so claiming displaces nothing.
+- *The =url= provider answers only the OSC 8 case.* thingatpt already reads a
+  bare URL from the text, and more schemes than goto-addr does. What it cannot
+  know is that these characters carry a destination written nowhere on screen.
+
+Found and fixed on the way: =ffap-file-exists-string= returns the name it was
+*given*, not where it found it, so =cooked-file-link--exists= answered a bare
+=sub/f.txt= for a file that exists only under the project root — and the caller
+resolved that against the child's =default-directory=, the one directory it had
+just been established not to be in.
 =thing-at-point-provider-alist= for =url= / =filename= / =existing-filename=,
 the matching bounds alist, and =file-name-at-point-functions=. Installed from
 =cooked-mode.el= setup with each link layer contributing its own — the tier
