@@ -666,10 +666,17 @@ printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 https://two
 read x; \
 printf '\\033[1;1Hgo to https://three.example/ now'; \
 printf '\\033[2;1H\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 https://four.example/'; \
+printf '\\033[3;1H'; \
 sleep 5")
     (cooked-tests--cell)
     (should (cooked-tests--settle
              (lambda () (string-match-p "two.example" (cooked-tests--text)))))
+    ;; The child parks the cursor on a third row after the repaint, and that is
+    ;; load-bearing rather than tidy: the URL guess declines the cursor's own
+    ;; row -- see `cooked--link-hold-bounds' -- so leaving the cursor on row 2
+    ;; would make this fail for a reason with nothing to do with the
+    ;; `inhibit-modification-hooks' binding it is about.
+    ;;
     ;; Look once, so both rows are marked fontified and the repaint has
     ;; something to take back.
     (cooked-tests--fontify)
@@ -684,12 +691,12 @@ sleep 5")
       (let ((pos (cooked-tests--link-at text)))
         (should pos)
         (should-not (get-text-property pos 'fontified))))
-    ;; And the looking, when it happens, finds what is there now.
+    ;; And the looking, when it happens, finds what is there now -- as text
+    ;; properties rather than overlays; see `cooked--fontify-links'.
     (cooked-tests--fontify)
     (dolist (text '("three.example" "four.example"))
       (let ((pos (cooked-tests--link-at text)))
-        (should (seq-find (lambda (o) (overlay-get o 'goto-address))
-                          (overlays-in pos (1+ pos))))))))
+        (should (get-text-property pos 'cooked-link-url))))))
 
 (ert-deftest cooked-the-scan-is-not-armed-when-it-has-nothing-to-scan ()
   "Registering jit-lock is not free: it hangs `jit-lock-after-change\=' on every
