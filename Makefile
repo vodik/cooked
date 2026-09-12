@@ -144,9 +144,28 @@ checkdoc:
 	                   (checkdoc-file \"$$f\"))" 2>&1; \
 	done | grep -v '^Warning (emacs): $$' || true
 
+# Byte-compiled, and that is not a detail: every figure this suite produced before
+# now was measured on interpreted Lisp that no user ever runs.  Compiled, a styled
+# 24x80 frame conses 1,858 cells against 14,112, per-frame styled p50 goes 0.575 to
+# 0.183 ms, and the UNSTABLE flag fires on three rows rather than eight -- so most
+# of the fat tail the variance check was built to filter out is the harness's own
+# and not cooked's.  `cooked--face-packed' on a cache hit conses 42 net interpreted
+# and *nothing* compiled, which is what its docstring has always claimed.
+#
+# Its own step rather than a dependency on `compile', which ends in
+# `rm -f lisp/*.elc' on purpose: that target exists to fail the build on a warning,
+# and leaving its output behind would silently change what `lisp-test' loads.  The
+# same reasoning applies here in reverse, so the `.elc' are removed again when this
+# finishes -- from a `trap', so it happens when the bench fails or is interrupted
+# too, and a stale `.elc' cannot follow you into the next test run.
+#
+# `lisp-test' stays interpreted.  A readable backtrace is worth more there than
+# speed, and the suite is not measuring anything.
 bench:
+	$(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
+	  -f batch-byte-compile $(wildcard lisp/*.el)
 	cargo test --release --test throughput -- --ignored --nocapture
-	$(BATCH) -l cooked-bench.el -f cooked-bench
+	@trap 'rm -f lisp/*.elc' EXIT INT TERM; $(BATCH) -l cooked-bench.el -f cooked-bench
 
 # `cargo clean' only reaches CARGO_TARGET_DIR, so the installed core -- which is
 # deliberately not cargo's to manage -- has to be named here or it survives.
