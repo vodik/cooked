@@ -12,6 +12,13 @@
 ;; Batch mode has no window system, so the box-drawing figures here measure spec
 ;; construction and property application, not rasterization.  That is the part
 ;; that scales per cell, which is what makes it worth watching.
+;;
+;; Every case reports a distribution rather than a total, and *the median is the
+;; headline*.  Not a house preference: garbage collection is deliberately left
+;; running inside a measured loop, so a case that allocates has a p99 fifteen
+;; times its median with nothing at all wrong -- see `cooked-bench--record' for
+;; the GC count that makes that readable.  A mean sits somewhere between the two
+;; and describes neither.
 
 ;;; Code:
 
@@ -21,7 +28,145 @@
 (require 'cooked-mode)
 
 (defvar cooked-bench-results nil
-  "Accumulated (LABEL SECONDS DETAIL) rows, for `cooked-bench--report'.")
+  "Accumulated (LABEL SAMPLES DETAIL) rows, for `cooked-bench--report'.
+
+SAMPLES is the list of per-iteration seconds, not a total: every case here
+reports a spread, because a single total cannot tell a workload that is
+genuinely slow from one that was interrupted once by something else on the
+machine.")
+
+(defvar cooked-bench-min-duration 0.5
+  "Seconds a measured loop must run before its samples are worth reading.
+
+A case declares an iteration count, but that count is a *floor*: if the
+declared iterations finish faster than this the loop keeps going.  The reason
+is that `float-time' resolution and scheduler granularity are fixed costs, so
+a loop that finishes in 5 ms is mostly measuring them.  Half a second is
+ghostel's figure and there is no reason to differ.")
+
+;;;; The measured primitive
+;;
+;; One place where iteration, warmup, GC and statistics are decided, so that
+;; every case in this file is comparable with every other and none of them has
+;; to get the discipline right on its own.  The semantics are ghostel's
+;; `ghostel-bench--measure' (bench/ghostel-bench.el:270) -- discarded warmup,
+;; three collections, a trial phase that raises the iteration count to reach
+;; `cooked-bench-min-duration', and a loop that continues while *either* the
+;; count is unmet or the clock is short -- with two deliberate divergences.
+;;
+;; First, every per-iteration time is kept rather than summed.  ghostel reports
+;; a mean everywhere except typing latency, and a mean is the statistic one
+;; interfering scheduler event destroys: a case that ran 200 clean iterations
+;; and one 40 ms stall reports a number nothing in the code explains.  The
+;; median survives that, so the median is the headline here and the mean is
+;; printed beside it as the thing to distrust when the two disagree.  The same
+;; argument is made at greater length in the header of
+;; scripts/bench-scroll-ceiling.el, from the other direction: there it is the
+;; compositor's frame callback rather than another process, and the median was
+;; still the only statistic that held still.
+;;
+;; Second, the trial phase scales on *wall* time while the sample charged is
+;; whatever BODY-FN says it is.  ghostel does not need the distinction because
+;; its bodies are pure computation, but cooked's real-child cases spend most of
+;; their wall clock waiting in `accept-process-output' for a shell loop, and
+;; charge only the drain and apply that happen between waits.  Scaling on the
+;; charged time would divide a 0.5 s target by a 4 ms sample and ask for a
+;; hundred and twenty child processes.
+
+(defun cooked-bench--pct (sorted p)
+  "The P quantile of SORTED, by nearest rank.
+
+Nearest rank rather than interpolation, so the figure printed is always a time
+that was actually observed -- an interpolated p99 of a twelve-sample run is a
+number no iteration ever took.  Same rule as `ceil--pct' in
+scripts/bench-scroll-ceiling.el."
+  (nth (min (1- (length sorted)) (floor (* p (length sorted)))) sorted))
+
+(defun cooked-bench--record (label samples &optional gcs detail)
+  "Record and print SAMPLES, a list of per-iteration seconds, under LABEL.
+
+GCS is how many garbage collections happened inside the measured loop and
+DETAIL is appended to the printed row.
+
+The GC count is printed rather than kept to one side because it is what makes
+the tail readable.  Collection is deliberately not suppressed during a loop --
+a workload that allocates should pay for it, as a real session does -- so a
+case that allocates heavily can have a p99 twenty times its median with
+nothing wrong: the slow iterations are the ones that collected.  Without the
+count there is no way to tell that apart from another process having taken the
+CPU, which is a different problem with a different fix."
+  (push (list label samples gcs detail) cooked-bench-results)
+  (let* ((sorted (sort (copy-sequence samples) #'<))
+         (n (length sorted))
+         (mean (/ (apply #'+ sorted) (float n))))
+    (message "  %-40s n=%5d  min %7.3f  p50 %7.3f  p99 %7.3f  max %7.3f  mean %7.3f ms  %3d gc  %s"
+             label n
+             (* 1000 (car sorted))
+             (* 1000 (cooked-bench--pct sorted 0.50))
+             (* 1000 (cooked-bench--pct sorted 0.99))
+             (* 1000 (car (last sorted)))
+             (* 1000 mean)
+             (or gcs 0)
+             (or detail ""))))
+
+(defun cooked-bench--measure (label unit-count body-fn &optional iterations)
+  "Time BODY-FN repeatedly and record its distribution under LABEL.
+
+BODY-FN is called with no arguments.  If it returns a float that float is the
+sample, and the rest of the call is not cooked's to answer for -- which is how
+the real-child cases exclude the child's own runtime.  Any other return value
+means the wall time of the call is the sample.  A float specifically, rather
+than \"non-nil\": bodies that end in a call whose value nobody wanted are the
+common case here, and one of them returning a cons was enough to make the
+charge nonsense before the test was narrowed.
+
+UNIT-COUNT is how many units of work one iteration does -- frames, rows,
+drains.  When it is more than one, the per-unit median is printed alongside,
+because that is the figure that compares across cases of different sizes.
+
+ITERATIONS is a floor and defaults to 1.  The loop runs until both the count
+is met and `cooked-bench-min-duration' has elapsed, so a case that got faster
+than its trial estimate still runs long enough to be timed."
+  (let ((n (max 1 (or iterations 1)))
+        (samples nil))
+    (garbage-collect)
+    ;; The discarded warmup: first call through a code path pays for
+    ;; autoloading, the byte-compiler's lazy work and every cache in the render
+    ;; being cold, and none of that is what the case is about.
+    (funcall body-fn)
+    (garbage-collect)
+    ;; Trial phase.  Three iterations is enough to size the loop and cheap
+    ;; enough to throw away, which is what happens to its samples -- they were
+    ;; taken before the count was settled and there is no reason to mix them in.
+    (let* ((trials (min 3 n))
+           (trial-start (float-time)))
+      (dotimes (_ trials) (funcall body-fn))
+      (let ((trial-wall (- (float-time) trial-start)))
+        (when (and (> trial-wall 0) (< trial-wall cooked-bench-min-duration))
+          (setq n (max n (ceiling (/ (* cooked-bench-min-duration trials)
+                                     trial-wall)))))))
+    (garbage-collect)
+    ;; Not suppressed during the loop, deliberately.  A workload that allocates
+    ;; its way into a collection should pay for it here, because a real session
+    ;; does; the three collections above only make sure it is not paying for
+    ;; garbage some earlier case left behind.
+    (let ((start (float-time))
+          (collections gcs-done)
+          (done 0))
+      (while (or (< done n) (< (- (float-time) start) cooked-bench-min-duration))
+        (let* ((t0 (float-time))
+               (charged (funcall body-fn)))
+          (push (if (floatp charged) charged (- (float-time) t0)) samples)
+          (setq done (1+ done))))
+      (setq collections (- gcs-done collections))
+      (cooked-bench--record
+       label samples collections
+       (when (> unit-count 1)
+         (let ((sorted (sort (copy-sequence samples) #'<)))
+           (format "%d units/iter, %.3f ms/unit at p50"
+                   unit-count
+                   (/ (* 1000 (cooked-bench--pct sorted 0.50)) unit-count))))))
+    samples))
 
 (defmacro cooked-bench--with-session (argv &rest body)
   "Run BODY in a live cooked buffer running ARGV."
@@ -41,16 +186,23 @@
        (with-current-buffer buffer (cooked--cleanup))
        (kill-buffer buffer))))
 
-(defun cooked-bench--record (label seconds &optional detail)
-  (push (list label seconds detail) cooked-bench-results)
-  (message "  %-42s %8.1f ms   %s" label (* 1000 seconds) (or detail "")))
+(defvar cooked-bench--last-detail nil
+  "Detail string left by the most recent session, for `cooked-bench--session'.
 
-(defun cooked-bench--drain-until-exit (label &optional seconds)
-  "Pump ARGV's session to completion, timing only drain and apply.
+An iteration of a real-child case is a whole session, so the drain count and
+buffer size differ from one to the next and there is no single figure for the
+run.  The last iteration's is reported, which is representative because the
+child is the same every time; the spread that actually matters is in the
+samples.")
+
+(defun cooked-bench--drain-until-exit (&optional seconds)
+  "Pump the current session to completion, charging only drain and apply.
 
 The child runs on its own while we wait in `accept-process-output', so the
 elapsed time of the whole loop is mostly the child's.  Only the work Emacs does
-per wakeup is accumulated, which is the number this file exists to produce."
+per wakeup is accumulated, which is the number this file exists to produce, and
+it is that accumulation -- not the wall clock -- that is returned as the
+sample."
   (let ((deadline (+ (float-time) (or seconds 30)))
         (spent 0.0)
         (drains 0))
@@ -61,39 +213,58 @@ per wakeup is accumulated, which is the number this file exists to produce."
           (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))
           (setq spent (+ spent (- (float-time) t0))
                 drains (1+ drains)))))
-    (cooked-bench--record label spent
-                          (format "%d drains, %d buffer chars" drains (buffer-size)))
+    (setq cooked-bench--last-detail
+          (format "%d drains, %d buffer chars" drains (buffer-size)))
     spent))
+
+(defun cooked-bench--session (label argv &optional iterations)
+  "Measure LABEL as repeated whole sessions of ARGV, drained to exit.
+
+One iteration is one spawn, one flood and one teardown, because there is no
+smaller repeatable unit for a case whose whole point is a real child: the
+drains inside a single session are not interchangeable samples, the first
+seeing a cold buffer and the last a full one.  So the count stays small -- the
+default floor of three is usually raised to five or six by
+`cooked-bench-min-duration' -- and at that n the p99 is the maximum by
+construction.  That is not a defect to hide: the p99 column on these rows is
+reading `the worst of about six sessions', which is exactly what the stability
+check downstream wants from it."
+  (cooked-bench--measure
+   label 1
+   (lambda ()
+     (cooked-bench--with-session argv (cooked-bench--drain-until-exit)))
+   (or iterations 3))
+  (message "  %-40s   %s" "" cooked-bench--last-detail))
 
 (defun cooked-bench-flood ()
   "Plain output scrolling into the buffer: the `cat a big file' case."
-  (cooked-bench--with-session
-      '("/bin/sh" "-c" "i=0; while [ $i -lt 20000 ]; do \
-echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")
-    (cooked-bench--drain-until-exit "flood, 20k plain lines")))
+  (cooked-bench--session
+   "flood, 20k plain lines"
+   '("/bin/sh" "-c" "i=0; while [ $i -lt 20000 ]; do \
+echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")))
 
 (defun cooked-bench-styled ()
   "Heavily coloured output: the `ls --color' / build-log case.
 
 This is the one the face cache is for — every line carries several styled runs,
 so it is the shape that turns a per-run cost into a visible one."
-  (cooked-bench--with-session
-      '("/bin/sh" "-c" "i=0; while [ $i -lt 20000 ]; do \
+  (cooked-bench--session
+   "flood, 20k styled lines"
+   '("/bin/sh" "-c" "i=0; while [ $i -lt 20000 ]; do \
 printf '\\033[1;32mword\\033[0m \\033[38;2;10;20;30mrgb\\033[0m plain %s\\n' $i; \
-i=$((i+1)); done")
-    (cooked-bench--drain-until-exit "flood, 20k styled lines")))
+i=$((i+1)); done")))
 
 (defun cooked-bench-repaint ()
   "Full-screen repaint over the alternate screen: the `htop' case.
 
 Nothing scrolls, so this isolates the damaged-row path — every frame rewrites
 every row in place and the buffer never grows."
-  (cooked-bench--with-session
-      '("/bin/sh" "-c" "printf '\\033[?1049h'; f=0; while [ $f -lt 400 ]; do \
+  (cooked-bench--session
+   "repaint, 400 frames x 24 rows"
+   '("/bin/sh" "-c" "printf '\\033[?1049h'; f=0; while [ $f -lt 400 ]; do \
 r=1; while [ $r -le 24 ]; do printf '\\033[%s;1H\\033[4%sm' $r $((f%8)); \
 printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'; r=$((r+1)); done; \
-f=$((f+1)); done; printf '\\033[?1049l'")
-    (cooked-bench--drain-until-exit "repaint, 400 frames x 24 rows")))
+f=$((f+1)); done; printf '\\033[?1049l'")))
 
 (defun cooked-bench-box-drawing ()
   "A repaint made of box-drawing characters, which take the bitmap path.
@@ -102,12 +273,12 @@ The reason this is separate from `cooked-bench-repaint': every cell here gets a
 `display' property and an image spec of its own, so it is the workload that
 tells you whether `cooked--box-image-cache' is earning its keep.  Compare the
 two figures — the gap is what box drawing costs over plain text."
-  (cooked-bench--with-session
-      '("/bin/sh" "-c" "printf '\\033[?1049h'; f=0; while [ $f -lt 400 ]; do \
+  (cooked-bench--session
+   "repaint, 400 frames of box drawing"
+   '("/bin/sh" "-c" "printf '\\033[?1049h'; f=0; while [ $f -lt 400 ]; do \
 r=1; while [ $r -le 24 ]; do printf '\\033[%s;1H' $r; \
 printf '\\342\\224\\200%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; \
-r=$((r+1)); done; f=$((f+1)); done; printf '\\033[?1049l'")
-    (cooked-bench--drain-until-exit "repaint, 400 frames of box drawing")))
+r=$((r+1)); done; f=$((f+1)); done; printf '\\033[?1049l'")))
 
 (defun cooked-bench-marshalling ()
   "Cost of `cooked--drain' alone, with nothing applied to the buffer.
@@ -115,22 +286,28 @@ r=$((r+1)); done; f=$((f+1)); done; printf '\\033[?1049l'")
 Isolates the module boundary: the same delta is built and converted to Lisp,
 but never rendered.  Subtract this from the figures above to see how much of a
 drain is marshalling rather than redisplay."
-  (cooked-bench--with-session
-      '("/bin/sh" "-c" "i=0; while [ $i -lt 20000 ]; do \
+  (cooked-bench--measure
+   "drain only, 20k plain lines" 1
+   (lambda ()
+     (cooked-bench--with-session
+         '("/bin/sh" "-c" "i=0; while [ $i -lt 20000 ]; do \
 echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")
-    (let ((deadline (+ (float-time) 30))
-          (spent 0.0)
-          (drains 0))
-      (while (and cooked--session (< (float-time) deadline)
-                  (null (plist-get (cooked--drain cooked--session) :exit)))
-        (accept-process-output nil 0.02)
-        (when cooked--session
-          (let ((t0 (float-time)))
-            (cooked--drain cooked--session cooked-rejoin-wrapped-lines)
-            (setq spent (+ spent (- (float-time) t0))
-                  drains (1+ drains)))))
-      (cooked-bench--record "drain only, 20k plain lines" spent
-                            (format "%d drains, nothing rendered" drains)))))
+       (let ((deadline (+ (float-time) 30))
+             (spent 0.0)
+             (drains 0))
+         (while (and cooked--session (< (float-time) deadline)
+                     (null (plist-get (cooked--drain cooked--session) :exit)))
+           (accept-process-output nil 0.02)
+           (when cooked--session
+             (let ((t0 (float-time)))
+               (cooked--drain cooked--session cooked-rejoin-wrapped-lines)
+               (setq spent (+ spent (- (float-time) t0))
+                     drains (1+ drains)))))
+         (setq cooked-bench--last-detail
+               (format "%d drains, nothing rendered" drains))
+         spent)))
+   3)
+  (message "  %-40s   %s" "" cooked-bench--last-detail))
 
 ;;;; Per-frame rendering, driven synthetically
 ;;
@@ -228,18 +405,25 @@ single record the encoding exists to produce."
          (spans (list (list 0 deco))))
     (cl-loop for i below count collect (cons i (list text nil spans)))))
 
-(defun cooked-bench--frames (label rows frames)
-  "Apply ROWS as a damaged-row update FRAMES times, timing the lot."
+(defun cooked-bench--frames (label rows &optional frames)
+  "Apply ROWS as a damaged-row update, one frame per iteration.
+
+The unit is one `cooked--apply' rather than a batch of them, which the earlier
+shape could not offer: a batch total divided by its count hides whether the
+frames all cost the same.  It is safe to iterate here because they do -- the
+alternate screen rewrites its rows in place, so the buffer does not grow and
+the thousandth frame costs what the first did.  That was checked before the
+loop was allowed to auto-scale, not assumed.
+
+FRAMES is the floor, defaulting to the 200 the earlier batches used, so a
+declared count is never lower than what the recorded numbers were taken at."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-tests--settle-briefly)
-    (let ((update (cooked-bench--update rows t))
-          (t0 (float-time)))
-      (dotimes (_ frames) (cooked--apply update))
-      (cooked-bench--record
-       label (- (float-time) t0)
-       (format "%d frames x %d rows, %.2f ms/frame"
-               frames (length rows)
-               (/ (* 1000 (- (float-time) t0)) frames))))))
+    (let ((update (cooked-bench--update rows t)))
+      (cooked-bench--measure label 1
+                             (lambda () (cooked--apply update))
+                             (or frames 200))
+      (message "  %-40s   %d rows/frame" "" (length rows)))))
 
 (defun cooked-tests--settle-briefly ()
   "Let the child start and the first drain land."
@@ -321,24 +505,31 @@ RATIO stands in for coalescing: 1 is a child slow enough that every frame it
 paints is displayed, 8 is one painting eight times between two redisplays --
 which is the ordinary case for anything fast, and the case the deferral exists
 for.  The scan is driven over the screen region rather than the whole buffer,
-because that is what a window would have shown."
+because that is what a window would have shown.
+
+The iteration here is a whole group of RATIO frames plus the one fontification
+that follows them, not a single frame.  It has to be: a per-frame unit would
+put the scan's whole cost into every RATIOth sample and nothing into the rest,
+so the median would report the frames that skipped the scan and the comparison
+between RATIO 1 and RATIO 8 -- the only reason these rows exist -- would come
+out as a difference in how often the tail fires rather than in cost.  The
+per-unit figure printed beside the group is the per-frame number the earlier
+shape reported."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-tests--settle-briefly)
     ;; The primary screen: the alternate one has the URL scan off by default,
     ;; and what is under test is when the scan is paid rather than which screen
     ;; pays it.  See `cooked-detect-links-on-alt-screen'.
-    (let ((update (cooked-bench--update rows nil))
-          (t0 (float-time)))
-      (dotimes (frame frames)
-        (cooked--apply update)
-        (when (zerop (mod (1+ frame) ratio))
-          (cooked-bench--fontify-as-redisplay
-           (or (cooked--screen-start-position) (point-min)) (point-max))))
-      (cooked-bench--record
-       label (- (float-time) t0)
-       (format "%d frames x %d rows, 1 redisplay per %d, %.2f ms/frame"
-               frames (length rows) ratio
-               (/ (* 1000 (- (float-time) t0)) frames))))))
+    (let ((update (cooked-bench--update rows nil)))
+      (cooked-bench--measure
+       label ratio
+       (lambda ()
+         (dotimes (_ ratio) (cooked--apply update))
+         (cooked-bench--fontify-as-redisplay
+          (or (cooked--screen-start-position) (point-min)) (point-max)))
+       (max 1 (/ frames ratio)))
+      (message "  %-40s   %d rows/frame, 1 redisplay per %d frames"
+               "" (length rows) ratio))))
 
 (defun cooked-bench-deferred ()
   "What the cosmetic passes cost against how often the screen is actually drawn."
@@ -396,36 +587,49 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
           (chunk (buffer-substring (point-min) (point-max))))
       (goto-char (point-max))
       (dotimes (_ 40) (insert chunk)))
-    (dolist (cell '((12 . 26) (10 . 20)))
-      (setq cooked--last-cell cell)
-      (let ((t0 (float-time)))
-        (cooked--rescale-deco)
-        (let ((elapsed (- (float-time) t0)))
-          (cooked-bench--record
-           (format "rescale-deco, %d rows of box drawing"
-                   (count-lines (point-min) (point-max)))
-           elapsed
-           (format "%d cells, %.4f ms/row"
-                   (buffer-size)
-                   (/ (* 1000 elapsed)
-                      (max 1 (count-lines (point-min) (point-max)))))))))
+    ;; Alternating the cell every iteration is what makes the loop measure
+    ;; anything: `cooked--rescale-deco' declines to walk a buffer that is
+    ;; already at the size asked for, so a loop that requested the same cell
+    ;; twice would time the gate from the second iteration onward and report a
+    ;; walk that costs almost nothing.  The two sizes are the pair the earlier
+    ;; shape used, and the walk is symmetric between them.
+    (let ((rows (count-lines (point-min) (point-max)))
+          (cells (buffer-size))
+          (toggle nil))
+      (cooked-bench--measure
+       (format "rescale-deco, %d rows of box drawing" rows) rows
+       (lambda ()
+         (setq toggle (not toggle)
+               cooked--last-cell (if toggle '(12 . 26) '(10 . 20)))
+         (cooked--rescale-deco))
+       2)
+      (message "  %-40s   %d cells" "" cells))
     ;; The gate the whole design rests on: asked for a size it is already at, it
-    ;; does not walk anything.
-    (let ((t0 (float-time)))
-      (cooked--rescale-deco)
-      (cooked-bench--record "rescale-deco, cell unchanged" (- (float-time) t0)
-                            "the gate `cooked--sync-size' relies on"))))
+    ;; does not walk anything.  Left un-alternated on purpose -- this row is the
+    ;; gate and nothing else.
+    (cooked-bench--measure "rescale-deco, cell unchanged" 1
+                           (lambda () (cooked--rescale-deco)))
+    (message "  %-40s   %s" "" "the gate `cooked--sync-size' relies on")))
 
 (defun cooked-bench--report ()
+  "Print the run footer.
+
+The total is the time actually spent under measurement, which is no longer the
+sum of one pass over each workload: every case now iterates until it has
+enough samples to have a distribution, so this figure grew when the primitive
+landed without anything getting slower.  It is a cost-of-the-suite number, not
+a result."
   (message "\n%-42s %11s" "total" "")
   (message "  %-40s %8.1f ms"
-           "all benchmarks"
-           (* 1000 (apply #'+ (mapcar #'cadr cooked-bench-results)))))
+           "all iterations of all benchmarks"
+           (* 1000 (apply #'+ (mapcar (lambda (row) (apply #'+ (cadr row)))
+                                      cooked-bench-results)))))
 
 (defun cooked-bench ()
   "Run every benchmark in this file."
   (setq cooked-bench-results nil)
-  (message "cooked: Emacs-side cost per workload (drain + apply only)\n")
+  (message "cooked: Emacs-side cost per workload (drain + apply only)")
+  (message "per-iteration distribution; read the p50 -- see the Commentary\n")
   (cooked-bench-marshalling)
   (cooked-bench-flood)
   (cooked-bench-styled)
