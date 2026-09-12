@@ -95,13 +95,13 @@ Benchmarking and fuzzing first: both are cheap, both are informative before any
 code changes, and one of them can *delete* work. Nothing here is gated on
 anything else, so these can run in parallel.
 
-** REVIEW [#A] Measure the scroll ceiling with rejoining off
+** DONE [#A] Measure the scroll ceiling with rejoining off
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §7 "The highest-information measurement available right now"
 :GAIN:     may delete the guard/wrap-cache/mark-truncation subsystem
-:BRANCH:   cooked/scroll-ceiling
-:RESULT:   ceiling does not move on realistic content — §7 suspect (ii) not confirmed
+:BRANCH:   16b9be2
+:RESULT:   ceiling does not move — §7 suspect (ii) not confirmed; real cost is pgtk-vs-tty, not rejoin
 :END:
 No code. =cooked-toggle-rejoin-wrapped-lines= already exists
 (=cooked-mode.el:147=). The three scroll causes are not independent: =rejoin=t=
