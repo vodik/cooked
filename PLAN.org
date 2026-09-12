@@ -963,11 +963,12 @@ The merge hazard =cooked-adjacent-box-glyphs-do-not-share-a-display-property=
 guards does *not* apply: a spec sized to exactly the range it covers is meant to
 merge.
 
-** NEXT [#B] An image case in the bench suite
+** WIP [#B] An image case in the bench suite
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   none — found while landing the row-range image work
-:BRANCH:
+:BRANCH:   cooked/bench-fixtures
+:AGENT:    yes
 :END:
 =cooked-bench.el= has no image fixture: every case is box drawing or plain text.
 So the change that took a frame of picture from 1944 =display= intervals to 48
@@ -1035,12 +1036,13 @@ Note cooked already *beats* ghostel under a scroll region and on the alt screen,
 where their page-dirty flag degrades to a whole-viewport repaint. Do not
 regress that.
 
-** TODO [#B] Allocation per frame
+** WIP [#B] Allocation per frame
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §9 — the lever the =gc-cons-threshold= bracket was reaching for
 :GATE:     =make bench= must byte-compile
-:BRANCH:
+:BRANCH:   cooked/allocation
+:AGENT:    yes
 :END:
 Refusing the GC bracket above leaves the real question standing: *the only thing
 that removes a collection is not allocating.* Compiled, a styled 24x80 apply
@@ -1055,12 +1057,13 @@ conses 683 against plain's 299, about *two conses per style span* on a path
 whose docstring describes it as allocation-free per span. Either a real leak in
 the packed walk or a docstring that overstates; find out which.
 
-** TODO [#B] =adjustRegion= mechanical floor
+** WIP [#B] =adjustRegion= mechanical floor
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §7 "Marker preservation"
 :GATE:     Coalesce contiguous damaged rows into one Block
-:BRANCH:
+:BRANCH:   cooked/adjust-region
+:AGENT:    yes
 :END:
 Keep =editing=/=wandered=/=follow= exactly as they are — they answer questions
 arithmetic cannot. Add the floor underneath for the two cases that have no
@@ -1183,12 +1186,13 @@ the matching bounds alist, and =file-name-at-point-functions=. Installed from
 straddle is the point. embark, =browse-url-at-point=, ffap and =find-file='s
 =M-n= all light up with no embark dependency.
 
-** TODO [#B] Soft-wrap joining for detection
+** WIP [#B] Soft-wrap joining for detection
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §6 detection matrix
 :GATE:     Deferred, coalesced link detection
-:BRANCH:
+:BRANCH:   cooked/soft-wrap-join
+:AGENT:    yes
 :END:
 Closes cooked's one documented detection gap: a URL wrapped across a live row.
 Prerequisite — =Row::wrapped= exists (=screen.rs:99=) but is used only for the
@@ -1599,10 +1603,11 @@ gstring's glyph is at index *2*, not 1. And the metrics come from =query-font=
 — pixel size 2, ascent 4, descent 5 — *not* =font-info=, which has a different
 layout and answers 0 for those indices without complaining.
 
-** TODO [#C] Remaining smaller items
+** WIP [#C] Remaining smaller items
 :PROPERTIES:
 :REPORT:   §4, §5, §6, §8, §10
-:BRANCH:
+:BRANCH:   cooked/smaller-items
+:AGENT:    yes
 :END:
 Kitty flags beyond bit 1 (or stop claiming them in =CSI ? u=) · remote-gated
 password regex fallback · =cooked-password-functions= as a chain · prompts as an
