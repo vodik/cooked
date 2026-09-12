@@ -1402,11 +1402,11 @@ paths, because Emacs ports disagree — =dnd-protocol-alist= for X11/pgtk,
 =[drag-n-drop]= for NS/w32 — plus an emulation keymap for mode-line and fringe
 drops.
 
-** TODO [#C] Glyph scaling before trimming
+** WIP [#C] Glyph scaling before trimming
 :PROPERTIES:
 :EFFORT:   2d
 :REPORT:   §2 "The framing that matters: repair vs destroy"
-:BRANCH:
+:BRANCH:   cooked/glyph-scaling
 :END:
 Turns a destructive repair into a non-destructive one. Needs a metrics cache
 first, or it will =font-at= per cell per drain. Use ghostel's key shape with
