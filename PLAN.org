@@ -1412,8 +1412,58 @@ Turns a destructive repair into a non-destructive one. Needs a metrics cache
 first, or it will =font-at= per cell per drain. Use ghostel's key shape with
 cooked's stamp invalidation — =cooked--wrap-cache= is already stamped on font,
 =face-remapping-alist= and geometry. Load-bearing details: the three-way min of
-width/ascent/descent ratios, and the =floor(pixel_size × scale) / pixel_size=
+width/ascent/descent ratios, and the =floor(pixel_size x scale) / pixel_size=
 quantization.
+
+*** Measured first, and §2's plan is wrong about where the hook goes
+
+Probed in a real pgtk frame on this machine's default font — 9x20 cell, default
+ascent 15, descent 5:
+
+| glyph                   | width | slot | ascent | descent | overflows |
+|-------------------------+-------+------+--------+---------+-----------|
+| =a=, =─=, =│=, =░=, =▓= |     9 |    9 |     15 |       5 | —         |
+| 文                      |    15 |   18 |   *18* |       5 | *height*  |
+| 🙂                      |  *19* |   18 |     14 |       4 | *width*   |
+
+*Both hazards are live, and they are different defects.* The emoji is one pixel
+over its two-cell slot, which accumulates across a row and eventually
+soft-wraps — the case the guard already catches and repairs destructively, and
+the one §2's "step 2.5 inside =cooked--guard-row-width=" is written for.
+
+*The CJK case has no repair at all today, and the guard cannot see it.* 文 has
+an ascent of 18 against the default 15, so a row holding one is *23 pixels tall
+against 20* — measured, 15% over — while the width fits comfortably. The guard's
+only question is =cooked--row-wraps-p=, and for that row it answers *nil*. So
+scaling hung off the wrap check would never fire for the offender that is
+actually mispainting.
+
+This also confirms *why the three-way min is load-bearing*, with numbers rather
+than by assertion: for 文 the sum ratio is 20/23 = 0.87 and the ascent ratio is
+15/18 = 0.83, so scaling by the sum leaves the ascent over the line.
+
+The consequence beyond ugliness: =cooked--window-rows= divides the window's
+pixel height by =window-default-line-height= to tell the child how many rows it
+has, so rows 15% taller than that divisor mean the grid and the display disagree
+about how many rows fit. Same class of hazard =default-text-properties nil= was
+set to prevent (§7), reached by a different route.
+
+*** How the trigger has to change
+
+Not "did the row wrap" but "does this row hold a glyph exceeding its slot in
+*either* dimension". The cost is controlled by the gate already there: step 1's
+=cooked--row-mismeasured-p= skips a uniform row in a fixed-pitch font, which is
+the overwhelming majority and cannot hold an offender. Only what survives that
+gate needs a per-cluster measurement, and only the first sighting of each
+cluster needs a real one.
+
+*** The metrics recipe, and two details a Lisp port gets wrong
+
+=find-composition START END nil t= first, taking =(nth 2 ...)= when it answers;
+otherwise =font-at=, =composition-get-gstring=, =font-shape-gstring=. Then: the
+gstring's glyph is at index *2*, not 1. And the metrics come from =query-font=
+— pixel size 2, ascent 4, descent 5 — *not* =font-info=, which has a different
+layout and answers 0 for those indices without complaining.
 
 ** TODO [#C] Remaining smaller items
 :PROPERTIES:
