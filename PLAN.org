@@ -553,14 +553,78 @@ Landed with the property test rather than after it:
 =tests/delta_replay.regressions= holds the two genuine shrunk seeds and is
 replayed ahead of the random cases on every run.
 
-** WIP [#B] A =make= target that checks cited symbol names
+** DONE [#B] A =make= target that checks cited symbol names
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   none — found by the stale-prose sweep
 :GAIN:     nine of eleven stale citations caught mechanically, forever
-:BRANCH:   cooked/citation-check
-:AGENT:    yes
+:BRANCH:   c08dfe4, 0b45533
 :END:
+=make citations=, advisory inside =lint= beside =checkdoc=. *Zero stale
+citations as of 0b45533.*
+
+*"About fifteen lines of shell" understates it by an order of magnitude, and the
+reason is the finding.* It is Lisp, and existence is decided by *loading the
+suite and asking Emacs* — =fboundp=, =boundp=, =ert-test-boundp=, =facep=,
+=cl-find-class=. Shell would have to reimplement the naming rules of every
+defining macro, and the cases it gets wrong are exactly the false positives that
+matter.
+
+The false-positive classes, in the order they bit: a =with-temp-buffer= has no
+Lisp syntax table, so =parse-partial-sexp= finds *no comments at all* and the
+checker silently treats the whole tree as code — the one arrangement in which it
+reports nothing and looks like it works; =string-match= folds case, so
+=cooked-*= swallowed every =COOKED_SHELL_INTEGRATION_FEATURES=; strings that are
+data rather than prose; English compounds (=comint-shaped, cooked-implemented=);
+glob prefixes; and *line-wrapped symbols* across two =;;= lines, which was a
+silent *miss* rather than a false positive and so the worse failure in a check
+people are meant to trust.
+
+*Advisory rather than a gate, deliberately.* Two of its four findings were prose
+accurately naming something that no longer exists. Gating forces those to be
+reworded to suit the checker or kept in an exemption list — and an exemption
+list is a second thing that goes stale with nothing checking it.
+
+*It found 19 broken rustdoc intra-doc links, not "about twenty warnings".* The
+~20 "links to private item" warnings were *noise hiding* 19 genuinely broken
+links. Fixed rather than filtered: a crate-root allow for the private-item
+class, and docs built with =--document-private-items= — without which rustdoc
+documents about four items and checks almost no links at all.
+
+** DONE [#C] Test-suite ergonomics
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   §9 "Makefile and CI mechanics"
+:BRANCH:   d94ed8b
+:END:
+ERT tags on the dependency axis (~100 tests: zsh 47, evil 19, bash 12, plus
+fish/tic/git/htop/base64/script/terminfo), driving
+=make lisp-test SELECTOR='(not (tag zsh))'=. Per-file stamps:
+=make -j8 lisp-test-parallel= is *24 s against 80 s* measured here, and touching
+one test file reruns it in 0.3 s. =make bench-quick= is *7 s*, and byte-compiles
+and removes its own =.elc= from a trap exactly as =bench= does.
+
+=COOKED_TEST_TIMEOUT_SCALE= verified against the hazard the task names — empty
+and garbage both fall back to 1, *never* 0:
+
+| value                        | scale |
+|------------------------------+-------|
+| unset, =""=, =" "=           |     1 |
+| =4=                          |     4 |
+| =2.5=                        |   2.5 |
+| =0=, =-3=, =wat=, =4x=, =1e3= |     1 |
+
+Rust additionally rejects =inf= and =NaN=: both parse as floats, and =inf= turns
+a failing test into a hang, which is the worse of the two.
+=resize_reaches_the_child= got the scale *and* a longer base budget, because its
+child sleeps before saying anything — the only wait in that module that spends
+most of its budget before the first byte, which is why it was the one that broke
+at loadavg 38.
+
+Found on the way: *=module= reinstalled unconditionally*, re-timing the artifact
+and invalidating every stamp after any target that touched it. It now installs
+only when the bytes differ — which cannot reintroduce the SIGBUS that target
+exists to avoid, because it then writes nothing at all.
 The stale-prose sweep found eleven comments citing a function, variable or test
 that does not exist, and *nine of the eleven were mechanically detectable*: pull
 every =cooked-*= token out of comments and docstrings, diff against every
@@ -583,55 +647,6 @@ Also worth doing while in here: rustdoc reports about twenty "public
 documentation links to private item" warnings, so a genuinely broken intra-doc
 link is invisible in the noise. One of the eleven was a Rust one and rustdoc
 did not flag it.
-
-** TODO [#C] Test-suite ergonomics
-:PROPERTIES:
-:EFFORT:   4h
-:REPORT:   §9 "Makefile and CI mechanics"
-:BRANCH:
-:END:
-ERT tags as the platform/dependency axis; per-file parallel stamp targets;
-=COOKED_TEST_TIMEOUT_SCALE= (CI-default 4, *positive numeric parse only* — an
-empty env var otherwise zeroes every timeout); =COOKED_DEBUG_TESTS= per-test
-name logging. Plus =make bench-quick= under ten seconds.
-
-Two things found since that belong here. =src/session.rs::resize_reaches_the_child=
-is *load-flaky* — it failed at loadavg 38 and passes in isolation, on stock main
-— so it wants either the timeout scale or a tag. And =make compile= now removes
-its own =.elc= files (a6a061b), which had been producing bogus arity errors on
-every subsequent run.
-
-* Wave 0.5 — the baseline was not green                            :repair:
-:PROPERTIES:
-:VISIBILITY: children
-:END:
-
-Neither of these is in REPORT.org. Both were found by trying to *verify* Wave 0
-work and discovering there was nothing to verify against.
-
-** DONE [#A] =make compile= was broken on main
-:PROPERTIES:
-:BRANCH:   fe9f77c
-:END:
-One 82-column docstring line in =cooked--guard-row-width=, and
-=byte-compile-error-on-warn= is =t=, so =compile= failed — and =lint= and =test=
-both depend on it. Every agent working from this roadmap would have hit it.
-
-** DONE [#A] =make test= had never passed in this repository
-:PROPERTIES:
-:BRANCH:   e096a65
-:END:
-=cooked-new-output-scrolls-a-following-window= failed identically (139 vs 132) at
-*every commit in history*, including the initial one. The test was wrong, not the
-pin: =cooked--pin-transcript-bottom= anchors a windowful up from =BOTTOM=, the
-drain passes the cursor as =POS= and =point-max= as =BOTTOM=, and a transcript
-ending in a newline puts =point-max= one screen line below the cursor
-(instrumented: pos=278, bottom=279). Deriving the expectation from =POS=
-asserted the contract the function had before =BOTTOM= existed.
-
-*The lesson for this roadmap*: establish the green baseline before trusting any
-=Done when= line. Two Wave 0 tasks name =make bench= and CI as their verification
-and would have inherited a red tree.
 
 * Wave 1 — free wins                                              :lisp:core:
 :PROPERTIES:
