@@ -1291,11 +1291,32 @@ is not. =cooked--host= already carries it and =cooked--foreign-host-p=
     (setq default-directory (file-name-as-directory path) ...)
 #+end_src
 
-Two details to take verbatim: *reuse the existing remote prefix* so
-method/user/multi-hop survive, and *skip =file-directory-p= on the remote
-branch* — validating opens a TRAMP connection on every =cd=. Their
+One detail to take verbatim: *skip =file-directory-p= on the remote branch* —
+validating opens a TRAMP connection on every =cd=. Their
 =ghostel--local-host-p= (=:3517=) also strips a trailing =.local= for macOS
 kernel-hostname drift, a case =cooked--foreign-host-p= does not handle.
+
+*The other detail was wrong, and so was the sketch below it. Corrected after
+implementing it; all three found by tests rather than by reading.*
+
+1. *"Reuse the existing remote prefix so multi-hop survives" does the exact
+   opposite.* =(file-remote-p "/ssh:jump|ssh:host:/tmp/")= returns =/ssh:host:=:
+   TRAMP rebuilds the prefix from the dissected name and drops the =hop= slot.
+   The advice therefore flattens a bastion connection to a direct one —
+   silently, into a perfectly well-formed name for a host you cannot reach.
+   Take =default-directory= minus its ='localname= instead.
+2. *=file-name-as-directory= undoes the fix.* On a remote name it dispatches to
+   the same handler and drops the hop again, so the trailing slash has to be
+   plain string concatenation.
+3. *=(format "/%s:%s:" method host)= is a method-injection hole, and ghostel
+   has it as written.* "Construct from =cooked--host=, never from the payload"
+   is necessary and *not sufficient*, because =cooked--host= *is* payload: it is
+   =[^/]*=, percent-decoded, out of an escape sequence any =cat= of a hostile
+   file can emit. Measured — a reported host of =a|sudo:= builds
+   =/ssh:a|sudo::/etc/=, which TRAMP reads as method =sudo=, user =root=, host
+   =a=. A root hop, from printing a file. The fix is a character-set check on
+   the host and *declining* rather than quoting, since a host containing TRAMP
+   punctuation is not a host anyone has.
 
 *Sketch:*
 
@@ -1309,12 +1330,16 @@ kernel-hostname drift, a case =cooked--foreign-host-p= does not handle.
   (if (cooked--foreign-host-p)
       (when (eq cooked-remote-directory 'tramp)
         (setq default-directory
-              (file-name-as-directory
-               (concat (or (file-remote-p default-directory)
-                           (format "/%s:%s:" (or cooked-tramp-default-method
-                                                 tramp-default-method)
-                                   cooked--host))
-                       path))))      ; NO file-directory-p here
+              ;; NOT `file-remote-p', which drops the hop; NOT
+               ;; `file-name-as-directory', which drops it again.  And the host
+               ;; is checked before it is written, or `a|sudo:' is a root hop.
+               (concat (or (cooked--remote-prefix default-directory)
+                           (and (string-match-p cooked--host-name-regexp
+                                                cooked--host)
+                                (format "/%s:%s:" (or cooked-tramp-default-method
+                                                      tramp-default-method)
+                                        cooked--host)))
+                       path "/")))      ; NO file-directory-p here
     (when-let* ((name (cooked--local-name path)) ...)
       ...)))
 #+end_src
