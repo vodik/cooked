@@ -963,15 +963,54 @@ Wants the same treatment the box fixtures got in 116572d: the six-element block
 shape, and a pinned cell size so =cooked--deco-cell-size= does not answer from a
 1x1 batch window.
 
-** WIP [#B] Express the ordinary scroll as a scroll
+** DONE [#B] Express the ordinary scroll as a scroll
 :PROPERTIES:
 :EFFORT:   3d
 :REPORT:   §12 "Scroll is where the models genuinely differ"
 :GATE:     Coalesce contiguous damaged rows into one Block
 :GAIN:     25 rows of damage → 2, on the most common terminal operation
-:BRANCH:   cooked/scroll-as-scroll
-:AGENT:    yes
+:BRANCH:   361c5ff
 :END:
+*The largest win in the report, and it landed.* Counted independently on merge,
+with a probe that compiles against both trees:
+
+| case (24x80, screen painted) | before | after |
+|------------------------------+--------+-------|
+| one-line scroll, full screen |     24 |   *1* |
+| =CSI 5;10r= region, 6 rows   |      6 |   *1* |
+| reverse index at the top     |     24 |   *1* |
+| =CSI 3 L= at row 12          |     13 |   *3* |
+| 24+ line feeds (turnover)    |     24 |    24 |
+
+Marker survival verified the same way: the two new tests *fail on main* — the
+marker is dragged to the deletion point and the overlay collapses to zero length
+— and the text-equivalence test passes on both, as it must.
+
+*Three corrections to §12.* Its "25 rows" for the full-screen scroll is 24. Its
+matrix calls =IL=/=DL= "correct minimum" when they were damaging every row from
+the cursor down. And its verdict — that "a session that is mostly =tail -f= at
+one line per frame is measurably better served by ghostel's model" — *no longer
+holds*: ghostel's 2 includes cursor rows their model marks structurally, cooked's
+cursor rides the =Delta= and costs nothing, so cooked is now narrower than
+ghostel on the one workload §12 conceded.
+
+*PLAN's "ring-buffer =Screen::rows= instead of =rotate_left=" was solving a
+non-problem and was deliberately not done.* =rotate_left= moves =Row= structs,
+not cell contents — 24 pointer-sized moves on a 24-row screen. The cost was never
+Rust-side; it was the 6.2 KB of buffer text and the destroyed markers on the Lisp
+side. Ring-buffering would have made every =self.rows[i]= in a 2000-line module a
+modular index for no measurable gain, on the riskiest change in the report.
+
+One imprecision accepted and documented in the code: a moved row keeps the
+shade-glyph dither phase it was drawn at, so at an *odd cell height* there is a
+one-pixel horizontal seam across ░▒▓ cells until that row is damaged for its own
+reasons. The alternative is damaging every row carrying a shade — every row of a
+TUI that shades its background.
+
+*=make bench= has no scroll fixture*, so it cannot see this at all:
+=cooked-bench--update= builds =:scrolled nil= with no shift, and the real-child
+floods saturate the move and take the unchanged path. Same gap the image task
+found; both belong to the bench-fixture task below.
 The largest single win and the riskiest change in the report. Damage only the
 recycled rows rather than =touch_range(top..=bottom)=; the departing rows are
 already the scrollback text =cooked--render-scrolled= just inserted.
