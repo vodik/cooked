@@ -95,12 +95,12 @@ Benchmarking and fuzzing first: both are cheap, both are informative before any
 code changes, and one of them can *delete* work. Nothing here is gated on
 anything else, so these can run in parallel.
 
-** NEXT [#A] =make bench= must byte-compile
+** WIP [#A] =make bench= must byte-compile
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §9 D — found by auditing the UNSTABLE rule, not by the report
 :GAIN:     every number already recorded in Waves 0 and 1 is re-taken and some change by 3x
-:BRANCH:
+:BRANCH:   cooked/bench-compile
 :END:
 *Every published bench number in this file was measured on interpreted Lisp that
 no user ever runs.* =BATCH= is =emacs -Q --batch -L lisp -L tests=, the =bench=
