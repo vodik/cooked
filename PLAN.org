@@ -1534,6 +1534,52 @@ its own =display= spec. The candidates, none tried:
 *Do not close this task on the geometry alone.* That is what nearly happened
 here: every pixel measurement said it worked.
 
+*** Borrowed from ghostel after a closer read (2dda682)
+
+Two things its =Renderer.zig= has that the first pass did not.
+
+*The metrics key includes the face.* ghostel keys on =style_id=; cooked keyed on
+text alone, which hands a bold glyph the regular one's measurements. A bold face
+is a different font and so a different glyph. Straight correctness fix.
+
+*=adjustWidth=, the claim path* — and it is a better idea than the one it sits
+beside. A glyph too wide for its cell does not have to be made *smaller* if
+there is somewhere for it to *go*. Given two cells it is scaled less, or not at
+all, and the leftover gap is exactly what scaling costs, so the cheapest gap is
+the one never opened. It runs *before* the scaling: widen the slot where that is
+free, then scale whatever is still over. The claimed space is hidden with
+=(space :width 0)= rather than deleted — a space at zero width is still a space
+in the buffer, so the yank, the search and =cooked--check-seam= all still see
+what the child sent.
+
+*It does not help the CJK case*, and neither does ghostel's: both skip claiming
+for a glyph that is already two cells wide (=if (cell.wide) return 2=). So the
+left-alignment gap above stands in both projects.
+
+*** For a manual look — the notes to test against
+
+Rendered fixture and recipe, for when you can eyeball it:
+
+#+begin_src sh
+WAYLAND_DISPLAY=wayland-1 emacs -Q -l scripts/glyph-scaling-shot.el
+#+end_src
+
+writes =before.png= and =after.png=. Note =x-export-frames= refuses a frame that
+is not *visible*, so this cannot run under the gamescope headless recipe — it
+has to be a real compositor.
+
+What to look for, in order of how much it matters:
+
+1. *The box in =after.png= should align* — the =│= separators under the =┬=, all
+   four rows the same height. This is the fix; it is wrong in =before.png=.
+2. *The gap after 文* is the known defect. Is it bad enough to prefer the old
+   behaviour? =cooked-glyph-scale-floor= to nil restores trim-only.
+3. *A one-cell glyph that stands alone between spaces* should get the claim path
+   — no shrinking, and the space after it collapsing to nothing. Nothing in the
+   fixture triggers this; a font with an over-wide Powerline or Nerd Font glyph
+   would. Worth trying with your own prompt.
+4. *Bold CJK beside regular CJK* should now measure separately.
+
 *** Still open
 
 - *No bench case.* Same gap the image and scroll work hit: the guard's cost with
