@@ -33,7 +33,7 @@ MODULE := target/release/libcooked$(MODULE_SUFFIX)
 # evil says so and skips, which is quiet enough to be mistaken for passing.
 EVIL_LOAD_PATH ?=
 
-.PHONY: all test rust-test lisp-test lint checkdoc compile bench clean module terminfo
+.PHONY: all test rust-test lisp-test lint checkdoc citations compile bench clean module terminfo
 
 all: test
 
@@ -115,7 +115,7 @@ terminfo:
 	  done && rm -rf terminfo/rt.ti terminfo/rt.db && \
 	  find terminfo/db -type f | sort | sed 's/^/  /'
 
-lint: compile checkdoc
+lint: compile checkdoc citations
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 
@@ -143,6 +143,49 @@ checkdoc:
 	                         sentence-end-double-space t) \
 	                   (checkdoc-file \"$$f\"))" 2>&1; \
 	done | grep -v '^Warning (emacs): $$' || true
+
+# Advisory, like `checkdoc', and for the same reason rather than out of caution.
+#
+# The comments in this tree are unusually detailed and are therefore trusted, so
+# a comment naming a function is an assertion -- and until now it was the only
+# assertion here that nothing checked.  A sweep found eleven citing something
+# that does not exist, nine of them mechanically detectable, and the category
+# that recurs is a cited *test* name: renaming a defun breaks its callers, while
+# renaming an `ert-deftest' breaks nothing, so a docstring naming one can be
+# wrong for as long as nobody reads it.  One test name managed to be wrong in
+# both directions inside a month.
+#
+# It does not gate, because two of the four findings on the run that landed this
+# were prose deliberately naming something gone -- "the fifth table,
+# `cooked--special-keys'", "the replacement for `session::is_errno'" -- which is
+# accurate writing about history and not a defect.  Gating would force those to
+# be reworded to suit the checker, or kept in an exemption list, and an
+# exemption list is a second thing that goes stale with nothing checking it.
+# The oracle underneath is deliberately loose as well: a name counts as real if
+# it appears anywhere in the tree's code, which is the right question for prose
+# but not a foundation to fail a build on.  So it is `checkdoc''s bargain --
+# read the output, do not chase it to zero -- and it runs inside `lint' so that
+# it is read.
+#
+# The rustdoc half is in here because it is the same job.  It was unreadable
+# before: nineteen "links to private item" warnings, which in a cdylib whose
+# every internal type is private is the lint describing the crate rather than
+# finding a defect, and a genuinely broken link arrived in the middle of them
+# and was not seen.  The shape warning is now silenced at the crate root and the
+# defect warning kept -- see the comment on the `allow' in src/lib.rs -- which
+# turned up nineteen broken links that had been invisible.  Four remain, three
+# in `src/emu/screen.rs' and one in `src/emu/stream.rs'; when they are fixed
+# this can gate on the Rust side alone by adding RUSTDOCFLAGS='-D warnings' to
+# the `cargo doc' line.
+#
+# `--document-private-items' is not optional: without it this crate documents
+# about four items, because everything else is private, and rustdoc checks the
+# links of only what it documents.
+citations:
+	@$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el \
+	  -l scripts/check-citations.el -f cooked-citations-batch
+	@cargo doc --no-deps --document-private-items 2>&1 | \
+	  grep -E '^(warning|error)' || true
 
 # Byte-compiled, and that is not a detail: every figure this suite produced before
 # now was measured on interpreted Lisp that no user ever runs.  Compiled, a styled

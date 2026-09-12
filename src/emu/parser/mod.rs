@@ -204,7 +204,7 @@ impl Parser {
     ///
     /// Returns the number of bytes read before termination.
     ///
-    /// See [`Perform::advance`] for more details.
+    /// See [`Self::advance`] for more details.
     #[inline]
     #[must_use = "Returned value should be used to processs the remaining bytes"]
     // Unused in cooked, which handles synchronized updates through `Modes::sync_until`

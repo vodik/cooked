@@ -126,7 +126,7 @@ macro_rules! ffi {
 /// A symbol from the load-time table, named by the spelling it has in Lisp.
 ///
 /// [`Env::intern`] costs a `CString` allocation, an FFI call and the
-/// `non_local_exit_check` every [`ffi!`] does after it. That is the cost [`symbols!`]
+/// `non_local_exit_check` every [`ffi!`] does after it. That is the cost `symbols!`
 /// exists to remove, and this is how a call site reaches the table without naming a
 /// [`Sym`] variant -- so a symbol goes on being written as the word it is in Lisp.
 ///
@@ -145,7 +145,7 @@ pub(crate) use sym;
 /// Each of these had a `fn as_str(self) -> &'static str` beside the enum and an
 /// `env.intern(x.as_str())` at the boundary, which put the naming in the wrong place
 /// twice over. The spelling is a fact about what crosses into Lisp, not about the
-/// emulator, and interning it per drain is the cost [`symbols!`] exists to remove -- but
+/// emulator, and interning it per drain is the cost `symbols!` exists to remove -- but
 /// the enums live in `emu` and `pty`, which are plain Rust with no [`Env`] in sight and
 /// no business naming a [`Sym`].
 ///

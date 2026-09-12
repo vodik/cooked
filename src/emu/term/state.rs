@@ -251,7 +251,7 @@ impl State {
     ///     and that transmission is the only chance those bytes have to cross.
     ///
     /// Shedding tells the store, which is not optional: the invariant on
-    /// [`ImageStore`](crate::emu::image::ImageStore) is that an id is tracked iff Emacs
+    /// [`crate::emu::image::ImageStore`] is that an id is tracked iff Emacs
     /// has its bytes, and these bytes are not going. Left tracked, the next transmission
     /// of the same frame -- the next time round the loop, for an animation -- would be
     /// answered "you already have this one" and never cross, and the placement would

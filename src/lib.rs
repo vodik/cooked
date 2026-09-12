@@ -3,6 +3,22 @@
 //! Lisp entry points live here; everything below is plain Rust and unit-testable without
 //! an Emacs in the loop.
 
+// This crate is a cdylib whose only real consumer is Emacs, reached through the
+// `defuns!` table below and not through Rust's visibility rules, so nearly every
+// type in it is private by design.  Documentation that explains a public entry
+// point therefore has to point *inwards* -- `cooked--drain' cannot be explained
+// without naming `Screen::drain_damage' and `Event' -- and rustdoc warns about
+// every one of those links, nineteen of them, on a build with no defects in it
+// at all.  That is not a lint finding, it is the lint describing the shape of
+// the crate, and the cost of leaving it on is that the one warning class that
+// *is* a defect -- `broken_intra_doc_links', a link naming something that no
+// longer exists -- arrives in the middle of the nineteen and is not read.  So
+// the shape warning is silenced and the defect warning is kept, and `make doc'
+// turns what is left into an error.  Read the docs with
+// `cargo doc --document-private-items'; without it this crate documents about
+// four items and none of the links resolve.
+#![allow(rustdoc::private_intra_doc_links)]
+
 pub mod emu;
 pub(crate) mod env;
 pub(crate) mod error;
@@ -460,7 +476,7 @@ fn pairs(env: Env, alist: Value) -> Result<Vec<(String, String)>> {
 /// An extension trait rather than a free function because there is no `impl From` to be
 /// had -- the conversion needs an `Env`, which the error does not carry -- and six call
 /// sites spelling `.or_signal(env)?` is what that shortfall looked like.
-/// `Display` on [`cooked::error::Error`] does the message, so this no longer has to know
+/// `Display` on [`crate::error::Error`] does the message, so this no longer has to know
 /// anything about what went wrong.
 /// The crate's id newtypes, which are all one integer wide.
 ///
@@ -834,7 +850,7 @@ fn filter_feed(env: Env, args: &[Value]) -> Result<Value> {
 /// it can be tested without an Emacs — everything else on this path needs an `Env` and
 /// so can only be exercised by the Lisp suite.
 ///
-/// Ascending order is what makes a run a run, and [`Screen::drain_damage`] produces it
+/// Ascending order is what makes a run a run, and [`crate::emu::screen::Screen::drain_damage`] produces it
 /// by construction: it walks the dirty flags by index. Nothing here *relies* on that,
 /// which is deliberate. The condition is `next == this + 1` rather than "not known to be
 /// clean", so a list that arrived out of order or with a repeat simply coalesces less;

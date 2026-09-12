@@ -159,7 +159,7 @@ impl<K: Id> Ledger<K> {
 
     /// Move `id` to the most-recently-used end, or do nothing if it is not held.
     ///
-    /// Doing nothing is what the collision tests rely on: [`Ledger::plant`] files an id in
+    /// Doing nothing is what the collision tests rely on: `plant` files an id in
     /// a bucket without an entry, so it has no place in the order to move.
     fn touch(&mut self, id: K) {
         if self.newest == Some(id) {

@@ -428,7 +428,7 @@ pub(crate) const MARKS_PER_ROW: usize = 8;
 /// already holds a buffer marker for has *moved* to.
 ///
 /// A dense counter rather than anything derived from the position, which is the whole
-/// point: the position is what a rewrap changes. Handed out in [`super::term::State`],
+/// point: the position is what a rewrap changes. Handed out in `term::State`,
 /// stored only in [`Extra::Mark`], and never reused -- see the module docs on
 /// `Delta::marks` for the round trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1215,7 +1215,7 @@ impl Row {
     /// cell by cell because an attachment can land on any one of them.
     ///
     /// `runs_to_matches_the_reference` is what keeps this honest -- it is checked against
-    /// [`Row::runs_to_reference`] over randomised rows, including the wide characters and
+    /// `Row::runs_to_reference` over randomised rows, including the wide characters and
     /// box glyphs that make the two disagree if the scan is wrong.
     fn build_plain_runs(&self, end: usize) -> Vec<Run> {
         let mut runs = Vec::<Run>::with_capacity(4);

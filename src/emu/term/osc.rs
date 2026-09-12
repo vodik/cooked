@@ -415,7 +415,7 @@ impl State {
 
     /// Hang the pen's underline colour and open hyperlink on a block WIDTH cells wide.
     ///
-    /// What [`Perform::print`](crate::emu::parser::Perform::print) does after every
+    /// What [`crate::emu::parser::Perform::print`] does after every
     /// character it places, said once for a block: the two attachment writers locate
     /// their cell by backing up over the width just written, so they need the block's
     /// width rather than any character's.

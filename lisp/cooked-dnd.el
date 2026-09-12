@@ -160,7 +160,7 @@ what the rest of cooked's optional layers do."
   "`emulation-mode-map-alists\=' entry, live only where the flag is set.")
 
 (defvar-local cooked-dnd--active nil
-  "Whether `cooked-dnd-mode-line-map\=' applies to this buffer.")
+  "Whether `cooked-dnd-map\=' applies to this buffer.")
 
 (defun cooked-dnd-setup ()
   "Install the drop handlers in this buffer.

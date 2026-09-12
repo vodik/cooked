@@ -27,7 +27,7 @@ use super::intern::{Id, Ledger};
 
 /// The wire name for one distinct hyperlink destination.
 ///
-/// A dense index rather than the hash itself, so an [`super::Extra::Link`] is four
+/// A dense index rather than the hash itself, so an [`super::cell::Extra::Link`] is four
 /// bytes. The hash decides *which* index — see [`LinkStore::intern`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LinkId(pub u32);

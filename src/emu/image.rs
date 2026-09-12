@@ -242,7 +242,7 @@ pub(crate) struct ImageStore {
     ///
     /// The ledger buckets by the low half; the whole 128 bits is what settles whether a
     /// transmission is the same picture as one already named. See
-    /// [`content_hash`](super::content_hash) for why a digest is allowed to be the last
+    /// [`content_hash`] for why a digest is allowed to be the last
     /// word here where a hyperlink's URI is not.
     hashes: HashMap<ImageId, u128>,
 }

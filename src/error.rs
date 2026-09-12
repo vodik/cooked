@@ -39,7 +39,11 @@ pub enum Error {
 }
 
 impl Error {
-    /// The errno this is, if it is one. The replacement for `session::is_errno`.
+    /// The errno this is, if it is one.
+    ///
+    /// Non-errno variants answer `None` rather than a stand-in code, so a
+    /// caller branching on a specific failure cannot mistake "this was not an
+    /// OS error at all" for some errno that happens to be zero.
     pub fn errno(&self) -> Option<Errno> {
         match self {
             Self::Os(errno) => Some(*errno),

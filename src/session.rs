@@ -468,7 +468,7 @@ impl Notifier {
     /// Returns whether a throttled notification is still waiting. Flushing here retires
     /// the ordinary case, where the render lands after `min_interval` has already elapsed.
     /// A re-arm that lands inside the window leaves the retry to the reader thread — which
-    /// computed its [`Self::poll_timeout`] while the previous wakeup was still in flight,
+    /// computed its [`Shared::poll_timeout`] while the previous wakeup was still in flight,
     /// and so is asleep for the whole of `POLL_TIMEOUT_MS` rather than for the few
     /// milliseconds this notification actually has left to wait. That is the caller's cue
     /// to interrupt the poll so the timeout is computed again.
@@ -480,7 +480,7 @@ impl Notifier {
     /// Copy the emulator's synchronized-output deadline where the notify path can see it.
     ///
     /// Adopted only when no frame is being held by an earlier one, which is the whole of
-    /// what stops a client from holding the buffer still indefinitely. [`SYNC_TIMEOUT`]
+    /// what stops a client from holding the buffer still indefinitely. [`crate::emu::term::SYNC_TIMEOUT`]
     /// is armed by the emulator at every BSU, so taking the newest deadline each time
     /// makes the cap a per-marker one: a client that begins its next frame before the
     /// reader has drawn the last — which is every client repainting flat out, and is
@@ -663,11 +663,11 @@ impl Interrupt {
 /// impl below, next to the fields they belong to, rather than at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Options {
-    /// See [`Notifier::min_interval`].
+    /// See [`NotifyState::min_interval`].
     pub min_redisplay_interval: std::time::Duration,
     /// See [`QUIESCENCE`].
     pub quiescence: std::time::Duration,
-    /// See [`Notifier::frame_ceiling`].
+    /// See [`NotifyState::frame_ceiling`].
     pub frame_ceiling: std::time::Duration,
     /// See [`Shared::backlog_limit`].
     pub backlog_limit: usize,
@@ -678,7 +678,7 @@ impl Options {
     /// everything that derives from it following.
     ///
     /// The one way to choose the interval, and the reason there is a constructor here at
-    /// all. [`Notifier::frame_ceiling`] is that interval, so a caller writing
+    /// all. [`NotifyState::frame_ceiling`] is that interval, so a caller writing
     /// `Options { min_redisplay_interval: x, ..Default::default() }` would get the
     /// ceiling computed from the *default* interval and then the interval it belongs to
     /// overwritten underneath it — the derivation silently undone by the update syntax
@@ -1003,7 +1003,7 @@ impl Session {
     ///
     /// The backlog limit is backpressure, which is a different question with a different
     /// answer: not how often to redraw, but how much may pile up while Emacs falls behind
-    /// before [`Self::read_loop`] stops taking bytes off the pty -- at which point its
+    /// before [`Shared::read_loop`] stops taking bytes off the pty -- at which point its
     /// buffer fills and the child blocks in `write`. One paces, the other pauses. Naming
     /// the pair after the half that paces would assert a second pace mechanism that
     /// deliberately does not exist; [`Notifier::set_pacing`] is the one that earns the word.

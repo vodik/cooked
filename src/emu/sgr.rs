@@ -1,7 +1,7 @@
 //! `SGR` decoding: the one place that turns `CSI Ps m` into a rendition.
 //!
 //! Here rather than in [`term`](super::term) because there are two things in this crate
-//! that keep a pen and neither is the other's layer. [`term::State`](super::term::State)
+//! that keep a pen and neither is the other's layer. `term::State`
 //! keeps one for the grid it writes cells into; [`stream::Filter`](super::stream::Filter)
 //! keeps one for a byte stream with no grid behind it at all. The escape sequence they
 //! are decoding is the same escape sequence, and the failure mode of two decoders is not
