@@ -207,6 +207,7 @@ question this test is named for."
 (ert-deftest cooked-completion-comes-from-zsh-itself ()
   "The whole exchange against a real shell: zsh's own completion system, run in
 the shell you are typing at, over a line it has never seen."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
@@ -263,6 +264,7 @@ length against the wrong anchor: a span reaching PREFIX characters back from
 wherever the drain left point, which is why the report described it as
 sometimes the next chunk and sometimes the whole prompt.  Here there is a word
 after the cursor to make the difference visible."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
@@ -299,6 +301,7 @@ parser, one protocol, and a shell that announces for itself.
 The spec here is registered by the test rather than borrowed from
 bash-completion, which is not installed everywhere and would make this a test of
 somebody else\='s package."
+  :tags '(base64 bash)
   (skip-unless (executable-find "bash"))
   (skip-unless (executable-find "base64"))
   (let ((buffer (generate-new-buffer "*cooked-bash-complete*"))
@@ -427,6 +430,7 @@ longer way of saying this: the startup file is written at spawn too, so writing
 the `source' line or not makes the same decision at the same moment, with one
 fewer variable to explain.  The core snippet is sourced either way -- it is what
 the marks and the announcement come from, and neither is optional."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (dolist (loaded '(nil t))
     (let ((cooked-shell-completion-functions
@@ -450,6 +454,7 @@ line it draws is the one the capture put in BUFFER -- so a second copy of the
 command appeared exactly where the completion would have gone, and restoring
 BUFFER did not take it back.  `git commit -am <TAB>' is the everyday case: the
 flags have already said everything, so `_git' offers nothing and explains why."
+  :tags '(git zsh)
   (skip-unless (executable-find "zsh"))
   (skip-unless (executable-find "git"))
   (cooked-tests--with-fake-zdotdir

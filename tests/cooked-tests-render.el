@@ -399,6 +399,7 @@ still pass if the core stopped coalescing altogether."
         (should (member "ZZZ" lines))))))
 
 (ert-deftest cooked-prompt-lands-on-its-own-line-after-a-command ()
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh" :settle (lambda () (eq cooked--semantic 'input)))
     (let ((prompt (string-trim (buffer-substring-no-properties

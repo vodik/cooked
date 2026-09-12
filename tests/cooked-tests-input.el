@@ -207,6 +207,7 @@ parameter -- here, with nothing negotiated, it is the classical `ESC t'."
 all -- reach a leader, scroll, get to another window -- and it used to stop
 the terminal dead until they came back.  Normal state suspends forwarding and
 stops the view chasing the cursor; the child keeps drawing throughout."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -232,6 +233,7 @@ stops the view chasing the cursor; the child keeps drawing throughout."
 left in insert state, because the thaw hung on *entering* emacs state and the
 auto-resume needs `self-insert-command', which is not what a letter runs in
 normal state.  Deriving the mode from evil's state has no such hole."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -343,6 +345,7 @@ result land where it can be seen."
 (ert-deftest cooked-suspend-stops-the-job-with-isig-on ()
   "The ordinary path: the tty still acts on its `susp\=' character, so writing
 that byte is the whole of it and the line discipline does the rest."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--send cooked--session "sleep 60\r")
@@ -365,6 +368,7 @@ now; this side names it.
 
 `stty raw -isig\=' is the smallest thing that reproduces it, and it is exactly
 what a full-screen program does when it wants ^Z as a byte of its own."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--send cooked--session "sh -c 'stty raw -isig; sleep 60'\r")
@@ -444,6 +448,7 @@ being typed will be read by.
 canonical, so cooked reads it as `edit\=' -- correctly, it is a line being edited
 -- and that is exactly the case the state word alone cannot distinguish from a
 shell prompt."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--refresh-keymap)
@@ -511,6 +516,7 @@ exit status is the only thing about a dead session still true."
   "A selection is a claim about a region of text, and text rewritten
 underneath it makes the claim a lie -- so visual state defers the render where
 normal state does not."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -542,6 +548,7 @@ so the buffer stays writable and `cooked-input-map' stays installed.  Making the
 buffer read-only, or handing it `cooked-peek-map' whose `self-insert' remap
 sends raw bytes past cooked's line editor, would break the very prompt the user
 is typing at."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -568,6 +575,7 @@ is typing at."
   "Evil's replace state overtypes rather than self-inserting in the usual
 buffers, so it is worth checking explicitly rather than assuming insert
 state's handling covers it."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -716,6 +724,7 @@ confirmation must send nothing at all."
   "`p' is the key a vim user's hand reaches for, and inside a full-screen program
 it is the only route to the kill ring: the program's own `p' pastes its own
 registers and has never heard of Emacs'."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -732,6 +741,7 @@ registers and has never heard of Emacs'."
 (ert-deftest cooked-evil-normal-state-paste-stays-evils-own-at-a-prompt ()
   "The pending line is ordinary editable text, so `p' keeps evil's semantics
 there rather than shipping the kill off to a child that is not reading."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -813,6 +823,7 @@ no reload -- and turning it off has to give the stock command back exactly."
 (ert-deftest cooked-evil-caret-goes-to-the-command-not-the-prompt ()
   "\\`^' means the first non-blank of the *command*, so the blank it skips is
 one the user typed and not the space after the prompt's `$'."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -830,6 +841,7 @@ one the user typed and not the space after the prompt's `$'."
   "The reason `^' is an `evil-define-motion' with a type rather than a command
 that moves point: without the exclusive range `d^' and `c^' delete nothing, or
 the wrong thing."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -850,6 +862,7 @@ the wrong thing."
 (ert-deftest cooked-evil-insert-line-enters-insert-at-the-command ()
   "\\`I' computes a position and changes state in one command, so it needs its
 own wrapper rather than point put back afterwards."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -1387,6 +1400,7 @@ the same certainty a local one does, by the same bytes."
 The whole line goes, not the part before point: sending the prefix alone would
 silently drop whatever followed the cursor, and the left-arrows that avoid that
 cost one byte each."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (goto-char cooked--input-end)
@@ -1410,6 +1424,7 @@ cost one byte each."
 (ert-deftest cooked-delegation-lasts-exactly-one-line ()
   "Delegation is a one-way door for the rest of the line and no further.
 A fresh prompt is a fresh line, and Emacs may have it back."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (goto-char cooked--input-end)
@@ -1452,6 +1467,7 @@ half-completed line went to the shell underneath it.
 No corfu here on purpose.  What is being pinned is the precedence contract --
 an active `completion-in-region-mode\=' keymap wins Enter -- and every in-buffer
 completion UI, the built-in one included, is on the far side of that same test."
+  :tags '(evil evil-collection)
   (skip-unless (require 'evil nil t))
   (skip-unless (require 'evil-collection nil t))
   (require 'cooked-evil)
@@ -1492,6 +1508,7 @@ completion UI, the built-in one included, is on the far side of that same test."
 State syncing lives in `cooked-evil', which is opt-in, so the test has to opt in
 the same way a user's configuration does — without it `cooked-state-change-hook'
 has no handler and nothing drives evil at all."
+  :tags '(evil zsh)
   (skip-unless (and (executable-find "zsh") (require 'evil nil t)))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -1560,6 +1577,7 @@ cursor Emacs had been told not to draw.  OSC 133 is what tells the two apart:
 while a command is running the mark says `output\=', and there the child\='s
 `CSI ?25l\=' is about its own picture and is honoured; at the prompt either side
 of it the cursor comes back."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--send-input-string "printf \'GO\\033[?25l\'; sleep 2")
@@ -1583,6 +1601,7 @@ true under policy `cooked\=' at all -- the child repainting a canonical tty
 never took the keyboard to be suspended from, which is why
 `cooked-toggle-peek\=' refuses here and `evil\=' normal state is the door.  Driven
 through `cooked-input-mode-functions\=', the seam evil itself uses."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--send-input-string "printf \'GO\\033[?25l\'; sleep 3")
@@ -2007,6 +2026,7 @@ Asserted anyway, and asserted on evil's state rather than on the mark, because
 the failure this rules out is invisible from the buffer: evil left believing in
 a visual state with no region under it, after which the next \\`v' *leaves*
 visual state rather than entering it."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -2029,6 +2049,7 @@ is what kept the two in step above, and the drain clears the same selection for
 the same reason with no command to read -- so both go through
 `cooked--deactivate-mark', which asks evil outright.  Driven here with
 `this-command' bound to nil, which is what a process filter sees."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -2052,6 +2073,7 @@ Reachable only with the render left live in visual state.  `frozen' is the
 default precisely so that a selection is never rewritten underneath -- there is
 no drain at all then, which
 `cooked-evil-visual-state-freezes-the-render' is the proof of."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -2231,6 +2253,7 @@ ordering in `cooked--sync-cursor-type\=' is what those still need.
 
 The buffer has to be shown in a window for any of that to run, which is why the
 older visibility test never saw it."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (let ((buffer (generate-new-buffer "*cooked-cursor*")))
     (unwind-protect
@@ -2553,6 +2576,7 @@ line below the prompt; typing there used to land outside the input markers, and
 buffer looking accepted.  Before the region, the prompt is read-only, so typing
 signalled \"Text is read-only\" — which is exactly where evil's normal state
 leaves the cursor at an empty prompt, since it pulls back off the end of a line."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh" :name "*cooked-snap*" :settle (lambda () (eq cooked--semantic 'input)))
     (switch-to-buffer buffer)
@@ -2668,6 +2692,7 @@ must not take the binding away."
 that printed nothing is the beginning of the next prompt -- so a quiet command,
 and every failing one, was stepped straight over and looked as though it had
 never been recorded.  It always was; there was nowhere to stand."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (dolist (line '("echo one" "false" "echo two"))
@@ -2716,6 +2741,7 @@ nothing about the prompt.  Navigation then means what it always did."
   "`ic' is what the command printed; `ac' adds the prompt it was typed at and
 the line itself.  Neither reaches the following prompt, which a linewise range
 ending one past the output would otherwise swallow."
+  :tags '(evil zsh)
   (skip-unless (require 'evil nil t))
   (skip-unless (executable-find "zsh"))
   (require 'cooked-evil)
@@ -2764,6 +2790,7 @@ selection and evil was left believing in a visual state the user could not see
 `v' then *exited* that state instead of entering it, `i' put the buffer in
 insert state, and the `c' went to the shell as a keystroke.  Two `vic' in a row
 have to leave evil in visual state."
+  :tags '(evil zsh)
   (skip-unless (require 'evil nil t))
   (skip-unless (executable-find "zsh"))
   (require 'cooked-evil)
@@ -2804,6 +2831,7 @@ have to leave evil in visual state."
 (ert-deftest cooked-evil-command-text-object-covers-what-is-still-running ()
   "A build that has not finished has no record yet, only the live markers --
 and `yac' on it is exactly what one wants while it is running."
+  :tags '(evil zsh)
   (skip-unless (require 'evil nil t))
   (skip-unless (executable-find "zsh"))
   (require 'cooked-evil)
@@ -2824,6 +2852,7 @@ and `yac' on it is exactly what one wants while it is running."
 (ert-deftest cooked-evil-text-objects-are-scoped-to-cooked-buffers ()
   "Ours in a cooked buffer, and only there: the rest of the family has to keep
 meaning what it means, in this buffer and every other one."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -2865,6 +2894,7 @@ whose cursor has been turned off is navigating blind."
 
 (ert-deftest cooked-evil-normal-state-gives-a-hidden-cursor-back ()
   "The same, reached the way an evil user reaches it."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -3170,6 +3200,7 @@ child that died while the buffer was peeked left it read-only under
   "The same for the state an evil user is actually in: normal state is
 read-only while the child owns the keyboard, and there is no child to own it
 once it has exited."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -3293,6 +3324,7 @@ Every refresh ran `cooked-state-change-hook', `cooked-evil-sync' answered it by
 putting evil into `cooked-evil-child-state', and a full-screen program changes
 its termios settings routinely -- so a keystroke after `C-z' the user was back
 in emacs state, where `V' is forwarded to the child like any other key."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -3323,6 +3355,7 @@ through `cooked-semi-map', so `C-z' appeared to do nothing at all: every key,
 \\`V' included, still went to the child.  Normal state is where `C-z' has to
 land, and the insert state being remembered belonged to a prompt that is no
 longer on screen."
+  :tags '(evil)
   (skip-unless (require 'evil nil t))
   (require 'cooked-evil)
   (evil-mode 1)
@@ -3351,6 +3384,7 @@ warned that `undo-outer-limit' had discarded megabytes of it.  A command that
 prints two hundred lines is two hundred rows of churn, and none of it is the
 user's to undo -- so what is left afterwards is the empty history the anchor
 reset leaves behind, anchored at the new prompt."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (let ((before (length cooked--commands)))
@@ -3391,6 +3425,7 @@ where an anchor of nil comparing unequal to itself would show up."
 (ert-deftest cooked-undo-at-a-prompt-takes-back-the-line-and-nothing-above-it ()
   "What undo is scoped to, stated from the user's side: the typed line goes and
 the transcript above it -- which no history entry has ever named -- is untouched."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked-tests--display-buffer)
@@ -3408,6 +3443,7 @@ the transcript above it -- which no history entry has ever named -- is untouched
   "`t' is a decision, not an empty history: a buffer where undo was turned off
 must come out of a drain -- and out of the anchor reset inside it -- still off,
 since nil there would be switching it back on for them."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (setq buffer-undo-list t)
@@ -3428,6 +3464,7 @@ list and `undo-more' walks it without ever consulting the list again, so a drain
 that emptied the list and left the pointer would have the next `C-/' of a run in
 progress undoing entries about text that has moved.  evil's own pointer goes the
 same way and for the same reason."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "hello")
@@ -3468,6 +3505,7 @@ pointing into text that no longer exists."
 it.  The prompt lands back where it was, so the next drain's anchor check sees
 nothing move -- while every entry recorded before it names text that has been
 deleted and rebuilt underneath."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "hello")
@@ -3526,6 +3564,7 @@ user's on screen, and plain `evil-undo' -- `(interactive \"*p\")' -- answers
 \"Buffer is read-only\" there, which is a fact about the buffer and not about the
 undo.  The read-only comes from `cooked-evil-normal-state-render' being `still',
 which is the default, so this is what a user meets."
+  :tags '(evil zsh)
   (skip-unless (require 'evil nil t))
   (skip-unless (executable-find "zsh"))
   (require 'cooked-evil)
@@ -3554,6 +3593,7 @@ command that signalled, so evil is left believing in a selection nothing will
 reconcile and the next \\`v' leaves visual state instead of entering it.
 Reporting and returning leaves the selection standing, the text alone, and the
 state something the user can still see out of."
+  :tags '(evil zsh)
   (skip-unless (require 'evil nil t))
   (skip-unless (executable-find "zsh"))
   (require 'cooked-evil)

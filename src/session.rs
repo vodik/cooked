@@ -1480,8 +1480,78 @@ mod tests {
         }
     }
 
-    fn wait_for(session: &Session, mut done: impl FnMut(&Update) -> bool) -> Update {
-        let deadline = Instant::now() + Duration::from_secs(5);
+    /// Multiply every deadline in this module by `COOKED_TEST_TIMEOUT_SCALE`.
+    ///
+    /// The numbers below were chosen on an idle machine, and every one of them is a bet
+    /// about how fast a real child gets through a real pty. On a shared CI runner, or on
+    /// a developer's machine while cargo is linking, the bet is simply wrong: the code is
+    /// fine and the deadline is not. `resize_reaches_the_child` is the one that says so
+    /// out loud -- it failed at a load average of 38 and passes in isolation on the same
+    /// commit -- and the fix for a machine is to describe the machine once rather than to
+    /// edit each deadline in the tree upward until the fastest of them stops failing.
+    ///
+    /// A positive number and nothing else. An empty string does not parse and neither
+    /// does `wat`, but the interesting case is the one that parses: a scale of zero, or a
+    /// negative one, collapses every deadline to "already expired", so every wait here
+    /// returns instantly, every test that needs a child fails at once, and nothing in the
+    /// output says why. An empty variable is not exotic either -- it is what a CI config
+    /// declaring the name without a value produces, and what a makefile exporting an
+    /// unset variable produces -- so the guard is the point of this function rather than
+    /// a formality around it. Anything unusable means 1.
+    fn timeout_scale() -> f64 {
+        parse_timeout_scale(std::env::var("COOKED_TEST_TIMEOUT_SCALE").ok().as_deref())
+    }
+
+    /// The parse, separated from the environment so it can be tested.
+    ///
+    /// Reading the variable and deciding what it means are one line together and two
+    /// apart, and apart is worth it: `std::env::set_var` is unsafe and process-global, so
+    /// a test that exercised this through the environment would be racing every other
+    /// test in this binary for the same variable.
+    fn parse_timeout_scale(raw: Option<&str>) -> f64 {
+        raw.and_then(|raw| raw.trim().parse::<f64>().ok())
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .unwrap_or(1.0)
+    }
+
+    #[test]
+    fn the_timeout_scale_only_accepts_a_positive_number() {
+        assert_eq!(parse_timeout_scale(Some("4")), 4.0);
+        assert_eq!(parse_timeout_scale(Some(" 2.5 ")), 2.5);
+        assert_eq!(parse_timeout_scale(None), 1.0);
+        // The whole reason the guard exists: an empty variable is what a CI config
+        // declaring the name without a value produces, and what a makefile exporting an
+        // unset variable produces. Read as 0 it would expire every deadline here before
+        // it was taken.
+        assert_eq!(parse_timeout_scale(Some("")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("   ")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("0")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("-3")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("wat")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("4x")), 1.0);
+        // `inf` parses as a float and would make every wait unbounded, which is a hang
+        // rather than a failure and is the worse of the two.
+        assert_eq!(parse_timeout_scale(Some("inf")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("NaN")), 1.0);
+    }
+
+    /// A deadline of `seconds`, stretched by [`timeout_scale`].
+    fn patience(seconds: f64) -> Duration {
+        Duration::from_secs_f64(seconds * timeout_scale())
+    }
+
+    fn wait_for(session: &Session, done: impl FnMut(&Update) -> bool) -> Update {
+        wait_for_within(session, 5.0, done)
+    }
+
+    /// [`wait_for`] with the base deadline spelled out, for a test whose child does not
+    /// begin producing output the moment it starts.
+    fn wait_for_within(
+        session: &Session,
+        seconds: f64,
+        mut done: impl FnMut(&Update) -> bool,
+    ) -> Update {
+        let deadline = Instant::now() + patience(seconds);
         let mut merged = session.drain();
         while Instant::now() < deadline {
             if done(&merged) {
@@ -1558,7 +1628,7 @@ mod tests {
 
         // ...and throttling must cost nothing but time. Every picture is still owed.
         let mut seen = 0usize;
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + patience(20.0);
         while Instant::now() < deadline {
             seen += session.drain().delta.images.len();
             if seen >= FRAMES {
@@ -1589,7 +1659,7 @@ mod tests {
         );
 
         let mut collected: Vec<String> = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + patience(10.0);
         while Instant::now() < deadline {
             let update = session.drain();
             collected.extend(update.delta.scrolled.iter().map(|line| {
@@ -2408,6 +2478,11 @@ mod tests {
         );
     }
 
+    /// The load-sensitive one. Its child sleeps before it says anything, so this is
+    /// the only wait here that spends most of its budget before the first byte
+    /// arrives -- which is why it is the test that failed at a load average of 38
+    /// while passing in isolation on the same commit. The extra base budget is for
+    /// the child's own sleep; `COOKED_TEST_TIMEOUT_SCALE` is for the machine.
     #[test]
     fn resize_reaches_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.3; stty size"]);
@@ -2418,7 +2493,7 @@ mod tests {
                 cell: Default::default(),
             })
             .expect("resize");
-        let update = wait_for(&session, |u| rendered(u).contains("12 40"));
+        let update = wait_for_within(&session, 10.0, |u| rendered(u).contains("12 40"));
         assert!(rendered(&update).contains("12 40"));
     }
 }

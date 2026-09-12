@@ -76,6 +76,87 @@ Returns the packages that could not be found."
 (require 'cooked)
 (require 'cooked-mode)
 
+;;;; Waiting, and how long for
+
+;; Every wait in this suite is a deadline on a real child through a real pty, so
+;; every one of them is really a bet about how fast the machine is.  The numbers
+;; here were chosen on an idle developer laptop, and on a shared CI runner --
+;; or on this laptop while cargo is linking -- they are simply wrong: the code
+;; is fine and the deadline is not.  COOKED_TEST_TIMEOUT_SCALE multiplies all of
+;; them at once, so a slow machine is told about the machine rather than having
+;; each timeout in the tree edited upward until the fastest one stops failing.
+;;
+;; Scaling is the right knob and not merely the easy one.  A deadline that is
+;; too short reports a *failure*, which is the loudest thing the suite can say
+;; and is exactly what should not be said about a busy machine; a deadline that
+;; is too long costs only the time of a genuine failure, which is rare.  So the
+;; asymmetry is real and the scale only ever goes up.
+;;
+;; The parse accepts a positive number and nothing else, and that guard is the
+;; whole point of it rather than defensive habit.  `string-to-number' answers 0
+;; for "" and for "wat" alike, and an empty COOKED_TEST_TIMEOUT_SCALE is not
+;; exotic -- it is what a CI configuration produces when the variable is
+;; declared and left unset, or what `export COOKED_TEST_TIMEOUT_SCALE' in a
+;; makefile produces for a variable that was never given a value.  Multiplying
+;; by that zero turns every deadline in the suite into "already expired", so
+;; every wait returns immediately, every test that needs a child fails at once,
+;; and the run is red for a reason that appears nowhere in its output.  A bad
+;; value therefore falls back to 1 and says so.
+
+(defun cooked-tests--parse-timeout-scale (raw)
+  "Return the positive number RAW spells, or nil if it does not spell one."
+  (when raw
+    (let ((text (string-trim raw)))
+      (and (string-match-p "\\`[0-9]+\\(\\.[0-9]+\\)?\\'" text)
+           (let ((n (string-to-number text)))
+             (and (> n 0) n))))))
+
+(defconst cooked-tests-timeout-scale
+  (let* ((raw (getenv "COOKED_TEST_TIMEOUT_SCALE"))
+         (parsed (cooked-tests--parse-timeout-scale raw)))
+    (cond (parsed parsed)
+          ;; Only complain about a value that was actually offered.  An unset
+          ;; variable is the ordinary case and needs no line of output.
+          ((and raw (not (string-empty-p (string-trim raw))))
+           (message "cooked-tests: COOKED_TEST_TIMEOUT_SCALE=%S is not a positive number -- using 1"
+                    raw)
+           1)
+          (raw
+           (message "cooked-tests: COOKED_TEST_TIMEOUT_SCALE is set but empty -- using 1")
+           1)
+          (t 1)))
+  "Multiplier applied to every deadline in this suite.  See above.")
+
+(defun cooked-tests-timeout (seconds)
+  "Return SECONDS scaled by `cooked-tests-timeout-scale'."
+  (* seconds cooked-tests-timeout-scale))
+
+;;;; Saying which test is running
+
+;; ERT's batch reporter names a test when it *finishes*, which is the wrong end
+;; for the two failures that are hardest to chase here: a test that hangs until
+;; the harness kills the whole run, and a test that leaves a child or a
+;; temporary directory behind and breaks a later one.  In both, the name that
+;; matters is the one that never got printed.  COOKED_DEBUG_TESTS prints it on
+;; the way in, with a timestamp, so the tail of a killed run names the culprit
+;; and a slow test is visible as a gap between two lines.
+;;
+;; Advice rather than a fork of the batch reporter: ERT offers no hook that runs
+;; before a test body, and reimplementing `ert-run-tests-batch' to get one would
+;; mean owning its output format forever.
+
+(defvar cooked-tests--debug (and (getenv "COOKED_DEBUG_TESTS") t)
+  "Whether to name each test as it starts.  Set from COOKED_DEBUG_TESTS.")
+
+(defun cooked-tests--announce (test &rest _)
+  "Print the name of TEST before it runs."
+  (when (ert-test-p test)
+    (message "cooked-tests: [%s] running %s"
+             (format-time-string "%H:%M:%S.%3N") (ert-test-name test))))
+
+(when cooked-tests--debug
+  (advice-add 'ert-run-test :before #'cooked-tests--announce))
+
 (defun cooked-tests--stamp-background (image)
   "Put a `:background\=' on IMAGE, as `solaire-mode\=' advises `create-image\=' to do.
 
@@ -151,7 +232,7 @@ are usually no rows left to join.  Over the whole render suite seven of this
 helper's drains carried evicted rows, and every one of them happened to be under
 rejoining anyway.  A test whose result depends on which of two drains got to a
 row first is not testing what it says it is."
-  (let ((deadline (+ (float-time) (or seconds 5))))
+  (let ((deadline (+ (float-time) (cooked-tests-timeout (or seconds 5)))))
     (while (and (< (float-time) deadline) (not (funcall predicate)))
       (accept-process-output nil 0.05)
       (when cooked--session
@@ -167,7 +248,11 @@ draining has been *suppressed* (peek mode) cannot wait with
 `cooked-tests--settle', since the wait itself would apply the very drain
 under test.  `cooked--on-wake', the process filter, is the only thing
 draining here."
-  (let ((deadline (+ (float-time) seconds)))
+  ;; Scaled like every other wait here: this one is a *minimum* rather than a
+  ;; deadline -- it is how long a suppressed drain is given to fail to happen --
+  ;; and on a machine slow enough to need the scale, the thing being waited out
+  ;; is slower too.
+  (let ((deadline (+ (float-time) (cooked-tests-timeout seconds))))
     (while (< (float-time) deadline) (accept-process-output nil 0.05))))
 
 (defun cooked-tests--text ()
@@ -317,7 +402,9 @@ produce them.
   :setup    one form run in the buffer after `cooked-mode\=' and before the
             child, for a test that has to arrange something first.
   :settle   predicate for the first prompt, replacing the default below.
-  :timeout  seconds to wait for it.
+  :timeout  seconds to wait for it, before COOKED_TEST_TIMEOUT_SCALE is
+            applied -- `cooked-tests--settle\=' scales it, and scaling it here
+            as well would square the multiplier.
 
 `cooked--scratch\=' is set from the invocation, which is not bookkeeping: it is
 the only handle on the generated startup files, and `cooked--cleanup\=' removes

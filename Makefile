@@ -33,7 +33,44 @@ MODULE := target/release/libcooked$(MODULE_SUFFIX)
 # evil says so and skips, which is quiet enough to be mistaken for passing.
 EVIL_LOAD_PATH ?=
 
-.PHONY: all test rust-test lisp-test lint checkdoc citations compile bench clean module terminfo
+# Every wait in either suite is a deadline on a real child through a real pty,
+# so every one of them is a bet about how fast this machine is.  The numbers
+# were chosen on an idle laptop; on a shared CI runner, or on that same laptop
+# while cargo is linking, the bet is wrong and the code is not.
+# COOKED_TEST_TIMEOUT_SCALE stretches all of them at once, which is why
+# `src/session.rs::resize_reaches_the_child' -- the one that failed at a load
+# average of 38 and passed in isolation on the same commit -- is a knob away
+# from green rather than a rewrite away.
+#
+# Four under CI and one otherwise.  A developer wants a wrong deadline to fail
+# fast; CI wants it not to fail at all, and CI's runners are shared, throttled
+# and unpredictable in a way no local number can anticipate.
+ifdef CI
+COOKED_TEST_TIMEOUT_SCALE ?= 4
+endif
+
+# Exported only when it has a value, and this `ifdef' is the whole reason the
+# parsers on both sides insist on a *positive* number.  A bare
+# `export COOKED_TEST_TIMEOUT_SCALE' exports the empty string when the variable
+# was never set, `string-to-number' reads "" as 0, and multiplying by that zero
+# expires every deadline in the suite before it is taken -- so every wait
+# returns at once, every test needing a child fails, and nothing in the output
+# says why.  The guard on the other side catches it; not exporting an empty
+# value means it never has to.
+ifdef COOKED_TEST_TIMEOUT_SCALE
+export COOKED_TEST_TIMEOUT_SCALE
+endif
+
+# Which tests to run, as an ERT selector.  `t' is all of them; the tags are the
+# platform and dependency axis, one per `skip-unless' -- see the Commentary in
+# tests/cooked-tests.el.
+#
+#   make lisp-test SELECTOR='(not (tag zsh))'
+#   make lisp-test SELECTOR='(tag evil)'
+SELECTOR ?= t
+
+.PHONY: all test rust-test lisp-test lisp-test-parallel lint checkdoc citations \
+        compile bench bench-quick clean module terminfo
 
 all: test
 
@@ -59,11 +96,22 @@ rust-test:
 # as `(deleted)' -- instead of taking the SIGBUS an in-place rewrite would have
 # dealt it.  The staging copy is made in the same directory on purpose, so the
 # rename cannot fall back to a cross-filesystem copy and stop being atomic.
+#
+# Installed only when the bytes differ, which is not an optimisation of the copy
+# -- the copy is milliseconds -- but of the *mtime*.  An unconditional install
+# re-times the artifact on every run, and everything downstream that compares
+# timestamps then has to redo itself: the per-file test stamps below were
+# rebuilding all seventeen files after any target that touched `module',
+# including one that had just rebuilt nothing.  Skipping an identical install
+# cannot reintroduce the SIGBUS this target exists to avoid, because it writes
+# nothing at all.
 module:
 	cargo build --release
 	@mkdir -p target/release
-	@cp $(CARGO_TARGET_DIR)/release/libcooked$(MODULE_SUFFIX) $(MODULE).new
-	@mv -f $(MODULE).new $(MODULE)
+	@if ! cmp -s $(CARGO_TARGET_DIR)/release/libcooked$(MODULE_SUFFIX) $(MODULE); then \
+	  cp $(CARGO_TARGET_DIR)/release/libcooked$(MODULE_SUFFIX) $(MODULE).new && \
+	  mv -f $(MODULE).new $(MODULE); \
+	fi
 
 # Depends on `module' because the two halves are one protocol: the defuns the
 # core provides and the Lisp that calls them are versioned together, so a suite
@@ -71,7 +119,39 @@ module:
 # anything it is actually testing.  That is not hypothetical -- it is what a
 # scratch-dir build looks like from inside the test output.
 lisp-test: module
-	$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el -f ert-run-tests-batch-and-exit
+	$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el \
+	  --eval '(ert-run-tests-batch-and-exit (quote $(SELECTOR)))'
+
+# The same tests, one Emacs per file, so that `make -j8 lisp-test-parallel' uses
+# the cores this machine has.  The serial run is about eighty seconds and most
+# of it is spent waiting on children rather than computing, which is the shape
+# of workload that parallelises almost perfectly.
+#
+# Stamps rather than .PHONY targets, because a stamp is what lets make skip a
+# file whose tests cannot have changed.  Each depends on its own test file, on
+# every file in `lisp/' -- the code under test -- and on the module, so editing
+# one renderer reruns everything and editing one test file reruns one file.
+# They are *not* wired into `make test': a stamp tree can be stale in ways a
+# release gate must not tolerate, and `test' exists to be the thing that always
+# actually runs.  This is the inner-loop target.
+#
+# Each Emacs loads the whole suite and selects, rather than loading one file;
+# `cooked-tests-run-file' explains why.
+# `cooked-tests*.el' and not `cooked-tests-*.el': the runner file itself holds a
+# test, and the hyphenated glob quietly left it out -- 636 tests here against
+# 637 from `lisp-test', which is exactly the kind of shortfall a parallel
+# target must not be able to hide.  `cooked-bench.el' is not matched and should
+# not be; it is the benchmark, and `cooked-tests-bench.el' is its tests.
+TEST_FILES := $(wildcard tests/cooked-tests*.el)
+TEST_STAMPS := $(patsubst tests/%.el,target/test-stamps/%.stamp,$(TEST_FILES))
+
+lisp-test-parallel: $(TEST_STAMPS)
+
+target/test-stamps/%.stamp: tests/%.el $(wildcard lisp/*.el) $(MODULE)
+	@mkdir -p $(@D)
+	@$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el \
+	  --eval '(cooked-tests-run-file "$<")'
+	@touch $@
 
 # The compiled database we ship, so that a machine with no `tic' still gets a
 # terminal that describes what we implement.  Both subdirectory spellings are
@@ -210,8 +290,36 @@ bench:
 	cargo test --release --test throughput -- --ignored --nocapture
 	@trap 'rm -f lisp/*.elc' EXIT INT TERM; $(BATCH) -l cooked-bench.el -f cooked-bench
 
+# The same benchmarks, sized to finish inside ten seconds, for the question
+# "did I just make it slower by an order of magnitude" -- which is worth asking
+# on every commit and is not worth eighty seconds.  It is a smoke test and not a
+# measurement: `cooked-bench-min-duration' drops from 0.5s to 0.02s, so each
+# case gets a fortieth of the samples and its p99 and its GC counts are noise.
+# Nothing produced here belongs in a commit message.  Take a number from
+# `make bench'.
+#
+# The load guard is forced off for the same reason.  It exists to stop a
+# *measurement* being taken on a busy machine, and refusing to run a smoke test
+# because something else is compiling would only teach people to skip the smoke
+# test.
+#
+# Byte-compiled and cleaned up from a `trap', exactly as `bench' is, and that is
+# not copied ceremony: this target measures the same Lisp and would report
+# interpreted figures three times the real ones without it, and a `.elc' left
+# behind by an interrupted run silently changes what the next `lisp-test'
+# loads.  The Rust throughput benchmark is left to `bench' -- it is a release
+# build, so it cannot be made to fit in ten seconds by asking for fewer samples.
+bench-quick:
+	$(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
+	  -f batch-byte-compile $(wildcard lisp/*.el)
+	@trap 'rm -f lisp/*.elc' EXIT INT TERM; \
+	  COOKED_BENCH_FORCE=1 $(BATCH) \
+	    --eval '(setq cooked-bench-min-duration 0.02)' \
+	    -l cooked-bench.el -f cooked-bench
+
 # `cargo clean' only reaches CARGO_TARGET_DIR, so the installed core -- which is
 # deliberately not cargo's to manage -- has to be named here or it survives.
 clean:
 	cargo clean
+	rm -rf target/test-stamps
 	rm -f lisp/*.elc tests/*.elc $(MODULE) $(MODULE).new

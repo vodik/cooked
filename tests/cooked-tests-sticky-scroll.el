@@ -109,6 +109,7 @@ redisplay: a header line costs a row of the window body, which
   "The whole pipeline, not just the presentation layer above: a real zsh's OSC
 133 marks land in `cooked--commands' with a prompt marker and an `input', and
 the header pins to it once the window is scrolled into its output."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh" :name "*cooked-sticky-zsh*" :setup (cooked-tests--display-buffer) :settle (lambda () (eq cooked--semantic 'input)))
     (cooked--restore-pending-input nil)

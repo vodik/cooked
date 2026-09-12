@@ -599,6 +599,7 @@ Batch runs no redisplay and no command loop, so the two hooks that would notice
 are called here where Emacs would call them: `cooked--update-attention' from
 `window-buffer-change-functions', and `cooked--track-wandering' from
 `post-command-hook'."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (let ((buffer (generate-new-buffer "*cooked-zsh*"))
         (target (make-temp-file "cooked-open" nil ".txt" "opened by the child\n")))
@@ -651,6 +652,7 @@ are called here where Emacs would call them: `cooked--update-attention' from
 
 (ert-deftest cooked-find-file-works-end-to-end-from-the-shell ()
   "The headline trick: a shell function opens a buffer in the Emacs running it."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (let ((target (make-temp-file "cooked-open")))
     (unwind-protect
@@ -671,6 +673,7 @@ are called here where Emacs would call them: `cooked--update-attention' from
 its whole output family measures from them.  They sat at `point-min\=' until the
 shell\='s own marks started feeding them -- which is why `comint-delete-output\='
 used to flush the entire buffer."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh")
     (cooked--replace-input "echo alpha")
@@ -739,6 +742,7 @@ the top and the buffer above grows by exactly what left.
 
 The emulator now keeps each mark on its cell and reports the ones a rewrap moved;
 see `cooked--relocate-marks\='."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (dolist (input '("echo alpha" "echo beta" "echo gamma"))
@@ -769,6 +773,7 @@ printing wrapped output walks its own prompt marker away from its prompt.
 Output wider than the screen is what makes it wrapped, so the width here is
 load-bearing: at 20 columns each of these lines is two rows, the second a
 continuation."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked-tests--resize 8 20)
@@ -794,6 +799,7 @@ them is in text Emacs is about to *insert* rather than on a row it is about to
 rewrite.  Both spellings come through `cooked--anchor-position\=', so the records
 that end up in scrollback and the ones still on the live screen are right
 together."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (dolist (input '("echo alpha" "echo beta" "echo gamma"))
@@ -814,6 +820,7 @@ together."
 it, which collapses every marker Emacs holds into that text -- the rows coming
 back identical is no help, since it was the delete that destroyed them.  So the
 redraw reports its marks the same way a resize does."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 8))
@@ -833,6 +840,7 @@ mention again, so `cooked--render-scrolled\=' drops it -- which keeps the table 
 the handful of marks the live screen carries rather than four per command of the
 session.  The records keep their markers; what goes is the ability to relocate
 them, which nothing will ask for."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "seq 1 200")
@@ -850,6 +858,7 @@ them, which nothing will ask for."
 away for a flag.  It is what `cooked-previous-command' lands on and where the
 outer half of an `evil' command text object starts, and no regexp can recover
 it: a prompt is whatever the user's theme decided to draw."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "echo alpha")
@@ -874,6 +883,7 @@ it: a prompt is whatever the user's theme decided to draw."
 rather than cutting buffer text the grid would still hold.  The check that
 matters is that both ends still agree afterwards: a `cooked-refresh\=', which
 rebuilds the buffer from the grid alone, must not bring the output back."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "echo alpha")
@@ -905,6 +915,7 @@ rebuilds the buffer from the grid alone, must not bring the output back."
 gone, and exactly the output that has left the grid.  Each half has one owner --
 the emulator removes the rows it still holds, Emacs deletes the scrollback it
 owns outright -- and the seam bookkeeping is only owed when the cut reaches it."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     ;; More lines than the grid is tall, so most of it scrolls into scrollback.
@@ -1288,6 +1299,7 @@ the shell's own line editor.
 The record is the other half.  Each continuation line is submitted separately,
 so the command's own text has to accumulate across them or the record for the
 whole construct would say only its last line."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (cooked--replace-input "for x in alpha beta; do")

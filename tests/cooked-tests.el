@@ -51,6 +51,20 @@
 ;;         -l cooked-tests.el -f ert-run-tests-batch-and-exit
 ;;
 ;; `goto-chg' is evil\='s one hard dependency.
+;;
+;; Every test that guards itself with a `skip-unless' also carries a `:tags' for
+;; what it is guarding on -- `zsh', `bash', `fish', `evil', `tic' and so on --
+;; so the platform axis can be selected on rather than discovered by reading a
+;; hundred `skip-unless' forms.  A tag names a *dependency*, not a subject: what
+;; a test is about is already answered by which file it lives in, and a second
+;; taxonomy over the same tests would only drift from the first.  So:
+;;
+;;   make lisp-test SELECTOR='(not (tag zsh))'      # no zsh on this machine
+;;   make lisp-test SELECTOR='(tag evil)'           # just the evil layer
+;;
+;; That is worth having because skipping is silent: on a machine without zsh,
+;; fifty-odd tests skip and the run still says it passed.  Selecting them out
+;; deliberately makes the absence a decision rather than a surprise.
 
 ;;; Code:
 
@@ -72,6 +86,50 @@
 (require 'cooked-tests-process)
 (require 'cooked-tests-comint)
 (require 'cooked-tests-bench)
+
+;; Running one file's tests without loading only that file.
+;;
+;; Loading a single test file works and is documented above, but it is not what
+;; a per-file `make' target can do: several files share fixtures through
+;; `cooked-tests-helpers', and the set that does is not written down anywhere
+;; that a makefile could read.  So the whole suite is loaded and the selector
+;; does the narrowing, using the file ERT itself recorded when the test was
+;; defined.  The cost is the load, which is a fraction of a second; the benefit
+;; is that a per-file target cannot go stale as fixtures move between files.
+
+(defun cooked-tests-run-file (file)
+  "Run the tests defined in FILE and exit with their status.
+Truenames on both sides, because ERT stores the path the file was loaded from
+and a caller naming the same file through a symlink or a relative path is
+naming the same tests."
+  (let ((wanted (file-truename file)))
+    (ert-run-tests-batch-and-exit
+     `(satisfies
+       ,(lambda (test)
+          (let ((defined-in (ert-test-file-name test)))
+            (and defined-in (equal (file-truename defined-in) wanted))))))))
+
+;; The one test that is about the harness rather than about cooked.  It lives
+;; here, beside the runner, because that is what it is part of; there is no
+;; separate file for it because one test does not need a file.
+(ert-deftest cooked-the-test-timeout-scale-only-accepts-a-positive-number ()
+  "COOKED_TEST_TIMEOUT_SCALE multiplies every deadline in the suite, so a value
+that parses to zero does not slow the suite down -- it expires every wait before
+it is taken, fails every test that needs a child, and says nothing about why.
+`string-to-number\=' reads both \"\" and \"wat\" as 0, and an empty value is the
+ordinary accident: a CI configuration that declares the name without giving it
+one, or a makefile that exports a variable it never set.  So the parser rejects
+everything that is not a positive number and the caller falls back to 1."
+  (should (equal 4 (cooked-tests--parse-timeout-scale "4")))
+  (should (equal 2.5 (cooked-tests--parse-timeout-scale " 2.5 ")))
+  (should-not (cooked-tests--parse-timeout-scale nil))
+  (dolist (bad '("" "   " "0" "0.0" "-3" "wat" "4x" "1e3" "inf"))
+    (should-not (cooked-tests--parse-timeout-scale bad)))
+  ;; And the scale actually in force is a positive number whatever the
+  ;; environment this run inherited says.
+  (should (numberp cooked-tests-timeout-scale))
+  (should (> cooked-tests-timeout-scale 0))
+  (should (equal (* 5 cooked-tests-timeout-scale) (cooked-tests-timeout 5))))
 
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here

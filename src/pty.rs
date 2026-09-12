@@ -888,7 +888,16 @@ mod tests {
             None,
         )
         .expect("spawn");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        // Scaled like the session tests' deadlines, and for the same reason; the
+        // reasoning is written down on `session::tests::timeout_scale`. Spelled out here
+        // rather than shared, because a test helper in one module's `cfg(test)` tree is
+        // not reachable from another's.
+        let scale: f64 = std::env::var("COOKED_TEST_TIMEOUT_SCALE")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .unwrap_or(1.0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(2.0 * scale);
         while std::time::Instant::now() < deadline {
             // `mode()` can transiently fail immediately after spawn, before the child has
             // opened its slave (see `Pty::resize`'s doc comment) — tolerated the same way

@@ -22,6 +22,7 @@ The probe is `precmd_functions\=' rather than any single hook name because setup
 is deferred to the first prompt: immediately after sourcing, the only thing
 registered is the deferred initializer, and under another terminal there must be
 nothing at all."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (let ((snippet (expand-file-name "cooked.zsh" (cooked--integration-directory))))
     (dolist (term '("xterm-kitty" "cooked"))
@@ -38,6 +39,7 @@ nothing at all."
 `OSC 51;CH\=' come apart: the core alone claims a line editor is reading -- which
 is what licenses the Emacs input region behind an ssh -- while saying it can
 answer no requests.  Sourcing the capture is what turns the last field on."
+  :tags '(base64 zsh)
   (skip-unless (executable-find "zsh"))
   (skip-unless (executable-find "base64"))
   (let* ((dir (cooked--integration-directory))
@@ -169,6 +171,7 @@ there is no autoload left to resolve."
 (ert-deftest cooked-zsh-sources-the-users-zshenv ()
   "Regression: ZDOTDIR pointed at a directory with only a .zshrc, so the user's
 own ~/.zshenv — where PATH and friends usually live — was never read."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshenv" . "export COOKED_ZSHENV_WITNESS=yes\n")
@@ -193,6 +196,7 @@ own ~/.zshenv — where PATH and friends usually live — was never read."
 theme rebuilding PS1 from its own precmd dropped it — and with it the whole
 hand-the-keyboard-back feature.  Exit codes broke the same way, because our
 precmd then ran after the theme's and read its status instead of the command's."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "__theme_precmd() { PS1='theme%% ' }\n\
@@ -262,6 +266,7 @@ which is the half a user standing the marks down still wants.
 
 The snippet defers its own setup to the first prompt precisely so that the rc,
 which runs earlier, has somewhere to stand."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-fake-zdotdir
       '((".zshrc" . "PROMPT='$ '\nCOOKED_SHELL_INTEGRATION_FEATURES=\"${COOKED_SHELL_INTEGRATION_FEATURES-} no-marks\"\n"))
@@ -381,6 +386,7 @@ than about what it printed, which it can only answer by being asked."
 expands when it draws the prompt -- not as bytes.  The guard against
 re-appending tested for a real ESC, so it never matched, and by the tenth prompt
 PS1 was mostly marks.  Nothing was visibly wrong: an OSC occupies no columns."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc)))
     (unwind-protect
@@ -407,6 +413,7 @@ expands exactly once per command line it is about to run, so the question the
 latch answered no longer gets asked.  The test stays because the property is the
 same one either way, and it is the property rather than the mechanism that
 Emacs depends on."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc)))
     (unwind-protect
@@ -426,6 +433,7 @@ The zsh half of this is covered separately; bash gets its own because the way it
 stays first differs -- a string prepended to PROMPT_COMMAND rather than a
 reordered array -- and because a theme appending to PROMPT_COMMAND is the common
 way to break it."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc "__theme() { :; }"
                                    "PROMPT_COMMAND='__theme'")))
@@ -441,6 +449,7 @@ construct falls out of Emacs\=' hands back to readline.
 `A;k=s\=' rather than a bare `A\=': the option is what says this prompt continues
 the previous one, which is what keeps the command record filed under the prompt
 the construct was typed at."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc)))
     (unwind-protect
@@ -461,6 +470,7 @@ line is the whole point of marking it; the `A;k=s\\=' inside that is the marks\\
 half.  Gating both halves on `input-mark\\=' alone emitted a continuation whose
 prompt start was never announced -- a claim about a command Emacs has no record
 of, which then latched a flag on the Emacs side that nothing could clear."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc))
         (script "for x in 1 2; do\necho $x\ndone\nexit\n"))
@@ -494,6 +504,7 @@ which is to say after everything else had run.  `trap ... DEBUG\=' replaces
 whatever was there without a word, so the thing it replaced was, as often as not,
 bash-preexec: every `preexec_functions\=' hook the user had went quiet, and
 nothing anywhere said so.  The mark rides in PS0 now, which displaces nothing."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc "__user_preexec() { :; }"
                                    "trap '__user_preexec' DEBUG")))
@@ -511,6 +522,7 @@ element 0 only, so the user\='s remaining entries survive -- and now run *after*
 everything we appended, which under the old DEBUG trap meant the first of them
 was reported as a command the user had typed and every prompt emitted a stray
 `C\='.  Branch on the actual type, as kitty and Ghostty both do."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc "PROMPT_COMMAND=(\"__first=1\" \"__second=1\")")))
     (unwind-protect
@@ -535,6 +547,7 @@ command and the only one Emacs has when the shell kept the line.
 
 Percent-encoded rather than kitty\='s `cmdline=\=', which is `printf %q\=' output
 and so is quoted in a way only that shell can undo."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc)))
     (unwind-protect
@@ -552,6 +565,7 @@ The history number settles it -- what bash said the next command would be
 numbered, taken at the prompt, against what the entry actually carries -- and
 when they disagree the mark goes out bare.  Saying nothing is the only honest
 answer, and it costs nothing: Emacs still has the text it submitted."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc "HISTCONTROL=ignorespace")))
     (unwind-protect
@@ -571,6 +585,7 @@ answer, and it costs nothing: Emacs still has the text it submitted."
 (ert-deftest cooked-bash-survives-a-theme-that-rebuilds-the-prompt ()
   "A theme rebuilding PS1 from PROMPT_COMMAND must not cost the `B\=' mark, which
 is the whole hand-the-keyboard-back feature."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc "__theme() { PS1='theme$ '; }"
                                    "PROMPT_COMMAND='__theme'")))
@@ -588,6 +603,7 @@ installs nothing there, by design.  That is the arrangement worth asserting,
 because it is the one every fish user gets.  The snippet\='s own path is
 `cooked-fish-supplies-the-marks-fish-declines-to-send\=', which has to force
 fish to be quiet before there is anything of ours to see."
+  :tags '(fish)
   (skip-unless (executable-find "fish"))
   (cooked-tests--with-fish
     ;; The `B' arrived and was believed: Emacs owns the line.
@@ -613,6 +629,7 @@ Wrapping it once at startup was not enough: anything that redefines
 exactly that every time you change theme.  So the wrapper is re-applied at each
 prompt, from the same reasoning that re-applies the PS1 marks in bash and zsh.
 The test redefines the prompt mid-session and asks for the marks again."
+  :tags '(fish script)
   (skip-unless (executable-find "fish"))
   (skip-unless (executable-find "script"))
   (let* ((config (make-temp-file "cooked-tests-fish-" t))
@@ -662,6 +679,7 @@ out of a `fish_postexec\\=' handler where `$status\\=' is the command\\'s.
 
 Read off the wire rather than through a session, because what is under test is
 which *emitter* spoke: a mark reaches Emacs the same way whoever sent it."
+  :tags '(fish script)
   (skip-unless (executable-find "fish"))
   (skip-unless (executable-find "script"))
   (let* ((config (make-temp-file "cooked-tests-fish-" t))
@@ -719,6 +737,7 @@ Asserted through the feature list rather than by counting marks on the wire,
 because the feature list is *how* it gets out of the way: the snippet appends the
 same `no-NAME\=' forms an rc would, so there is one mechanism deciding what is on
 and `__cooked_want\=' remains the only thing that answers."
+  :tags '(fish)
   (skip-unless (executable-find "fish"))
   (cooked-tests--with-fish
     ;; Asked of `__cooked_want' rather than read off `$__cooked_features', which is
@@ -745,6 +764,7 @@ and `__cooked_want\=' remains the only thing that answers."
 
 (ert-deftest cooked-bash-honours-the-feature-list ()
   "The same subtraction zsh honours, on the shell that gets less attention."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (let ((rc (cooked-tests--bash-rc)))
     (unwind-protect
@@ -801,6 +821,7 @@ the title is the empty string rather than an error, so the feature looks
 registered and does nothing.  It reached the snippet by being copied out of an rc
 that set the option globally, which is exactly the difference between an example
 and a shipped file, so the rc here does not set it."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   ;; `command\=' and an assignment stand in for the whole skip list.  Not `sudo\=',
   ;; which is on it: running one in a test would sit waiting for a password.
@@ -813,6 +834,7 @@ and a shipped file, so the rc here does not set it."
 
 (ert-deftest cooked-zsh-title-can-be-declined ()
   "`no-title\=' leaves the title to whoever was already writing it."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (should-not (cooked-tests--zsh-osc 2 "" "true\nexit\n"
                                      "marks input-mark cwd announce title no-title")))
@@ -827,6 +849,7 @@ first prompt of a session -- sends no `D\=' at all; an open `C\=' is closed with
 bare `D\=' that reports no status because there is none to report.  cooked\='s
 Emacs side ignores a `D\=' that closes nothing either way, so this is about not
 putting an untrue mark on a wire that other readers also have to make sense of."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (let ((marks (cooked-tests--zsh-osc 133 "" "\ntrue\nexit\n")))
     ;; Nothing before the session\'s first prompt: the first mark on the wire opens a
@@ -845,6 +868,7 @@ putting an untrue mark on a wire that other readers also have to make sense of."
 directory that does not exist, and tracking stops without a word.  The receiving
 half has always decoded; it was the sending half that did not encode, in all
 three shells at once, so all three are checked here against the same directory."
+  :tags '(bash zsh)
   (skip-unless (executable-find "zsh"))
   (skip-unless (executable-find "bash"))
   (let* ((parent (make-temp-file "cooked-tests-cwd-" t))
@@ -872,6 +896,7 @@ three shells at once, so all three are checked here against the same directory."
 
 (ert-deftest cooked-real-bash-reaches-input-state-at-its-prompt ()
   "The headline case: a real interactive shell, whose prompt is raw-mode."
+  :tags '(bash)
   (skip-unless (executable-find "bash"))
   (cooked-tests--with-shell
       ("bash"
@@ -893,6 +918,7 @@ three shells at once, so all three are checked here against the same directory."
 
 (ert-deftest cooked-zsh-reports-command-exit-codes ()
   "Regression: `local status=$?' fails in zsh, which silently killed OSC 133;D."
+  :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-shell ("zsh" :settle (lambda () (eq cooked--semantic 'input)))
     (should-not (string-match-p "read-only variable" (cooked-tests--text)))
@@ -976,6 +1002,7 @@ and a name we do not describe still resolves, ncurses falling through to
 ~/.terminfo and the system database on a miss.  So there is nothing to merge and
 no list to keep, and a caller who really does keep a database there can name it
 on TERMINFO_DIRS, which we no longer touch either."
+  :tags '(terminfo)
   (skip-unless (cooked--terminfo-database))
   (let* ((process-environment (cons "TERMINFO=/opt/theirs" process-environment))
          (env (cooked--child-environment)))
@@ -1000,6 +1027,7 @@ source, forget to rebuild, and every child is handed a description of a
 terminal this no longer is.  It cannot surface downstream -- a capability that
 is merely wrong reads as the child declining to use it -- so it is caught while
 the two files can still be compared."
+  :tags '(tic)
   (skip-unless (executable-find "tic"))
   (let ((database (make-temp-file "cooked-terminfo" t)))
     (unwind-protect
@@ -1047,6 +1075,7 @@ the binding existed to replace."
 
 (ert-deftest cooked-full-screen-programs-redraw-after-a-resize ()
   "End to end: htop must move its footer when the terminal grows."
+  :tags '(htop)
   (skip-unless (executable-find "htop"))
   (let ((buffer (generate-new-buffer "*cooked-htop*")))
     (unwind-protect
