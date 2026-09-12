@@ -311,21 +311,56 @@ than its trial estimate still runs long enough to be timed."
                    (/ (* 1000 (cooked-bench--pct sorted 0.50)) unit-count))))))
     samples))
 
+(defvar cooked-bench--cell '(10 . 20)
+  "The cell size in pixels the bench window claims, as (WIDTH . HEIGHT).
+
+Batch's window is a terminal window and reports a cell of one pixel by one, so
+once the buffer is displayed `cooked--deco-cell-size' prefers that to
+`cooked--last-cell' and every box glyph is rasterized into a single pixel.
+Nothing errors; the box-drawing figures just quietly stop being about the
+bitmaps.  Holding the window's answer at the 10x20 every other batch fixture
+uses keeps attaching the window to one change instead of two, which is what
+makes a before-and-after diff of these numbers mean anything.
+
+Also the handle the rescale benchmark turns, because it is now the only way to
+move the cell: see `cooked-bench-rescale'.")
+
 (defmacro cooked-bench--with-session (argv &rest body)
   "Run BODY in a live cooked buffer running ARGV."
   (declare (indent 1))
   `(let ((buffer (generate-new-buffer "*cooked-bench*")))
      (unwind-protect
-         (with-current-buffer buffer
-           (cooked-mode)
-           (cooked--start ,argv)
-           (cooked--refresh-keymap)
-           ;; No window in batch, so `cooked--deco-cell-size' would decline to
-           ;; guess a cell and nothing would take the bitmap path at all -- see
-           ;; there.  A buffer-local size is what it asks for, and 10x20 is the
-           ;; one every other batch fixture uses.
-           (setq cooked--last-cell '(10 . 20))
-           ,@body)
+         (cl-letf (((symbol-function 'cooked--cell-size)
+                    (lambda (_window) cooked-bench--cell)))
+           (with-current-buffer buffer
+             (cooked-mode)
+             (cooked--start ,argv)
+             (cooked--refresh-keymap)
+             ;; What `cooked--deco-cell-size' falls back to when the buffer is
+             ;; displayed nowhere -- kept for the drain's own size bookkeeping,
+             ;; and now shadowed for decoration purposes by the window below.
+             (setq cooked--last-cell '(10 . 20))
+             ;; Batch's selected window does not display anything, but
+             ;; `get-buffer-window-list' returns it all the same, and that is the
+             ;; whole of what the window-dependent paths test for.  Without this
+             ;; they short-circuit and the benchmark measures less work than a
+             ;; session does: `cooked--layout-window' answers nil, so
+             ;; `cooked--guard-row-width' skips every row and the wrap cache is
+             ;; never consulted, and the bottom anchoring in cooked-render.el has
+             ;; no window to walk.  Same reason and same idiom as
+             ;; `cooked-tests--display-buffer' in cooked-tests-helpers.el, whose
+             ;; docstring makes the point for the guard specifically -- a row
+             ;; displayed nowhere has no layout to disagree with, so there is
+             ;; nothing to trim and nothing to measure.
+             ;;
+             ;; It does not make this a graphical measurement.  The window has no
+             ;; glyph matrix to rasterize into, so the box-drawing figures still
+             ;; measure spec construction rather than drawing, and the guard still
+             ;; counts characters where a real frame would ask for font metrics --
+             ;; a gap the scroll-ceiling run measured at 2.4x in apply alone.  What
+             ;; attaching the window buys is that the code runs at all.
+             (set-window-buffer (selected-window) buffer)
+             ,@body))
        (with-current-buffer buffer (cooked--cleanup))
        (kill-buffer buffer))))
 
@@ -482,12 +517,13 @@ missing here from the moment the drain grew them, which is how
 (defun cooked-bench--plain-rows (count cols)
   "COUNT damaged rows of unstyled text, the cheapest thing to render.
 
-A row is (INDEX . BLOCK), and a block is (TEXT STYLE-SPANS DECO-SPANS LINK-SPANS)
-with
-offsets in characters -- see `cooked--render-block'.  Unstyled text carries
-no span list at all, which is the case the sparse shape is built around."
+A row is (INDEX . BLOCK), and a block is (TEXT STYLE-SPANS DECO-SPANS
+LINK-SPANS WIDTH UNIFORM) with offsets in characters -- see
+`cooked--render-block'.  Unstyled text carries no span list at all, which is
+the case the sparse shape is built around.  WIDTH is the cell count and
+UNIFORM is t here because every character is one ASCII byte on one cell."
   (let ((text (make-string cols ?x)))
-    (cl-loop for i below count collect (cons i (list text nil nil nil)))))
+    (cl-loop for i below count collect (cons i (list text nil nil nil cols t)))))
 
 (defun cooked-bench--le (value bytes)
   "VALUE as BYTES little-endian bytes, as a list."
@@ -523,7 +559,7 @@ log actually emits and so the case the encoding is tuned for."
                                                            (logior (ash 1 24) (mod (+ i r) 8))
                                                            0 0
                                                            (if (cl-evenp r) 1 0))))
-                                   nil nil)))))
+                                   nil nil (* 8 width) t)))))
 
 (defun cooked-bench--url-rows (count cols)
   "COUNT damaged rows each carrying a URL, which is what the goto-addr scan costs.
@@ -532,7 +568,7 @@ Plain text otherwise, so the gap against `cooked-bench--plain-rows\=' is the who
 of what `cooked--fontify-links\=' spends on a row that has something to find."
   (let* ((url "curl https://example.com/some/long/path ")
          (text (truncate-string-to-width (concat url (make-string cols ?x)) cols)))
-    (cl-loop for i below count collect (cons i (list text nil nil nil)))))
+    (cl-loop for i below count collect (cons i (list text nil nil nil cols t)))))
 
 (defun cooked-bench--box-rows (count cols)
   "COUNT damaged rows of box drawing, every cell taking the bitmap path.
@@ -546,7 +582,14 @@ single record the encoding exists to produce."
          (deco (cons 'glyph (unibyte-string #x50 #x00
                                             (logand cols #xff) (ash cols -8))))
          (spans (list (list 0 deco))))
-    (cl-loop for i below count collect (cons i (list text nil spans)))))
+    ;; UNIFORM is nil, unlike every other fixture here: the box-drawing
+    ;; character is three bytes, and UNIFORM asks about bytes as well as cells.
+    ;; That is not a detail -- it is the flag that decides whether
+    ;; `cooked--guard-row-width' can finish without measuring anything, so a
+    ;; fixture claiming t would make the box rows look like the cheap case and
+    ;; measure the one path this row exists to exercise.
+    (cl-loop for i below count
+             collect (cons i (list text nil spans nil cols nil)))))
 
 (defun cooked-bench--frames (label rows &optional frames)
   "Apply ROWS as a damaged-row update, one frame per iteration.
@@ -736,6 +779,17 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
     ;; twice would time the gate from the second iteration onward and report a
     ;; walk that costs almost nothing.  The two sizes are the pair the earlier
     ;; shape used, and the walk is symmetric between them.
+    ;;
+    ;; It is `cooked-bench--cell' that has to move, not `cooked--last-cell'.
+    ;; Poking the latter worked only while the buffer was displayed nowhere:
+    ;; once there is a window, `cooked--deco-cell-size' prefers what the window
+    ;; says and never looks at the fallback, so the gate closed on every
+    ;; iteration and the case reported seventy thousand iterations of four
+    ;; microseconds -- the gate, timed over and over, labelled as the walk.  A
+    ;; benchmark that measures nothing does not fail, it just reports a
+    ;; flattering number, which is the failure mode this whole file is written
+    ;; against.  Moving the window's answer also drives the walk the way
+    ;; production does, through `cooked--deco-cell-size', rather than around it.
     (let ((rows (count-lines (point-min) (point-max)))
           (cells (buffer-size))
           (toggle nil))
@@ -743,7 +797,8 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
        (format "rescale-deco, %d rows of box drawing" rows) rows
        (lambda ()
          (setq toggle (not toggle)
-               cooked--last-cell (if toggle '(12 . 26) '(10 . 20)))
+               cooked-bench--cell (if toggle '(12 . 26) '(10 . 20))
+               cooked--last-cell cooked-bench--cell)
          (cooked--rescale-deco))
        2)
       (message "  %-40s   %d cells" "" cells))

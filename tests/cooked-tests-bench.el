@@ -118,5 +118,34 @@ the one call under test."
           (setq pos (1+ pos))))
       (should (= decorated 40)))))
 
+(ert-deftest cooked-bench-rows-carry-the-width-and-uniform-the-guard-reads ()
+  "A block is (TEXT STYLE-SPANS DECO-SPANS LINK-SPANS WIDTH UNIFORM), and every
+fixture here has to supply all six.
+
+The last two are the ones that went stale, and they went stale in the quietest
+way this file has yet seen.  Nothing reads them in `cooked--render-block\=';
+`cooked--render-rows\=' reads them off the block afterwards and hands them to
+`cooked--guard-row-width\=', which does nothing at all unless the buffer is
+displayed.  The benchmark displayed nothing, so four-element blocks drove every
+figure in the file for as long as they existed, and the moment a window was
+attached the guard got a nil WIDTH and the run died in
+`cooked--row-mismeasured-p\='.  A crash was the lucky outcome: had the fixture
+said WIDTH the guard could work with and UNIFORM t, it would have reported the
+fast path's cost for rows that in production take the slow one.
+
+So the arity is asserted for every generator, and UNIFORM is asserted against
+the text rather than against a literal -- it means every character is one byte
+on one cell, so it is the box row, whose characters are three bytes each, that
+has to answer nil."
+  (dolist (rows (list (cooked-bench--plain-rows 2 80)
+                      (cooked-bench--styled-rows 2 80)
+                      (cooked-bench--url-rows 2 80)
+                      (cooked-bench--box-rows 2 80)))
+    (pcase-dolist (`(,_index . ,block) rows)
+      (should (= (length block) 6))
+      (pcase-let ((`(,text ,_styles ,_deco ,_links ,width ,uniform) block))
+        (should (= width (string-width text)))
+        (should (eq uniform (= (string-bytes text) (length text))))))))
+
 (provide 'cooked-tests-bench)
 ;;; cooked-tests-bench.el ends here
