@@ -134,10 +134,22 @@ pub(crate) mod sixel;
 pub(crate) mod term;
 pub(crate) mod text;
 
-pub(crate) use cell::{Color, Deco, MarkId, Run, Style};
+pub(crate) use cell::{Color, Deco, MarkId, Style};
 pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ImageId};
 pub(crate) use link::LinkId;
-pub(crate) use term::{Anchor, ColorScheme, CursorShape, Delta, Event, KeyEncoding, osc_reply};
+pub(crate) use term::{Anchor, ColorScheme, CursorShape, Event, KeyEncoding, osc_reply};
 
-// The benchmark's whole surface; see `tests/throughput.rs`.
-pub use term::{BACKLOG_HIGH_WATER, Term};
+// What the integration tests are allowed to see, and no more. `tests/throughput.rs` needs
+// `Term` and the high-water mark; `tests/delta_replay.rs` needs the other three, because
+// its whole subject is what a drain reports — it accumulates `Delta::rows` into a shadow
+// grid and compares `Run`s, styles included, against the grid's own full reading of
+// itself.
+//
+// Widened here rather than by making the modules public: an integration test is an
+// external crate and cannot reach `pub(crate)`, so a self-oracle over the drain protocol
+// either lives in `src/` beside the code it is meant to be independent of, or the
+// protocol's own types become nameable from outside. The second is the smaller
+// concession — these are already the wire format the Lisp side is written against, so
+// nothing here is more exposed than `cooked--apply' already assumes.
+pub use cell::Run;
+pub use term::{BACKLOG_HIGH_WATER, Delta, Scrolled, Term};

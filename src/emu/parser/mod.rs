@@ -20,6 +20,15 @@
 //! an archaeology exercise. The `no_std` machinery and the optional `ansi` module are
 //! the only things dropped: cooked is always `std`, and it has its own interpreter.
 //!
+//! Two *behavioural* divergences, both in [`Parser::advance_partial_utf8`], both found by
+//! `tests/delta_replay.rs` and both cases of the resumed path disagreeing with the path a
+//! whole read takes — so both are bugs rather than adaptations, and a re-sync should
+//! carry them forward rather than drop them:
+//!
+//! * a codepoint split across two reads no longer swallows the text that followed it in
+//!   the same buffer;
+//! * a C1 control split across two reads is executed rather than printed.
+//!
 //! # Differences from the original state machine description
 //!
 //! * UTF-8 support for input
@@ -784,7 +793,7 @@ impl Parser {
             // If the entire buffer is valid, use the first character and continue parsing.
             Ok(parsed) => {
                 let c = unsafe { parsed.chars().next().unwrap_unchecked() };
-                performer.print(c);
+                Self::partial_dispatch(performer, c);
 
                 self.partial_utf8_len = 0;
                 c.len_utf8() - old_bytes
@@ -792,18 +801,37 @@ impl Parser {
             Err(err) => {
                 let valid_bytes = err.valid_up_to();
                 // If we have any valid bytes, that means we partially copied another
-                // utf8 character into `partial_utf8`. Since we only care about the
-                // first character, we just ignore the rest.
+                // utf8 character into `partial_utf8`. Only the first character is ours to
+                // emit; everything after it is still in the caller's buffer and is parsed
+                // by the loop we return to.
+                //
+                // **A divergence from upstream**, the first of the two the module header
+                // lists. vte 0.15.0 returns `valid_bytes - old_bytes` here, which tells
+                // the caller to skip *every* byte that parsed rather than just the
+                // character that was printed -- so text between the completed codepoint
+                // and the next partial one is consumed and never printed. It takes three
+                // things at once to reach: a codepoint split across two reads, at least
+                // one more character after it, and a second multi-byte codepoint whose
+                // own bytes are cut by the four-byte staging buffer. `tests/
+                // delta_replay.rs` produces all three within a few hundred cases, which
+                // is precisely what the fragmented-write generator is for; by hand it
+                // looks like `"\u{2500}"` split mid-sequence, and the space after it
+                // vanishing off the grid.
+                //
+                // The fix is to return what the `Ok` arm ten lines above already returns:
+                // the length of the character actually emitted. `c` began in
+                // `partial_utf8` before this call, so `c.len_utf8()` always exceeds
+                // `old_bytes` and the subtraction cannot wrap.
                 if valid_bytes > 0 {
                     let c = unsafe {
                         let parsed = str::from_utf8_unchecked(&self.partial_utf8[..valid_bytes]);
                         parsed.chars().next().unwrap_unchecked()
                     };
 
-                    performer.print(c);
+                    Self::partial_dispatch(performer, c);
 
                     self.partial_utf8_len = 0;
-                    return valid_bytes - old_bytes;
+                    return c.len_utf8() - old_bytes;
                 }
 
                 match err.error_len() {
@@ -819,6 +847,28 @@ impl Parser {
                     None => to_copy,
                 }
             }
+        }
+    }
+
+    /// One code point completed out of the partial-UTF-8 staging buffer, dispatched the
+    /// way [`Parser::ground_dispatch`] would have dispatched it had the bytes arrived in
+    /// one read.
+    ///
+    /// **A divergence from upstream**, the second of the two the module header lists, and
+    /// the same shape as the first: vte 0.15.0 calls `print` unconditionally here, so a C1 control
+    /// split across two reads is printed as a glyph while the same two bytes arriving
+    /// together are executed. `CSI` written as `\u{9b}` is the one that matters -- the
+    /// grid would gain a stray character and lose the escape sequence that followed it.
+    /// Found by `tests/delta_replay.rs`.
+    ///
+    /// Only the C1 range is tested, unlike `ground_dispatch`'s predicate: a C0 control is
+    /// one byte in UTF-8 and so can never be the thing a partial sequence completes into.
+    #[inline]
+    fn partial_dispatch<P: Perform>(performer: &mut P, c: char) {
+        if matches!(c, '\u{80}'..='\u{9f}') {
+            performer.execute(c as u8);
+        } else {
+            performer.print(c);
         }
     }
 
@@ -1580,6 +1630,49 @@ mod tests {
         assert_eq!(dispatcher.dispatched.len(), 2);
         assert_eq!(dispatcher.dispatched[0], Sequence::Print('ĸ'));
         assert_eq!(dispatcher.dispatched[1], Sequence::Print('🎉'));
+    }
+
+    /// cooked's, not upstream's: the case the `valid_bytes - old_bytes` return dropped.
+    ///
+    /// `"ĸaĸ"` cut after the first byte. Completing that codepoint fills the four-byte
+    /// staging buffer with `ĸ`, the `a`, and the lead byte of the second `ĸ` -- so the
+    /// buffer ends mid-character and lands in the `Err` arm with two characters' worth of
+    /// valid bytes in it. Upstream skipped the caller past all of them, and the `a` was
+    /// never printed. Found by `tests/delta_replay.rs`; see the comment in
+    /// `advance_partial_utf8`.
+    #[test]
+    fn partial_utf8_followed_by_more_text() {
+        const INPUT: &[u8] = "ĸaĸ".as_bytes();
+
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        parser.advance(&mut dispatcher, &INPUT[..1]);
+        parser.advance(&mut dispatcher, &INPUT[1..]);
+
+        assert_eq!(dispatcher.dispatched.len(), 3);
+        assert_eq!(dispatcher.dispatched[0], Sequence::Print('ĸ'));
+        assert_eq!(dispatcher.dispatched[1], Sequence::Print('a'));
+        assert_eq!(dispatcher.dispatched[2], Sequence::Print('ĸ'));
+    }
+
+    /// cooked's, not upstream's: a C1 control cut in half is still a control.
+    ///
+    /// `\u{9b}` is `CSI`, and the two bytes it is written as in UTF-8 are as likely to
+    /// straddle a read as any other pair. Arriving together they are executed; upstream
+    /// printed them when they arrived apart. See `Parser::partial_dispatch`.
+    #[test]
+    fn partial_utf8_c1_control() {
+        const INPUT: &[u8] = "\u{9b}".as_bytes();
+
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        parser.advance(&mut dispatcher, &INPUT[..1]);
+        parser.advance(&mut dispatcher, &INPUT[1..]);
+
+        assert_eq!(dispatcher.dispatched.len(), 1);
+        assert_eq!(dispatcher.dispatched[0], Sequence::Execute(0x9b));
     }
 
     #[test]

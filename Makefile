@@ -39,6 +39,15 @@ all: test
 
 test: rust-test lisp-test lint
 
+# `cargo test` is both suites: the unit tests under `src/', and the property test in
+# `tests/delta_replay.rs' that replays a drain's deltas against the grid they came from.
+#
+# The property test runs a fixed 1024 cases here, which is a second or so and the right
+# size for a gate -- a suite whose runtime nobody can predict is a suite people learn to
+# skip. `PROPTEST_CASES' in the environment overrides it, and is how a suspicion gets
+# chased: `PROPTEST_CASES=100000 make rust-test' is a few minutes and a much wider net.
+# Anything it finds shrinks and lands in `tests/delta_replay.regressions', which is
+# committed and replayed ahead of the random cases on every subsequent run.
 rust-test:
 	cargo test
 

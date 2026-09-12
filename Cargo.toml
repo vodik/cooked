@@ -24,6 +24,12 @@ unicode-width = "0.2"
 [lints.rust]
 unreachable_pub = "warn"
 
+# proptest drives `tests/delta_replay.rs`, the self-oracle over the damage tracker. It is
+# a test dependency and must stay one: the module Emacs loads has the dependency list it
+# has on purpose, and nothing under `src/` may grow this.
+[dev-dependencies]
+proptest = "1.11"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
