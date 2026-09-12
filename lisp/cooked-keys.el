@@ -37,6 +37,8 @@
 (require 'cooked)
 (require 'cooked-util)
 (require 'cooked-mouse)
+;; For `cooked-link-delegate-function', the slot this file fills at the bottom.
+(require 'cooked-link)
 
 ;; Defined by the native core at `module-load' time, so the byte-compiler cannot
 ;; see them; cooked.el and cooked-mode.el declare their own sets the same way.
@@ -1205,6 +1207,40 @@ no completion channel reaches `git checkout <TAB>\=' -- but it should be chosen.
            (cooked--replace-keymap cooked-input-map
                                    (cooked--build-input-map value))))
   :group 'cooked)
+
+;;;; Who owns a click or a RET on a link
+
+;; cooked-link.el is base tier and cannot ask this: the answer depends on the mouse
+;; grab, on whether keys are being forwarded and on whether the session is suspended,
+;; and a base-tier file reaching upward for policy is the one thing `docs/DESIGN.md'
+;; rules out.  So the link layer states the occasion and this file, which already owns
+;; every one of those three states, decides.
+
+(defun cooked--link-delegate (event)
+  "Hand EVENT to the child if the child owns it, and say whether that happened.
+
+`cooked-link-delegate-function', so the answer is nil when the invocation
+belongs to Emacs and the link should be followed.
+
+The gate is not politeness, it is a documented guarantee.  A `keymap' text or
+overlay property is consulted *before* `emulation-mode-map-alists', so the
+binding `cooked-follow-link' sits on outranks `cooked--mouse-map' -- and a
+plain click while the child has grabbed the mouse belongs to the child, with
+Shift as the sanctioned escape.  Without that rule a click meant for the
+program underneath would follow a link instead.  The same holds for RET while
+keys are being forwarded.
+
+Only the unshifted case reaches here; cooked-link.el filters the rest, because
+`S-RET' and `S-mouse-2' following the link regardless of state is what keeps a
+link reachable at all inside a full-screen program."
+  (cond
+   ((mouse-event-p event)
+    (when (bound-and-true-p cooked--mouse-grab) (cooked-mouse-event) t))
+   ((and (cooked--child-owns-keyboard-p) (not (cooked--suspended-p)))
+    (cooked-send-key)
+    t)))
+
+(setq cooked-link-delegate-function #'cooked--link-delegate)
 
 (provide 'cooked-keys)
 ;;; cooked-keys.el ends here

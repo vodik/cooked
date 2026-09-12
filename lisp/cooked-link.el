@@ -63,11 +63,32 @@
 ;; it can be reached from.
 (require 'cooked-util)
 
-(declare-function cooked--suspended-p "cooked")
-(declare-function cooked--child-owns-keyboard-p "cooked")
-(declare-function cooked-mouse-event "cooked-mouse")
-(declare-function cooked-send-key "cooked-keys")
-(defvar cooked--mouse-grab)
+;; What was here until recently was four `declare-function's -- `cooked--suspended-p',
+;; `cooked--child-owns-keyboard-p', `cooked-mouse-event' and `cooked-send-key' -- plus
+;; a `defvar' for `cooked--mouse-grab'.  Two of those are input-ownership *policy
+;; questions*, and this file is base tier, where `docs/DESIGN.md' says a file "carries
+;; notifications upward, never questions."  A link layer deciding whether a click
+;; belongs to the child is that rule broken outright: the answer depends on the mouse
+;; grab, on whether keys are being forwarded and on whether the session is suspended,
+;; none of which this file has any business knowing.
+;;
+;; `cooked-link-delegate-function' inverts it.  This file states the *occasion* -- an
+;; unshifted invocation, which is the one the child could plausibly own -- and the
+;; layer that already owns input decides and acts.  See `cooked--link-delegate' in
+;; cooked-keys.el, which is where the grab and the forwarding state already live.
+
+(defvar cooked-link-delegate-function nil
+  "Function offered an unshifted link invocation before the link is followed.
+
+Called with one argument, the event that invoked the command, and returns
+non-nil if it *took* the event -- forwarded it to the child, or otherwise
+handled it -- in which case no link is followed.  nil means the invocation
+belongs to Emacs and the link is opened.
+
+Set from above by whichever layer owns input; unset, every invocation follows
+the link, which is the right answer for a buffer with no child in it.  The
+shifted variants never reach here at all: `S-RET' and `S-mouse-2' are the
+sanctioned escape and must keep working whatever the child has grabbed.")
 
 (defgroup cooked-link nil
   "Links in terminal output."
@@ -164,10 +185,6 @@ arrive too late for the row that needed it."
 
 ;;;; Following
 
-(defun cooked--link-forwarding-keys-p ()
-  "Whether a key pressed now would be forwarded to the child."
-  (and (cooked--child-owns-keyboard-p) (not (cooked--suspended-p))))
-
 (defun cooked--open-link-at-point ()
   "Open whatever at point counts as a link, in the order the sources rank.
 
@@ -202,20 +219,16 @@ reachable at all inside a full-screen program.
 Once it does decide to open something, `cooked--open-link-at-point\=' says what
 that is."
   (interactive (list last-nonmenu-event))
-  ;; Both questions are asked of `last-input-event' rather than of EVENT: it is the
+  ;; The shift test is asked of `last-input-event' rather than of EVENT: it is the
   ;; same object for every interactive route into here, and it is the one that is
-  ;; still right when a caller passes no event at all.
-  (let ((mouse (mouse-event-p last-input-event))
-        (shift (memq 'shift (event-modifiers last-input-event))))
-    (cond
-     ((and (not shift) mouse (bound-and-true-p cooked--mouse-grab))
-      (cooked-mouse-event))
-     ((and (not shift) (not mouse) (cooked--link-forwarding-keys-p))
-      (cooked-send-key))
-     (t
-      (when (and (consp event) (posn-point (event-end event)))
-        (posn-set-point (event-end event)))
-      (cooked--open-link-at-point)))))
+  ;; still right when a caller passes no event at all.  The delegate is handed that
+  ;; same object for the same reason.
+  (unless (and (not (memq 'shift (event-modifiers last-input-event)))
+               cooked-link-delegate-function
+               (funcall cooked-link-delegate-function last-input-event))
+    (when (and (consp event) (posn-point (event-end event)))
+      (posn-set-point (event-end event)))
+    (cooked--open-link-at-point)))
 
 (defun cooked-follow-link-at-point ()
   "Follow the link at point, whoever owns the keyboard.
@@ -246,28 +259,55 @@ whether cooked's own `C-c' map is reachable at all already decides it."
 
 ;;;; The OSC 8 pass
 
-(defun cooked-link--claimed-p (pos)
-  "Whether some other source has already made the text at POS a link.
+(defun cooked-link--osc-8-claim-p (pos)
+  "Whether an `OSC 8\=' span covers POS."
+  (get-text-property pos 'cooked-link-id))
 
-The precedence between the three sources, stated in one place so that adding a
-fourth is one edit rather than a pairwise check per existing pair:
+(defun cooked-link--goto-addr-claim-p (pos)
+  "Whether a goto-addr overlay covers POS."
+  (seq-some (lambda (overlay) (overlay-get overlay 'goto-address))
+            (overlays-at pos)))
 
-  1. An `OSC 8\=' span, because the child named the destination outright and
-     nothing here has to guess at it.
-  2. A `goto-addr\=' match, which read a URL out of the text itself.
-  3. Anything guessed from the shape of the text -- `cooked-file-link.el\='s
-     file names -- which is the only source that can be wrong about what the
-     text even is.
+(defvar cooked-link-claim-functions
+  (list (cons 'osc-8 #'cooked-link--osc-8-claim-p)
+        (cons 'goto-addr #'cooked-link--goto-addr-claim-p))
+  "Sources that can claim a span as a link, in order of precedence.
 
-So this answers for the two above the guessing layer, and the guessing layer
-asks it before claiming anything.  Deliberately *not* the question
-`cooked--fontify-links\=' asks when it drops a goto-addr overlay: that one is
-specifically about an `OSC 8\=' span having claimed the same characters, and
-widening it to \"claimed\" would have it delete overlays sitting over file names
-too."
-  (or (get-text-property pos 'cooked-link-id)
-      (seq-some (lambda (overlay) (overlay-get overlay 'goto-address))
-                (overlays-at pos))))
+An alist of (SYMBOL . PREDICATE); PREDICATE is called with a buffer position
+and answers whether that source has claimed it.  Earlier entries outrank later
+ones, and `cooked-link--claimed-p\=' is the arbiter.
+
+The list is *data the layers contribute to* rather than an ordering written
+into this file, and the difference is not cosmetic.  The ranking used to be a
+constant here reading `OSC 8\=' > goto-addr > \"guessed shape\" -- but guessed
+shape is `cooked-file-link.el\='s output, so the base layer was naming a
+category that does not exist unless an optional layer above it happens to be
+loaded.  A source now registers itself, at the rank it belongs at, from the
+file that produces it.
+
+The two entries here are the two this file produces, in the order they have
+always ranked: what the child named outright first, then what goto-addr read
+out of the text.  A layer that *guesses* -- from a shape, from the filesystem
+-- appends itself, because guessing is the only kind that can be wrong about
+what the text even is.")
+
+(defun cooked-link--claimed-p (pos &optional source)
+  "Which source, if any, has already made the text at POS a link.
+
+Returns the claiming source\='s symbol, or nil.  With SOURCE, answers only for
+sources ranked *above* it: a source asks before claiming, and must not be told
+that it has claimed the position itself -- nor be blocked by something it
+outranks.  The walk therefore stops at SOURCE\='s own entry.
+
+Deliberately *not* the question `cooked--fontify-links\=' asks when it drops a
+goto-addr overlay: that one is specifically about an `OSC 8\=' span having
+claimed the same characters, and widening it to \"claimed\" would have it
+delete overlays sitting over file names too."
+  (catch 'claimed
+    (pcase-dolist (`(,symbol . ,predicate) cooked-link-claim-functions)
+      (when (eq symbol source) (throw 'claimed nil))
+      (when (funcall predicate pos) (throw 'claimed symbol)))
+    nil))
 
 (defun cooked-link--propertize (beg end &rest extra)
   "Make BEG..END behave as a link, carrying EXTRA over the common properties.

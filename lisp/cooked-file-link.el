@@ -219,6 +219,15 @@ a rule that matched some other part of the line from contributing numbers."
           (move-to-column col)))
       t)))
 
+(defun cooked-file-link--claim-p (pos)
+  "Whether this layer has claimed POS as a file name.
+
+The entry `cooked-link-claim-functions\=' carries for the guessing tier.  The
+property is the one `cooked-file-link-scan\=' puts down, so the answer is about
+spans this layer actually made rather than about text it merely could have
+matched."
+  (get-text-property pos 'cooked-file-link))
+
 (defun cooked-file-link-scan (beg end)
   "Highlight existing file names between BEG and END.
 
@@ -246,9 +255,11 @@ guessed."
                  (string (match-string-no-properties 0)))
             (pcase-let ((`(,name ,_line ,_col) (cooked-file-link--split string)))
               ;; What the child named, and what goto-addr read out of the text,
-              ;; both outrank what this guessed from its shape; see
-              ;; `cooked-link--claimed-p'.
-              (unless (cooked-link--claimed-p from)
+              ;; both outrank what this guessed from its shape.  Asking as
+              ;; `guessed' rather than anonymously is what makes that a fact
+              ;; about this layer's own rank rather than one written into the
+              ;; base layer -- see `cooked-link-claim-functions'.
+              (unless (cooked-link--claimed-p from 'guessed)
                 (let ((file (with-memoization (gethash name known)
                               (or (cooked-file-link--exists name) 'none))))
                   (unless (eq file 'none)
@@ -260,6 +271,16 @@ guessed."
 
 (add-hook 'cooked-link-follow-functions #'cooked-file-link-follow)
 (add-hook 'cooked-link-scan-functions #'cooked-file-link-scan)
+
+;; Registered at the *end*, which is this layer's rank and not an accident of load
+;; order: a guess from the shape of the text is the only claim that can be wrong
+;; about what the text even is, so everything that read a destination outright
+;; outranks it.  `add-to-list' with APPEND, and keyed on the symbol, so loading this
+;; file twice does not stack two entries.
+(unless (assq 'guessed cooked-link-claim-functions)
+  (setq cooked-link-claim-functions
+        (append cooked-link-claim-functions
+                (list (cons 'guessed #'cooked-file-link--claim-p)))))
 
 (provide 'cooked-file-link)
 

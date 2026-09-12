@@ -146,6 +146,77 @@
           (cooked-follow-link nil))
         (should browsed)))))
 
+(ert-deftest cooked-a-link-follows-when-no-layer-claims-the-input ()
+  "The base layer alone must not decide who owns a click.
+
+The point of `cooked-link-delegate-function\=' is that cooked-link.el is base
+tier and, by `docs/DESIGN.md\='s rule, carries notifications upward and never
+questions.  It used to ask `cooked--child-owns-keyboard-p\=' and
+`cooked--suspended-p\=' through `declare-function\=', which is that rule broken.
+With no delegate installed there is nothing above to answer, and the only
+correct behaviour is to follow the link -- not to guess, and not to signal
+`void-function\=' reaching for a layer that was never loaded."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "here" (cooked-tests--text)))))
+    (goto-char (cooked-tests--link-at "here"))
+    (let ((browsed nil)
+          (cooked-link-delegate-function nil)
+          ;; Set as a real grab would set it.  Nothing may consult it from down
+          ;; here, and that is exactly what this asserts.
+          (cooked--mouse-grab t))
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (&rest _) (setq browsed t))))
+        (let ((last-input-event (list 'mouse-2 nil)))
+          (cooked-follow-link))
+        (should browsed)))))
+
+(ert-deftest cooked-link-claims-are-ordered-by-what-the-layers-registered ()
+  "Precedence is data the layers contribute, not a constant in the base layer.
+
+The ranking used to be written into `cooked-link--claimed-p\=' as `OSC 8\=' >
+goto-addr > \"guessed shape\" -- but guessed shape is cooked-file-link.el\='s
+output, so the bottom of the stack was naming a category that does not exist
+unless an optional layer above it is loaded.  Three things have to hold now:
+each source answers for itself, a source asking is not told it claimed the
+position itself, and a source is not blocked by one it outranks."
+  (with-temp-buffer
+    (insert "abcdefghij")
+    (let* ((claimed nil)
+           (cooked-link-claim-functions
+            (list (cons 'osc-8 (lambda (pos) (memq pos claimed)))
+                  (cons 'goto-addr (lambda (pos) (memq (1+ pos) claimed)))
+                  (cons 'guessed (lambda (pos) (memq (+ 2 pos) claimed))))))
+      ;; Nothing registered a claim yet.
+      (should-not (cooked-link--claimed-p 1))
+      ;; The top source claims, and is named -- the return value is the symbol,
+      ;; so a caller can say *which* source outranked it rather than only that
+      ;; one did.
+      (setq claimed '(1))
+      (should (eq (cooked-link--claimed-p 1) 'osc-8))
+      ;; The guessing layer asks as itself and is still blocked, because OSC 8
+      ;; outranks it.
+      (should (eq (cooked-link--claimed-p 1 'guessed) 'osc-8))
+      ;; ... and OSC 8 asking as itself is *not* told it claimed its own span.
+      (should-not (cooked-link--claimed-p 1 'osc-8))
+      ;; A claim held only by the lowest source does not block the ones above
+      ;; it: the walk stops at the asking source's own entry.
+      (setq claimed '(3))
+      (should (eq (cooked-link--claimed-p 1) 'guessed))
+      (should-not (cooked-link--claimed-p 1 'goto-addr))
+      (should-not (cooked-link--claimed-p 1 'osc-8)))))
+
+(ert-deftest cooked-the-file-link-layer-registers-itself-below-the-others ()
+  "cooked-file-link.el appends its own rank rather than the base layer naming it."
+  (should (eq (car (car (last cooked-link-claim-functions))) 'guessed))
+  (should (memq 'osc-8 (mapcar #'car cooked-link-claim-functions)))
+  ;; Loading the layer twice must not stack a second entry.
+  (let ((before (length cooked-link-claim-functions)))
+    (load "cooked-file-link" nil t)
+    (should (= (length cooked-link-claim-functions) before))))
+
 (ert-deftest cooked-a-link-survives-scrolling-into-the-scrollback ()
   ;; The id travels with the row through eviction, because both live and scrolled
   ;; rows go through the same `Row::runs' -- which is also why `Extra::Link' needed no
