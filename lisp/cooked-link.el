@@ -264,9 +264,11 @@ whether cooked's own `C-c' map is reachable at all already decides it."
   (get-text-property pos 'cooked-link-id))
 
 (defun cooked-link--goto-addr-claim-p (pos)
-  "Whether a goto-addr overlay covers POS."
-  (seq-some (lambda (overlay) (overlay-get overlay 'goto-address))
-            (overlays-at pos)))
+  "Whether the detected-URL pass has claimed POS.
+
+A text property since the pass stopped making overlays -- see
+`cooked--fontify-links\='."
+  (get-text-property pos 'cooked-link-url))
 
 (defvar cooked-link-claim-functions
   (list (cons 'osc-8 #'cooked-link--osc-8-claim-p)
@@ -387,51 +389,111 @@ claim a click the image had a better claim to."
       (cdr (setq cooked--url-scheme-regexp
                  (cons schemes (regexp-opt schemes)))))))
 
+(defconst cooked-link--url-properties
+  '(cooked-link-url face mouse-face follow-link help-echo keymap)
+  "The properties the detected-URL pass owns, and the only ones it removes.
+
+Named once so unfontifying cannot drift from fontifying and leave a stray
+`mouse-face' highlighting text that is no longer a link.")
+
+(defun cooked-link--unfontify-urls (beg end)
+  "Remove the detected-URL pass's own properties from BEG..END.
+
+`goto-address-fontify' begins with `goto-address-unfontify' and this is the
+same move, but it has to be *narrower*: an overlay could simply be deleted,
+where these properties share their names with the ones an `OSC 8' span sets.
+So only runs actually carrying `cooked-link-url' are cleared, which leaves an
+explicit hyperlink -- and cooked-file-link.el's spans -- untouched."
+  (let ((pos beg))
+    (while (< pos end)
+      (let ((next (or (next-single-property-change pos 'cooked-link-url nil end)
+                      end)))
+        (when (get-text-property pos 'cooked-link-url)
+          (remove-list-of-text-properties pos next cooked-link--url-properties))
+        (setq pos next)))))
+
+(defun cooked-link--fontify-url-match (beg end url face mouse-face help-echo)
+  "Make BEG..END a detected link to URL, unless something outranks it."
+  (unless (cooked-link--claimed-p beg 'goto-addr)
+    (cooked-link--propertize beg end
+                             'cooked-link-url url
+                             'help-echo help-echo
+                             'mouse-face mouse-face
+                             'face (and goto-address-fontify-p face))))
+
 (defun cooked--fontify-links (beg end)
   "Scan BEG..END for things that look like URLs, and highlight what it finds.
 
-`goto-address-fontify-region' does the whole of the work; what is here is the
-three things cooked has to say about it.
+Text properties, not overlays, and that is the substance of this rather than a
+detail.  goto-addr makes an overlay per match; on a *live* terminal row that is
+the expensive form twice over -- redisplay assembles the overlay list per
+window per redisplay, and `note_mouse_highlight' walks `overlays_at' on every
+motion event over the buffer.  cooked's own `OSC 8' path has always used
+properties, so this also stops one buffer answering the same question two
+different ways.  REPORT.org §7 ranks it fourth of the borrowables.
 
-`goto-address-highlight-keymap' is swapped for `cooked-link-map' by let-binding
-it, because the overlay records the keymap's *value* at the moment it is put.
-Without that a click on a link would beat the child's own mouse grab — a
-`keymap' property outranks `emulation-mode-map-alists' — which is exactly the
-guarantee `cooked-follow-link' exists to keep.
-
-`goto-address-prog-mode' is bound off: it tests `(nth 8 (syntax-ppss))', which
-over raw terminal output parses nothing meaningful.
+What replacing `goto-address-fontify-region' costs is the scan itself, which is
+reproduced here rather than called -- goto-addr offers no hook to filter its
+matches with, and the filtering is the point.  Everything observable is kept:
+both regexps, `bounds-of-thing-at-point' for the URL bounds where goto-addr
+uses it and the raw match for mail where it does not, `goto-address-fontify-p',
+`goto-address-fontify-maximum-size', and the user's own
+`goto-address-url-face', `goto-address-mail-face' and the two mouse faces.
+What is not kept is the button.el wiring (`button', `action', `category'):
+`cooked-link-map' already answers RET and mouse-2, which is the interaction
+those existed to provide.
 
 `thing-at-point-beginning-of-url-regexp' is bound because thingatpt does not
-cache it.  goto-addr asks `bounds-of-thing-at-point' about every match, and with
-that variable nil — which is its default — the well-formed-URL check runs
-`regexp-opt' over ninety-odd schemes for each one: a millisecond and 170 KB of
-garbage per row carrying a URL, which is a full GC every few keystrokes at a
-prompt.  The bound value is literally the expression thingatpt would have
-evaluated, so nothing about the match changes; ffap binds the same variable for
-the same purpose, so it is a seam rather than a reach into internals.  The `or'
-leaves a user who set it their own.
+cache it.  `bounds-of-thing-at-point' is asked about every match, and with that
+variable nil -- its default -- the well-formed-URL check runs `regexp-opt' over
+ninety-odd schemes for each one: a millisecond and 170 KB of garbage per row
+carrying a URL, which is a full GC every few keystrokes at a prompt.  The bound
+value is literally the expression thingatpt would have evaluated, so nothing
+about the match changes; ffap binds the same variable for the same purpose.
 
-And an explicit `OSC 8' span wins.  A match that starts inside one is dropped
-rather than suppressed beforehand, since goto-addr offers no hook to filter
-with and the alternative is reimplementing its scan to add one.  Overlays are
-cheap and this only ever runs over a row or a batch."
+An explicit `OSC 8' span still wins, but now by being *asked* rather than by
+having its overlays deleted afterwards: `cooked-link--claimed-p' is consulted
+per match with `goto-addr' as the asking source, so the precedence is the one
+`cooked-link-claim-functions' states and nothing is created only to be undone."
   (when cooked-detect-links
-    ;; Guarded like `cooked--apply-deco': this runs from inside the drain, over
-    ;; text that is already correct without it, and `goto-address-url-regexp' is a
-    ;; variable the user may have replaced.  A cosmetic pass must not be able to
-    ;; abort a redisplay half-done.
+    ;; Guarded like `cooked--apply-deco': this runs over text that is already
+    ;; correct without it, and `goto-address-url-regexp' is a variable the user
+    ;; may have replaced.  A cosmetic pass must not abort a redisplay half-done.
     (cooked--protect-seam 'cooked--fontify-links
-      (let ((goto-address-highlight-keymap cooked-link-map)
-            (goto-address-prog-mode nil)
-            (thing-at-point-beginning-of-url-regexp
-             (or thing-at-point-beginning-of-url-regexp
-                 (cooked--url-scheme-regexp))))
-        (goto-address-fontify-region beg end))
-      (dolist (overlay (overlays-in beg end))
-        (when (and (overlay-get overlay 'goto-address)
-                   (get-text-property (overlay-start overlay) 'cooked-link-id))
-          (delete-overlay overlay))))))
+      (let ((inhibit-read-only t))
+      ;; Scrollback carries `read-only', and this pass writes *text properties*
+      ;; now where it used to make overlays -- which touch no text and so never
+      ;; needed this.  `cooked--fontify-region' binds it too, but a cosmetic pass
+      ;; that signals `text-read-only' from inside redisplay is a bad enough
+      ;; failure to be worth being self-sufficient about.
+      (when (or (eq t goto-address-fontify-maximum-size)
+                (< (- end beg) goto-address-fontify-maximum-size))
+        (let ((thing-at-point-beginning-of-url-regexp
+               (or thing-at-point-beginning-of-url-regexp
+                   (cooked--url-scheme-regexp))))
+          (cooked-link--unfontify-urls beg end)
+          (save-excursion
+            (goto-char beg)
+            (while (re-search-forward goto-address-url-regexp end t)
+              ;; goto-addr takes the bounds from thingatpt rather than from its
+              ;; own match, and the difference is real: the regexp swallows
+              ;; trailing punctuation that `bounds-of-thing-at-point' trims.
+              (when-let* ((bounds (save-excursion
+                                    (goto-char (match-beginning 0))
+                                    (bounds-of-thing-at-point 'url))))
+                (cooked-link--fontify-url-match
+                 (car bounds) (cdr bounds)
+                 (buffer-substring-no-properties (car bounds) (cdr bounds))
+                 goto-address-url-face goto-address-url-mouse-face
+                 "mouse-2, C-c RET: follow URL"))))
+          (save-excursion
+            (goto-char beg)
+            (while (re-search-forward goto-address-mail-regexp end t)
+              (cooked-link--fontify-url-match
+               (match-beginning 0) (match-end 0)
+               (concat "mailto:" (match-string-no-properties 0))
+               goto-address-mail-face goto-address-mail-mouse-face
+               "mouse-2, C-c RET: mail this address")))))))))
 
 ;;;; thing-at-point, which is how everything else finds a link
 

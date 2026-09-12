@@ -70,15 +70,71 @@
              (lambda () (string-match-p "example.com" (cooked-tests--text)))))
     ;; The scan is redisplay's now, and batch mode does not redisplay.
     (cooked-tests--fontify)
-    (let* ((at (cooked-tests--link-at "https://example.com/"))
-           (overlay (seq-find (lambda (o) (overlay-get o 'goto-address))
-                              (overlays-at at))))
-      (should overlay)
-      (should (overlay-get overlay 'follow-link))
+    (let ((at (cooked-tests--link-at "https://example.com/")))
+      ;; Text properties, not overlays.  An overlay per match on a live row is
+      ;; the expensive form twice over -- redisplay assembles the overlay list
+      ;; per window per redisplay, and `note_mouse_highlight' walks
+      ;; `overlays_at' on every motion.  See `cooked--fontify-links'.
+      (should-not (overlays-at at))
+      (should (equal (get-text-property at 'cooked-link-url)
+                     "https://example.com/"))
+      (should (get-text-property at 'follow-link))
+      (should (get-text-property at 'mouse-face))
       ;; The keymap is ours, not goto-addr's: a `keymap' property outranks
       ;; `emulation-mode-map-alists', so the gate has to be in the command that
       ;; property names.  See `cooked-follow-link'.
-      (should (eq (overlay-get overlay 'keymap) cooked-link-map)))))
+      (should (eq (get-text-property at 'keymap) cooked-link-map)))))
+
+(ert-deftest cooked-the-url-guess-creates-no-overlays-at-all ()
+  "The whole point of the conversion, asserted as an absence.
+
+An overlay per detected URL is paid twice on a live row: redisplay assembles
+the overlay list per window per redisplay, and `note_mouse_highlight\=' walks
+`overlays_at\=' on every motion event.  A build log is mostly URLs, so this is
+not a rounding error -- REPORT.org §7 ranks it fourth of the borrowables."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'a https://one.example/ b https://two.example/ c d@e.example\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "two.example" (cooked-tests--text)))))
+    (cooked-tests--fontify)
+    ;; All three found ...
+    (should (equal (get-text-property (cooked-tests--link-at "https://one.example/")
+                                      'cooked-link-url)
+                   "https://one.example/"))
+    (should (equal (get-text-property (cooked-tests--link-at "d@e.example")
+                                      'cooked-link-url)
+                   "mailto:d@e.example"))
+    ;; ... and not one overlay anywhere.
+    (should-not (overlays-in (point-min) (point-max)))))
+
+(ert-deftest cooked-unfontifying-the-guess-cannot-strip-an-explicit-link ()
+  "Rescanning must clear only what the guess itself put down.
+
+`goto-address-fontify\=' opens with `goto-address-unfontify\=', and an overlay
+could simply be deleted.  Properties cannot: the guess sets `mouse-face\=',
+`keymap\=' and `help-echo\=' under the same names an `OSC 8\=' span sets them,
+so a blanket `remove-text-properties\=' over the region would silently
+de-link every real hyperlink on it.  Only runs carrying `cooked-link-url\='
+may be cleared."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\033]8;;https://real.example/\\033\\\\LABEL\\033]8;;\\033\\\\ and https://guess.example/\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "guess.example" (cooked-tests--text)))))
+    (cooked-tests--fontify)
+    (let ((osc (cooked-tests--link-at "LABEL")))
+      (should (equal (cooked-link-uri osc) "https://real.example/"))
+      (should (eq (get-text-property osc 'keymap) cooked-link-map))
+      ;; Scan the whole buffer again, as a redisplay over rewritten text would.
+      (cooked--fontify-links (point-min) (point-max))
+      (should (equal (cooked-link-uri osc) "https://real.example/"))
+      (should (eq (get-text-property osc 'keymap) cooked-link-map))
+      (should (get-text-property osc 'mouse-face))
+      ;; And the guess is still there too, exactly once.
+      (should (equal (get-text-property (cooked-tests--link-at "https://guess.example/")
+                                        'cooked-link-url)
+                     "https://guess.example/")))))
 
 (ert-deftest cooked-an-explicit-link-wins-over-the-guess ()
   ;; The text is a URL *and* an OSC 8 span pointing somewhere else.  What the child
@@ -90,8 +146,10 @@
              (lambda () (string-match-p "example.com" (cooked-tests--text)))))
     (let ((at (cooked-tests--link-at "https://example.com/")))
       (should (equal (cooked-link-uri at) "https://elsewhere.example/"))
-      (should-not (seq-find (lambda (o) (overlay-get o 'goto-address))
-                            (overlays-at at))))))
+      ;; And dropped by never being created: the guess asks
+      ;; `cooked-link--claimed-p' as `goto-addr' before propertizing, where it
+      ;; used to make overlays and delete them again afterwards.
+      (should-not (get-text-property at 'cooked-link-url)))))
 
 (ert-deftest cooked-a-link-does-not-steal-a-click-from-the-child ()
   ;; A `keymap' text property is consulted before `emulation-mode-map-alists', so
@@ -348,8 +406,8 @@ the everyday shape of this."
         '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
       (should (cooked-tests--settle
                (lambda () (string-match-p "example.com" (cooked-tests--text)))))
-      (should-not (seq-find (lambda (o) (overlay-get o 'goto-address))
-                            (overlays-at (cooked-tests--link-at "https://")))))))
+      (should-not (get-text-property (cooked-tests--link-at "https://")
+                                     'cooked-link-url)))))
 
 
 (ert-deftest cooked-the-url-scheme-regexp-is-built-once ()
@@ -517,12 +575,12 @@ paints.  Nothing has displayed this buffer, so nothing has guessed yet."
       '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
     (should (cooked-tests--settle
              (lambda () (string-match-p "example.com" (cooked-tests--text)))))
-    (should-not (seq-find (lambda (o) (overlay-get o 'goto-address))
-                          (overlays-in (point-min) (point-max))))
+    (should-not (text-property-not-all (point-min) (point-max)
+                                       'cooked-link-url nil))
     ;; And it is only the looking that was missing.
     (cooked-tests--fontify)
-    (should (seq-find (lambda (o) (overlay-get o 'goto-address))
-                      (overlays-in (point-min) (point-max))))))
+    (should (text-property-not-all (point-min) (point-max)
+                                   'cooked-link-url nil))))
 
 (ert-deftest cooked-the-scan-is-not-armed-when-it-has-nothing-to-scan ()
   "Registering jit-lock is not free: it hangs `jit-lock-after-change\=' on every
