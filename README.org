@@ -93,7 +93,9 @@ Ghostel embeds libghostty — the same engine behind the Ghostty app — and it'
 of the four on raw throughput. Like eat and vterm, its terminal is a rectangle of
 characters with no idea where a command starts or ends; what it calls "comint support" is
 a minor mode that drops libghostty's colour handling into somebody else's =shell-mode=
-buffer, not a comint-derived terminal. If a native rendering engine is what you're after
+buffer, not a comint-derived terminal — and it passes carriage returns and backspaces
+through for comint to *delete* with, where [[*Any comint buffer][cooked-comint]]
+resolves them against the line they addressed. If a native rendering engine is what you're after
 and you don't need cooked's structure, ghostel is newer and worth a look.
 
 ** cooked
@@ -253,6 +255,12 @@ Wires up [[*Compile integration][compile integration]] inside a cooked buffer �
 Wires up [[*Compile integration][compile integration]] for =M-x compile=, =grep= and the
 rest, outside any cooked buffer at all — see below.
 
+** cooked-comint
+
+Puts the emulator on *any* comint buffer — =M-x shell=, =run-python=,
+=sql-interactive-mode=, =gud= — as a filter, without making it a terminal. See
+[[*Any comint buffer][Any comint buffer]] below.
+
 ** cooked-command-decorations
 
 A fringe marker per command, coloured by exit status — running, succeeded, failed — so
@@ -358,6 +366,60 @@ scrollback. Enable it globally with =M-x cooked-process-mode= (after
 Neither vterm nor eat has an equivalent to either half: both would need to know where a
 command's output begins and ends to scope a =next-error= search, and neither hooks
 =compilation-start= to fix what stock Emacs hands a build.
+
+* Any comint buffer
+
+=M-x shell=, =run-python=, =sql-interactive-mode=, =inferior-ess=, =gud= — all comint,
+and all reading their child's output with =ansi-color=, which is a regexp that knows
+about colour and nothing else. =cooked-comint-mode= puts cooked's actual VT parser on
+=comint-preoutput-filter-functions= instead, and changes nothing else: it never inserts
+text, never moves =process-mark=, never touches the input region. comint does all of
+that afterwards exactly as before.
+
+What that buys is what a regexp can't do. An escape sequence split across two reads
+resumes rather than being printed. A rendition set in one chunk still colours the next.
+And control characters are *resolved against the line they addressed* rather than passed
+through for =comint-carriage-motion= to delete with:
+
+#+begin_src sh
+  $ printf 'abcdefghij\rXYZ\n'
+  XYZ           # comint: the CR deleted to the start of the line
+  XYZdefghij    # cooked-comint: the CR moved the cursor and XYZ overwrote
+#+end_src
+
+The clearest demonstration is a Python REPL, because readline redraws its whole line on
+every keystroke and each redraw is a carriage return. Stock comint turns one =print(1+1)=
+into this:
+
+#+begin_example
+  >>> print(1+1)
+  >>> p>>> pr>>> pri>>> prin>>> print>>> print(>>> print(1>>> print(1+1)
+  2
+#+end_example
+
+and =cooked-comint-mode= into what the child meant by it — every redraw lands on the line
+it was redrawing, so only the line it settled on is left:
+
+#+begin_example
+  >>> print(1+1)
+  print(1+1)
+  2
+#+end_example
+
+The line that is still there twice is Python echoing input comint had already inserted,
+which is a different thing entirely and has its own switch in comint
+(~comint-process-echoes~, which =python-mode= sets and a bare comint buffer does not).
+
+There is no grid behind it — one row of cells, no height, no scroll region — so a line
+reaches the buffer the moment its newline arrives and an unfinished prompt reaches it at
+the end of the chunk that wrote it. A full-screen program in a comint buffer is not
+something this can rescue, and the sequences that would matter to one are dropped rather
+than half-applied.
+
+Turn it on for one buffer with =M-x cooked-comint-mode=, or for every comint buffer with
+=(cooked-comint-global-mode 1)=, after =(require 'cooked-comint)=. It is a sibling of
+=cooked-process=, not a layer on the terminal: it loads no session, no grid and no
+keymap, and works in a buffer that has never heard of =cooked-mode=.
 
 * On passwords
 

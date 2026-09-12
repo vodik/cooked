@@ -660,6 +660,27 @@ The one coupling that crosses the other way is a cache: `cooked--flush-face-cach
 to drop decoration specs that were coloured against the outgoing theme, and cannot name
 them from below. `cooked-theme-change-hook` is how the upper layer says so instead.
 
+`cooked-process.el` and `cooked-comint.el` are the two files that sit *beside* all of
+this rather than above or below it, and they are worth reading as a pair, because they
+are the same emulator answering two consumers who both already work. `cooked-process.el`
+requires `cooked.el` and runs a headless session, grid and all, for `compile` and its
+relatives; `cooked-comint.el` requires `cooked-util.el` and `cooked-face.el` and nothing
+else, and drives `emu::stream::Filter`, which has no grid at all.
+
+The asymmetry is not an oversight and it is the interesting part. A grid retires a row
+when the row scrolls off it, so `cooked-process-rows` is a latency knob — fine for a
+build log, fatal for `M-x shell`, where you would sit eight lines behind your own
+prompt. A one-row line buffer has nothing to scroll and so has no knob: a line reaches
+the consumer when its newline does. That is why the second one exists, and why it could
+not be the first one with the height turned down.
+
+What they share, they share deliberately and in the two places it costs nothing.
+`emu::sgr::apply` decodes `CSI Ps m` for both performers, so a rendition cannot mean one
+thing on a grid and another in a stream. And both hand Emacs the same packed style
+records, read by the same `cooked--face-packed` against the same per-buffer cache — which
+is what keeps `cooked-face.el` below both of them, and why `cooked--style-record` lives
+there rather than beside either reader.
+
 ## `cooked-osc-eval-request`: why the verbs are a closed set
 
 The command channel started as vterm's: a name off the wire, looked up in an alist, and

@@ -885,6 +885,21 @@ mod tests {
     }
 
     #[test]
+    fn a_readline_redraw_leaves_only_the_line_it_settled_on() {
+        // What a Python or Node REPL actually sends, and the case that makes the
+        // difference visible without anybody having to contrive one: readline redraws
+        // the whole line on every keystroke, each redraw prefixed by a carriage
+        // return. comint deletes to the start of the line for each of them and leaves
+        // the lot behind as `>>> p>>> pr>>> pri...'; resolved against the line they
+        // address, they are one line that changed its mind eight times.
+        let mut buffer = Buffer::new();
+        for typed in ["p", "pr", "pri", "prin", "print", "print()"] {
+            buffer.feed(&format!("\r>>> {typed}"));
+        }
+        assert_eq!(buffer.feed("\r\n2\n"), ">>> print()\n2\n");
+    }
+
+    #[test]
     fn crlf_ends_one_line_rather_than_making_two() {
         // The pair every child on a pty sends, and the reason CR cannot simply be
         // passed on: resolved here it is a cursor move that the newline then makes
