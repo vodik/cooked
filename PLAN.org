@@ -1145,12 +1145,38 @@ payload); guard =cooked-file-link= off when =default-directory= is remote; have
 
 *Ship the mapping alone.* The remote spawn is architectural — see §5.
 
-** WIP [#B] Shell history via the shell's own command
+** DONE [#B] Shell history via the shell's own command
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §5 "Shell history for free"
-:BRANCH:   cooked/history
+:BRANCH:   a248271
 :END:
+Landed, and verified live against bash, zsh and fish before the tests were
+written — 26, 2000 (the cap) and 61 entries respectively, the fish figure
+confirming the NUL split.
+
+=process-file= is the whole remote story in one word: it dispatches on
+=default-directory=, which =cooked--set-directory= now keeps on a TRAMP path
+(3365191), so a remote session queries the remote host and *there is no remote
+branch in the file at all*.
+
+Three things §5's four lines of data do not say:
+
+- *The split is decided per call, not per shell.* =history -z= is a fish flag
+  rather than a fish property, so an unlisted shell or a wrapper works either
+  way.
+- *The completion table has to refuse to re-sort.* The shells are asked for a
+  reversed history precisely so the newest is first, and =completing-read= sorts
+  alphabetically by default — which puts the command being reached for nine
+  times in ten wherever the alphabet happens to put it.
+- *The entry never carries a newline.* Running the chosen one on the spot is a
+  one-way door over somebody's shell history, and the entry you meant is one
+  line away from the entry you did not.
+
+One limitation, documented in =cooked-history-shell= rather than worked around:
+the shell is guessed from =cooked-shell=, so a session started with an explicit
+command guesses wrong. cooked keeps no per-buffer record of what it launched,
+and adding one to the core on behalf of an optional layer is the wrong trade.
 New =lisp/cooked-history.el=. Four lines of data through =process-file=, so a
 remote buffer queries the remote host for free once TRAMP lands. NUL-split for
 fish. A function value replaces the string, which is how atuin/histdb plug in.
