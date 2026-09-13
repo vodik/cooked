@@ -786,8 +786,7 @@ impl Term {
     /// A retransmission of the same bytes afterwards is a new picture as far as the
     /// module is concerned: a fresh id, and the payload crosses again.
     pub fn forget_image(&mut self, id: ImageId) {
-        self.state.images.forget(id);
-        self.state.kitty.forget(id);
+        self.state.forget_image(id);
     }
 
     /// Emacs has discarded the scrollback, so the top row continues nothing.

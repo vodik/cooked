@@ -85,6 +85,20 @@ const REGIONAL: std::ops::RangeInclusive<char> = '\u{1F1E6}'..='\u{1F1FF}';
 /// perfectly good answer.
 const MAX_CLUSTER: usize = 512;
 
+/// How many of BYTES, from the start, are printable ASCII: `0x20..=0x7e`.
+///
+/// Exactly the characters that are one byte in the stream, one column on the grid, never
+/// zero-width and never a control, which is what lets both printers write a run of them
+/// without asking the segmenter about each. DEL is outside it: it is not a control to the
+/// parser, and it has no width.
+#[inline]
+pub(crate) fn printable_ascii_len(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .take_while(|&&b| (0x20..0x7f).contains(&b))
+        .count()
+}
+
 /// Whether TEXT holds a control character: C0, DEL or C1.
 ///
 /// The one test for text that is about to be framed into a reply or handed to Emacs to

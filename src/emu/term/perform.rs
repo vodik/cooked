@@ -80,10 +80,7 @@ impl Perform for State {
         let mut rest = text;
         while !rest.is_empty() {
             let plain = if batched {
-                rest.as_bytes()
-                    .iter()
-                    .take_while(|&&b| (0x20..0x7f).contains(&b))
-                    .count()
+                text::printable_ascii_len(rest.as_bytes())
             } else {
                 0
             };

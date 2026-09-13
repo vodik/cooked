@@ -150,13 +150,12 @@ impl State {
     /// result is bytes rather than a string because a multi-byte character arrives as one
     /// `%XX` per byte and only reassembles once they are all back.
     fn percent_decode(raw: &[u8]) -> Vec<u8> {
-        let hex = |b: u8| (b as char).to_digit(16);
         let mut out = Vec::with_capacity(raw.len());
         let mut rest = raw;
         while let Some((&first, tail)) = rest.split_first() {
             match (first, tail) {
-                (b'%', [hi, lo, ..]) if let (Some(hi), Some(lo)) = (hex(*hi), hex(*lo)) => {
-                    out.push((hi * 16 + lo) as u8);
+                (b'%', [hi, lo, ..]) if let Some(byte) = crate::emu::bytes::hex_byte(*hi, *lo) => {
+                    out.push(byte);
                     rest = &tail[2..];
                 }
                 _ => {

@@ -68,7 +68,7 @@ use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
 use super::sgr;
 use super::term::osc::validated_text;
-use super::text::{Segmenter, Step};
+use super::text::{self, Segmenter, Step};
 
 /// Columns one logical line may reach before it is retired to keep it bounded.
 ///
@@ -109,6 +109,15 @@ impl Default for Column {
 }
 
 impl Column {
+    fn new(ch: char, style: Style, underline: Color, link: Option<LinkId>) -> Self {
+        Self {
+            cell: Cell { ch, style },
+            marks: None,
+            underline,
+            link,
+        }
+    }
+
     fn blank(style: Style) -> Self {
         Self {
             cell: Cell::blank(style),
@@ -325,28 +334,13 @@ impl Stream {
         for offset in 0..width {
             self.split_wide(self.col + offset);
         }
-        self.line[self.col] = Column {
-            cell: Cell {
-                ch,
-                style: self.pen,
-            },
-            marks: None,
-            underline: self.underline,
-            link: self.link,
-        };
+        let (pen, underline, link) = (self.pen, self.underline, self.link);
+        self.line[self.col] = Column::new(ch, pen, underline, link);
         // The columns a wide character stands on beyond its first hold no character of
         // their own and contribute no text, but they do carry the rendition, so that a
         // background painted under a CJK character covers both halves of it.
         for offset in 1..width {
-            self.line[self.col + offset] = Column {
-                cell: Cell {
-                    ch: CONTINUATION,
-                    style: self.pen,
-                },
-                marks: None,
-                underline: self.underline,
-                link: self.link,
-            };
+            self.line[self.col + offset] = Column::new(CONTINUATION, pen, underline, link);
         }
         self.base = Some(self.col);
         self.col += width;
@@ -379,15 +373,10 @@ impl Stream {
             self.pad(base + after);
             for offset in before.max(1)..after {
                 self.split_wide(base + offset);
-                self.line[base + offset] = Column {
-                    cell: Cell {
-                        ch: CONTINUATION,
-                        style: self.line[base].cell.style,
-                    },
-                    marks: None,
-                    underline: self.line[base].underline,
-                    link: self.line[base].link,
-                };
+                let owner = &self.line[base];
+                let continuation =
+                    Column::new(CONTINUATION, owner.cell.style, owner.underline, owner.link);
+                self.line[base + offset] = continuation;
             }
             self.col = self.col.max(base + after);
         }
@@ -559,11 +548,7 @@ impl Perform for Stream {
     fn print_str(&mut self, text: &str) {
         let mut rest = text;
         while !rest.is_empty() {
-            let plain = rest
-                .as_bytes()
-                .iter()
-                .take_while(|&&b| (0x20..0x7f).contains(&b))
-                .count();
+            let plain = text::printable_ascii_len(rest.as_bytes());
             if plain == 0 {
                 let c = rest.chars().next().unwrap_or('\0');
                 self.print(c);
@@ -578,12 +563,7 @@ impl Perform for Stream {
             self.split_wide(self.col + plain - 1);
             let (pen, underline, link) = (self.pen, self.underline, self.link);
             for (offset, c) in rest[..plain].chars().enumerate() {
-                self.line[self.col + offset] = Column {
-                    cell: Cell { ch: c, style: pen },
-                    marks: None,
-                    underline,
-                    link,
-                };
+                self.line[self.col + offset] = Column::new(c, pen, underline, link);
             }
             self.col += plain;
             self.base = Some(self.col - 1);

@@ -307,8 +307,7 @@ impl State {
             Some(DcsString::CapabilityRequest(request)) => return request.put(bytes),
             None => return,
         };
-        let room = limit - body.len().min(limit);
-        body.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        crate::emu::bytes::extend_bounded(body, bytes, limit);
     }
 
     /// The DCS string ended: act on what was collected, if it was one of ours.

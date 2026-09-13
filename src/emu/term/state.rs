@@ -323,9 +323,15 @@ impl State {
             keep
         });
         for id in shed {
-            self.images.forget(id);
-            self.kitty.forget(id);
+            self.forget_image(id);
         }
+    }
+
+    /// Stop tracking image ID everywhere the emulator hangs something off it: the store's
+    /// ledger and geometry, and the kitty client's own name for the picture.
+    pub(super) fn forget_image(&mut self, id: ImageId) {
+        self.images.forget(id);
+        self.kitty.forget(id);
     }
 
     pub(super) fn drain(&mut self) -> Delta {

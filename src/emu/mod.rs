@@ -121,6 +121,7 @@ fn fmix64(mut hash: u64) -> u64 {
     hash ^ (hash >> 33)
 }
 
+pub(crate) mod bytes;
 pub(crate) mod cell;
 pub(crate) mod glyph;
 pub(crate) mod image;

@@ -7,6 +7,7 @@
 //! `setrgbf` and `Ms`, and runs in 256 colours without OSC 52 when nobody answers.
 
 use super::*;
+use crate::emu::bytes::{extend_bounded, hex_byte};
 use crate::emu::terminfo;
 
 /// Longest XTGETTCAP request collected from one DCS string.
@@ -28,9 +29,7 @@ pub(super) struct Request {
 impl Request {
     /// A slice of the payload, kept up to the limit and remembered as overrun past it.
     pub(super) fn put(&mut self, bytes: &[u8]) {
-        let room = XTGETTCAP_BODY_LIMIT - self.body.len().min(XTGETTCAP_BODY_LIMIT);
-        self.overran |= bytes.len() > room;
-        self.body.extend_from_slice(&bytes[..bytes.len().min(room)]);
+        self.overran |= extend_bounded(&mut self.body, bytes, XTGETTCAP_BODY_LIMIT);
     }
 }
 
@@ -85,10 +84,7 @@ fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     hex.chunks_exact(2)
-        .map(|pair| {
-            let digit = |b: u8| (b as char).to_digit(16);
-            Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8)
-        })
+        .map(|pair| hex_byte(pair[0], pair[1]))
         .collect()
 }
 
