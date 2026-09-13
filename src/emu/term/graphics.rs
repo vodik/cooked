@@ -152,6 +152,13 @@ impl State {
         let Some(args) = args.strip_prefix("File=") else {
             return false;
         };
+        // Emacs cannot show it. Refused here rather than laid as blanks, because unlike
+        // sixel and kitty this protocol has no probe for `graphics_hidden` to answer
+        // "no" to: `imgcat` just sends. Taking up the rows would leave a hole the size
+        // of a picture in the transcript and nothing to say why.
+        if self.graphics_hidden {
+            return true;
+        }
 
         let mut inline = false;
         // What the child asked for, per axis. `None` on either means "work it out from
@@ -299,6 +306,16 @@ impl State {
     /// Reachable only because the parser is vendored: upstream vte consumes APC and
     /// tells the performer nothing, which is why an image never arrived at all before.
     pub(super) fn apc(&mut self, bytes: &[u8]) {
+        // A probe is how a kitty client decides whether to transmit at all, so this is
+        // the kitty half of what DA1's missing `4` says to a sixel producer. Answered
+        // before `feed` sees it, which is also what `feed` does with a probe arriving
+        // mid-transfer: the transfer in flight is left alone.
+        if self.graphics_hidden
+            && let Some(refusal) = crate::emu::kitty::refuse_probe(bytes)
+        {
+            self.events.push(Event::Reply(refusal));
+            return;
+        }
         let (outcome, reply) = self.kitty.feed(bytes);
         if let Some(reply) = reply {
             self.events.push(Event::Reply(reply));

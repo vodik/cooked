@@ -143,6 +143,16 @@
 #                     file -- xterm's own arrangement, an indexed entry and a
 #                     direct one side by side, with `cooked-term-name' choosing
 #                     between them.
+#
+#   Sxl               sixel, which is implemented -- but not everywhere a
+#                     session can be displayed. Whether a picture can be shown
+#                     depends on `cooked-inline-images' and on the frames the
+#                     buffer is on, so DA1 carries its `4' only while one can,
+#                     and a terminfo entry cannot follow a per-buffer answer.
+#                     Declared, it would have tmux forward sixel into a buffer
+#                     that has just told the child it draws none. The query is
+#                     the truth and the static claim could only be a guess, so
+#                     the guess is left out: a missing claim is the safe kind.
 
 cooked-256color|cooked terminal emulator for Emacs,
 	OTbs,

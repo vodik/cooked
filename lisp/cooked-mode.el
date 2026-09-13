@@ -1598,6 +1598,11 @@ back to.  See `cooked-bell-pending'."
   ;; something else.
   (add-hook 'window-selection-change-functions #'cooked--update-attention)
   (add-hook 'window-buffer-change-functions #'cooked--update-attention)
+  ;; Whether a picture can be shown is a question about every frame the buffer
+  ;; is on, so it is asked by walking sessions too; see `cooked--sync-graphics'.
+  (add-hook 'window-buffer-change-functions #'cooked--sync-graphics-everywhere)
+  (add-hook 'after-delete-frame-functions #'cooked--sync-graphics-everywhere)
+  (add-variable-watcher 'cooked-inline-images #'cooked--sync-graphics-on-toggle)
   ;; Frame focus is not a per-buffer event, so this one walks live sessions.
   ;;
   ;; `after-focus-change-function' holds a *single function*, defaulting to `ignore',

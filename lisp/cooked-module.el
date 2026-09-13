@@ -125,7 +125,7 @@ both spellings, because it was written on somebody else\='s machine."
   (car (file-expand-wildcards (expand-file-name (concat "*/" name) database))))
 
 (defconst cooked--terminfo-digest
-  "95c1e2c13556d668f38dcac315292d12d154a2f94ef11d0257a11b7e4f93d818"
+  "18ab5f08b420ffcef5ed8418ab9ce6ad17a57ac7583b268ad68a633eb40a107f"
   "SHA-256 of the terminfo/cooked.ti this Lisp was written against.
 
 The other half of the version-vs-sidecar staleness check in

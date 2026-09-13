@@ -798,6 +798,13 @@ impl State {
             (Some(b'?'), 'S') => {
                 let (item, action) = (params.arg(0, 0), params.arg(1, 0));
                 match item {
+                    // Nothing sixel can draw would be shown, so neither item has an
+                    // answer worth giving: failure, which a producer that ignored the
+                    // missing `4` in DA1 reads the same way. Registers and geometry
+                    // alike, because a palette size is only a promise about a picture.
+                    1 | 2 if self.graphics_hidden => {
+                        self.csi_reply(format_args!("?{item};3S"));
+                    }
                     // Colour registers. Fixed at the palette the sixel decoder actually
                     // allocates, so the answer cannot drift from what a stream may
                     // address. Reading (1) and reading the maximum (4) are the same
@@ -867,6 +874,13 @@ impl State {
             // 6/selective erase, not 2/printer — see the printer capabilities dropped
             // from terminfo. The 4 is load-bearing rather than decorative: it is how
             // every sixel producer in circulation decides whether to emit one at all.
+            //
+            // Which is why it goes when Emacs has said a picture cannot be shown here
+            // (`graphics_hidden`). A producer that finds no `4` does not give up: chafa,
+            // timg and their kind draw with half blocks instead, and that renders on a
+            // terminal frame or with `cooked-inline-images` off, where a sixel would
+            // leave a blank rectangle.
+            (None, 'c') if self.graphics_hidden => self.csi_reply(format_args!("?62;22c")),
             (None, 'c') => self.csi_reply(format_args!("?62;4;22c")),
             // Secondary DA. Unanswered, a child that queries and waits hangs.
             (Some(b'>'), 'c') => self.csi_reply(format_args!(">0;0;0c")),

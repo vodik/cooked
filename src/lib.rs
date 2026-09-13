@@ -280,6 +280,16 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// query arrives, rather than by waking Lisp to ask about a theme it already said.
         "cooked--set-color-scheme" 2..=2 => set_color_scheme;
 
+        /// Tell SESSION whether Emacs can show the pictures its child transmits.
+        ///
+        /// SHOWN nil withdraws the claim to graphics from every answer that makes one: the
+        /// primary DA loses its `4', XTSMGRAPHICS answers failure, a kitty `a=q' probe is
+        /// told `ENOTSUPPORTED', and an iTerm2 inline image is not drawn.  A producer that
+        /// probes then picks its own half-block renderer, which shows something where a
+        /// picture cooked cannot display would show nothing.  Held here, like the colour
+        /// scheme, so each query is answered where it arrives.
+        "cooked--set-graphics-shown" 2..=2 => set_graphics_shown;
+
         /// Send SIGNAL to SESSION's foreground group.
         ///
         /// SIGNAL is a symbol naming it -- `sigtstp', `sigcont' -- or, for a caller with a
@@ -679,6 +689,12 @@ fn set_color_scheme(env: Env, args: &[Value]) -> Result<Value> {
     };
     let owed = handle(env, args[0])?.set_color_scheme(scheme);
     env.into_lisp(owed.as_deref())
+}
+
+fn set_graphics_shown(env: Env, args: &[Value]) -> Result<Value> {
+    // Nil-or-not, as `set_attended` reads its flag.
+    handle(env, args[0])?.set_graphics_shown(env.from_lisp(args[1])?);
+    Ok(env.nil())
 }
 
 fn signal(env: Env, args: &[Value]) -> Result<Value> {

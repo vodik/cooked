@@ -3121,13 +3121,104 @@ is the whole of advertising the protocol.
 
 The reply is observed via the tty's own echo of it, which in cooked mode renders
 the escape as `^[' rather than sending it back through the parser -- so what the
-buffer shows is the answer having reached the child, which is the claim."
-  (cooked-tests--with-session
-      (list "/bin/sh" "-c"
-            "printf '\\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\033\\\\'; cat")
-    (should (cooked-tests--settle
-             (lambda () (string-match-p "_Gi=31;OK" (cooked-tests--text)))
-             8))))
+buffer shows is the answer having reached the child, which is the claim.
+
+The frame is said to show images: a batch Emacs has only a terminal frame, and
+there the probe is refused -- see `cooked-graphics-answers-follow-inline-images'."
+  (cl-letf (((symbol-function 'cooked--frame-shows-images-p) #'always))
+    (cooked-tests--with-session
+        (list "/bin/sh" "-c"
+              "printf '\\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\033\\\\'; cat")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "_Gi=31;OK" (cooked-tests--text)))
+               8)))))
+
+(defconst cooked-tests--graphics-probes
+  "\\033[c\\033[?1;1S\\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\033\\\\"
+  "DA1, the XTSMGRAPHICS register count and a kitty probe, for `printf'.")
+
+(defun cooked-tests--graphics-prober (out)
+  "Shell sending the graphics probes on each `q' it reads, logging the rest to OUT.
+
+Replies arrive on the same stdin as the trigger, so they are told apart by
+content: none of the three answers, refused or not, contains a `q'.  One byte
+at a time through `dd' because a reply has no line ending to read up to."
+  (list "/bin/sh" "-c"
+        (format (concat "stty raw -echo; "
+                        "while c=$(dd bs=1 count=1 2>/dev/null); do "
+                        "if [ \"$c\" = q ]; then printf '%s'; "
+                        "else printf '%%s' \"$c\" >> %s; fi; done")
+                cooked-tests--graphics-probes out)))
+
+(defun cooked-tests--graphics-replies (out)
+  "Trigger the probes in this session, and return the replies logged to OUT.
+Settles on the kitty reply, which is the last of the three to be sent."
+  (with-temp-file out)
+  (cooked--send cooked--session "q")
+  (should (cooked-tests--settle
+           (lambda () (string-match-p "_Gi=31;[^\033]*\033\\\\\\'"
+                                      (cooked-tests--contents out)))))
+  (cooked-tests--contents out))
+
+(ert-deftest cooked-graphics-answers-follow-inline-images ()
+  "Every answer that claims graphics withdraws the claim when images are turned
+off, and makes it again when they come back on -- through the variable watcher,
+with nothing but the toggle to set it off."
+  (let ((out (make-temp-file "cooked-graphics"))
+        (cooked-inline-images t))
+    (unwind-protect
+        (cl-letf (((symbol-function 'cooked--frame-shows-images-p) #'always))
+          (cooked-tests--with-session (cooked-tests--graphics-prober out)
+            (let ((shown (cooked-tests--graphics-replies out)))
+              (should (string-match-p "\033\\[\\?62;4;22c" shown))
+              (should (string-match-p "\033\\[\\?1;0;[0-9]+S" shown))
+              (should (string-match-p "_Gi=31;OK" shown)))
+            (setq cooked-inline-images nil)
+            (let ((hidden (cooked-tests--graphics-replies out)))
+              (should (string-match-p "\033\\[\\?62;22c" hidden))
+              (should (string-match-p "\033\\[\\?1;3S" hidden))
+              (should (string-match-p "_Gi=31;ENOTSUPPORTED" hidden)))
+            (setq cooked-inline-images t)
+            (should (string-match-p "\033\\[\\?62;4;22c"
+                                    (cooked-tests--graphics-replies out)))))
+      (delete-file out))))
+
+(ert-deftest cooked-graphics-answers-drop-sixel-on-a-terminal-frame ()
+  "A buffer shown only on a frame that cannot display images drops the `4' from
+DA1, and a graphical window showing it too brings it back.
+
+The frames are stood in for through `cooked--frame-shows-images-p', batch Emacs
+having only the one terminal frame, and the window hook is called rather than
+waited for: `window-buffer-change-functions' runs from redisplay, which a batch
+session does not do.  What this covers is the decision and its wiring to the
+core; that the hook fires on a real frame change is Emacs' own promise."
+  (let ((out (make-temp-file "cooked-graphics-tty"))
+        (graphical t))
+    (unwind-protect
+        (cl-letf (((symbol-function 'cooked--frame-shows-images-p)
+                   (lambda (_frame) graphical)))
+          (cooked-tests--with-session (cooked-tests--graphics-prober out)
+            ;; Displayed nowhere yet, so the frame the session started from
+            ;; answered, and it was graphical.
+            (should (string-match-p "\033\\[\\?62;4;22c"
+                                    (cooked-tests--graphics-replies out)))
+            (cooked-tests--display-buffer)
+            (setq graphical nil)
+            (cooked--sync-graphics-everywhere)
+            (should (string-match-p "\033\\[\\?62;22c"
+                                    (cooked-tests--graphics-replies out)))
+            ;; Buried: no window says anything, so the answer stays where it was
+            ;; rather than being guessed from whichever frame is selected.
+            (set-window-buffer (selected-window) (get-buffer-create " *cooked-other*"))
+            (setq graphical t)
+            (cooked--sync-graphics-everywhere)
+            (should (string-match-p "\033\\[\\?62;22c"
+                                    (cooked-tests--graphics-replies out)))
+            (set-window-buffer (selected-window) buffer)
+            (cooked--sync-graphics-everywhere)
+            (should (string-match-p "\033\\[\\?62;4;22c"
+                                    (cooked-tests--graphics-replies out)))))
+      (delete-file out))))
 
 ;;;; Containment
 ;;

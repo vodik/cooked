@@ -655,6 +655,111 @@ fn the_primary_da_advertises_sixel() {
     assert_eq!(replies, vec!["\x1b[?62;4;22c"]);
 }
 
+/// Every reply a drain carries, as text.
+fn reply_strings(t: &mut Term) -> Vec<String> {
+    t.drain()
+        .events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn graphics_answers_follow_what_emacs_can_show() {
+    // The three probes a picture producer sends, asked with graphics shown, then hidden,
+    // then shown again: each answer has to follow the flag in both directions, and a
+    // flag that only ever turned off would pass a test that asked once.
+    let probes: &[u8] = b"\x1b[c\x1b[?1;1S\x1b[?2;1S\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+    let shown = vec![
+        "\x1b[?62;4;22c".to_string(),
+        format!("\x1b[?1;0;{}S", crate::emu::sixel::PALETTE_SIZE),
+        "\x1b[?2;0;800;480S".to_string(),
+        "\x1b_Gi=31;OK\x1b\\".to_string(),
+    ];
+    let mut t = with_metrics(24, 80);
+    t.feed(probes);
+    assert_eq!(reply_strings(&mut t), shown);
+
+    t.set_graphics_shown(false);
+    t.feed(probes);
+    assert_eq!(
+        reply_strings(&mut t),
+        vec![
+            "\x1b[?62;22c",
+            "\x1b[?1;3S",
+            "\x1b[?2;3S",
+            "\x1b_Gi=31;ENOTSUPPORTED:display\x1b\\",
+        ]
+    );
+
+    t.set_graphics_shown(true);
+    t.feed(probes);
+    assert_eq!(reply_strings(&mut t), shown);
+}
+
+#[test]
+fn hidden_graphics_survive_a_reset() {
+    // What Emacs can display is not something the child negotiated, so neither DECSTR
+    // nor RIS may put the `4` back.
+    let mut t = with_metrics(10, 20);
+    t.set_graphics_shown(false);
+    t.feed(b"\x1b[!p\x1bc\x1b[c");
+    assert_eq!(reply_strings(&mut t), vec!["\x1b[?62;22c"]);
+}
+
+#[test]
+fn a_refused_probe_leaves_a_transfer_in_flight_alone() {
+    // A probe arriving between two chunks is answered where it stands, as `Kitty::feed`
+    // answers one -- and refusing it must not be the thing that eats the picture.
+    let png = rgba_png(10, 20, &[0; 10 * 20 * 4]);
+    let body = b64(&png);
+    let (head, tail) = body.split_at(body.len() / 2);
+    let mut t = with_metrics(10, 20);
+    t.set_graphics_shown(false);
+    t.feed(format!("\x1b_Ga=T,f=100,i=7,m=1;{head}\x1b\\").as_bytes());
+    t.feed(b"\x1b_Ga=q,i=8,s=1,v=1,f=24;AAAA\x1b\\");
+    t.feed(format!("\x1b_Gm=0;{tail}\x1b\\").as_bytes());
+    let delta = t.drain();
+    assert_eq!(delta.images.len(), 1, "the picture still arrives");
+    let replies: Vec<_> = delta
+        .events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        replies.contains(&"\x1b_Gi=8;ENOTSUPPORTED:display\x1b\\".to_string()),
+        "{replies:?}"
+    );
+}
+
+#[test]
+fn an_iterm_inline_image_is_not_drawn_where_it_cannot_be_shown() {
+    // No probe to refuse, so the picture itself is: laid anyway, it would be a
+    // blank rectangle in the transcript with nothing to say why.
+    let png = rgba_png(30, 20, &[0; 30 * 20 * 4]);
+    let mut t = with_metrics(10, 20);
+    t.set_graphics_shown(false);
+    t.feed(format!("\x1b]1337;File=inline=1:{}\x07", b64(&png)).as_bytes());
+    assert!(placements(&t, 0).is_empty());
+    let delta = t.drain();
+    assert!(delta.images.is_empty());
+    // Consumed rather than passed on: it was ours, and Lisp has nothing to do with it.
+    assert!(
+        !delta
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Osc(1337, ..)))
+    );
+    let cursor = t.screen().cursor;
+    assert_eq!((cursor.row, cursor.col), (0, 0), "no rows were laid for it");
+}
+
 #[test]
 fn an_iterm_inline_image_puts_a_picture_on_the_grid() {
     // The third producer of the same `ImageData`, and the least structured: the

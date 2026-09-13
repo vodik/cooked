@@ -54,6 +54,13 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 | `smm`, `rmm`, `km` | meta sets the eighth bit (mode 1034). How Meta is spelled is negotiated through modifyOtherKeys or the kitty protocol, which is the mechanism that should own it |
 | `cvvis` | cursor *blink* is `blink-cursor-mode`, yours to set and not the child\'s. `cnorm` covers visibility |
 
+**Not declared, although implemented:** `Sxl`. Sixel works, but only where a picture can
+be shown: with `cooked-inline-images` off, or a buffer shown only on a terminal frame, the
+primary DA drops its `4`, XTSMGRAPHICS answers failure and a kitty `a=q` probe is refused,
+so that chafa and timg pick their half-block renderers instead of drawing a blank
+rectangle. A static entry cannot follow a per-buffer answer, and declared it would have
+tmux forward sixel the buffer has just refused. Ask DA1.
+
 A child does not have to take our word for any of it. DECRQM (`CSI ? Ps $ p`) answers 1 or
 2 for a mode we implement, 4 — "permanently reset" — for every one in that last table, 3 —
 "permanently set" — for 2027, grapheme clustering, which is always on, and 0 for one we

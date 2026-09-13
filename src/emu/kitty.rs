@@ -469,6 +469,25 @@ fn join(first: Option<Vec<u8>>, second: Option<Vec<u8>>) -> Option<Vec<u8>> {
 /// `q=1` suppresses success and leaves errors, `q=2` suppresses both. A command with no
 /// id gets no response either: the protocol keys the answer to `i=`, and one without it
 /// is unaddressable.
+/// The refusal owed to PAYLOAD if it is an `a=q` probe, when Emacs cannot show pictures.
+///
+/// `None` for anything that is not a probe -- including a probe the child asked to hear
+/// nothing about, whose `q=` is honoured as it is for every other answer -- and for
+/// anything not addressed to `G`. A free function rather than a method, because a probe
+/// leaves no trace whether it is answered or refused, so there is nothing of `Kitty`'s
+/// it could need.
+pub(crate) fn refuse_probe(payload: &[u8]) -> Option<Vec<u8>> {
+    let control = payload.strip_prefix(b"G")?;
+    let control = control.split(|&b| b == b';').next().unwrap_or_default();
+    let cmd = Command::parse(&String::from_utf8_lossy(control));
+    // The explicit action only: a continuation chunk names none, and must still reach
+    // the transfer it belongs to.
+    if cmd.explicit_action != Some(Action::Query) {
+        return None;
+    }
+    response(&cmd, Some("ENOTSUPPORTED:display"))
+}
+
 fn response(cmd: &Command, error: Option<&str>) -> Option<Vec<u8>> {
     match (cmd.quiet, error) {
         (q, _) if q >= 2 => return None,

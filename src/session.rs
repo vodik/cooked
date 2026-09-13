@@ -1087,6 +1087,12 @@ impl Session {
         self.shared.term.held().alt_scroll()
     }
 
+    /// Record whether Emacs can show this session's pictures; see
+    /// `Term::set_graphics_shown`.
+    pub(crate) fn set_graphics_shown(&self, shown: bool) {
+        self.shared.term.held().set_graphics_shown(shown);
+    }
+
     /// Record Emacs' colour scheme, returning what a mode 2031 subscriber is owed.
     pub(crate) fn set_color_scheme(&self, scheme: ColorScheme) -> Option<Vec<u8>> {
         self.shared.term.held().set_color_scheme(scheme)

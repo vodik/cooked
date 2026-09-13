@@ -828,6 +828,15 @@ impl Term {
         (changed && self.state.modes.color_scheme_updates).then(|| color_scheme_report(scheme))
     }
 
+    /// Tell the emulator whether Emacs can show a picture this session transmits.
+    ///
+    /// Nothing is owed on a change: none of the three answers it governs is a
+    /// subscription, and a child that asked while the answer was the other one simply
+    /// asks again the next time it starts.
+    pub fn set_graphics_shown(&mut self, shown: bool) {
+        self.state.graphics_hidden = !shown;
+    }
+
     /// Take BYTES as an image and lay it into the grid at the cursor.
     ///
     /// The two halves of what a transmit-and-display does, together because they share
@@ -1113,6 +1122,21 @@ struct State {
     /// On [`State`] rather than [`Modes`] for the same reason `metrics` is: it is not
     /// something the child negotiated, so a soft reset must not clear it.
     color_scheme: Option<ColorScheme>,
+    /// Emacs has said nothing this session transmits can be shown: images are off, or
+    /// every window on the buffer is on a terminal frame.
+    ///
+    /// What it changes is what the child is *told*, not what the grid does with a
+    /// picture that arrives anyway -- DA1 drops its `4`, XTSMGRAPHICS answers failure and
+    /// a kitty `a=q` probe is refused -- because every producer worth the name probes one
+    /// of those first and has a half-block mode to fall back to, which is a picture where
+    /// the alternative is a blank rectangle. `OSC 1337 File=` is the exception and is
+    /// dropped outright, since it has no probe to answer and so no other way to be told.
+    ///
+    /// Negative so the default is the answer cooked always gave: the core cannot see a
+    /// frame, and Lisp reports the truth as the session starts. On [`State`] rather than
+    /// [`Modes`] for the reason `metrics` is -- no reset the child sends can change what
+    /// Emacs is able to display.
+    graphics_hidden: bool,
     /// Rows that have ever left the top of the primary screen. Screen row 0 is this row,
     /// counting from the beginning of the session, which is what makes an [`Anchor`]
     /// outlive the grid position it was taken from.
