@@ -9,11 +9,10 @@
 //!
 //! ## Why not the grid
 //!
-//! `cooked-process.el' already runs a *headless* session for `compile' and friends, and
-//! reusing it here was the obvious move and the wrong one. A grid retires a row when the
-//! row scrolls off the top of it, so a session eight rows tall hands its consumer the
-//! first line when the ninth arrives. That is a fine trade for a build log and a fatal
-//! one for a shell, where it would leave you sitting eight lines behind your own prompt.
+//! `cooked-process.el' runs a *headless* session for `compile' and friends, but a grid
+//! retires a row only when it scrolls off the top, so a session eight rows tall hands its
+//! consumer the first line when the ninth arrives. That is fine for a build log and fatal
+//! for a shell, which would sit eight lines behind its own prompt.
 //!
 //! So this is a third mode, between a grid and ghostel's pass-everything-through: **one
 //! row of cells, and no rows at all above or below it**. A line retires the instant its
@@ -23,8 +22,7 @@
 //!
 //! ## Why a line buffer rather than passing CR and BS through
 //!
-//! Passing them through is what ghostel's `comint_filter.zig' does, and cooked's own
-//! `cooked-process.el' documented why that is wrong before ghostel existed:
+//! Passing them through is what ghostel's `comint_filter.zig' does, and it is wrong:
 //!
 //! ```text
 //!   $ printf 'abcdefghij\rXYZ\n'
@@ -38,10 +36,8 @@
 //! accident, because they rewrite the whole line every time; partial overwrites do not.
 //!
 //! A one-row line buffer resolves all of it -- CR, BS, TAB, `CSI K', `CSI G', `CSI X',
-//! `CSI P', `CSI @' -- for about sixty lines over passing them through, and leaves the
-//! consumer with text that says what the child meant. `cooked-comint-mode' therefore
-//! sets `comint-inhibit-carriage-motion', which is one fewer pass over every chunk as
-//! well as the removal of a wrong one.
+//! `CSI P', `CSI @' -- and leaves the consumer with text that says what the child meant.
+//! `cooked-comint-mode' therefore sets `comint-inhibit-carriage-motion'.
 //!
 //! ## What is *not* here, and why that is the point
 //!
@@ -226,10 +222,8 @@ impl Filter {
 
     /// What the last [`Filter::feed`] produced.
     ///
-    /// Separate from `feed` rather than returned by it, so that the emission can be read
-    /// beside [`Filter::uri`]: turning a link span into something Emacs can act on means
-    /// holding the runs and asking the store about them at the same time, and a `&mut`
-    /// borrow that outlived the feed would forbid exactly that.
+    /// Separate from `feed` so the emission can be read beside [`Filter::uri`]; a `&mut`
+    /// borrow outliving the feed would forbid holding the runs while asking about links.
     pub(crate) fn emission(&self) -> &Emission {
         &self.stream.out
     }

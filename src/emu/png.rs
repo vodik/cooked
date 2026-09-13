@@ -4,9 +4,8 @@
 //! grids, cells or sessions, and that is the argument for it existing rather than an
 //! accident of where the code landed: [`sniff`] answers "what is this file, and how big"
 //! from the header alone, and [`Pixels::encode`] answers "what can Emacs decode" from a
-//! size, a layout and a buffer. Both used to sit beside the store in
-//! [`image`](super::image), where a third of the file was deflate blocks and CRC tables
-//! the store never called and could not have used.
+//! size, a layout and a buffer. Neither is any business of the store in
+//! [`image`](super::image).
 //!
 //! Encoding and decoding are one module rather than two because they are one concern: the
 //! sniffers read the same headers the encoder writes, and the encoder is what the header
@@ -287,13 +286,11 @@ fn adler32(data: &[u8]) -> u32 {
 /// which is what lets eight bytes be folded in at once.
 ///
 /// A `const fn` rather than sixteen kilobytes of pasted magic numbers: the polynomial
-/// stays in sight, and the tables cannot drift from it. Measured, because it is not
-/// obvious: the *single* table is no faster than the bitwise loop it replaces. Every
-/// byte's lookup is indexed by the previous byte's result, so the loop runs at the
-/// latency of a dependent L1 load — about the same as eight shifts, which superscalar
-/// hardware pipelines. Only breaking the chain, by indexing eight independent tables
-/// with eight independent bytes, actually wins: 5.7ms to 1.3ms on a three-megabyte
-/// picture.
+/// stays in sight, and the tables cannot drift from it. Eight tables because a *single*
+/// table is no faster than a bitwise loop: each lookup is indexed by the previous result,
+/// so the loop runs at the latency of a dependent L1 load. Indexing eight independent
+/// tables with eight independent bytes breaks the chain, 5.7ms to 1.3ms on a
+/// three-megabyte picture.
 const fn crc32_tables() -> [[u32; 256]; 8] {
     let mut tables = [[0u32; 256]; 8];
     let mut byte = 0;

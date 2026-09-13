@@ -577,9 +577,8 @@ mod tests {
         assert_eq!(vertical.edge(Edge::Left), Weight::None);
     }
 
-    // The bug this field exists to fix: every dashed line used to be bit-identical to
-    // the solid line of the same weight, so the distinction was lost in the emulator
-    // and the renderer could not have drawn a dash even in principle.
+    // A dashed line must not be bit-identical to the solid line of the same weight, or
+    // the renderer could not draw a dash even in principle.
     #[test]
     fn dashed_lines_are_distinct_from_their_solid_counterpart_and_each_other() {
         let solid = classify('\u{2500}').unwrap(); // ─

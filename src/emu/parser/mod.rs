@@ -946,12 +946,9 @@ pub trait Perform {
 
     /// Draw a run of printable characters, none of them a C0 or C1 control.
     ///
-    /// Upstream calls [`Perform::print`] once per character and nothing else. That is the
-    /// wrong shape for the common case by a wide margin: ordinary output is long runs of
-    /// text in one pen, and a performer that can place a whole run at once pays the
-    /// cursor bookkeeping, the margin tests and the damage flag once instead of per
-    /// character. The emulator measured at ~4 instructions per cycle before this existed,
-    /// so what was left to win was instructions, not stalls.
+    /// Upstream calls [`Perform::print`] once per character. Ordinary output is long runs
+    /// of text in one pen, and a performer that places a whole run at once pays the cursor
+    /// bookkeeping, the margin tests and the damage flag once instead of per character.
     ///
     /// The default implementation is exactly the old behaviour, so a performer that does
     /// not care may ignore this and implement `print` alone.

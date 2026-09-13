@@ -752,20 +752,12 @@ impl<T: IntoLisp> IntoLisp for Option<T> {
 /// A vector of values that are already Lisp, which is every list this module builds by
 /// iterating: the drain's rows, marks, events, images and links.
 ///
-/// Concrete rather than the `impl<T: IntoLisp> IntoLisp for Vec<T>` this replaced, for
-/// two reasons.
-///
-/// It costs nothing. The blanket version mapped `into_lisp` over the elements and
-/// collected into a second `Vec` before handing that to [`Env::list`] -- and for
-/// `T = Value`, which was the only `T` any call site ever used, that map is the identity.
-/// A `Vec<Value>` is already the contiguous array `funcall` wants, so this passes it
-/// straight through.
-///
-/// And it closes a trap. `u8` is [`IntoLisp`], so the blanket impl also covered
-/// `Vec<u8>` -- meaning a byte string handed over without `.as_slice()` quietly became a
-/// Lisp *list of integers* instead of the unibyte string the `&[u8]` impl makes, with
-/// nothing but the reader's attention between the two. `Vec<u8>` now implements
-/// [`IntoLisp`] not at all, so forgetting the slice is a compile error.
+/// Concrete rather than a blanket `impl<T: IntoLisp> IntoLisp for Vec<T>`, for two
+/// reasons. A `Vec<Value>` is already the contiguous array `funcall` wants, so it passes
+/// straight through with no second `Vec`. And a blanket impl would cover `Vec<u8>`, which
+/// would quietly become a Lisp *list of integers* instead of the unibyte string the
+/// `&[u8]` impl makes; with no impl for `Vec<u8>`, forgetting `.as_slice()` is a compile
+/// error.
 impl IntoLisp for Vec<Value> {
     fn into_lisp(self, env: &Env) -> Result<Value> {
         env.list(&self)

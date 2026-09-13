@@ -5,10 +5,9 @@
 //! "algorithm for splitting text into cells" is the only written-down statement of what
 //! a terminal is supposed to do here. It is worth having in one place because the two
 //! halves are not separable — a width is a property of a *grapheme cluster*, not of a
-//! code point, and asking a width table one code point at a time is exactly the bug
-//! this module exists to close: a ZWJ emoji family (`👨‍👩‍👧`) is five code points, three
-//! of which a per-character table calls two columns wide, so it landed on six cells
-//! instead of the two the child laid out for.
+//! code point. A ZWJ emoji family (`👨‍👩‍👧`) is five code points, three of which a
+//! per-character table calls two columns wide, so asking one code point at a time would
+//! put it on six cells instead of the two the child laid out for.
 //!
 //! ## Streaming, not batching
 //!

@@ -433,7 +433,8 @@ impl Pty {
             return Err(Error::Reaped);
         }
         match self.foreground().unwrap_or(self.child) {
-            // `killpg` rather than `kill(-pid)`: the negation was the whole footgun.
+            // `killpg` rather than `kill(-pid)`, which one missed negation turns into a
+            // signal to the wrong process.
             Pid(target) if target > 1 => Ok(killpg(NixPid::from_raw(target), sig)?),
             _ => Err(Error::NoForeground),
         }

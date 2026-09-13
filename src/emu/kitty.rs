@@ -401,22 +401,16 @@ impl Kitty {
         // the terminal, which `cat` of a hostile file is. Bounding it against the payload
         // needs no arbitrary maximum — `MAX_PAYLOAD` already bounds that.
         //
-        // What the check bounds is the *amplification* from payload to allocation, and it
-        // used to be spelled as exact equality, which bounds it far more tightly than it
-        // has to and refuses a picture that merely arrived short. That is not a
-        // theoretical distinction: a Ctrl-C during an animation cuts the child's blocked
-        // `write` part-way through, so the frame in flight lands a few kilobytes short of
-        // the four megabytes it declared — and a frame refused places nothing, which
-        // leaves the cursor at the picture's top-left, where the client parks it between
-        // frames, for the shell's `ED` to erase the picture from. Both encoders below
-        // already pad a short buffer rather than lie about its length, so the honest
-        // answer is the one a terminal drawing that frame character by character would
-        // have given: as much of the picture as actually arrived. A factor of two is the
-        // loosest bound that is still a bound.
+        // What the check bounds is the *amplification* from payload to allocation, not
+        // exact equality, which would refuse a picture that merely arrived short. A Ctrl-C
+        // during an animation cuts the child's `write` part-way, so the frame in flight
+        // lands a few kilobytes short, and a refused frame places nothing -- leaving the
+        // cursor where the shell's `ED` then erases the picture. Both encoders pad a short
+        // buffer, so drawing as much as arrived is the honest answer. A factor of two is
+        // the loosest bound that is still a bound.
         //
-        // A PNG is a file and carries its own size; only the raw layouts have geometry to
-        // check. `Payload::pixels()` is `None` for exactly that case, which is what the
-        // old `bytes_per_pixel = 0` sentinel was standing in for.
+        // A PNG carries its own size; only the raw layouts, where `Payload::pixels()` is
+        // `Some`, have geometry to check.
         let (format, bytes) = match cmd.format.pixels() {
             None => (ImageFormat::Png, raw),
             Some(layout) => {
@@ -530,16 +524,12 @@ fn response(cmd: &Command, error: Option<&str>) -> Option<Vec<u8>> {
 /// makes this a repair rather than a resynchronisation: the payload decodes byte for byte
 /// as it was sent, with no shift.
 ///
-/// Losing the frame is not a cosmetic matter, and this is the bug it was found through:
-/// a transmission that is refused places nothing, so the cursor stays at the picture's
-/// top-left, where the client left it between frames. The newline the client prints after
-/// each frame then moves one row *into* the picture, and the shell's own `ED` on the way
-/// to a new prompt erases everything below it. One row of the picture survives, and the
-/// prompt sits in the hole.
+/// Losing the frame is not cosmetic: a refused transmission places nothing, the cursor
+/// stays at the picture's top-left, and the shell's `ED` on the way to a new prompt erases
+/// the picture, leaving one row of it with the prompt in the hole.
 ///
 /// Shared with the `OSC 1337` path in [`super::term`], which carries its image the same
-/// way. It lives here because this is where it was first needed, and a second copy would
-/// be a second set of edge cases.
+/// way.
 pub(super) fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(input.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0u32);

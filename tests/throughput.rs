@@ -83,15 +83,9 @@ fn repaint(frames: usize, rows: usize, cols: usize) -> Vec<u8> {
 /// benchmark. Feeding all 200k lines in one call lets `pending_scrollback` reach 200k
 /// entries, which is a state the reader thread makes unreachable: `Shared::read_loop`
 /// stops reading the pty at `backlog() >= backlog_limit` and lets the child block in
-/// `write`. So the un-throttled form measured heap growth, not parsing.
-///
-/// It measured it badly enough to invert the ordering: "parse only" came out
-/// *slower* than parse-and-drain, which cannot be true of strictly less work. Reducing
-/// evicted rows to runs in `State::archive` shrank the retained footprint but did not
-/// bound it, and only the reader stopping bounds it. `perf stat` settles what the residue
-/// was — 28,681 page faults against 3,826 for the draining variant, with instruction
-/// counts within 2% of each other (10.18B vs 10.36B). Identical work, different memory:
-/// the cost was the kernel handing over fresh pages, inside the timed region.
+/// `write`. So the un-throttled form measures heap growth, not parsing -- enough to make
+/// "parse only" slower than parse-and-drain, with the difference all page faults while
+/// the kernel hands over fresh pages inside the timed region.
 ///
 /// So the chunk size is `READ_CHUNK` and the backlog is sampled between chunks, both
 /// matching `Shared::read_loop`, and a drain that trips the limit is thrown away —
