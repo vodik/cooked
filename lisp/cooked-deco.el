@@ -107,16 +107,14 @@ value on every drain.  Unlike the shape itself, a pattern has no bound of its
 own.  Left unwatched, either cache would grow for as long as such a program
 kept redrawing, which is most of a session running one.
 
-The pattern is a wider key than the run length it replaced, and what would
-thrash it is content with high entropy *per row*.  Two things keep the real
-cases cheap.  Low-entropy drawing repeats itself: a border is one long
-identical run and thirty thousand `tree\=' rows share a handful of indents, so
-the table holds a few entries however long the session runs.  And the
-high-entropy case that would not -- btop\='s shade plots, a fresh dither across
-the row every frame -- never reaches these tables as a pattern at all, because
-a shade breaks a run for the dither reason `cooked--apply-glyph-deco\=' gives
-and arrives here one cell at a time.  What is left is the progress bar, which
-minted a key per width before this and mints a key per width now.
+What would thrash a pattern key is content with high entropy *per row*, and two
+things keep the real cases cheap.  Low-entropy drawing repeats itself: a border
+is one long identical run and thirty thousand `tree\=' rows share a handful of
+indents, so the table holds a few entries however long the session runs.  And
+the high-entropy case -- btop\='s shade plots, a fresh dither across the row
+every frame -- never reaches these tables as a pattern at all, because a shade
+breaks a run for the dither reason `cooked--apply-glyph-deco\=' gives.  What is
+left is a progress bar, which mints one key per width.
 
 Raising this trades memory for fewer of the clears below buying back a shape
 `cooked--box-glyph-cell-cache\=' already has for free; lowering it does the
@@ -169,21 +167,15 @@ below has to move with it.")
   "The last cons of `cooked--image-order\=', so an append costs nothing.
 
 A queue whose oldest end is its head is the right shape for eviction and the
-wrong one for insertion: appending to a list means walking it, so a session
-holding N pictures paid N conses to record the next one and O(N^2) to fill its
-cache.  That is not a hypothetical size.  The cap is measured in bytes, so what
-bounds the list is the *size* of the pictures -- a child drawing multi-megabyte
-frames holds a few dozen ids, while one drawing 4KB icons holds sixteen
-thousand under the same 64MB, and the second is the one that spends seconds in
-`cooked--install-images\='.
+wrong one for insertion: appending to a list means walking it, so filling a
+cache of N pictures would cost O(N^2).  N can be large, because the cap is in
+bytes -- a child drawing 4KB icons holds sixteen thousand ids under the same
+64MB that holds a few dozen multi-megabyte frames.  The module's `Ledger\=' in
+src/emu/intern.rs keeps its order the same way, for the same reason.
 
-The same fix the module made on its own side, and for the same reason: see the
-`Ledger\=' in src/emu/intern.rs, whose ordering is an intrusive list rather than
-a deque precisely so that neither end costs a scan.
-
-A second copy of a fact, and therefore a thing that can disagree with the first
--- which is why nothing sets `cooked--image-order\=' in place.  The two writers
-are the append and the wholesale replacement, and both live next to this.")
+A second copy of a fact can disagree with the first, which is why nothing sets
+`cooked--image-order\=' in place.  The two writers are the append and the
+wholesale replacement, and both live next to this.")
 
 (defvar-local cooked--image-specs nil
   "(ID CELL-WIDTH CELL-HEIGHT) -> the `create-image' spec, weakly.
@@ -289,24 +281,16 @@ Read by `cooked--glyph-run-segments\=', which says what it is for.")
 (defvar cooked--deco-pass nil
   "This render pass\='s (WINDOW . CELL), computed at most once, or nil outside one.
 
-`cooked--cell-size\=' has always said it is \"measured once per render pass and
-passed down, rather than asked per character\".  That was true of the two
-functions immediately below it and false of the path that actually reaches
-them: `cooked--apply-deco\=' asked `cooked--layout-window\=' and
-`cooked--deco-cell-size\=' afresh for *every decoration record*, and a record is
-a run of one shape rather than a row.  A TUI border row is one record and hid
-the cost completely; `tree' in a large directory is the workload that does not,
-because its indent is `U+2502\=' separated by `U+00A0\=' and so arrives as three
-separate runs per nesting level.  Measured on `tree -C /usr/include\=': 86,107
-records for 30,326 rows, against 172,224 `cooked--layout-window\=' walks and
-86,107 cell measurements.  `window-font-width\=' costs 20.8us on pgtk and
-`window-default-line-height\=' a further 8.9us, against `frame-char-width\=''s
-0.085us -- so 2.56s of a 3.10s session was spent asking the same window the same
-question eighty-six thousand times.  With the box, the same session is 311ms and
-the walk count is 17.
+`cooked--apply-deco\=' is called once per decoration record, and a record is a
+run of one shape rather than a row.  A TUI border row is one record, but `tree'
+in a large directory is not: its indent is `U+2502\=' separated by `U+00A0\=', so
+it arrives as three runs per nesting level, and asking `cooked--layout-window\='
+and the cell size per record meant tens of thousands of window measurements for
+one listing.  `window-font-width\=' and `window-default-line-height\=' are each
+far dearer than `frame-char-width\=', so the pass asks them once.
 
 A box rather than a plain value because the answer is wanted lazily: a drain
-that decorates nothing should not pay 30us to measure a cell it never uses.
+that decorates nothing should not pay to measure a cell it never uses.
 `unset\=' is the sentinel for \"this pass has not asked yet\", which nil cannot
 be -- nil is the honest answer for a buffer displayed nowhere on a terminal
 frame, and caching it as though it were a miss would re-measure every record on
@@ -314,10 +298,8 @@ exactly the sessions that can least afford it.
 
 Bound in `cooked--apply\=', which is the render pass: nothing between its first
 `cooked--render-scrolled\=' and its last `cooked--render-rows\=' creates, deletes
-or resizes a window, or changes a font.  That is the same argument
-`cooked--render-rows\=' already makes for hoisting `cooked--layout-window\=' out
-of the per-row loop and `cooked--wrap-cache\=' makes for the layout stamp; this
-is the third place it holds and the one nobody had made it in.  Unbound, every
+or resizes a window, or changes a font -- the argument `cooked--render-rows\='
+makes for hoisting `cooked--layout-window\=' out of its loop.  Unbound, every
 caller is answered per call, correctly and slowly.")
 
 (defun cooked--deco-geometry ()
@@ -852,13 +834,12 @@ means nothing is showing that picture.  The test errs the safe way -- a spec the
 collector has not got to yet reads as displayed -- which under-evicts and never
 blanks anything.
 
-There is deliberately no second pass taking the oldest regardless.  That pass
-was the bound, and it was also a bug: it evicted ids that were still on screen,
-and `cooked--image-spec\=' answers nil for an id with no data, so the next resize
--- which damages every row of the grid, and only the grid -- rebuilt the on-grid
-half of a picture as nothing while its scrollback half went on drawing.  A
-guaranteed byte limit is not worth that, and it is no longer needed for the
-common case: ordinary eviction is `cooked--release-images\='."
+There is deliberately no second pass taking the oldest regardless, because it
+would evict ids still on screen.  `cooked--image-spec\=' answers nil for an id
+with no data, so the next resize -- which damages every row of the grid, and
+only the grid -- would rebuild the on-grid half of a picture as nothing while
+its scrollback half went on drawing.  A guaranteed byte limit is not worth
+that, and ordinary eviction is `cooked--release-images\=' anyway."
   (when (and cooked-image-cache-size
              (> cooked--image-bytes cooked-image-cache-size))
     ;; Asked once for the whole pass rather than once per candidate.  Nothing
@@ -868,10 +849,9 @@ common case: ordinary eviction is `cooked--release-images\='."
           (order cooked--image-order)
           (kept nil))
       ;; Detached for the length of the pass, which owns it and puts it back
-      ;; below.  Not tidiness: `cooked--forget-image' takes its id out of the
-      ;; queue, and with the queue still installed that is a search of the rest
-      ;; of the list for something this loop has already popped off it -- so
-      ;; spending N pictures cost N^2 walks to find N nothings.
+      ;; below.  `cooked--forget-image' takes its id out of the queue, and with
+      ;; the queue still installed that would search the rest of the list for
+      ;; something this loop has already popped, N^2 walks for N pictures.
       (setq cooked--image-order nil
             cooked--image-order-tail nil)
       (while (and order (> cooked--image-bytes cooked-image-cache-size))
@@ -1174,9 +1154,8 @@ same way however long ago its row was written.
 
 The single answer to \"what does this decoration look like\", and every path
 that can ask it goes through here or through the two halves it is composed of.
-That was three separate derivations of the same two shapes once, which is three
-places for a new decoration kind to be added and two of them easy to miss -- the
-rescale path being the one that would silently go on painting the old size.
+One derivation is one place to add a new decoration kind; separate ones would
+leave the rescale path silently painting the old size.
 
 The composition is what the halves are for rather than a second answer beside
 them.  `cooked--rescale-deco\=' calls this, having only a record and no idea
@@ -1527,15 +1506,8 @@ stuck at the previous font size, visibly mismatched once the pin is released."
               ;; and rebuilding only its first character would leave the rest of
               ;; the run displaying the old cell size for as long as the buffer
               ;; lives, which is the mismatch this whole function exists to repair.
-              ;;
-              ;; That the walk visited every character anyway was an accident of
-              ;; allocation rather than anything stated: `cooked--apply-deco' consed
-              ;; a fresh record per cell, so no two were ever `eq' and no run was
-              ;; ever longer than one.  Sharing a record between cells that agree is
-              ;; the obvious saving to make on the render path, and making it would
-              ;; have broken this silently -- the buffer would simply have stopped
-              ;; tracking the font, with nothing to point at.  So the loop is
-              ;; written to the property's semantics rather than to that accident.
+              ;; The loop is written to the property's semantics, so it stays
+              ;; right however the render path chooses to share records.
               ;;
               ;; The slice geometry is in cells and a glyph's bitmap is rendered
               ;; at the cell size, so both shapes move; asking the one derivation
