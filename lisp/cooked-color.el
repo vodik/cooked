@@ -230,19 +230,15 @@ the three defaults above, and each of those already has its own undo."
 
 ;;;; OSC 12 — the cursor, worn by the frame
 ;;
-;; The other two defaults are face remaps, and OSC 12 used to be one too: a
-;; buffer-local remap of the `cursor' face.  It never reached the screen.  Emacs
+;; The other two defaults are face remaps, but OSC 12 cannot be one.  Emacs
 ;; draws every cursor in its frame's `cursor-color' parameter, which the `cursor'
-;; face feeds only through the frame-wide face, so a remap changed what the
-;; buffer's faces said and not a single pixel.  That was checked in a headless
-;; pgtk frame, a red OSC 12 over a blue frame cursor, and no red pixel appeared
-;; in either the box or the hollow cursor.
+;; face feeds only through the frame-wide face, so a buffer-local remap of
+;; `cursor' changes what the buffer's faces say and not a single pixel.
 ;;
 ;; So the frame wears the colour while a cooked buffer that set one is in its
-;; selected window, and takes its own back the moment that stops.  Neither vterm
-;; nor eat does even that much; both ignore OSC 12 sets.  Two things follow from
-;; there being one colour per frame.  While
-;; the cooked window is selected, the hollow cursors other windows on the frame
+;; selected window, and takes its own back the moment that stops.  Two things
+;; follow from there being one colour per frame.  While the cooked window is
+;; selected, the hollow cursors other windows on the frame
 ;; draw are in its colour too; those are the cursors of windows you are not
 ;; typing in, and the alternative of declining OSC 12 outright costs the cursor
 ;; you are.  And the colour given back is whatever the frame had when the child's

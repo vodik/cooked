@@ -81,10 +81,9 @@ line submitted last rather than the command that ran.  See
    ;; a time.
    ;;
    ;; Through `cooked--bracketed-paste' rather than bracketing it here, because
-   ;; the end marker has to be stripped out of TEXT first and this path used to
-   ;; spell the wrapping itself and forget to.  TEXT is not ours: it is whatever
-   ;; is in the input region, and a paste into that region can carry a literal
-   ;; `ESC [ 201 ~' -- which closed the bracket early and handed the shell the
+   ;; the end marker has to be stripped out of TEXT first.  TEXT is whatever is
+   ;; in the input region, and a paste into that region can carry a literal
+   ;; `ESC [ 201 ~' that would close the bracket early and hand the shell the
    ;; rest as keystrokes.
    (concat (if (and (string-search "\n" text)
                     (cooked--bracketed-paste-p cooked--session))
@@ -117,8 +116,7 @@ newline survives until you submit."
 ;; cooked has to maintain or `comint-previous-input' answers "Not at command
 ;; line"; `cooked--input-mark' is that mark.  Everything hung off the
 ;; ring comes with it: `comint-input-ignoredups', `comint-input-ring-size',
-;; ring persistence, and the isearch that `comint-mode' has been installing all
-;; along and that had nothing to search until now.
+;; ring persistence, and the isearch that `comint-mode' installs.
 ;;
 ;; The *editing* stays cooked's, and that asymmetry is deliberate.
 ;; `comint-goto-input' deletes from the process mark to `point-max' on the

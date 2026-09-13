@@ -47,16 +47,12 @@
 ;; property names survives.  `cooked--sync-fontification' has why this moved off the
 ;; render path and what registering jit-lock costs when there is nothing to scan.
 ;;
-;; A URL the child wrapped across a column boundary used to be the one accepted gap:
-;; each live row is its own hard-newlined buffer line, `goto-address-url-regexp' stops
-;; at a newline, and so the two halves were two lines.  It closed without detecting
-;; against the grid, which was the expensive answer this file had assumed was the only
-;; one.  The emulator already knew -- `Row::wrapped' -- and was telling Emacs only on
-;; the way out to scrollback, where `cooked-rejoin-wrapped-lines' joins the logical
-;; line and the gap closed on its own.  That one bit now rides the drain's row table
-;; too, `cooked--mark-row-wrap' puts it on the newline, and the scan matches against
-;; the rejoined *string* when there is one to build.  See "Soft wrap" below, which is
-;; ghostel's arrangement taken whole.
+;; A URL the child wrapped across a column boundary is the awkward case: each live row
+;; is its own hard-newlined buffer line, and `goto-address-url-regexp' stops at a
+;; newline.  The emulator knows which rows wrapped -- `Row::wrapped' -- and that bit
+;; rides the drain's row table, `cooked--mark-row-wrap' puts it on the newline, and
+;; the scan matches against the rejoined *string* when there is one to build.  See
+;; "Soft wrap" below, which is ghostel's arrangement taken whole.
 ;;
 ;; File names are not detected here.  Deciding that `src/lib.rs' is a file rather than
 ;; a word means asking the filesystem, and asking it per candidate per redraw is a
@@ -303,18 +299,15 @@ and answers whether that source has claimed it.  Earlier entries outrank later
 ones, and `cooked-link--claimed-p\=' is the arbiter.
 
 The list is *data the layers contribute to* rather than an ordering written
-into this file, and the difference is not cosmetic.  The ranking used to be a
-constant here reading `OSC 8\=' > goto-addr > \"guessed shape\" -- but guessed
-shape is `cooked-file-link.el\='s output, so the base layer was naming a
-category that does not exist unless an optional layer above it happens to be
-loaded.  A source now registers itself, at the rank it belongs at, from the
-file that produces it.
+into this file.  A guessed file name is `cooked-file-link.el\='s output, so a
+ranking written here would name a category that does not exist unless an
+optional layer above it happens to be loaded.  A source registers itself, at
+the rank it belongs at, from the file that produces it.
 
-The two entries here are the two this file produces, in the order they have
-always ranked: what the child named outright first, then what goto-addr read
-out of the text.  A layer that *guesses* -- from a shape, from the filesystem
--- appends itself, because guessing is the only kind that can be wrong about
-what the text even is.")
+The two entries here are the two this file produces: what the child named
+outright first, then what goto-addr read out of the text.  A layer that
+*guesses* -- from a shape, from the filesystem -- appends itself, because
+guessing is the only kind that can be wrong about what the text even is.")
 
 (defun cooked-link--claimed-p (pos &optional source)
   "Which source, if any, has already made the text at POS a link.
@@ -790,9 +783,8 @@ was."
     ;; may have replaced.  A cosmetic pass must not abort a redisplay half-done.
     (cooked--protect-seam 'cooked--fontify-links
       (let ((inhibit-read-only t))
-      ;; Scrollback carries `read-only', and this pass writes *text properties*
-      ;; now where it used to make overlays -- which touch no text and so never
-      ;; needed this.  `cooked--fontify-region' binds it too, but a cosmetic pass
+      ;; Scrollback carries `read-only', and this pass writes text properties.
+      ;; `cooked--fontify-region' binds it too, but a cosmetic pass
       ;; that signals `text-read-only' from inside redisplay is a bad enough
       ;; failure to be worth being self-sufficient about.
       (when (or (eq t goto-address-fontify-maximum-size)

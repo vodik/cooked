@@ -108,13 +108,10 @@ a line the child rewrites rapidly.
 
 Called at the end of a drain, after the block that scrolls windows, and again
 from `post-command-hook\='.  `evil\=' refreshes its own cursor from
-`window-configuration-change-hook\=' and on every state change, and it advises
-`select-window\=' -- which the render used to call, once per window, to
-`recenter\=' through `with-selected-window\='.  Setting the cursor any earlier
-let evil get the last word inside the very drain that hid it, which showed up
-as a cursor jumping around a progress bar the child had asked to draw without
-one.  Scrolling no longer selects anything, so that particular door is shut;
-the ordering stays because the other two ways in are still open.
+`window-configuration-change-hook\=' and on every state change.  Setting the
+cursor any earlier would let evil have the last word inside the very drain that
+hid it, and a progress bar the child asked to draw without a cursor would show
+one jumping around it.
 
 A hidden cursor is honoured by default: every full-screen program drawing a
 frame, `less\=', and any progress bar worth the name relies on that.  Two cases

@@ -414,9 +414,7 @@ out loud rather than letting it surface as something else entirely.")
 (defun cooked--build-module (root built)
   "Build the native core under ROOT and install it at BUILT.
 
-Installed by rename, never by letting cargo write BUILT directly, and that is
-the whole reason this is a function rather than the `call-process\=' that used to
-sit inline in `cooked--load-module\='.
+Installed by rename, never by letting cargo write BUILT directly.
 
 rustc writes its output in place -- same inode, new contents -- and cargo
 hardlinks the uplifted copy to the one under `deps/\='.  So a rebuild rewrites
@@ -438,8 +436,8 @@ this reason.
 
 Copied rather than moved.  Leaving cargo\='s artifact where cargo put it is what
 keeps its fingerprint tracking honest, so the next build relinks only when
-something changed.  `make module\=' does exactly this, and the two have to agree:
-fixing one and leaving the other is how a bug like this survives being found."
+something changed.  `make module\=' does exactly this, and the two have to
+agree."
   (let* ((default-directory root)
          ;; The Makefile spells this `?=', and this is the same bargain: an outer
          ;; CARGO_TARGET_DIR still wins, so a CI cache or a scratch build kept

@@ -161,8 +161,8 @@ policy's own map does, making insert state indistinguishable from emacs state."
 ;; has bound `inhibit-read-only' to t and `buffer-undo-list' to t so that the
 ;; emulator can rewrite rows the user may not.  Third-party code invited into
 ;; that window inherits both, so an edit it makes there is neither refused nor
-;; recorded.  Measured, not assumed: a hook on `cooked-state-change-hook' in a
-;; live session sees `inhibit-read-only' t every time.
+;; recorded: a hook on `cooked-state-change-hook' in a live session sees
+;; `inhibit-read-only' t every time.
 ;;
 ;; So the defence has to be "do not start the edit", and it cannot be "signal".
 ;; A signal thrown from inside a state-transition hook leaves evil half

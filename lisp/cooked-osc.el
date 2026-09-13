@@ -353,8 +353,8 @@ too: there is nothing to say, and a bare `ESC ] 9 ST\=' is not a request."
 ;; hold nothing else -- so the rendering in cooked-mode-line.el is built out of
 ;; cooked's own vocabulary, and a hostile payload's only reachable outcome is
 ;; that it is refused.  That is a stronger guarantee than sanitising would be,
-;; and it is deliberate: this is the same shape of channel as the OSC 7 payload
-;; that turned out to be able to name a TRAMP host.
+;; and it is deliberate: this is the same shape of channel as an OSC 7 payload,
+;; which can name a TRAMP host.
 
 (defconst cooked--progress-states
   '(("0" . nil) ("1" . set) ("2" . error) ("3" . indeterminate) ("4" . paused))
