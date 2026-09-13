@@ -1701,7 +1701,8 @@ fn terminfo_entry_matches_what_decrqm_says() {
 /// see these two: modifyOtherKeys is not a mode, and OSC 8 is not a control sequence
 /// at all. `Hls` is parametrised, so its value is pinned to tmux's own spelling in
 /// `tty-features.c` and the two expansions tmux sends are fed by hand -- an open with
-/// an `id=`, and the empty close it writes before every reset.
+/// an `id=`, and the empty close it writes before every reset. `ol` is an SGR, which
+/// no mode check sees either.
 #[test]
 fn the_extended_names_tmux_reads_do_what_they_say() {
     let capabilities = terminfo_capabilities();
@@ -1728,6 +1729,19 @@ fn the_extended_names_tmux_reads_do_what_they_say() {
     assert_eq!(runs.len(), 2, "{runs:?}");
     assert!(runs[0].1.is_some(), "an open with an id= links");
     assert_eq!(runs[1].1, None, "the empty close unlinks");
+
+    // `ol' is tmux's name for SGR 59 and not ncurses', which has no `ol' at all, so
+    // nothing but tmux's own `usstyle' check says what it should be. tmux sends it to
+    // take a cell's underline colour back to the default.
+    let mut reset = b"\x1b[4m\x1b[58;5;196m".to_vec();
+    reset.extend(terminfo_decode(value("ol")));
+    reset.push(b'x');
+    let t = term(2, 8, &reset);
+    assert_eq!(
+        t.screen().row(0).unwrap().runs()[0].underline,
+        Color::Default,
+        "`ol'"
+    );
 }
 
 #[test]

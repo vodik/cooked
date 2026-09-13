@@ -58,7 +58,11 @@
 #   Tc, setrgbf       direct colour (COLORTERM=truecolor is a convention, not a
 #   setrgbb           capability)
 #   Smulx, Setulc     styled and coloured underlines, mapped onto Emacs'
-#   Setulc1           :underline face attribute
+#   Setulc1, ol       :underline face attribute. `ol' is SGR 59, the underline
+#                     colour back to the text's own; tmux's name again, and
+#                     not the standard one it looks like -- terminfo has `op'
+#                     and `oc' but no `ol'. tmux's usstyle feature wants all
+#                     four of these before it counts as present
 #   Smol              overline (SGR 53), onto :overline. tmux's name for it;
 #                     there is no standard one, and no Rmol either -- tmux
 #                     clears it with sgr0, and SGR 55 is there for anything
@@ -463,6 +467,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	Smulx=\E[4:%p1%dm,
 	Setulc=\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%dm,
 	Setulc1=\E[58:5:%p1%dm,
+	ol=\E[59m,
 	Smol=\E[53m,
 	Ss=\E[%p1%d q,
 	Se=\E[2 q,

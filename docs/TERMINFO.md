@@ -40,6 +40,7 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 |---|---|
 | `Tc`, `setrgbf`, `setrgbb` | direct colour; `COLORTERM=truecolor` is a convention, not a capability |
 | `Smulx`, `Setulc` | styled and coloured underlines, onto Emacs\' `:underline` |
+| `Setulc1`, `ol` | the underline colour from the palette, and back to the text\'s own (`SGR 59`). `ol` is tmux\'s name, not a standard one; its `usstyle` feature wants it with the other three |
 | `Smol` | overline (`SGR 53`, cleared by `55`), onto `:overline`. The name is tmux\'s |
 | `Sync` | synchronized output, which suppresses the Emacs wakeup for a frame |
 | `Su` | styled underlines again, as the boolean neovim looks for; it promises nothing `Smulx` does not |
