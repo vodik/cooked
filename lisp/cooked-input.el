@@ -61,7 +61,16 @@ construct reaches the shell one line at a time -- Emacs owns each `PS2' line
 the same way it owns the first -- so the record for
 \"for x in 1 2; do ... done\" would otherwise say only `done', which is the
 line submitted last rather than the command that ran.  See
-`cooked-line-prompt-continued'."
+`cooked-line-prompt-continued'.
+
+TEXT goes through `cooked--strip-paste-controls' first, for the same reason a
+paste does.  The input region holds whatever was yanked into it, so a kill of
+\"ls ESC [ A\" would otherwise reach the shell as keystrokes on RET, and an
+interrupt character in it would kill the line it was part of.  Every path that
+puts text at a prompt ends here, so this one strip covers `yank', a terminal
+frame's paste, and a history entry or a dropped file name inserted into the
+line."
+  (setq text (cooked--strip-paste-controls text))
   (let ((record (cooked--line)))
     (setf (cooked-line-submitted-input record)
           (let ((line (and (not (string-blank-p text)) text))

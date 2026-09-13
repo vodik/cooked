@@ -781,6 +781,38 @@ behind the freeze."
           (message "Nothing to paste")
         (cooked--send-paste text)))))
 
+(defvar xterm-store-paste-on-kill-ring)  ; term/xterm.el, loaded on a tty frame
+(declare-function xterm-paste "term/xterm" (event))
+
+(defun cooked-xterm-paste (event)
+  "Paste the text a terminal frame\='s host terminal delivered in EVENT.
+
+On `emacs -nw\=' a paste in the host terminal arrives as one `xterm-paste\='
+event, of the form (xterm-paste TEXT), which term/xterm.el decodes from the
+bracketed-paste markers.  Its global binding, `xterm-paste\=', inserts TEXT
+into the current buffer with `yank\=', called as a function, so the remap that
+turns `yank\=' into `cooked-paste\=' never sees it.  Pasting into a running vim
+therefore put the text into the cooked buffer instead of into vim.
+
+At an input prompt this does what `xterm-paste\=' does, since the line is
+being edited in the buffer; `cooked--send-input-string\=' strips the control
+bytes when it is submitted.  While the child owns the keyboard TEXT goes to it
+through `cooked--send-paste\=', bracketed if the child asked, with the same
+control-byte strip as `cooked-paste\='.  TEXT is put on the kill ring first
+when `xterm-store-paste-on-kill-ring\=' says so, as `xterm-paste\=' would."
+  (interactive "e")
+  (if (cooked--input-state-p)
+      (xterm-paste event)
+    (cooked--resume-forwarding)
+    (unless (cooked--live-session)
+      (user-error "No live session"))
+    (let ((text (nth 1 event)))
+      (when (and (boundp 'xterm-store-paste-on-kill-ring)
+                 xterm-store-paste-on-kill-ring)
+        (kill-new text))
+      (unless (string-empty-p text)
+        (cooked--send-paste text)))))
+
 ;;;; Per-program key overrides
 
 (defconst cooked--override-bytes

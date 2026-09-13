@@ -146,7 +146,7 @@ was never built."
 (defvar cooked-snap-commands
   '(self-insert-command
     cooked-newline newline newline-and-indent
-    yank yank-pop cooked-paste cooked-evil-paste
+    yank yank-pop cooked-paste cooked-xterm-paste cooked-evil-paste
     evil-paste-before evil-paste-after evil-paste-from-register)
   "Commands that should act on the input region even if point drifted out of it.
 See `cooked--snap-to-input'.

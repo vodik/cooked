@@ -1723,6 +1723,12 @@ to the child verbatim."
 ;; earlier command to head off.
 (define-key cooked-mode-map [mouse-2] #'cooked-paste)
 
+;; A paste in a terminal frame's host terminal arrives as an event of its own,
+;; not as the key `yank' is bound to; see `cooked-xterm-paste'.  It is bound on
+;; the shared parent because the passthrough maps bind characters and function
+;; keys but never this event, so every state reaches it.
+(define-key cooked-mode-map [xterm-paste] #'cooked-xterm-paste)
+
 ;; Whatever key a user has bound to comint's commands reaches ours, so
 ;; `evil-collection-comint' (which binds `repl-submit' to `comint-send-input')
 ;; works without knowing cooked exists.

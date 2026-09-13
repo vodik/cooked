@@ -720,6 +720,48 @@ confirmation must send nothing at all."
     (cooked-tests--with-kill "echo hi" (cooked-paste))
     (should (equal (cooked--pending-input) "echo hi"))))
 
+(ert-deftest cooked-yank-at-a-prompt-cannot-send-the-shell-an-escape ()
+  "A control byte yanked into the pending line reaches the child as a space.
+
+At a prompt `cooked-paste' is `yank', so the text sits in the buffer until RET
+and the strip that `cooked--send-paste' applies was never on its way.  A kill of
+\"a ESC [ A b C-c c\" then reached the shell as an up-arrow and an interrupt.
+The child here is `cat -v' on a canonical tty, so an ESC that got through would
+be spelled out as ^[ twice, once by the echo and once by cat, and a C-c would
+kill it before it printed anything."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat -v")
+    (should (cooked-tests--settle
+             (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
+    (cooked--refresh-keymap)
+    (cooked-tests--with-kill "a\e[Ab\C-cc" (cooked-paste))
+    (should (equal (cooked--pending-input) "a\e[Ab\C-cc"))
+    (cooked-send-input)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "^a \\[Ab c$" (cooked-tests--text)))))
+    (should-not (string-search "^[" (cooked-tests--text)))
+    (should-not (string-search "^C" (cooked-tests--text)))))
+
+(ert-deftest cooked-terminal-frame-paste-goes-to-the-child-bracketed ()
+  "An `xterm-paste' event reaches the child, not the buffer, in every state.
+
+On `emacs -nw' the host terminal's paste is decoded into (xterm-paste TEXT),
+and its global binding inserts TEXT with `yank' called as a function, which no
+remap sees.  The binding has to be found through the state map the buffer is
+actually wearing, so it is looked up there rather than on `cooked-mode-map'."
+  (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
+    (should (cooked--bracketed-paste-p cooked--session))
+    (require 'term/xterm)
+    ;; Global first, so the assertion below is about this buffer outranking it.
+    (should (eq (lookup-key global-map [xterm-paste]) #'xterm-paste))
+    (should (eq (key-binding [xterm-paste]) #'cooked-xterm-paste))
+    (let ((kill-ring nil)
+          (xterm-store-paste-on-kill-ring t))
+      (cooked-xterm-paste '(xterm-paste "a\ehello"))
+      (should (equal (car kill-ring) "a\ehello")))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-search "^[[200~a hello^[[201~" (cooked-tests--text)))))))
+
 (ert-deftest cooked-evil-normal-state-pastes-into-the-child ()
   "`p' is the key a vim user's hand reaches for, and inside a full-screen program
 it is the only route to the kill ring: the program's own `p' pastes its own
@@ -1435,6 +1477,21 @@ cost one byte each."
     (should (cooked--child-owns-keyboard-p))
     ;; Refusing twice, because the second call has nothing left to hand over.
     (should-error (cooked-delegate-key "\C-r") :type 'user-error)))
+
+(ert-deftest cooked-delegation-strips-control-bytes-from-the-line ()
+  "The line handed to the shell is typing, so an ESC yanked into it is a space.
+
+The key that follows is sent as it is, since sending a key is the point."
+  :tags '(zsh)
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-zsh
+    (goto-char cooked--input-end)
+    (insert "echo \e[Ahi")
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (bytes) (setq sent bytes))))
+        (cooked-delegate-key "\C-r"))
+      (should (equal sent "echo  [Ahi\C-r")))))
 
 (ert-deftest cooked-delegation-lasts-exactly-one-line ()
   "Delegation is a one-way door for the rest of the line and no further.
