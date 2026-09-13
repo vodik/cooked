@@ -1415,6 +1415,176 @@ fn terminfo_modes(value: &str) -> Vec<(bool, u16, bool)> {
     modes
 }
 
+/// One element of a POSIX extended regular expression, as `terminfo_ere` parses it.
+enum Ere {
+    Byte(u8),
+    Any,
+    /// A bracket expression: its ranges, and whether it was negated with `^`.
+    Class(Vec<(u8, u8)>, bool),
+    Group(Vec<(Ere, Repeat)>),
+}
+
+#[derive(Clone, Copy)]
+enum Repeat {
+    One,
+    Optional,
+    Star,
+    Plus,
+}
+
+/// A response pattern such as `rv` or `xr`, decoded from terminfo's escapes and then
+/// parsed as the POSIX ERE that `tset` and tmux hand to `regcomp`.
+///
+/// This is the subset those patterns use -- literals, backslash-escaped literals, `.`,
+/// bracket expressions, groups and the `* + ?` quantifiers -- and not a regex engine.
+/// Alternation and `{m,n}` panic rather than being read as literals, so a pattern that
+/// outgrows the parser fails the audit loudly instead of matching the wrong thing.
+fn terminfo_ere(value: &str) -> Vec<(Ere, Repeat)> {
+    fn sequence(bytes: &[u8], at: &mut usize, nested: bool) -> Vec<(Ere, Repeat)> {
+        let mut out = Vec::new();
+        while let Some(&b) = bytes.get(*at) {
+            *at += 1;
+            let atom = match b {
+                b')' if nested => return out,
+                b'(' => Ere::Group(sequence(bytes, at, true)),
+                b'.' => Ere::Any,
+                b'\\' => {
+                    *at += 1;
+                    Ere::Byte(*bytes.get(*at - 1).expect("pattern ends in a backslash"))
+                }
+                b'[' => {
+                    let negated = bytes.get(*at) == Some(&b'^');
+                    *at += usize::from(negated);
+                    let mut ranges = Vec::new();
+                    // A `]` straight after the opening bracket is a member, not the end.
+                    let first = *at;
+                    while bytes[*at] != b']' || *at == first {
+                        let lo = bytes[*at];
+                        if bytes[*at + 1] == b'-' && bytes[*at + 2] != b']' {
+                            ranges.push((lo, bytes[*at + 2]));
+                            *at += 3;
+                        } else {
+                            ranges.push((lo, lo));
+                            *at += 1;
+                        }
+                    }
+                    *at += 1;
+                    Ere::Class(ranges, negated)
+                }
+                b'|' | b'{' | b'^' | b'$' => {
+                    panic!("`{}' is ERE syntax the audit does not parse", b as char)
+                }
+                _ => Ere::Byte(b),
+            };
+            let repeat = match bytes.get(*at) {
+                Some(b'?') => Repeat::Optional,
+                Some(b'*') => Repeat::Star,
+                Some(b'+') => Repeat::Plus,
+                _ => Repeat::One,
+            };
+            *at += usize::from(!matches!(repeat, Repeat::One));
+            out.push((atom, repeat));
+        }
+        assert!(!nested, "unclosed group");
+        out
+    }
+    sequence(&terminfo_decode(value), &mut 0, false)
+}
+
+/// Whether `pattern` matches all of `input`, anchored at both ends: a reply with
+/// anything before or after the pattern is not the reply the entry describes.
+///
+/// Matching tracks the set of offsets a prefix of the pattern can end at, so a `.*`
+/// costs a pass over the input rather than a backtrack per byte.
+fn ere_matches_whole(pattern: &[(Ere, Repeat)], input: &[u8]) -> bool {
+    fn atom(e: &Ere, input: &[u8], from: usize) -> Vec<usize> {
+        match e {
+            Ere::Group(inner) => sequence(inner, input, vec![from]),
+            _ => match input.get(from) {
+                Some(&b)
+                    if match e {
+                        Ere::Byte(want) => b == *want,
+                        Ere::Any => true,
+                        Ere::Class(ranges, negated) => {
+                            ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&b)) != *negated
+                        }
+                        Ere::Group(_) => unreachable!(),
+                    } =>
+                {
+                    vec![from + 1]
+                }
+                _ => Vec::new(),
+            },
+        }
+    }
+    fn sequence(pattern: &[(Ere, Repeat)], input: &[u8], mut ends: Vec<usize>) -> Vec<usize> {
+        for (e, repeat) in pattern {
+            let step = |from: &[usize]| {
+                let mut next: Vec<usize> = from.iter().flat_map(|&f| atom(e, input, f)).collect();
+                next.sort_unstable();
+                next.dedup();
+                next
+            };
+            let once = step(&ends);
+            ends = match repeat {
+                Repeat::One => once,
+                Repeat::Optional => [ends, once].concat(),
+                Repeat::Star | Repeat::Plus => {
+                    let mut all = if matches!(repeat, Repeat::Star) {
+                        ends
+                    } else {
+                        Vec::new()
+                    };
+                    let mut frontier = once;
+                    while !frontier.is_empty() {
+                        all.extend(&frontier);
+                        all.sort_unstable();
+                        all.dedup();
+                        frontier = step(&frontier);
+                        frontier.retain(|end| !all.contains(end));
+                    }
+                    all
+                }
+            };
+            ends.sort_unstable();
+            ends.dedup();
+        }
+        ends
+    }
+    sequence(pattern, input, vec![0]).contains(&input.len())
+}
+
+/// The matcher the audit relies on, held to the two patterns the entry used to carry.
+/// Both were xterm's and neither matches what cooked sends, so a matcher that accepted
+/// either would make the `rv`/`xr` half of the audit vacuous.
+#[test]
+fn the_audit_ere_matcher_tells_old_patterns_from_new() {
+    let da2 = b"\x1b[>0;0;0c";
+    let xtversion = b"\x1bP>|cooked(1.0.0)\x1b\\";
+    assert!(ere_matches_whole(&terminfo_ere(r"\E\\[>0;0;0c"), da2));
+    assert!(!ere_matches_whole(
+        &terminfo_ere(r"\E\\[>41;[1-6][0-9][0-9];0c"),
+        da2
+    ));
+    assert!(ere_matches_whole(
+        &terminfo_ere(r"\E\\[>41;[1-6][0-9][0-9];0c"),
+        b"\x1b[>41;390;0c"
+    ));
+    assert!(ere_matches_whole(
+        &terminfo_ere(r"\EP>\\|cooked\\((.*)\\)\E\\\\"),
+        xtversion
+    ));
+    assert!(!ere_matches_whole(
+        &terminfo_ere(r"\EP>\\|XTerm\\((.*)\\)\E\\\\"),
+        xtversion
+    ));
+    // Anchored: a trailing byte is not the reply the pattern describes.
+    assert!(!ere_matches_whole(
+        &terminfo_ere(r"\E\\[>0;0;0c"),
+        b"\x1b[>0;0;0cx"
+    ));
+}
+
 /// The header of `cooked.ti` argues that every capability has been checked against
 /// the code. This is that check, so that the argument is no longer a person reading.
 ///
@@ -1423,7 +1593,8 @@ fn terminfo_modes(value: &str) -> Vec<(bool, u16, bool)> {
 /// of. A mode on the `# declined-modes:` line answers 4, and no capability may set
 /// one: re-adding `flash` without DECSCNM is the case in point. And a query the
 /// entry declares gets a reply, since a query claimed and not answered is a child
-/// waiting out its timeout.
+/// waiting out its timeout. For `RV` and `XR` that reply must also match the entry's
+/// own `rv` and `xr`, which is what the child compares it against.
 #[test]
 fn terminfo_entry_matches_what_decrqm_says() {
     let source = include_str!("../../../terminfo/cooked.ti");
@@ -1488,6 +1659,38 @@ fn terminfo_entry_matches_what_decrqm_says() {
                 .iter()
                 .any(|event| matches!(event, Event::Reply(_))),
             "`{query}' ({value}) gets no reply"
+        );
+    }
+
+    // `tset` and tmux do not stop at a reply arriving: they match it against the
+    // entry's own pattern, so a reply that drifts from `rv` or `xr` is as good as none.
+    for (query, pattern) in [("RV", "rv"), ("XR", "xr")] {
+        let value = |name: &str| {
+            capabilities
+                .iter()
+                .find(|(n, _)| *n == name)
+                .unwrap_or_else(|| panic!("cooked.ti no longer declares `{name}'"))
+                .1
+        };
+        let mut t = term(4, 8, &terminfo_decode(value(query)));
+        let replies: Vec<Vec<u8>> = t
+            .drain()
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Reply(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect();
+        let ere = terminfo_ere(value(pattern));
+        assert!(
+            replies.iter().any(|reply| ere_matches_whole(&ere, reply)),
+            "`{query}' is answered {:?}, which `{pattern}' ({}) does not match",
+            replies
+                .iter()
+                .map(|reply| String::from_utf8_lossy(reply))
+                .collect::<Vec<_>>(),
+            value(pattern)
         );
     }
 }
