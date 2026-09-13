@@ -775,8 +775,8 @@ verbs need no entry, so deny-by-default costs nothing here."
 Unlike `cooked-tests--settle\=', this never calls `cooked--apply\=' itself: the
 wake filter has to drive `cooked--drain-and-apply\=' for the drain's own
 bookkeeping -- `cooked--draining\=' and the `unwind-protect\=' that clears it --
-to be under test at all."
-  (let ((deadline (+ (float-time) (or seconds 5))))
+to be under test at all.  SECONDS is scaled by `cooked-tests-timeout\='."
+  (let ((deadline (+ (float-time) (cooked-tests-timeout (or seconds 5)))))
     (while (and (< (float-time) deadline) (not (funcall predicate)))
       (accept-process-output nil 0.05))
     (funcall predicate)))

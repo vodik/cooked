@@ -1294,8 +1294,9 @@ state a user setting this in their init file is in."
 ;; path that asks with the flag in force.
 
 (defun cooked-tests--split-settle (predicate &optional seconds)
-  "Pump until PREDICATE holds or SECONDS elapse, draining as the mode does."
-  (let ((deadline (+ (float-time) (or seconds 5))))
+  "Pump until PREDICATE holds or SECONDS elapse, draining as the mode does.
+SECONDS is scaled by `cooked-tests-timeout'."
+  (let ((deadline (+ (float-time) (cooked-tests-timeout (or seconds 5)))))
     (while (and (< (float-time) deadline) (not (funcall predicate)))
       (accept-process-output nil 0.05)
       (when cooked--session (cooked--drain-and-apply)))

@@ -585,14 +585,15 @@ answer as nothing recorded and the one every caller here wants."
 
 (defun cooked-tests--run-until-dead (argv seconds)
   "Run ARGV in a cooked buffer and pump for up to SECONDS, killing it if alive.
-Returns non-nil when the buffer killed itself along the way."
+Returns non-nil when the buffer killed itself along the way.  SECONDS is
+scaled by `cooked-tests-timeout\=', like every other wait in the suite."
   (let ((buffer (generate-new-buffer "*cooked-test*")))
     (unwind-protect
         (progn
           (with-current-buffer buffer
             (cooked-mode)
             (cooked--start argv))
-          (let ((deadline (+ (float-time) seconds)))
+          (let ((deadline (+ (float-time) (cooked-tests-timeout seconds))))
             (while (and (< (float-time) deadline) (buffer-live-p buffer))
               (accept-process-output nil 0.05)
               ;; Timers, so the deferred kill actually fires.

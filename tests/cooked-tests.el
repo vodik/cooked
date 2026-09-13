@@ -133,7 +133,7 @@ everything that is not a positive number and the caller falls back to 1."
   (should (equal 4 (cooked-tests--parse-timeout-scale "4")))
   (should (equal 2.5 (cooked-tests--parse-timeout-scale " 2.5 ")))
   (should-not (cooked-tests--parse-timeout-scale nil))
-  (dolist (bad '("" "   " "0" "0.0" "-3" "wat" "4x" "1e3" "inf"))
+  (dolist (bad '("" "   " "0" "0.0" "-3" "wat" "4x" "1e3" "+4" ".5" "5." "inf"))
     (should-not (cooked-tests--parse-timeout-scale bad)))
   ;; And the scale actually in force is a positive number whatever the
   ;; environment this run inherited says.
@@ -168,6 +168,27 @@ session fixtures fail the test that left one behind."
      (run-at-time 0 nil (lambda () (ignore-errors (read-passwd "Password: "))))
      (cooked-tests--pump 0.2))
    :type 'ert-test-failed))
+
+(ert-deftest cooked-the-test-timeout-scale-reaches-every-wait ()
+  "Each wait loop in the suite stretches its deadline by the scale.
+
+A loop that reads its SECONDS raw keeps the idle-laptop bet the scale exists to
+correct, and three did: `cooked-tests--run-until-dead\=',
+`cooked-tests--pump-wakes\=' and `cooked-tests--split-settle\='.  Each is given
+a tenth of a second that nothing will cut short under a scale of four, and has
+to take at least four tenths."
+  (let ((cooked-tests-timeout-scale 4))
+    (dolist (wait (list (lambda () (cooked-tests--settle #'ignore 0.1))
+                        (lambda () (cooked-tests--pump 0.1))
+                        (lambda () (cooked-tests--pump-wakes #'ignore 0.1))
+                        (lambda ()
+                          (cooked-tests--with-session '("/bin/sh" "-c" "exec cat")
+                            (cooked-tests--split-settle #'ignore 0.1)))
+                        (lambda ()
+                          (cooked-tests--run-until-dead '("/bin/sh" "-c" "exec cat") 0.1))))
+      (let ((start (float-time)))
+        (funcall wait)
+        (should (>= (- (float-time) start) 0.4))))))
 
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here

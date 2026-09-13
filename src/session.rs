@@ -1237,59 +1237,9 @@ mod tests {
         }
     }
 
-    /// Multiply every deadline in this module by `COOKED_TEST_TIMEOUT_SCALE`.
-    ///
-    /// The numbers below were chosen on an idle machine, and each is a bet about how fast
-    /// a real child gets through a real pty. On a shared CI runner, or while cargo is
-    /// linking, the bet is wrong and the code is not -- `resize_reaches_the_child` failed
-    /// at a load average of 38 and passes in isolation. Describing the machine once beats
-    /// raising every deadline in the tree.
-    ///
-    /// A positive number and nothing else. A scale of zero or less would parse and expire
-    /// every deadline at once, failing every test that needs a child with nothing in the
-    /// output to say why. An empty variable is what a makefile exporting an unset variable
-    /// produces, so the guard is the point of this function rather than
-    /// a formality around it. Anything unusable means 1.
-    fn timeout_scale() -> f64 {
-        parse_timeout_scale(std::env::var("COOKED_TEST_TIMEOUT_SCALE").ok().as_deref())
-    }
-
-    /// The parse, separated from the environment so it can be tested.
-    ///
-    /// Reading the variable and deciding what it means are one line together and two
-    /// apart, and apart is worth it: `std::env::set_var` is unsafe and process-global, so
-    /// a test that exercised this through the environment would be racing every other
-    /// test in this binary for the same variable.
-    fn parse_timeout_scale(raw: Option<&str>) -> f64 {
-        raw.and_then(|raw| raw.trim().parse::<f64>().ok())
-            .filter(|scale| scale.is_finite() && *scale > 0.0)
-            .unwrap_or(1.0)
-    }
-
-    #[test]
-    fn the_timeout_scale_only_accepts_a_positive_number() {
-        assert_eq!(parse_timeout_scale(Some("4")), 4.0);
-        assert_eq!(parse_timeout_scale(Some(" 2.5 ")), 2.5);
-        assert_eq!(parse_timeout_scale(None), 1.0);
-        // The whole reason the guard exists: an empty variable is what a CI config
-        // declaring the name without a value produces, and what a makefile exporting an
-        // unset variable produces. Read as 0 it would expire every deadline here before
-        // it was taken.
-        assert_eq!(parse_timeout_scale(Some("")), 1.0);
-        assert_eq!(parse_timeout_scale(Some("   ")), 1.0);
-        assert_eq!(parse_timeout_scale(Some("0")), 1.0);
-        assert_eq!(parse_timeout_scale(Some("-3")), 1.0);
-        assert_eq!(parse_timeout_scale(Some("wat")), 1.0);
-        assert_eq!(parse_timeout_scale(Some("4x")), 1.0);
-        // `inf` parses as a float and would make every wait unbounded, which is a hang
-        // rather than a failure and is the worse of the two.
-        assert_eq!(parse_timeout_scale(Some("inf")), 1.0);
-        assert_eq!(parse_timeout_scale(Some("NaN")), 1.0);
-    }
-
-    /// A deadline of `seconds`, stretched by [`timeout_scale`].
+    /// A deadline of `seconds`, stretched by [`crate::pty::timeout_scale`].
     fn patience(seconds: f64) -> Duration {
-        Duration::from_secs_f64(seconds * timeout_scale())
+        Duration::from_secs_f64(seconds * crate::pty::timeout_scale())
     }
 
     fn wait_for(session: &Session, done: impl FnMut(&Update) -> bool) -> Update {

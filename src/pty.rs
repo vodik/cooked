@@ -662,9 +662,83 @@ unsafe fn child_exec(
     }
 }
 
+/// Multiply every deadline in the Rust tests by `COOKED_TEST_TIMEOUT_SCALE`.
+///
+/// The numbers in those tests were chosen on an idle machine, and each is a bet about how
+/// fast a real child gets through a real pty. On a shared CI runner, or while cargo is
+/// linking, the bet is wrong and the code is not -- `resize_reaches_the_child` failed at a
+/// load average of 38 and passes in isolation. Describing the machine once beats raising
+/// every deadline in the tree.
+///
+/// Here rather than in a `tests` module because both this file's tests and the session's
+/// use it, and a helper inside one module's private `tests` is not reachable from another.
+/// There was a copy in each until they disagreed about what they accepted.
+#[cfg(test)]
+pub(crate) fn timeout_scale() -> f64 {
+    parse_timeout_scale(std::env::var("COOKED_TEST_TIMEOUT_SCALE").ok().as_deref())
+}
+
+/// The parse behind [`timeout_scale`]: a positive decimal number, or 1.
+///
+/// Digits with an optional fraction and nothing else, which is exactly what the Lisp suite's
+/// `cooked-tests--parse-timeout-scale` accepts, so one value means the same thing to both
+/// halves of `make test`. `str::parse::<f64>` alone would take `1e3`, `+4`, `.5` and `inf`,
+/// the last of which makes every wait unbounded, a hang rather than a failure.
+///
+/// A scale of zero would expire every deadline at once, failing every test that needs a
+/// child with nothing in the output to say why, and an empty variable is what a makefile
+/// exporting an unset variable produces, so the guard is the point of this function rather
+/// than a formality around it.
+///
+/// Separated from the environment so it can be tested: `std::env::set_var` is unsafe and
+/// process-global, so a test that went through the variable would race every other test in
+/// this binary for it.
+#[cfg(test)]
+fn parse_timeout_scale(raw: Option<&str>) -> f64 {
+    let decimal = |text: &str| {
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, "0"));
+        [whole, fraction]
+            .iter()
+            .all(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+    };
+    raw.map(str::trim)
+        .filter(|text| decimal(text))
+        .and_then(|text| text.parse::<f64>().ok())
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .unwrap_or(1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_timeout_scale_only_accepts_a_positive_number() {
+        assert_eq!(parse_timeout_scale(Some("4")), 4.0);
+        assert_eq!(parse_timeout_scale(Some(" 2.5 ")), 2.5);
+        assert_eq!(parse_timeout_scale(None), 1.0);
+        // The whole reason the guard exists: an empty variable is what a CI config
+        // declaring the name without a value produces, and what a makefile exporting an
+        // unset variable produces. Read as 0 it would expire every deadline here before
+        // it was taken.
+        assert_eq!(parse_timeout_scale(Some("")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("   ")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("0")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("0.0")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("-3")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("wat")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("4x")), 1.0);
+        // What `str::parse::<f64>` takes and the Lisp parser does not. The two suites read
+        // one variable, and a value one of them rejects must not scale the other.
+        assert_eq!(parse_timeout_scale(Some("1e3")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("+4")), 1.0);
+        assert_eq!(parse_timeout_scale(Some(".5")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("5.")), 1.0);
+        // `inf` would make every wait unbounded, which is a hang rather than a failure and
+        // is the worse of the two.
+        assert_eq!(parse_timeout_scale(Some("inf")), 1.0);
+        assert_eq!(parse_timeout_scale(Some("NaN")), 1.0);
+    }
 
     fn termios_with(lflag: LocalFlags) -> Termios {
         let mut t = Termios::from(unsafe { std::mem::zeroed::<libc::termios>() });
@@ -891,16 +965,8 @@ mod tests {
             None,
         )
         .expect("spawn");
-        // Scaled like the session tests' deadlines, and for the same reason; the
-        // reasoning is written down on `session::tests::timeout_scale`. Spelled out here
-        // rather than shared, because a test helper in one module's `cfg(test)` tree is
-        // not reachable from another's.
-        let scale: f64 = std::env::var("COOKED_TEST_TIMEOUT_SCALE")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<f64>().ok())
-            .filter(|scale| scale.is_finite() && *scale > 0.0)
-            .unwrap_or(1.0);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(2.0 * scale);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs_f64(2.0 * timeout_scale());
         while std::time::Instant::now() < deadline {
             // `mode()` can transiently fail immediately after spawn, before the child has
             // opened its slave (see `Pty::resize`'s doc comment) — tolerated the same way
