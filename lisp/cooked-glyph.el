@@ -35,7 +35,7 @@
 ;;;; The descriptor
 ;;
 ;; Mirrors the bit layout of `BoxGlyph' in src/emu/glyph.rs — kept in sync by hand,
-;; the same way `cooked--attr-*' in cooked.el mirrors `Attrs'.  Line glyphs: four
+;; the same way `cooked--attr-*' in cooked-face.el mirrors `Attrs'.  Line glyphs: four
 ;; 2-bit edge-weight fields (up/down/left/right, 0=none 1=light 2=heavy 3=double)
 ;; packed into bits 0-7, an arc flag at bit 8, forward/backward diagonal flags at
 ;; bits 9-10 (mutually exclusive with the edge fields on any real codepoint), and a

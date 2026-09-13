@@ -76,23 +76,17 @@
 ;; without this the file compiles a call to a function that does not exist and
 ;; the guard it is supposed to install is simply absent: the body then runs
 ;; unprotected from inside the process filter and signals `void-function' there.
-;; cooked.el requires this file, so cooked-util.el is the one place in the graph
-;; it can be reached from.
+;; This file is base tier, so cooked-util.el is the one place in the graph those
+;; can be reached from.
 (require 'cooked-util)
 
-;; What was here until recently was four `declare-function's -- `cooked--suspended-p',
-;; `cooked--child-owns-keyboard-p', `cooked-mouse-event' and `cooked-send-key' -- plus
-;; a `defvar' for `cooked--mouse-grab'.  Two of those are input-ownership *policy
-;; questions*, and this file is base tier, where `docs/DESIGN.md' says a file "carries
-;; notifications upward, never questions."  A link layer deciding whether a click
-;; belongs to the child is that rule broken outright: the answer depends on the mouse
-;; grab, on whether keys are being forwarded and on whether the session is suspended,
-;; none of which this file has any business knowing.
-;;
-;; `cooked-link-delegate-function' inverts it.  This file states the *occasion* -- an
-;; unshifted invocation, which is the one the child could plausibly own -- and the
-;; layer that already owns input decides and acts.  See `cooked--link-delegate' in
-;; cooked-keys.el, which is where the grab and the forwarding state already live.
+;; Whether a click or a RET on a link belongs to the child is an input-ownership
+;; question: the answer depends on the mouse grab, on whether keys are being
+;; forwarded and on whether the session is suspended, none of which a base-tier
+;; file has any business knowing.  So `cooked-link-delegate-function' inverts it.
+;; This file states the *occasion* -- an unshifted invocation, which is the one the
+;; child could plausibly own -- and the layer that owns input decides and acts.  See
+;; `cooked--link-delegate' in cooked-keymaps.el.
 
 (defvar cooked-link-delegate-function nil
   "Function offered an unshifted link invocation before the link is followed.
@@ -821,7 +815,7 @@ was."
 ;;
 ;; The providers are *collected* rather than installed here.  `url' is this file's
 ;; to contribute and `filename'/`existing-filename' are cooked-file-link.el's, which
-;; is an optional layer above cooked.el -- so the installation point straddles the
+;; is an optional layer on top of `cooked-mode' -- so the installation point straddles the
 ;; tier boundary and belongs in cooked-mode.el's setup, with each layer contributing
 ;; its own.  That straddle is the point, not an awkwardness to design around: the
 ;; alternative is the base layer naming a provider only an upper layer can supply,

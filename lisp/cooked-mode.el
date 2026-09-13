@@ -2,17 +2,15 @@
 
 ;;; Commentary:
 
-;; The interactive half of cooked: which keymap the buffer wears when, input
-;; submission, history, and the mode itself.  Five things that used to live here
-;; have their own files, each named for what it is -- cooked-keys.el,
-;; cooked-completion.el, cooked-secret.el, cooked-shell-integration.el and
-;; cooked-mode-line.el -- and the command records everything here navigates by
-;; are cooked-command.el.  See cooked.el, the main file, for what this is and
-;; how to install it.
+;; The top of the interaction layer: `cooked-mode' itself, which keymap the
+;; buffer wears when, keeping the child sized to its windows, attention and focus,
+;; and what imenu, outline and bookmarks find in a transcript.  See cooked.el,
+;; the main file, for what cooked is and how to install it.
 ;;
-;; Key encoding and the keymaps themselves are cooked-keys.el's: it says what a
-;; key becomes and builds the maps, this file says which map is installed and
-;; when.  `cooked--refresh-keymap' is the join.
+;; What a key becomes is cooked-keys.el, the maps are cooked-keymaps.el, and the
+;; line's commands are cooked-input.el; this file says which map is installed and
+;; when.  `cooked--refresh-keymap' is the join, and the layers below ask for it
+;; through `cooked--refresh-hook'.
 
 ;; Two signals decide who owns the keyboard.  The kernel's line discipline
 ;; (`cooked--mode') identifies programs doing canonical reads, and OSC 133 marks

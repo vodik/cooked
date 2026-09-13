@@ -627,34 +627,50 @@ it is painting and is honoured.
 
 ---
 
-## The base layer, and why anything sits *below* cooked.el
+## How the Lisp files are layered
 
-`cooked.el` requires `cooked-face.el`, `cooked-deco.el`, `cooked-link.el` and
-`cooked-command.el`, so none of them can require it back — which is why `cooked-util.el`
-exists. It holds the customization group, the session handle, the seam runners, and the
-macros the layers above reach for often enough that open-coding them was how they
-drifted apart.
+Every file requires the files it calls, and the requires run one way. From the floor up:
 
-`cooked-command.el` is the one whose placement is worth stating, because it looks wrong:
-almost all of its readers are in `cooked-mode.el`, one level *above* `cooked.el`, so
-that is where it seems to belong. It sits below instead, and the test is what it
-depends on rather than who depends on it — nothing in it reaches for anything above it,
-so the drain can call `cooked--mark-command-end` and `cooked--running-anchor` directly.
-Placed in the middle it would have needed four `declare-function`s pointing back down
-into `cooked.el`, and the rule that block states about itself is that it carries
-notifications upward, never questions.
+```
+cooked-util        the group, the session handle, the seam runners, the core's defuns
+base tier          cooked-module, -face, -glyph, -deco, -link, -command: nothing of a session
+cooked-state       the cursor and grid records, the negotiated modes, who owns the keyboard
+cooked-guard       keeping a live row to one screen line
+cooked-screen      the grid as buffer text: cells, anchors, blocks, shifts, damaged rows
+cooked-pending     the input Emacs holds at a prompt
+cooked-cursor      the child's cursor, the ghost, and point when it wanders
+cooked-semantic    what OSC 133 marks do to the buffer and the command records
+cooked-graphics    whether the child is told a picture can be shown
+cooked-osc         OSC dispatch, titles and the buffer name, notifications, clipboard, OSC 7
+cooked-color       OSC 10/11/12, the palette, the colour scheme, DECSCNM
+cooked-window-ops  XTWINOPS
+cooked-mouse, -bell, -secret, -scrollback
+cooked-render      the drain pipeline
+cooked-session     starting a child
+cooked-peek        stepping out of forwarding
+cooked-keys        what a key becomes
+cooked-input       the line's commands
+cooked-keymaps     which keys reach the child
+cooked-mode        the mode, the keymap refresh, size, attention, focus
+cooked             the entry points
+```
 
-`cooked-render.el` is the same test read the other way, and lands on the other side.
-The redisplay pipeline — `cooked--drain-and-apply`, `cooked--apply` and the viewport
-around it — reads `cooked--grid`, the input region, the marks and the screen region, and
-calls down into the renderers, the decorations, the links and the OSC handlers. Nothing
-below it needs anything it defines, so it sits *above* `cooked.el` and is required by
-`cooked-mode.el`, exactly as `cooked-keys.el` is. `cooked-scrollback.el` sits between the
-two: the drain calls it, it calls nothing in the drain but the repaint
-`cooked-clear-scrollback` owes. What crosses back down into `cooked.el` is one
-declaration, `cooked--on-wake` — the wake pipe's filter is installed by `cooked--start`,
-because the pipe is part of spawning a child, and the filter's body is a notification
-handed to the pipeline rather than a question put to it.
+A file sits where what it *depends on* puts it, not where its readers are.
+`cooked-command.el` is the case that looks wrong: almost all of its readers are near the
+top, but nothing in it reaches for anything above it, so it is base tier and the shell
+marks call `cooked--mark-command-end` and `cooked--running-anchor` as ordinary downward
+calls. `cooked-render.el` is the same test read the other way: the pipeline reads the
+state, the pending input, the marks and the screen, and calls down into the renderers,
+the decorations, the links, the OSC handlers and the mouse, while nothing below it needs
+anything it defines.
+
+What a lower file cannot do is name a function above it, and the one it used to need was
+`cooked--refresh-keymap`: the alternate screen switch, the tty's mode, the shell marks,
+the child's exit, peek and delegation all change what the keymap is derived from. They run
+`cooked--refresh-hook` through `cooked--request-refresh` instead, and `cooked-mode.el`
+puts the refresh on it. `make compile` compiles each file in an Emacs of its own, so a
+call that runs upward without a `require` behind it is an error rather than something
+another file's load happens to paper over.
 
 The one coupling that crosses the other way is a cache: `cooked--flush-face-cache` has
 to drop decoration specs that were coloured against the outgoing theme, and cannot name
@@ -1467,9 +1483,8 @@ src/session.rs   reader thread, coalesced wakeups, explicit idempotent shutdown
 src/lib.rs       the Lisp-facing surface
 src/platform/    one module per OS; each gets the best facility it actually has rather
                  than levelling down to the intersection (see below)
-lisp/            cooked-util.el is the floor everything else requires; cooked.el owns
-                 the state and the policy derived from it; cooked-mode.el binds keys
-                 to it and pulls in the rest. The opt-in files (cooked-evil,
+lisp/            layered one way, from cooked-util.el up to cooked.el; see "How the
+                 Lisp files are layered" above. The opt-in files (cooked-evil,
                  cooked-osc-eval, cooked-shell-completion, cooked-file-link,
                  cooked-next-error, cooked-command-decorations, cooked-project,
                  cooked-consult, cooked-dnd, cooked-history, cooked-command-search)
@@ -1481,8 +1496,8 @@ docs/            this file, plus KEYBOARD, FEATURES, SHELL, TERMINFO, IMAGES, RO
 tests/           cooked-tests.el loads the suite; the rest are split by subject
 ```
 
-`cooked-util.el` cannot require `cooked.el` back for a macro, which is what the base
-layer exists to prevent, rather than each file above it growing its own copy.
+`cooked-util.el` holds the macros every layer uses, so no file above it grows its own
+copy.
 `cooked-glyph.el` sits below all of it and knows nothing about terminals — a shape
 descriptor and a pixel size in, raw XBM bits out — which is why the pixel-level tests
 can assert against it without starting a session. Scrollback lives in the Emacs buffer,

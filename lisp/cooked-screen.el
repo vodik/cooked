@@ -669,6 +669,8 @@ paid wherever it is paid from."
       ;; rather than trusting that is one less thing to be wrong about later.
       (setq cooked--protected (cons (buffer-chars-modified-tick) limit)))))
 
+;;;; Writing damaged rows
+
 (defvar cooked-row-rendered-functions nil
   "Abnormal hook run with the bounds of each live row this drain rewrote.
 

@@ -28,12 +28,8 @@
 
 ;;;; Starting and stopping a session
 ;;
-;; What it takes to get a child running in this buffer and to let go of one
-;; again: the size to give it, the environment to hand it, the wake pipe the
-;; native core rings, and the question of whether killing the buffer should ask
-;; first.  Drawing what the child sends is cooked-render.el and capping how much
-;; of it the buffer keeps is cooked-scrollback.el; both used to be filed here,
-;; under a heading broad enough to have accepted them.
+;; The environment to hand a child, the wake pipe the native core rings, and the
+;; two options that pace it.
 
 ;; Defined by the two `defcustom's below, which name this function as their
 ;; `:set' and so need it to exist first.

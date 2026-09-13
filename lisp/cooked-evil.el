@@ -286,8 +286,8 @@ back on its own."
   "The `cooked--input-mode' evil's current state asks for.
 
 Derived on every transition rather than latched by a hook, which is what makes
-`i' out of normal state resume forwarding on its own -- see the commentary in
-cooked-mode.el above `cooked-toggle-peek' for the bug latching it caused."
+`i' out of normal state resume forwarding on its own -- see the commentary at
+the top of cooked-peek.el for the bug latching it caused."
   ;; nil rather than `cooked--default-input-mode' where evil is not driving:
   ;; the default sits on the same hook, behind this, so answering nil is how
   ;; this defers to it.  Calling it here as well would answer *for* it, which is

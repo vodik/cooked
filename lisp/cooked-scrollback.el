@@ -5,16 +5,9 @@
 ;; The transcript's upper bound: how many lines above the live screen a session
 ;; keeps, and the two ways text up there is taken away again.
 ;;
-;; Not opt-in, unlike `cooked-next-error' and its neighbours; `cooked-mode' gets
-;; this by way of cooked-render.el.  It is a separate file on the argument
-;; cooked-mouse.el and cooked-keys.el each make in turn -- a self-contained
-;; subject that had grown too large to keep sharing a file with everything else
-;; in it.  Here the file was cooked.el and the section was "Session lifecycle",
-;; which at a thousand lines was three subjects filed together because they were
-;; written in that order: starting a child, drawing what it sends, and capping
-;; how much of it survives.  This is the third, and it is the small one -- kept
-;; separate rather than folded into cooked-render.el because a cap is not part
-;; of the pipeline, only something the pipeline calls once per drain.
+;; Not opt-in: the drain pipeline in cooked-render.el requires this.  It is kept
+;; out of that file because a cap is not part of the pipeline, only something
+;; the pipeline calls once per drain.
 ;;
 ;; The subject is one number the two ends co-own, and every function here is
 ;; about not lying about it.  Emacs holds the transcript text; the emulator holds
@@ -30,10 +23,9 @@
 ;;
 ;; Below cooked-render.el, which is the direction the calls run: the drain ends
 ;; with `cooked--trim-scrollback' and dispatches `CSI 3 J' to
-;; `cooked--discard-scrollback', and neither of those needs anything the pipeline
-;; defines.  The single exception is `cooked-clear-scrollback', which repaints
-;; after cutting and so reaches back up for the drain -- declared below rather
-;; than required, and the only such edge in this file.
+;; `cooked--discard-scrollback', and neither needs anything the pipeline defines.
+;; `cooked-clear-scrollback', which cuts and then drains to repaint, is a command
+;; in cooked-mode.el for that reason.
 
 ;;; Code:
 

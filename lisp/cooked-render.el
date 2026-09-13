@@ -6,16 +6,6 @@
 ;; showing it: the drain itself, the order an update is applied in, and the view
 ;; put back on top afterwards.
 ;;
-;; Not opt-in, unlike `cooked-next-error' and its neighbours; `cooked-mode'
-;; requires this, on the argument cooked-mouse.el and cooked-keys.el each make in
-;; turn -- a self-contained subject that had grown too large to keep sharing a
-;; file with everything else in it.  Here the file was cooked.el and the section
-;; was "Session lifecycle", which at a thousand lines was three subjects filed
-;; together because they were written in that order: starting a child, drawing
-;; what it sends, and capping how much of it the buffer keeps.  Only the first is
-;; the session's life.  The second is this file; the third is
-;; cooked-scrollback.el.
-;;
 ;; The unit worth reading whole is `cooked--apply', whose docstring already says
 ;; "the order below is the whole of it".  Everything else here either feeds it --
 ;; `cooked--on-wake' is the process filter's callback, `cooked--drain-and-apply'
@@ -25,24 +15,15 @@
 ;; `cooked--place-point' and `cooked--scroll-windows' for putting it back.
 ;; `cooked-refresh' is the way out when a step of that order signalled part-way.
 ;;
-;; This file sits ABOVE cooked.el rather than beside it, and that was the one
-;; decision the split turned on.  The pipeline is a pure consumer: it reads
-;; `cooked--grid', the input region, the marks and the screen region, and calls
-;; down into the renderers, the decorations, the links and the OSC handlers.
-;; Nothing below it needs anything it defines.  Sitting below cooked.el would
-;; have meant declaring most of that file's screen-region section; sitting here
-;; means requiring it -- and requiring cooked-osc.el and cooked-mouse.el with it,
-;; so the two OSC handlers and the mouse state that `cooked--handle-event'
-;; dispatches to become ordinary calls.  Three of cooked.el's own
-;; `declare-function's went away with the code that needed them.
+;; The adoption of what a drain reports that is not rows lives here too: the
+;; alternate screen going up or down, the tty's mode, and the child's exit.
 ;;
-;; One back-edge downward survives, and it is the honest one: the wake pipe's
-;; filter is installed by `cooked--start', in cooked.el, and its callback is
-;; `cooked--on-wake' here.  cooked.el declares that pair and nothing else of this
-;; file.  Upward, three things cooked-mode.el owns are declared below -- a
-;; setting read, and two notifications that something changed, which is the one
-;; shape a back-edge here is allowed to have; see cooked-mode-line.el's header
-;; for the same arrangement stated at length.
+;; The pipeline is a consumer.  It reads the session state, the pending input,
+;; the marks and the screen region, and calls down into the renderers, the
+;; decorations, the links, the OSC handlers and the mouse; nothing below it needs
+;; anything it defines.  Starting a session, which installs `cooked--on-wake' as
+;; the wake pipe's filter, is cooked-session.el, one level up.  What this file
+;; has to tell the keymap it tells through `cooked--request-refresh'.
 
 ;;; Code:
 
@@ -352,8 +333,8 @@ answerable before the render, exactly like `others' above.  See
 (defun cooked--capture-relocations (others)
   "The positions this drain would otherwise drag, as `cooked-relocation's.
 
-The policy half of the floor cooked.el implements; see the commentary above
-`cooked-relocation' for what the transform is and why the mark and a held
+The policy half of the floor cooked-screen.el implements; see the commentary
+above `cooked-relocation' for what the transform is and why the mark and a held
 window's point are the two things with nothing else speaking for them.
 
 The mark whenever there is one in the live screen, active or not.  Not gated on
@@ -730,6 +711,8 @@ two chances to disagree."
      (cooked--handle-semantic event batch-start))
     (_ nil)))
 
+;;;; The alternate screen, and the link passes redisplay runs
+
 (defcustom cooked-alt-change-hook nil
   "Hook run in the buffer when the alternate screen goes up or comes down.
 
@@ -819,10 +802,10 @@ The cursor\='s row always, and the whole input region on top of it when the user
 is typing -- the two are usually the same row and the `max\=' costs nothing when
 they are.  Returns buffer positions, not markers.
 
-This lives in cooked.el rather than cooked-link.el on purpose.  Where the cursor
-is and whether input is being edited are session state, and cooked-link.el is
-base tier: it was asking questions upward until recently and must not start
-again.  The link layer is told what range to scan; it does not ask why."
+This lives here rather than in cooked-link.el on purpose.  Where the cursor is
+and whether input is being edited are session state, and cooked-link.el is base
+tier, which must not ask questions upward.  The link layer is told what range
+to scan; it does not ask why."
   (when-let* ((cursor (cooked--cursor-position)))
     (let ((beg (save-excursion (goto-char cursor) (line-beginning-position)))
           (end (save-excursion (goto-char cursor) (line-end-position))))

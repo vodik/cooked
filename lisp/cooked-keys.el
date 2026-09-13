@@ -1,35 +1,18 @@
-;;; cooked-keys.el --- Key encoding and keymaps for cooked terminals -*- lexical-binding: t; -*-
+;;; cooked-keys.el --- What a key becomes on its way to the child -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
 ;; Everything between a key press and the bytes the child receives: how an Emacs
-;; event is spelled in whichever protocol the child negotiated, which keys are
-;; forwarded to it at all, and which are held back for Emacs.
+;; event is spelled in whichever protocol the child negotiated -- or the one
+;; `cooked-key-protocol-overrides' assumes for a program that never negotiates --
+;; the commands that send a key, a string or a paste, and the per-program
+;; overrides that rebind a key to bytes of its own.
 ;;
-;; Not opt-in, unlike `cooked-next-error' and its neighbours; `cooked-mode'
-;; requires this, exactly as it requires cooked-mouse.el and for the reason that
-;; file gives: a self-contained subject that had grown too large to keep sharing
-;; a file with the mode itself.  The keyboard is the same case, larger -- eleven
-;; hundred lines of `cooked-mode.el', across three sections, one of which was
-;; named "Suspending: peek" for the hundred lines of it that were about
-;; suspending rather than for the four hundred that were keymap construction.
-;; The mouse had had the treatment; the keyboard had not.
-;;
-;; The seam is encoding against state.  What a key *becomes* is here.  *When* a
-;; map is installed is not: `cooked--refresh-keymap', `cooked--state-keymap',
-;; `cooked--policy' and the hooks around them stay in cooked-mode.el with the
-;; rest of the state machine.  This file builds the maps; that file decides
-;; which one the buffer is wearing.  Peek is where the line is easiest to see --
-;; `cooked-peek-map' is a keymap and lives here, while `cooked-toggle-peek' and
-;; `cooked--resume-forwarding' are transitions and do not.  `cooked--forwarding-map'
-;; sits just on this side of that line: which *spelling* of a forwarding map a
-;; frame needs is a fact about how a key is written down, not about what the
-;; child is doing.
-;;
-;; The maps are defined *below* the options that configure them, which reads
-;; backwards and has to: a `defvar' that builds itself from an option's value
-;; needs the option to exist first.  See `cooked--passthrough-setter', which is
-;; the other half of that arrangement.
+;; Which keys are forwarded at all is cooked-keymaps.el, and which map is
+;; installed when is `cooked--refresh-keymap' in cooked-mode.el.  Both sit above
+;; this file.  What it needs below it is the session state, the child's cursor,
+;; which every send snaps point back to, and peek, which every out-of-band send
+;; resumes.
 
 ;;; Code:
 

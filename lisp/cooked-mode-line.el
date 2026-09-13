@@ -7,11 +7,10 @@
 ;; command whose output a window is scrolled into; and the annotation beside its
 ;; name in a completion list, which is the mode line read from outside the buffer.
 ;;
-;; All three read the command records, so this file sits above cooked-command.el
-;; -- and the first two reach back into cooked-mode.el for three things the
-;; interaction layer owns, declared below.  The direction is right: this is a
-;; *reader* of state that layer maintains, which is the one shape a back-edge here
-;; is allowed to have.
+;; All three read the command records and the session state, and the mode line
+;; also reads the progress and the buffer-name template cooked-osc.el keeps, the
+;; bell's mark, and offers the peek toggle.  Nothing below here reads any of it
+;; back, so the file sits on all of those and under cooked-mode.el.
 
 ;;; Code:
 

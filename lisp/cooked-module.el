@@ -19,11 +19,10 @@
 ;; version-vs-sidecar: a downloaded install has no terminfo/cooked.ti to be older
 ;; than.
 ;;
-;; None of it is about terminals.  It sat in `cooked.el\=' between the wire protocol
-;; and the renderer, which is where it was first written rather than where it
-;; belongs: nothing in the drain path calls any of it, and nothing here knows what a
-;; grid or a buffer is.  Its only dependency is `cooked--root\=', which is why this
-;; can sit directly on `cooked-util.el\=' and below everything else.
+;; None of it is about terminals: nothing in the drain path calls any of it, and
+;; nothing here knows what a grid or a buffer is.  Its only dependency is
+;; `cooked--root\=', which is why this sits directly on `cooked-util.el\=' and below
+;; everything else.
 ;;
 ;; The one thing to understand before changing `cooked--build-module\=': installing
 ;; by rename rather than by writing over the loaded file is load-bearing, not

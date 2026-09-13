@@ -13,13 +13,14 @@
 ;;
 ;; The division the core draws: it interprets what changes *the terminal* -- the
 ;; alternate screen, mouse and paste modes, device replies -- and nothing else.  What a
-;; sequence means to Emacs is Emacs\=' business, and that is this file: titles, the
-;; working directory, the default colours, notifications, the clipboard, and the OSC 51
-;; channel\='s two nil-valued hooks.
+;; sequence means to Emacs is Emacs\=' business, and that is this file: titles and the
+;; buffer name built from them, the working directory, notifications, progress, the
+;; clipboard, and the OSC 51 channel\='s two nil-valued hooks.  The colours are
+;; cooked-color.el, which this file dispatches to.
 ;;
-;; Two of these are refused by default and say so in their own docstrings, for the same
-;; reason: anything that can write to the terminal can send one.  See
-;; `cooked-allow-color-set\=' and `cooked-allow-notifications\='.
+;; Notifications are refused by default and say so in their docstring: anything that
+;; can write to the terminal can send one.  See `cooked-allow-notifications\=', and
+;; `cooked-allow-color-set\=' for the same rule applied to the colours.
 
 ;;; Code:
 
@@ -107,6 +108,11 @@ hypothetical -- `cooked--osc-emacs' can reach `find-file', which
   (cooked--update-buffer-name)
   (force-mode-line-update))
 
+;;;; The buffer's name
+;;
+;; Built from the directory OSC 7 reports and the title OSC 0 and 2 set, and
+;; renamed from those two handlers.
+
 (defcustom cooked-buffer-name "*cooked: %p*"
   "How session buffers are named.
 
@@ -185,9 +191,7 @@ column is not the user's choice about buffer names."
       (unless (equal name (buffer-name))
         (rename-buffer (generate-new-buffer-name name))))))
 
-(defun cooked--osc-cwd (parts)
-  "Track the child's directory, from the OSC 7 payload PARTS."
-  (cooked--set-directory (string-join parts ";")))
+;;;; OSC 9, 99 and 777 — notifications
 
 (defcustom cooked-allow-notifications nil
   "Whether the child may raise desktop notifications, via OSC 9, 99 or 777.
@@ -795,6 +799,10 @@ however many of `c\=' and `s\=' were named."
 ;; branch trusts nothing about the payload and checks the directory is there.
 ;; The remote branch cannot check anything without paying for a connection, so it
 ;; instead refuses to let the payload decide *where* the connection would go.
+
+(defun cooked--osc-cwd (parts)
+  "Track the child's directory, from the OSC 7 payload PARTS."
+  (cooked--set-directory (string-join parts ";")))
 
 (defcustom cooked-remote-directory 'tramp
   "What an OSC 7 report from another host does to `default-directory\='.

@@ -2,15 +2,14 @@
 
 ;;; Commentary:
 
-;; The bottom of the Lisp stack, below even `cooked.el\='.  Nothing here knows what a
-;; terminal is: it is the customization group, the handle to the native core, and the
-;; four macros the layers above reach for often enough that open-coding them was how
-;; they drifted apart.
+;; The bottom of the Lisp stack.  Nothing here knows what a terminal is: it is the
+;; customization group, the handle to the native core and the list of what the core
+;; defines, the macros the layers above reach for often enough that open-coding them
+;; was how they drifted apart, and a few helpers about windows, files and hosts that
+;; more than one layer needs.
 ;;
-;; It exists because the layering has a floor.  `cooked-face.el\=' and `cooked-deco.el\='
-;; are required *by* `cooked.el\=', so they cannot require it back for a macro -- and
-;; duplicating `cooked--dolist-buffers\=' into each of them is exactly the shape this
-;; file was extracted to stop.
+;; Every other file requires this one, directly or through the base tier, and it
+;; requires nothing of the package.
 
 ;;; Code:
 
@@ -492,6 +491,8 @@ file is the floor for."
   (if (file-remote-p name)
       (progn (message "cooked: refused `%s' (a remote file name)" name) nil)
     name))
+
+;;;; Windows, and waiting until redisplay is over
 
 (defun cooked--layout-window ()
   "The window this buffer's rows are laid out for, or nil if it has none.

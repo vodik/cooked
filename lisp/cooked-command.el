@@ -7,17 +7,13 @@
 ;; the list of finished ones, the two hooks, and the queries the rest of the tree
 ;; asks of them.
 ;;
-;; It sits *below* cooked.el rather than beside cooked-mode.el, which is where most
-;; of its readers are, and the placement is the interesting part.  Nothing here
-;; depends on anything above it: the struct, the accessors, the buffer-locals and
-;; every query call only each other and stock Emacs.  So the drain can reach
+;; It sits in the base tier, below the session state and everything that renders,
+;; although most of its readers are near the top, and the placement is the
+;; interesting part.  Nothing here depends on anything above it: the struct, the
+;; accessors, the buffer-locals and every query call only each other and stock
+;; Emacs.  So the shell marks in cooked-semantic.el reach
 ;; `cooked--mark-command-end\=' and `cooked--running-anchor\=' as ordinary downward
-;; calls, where a file between cooked.el and cooked-mode.el would have needed four
-;; `declare-function\='s pointing back up into it -- and cooked.el\='s own rule for
-;; that block is that it carries notifications upward, never questions.
-;;
-;; Every consumer reaches these through `cooked\=' or `cooked-mode\=', so nothing
-;; had to change its `require\='s.
+;; calls, and every file that reads a record requires this one.
 
 ;;; Code:
 

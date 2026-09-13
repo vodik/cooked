@@ -356,10 +356,10 @@ by the keyboard and the other by the mouse."
 ;; underneath it and putting it back — which is a question about ownership, asked
 ;; from inside the process filter, long before any key is pressed.
 ;;
-;; So the state and the policy derived from it live at this level, and the layer
-;; above binds keys to them.  What cooked.el still calls upward is only ever a
-;; notification that something changed; `cooked--refresh-keymap' is the one that
-;; matters, and it is the seam `cooked-state-change-hook' hangs off.
+;; So the state and the policy derived from it live at this level, and the layers
+;; above bind keys to them.  A lower file that changes something the policy reads
+;; says so with `cooked--request-refresh', and `cooked--refresh-keymap' answers it
+;; from the top; that refresh is the seam `cooked-state-change-hook' hangs off.
 
 (defvar-local cooked--semantic nil
   "OSC 133 state: nil, `prompt', `input' or `output'.")

@@ -67,7 +67,7 @@ independently of it: `text-scale-mode\=' changes the cell size and the row and
 column count together, but a theme or font change can move the cell size while
 the grid stays put, and the child has to hear about that too.
 
-It lives here rather than beside `cooked--last-size\=' in cooked-mode.el because
+It lives here rather than beside `cooked--last-size\=' in cooked-state.el because
 the renderer reads it: it is this buffer\='s own last known good measurement, and
 `cooked--deco-cell-size\=' prefers it to any window that is not one of ours.
 Either component is nil on a terminal frame, or when nothing has ever displayed

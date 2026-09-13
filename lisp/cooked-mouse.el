@@ -7,15 +7,14 @@
 ;; report when the child asked for one, arrow keys when it is on the alternate
 ;; screen and asked only for that.
 ;;
-;; Not opt-in, unlike `cooked-next-error' and its neighbours; `cooked-mode'
-;; requires this.  It is a separate file because it is a self-contained subject
-;; that had grown to a fifth of `cooked-mode.el' -- it depends on nothing that
-;; file defines, which is what made it separable.
+;; Not opt-in: the drain pipeline and the keymaps require it.  It sits on the
+;; screen, which turns a click into a cell, and on cooked-osc.el, which dispatches
+;; the OSC 22 pointer shape here.
 ;;
 ;; Reports are only sent when the child asked for them; otherwise the click does
 ;; what it does in any Emacs buffer, so selecting text still works.  The whole of
 ;; that gate is `cooked--mouse-grab', and `cooked--update-mouse-grab' is what
-;; `cooked-mode.el' calls to keep it current.
+;; `cooked--refresh-keymap' calls to keep it current.
 ;;
 ;; Two gates sit beside it, and both are about which click rather than when.  A
 ;; position means something to a child only if the pointer was over the window
@@ -160,8 +159,7 @@ keymap gate is recomputed only when something calls
 
 The same wire shape `cooked-cursor\=' and `cooked-grid\=' get, decoded at the same
 boundary and for the same reason -- see \"What the two ends exchange\" in
-cooked.el.  This one arrived as four flat buffer-locals set positionally from a
-single event, which is the shape that preamble exists to argue against.
+cooked-state.el.
 
 Never mutated in place.  `cooked--set-mouse-state\=' replaces it wholesale on
 every `mouse\=' event, which is what makes `cooked--mouse-state-none\=' safe to
@@ -222,10 +220,9 @@ Gates `cooked--mouse-map'; nil everywhere else, so the entry in
 Deliberately not a slot on `cooked-mouse-state\=', and the omission is not an
 oversight.  Two independent reasons: `cooked--mouse-map-alist\=' puts this
 *symbol* into `emulation-mode-map-alists\=', which Emacs evaluates as a
-variable, and `cooked-link.el\=' reads it through `bound-and-true-p\=' behind a
-forward `defvar\=', being a file cooked.el requires and so one that cannot
-require this one.  It is also a *derived* value rather than something the child
-said, which is what that struct holds.")
+variable, and `cooked-link.el\=' reads it through `bound-and-true-p\=', being a
+base-tier file that cannot require this one.  It is also a *derived* value
+rather than something the child said, which is what that struct holds.")
 
 (defvar-local cooked--wheel-grab nil
   "Whether the wheel belongs to an alternate screen nobody else has claimed.
