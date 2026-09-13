@@ -1043,7 +1043,7 @@ which has no such seam at all."
           (when relocations (cooked--note-relocations relocations start end))
           (delete-region start end)
           (goto-char start)
-          (cooked--render-block block index row-start)
+          (cooked--render-block block index (and span row-start))
           (when span
             (let ((keep (+ row-start (nth 2 span))))
               (when (< keep (line-end-position))

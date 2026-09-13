@@ -398,6 +398,30 @@ one interval, and without the cut after it the cursor's segment is four cells."
                                 :data-width)
                      (* 3 10))))))
 
+(ert-deftest cooked-the-cursor-in-an-empty-field-is-one-cell-wide ()
+  "The cursor inside a drawn input field is cut out of the field's middle row.
+
+The field is three rows, and the rows of one damaged block were all measured
+from the first row's start, so on the middle row the cursor's cell was looked
+for nine characters too far along and the row was never cut: the cursor drew
+as a box around the whole field.  The origin a block is handed is only for an
+edit, which replaces part of one row."
+  (cooked-tests--with-session
+      ;; `┌────┐', `│    │', `└────┘', then CUP into the field's second blank.
+      '("/bin/sh" "-c"
+        "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\220\\r\\n\\342\\224\\202    \\342\\224\\202\\r\\n\\342\\224\\224\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\230\\033[2;3H'; sleep 5")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (equal (cooked--cursor-cell) '(1 . 2)))))
+    (let ((row (save-excursion (cooked--goto-screen-row 1) (point))))
+      (should (cooked-tests--settle
+               (lambda () (get-text-property row 'display))))
+      (should (= (point) (+ row 2)))
+      (should (equal (next-single-property-change row 'cooked-deco) (+ row 2)))
+      (should (equal (next-single-property-change (+ row 2) 'cooked-deco) (+ row 3)))
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image row)) :data-width)
+                     (* 2 10))))))
+
 (ert-deftest cooked-the-cursor-is-found-by-character-after-a-wide-one ()
   "On `日本X' with the cursor on `本', point is on `本'.
 
