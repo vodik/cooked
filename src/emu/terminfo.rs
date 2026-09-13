@@ -70,10 +70,12 @@ impl Entry {
 
     /// What XTGETTCAP answers for NAME, or `None` for a miss.
     ///
-    /// The entry first, and then the two names xterm answers that are not capabilities
-    /// at all: `TN`, the terminal's name, and `Co`, termcap's spelling of `colors`, which
-    /// is what older clients ask for. Both are the entry's own facts under another name
-    /// rather than anything added, so an entry that ever declares either itself wins.
+    /// The entry first, and then the names xterm answers that are not capabilities at
+    /// all: `TN`, the terminal's name, which xterm also answers as `name`; `Co`, termcap's
+    /// spelling of `colors`, which is what older clients ask for; and the termcap
+    /// spellings of the keys, so `ku` answers what `kcuu1` does. Each is the entry's own
+    /// fact under another name rather than anything added, so an entry that ever declares
+    /// one of them itself wins.
     ///
     /// `RGB` is deliberately not synthesised the way ghostty does. `cooked.ti` argues at
     /// length that `RGB` is a claim about `setaf`, true of `cooked-direct` and false of
@@ -85,11 +87,72 @@ impl Entry {
             return Some(value.reply());
         }
         match name {
-            "TN" => Some(self.names[0].as_bytes().to_vec()),
+            "TN" | "name" => Some(self.names[0].as_bytes().to_vec()),
             "Co" => self.get("colors").map(Value::reply),
-            _ => None,
+            _ => termcap_key(name)
+                .and_then(|name| self.get(&name))
+                .map(Value::reply),
         }
     }
+}
+
+/// The keys xterm answers under their termcap names as well, other than the function
+/// keys, as `(termcap, terminfo)`. The list is xterm's own table in `xtermcap.c`, less
+/// its `F`-keys, which [`termcap_key`] spells out rather than lists.
+const TERMCAP_KEYS: &[(&str, &str)] = &[
+    ("%1", "khlp"),
+    ("#1", "kHLP"),
+    ("@0", "kfnd"),
+    ("*0", "kFND"),
+    ("*6", "kslt"),
+    ("#6", "kSLT"),
+    ("kh", "khome"),
+    ("#2", "kHOM"),
+    ("@7", "kend"),
+    ("*7", "kEND"),
+    ("kl", "kcub1"),
+    ("kr", "kcuf1"),
+    ("ku", "kcuu1"),
+    ("kd", "kcud1"),
+    ("#4", "kLFT"),
+    ("%i", "kRIT"),
+    ("kF", "kind"),
+    ("kR", "kri"),
+    ("@8", "kent"),
+    ("K1", "ka1"),
+    ("K4", "kc1"),
+    ("K3", "ka3"),
+    ("K5", "kc3"),
+    ("kB", "kcbt"),
+    ("kC", "kclr"),
+    ("kD", "kdch1"),
+    ("kI", "kich1"),
+    ("kN", "knp"),
+    ("kP", "kpp"),
+    ("%c", "kNXT"),
+    ("%e", "kPRV"),
+    ("&8", "kund"),
+    ("kb", "kbs"),
+];
+
+/// The terminfo name of the key termcap calls TERMCAP, or `None` for a name that is
+/// not a termcap key.
+///
+/// termcap numbers the function keys in one character each: `k1` to `k9` are `kf1` to
+/// `kf9`, `k;` is `kf10`, and from `kf11` on they are `F` and then `1` to `9`, `A` to
+/// `Z` and `a` to `r`, so `FP` is `kf35` and `Fr` is `kf63`.
+fn termcap_key(termcap: &str) -> Option<std::borrow::Cow<'static, str>> {
+    const ELEVENTH_ON: &[u8] = b"123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqr";
+    if let Some(&(_, terminfo)) = TERMCAP_KEYS.iter().find(|(name, _)| *name == termcap) {
+        return Some(terminfo.into());
+    }
+    let n = match termcap.as_bytes() {
+        [b'k', digit @ b'1'..=b'9'] => usize::from(digit - b'0'),
+        [b'k', b';'] => 10,
+        [b'F', c] => 11 + ELEVENTH_ON.iter().position(|b| b == c)?,
+        _ => return None,
+    };
+    Some(format!("kf{n}").into())
 }
 
 /// Every entry in the file.
@@ -251,11 +314,19 @@ fn parse_number(s: &str) -> u32 {
 /// `\200`, because terminfo strings are NUL-terminated and ncurses writes the high byte
 /// out as a NUL. Nothing in the file uses it, and it is here so a later use is not
 /// quietly mis-sent.
+///
+/// A delay, `$<100/>`, is dropped. It is an instruction to whatever writes the string
+/// -- `tputs` sleeps or pads there -- and never bytes on the wire, so `flash` sends
+/// `\E[?5h\E[?5l`, which is what `tput flash` prints.
 pub(crate) fn decode(value: &str) -> Vec<u8> {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
+        if let Some(length) = delay_length(&bytes[at..]) {
+            at += length;
+            continue;
+        }
         let b = bytes[at];
         at += 1;
         match b {
@@ -298,9 +369,40 @@ pub(crate) fn decode(value: &str) -> Vec<u8> {
     out
 }
 
+/// The length of the delay BYTES starts with, or `None` if they do not start with one.
+///
+/// terminfo(5)'s grammar: `$<`, a number of milliseconds with an optional tenth, an
+/// optional `*` for proportional and `/` for mandatory, and `>`. Anything else that
+/// starts with `$<` is text and is sent as it stands.
+fn delay_length(bytes: &[u8]) -> Option<usize> {
+    let body = bytes.strip_prefix(b"$<")?;
+    let end = body.iter().position(|&b| b == b'>')?;
+    let spec = &body[..end];
+    let flags = spec
+        .iter()
+        .rev()
+        .take_while(|b| matches!(b, b'*' | b'/'))
+        .count();
+    let number = &spec[..spec.len() - flags];
+    let delay = flags <= 2
+        && number.first().is_some_and(u8::is_ascii_digit)
+        && number.iter().all(|b| b.is_ascii_digit() || *b == b'.')
+        && number.iter().filter(|&&b| b == b'.').count() <= 1;
+    delay.then_some(end + 3)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delay_sends_nothing() {
+        assert_eq!(decode("\\E[?5h$<100/>\\E[?5l"), b"\x1b[?5h\x1b[?5l");
+        assert_eq!(decode("a$<5>b$<2.5*>c"), b"abc");
+        // Not a delay, so the text is the value.
+        assert_eq!(decode("$<x>"), b"$<x>");
+        assert_eq!(decode("$<5"), b"$<5");
+    }
 
     #[test]
     fn escapes_decode_to_what_they_send() {

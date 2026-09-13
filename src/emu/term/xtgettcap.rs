@@ -165,6 +165,48 @@ mod tests {
     }
 
     #[test]
+    fn a_delay_in_a_string_is_not_sent() {
+        // `flash=\E[?5h$<100/>\E[?5l`: the pause is for `tputs` to take, and a client
+        // replaying the answer would otherwise print `$<100/>` on a reversed screen.
+        assert_eq!(
+            ask("cooked", &["flash"]),
+            vec![hit("flash", b"\x1b[?5h\x1b[?5l")]
+        );
+    }
+
+    #[test]
+    fn a_key_is_answered_under_its_termcap_name_too() {
+        // As xterm answers them, and named in the reply as they were asked.
+        assert_eq!(
+            ask(
+                "cooked",
+                &["ku", "k1", "k;", "FP", "Fr", "kb", "kh", "#4", "K1", "@8"]
+            ),
+            vec![
+                hit("ku", b"\x1bOA"),
+                hit("k1", b"\x1bOP"),
+                hit("k;", b"\x1b[21~"),
+                hit("FP", b"\x1b[23;5~"),
+                hit("Fr", b"\x1b[1;4R"),
+                hit("kb", b"\x7f"),
+                hit("kh", b"\x1bOH"),
+                hit("#4", b"\x1b[1;2D"),
+                hit("K1", b"\x1bOw"),
+                hit("@8", b"\x1bOM"),
+            ]
+        );
+        assert_eq!(ask("cooked", &["name"]), vec![hit("name", b"cooked")]);
+        // A termcap-shaped name that is no key, and one past `kf63`, are still misses.
+        for name in ["k0", "Fs", "kZ"] {
+            assert_eq!(
+                ask("cooked", &[name]),
+                vec![format!("\x1bP0+r{}\x1b\\", hex_encode(name.as_bytes()))],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn a_string_with_parameters_is_sent_as_written() {
         let setrgbf = terminfo::default_entry().get("setrgbf");
         let Some(terminfo::Value::Str(source)) = setrgbf else {

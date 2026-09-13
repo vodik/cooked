@@ -129,7 +129,9 @@ and read with `use=` resolved, for whichever entry `TERM` named when the child w
 (`cooked-256color` when it named something else). That is how a remote neovim finds `Tc`,
 `setrgbf` and `Ms` with no database on the far side. A string with no `%` parameters is
 sent as the bytes it produces and one with parameters as written, which is what kitty and
-ghostty send. `TN` and `Co` are answered too, as the entry's name and `colors`. `RGB` is
+ghostty send, with any `$<…>` delay left out, since `tputs` takes that and the wire never
+sees it. `TN` (or `name`) and `Co` are answered too, as the entry's name and `colors`, and
+so are the keys under their termcap names, `ku` as `kcuu1`, as xterm answers them. `RGB` is
 answered only under `cooked-direct`, where it is declared: it claims that `setaf` takes an
 RGB value, which is true of that entry and false of `cooked-256color`. The
 reply stops at the first capability the entry lacks, as xterm's does, and names it only
