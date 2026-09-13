@@ -591,13 +591,42 @@ links. Fixed rather than filtered: a crate-root allow for the private-item
 class, and docs built with =--document-private-items= — without which rustdoc
 documents about four items and checks almost no links at all.
 
-** WIP [#B] The evil blank-row bug, and what else evil edits
+** DONE [#B] The evil blank-row bug, and what else evil edits
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   none — found by the first bench fixture containing a blank row
-:BRANCH:   cooked/whitespace-sweep
-:AGENT:    yes
+:BRANCH:   73b2a6d, 3099409
 :END:
+*The task's framing was wrong, and the correction reframes the whole subject.*
+A cooked buffer already refuses ordinary edits, loudly — the =read-only= property
+=cooked--protect= puts on the screen and scrollback signals, and
+=delete-trailing-whitespace=, =whitespace-cleanup= and an editorconfig trim all
+meet it. What gets past is code running *inside the drain*: =cooked--apply= binds
+=inhibit-read-only= and =buffer-undo-list= to =t=, and =cooked--refresh-keymap=
+runs =cooked-state-change-hook= — and so every evil transition cooked itself
+forces — from inside that window. Measured in a live session, not reasoned
+about. *The real subject is the drain's own =inhibit-read-only= window and who is
+invited into it*, which is now pinned by a test and warned about in
+=cooked-state-change-hook='s docstring.
+
+Two more evil edits found and fixed beyond the original, both reproduced first:
+=evil-maybe-expand-abbrev= turned a child-printed =teh= into =the=, and
+=evil-cleanup-insert-state='s vcount branch grew a two-column row two spaces it
+was never sent. Everything else evil installs was swept and declined with a
+reason each.
+
+*ws-butler cannot reach a cooked buffer* — it exempts =mode-class= =special=,
+which cooked inherits from comint and never declares, so a refactor away from
+comint would drop it silently. That is now asserted.
+
+*The general defence beat the specific ones, but not the obvious general one.*
+Closing the seam — restoring =inhibit-read-only= around the hook — converts
+silence into a signal thrown from inside a state transition, leaving evil half
+transitioned in a state the user cannot get out of. Worse than the loss. So the
+defence has to be "do not start the edit", and what is shared is the predicate
+and the switch list: one =:around= advice binds evil's own four switches to nil
+in a cooked buffer and lets evil take the branch it already has for having
+nothing to do.
 *Fixed* (73b2a6d): entering evil insert state arms =evil-maybe-remove-spaces= on
 =post-command-hook= and leaving calls it, and it deletes the whitespace from a
 line holding nothing else. In a cooked buffer that line is a *screen row* and
@@ -1756,7 +1785,7 @@ State of the other eleven, by whether the code has anything:
 | =around-font-scale= advice        | *DONE*, 2157a1a                           |
 | medium gating defcustom           | *DECLINED*, 75d32c6 — =t=t= deletes files |
 | bash < 4.4 DEBUG-trap fallback    | *DECLINED*, c13973e — decays and says so  |
-| nushell arm                       | partial — four files mention nu           |
+| nushell arm                       | *DECLINED* — nu is not installed here     |
 | picker annotations                | =cooked--title= used in five files        |
 
 **** Done: pixel-delta wheel accumulation (cfe4e85)
@@ -1768,6 +1797,26 @@ fast swipe, so a notch would be accumulated, rounded, and a click would go
 missing. And the floor of one press is the event's own *line count*, not a
 constant: macOS reports a notch as one line and fewer pixels than a row when
 =line-spacing= is set, so the row arithmetic yields zero and the notch vanishes.
+
+**** Done: fish injected (754493e); nushell declined
+
+*The fish scheme was refused for a reason that turned out not to hold.* The
+docstring said injecting would mean being right about =-C= ordering and
+config.fish sourcing against a shell nothing here had run. It does not: fish
+sources =fish/vendor_conf.d/*.fish= out of every directory in =XDG_DATA_DIRS=,
+at startup, interactive and login alike — its own documented autoload path, with
+no ordering to be right about and nothing of the user's to shadow. Put to a real
+fish rather than to its manual.
+
+The user's =XDG_DATA_DIRS= is appended rather than replaced, and its default
+spelled out when unset: POSIX says an empty value means the default, but fish
+reads the variable rather than the specification, so leaving it empty would hide
+every vendor completion on the system.
+
+*Nushell is declined*: not installed here, and REPORT's claim that it emits
+OSC 133 natively is the kind of thing this session has repeatedly found true but
+not in the way stated. Shipping an arm nobody can run is how untested paths get
+in. Old bash and old fish are out of scope by decision.
 
 **** Declined: kitty transmission by file (75d32c6)
 
@@ -1932,13 +1981,39 @@ and =font-lock-face= unconditionally, per =cooked-process.el:350=.
 Factor the =set_attribute= arm out of =term/csi.rs= so grid and stream share SGR
 decoding — the same instinct as ghostel's =style_face.zig=, on the Rust side.
 
-** WIP [#C] Prebuilt module download
+** DONE [#C] Prebuilt module download
 :PROPERTIES:
 :EFFORT:   2d
 :REPORT:   §3 "Prebuilt module download"; "The artifact has to carry terminfo"
-:BRANCH:   cooked/prebuilt-module
-:AGENT:    yes
+:BRANCH:   aa277a5
 :END:
+*The digest closes the hole only because two escape hatches were removed*, and
+that is the substance of it. ghostel's =latest= download is *deliberately not
+ported* — there is no pinned digest for a moving target, so =latest= would be a
+path on which verification silently does not happen, which is exactly the
+\"download proceeds anyway\" failure. And an asset with no pinned digest is
+refused *before the fetch*, so there is no \"could not verify, continuing\".
+
+What it does *not* do is defend the release: whoever can write the constant can
+write the artifact. It moves the trust root from the CDN to the git tag, not to
+a key, and the docstring says so rather than letting a reader assume a signature.
+
+*Staleness is a branch, not a replacement* — §3 reads as the latter and must not
+be. Sidecar present → compare the terminfo digest; no sidecar but source present
+→ the old mtime rule, which catches an edit made a second ago that no sidecar
+can; neither → face value. And a *digest* rather than a version number, because a
+hand-bumped version is a constant nobody remembers to move — a test recomputes
+it from the checkout, so forgetting fails the suite.
+
+*Bug found on the way*: Emacs' auto-compression is keyed on the destination
+being named =.tar.gz=, and jka-compr skips content already carrying the gzip
+magic — so a healthy artifact is written verbatim *by luck*, while an HTML error
+page served with a 200 gets gzipped on the way to disk and then fails its digest
+with a story about tampering.
+
+*Unwired, as expected*: no release publishes artifacts, so the command declines
+and says why. §3's \"~30 lines\" is the digest comparison only; a download
+actually safe to load is ~200 lines plus the Makefile side.
 Port the sidecar read *before* =module-load= (so a stale =.so= is refused),
 atomic install-by-rename, never prompting at load time. Then do what ghostel
 did not: publish =SHA256SUMS= and verify against digests compiled into the
