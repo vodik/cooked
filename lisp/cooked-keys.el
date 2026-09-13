@@ -412,6 +412,27 @@ differently from the legacy terminal: a keypad key is a key of its own there,
 not the main-keyboard key it stands in for, so that `kp-home\=' and `home\='
 can be told apart.")
 
+(defconst cooked--kitty-disambiguate 1
+  "Kitty keyboard flag 1: spell ambiguous keys, Escape and chords, as escape codes.")
+
+(defconst cooked--kitty-alternate-keys 4
+  "Kitty keyboard flag 4: report the shifted key alongside the key itself.")
+
+(defconst cooked--kitty-all-keys 8
+  "Kitty keyboard flag 8: report every key as an escape code, text keys included.")
+
+(defconst cooked--kitty-associated-text 16
+  "Kitty keyboard flag 16: report the text a key produces alongside its code.")
+
+(defconst cooked--kitty-negotiated
+  (logior cooked--kitty-disambiguate cooked--kitty-all-keys)
+  "The kitty flags either of which means the child asked for the protocol itself.
+
+Flag 8 turns the protocol on as surely as flag 1 does, since reporting every key
+as an escape code disambiguates them all by construction, while flags 4 and 16
+only add a field to an escape code something else already chose to send.  The
+core makes the same test in `State::key_encoding\='.")
+
 (defun cooked--kitty-flag-p (bit)
   "Whether the child's kitty flags include BIT."
   (/= 0 (logand cooked--kitty-flags bit)))
@@ -419,16 +440,14 @@ can be told apart.")
 (defun cooked--kitty-negotiated-p ()
   "Whether the child asked for the kitty protocol itself, so all of it applies.
 
-Bit 1 or bit 8 -- the core's own test, in `State::key_encoding\=', and for the
-same reason: reporting every key as an escape code disambiguates them all by
-construction.  What it rules out is a `kitty\=' that nobody negotiated, which
-`cooked-key-protocol-overrides\=' binds for a program that reads the protocol
-without ever asking for it.  That guess re-spells only the `literal\=' keys, as
-it always has: a Claude Code sent Escape as `ESC [ 27 u\=' on the strength of a
-match against its process name would be the rubbish-in-the-input case the
-negotiation exists to prevent."
+See `cooked--kitty-negotiated\=' for which flags say so.  What it rules out is a
+`kitty\=' that nobody negotiated, which `cooked-key-protocol-overrides\=' binds
+for a program that reads the protocol without ever asking for it.  That guess
+re-spells only the `literal\=' keys: a Claude Code sent Escape as
+`ESC [ 27 u\=' on the strength of a match against its process name would be the
+rubbish-in-the-input case the negotiation exists to prevent."
   (and (eq cooked--keys 'kitty)
-       (cooked--kitty-flag-p #b1001)))
+       (cooked--kitty-flag-p cooked--kitty-negotiated)))
 
 (defun cooked--kitty-text-p (char)
   "Whether CHAR may be reported as associated text: not a C0 or C1 control."
@@ -475,12 +494,12 @@ event does not carry."
          (meta (memq 'meta mods))
          (shift (memq 'shift mods))
          (text (if shift (upcase char) char)))
-    (if (and (not ctrl) (not meta) (not (cooked--kitty-flag-p 8)))
+    (if (and (not ctrl) (not meta) (not (cooked--kitty-flag-p cooked--kitty-all-keys)))
         (string text)
       (cooked--kitty-csi-u
        char param
-       (and (cooked--kitty-flag-p 4) shift (/= text char) text)
-       (and (cooked--kitty-flag-p 16) (not ctrl) (not meta)
+       (and (cooked--kitty-flag-p cooked--kitty-alternate-keys) shift (/= text char) text)
+       (and (cooked--kitty-flag-p cooked--kitty-associated-text) (not ctrl) (not meta)
             (cooked--kitty-text-p text) text)))))
 
 (defun cooked--encode-kitty-entry (entry mods param)
@@ -498,7 +517,7 @@ text is `CSI number ; modifier u\=' or `CSI 1 ; modifier FINAL\=':
   F3 is `ESC [ 13 ~\=', since `ESC [ 1 ; MOD R\=' is a cursor position report.
   The keypad is a set of keys of its own; see `cooked--kitty-keypad-codes\='."
   (let ((modified (> param 1))
-        (all (cooked--kitty-flag-p 8)))
+        (all (cooked--kitty-flag-p cooked--kitty-all-keys)))
     (pcase entry
       (`(escape . ,_) (cooked--kitty-csi-u 27 param))
       (`(,_ literal ,code . ,_)
@@ -518,7 +537,7 @@ text is `CSI number ; modifier u\=' or `CSI 1 ; modifier FINAL\=':
              plain
            (cooked--kitty-csi-u
             code param nil
-            (and (cooked--kitty-flag-p 16) (cooked--kitty-text-p char)
+            (and (cooked--kitty-flag-p cooked--kitty-associated-text) (cooked--kitty-text-p char)
                  (not (memq 'control mods)) (not (memq 'meta mods))
                  char)))))
       (_ (cooked--encode-entry entry param mods)))))
