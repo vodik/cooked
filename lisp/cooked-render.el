@@ -140,7 +140,8 @@ again is safe."
     ;; can mend, since `cooked-refresh' drains too.  Callees are meant not to
     ;; wander (see `cooked--handle-osc'), but this is the drain's own guarantee
     ;; and does not depend on their good behaviour.
-    (let ((buffer (current-buffer)))
+    (let ((buffer (current-buffer))
+          (applied nil))
       (unwind-protect
           (progn
             (setq cooked--draining t
@@ -150,11 +151,21 @@ again is safe."
             ;; and a freeze that has lifted does not lift again.
             (while (and cooked--drain-pending cooked--session)
               (setq cooked--drain-pending nil)
-              (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))))
+              (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines)))
+            (setq applied t))
         (when (buffer-live-p buffer)
           (with-current-buffer buffer
             (setq cooked--draining nil
                   cooked--drain-pending nil)
+            ;; A drain that did not finish applying has told the core Emacs holds
+            ;; rows it never inserted, and the core leaves a row out of later
+            ;; drains when its cells match that copy.  So a child repainting the
+            ;; same frame would never mend the screen.  `cooked--on-wake' follows
+            ;; a failure with `cooked-refresh', which clears the copy itself, but
+            ;; not under `cooked-debug', and not for any other caller; this is the
+            ;; one place every unfinished apply passes.
+            (unless applied
+              (cooked--forget-sent-rows))
             ;; The far end of the core's backpressure: one wake byte is in flight
             ;; from the drain that brought us here until this says the buffer has
             ;; been drawn, so `cooked-min-redisplay-interval' paces rendering --

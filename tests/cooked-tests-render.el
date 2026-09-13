@@ -582,6 +582,30 @@ full-screen program\\='s."
      (cooked-tests--paint-rows ,rows "aaa")
      ,@body))
 
+(ert-deftest cooked-a-drain-that-fails-to-apply-forgets-what-it-sent ()
+  "A repaint of the same cells mends a screen whose last drain signalled.
+
+The core records a row as held by Emacs when it hands the row over, and leaves
+it out of later drains while its cells still match.  An apply that signals has
+inserted nothing, so without forgetting the copy the child could repaint the
+row forever and Emacs would never be sent it.  Under `cooked-debug', which the
+test fixture binds, `cooked--on-wake' does not follow up with `cooked-refresh'."
+  (cooked-tests--with-rewritable-rows 3
+    ;; Frozen while the bytes arrive, so the filter does not drain them first.
+    (setq cooked--input-mode 'frozen)
+    (cooked--send cooked--session "\033[1;1H\033[2Kzzz")
+    (cooked-tests--pump 0.2)
+    (setq cooked--input-mode nil)
+    (cl-letf (((symbol-function 'cooked--render-rows)
+               (lambda (&rest _) (error "Deliberate render failure"))))
+      (should-error (cooked--drain-and-apply)))
+    (should-not (string-match-p "zzz" (cooked-tests--text)))
+    ;; Erased and written back, as `watch\=' repaints: damaged, and identical to
+    ;; what the failed drain handed over.
+    (cooked--send cooked--session "\033[1;1H\033[2Kzzz")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "zzz" (cooked-tests--text)))))))
+
 (ert-deftest cooked-a-dismissed-selection-leaves-its-mark-where-it-was ()
   "The case `cooked-selection-render' leaves behind rather than the one it
 answers.  The freeze holds the render for as long as the selection is up, so the
