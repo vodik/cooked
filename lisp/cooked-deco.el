@@ -487,10 +487,16 @@ sized to fill.  Anchoring the font's own ascent instead keeps the extra space
 where Emacs actually puts it — below the baseline.
 
 Falls back to `center' if the font reports no metrics, which is the previous
-behaviour and still correct whenever `line-spacing' is nil."
+behaviour and still correct whenever `line-spacing' is nil.  That is always
+the case on a terminal frame, which has no font to ask.
+
+The font is `cooked--default-font\=''s, which follows a zoom, and a zoom moves
+the line box with it, so HEIGHT is a new key for a zoomed font.  A font swapped
+for one of the same line height and a different ascent is the case the key
+does not see."
   (cooked--cached cooked--box-ascent-cache height
-    (let ((base (ignore-errors
-                  (aref (font-info (face-font 'default nil window)) 8))))
+    (let ((base (when-let* ((font (cooked--default-font window)))
+                  (aref (query-font font) 4))))
       (if (and (natnump base) (> height 0) (<= base height))
           (round (* 100 base) height)
         'center))))

@@ -683,6 +683,19 @@ cell-specific at all."
           (should (stringp (plist-get plist :data)))))
     (advice-remove 'create-image #'cooked-tests--stamp-background)))
 
+(ert-deftest cooked-a-box-glyph-sits-on-the-ascent-of-a-graphical-font ()
+  "A bitmap filling the line box is anchored at the font\='s ascent.
+
+A 20-pixel line box in a font of ascent 15 puts the baseline three quarters of
+the way down, so the image asks for `:ascent 75\='.  The font was read with
+`face-font\=' given the window as its CHARACTER argument, which signals on
+every graphical frame, so the percentage was never computed outside batch and
+every image fell back to `center\='.  The font here is the stand-in for the one
+a pgtk frame reports, which batch Emacs does not have."
+  (with-temp-buffer
+    (cooked-tests--with-glyph-font '(15 5 9)
+      (should (equal (cooked--box-glyph-ascent (selected-window) 20) 75)))))
+
 (ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐

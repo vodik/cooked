@@ -525,6 +525,27 @@ which is the ordinary case and stays free."
                  (when (< chars width)
                    (setq narrowest window width chars))))))))
 
+(defconst cooked--default-font-probe (propertize " " 'face 'default)
+  "The text `cooked--default-font\=' asks `font-at\=' about.
+A constant, so that asking allocates nothing.")
+
+(defun cooked--default-font (window)
+  "The font this buffer\='s default face is drawn in on WINDOW, or nil.
+
+The font a row is laid out against, which is not the frame\='s: after
+`text-scale-increase\=' in a 15-pixel font, `face-attribute\=' on the frame
+still answers the 15-pixel font while the buffer is drawn in a 26-pixel one.
+`font-at\=' on a space in the default face answers as the display engine would,
+through this buffer\='s `face-remapping-alist\=', so it has to be asked with the
+buffer current.  That is the probe ghostel makes, for the same reason.
+
+WINDOW nil means the selected window, as it does for `font-at\=' itself; only
+the frame is taken from it, since the remapping is the buffer\='s.  Nil on a
+terminal frame, which has no fonts to ask about."
+  (let ((window (or window (selected-window))))
+    (and (display-graphic-p (window-frame window))
+         (font-at 0 window cooked--default-font-probe))))
+
 (defun cooked--defer (function)
   "Call FUNCTION with no arguments, later, in the current buffer if it lives.
 

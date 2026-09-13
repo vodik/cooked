@@ -804,6 +804,29 @@ buffer on screen before there is any trimming to assert about."
   (set-window-buffer (selected-window) (current-buffer))
   (selected-window))
 
+(defmacro cooked-tests--with-glyph-font (font &rest body)
+  "Run BODY as if the default face in every window were drawn in FONT.
+
+FONT is (ASCENT DESCENT CELL), and it is what `query-font\=' and
+`window-font-width\=' answer for the font `cooked--default-font\=' finds.  Batch
+Emacs has no graphical frame and so no font to ask; this stands in for the one
+a zoomed pgtk frame reports, and leaves `face-attribute\=' and
+`frame-char-width\=' answering for the batch frame, as an unzoomed one would."
+  (declare (indent 1))
+  `(pcase-let ((`(,ascent ,descent ,cell) ,font))
+     (cl-letf* ((real-query-font (symbol-function 'query-font))
+                ((symbol-function 'cooked--default-font)
+                 (lambda (_window) 'cooked-tests--font))
+                ((symbol-function 'query-font)
+                 (lambda (font)
+                   (if (eq font 'cooked-tests--font)
+                       (vector "test" nil (+ ascent descent) cell ascent descent
+                               cell cell nil)
+                     (funcall real-query-font font))))
+                ((symbol-function 'window-font-width)
+                 (lambda (&rest _) cell)))
+       ,@body)))
+
 (defun cooked-tests--glyph-grid (bits width height)
   "The pixel bitmap `cooked--render-box-glyph' would pack, for BITS."
   (cooked--render-box-glyph-cell bits width height))
