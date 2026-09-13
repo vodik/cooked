@@ -4277,6 +4277,7 @@ fn decrqss_answers_the_pen_as_the_sgr_that_recreates_it() {
         (&b""[..], "0m"),
         (b"\x1b[1;3m", "0;1;3m"),
         (b"\x1b[1;2;5;7;8;9m", "0;1;2;5;7;8;9m"),
+        (b"\x1b[53;3m", "0;3;53m"),
         // Underline styles keep their colon form; single is plain `4`.
         (b"\x1b[4m", "0;4m"),
         (b"\x1b[4:3m", "0;4:3m"),

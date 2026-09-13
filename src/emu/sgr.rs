@@ -147,6 +147,7 @@ pub(crate) fn describe(pen: Style, underline: Color) -> String {
         (Attrs::REVERSE, 7),
         (Attrs::CONCEAL, 8),
         (Attrs::STRIKE, 9),
+        (Attrs::OVERLINE, 53),
     ] {
         if attrs.contains(flag) {
             push(format_args!("{code}"));
