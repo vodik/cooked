@@ -163,6 +163,39 @@ fn full_screen_repaint() {
     println!("{:>44}({rows} damaged rows handed to Lisp)", "");
 }
 
+/// Scrolling a 200x400 screen, with and without a scroll region.
+///
+/// The region case is the one that separates storage designs. A full-screen scroll can
+/// be answered by moving where row 0 starts, but a `DECSTBM` region -- vim's text area
+/// above its status line -- has fixed rows above and below it, so a grid that stored its
+/// cells flat and moved them on every linefeed would copy the whole region per line:
+/// 80k cells per line here. The region variant has to stay within reach of the
+/// full-screen one for that to be ruled out.
+#[test]
+#[ignore = "benchmark"]
+fn scroll_region() {
+    let body = plain(50_000);
+    for (label, setup) in [
+        ("scroll 200x400, full screen", b"\x1b[200;1H".to_vec()),
+        (
+            "scroll 200x400, region 2..199",
+            b"\x1b[2;199r\x1b[199;1H".to_vec(),
+        ),
+    ] {
+        let mut term = Term::new(200, 400);
+        term.feed(&setup);
+        let mut scrolled = 0usize;
+        timed(label, body.len(), || {
+            for piece in body.chunks(READ_CHUNK) {
+                term.feed(piece);
+                let delta = term.drain();
+                scrolled += delta.scrolled.len() + delta.shifts.len();
+            }
+        });
+        println!("{:>44}({scrolled} lines scrolled or shifts reported)", "");
+    }
+}
+
 /// What hyperlinks cost, which is a question about `LinkStore` rather than the parser.
 ///
 /// Here because the other four benchmarks emit no `OSC 8` at all, so the store they all
