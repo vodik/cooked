@@ -280,8 +280,10 @@ printf 'rang\\n'; sleep 5")
 (ert-deftest cooked-a-hidden-bell-waits-in-the-annotation-until-seen ()
   "Out of sight a bell is a mark rather than a noise, and looking clears it.
 
-Cleared through `cooked--update-attention', the window hook, rather than by
-setting the variable back, because the wiring is the part that can rot."
+Cleared through the window hook rather than by setting the variable back,
+because the wiring is the part that can rot.  Batch runs no redisplay, so the
+hook is run here where redisplay would run it on showing the buffer: its global
+value, which is what reaches a buffer that was displayed nowhere."
   (let ((rings 0)
         (cooked--bell-last nil))
     (cl-letf (((symbol-function 'ding) (lambda (&rest _) (cl-incf rings))))
@@ -293,7 +295,7 @@ setting the variable back, because the wiring is the part that can rot."
         (should (string-match-p "\\`  idle  bell\\b" (cooked-tests--bell-annotation)))
         (should (string-match-p " bell" (cooked--mode-line)))
         (set-window-buffer (selected-window) (current-buffer))
-        (cooked--update-attention)
+        (run-hook-with-args 'window-buffer-change-functions (selected-frame))
         (should-not cooked-bell-pending)
         ;; Anchored on the field: the worktree this runs in may have `bell' in its
         ;; name, and the directory is in the annotation too.
@@ -2004,7 +2006,11 @@ default colours and the cursor\='s.  None of them is settable."
   "The cursor is drawn in the frame\='s `cursor-color\=', so a remap of the `cursor\='
 face never reached the screen.  The frame wears the child\='s colour while the
 buffer is in its selected window, gives its own back when it is not, and gives
-back a colour something else set in the meantime rather than the stale one."
+back a colour something else set in the meantime rather than the stale one.
+
+Batch runs no redisplay, so the window hooks are run here where redisplay would
+run them, by their global values: the buffer leaving the window and coming back,
+and the selection moving to another window and back."
   (let* ((frame (selected-frame))
          (window (selected-window))
          (before (window-buffer window))
@@ -2024,12 +2030,21 @@ back a colour something else set in the meantime rather than the stale one."
           (with-current-buffer other
             (should (equal (cooked--default-color 'cursor) own)))
           (set-window-buffer window other)
-          (cooked--sync-cursor-color frame)
+          (run-hook-with-args 'window-buffer-change-functions frame)
           (should (equal (frame-parameter frame 'cursor-color) own))
           (should-not (frame-parameter frame 'cooked--cursor-color))
           (set-window-buffer window (current-buffer))
-          (cooked--sync-cursor-color frame)
+          (run-hook-with-args 'window-buffer-change-functions frame)
           (should (equal (frame-parameter frame 'cursor-color) "#ff0000"))
+          (let ((beside (split-window window)))
+            (set-window-buffer beside other)
+            (select-window beside)
+            (run-hook-with-args 'window-selection-change-functions frame)
+            (should (equal (frame-parameter frame 'cursor-color) own))
+            (select-window window)
+            (run-hook-with-args 'window-selection-change-functions frame)
+            (should (equal (frame-parameter frame 'cursor-color) "#ff0000"))
+            (delete-window beside))
           ;; What a theme does underneath: the frame's own colour changes while
           ;; the child's is worn, and that is the colour given back.
           (set-frame-parameter frame 'cursor-color "#00ff00")
