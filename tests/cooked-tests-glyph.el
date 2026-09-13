@@ -826,33 +826,43 @@ such row came out 18 pixels tall.  htop and btop are mostly such rows, so the
 screen ran a row or two past its window, and the stroke of a vertical line
 stopped a pixel short of the one below it.
 
+Emacs also adds `line-spacing\=' below an image as it does below a character,
+so a bitmap as tall as the line box made its row taller by the spacing again.
+It is drawn at the height of the text instead.
+
 The line box is worked out as redisplay works it out: the taller of the
-font\='s and the image\='s ascent, over the taller of their descents, the image
-ascent being the truncation Emacs makes.  The fonts are the ones a pgtk frame
-reported for Adwaita Mono at heights 100, 130, 160, 200 and 220, and three more
-with other ratios."
+font\='s and the image\='s ascent, over the taller of their descents, plus the
+spacing, the image ascent being the truncation Emacs makes.  The fonts are the
+ones a pgtk frame reported for Adwaita Mono at heights 100, 130, 160, 200 and
+220, and three more with other ratios.  Without spacing the bitmap fills the
+line box, so a vertical stroke on its top and bottom pixel rows meets the next
+row\='s."
   (dolist (font '((13 4 8) (17 5 10) (21 6 12) (27 8 16) (29 9 17)
                   (15 5 9) (11 3 7) (40 13 23)))
-    (with-temp-buffer
-      (cooked-tests--with-glyph-font font
-        (pcase-let* ((`(,ascent ,descent ,cell) font)
-                     (line (+ ascent descent))
-                     (pattern (cooked--glyph-pattern
-                               (cooked-tests--line-bits 1 1 0 0) 1))
-                     (image (cooked--box-glyph-image
-                             pattern (selected-window) (cons cell line)))
-                     (percent (plist-get (cdr image) :ascent))
-                     (image-ascent (truncate (* line (/ percent 100.0))))
-                     (bitmap (cooked-tests--glyph-grid
-                              (cooked-tests--line-bits 1 1 0 0) cell line)))
-          (ert-info ((format "font %S, :ascent %S" font percent))
-            (should (= image-ascent ascent))
-            (should (= (+ (max ascent image-ascent)
-                          (max descent (- line image-ascent)))
-                       line))
-            (should (= (plist-get (cdr image) :data-height) line))
-            (should (cooked--bitmap-ref bitmap (/ cell 2) 0))
-            (should (cooked--bitmap-ref bitmap (/ cell 2) (1- line)))))))))
+    (dolist (spacing '(0 2 5))
+      (with-temp-buffer
+        (cooked-tests--with-glyph-font font
+          (pcase-let* ((`(,ascent ,descent ,cell) font)
+                       (text (+ ascent descent))
+                       (line (+ text spacing))
+                       (bits (cooked-tests--line-bits 1 1 0 0))
+                       (image (cooked--box-glyph-image
+                               (cooked--glyph-pattern bits 1)
+                               (selected-window) (cons cell line)))
+                       (height (plist-get (cdr image) :data-height))
+                       (percent (plist-get (cdr image) :ascent))
+                       (image-ascent (truncate (* height (/ percent 100.0))))
+                       (bitmap (cooked-tests--glyph-grid bits cell height)))
+            (ert-info ((format "font %S, spacing %d, :ascent %S" font spacing percent))
+              (should (= image-ascent ascent))
+              (should (= (+ (max ascent image-ascent)
+                            (max descent (- height image-ascent))
+                            spacing)
+                         line))
+              (when (zerop spacing)
+                (should (= height line))
+                (should (cooked--bitmap-ref bitmap (/ cell 2) 0))
+                (should (cooked--bitmap-ref bitmap (/ cell 2) (1- line)))))))))))
 
 (ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
   (cooked-tests--with-session

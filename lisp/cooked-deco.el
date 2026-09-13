@@ -86,6 +86,12 @@ rather than a bitmap, and that call is far too costly to repeat per character
 on a full-screen repaint.  Keyed by height alone: the answer depends only on
 the font's ascent relative to the line box.")
 
+(defvar-local cooked--box-glyph-height-cache nil
+  "Line-box height -> the height a box-drawing bitmap is drawn at, per buffer.
+
+The other half of `cooked--box-ascent-cache\=', memoizing the same font lookup
+for `cooked--box-glyph-height\='.")
+
 (defvar-local cooked--box-glyph-cell-cache nil
   "Descriptor+pixel-size -> unpacked single-cell bitmap, per buffer.
 
@@ -260,9 +266,9 @@ size from font size — the very misalignment this feature exists to remove.
 Height comes from `window-default-line-height', not `window-font-height', for
 the reason `cooked--window-rows' already gives: the line box is what a row
 actually occupies and includes `line-spacing', while the font height does not.
-A bitmap sized to the font leaves exactly `line-spacing' pixels of background
-beneath every glyph, breaking the continuous vertical borders this exists to
-produce — the same defect `indent-bars' documents for box characters."
+That is the cell a child is told about and a picture is sliced by.  A
+box-drawing bitmap is drawn shorter than it under `line-spacing\=', for the
+reason `cooked--box-glyph-height\=' gives."
   (cons (window-font-width window 'default)
         (window-default-line-height window)))
 
@@ -513,6 +519,30 @@ which `cooked--image-ascent-percent\=' explains."
           (cooked--image-ascent-percent base height)
         'center))))
 
+(defun cooked--box-glyph-height (window line)
+  "The height to draw a box-drawing bitmap at, in a LINE-pixel line box on WINDOW.
+
+The font\='s ascent and descent together, which is LINE itself unless
+`line-spacing\=' is set.  Emacs adds the spacing below every glyph on a row,
+an image as much as a character, so a bitmap already as tall as the line box
+gets it a second time.  With `line-spacing\=' 2 in a font of ascent 13 and
+descent 4, a 19-pixel bitmap made its row 21 pixels tall, and a screen of box
+drawing ran past the rows the child was told.  Drawn 17 pixels tall, a glyph
+occupies what the text beside it does, and the spacing below it is background,
+as it is below the text.  A vertical border then shows a gap of the spacing
+between rows, which is the price of the grid fitting its window.
+
+LINE when the font reports no metrics, as on a terminal frame, or reports
+more than the line box holds.  Cached by LINE as `cooked--box-glyph-ascent\=' is,
+and blind to the same font swap."
+  (cooked--cached cooked--box-glyph-height-cache line
+    (let* ((font (cooked--default-font window))
+           (metrics (and font (query-font font)))
+           (text (and metrics (+ (aref metrics 4) (aref metrics 5)))))
+      (if (and text (< 0 text line))
+          text
+        line))))
+
 (defun cooked--image-ascent-percent (ascent height)
   "The `:ascent\=' percentage that puts ASCENT of HEIGHT pixels above the baseline.
 
@@ -622,7 +652,10 @@ now hiding a box glyph as it always did the text beside it."
   ;; rather than describe the bit layout.  Emacs accepts only three `:data' shapes:
   ;; a vector of per-row strings, a whole XBM *file* in a string, or bare bits with
   ;; these three properties.  A packed (WIDTH HEIGHT DATA) list is none of them.
-  (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits pattern size)))
+  (pcase-let ((`(,width ,height ,data)
+               (cooked--box-glyph-bits
+                pattern
+                (cons (car size) (cooked--box-glyph-height window (cdr size))))))
     (cooked--uncolored
      (create-image data 'xbm t
                    :data-width width :data-height height
