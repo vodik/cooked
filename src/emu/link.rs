@@ -86,12 +86,9 @@ impl LinkStore {
     /// that — two spans with the *same* destination that should nonetheless highlight
     /// separately — is not one anything renders differently here.
     ///
-    /// The hash only narrows the search to a bucket; every candidate in it is compared
-    /// against the actual URI before being treated as the same link. Two distinct URIs
-    /// that happen to share a hash therefore get distinct ids rather than one silently
-    /// winning and the other's destination vanishing — the fast hash used here makes no
-    /// promise against a deliberate search for such a pair, so the comparison is load-
-    /// bearing, not a redundant sanity check.
+    /// The hash only narrows the search to a bucket; every candidate is compared against
+    /// the actual URI. The fast hash makes no promise against a deliberately searched
+    /// collision, so this comparison is what keeps two URIs from sharing an id.
     pub(crate) fn intern(&mut self, uri: &str) -> (LinkId, bool) {
         let hash = fast_hash(uri.as_bytes());
         if let Some(id) = self
@@ -184,9 +181,8 @@ mod tests {
 
     /// A real fast-hash collision is expensive to find by brute force in a unit test, so
     /// this plants one directly: a decoy id occupies the bucket a real URI would hash
-    /// into, with different text behind it. Before the fix this was `intern`'s only
-    /// check, so the decoy would have been returned as if it were the real URI —
-    /// silently pointing whoever follows the link at the decoy's destination instead.
+    /// into, with different text behind it. Trusting the bucket would return the decoy as
+    /// if it were the real URI, silently pointing the link at the decoy's destination.
     #[test]
     fn a_shared_hash_bucket_does_not_alias_a_different_uri() {
         let mut store = LinkStore::default();

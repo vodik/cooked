@@ -4,25 +4,18 @@
 /// content-addressing then always double-checks with a real equality comparison.
 ///
 /// Eight bytes at a time, in the shape rustc's own `FxHash` uses: rotate, xor in the
-/// next word, multiply. It was FNV-1a, which is the same idea one byte at a time and so
-/// eight times the work — 3ms on a three-megabyte image, on the reader thread, inside
-/// the mutex Emacs takes to redisplay, to answer a question the byte-for-byte comparison
-/// in `ImageStore::intern` then settles properly for 78us. The quality bar this has to
-/// clear is only "distributes well enough to keep buckets short", and the paragraph
-/// below is why it is allowed to be that low.
+/// next word, multiply. A byte-at-a-time hash such as FNV-1a would be eight times the
+/// work, on the reader thread, inside the mutex Emacs takes to redisplay. The quality bar
+/// is only "distributes well enough to keep buckets short", and the next paragraph is
+/// why it may be that low.
 ///
-/// [`image::ImageStore`] and [`link::LinkStore`] both used `std::hash::DefaultHasher`
-/// (SipHash-1-3) here, as their sole test of identity — no comparison of the actual
-/// bytes on a hash hit. `DefaultHasher` is *not* randomized per process the way
-/// `RandomState` is (its keys are fixed), so a hostile child process, which fully
-/// controls both hyperlink URIs and image payloads, could in principle search offline
-/// for two different byte strings that collide under it and have the second silently
-/// aliased to the first — a wrong image displayed, or worse, a hyperlink's destination
-/// swapped under a URI that looks unrelated. Both call sites now compare the actual
-/// content on every hash hit, which is what actually closes that hole; once a hit is
-/// verified rather than trusted, the hash itself only has to distribute well, not resist
-/// a deliberate search for a collision — so it can be, and now is, a plain fast hash
-/// rather than a cryptographic one.
+/// A hostile child fully controls hyperlink URIs, and a hash that was a store's sole test
+/// of identity could be searched offline for a collision -- even a keyed one like
+/// `DefaultHasher`, whose keys are fixed -- so that one URI's destination is silently
+/// swapped under another. [`link::LinkStore`] therefore compares the actual content on
+/// every hash hit. Once a hit is verified rather than trusted, the hash only has to
+/// distribute well, not resist a deliberate search, so it can be a plain fast hash.
+/// [`content_hash`] explains why images are the different case.
 pub(crate) fn fast_hash(bytes: &[u8]) -> u64 {
     let mut chunks = bytes.chunks_exact(8);
     let mut hash = 0u64;
@@ -51,10 +44,8 @@ fn mix(hash: u64, word: u64) -> u64 {
 /// A 128-bit digest of raw bytes, wide enough to *be* the identity rather than to narrow
 /// the search for it.
 ///
-/// [`image::ImageStore`] keeps one of these per image instead of the payload it used to
-/// keep for the byte-for-byte comparison, which is what turned 64MB of retained frames
-/// into sixteen bytes an image. Nothing downstream can be compared against any more, so
-/// the digest has to answer "same picture?" alone.
+/// [`image::ImageStore`] keeps one of these per image instead of the payload, sixteen
+/// bytes rather than megabytes, so the digest alone answers "same picture?".
 ///
 /// **Why 128 bits is enough here.** The store tracks at most
 /// [`image::MAX_TRACKED_IMAGES`] (4096) images, so an accidental collision between two
@@ -81,8 +72,8 @@ fn mix(hash: u64, word: u64) -> u64 {
 /// input on their own, and the low 64 bits are exactly what the ledger buckets by.
 ///
 /// One pass, eight bytes at a time, which keeps it memory-bound: a three-megabyte frame
-/// costs about the same here as the single-lane [`fast_hash`] it replaces, and both run
-/// on the reader thread inside the mutex Emacs takes to redisplay.
+/// costs about what the single-lane [`fast_hash`] does, on the reader thread inside the
+/// mutex Emacs takes to redisplay.
 pub(crate) fn content_hash(bytes: &[u8]) -> u128 {
     const SEED_B: u64 = 0x9e37_79b9_7f4a_7c15;
     let mix_b = |hash: u64, word: u64| (hash.rotate_left(27) ^ word).wrapping_mul(SEED_B);

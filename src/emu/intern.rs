@@ -2,8 +2,7 @@
 //!
 //! [`ImageStore`](super::image::ImageStore) and [`LinkStore`](super::link::LinkStore) are
 //! the same idea twice: hash the content, narrow to a bucket, compare properly, hand back
-//! a dense id, and evict least-recently-used. Written out, they were field-for-field
-//! identical in four places and the ordering was character-for-character the same code.
+//! a dense id, and evict least-recently-used.
 //!
 //! What is *not* shared is what each keeps against an id -- a link is its URI, an image is
 //! a geometry and a digest of bytes that live in Emacs -- and how each settles a hash hit:
@@ -27,9 +26,8 @@ pub(crate) trait Id: Copy + Eq + Hash {
 struct Entry<K> {
     /// Which bucket of [`Ledger::by_hash`] this id sits in.
     ///
-    /// Carried per entry purely so eviction can unfile an id in one lookup. Without it
-    /// the only way back from an id to its bucket is to search every bucket, which is
-    /// what [`Ledger::evict_oldest`] used to do.
+    /// Carried per entry so eviction can unfile an id in one lookup rather than searching
+    /// every bucket.
     hash: u64,
     /// Towards the least-recently-used end; `None` at it.
     older: Option<K>,
@@ -39,16 +37,13 @@ struct Entry<K> {
 
 /// Ids, their hash buckets, and their least-recently-used order.
 ///
-/// The order is an intrusive doubly-linked list rather than a `VecDeque`, and both of the
-/// operations that touch it are O(1) as a result. As a deque they were not, and both were
-/// on paths a child can drive:
+/// The order is an intrusive doubly-linked list rather than a `VecDeque`, so both
+/// operations on it are O(1), and both are on paths a child can drive:
 ///
-/// - Re-using an entry had to find it in the order before moving it to the end, which was
-///   a scan of every id held. `ls --hyperlink=auto` re-emits a link's whole `OSC 8`
-///   sequence per line, so that scan ran per line of output.
-/// - Eviction had to unfile the id from its bucket, and with no record of *which* bucket,
-///   the only way was `by_hash.retain(..)` over every bucket in the map. At the cap, where
-///   each insert evicts, that made a directory of links quadratic in the number of them.
+/// - Re-using an entry moves it to the end. `ls --hyperlink=auto` re-emits a link's
+///   `OSC 8` per line, so a scan here would run per line of output.
+/// - Eviction unfiles the id from the bucket its entry names. At the cap every insert
+///   evicts, so a sweep over all buckets would make a directory of links quadratic.
 #[derive(Debug)]
 pub(crate) struct Ledger<K> {
     /// A hash bucket, not the identity itself. More than one entry only when two distinct
@@ -81,16 +76,10 @@ impl<K: Id> Ledger<K> {
     /// The id in `hash`'s bucket that `matches` accepts, moved to the most-recently-used
     /// end on the way out.
     ///
-    /// Finding and touching are one call rather than two because the two were never
-    /// separately useful: both stores looked up and then unconditionally touched, and a
-    /// caller that forgot the second half would get a silently wrong eviction order --
-    /// the entry a child is using every line would be the one aged out. Nothing here can
-    /// be half-used now.
-    ///
-    /// They were split because a `&mut self` receiver appeared to conflict with a
-    /// `matches` closure reading the caller's own value map. Closure captures have been
-    /// field-precise since edition 2021, so `self.ledger.find(|id| self.uris..)` borrows
-    /// the two fields disjointly and the constraint that forced the split is gone.
+    /// Finding and touching are one call because a caller that forgot to touch would get a
+    /// silently wrong eviction order, aging out the entry a child uses every line. Closure
+    /// captures are field-precise, so `self.ledger.find(|id| self.uris..)` borrows the two
+    /// fields disjointly.
     pub(crate) fn find(&mut self, hash: u64, matches: impl Fn(K) -> bool) -> Option<K> {
         let id = self
             .by_hash
@@ -143,9 +132,7 @@ impl<K: Id> Ledger<K> {
 
     /// Every id, least-recently-used first, without disturbing the order.
     ///
-    /// Only the tests walk the order now: the one production reader was the pass that
-    /// shed image payloads ahead of their entries, and there are no payloads here to
-    /// shed any more -- see [`ImageStore`](super::image::ImageStore).
+    /// Only the tests walk the order.
     #[cfg(test)]
     pub(crate) fn lru(&self) -> impl Iterator<Item = K> + '_ {
         std::iter::successors(self.oldest, |&id| {

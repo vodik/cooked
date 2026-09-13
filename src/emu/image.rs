@@ -58,8 +58,8 @@ pub enum ImageFormat {
 
 /// A size in pixels.
 ///
-/// A named pair rather than `(u32, u32)` because the tuple form was threaded positionally
-/// through four modules, and `.0`/`.1` at a call site says nothing about which axis it is.
+/// A named pair rather than `(u32, u32)`, because `.0`/`.1` at a call site says nothing
+/// about which axis it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct PixelSize {
     pub w: u32,
@@ -71,11 +71,8 @@ impl PixelSize {
         Self { w, h }
     }
 
-    /// Whether either axis is zero, which makes the whole thing undrawable.
-    ///
-    /// One predicate replacing three spellings of it: a `(w != 0 && h != 0).then_some(..)`
-    /// in the sniffers, a `needed == 0` in the kitty validator, and a bare pair of
-    /// comparisons in the sixel decoder.
+    /// Whether either axis is zero, which makes the whole thing undrawable. The sniffers,
+    /// the kitty validator and the sixel decoder all ask this.
     pub fn is_empty(self) -> bool {
         self.w == 0 || self.h == 0
     }
@@ -189,16 +186,11 @@ impl PixelSize {
 /// Addressing each cell separately means all of that is handled by the machinery that
 /// already handles it for characters, and none of it needs a case here.
 ///
-/// `cols`/`rows` are the rectangle *this* placement was laid at, repeated on every cell
-/// of it. That looks redundant and is not: the rectangle belongs to the placement rather
-/// than to the image, because one picture can be laid at two sizes and both remain on
-/// screen at once. A child that resizes -- `viu` on a window reshape -- retransmits the
-/// same bytes with a new `c=`/`r=`, and ids are content-addressed, so the second
-/// placement names the id the first one did. With the rectangle held against the image
-/// there is one field for two answers: whichever transmission wrote it last decides how
-/// Emacs cuts slices for rows laid by the other, and the older picture is drawn at the
-/// newer one's size. Held here, each cell says how to cut itself and a row that has
-/// reached the scrollback keeps the answer it was written with forever.
+/// `cols`/`rows` are the rectangle *this* placement was laid at, repeated on every cell.
+/// It belongs to the placement rather than the image, because one picture can be on screen
+/// at two sizes: `viu` on a window reshape retransmits the same bytes with a new
+/// `c=`/`r=`, and content addressing gives both placements one id. Held here, each cell
+/// says how to cut itself, and a row in scrollback keeps the answer it was written with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placement {
     pub id: ImageId,
@@ -211,10 +203,9 @@ pub struct Placement {
 
 /// Everything the module keeps about an image once its bytes have gone to Lisp.
 ///
-/// Forty-odd bytes against the megabytes the payload used to cost, and neither field is
-/// a cached measurement: `px` is what the picture *is*, `asked` is what the child *said*,
-/// and the cell rectangle is worked out from the two whenever it is needed. See
-/// [`ImageStore::cells`] for why the derivation cannot be done once and kept.
+/// Neither field is a cached measurement: `px` is what the picture *is*, `asked` is what
+/// the child *said*, and the cell rectangle is worked out from the two when needed. See
+/// [`ImageStore::cells`] for why it cannot be computed once and kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Image {
     /// Intrinsic pixel size, which is what a placement naming no rectangle is measured
@@ -226,11 +217,8 @@ pub(crate) struct Image {
 
 /// One image's bytes on their way to Lisp, exactly once.
 ///
-/// No cell rectangle here, deliberately. The bytes cross once and the same picture can
-/// afterwards be laid at any number of sizes, so a rectangle carried alongside them
-/// would be the *first* placement's and would go stale the moment a child resized. The
-/// rectangle rides every [`Placement`] instead, which is the only place it is ever
-/// asked for.
+/// No cell rectangle: the bytes cross once and the picture can then be laid at any size,
+/// so the rectangle rides every [`Placement`] instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageData {
     pub id: ImageId,
@@ -241,9 +229,9 @@ pub struct ImageData {
 
 /// Distinct images this store will name at once.
 ///
-/// An entry is a geometry, a digest and two links: some forty bytes, against the
-/// megabytes a frame of it used to cost. The cap is here so that a session that runs for
-/// a week does not grow a map forever, not to bound anything a user would notice.
+/// An entry is a geometry, a digest and two links, some forty bytes. The cap is so that a
+/// session running for a week does not grow a map forever, not to bound anything a user
+/// would notice.
 pub(crate) const MAX_TRACKED_IMAGES: usize = 4096;
 
 /// The images this terminal knows about.
@@ -254,14 +242,11 @@ pub(crate) const MAX_TRACKED_IMAGES: usize = 4096;
 /// bookkeeping agrees with what Lisp holds: *an id is tracked here if and only if the
 /// module believes Lisp still has its bytes.*
 ///
-/// That is not something the module can work out for itself, so Lisp says: every path in
-/// cooked-deco.el that drops an image calls `cooked--image-forget', which reaches
-/// [`Self::forget`]. Both halves used to keep their own opinion instead -- 4096 entries
-/// here against a 64MB byte cap there -- and the two disagreed by three orders of
-/// magnitude, which is exactly how an animation ended up drawing nothing for half of
-/// every loop: [`Self::intern`] answered "you already have this one" about frames Emacs
-/// had evicted, so the payload never crossed and the cells carried a placement with no
-/// picture behind it.
+/// The module cannot work that out for itself, so Lisp says: every path in cooked-deco.el
+/// that drops an image calls `cooked--image-forget', which reaches [`Self::forget`]. If the
+/// two sides kept separate eviction policies, [`Self::intern`] would answer "you already
+/// have this one" about frames Emacs had evicted, and an animation would draw nothing for
+/// part of every loop.
 #[derive(Debug, Default)]
 pub(crate) struct ImageStore {
     /// Ids, hash buckets and LRU order; see [`Ledger`].
@@ -278,11 +263,10 @@ pub(crate) struct ImageStore {
 
 /// What [`ImageStore::intern`] decided about one transmission.
 ///
-/// A struct rather than a pair because of `retired`: the count cap can drop an id as a
-/// side effect of naming a new one, and everything the *rest* of the emulator hangs off
-/// an id -- the client-id map in [`Kitty`](super::kitty::Kitty) -- has to go at the same
-/// moment or it outlives the picture it names. Returning it makes that the caller's
-/// visible obligation instead of a comment nobody reads.
+/// A struct because of `retired`: the count cap can drop an id while naming a new one, and
+/// what the rest of the emulator hangs off an id -- the client-id map in
+/// [`Kitty`](super::kitty::Kitty) -- has to go at the same moment. Returning it makes that
+/// the caller's visible obligation.
 #[derive(Debug)]
 pub(crate) struct Interned {
     pub id: ImageId,
@@ -305,12 +289,9 @@ impl ImageStore {
     /// whole point of hashing the content: a child redrawing one picture per frame
     /// transmits it per frame, and only the first of those needs to cross the boundary.
     ///
-    /// "The same bytes" is decided by the 128-bit digest and nothing else. The store
-    /// used to keep the payload and compare it byte for byte on a hash hit, which is
-    /// what made it a second cache of every frame in flight -- and a cache with its own
-    /// eviction policy, which is what broke: a shed payload left an entry that still
-    /// claimed Lisp had the picture. The digest is now the entry, so there is nothing
-    /// left to shed and nothing to disagree about.
+    /// "The same bytes" is decided by the 128-bit digest alone. Keeping payloads to compare
+    /// would make this a second cache of every frame with an eviction policy of its own,
+    /// able to disagree with Lisp's; with the digest as the entry there is nothing to shed.
     pub(crate) fn intern(&mut self, bytes: &[u8], px: PixelSize) -> Interned {
         let hash = content_hash(bytes);
         // The ledger's buckets are 64 bits wide; the full digest is what a hit is
@@ -342,15 +323,11 @@ impl ImageStore {
     /// The answer to a bare `a=p`, which names an id and no geometry at all, and nothing
     /// else: what a picture already on the grid is showing rides its [`Placement`].
     ///
-    /// Two cases, and keeping them apart is the whole reason this is not one stored
-    /// rectangle. A child that said `c=`/`r=` was talking about the screen -- "give this
-    /// picture a third of the window" -- and means the same thing whatever the font is,
-    /// so its answer is replayed verbatim. A child that said nothing was talking about
-    /// its pixels, and the cells those come to is a question with a different answer
-    /// after a font change, so it is asked again here rather than remembered. Storing
-    /// the measurement instead is what made a gif alternate between two sizes across a
-    /// zoom: the pixel case was answered with a rectangle measured against a font
-    /// nobody was using any more.
+    /// Two cases, which is why this is not one stored rectangle. A child that said
+    /// `c=`/`r=` was talking about the screen and means the same whatever the font, so its
+    /// answer is replayed verbatim. A child that said nothing was talking about its pixels,
+    /// whose cell count changes with the font, so it is measured again here; a stored
+    /// measurement would make a gif alternate between two sizes across a zoom.
     ///
     /// `None` for an id the store has forgotten.
     pub(crate) fn cells(&self, id: ImageId, metrics: Option<CellMetrics>) -> Option<CellSize> {
@@ -363,9 +340,7 @@ impl ImageStore {
     /// `None` puts it back to being measured from its pixels. Overwritten on every
     /// transmission rather than fixed at the first, because it exists to answer a later
     /// bare `a=p` and the most recent thing the child said is the best answer to that.
-    /// Kept in the same map as the id rather than beside it so that it cannot be left
-    /// behind when the image goes -- it was, and a long session leaked an entry per
-    /// picture through both eviction paths.
+    /// Kept in the same entry as the id so that it goes when the image does.
     pub(crate) fn set_asked(&mut self, id: ImageId, asked: Option<CellSize>) {
         if let Some(image) = self.images.get_mut(&id) {
             image.asked = asked;
@@ -496,16 +471,10 @@ mod tests {
         assert_eq!(store.hashes[&decoy], content_hash(b"decoy"), "untouched");
     }
 
-    /// The bug, at its smallest. Thirty distinct multi-megabyte frames, then the first
-    /// one again byte for byte: the store used to keep the payloads and shed the oldest
-    /// past a 64MB cap, after which its find predicate matched on the hash alone and
-    /// answered "not fresh" about an image whose bytes it had itself dropped. Lisp,
-    /// whose own cap was three orders of magnitude smaller, had dropped them too, so the
-    /// picture never crossed again and the placements drew nothing.
-    ///
-    /// The answer is still "not fresh", and now it is *true*: there are no payloads to
-    /// shed, so the store's claim that Lisp has this picture is one Lisp is still good
-    /// for. Ninety megabytes of frames leave ninety digests behind.
+    /// Thirty distinct multi-megabyte frames, then the first one again byte for byte. The
+    /// answer is "not fresh", and it is *true*: the store keeps no payloads to shed, so its
+    /// claim that Lisp has the picture holds until Lisp says otherwise. Ninety megabytes of
+    /// frames leave ninety digests behind.
     #[test]
     fn a_frame_the_store_still_names_does_not_cross_twice() {
         let mut store = ImageStore::default();
@@ -537,10 +506,8 @@ mod tests {
         assert_ne!(again.id, first.id, "a forgotten id is not reissued");
     }
 
-    /// Geometry and digest are one entry now, so nothing survives the id that named it.
-    /// They were two maps, and the second was pruned by neither eviction path: a long
-    /// session leaked a cell rectangle per picture, and those rectangles are what `a=p`
-    /// re-placement reads.
+    /// Geometry and digest are one entry, so nothing survives the id that named it -- in
+    /// particular not the rectangle `a=p` re-placement reads.
     #[test]
     fn nothing_outlives_the_entry_it_belongs_to() {
         let mut store = ImageStore::default();
