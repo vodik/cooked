@@ -1963,15 +1963,16 @@ the terminal, and a translation reaching it would be a bug nobody would connect
 to this setting. Verified against a real tty under foot — wrapped once, still
 once after two more calls.
 
-** REVIEW [#B] =cooked-consult.el= — a terminal picker
+** DONE [#B] =cooked-consult.el= — a terminal picker
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   none — ghostel's =extensions/consult-ghostel/consult-ghostel.el=
 :GATE:     "picker annotations" in Remaining smaller items (=cooked--title= public)
-:BRANCH:   58a17c5
+:BRANCH:   cb2a1fc
 :AGENT:    yes
 :END:
 :LOGBOOK:
+- State "DONE"       from "REVIEW"     [2026-09-12 Sat 23:05]
 - State "REVIEW"     from "WIP"        [2026-09-12 Sat 22:55]
 - State "WIP"        from "TODO"       [2026-09-12 Sat 22:40]
 :END:
@@ -2001,7 +2002,7 @@ Done when: the picker previews, narrows and creates-on-miss; annotations show
 under plain =completing-read= with consult unloaded; a test covers the
 annotation for a running, a failed and an idle session.
 
-*** Landed: 58a17c5, on =cooked/consult-picker=
+*** Landed: cb2a1fc
 
 =consult-cooked= picks from this project's terminals and then the rest (=p= and
 =o= narrow to either), previews each, and a name that matches nothing starts a
@@ -2030,15 +2031,17 @@ Not covered by a test: the real minibuffer. Batch Emacs reads it from stdin, so
 the tests call the sources directly for items, preview, which source a miss goes
 to, and =:new=.
 
-** WIP [#B] Search the session's commands, across every buffer
+** DONE [#B] Search the session's commands, across every buffer
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   none
 :GATE:     =cooked-consult.el= — a terminal picker (the file it lands in)
-:BRANCH:   cooked/command-search
+:BRANCH:   c467821
 :AGENT:    yes
 :END:
 :LOGBOOK:
+- State "DONE"       from "REVIEW"     [2026-09-12 Sat 23:05]
+- State "REVIEW"     from "WIP"        [2026-09-12 Sat 23:10]
 - State "WIP"        from "TODO"       [2026-09-12 Sat 22:40]
 :END:
 Not shell history. =cooked-history= reads the shell's history file and *types*
@@ -2104,7 +2107,47 @@ following its tail; a command that finishes while the picker is open resolves
 to its record; a multiline =for= loop is findable by a word on its second line
 and reruns byte-identical; a test covers the nil-=input= fallback.
 
+*** Landed: c467821
+=cooked-command-search.el=, consult-free: =completing-read= with group,
+annotation and identity sort metadata, so running-first, newest-first survives
+every UI. The consult source, with preview and =f=/=s=/=r= narrow keys, is
+written against it and waits for =cooked-consult.el= — below.
 
+*The running candidate is its own type* and holds the anchor marker itself — not
+a copy and not a new one. =cooked--mark-command-end= builds the record on that
+same marker, so a command that finished while the picker was open resolves by
+=eq=, exactly, even across a scrollback trim. The drawer's "record whose
+=prompt= is that position" would have missed there. Its jump has to do three
+things, not one: end a peek, clear =cooked--wandered=, and pin the window, since
+a quiet server sends no drain to do it.
+
+*=cooked--command-started-at= went in the core*, beside =cooked--command-start=.
+A hook added by a layer loaded on first use misses every command already
+running, and that is the server this exists to find.
+
+*Multiline: collapsed*, through the =cooked--command-name= imenu now shares. The
+⏎-and-cap reading can only match what it hides through =invisible=, which each
+UI honours differently. Rerun sends =cooked-command-input=; the test checks it
+byte for byte.
+
+Narrowing is a prefix argument, since plain =completing-read= has none and a
+typed prefix would be matched as text. A session that has exited offers no
+running command, for the reason the picker's annotation gives.
+
+*** Follow-up: landed 8924a68
+=consult-cooked-command= in =cooked-consult.el=, loading
+=cooked-command-search= when it runs. *The drawer's snippet had one thing
+wrong*, and a batch run through a real =consult--read= caught it where the
+state-function unit test could not: consult hands the state function whatever
+=:lookup= returned, the candidate *object*, not its string, so a preview that
+read the string's property errored on every selection move while the jump
+itself still worked. The unit test now passes objects, as consult does.
+
+The picker's running annotation says how long (=running 4m 12s: make=), through
+=cooked--command-duration= in =cooked-command.el=, which the search now shares.
+*Not done*: =cooked--annotation-status= keeps its own whitespace collapse rather
+than calling =cooked--command-name= — that lives in =cooked-mode.el=, which
+requires =cooked-mode-line.el=, so the call would point up a layer.
 
 * Wave 5 — the big ones                                        :core:feature:
 :PROPERTIES:
@@ -2283,6 +2326,89 @@ you zero scans and a clean bill of health. And =cooked-file-link-scan-limit= is
 per *jit-lock chunk*, not per drain — observed chunks are 2–25 lines, so the
 400-line cap never engages in normal use, while a piped reproduction makes
 chunks huge and measures the defence instead of the bug.
+
+** WIP [#A] One image per box-drawing run, blanks and mixed shapes included
+:PROPERTIES:
+:EFFORT:   1d
+:REPORT:   none — extends REPORT §2's run-wide image to the shapes it cannot reach
+:BRANCH:   cooked/glyph-run-patterns
+:AGENT:    yes
+:END:
+The run-wide glyph image (783b0f4) collapsed a border row from 1920 =display=
+intervals to 24 and moved cooked's scroll ceiling. It cannot help =tree=, and
+measuring the gesture rather than the arrival says how much that costs.
+
+*** Measured: images are two thirds of a scroll through =tree=
+
+=scripts/bench-tree.el= grew gesture arms. =scroll-down= 10 screen lines over
+settled =tree -C /usr/include=, 100x32 pgtk under the gamescope recipe, 20
+warmups then 60 timed, 3 reps, medians, load 1.4–1.6.
+
+| arm                        |   p50 |   p90 |
+|----------------------------+-------+-------|
+| baseline                   | 11.05 | 12.72 |
+| =box-drawing-images= nil   |  3.61 |  4.86 |
+| =detect-links= nil         |  9.11 |  9.53 |
+| =glyph-scale-floor= nil    | 11.19 | 13.21 |
+| all off                    |  1.79 |  2.13 |
+
+*Images are 67% of the gesture on their own*, a 3.1x effect. Links are 17%,
+which agrees with the 21% measured against a different fixture. Glyph scaling is
+flat for the *third* independent time and should stop being suspected.
+
+*** Why the existing coalescing cannot reach it
+
+Two separate limits, at two different layers, and only one of them is about
+whitespace.
+
+*A record is a run of one shape.* =Deco::packed= run-length encodes
+=(bits, count)= per run of *identical* shapes, so =├──= arrives as =├=x1 then
+=─=x2 and Lisp puts two =display= properties over three cells. The sequence is
+already there on the wire — it is the *encoding* that splits it, not the run
+building. Lisp can bake one bitmap for the whole record list of a run without
+the wire changing at all.
+
+*A run breaks on any undecorated cell.* =Row::build_runs= splits when
+=(Some(deco), None)=, and a space classifies to =None=, so =│   │   ├──= is
+three decorated runs with plain text between them. This is the half that needs
+Rust: a =Deco::Glyphs= run must be able to absorb a plain space as a *blank*
+shape and keep going.
+
+For =tree= the second is where the win is. The agent that attributed the
+arrival slowness counted 86,107 decoration records for 30,326 rows — 2.84 per
+row, and a =tree= row wants to be *one*.
+
+*** The shape to build
+
+1. *Lisp, contained.* =cooked--apply-glyph-deco= bakes one image for the whole
+   run rather than one per =(BITS COUNT)= record, keyed on the record list.
+   =cooked--deco-image= already takes a =COUNT=; it needs a *pattern* instead.
+2. *Rust, wire.* A reserved blank =BoxGlyph= and an arm in =build_runs= letting
+   a =Glyphs= run absorb a space of identical =style=, =underline= and =link=.
+   Leading and trailing blanks must be *trimmed* from the run, or a row's
+   trailing spaces get baked into a bitmap nobody can see.
+
+*Four rules break a run, and three are already there.* A shade breaks it, and
+must — its dither phase is a function of the cell's own pixel origin, so two
+adjacent =▒= at an odd cell width are genuinely different bitmaps
+(=cooked--box-shade-p=). A style, underline or link change breaks it, as it does
+today. *New:* the cursor's cell breaks it. cooked puts point wherever the child's
+cursor is on every drain, and a =display= spanning several cells makes Emacs
+draw the cursor at the *start* of the whole span — invisible today because a run
+is identical box glyphs and a cursor never sits in a border, and very visible
+once runs bridge the indentation a cursor does sit in.
+
+*The cache is the risk, and the shade rule happens to bound it.* Keyed on a
+pattern rather than shape-and-count, low-entropy content is still cheap — a
+border is one long identical run, =tree='s indent is a handful of patterns for
+thirty thousand rows. btop's shade plots are the high-entropy case that would
+thrash it, and shades are already excluded for the dither reason. Bound the run
+length anyway so a pathological row cannot mint an unbounded bitmap;
+=cooked-box-glyph-run-cache-limit= is the existing knob.
+
+Done when: a =tree= row costs one =display= interval for its whole indent, the
+gesture arms above are re-run and recorded, and the cursor rule has a test that
+fails without it.
 
 ** TODO [#B] The file-link scan doubles its syscalls on every name that misses
 :PROPERTIES:
