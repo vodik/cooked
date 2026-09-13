@@ -894,7 +894,7 @@ which is the state the old scrollback-only command could not touch."
 (ert-deftest cooked-title-renames-the-buffer-only-when-asked ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;running-thing\\007'; sleep 5")
     (let ((original (buffer-name)))
-      (should (cooked-tests--settle (lambda () (equal cooked--title "running-thing"))))
+      (should (cooked-tests--settle (lambda () (equal cooked-title "running-thing"))))
       ;; Default is off: a name that moves under you is hard to find again.
       (should (equal (buffer-name) original)))))
 

@@ -227,6 +227,7 @@ already loaded and running is a switch in name only — these are separate files
   (require 'cooked-next-error)
   (require 'cooked-command-decorations)
   (require 'cooked-project)
+  (require 'cooked-consult)             ; wants consult
   (require 'cooked-process)
   (cooked-process-mode 1))
 #+end_src
@@ -280,6 +281,15 @@ you can see how a scrollback full of commands went without reading any of it.
 
 Scopes a session to the current project root: =cooked-project= reuses one terminal per
 project the way ~project-shell~ does, rather than one per invocation.
+
+** cooked-consult
+
+=M-x consult-cooked= picks a terminal, this project's first, previewing each as you move
+over it and saying beside its name what it is doing: the running command or the last
+failure, the title, the directory and the input mode. A name that matches nothing starts
+a session with that name; =C-u= makes it plain =cooked=. It also puts terminals into
+=consult-buffer= behind the =t= narrow key. The annotations do not need consult —
+~cooked-buffer-completion-table~ carries them to any =completing-read=.
 
 ** Shell integration
 

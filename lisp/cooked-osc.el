@@ -103,7 +103,7 @@ hypothetical -- `cooked--osc-emacs' can reach `find-file', which
 
 (defun cooked--set-title (title)
   "Set the child's title to TITLE and show it."
-  (setq cooked--title title)
+  (setq cooked-title title)
   (cooked--update-buffer-name)
   (force-mode-line-update))
 
@@ -121,7 +121,7 @@ XTWINOPS 22 and 23, which `smcup' and `rmcup' send around the alternate screen:
 without them a full-screen program that sets a title leaves it behind on exit."
   (if push
       (setq cooked--title-stack
-            (last (cons cooked--title cooked--title-stack)
+            (last (cons cooked-title cooked--title-stack)
                   cooked--title-stack-limit))
     ;; An underflowing pop is the child's bug, not ours; leave the title alone.
     (when cooked--title-stack

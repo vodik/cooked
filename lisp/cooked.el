@@ -269,7 +269,14 @@ the `editing\=' binding in `cooked--apply\='."
 
 One of `legacy', `modify-other' or `kitty', as negotiated by the child itself —
 see `cooked--key-encodings' for why this cannot simply be assumed.")
-(defvar-local cooked--title nil "Title the child last set, via OSC 0 or 2.")
+(defvar-local cooked-title nil
+  "Title the child last set, via OSC 0 or 2, or nil if it never set one.
+
+Public, unlike the rest of the session state beside it, because it is the one
+piece a reader outside the tree has an obvious use for -- a buffer switcher, a
+tab line, a `frame-title-format' -- and it has a reader in five files inside
+it.  The child's own bytes: anything that puts it in a mode line has to
+escape `%' first, as `cooked--mode-line-quote' does.")
 (defvar-local cooked--title-stack nil
   "Titles saved by XTWINOPS 22, newest first.  See `cooked--handle-title-stack'.")
 (defvar-local cooked--host nil

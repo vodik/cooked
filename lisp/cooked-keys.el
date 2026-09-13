@@ -472,7 +472,7 @@ that makes it run."
            (not (y-or-n-p
                  (format "Paste %d lines, which %s will run as each arrives?"
                          (1+ (cl-count ?\n text))
-                         (or cooked--title "The child")))))
+                         (or cooked-title "The child")))))
       (message "Paste cancelled"))
      (t
       (cooked--snap-to-cursor)
@@ -540,7 +540,7 @@ CONDITION is either a regexp matched against the name of the program in the
 child's foreground process group -- `claude' matches whether it was started as
 the session's command or typed at the session's shell -- or a function of no
 arguments called in the buffer, for a test the process name cannot express
-\(`cooked--title', `cooked--alt', `default-directory').
+\(`cooked-title', `cooked--alt', `default-directory').
 
 BINDINGS is an alist of (KEY . ACTION), KEY as `kbd' spells it.  ACTION is:
 

@@ -127,7 +127,7 @@ column is not the user's choice about buffer names."
   (when cooked-buffer-name-auto-update
     (let ((name (cooked--format-buffer-name
                  (abbreviate-file-name default-directory)
-                 cooked--title
+                 cooked-title
                  (or cooked--host ""))))
       (unless (equal name (buffer-name))
         (rename-buffer (generate-new-buffer-name name))))))

@@ -32,7 +32,7 @@
 
 (ert-deftest cooked-osc-title-reaches-the-mode-line ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;my-title\\007'; sleep 5")
-    (should (cooked-tests--settle (lambda () (equal cooked--title "my-title"))))
+    (should (cooked-tests--settle (lambda () (equal cooked-title "my-title"))))
     (should (string-match-p "my-title" (cooked--mode-line)))))
 
 (ert-deftest cooked-notifications-are-closed-until-opted-in ()
@@ -102,22 +102,22 @@
   (cooked-tests--with-session
    '("/bin/sh" "-c"
      "printf '\\033]2;shell\\007\\033[22;0;0t\\033]2;vim\\007'; sleep 5")
-   (should (cooked-tests--settle (lambda () (equal cooked--title "vim"))))
+   (should (cooked-tests--settle (lambda () (equal cooked-title "vim"))))
    (cooked--handle-title-stack nil)
-   (should (equal cooked--title "shell"))))
+   (should (equal cooked-title "shell"))))
 
 (ert-deftest cooked-title-stack-is-bounded-and-survives-underflow ()
   (with-temp-buffer
     (cooked-mode)
-    (setq-local cooked--title-stack nil cooked--title "last")
+    (setq-local cooked--title-stack nil cooked-title "last")
     ;; A child that pushes and never pops must not grow the list without bound.
     (dotimes (i 20)
-      (setq-local cooked--title (number-to-string i))
+      (setq-local cooked-title (number-to-string i))
       (cooked--handle-title-stack t))
     (should (= (length cooked--title-stack) cooked--title-stack-limit))
     ;; Popping past the bottom leaves the title alone rather than clearing it.
     (dotimes (_ 20) (cooked--handle-title-stack nil))
-    (should cooked--title)))
+    (should cooked-title)))
 
 (ert-deftest cooked-osc-handler-errors-do-not-break-redisplay ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;boom\\007'; printf 'after\\n'; sleep 5")
@@ -1427,7 +1427,7 @@ which makes the child's title an injection site, and makes cooked's *own*
     ;; And a title full of specifiers is passed through doubled, so it is shown
     ;; rather than obeyed: `%b' would otherwise become the buffer name and `%-'
     ;; a run of dashes out to the margin.
-    (setq cooked--title "%b%-%%")
+    (setq cooked-title "%b%-%%")
     (should (string-match-p (regexp-quote "%%b%%-%%%%") (cooked--mode-line)))
     ;; The general form of both: nothing reaches the mode line holding an odd
     ;; number of `%' in a row, which is the only way a specifier can survive.

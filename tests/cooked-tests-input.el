@@ -414,11 +414,11 @@ to separate, and the one this whole indicator is judged on."
                 cooked--host nil
                 cooked--completion-nonce nil
                 cooked--exit nil
-                cooked--title nil
+                cooked-title nil
                 cooked--foreground-label "htop")
     (should (equal (substring-no-properties (cooked--mode-line)) " raw htop"))
     ;; A title outranks it: the shell knows the arguments, `comm\= knows a name.
-    (setq-local cooked--title "make -j8 world")
+    (setq-local cooked-title "make -j8 world")
     (should (equal (substring-no-properties (cooked--mode-line))
                    " raw make -j8 world"))
     ;; Never both -- two accounts of one thing, and only room for the better.
@@ -480,7 +480,7 @@ nobody asked for, and easy to reintroduce by inlining the obvious call."
                 cooked--host nil
                 cooked--completion-nonce nil
                 cooked--exit nil
-                cooked--title nil
+                cooked-title nil
                 cooked--foreground-label "htop")
     (cl-letf (((symbol-function 'process-attributes)
                (lambda (&rest _) (ert-fail "mode line called process-attributes")))
@@ -501,7 +501,7 @@ exit status is the only thing about a dead session still true."
                 cooked--semantic-seen nil
                 cooked--host nil
                 cooked--completion-nonce nil
-                cooked--title nil
+                cooked-title nil
                 cooked--foreground-label "htop"
                 cooked--input-mode 'frozen
                 cooked--exit 0)
@@ -1340,7 +1340,7 @@ no integration at all\" only exists as a latch."
                   cooked--semantic-seen seen
                   cooked--host nil
                   cooked--completion-nonce nil
-                  cooked--title nil
+                  cooked-title nil
                   cooked--foreground-label nil
                   cooked--exit nil)
       (should (eq (cooked--policy) policy))
@@ -1366,7 +1366,7 @@ the same certainty a local one does, by the same bytes."
                 cooked--semantic-seen t
                 cooked--host nil
                 cooked--completion-nonce nil
-                cooked--title nil
+                cooked-title nil
                 cooked--foreground-label nil
                 cooked--exit nil)
     ;; Local: the child is ours, and nothing about this changes.

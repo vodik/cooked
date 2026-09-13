@@ -49,7 +49,7 @@ Matches a bare directory (straight) or a versioned one (package.el)."
               (throw 'found dir)))))))
 
 (defconst cooked-tests--optional-packages
-  '("goto-chg" "evil" "evil-collection")
+  '("goto-chg" "evil" "evil-collection" "compat" "consult")
   "Packages a `skip-unless' asks for, and which therefore have to be found first.
 
 One list rather than a call apiece, because what the tests ask for and what is

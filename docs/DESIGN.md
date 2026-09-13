@@ -1405,7 +1405,7 @@ lisp/            cooked-util.el is the floor everything else requires; cooked.el
                  to it and pulls in the rest. The opt-in files (cooked-evil,
                  cooked-osc-eval, cooked-shell-completion, cooked-file-link,
                  cooked-next-error, cooked-command-decorations, cooked-project,
-                 cooked-dnd) sit on top and are `require`d, not toggled by a
+                 cooked-consult, cooked-dnd) sit on top and are `require`d, not toggled by a
                  variable. cooked-process.el is opt-in too, but as an autoloaded
                  minor mode rather than by being loaded
 shell-integration/  bash, zsh, fish, plus zsh's completion capture

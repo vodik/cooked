@@ -2,14 +2,16 @@
 
 ;;; Commentary:
 
-;; Two ways a session says what it is doing without being asked: the mode line,
-;; which is always there, and sticky scroll, which is a header line naming the
-;; command whose output a window is scrolled into.
+;; Three ways a session says what it is doing without being asked: the mode line,
+;; which is always there; sticky scroll, which is a header line naming the
+;; command whose output a window is scrolled into; and the annotation beside its
+;; name in a completion list, which is the mode line read from outside the buffer.
 ;;
-;; Both read the command records, so this file sits above cooked-command.el --
-;; and both reach back into cooked-mode.el for three things the interaction layer
-;; owns, declared below.  The direction is right: this is a *reader* of state that
-;; layer maintains, which is the one shape a back-edge here is allowed to have.
+;; All three read the command records, so this file sits above cooked-command.el
+;; -- and the first two reach back into cooked-mode.el for three things the
+;; interaction layer owns, declared below.  The direction is right: this is a
+;; *reader* of state that layer maintains, which is the one shape a back-edge here
+;; is allowed to have.
 
 ;;; Code:
 
@@ -206,9 +208,9 @@ the better one.  The title also stands down when
 it, so printing it again would only spend columns on a word already on
 screen."
   (or (and (not (cooked--buffer-name-shows-title-p))
-           cooked--title
-           (not (string-empty-p cooked--title))
-           cooked--title)
+           cooked-title
+           (not (string-empty-p cooked-title))
+           cooked-title)
       cooked--foreground-label))
 
 (defun cooked--mode-line ()
@@ -264,6 +266,136 @@ screen."
                  (cooked--mode-line-click
                   #'cooked-goto-last-command
                   "cooked: last exit status.  mouse-1: go to that command"))))))))
+
+;;;; In a completion list
+;;
+;; What a picker says beside a session's name: the mode line's facts, asked of a
+;; buffer that is not the current one.  Here and not in cooked-consult.el, because
+;; nothing about it is consult's -- it is completion metadata, which vertico, the
+;; default completion UI and anything else reading `completion-metadata' all
+;; honour -- and a picker built on plain `completing-read' must get it without
+;; loading a package it does not use.  Here and not in cooked-mode.el, because it
+;; is the same report as `cooked--mode-line' in another place, and the faces that
+;; say how a command went are already defined above.
+
+(defun cooked--annotation-status ()
+  "What this session is doing, in one or two words, for a completion annotation.
+
+A running command first, named by its own line: the running command has no
+record -- see `cooked--running-anchor' -- so it is read from
+`cooked--command-input', which is live for exactly as long as the anchor is.
+Otherwise the last command's exit status if it failed, and `idle' if it did
+not or if there has been no command at all.  A zero status is not spelled out:
+a list of sessions reading `exit 0' down one column is noise around the one
+that says something else.
+
+A dead session says how the child went and nothing more, for the reason
+`cooked--mode-line' gives: its buffer-locals hold whatever they last said, and
+reporting a command as running in a session that exited is wrong rather than
+stale."
+  (cond
+   (cooked--exit
+    (propertize (format "exited %s" cooked--exit)
+                'face (if (eql cooked--exit 0) 'cooked-success 'cooked-failure)))
+   ((cooked--running-anchor)
+    (let ((input (and cooked--command-input
+                      (string-trim (replace-regexp-in-string
+                                    "[ \t\n]+" " " cooked--command-input)))))
+      (if (and input (not (string-empty-p input)))
+          (concat "running: " (truncate-string-to-width input 32 nil nil t))
+        "running")))
+   ((when-let* ((code (cooked-last-exit-code)))
+      (and (not (eql code 0))
+           (propertize (format "exit %s" code) 'face 'cooked-failure))))
+   (t "idle")))
+
+(defun cooked-buffer-annotation (buffer)
+  "A one-line account of the cooked session in BUFFER, for a completion list.
+
+BUFFER is a buffer or its name, since a completion table hands over the
+candidate string and a consult source hands over the buffer itself.  Nil for
+anything that is not a cooked buffer, so this can sit on a table that mixes
+them.
+
+Four fields, each left out when it has nothing to say: what the session is
+doing (see `cooked--annotation-status'), the title the child set, the directory
+its shell is in, and the input mode when it is anything but the ordinary one.
+The directory is `default-directory', which OSC 7 keeps as a TRAMP name once the
+shell is on another host, and it is abbreviated only when local: abbreviating a
+remote name asks TRAMP for the home directory at the far end, and a completion
+list redrawn per keystroke must not be what opens a connection.
+
+The title is dropped when it only repeats the running command, which is what a
+shell\\='s title hook usually sets it to."
+  (when-let* ((buffer (get-buffer buffer))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'cooked-mode)
+        (let* ((status (cooked--annotation-status))
+               (title (and cooked-title
+                           (not (string-empty-p cooked-title))
+                           (not (and cooked--command-input
+                                     (equal (string-trim cooked-title)
+                                            (string-trim cooked--command-input))))
+                           (truncate-string-to-width cooked-title 32 nil nil t)))
+               (directory (if (file-remote-p default-directory)
+                              default-directory
+                            (abbreviate-file-name default-directory)))
+               (mode (unless cooked--exit
+                       (pcase cooked--input-mode
+                         ('semi (propertize "semi" 'face 'shadow))
+                         ('still (propertize "still" 'face 'cooked-still))
+                         ('frozen (propertize "frozen" 'face 'cooked-peek)))))
+               (text (concat "  " (string-join (delq nil (list status title directory mode))
+                                               "  "))))
+          ;; Appended, so the faces set on a field above win over the dim one the
+          ;; completion UI gives an annotation as a whole.
+          (add-face-text-property 0 (length text) 'completions-annotations t text)
+          text)))))
+
+(defun cooked--buffer-affixation (names)
+  "NAMES with `cooked-buffer-annotation' as a suffix, in one aligned column.
+
+An `affixation-function' rather than only the `annotation-function', because
+an annotation is appended directly to its candidate and the names of cooked
+buffers differ in length by as much as the directories in them do -- so four
+fields read as a ragged edge unless something pads them to one column, and only
+a function that sees every name at once can know how far."
+  (let ((width (apply #'max 0 (mapcar #'string-width names))))
+    (mapcar (lambda (name)
+              (list name ""
+                    (if-let* ((annotation (cooked-buffer-annotation name)))
+                        (concat (make-string (- width (string-width name)) ?\s)
+                                annotation)
+                      "")))
+            names)))
+
+(defun cooked-buffer-completion-table ()
+  "A completion table of cooked buffer names, annotated with what each is doing.
+
+For `completing-read', and carrying its annotations as metadata so that every
+completion UI shows them without anything else loaded.  Most recently used
+first, as `buffer-list' has them, and left in that order: alphabetical is the
+wrong order for switching.
+
+The category is `cooked-buffer' rather than `buffer', and deliberately.
+marginalia keeps an annotator of its own for `buffer' that takes precedence
+over the table's, so under that category a marginalia user would see mode and
+size where this table says what the session is doing -- the one thing the
+table exists to say.  The cost is that a tool keyed on `buffer' does not
+recognise these as buffers without being told: for embark that is
+\(add-to-list \\='embark-keymap-alist \\='(cooked-buffer . embark-buffer-map))."
+  (let (names)
+    (cooked--dolist-buffers (push (buffer-name) names))
+    (setq names (nreverse names))
+    (lambda (string predicate action)
+      (if (eq action 'metadata)
+          `(metadata (category . cooked-buffer)
+                     (annotation-function . cooked-buffer-annotation)
+                     (affixation-function . cooked--buffer-affixation)
+                     (display-sort-function . identity)
+                     (cycle-sort-function . identity))
+        (complete-with-action action names string predicate)))))
 
 ;;;; Progress
 ;;

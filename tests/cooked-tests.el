@@ -12,6 +12,8 @@
 ;;   cooked-tests-input.el       keys, mouse, paste, keyboard ownership
 ;;   cooked-tests-dnd.el         drops and yank-media, the optional layer
 ;;   cooked-tests-history.el     the optional shell-history layer
+;;   cooked-tests-consult.el     the optional terminal picker, and the
+;;                               annotations it shares with plain completion
 ;;   cooked-tests-osc.el         the sequences answered in Lisp
 ;;   cooked-tests-link.el        URLs, OSC 8 hyperlinks, the optional file layer
 ;;   cooked-tests-completion.el  both completion backends
@@ -55,7 +57,7 @@
 ;; `goto-chg' is evil\='s one hard dependency.
 ;;
 ;; Every test that guards itself with a `skip-unless' also carries a `:tags' for
-;; what it is guarding on -- `zsh', `bash', `fish', `evil', `tic' and so on --
+;; what it is guarding on -- `zsh', `bash', `fish', `evil', `consult', `tic' and so on --
 ;; so the platform axis can be selected on rather than discovered by reading a
 ;; hundred `skip-unless' forms.  A tag names a *dependency*, not a subject: what
 ;; a test is about is already answered by which file it lives in, and a second
@@ -76,6 +78,7 @@
 (require 'cooked-tests-input)
 (require 'cooked-tests-dnd)
 (require 'cooked-tests-history)
+(require 'cooked-tests-consult)
 (require 'cooked-tests-osc)
 (require 'cooked-tests-link)
 (require 'cooked-tests-completion)
