@@ -38,19 +38,14 @@ impl Region {
 /// Rows moved wholesale to a different index, so Emacs can move its own text rather than
 /// be handed all of it again.
 ///
-/// The scroll is the one operation where "which rows changed" and "how much work Emacs
-/// has to do" come apart. After a `rotate_left` every index in the region genuinely holds
-/// different text, so damage tracking is *right* to report the whole region — and yet the
-/// text itself did not change at all: it moved, and the buffer can move it the same way
-/// with two edits, keeping every marker, overlay and fontification anchored in the rows
-/// that survived. So the region's rows are reported as a shift rather than as damage, and
-/// only the recycled rows at the far end — the ones that really do hold new text — are
-/// damaged.
+/// After a scroll every index in the region holds different text, but the text only moved,
+/// and the buffer can move it with two edits while keeping every marker, overlay and
+/// fontification in the surviving rows. So the region is reported as a shift, and only the
+/// recycled rows at the far end are damaged.
 ///
-/// Applying a shift is what makes the *undamaged* rows correct, so a shift may never be
-/// dropped in favour of nothing. It may always be dropped in favour of damaging every row
-/// it covers, which is what [`Screen::touch_all`] does: a row rewritten whole does not
-/// care where its text used to be.
+/// A shift is what makes the *undamaged* rows correct, so it may never be dropped in favour
+/// of nothing -- only in favour of damaging every row it covers, as [`Screen::touch_all`]
+/// does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shift {
     /// The scroll region the rows moved within, inclusive at both ends.
@@ -125,13 +120,9 @@ pub struct Evicted(Vec<Departed>);
 
 /// One row on its way out of a grid, already reduced to what the transcript needs.
 ///
-/// A [`Row`] owns a cell for every column, so carrying departing rows as rows kept
-/// `cols * size_of::<Cell>()` alive per line for as long as the backlog held them --
-/// and, worse, meant `scroll_up` had to *clone* the rows it was about to rotate away
-/// just so the archiver could read them. Reducing here instead deletes both costs: the
-/// clone has nothing to copy, and what is retained is trimmed to content.
-///
-/// The reduction is work that had to happen regardless; only its position moved.
+/// A [`Row`] owns a cell for every column, so the backlog holding rows would keep
+/// `cols * size_of::<Cell>()` alive per line, and `scroll_up` would have to clone rows it
+/// is about to rotate away. Reducing them to runs as they leave avoids both.
 #[derive(Debug)]
 pub struct Departed {
     pub runs: Vec<Run>,
@@ -155,8 +146,7 @@ impl Departed {
         }
     }
 
-    /// The row's text, for tests and diagnostics. Mirrors [`Row::to_text`], which is what
-    /// the assertions on evicted rows used before they were reduced this early.
+    /// The row's text, for tests and diagnostics; the equivalent of [`Row::to_text`].
     pub fn to_text(&self) -> String {
         self.runs.iter().map(|run| run.text.as_str()).collect()
     }
@@ -174,10 +164,7 @@ impl Evicted {
 
     /// Reduce rows leaving a grid, for the producers that already own them.
     ///
-    /// `scroll_up` deliberately does not use this: it reduces from the slice it is about
-    /// to rotate, which is the whole point of reducing here rather than at drain time.
-    /// The rest -- a resize shrinking, a rewrap overflowing, a full erase going to
-    /// history -- construct their rows and have nothing to save by borrowing.
+    /// `scroll_up` does not use this; it reduces from the slice it is about to rotate.
     fn from_rows(rows: &[Row]) -> Self {
         Self(rows.iter().map(Departed::from_row).collect())
     }
@@ -222,32 +209,26 @@ pub struct Screen {
     dirty: Vec<bool>,
     /// Row moves since the last drain, in the order they happened; see [`Shift`].
     ///
-    /// A log rather than one accumulated move, because a drain can hold scrolls in two
-    /// different regions — a TUI with a `DECSTBM` status area alternates between the
-    /// region and the whole screen — and the buffer has to replay them in order for the
-    /// rows *outside* each region to end up where they started. Consecutive moves of the
-    /// same rows in the same direction do coalesce, which is the case that matters: a
-    /// flood scrolls once per line, and a thousand-line `cat` must not become a thousand
-    /// pairs of buffer edits.
+    /// A log rather than one accumulated move, because a TUI with a `DECSTBM` status area
+    /// can scroll two different regions in one drain, and the buffer has to replay them in
+    /// order. Consecutive moves of the same rows the same way coalesce, so a thousand-line
+    /// `cat` is not a thousand pairs of buffer edits.
     shifts: Vec<Shift>,
     /// How many times a row has been marked damaged; see [`Screen::touches`].
     touches: u64,
     tabs: Vec<bool>,
     /// Rows of row 0's logical line that have already left the grid for Emacs.
     ///
-    /// [`Row::wrapped`] says a row is continued *below*. Nothing says a row is continued
-    /// from *above*, and once the rows above have been handed over there is nothing left
-    /// on the grid to ask — so a rewrap would chunk that leading fragment as though it
-    /// began a line, and its hard breaks would land `cols` from the fragment's start
-    /// rather than from the line's. The buffer then shows a row wider than the window.
+    /// [`Row::wrapped`] says a row is continued *below*; nothing on the grid says row 0 is
+    /// continued from *above* once those rows have been handed over. Without this, a rewrap
+    /// would chunk the leading fragment as though it began a line, and the buffer would show
+    /// a row wider than the window.
     ///
-    /// Counted in rows rather than cells because a row that leaves mid-line is exactly
-    /// `cols` wide — [`Row::line_runs`] keeps the trailing blanks that would otherwise cut
-    /// it short — making `carried * cols` the head's exact width. The one row handed over
-    /// narrower is the seam fragment [`Logical::take_front`] cuts, and that exists
-    /// precisely to top the head up to a whole number of rows at the new width, so
-    /// [`Screen::reflow`] restores the property before it returns and it holds
-    /// unconditionally. [`Screen::head`] is the same quantity in characters.
+    /// Counted in rows because a row that leaves mid-line is exactly `cols` wide
+    /// ([`Row::line_runs`] keeps its trailing blanks), so `carried * cols` is the head's
+    /// width. The seam fragment [`Logical::take_front`] cuts is narrower, but it exists to
+    /// top the head up to whole rows at the new width, so [`Screen::reflow`] restores the
+    /// property. [`Screen::head`] is the same quantity in characters.
     carried: usize,
     /// DECAWM, on by default as every terminal starts. See [`Screen::set_autowrap`].
     autowrap: bool,
@@ -255,16 +236,11 @@ pub struct Screen {
     insert_mode: bool,
     /// Whether rows leaving the top of this grid are history worth building.
     ///
-    /// False for the alternate grid, which is a running program's scratch frame and
-    /// contributes no transcript. [`State::evicted`](super::term) already refuses to
-    /// archive while the alternate screen is shown, and this does not replace that:
-    /// `evicted` is the funnel that owns the policy, and this only stops the *work* being
-    /// done for rows nobody will read. Deleting either is wrong.
-    ///
-    /// It cannot be folded into [`Screen::archives`]'s region test. That test asks whether
-    /// the scroll covers the whole grid, which is true of the alt screen as often as the
-    /// primary — so before this flag existed, every full-region scroll under `less` or
-    /// `vim` built a departure record per line and dropped it on the floor.
+    /// False for the alternate grid, which contributes no transcript.
+    /// [`State::evicted`](super::term) owns the policy of not archiving while the alternate
+    /// screen is shown; this only stops the *work* of building departure records nobody
+    /// will read. It cannot be folded into [`Screen::archives`], whose full-region test is
+    /// as true under `less` as on the primary.
     history: bool,
 }
 
@@ -277,19 +253,10 @@ impl Default for Screen {
 }
 
 impl Screen {
-    /// Both dimensions are floored at 1 here, not merely by convention at the callers
-    /// this binding happens to have. A zero-height screen has no last row for `arg()`'s
-    /// callers to default a 1-based CSI parameter against — `CSI r` (DECSTBM) is the
-    /// one place that default is the screen's own height rather than a literal — so
-    /// this module keeping its own invariant is what makes that call site's
-    /// `saturating_sub` a belt rather than the only strap.
-    ///
-    /// A zero *width* is worse than a defaulting problem: `Screen::write` finishes with
-    /// `self.cursor.col = cols - 1`, and four other sites subtract one from `cols` the
-    /// same way, so the first character printed onto a zero-column grid panics. That is
-    /// unreachable today only because `lib.rs` clamps what Emacs reports, two layers
-    /// away — which is exactly the arrangement the paragraph above says this module does
-    /// not rely on. One `max` here makes the panic unrepresentable instead.
+    /// Both dimensions are floored at 1 here rather than trusting callers. A zero-height
+    /// screen has no last row for `CSI r` to default to, and a zero width would panic on
+    /// the first character, since `Screen::write` and four other sites subtract one from
+    /// `cols`. `lib.rs` clamps what Emacs reports, but this module keeps its own invariant.
     pub fn new(rows: usize, cols: usize) -> Self {
         let rows = rows.max(1);
         let cols = cols.max(1);
@@ -312,11 +279,9 @@ impl Screen {
 
     /// A grid whose departing rows are not history: the alternate screen.
     ///
-    /// A constructor rather than a field left for the caller to clear, because the two
-    /// grids are built side by side in `State::new` and a flag assigned
-    /// after the fact is one a later edit can drop without anything failing — the symptom
-    /// would be wasted work, which no test asserts the absence of. Saying it in the name
-    /// makes it structural. See [`Screen::history`].
+    /// A constructor rather than a flag for the caller to clear, because dropping such an
+    /// assignment would only waste work, which no test would notice. See
+    /// [`Screen::history`].
     pub fn scratch(rows: usize, cols: usize) -> Self {
         Self {
             history: false,
@@ -402,30 +367,19 @@ impl Screen {
 
     /// Hand row INDEX to EDIT, and damage it only if EDIT says it changed something.
     ///
-    /// [`Screen::touch`]'s conditional twin, and the difference is worth a paragraph
-    /// because damage is the unit Emacs pays in. A damaged row is deleted, reinserted and
-    /// re-propertized on the Lisp side, which dirties the glyph matrix for it — so a
-    /// full-screen program repainting a frame identical to the last one used to cost a
-    /// whole screen of that for a picture nobody could tell apart from the one already
-    /// drawn. The writers ([`Row::set`], [`Row::fill_run`], [`Row::fill`],
-    /// [`Row::erase_all`]) each report whether the cells they wrote differ from the cells
-    /// that were there, and this is where that answer becomes the flag.
+    /// [`Screen::touch`]'s conditional twin. Damage is the unit Emacs pays in -- a damaged
+    /// row is deleted, reinserted and re-propertized -- so a full-screen program repainting
+    /// an identical frame should cost nothing. The writers ([`Row::set`], [`Row::fill_run`],
+    /// [`Row::fill`], [`Row::erase_all`]) report whether the cells they wrote differ, and
+    /// this turns that answer into the flag.
     ///
-    /// **It is not a general equality check on the row, and must not become one.** There
-    /// is no shadow copy of the previous frame here; each writer compares only the cells
-    /// it is about to overwrite. So the paths where damage means something other than
-    /// "these cells now read differently" keep `touch` and mark unconditionally, and they
-    /// are all of them deliberate: [`Screen::touch_all`] (Emacs asked for the screen back
-    /// whether or not it changed), the row-shifting operations
-    /// ([`Screen::scroll_up`]/[`Screen::scroll_down`]/[`Screen::remove_rows`], which move
-    /// rows rather than write cells, so a row has new text at its own index without any
-    /// writer having been asked anything — though the two scrolls now damage only the
-    /// rows they *recycled* and report the rest as a [`Shift`], which is the same claim
-    /// made more precisely rather than a weaker one), [`Screen::clear_rows`] (see
-    /// [`Row::clear`], which declines to answer because the scroll path would pay for
-    /// the answer and discard it), the
-    /// image and attachment writers, and the combining-mark path. The cursor needs none of this: it rides the [`Delta`](super::term) on every
-    /// drain and never depended on its row being damaged.
+    /// **It is not a general equality check on the row.** There is no copy of the previous
+    /// frame; each writer compares only the cells it overwrites. Paths where damage means
+    /// something else keep `touch`: [`Screen::touch_all`], because Emacs asked for the screen
+    /// back; the row-moving operations, which put new text at an index without writing
+    /// cells (the scrolls report the moved rows as a [`Shift`]); [`Screen::clear_rows`], for
+    /// the reason [`Row::clear`] gives; the image and attachment writers; and the
+    /// combining-mark path.
     ///
     /// Returns whether there was a row at INDEX at all, which is not the same question as
     /// whether anything changed — [`Screen::write_run`] has to tell the two apart to say
@@ -451,10 +405,7 @@ impl Screen {
     /// Mark every row in an inclusive range damaged.
     ///
     /// A slice fill rather than a loop of `dirty.get_mut(i)`: `scroll_up` calls this on
-    /// *every* scrolled line, so the per-index bounds check was one branch per row per
-    /// line of output. Clamping once and filling lets this be the memset it always was.
-    /// The range it is called with there is now the recycled rows rather than the whole
-    /// region — see [`Shift`] — which does not change the argument, only its scale.
+    /// every scrolled line, and clamping once lets it be a memset.
     fn touch_range(&mut self, range: std::ops::RangeInclusive<usize>) {
         let (first, last) = range.into_inner();
         let end = (last + 1).min(self.dirty.len());
@@ -467,11 +418,9 @@ impl Screen {
     pub fn touch_all(&mut self) {
         self.dirty.fill(true);
         self.touches += 1;
-        // Every row is about to be sent whole, so the buffer text a pending shift would
-        // have moved is about to be overwritten anyway — see [`Shift`] on the one
-        // direction the trade goes. Dropping the log is not merely an optimisation here:
-        // `resize` damages everything precisely because it changed the row count, and a
-        // shift naming a `bottom` the grid no longer has is a shift Lisp cannot apply.
+        // Every row is about to be sent whole, so pending shifts can go -- and must, after
+        // a resize, since a shift naming a `bottom` the grid no longer has cannot be
+        // applied.
         self.shifts.clear();
     }
 
@@ -481,10 +430,8 @@ impl Screen {
     /// damaged rows: the damage indices are in post-shift coordinates, because the dirty
     /// flags travel with their rows through every move (see [`Screen::scroll_up`]).
     ///
-    /// Saturated entries are dropped here rather than at the moment they saturate; see
-    /// [`Screen::shift`] for why they have to stay in the log until then. A region that
-    /// turned over completely has every row damaged, so moving its text would be work
-    /// spent on lines that are about to be rewritten from the grid regardless.
+    /// Saturated entries are dropped here, since a region that turned over completely has
+    /// every row damaged; see [`Screen::shift`] for why they stay in the log until then.
     pub fn drain_shifts(&mut self) -> Vec<Shift> {
         let mut shifts = std::mem::take(&mut self.shifts);
         shifts.retain(|s| s.count < s.bottom + 1 - s.top);
@@ -494,29 +441,20 @@ impl Screen {
     /// Record that `n` rows moved within `top..=bottom`, returning whether it was worth
     /// recording; see [`Shift`].
     ///
-    /// Coalescing is by identity of the region and the direction rather than by any
-    /// arithmetic on overlapping ranges, and only against the immediately preceding
-    /// entry. Two moves of the same rows the same way compose into one move of their
-    /// sum — that much is arithmetic — and it is the only composition worth having,
-    /// because it is the only one a flood produces. Anything else stays a separate entry
-    /// and costs Emacs a pair of buffer edits, which is what an interleaved pair of
-    /// scroll regions genuinely costs.
+    /// Coalescing is by identity of the region and direction, and only against the
+    /// preceding entry: two moves of the same rows the same way compose into one, which is
+    /// the only composition a flood produces. Anything else stays a separate entry.
     ///
-    /// **False once the accumulated move reaches the region's height**, and that is the
-    /// case to get right rather than the elegant one. A `cat` of a thousand lines turns a
-    /// 24-row screen over forty times: every row is recycled, so every row is damaged and
-    /// rewritten anyway, and a shift on top of that would be a whole-region delete and
-    /// insert bought for nothing — the old cost plus the new one. So the caller damages
-    /// the whole region, which is exactly what it did before this change, and
-    /// [`Screen::drain_shifts`] drops the entry on the way out.
+    /// **False once the accumulated move reaches the region's height.** A `cat` of a
+    /// thousand lines turns a 24-row screen over forty times, recycling every row, so a
+    /// shift on top would be a whole-region delete and insert bought for nothing. The
+    /// caller damages the whole region instead, and [`Screen::drain_shifts`] drops the
+    /// entry.
     ///
-    /// The entry is *kept* meanwhile, saturated at the height, rather than removed here.
-    /// Removing it looks tidier and is the version to avoid: the next line feed would find
-    /// no entry to coalesce with, push a fresh one, and climb back to the height — so a
-    /// flood would spend twenty-three scrolls out of every twenty-four with a live entry
-    /// in the log, and hand Emacs a pair of buffer edits per drain for rows it is about to
-    /// rewrite anyway. Saturated and kept, the log holds one entry for the whole flood and
-    /// every subsequent scroll answers false in two comparisons.
+    /// The entry is *kept*, saturated at the height, rather than removed. Removed, the next
+    /// line feed would push a fresh entry that climbs back to the height, and a flood would
+    /// hand Emacs buffer edits per drain for rows it is about to rewrite. Kept, every later
+    /// scroll answers false in two comparisons.
     fn shift(&mut self, top: usize, bottom: usize, n: usize, direction: Direction) -> bool {
         let height = bottom + 1 - top;
         if let Some(last) = self.shifts.last_mut() {
@@ -540,11 +478,9 @@ impl Screen {
     /// destructive and by a caller who only wants to know whether anything happened --
     /// see `Term::feed`, which compares two readings of it.
     ///
-    /// A running count rather than "is any row dirty", which is the obvious form and is
-    /// wrong in the case that matters: damage stays up until Emacs drains, so between two
-    /// reads of a program repainting flat out the flag says `true` both times and the
-    /// second read looks like it did nothing. A count saturates at `u64`, which is a
-    /// hundred years of touching a row every nanosecond.
+    /// A running count rather than "is any row dirty": damage stays up until Emacs drains,
+    /// so for a program repainting flat out the flag would say `true` on both sides of a
+    /// read and the read would look like it did nothing.
     pub fn touches(&self) -> u64 {
         self.touches
     }
@@ -564,12 +500,10 @@ impl Screen {
 
     /// Print one character at the width a width table gives it.
     ///
-    /// The unsegmented form, kept for the callers that genuinely have one character and
-    /// no stream around it: `REP`, which repeats the last graphic character, and the
-    /// tests in this module. The printing path proper does not come through here — it
-    /// goes through [`Screen::place`] and [`Screen::join`] with a width the
-    /// [`Segmenter`](crate::emu::text::Segmenter) worked out, because a width is a
-    /// property of a grapheme cluster and not of a code point.
+    /// The unsegmented form, for callers with one character and no stream around it: `REP`
+    /// and the tests. Ordinary printing goes through [`Screen::place`] and [`Screen::join`]
+    /// with a width the [`Segmenter`](crate::emu::text::Segmenter) measured, because width
+    /// belongs to a grapheme cluster rather than a code point.
     pub fn write(&mut self, ch: char, style: Style) -> Evicted {
         match crate::emu::text::char_cells(ch) {
             0 => {
@@ -585,21 +519,15 @@ impl Screen {
     ///
     /// BEFORE is how many columns that cell stood on, which is what locates it: the
     /// cursor has moved past it by exactly that much, or is pinned at the last column
-    /// with a deferred wrap armed, in which case the cell ends at the right edge. It is
-    /// the same arithmetic [`Screen::mark_underline`] does and for the same reason — a
-    /// mark on a continuation cell is a mark [`Row::runs`] skips, which is to say a mark
-    /// that vanishes. A BEFORE of zero means there was no such cell at all (a combining
-    /// mark first thing on a row); the long-standing answer, kept here, is to fold it
-    /// onto the cell to the left and let a blank carry it.
+    /// with a deferred wrap armed, in which case the cell ends at the right edge. It is the
+    /// arithmetic [`Screen::mark_underline`] does, because a mark on a continuation cell is
+    /// one [`Row::runs`] skips. A BEFORE of zero means there was no such cell (a combining
+    /// mark first thing on a row), and the mark folds onto the cell to the left.
     ///
-    /// AFTER is what the cell measures now, which differs from BEFORE only for a
-    /// variation selector — `U+FE0F` promoting a text-presentation character to a
-    /// two-column emoji, `U+FE0E` demoting it back. The spec is explicit that these
-    /// resize a cell already drawn, and equally explicit that this is awkward: it means
-    /// the width of a string cannot be known without knowing the width of the screen it
-    /// lands on, since a widening at the right edge has nowhere to go. That case is
-    /// declined rather than wrapped — the character is already on this row and moving it
-    /// to the next would be a worse lie than being a column narrow.
+    /// AFTER differs from BEFORE only for a variation selector -- `U+FE0F` promoting a
+    /// character to a two-column emoji, `U+FE0E` demoting it. A widening at the right edge
+    /// has nowhere to go and is declined rather than wrapped, since moving a character
+    /// already drawn to the next row would be worse than being a column narrow.
     ///
     /// Returns the columns the cell ended up standing on, which is AFTER unless the
     /// widening was declined. The caller records it, because from then on it is that
@@ -685,10 +613,8 @@ impl Screen {
         }
 
         let (row, col) = (self.cursor.row, self.cursor.col);
-        // One `touch` for both edits. Two of them re-did the damage flag and the row
-        // lookup for every character written in insert mode, and this is the hottest call
-        // in the emulator -- so the insert lives inside the borrow rather than taking its
-        // own.
+        // One `touch` for both edits, so insert mode does not pay for the damage flag and
+        // row lookup twice on the hottest call in the emulator.
         self.edit(row, |r| {
             // `|=` and not `||`: every write has to happen, so none of these may be
             // short-circuited away by an earlier one having already reported damage.
@@ -721,11 +647,10 @@ impl Screen {
     /// Leave the cursor at column END, or pinned at the last column with the deferred
     /// wrap armed if END is off the row.
     ///
-    /// One copy, because there are now three writers that finish a character — the
-    /// ordinary print, a variation selector resizing what it landed on, and an `OSC 66`
-    /// block — and the deferred wrap is the single subtlest thing in this file. A second
-    /// spelling of it is how the three would come to disagree, and a client detects this
-    /// protocol by *reading the cursor back*, so a disagreement is not cosmetic.
+    /// One copy for the three writers that finish a character -- the ordinary print, a
+    /// variation selector resizing its cell, and an `OSC 66` block -- because the deferred
+    /// wrap is the subtlest thing in this file and `OSC 66` clients detect support by
+    /// reading the cursor back.
     fn settle_cursor(&mut self, end: usize) {
         if end >= self.cols {
             self.cursor.col = self.cols - 1;
@@ -773,16 +698,12 @@ impl Screen {
     ///
     /// Returns how many were placed, which may be fewer than offered and may be zero; the
     /// caller writes whatever is left through [`Screen::write`], one character at a time.
-    /// That split is deliberate. Everything genuinely hard about placing a character --
-    /// the deferred wrap, DECAWM, the scroll it can trigger, wide characters and the
-    /// continuation cell they need, combining marks folding onto the cell to their left --
-    /// stays in `write`, in one copy. This handles only the case where none of that
-    /// applies, which is also the case that accounts for nearly all output.
+    /// Everything hard about placing a character -- the deferred wrap, DECAWM, scrolling,
+    /// wide characters, combining marks -- stays in `write`, in one copy. This handles only
+    /// the case where none of it applies, which is nearly all output.
     ///
-    /// **The last column is left alone on purpose.** It is where `write` decides whether
-    /// to arm the deferred wrap, and a second copy of that decision is how the two would
-    /// drift apart. So the run stops one short and `write` places the character that
-    /// lands there.
+    /// **The last column is left alone**, because that is where `write` decides whether to
+    /// arm the deferred wrap, and a second copy of that decision could drift.
     ///
     /// Insert mode and a pending wrap both bail out entirely rather than being handled:
     /// IRM shifts the row per character, and a pending wrap means the next character
@@ -836,11 +757,9 @@ impl Screen {
 
     /// Record the pen's open hyperlink on the cell the cursor just wrote.
     ///
-    /// [`Screen::mark_underline`]'s twin, including the wide-character arithmetic: the
-    /// id must land on the lead column, because [`Row::runs`] skips continuation cells
-    /// and an attachment on one would simply vanish. Only the *reason* the pen holds a
-    /// link differs from the underline colour's, and it differs sharply — see
-    /// `Term`'s `link` field.
+    /// [`Screen::mark_underline`]'s twin, including the wide-character arithmetic that puts
+    /// the id on the lead column. See `State::link` for how an open link differs from an
+    /// underline colour.
     pub fn mark_link(&mut self, link: Option<LinkId>, width: usize) {
         let (row, cols) = (self.cursor.row, self.cols);
         let col = if self.cursor.wrap_pending {
@@ -968,39 +887,26 @@ impl Screen {
         if n == 0 {
             return Evicted::none();
         }
-        // Reduced here, from the rows still in place, rather than cloned across the
-        // rotation below. `rotate_left` moves rows without touching their contents and
-        // the `clear` after it is what the clone used to be protecting against, so
-        // reading them first is trivially equivalent -- and it is the difference between
-        // one `Vec<Cell>` copy per scrolled line and none.
-        //
-        // After the flag, not before: `Screen::write` marks the row above `wrapped` on a
-        // write-wrap and only then calls `linefeed`, so the value `line_runs` reads here
-        // is the settled one.
+        // Reduced here, from the rows still in place, so no row is cloned across the
+        // rotation below. `Screen::write` marks the row above `wrapped` before calling
+        // `linefeed`, so the flag `line_runs` reads is already settled.
         let evicted = if self.archives() {
             Evicted::from_rows(&self.rows[top..top + n])
         } else {
             Evicted::none()
         };
         self.rows[top..=bottom].rotate_left(n);
-        // The dirty flags rotate with the rows they belong to, which is what lets the
-        // damage this drain reports be read in post-shift coordinates. Without it a row
-        // written before the scroll and moved by it would be reported at the index it
-        // used to have, and Emacs would repaint the wrong line with it.
-        //
-        // Under the old unconditional `touch_range(top..=bottom)` the question could not
-        // arise, every row in the region being damaged either way. It arises now.
+        // The dirty flags rotate with their rows, so the damage reported is in post-shift
+        // coordinates; otherwise a row written before the scroll would be repainted at the
+        // index it used to have.
         self.dirty[top..=bottom].rotate_left(n);
         for row in &mut self.rows[bottom + 1 - n..=bottom] {
             row.clear(pen.erase());
         }
-        // The whole of this change. The rows above the recycled ones hold text they
-        // already held, at a different index, and Emacs can move buffer text far more
-        // cheaply than it can be handed it again — and moving it is what keeps the
-        // markers, overlays and fontification anchored in those rows alive. Only the
-        // blanks rotated in at the bottom are genuinely new. The `else` is the region
-        // having turned over completely, where there is nothing left to move; see
-        // [`Screen::shift`].
+        // The rows above the recycled ones hold the text they already held at another
+        // index, which Emacs can move cheaply while keeping its markers and overlays; only
+        // the blanks rotated in are new. The `else` is the region having turned over
+        // completely; see [`Screen::shift`].
         if self.shift(top, bottom, n, Direction::Up) {
             self.touch_range(bottom + 1 - n..=bottom);
         } else {
@@ -1017,20 +923,14 @@ impl Screen {
     /// into the buffer as scrollback. Rows below shift up, blanks come in at the bottom,
     /// and the whole affected span is marked damaged so the next drain repaints it.
     ///
-    /// This is the only way the grid may be edited from outside, and it goes through the
-    /// emulator for the same reason input does: rows have exactly one owner. Emacs asks;
-    /// nothing above ever deletes buffer text the grid still holds, or the two ends stop
-    /// agreeing about what the screen is.
+    /// Rows have one owner, so Emacs asks rather than deleting buffer text the grid still
+    /// holds.
     ///
-    /// Removing from the very top clears [`Screen::carried`]. That count says how much of
-    /// row 0's logical line has already been handed to Emacs, and once row 0 itself is
-    /// gone the new top row continues nothing.
+    /// Removing from the very top clears [`Screen::carried`]: once row 0 is gone, the new
+    /// top row continues nothing.
     ///
-    /// The scroll region is deliberately left alone. The row count is unchanged, so its
-    /// bounds stay valid, and resetting it here would clear a child's `DECSTBM` as a side
-    /// effect of an unrelated edit — [`Screen::delete_lines`] saves and restores it around
-    /// its own temporary change for the same reason, and [`Screen::reset_region`] exists
-    /// for the callers that mean it.
+    /// The scroll region is left alone. The row count is unchanged, so its bounds stay
+    /// valid, and resetting it would clear a child's `DECSTBM` as a side effect.
     pub fn remove_rows(&mut self, first: usize, count: usize) {
         let height = self.rows.len();
         let first = first.min(height);
@@ -1038,14 +938,9 @@ impl Screen {
         if count == 0 {
             return;
         }
-        // No [`Shift`] and no rotation of the dirty flags, unlike the scroll paths, and
-        // both omissions rest on the `touch_range` at the bottom of this function: every
-        // row from `first` down is damaged unconditionally, so a flag left at the index
-        // its row used to have is subsumed rather than lost, and there is no undamaged
-        // row below the cut whose text Emacs would have to move to keep correct. A shift
-        // already logged by a scroll earlier in the same drain stays in the log and is
-        // still right to apply — it moves text that is then repainted from `first` down,
-        // and a shift preserves the region's line count either way.
+        // No [`Shift`] and no rotation of the dirty flags, unlike the scrolls: every row
+        // from `first` down is damaged unconditionally below, so there is nothing to keep
+        // correct by moving. A shift logged earlier in the drain is still right to apply.
         self.rows.drain(first..first + count);
         let pen = Style::default();
         self.rows.resize(height, Row::new(self.cols));
@@ -1131,12 +1026,9 @@ impl Screen {
 
     /// Erase, returning rows that became scrollback.
     ///
-    /// Only `All` yields any, and only off an unpartitioned screen. Clearing the whole
-    /// display is the child discarding a screen it has finished with — `clear` and the
-    /// shell's `C-l` both arrive here — and blanking those rows in place deleted a
-    /// screenful of transcript from the Emacs buffer with them. xterm loses it too, which
-    /// is why `clear -x` exists; but history here belongs to Emacs, not to the grid, so
-    /// the grid has no business dropping it.
+    /// Only `All` yields any, and only off an unpartitioned screen. Clearing the display is
+    /// the child finishing with a screen -- `clear` and the shell's `C-l` both arrive here --
+    /// and history belongs to Emacs, so the rows are archived rather than blanked away.
     ///
     /// A partial erase archives nothing: the child is rewriting part of a screen it is
     /// still drawing on, not finishing with one.
@@ -1226,11 +1118,8 @@ impl Screen {
             top: self.cursor.row,
             bottom: saved.bottom,
         };
-        // Deleting at row 0 of an unpartitioned screen looks to `scroll_up` exactly like
-        // rows leaving the top, but these are discarded rather than handed to Emacs, so
-        // what Emacs holds — and therefore where the buffer wraps the top line — has not
-        // changed. Letting the carry advance here would have a later rewrap hand over
-        // cells to complete a row that was already complete.
+        // Deleting at row 0 looks to `scroll_up` like rows leaving the top, but these are
+        // discarded, so what Emacs holds has not changed and the carry must not advance.
         let carried = self.carried;
         self.scroll_up(n, pen).discard();
         self.carried = carried;
@@ -1239,13 +1128,10 @@ impl Screen {
 
     /// HT/CHT: forward `count` tab stops, pinned at the last column.
     ///
-    /// `count` is clamped to the width for the same reason REP is clamped to the screen
-    /// and SU/SD to the region's height: the parameter is a `u16` off the wire, so three
-    /// bytes can ask for 65535 of these, and every iteration past `cols` is provably a
-    /// no-op because the cursor saturated at the last column before it. Unclamped it was
-    /// linear in the count all the way up -- a 24x200 grid feeding plain ASCII at 45.8
-    /// MB/s dropped to 0.29 MB/s under `CSI 65535 I`, which is a denial of service
-    /// spelled in five bytes.
+    /// `count` is clamped to the width, as REP is clamped to the screen: the parameter is a
+    /// `u16` off the wire, and every iteration past `cols` is a no-op. Unclamped, `CSI 65535
+    /// I` took a 24x200 grid from 45.8 MB/s to 0.29 MB/s -- a denial of service in five
+    /// bytes.
     pub fn tab(&mut self, count: usize) {
         let count = count.min(self.cols);
         let col = (0..count).fold(self.cursor.col, |col, _| {
@@ -1305,12 +1191,9 @@ impl Screen {
 
     /// DECALN: the margins reset, the cursor home and every cell an `E`.
     ///
-    /// The alignment pattern vttest draws its frames against. The caller erases the
-    /// display first, through the same path `CSI 2J` takes, so that what was on a primary
-    /// screen goes to history rather than being painted over: the pattern replaces a
-    /// screen just as a clear does, and only one of those should decide what happens to
-    /// the transcript. That leaves this writing onto blank rows, and the cells go down in
-    /// the default rendition whatever the pen holds, which is what xterm does.
+    /// The alignment pattern vttest draws against. The caller erases the display first,
+    /// through the `CSI 2J` path, so a primary screen's contents go to history. The cells
+    /// go down in the default rendition whatever the pen holds, as in xterm.
     pub fn align(&mut self) {
         let pattern = "E".repeat(self.cols);
         for i in 0..self.rows.len() {
@@ -1358,9 +1241,8 @@ impl Screen {
     /// Resize, returning rows that became scrollback.
     ///
     /// Shrinking absorbs the blank rows below the content first. Evicting from the top
-    /// instead — the obvious implementation — pushes the visible prompt into scrollback
-    /// while keeping the empty rows underneath it, so the transcript gains a duplicate of
-    /// whatever was on screen.
+    /// instead would push the visible prompt into scrollback while keeping the empty rows
+    /// under it.
     ///
     /// A width change under [`Resize::Rewrap`] re-lays the grid out instead of cutting it;
     /// see [`Screen::reflow`]. Not when a scroll region is set: the rows either side of the
@@ -1418,16 +1300,11 @@ impl Screen {
 
     /// Rewrap the grid to `rows` by `cols`, returning rows pushed off the top as history.
     ///
-    /// The live grid is a transcript Emacs has not been given yet, so truncating it to a
-    /// narrower width destroys text outright: run `ps`, narrow the frame, and the columns
-    /// past the new edge are simply gone. `Row::wrapped` records which rows are
-    /// continuations rather than lines of their own, which is enough to recover the lines
-    /// the child actually printed and chunk them again at the new width.
-    ///
-    /// Scrollback has always worked this way: it keeps one buffer line per logical line and
-    /// lets Emacs re-wrap it for display. This gives the live screen the same property, and
-    /// with it the round trip — narrowing and widening back returns the original layout,
-    /// because the wrap provenance is preserved rather than destroyed.
+    /// The live grid is transcript Emacs has not been given yet, so truncating it would
+    /// destroy text: run `ps`, narrow the frame, and the columns past the edge are gone.
+    /// `Row::wrapped` is enough to recover the lines the child printed and chunk them again,
+    /// so narrowing and widening back returns the original layout, as scrollback already
+    /// does.
     fn reflow(&mut self, rows: usize, cols: usize) -> Evicted {
         // Cells of the first line that are already in Emacs, measured at the width they
         // were chunked at — which is the one still in force as the grid is read.
@@ -1691,8 +1568,8 @@ impl Logical {
         let mut cells = self.cells[start..taken].to_vec();
         cells.resize(cols, Cell::default());
         // Bounded by `taken`, not by `end`: `chunk` hands this a range wider than the
-        // screen for a character that fits nowhere, and filtering against the unclamped
-        // range then built a row whose attachments indexed past its own cells.
+        // screen for a character that fits nowhere, and the attachments must not index
+        // past the row's own cells.
         let mut extras: Vec<(u16, Extra)> = self
             .extras
             .iter()
@@ -2023,9 +1900,8 @@ mod tests {
             write(screen, "top");
         }
 
-        // Both scroll the full region, which is the only condition `archives' used to
-        // test -- so before `history' this pair was indistinguishable and the scratch
-        // grid built a departure record per line for a transcript that does not exist.
+        // Both scroll the full region, so `archives' alone cannot tell them apart;
+        // `history' is what stops the scratch grid building departure records.
         assert_eq!(primary.scroll_up(1, Style::default()).len(), 1);
         assert!(scratch.scroll_up(1, Style::default()).is_empty());
 
