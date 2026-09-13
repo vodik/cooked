@@ -15,7 +15,7 @@
 
 use crate::error::{Error, Result};
 use nix::errno::Errno;
-use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::poll::{PollFd, PollFlags, PollTimeout};
 use nix::pty::{PtyMaster, grantpt, posix_openpt, unlockpt};
 use nix::sys::signal::{Signal, killpg};
@@ -202,7 +202,7 @@ pub(crate) struct Pty {
 /// Generous enough that a legitimate large bracketed paste to a briefly slow reader
 /// (a shell about to start echoing) never trips it; short enough that a genuinely
 /// stopped job (`C-z`) turns into a prompt error instead of a frozen editor.
-const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+pub(crate) const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Cap a remaining-time budget to what [`nix::poll::poll`] accepts, without waiting past
 /// the deadline computed from [`WRITE_TIMEOUT`].
@@ -291,6 +291,14 @@ impl Pty {
             }
         }
 
+        // Non-blocking, so a reply can be offered to a child that is not reading without
+        // waiting on it; see `Pty::write_some`. Nothing here ever relied on blocking: the
+        // reader polls before it reads and `Pty::write` polls before it writes. Set on the
+        // parent's side after the fork, since the flag belongs to the open file and the
+        // child has closed its copy of the master either way.
+        let flags = OFlag::from_bits_retain(fcntl(&master, FcntlArg::F_GETFL)?);
+        fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
+
         Ok(Self {
             master,
             child: Pid(child),
@@ -368,41 +376,58 @@ impl Pty {
 
     /// Write to the child, without blocking Emacs' only thread forever on it.
     ///
-    /// The master is a blocking fd, and `write(2)` on a tty blocks once its input queue
-    /// is full — a stopped job (`C-z`/`SIGSTOP`), a full-screen program not reading, or
-    /// flow control all fill it. This function is called directly on the thread holding
-    /// the `emacs_env` (see `env.rs`'s own rule that such a thread must never block), so
-    /// it polls for writability first and gives up after [`WRITE_TIMEOUT`] rather than
-    /// waiting on the child indefinitely. A short individual poll keeps the common case
-    /// (plenty of room) indistinguishable from the old unconditional write; the bound
-    /// only ever bites when the child truly cannot make progress.
-    pub(crate) fn write(&self, mut buf: &[u8]) -> Result<()> {
-        let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
+    /// `write(2)` on a tty cannot complete once its input queue is full -- a stopped job
+    /// (`C-z`/`SIGSTOP`), a full-screen program not reading, or flow control all fill it.
+    /// This function is called directly on the thread holding the `emacs_env` (see
+    /// `env.rs`'s own rule that such a thread must never block), so it polls for
+    /// writability and gives up at DEADLINE rather than waiting on the child indefinitely.
+    /// A short individual poll keeps the common case (plenty of room) indistinguishable
+    /// from an unconditional write; the bound only ever bites when the child truly cannot
+    /// make progress.
+    pub(crate) fn write(&self, mut buf: &[u8], deadline: std::time::Instant) -> Result<()> {
         while !buf.is_empty() {
+            self.wait_writable(deadline)?;
+            buf = &buf[self.write_some(buf)?..];
+        }
+        Ok(())
+    }
+
+    /// Wait until the child's input queue has room, or DEADLINE passes.
+    pub(crate) fn wait_writable(&self, deadline: std::time::Instant) -> Result<()> {
+        loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(Error::WriteTimeout);
             }
             let mut fds = [PollFd::new(self.master.as_fd(), PollFlags::POLLOUT)];
             match nix::poll::poll(&mut fds, poll_timeout(remaining)) {
-                Ok(0) => continue, // timed out this round; loop re-checks the deadline
+                // Timed out this round; the loop re-checks the deadline.
+                Ok(0) | Err(Errno::EINTR) => continue,
                 Ok(_) => {}
-                Err(Errno::EINTR) => continue,
                 Err(e) => return Err(e.into()),
             }
-            if !fds[0]
-                .revents()
-                .is_some_and(|r| r.contains(PollFlags::POLLOUT))
-            {
-                continue;
-            }
-            match nix::unistd::write(self.master.as_fd(), buf) {
-                Ok(n) => buf = &buf[n..],
-                Err(Errno::EINTR) | Err(Errno::EAGAIN) => {}
-                Err(e) => return Err(e.into()),
+            // Anything but POLLOUT is an error or a hangup, which the write itself reports
+            // more precisely than the event bits do.
+            if fds[0].revents().is_some_and(|r| !r.is_empty()) {
+                return Ok(());
             }
         }
-        Ok(())
+    }
+
+    /// Write as much of BUF as the child's input queue has room for, without waiting.
+    ///
+    /// Answers how many bytes went, which is 0 when the queue is full. The master is
+    /// non-blocking, so this can never park the calling thread; it is how a reply is
+    /// offered to a child that may have stopped reading.
+    pub(crate) fn write_some(&self, buf: &[u8]) -> Result<usize> {
+        loop {
+            return match nix::unistd::write(self.master.as_fd(), buf) {
+                Ok(n) => Ok(n),
+                Err(Errno::EAGAIN) => Ok(0),
+                Err(Errno::EINTR) => continue,
+                Err(e) => Err(e.into()),
+            };
+        }
     }
 
     /// Read available output. An empty slice means the child closed the slave end.
@@ -557,7 +582,6 @@ fn resolve(program: &OsStr, path: Option<&str>) -> Result<CString> {
 /// POSIX specifies only `O_RDWR | O_NOCTTY` for `posix_openpt` and macOS rejects
 /// anything more with `EINVAL`, so fall back to setting the flag by hand.
 fn open_master() -> Result<PtyMaster> {
-    use nix::fcntl::OFlag;
     match posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_CLOEXEC) {
         Err(Errno::EINVAL) => {
             let master = posix_openpt(OFlag::O_RDWR | OFlag::O_NOCTTY)?;

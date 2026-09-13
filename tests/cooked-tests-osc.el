@@ -1720,6 +1720,65 @@ colours it draws, which DECSCNM exchanges."
                           'light)))))
       (delete-file out))))
 
+(ert-deftest cooked-osc-4-sweep-is-answered-in-one-write ()
+  "A theme picker asking for all 256 palette entries gets them back in one write.
+
+Each answer used to be its own synchronous write to the pty, so the sweep cost
+256 of them, each able to stall on a child that had stopped reading.  The
+queries go out from a file in one `cat', so they reach the core in one read and
+Lisp in one drain."
+  (let ((out (make-temp-file "cooked-osc4-sweep"))
+        (queries (make-temp-file "cooked-osc4-queries"))
+        (writes nil)
+        (reply (symbol-function 'cooked--reply)))
+    (unwind-protect
+        (progn
+          (with-temp-file queries
+            (dotimes (n 256) (insert (format "\e]4;%d;?\a" n))))
+          (cl-letf (((symbol-function 'cooked--reply)
+                     (lambda (session bytes)
+                       (when (string-match-p "\e]4;" bytes) (push bytes writes))
+                       (funcall reply session bytes))))
+            (cooked-tests--with-session
+                (list "/bin/sh" "-c"
+                      (format "stty raw -echo; cat %s; cat > %s" queries out))
+              (should (cooked-tests--settle
+                       (lambda () (string-match-p "4;255;rgb:"
+                                                  (cooked-tests--contents out)))))
+              (should (= 1 (length writes)))
+              (should (equal (cooked-tests--contents out) (car writes)))
+              (should (string-prefix-p "\e]4;0;rgb:" (car writes))))))
+      (delete-file out)
+      (delete-file queries))))
+
+(ert-deftest cooked-a-frozen-buffer-keeps-a-colour-answer-ahead-of-da1 ()
+  "DA1 behind a colour query waits with the query for the thaw, and follows it.
+
+A program asks for the background and then DA1, and takes DA1 answered first
+as the colour never coming.  Only Lisp can answer the colour, and a frozen
+buffer does not drain, so the core must not send DA1 on ahead of it."
+  (let ((out (make-temp-file "cooked-frozen-osc11"))
+        (flag (make-temp-name (expand-file-name "cooked-frozen-flag"
+                                                temporary-file-directory))))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "stty raw -echo; printf ready; until [ -e %s ]; do sleep 0.02; done; printf '\\033]11;?\\033\\\\\\033[c'; cat > %s"
+                          flag out))
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "ready" (cooked-tests--text)))))
+          (setq cooked--input-mode 'frozen)
+          (write-region "" nil flag)
+          (cooked-tests--pump 0.5)
+          (should (equal "" (cooked-tests--contents out)))
+          (setq cooked--input-mode nil)
+          (should (cooked-tests--settle
+                   (lambda () (string-suffix-p "c" (cooked-tests--contents out)))))
+          (should (string-match-p "\\`\e\\]11;rgb:[^\e]+\e\\\\\e\\[\\?62[;0-9]*c\\'"
+                                  (cooked-tests--contents out))))
+      (delete-file out)
+      (ignore-errors (delete-file flag)))))
+
 (ert-deftest cooked-osc-color-reply-echoes-the-terminator-it-was-asked-with ()
   "A client that queried with ST does not recognise a BEL-terminated answer."
   (let ((out (make-temp-file "cooked-osc10")))

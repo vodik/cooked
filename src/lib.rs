@@ -19,6 +19,7 @@ pub(crate) mod env;
 pub(crate) mod error;
 pub(crate) mod platform;
 pub(crate) mod pty;
+pub(crate) mod replies;
 pub(crate) mod session;
 mod wire;
 
@@ -181,7 +182,15 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         "cooked--drain" 1..=2 => drain;
 
         /// Write STRING to the pty of SESSION.
+        /// Waits up to three seconds for a child that is not reading, then signals, having
+        /// sent whatever it took by then. Replies already queued for the child go first.
         "cooked--send" 2..=2 => send;
+
+        /// Owe SESSION's child STRING, a reply, without waiting for it to be read.
+        /// Queued behind earlier replies and written as far as the pty has room for now;
+        /// the rest follows once the child reads. Never blocks and never signals: a child
+        /// that has stopped reading for long enough loses the reply instead.
+        "cooked--reply" 2..=2 => reply;
 
         /// A VT filter with no terminal behind it, for a comint buffer.
         /// Holds a resumable parser, a pen and one line of cells; see `cooked--filter-feed'.
@@ -212,12 +221,12 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// what is new and takes nothing back.
         "cooked--filter-feed" 3..=3 => filter_feed;
 
-        /// Answer an OSC query on SESSION with CODE, PAYLOAD and BELL.
-        /// Writes `ESC ] CODE ; PAYLOAD' terminated by BEL when BELL is non-nil and by ST
+        /// The OSC reply with CODE, PAYLOAD and BELL, as a unibyte string.
+        /// `ESC ] CODE ; PAYLOAD' terminated by BEL when BELL is non-nil and by ST
         /// otherwise; pass the BELL-P the `osc' event carried, since a client that queried with
         /// BEL will not recognise an ST-terminated answer. Signals if PAYLOAD contains control
-        /// characters, which could close the sequence early.
-        "cooked--reply-osc" 4..=4 => reply_osc;
+        /// characters, which could close the sequence early. `cooked--reply-osc' sends it.
+        "cooked--osc-reply" 3..=3 => osc_reply;
 
         /// Resize SESSION to ROWS by COLS, each cell CELL-WIDTH by CELL-HEIGHT pixels.
         /// The cell size may be nil or omitted, which is what a terminal frame has to
@@ -586,18 +595,23 @@ fn send(env: Env, args: &[Value]) -> Result<Value> {
     Ok(env.nil())
 }
 
-fn reply_osc(env: Env, args: &[Value]) -> Result<Value> {
-    let code = env.from_lisp::<u16>(args[1])?;
-    let payload = env.from_lisp::<String>(args[2])?;
-    let terminator = emu::Terminator::from_bell(!env.is_nil(args[3]));
+fn reply(env: Env, args: &[Value]) -> Result<Value> {
+    let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
+    handle(env, args[0])?.reply(&bytes);
+    Ok(env.nil())
+}
+
+fn osc_reply(env: Env, args: &[Value]) -> Result<Value> {
+    let code = env.from_lisp::<u16>(args[0])?;
+    let payload = env.from_lisp::<String>(args[1])?;
+    let terminator = emu::Terminator::from_bell(!env.is_nil(args[2]));
     let Some(bytes) = emu::osc_reply(code, &payload, terminator) else {
         return Err(env.signal(
             "error",
             "cooked: refusing to frame an OSC reply containing control characters",
         ));
     };
-    handle(env, args[0])?.send(&bytes).or_signal(env)?;
-    Ok(env.nil())
+    env.into_lisp(bytes.as_slice())
 }
 
 fn resize(env: Env, args: &[Value]) -> Result<Value> {

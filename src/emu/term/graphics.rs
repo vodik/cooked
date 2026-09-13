@@ -312,12 +312,12 @@ impl State {
         if self.graphics_hidden
             && let Some(refusal) = crate::emu::kitty::refuse_probe(bytes)
         {
-            self.events.push(Event::Reply(refusal));
+            self.push_reply(Event::Reply(refusal));
             return;
         }
         let (outcome, reply) = self.kitty.feed(bytes);
         if let Some(reply) = reply {
-            self.events.push(Event::Reply(reply));
+            self.push_reply(Event::Reply(reply));
         }
         match outcome {
             Outcome::Image {

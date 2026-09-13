@@ -2765,7 +2765,7 @@ next focus change signals `invalid-function\='."
     ;; nothing -- an empty buffer is what both the working and the broken case look like.
     ;; Waiting longer does not help; there is nothing to wait for.
     (let (sent)
-      (cl-letf (((symbol-function 'cooked--send-if-live)
+      (cl-letf (((symbol-function 'cooked--reply-if-live)
                  (lambda (&rest _) (setq sent t))))
         (cooked--report-focus))
       (should-not sent))))
@@ -2776,7 +2776,7 @@ next focus change signals `invalid-function\='."
    (should (cooked-tests--settle
             (lambda () (cooked--focus-events-p cooked--session))))
    (let ((sent nil))
-     (cl-letf (((symbol-function 'cooked--send)
+     (cl-letf (((symbol-function 'cooked--reply)
                 (lambda (_s text) (push text sent))))
        ;; Losing focus reports once; asking again while still unfocused is silent.
        (setq-local cooked--focused t)

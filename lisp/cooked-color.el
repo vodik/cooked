@@ -130,7 +130,7 @@ Sent rather than left to ride the drain because a theme change produces no child
 output, so nothing would ever wake one; see `cooked--set-color-scheme\\='."
   (when-let* ((session (cooked--live-session))
               (bytes (cooked--set-color-scheme session (cooked--color-scheme))))
-    (cooked--send-if-live bytes)))
+    (cooked--reply-if-live bytes)))
 
 (add-hook 'cooked-theme-change-hook #'cooked--sync-color-scheme)
 

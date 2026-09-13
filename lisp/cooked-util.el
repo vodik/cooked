@@ -31,8 +31,8 @@
       cooked--focus-events-p cooked--foreground-pid cooked--forget-history
       cooked--image-forget cooked--job-control cooked--kill
       cooked--live-p cooked--make-filter cooked--pid
-      cooked--prompt-text cooked--ready cooked--redraw
-      cooked--remove-rows cooked--reply-osc cooked--resize cooked--row-unsent
+      cooked--osc-reply cooked--prompt-text cooked--ready cooked--redraw
+      cooked--remove-rows cooked--reply cooked--resize cooked--row-unsent
       cooked--sample-mode cooked--send cooked--set-attended
       cooked--set-color-scheme cooked--set-graphics-shown cooked--set-tuning
       cooked--signal cooked--spawn)
@@ -391,13 +391,70 @@ that the session is over."
 (defun cooked--send-if-live (bytes)
   "Send BYTES if there is still a child, and do nothing if there is not.
 
-For the writes that are not a keystroke: a device-status reply resolved
-mid-drain, a focus notification from a global hook, a completion request.  There
-the child having just exited is an ordinary race rather than something the user
-asked for and should be told about — and signalling from inside a process filter
-would abort the rest of the redisplay."
+For input the user did not type as such: a completion request, the interrupt
+that abandons a secret prompt.  There the child having just exited is an
+ordinary race rather than something the user asked for and should be told
+about — and signalling from inside a process filter would abort the rest of the
+redisplay.  A reply goes through `cooked--reply-if-live\=' instead."
   (when-let* ((session (cooked--live-session)))
     (cooked--send session bytes)))
+
+;;;; Replies
+
+(defvar cooked--reply-batch nil
+  "The replies owed during the events being handled, as (SESSION . REPLIES).
+
+REPLIES is newest first.  Bound by `cooked--batching-replies\=' and nil
+everywhere else, where a reply is queued the moment it is composed.")
+
+(defmacro cooked--batching-replies (session &rest body)
+  "Run BODY, then owe SESSION\='s child every reply BODY composed, as one string.
+
+A palette sweep asks for 256 entries in one sequence and is answered once per
+entry; queued one at a time, each would be its own write to the pty.  Held
+here instead, they go out together, in the order they were composed.  The
+replies are sent even if BODY signals, since the child is still waiting for
+the ones composed before the error."
+  (declare (indent 1) (debug t))
+  (let ((batch (make-symbol "batch")))
+    `(let* ((,batch (list ,session))
+            (cooked--reply-batch ,batch))
+       (unwind-protect
+           (progn ,@body)
+         (when-let* ((replies (cdr ,batch))
+                     ((cooked--live-p (car ,batch))))
+           (cooked--reply (car ,batch) (apply #'concat (nreverse replies))))))))
+
+(defun cooked--queue-reply (session bytes)
+  "Owe SESSION\='s child BYTES, a reply, without waiting for it to read them.
+
+Replies are not keystrokes.  A child that has stopped reading -- a suspended
+job, or a program hung in raw mode -- would otherwise stall Emacs on every
+answer and every resize, so a reply joins a queue the core writes as the child
+makes room, and one owed to a child that has not read in a long while is
+dropped.  See `cooked--send\=' for input, which waits and then signals."
+  (if (eq session (car cooked--reply-batch))
+      (push bytes (cdr cooked--reply-batch))
+    (cooked--reply session bytes)))
+
+(defun cooked--reply-if-live (bytes)
+  "Owe the child BYTES if there is still a child, and do nothing if not.
+
+For what the terminal tells the child rather than what the user types: a
+device-status reply resolved mid-drain, a focus report from a global hook, a
+colour-scheme notification.  The child having just exited is an ordinary race
+there, as it is for `cooked--send-if-live\='."
+  (when-let* ((session (cooked--live-session)))
+    (cooked--queue-reply session bytes)))
+
+(defun cooked--reply-osc (session code payload bell)
+  "Answer an OSC query on SESSION with CODE and PAYLOAD, ended by BEL if BELL.
+
+The reply is `ESC ] CODE ; PAYLOAD\=', framed by `cooked--osc-reply\=', which
+refuses a PAYLOAD holding control characters that could close it early.  Pass
+`cooked--osc-bell-terminated\=' as BELL, since a client that queried with BEL
+will not recognise an ST-terminated answer."
+  (cooked--queue-reply session (cooked--osc-reply code payload bell)))
 
 (defun cooked--forget-sent-rows (&optional redraw)
   "Make the core send every live row again the next time it is damaged.

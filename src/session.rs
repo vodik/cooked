@@ -4,9 +4,10 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{Delta, Term};
+use crate::emu::{Delta, Event, Term};
 use crate::error::Result;
-use crate::pty::{AtomicMode, JobControl, Mode, Pid, Pty, Winsize};
+use crate::pty::{AtomicMode, JobControl, Mode, Pid, Pty, WRITE_TIMEOUT, Winsize};
+use crate::replies::{ReplyKind, ReplyQueue};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{SigSet, Signal};
@@ -14,7 +15,7 @@ use std::ffi::OsStr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::JoinHandle;
 
 /// Take a lock, treating poisoning as nothing to refuse over.
@@ -471,6 +472,19 @@ fn remaining(deadline: Option<std::time::Instant>) -> Option<std::time::Duration
 struct Shared {
     pty: Pty,
     term: Mutex<Term>,
+    /// Replies the child is owed and has not yet taken; see [`crate::replies`].
+    ///
+    /// Held only for as long as it takes to queue or to offer the pty a non-blocking
+    /// write, so any thread may take it, the reader included, without waiting on the
+    /// child.
+    replies: Mutex<ReplyQueue>,
+    /// Held by whoever is writing to the pty, so that input and replies never interleave.
+    ///
+    /// A reply cut in two by a keystroke is two garbled sequences. [`Session::send`] holds
+    /// this for as long as its write takes, which can be `WRITE_TIMEOUT`; everything else
+    /// only ever `try_lock`s it, and leaves the queue to the sender when it is busy. See
+    /// [`Shared::flush_replies`].
+    writer: Mutex<()>,
     mode: AtomicMode,
     /// A size the child is not yet known to have, for the reader thread to keep applying
     /// until it sticks. `None` once the tty agrees. See `Session::resize`.
@@ -619,9 +633,13 @@ impl Session {
         if let Some((_, name)) = env.iter().find(|(k, _)| k.as_ref() == "TERM") {
             term.set_terminfo(name.as_ref());
         }
+        // The reader sends what it can answer itself, so a reply never waits on a drain.
+        term.answer_directly();
         let shared = Arc::new(Shared {
             pty,
             term: Mutex::new(term),
+            replies: Mutex::new(ReplyQueue::default()),
+            writer: Mutex::new(()),
             mode: AtomicMode::new(mode),
             pending_resize: Mutex::new(None),
             notifier: Notifier::new(wake, &options),
@@ -713,6 +731,15 @@ impl Session {
     /// by the reader's ordinary tick instead, slower but never stuck.
     /// `cooked--drain-and-apply` still calls it from an `unwind-protect` cleanup.
     pub(crate) fn ready(&self) {
+        // The drain's events are handled, so Lisp has queued every answer it owed, and the
+        // replies that waited behind them may follow.
+        let outbound = {
+            let mut term = self.shared.term.held();
+            term.events_handled();
+            term.take_outbound()
+        };
+        self.shared.queue_replies(outbound);
+        self.flush_replies();
         if self.shared.notifier.rearm() {
             self.shared.interrupt.raise();
         }
@@ -720,9 +747,50 @@ impl Session {
 
     /// Write BYTES to the child, and count that as the user interacting with this
     /// session; see [`Shared::interacted`].
+    ///
+    /// Waits up to `WRITE_TIMEOUT` for the child to take them, and fails after that, as a
+    /// paste into a stopped job always has. Replies already queued go first, inside the
+    /// same deadline: they were owed before this input was typed, and writing input
+    /// between the halves of a reply would garble both.
     pub(crate) fn send(&self, bytes: &[u8]) -> Result<()> {
         self.shared.interacted();
-        self.shared.pty.write(bytes)
+        let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
+        let writer = self.shared.writer.held();
+        let result = self.shared.write_after_replies(bytes, deadline);
+        // A reply queued while the writer was held found it busy and left itself here, so
+        // offer the queue once more. The writer is released with the queue still locked:
+        // a reply queued after that finds the writer free and goes out on its own.
+        let mut queue = self.shared.replies.held();
+        let _ = queue.flush(|b| self.shared.pty.write_some(b));
+        drop(writer);
+        let waiting = !queue.is_empty();
+        drop(queue);
+        if waiting {
+            self.shared.interrupt.raise();
+        }
+        result
+    }
+
+    /// Owe the child BYTES, a reply Lisp composed, without waiting for it to read them.
+    ///
+    /// Queued and written as far as the pty takes them now; the reader thread writes the
+    /// rest once there is room. A child that has stopped reading for long enough loses
+    /// the reply rather than growing the queue; see [`ReplyQueue::push`]. Not counted as
+    /// interaction, since the user did nothing.
+    pub(crate) fn reply(&self, bytes: &[u8]) {
+        self.shared.replies.held().push(ReplyKind::Answer, bytes);
+        self.flush_replies();
+    }
+
+    /// Write queued replies from Emacs' thread, and wake the reader to finish the job
+    /// if the pty had no room for all of them.
+    ///
+    /// The reader was asleep on a poll computed while the queue was empty, and it only
+    /// watches for room while something is waiting.
+    fn flush_replies(&self) {
+        if self.shared.flush_replies() {
+            self.shared.interrupt.raise();
+        }
     }
 
     /// Resize the emulator and the pty, and keep asking until the child agrees.
@@ -761,12 +829,16 @@ impl Session {
             result => result,
         };
         // Mode 2048's report, after the ioctl so that a child that asks the tty reads the
-        // same size. Written here rather than returned to Lisp, since sending it involves
-        // no decision. Straight to the pty rather than through [`Session::send`], because a
-        // resize is not the user interacting, and with the error dropped, because a buffer
-        // resized after its child exited is ordinary and nobody is owed the report.
+        // same size. Queued here rather than returned to Lisp, since sending it involves no
+        // decision, and queued rather than written, because windows are resized in bursts
+        // while an edge is dragged and a child that has stopped reading must not stall
+        // each one. A report still waiting is replaced, so the burst queues one.
         if let Some(report) = report {
-            let _ = self.shared.pty.write(&report);
+            self.shared
+                .replies
+                .held()
+                .push(ReplyKind::SizeReport, &report);
+            self.flush_replies();
         }
         result
     }
@@ -991,13 +1063,76 @@ impl Shared {
         }
     }
 
+    /// Queue the replies the emulator composed, as [`Term::take_outbound`] hands them over.
+    fn queue_replies(&self, outbound: Vec<Event>) {
+        if outbound.is_empty() {
+            return;
+        }
+        let mut queue = self.replies.held();
+        for event in outbound {
+            match event {
+                Event::Reply(bytes) => queue.push(ReplyKind::Answer, &bytes),
+                Event::SizeReport(bytes) => queue.push(ReplyKind::SizeReport, &bytes),
+                _ => continue,
+            };
+        }
+    }
+
+    /// Offer the queued replies to the pty without waiting, answering whether any are still
+    /// waiting for room.
+    ///
+    /// Leaves the queue alone while [`Session::send`] holds the writer, since the sender
+    /// offers the queue again before it lets go, and answers `false` then: nothing need
+    /// watch for room on the sender's behalf. A write that fails outright empties the
+    /// queue, because the child is gone; the reader learns that from its own read.
+    fn flush_replies(&self) -> bool {
+        let writer = match self.writer.try_lock() {
+            Ok(writer) => writer,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        let mut queue = self.replies.held();
+        let _ = queue.flush(|bytes| self.pty.write_some(bytes));
+        drop(writer);
+        !queue.is_empty()
+    }
+
+    /// Whether the reader should watch the pty for room: replies are waiting, and no
+    /// sender is about to write them itself.
+    fn awaits_room(&self) -> bool {
+        !self.replies.held().is_empty()
+            && !matches!(self.writer.try_lock(), Err(TryLockError::WouldBlock))
+    }
+
+    /// [`Session::send`]'s write, after the replies queued ahead of it.
+    fn write_after_replies(&self, bytes: &[u8], deadline: std::time::Instant) -> Result<()> {
+        loop {
+            let mut queue = self.replies.held();
+            queue.flush(|b| self.pty.write_some(b))?;
+            if queue.is_empty() {
+                break;
+            }
+            drop(queue);
+            self.pty.wait_writable(deadline)?;
+        }
+        self.pty.write(bytes, deadline)
+    }
+
     fn read_loop(&self) {
         block_sigpipe();
         let mut buf = vec![0u8; READ_CHUNK];
 
         while !self.shutdown.load(Ordering::SeqCst) {
+            // Room is watched for only while a reply waits for it: a child that is not
+            // reading keeps the pty full, and a writable pty with nothing to write would
+            // return from every poll at once.
+            let events = if self.awaits_room() {
+                PollFlags::POLLIN | PollFlags::POLLOUT
+            } else {
+                PollFlags::POLLIN
+            };
             let mut fds = [
-                PollFd::new(self.pty.as_fd(), PollFlags::POLLIN),
+                PollFd::new(self.pty.as_fd(), events),
                 PollFd::new(self.interrupt.read.as_fd(), PollFlags::POLLIN),
             ];
             match poll(&mut fds, self.poll_timeout()) {
@@ -1006,7 +1141,8 @@ impl Shared {
                 Ok(_) => {}
             }
             let interrupted = fds[1].revents().is_some_and(|r| !r.is_empty());
-            let ready = fds[0].revents().is_some_and(|r| !r.is_empty());
+            let revents = fds[0].revents().unwrap_or(PollFlags::empty());
+            let ready = !(revents - PollFlags::POLLOUT).is_empty();
             // Either teardown asked us to stop -- in which case do not touch the pty on the
             // way out -- or a drain left a throttled notification for the `flush` below,
             // and all that was wanted was this iteration itself.
@@ -1027,6 +1163,13 @@ impl Shared {
             // A resize the tty has not taken yet is retried on every tick; see
             // `Session::resize`.
             self.apply_pending_resize();
+
+            // Before the backlog check below, which stops reading but must not stop the
+            // child from getting its answers: a program blocked in `write` may be about to
+            // read one.
+            if revents.contains(PollFlags::POLLOUT) {
+                self.flush_replies();
+            }
 
             // Retires a notification held back by the throttle or the quiescence rule.
             // This, rather than the read below, draws the ordinary frame: a poll that came
@@ -1055,7 +1198,15 @@ impl Shared {
             match self.pty.read(&mut buf) {
                 Ok([]) => return self.finish(Ended::ChildGone),
                 Ok(data) => {
-                    let drawable = self.term.held().feed(data);
+                    let (drawable, outbound) = {
+                        let mut term = self.term.held();
+                        (term.feed(data), term.take_outbound())
+                    };
+                    // Answered from here rather than from a drain, so a frozen or hidden
+                    // buffer's child is answered too. See `ReplyRoute` for which replies
+                    // wait for Lisp instead.
+                    self.queue_replies(outbound);
+                    self.flush_replies();
                     self.refresh_sync();
                     // Not `announce`: the `flush` at the top of the loop sends the wakeup
                     // once the child has finished writing. Passing whether the read changed
@@ -1079,7 +1230,9 @@ impl Shared {
                 Err(e) if e.is(Errno::EIO) => {
                     return self.finish(Ended::ChildGone);
                 }
-                Err(e) if e.is(Errno::EINTR) => {}
+                // The master is non-blocking, and a poll that reported a hangup or an error
+                // can find nothing to read after all.
+                Err(e) if e.is(Errno::EINTR) || e.is(Errno::EAGAIN) => {}
                 Err(_) => return self.finish(Ended::Aborted),
             }
         }
@@ -2165,7 +2318,7 @@ mod tests {
         let (session, _read) = session(&[
             "/bin/sh",
             "-c",
-            r"stty -icanon -echo; printf '\033[?2048hready\n'; dd bs=1 count=19 2>/dev/null | tr '\033' E",
+            r"stty -icanon -echo; printf '\033[?2048hready\n'; dd bs=1 count=34 2>/dev/null | tr '\033' E",
         ]);
         wait_for(&session, |u| rendered(u).contains("ready"));
         session
@@ -2175,8 +2328,64 @@ mod tests {
                 cell: CellMetrics::new(10, 20),
             })
             .expect("resize");
-        let update = wait_for(&session, |u| rendered(u).contains("E[48;12;40;240;400t"));
-        assert!(rendered(&update).contains("E[48;12;40;240;400t"));
+        // The answer to `2048 h` first, sent by the reader as it parsed the request, then
+        // the report the resize owes.
+        let want = "E[48;24;80;0;0tE[48;12;40;240;400t";
+        let update = wait_for(&session, |u| rendered(u).contains(want));
+        assert!(rendered(&update).contains(want));
+    }
+
+    /// A child in raw mode that has stopped reading, with mode 2048 set, while its window
+    /// is dragged. Each report used to be written on Emacs' thread with a three-second
+    /// timeout, so once the pty's input queue filled every resize froze Emacs.
+    #[test]
+    fn a_child_that_never_reads_survives_ten_thousand_resizes() {
+        let (session, _read) = session(&[
+            "/bin/sh",
+            "-c",
+            r"stty raw -echo; printf '\033[?2048hready\n'; exec sleep 60",
+        ]);
+        wait_for(&session, |u| rendered(u).contains("ready"));
+        let budget = patience(5.0);
+        let started = std::time::Instant::now();
+        for n in 0..10_000u16 {
+            session
+                .resize(Winsize {
+                    rows: 24 + n % 2,
+                    cols: 80,
+                    cell: Default::default(),
+                })
+                .expect("resize");
+            // Checked as it goes, so a regression fails in seconds rather than hours.
+            assert!(
+                started.elapsed() < budget,
+                "{n} resizes took {:?}",
+                started.elapsed()
+            );
+        }
+        // Every report still waiting was replaced by the next. What is left is the newest,
+        // and at most the rest of one the pty took part of before it filled.
+        let queued = session.shared.replies.held().len();
+        assert!(queued > 0, "the pty should have filled");
+        assert!(
+            queued < 2 * b"\x1b[48;25;80;0;0t".len(),
+            "{queued} bytes queued"
+        );
+    }
+
+    /// Queries arriving faster than a child that never reads can take the answers. The
+    /// reader keeps reading, so the child finishes writing, and the queue stops growing at
+    /// its limit.
+    #[test]
+    fn a_child_flooding_queries_without_reading_still_finishes_writing() {
+        let (session, _read) = session(&[
+            "/bin/sh",
+            "-c",
+            r#"stty raw -echo; yes "$(printf '\033[c')" | head -c 4000000; printf 'done\r\n'; exec sleep 60"#,
+        ]);
+        wait_for_within(&session, 20.0, |u| rendered(u).contains("done"));
+        assert!(session.shared.replies.held().len() <= crate::replies::REPLY_QUEUE_LIMIT);
+        assert!(!session.shared.replies.held().is_empty());
     }
 
     /// The load-sensitive one. Its child sleeps before it says anything, so this is

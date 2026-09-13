@@ -1004,6 +1004,39 @@ our TERM, and the only way it learns there is direct colour."
           (should (equal "\033P1+r5463\033\\" (cooked-tests--contents out))))
       (delete-file out))))
 
+(ert-deftest cooked-a-frozen-buffer-still-answers-device-attributes ()
+  "A query from a frozen buffer\='s child is answered without waiting for the thaw.
+
+A freeze defers the render, and every reply used to be sent from the drain, so
+DA1 from a child started under a held selection went unanswered until the user
+let go.  The child waits on a flag file rather than a delay, so the query is
+provably sent after the freeze is in place."
+  (let ((out (make-temp-file "cooked-frozen-da1"))
+        (flag (make-temp-name (expand-file-name "cooked-frozen-flag"
+                                                temporary-file-directory))))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "stty raw -echo; printf ready; until [ -e %s ]; do sleep 0.02; done; printf '\\033[c'; cat > %s"
+                          flag out))
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "ready" (cooked-tests--text)))))
+          (setq cooked--input-mode 'frozen)
+          (should (cooked--frozen-p))
+          (write-region "" nil flag)
+          ;; Pumped, not settled: settling drains by hand, which is the very
+          ;; thing a freeze withholds.
+          (let ((deadline (+ (float-time) (cooked-tests-timeout 3))))
+            (while (and (< (float-time) deadline)
+                        (not (string-suffix-p "c" (cooked-tests--contents out))))
+              (accept-process-output nil 0.05)))
+          (should (cooked--frozen-p))
+          ;; The `4\=' comes and goes with whether this Emacs can show pictures.
+          (should (string-match-p "\\`\033\\[\\?62\\(;4\\)?;22c\\'"
+                                  (cooked-tests--contents out))))
+      (delete-file out)
+      (ignore-errors (delete-file flag)))))
+
 (ert-deftest cooked-xtgettcap-answers-for-the-entry-term-names ()
   "The core answers from the entry the child was told about, not a fixed one.
 

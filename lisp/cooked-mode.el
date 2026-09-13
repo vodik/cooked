@@ -1065,7 +1065,7 @@ assumption on startup is that it has focus, and telling it so again is noise.")
       (setq cooked--focused focused)
       (when-let* ((session (cooked--live-session)))
         (when (cooked--focus-events-p session)
-          (cooked--send-if-live (cooked--csi (if focused "I" "O"))))))))
+          (cooked--reply-if-live (cooked--csi (if focused "I" "O"))))))))
 
 (defun cooked--frame-focus-changed (&rest _)
   "Report focus for every live session, from `after-focus-change-function'."

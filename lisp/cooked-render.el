@@ -604,8 +604,11 @@ and the region shaped before anything measures it."
     ;; pointed at, and a drain that both resizes and carries a fresh mark should
     ;; end with the fresh mark's own anchor.
     (cooked--relocate-marks (plist-get update :marks) batch-start)
-    (dolist (event (plist-get update :events))
-      (cooked--handle-event event batch-start))
+    ;; Batched, so a drain that asks for the whole palette is answered in one
+    ;; write rather than one per entry.  See `cooked--batching-replies'.
+    (cooked--batching-replies cooked--session
+      (dolist (event (plist-get update :events))
+        (cooked--handle-event event batch-start)))
     ;; After both, which is the ordering `cooked-row-rendered-functions' is
     ;; documented against.
     (cooked--notify-rows-rendered rendered)
@@ -682,7 +685,7 @@ two chances to disagree."
     (`(bell) (cooked--protect-seam 'cooked-bell-function
                (funcall cooked-bell-function)))
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
-    (`(reply . ,bytes) (cooked--send-if-live bytes))
+    (`(reply . ,bytes) (cooked--reply-if-live bytes))
     (`(title-stack ,push) (cooked--handle-title-stack push))
     (`(resize-request ,rows ,cols) (cooked--handle-resize-request rows cols))
     (`(frame-size ,pixels) (cooked--handle-frame-size pixels))

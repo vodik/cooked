@@ -129,10 +129,10 @@ absence."
                    (window-frame window)
                  (selected-frame))))
     (cond ((not pixels)
-           (cooked--send-if-live
+           (cooked--reply-if-live
             (cooked--csi "t" 9 (frame-text-lines frame) (frame-text-cols frame))))
           ((display-graphic-p frame)
-           (cooked--send-if-live
+           (cooked--reply-if-live
             (cooked--csi "t" 5 (frame-text-height frame) (frame-text-width frame)))))))
 
 (provide 'cooked-window-ops)

@@ -196,6 +196,24 @@ pub enum Event {
     FrameSize(Unit),
 }
 
+impl Event {
+    /// Whether Lisp may answer this, which holds back every reply composed after it; see
+    /// [`ReplyRoute`].
+    ///
+    /// For an OSC, a query is a part that is `?` or begins with one: `OSC 4 ; 1 ; ?`,
+    /// `OSC 11 ; ?`, `OSC 52 ; c ; ?`, `OSC 22 ; ?pointer`. That is the xterm convention
+    /// every query Lisp answers follows. A handler answering something else still has its
+    /// reply sent, but a reply the emulator composed later in the same stretch of output
+    /// may reach the child first.
+    fn awaits_answer(&self) -> bool {
+        match self {
+            Self::Osc(_, parts, _) => parts.iter().any(|part| part.starts_with('?')),
+            Self::FrameSize(_) => true,
+            _ => false,
+        }
+    }
+}
+
 /// A push or a pop, for [`Event::TitleStack`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackOp {
@@ -647,9 +665,68 @@ impl State {
 
     fn reply(&mut self, framing: Framing, body: std::fmt::Arguments<'_>) {
         if let Some(bytes) = reply::frame(framing, body) {
-            self.events.push(Event::Reply(bytes));
+            self.push_reply(Event::Reply(bytes));
         }
     }
+
+    /// Owe the child REPLY, an [`Event::Reply`] or [`Event::SizeReport`].
+    ///
+    /// Straight to [`Term::take_outbound`] when the session has asked for that and nothing
+    /// Lisp has yet to answer came first; otherwise with the drain, as every reply once
+    /// went. See [`ReplyRoute`].
+    pub(super) fn push_reply(&mut self, reply: Event) {
+        debug_assert!(matches!(reply, Event::Reply(_) | Event::SizeReport(_)));
+        let route = &mut self.replies;
+        if route.direct && !route.undrained && !route.handling {
+            route.outbound.push(reply);
+        } else {
+            // Behind something Lisp answers, so everything after it must wait too, or a
+            // later answer would overtake this one.
+            route.undrained = true;
+            self.events.push(reply);
+        }
+    }
+
+    /// Hand Lisp EVENT, noting whether it is a question Lisp may answer.
+    ///
+    /// Only [`Event::Osc`] and [`Event::FrameSize`] come through here, the two that Lisp
+    /// replies to. Every other event is pushed directly.
+    pub(super) fn push_for_lisp(&mut self, event: Event) {
+        if event.awaits_answer() {
+            self.replies.undrained = true;
+        }
+        self.events.push(event);
+    }
+}
+
+/// Whether a reply the emulator composes may go straight to the child, or must travel
+/// with the drain behind a question only Lisp can answer.
+///
+/// Replies once all went with the drain, and a drain is deferred while a buffer is frozen,
+/// so DA1 from a frozen buffer's child waited for the thaw. The emulator composes most
+/// replies alone and can send those at once. The exceptions are queries answered from
+/// Emacs' own state: the palette and default colours (OSC 4, 10 to 19), the clipboard
+/// (OSC 52), the pointer (OSC 22) and the frame's size (`CSI 19 t`).
+///
+/// Order is what makes that more than a shortcut. `OSC 11 ; ? ST` followed by DA1 is how
+/// a program asks for the background with a deadline: DA1 is answered by every terminal,
+/// so a reply to it arriving first means the colour query went unanswered. Sending DA1
+/// ahead of Lisp's answer would say exactly that. So once such a query is waiting, every
+/// later reply waits with it, in the drain, until Lisp says it has handled the drain that
+/// carried it.
+#[derive(Debug, Default)]
+pub(super) struct ReplyRoute {
+    /// Whether anything takes replies from [`Term::take_outbound`]. Off by default, so a
+    /// [`Term`] with no session behind it keeps every reply in its drain, which is where
+    /// the emulator's own tests look for them.
+    direct: bool,
+    /// Replies bound straight for the child, in the order they were composed.
+    outbound: Vec<Event>,
+    /// The undrained events hold a question for Lisp, or a reply queued behind one.
+    undrained: bool,
+    /// A drain carried such a question, and Lisp has not yet said it is handled; see
+    /// [`Term::events_handled`].
+    handling: bool,
 }
 
 pub struct Term {
@@ -696,7 +773,54 @@ impl Term {
     }
 
     pub fn drain(&mut self) -> Delta {
+        let route = &mut self.state.replies;
+        route.handling |= std::mem::take(&mut route.undrained);
         self.state.drain()
+    }
+
+    /// Send replies to [`Term::take_outbound`] from now on, rather than with the drain,
+    /// whenever nothing Lisp answers is ahead of them. See [`ReplyRoute`].
+    pub fn answer_directly(&mut self) {
+        self.state.replies.direct = true;
+    }
+
+    /// The replies owed to the child that need nothing from Lisp, oldest first, as
+    /// [`Event::Reply`] and [`Event::SizeReport`].
+    pub fn take_outbound(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.state.replies.outbound)
+    }
+
+    /// Lisp has handled every event of the drains so far, and answered what it was asked.
+    ///
+    /// Replies composed from here on go straight out again, unless a question has arrived
+    /// since the last drain. Replies that queued behind the question as events are moved to
+    /// [`Term::take_outbound`] when nothing Lisp answers is still ahead of them, since no
+    /// drain need carry them any more.
+    pub fn events_handled(&mut self) {
+        let state = &mut self.state;
+        state.replies.handling = false;
+        if !state.replies.direct || !state.replies.undrained {
+            return;
+        }
+        let ahead = state
+            .events
+            .iter()
+            .position(Event::awaits_answer)
+            .unwrap_or(state.events.len());
+        if ahead == state.events.len() {
+            state.replies.undrained = false;
+        }
+        let mut index = 0;
+        let outbound = &mut state.replies.outbound;
+        state.events.retain(|event| {
+            let before = index < ahead;
+            index += 1;
+            let reply = matches!(event, Event::Reply(_) | Event::SizeReport(_));
+            if before && reply {
+                outbound.push(event.clone());
+            }
+            !(before && reply)
+        });
     }
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
@@ -749,6 +873,10 @@ impl Term {
         }
         self.state
             .events
+            .retain(|e| !matches!(e, Event::SizeReport(_)));
+        self.state
+            .replies
+            .outbound
             .retain(|e| !matches!(e, Event::SizeReport(_)));
         Some(report)
     }
@@ -1142,6 +1270,8 @@ struct State {
     /// the seam and a window lookup. A flag rather than a search of `events`, which a
     /// burst of bells among a burst of replies would make quadratic.
     bell_queued: bool,
+    /// Where a composed reply goes; see [`ReplyRoute`].
+    replies: ReplyRoute,
     /// The last graphic character printed, for REP. Held after the designated set has
     /// translated it, so repeating a box-drawing character repeats what was drawn.
     ///

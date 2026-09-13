@@ -205,7 +205,7 @@ impl State {
                 self.set_flag_mode(mode, on);
                 if on {
                     let report = self.current_size_report();
-                    self.events.push(Event::SizeReport(report));
+                    self.push_reply(Event::SizeReport(report));
                 }
             }
             DecMode::ReverseScreen => {
@@ -754,8 +754,8 @@ impl State {
                 }
                 // The frame, which only Emacs can measure. Lisp answers, and answers
                 // `15t` only where there are pixels, by the same rule as `14t` above.
-                15 => self.events.push(Event::FrameSize(Unit::Pixels)),
-                19 => self.events.push(Event::FrameSize(Unit::Cells)),
+                15 => self.push_for_lisp(Event::FrameSize(Unit::Pixels)),
+                19 => self.push_for_lisp(Event::FrameSize(Unit::Cells)),
                 22 => self.events.push(Event::TitleStack(StackOp::Push)),
                 23 => self.events.push(Event::TitleStack(StackOp::Pop)),
                 // A 0 or omitted argument means "leave this dimension", which `arg`'s
@@ -869,7 +869,7 @@ impl State {
             // DSRs such as `CSI ? 6 n` unimplemented rather than swallowed.
             (Some(b'?'), 'n') if params.arg(0, 0) == 996 => {
                 if let Some(scheme) = self.color_scheme {
-                    self.events.push(Event::Reply(color_scheme_report(scheme)));
+                    self.push_reply(Event::Reply(color_scheme_report(scheme)));
                 }
             }
             _ => return false,

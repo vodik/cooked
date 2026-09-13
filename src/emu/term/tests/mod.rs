@@ -79,6 +79,7 @@ mod keyboard;
 mod marks;
 mod modes;
 mod osc;
+mod replies;
 mod reports;
 mod screen;
 mod sgr;
