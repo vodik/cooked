@@ -23,8 +23,19 @@
 # Wrapped in a conditional rather than guarded by an early `exit': in a sourced file
 # `exit' means "stop reading this file" only from fish 3.4 onwards, and means "quit
 # the shell" before that. A block needs no version floor.
+#
+# Inside tmux, TERM_PROGRAM says `tmux' -- the server sets it in every pane -- so the
+# test for cooked there is the feature list instead.  See the same test in cooked.bash,
+# and docs/SHELL.md for the tmux side.
 
-if status is-interactive; and test "$TERM_PROGRAM" = cooked; and not set -q COOKED_INTEGRATION_LOADED
+if status is-interactive
+    and begin
+        test "$TERM_PROGRAM" = cooked
+        or begin
+            test "$TERM_PROGRAM" = tmux; and set -q TMUX; and set -q COOKED_SHELL_INTEGRATION_FEATURES
+        end
+    end
+    and not set -q COOKED_INTEGRATION_LOADED
     set -g COOKED_INTEGRATION_LOADED 1
 
     # The feature list, taken verbatim from the environment so that every shell
@@ -47,6 +58,22 @@ if status is-interactive; and test "$TERM_PROGRAM" = cooked; and not set -q COOK
     function __cooked_want --argument-names feature
         string match -q -- "* no-$feature *" " $__cooked_features "; and return 1
         string match -q -- "* $feature *" " $__cooked_features "
+    end
+
+    # How an OSC is framed on the way out.  Inside tmux each is wrapped in
+    # `DCS tmux; ... ST' with the payload's ESCs doubled, which is the only way past a
+    # server that reads OSC 7 and 133 for itself; see cooked.bash for the whole of the
+    # argument, including why TERM_PROGRAM and not TMUX decides.  The title is left
+    # alone, because OSC 2 is tmux's to consume.
+    set -g __cooked_osc_open \e']'
+    set -g __cooked_osc_close \a
+    if test "$TERM_PROGRAM" = tmux
+        set __cooked_osc_open \e'Ptmux;'\e\e']'
+        set __cooked_osc_close \a\e'\\'
+    end
+
+    function __cooked_osc --argument-names payload
+        printf '%s%s%s' $__cooked_osc_open $payload $__cooked_osc_close
     end
 
     # And fish gets the last word after that.  From 4.0.0 it emits the marks and OSC 7
@@ -81,9 +108,19 @@ if status is-interactive; and test "$TERM_PROGRAM" = cooked; and not set -q COOK
     # The version test is spelled with `string match' because `string split --fields'
     # is fish 3.2 and this file still means to work on 3.x, where the answer is simply
     # that fish marks nothing and everything below stays on.
+    #
+    # Except inside tmux, where fish's own marks and OSC 7 are written unwrapped and the
+    # server keeps them -- so there ours are the only ones that reach cooked, and
+    # standing down would leave the session with none.  Only the title still stands
+    # down, since that one tmux means to consume either way.  fish's copies go on
+    # reaching tmux too, which is harmless: tmux reads them for its own prompt jumps
+    # and pane path.
     if test (string match -r '^[0-9]+' -- $version) -ge 4
-        set -g __cooked_features "$__cooked_features no-cwd no-title"
-        if not status features | string match -qr '^mark-prompt\s+off'
+        set -g __cooked_features "$__cooked_features no-title"
+        if test "$TERM_PROGRAM" != tmux
+            set -g __cooked_features "$__cooked_features no-cwd"
+        end
+        if test "$TERM_PROGRAM" != tmux; and not status features | string match -qr '^mark-prompt\s+off'
             set -g __cooked_features "$__cooked_features no-marks no-input-mark"
         end
     end
@@ -114,9 +151,9 @@ if status is-interactive; and test "$TERM_PROGRAM" = cooked; and not set -q COOK
             # and so is quoted in a way only that shell can undo.  fish's own 4.x marks
             # send `cmdline_url=' too, which is where the spelling comes from.
             if test -n "$argv[1]"
-                printf '\033]133;C;cmdline_url=%s\007' (string escape --style=url -- "$argv[1]")
+                __cooked_osc "133;C;cmdline_url="(string escape --style=url -- "$argv[1]")
             else
-                printf '\033]133;C\007'
+                __cooked_osc '133;C'
             end
             set -g __cooked_state 1
         end
@@ -125,7 +162,7 @@ if status is-interactive; and test "$TERM_PROGRAM" = cooked; and not set -q COOK
     if __cooked_want marks
         function __cooked_postexec --on-event fish_postexec
             set -l last_status $status
-            printf '\033]133;D;%s\007' $last_status
+            __cooked_osc "133;D;$last_status"
             set -g __cooked_state 2
         end
 
@@ -140,7 +177,7 @@ if status is-interactive; and test "$TERM_PROGRAM" = cooked; and not set -q COOK
         # three events; the old version of this file carried none of it, and a command that
         # never got its `D' left a record open until some later command landed inside it.
         function __cooked_close_open --on-event fish_prompt --on-event fish_cancel --on-event fish_posterror
-            test "$__cooked_state" -eq 1; and printf '\033]133;D\007'
+            test "$__cooked_state" -eq 1; and __cooked_osc '133;D'
             set -g __cooked_state 2
         end
     end
@@ -154,7 +191,7 @@ if status is-interactive; and test "$TERM_PROGRAM" = cooked; and not set -q COOK
         function __cooked_report_cwd --on-variable PWD --on-event fish_prompt
             test "$PWD" = "$__cooked_last_cwd"; and return
             set -g __cooked_last_cwd "$PWD"
-            printf '\033]7;file://%s%s\007' $hostname (string escape --style=url -- "$PWD")
+            __cooked_osc "7;file://$hostname"(string escape --style=url -- "$PWD")
         end
     end
 
@@ -197,9 +234,9 @@ if status is-interactive; and test "$TERM_PROGRAM" = cooked; and not set -q COOK
         functions --copy fish_prompt __cooked_inner_prompt
 
         function fish_prompt
-            __cooked_want marks; and printf '\033]133;A\007'
+            __cooked_want marks; and __cooked_osc '133;A'
             __cooked_inner_prompt
-            __cooked_want input-mark; and printf '\033]133;B\007'
+            __cooked_want input-mark; and __cooked_osc '133;B'
         end
     end
 

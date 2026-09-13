@@ -29,7 +29,9 @@
 
 [[ -n "${COOKED_COMPLETION_LOADED-}" ]] && return
 COOKED_COMPLETION_LOADED=1
-[[ $TERM_PROGRAM == cooked ]] || return
+# The core's own test, tmux included; see cooked.zsh.
+[[ $TERM_PROGRAM == cooked ||
+   ( $TERM_PROGRAM == tmux && -n ${TMUX-} && -n ${COOKED_SHELL_INTEGRATION_FEATURES+set} ) ]] || return
 [[ -o interactive ]] || return
 
 # The reply is framed with base64; without it there is nothing to answer with, and
@@ -279,9 +281,10 @@ __cooked_complete() {
   done
   # base64 because a description is arbitrary text — compsys puts colour in some of
   # them — and a single control byte would end the sequence carrying it.
-  printf '\e]51;CR;%s;%d;%d;%d;%s\e\\' \
+  # Framed by the core, which knows whether tmux is in the way.
+  printf '%s51;CR;%s;%d;%d;%d;%s%s' "$__cooked_osc_open" \
     $fields[2] $__cooked_prefix $__cooked_suffix $__cooked_truncated \
-    "$(print -rn -- $blob | base64 | tr -d '\n')"
+    "$(print -rn -- $blob | base64 | tr -d '\n')" "$__cooked_osc_st"
 }
 zle -N __cooked_complete
 

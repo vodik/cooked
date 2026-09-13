@@ -21,7 +21,9 @@
 #   Emacs  ESC [ > 99 u NONCE ; SERIAL ; POINT ; LINE LF
 #   shell  ESC ] 51 ; C R ; SERIAL ; PREFIX ; SUFFIX ; TRUNCATED ; BASE64 ST
 
-[[ $TERM_PROGRAM == cooked ]] || return
+# The core's own test, tmux included; see cooked.bash.
+[[ $TERM_PROGRAM == cooked ||
+   ( $TERM_PROGRAM == tmux && -n ${TMUX-} && -n ${COOKED_SHELL_INTEGRATION_FEATURES+set} ) ]] || return
 [[ -n "${COOKED_COMPLETION_LOADED-}" ]] && return
 COOKED_COMPLETION_LOADED=1
 [[ $- == *i* ]] || return
@@ -169,7 +171,8 @@ __cooked_complete() {
 
   # base64 because a candidate is arbitrary text and a single control byte in one
   # would end the sequence carrying it.
-  printf '\e]51;CR;%s;%d;%d;%d;%s\e\\' \
+  # Framed by the core, which knows whether tmux is in the way.
+  printf "${__cooked_osc_open}51;CR;%s;%d;%d;%d;%s${__cooked_osc_st}" \
     "$serial" "${#__cooked_complete_word}" 0 "$truncated" \
     "$(printf '%s' "$blob" | base64 | tr -d '\n')"
 

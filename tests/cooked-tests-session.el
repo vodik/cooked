@@ -1506,5 +1506,255 @@ fish honours its own documented path is fish\='s business, and
                                        "-c" "echo $COOKED_VENDOR_RAN")))))))
       (delete-directory dir t))))
 
+;;; tmux
+
+(defun cooked-tests--script-output (command input &rest env)
+  "Run COMMAND on a pty under `script', type INPUT at it, and return its output.
+
+ENV is extra environment entries, ahead of the inherited ones.  A pty rather
+than a pipe because zsh writes its marks to the terminal itself rather than to
+stdout, and fish will not draw a prompt without one."
+  (let ((file (make-temp-file "cooked-tests-input-")))
+    (unwind-protect
+        (with-temp-buffer
+          (with-temp-file file (insert input))
+          (let ((process-environment (append env '("TERM=xterm-256color")
+                                             process-environment)))
+            (call-process "script" file t nil "-qc" command "/dev/null"))
+          (buffer-string))
+      (delete-file file))))
+
+(defun cooked-tests--tmux-unwrap (bytes)
+  "BYTES with each tmux passthrough replaced by the sequence it carries."
+  (replace-regexp-in-string
+   "\ePtmux;\\(\\(?:[^\e]\\|\e\e\\)*\\)\e\\\\"
+   (lambda (match) (string-replace "\e\e" "\e" (match-string 1 match)))
+   bytes t t))
+
+(defun cooked-tests--integration-oscs (bytes)
+  "The distinct OSC 7, 133 and 51 sequences in BYTES, sorted, nonces blanked.
+
+Sorted and deduplicated because what the tmux tests compare is two runs of a
+shell, and how many times a shell redraws a prompt under type-ahead is not
+something either run controls."
+  (let ((found nil))
+    (with-temp-buffer
+      (insert bytes)
+      (goto-char (point-min))
+      (while (re-search-forward "\e]\\(\\(?:7\\|133\\|51\\);[^\a\e]*\\)\\(?:\a\\|\e\\\\\\)"
+                                nil t)
+        (push (replace-regexp-in-string "\\`\e]51;CH;2;[0-9]+;" "\e]51;CH;2;N;"
+                                        (match-string 0))
+              found)))
+    (sort (delete-dups found) #'string<)))
+
+(defun cooked-tests--bare-integration-osc-p (bytes)
+  "Whether BYTES holds an OSC 7, 133 or 51 that tmux would read for itself.
+
+One whose ESC is not the second of a doubled pair, which is to say one outside a
+passthrough."
+  (string-match-p "\\(?:\\`\\|[^\e]\\)\e]\\(?:7\\|133\\|51\\);" bytes))
+
+(defconst cooked-tests--tmux-env
+  '("TMUX=/tmp/cooked-tests-tmux,1,0" "COOKED_SHELL_INTEGRATION_FEATURES=marks input-mark cwd announce")
+  "The environment of a pane in a tmux server started from cooked, less TERM_PROGRAM.")
+
+(ert-deftest cooked-bash-and-zsh-wrap-their-marks-for-tmux ()
+  "Inside tmux the snippets send what they always send, inside tmux\\='s passthrough.
+
+tmux reads OSC 7 and 133 for itself and drops OSC 51, so written plainly none of
+them gets through.  The property is that unwrapping the tmux run gives back exactly
+the sequences the direct run sends, and that nothing of ours is left outside a
+passthrough for tmux to take.
+
+The direct run has TMUX set as well, which is the case of an Emacs started inside
+tmux: TMUX is inherited by every cooked buffer, where nothing is in the way, so
+TERM_PROGRAM is what has to decide."
+  :tags '(bash zsh script)
+  (skip-unless (executable-find "script"))
+  (let* ((dir (cooked--integration-directory))
+         (zdotdir (make-temp-file "cooked-tests-zdotdir-" t))
+         (bashrc (cooked-tests--bash-rc))
+         (runs
+          `(("bash" ,(format "bash --rcfile %s -i" (shell-quote-argument bashrc))
+             "cd /tmp\ntrue\nexit\n")
+            ("zsh" "zsh -i" "cd /tmp\ntrue\nexit\n"))))
+    (with-temp-file (expand-file-name ".zshrc" zdotdir)
+      (insert "PS1='$ '\nsource "
+              (shell-quote-argument (expand-file-name "cooked.zsh" dir)) "\n"))
+    (unwind-protect
+        (pcase-dolist (`(,shell ,command ,input) runs)
+          (when (executable-find shell)
+            (let* ((zenv (concat "ZDOTDIR=" zdotdir))
+                   (direct (apply #'cooked-tests--script-output command input zenv
+                                  "TERM_PROGRAM=cooked" cooked-tests--tmux-env))
+                   (wrapped (apply #'cooked-tests--script-output command input zenv
+                                   "TERM_PROGRAM=tmux" cooked-tests--tmux-env))
+                   (expected (cooked-tests--integration-oscs direct)))
+              (ert-info ((format "%s" shell))
+                ;; The run did something worth comparing: a directory, both prompt
+                ;; marks and an announcement.
+                (should (seq-find (lambda (s) (string-match-p "\\`\e]7;file://.*/tmp" s))
+                                  expected))
+                (should (member "\e]133;A\a" expected))
+                (should (member "\e]133;B\a" expected))
+                (should (seq-find (lambda (s) (string-prefix-p "\e]51;CH;" s)) expected))
+                (should-not (string-search "\ePtmux;" direct))
+                (should-not (cooked-tests--bare-integration-osc-p wrapped))
+                (should (equal (cooked-tests--integration-oscs
+                                (cooked-tests--tmux-unwrap wrapped))
+                               expected))))))
+      (delete-file bashrc)
+      (delete-directory zdotdir t))))
+
+(ert-deftest cooked-fish-wraps-its-marks-for-tmux-and-does-not-stand-down ()
+  "fish 4 marks its own prompts, and inside tmux those marks go to tmux and stop.
+
+So the stand-down that is right everywhere else would leave a fish in a tmux pane
+with no marks reaching cooked at all.  Inside tmux the snippet keeps its marks and
+its directory, and wraps them."
+  :tags '(fish script)
+  (skip-unless (executable-find "fish"))
+  (skip-unless (executable-find "script"))
+  (let ((config (make-temp-file "cooked-tests-fish-" t)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "fish" config))
+          (with-temp-file (expand-file-name "fish/config.fish" config)
+            (insert "function fish_prompt; printf '$ '; end\n"
+                    "source " (shell-quote-argument
+                               (expand-file-name "cooked.fish"
+                                                 (cooked--integration-directory)))
+                    "\n"))
+          (let* ((wrapped (apply #'cooked-tests--script-output "fish -i" "cd /tmp\nexit\n"
+                                 (concat "XDG_CONFIG_HOME=" config)
+                                 "TERM_PROGRAM=tmux" cooked-tests--tmux-env))
+                 ;; Only what travelled inside a passthrough: fish's own marks are
+                 ;; on the wire too, bare, and are tmux's.
+                 (carried nil))
+            (with-temp-buffer
+              (insert wrapped)
+              (goto-char (point-min))
+              (while (re-search-forward "\ePtmux;\\(\\(?:[^\e]\\|\e\e\\)*\\)\e\\\\" nil t)
+                (push (string-replace "\e\e" "\e" (match-string 1)) carried)))
+            (should (member "\e]133;A\a" carried))
+            (should (member "\e]133;B\a" carried))
+            (should (member "\e]133;C;cmdline_url=cd%20/tmp\a" carried))
+            (should (seq-find (lambda (s) (string-match-p "\\`\e]7;file://.*/tmp\a" s))
+                              carried))))
+      (delete-directory config t))))
+
+(ert-deftest cooked-snippets-stay-out-of-a-tmux-cooked-did-not-start ()
+  "A pane whose environment has no feature list is not cooked\\='s, and gets nothing.
+
+Inside tmux TERM_PROGRAM says tmux whoever the client is, so the feature list is
+the snippet\\='s test.  Without it -- a server started from another terminal, or a
+`update-environment\\=' that cleared it -- sourcing the file from a shared rc must
+be as inert as it is under any other terminal."
+  :tags '(bash script)
+  (skip-unless (executable-find "bash"))
+  (skip-unless (executable-find "script"))
+  (let ((bashrc (cooked-tests--bash-rc)))
+    (unwind-protect
+        (let ((out (cooked-tests--script-output
+                    (format "env -u COOKED_SHELL_INTEGRATION_FEATURES bash --rcfile %s -i"
+                            (shell-quote-argument bashrc))
+                    "cd /tmp\nexit\n"
+                    "TERM_PROGRAM=tmux" (car cooked-tests--tmux-env))))
+          (should-not (string-search "\ePtmux;" out))
+          (should-not (string-match-p "\e]\\(?:7\\|133\\|51\\);" out)))
+      (delete-file bashrc))))
+
+(defun cooked-tests--tmux ()
+  "The tmux to test against: COOKED_TEST_TMUX if it names one, else PATH\\='s."
+  (let ((named (getenv "COOKED_TEST_TMUX")))
+    (if (and named (file-executable-p named)) named (executable-find "tmux"))))
+
+(defmacro cooked-tests--with-tmux (config &rest body)
+  "Run BODY in a cooked buffer running bash inside a private tmux server.
+
+CONFIG is the text of the server\\='s configuration.  The server has a socket of
+its own and no user configuration, and is killed on the way out.  TMUX is
+removed from tmux\\='s own environment, because a suite run from inside tmux
+would otherwise be refused as a nested session."
+  (declare (indent 1))
+  `(let* ((tmux (cooked-tests--tmux))
+          (dir (make-temp-file "cooked-tests-tmux-" t))
+          (socket (expand-file-name "socket" dir))
+          (conf (expand-file-name "tmux.conf" dir))
+          (rc (cooked-tests--bash-rc)))
+     (with-temp-file conf (insert ,config))
+     (unwind-protect
+         (cooked-tests--with-session
+             (list "env" "-u" "TMUX"
+                   (concat "COOKED_SHELL_INTEGRATION_FEATURES="
+                           "marks input-mark cwd announce")
+                   tmux "-S" socket "-f" conf "new-session"
+                   "bash" "--rcfile" rc "-i")
+           (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 15))
+           ,@body)
+       (call-process tmux nil nil nil "-S" socket "kill-server")
+       (delete-file rc)
+       (delete-directory dir t))))
+
+(defun cooked-tests--tmux-run (command)
+  "Submit COMMAND at the prompt and wait for the next one."
+  (let ((before (length cooked--commands)))
+    (if (cooked--input-region)
+        (progn (cooked--replace-input command) (cooked-send-input))
+      (cooked--send cooked--session (concat command "\r")))
+    (should (cooked-tests--settle
+             (lambda () (and (> (length cooked--commands) before)
+                             (eq cooked--semantic 'input)))
+             10))))
+
+(defun cooked-tests--prompt-lines ()
+  "The text of the line at each of `cooked--prompt-starts\\='."
+  (mapcar (lambda (at) (save-excursion
+                         (goto-char at)
+                         (buffer-substring-no-properties at (line-end-position))))
+          (cooked--prompt-starts)))
+
+(ert-deftest cooked-prompt-navigation-and-directory-work-inside-tmux ()
+  "A shell in tmux in cooked: its directory tracked, its prompts navigable.
+
+tmux is kept off the alternate screen and without a status line, which is the
+arrangement docs/SHELL.md gives for marks that last into scrollback.  The long
+command is there to push its own prompt off the screen: a mark that was not
+carried into scrollback with its row would now name a line of its output."
+  :tags '(tmux bash)
+  (skip-unless (cooked-tests--tmux))
+  (skip-unless (executable-find "bash"))
+  (cooked-tests--with-tmux
+      (concat "set -g allow-passthrough on\n"
+              "set -g status off\n"
+              "set -ga terminal-overrides ',cooked*:smcup@:rmcup@'\n")
+    (cooked-tests--tmux-run "cd /tmp")
+    (should (equal default-directory "/tmp/"))
+    (cooked-tests--tmux-run "seq 1 100")
+    (cooked-tests--tmux-run "true")
+    (should (equal (cooked-tests--prompt-lines)
+                   '("$ cd /tmp" "$ seq 1 100" "$ true" "$ ")))
+    ;; And the navigation command lands on them, the live prompt counting as one.
+    (goto-char (point-max))
+    (cooked-previous-command 3)
+    (should (looking-at-p (regexp-quote "$ seq 1 100")))
+    ;; Emacs owns the line: the announcement got through as well as the marks.
+    (should (eq (cooked--policy) 'cooked))))
+
+(ert-deftest cooked-tmux-on-the-alternate-screen-keeps-the-keyboard ()
+  "By default tmux takes the alternate screen, and there the keys stay tmux\\='s.
+
+The marks still arrive and the directory is still tracked, but a prompt mark on
+the alternate screen must not hand Emacs the line: the screen is tmux\\='s frame,
+not a transcript."
+  :tags '(tmux bash)
+  (skip-unless (cooked-tests--tmux))
+  (skip-unless (executable-find "bash"))
+  (cooked-tests--with-tmux "set -g allow-passthrough on\n"
+    (cooked-tests--tmux-run "cd /tmp")
+    (should (equal default-directory "/tmp/"))
+    (should (eq (cooked--policy) 'alt))))
+
 (provide 'cooked-tests-session)
 ;;; cooked-tests-session.el ends here

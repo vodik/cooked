@@ -17,7 +17,13 @@
 # The completion capture is its own file, cooked-completion.bash; the announcement
 # below is here because it is not about completion. See the comment on it.
 
-[[ $TERM_PROGRAM == cooked ]] || return
+# Inside tmux, TERM_PROGRAM says `tmux' -- the server sets it in every pane -- so the
+# test for cooked there is the feature list instead: cooked exports it to every child,
+# and a tmux server started from a cooked buffer carries it into its panes.  That is
+# a weaker identity than TERM_PROGRAM, since a server outlives the terminal it was
+# started from, and docs/SHELL.md says how `update-environment' tightens it.
+[[ $TERM_PROGRAM == cooked ||
+   ( $TERM_PROGRAM == tmux && -n ${TMUX-} && -n ${COOKED_SHELL_INTEGRATION_FEATURES+set} ) ]] || return
 [[ -n "${COOKED_INTEGRATION_LOADED-}" ]] && return
 COOKED_INTEGRATION_LOADED=1
 [[ $- == *i* ]] || return
@@ -53,7 +59,33 @@ __cooked_want() {
   esac
 }
 
-__cooked_osc() { builtin printf '\033]%s\007' "$1"; }
+# How an OSC is framed on the way out, kept as the backslash escapes that both `printf'
+# and prompt expansion decode, so that one spelling serves the hooks and PS1 alike.
+# _close ends a sequence with BEL and _st with ST, and a caller picks whichever the
+# sequence has always used.
+#
+# Inside tmux every one of them is wrapped in tmux's passthrough, `DCS tmux; ... ST'
+# with each ESC of the payload doubled, as vterm's snippet does.  Unwrapped they never
+# get here: tmux reads OSC 7 and 133 for its own pane path and prompt jumps, and
+# swallows OSC 51 as unknown.  The server passes the DCS on only under
+# `set -g allow-passthrough on' and drops it silently otherwise, so a server without
+# the option costs nothing but the marks.  TERM_PROGRAM rather than TMUX is what
+# decides, because TMUX is inherited: an Emacs started inside tmux hands it to every
+# cooked buffer, where the shell is talking to cooked directly and a wrapped mark would
+# be read as a DCS nobody asked for.
+#
+# The title is not wrapped.  tmux keeps a pane title of its own and hands it on under
+# `set-titles', so OSC 2 is a sequence tmux means to consume.
+__cooked_osc_open='\033]'
+__cooked_osc_close='\007'
+__cooked_osc_st='\033\\'
+if [[ $TERM_PROGRAM == tmux ]]; then
+  __cooked_osc_open='\033Ptmux;\033\033]'
+  __cooked_osc_close='\007\033\\'
+  __cooked_osc_st='\033\033\\\033\\'
+fi
+
+__cooked_osc() { builtin printf "${__cooked_osc_open}%s${__cooked_osc_close}" "$1"; }
 
 #
 # Percent-encoding, for OSC 7 and for the command line on the `C' mark.
@@ -238,8 +270,8 @@ __cooked_ps0_marked=
 __cooked_prompt() {
   local a= b=
 
-  __cooked_want marks      && a='\[\033]133;A\007\]'
-  __cooked_want input-mark && b='\[\033]133;B\007\]'
+  __cooked_want marks      && a="\\[${__cooked_osc_open}133;A${__cooked_osc_close}\\]"
+  __cooked_want input-mark && b="\\[${__cooked_osc_open}133;B${__cooked_osc_close}\\]"
 
   if [[ -n $a || -n $b ]]; then
     [[ $PS1 == "$__cooked_ps1_marked" ]] || __cooked_ps1_clean=$PS1
@@ -254,7 +286,7 @@ __cooked_prompt() {
     # inside a `$(...)' in the prompt, where an escape sequence would be shell syntax
     # rather than prompt text.  Ghostty draws the same line for the same reason.
     if [[ -n $a && $PS1 == *'\n'* ]]; then
-      PS1=${PS1//'\n'/'\n\[\033]133;A;k=s\007\]'}
+      PS1=${PS1//'\n'/"\\n\\[${__cooked_osc_open}133;A;k=s${__cooked_osc_close}\\]"}
     fi
     __cooked_ps1_marked=$PS1
   fi
@@ -275,7 +307,7 @@ __cooked_prompt() {
   # command Emacs has no record of.
   if [[ -n $b ]]; then
     local a2=
-    [[ -n $a ]] && a2='\[\033]133;A;k=s\007\]'
+    [[ -n $a ]] && a2="\\[${__cooked_osc_open}133;A;k=s${__cooked_osc_close}\\]"
     [[ $PS2 == "$__cooked_ps2_marked" ]] || __cooked_ps2_clean=$PS2
     PS2="${a2}${__cooked_ps2_clean}${b}"
     __cooked_ps2_marked=$PS2
@@ -363,7 +395,7 @@ __cooked_complete_replies=0
 
 __cooked_complete_announce() {
   __cooked_complete_nonce=${RANDOM}${RANDOM}
-  builtin printf '\033]51;CH;2;%s;%s\033\\' \
+  builtin printf "${__cooked_osc_open}51;CH;2;%s;%s${__cooked_osc_st}" \
     "$__cooked_complete_nonce" "$__cooked_complete_replies"
 }
 

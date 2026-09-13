@@ -19,7 +19,11 @@
 # The completion capture is its own file, cooked-completion.zsh, because it is a
 # wire protocol rather than a preference; source it after this one.
 
-[[ $TERM_PROGRAM == cooked ]] || return
+# Inside tmux, TERM_PROGRAM says `tmux' -- the server sets it in every pane -- so the
+# test for cooked there is the feature list instead.  See the same test in cooked.bash,
+# and docs/SHELL.md for the tmux side.
+[[ $TERM_PROGRAM == cooked ||
+   ( $TERM_PROGRAM == tmux && -n ${TMUX-} && -n ${COOKED_SHELL_INTEGRATION_FEATURES+set} ) ]] || return
 
 [[ -n "${COOKED_INTEGRATION_LOADED-}" ]] && return
 COOKED_INTEGRATION_LOADED=1
@@ -72,7 +76,24 @@ __cooked_want() {
   [[ " $__cooked_features " == *" $1 "* ]]
 }
 
-__cooked_osc() { builtin print -nu $__cooked_fd -- "\e]$1\a" }
+# How an OSC is framed on the way out, as the bytes themselves: _close ends a sequence
+# with BEL and _st with ST, and a caller picks whichever the sequence has always used.
+# Inside tmux each is wrapped in `DCS tmux; ... ST' with the payload's ESCs doubled,
+# which is the only way past a server that reads OSC 7 and 133 for itself and drops
+# OSC 51; see cooked.bash for the whole of the argument, including why TERM_PROGRAM and
+# not TMUX decides.  The title is left alone, because OSC 2 is tmux's to consume.
+#
+# Printed with `-r' from here on, so a backslash in the frame is a byte rather than an
+# escape.  Every payload is percent-encoded or base64 or a number, so `-r' costs nothing
+# the old unraw `print' was decoding.
+typeset -g __cooked_osc_open=$'\e]' __cooked_osc_close=$'\a' __cooked_osc_st=$'\e\\'
+if [[ $TERM_PROGRAM == tmux ]]; then
+  __cooked_osc_open=$'\ePtmux;\e\e]'
+  __cooked_osc_close=$'\a\e\\'
+  __cooked_osc_st=$'\e\e\\\e\\'
+fi
+
+__cooked_osc() { builtin print -rnu $__cooked_fd -- "${__cooked_osc_open}$1${__cooked_osc_close}" }
 
 #
 # Percent-encoding, for OSC 7 and for the command line on the `C' mark.
@@ -309,8 +330,10 @@ __cooked_prompt_precmd() {
   fi
 
   local a= b= a2=
-  __cooked_want marks      && a=$'%{\e]133;A\a%}' && a2=$'%{\e]133;A;k=s\a%}'
-  __cooked_want input-mark && b=$'%{\e]133;B\a%}'
+  __cooked_want marks &&
+    a="%{${__cooked_osc_open}133;A${__cooked_osc_close}%}" &&
+    a2="%{${__cooked_osc_open}133;A;k=s${__cooked_osc_close}%}"
+  __cooked_want input-mark && b="%{${__cooked_osc_open}133;B${__cooked_osc_close}%}"
   [[ -z $a && -z $b ]] && return 0
 
   [[ $PS1 == "$__cooked_ps1_marked" ]] || __cooked_ps1_clean=$PS1
@@ -373,8 +396,8 @@ __cooked_complete_announce() {
   __cooked_complete_nonce=${RANDOM}${RANDOM}
   # An OSC occupies no columns and moves no cursor, so ZLE's idea of the screen
   # survives being written to from inside a widget.
-  builtin print -nu $__cooked_fd -- \
-    "\e]51;CH;2;${__cooked_complete_nonce};${__cooked_complete_replies}\e\\"
+  builtin print -rnu $__cooked_fd -- \
+    "${__cooked_osc_open}51;CH;2;${__cooked_complete_nonce};${__cooked_complete_replies}${__cooked_osc_st}"
 }
 
 # Announced from `zle-line-init' rather than a precmd hook, and the difference is not
@@ -437,7 +460,7 @@ __cooked_title_precmd() { builtin print -Pnu $__cooked_fd -- '\e]2;%~\a' }
 # asked and taking away something you wrote are different acts, and only the second
 # cannot be undone by turning the feature back off.
 __cooked_install_helpers() {
-  __cooked_verb() { builtin printf '\e]51;E1;%s;%s\e\\' "$1" "${2-}" }
+  __cooked_verb() { builtin printf '%s51;E1;%s;%s%s' "$__cooked_osc_open" "$1" "${2-}" "$__cooked_osc_st" }
 
   find_file()              { __cooked_verb F "${${1:-.}:a}" }
   find_file_other_window() { __cooked_verb O "${${1:-.}:a}" }
@@ -464,14 +487,14 @@ __cooked_install_helpers() {
   # An alias that shadows a real command reads very differently as something you wrote
   # than as something cooked put in your shell.
   cooked_send() {
-    builtin printf '\e]51;E1;!;'
+    builtin printf '%s51;E1;!;' "$__cooked_osc_open"
     local arg
     for arg in "$@"; do
       arg="${arg//\\/\\\\}"
       arg="${arg//\"/\\\"}"
       builtin printf '"%s" ' "$arg"
     done
-    builtin printf '\e\\'
+    builtin printf '%s' "$__cooked_osc_st"
   }
 }
 

@@ -92,6 +92,79 @@ Sourcing `cooked.fish` anyway is safe: it detects that and stands down rather th
 bracketing every prompt twice. It still does the work on fish 3.x, and on a fish 4 told
 `no-mark-prompt`.
 
+## Inside tmux
+
+tmux reads OSC 7 and 133 for its own pane path and prompt jumps, and drops OSC 51, so
+none of them reaches cooked as written. The snippets therefore wrap all three in tmux's
+passthrough, `DCS tmux; … ST` with every ESC inside doubled, whenever `TERM_PROGRAM`
+says `tmux`. That is the variable tmux sets in each pane, and it is `TERM_PROGRAM`
+rather than `TMUX` that decides because `TMUX` is inherited: an Emacs started inside
+tmux hands it on to every cooked buffer, where nothing is in the way. Titles are not
+wrapped, because OSC 2 is tmux's to consume and `set-titles` hands it on.
+
+Three things are yours to arrange.
+
+**The snippet has to be in the pane.** Injection reaches only the shell cooked spawned,
+and tmux starts its panes from your rc, so the line in your rc is the one that counts,
+and its test has to admit tmux:
+
+```bash
+[[ $TERM_PROGRAM == cooked || $TERM_PROGRAM == tmux ]] && source /path/to/cooked.bash
+```
+
+The snippet makes the real decision itself. Inside tmux it sets itself up only when
+`COOKED_SHELL_INTEGRATION_FEATURES` is in the environment. cooked exports that variable to
+every child, so a tmux server started from a cooked buffer carries it into every pane.
+On fish 4 the snippet does not stand down inside tmux as it does elsewhere, since fish's
+own marks go to tmux and stop there.
+
+**tmux has to pass the sequences on, and learn what the entry cannot tell it.**
+
+```tmux
+set -g allow-passthrough on
+set -ga update-environment COOKED_SHELL_INTEGRATION_FEATURES
+set -as terminal-features ',cooked*:usstyle:progressbar'
+```
+
+Without `allow-passthrough`, tmux drops the wrapped sequences without a word. Nothing
+reaches the screen, and you simply have no marks. `update-environment` matters because a
+server outlives the terminal it was started from. Without it, a pane opened from a
+client in another terminal still finds the variable and sends marks to a terminal that
+never asked for them. With it, tmux refreshes the variable from whichever client
+attaches or makes the session.
+
+The features on the `terminal-features` line are the two that `cooked-256color` does
+not declare. `usstyle` needs `ol` as well, and `progressbar` needs `Spb`. Everything
+else tmux looks for is found in the entry: `RGB` (from `COLORTERM`), `hyperlinks`,
+`extkeys`, `focus`, `title`, `sync`, `overline`, `strikethrough`, `bpaste`, `cstyle`
+and `ccolour`. To check, run `tmux display -p '#{I/f:hyperlinks}'`, which prints 1 or
+0 for any feature. Don't use `#{client_termfeatures}` for this: it lists only the
+features switched on by name, and never the ones tmux found in terminfo.
+
+**Where tmux draws decides what the marks are good for.** By default tmux takes the
+alternate screen. There, cooked keeps no transcript and hands every key to tmux (the
+policy is `alt`), so the input line stays tmux's and nothing can eat a keystroke.
+Directory tracking works, and a prompt mark works for as long as its row is on screen.
+Once output scrolls, the marks no longer point at their prompts, because the alternate
+screen scrolls without scrollback and the marks do not move with it. For marks that
+follow the transcript into scrollback, and an input line Emacs edits, keep tmux off the
+alternate screen and remove the status line:
+
+```tmux
+set -ga terminal-overrides ',cooked*:smcup@:rmcup@'
+set -g status off
+```
+
+The status line has to go because tmux scrolls the pane inside a margin that stops
+short of it, and cooked archives only rows that scroll off the top of the whole screen.
+Once they are gone, the rest of the pane is lost. Treat this arrangement as one pane per
+window. The marks carry no pane, so with a split, cooked reads both panes' prompts as
+one transcript. Copy mode and switching windows repaint the screen in place, too.
+
+Out of reach either way: a shell behind an `ssh` from inside the pane. The far end has
+neither `TMUX` nor `TERM_PROGRAM=tmux`, so it writes its marks unwrapped and tmux keeps
+them.
+
 ## The OSC 51 channels
 
 One OSC number carries two unrelated things, and each needs a half in Emacs and a half
