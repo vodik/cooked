@@ -189,7 +189,7 @@ At a prompt this is Emacs' own history, editing the pending line in the buffer.
 Everywhere else the child is the one with a history, and this forwards \\`<up>'
 to it -- which is what the key would have done in any terminal, and what it has
 to do here: `evil-collection-comint' binds the arrow keys for insert state on
-an auxiliary keymap that outranks `cooked-semi-map', so without this they reach
+an auxiliary keymap that outranks the local map, so without this they reach
 `cooked--history-move' at a shell that is editing its own line and are answered
 with \"Not at an input prompt\"."
   (interactive "p")

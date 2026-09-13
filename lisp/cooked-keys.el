@@ -138,6 +138,23 @@ longer disagree.  The symbols are also exactly the set
 `cooked--build-passthrough-map\=' binds explicitly, in every modified spelling,
 for each of the maps it builds -- which is the table\='s other consumer.")
 
+(defconst cooked--key-event-aliases
+  '((delete . deletechar))
+  "Keys a graphical frame names differently, as (EVENT . SYMBOL).
+
+SYMBOL is the `cooked--key-encodings\=' row the key is spelled by, and EVENT is
+the name a graphical frame gives the same key.  A terminal frame decodes the
+Delete key\='s `ESC [ 3 ~\=' as `deletechar\=', but a graphical frame reports it
+as `delete\=' and translates that to `deletechar\=' through
+`local-function-key-map\=' only when nothing binds `delete\=' -- and
+`comint-mode-map\=' does.  So Delete in a full-screen program ran
+`delete-forward-char\=' on a read-only row instead of reaching the child.
+
+`cooked--build-passthrough-map\=' binds each EVENT beside its row, in every
+modified spelling, and `cooked--encode-event\=' reads EVENT as SYMBOL, so
+\\`C-<delete>\=' is sent as `ESC [ 3 ; 5 ~\=' on either frame.  Every other row
+of the table is named alike on both.")
+
 (defun cooked--key-sequence (entry)
   "The unmodified, un-negotiated escape sequence ENTRY names.
 
@@ -542,6 +559,7 @@ every capital into a lowercase letter."
   ;; and if it is not it falls through to the plain-character case below.
   (let* ((mods (event-modifiers event))
          (basic (event-basic-type event))
+         (basic (alist-get basic cooked--key-event-aliases basic))
          ;; `backtab' is the mirror image of the capital-letter case above: Emacs
          ;; bakes its shift into the base symbol and reports none in `mods' at
          ;; all, for `backtab' alone or with other modifiers held alongside it

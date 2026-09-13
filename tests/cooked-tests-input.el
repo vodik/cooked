@@ -1487,7 +1487,10 @@ completion UI, the built-in one included, is on the far side of that same test."
   (skip-unless (require 'evil-collection nil t))
   (require 'cooked-evil)
   (evil-mode 1)
-  (cooked-tests--with-echoing-child ""
+  ;; At a prompt, which is the only place an in-buffer completion shows: over a
+  ;; child that owns the keyboard, Enter is forwarded ahead of both.
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
     (let ((map (make-sparse-keymap)))
       ;; Both spellings: a GUI frame's Enter is `<return>', and leaving it out
       ;; here would let the fall-through run past this map to the passthrough one
@@ -4690,6 +4693,56 @@ every layer invited onto that hook inherits it."
                 nil t)
       (should (cooked-tests--settle (lambda () (not (eq seen 'never)))))
       (should (equal seen '(t t))))))
+
+(ert-deftest cooked-evil-insert-state-forwards-what-a-program-needs ()
+  "Insert state over a child that owns the keyboard forwards like emacs state.
+
+`cooked-semi-map' was worn as the local map, and evil's insert state maps and
+evil-collection's auxiliary maps outrank every local map, so `S-<return>' inside
+a full-screen program inserted a newline into the read-only screen instead of
+reaching the program, and `C-r', `C-w' and `C-o' ran evil's commands.  The
+forwarding now sits above evil while the semi map is worn, under each policy in
+which the child owns the keyboard.  It leaves alone what insert state keeps for
+Emacs, and at a prompt it is not there at all."
+  :tags '(evil evil-collection)
+  (skip-unless (require 'evil nil t))
+  (skip-unless (require 'evil-collection nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  ;; Where `S-<return>' was lost: evil-collection's comint bindings.
+  (cooked-tests--with-evil-collection (comint)
+    (cooked-tests--with-echoing-child ""
+      (cooked-tests--assert-forwarded 'raw)
+      (cooked--handle-semantic '(command-start nil nil) nil)
+      (cooked--refresh-keymap)
+      (cooked-tests--assert-forwarded 'command))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "printf '\\033[?1049h'; stty raw -echo; cat -v")
+      (should (cooked-tests--settle (lambda () cooked--alt)))
+      (cooked-tests--assert-forwarded 'alt)
+      ;; And what the forwarded keys send, from insert state.
+      (evil-insert-state)
+      (cooked-tests--with-kitty-flags 1
+        (let ((last-command-event 'S-return))
+          (call-interactively (key-binding (kbd "S-<return>")))))
+      (should (cooked-tests--settle
+               (lambda () (string-search "^[[13;2u" (cooked-tests--text)))))
+      ;; A graphical frame's Delete key is `delete', not the `deletechar' a
+      ;; terminal decodes, and is spelled the same.
+      (let ((last-command-event 'delete))
+        (call-interactively (key-binding (kbd "<delete>"))))
+      (should (cooked-tests--settle
+               (lambda () (string-search "^[[3~" (cooked-tests--text))))))
+    ;; At a prompt Emacs owns the line, and insert state is evil's and cooked's.
+    (cooked-tests--with-session '("/bin/cat")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
+      (evil-insert-state)
+      (should-not cooked--semi-map-worn)
+      (dolist (key cooked-tests--keys-a-program-needs)
+        (ert-info ((format "%s in insert state at a prompt" key))
+          (should-not (eq (key-binding (kbd key)) #'cooked-send-key))))
+      (should (eq (key-binding (kbd "C-w")) #'evil-delete-backward-word))
+      (should (eq (key-binding (kbd "RET")) #'cooked-send-input)))))
 
 (ert-deftest cooked-semi-map-leaves-emacs-its-control-chords ()
   "Evil insert state keeps `C-;' and `C-SPC' for Emacs; the raw map forwards them.

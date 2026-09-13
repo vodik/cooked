@@ -849,5 +849,59 @@ the command's output, and CODE is the exit status.  Returns the new record."
         (push command cooked--commands)
         command))))
 
+(defmacro cooked-tests--with-evil-collection (modes &rest body)
+  "Run BODY with evil-collection set up for MODES, and put their keymaps back.
+
+MODES is an unquoted list, e.g. `(comint)'.  evil-collection binds into
+auxiliary maps inside each mode's own keymap, and nothing undoes that, so a
+test that ran `evil-collection-init' would leave every later test in the same
+Emacs under a configuration it never asked for: an insert-state `S-<return>'
+at a prompt ran evil-collection's `newline' in a test about `cooked-newline'.
+Each mode's map is copied first and its contents restored after, keeping the
+map itself, which `cooked-mode-map' has as a parent."
+  (declare (indent 1))
+  (let ((saved (make-symbol "saved")))
+    `(let ((,saved (mapcar (lambda (mode)
+                             (let ((map (symbol-value (intern (format "%s-mode-map" mode)))))
+                               (cons map (copy-keymap map))))
+                           ',modes)))
+       (unwind-protect
+           (progn (evil-collection-init ',modes)
+                  ,@body)
+         (pcase-dolist (`(,map . ,copy) ,saved)
+           (setcdr map (cdr copy)))))))
+
+(defconst cooked-tests--keys-a-program-needs
+  '("S-<return>" "S-<left>" "C-v" "C-w" "C-o" "C-r" "C-a" "C-k" "<insert>"
+    "<delete>" "C-<delete>" "RET" "<return>" "S-SPC")
+  "Keys a full-screen program reads that Emacs or evil also has a use for.
+
+Each was probed going somewhere other than the child from evil insert state:
+`S-<return>' to evil-collection's `newline', `C-r' to a register paste, `C-a'
+to `evil-paste-last-insertion', `<delete>' to `comint-mode-map''s
+`delete-forward-char' in every state.  `S-SPC' was translated to a plain space
+with its shift gone.")
+
+(defun cooked-tests--assert-forwarded (policy)
+  "Assert that every key a program needs forwards, in emacs and insert state.
+POLICY is the one the buffer must be under, named so a failure says which."
+  (should (eq (cooked--policy) policy))
+  (dolist (state '(emacs insert))
+    (funcall (intern (format "evil-%s-state" state)))
+    (should (eq (bound-and-true-p evil-state) state))
+    (dolist (key cooked-tests--keys-a-program-needs)
+      (ert-info ((format "%s in %s state under `%s'" key state policy))
+        (should (eq (key-binding (kbd key)) #'cooked-send-key)))))
+  ;; What insert state keeps is still Emacs' and evil's: the exceptions, ESC,
+  ;; the Meta space, the Control chords no character names, and evil's own way
+  ;; into emacs state.
+  (evil-insert-state)
+  (dolist (key '("C-g" "C-x" "C-h" "C-u" "C-l" "M-x" "C-;" "C-SPC"))
+    (ert-info ((format "%s in insert state under `%s'" key policy))
+      (should-not (eq (key-binding (kbd key)) #'cooked-send-key))))
+  (should (eq (key-binding (kbd "<escape>")) #'evil-normal-state))
+  (should (eq (key-binding (kbd "C-z")) #'evil-emacs-state))
+  (should (eq (key-binding (kbd "C-c C-v")) #'cooked-toggle-peek)))
+
 (provide 'cooked-tests-helpers)
 ;;; cooked-tests-helpers.el ends here

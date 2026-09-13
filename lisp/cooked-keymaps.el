@@ -151,14 +151,25 @@ where Meta chords arrive as two forwarded bytes, and is why
     (unless reserve-chords
       (dolist (event (cooked--control-chord-events exceptions))
         (define-key map (vector event) #'cooked-send-key)))
+    ;; Shift+Space too, the one printable key whose shifted form is no character
+    ;; of its own.  Unbound, Emacs translates it to a plain space with the shift
+    ;; gone, so a kitty child reporting every key never gets its `CSI 32;2u'.
+    (unless (memq ?\S-\s exceptions)
+      (define-key map (vector ?\S-\s) #'cooked-send-key))
     ;; Bind the modified variants explicitly, not for completeness but for
     ;; correctness: when `S-return' has no binding Emacs shift-translates it to
     ;; `return' and runs *that* binding, with `last-command-event' already flattened.
     ;; By the time `cooked-send-key' looks, the shift is gone and unrecoverable.
-    (dolist (entry cooked--key-encodings)
+    ;; A graphical frame's own names for a row are bound the same way, since
+    ;; `delete' reaches `deletechar' only when nothing binds it.
+    (dolist (key (append (mapcar #'car cooked--key-encodings)
+                         (mapcar #'car cooked--key-event-aliases)))
       (dolist (prefix '("" "S-" "C-" "M-" "C-S-" "M-S-" "C-M-"))
-        (let ((event (intern (concat prefix (symbol-name (car entry))))))
-          (unless (or (and reserve-chords (string-search "M-" prefix))
+        (let ((event (intern (concat prefix (symbol-name key)))))
+          (unless (or (and reserve-chords
+                           ;; The Escape key a graphical frame sends is ESC
+                           ;; under another name, and is reserved with it.
+                           (or (string-search "M-" prefix) (eq key 'escape)))
                       (memq event exceptions))
             (define-key map (vector event) #'cooked-send-key)))))
     ;; Everything else cooked binds under `C-c' -- its own commands, and the
@@ -389,12 +400,21 @@ key each, as for `cooked-raw-exceptions'.
 `cooked-send-literal-key' (\\`C-c C-q') sends any one of these through to the
 child anyway, for the program that wants it back."
   :type '(repeat string)
-  :set (cooked--passthrough-setter 'cooked-semi-map t)
+  :set (cooked--passthrough-setter 'cooked--semi-forwarding-map t)
   :group 'cooked)
 
-(defvar cooked-semi-map
+(defvar cooked--semi-forwarding-map
   (cooked--build-passthrough-map
    (mapcar #'cooked--exception-event cooked-semi-exceptions) t)
+  "What `cooked-semi-map' forwards, on its own and with no parent.
+
+`cooked-semi-map' is this and `cooked-mode-map' beneath it.  Kept apart because
+evil needs the forwarding alone: cooked-evil.el puts it above evil's insert
+state maps, and the parent would put `comint-mode-map''s `<delete>' and its
+Meta bindings above them too.")
+
+(defvar cooked-semi-map
+  (make-composed-keymap cooked--semi-forwarding-map)
   "Keymap for forwarding that stops short of taking Emacs away.
 
 The other passthrough maps answer \"the child needs every key\" and reserve `C-c'
@@ -423,9 +443,23 @@ prefix too, but only on a graphical frame and only for characters, where the
 Escape key arrives as `escape' and is bound alongside; here the point is for
 ESC to reach Emacs, so there is nothing to bind it to.
 
+The bindings live in `cooked--semi-forwarding-map', which this composes, so
+evil can wear them without this map's parent; see `cooked--semi-map-worn'.
+
 \\`C-c C-q' is the way through for any one key this map keeps --
 `cooked-send-literal-key' reads the event itself rather than looking it up
 here.")
+
+(defvar-local cooked--semi-map-worn nil
+  "Whether `cooked-semi-map' is the local map, set by `cooked--state-keymap'.
+
+A variable because evil asks it as one.  Evil's insert state maps sit in
+`emulation-mode-map-alists', above every local map, so from insert state
+`S-<return>', `C-r' and `C-w' ran evil's commands and never reached the
+child.  cooked-evil.el hangs `cooked--semi-forwarding-map' on an evil
+minor-mode keymap switched by this variable, which Emacs reads on every key,
+so the forwarding sits above evil exactly while this map is worn and never
+at a prompt.")
 
 (defun cooked--peek-resume-and-send ()
   "End peek and forward the key that invoked this command to the child.

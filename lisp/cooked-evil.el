@@ -68,6 +68,19 @@
 ;; cooked's own.
 ;;
 ;; See `cooked-evil-insert-state-submits' to turn that off.
+;;
+;; Insert state over a child that owns the keyboard needs the opposite answer,
+;; and a stronger one.  `cooked-semi-map' is worn as the local map, and evil's
+;; insert state map outranks every local map: `C-r' pasted a register, `C-w'
+;; deleted a word of the read-only screen, and `S-<return>' ran
+;; evil-collection's `newline' rather than reaching the program.  So the
+;; forwarding is hung on an evil minor-mode keymap as well, switched by
+;; `cooked--semi-map-worn'.  Minor-mode keymaps rank above auxiliary keymaps and
+;; the state maps alike, and the switch is a variable Emacs reads per key, so
+;; the forwarding is above evil exactly while it is worn and gone at a prompt,
+;; with nothing to renormalize.  What it leaves unbound -- the exceptions, ESC,
+;; the Meta space -- falls through to evil as before, and so does
+;; `evil-toggle-key', which is how insert state is left for emacs state.
 
 ;;; Code:
 
@@ -641,6 +654,32 @@ unchanged.  See `cooked-evil-insert-line' for the other half of the pair."
     (evil-define-key* 'normal cooked-mode-map
                       (kbd "p") #'cooked-evil-paste
                       (kbd "P") #'cooked-evil-paste)))
+
+(declare-function evil-get-minor-mode-keymap "ext:evil-core")
+(defvar evil-toggle-key)
+
+(defun cooked-evil--forward-above (state)
+  "Make the child\='s forwarding outrank evil\='s own keymaps in STATE.
+
+`cooked--semi-forwarding-map\=' becomes the parent of evil\='s minor-mode keymap
+for `cooked--semi-map-worn\=' in STATE, so it answers ahead of the state maps
+while that variable is non-nil; see the Commentary for why a local map could
+not.  The parent is the forwarding alone, without `cooked-mode-map\=' and
+`comint-mode-map\=' beneath it, which would put comint\='s own bindings above
+evil\='s too.
+
+`evil-toggle-key\=' is left to evil.  It is the way out of insert state into
+emacs state, as ESC is the way into normal state, and forwarding it would send
+\\`C-z\=' to the child as a suspend."
+  (let ((map (evil-get-minor-mode-keymap state 'cooked--semi-map-worn)))
+    (set-keymap-parent map cooked--semi-forwarding-map)
+    (define-key map (kbd evil-toggle-key) nil)))
+
+(with-eval-after-load 'evil
+  ;; Replace state as well, since `cooked-evil--input-mode' wears the semi map
+  ;; there too.
+  (cooked-evil--forward-above 'insert)
+  (cooked-evil--forward-above 'replace))
 
 (defconst cooked-evil--submit
   `(menu-item

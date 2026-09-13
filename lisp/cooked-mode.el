@@ -441,10 +441,14 @@ render half of the mode, which no keymap carries."
   ;; the arms that consult the frame -- so a map worn without asking about one
   ;; leaves nothing behind for `cooked--window-selection-changed' to think is
   ;; stale.  See `cooked--keymap-frame-type'.
-  (setq cooked--keymap-frame-type nil)
+  (setq cooked--keymap-frame-type nil
+        ;; Likewise, so the forwarding evil wears above its insert state is
+        ;; switched off by any refresh that chooses another map.
+        cooked--semi-map-worn nil)
   (pcase (and (not (eq policy 'cooked)) mode)
     ((or 'still 'frozen) cooked-peek-map)
-    ('semi cooked-semi-map)
+    ('semi (setq cooked--semi-map-worn t)
+           cooked-semi-map)
     ;; The three that forward everything go through `cooked--forwarding-map',
     ;; which is where the frame gets a say: on a graphical frame a Meta chord is
     ;; one event that no list of character codes can name, and the map worn there
