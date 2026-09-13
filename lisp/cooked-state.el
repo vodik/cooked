@@ -232,13 +232,12 @@ escape `%' first, as `cooked--mode-line-quote' does.")
 (defvar-local cooked--host nil
   "Host the child last reported over OSC 7, or nil for this machine.
 
-The authority half of `file://HOST/PATH\=', which cooked used to match and throw
-away.  Keeping it is what stops every path-shaped thing in the buffer being
-answered locally: after an `ssh\=', the remote shell goes on reporting its
-directory faithfully and the names it sends are real -- on the other host.  A
-local `/home/you/src/thing\=' that happens to exist here is the failure case,
-and it is the common one, because the layouts people ssh between are the ones
-they keep in step.
+The authority half of `file://HOST/PATH\='.  Keeping it is what stops every
+path-shaped thing in the buffer being answered locally: after an `ssh\=', the
+remote shell goes on reporting its directory faithfully and the names it sends
+are real -- on the other host.  A local `/home/you/src/thing\=' that happens to
+exist here is the failure case, and it is the common one, because the layouts
+people ssh between are the ones they keep in step.
 
 Set by `cooked--set-directory\=' and read through `cooked--foreign-host-p\=';
 see it for what declines and why.")
@@ -267,11 +266,9 @@ Every escape sequence cooked sends the child that is not an OSC is framed here
 or in `cooked--ss3\=', and for the same reason an OSC handler calls
 `cooked--reply-osc\=' rather than writing the brackets out itself: the framing is
 the part that is identical every time, so it is the part that has no business
-being respelled at each call site.  It had been -- a `concat\=' in one file, a
-`format\=' with the CSI written into its control string in the next, across the
-keyboard, the mouse, the focus reports and the completion channel, four files
-that never compared notes about it.  What actually differs between those sites
-is the parameters and the final byte, and that is now all they say.
+being respelled at each call site, across the keyboard, the mouse, the focus
+reports and the completion channel.  What actually differs between those sites
+is the parameters and the final byte, and that is all they say.
 
 FINAL is a string rather than a character because that is what it already is at
 both of the sites that have one to hand: `cooked--key-encodings\=' stores the
@@ -296,10 +293,10 @@ depends on what the child has asked for."
 PREFIX is the byte ECMA-48 sets aside ahead of the parameters for private use,
 as a string, or nil for the ordinary sequence `cooked--csi\=' builds.  Cooked
 sends two of them.  `<\=' introduces an SGR mouse report, and is the whole of
-what tells the child it is reading one rather than the X10 report that used to
-be the only kind; see `cooked--mouse-report\='.  `>\=' introduces the completion
-request in `cooked--shell-completions\=', which is private in the stronger sense
-that nothing but cooked\='s own shell integration will ever recognise it, and
+what tells the child it is reading one rather than an X10 report; see
+`cooked--mouse-report\='.  `>\=' introduces the completion request in
+`cooked--shell-completions\=', which is private in the stronger sense that
+nothing but cooked\='s own shell integration will ever recognise it, and
 which is why it may take a free-form payload after the final byte that no other
 sequence here would.
 
@@ -579,7 +576,7 @@ row, hard-wrapped at whatever width was in force when it was printed.
 Turning it off also shrinks the scrollback, which is not obvious and is not
 small: `cooked-scrollback-lines\=' counts *buffer* lines, so hard-splitting
 multiplies the line count by the wrap factor and the same cap then retains far
-less text.  Measured at a factor of nine on 800-column output.  See there."
+less text -- about a ninth as much on 800-column output.  See there."
   :type 'boolean :group 'cooked)
 
 (defvar-local cooked--last-size nil

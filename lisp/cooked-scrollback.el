@@ -54,20 +54,12 @@ however many screen rows it took.  That is the honest unit, being the one the
 buffer is actually made of, and it is the unit every other emulator caps in.
 
 *It does mean this setting alone does not decide how much memory a session
-uses*, and the size of that is worth stating rather than leaving to be
-discovered.  Measured on one identical byte stream at a cap of 500: 80-column
-output, which wraps nowhere, retains 39,914 characters with rejoining on and
-40,553 with it off -- the same, as it should be.  800-column output retains
-*407,741 characters with rejoining on against 44,805 with it off*, a factor of
-nine, because each of those 500 retained lines is ten screen rows of text rather
-than one.
-
-Which is arithmetic rather than a bug: you asked for 500 lines and got 500
-lines, for whichever meaning of a line the other setting chose.  It is written
-down here because the coupling runs between two settings that look unrelated,
-and
-because the surprising direction is the counter-intuitive one -- turning
-rejoining *off* is what shrinks your history.  Cap in characters instead and the
+uses.*  At a cap of 500, 80-column output retains the same forty thousand
+characters either way, but 800-column output retains about nine times as much
+with rejoining on, because each retained line is ten screen rows of text rather
+than one.  You asked for 500 lines and got 500 lines, for whichever meaning of a
+line the other setting chose -- so turning rejoining *off* is what shrinks your
+history.  Cap in characters instead and the
 failure inverts: one pathological line evicts the entire transcript, which is
 worse and is why this is not counted that way.
 
@@ -147,12 +139,9 @@ many lines at all, and the deletion only happens once it is over the cap by
 Cuts at a line beginning, because `cooked--discard-scrollback\=' hands the
 emulator a seam and half a line is not one.
 
-`cooked--split-seam\=' used to ride along here, because this is the one thing in
-this file the drain calls unconditionally.  It has moved to `cooked--apply\=',
-one line above `cooked--check-seam\=', which is what let that assertion cover
-the split mode as well: run from here the reset landed *after* the assertion
-had already looked, so a drain evicting a wrapped row saw the stale claim and
-the assertion had to exclude the mode entirely."
+`cooked--split-seam\=' does not run here but in `cooked--apply\=', one line
+above `cooked--check-seam\=', so that the assertion sees the seam after it has
+been split rather than before."
   (save-restriction
     (widen)
     (when-let* ((cap cooked-scrollback-lines)
@@ -161,19 +150,16 @@ the assertion had to exclude the mode entirely."
                 ;; A line above the screen carries at least its own newline, so
                 ;; there cannot be THRESHOLD of them in fewer than THRESHOLD
                 ;; characters.  That makes this a sound way to skip the count
-                ;; rather than a guess at how wide a line is: the gate this
-                ;; replaced asked for `(* cap 40)' characters, which for anything
-                ;; narrower than 40 columns never opened, and the cap it is here
-                ;; to enforce simply did not hold -- a flood of `line1234' sat at
-                ;; five times the cap and was never trimmed.
+                ;; rather than a guess at how wide a line is: a gate assuming
+                ;; some average width would never open for output narrower than
+                ;; that, and a flood of `line1234' would sit far past the cap.
                 ((>= (- screen (point-min)) threshold))
                 ;; `line-number-at-pos' walks from `point-min', which is affordable
                 ;; precisely because the cap bounds what it walks: the buffer this
                 ;; runs against is a capped one, and an uncapped session never
-                ;; reaches here at all.  Measured at 15us for a cap of 1000 against
-                ;; the 8ms redisplay floor, and a bounded `forward-line' walk back
-                ;; from the screen -- O(cap) rather than O(buffer) -- was tried and
-                ;; is five times slower, this being a C-level scan for newlines.
+                ;; reaches here at all.  It is a C-level scan for newlines,
+                ;; which beats a bounded `forward-line' walk back from the
+                ;; screen even though that one is O(cap) rather than O(buffer).
                 ((> (line-number-at-pos screen t) threshold)))
       (save-excursion
         (goto-char screen)
