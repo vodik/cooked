@@ -163,6 +163,65 @@ fn full_screen_repaint() {
     println!("{:>44}({rows} damaged rows handed to Lisp)", "");
 }
 
+/// The `watch`/htop shape as those programs actually draw: every frame homes the cursor,
+/// erases each line and writes it again, and almost all of it comes out the same.
+///
+/// Each frame changes three things -- a clock on row 0, a one-cell spinner on row 1 and
+/// the tail of a progress bar on row 2 -- and rewrites the other rows exactly as they
+/// were. Every row is damaged, because every row was erased, so what this measures is how
+/// many rows reach Lisp once the drain compares them with what Emacs already holds.
+fn mostly_unchanged(frames: usize, rows: usize, cols: usize) -> Vec<u8> {
+    let spinner = ['|', '/', '-', '\\'];
+    let mut out = Vec::new();
+    for frame in 0..frames {
+        out.extend_from_slice(b"\x1b[H");
+        for row in 1..=rows {
+            out.extend_from_slice(format!("\x1b[{row};1H\x1b[2K").as_bytes());
+            let line = match row {
+                1 => format!("Every 1.0s: uptime   frame {frame:08}"),
+                2 => format!("working {}", spinner[frame % spinner.len()]),
+                3 => {
+                    let done = (frame * cols / frames).min(cols - 2);
+                    format!("[{}{}]", "#".repeat(done), " ".repeat(cols - 2 - done))
+                }
+                _ => format!(
+                    "{row:4} \x1b[3{}mprocess\x1b[0m {}",
+                    row % 8,
+                    "x".repeat(cols / 2)
+                ),
+            };
+            out.extend_from_slice(line.as_bytes());
+        }
+    }
+    out
+}
+
+/// Mostly-unchanged frames, drained once per frame; see [`mostly_unchanged`].
+#[test]
+#[ignore = "benchmark"]
+fn repaint_mostly_unchanged() {
+    let (frames, rows, cols) = (2_000, 50, 200);
+    let data = mostly_unchanged(frames, rows, cols);
+    let mut term = Term::new(rows, cols);
+    let mut sent = 0usize;
+    timed("repaint, mostly unchanged", data.len(), || {
+        for frame in data
+            .split_inclusive(|b| *b == b'H')
+            .collect::<Vec<_>>()
+            .chunks(rows + 1)
+        {
+            for piece in frame {
+                term.feed(piece);
+            }
+            sent += term.drain().rows.len();
+        }
+    });
+    println!(
+        "{:>44}({sent} rows handed to Lisp over {frames} frames)",
+        ""
+    );
+}
+
 /// Scrolling a 200x400 screen, with and without a scroll region.
 ///
 /// The region case is the one that separates storage designs. A full-screen scroll can
