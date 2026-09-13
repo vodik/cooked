@@ -818,11 +818,19 @@ impl Screen {
         self.saved = Some(self.cursor);
     }
 
-    /// DECRC's half: go back to the saved position, if there is one, and forget it.
+    /// DECRC's half: go back to the saved position, or home if nothing was saved.
+    ///
+    /// The save is kept, so a second DECRC goes back to the same place, and a DECRC with
+    /// no save behind it homes the cursor. Both are xterm's reading, which restores from a
+    /// saved-cursor record that starts out zeroed and that nothing but DECSTR clears.
     pub fn restore_cursor(&mut self) {
-        if let Some(saved) = self.saved.take() {
-            self.goto(saved.row, saved.col);
-        }
+        let saved = self.saved.unwrap_or_default();
+        self.goto(saved.row, saved.col);
+    }
+
+    /// Whether DECSC has saved a position on this screen since DECSTR.
+    pub fn has_saved_cursor(&self) -> bool {
+        self.saved.is_some()
     }
 
     /// DECSTR and RIS: nothing is saved any more.

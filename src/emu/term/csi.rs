@@ -161,13 +161,22 @@ impl State {
             // switch because `restore_cursor` acts on the screen being shown, and the
             // primary's cursor is the one `1049 h` saved -- which a resize inside a
             // full-screen program will have moved.
+            //
+            // Only on the way out of the alternate screen, and only onto a save, which is
+            // where this parts from xterm. A DECRC keeps its save and homes without one,
+            // so a stray `rmcup` from a script on the primary screen would otherwise
+            // move the shell's cursor back over the output since the last full-screen
+            // program, or to the corner after a DECSTR. There the primary's own cursor
+            // is already the right answer.
             DecMode::AltScreenSaveCursor => {
                 if on {
                     self.save_cursor();
                     self.set_alt(true);
-                } else {
+                } else if self.shown.is_alternate() {
                     self.set_alt(false);
-                    self.restore_cursor();
+                    if self.screen().has_saved_cursor() {
+                        self.restore_cursor();
+                    }
                 }
             }
             DecMode::SynchronizedOutput => {
@@ -334,11 +343,13 @@ impl State {
         self.screen_mut().save_cursor();
     }
 
-    /// DECRC: put back what [`State::save_cursor`] kept on this screen, if anything.
+    /// DECRC: put back what [`State::save_cursor`] kept on this screen.
+    ///
+    /// With nothing kept, the charsets go back to their power-on designations and the
+    /// cursor home, as in xterm and ghostty. The save is not used up; see
+    /// [`Screen::restore_cursor`].
     pub(super) fn restore_cursor(&mut self) {
-        if let Some(charsets) = self.saved_charsets[self.shown].take() {
-            self.modes.charsets = charsets;
-        }
+        self.modes.charsets = self.saved_charsets[self.shown].unwrap_or_default();
         self.screen_mut().restore_cursor();
     }
 

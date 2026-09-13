@@ -404,8 +404,9 @@ fn xtrestore_of_an_unchanged_mode_does_not_move_the_cursor() {
 /// `CSI ? s` and `CSI ? r` are not SCOSC and DECSTBM, which have no private byte.
 #[test]
 fn xtsave_is_not_save_cursor_and_xtrestore_is_not_decstbm() {
+    // Had `?25s` saved the cursor, `CSI u` would go back to 2;3. With no save it homes.
     let t = term(4, 8, b"\x1b[2;3H\x1b[?25s\x1b[4;4H\x1b[u");
-    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (3, 3));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (0, 0));
 
     let t = term(4, 8, b"\x1b[2;3r\x1b[3;3H\x1b[?25r");
     assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (2, 2));

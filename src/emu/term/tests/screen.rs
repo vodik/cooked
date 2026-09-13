@@ -437,6 +437,41 @@ fn charsets_are_reset_by_decstr_and_restored_by_decrc() {
     assert_eq!(text(&t, 0), "─", "1049 restores the primary's graphics set");
 }
 
+/// A DECRC keeps its save, so a second one goes back to the same place; with no save it
+/// homes the cursor and puts the charsets back, as xterm and ghostty do.
+#[test]
+fn decrc_keeps_its_save_and_homes_without_one() {
+    let t = term(4, 10, b"\x1b[2;3H\x1b7\x1b[4;4H\x1b8\x1b[4;4H\x1b8");
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (1, 2));
+    let t = term(4, 10, b"\x1b(0\x1b[3;3H\x1b8q");
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (0, 1));
+    assert_eq!(text(&t, 0), "q", "no save: G0 is ASCII again");
+    // DECSTR forgets the save, so the DECRC after it homes too.
+    let t = term(4, 10, b"\x1b[2;3H\x1b7\x1b[!p\x1b[4;4H\x1b8");
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (0, 0));
+}
+
+/// `1049 l` restores the primary's cursor only when it leaves the alternate screen onto a
+/// save. A stray one from a script must not send the shell's cursor back over its output.
+#[test]
+fn a_stray_1049_reset_leaves_the_primary_cursor_alone() {
+    let t = term(
+        6,
+        10,
+        b"\x1b[2;1H\x1b[?1049h\x1b[?1049l\x1b[5;4H\x1b[?1049l",
+    );
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (4, 3));
+    // Nor home it when there is nothing saved to go back to.
+    let t = term(6, 10, b"\x1b[?1049h\x1b[!p\x1b[5;4H\x1b[?1049l");
+    assert_eq!(
+        t.screen().cursor().row,
+        0,
+        "the primary's own cursor, not a restore"
+    );
+    let t = term(6, 10, b"\x1b[5;4H\x1b[?1049l");
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (4, 3));
+}
+
 /// vttest's first screen draws its border onto DECALN's pattern, inside margins it has
 /// set; the pattern has to fill every cell, reset those margins, home the cursor and
 /// leave the pen out of it.
