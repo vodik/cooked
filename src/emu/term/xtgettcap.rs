@@ -327,6 +327,42 @@ mod tests {
         );
     }
 
+    /// The bytes a parameter-free terminfo string sends, for the escapes `cooked.ti` uses.
+    ///
+    /// Written out here rather than borrowed from `terminfo::decode`, which is what builds
+    /// the replies: an expectation built by the decoder under test agrees with any mistake
+    /// it makes, so `\007` read as a NUL and two digits would have passed. An escape this
+    /// does not know panics, so a new one in the file is a decision rather than a guess.
+    fn unescape(value: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut chars = value.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => match chars.next() {
+                    Some('E') => out.push(0x1b),
+                    Some('\\') => out.push(b'\\'),
+                    Some('n') => out.push(b'\n'),
+                    Some('r') => out.push(b'\r'),
+                    Some(first @ '0'..='7') => {
+                        let digits: String = [Some(first), chars.next(), chars.next()]
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                        out.push(u8::from_str_radix(&digits, 8).expect("three octal digits"));
+                    }
+                    other => panic!("{value:?}: no expectation for the escape {other:?}"),
+                },
+                '^' => match chars.next() {
+                    Some('?') => out.push(0x7f),
+                    Some(c @ '@'..='_') => out.push(c as u8 - b'@'),
+                    other => panic!("{value:?}: no expectation for ^{other:?}"),
+                },
+                c => out.push(u8::try_from(c).expect("ASCII")),
+            }
+        }
+        out
+    }
+
     /// The entry and the reply cannot drift: every capability line of every entry in
     /// `cooked.ti`, read here line by line and not through the parser the core uses, is
     /// answered under that entry's name with the value the line gives it. A line the
@@ -358,7 +394,7 @@ mod tests {
             if let Some((name, value)) = field.split_once('=') {
                 let bytes = match value.contains('%') {
                     true => value.as_bytes().to_vec(),
-                    false => terminfo::decode(value),
+                    false => unescape(value),
                 };
                 (name.to_owned(), bytes)
             } else if let Some((name, number)) = field.split_once('#') {
