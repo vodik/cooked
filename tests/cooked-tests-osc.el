@@ -1696,6 +1696,30 @@ so a terminal that never answers costs them their whole timeout on startup."
                    (cooked-tests--contents out))))
       (delete-file out))))
 
+(ert-deftest cooked-osc-10-and-11-answer-the-colours-the-buffer-draws ()
+  "A query after an OSC 11 set gets the colour set, and under DECSCNM the swap.
+The answer used to be the theme\='s face, read without the buffer\='s remaps, so a
+child was told a background it had already replaced; xterm answers from the
+colours it draws, which DECSCNM exchanges."
+  (let ((out (make-temp-file "cooked-osc-drawn"))
+        (cooked-allow-color-set t))
+    (unwind-protect
+        (cooked-tests--with-session
+            (cooked-tests--reply-to "\\033]11;#ff0000\\007\\033[?5h\\033]10;?;?\\007" out)
+          (let ((foreground (cooked--default-color 'foreground)))
+            (should (cooked-tests--settle
+                     (lambda () (string-match-p "11;rgb:" (cooked-tests--contents out)))))
+            (should (equal (cooked-tests--contents out)
+                           (format "\033]10;rgb:ffff/0000/0000\007\033]11;%s\007"
+                                   (cooked--color-to-osc foreground))))
+            ;; And the scheme `CSI ? 996 n' is answered with reads that background.
+            (should (eq (cooked--color-scheme)
+                        (if (color-dark-p (mapcar (lambda (v) (/ v 65535.0))
+                                                  (color-values foreground)))
+                            'dark
+                          'light)))))
+      (delete-file out))))
+
 (ert-deftest cooked-osc-color-reply-echoes-the-terminator-it-was-asked-with ()
   "A client that queried with ST does not recognise a BEL-terminated answer."
   (let ((out (make-temp-file "cooked-osc10")))

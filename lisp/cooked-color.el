@@ -104,7 +104,7 @@ exists to fix."
 (defun cooked--color-scheme ()
   "Whether this buffer renders dark or light, as `dark\=' or `light\='.
 
-Derived from `cooked--default-color\=', which is what OSC 11 answers from, rather
+Derived from `cooked--child-color\=', which is what OSC 11 answers from, rather
 than from `frame-background-mode\=' — and that is the whole point.  A child told
 the scheme changed reacts by querying OSC 11 for the actual background, so two
 readings of one value cannot be allowed to contradict each other.
@@ -114,7 +114,7 @@ readings of one value cannot be allowed to contradict each other.
 cutoff included, so with nothing remapped this agrees with Emacs\=' own answer
 rather than approximating it."
   (if (color-dark-p (mapcar (lambda (v) (/ v 65535.0))
-                            (color-values (cooked--default-color 'background))))
+                            (color-values (cooked--child-color 'background))))
       'dark
     'light))
 
@@ -169,7 +169,7 @@ the code."
     (dolist (part parts)
       (when-let* ((kind (alist-get code cooked--osc-color-sources)))
         (if (equal part "?")
-            (when-let* ((payload (cooked--color-to-osc (cooked--default-color kind))))
+            (when-let* ((payload (cooked--color-to-osc (cooked--child-color kind))))
               (cooked--reply-osc cooked--session code payload
                                  cooked--osc-bell-terminated))
           (when (and cooked-allow-color-set
@@ -400,6 +400,20 @@ was given."
   (or (when-let* ((cookie (car (alist-get kind cooked--color-remaps))))
         (plist-get (cdr cookie) (if (eq kind 'foreground) :foreground :background)))
       (cooked--default-color kind)))
+
+(defun cooked--child-color (kind)
+  "The color KIND is, as a query from the child is answered.
+
+For the two defaults that is the color the buffer draws: an OSC 10 or 11 set
+counts, and under DECSCNM the two are swapped, as xterm swaps its own.  So a
+child that set its background to #ff0000 and asks for it back is told #ff0000,
+and not the theme\='s color, which `face-background\=' reads without the remap.
+Every other kind is `cooked--default-color\=''s."
+  (pcase kind
+    ((or 'foreground 'background)
+     (let ((other (if (eq kind 'foreground) 'background 'foreground)))
+       (cooked--screen-color (if cooked--reverse-screen-level other kind))))
+    (_ (cooked--default-color kind))))
 
 (defun cooked--apply-reverse-screen ()
   "Redraw the remap for `cooked--reverse-screen' against the colors of the moment.
