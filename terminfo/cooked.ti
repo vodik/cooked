@@ -93,6 +93,11 @@
 #                     one cooked encodes; level 1 falls back to legacy keys.
 #   Enfcs, Dsfcs      focus reporting, mode 1004 -- `fe' and `fd' under the
 #                     names tmux's focus-events asks for.
+#   Swd               the working directory as OSC 7, closed by `fsl', which
+#                     is how tmux's osc7 feature hands on the directory of
+#                     the active pane while set-titles is on. That follows
+#                     pane and window switches, which marks passed through
+#                     from every pane cannot.
 #
 # Not yet `Sxl', although sixel is decoded. Whether a sixel can be shown depends
 # on the frame the buffer is in, and an entry cannot change its answer when the
@@ -480,6 +485,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	Eneks=\E[>4;2m,
 	Dseks=\E[>4m,
 	Hls=\E]8;%?%p1%l%tid=%p1%s%;;%p2%s\E\\,
+	Swd=\E]7;,
 	Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
 
 cooked|cooked terminal emulator for Emacs,

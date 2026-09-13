@@ -123,7 +123,8 @@ own marks go to tmux and stop there.
 ```tmux
 set -g allow-passthrough on
 set -ga update-environment COOKED_SHELL_INTEGRATION_FEATURES
-set -as terminal-features ',cooked*:usstyle:progressbar'
+set -as terminal-features ',cooked*:progressbar'
+set -g set-titles on
 ```
 
 Without `allow-passthrough`, tmux drops the wrapped sequences without a word. Nothing
@@ -133,22 +134,31 @@ client in another terminal still finds the variable and sends marks to a termina
 never asked for them. With it, tmux refreshes the variable from whichever client
 attaches or makes the session.
 
-The features on the `terminal-features` line are the two that `cooked-256color` does
-not declare. `usstyle` needs `ol` as well, and `progressbar` needs `Spb`. Everything
-else tmux looks for is found in the entry: `RGB` (from `COLORTERM`), `hyperlinks`,
-`extkeys`, `focus`, `title`, `sync`, `overline`, `strikethrough`, `bpaste`, `cstyle`
-and `ccolour`. To check, run `tmux display -p '#{I/f:hyperlinks}'`, which prints 1 or
+`allow-passthrough on` lets through anything the visible pane writes, not only the
+snippet's marks, so a program there can reach the OSC 51 channels just as it could
+running directly in cooked. `all` would let hidden panes through as well, and a hidden
+pane's directory report would then move `default-directory` to a pane you are not
+looking at, so keep it at `on`.
+
+`set-titles` is what makes tmux hand on the active pane's directory itself. The entry
+declares `Swd`, and with `set-titles` on tmux sends OSC 7 for whichever pane is active,
+again whenever you switch panes or windows. That follows the pane you are in, which
+reports passed through from the panes cannot.
+
+The feature on the `terminal-features` line is the one `cooked-256color` does not
+declare: `progressbar` needs `Spb`. Everything else tmux looks for is found in the entry:
+`RGB` (from `COLORTERM`), `hyperlinks`, `extkeys`, `focus`, `title`, `sync`, `usstyle`,
+`overline`, `strikethrough`, `bpaste`, `cstyle`, `ccolour` and `osc7`. To check, run `tmux display -p '#{I/f:hyperlinks}'`, which prints 1 or
 0 for any feature. Don't use `#{client_termfeatures}` for this: it lists only the
 features switched on by name, and never the ones tmux found in terminfo.
 
 **Where tmux draws decides what the marks are good for.** By default tmux takes the
 alternate screen. There, cooked keeps no transcript and hands every key to tmux (the
 policy is `alt`), so the input line stays tmux's and nothing can eat a keystroke.
-Directory tracking works, and a prompt mark works for as long as its row is on screen.
-Once output scrolls, the marks no longer point at their prompts, because the alternate
-screen scrolls without scrollback and the marks do not move with it. For marks that
-follow the transcript into scrollback, and an input line Emacs edits, keep tmux off the
-alternate screen and remove the status line:
+Directory tracking works, but prompt marks are dropped: the alternate screen scrolls
+without scrollback, so a mark there would name a line of output as soon as the pane
+scrolled. For marks that follow the transcript into scrollback, and an input line Emacs
+edits, keep tmux off the alternate screen and remove the status line:
 
 ```tmux
 set -ga terminal-overrides ',cooked*:smcup@:rmcup@'
@@ -157,9 +167,24 @@ set -g status off
 
 The status line has to go because tmux scrolls the pane inside a margin that stops
 short of it, and cooked archives only rows that scroll off the top of the whole screen.
-Once they are gone, the rest of the pane is lost. Treat this arrangement as one pane per
-window. The marks carry no pane, so with a split, cooked reads both panes' prompts as
-one transcript. Copy mode and switching windows repaint the screen in place, too.
+Once they are gone, the rest of the pane is lost. Copy mode and switching windows repaint
+the screen in place, too.
+
+**A mark lands wherever tmux's own cursor is.** tmux writes a passed-through sequence at
+the cursor of the terminal it draws on, without first moving to the pane's cursor. So
+the geometry of a mark is only right when the pane and the terminal agree:
+
+- With a split, every visible pane's marks arrive in one stream, each at that pane's
+  place on the terminal, and cooked reads them all as one transcript. Treat this
+  arrangement as one pane per window.
+- With `status-position top`, every mark is a row off.
+- tmux may not yet have drawn a carriage return the shell sent just before its prompt
+  mark, and the mark then carries the column the previous line ended at.
+- A tmux inside tmux needs its passthrough wrapped twice, which the snippets do not do,
+  so the inner shell's marks never arrive.
+
+None of this is fixable from outside tmux, since the pane's position is tmux's to know.
+tmux's own OSC 133 handling is the channel for navigating prompts inside tmux.
 
 Out of reach either way: a shell behind an `ssh` from inside the pane. The far end has
 neither `TMUX` nor `TERM_PROGRAM=tmux`, so it writes its marks unwrapped and tmux keeps

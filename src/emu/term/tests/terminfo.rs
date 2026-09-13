@@ -341,8 +341,8 @@ fn terminfo_entry_matches_what_decrqm_says() {
 /// The extended names tmux reads do what tmux will use them for.
 ///
 /// The DECRQM check above already covers `Enfcs`, whose mode it can see. It cannot
-/// see these two: modifyOtherKeys is not a mode, and OSC 8 is not a control sequence
-/// at all. `Hls` is parametrised, so its value is pinned to tmux's own spelling in
+/// see these three: modifyOtherKeys is not a mode, and OSC 8 and OSC 7 are not control
+/// sequences at all. `Hls` is parametrised, so its value is pinned to tmux's own spelling in
 /// `tty-features.c` and the two expansions tmux sends are fed by hand -- an open with
 /// an `id=`, and the empty close it writes before every reset. `ol` is an SGR, which
 /// no mode check sees either.
@@ -376,6 +376,20 @@ fn the_extended_names_tmux_reads_do_what_they_say() {
     assert_eq!(runs.len(), 2, "{runs:?}");
     assert!(runs[0].1.is_some(), "an open with an id= links");
     assert_eq!(runs[1].1, None, "the empty close unlinks");
+
+    // `Swd' and `fsl' are what tmux's osc7 feature writes around the active pane's
+    // path, and together they must be the OSC 7 the Lisp side tracks, with the
+    // terminator tmux actually sends.
+    assert_eq!(value("Swd"), r"\E]7;");
+    let mut path = terminfo_decode(value("Swd"));
+    path.extend_from_slice(b"file://h/tmp");
+    path.extend(terminfo_decode(value("fsl")));
+    let mut t = term(2, 8, &path);
+    assert_eq!(
+        t.drain().events,
+        vec![Event::Osc(7, vec!["file://h/tmp".into()], Terminator::Bel)],
+        "`Swd'"
+    );
 
     // `ol' is tmux's name for SGR 59 and not ncurses', which has no `ol' at all, so
     // nothing but tmux's own `usstyle' check says what it should be. tmux sends it to
