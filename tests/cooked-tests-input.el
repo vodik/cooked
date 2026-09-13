@@ -3909,5 +3909,66 @@ by the first bench fixture to contain one."
                                         "\n"))
                    "        "))))
 
+(ert-deftest cooked-a-remote-password-prompt-is-caught-by-the-regex ()
+  "The arm that reaches a child the termios probe cannot see.
+
+`ssh host sudo ...\=' puts the *far* tty into secret mode; the local one this
+session owns never changes, so the detector never fires and the password is
+typed into the buffer in the clear.  Gated on the host being foreign, because
+matching a regex against local output would false-positive on any program
+displaying a file that mentions a password."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (erase-buffer)
+    ;; What `ssh' and `sudo' actually print.  A prefix in front of the word --
+    ;; `user@host password: ' -- is *not* matched by
+    ;; `comint-password-prompt-regexp', which anchors the prompt, and using one
+    ;; here tested the test rather than the code.
+    (insert "simon@host's password: ")
+    (goto-char (point-max))
+    (cl-letf (((symbol-function 'cooked--cursor-position) (lambda () (point-max))))
+      ;; Local: no regex is even attempted, and nothing is armed.
+      (cl-letf (((symbol-function 'cooked--foreign-host-p) (lambda () nil)))
+        (should-not (cooked--secret-prompt-on-row-p)))
+      ;; Foreign: caught.
+      (cl-letf (((symbol-function 'cooked--foreign-host-p) (lambda () t)))
+        (should (cooked--secret-prompt-on-row-p))
+        ;; A row that is not a prompt is not caught, foreign or not.
+        (erase-buffer)
+        (insert "just some output about passwords in general")
+        (should-not (cooked--secret-prompt-on-row-p))
+        ;; And sudo's form, since the two shapes are what this is for.
+        (erase-buffer)
+        (insert "[sudo] password for simon: ")
+        (should (cooked--secret-prompt-on-row-p))))))
+
+(ert-deftest cooked-password-sources-compose-and-defer-to-the-single-slot ()
+  "The chain is asked first, and `cooked-password-function\=' is the last word.
+
+A single slot cannot compose -- a second source means writing a dispatcher, and
+every user wanting two writes the same one.  The existing slot keeps working and
+keeps its meaning as the answer of last resort."
+  (let ((asked nil))
+    (let ((cooked-password-functions
+           (list (lambda (_p) (push 'first asked) nil)
+                 (lambda (_p) (push 'second asked) "from-the-chain")
+                 (lambda (_p) (push 'third asked) "never-reached")))
+          (cooked-password-function (lambda (_p) (push 'slot asked) "from-the-slot")))
+      (should (equal (cooked--password-from-sources "Password:") "from-the-chain"))
+      ;; Stopped at the first answer; the slot was never consulted.
+      (should (equal (nreverse asked) '(first second))))
+    ;; Every entry declining falls through to the slot.
+    (setq asked nil)
+    (let ((cooked-password-functions (list (lambda (_p) nil)))
+          (cooked-password-function (lambda (_p) (push 'slot asked) "from-the-slot")))
+      (should (equal (cooked--password-from-sources "Password:") "from-the-slot"))
+      (should (equal asked '(slot))))
+    ;; And an entry that signals is contained: the next one is still asked.
+    (let ((cooked-password-functions
+           (list (lambda (_p) (error "a broken auth-source backend"))
+                 (lambda (_p) "survived")))
+          (cooked-password-function nil))
+      (should (equal (cooked--password-from-sources "Password:") "survived")))))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

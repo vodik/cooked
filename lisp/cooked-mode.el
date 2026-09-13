@@ -904,6 +904,25 @@ against the state it will actually run in."
         (cooked--schedule-secret)
       (cooked--cancel-secret))))
 
+(defun cooked--check-secret-prompt ()
+  "Arm the secret read for a prompt only the regex arm can see.
+
+The termios detector fires from `cooked--set-mode\=', on a *change* of what the
+local tty is doing.  A remote child changes the far tty and the local one never
+moves, so that path is never reached and there is no state transition to hang
+this off -- the question has to be asked per drain instead.
+
+Cheap where it does not apply, which is the point of the ordering:
+`cooked--secret-prompt-on-row-p\=' asks `cooked--foreign-host-p\=' first, so a
+local session pays one string comparison and no regexp at all.  Nothing is armed
+while a read is already in flight, or while the tty *has* gone into secret mode
+and the first arm has it."
+  (when (and cooked--session
+             (not (eq cooked--mode 'secret))
+             (not cooked--secret-read)
+             (cooked--secret-prompt-on-row-p))
+    (cooked--schedule-secret)))
+
 (defcustom cooked-state-change-hook nil
   "Hook run in the session's buffer after who owns the keyboard changes.
 

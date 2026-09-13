@@ -22,14 +22,51 @@
 
 (defcustom cooked-password-function nil
   "Function called with the prompt string to supply a password non-interactively.
-Should return a string, or nil to fall back to `read-passwd'.  Lets auth-source
-or `pass' answer a prompt no ordinary terminal could even detect.
+Should return a string, or nil to fall back to `read-passwd\='.  Lets auth-source
+or `pass\=' answer a prompt no ordinary terminal could even detect.
 
 The returned string is not modified: cooked copies it before writing it to the
 child and clears only that copy, because a backend is free to return the very
 string its own cache holds.  A source that would rather cooked did not keep the
-plaintext alive at all can return a `copy-sequence' and clear its own."
+plaintext alive at all can return a `copy-sequence\=' and clear its own.
+
+A single slot, kept for the configuration already using it.
+`cooked-password-functions\=' is the composing form and is asked first."
   :type '(choice (const nil) function) :group 'cooked)
+
+(defcustom cooked-password-functions nil
+  "Abnormal hook asked for a password, first non-nil answer winning.
+
+Each entry is called with the prompt string, in the session\='s buffer, and
+returns the password or nil to let the next one try.  The chain is the point:
+auth-source for the hosts it knows, `pass\=' for the rest, and `read-passwd\='
+at the tail is what cooked does anyway when every entry declines.
+
+A single =cooked-password-function= cannot compose -- a second source means
+writing a dispatcher, and every user who wants two writes the same one.  This is
+the seam idiom the rest of cooked uses, and it is asked *before*
+`cooked-password-function\=' so an existing configuration keeps working as the
+last word rather than the first.
+
+Two things worth knowing before writing an entry. Returning the empty string
+counts as an *answer*, not a decline -- some prompts genuinely take one, so
+cooked cannot guess, and an entry that means \"I have nothing\" must return
+nil. And whatever is returned is copied before it reaches the child and only the
+copy is cleared, for the reason `cooked-password-function\=' gives.
+
+Run through `cooked--run-seam-until-success\=', so an entry that signals has
+given no answer and the next is asked -- a broken auth-source backend does not
+take the prompt down with it."
+  :type 'hook :group 'cooked)
+
+(defun cooked--password-from-sources (prompt)
+  "Ask every configured source for the password PROMPT wants, or nil.
+
+The chain first, then the single slot: an existing `cooked-password-function\='
+keeps working, and keeps its meaning as the answer of last resort rather than
+becoming one voice among several."
+  (or (cooked--run-seam-until-success 'cooked-password-functions prompt)
+      (and cooked-password-function (funcall cooked-password-function prompt))))
 
 (defcustom cooked-secret-debounce 0.03
   "Seconds to wait before prompting for a secret.
@@ -47,6 +84,46 @@ this lets the prompt text arrive first."
 A read that finishes holding a stale epoch is answering a question nobody
 is waiting on any more, and must not touch the child -- see
 `cooked--cancel-secret'.")
+
+(defcustom cooked-password-prompt-regexp comint-password-prompt-regexp
+  "What a password prompt looks like, for a child the termios probe cannot see.
+
+Only consulted on a *foreign host*, and that gate is the whole of why this is
+safe to have at all.
+
+cooked normally detects a password prompt from the terminal itself: the child
+puts the tty into canonical mode with echo off, which is what `sudo\\=', `ssh\\='
+and `gpg\\=' all do and what no ordinary program does by accident.  That is a
+fact, not a guess, and it needs no pattern.
+
+It is also invisible through a *remote* shell.  `ssh host sudo …\\=' puts the
+*far* tty into secret mode; the local one this session owns never changes, so
+the detector never fires and the password is typed into the buffer in the clear.
+A regex is the only thing left, and matching one against every line of local
+output would false-positive on `less\=' reading a file that merely mentions
+a password -- which is exactly why it is gated rather than merely
+lower-priority.
+
+Defaults to `comint-password-prompt-regexp\\=', which Emacs already maintains
+for this purpose and which `comint-watch-for-password-prompt\\=' matches
+case-insensitively; so does this."
+  :type 'regexp :group 'cooked)
+
+(defun cooked--secret-prompt-on-row-p ()
+  "Whether the cursor's row looks like a password prompt from a foreign host.
+
+The second arm of the detector, and the only one that can reach a remote
+child.  Asked of the *cursor's* row rather than of the whole screen: a prompt is
+where the cursor is waiting, and a screenful of a build log mentioning passwords
+is not one."
+  (and (cooked--foreign-host-p)
+       (when-let* ((position (cooked--cursor-position))
+                   (case-fold-search t))
+         (save-excursion
+           (goto-char position)
+           (string-match-p cooked-password-prompt-regexp
+                           (buffer-substring-no-properties
+                            (line-beginning-position) (line-end-position)))))))
 
 (defun cooked--schedule-secret ()
   "Prompt for a secret once the prompt text has had time to arrive.
@@ -199,8 +276,7 @@ space, and does not."
               ;; `supplied' is kept separate from `secret' because only one of
               ;; the two is ours to destroy; see the comments on the two
               ;; `clear-string' calls below.
-              (let* ((supplied (and cooked-password-function
-                                    (funcall cooked-password-function prompt)))
+              (let* ((supplied (cooked--password-from-sources prompt))
                      (secret (or supplied (cooked--read-passwd prompt))))
                 (unwind-protect
                     ;; The wire copy is freshly allocated here and nothing else

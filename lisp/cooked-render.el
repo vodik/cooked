@@ -606,6 +606,11 @@ and the region shaped before anything measures it."
     ;; guess declined while the cursor sat on it has to be asked for again once
     ;; the cursor has moved on.
     (cooked--release-held-link-row)
+    ;; And the other question that can only be asked once the cursor has landed:
+    ;; whether a *remote* child is at a password prompt.  The termios detector
+    ;; fires on a change of the local tty, which a remote child never makes, so
+    ;; there is no transition to hang it off -- see `cooked--check-secret-prompt'.
+    (cooked--check-secret-prompt)
     (cooked--fit-screen)
     (cooked--pad-to-cursor)
     ;; Immediately before the assertion, which is the whole reason it is here
