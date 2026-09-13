@@ -1270,6 +1270,50 @@ it looks like it worked."
 
 ;;;; Size and lifecycle
 
+(defun cooked--font-scale-resync (&optional only)
+  "Resize sessions whose font may just have moved.  ONLY limits it to one buffer.
+
+`:after\=' advice rather than ghostel\='s `:around\=', and the difference is a
+property of cooked rather than a shortcut.  ghostel snapshots which windows were
+anchored before the font moves and re-anchors them afterwards, because its
+anchoring is *latched*.  cooked\='s is computed: `cooked--pin-transcript-bottom\='
+works the view out from the buffer on every drain, and the resize below causes
+one.  There is nothing to save and put back.
+
+The cache needs no telling either, for the same kind of reason:
+`cooked--layout-stamp\=' names the font, so `cooked--wrap-cache\=' and the glyph
+metrics in it are thrown away by comparison the next time they are asked for.
+What is genuinely missing without this is the *child* being told, since a font
+change alters how many rows and columns the window holds and nothing else
+notices."
+  ;; ONLY rather than BUFFER: `cooked--dolist-buffers' binds `buffer' itself, and
+  ;; a parameter of that name is shadowed inside the body without a word said.
+  (cooked--dolist-buffers
+   (when (or (null only) (eq (current-buffer) only))
+     (cooked--sync-size))))
+
+(defun cooked--font-scale-local (&rest _)
+  "Resync this buffer after a buffer-local font change."
+  (cooked--font-scale-resync (current-buffer)))
+
+(defun cooked--advise-font-scale ()
+  "Notice the font changes `text-scale-mode-hook\=' does not report.
+
+Idempotent, and called from `cooked-mode\=' rather than at load: advice on a
+global function is a cost every Emacs pays, and a configuration that loads
+cooked but never starts a session should not pay it.
+
+`buffer-face-mode\=' is the one that matters -- `buffer-face-set\=',
+`buffer-face-toggle\=' and `variable-pitch-mode\=' all rescale through it, and it
+runs no hook.  `global-text-scale-adjust\=' is the other, and is advised only
+where it exists, being newer than the Emacs cooked still supports."
+  (unless (advice-member-p #'cooked--font-scale-local 'buffer-face-mode)
+    (advice-add 'buffer-face-mode :after #'cooked--font-scale-local))
+  (when (and (fboundp 'global-text-scale-adjust)
+             (not (advice-member-p #'cooked--font-scale-resync
+                                   'global-text-scale-adjust)))
+    (advice-add 'global-text-scale-adjust :after #'cooked--font-scale-resync)))
+
 (defun cooked--sync-size (&optional _frame)
   "Match the emulator and child to the window size.
 
@@ -2159,6 +2203,14 @@ to the child verbatim."
   ;; `window-size-change-functions' notices — `text-scale-mode-hook' is the one hook
   ;; that runs on every call, even repeated ones that leave the mode already on.
   (add-hook 'text-scale-mode-hook #'cooked--sync-size nil t)
+  ;; `text-scale-mode-hook' is not the whole story, and the gap is the case
+  ;; cooked already knows how to detect: `buffer-face-set',
+  ;; `variable-pitch-mode' and `buffer-face-toggle' all rescale the font through
+  ;; `buffer-face-mode', which runs no hook of its own -- so a session put into
+  ;; a proportional face was never told to re-measure, even though
+  ;; `cooked--ascii-fixed-pitch-p' exists precisely to notice one.  See
+  ;; `cooked--advise-font-scale'.
+  (cooked--advise-font-scale)
   (add-hook 'window-selection-change-functions #'cooked--window-selection-changed nil t)
   (add-hook 'context-menu-functions #'cooked--context-menu nil t)
   (add-hook 'kill-buffer-hook #'cooked--cleanup nil t))

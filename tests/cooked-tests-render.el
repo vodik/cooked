@@ -2003,6 +2003,30 @@ somewhere for it to go.  Three conditions, each with its own way of failing."
         (should-not (cooked--glyph-claims-next-cell-p
                      '(20 15 5 15) from (1+ from) (point-max) default 9))))))
 
+(ert-deftest cooked-a-face-remap-resizes-the-session-too ()
+  "`text-scale-mode-hook\=' is not the whole story, and the gap is the case
+cooked already knows how to detect.
+
+`buffer-face-set\=', `variable-pitch-mode\=' and `buffer-face-toggle\=' all
+rescale the buffer\='s font through `buffer-face-mode\=', which runs no hook --
+so a session put into a proportional face was never told to re-measure, even
+though `cooked--ascii-fixed-pitch-p\=' exists precisely to notice one.  Nothing
+else observes it either: the window\='s pixel dimensions do not change, so
+neither `window-configuration-change-hook\=' nor
+`window-size-change-functions\=' fires."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((synced 0))
+      (cl-letf* ((real (symbol-function 'cooked--sync-size))
+                 ((symbol-function 'cooked--sync-size)
+                  (lambda (&rest args) (cl-incf synced) (apply real args))))
+        (dolist (change (list (lambda () (text-scale-increase 1))
+                              (lambda () (variable-pitch-mode 1))
+                              (lambda () (buffer-face-set '(:height 120)))))
+          (setq synced 0)
+          (funcall change)
+          (should (> synced 0)))))))
+
 (provide 'cooked-tests-render)
 ;;; cooked-tests-render.el ends here
 
