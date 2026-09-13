@@ -87,6 +87,48 @@
   (should (equal (cooked--notification-clean "a\e]0;evil\007b" 100) "a]0;evilb"))
   (should (equal (cooked--notification-clean "abcdef" 3) "abc")))
 
+;; OSC 9 is two protocols under one number, so what is asserted is the split:
+;; iTerm2's message notifies, and none of ConEmu's numbered commands does.
+
+(ert-deftest cooked-osc-9-message-notifies-under-the-gate ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-allow-notifications nil))
+      (should (null (cooked-tests--capturing-notifications
+                      (cooked--osc-9 '("done"))))))
+    (let ((cooked-allow-notifications t))
+      (should (equal (cooked-tests--capturing-notifications
+                       (cooked--osc-9 '("done"))
+                       ;; A message may hold a `;' of its own.
+                       (cooked--osc-9 '("built" " 3 warnings"))
+                       ;; A number leading a message does not make it ConEmu's.
+                       (cooked--osc-9 '("42 files built")))
+                     '(("" . "done") ("" . "built; 3 warnings")
+                       ("" . "42 files built"))))
+      ;; And the rate cap applies, through the real `cooked--notify\='.
+      (let ((cooked-notification-rate '(2 . 10))
+            (raised 0))
+        (cl-letf (((symbol-function 'notifications-notify)
+                   (lambda (&rest _) (cl-incf raised)))
+                  ((symbol-function 'message) (lambda (&rest _) (cl-incf raised))))
+          (dotimes (_ 5) (cooked--osc-9 '("again"))))
+        (should (= raised 2))))))
+
+(ert-deftest cooked-osc-9-conemu-commands-never-notify ()
+  "A leading all-digit field is ConEmu's, implemented or not.
+
+`9;9;PATH' is ConEmu's working directory; read as iTerm2's message it would put
+a path on the desktop, which is the mistake testing for `4' alone would make."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-allow-notifications t))
+      (should (null (cooked-tests--capturing-notifications
+                      (dolist (parts '(("9" "/home/me") ("1" "500") ("12")
+                                       ("4" "1" "42") ("42") ("") ()))
+                        (cooked--osc-9 parts)))))
+      ;; `9;4' still reaches the progress indicator through the same handler.
+      (should (equal cooked--progress '(set . 42))))))
+
 (ert-deftest cooked-notification-chunks-are-bounded ()
   (with-temp-buffer
     (cooked-mode)
@@ -1485,6 +1527,15 @@ including one that renders nothing and puts the state somewhere else entirely."
       '("/bin/sh" "-c" "printf '\\033]9;4;1;37\\007'; sleep 5")
     (should (cooked-tests--settle (lambda () (equal cooked--progress '(set . 37)))))
     (should (string-match-p (regexp-quote "[37%%]") (cooked--mode-line)))))
+
+(ert-deftest cooked-osc-9-notifies-from-a-real-child ()
+  "The TERM.org check, end to end: a message notifies and `9;9;PATH' does not."
+  (let* ((cooked-allow-notifications t)
+         (seen (cooked-tests--capturing-notifications
+                 (cooked-tests--with-session
+                     '("/bin/sh" "-c" "printf '\\033]9;9;/tmp\\007\\033]9;done\\007'; sleep 5")
+                   (should (cooked-tests--settle (lambda () seen)))))))
+    (should (equal seen '(("" . "done"))))))
 
 (provide 'cooked-tests-osc)
 ;;; cooked-tests-osc.el ends here

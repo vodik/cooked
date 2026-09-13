@@ -55,7 +55,7 @@
     (112 . cooked--osc-color-reset)
     (51 . cooked--osc-emacs)
     (52 . cooked--osc-clipboard)
-    (9 . cooked--osc-progress)
+    (9 . cooked--osc-9)
     (99 . cooked--osc-notify)
     (777 . cooked--osc-notify-777))
   "Alist of OSC code to a function taking the remaining payload parts.
@@ -150,7 +150,7 @@ same reason the OSC 51 command channel is a separate file you have to require."
   :group 'cooked)
 
 (defcustom cooked-allow-notifications nil
-  "Whether the child may raise desktop notifications, via OSC 99 or OSC 777.
+  "Whether the child may raise desktop notifications, via OSC 9, 99 or 777.
 
 Off by default, for the same reason `cooked-allow-color-set\=' is: anything that
 can write to the terminal can send one.  A `cat\=' of a hostile file, a build log
@@ -260,6 +260,39 @@ the payload is its title or its body, and `d=0\=' means more chunks follow."
     (when cooked-allow-notifications
       (cooked--notify (nth 1 parts) (string-join (nthcdr 2 parts) ";")))))
 
+;;;; OSC 9 — two protocols under one number
+;;
+;; iTerm2 took OSC 9 for a one-line notification, `ESC ] 9 ; MESSAGE ST', with
+;; no title and no options.  ConEmu took the same number for a family of
+;; commands, `ESC ] 9 ; N ; ... ST' with N from 1 to 12, of which only `9;4',
+;; progress, is anything cooked shows -- and `9;9;PATH' is a working directory,
+;; which would make a nonsense notification if the two were told apart by the
+;; `4' alone.
+;;
+;; So the test is the shape of the first field, not its value: all digits is
+;; ConEmu's, whether or not cooked implements that command, and anything else
+;; is a message.  The cost is that iTerm2 cannot notify with a bare number such
+;; as `ESC ] 9 ; 42 ST', which is ConEmu's reading of it too and the reading
+;; that is safe to get wrong: a lost notification is quieter than a working
+;; directory on the desktop.
+
+(defun cooked--osc-9 (parts)
+  "Route OSC 9 PARTS to ConEmu's progress report or to iTerm2's notification.
+
+A first field of nothing but digits is a ConEmu command: `4\=' is handed to
+`cooked--osc-progress\=', and the other eleven are dropped rather than read as
+text.  Anything else is iTerm2's message, which may itself contain `;\=' and so
+is joined back together, and goes through `cooked-allow-notifications\=' and
+`cooked-notification-rate\=' like OSC 99 and 777.  An empty message is dropped
+too: there is nothing to say, and a bare `ESC ] 9 ST\=' is not a request."
+  (cond
+   ((or (null parts) (string-match-p (rx bos (+ digit) eos) (car parts)))
+    (cooked--osc-progress parts))
+   (cooked-allow-notifications
+    (let ((text (string-join parts ";")))
+      (unless (string-empty-p text)
+        (cooked--notify "" text))))))
+
 ;;;; OSC 9;4 — how far along the child says it is
 ;;
 ;; ConEmu's progress report, and the one sequence on this axis that everything
@@ -267,10 +300,9 @@ the payload is its title or its body, and `d=0\=' means more chunks follow."
 ;; progress bar.  `ESC ] 9 ; 4 ; STATE ; PERCENT ST', where STATE is a single
 ;; digit and PERCENT is an optional 0-100.
 ;;
-;; OSC 9 with anything else after it is iTerm2's one-shot desktop notification,
-;; which cooked does not implement; the `4' test below is what keeps the two
-;; apart, and it is the reason this handler is registered for the whole of OSC 9
-;; rather than for some sub-code the dispatch does not have.
+;; `cooked--osc-9' above has already decided this is ConEmu's rather than
+;; iTerm2's; the `4' test below is what separates progress from the other
+;; eleven ConEmu commands, none of which cooked acts on.
 ;;
 ;; Nothing the child sends reaches the mode line as text.  The payload is parsed
 ;; down to a symbol from a closed set and an integer, and `cooked--progress' can
