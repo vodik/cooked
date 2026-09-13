@@ -2490,11 +2490,6 @@ mod tests {
         );
     }
 
-    /// The load-sensitive one. Its child sleeps before it says anything, so this is
-    /// the only wait here that spends most of its budget before the first byte
-    /// arrives -- which is why it is the test that failed at a load average of 38
-    /// while passing in isolation on the same commit. The extra base budget is for
-    /// the child's own sleep; `COOKED_TEST_TIMEOUT_SCALE` is for the machine.
     /// The half of mode 2048 the emulator tests cannot see: the report is written to the
     /// pty by the resize itself, with no drain and no Lisp in between. The child takes
     /// its input unbuffered and prints what it read with ESC made visible.
@@ -2520,6 +2515,11 @@ mod tests {
         assert!(rendered(&update).contains("E[48;12;40;240;400t"));
     }
 
+    /// The load-sensitive one. Its child sleeps before it says anything, so this is
+    /// the only wait here that spends most of its budget before the first byte
+    /// arrives -- which is why it is the test that failed at a load average of 38
+    /// while passing in isolation on the same commit. The extra base budget is for
+    /// the child's own sleep; `COOKED_TEST_TIMEOUT_SCALE` is for the machine.
     #[test]
     fn resize_reaches_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.3; stty size"]);
