@@ -1671,10 +1671,65 @@ instead, and a reply the core\='s limit could not have carried is refused too."
 refuse it, and filling it does not touch the kill ring."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((cooked-clipboard-write nil)
+          (cooked-clipboard-read 'private)
           (kill-ring nil))
       (cooked--osc-clipboard '("3" "aGVsbG8="))
       (should-not kill-ring)
       (should (equal (aref cooked--cut-buffers 3) "hello")))))
+
+(ert-deftest cooked-osc-52-read-names-every-target-and-answers-the-first-with-text ()
+  "The reply echoes the targets as asked, as xterm does, and its payload comes
+from the first of them that has something to give under the setting."
+  (cooked-tests--osc-52-replies "\\033]52;cp;?\\007"
+    (should (equal (replies (lambda (s) (not (string-empty-p s))))
+                   "\033]52;cp;\007")))
+  ;; `s' is shared and so empty under `private'; the cut buffer after it answers.
+  (let ((cooked-clipboard-read 'private))
+    (cooked-tests--osc-52-replies
+        "\\033]52;0;aGVsbG8=\\007\\033]52;s0;?\\007"
+      (should (equal (replies (lambda (s) (not (string-empty-p s))))
+                     "\033]52;s0;aGVsbG8=\007"))))
+  ;; An empty kill ring falls through to PRIMARY.
+  (cooked-tests--with-kill ""
+    (cl-letf (((symbol-function 'gui-get-selection)
+               (lambda (type &rest _) (and (eq type 'PRIMARY) "primary"))))
+      (let ((cooked-clipboard-read t))
+        (cooked-tests--osc-52-replies "\\033]52;cp;?\\007"
+          (should (equal (replies (lambda (s) (not (string-empty-p s))))
+                         "\033]52;cp;cHJpbWFyeQ==\007")))))))
+
+(ert-deftest cooked-osc-52-empty-write-clears-rather-than-copies-nothing ()
+  "`52;c;\=' is not a copy of the empty string: the kill ring is left as it was
+and nothing says a copy happened, while PRIMARY and a cut buffer are cleared."
+  (with-temp-buffer
+    (let ((cooked-clipboard-write t)
+          (cooked-clipboard-read 'private)
+          (kill-ring (list "kept"))
+          (selections nil)
+          (messages nil))
+      (cl-letf (((symbol-function 'gui-set-selection)
+                 (lambda (type value) (push (cons type value) selections)))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (push args messages))))
+        (cooked--osc-52-write '(?0) "aGVsbG8=")
+        (should (equal (aref cooked--cut-buffers 0) "hello"))
+        (cooked--osc-52-write '(?c ?p ?0) "")
+        (should (equal kill-ring '("kept")))
+        (should-not messages)
+        (should (equal selections '((PRIMARY . nil))))
+        (should-not (aref cooked--cut-buffers 0))
+        ;; Not base64 at all clears as well, as xterm does.
+        (cooked--osc-52-write '(?q) "not base64!")
+        (should (equal (car selections) '(SECONDARY . nil)))
+        (should (equal kill-ring '("kept")))))))
+
+(ert-deftest cooked-osc-52-default-keeps-no-cut-buffer ()
+  "Under nil nothing reads a cut buffer back, so a write to one is not kept."
+  (with-temp-buffer
+    (let ((cooked-clipboard-read nil)
+          (inhibit-message t))
+      (cooked--osc-52-write '(?0 ?7) "aGVsbG8=")
+      (should-not cooked--cut-buffers))))
 
 (ert-deftest cooked-osc-52-can-be-refused-entirely ()
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")

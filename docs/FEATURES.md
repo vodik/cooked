@@ -198,7 +198,9 @@ answers only the cut buffers `0`–`7`, which OSC 52 writes fill per buffer and 
 reach the kill ring. `ask` prompts, naming the buffer and the program, before handing
 over the clipboard, and wants a typed `yes` so that a `y` meant for the program cannot
 answer it. `t` answers from the kill ring, or PRIMARY for `p`, without asking. A reply
-larger than `cooked-clipboard-max-size` goes out empty, with a message saying so.
+larger than `cooked-clipboard-max-size` goes out empty, with a message saying so. A query naming
+several targets, `cp` say, names them all in its reply and is answered from the first
+that has something to give.
 
 A child asking to resize the terminal (`resize -s`, or `CSI 8 ; rows ; cols t`) is refused
 unless you set `cooked-resize-requests` to `window`. Then the window the child is laid out

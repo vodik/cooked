@@ -688,7 +688,11 @@ E asks Emacs to run something; C is the completion channel."
 This covers the selections Emacs shares with everything else: the kill ring
 for the `c\=' and `s\=' targets, PRIMARY for `p\=' and SECONDARY for `q\='.  The
 eight cut buffers `0\=' to `7\=' are not among them -- they are private to the
-buffer, see `cooked-clipboard-read\=' -- and are written regardless.
+buffer, see `cooked-clipboard-read\=' -- and are written whenever that lets
+them be read back.
+
+A write of nothing, or of something that is not base64, clears PRIMARY and
+SECONDARY, as xterm clears a selection, and leaves the kill ring alone.
 
 Reading is a separate question, answered by `cooked-clipboard-read\='."
   :type 'boolean
@@ -702,7 +706,8 @@ for the reply; these settings only decide whether the reply has anything in it.
 Anything that can write to the terminal can ask -- a `cat\=' of a hostile file,
 output from a compromised host -- which is why the default hands over nothing.
 
-nil answers every query with an empty payload.
+nil answers every query with an empty payload, and keeps nothing a write puts
+in a cut buffer, since nothing could read it.
 
 `private\=' answers the cut buffers `0\=' to `7\=' with what OSC 52 last wrote to
 them in this buffer, and the shared selections with nothing.  The cut buffers
@@ -765,12 +770,12 @@ clipboard would otherwise take the echo area over.")
 (defvar-local cooked--cut-buffers nil
   "The eight OSC 52 cut buffers, as a vector of byte strings, or nil if unused.
 
-Filled by writes to targets `0\=' to `7\=' and read back by queries when
-`cooked-clipboard-read\=' is `private\=', `ask\=' or t.  Buffer-local, and never
-copied to the kill ring: that is what makes answering from them leak nothing
-the child did not put there itself.  The bytes are kept as decoded rather than
-as the base64 that arrived, so a read re-encodes them canonically and a
-malformed write cannot come back out verbatim.")
+Filled by writes to targets `0\=' to `7\=' while `cooked-clipboard-read\=' is
+`private\=', `ask\=' or t, and read back by queries under the same settings.
+Buffer-local, and never copied to the kill ring: that is what makes answering
+from them leak nothing the child did not put there itself.  The bytes are kept
+as decoded rather than as the base64 that arrived, so a read re-encodes them
+canonically and a malformed write cannot come back out verbatim.")
 
 (defvar-local cooked--clipboard-prompting nil
   "Whether an OSC 52 prompt under `ask\=' is open for this buffer.")
@@ -796,14 +801,34 @@ which is what xterm does with an empty one."
       (?q (gui-get-selection 'SECONDARY))
       (_ (current-kill 0 t)))))
 
-(defun cooked--osc-52-reply (target payload)
-  "Answer an OSC 52 query for TARGET with PAYLOAD, base64 or the empty string.
+(defun cooked--osc-52-reply (targets payload)
+  "Answer an OSC 52 query for TARGETS with PAYLOAD, base64 or the empty string.
 
-The reply names TARGET, one letter from the query\='s own field, because a
-client that asked about `p\=' matches its answer on that letter."
+The reply names every one of TARGETS, as xterm echoes the targets it
+understood, because a client that asked about `cp\=' matches its answer on
+that field.  They are the letters `cooked--osc-52-targets\=' kept, so nothing
+the child sent comes back unless it is one of those twelve."
   (when-let* ((session (cooked--live-session)))
-    (cooked--reply-osc session 52 (concat (string target) ";" payload)
+    (cooked--reply-osc session 52 (concat (concat targets) ";" payload)
                        cooked--osc-bell-terminated)))
+
+(defun cooked--osc-52-contents (target)
+  "The text TARGET holds, a cut buffer\='s or a shared selection\='s, or nil."
+  (if-let* ((index (cooked--osc-52-cut-buffer target)))
+      (and cooked--cut-buffers (aref cooked--cut-buffers index))
+    (cooked--osc-52-shared-contents target)))
+
+(defun cooked--osc-52-answers-p (target)
+  "Whether a query can be answered from TARGET under `cooked-clipboard-read\='.
+
+A cut buffer can when it holds something, under any setting but nil.  A shared
+selection can under t when it holds something, and under `ask\=' whatever it
+holds, since looking is what the prompt asks leave for."
+  (and cooked-clipboard-read
+       (if (or (cooked--osc-52-cut-buffer target)
+               (eq cooked-clipboard-read t))
+           (not (member (cooked--osc-52-contents target) '(nil "")))
+         (eq cooked-clipboard-read 'ask))))
 
 (defun cooked--osc-52-encode (text)
   "TEXT as the base64 an OSC 52 reply carries, or the empty string for nil.
@@ -863,27 +888,26 @@ killing the child in `cooked-kill-session\='."
 (defun cooked--osc-52-query (targets)
   "Answer the OSC 52 query for TARGETS, exactly once.
 
-xterm answers with the first selection named, and so does this.  Under `ask\='
-the reply leaves this function in a deferred prompt, carrying the terminator it
-was asked with, since `cooked--osc-bell-terminated\=' is unbound by then.  The
-program is named as it was when the query arrived, since by the time the prompt
-runs a short-lived `cat\=' may have exited and handed the foreground back to
-the shell.  Any error inside the prompt is an empty reply rather than none,
-because the child is still waiting for one."
-  (let* ((target (car targets))
-         (index (cooked--osc-52-cut-buffer target)))
+The answer comes from the first of TARGETS, in the order named, that
+`cooked--osc-52-answers-p\=' allows, as xterm falls through the selections it
+was asked for to the first that has something.  With none, the reply is empty.
+Under `ask\=' the reply leaves this function in a deferred prompt, carrying the
+terminator it was asked with, since `cooked--osc-bell-terminated\=' is unbound
+by then.  The program is named as it was when the query arrived, since by the
+time the prompt runs a short-lived `cat\=' may have exited and handed the
+foreground back to the shell.  Any error inside the prompt is an empty reply
+rather than none, because the child is still waiting for one."
+  (let ((target (seq-find #'cooked--osc-52-answers-p targets)))
     (cond
-     ((null cooked-clipboard-read)
-      (cooked--osc-52-reply target ""))
-     (index
+     ((null target)
+      (cooked--osc-52-reply targets ""))
+     ((or (cooked--osc-52-cut-buffer target)
+          (eq cooked-clipboard-read t))
       (cooked--osc-52-reply
-       target (cooked--osc-52-encode (and cooked--cut-buffers
-                                          (aref cooked--cut-buffers index)))))
-     ((eq cooked-clipboard-read 'private)
-      (cooked--osc-52-reply target ""))
-     ((eq cooked-clipboard-read 'ask)
+       targets (cooked--osc-52-encode (cooked--osc-52-contents target))))
+     (t
       (if cooked--clipboard-prompting
-          (cooked--osc-52-reply target "")
+          (cooked--osc-52-reply targets "")
         (setq cooked--clipboard-prompting t)
         (let ((bell cooked--osc-bell-terminated)
               (program (ignore-errors (cooked--foreground-program))))
@@ -892,7 +916,7 @@ because the child is still waiting for one."
              (unwind-protect
                  (let ((cooked--osc-bell-terminated bell))
                    (cooked--osc-52-reply
-                    target
+                    targets
                     (condition-case err
                         (if (cooked--osc-52-ask program target)
                             (cooked--osc-52-encode
@@ -903,40 +927,45 @@ because the child is still waiting for one."
                        (message "cooked: answered a clipboard read with nothing: %s"
                                 (error-message-string err))
                        ""))))
-               (setq cooked--clipboard-prompting nil)))))))
-     (t
-      (cooked--osc-52-reply
-       target (cooked--osc-52-encode (cooked--osc-52-shared-contents target)))))))
+               (setq cooked--clipboard-prompting nil))))))))))
 
 (defun cooked--osc-52-write (targets data)
   "Put the base64 DATA into each of TARGETS.
 
-A cut buffer is written under every setting, since it is this buffer\='s own and
-putting it on the kill ring would be wrong under any of them.  The shared
-selections need `cooked-clipboard-write\=', and the kill ring is written once
-however many of `c\=' and `s\=' were named."
+A cut buffer is this buffer\='s own, so `cooked-clipboard-write\=' does not
+cover it, and putting it on the kill ring would be wrong under any setting.  It
+is kept only while `cooked-clipboard-read\=' lets a query read it back, since
+otherwise it is up to eight payloads held for nothing.  The shared selections
+need `cooked-clipboard-write\=', and the kill ring is written once however many
+of `c\=' and `s\=' were named.
+
+DATA that is empty, or not base64, clears each target instead, which is what
+xterm does with it.  The kill ring has no way to be cleared, so a `c\=' or
+`s\=' with nothing in it is left alone rather than handed an empty kill."
   ;; Measured as the padded length, which is what a read-back re-encodes to, so
   ;; an unpadded write that fits is one whose contents can also be read back.
   (if (> (* 4 (ceiling (length data) 4)) (cooked--osc-52-max-size))
       ;; Refuse out loud: a silent drop looks like the copy simply failed.
       (message "cooked: refused a %d-character clipboard write (see `cooked-clipboard-max-size')"
                (length data))
-    (when-let* ((bytes (cooked--decode-base64 data)))
-      (let ((text (decode-coding-string bytes 'utf-8))
-            (killed nil))
-        (dolist (target targets)
-          (if-let* ((index (cooked--osc-52-cut-buffer target)))
+    (let* ((bytes (cooked--decode-base64 data))
+           (bytes (and bytes (not (string-empty-p bytes)) bytes))
+           (text (and bytes (decode-coding-string bytes 'utf-8)))
+           (killed nil))
+      (dolist (target targets)
+        (if-let* ((index (cooked--osc-52-cut-buffer target)))
+            (when (and cooked-clipboard-read (or bytes cooked--cut-buffers))
               (aset (or cooked--cut-buffers
                         (setq cooked--cut-buffers (make-vector 8 nil)))
-                    index bytes)
-            (when cooked-clipboard-write
-              (pcase target
-                (?p (gui-set-selection 'PRIMARY text))
-                (?q (gui-set-selection 'SECONDARY text))
-                (_ (unless killed
-                     (setq killed t)
-                     (kill-new text)
-                     (message "cooked: copied %d characters" (length text))))))))))))
+                    index bytes))
+          (when cooked-clipboard-write
+            (pcase target
+              (?p (gui-set-selection 'PRIMARY text))
+              (?q (gui-set-selection 'SECONDARY text))
+              (_ (when (and text (not killed))
+                   (setq killed t)
+                   (kill-new text)
+                   (message "cooked: copied %d characters" (length text)))))))))))
 
 (defun cooked--osc-clipboard (parts)
   "Write or answer the child\='s OSC 52 request, from PARTS."
