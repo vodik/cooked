@@ -69,9 +69,7 @@
 (require 'cooked-face)
 (require 'cooked-module)
 
-;; Provided by the native core; see `cooked--load-module'.
-(declare-function cooked--make-filter "ext:cooked-core")
-(declare-function cooked--filter-feed "ext:cooked-core")
+(cooked--declare-core)
 
 (defcustom cooked-comint-track-directory t
   "Whether `OSC 7' from the child sets `default-directory'.

@@ -26,10 +26,9 @@
 (require 'cooked)
 (require 'url-util)
 
-;; Calls upward into cooked-mode.el, and into the core for the handlers that
-;; answer a query rather than merely observing it.
-(declare-function cooked--reply-osc "ext:cooked-core")
-(declare-function cooked--set-color-scheme "ext:cooked-core")
+(cooked--declare-core)
+
+;; Calls upward into cooked-mode.el.
 (declare-function cooked--update-buffer-name "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
 (declare-function cooked--foreground-program "cooked-keys")

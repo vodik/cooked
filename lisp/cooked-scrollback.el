@@ -43,14 +43,13 @@
 (require 'cooked-command)
 (require 'cooked-deco)
 
+(cooked--declare-core)
+
 ;; Owned by cooked-mode.el, which requires this file.  The setting the seam's
 ;; shape follows, read here for the same reason cooked-render.el reads it: what
 ;; the drain hands over depends on it, and so does what the two ends may claim
 ;; about each other afterwards.  See `cooked--split-seam'.
 (defvar cooked-rejoin-wrapped-lines)
-
-(declare-function cooked--forget-history "ext:cooked-core")
-(declare-function cooked--clear-to-prompt "ext:cooked-core")
 
 ;; Owned by cooked-render.el, which requires this file: `cooked-clear-scrollback'
 ;; deletes and then has to have the screen redrawn, which is a request for a

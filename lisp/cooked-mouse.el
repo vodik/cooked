@@ -32,11 +32,8 @@
 (require 'cooked)
 (require 'cooked-util)
 
-;; Defined by the native core at `module-load' time, so the byte-compiler cannot
-;; see it; cooked.el and cooked-mode.el declare what they need of that set the
-;; same way.
-(declare-function cooked--alt-scroll-p "ext:cooked-core")
-(declare-function cooked--reply-osc "ext:cooked-core")
+(cooked--declare-core)
+
 (defvar cooked--last-cell)
 
 ;; Bound by `cooked--handle-osc' around the OSC 22 handler below, which lives

@@ -40,11 +40,7 @@
 ;; For `cooked-link-delegate-function', the slot this file fills at the bottom.
 (require 'cooked-link)
 
-;; Defined by the native core at `module-load' time, so the byte-compiler cannot
-;; see them; cooked.el and cooked-mode.el declare their own sets the same way.
-(declare-function cooked--bracketed-paste-p "ext:cooked-core")
-(declare-function cooked--foreground-pid "ext:cooked-core")
-(declare-function cooked--pid "ext:cooked-core")
+(cooked--declare-core)
 
 ;; Owned by cooked-mode.el, which requires this file.  Point management around a
 ;; send, the two halves of stepping out of forwarding, and the commands

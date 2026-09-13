@@ -125,13 +125,7 @@
 (require 'cl-lib)
 (require 'cooked)
 
-(declare-function cooked--spawn "ext:cooked-core")
-(declare-function cooked--drain "ext:cooked-core")
-(declare-function cooked--send "ext:cooked-core")
-(declare-function cooked--resize "ext:cooked-core")
-(declare-function cooked--redraw "ext:cooked-core")
-(declare-function cooked--signal "ext:cooked-core")
-(declare-function cooked--kill "ext:cooked-core")
+(cooked--declare-core)
 
 (defgroup cooked-process nil
   "Pty-backed processes for commands that only want text."
@@ -642,7 +636,6 @@ does at a terminal and what `interrupt-process' on a pipe cannot do at all."
               (session (buffer-local-value 'cooked-process--session host)))
     (with-current-buffer host (cooked--send session string))
     t))
-
 
 ;;;; The consumers
 

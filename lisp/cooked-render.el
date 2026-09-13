@@ -56,11 +56,7 @@
 (require 'cooked-osc)
 (require 'cooked-scrollback)
 
-;; Defined by the native core at `module-load' time, so the byte-compiler cannot
-;; see them; cooked.el and cooked-mode.el declare their own sets the same way.
-(declare-function cooked--drain "ext:cooked-core")
-(declare-function cooked--ready "ext:cooked-core")
-(declare-function cooked--redraw "ext:cooked-core")
+(cooked--declare-core)
 
 ;; Owned by cooked-mode.el, which requires this file.  One setting the drain is
 ;; parameterised by, one the bell is handed to, and two notifications -- the

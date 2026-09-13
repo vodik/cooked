@@ -24,9 +24,38 @@
 
 (defvar cooked-debug nil
   "When non-nil, re-signal redisplay errors instead of reporting them.")
-(declare-function cooked--pid "ext:cooked-core")
-(declare-function cooked--live-p "ext:cooked-core")
-(declare-function cooked--send "ext:cooked-core")
+
+(eval-and-compile
+  (defconst cooked--core-functions
+    '(cooked--alt-scroll-p cooked--bracketed-paste-p cooked--clear-to-prompt
+      cooked--core-version cooked--drain cooked--filter-feed
+      cooked--focus-events-p cooked--foreground-pid cooked--forget-history
+      cooked--image-forget cooked--job-control cooked--kill
+      cooked--live-p cooked--make-filter cooked--pid
+      cooked--prompt-text cooked--ready cooked--redraw
+      cooked--remove-rows cooked--reply-osc cooked--resize
+      cooked--sample-mode cooked--send cooked--set-attended
+      cooked--set-color-scheme cooked--set-graphics-shown cooked--set-tuning
+      cooked--signal cooked--spawn)
+    "Every function the native core defines, by name.
+
+The core registers these when `cooked--load-module\=' loads it, so the
+byte-compiler has never seen any of them.  Each file that calls one says
+`(cooked--declare-core)\=' once, rather than keeping a list of its own that a
+new defun in src/lib.rs would leave behind.  The test
+`cooked-core-functions-match-lib-rs\=' holds this list and the Rust table in
+step."))
+
+(defmacro cooked--declare-core ()
+  "Declare every function in `cooked--core-functions\=' to the byte-compiler.
+Expands to one `declare-function\=' per name, so it has to be called at the top
+level of each file that calls into the core."
+  `(progn
+     ,@(mapcar (lambda (name) `(declare-function ,name "ext:cooked-core"))
+               cooked--core-functions)))
+
+(cooked--declare-core)
+
 ;; `signal' refuses a symbol with no `error-conditions' property, so the native
 ;; core's `io_error' would otherwise itself fail with "Invalid error symbol"
 ;; the first time a pty operation errors.

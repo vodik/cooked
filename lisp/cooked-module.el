@@ -35,8 +35,7 @@
 
 (require 'cooked-util)
 
-;; Provided by the native core, which this file is what loads.
-(declare-function cooked--core-version "ext:cooked-core")
+(cooked--declare-core)
 
 (defcustom cooked-module-directory nil
   "Directory a downloaded native core is installed into, or nil for the default.

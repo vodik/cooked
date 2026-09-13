@@ -66,26 +66,12 @@
 (require 'cooked-deco)
 (require 'cooked-link)
 
+(cooked--declare-core)
+
 ;; `cooked-osc.el' requires this file, so what this file needs of it is declared
 ;; rather than required -- the same shape, and for the same reason, as the calls
 ;; upward into cooked-mode.el listed below.  Both are notifications: something
 ;; happened, and the layer that owns the meaning should react.
-(declare-function cooked--spawn "ext:cooked-core")
-(declare-function cooked--send "ext:cooked-core")
-(declare-function cooked--reply-osc "ext:cooked-core")
-(declare-function cooked--resize "ext:cooked-core")
-(declare-function cooked--prompt-text "ext:cooked-core")
-(declare-function cooked--core-version "ext:cooked-core")
-(declare-function cooked--signal "ext:cooked-core")
-(declare-function cooked--pid "ext:cooked-core")
-(declare-function cooked--bracketed-paste-p "ext:cooked-core")
-(declare-function cooked--live-p "ext:cooked-core")
-(declare-function cooked--sample-mode "ext:cooked-core")
-(declare-function cooked--set-attended "ext:cooked-core")
-(declare-function cooked--set-graphics-shown "ext:cooked-core")
-(declare-function cooked--set-tuning "ext:cooked-core")
-(declare-function cooked--kill "ext:cooked-core")
-
 (declare-function cooked--sync-color-scheme "cooked-osc")
 
 ;;;; What the two ends exchange
@@ -334,7 +320,6 @@ see it for what declines and why.")
 (declare-function cooked--on-wake "cooked-render")
 (defvar cooked-rejoin-wrapped-lines)
 (defvar cooked--last-size)
-(declare-function cooked--kill "ext:cooked-core")
 
 (defun cooked--foreign-host-p ()
   "Whether the child last said it was somewhere other than this machine.
@@ -3625,7 +3610,6 @@ and we need it to name ours."
                            (not (member name seen)))
                  collect (cons name (substring entry (1+ split)))
                  and do (push name seen)))))
-
 
 ;;;; Entry points
 

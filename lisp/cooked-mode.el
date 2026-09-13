@@ -38,21 +38,9 @@
 (require 'cooked-secret)
 (require 'comint)
 
-;; Defined by the native core at `module-load' time, so the byte-compiler cannot
-;; see them; cooked.el declares the same set for its own use.
-(declare-function cooked--send "ext:cooked-core")
-(declare-function cooked--sample-mode "ext:cooked-core")
-(declare-function cooked--set-attended "ext:cooked-core")
-(declare-function cooked--resize "ext:cooked-core")
+(cooked--declare-core)
+
 (declare-function cooked--cell-size "cooked-deco")
-(declare-function cooked--signal "ext:cooked-core")
-(declare-function cooked--prompt-text "ext:cooked-core")
-(declare-function cooked--bracketed-paste-p "ext:cooked-core")
-(declare-function cooked--focus-events-p "ext:cooked-core")
-(declare-function cooked--live-p "ext:cooked-core")
-(declare-function cooked--foreground-pid "ext:cooked-core")
-(declare-function cooked--pid "ext:cooked-core")
-(declare-function cooked--kill "ext:cooked-core")
 
 (defcustom cooked-buffer-name "*cooked: %p*"
   "How session buffers are named.
@@ -682,9 +670,6 @@ Which byte that is comes from the tty -- see `cooked--eof-byte'."
   (interactive)
   (cooked--resume-forwarding)
   (cooked--send-to-child (string (cooked--eof-byte))))
-
-(declare-function cooked--job-control "ext:cooked-core")
-(declare-function cooked--remove-rows "ext:cooked-core")
 
 (defun cooked--send-job-control (session key signal)
   "Ask SESSION for job control the way a terminal does.

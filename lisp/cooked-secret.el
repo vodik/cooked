@@ -17,8 +17,7 @@
 
 (require 'cooked)
 
-;; Provided by the native core; see `cooked--load-module'.
-(declare-function cooked--prompt-text "ext:cooked-core")
+(cooked--declare-core)
 
 (defcustom cooked-password-function nil
   "Function called with the prompt string to supply a password non-interactively.

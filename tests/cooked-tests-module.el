@@ -71,6 +71,33 @@ apparatus exists for and the one place this question cannot be asked."
     (skip-unless (file-exists-p source))
     (should (equal cooked--terminfo-digest (cooked--file-digest source)))))
 
+(ert-deftest cooked-core-functions-match-lib-rs ()
+  "`cooked--core-functions' names exactly the functions src/lib.rs registers.
+
+The list is what `cooked--declare-core' declares to the byte-compiler in every
+file that calls into the core.  A defun added to the Rust table and not here
+compiles into a warning in whichever file first calls it; one removed from the
+table and left here declares a function nothing will ever define, which nothing
+at all would notice.  Both are read off the source, so a renamed Rust entry
+fails here rather than as a void function in a session.
+
+Skipped where there is no checkout, as the terminfo digest test is."
+  (let ((files (and (file-directory-p (expand-file-name "src" (cooked--root)))
+                    (directory-files-recursively
+                     (expand-file-name "src" (cooked--root)) "\\.rs\\'"))))
+    (skip-unless files)
+    (let (registered)
+      (dolist (file files)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (while (re-search-forward
+                  "^[ \t]*\"\\(cooked--[a-z-]+\\)\"[ \t]+\\(?:[0-9.=]+[ \t]+\\)?=>"
+                  nil t)
+            (push (intern (match-string 1)) registered))))
+      (should registered)
+      (should (equal (sort (delete-dups registered) #'string<)
+                     (sort (copy-sequence cooked--core-functions) #'string<))))))
+
 (ert-deftest cooked-an-artifact-with-no-pinned-digest-is-not-downloaded ()
   "An asset absent from the table is refused, not fetched and hoped about.
 

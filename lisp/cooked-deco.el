@@ -26,10 +26,11 @@
 (require 'cooked-face)
 (require 'cooked-glyph)
 
+(cooked--declare-core)
+
 ;; The one thing decoration asks of the layer above: which window to measure a
 ;; cell against, when the buffer is not being rendered from the selected one.
 (declare-function cooked--layout-window "cooked")
-(declare-function cooked--image-forget "ext:cooked-core")
 
 (defcustom cooked-inline-images t
   "Whether to display images the child transmits.
