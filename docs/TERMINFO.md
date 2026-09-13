@@ -41,6 +41,17 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 | `Smulx`, `Setulc` | styled and coloured underlines, onto Emacs\' `:underline` |
 | `Smol` | overline (`SGR 53`, cleared by `55`), onto `:overline`. The name is tmux\'s |
 | `Sync` | synchronized output, which suppresses the Emacs wakeup for a frame |
+| `Su` | styled underlines again, as the boolean neovim looks for; it promises nothing `Smulx` does not |
+| `hs`, `tsl`, `fsl`, `dsl`, `TS` | the title (OSC 2) as xterm's status line, which is where vim's `title` and tmux's `set-titles` look |
+| `Hls` | OSC 8 hyperlinks, in the spelling tmux's `hyperlinks` feature uses |
+| `Eneks`, `Dseks` | modifyOtherKeys level 2 on and off, for tmux's `extended-keys` |
+| `Enfcs`, `Dsfcs` | focus reporting (mode 1004), under the names tmux's `focus-events` uses |
+
+The second group are extended names with no registry: ncurses' `terminfo.src` has none of
+them, so each was checked against the program that reads it. tmux uses any of them it
+finds in the entry, with no `terminal-features` line. `Sxl` is held back although sixel
+is decoded, because whether a picture can be shown depends on the frame, and the entry
+cannot change its answer when the buffer moves.
 
 **Removed, being things we do not implement and do not intend to:**
 

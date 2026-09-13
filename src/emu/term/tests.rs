@@ -1491,6 +1491,41 @@ fn terminfo_entry_matches_what_decrqm_says() {
     }
 }
 
+/// The extended names tmux reads do what tmux will use them for.
+///
+/// The DECRQM check above already covers `Enfcs`, whose mode it can see. It cannot
+/// see these two: modifyOtherKeys is not a mode, and OSC 8 is not a control sequence
+/// at all. `Hls` is parametrised, so its value is pinned to tmux's own spelling in
+/// `tty-features.c` and the two expansions tmux sends are fed by hand -- an open with
+/// an `id=`, and the empty close it writes before every reset.
+#[test]
+fn the_extended_names_tmux_reads_do_what_they_say() {
+    let capabilities = terminfo_capabilities();
+    let value = |name: &str| {
+        capabilities
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("cooked.ti does not declare `{name}'"))
+            .1
+    };
+
+    let mut t = term(2, 20, &terminfo_decode(value("Eneks")));
+    assert_eq!(t.keys(), KeyEncoding::ModifyOtherKeys, "`Eneks'");
+    t.feed(&terminfo_decode(value("Dseks")));
+    assert_eq!(t.keys(), KeyEncoding::Legacy, "`Dseks'");
+
+    assert_eq!(value("Hls"), r"\E]8;%?%p1%l%tid=%p1%s%;;%p2%s\E\\");
+    let t = term(
+        2,
+        30,
+        b"\x1b]8;id=7;https://example.com/\x1b\\in\x1b]8;;\x1b\\out",
+    );
+    let runs = links(&t, 0);
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(runs[0].1.is_some(), "an open with an id= links");
+    assert_eq!(runs[1].1, None, "the empty close unlinks");
+}
+
 #[test]
 fn alternate_scroll_needs_the_alt_screen() {
     let mut t = term(2, 8, b"\x1b[?1007h");

@@ -66,6 +66,35 @@
 #                     that does not
 #   Sync              synchronized output (mode 2026)
 #
+# And a second group, declared late: features the core already had, named in the
+# vocabulary of the programs that read them. None of these is in ncurses'
+# registry -- they are extended names, and each one's spelling here was checked
+# against the reader it is for rather than against a standard. tmux is the main
+# one, and it matters that tmux uses a capability it finds in the entry directly,
+# with no terminal-features line needed to switch it on.
+#
+#   Su                styled underlines, as the boolean neovim looks for. It
+#                     promises nothing Smulx does not already describe: SGR
+#                     4:1 to 4:5 and SGR 58, both mapped onto :underline.
+#   hs, tsl, fsl      the title as xterm's "status line", which is how vim's
+#   dsl, TS           `title' and tmux's set-titles find it. OSC 2 and BEL,
+#                     not OSC 0, because the title is all there is: nothing
+#                     here has an icon name for OSC 0 to set as well. TS is
+#                     the same as tsl without the column parameter tsl's
+#                     definition says it takes, and ncurses prefers it.
+#   Hls               OSC 8 hyperlinks, in tmux's exact spelling: an optional
+#                     id= and a URI, closed by ST. The id is accepted and
+#                     not needed -- links are interned by destination.
+#   Eneks, Dseks      modifyOtherKeys level 2 on and off (CSI > 4 ; 2 m and a
+#                     bare CSI > 4 m), for tmux's extended-keys. Level 2 is the
+#                     one cooked encodes; level 1 falls back to legacy keys.
+#   Enfcs, Dsfcs      focus reporting, mode 1004 -- `fe' and `fd' under the
+#                     names tmux's focus-events asks for.
+#
+# Not yet `Sxl', although sixel is decoded. Whether a sixel can be shown depends
+# on the frame the buffer is in, and an entry cannot change its answer when the
+# buffer moves to a terminal frame; that is for the graphics work to settle.
+#
 # Everything else xterm-256color declares is kept, and is now implemented. That
 # includes a dozen it declares under `infocmp -x' that we used to claim and
 # ignore:
@@ -158,6 +187,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	OTbs,
 	am,
 	bce,
+	hs,
 	mir,
 	msgr,
 	npc,
@@ -194,10 +224,12 @@ cooked-256color|cooked terminal emulator for Emacs,
 	dim=\E[2m,
 	dl=\E[%p1%dM,
 	dl1=\E[M,
+	dsl=\E]2;\007,
 	ech=\E[%p1%dX,
 	ed=\E[J,
 	el=\E[K,
 	el1=\E[1K,
+	fsl=^G,
 	home=\E[H,
 	hpa=\E[%i%p1%dG,
 	ht=^I,
@@ -333,6 +365,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	smso=\E[7m,
 	smul=\E[4m,
 	tbc=\E[3g,
+	tsl=\E]2;,
 	u6=\E[%i%d;%dR,
 	u7=\E[6n,
 	u8=\E[?%[;0123456789]c,
@@ -347,6 +380,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	PE=\E[201~,
 	PS=\E[200~,
 	RV=\E[>c,
+	TS=\E]2;,
 	XM=\E[?1006;1000%?%p1%{1}%=%th%el%;,
 	XR=\E[>0q,
 	kDC3=\E[3;3~,
@@ -421,6 +455,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	Tc,
 	setrgbf=\E[38:2::%p1%d:%p2%d:%p3%dm,
 	setrgbb=\E[48:2::%p1%d:%p2%d:%p3%dm,
+	Su,
 	Smulx=\E[4:%p1%dm,
 	Setulc=\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%dm,
 	Setulc1=\E[58:5:%p1%dm,
@@ -431,6 +466,11 @@ cooked-256color|cooked terminal emulator for Emacs,
 	fd=\E[?1004l,
 	kxIN=\E[I,
 	kxOUT=\E[O,
+	Enfcs=\E[?1004h,
+	Dsfcs=\E[?1004l,
+	Eneks=\E[>4;2m,
+	Dseks=\E[>4m,
+	Hls=\E]8;%?%p1%l%tid=%p1%s%;;%p2%s\E\\,
 	Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
 
 cooked|cooked terminal emulator for Emacs,
