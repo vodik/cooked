@@ -98,13 +98,26 @@ boundary forever.")
         (modify-syntax-entry ch "." table)
         (push ch cooked--syntax-overridden)))))
 
-(defcustom cooked-word-constituent-string "./~-_"
+(defcustom cooked-word-constituent-string "./~-_?#@&+="
   "Characters a word may run through in a cooked buffer.
 
 Terminal output is mostly paths, URLs and identifiers, and Emacs' defaults cut
-all three up: without this a double-click on `~/src/foo/bar.txt\=' takes `foo\='
-and \\[forward-word] over `api.example.com\=' stops four times.  The whole name
-is almost always the thing being pointed at.
+all three up: without this a double-click on `~/src/foo/bar.txt\=' takes `foo\=',
+one on `items?id=42#top\=' takes `items\=', and one on `simon@example.com\='
+takes `example.com\='.  The whole name is almost always the thing being pointed
+at.  `%\=' needs no entry, being a word constituent already, so `a%20b\=' is one
+word as it stands.
+
+A colon is not here, and stays a boundary through
+`cooked-word-boundary-string\=': it ends `main.c\=' in `main.c:42:\=' and
+separates the entries of a PATH.  So a double-click on
+`https://example.com/a?b=1\=' takes `//example.com/a?b=1\=', without its scheme;
+a link is followed whole through `cooked-link\=' instead.
+
+The same table edits the line at cooked\='s own prompt, which is Emacs text, so
+\\[backward-kill-word] and evil\='s `dw\=' move by these words too: after
+`git log --author=simon\=' one \\[backward-kill-word] kills `--author=simon\=',
+where a shell\='s own line editor would kill `simon\='.
 
 Set through customize and it reaches live buffers; see
 `cooked-mode-syntax-table\='."
@@ -135,9 +148,11 @@ the box-drawing ones are symbol constituents, not word constituents, so
 therefore belt-and-braces, and it earns its place in two ways rather than one:
 it keeps them boundaries when someone widens
 `cooked-word-constituent-string\=', and it says in one readable place which
-characters a terminal buffer treats as furniture.  A copy out of a TUI with two
-panes side by side must not take the border with it, and U+2502 is furniture,
-not text -- that is the intent this records even where Emacs already agrees.
+characters a terminal buffer treats as furniture.  A double-click in a TUI with
+two panes side by side stops at the border between them, because U+2502 is
+furniture, not text.  That is all a syntax table can do: a region copied with
+\\[kill-ring-save] holds every character between point and mark, and one
+spanning both panes still takes the border with it.
 
 One further reason the box-drawing entries cannot do harm and cannot do much
 good: \\[forward-word] consults `find-word-boundary-function-table\\=' as well as
@@ -368,8 +383,10 @@ The answer for anyone not driving this from somewhere else."
 The same claim `cooked-evil-visual-state-render\=' makes, for everyone who is
 not running evil: a selection says something about a region of text, and text
 being rewritten underneath it turns the claim into a lie.  Without it a plain
-\\[set-mark-command] -- or a `consult-line\=', or a mouse drag -- is clobbered
-by the next drain.
+\\[set-mark-command] or a mouse drag is clobbered by the next drain.  A jump that
+only moves point, like `consult-line\=', makes no selection and so freezes
+nothing; point stays where the jump put it as it does after any motion off the
+child\='s cursor, see `cooked--wandered\='.
 
 nil is a reasonable choice for anyone who selects in a terminal only to copy
 something that has already finished printing.
@@ -408,8 +425,9 @@ recomputes it, and nothing recomputed it for a selection.
 region is empty and `use-region-p\=' is nil at exactly the moment the hook
 runs.  Everything that makes it a selection happens afterwards, as ordinary
 motion, with no hook of its own.  So the question is asked once per command and
-the answer cached, which also covers the mouse drag and the `consult-line\='
-case for free.
+the answer cached, which also covers a mouse drag.  It does not cover
+`consult-line\=' or any other jump, since those push the mark without
+activating it and so leave no region.
 
 One `use-region-p\=' per command, and a refresh only on a *change* -- the
 refresh rebuilds a keymap and must not run on every keystroke."

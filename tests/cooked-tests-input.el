@@ -4606,7 +4606,12 @@ syntax table that satisfies one and not the other is the normal way to get this
 half right and ship it broken."
   (with-temp-buffer
     (set-syntax-table cooked-mode-syntax-table)
-    (dolist (subject '("~/src/foo/bar.txt" "api.example.com" "a-b_c.d" "/etc/passwd"))
+    (dolist (subject '("~/src/foo/bar.txt" "api.example.com" "a-b_c.d" "/etc/passwd"
+                       ;; A URL's query and fragment, a login, and a file name
+                       ;; with a `+': everything past the scheme's colon, which
+                       ;; stays a boundary.
+                       "//api.example.com/v1/items?id=42&x=%20#frag"
+                       "simon@host.example.com" "a+b.txt"))
       (erase-buffer)
       (insert "before " subject " after")
       (let ((beg (+ (point-min) (length "before ")))) 
@@ -4617,8 +4622,26 @@ half right and ship it broken."
         (pcase-let ((`(,from ,to) (mouse-start-end (point) (point) 1)))
           (should (equal (buffer-substring-no-properties from to) subject)))))))
 
+(ert-deftest cooked-a-word-at-the-prompt-is-the-same-word ()
+  "\\[backward-kill-word] at the prompt moves by the words a double-click selects.
+
+The trade `cooked-word-constituent-string' records: the table that makes a
+double-click take `--author=simon' whole makes \\[backward-kill-word] kill it
+whole too, where a shell's line editor would stop at the `='.  Pinned so the
+docstring stays true, in either direction."
+  (with-temp-buffer
+    (set-syntax-table cooked-mode-syntax-table)
+    (dolist (case '(("git commit --amend" . "--amend")
+                    ("git log --author=simon" . "--author=simon")
+                    ("make && make install" . "install")))
+      (erase-buffer)
+      (insert "$ " (car case))
+      (let ((kill-ring nil))
+        (backward-kill-word 1)
+        (should (equal (car kill-ring) (cdr case)))))))
+
 (ert-deftest cooked-a-box-border-does-not-join-two-panes ()
-  "A copy out of a two-pane TUI must not take the border with it.
+  "A double-click in a two-pane TUI must not take the border with it.
 
 Worth saying that this passes with `cooked-word-boundary-string\=' emptied, and
 is kept anyway: box-drawing characters are *symbol* constituents in Emacs\= own
