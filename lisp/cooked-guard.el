@@ -465,14 +465,24 @@ hold."
         (and (< quantized 1.0) quantized)))))
 
 (defun cooked--default-metrics (window metrics)
-  "The default face\='s (ASCENT DESCENT) in WINDOW, or nil if it cannot be had.
+  "The default face\='s (ASCENT DESCENT CELL) in WINDOW, or nil without a font.
 
-What a row is laid out *against*, and therefore what a glyph has to fit inside.
+What a row is laid out *against*, and therefore what a glyph has to fit inside:
+the font\='s ascent and descent, and CELL, the width of one grid cell in pixels.
 
-`face-attribute\=' with INHERIT t rather than `font-at\=': `font-at\=' answers
-about the font covering that position, which for a CJK character is the
-*fallback* font it was drawn from.  Asking it would compare the offender
-against itself and conclude everything fits.
+All three as this buffer draws them, which after a zoom is not what the frame
+says.  Under `text-scale-increase\=' in a 15-pixel font the buffer is drawn in a
+26-pixel one with 16-pixel cells, while the frame\='s default face and
+`frame-char-width\=' still answer 15 and 9.  Measured against the frame, every
+glyph on a row with a box character or a CJK one would be too big for its cell
+and shrink, while the ASCII rows beside it stayed zoomed.  So the font comes
+from `cooked--default-font\=' and the cell from `window-font-width\=', both of
+which follow `face-remapping-alist\='.
+
+Not `font-at\=' on the row: that answers about the font covering a position,
+which for a CJK character is the *fallback* font it was drawn from.  Asking it
+would compare the offender against itself and conclude everything fits.  The
+probe is a space in the default face, which is the font the grid is sized by.
 
 Cached in METRICS under a key no cluster can collide with, because it is a fact
 about the same font and geometry the rest of that table is keyed on and is
@@ -480,11 +490,9 @@ thrown away with them."
   (let ((key 'cooked--default))
     (or (gethash key metrics)
         (puthash key
-                 (when-let* ((font (face-attribute 'default :font
-                                                   (window-frame window) t))
-                             ((fontp font))
+                 (when-let* ((font (cooked--default-font window))
                              (info (query-font font)))
-                   (list (aref info 4) (aref info 5)))
+                   (list (aref info 4) (aref info 5) (window-font-width window)))
                  metrics))))
 
 (defun cooked--glyph-claims-next-cell-p (measured from to end default cell)
@@ -556,7 +564,9 @@ cluster costs one shaping call for the life of the font.
 `min-width\=' as well as `height\=' because the two answer different halves: the
 scale shrinks the glyph, and `min-width\=' holds the cell it sits in at the size
 the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
-  (when cooked-glyph-scale-floor
+  (when-let* ((cooked-glyph-scale-floor)
+              (default (cooked--default-metrics window metrics))
+              (cell (nth 2 default)))
     (save-excursion
       (goto-char start)
       (while (< (point) end)
@@ -572,22 +582,21 @@ the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
                         (string-width (buffer-substring-no-properties from to))))
                (measured (and (> cells 0)
                               (cooked--glyph-metrics from to window metrics)))
-               (default (and measured (cooked--default-metrics window metrics)))
                ;; Widen the slot where that is free, then scale whatever is
                ;; still over: a glyph given two cells is scaled less, or not
                ;; at all.  Nothing at all for a glyph that already fits, which
                ;; is the overwhelming majority, borders included.
-               (fits (and measured default
+               (fits (and measured
                           (cooked--glyph-fits-p
-                           measured (* (frame-char-width) cells) default)))
-               (claim (and measured default (not fits)
+                           measured (* cell cells) default)))
+               (claim (and measured (not fits)
                            (= cells 1)
                            (cooked--glyph-claims-next-cell-p
-                            measured from to end default (frame-char-width))))
+                            measured from to end default cell)))
                (cells (if claim 2 cells))
-               (scale (and measured default (not fits)
+               (scale (and measured (not fits)
                            (cooked--glyph-scale
-                            measured (* (frame-char-width) cells) default))))
+                            measured (* cell cells) default))))
           (when (or claim scale)
             (put-text-property from to 'display
                                (if scale

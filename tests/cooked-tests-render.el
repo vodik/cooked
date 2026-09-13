@@ -2400,6 +2400,35 @@ catch it -- the text was never wrong, only what was hung on it."
     ;; want the slot held at its budgeted width.
     (should-not (cooked--glyph-fits-p '(15 15 5 15) 18 default))))
 
+(ert-deftest cooked-glyph-scaling-measures-against-the-zoomed-font ()
+  "After a zoom, a glyph that fits the zoomed cell is left alone.
+
+`text-scale-increase\=' from a 15-pixel font draws the buffer in a 26-pixel one
+with 16-pixel cells, while the frame still says 15 pixels and 9.  Measured
+against the frame, the `│\=' below -- exactly one zoomed cell -- would be too
+big for its slot and shrink, while the ASCII rows beside it stayed zoomed.
+Against the zoomed font it fits, and the glyph really twice the cell is the one
+that shrinks."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((inhibit-read-only t)
+          (cooked-glyph-scale-floor 0.5))
+      (insert "│ →\n")
+      (cooked-tests--with-glyph-font '(20 6 16)
+        (cl-letf (((symbol-function 'cooked--glyph-metrics)
+                   (lambda (beg _end _window _metrics)
+                     (pcase (char-after beg)
+                       (?│ '(16 20 6 26))
+                       (?→ '(32 20 6 26))
+                       (_ '(16 20 6 26))))))
+          (cooked--scale-offenders (point-min) (line-end-position)
+                                   (selected-window)
+                                   (make-hash-table :test #'equal))))
+      (should-not (get-text-property (point-min) 'display))
+      (let ((arrow (get-text-property (+ (point-min) 2) 'display)))
+        (should (equal (assq 'min-width arrow) '(min-width (1))))
+        (should (= (cadr (assq 'height arrow)) 0.5))))))
+
 ;;;; Inline images
 ;;
 ;; Driven through `cooked--apply' with a synthetic update rather than through a

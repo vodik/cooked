@@ -395,7 +395,7 @@ and say the CJK character is half again wider than its two cells."
                  (lambda (beg _end _window _metrics)
                    (if (eq (char-after beg) ?漢) '(3 15 5 15) '(1 15 5 15))))
                 ((symbol-function 'cooked--default-metrics)
-                 (lambda (&rest _) '(15 5))))
+                 (lambda (&rest _) '(15 5 1))))
         (cooked-tests--with-mocked-wrap 10
           (cooked--guard-row-width (point-min) 3 nil nil nil (sxhash-equal "漢x"))))
       (let ((display (get-text-property (point-min) 'display)))
