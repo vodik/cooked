@@ -325,23 +325,14 @@ fn terminfo_entry_matches_what_decrqm_says() {
                 .1
         };
         let mut t = term(4, 8, &terminfo_decode(value(query)));
-        let replies: Vec<Vec<u8>> = t
-            .drain()
-            .events
-            .into_iter()
-            .filter_map(|event| match event {
-                Event::Reply(bytes) => Some(bytes),
-                _ => None,
-            })
-            .collect();
+        let replies = reply_strings(&mut t);
         let ere = terminfo_ere(value(pattern));
         assert!(
-            replies.iter().any(|reply| ere_matches_whole(&ere, reply)),
-            "`{query}' is answered {:?}, which `{pattern}' ({}) does not match",
             replies
                 .iter()
-                .map(|reply| String::from_utf8_lossy(reply))
-                .collect::<Vec<_>>(),
+                .any(|reply| ere_matches_whole(&ere, reply.as_bytes())),
+            "`{query}' is answered {:?}, which `{pattern}' ({}) does not match",
+            replies,
             value(pattern)
         );
     }

@@ -136,15 +136,7 @@ fn the_primary_da_advertises_sixel() {
     // How every sixel producer in circulation decides whether to emit one at all.
     let mut t = with_metrics(10, 20);
     t.feed(b"\x1b[c");
-    let replies: Vec<_> = t
-        .drain()
-        .events
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
-            _ => None,
-        })
-        .collect();
+    let replies = reply_strings(&mut t);
     assert_eq!(replies, vec!["\x1b[?62;4;22c"]);
 }
 
@@ -205,14 +197,7 @@ fn a_refused_probe_leaves_a_transfer_in_flight_alone() {
     t.feed(format!("\x1b_Gm=0;{tail}\x1b\\").as_bytes());
     let delta = t.drain();
     assert_eq!(delta.images.len(), 1, "the picture still arrives");
-    let replies: Vec<_> = delta
-        .events
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
-            _ => None,
-        })
-        .collect();
+    let replies = replies(delta.events);
     assert!(
         replies.contains(&"\x1b_Gi=8;ENOTSUPPORTED:display\x1b\\".to_string()),
         "{replies:?}"
@@ -399,15 +384,7 @@ fn the_capability_probe_clients_actually_send_is_answered() {
     // Answering this is the whole of advertising the protocol.
     let mut t = with_metrics(10, 20);
     t.feed(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
-    let replies: Vec<_> = t
-        .drain()
-        .events
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
-            _ => None,
-        })
-        .collect();
+    let replies = reply_strings(&mut t);
     assert_eq!(replies, vec!["\x1b_Gi=31;OK\x1b\\"]);
 }
 
@@ -418,15 +395,7 @@ fn an_unsupported_capability_is_declined_out_loud() {
     // remaining one: reading a path a child names is a decision about trust.
     let mut t = with_metrics(10, 20);
     t.feed(b"\x1b_Ga=T,f=100,t=f,i=4;AAAA\x1b\\");
-    let replies: Vec<_> = t
-        .drain()
-        .events
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
-            _ => None,
-        })
-        .collect();
+    let replies = reply_strings(&mut t);
     assert_eq!(replies, vec!["\x1b_Gi=4;ENOTSUPPORTED:medium\x1b\\"]);
 }
 
@@ -662,14 +631,7 @@ fn forgetting_an_image_takes_its_geometry_and_its_client_name_with_it() {
         placements(&t, 0).is_empty(),
         "nothing to place, nothing drawn"
     );
-    let replies: Vec<_> = delta
-        .events
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
-            _ => None,
-        })
-        .collect();
+    let replies = replies(delta.events);
     assert_eq!(replies, vec!["\x1b_Gi=7;ENOENT:image\x1b\\"]);
 }
 
@@ -856,14 +818,7 @@ fn a_client_name_survives_a_cell_change_and_is_replaced_at_the_new_size() {
     t.set_cell_metrics(CellMetrics::new(20, 40));
     t.feed(b"\x1b_Ga=p,i=7\x1b\\");
     let delta = t.drain();
-    let replies: Vec<_> = delta
-        .events
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
-            _ => None,
-        })
-        .collect();
+    let replies = replies(delta.events);
     assert_eq!(
         replies,
         vec!["\x1b_Gi=7;OK\x1b\\"],

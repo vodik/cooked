@@ -21,15 +21,7 @@ use super::*;
 fn the_detection_sequence_a_client_walks_reads_back_width_but_not_scale() {
     let mut t = term(4, 20, b"");
     t.feed(b"\r\x1b[6n\x1b]66;w=2; \x07\x1b[6n\x1b]66;s=2; \x07\x1b[6n");
-    let replies: Vec<_> = t
-        .drain()
-        .events
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
-            _ => None,
-        })
-        .collect();
+    let replies = reply_strings(&mut t);
     assert_eq!(
         replies,
         vec!["\x1b[1;1R", "\x1b[1;3R", "\x1b[1;4R"],

@@ -89,7 +89,7 @@ set", because Meta is spelled as a leading ESC whatever the child asks.
 
 None of that rests on a reading of the file any more. The entry's header carries a
 `# declined-modes:` line, and `terminfo_entry_matches_what_decrqm_says` in
-`src/emu/term/tests.rs` reads `cooked.ti` at compile time and fails if a mode a
+`src/emu/term/tests/terminfo.rs` reads `cooked.ti` at compile time and fails if a mode a
 capability names answers 0, a declined mode answers anything but 4 or is set by a
 capability, or one of the queries `u7`, `u9`, `RV` and `XR` goes unanswered. `flash`
 came back only once DECSCNM answered 1 or 2, and removing mode 5 again would fail it.

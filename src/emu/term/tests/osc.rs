@@ -136,7 +136,7 @@ fn a_hostile_uri_is_refused_rather_than_trimmed() {
     // somewhere else: a truncated URI is a different destination.
     let long = format!(
         "\x1b]8;;https://example.com/{}\x1b\\x",
-        "a".repeat(super::super::super::link::MAX_URI_LEN)
+        "a".repeat(crate::emu::link::MAX_URI_LEN)
     );
     assert!(links(&term(2, 8, long.as_bytes()), 0)[0].1.is_none());
 }

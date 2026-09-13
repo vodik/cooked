@@ -1,8 +1,6 @@
 //! The VT front end, end to end, one file per area, with the helpers they share here.
 
 use super::*;
-// Not in the parent's imports: the SGR arm that used to set these bits moved to
-// `emu::sgr`, and the one other name for it here is csi.rs's own import.
 use crate::emu::cell::Attrs;
 use crate::emu::cell::{Deco, Extra};
 use crate::emu::image::Placement;
@@ -40,16 +38,20 @@ fn with_metrics(rows: usize, cols: usize) -> Term {
     t
 }
 
-/// Every reply a drain carries, as text.
-fn reply_strings(t: &mut Term) -> Vec<String> {
-    t.drain()
-        .events
+/// Every reply among EVENTS, as text, in the order they were queued.
+fn replies(events: Vec<Event>) -> Vec<String> {
+    events
         .into_iter()
         .filter_map(|e| match e {
             Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
             _ => None,
         })
         .collect()
+}
+
+/// Every reply the next drain of T carries, as text.
+fn reply_strings(t: &mut Term) -> Vec<String> {
+    replies(t.drain().events)
 }
 
 /// The style and underline colour of the run on row 0 whose text is TEXT.

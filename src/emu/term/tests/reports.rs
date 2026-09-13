@@ -6,15 +6,7 @@ use super::*;
 fn xtwinops_reports_pixel_geometry_once_emacs_has_reported_a_cell_size() {
     let mut t = with_metrics(24, 80);
     t.feed(b"\x1b[14t\x1b[16t");
-    let replies: Vec<_> = t
-        .drain()
-        .events
-        .into_iter()
-        .filter_map(|e| match e {
-            Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
-            _ => None,
-        })
-        .collect();
+    let replies = reply_strings(&mut t);
     // 24 rows x 20px and 80 cols x 10px; then the cell itself.
     assert_eq!(replies, vec!["\x1b[4;480;800t", "\x1b[6;20;10t"]);
 }

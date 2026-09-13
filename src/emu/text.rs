@@ -61,7 +61,7 @@
 //! literal reading. A child measuring with Rust's `unicode-width` gets the narrow
 //! answer, and so does one written against kitty or ghostty; that column is the one
 //! this has to match. The corpus that pins every rule the mode is about, and this divergence with it, is
-//! `mode_2027_corpus` in `term/tests.rs`.
+//! `mode_2027_corpus` in `term/tests/text.rs`.
 //!
 //! [text sizing protocol]: https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
 //! [terminal-unicode-core]: https://github.com/contour-terminal/terminal-unicode-core
