@@ -2478,6 +2478,79 @@ drawn from the font and is still scaled."
         (should (eq (get-text-property (+ start i) 'display) (nth i before))))
       (should (assq 'height (get-text-property (+ start 5) 'display))))))
 
+(ert-deftest cooked-glyph-scaling-measures-nothing-on-a-terminal-frame ()
+  "A terminal frame has no font to fit a glyph inside, so nothing is measured.
+
+`font-at\=' answers nil off a window frame, and the walk used to ask it about
+every character of every non-uniform row on every drain anyway, for a scale it
+could never apply.  Batch Emacs is such a frame: a row of box drawing and CJK
+reaches the walk twice, and no character is measured either time."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((inhibit-read-only t)
+          (window (cooked-tests--display-buffer))
+          (cooked-glyph-scale-floor 0.5)
+          (metrics (make-hash-table :test #'equal))
+          (measured 0)
+          (asked 0))
+      (insert "│ 漢字 →\n")
+      (cl-letf* ((real-metrics (symbol-function 'cooked--glyph-metrics))
+                 (real-font (symbol-function 'cooked--default-font))
+                 ((symbol-function 'cooked--glyph-metrics)
+                  (lambda (&rest args)
+                    (cl-incf measured)
+                    (apply real-metrics args)))
+                 ((symbol-function 'cooked--default-font)
+                  (lambda (&rest args) (cl-incf asked) (apply real-font args))))
+        (dotimes (_ 2)
+          (cooked--scale-offenders (point-min) (line-end-position)
+                                   window metrics)))
+      (should (= measured 0))
+      (should (= asked 1))
+      (should-not (next-single-property-change (point-min) 'display)))))
+
+(ert-deftest cooked-a-cluster-that-cannot-be-measured-is-asked-about-once ()
+  "A nil measurement is remembered, and so is every other.
+
+`font-at\=' answers nil for a character on a frame with no font for it, and the
+cache could not hold nil, so the same character was shaped again on every
+drain.  Batch Emacs answers nil for everything, which makes it the case."
+  (with-temp-buffer
+    (insert "漢")
+    (let ((window (cooked-tests--display-buffer))
+          (metrics (make-hash-table :test #'equal))
+          (asked 0))
+      (cl-letf* ((real (symbol-function 'font-at))
+                 ((symbol-function 'font-at)
+                  (lambda (&rest args) (cl-incf asked) (apply real args))))
+        (dotimes (_ 2)
+          (should-not (cooked--glyph-metrics (point-min) (1+ (point-min))
+                                             window metrics))))
+      (should (= asked 1)))))
+
+(ert-deftest cooked-glyph-metrics-are-bounded-like-the-wrap-memo ()
+  "The metrics table is emptied past `cooked-wrap-cache-limit\=' measurements.
+
+It is keyed by face and cluster, and a truecolour stream mints a face for
+nearly every run it colours, so without a bound it grew until the font changed.
+Twelve distinct faces against a limit of four leave at most five measurements
+behind, counting across faces rather than per face."
+  (with-temp-buffer
+    (let ((metrics (make-hash-table :test #'equal))
+          (cooked-wrap-cache-limit 4))
+      (dotimes (i 12)
+        (insert (propertize "x" 'face `(:foreground ,(format "#0000%02x" i)))))
+      (cl-letf (((symbol-function 'font-at) (lambda (&rest _) nil)))
+        (dotimes (i 12)
+          (let ((pos (+ (point-min) i)))
+            (cooked--glyph-metrics pos (1+ pos) nil metrics))))
+      (let ((held 0))
+        (maphash (lambda (_face table)
+                   (when (hash-table-p table)
+                     (cl-incf held (hash-table-count table))))
+                 metrics)
+        (should (<= held 5))))))
+
 ;;;; Inline images
 ;;
 ;; Driven through `cooked--apply' with a synthetic update rather than through a

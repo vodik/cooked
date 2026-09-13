@@ -362,36 +362,56 @@ Two indices that are easy to get wrong and silent when they are.  The glyph sits
 at index *2* of the gstring, not 1.  And the font's own metrics come from
 `query-font\=' -- pixel size 2, ascent 4, descent 5 -- not from `font-info\=',
 which is a different vector whose slots 4 and 5 are a baseline offset and a
-compose rule, and which therefore answers 0 for both without complaining."
+compose rule, and which therefore answers 0 for both without complaining.
+
+A cluster that cannot be measured is remembered as nil, rather than asked about
+again on every drain: `font-at\=' has no font for a character nothing covers,
+and a cache that only held answers would shape that cluster once per cell per
+drain for as long as it stayed on screen.
+
+Bounded like `cooked--wrap-memo\=', by `cooked-wrap-cache-limit\=' measurements
+across every face, and emptied outright past it.  The key has a face in it, and
+a truecolour stream hands out a new face for nearly every run it colours:
+`lolcat\=' over a file of CJK text is one entry per distinct colour and
+character, and nothing but a font change would otherwise ever drop one."
   (let* ((face (get-text-property beg 'face))
-         (table (or (gethash face metrics)
-                    (puthash face (make-hash-table :test #'equal) metrics)))
+         (table (gethash face metrics))
          ;; The character itself for the one-character cluster the scale walk
          ;; always asks about, so a hit allocates nothing; the text otherwise.
          (key (if (= end (1+ beg))
                   (char-after beg)
-                (buffer-substring-no-properties beg end))))
-    (or (gethash key table)
-        (puthash
-         key
-         (when-let*
-             ((gstring
-               (if-let* ((composition (and (cooked--composition-possible-p beg)
-                                           (find-composition beg end nil t))))
-                   (nth 2 composition)
-                 (when-let* ((font (font-at beg window)))
-                   (font-shape-gstring
-                    (composition-get-gstring beg end font nil) nil))))
-              ((vectorp gstring))
-              ((> (length gstring) 2))
-              (header (aref gstring 0))
-              ((vectorp header))
-              (font (aref header 0))
-              (glyph (aref gstring 2))
-              ((vectorp glyph))
-              (info (query-font font)))
-           (list (aref glyph 4) (aref info 4) (aref info 5) (aref info 2)))
-         table))))
+                (buffer-substring-no-properties beg end)))
+         (known (if table (gethash key table 'unmeasured) 'unmeasured)))
+    (if (not (eq known 'unmeasured))
+        known
+      ;; Counted in the table it bounds, under a key no face can be, so that
+      ;; emptying the table resets the count with it.
+      (when (> (cl-incf (gethash 'cooked--measured metrics 0))
+               cooked-wrap-cache-limit)
+        (clrhash metrics)
+        (setq table nil))
+      (unless table
+        (setq table (puthash face (make-hash-table :test #'equal) metrics)))
+      (puthash
+       key
+       (when-let*
+           ((gstring
+             (if-let* ((composition (and (cooked--composition-possible-p beg)
+                                         (find-composition beg end nil t))))
+                 (nth 2 composition)
+               (when-let* ((font (font-at beg window)))
+                 (font-shape-gstring
+                  (composition-get-gstring beg end font nil) nil))))
+            ((vectorp gstring))
+            ((> (length gstring) 2))
+            (header (aref gstring 0))
+            ((vectorp header))
+            (font (aref header 0))
+            (glyph (aref gstring 2))
+            ((vectorp glyph))
+            (info (query-font font)))
+         (list (aref glyph 4) (aref info 4) (aref info 5) (aref info 2)))
+       table))))
 
 (defun cooked--composition-possible-p (pos)
   "Whether a composition could cover the character at POS.
@@ -484,16 +504,22 @@ which for a CJK character is the *fallback* font it was drawn from.  Asking it
 would compare the offender against itself and conclude everything fits.  The
 probe is a space in the default face, which is the font the grid is sized by.
 
+Nil on a terminal frame, where there is no font to fit a glyph inside and
+nothing to scale.  That answer is remembered like any other, so a terminal
+frame asks once per stamp and `cooked--scale-offenders\=' returns at once for
+every row after it.
+
 Cached in METRICS under a key no cluster can collide with, because it is a fact
 about the same font and geometry the rest of that table is keyed on and is
 thrown away with them."
-  (let ((key 'cooked--default))
-    (or (gethash key metrics)
-        (puthash key
-                 (when-let* ((font (cooked--default-font window))
-                             (info (query-font font)))
-                   (list (aref info 4) (aref info 5) (window-font-width window)))
-                 metrics))))
+  (let ((known (gethash 'cooked--default metrics 'unmeasured)))
+    (if (not (eq known 'unmeasured))
+        known
+      (puthash 'cooked--default
+               (when-let* ((font (cooked--default-font window))
+                           (info (query-font font)))
+                 (list (aref info 4) (aref info 5) (window-font-width window)))
+               metrics))))
 
 (defun cooked--glyph-claims-next-cell-p (measured from to end default cell)
   "Whether the glyph at FROM..TO may take the cell after it instead of shrinking.
@@ -559,7 +585,8 @@ cell, and measuring the base alone would answer about something nobody draws.
 Nothing is measured on a row that got here uniform and fixed-pitch -- the caller
 has already refused those, which is the whole cost control.  What reaches here
 is a row the grid thinks may be mismeasured, and on such a row each *distinct*
-cluster costs one shaping call for the life of the font.
+cluster costs one shaping call for the life of the font.  Nothing is measured
+on a terminal frame either, where `cooked--default-metrics\=' has no answer.
 
 A character carrying `cooked-deco\=' is passed over whole.  It is drawn as
 cooked\='s own image cut to its cells, so it fits by construction whatever the
