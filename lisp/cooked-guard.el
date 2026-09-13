@@ -561,6 +561,13 @@ has already refused those, which is the whole cost control.  What reaches here
 is a row the grid thinks may be mismeasured, and on such a row each *distinct*
 cluster costs one shaping call for the life of the font.
 
+A character carrying `cooked-deco\=' is passed over whole.  It is drawn as
+cooked\='s own image cut to its cells, so it fits by construction whatever the
+font would have made of it -- and the image of a box-drawing run is one
+`display\=' spanning every cell of the run.  Scaling one character inside it
+would replace the picture for that character with a shrunk font glyph and leave
+the rest of the run drawing the whole image again, two images wide.
+
 `min-width\=' as well as `height\=' because the two answer different halves: the
 scale shrinks the glyph, and `min-width\=' holds the cell it sits in at the size
 the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
@@ -570,44 +577,48 @@ the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
     (save-excursion
       (goto-char start)
       (while (< (point) end)
-        (let* ((from (point))
-               ;; One character.  A base and its combining marks are one glyph,
-               ;; and `cooked--glyph-metrics' measures them together through the
-               ;; composition that covers them; stepping by character here costs
-               ;; no allocation, where finding the position by moving point cost
-               ;; a marker per character.
-               (to (min end (1+ from)))
-               (cells (if (= to (1+ from))
-                          (char-width (char-after from))
-                        (string-width (buffer-substring-no-properties from to))))
-               (measured (and (> cells 0)
-                              (cooked--glyph-metrics from to window metrics)))
-               ;; Widen the slot where that is free, then scale whatever is
-               ;; still over: a glyph given two cells is scaled less, or not
-               ;; at all.  Nothing at all for a glyph that already fits, which
-               ;; is the overwhelming majority, borders included.
-               (fits (and measured
-                          (cooked--glyph-fits-p
-                           measured (* cell cells) default)))
-               (claim (and measured (not fits)
-                           (= cells 1)
-                           (cooked--glyph-claims-next-cell-p
-                            measured from to end default cell)))
-               (cells (if claim 2 cells))
-               (scale (and measured (not fits)
-                           (cooked--glyph-scale
-                            measured (* cell cells) default))))
-          (when (or claim scale)
-            (put-text-property from to 'display
-                               (if scale
-                                   `((min-width (,cells)) (height ,scale))
-                                 `((min-width (,cells)))))
-            (when claim
-              ;; Hidden, not deleted.  A space rendered at zero width is still a
-              ;; space in the buffer, so the yank, the search and
-              ;; `cooked--check-seam' all still see what the child sent.
-              (put-text-property to (1+ to) 'display '(space :width 0))))
-          (goto-char to))))))
+        (if (get-text-property (point) 'cooked-deco)
+            (goto-char
+             (next-single-property-change (point) 'cooked-deco nil end))
+          (let* ((from (point))
+                 ;; One character.  A base and its combining marks are one
+                 ;; glyph, and `cooked--glyph-metrics' measures them together
+                 ;; through the composition that covers them; stepping by
+                 ;; character here costs no allocation, where finding the
+                 ;; position by moving point cost a marker per character.
+                 (to (min end (1+ from)))
+                 (cells (if (= to (1+ from))
+                            (char-width (char-after from))
+                          (string-width
+                           (buffer-substring-no-properties from to))))
+                 (measured (and (> cells 0)
+                                (cooked--glyph-metrics from to window metrics)))
+                 ;; Widen the slot where that is free, then scale whatever is
+                 ;; still over: a glyph given two cells is scaled less, or not
+                 ;; at all.  Nothing at all for a glyph that already fits, which
+                 ;; is the overwhelming majority.
+                 (fits (and measured
+                            (cooked--glyph-fits-p
+                             measured (* cell cells) default)))
+                 (claim (and measured (not fits)
+                             (= cells 1)
+                             (cooked--glyph-claims-next-cell-p
+                              measured from to end default cell)))
+                 (cells (if claim 2 cells))
+                 (scale (and measured (not fits)
+                             (cooked--glyph-scale
+                              measured (* cell cells) default))))
+            (when (or claim scale)
+              (put-text-property from to 'display
+                                 (if scale
+                                     `((min-width (,cells)) (height ,scale))
+                                   `((min-width (,cells)))))
+              (when claim
+                ;; Hidden, not deleted.  A space rendered at zero width is still
+                ;; a space in the buffer, so the yank, the search and
+                ;; `cooked--check-seam' all still see what the child sent.
+                (put-text-property to (1+ to) 'display '(space :width 0))))
+            (goto-char to)))))))
 
 (defun cooked--guard-row-width (start width &optional window uniform cache hash)
   "Keep the screen row beginning at START to one screen line.

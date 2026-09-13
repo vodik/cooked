@@ -2400,6 +2400,23 @@ catch it -- the text was never wrong, only what was hung on it."
     ;; want the slot held at its budgeted width.
     (should-not (cooked--glyph-fits-p '(15 15 5 15) 18 default))))
 
+(ert-deftest cooked-a-glyph-is-not-claimed-into-a-space-a-box-run-holds ()
+  "A blank inside a box-drawing run is part of the run\='s image, not free.
+
+`Row::absorb_blank_runs\=' merges the gap in `│ │\=' into one run whose bitmap
+is three cells wide.  Hiding that space at zero width would pull the rest of
+the row one cell left under an image still three cells wide, so a glyph beside
+it must shrink rather than claim it.  The same row with a plain space claims."
+  (let ((default '(15 5)))
+    (with-temp-buffer
+      (insert "a X b")
+      (let ((from (+ (point-min) 2)))
+        (should (cooked--glyph-claims-next-cell-p
+                 '(20 15 5 15) from (1+ from) (point-max) default 9))
+        (put-text-property (1+ from) (+ from 2) 'cooked-deco '(glyph "run" 2 0))
+        (should-not (cooked--glyph-claims-next-cell-p
+                     '(20 15 5 15) from (1+ from) (point-max) default 9))))))
+
 (ert-deftest cooked-glyph-scaling-measures-against-the-zoomed-font ()
   "After a zoom, a glyph that fits the zoomed cell is left alone.
 
@@ -2428,6 +2445,38 @@ that shrinks."
       (let ((arrow (get-text-property (+ (point-min) 2) 'display)))
         (should (equal (assq 'min-width arrow) '(min-width (1))))
         (should (= (cadr (assq 'height arrow)) 0.5))))))
+
+(ert-deftest cooked-glyph-scaling-leaves-a-box-drawing-image-whole ()
+  "A box-drawing run drawn as cooked\='s own image is never scaled.
+
+The image of `┌──┐\=' is one `display\=' spanning four cells and fits them by
+construction.  The font\='s glyphs for the same characters can be any size at
+all -- here every one is reported twice its cell -- and scaling one character
+would replace its share of the picture with a shrunk glyph while the rest of the
+run went on drawing the whole four-cell image.  The CJK character after it is
+drawn from the font and is still scaled."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\200\\342\\224\\220 \\346\\274\\242\\n'; sleep 5")
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let* ((start (point-min))
+           (end (save-excursion (goto-char start) (line-end-position)))
+           (before (mapcar (lambda (i) (get-text-property (+ start i) 'display))
+                           (number-sequence 0 3)))
+           (cooked-glyph-scale-floor 0.5)
+           (inhibit-read-only t))
+      (should (car-safe (car before)))
+      (cooked-tests--with-glyph-font '(15 5 10)
+        (cl-letf (((symbol-function 'cooked--glyph-metrics)
+                   (lambda (beg _end _window _metrics)
+                     (if (eq (char-after beg) ?漢) '(30 15 5 15) '(20 15 5 15)))))
+          (cooked--scale-offenders start end (selected-window)
+                                   (make-hash-table :test #'equal))))
+      (dotimes (i 4)
+        (should (eq (get-text-property (+ start i) 'display) (nth i before))))
+      (should (assq 'height (get-text-property (+ start 5) 'display))))))
 
 ;;;; Inline images
 ;;
