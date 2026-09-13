@@ -34,6 +34,7 @@
 (cooked-bench-script-start ceil--out)
 (require 'cooked)
 (require 'cooked-mode)
+(require 'cooked-bench)
 
 (defconst ceil--awk-program "\
 BEGIN {
@@ -180,20 +181,27 @@ what is timed is redisplay and nothing else."
               ;; `redisplay' figure carries gamescope's frame callback, which is
               ;; why its tail pins to a refresh quantum no matter what the code
               ;; does.
-              (let ((quiet 0))
-                (while (and (< (float-time) deadline) (< quiet 3))
-                  (accept-process-output nil 0.005)
-                  (let ((t0 (float-time)))
-                    (when cooked--session
-                      (cooked--apply (cooked--drain cooked--session rejoin))
-                      (setq drains (1+ drains)))
-                    (let ((t1 (float-time)))
-                      (redisplay t)
-                      (setq apply-ms (+ apply-ms (- t1 t0))
-                            redisplay-ms (+ redisplay-ms (- (float-time) t1)))))
-                  (if (= tick (buffer-chars-modified-tick))
-                      (setq quiet (1+ quiet))
-                    (setq quiet 0 tick (buffer-chars-modified-tick)))))
+              ;;
+              ;; The drains are the wake filter's, made inside
+              ;; `accept-process-output' and charged there by
+              ;; `cooked-bench--charged'.  This loop once drained for itself
+              ;; after each wait and timed only that, so whatever the filter had
+              ;; already applied was missing from the apply column.
+              (pcase-let
+                  ((`(,spent ,count ,_applies)
+                    (cooked-bench--charged
+                     (lambda ()
+                       (let ((quiet 0))
+                         (while (and (< (float-time) deadline) (< quiet 3))
+                           (accept-process-output nil 0.005)
+                           (let ((t1 (float-time)))
+                             (redisplay t)
+                             (setq redisplay-ms (+ redisplay-ms (- (float-time) t1))))
+                           (if (= tick (buffer-chars-modified-tick))
+                               (setq quiet (1+ quiet))
+                             (setq quiet 0 tick (buffer-chars-modified-tick)))))))))
+                (setq apply-ms spent
+                      drains (+ drains count)))
               (when (>= i warmup)
                 (push (* 1000 apply-ms) applies)
                 (push (* 1000 redisplay-ms) redisplays))))

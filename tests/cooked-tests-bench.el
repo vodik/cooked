@@ -402,6 +402,55 @@ and say the CJK character is half again wider than its two cells."
         (should (assq 'height display))
         (should (< (cadr (assq 'height display)) 1.0))))))
 
+;;;; Real-child cases charge every drain
+
+(defun cooked-tests--count-calls (symbol thunk)
+  "Call THUNK and return how many times SYMBOL was called meanwhile."
+  (let* ((calls 0)
+         (count (lambda (&rest _) (setq calls (1+ calls)))))
+    (advice-add symbol :before count)
+    (unwind-protect (funcall thunk)
+      (advice-remove symbol count))
+    calls))
+
+(ert-deftest cooked-bench-a-session-charges-every-apply-the-filter-makes ()
+  "Every `cooked--apply\=' of a real-child case happens inside the charged time.
+
+The wake-pipe filter drains inside `accept-process-output\=', and the harness
+once timed only the drains it made itself afterwards, so on a flood most of
+the applies were never charged.  Counted independently of the harness, the
+applies it charged must be all of them, and there must be several, or the
+count is not about the filter at all.  The child pauses between lines, longer
+than the harness waits and than the core paces wakeups, so there are."
+  (cooked-bench--with-session
+      '("/bin/sh" "-c" "for i in 1 2 3 4; do echo line $i; sleep 0.05; done")
+    (let ((applies (cooked-tests--count-calls
+                    'cooked--apply
+                    (lambda () (cooked-bench--drain-until-exit 20)))))
+      (should cooked--exit)
+      (should (> applies 1))
+      (should (= (nth 1 cooked-bench--last-counts) applies)))))
+
+(ert-deftest cooked-bench-drain-only-charges-every-drain-and-applies-nothing ()
+  "The marshalling case times each `cooked--drain\=' and renders nothing.
+
+Its filter is switched off, so no drain is taken where it cannot be timed and
+no apply sneaks into a figure meant to exclude them.  Its loop condition once
+drained untimed on every pass, which a count of calls sees at once.  The child
+pauses between lines so that there is more than one drain to count."
+  (cooked-bench--with-session
+      '("/bin/sh" "-c" "for i in 1 2 3 4; do echo line $i; sleep 0.05; done")
+    (let (drains)
+      (should (= 0 (cooked-tests--count-calls
+                    'cooked--apply
+                    (lambda ()
+                      (setq drains (cooked-tests--count-calls
+                                    'cooked--drain
+                                    (lambda ()
+                                      (cooked-bench--drain-only-until-exit 20))))))))
+      (should (> drains 1))
+      (should (= (car cooked-bench--last-counts) drains)))))
+
 ;;;; The graphical scripts' prelude
 
 (defvar cooked-tests--bench-script-args nil

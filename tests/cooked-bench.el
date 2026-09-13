@@ -373,6 +373,51 @@ run.  The last iteration's is reported, which is representative because the
 child is the same every time; the spread that actually matters is in the
 samples.")
 
+(defvar cooked-bench--last-counts nil
+  "The (DRAINS APPLIES) the most recent session charged, for the tests.
+
+DRAINS counts calls of `cooked--drain-and-apply', or of `cooked--drain' in
+`cooked-bench--drain-only-until-exit', and APPLIES the calls of `cooked--apply'
+made inside them.  `cooked-tests-bench.el' counts the same calls independently
+and checks the two agree, which is the property the numbers depend on.")
+
+(defun cooked-bench--charged (pump)
+  "Call PUMP, timing every drain Emacs makes meanwhile, and return what they cost.
+
+The value is (SECONDS DRAINS APPLIES): the time spent inside
+`cooked--drain-and-apply', how many times it was entered, and how many calls of
+`cooked--apply' those entries made.  A re-entrant call is folded into the drain
+under way, as the function itself folds it, so no time is counted twice.
+
+The drains are charged where production makes them, rather than made by the
+harness, and that is the correction.  `cooked--start' installs the wake-pipe
+filter, and the filter runs inside `accept-process-output' and drains there.  A
+harness that timed only its own `cooked--apply' after each wait charged the
+drains the filter had not already taken: counted with advice on the 20k-line
+flood, the filter applied rows 14 and 15 times and the harness 5.  Advice on
+the function the filter calls sees every drain whoever asks for it, and PUMP
+needs to do nothing but wait.
+
+The advice is inside the timed region, which costs a closure call per drain:
+microseconds, against drains of a millisecond and more."
+  (let ((spent 0.0) (drains 0) (applies 0) (inside nil))
+    (let ((charge (lambda (fn &rest args)
+                    (if inside
+                        (apply fn args)
+                      (let ((t0 (float-time)))
+                        (setq inside t)
+                        (unwind-protect (apply fn args)
+                          (setq inside nil
+                                spent (+ spent (- (float-time) t0))
+                                drains (1+ drains)))))))
+          (count (lambda (&rest _) (when inside (setq applies (1+ applies))))))
+      (advice-add 'cooked--drain-and-apply :around charge)
+      (advice-add 'cooked--apply :before count)
+      (unwind-protect (funcall pump)
+        (advice-remove 'cooked--drain-and-apply charge)
+        (advice-remove 'cooked--apply count)))
+    (list spent drains applies)))
+
 (defun cooked-bench--drain-until-exit (&optional seconds)
   "Pump the current session to completion, charging only drain and apply.
 
@@ -380,19 +425,49 @@ The child runs on its own while we wait in `accept-process-output', so the
 elapsed time of the whole loop is mostly the child's.  Only the work Emacs does
 per wakeup is accumulated, which is the number this file exists to produce, and
 it is that accumulation -- not the wall clock -- that is returned as the
-sample."
+sample.  The wakeups are the production ones, paced by the core; see
+`cooked-bench--charged' for why the harness no longer drains for itself.
+
+SECONDS bounds the wait, 30 by default."
+  (let ((deadline (+ (float-time) (or seconds 30))))
+    (pcase-let ((`(,spent ,drains ,applies)
+                 (cooked-bench--charged
+                  (lambda ()
+                    (while (and cooked--session (< (float-time) deadline)
+                                (null cooked--exit))
+                      (accept-process-output nil 0.02))))))
+      (setq cooked-bench--last-counts (list drains applies)
+            cooked-bench--last-detail
+            (format "%d drains, %d applies, %d buffer chars"
+                    drains applies (buffer-size)))
+      spent)))
+
+(defun cooked-bench--drain-only-until-exit (&optional seconds)
+  "Drain the current session to completion without applying, charging every drain.
+
+The wake-pipe filter is replaced with `ignore' first.  Left in place it would
+drain and apply inside `accept-process-output', and the drains timed here would
+be whatever it had left over, each of them nearly empty.  Nothing re-arms the
+core's wake byte after that, which does not matter: the drains here are made on
+the harness's own 20 ms cadence and the core's backlog is emptied by them.
+
+Every call of `cooked--drain' is timed, including the one that finds the exit;
+that call was once made untimed in the loop condition, so a drain in two went
+uncharged.  SECONDS bounds the wait, 30 by default."
+  (set-process-filter cooked--wake #'ignore)
   (let ((deadline (+ (float-time) (or seconds 30)))
         (spent 0.0)
-        (drains 0))
-    (while (and cooked--session (< (float-time) deadline) (null cooked--exit))
+        (drains 0)
+        (exited nil))
+    (while (and cooked--session (< (float-time) deadline) (not exited))
       (accept-process-output nil 0.02)
-      (when cooked--session
-        (let ((t0 (float-time)))
-          (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))
-          (setq spent (+ spent (- (float-time) t0))
-                drains (1+ drains)))))
-    (setq cooked-bench--last-detail
-          (format "%d drains, %d buffer chars" drains (buffer-size)))
+      (let* ((t0 (float-time))
+             (update (cooked--drain cooked--session cooked-rejoin-wrapped-lines)))
+        (setq spent (+ spent (- (float-time) t0))
+              drains (1+ drains)
+              exited (plist-get update :exit))))
+    (setq cooked-bench--last-counts (list drains 0)
+          cooked-bench--last-detail (format "%d drains, nothing rendered" drains))
     spent))
 
 (defun cooked-bench--session (label argv &optional iterations)
@@ -472,20 +547,7 @@ drain is marshalling rather than redisplay."
      (cooked-bench--with-session
          '("/bin/sh" "-c" "i=0; while [ $i -lt 20000 ]; do \
 echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")
-       (let ((deadline (+ (float-time) 30))
-             (spent 0.0)
-             (drains 0))
-         (while (and cooked--session (< (float-time) deadline)
-                     (null (plist-get (cooked--drain cooked--session) :exit)))
-           (accept-process-output nil 0.02)
-           (when cooked--session
-             (let ((t0 (float-time)))
-               (cooked--drain cooked--session cooked-rejoin-wrapped-lines)
-               (setq spent (+ spent (- (float-time) t0))
-                     drains (1+ drains)))))
-         (setq cooked-bench--last-detail
-               (format "%d drains, nothing rendered" drains))
-         spent)))
+       (cooked-bench--drain-only-until-exit)))
    3)
   (message "  %-40s   %s" "" cooked-bench--last-detail))
 
