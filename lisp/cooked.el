@@ -95,7 +95,7 @@
 (declare-function cooked--refresh-keymap "cooked-mode")
 (declare-function cooked--update-mouse-grab "cooked-mouse")
 (declare-function cooked--defer "cooked-mode")
-(declare-function cooked--update-buffer-name "cooked-mode")
+(declare-function cooked--update-buffer-name "cooked-osc")
 (declare-function cooked--on-wake "cooked-render")
 (defvar cooked-rejoin-wrapped-lines)
 (defvar cooked--last-size)

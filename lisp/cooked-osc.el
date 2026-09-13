@@ -29,7 +29,6 @@
 (cooked--declare-core)
 
 ;; Calls upward into cooked-mode.el.
-(declare-function cooked--update-buffer-name "cooked-mode")
 (declare-function cooked--defer "cooked-mode")
 (declare-function cooked--foreground-program "cooked-keys")
 
@@ -130,6 +129,84 @@ without them a full-screen program that sets a title leaves it behind on exit."
     ;; An underflowing pop is the child's bug, not ours; leave the title alone.
     (when cooked--title-stack
       (cooked--set-title (pop cooked--title-stack)))))
+
+(defcustom cooked-buffer-name "*cooked: %p*"
+  "How session buffers are named.
+
+A string is used as a `format-spec\=' template:
+
+  %p    the abbreviated working directory
+  %t    the child\='s OSC 2 title, empty until it sets one
+  %h    the child\='s host, empty for a local session
+
+A function is called with three arguments, DIR TITLE HOST -- the same three
+values, already abbreviated/defaulted to \"\" -- and should return a name.
+Either way the result is uniquified, so several sessions can coexist.
+
+Only a rename (see `cooked-buffer-name-auto-update\=') can supply a title or
+host; the initial name is always formatted with TITLE and HOST empty, since
+neither is known before the child has said anything."
+  :type '(choice (string :tag "Format")
+                 (function :tag "Function of DIR, TITLE and HOST"))
+  :group 'cooked)
+
+(defcustom cooked-buffer-name-auto-update nil
+  "Whether to rename the buffer as the child's directory or title change.
+
+Off by default: a buffer whose name changes under you is hard to find again and
+breaks anything holding on to the old name.  Turn it on for the vterm-like
+behaviour of showing the running command in the buffer list -- or, with a
+`cooked-buffer-name\=' that mixes %p, %t and %h, to keep the directory and the
+title current side by side.  Every OSC 7 (directory) and OSC 0/2 (title) update
+re-renders the name, whether or not the template actually uses that piece."
+  :type 'boolean :group 'cooked)
+
+(defun cooked--format-buffer-name (dir title host)
+  "Apply `cooked-buffer-name\=' to DIR, TITLE and HOST."
+  (if (functionp cooked-buffer-name)
+      (funcall cooked-buffer-name dir title host)
+    (format-spec cooked-buffer-name
+                 `((?p . ,dir) (?t . ,title) (?h . ,host)))))
+
+(defun cooked--buffer-name (&optional directory)
+  "A fresh, unique buffer name for a session in DIRECTORY."
+  (generate-new-buffer-name
+   (cooked--format-buffer-name
+    (abbreviate-file-name (or directory default-directory)) "" "")))
+
+(defun cooked--buffer-name-shows-title-p ()
+  "Whether the active `cooked-buffer-name\=' template would print the title.
+
+Used by the mode line to decide whether printing the title again would be
+redundant.  Nil when `cooked-buffer-name-auto-update\=' is off, since then
+nothing renames the buffer at all.  Also nil when `cooked-buffer-name\=' is a
+function -- there is no way to know without calling it, and a mode-line query
+is not license to run one for its side effects."
+  (and cooked-buffer-name-auto-update
+       (stringp cooked-buffer-name)
+       (string-match-p "%[-0<>^_]*[0-9.]*t" cooked-buffer-name)))
+
+(defun cooked--update-buffer-name ()
+  "Rename the buffer after the child's directory or title, when asked to.
+
+Called on every OSC 7 and OSC 0/2, not just when the template's own fields
+changed: `cooked-buffer-name\=' can be a function that looks at other buffer
+state, so there is no cheap way to know in advance whether this particular
+update would change the name.  The `equal\=' check below is what keeps a quiet
+child from being renamed to the name it already has.
+
+Also where `list-buffers-directory\=' is kept current, outside the
+`cooked-buffer-name-auto-update\=' gate: this is the one place both OSC 7 and
+OSC 0/2 already pass through, and what the buffer list prints in its directory
+column is not the user's choice about buffer names."
+  (setq-local list-buffers-directory default-directory)
+  (when cooked-buffer-name-auto-update
+    (let ((name (cooked--format-buffer-name
+                 (abbreviate-file-name default-directory)
+                 cooked-title
+                 (or cooked--host ""))))
+      (unless (equal name (buffer-name))
+        (rename-buffer (generate-new-buffer-name name))))))
 
 ;;;; XTWINOPS — the window the child is laid out for
 ;;

@@ -34,7 +34,7 @@
 ;; clears it when the buffer is looked at; both readers below only report it.
 (defvar cooked-bell-pending)
 (declare-function cooked-toggle-peek "cooked-mode")
-(declare-function cooked--buffer-name-shows-title-p "cooked-mode")
+(declare-function cooked--buffer-name-shows-title-p "cooked-osc")
 
 (defface cooked-failure '((t :inherit error))
   "Face for a non-zero exit status in the mode line."
