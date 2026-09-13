@@ -4746,7 +4746,10 @@ typed into the buffer in the clear.  Gated on the host being foreign, because
 matching a regex against local output would false-positive on any program
 displaying a file that mentions a password.  Remote means a foreign host, or
 one of `cooked-password-remote-programs\=' in the foreground."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+  ;; `sleep 5; :' rather than `sleep 5': a shell execs a lone last command, and
+  ;; the foreground program then becomes `sleep' a moment after the start --
+  ;; which made the `sh' gate below pass or fail on how soon the test got there.
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5; :")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (erase-buffer)
     ;; What `ssh' and `sudo' actually print.  A prefix in front of the word --
