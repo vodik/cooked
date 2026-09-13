@@ -132,7 +132,9 @@ sent as the bytes it produces and one with parameters as written, which is what 
 ghostty send. `TN` and `Co` are answered too, as the entry's name and `colors`. `RGB` is
 answered only under `cooked-direct`, where it is declared: it claims that `setaf` takes an
 RGB value, which is true of that entry and false of `cooked-256color`. The
-reply stops at the first capability the entry lacks, as xterm's does. The in-band answer
+reply stops at the first capability the entry lacks, as xterm's does, and names it only
+in hex: a token that is not hex gets a bare `DCS 0 + r ST`, so nothing the child sent comes
+back as text it could type into a shell. The in-band answer
 has no list of its own to keep: `terminfo_entry_is_answered_in_full` in
 `src/emu/term/xtgettcap.rs` queries every capability line in the file, and fails if one is
 missed or answered with a different value.

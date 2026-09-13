@@ -15,8 +15,9 @@ use crate::emu::terminfo;
 /// A name is a handful of hex digits, and neovim's whole startup query is under a
 /// hundred bytes, so this is room for every capability in the entry asked for at once
 /// with plenty over. Past it the request is cut back to the last whole name rather than
-/// dropped: a reply stops at the first miss anyway, so answering the names that fit and
-/// then stopping is the same answer a shorter request would have had.
+/// dropped, and the names cut off are answered with one miss: a reply stops at the first
+/// miss anyway, so answering the names that fit and then saying no is the answer a
+/// request whose next name the entry lacked would have had.
 pub(crate) const XTGETTCAP_BODY_LIMIT: usize = 4096;
 
 /// An XTGETTCAP request being collected.
@@ -42,6 +43,11 @@ impl State {
     /// names in a batch and read replies until one says no, so answering past a miss
     /// would leave replies on the wire that nothing is waiting to read -- and those
     /// arrive at the shell as typed input.
+    ///
+    /// A request that overran the limit ends in a miss for the names that were cut off,
+    /// so a client asking for more than fits still hears the no it is reading for. Without
+    /// it a single 5 KB token, cut back to nothing, got no reply at all and the client sat
+    /// out its timeout.
     pub(super) fn capability_report(&mut self, mut request: Request) {
         if request.overran {
             let whole = request.body.iter().rposition(|&b| b == b';').unwrap_or(0);
@@ -52,29 +58,36 @@ impl State {
             if token.is_empty() {
                 continue;
             }
-            let answer = hex_decode(token)
-                .and_then(|name| String::from_utf8(name).ok())
-                .and_then(|name| Some((entry.answer(&name)?, name)));
-            match answer {
-                Some((value, name)) if value.is_empty() => {
-                    self.dcs_reply(format_args!("1+r{}", hex_encode(name.as_bytes())));
+            let name = hex_decode(token);
+            let value = name
+                .as_deref()
+                .and_then(|name| std::str::from_utf8(name).ok())
+                .and_then(|name| entry.answer(name));
+            match (name, value) {
+                (Some(name), Some(value)) if value.is_empty() => {
+                    self.dcs_reply(format_args!("1+r{}", hex_encode(&name)));
                 }
-                Some((value, name)) => {
+                (Some(name), Some(value)) => {
                     self.dcs_reply(format_args!(
                         "1+r{}={}",
-                        hex_encode(name.as_bytes()),
+                        hex_encode(&name),
                         hex_encode(&value)
                     ));
                 }
-                None => {
-                    // The child's own spelling of the name, since there may be no name
-                    // to re-encode: a token that is not hex is a miss too. `dcs_reply`
-                    // refuses it if it carries a control, and then nothing is sent --
-                    // still the end of the answer, which is all a miss has to say.
-                    self.dcs_reply(format_args!("0+r{}", String::from_utf8_lossy(token)));
-                    break;
+                (name, _) => {
+                    // The name as we decoded it, re-encoded, and never the child's own
+                    // spelling: a token need not be hex, and `\eP+qrm -rf ~\e\\` echoed
+                    // verbatim would type `0+rrm -rf ~` at the prompt. A token that does
+                    // not decode names nothing, so its miss is bare, which is the form
+                    // ctlseqs gives.
+                    let name = name.as_deref().map(hex_encode).unwrap_or_default();
+                    self.dcs_reply(format_args!("0+r{name}"));
+                    return;
                 }
             }
+        }
+        if request.overran {
+            self.dcs_reply(format_args!("0+r"));
         }
     }
 }
@@ -205,11 +218,34 @@ mod tests {
 
     #[test]
     fn a_name_that_is_not_hex_is_a_miss() {
+        // The token is printable and would read as a command if it came back: the miss
+        // names nothing rather than echo it.
         let mut t = Term::new(2, 8);
-        t.feed(b"\x1bP+qzz;5463\x1b\\");
+        t.feed(b"\x1bP+qrm -rf ~ x;5463\x1b\\");
         assert_eq!(
             t.drain().events,
-            vec![Event::Reply(b"\x1bP0+rzz\x1b\\".to_vec())]
+            vec![Event::Reply(b"\x1bP0+r\x1b\\".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_miss_names_the_capability_in_hex_whatever_case_it_was_asked_in() {
+        let mut t = Term::new(2, 8);
+        t.feed(b"\x1bP+q7a7a\x1b\\");
+        assert_eq!(
+            t.drain().events,
+            vec![Event::Reply(b"\x1bP0+r7A7A\x1b\\".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_single_token_past_the_limit_still_gets_a_miss() {
+        let mut t = Term::new(2, 8);
+        let token = "41".repeat(2500);
+        t.feed(format!("\x1bP+q{token}\x1b\\").as_bytes());
+        assert_eq!(
+            t.drain().events,
+            vec![Event::Reply(b"\x1bP0+r\x1b\\".to_vec())]
         );
     }
 
@@ -235,7 +271,12 @@ mod tests {
         let body = vec![name; count].join(";");
         let mut t = Term::new(2, 8);
         t.feed(format!("\x1bP+q{body}\x1b\\").as_bytes());
-        let replies = t.drain().events;
+        let mut replies = t.drain().events;
+        // The names cut off are answered with the miss a client reads until.
+        assert_eq!(
+            replies.pop(),
+            Some(Event::Reply(b"\x1bP0+r\x1b\\".to_vec()))
+        );
         assert_eq!(replies.len(), XTGETTCAP_BODY_LIMIT / 5);
         assert!(
             replies
