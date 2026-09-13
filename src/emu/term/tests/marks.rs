@@ -65,9 +65,9 @@ fn osc_133_ignores_the_other_spelling_of_the_prompt_mark() {
     );
 }
 
-/// The bug this cost: `k=r` is the prompt drawn to the *right* of the input line, not
-/// a continuation of anything. No `B` follows one, so reading it as a `PS2` left Emacs
-/// in `prompt` for the rest of the session with the input line gone for good.
+/// `k=r` is the prompt drawn to the *right* of the input line, not a continuation. No `B`
+/// follows one, so reading it as a `PS2` would leave Emacs in `prompt` for the rest of the
+/// session with the input line gone.
 ///
 /// A kind nobody here has heard of joins it: the safe answer for an unknown mark is to
 /// move no state, and both of the other answers move some.

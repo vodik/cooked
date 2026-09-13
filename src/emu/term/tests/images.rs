@@ -501,12 +501,9 @@ fn an_echo_inside_a_frame_does_not_leave_the_shell_to_erase_the_picture() {
     // the key is pressed, which for a child blocked part-way through a four-megabyte
     // frame is between two pieces of that write — so the echo lands inside the payload.
     //
-    // What that used to cost is the whole picture. A frame refused over two bytes nobody
-    // sent places nothing, so the cursor stays where the client left it between frames:
-    // the picture's *top* left, since viu comes back up by the picture's height after
-    // each one. The newline viu prints after the frame then moves one row into the
-    // picture rather than past it, and the shell's `ED` on its way to a new prompt erases
-    // everything below — leaving the first row of the picture and the prompt in the hole.
+    // Refusing the frame over two bytes nobody sent would cost the whole picture: the
+    // cursor stays at the picture's top left, where viu parks it between frames, and the
+    // shell's `ED` on the way to a new prompt erases everything below the first row.
     let mut t = with_metrics(24, 80);
     t.feed(b"\x1b[6;1H");
     let top = t.screen().cursor().row;
@@ -596,9 +593,8 @@ fn the_same_image_twice_crosses_the_boundary_once() {
 
 /// The bug the single-owner invariant exists for, from the emulator's side: Emacs has
 /// dropped the picture, the child sends it again, and it has to arrive as a picture and
-/// not as a reference to one nobody holds. Ids are content-addressed, so before
-/// `forget_image` existed the second transmission was answered with the first id and no
-/// bytes -- placements on the grid, nothing to draw them with.
+/// not as a reference to one nobody holds. Ids are content-addressed, so without
+/// `forget_image` the second transmission would get the first id and no bytes.
 #[test]
 fn an_image_crosses_again_after_the_store_forgot_it() {
     let mut t = with_metrics(10, 20);
@@ -725,12 +721,9 @@ fn image_placements_still_pack_one_record_per_character() {
 /// change needs no repair: the next frame the child draws is laid at the rectangle the
 /// new cell implies, while the bytes -- which have not changed -- do not cross again.
 ///
-/// This is the flip a gif used to show after a zoom. The measurement was taken once and
-/// kept against the id; ids are content-addressed, so frames Emacs still held were
-/// recognised and re-laid at the *old* rectangle while frames it had evicted were
-/// retransmitted and measured against the new one, and the two populations interleaved
-/// for as long as the animation looped. The store was dropped whole on a cell change to
-/// collapse them, at the cost of retransmitting every picture in the session.
+/// A measurement kept against the id would make a gif flip between two sizes after a
+/// zoom: frames Emacs still held re-laid at the old rectangle, evicted ones measured
+/// against the new one.
 #[test]
 fn a_replayed_picture_is_measured_against_the_cell_it_is_replayed_at() {
     let mut t = with_metrics(10, 20);
@@ -800,11 +793,9 @@ fn a_reshape_that_does_not_move_the_cell_keeps_every_picture() {
 /// A client's own name for a picture survives a cell change, and the picture it names is
 /// laid at the rectangle the *new* cell implies.
 ///
-/// Both halves used to go: the store was dropped whole when the font moved, so this
-/// `a=p` was answered `ENOENT:image` and the child -- which has no way to know the font
-/// changed, and every reason to think a picture it transmitted is still there -- lost it.
-/// The measurement is redone per placement now (see [`ImageStore::cells`]), so there is
-/// nothing stale to protect anyone from and the name can be kept.
+/// The child cannot know the font changed and has every reason to think its picture is
+/// still there. The measurement is redone per placement (see [`ImageStore::cells`]), so
+/// there is nothing stale to protect against and the name is kept.
 #[test]
 fn a_client_name_survives_a_cell_change_and_is_replaced_at_the_new_size() {
     let mut t = with_metrics(10, 20);
@@ -835,16 +826,11 @@ fn a_client_name_survives_a_cell_change_and_is_replaced_at_the_new_size() {
     );
 }
 
-/// `viu`'s window reshape, which is what sent us looking. It never rescales the pixels:
-/// every frame goes out at full resolution and the *terminal* is asked to fit it, so a
-/// reshape changes `c=`/`r=` and nothing else. Ids are content-addressed, so once the
-/// animation loops every frame is bytes the module already knows -- 270 transmissions of
-/// 61 distinct payloads, measured -- and none of them crosses the boundary again.
-///
-/// So the new rectangle can only reach Emacs on the placement. Held against the image it
-/// reached nothing at all: the module laid the smaller rectangle while Emacs went on
-/// building the spec at the size it had been told once, and the animation drew at its
-/// original size, cropped, for the rest of the session.
+/// `viu`'s window reshape. It never rescales the pixels -- the *terminal* is asked to fit
+/// each frame -- so a reshape changes `c=`/`r=` and nothing else. Once the animation
+/// loops, every frame is bytes the module already knows (270 transmissions of 61 distinct
+/// payloads) and none crosses the boundary again, so the new rectangle can only reach
+/// Emacs on the placement.
 #[test]
 fn a_reshape_relays_a_known_picture_at_the_new_rectangle() {
     let mut t = with_metrics(24, 80);

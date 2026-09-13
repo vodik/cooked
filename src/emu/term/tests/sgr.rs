@@ -168,8 +168,8 @@ fn an_erased_row_forgets_its_underline_colours() {
 
 #[test]
 fn dch_spares_an_underline_colour_on_a_column_it_never_touched() {
-    // DCH used to drop the row's whole table, so deleting a character anywhere took
-    // every colour on the row with it — including ones to the left of the cut.
+    // Dropping the row's whole table on DCH would take every colour on the row with it,
+    // including ones to the left of the cut.
     let t = term(2, 8, b"\x1b[58;5;196ma\x1b[mbcdef\x1b[5G\x1b[1P");
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs[0].text, "a");

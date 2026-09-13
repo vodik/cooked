@@ -43,9 +43,8 @@ fn decrqm_answers_honestly_about_every_mode() {
 
 /// Every one-flag mode must set, report itself set, and come back reset by DECSTR.
 ///
-/// The guard on `dec_flags!` staying the single table it replaced: before it, set/query/
-/// reset were three hand-written lists, and a mode could be settable while reporting
-/// itself unrecognised, or survive a soft reset that was supposed to clear it.
+/// The guard on `dec_flags!` staying one table for set, query and reset, so a mode cannot
+/// be settable while reporting itself unrecognised, or survive a soft reset.
 #[test]
 fn every_flag_mode_sets_reports_and_soft_resets() {
     for mode in [1u16, 5, 25, 66, 1004, 1007, 2004, 2031, 2048] {

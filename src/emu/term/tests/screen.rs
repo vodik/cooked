@@ -68,10 +68,9 @@ fn rep_is_bounded_by_the_screen() {
 
 #[test]
 fn a_tab_count_is_bounded_by_the_width() {
-    // `CSI 65535 I` and `CSI 65535 Z`, the two repeat counts that were missed when REP
-    // was bounded by the screen and SU/SD by the region. Both saturate long before the
-    // count runs out, so the work past `cols` was provably nothing -- measured at 158x
-    // slower than plain text on a 24x200 grid.
+    // `CSI 65535 I` and `CSI 65535 Z`: both saturate long before the count runs out, so
+    // unbounded they would be work past `cols` that does nothing, 158x slower than plain
+    // text on a 24x200 grid.
     let t = term(2, 24, b"\x1b[65535I");
     assert_eq!(t.screen().cursor().col, 23);
     let t = term(2, 24, b"\x1b[20G\x1b[65535Z");
