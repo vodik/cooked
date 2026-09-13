@@ -3842,5 +3842,47 @@ what keeps a sub-row *trackpad* tick at zero while this reports once."
                     '(wheel-down (nil 0 (0 . 0) 0 nil 0 nil nil (0 . 12)) 1 1 (0 . 12)))
                    1))))))
 
+(ert-deftest cooked-the-lone-esc-filter-wraps-once-and-composes ()
+  "Wrapping is idempotent and does not discard what was already there.
+
+Two details that look like paranoia and are not.  The entry is read with
+`assq\=' rather than `lookup-key\=', because `lookup-key\=' resolves a
+`menu-item\=' filter to the map behind it and would silently drop another
+package\='s wrapper -- evil\='s, in the case that matters.  And ours is
+recognised by its `:filter\=' symbol rather than by identity, because
+`define-key\=' copies the list, so identity never matches and every call would
+wrap again."
+  (skip-unless (not (display-graphic-p)))
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((entry (cdr (assq ?\e (cdr input-decode-map)))))
+      (should (eq (car-safe entry) 'menu-item))
+      (should (eq (cadr (memq :filter entry)) 'cooked--tty-esc))
+      ;; Whatever was underneath is carried, not replaced.
+      (let ((inner (nth 2 entry)))
+        (cooked--tty-esc-init)
+        (cooked--tty-esc-init)
+        (let ((again (cdr (assq ?\e (cdr input-decode-map)))))
+          (should (eq (cadr (memq :filter again)) 'cooked--tty-esc))
+          ;; Still one deep: the inner entry is not another of ours.
+          (should (equal (nth 2 again) inner)))))))
+
+(ert-deftest cooked-the-lone-esc-filter-keeps-out-of-the-childs-way ()
+  "ESC is how you leave insert mode in the vim inside the terminal.
+
+The departure from ghostel, and the reason for it: a translation reaching the
+child would be a bug nobody would connect to this setting.  Where Emacs owns the
+line there is no such claim on the byte."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let ((map '(keymap)))
+      ;; Child reading the keyboard: the byte is the child's, untranslated.
+      (cl-letf (((symbol-function 'cooked--child-owns-keyboard-p) (lambda () t)))
+        (should (eq (cooked--tty-esc map) map)))
+      ;; And switched off entirely, nothing is translated either.
+      (cl-letf (((symbol-function 'cooked--child-owns-keyboard-p) (lambda () nil))
+                (cooked-tty-escape-delay nil))
+        (should (eq (cooked--tty-esc map) map))))))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

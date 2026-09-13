@@ -1262,6 +1262,82 @@ no completion channel reaches `git checkout <TAB>\=' -- but it should be chosen.
                                    (cooked--build-input-map value))))
   :group 'cooked)
 
+;;;; A real `escape' on a tty
+
+(defcustom cooked-tty-escape-delay 0.01
+  "How long to wait for a byte after ESC before calling it a lone ESC, or nil.
+
+On a graphical frame Emacs already distinguishes the ESC *key* from the ESC
+*byte* that starts an escape sequence, and binds the first as `escape\='.  On a
+terminal frame it cannot: both arrive as the same byte, and the only thing
+telling them apart is that a sequence's remaining bytes follow immediately.  So
+a tty Emacs has no `escape\=' event at all, and configuration keyed on one --
+which is most evil configuration -- silently does nothing there.
+
+This is the same wait a terminal Emacs already makes for `ESC\=' as Meta, spelled
+so that the answer is an event rather than a prefix.  10ms is ghostel\='s number
+and is below the threshold at which a delay on a *deliberate* keypress is
+noticeable; it is never paid on a real escape sequence, because the following
+byte is already in the queue.
+
+nil disables the translation entirely."
+  :type '(choice (const :tag "No `escape' event on a tty" nil) number)
+  :group 'cooked)
+
+(defun cooked--tty-esc (map)
+  "Translate a lone ESC to `escape\=', or answer MAP to decode as usual.
+
+The `:filter\=' of a `menu-item\=' entry on ESC in `input-decode-map\='.
+
+*Only where the child is not reading the keyboard*, which is a deliberate
+departure from ghostel.  ESC is how you leave insert mode in the vim running
+inside the terminal, and a translation that reached it would be a bug of exactly
+the kind nobody would connect to this setting.  Where Emacs owns the line there
+is no such claim on the byte, and an `escape\=' event is strictly more than a tty
+had before.
+
+The `[27 27]\=' guard is ghostel\='s and is not optional: the first ESC of a fast
+pair is already committed by the time the second decodes, so translating the
+second leaves `ESC ESC\=' looking for an unbound `ESC <escape>\=' instead of
+reaching its own binding."
+  (if (and cooked-tty-escape-delay
+           cooked--session
+           (not (cooked--child-owns-keyboard-p))
+           (let* ((keys (this-single-command-keys))
+                  (len (length keys)))
+             (and (> len 0)
+                  (eq (aref keys (1- len)) ?\e)
+                  (not (and (> len 1) (eq (aref keys (- len 2)) ?\e)))))
+           (sit-for cooked-tty-escape-delay))
+      [escape]
+    map))
+
+(defun cooked--tty-esc-init (&optional frame)
+  "Install the lone-ESC filter on FRAME's terminal, if it is a text one.
+
+Re-wraps when another package has replaced the entry since, and composes rather
+than replaces -- whatever was there is wrapped, so evil's own filter still runs,
+and at most one translation delay is paid per key.
+
+Two details that look like paranoia and are not, both ghostel's.  The entry is
+read *structurally* with `assq\=' rather than with `lookup-key\=', because
+`lookup-key\=' resolves a `menu-item\=' filter to the map behind it, silently
+dropping another package's wrapper on the way past.  And our own wrapper is
+recognised by its `:filter\=' symbol rather than by identity, because
+`define-key\=' copies the `menu-item\=' list and identity would never match, so
+every call would wrap again.
+
+Inert outside a cooked buffer with a live child, so nothing uninstalls it."
+  (let ((terminal (frame-terminal frame)))
+    (when (eq (terminal-live-p terminal) t)
+      (with-selected-frame (or frame (selected-frame))
+        (let* ((cell (assq ?\e (cdr input-decode-map)))
+               (raw (if cell (cdr cell) (lookup-key input-decode-map [?\e]))))
+          (unless (and (eq (car-safe raw) 'menu-item)
+                       (eq (cadr (memq :filter raw)) 'cooked--tty-esc))
+            (define-key input-decode-map (vector ?\e)
+              `(menu-item "" ,raw :filter cooked--tty-esc))))))))
+
 ;;;; Who owns a click or a RET on a link
 
 ;; cooked-link.el is base tier and cannot ask this: the answer depends on the mouse

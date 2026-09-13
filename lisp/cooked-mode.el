@@ -2128,6 +2128,14 @@ to the child verbatim."
   ;; only incidentally -- the two never bind the same event.
   (add-to-list 'emulation-mode-map-alists 'cooked--override-map-alist)
   (add-hook 'post-command-hook #'cooked--track-selection nil t)
+  ;; Per *terminal*, not per buffer, and re-checked when the buffer appears on
+  ;; another frame -- an `emacsclient -t' opened after this session started has
+  ;; a terminal of its own that has never been through here.
+  (cooked--tty-esc-init)
+  (add-hook 'window-buffer-change-functions
+            (lambda (window)
+              (when (windowp window) (cooked--tty-esc-init (window-frame window))))
+            nil t)
   (cooked--install-thing-at-point-providers)
   (cooked--install-global-hooks)
   ;; Negative depth so it runs ahead of the snap: the guard can substitute
