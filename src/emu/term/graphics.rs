@@ -254,8 +254,8 @@ impl State {
         }
     }
 
-    /// `ESC P ... q` — the start of a sixel image or of a DECRQSS, and nothing else so
-    /// far.
+    /// `ESC P ... q` — the start of a sixel image, a DECRQSS or an XTGETTCAP, and
+    /// nothing else so far.
     ///
     /// Every other DCS is let through untouched: DECRSPS and the rest are not
     /// implemented, and collecting a payload we would only discard is worse than not
@@ -271,6 +271,7 @@ impl State {
         self.dcs = match (action, intermediates, ignore) {
             ('q', [], false) => Some(DcsString::Sixel(Vec::new())),
             ('q', [b'$'], false) => Some(DcsString::StatusRequest(Vec::new())),
+            ('q', [b'+'], false) => Some(DcsString::CapabilityRequest(Default::default())),
             _ => None,
         };
     }
@@ -288,6 +289,7 @@ impl State {
         let (body, limit) = match &mut self.dcs {
             Some(DcsString::Sixel(body)) => (body, SIXEL_BODY_LIMIT),
             Some(DcsString::StatusRequest(body)) => (body, DECRQSS_BODY_LIMIT),
+            Some(DcsString::CapabilityRequest(request)) => return request.put(bytes),
             None => return,
         };
         let room = limit - body.len().min(limit);
@@ -299,6 +301,7 @@ impl State {
         let body = match self.dcs.take() {
             Some(DcsString::Sixel(body)) => body,
             Some(DcsString::StatusRequest(name)) => return self.status_report(&name),
+            Some(DcsString::CapabilityRequest(request)) => return self.capability_report(request),
             None => return,
         };
         let Some(bitmap) = sixel::decode(&body) else {

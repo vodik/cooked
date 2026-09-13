@@ -122,6 +122,20 @@ incantation:
 infocmp -x cooked-256color | ssh host 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo -'
 ```
 
+A program that asks rather than looks does not need the install. XTGETTCAP
+(`DCS + q <hex names> ST`) is answered from the same `cooked.ti`, compiled into the module
+and read with `use=` resolved, for whichever entry `TERM` named when the child was spawned
+(`cooked-256color` when it named something else). That is how a remote neovim finds `Tc`,
+`setrgbf` and `Ms` with no database on the far side. A string with no `%` parameters is
+sent as the bytes it produces and one with parameters as written, which is what kitty and
+ghostty send. `TN` and `Co` are answered too, as the entry's name and `colors`. `RGB` is
+answered only under `cooked-direct`, where it is declared: it claims that `setaf` takes an
+RGB value, which is true of that entry and false of `cooked-256color`. The
+reply stops at the first capability the entry lacks, as xterm's does. The in-band answer
+has no list of its own to keep: `terminfo_entry_is_answered_in_full` in
+`src/emu/term/xtgettcap.rs` queries every capability line in the file, and fails if one is
+missed or answered with a different value.
+
 The names `eterm` and `eterm-color` were already taken by Emacs' `term.el`, and
 `Eterm`/`Eterm-256color` by the X terminal Eterm — which is what this project was first
 called, and why it no longer is.

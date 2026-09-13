@@ -735,9 +735,15 @@ impl Session {
 
         let pty = Pty::spawn(argv, env, size, cwd)?;
         let mode = pty.mode().unwrap_or_default();
+        let mut term = Term::new(size.rows.into(), size.cols.into());
+        // XTGETTCAP answers for the entry the child was told about, and this is where
+        // what it was told is known: Lisp chose TERM, and it arrives here with the rest.
+        if let Some((_, name)) = env.iter().find(|(k, _)| k.as_ref() == "TERM") {
+            term.set_terminfo(name.as_ref());
+        }
         let shared = Arc::new(Shared {
             pty,
-            term: Mutex::new(Term::new(size.rows.into(), size.cols.into())),
+            term: Mutex::new(term),
             mode: AtomicMode::new(mode),
             pending_resize: Mutex::new(None),
             notifier: Notifier::new(wake, &options),

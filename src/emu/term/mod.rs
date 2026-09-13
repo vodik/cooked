@@ -24,6 +24,7 @@ mod perform;
 mod state;
 #[cfg(test)]
 mod tests;
+mod xtgettcap;
 
 /// The cursor shape a child asked for with DECSCUSR (`CSI Ps SP q`).
 ///
@@ -711,10 +712,10 @@ impl State {
 
     /// Queue `ESC P BODY ESC \` -- a DCS reply.
     ///
-    /// XTVERSION's answer and DA3's. Its own method rather than a string pasted at
-    /// each call site, because the terminator is the part a second site would get
-    /// wrong: a DCS that is never closed leaves the parser eating everything the
-    /// child prints next.
+    /// XTVERSION's answer, DA3's, DECRQSS's and XTGETTCAP's. Its own method rather than
+    /// a string pasted at each call site, because the terminator is the part a second
+    /// site would get wrong: a DCS that is never closed leaves the parser eating
+    /// everything the child prints next.
     pub(crate) fn dcs_reply(&mut self, body: std::fmt::Arguments<'_>) {
         self.framed_reply("\x1bP", body, "\x1b\\");
     }
@@ -1149,7 +1150,7 @@ impl Default for Modes {
 
 /// A DCS string cooked answers, with its payload so far.
 ///
-/// Both are collected whole and acted on at the terminator, because neither means
+/// All three are collected whole and acted on at the terminator, because neither means
 /// anything until it is complete; what differs is how much either may hold.
 enum DcsString {
     /// `DCS P1;P2;P3 q` -- a picture. Collected rather than decoded incrementally because
@@ -1159,6 +1160,10 @@ enum DcsString {
     /// [`DECRQSS_BODY_LIMIT`], which is past the longest name answered, so an over-long
     /// request is still refused rather than truncated into a valid one.
     StatusRequest(Vec<u8>),
+    /// `DCS + q Pt` -- XTGETTCAP, hex-encoded terminfo names separated by `;`. Capped at
+    /// [`xtgettcap::XTGETTCAP_BODY_LIMIT`] and cut back to the last whole name past it;
+    /// see there.
+    CapabilityRequest(xtgettcap::Request),
 }
 
 /// How much of a DECRQSS payload is kept. See [`DcsString::StatusRequest`].
@@ -1184,6 +1189,12 @@ struct State {
     /// `None` for every other DCS: the parser hands over the payload of whatever string
     /// is running, and only the introducers [`DcsString`] names are collected.
     dcs: Option<DcsString>,
+    /// The terminfo entry TERM named at spawn, or `None` for one that is not ours, which
+    /// is answered from the default entry -- see [`Term::set_terminfo`].
+    ///
+    /// On [`State`] rather than [`Modes`]: the child did not negotiate it, and a reset
+    /// does not change what TERM said.
+    terminfo: Option<&'static crate::emu::terminfo::Entry>,
     /// The cell size Emacs reports, for turning pixels into a cell rectangle.
     metrics: CellMetrics,
     /// The light/dark scheme Emacs reports, for answering `CSI ? 996 n`.

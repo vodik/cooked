@@ -134,6 +134,7 @@ pub(crate) mod sgr;
 pub(crate) mod sixel;
 pub(crate) mod stream;
 pub(crate) mod term;
+pub(crate) mod terminfo;
 pub(crate) mod text;
 
 pub(crate) use cell::{Color, Deco, MarkId, Style};

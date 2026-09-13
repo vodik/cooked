@@ -992,6 +992,38 @@ assertion is the child\='s answer, which is the only one that matters, and
   (let ((cooked-term-name nil))
     (should (equal (cooked--terminfo) "xterm-256color"))))
 
+(ert-deftest cooked-xtgettcap-answers-tc-through-the-pty ()
+  "A child asking for Tc in band gets the entry's answer on its own input.
+
+This is the request neovim makes over ssh, where no terminfo database knows
+our TERM, and the only way it learns there is direct colour."
+  (let ((out (make-temp-file "cooked-xtgettcap")))
+    (unwind-protect
+        (cooked-tests--with-session (cooked-tests--reply-to "\\033P+q5463\\033\\\\" out)
+          (should (cooked-tests--settle
+                   (lambda () (string-suffix-p "\033\\" (cooked-tests--contents out)))))
+          (should (equal "\033P1+r5463\033\\" (cooked-tests--contents out))))
+      (delete-file out))))
+
+(ert-deftest cooked-xtgettcap-answers-for-the-entry-term-names ()
+  "The core answers from the entry the child was told about, not a fixed one.
+
+RGB is declared on cooked-direct and deliberately not on cooked-256color, so
+the same question gets a hit under one TERM and a miss under the other.  The
+name travels to the core in the environment the child is spawned with."
+  :tags '(terminfo)
+  (skip-unless (cooked--terminfo-database))
+  (dolist (case '(("cooked-direct" . "\033P1+r524742\033\\")
+                  ("cooked-256color" . "\033P0+r524742\033\\")))
+    (let ((cooked-term-name (car case))
+          (out (make-temp-file "cooked-xtgettcap")))
+      (unwind-protect
+          (cooked-tests--with-session (cooked-tests--reply-to "\\033P+q524742\\033\\\\" out)
+            (should (cooked-tests--settle
+                     (lambda () (string-suffix-p "\033\\" (cooked-tests--contents out)))))
+            (should (equal (cdr case) (cooked-tests--contents out))))
+        (delete-file out)))))
+
 (ert-deftest cooked-names-its-own-terminfo-database ()
   "TERMINFO names our database, and an inherited one does not survive beside it.
 

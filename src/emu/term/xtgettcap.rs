@@ -1,0 +1,334 @@
+//! XTGETTCAP, `DCS + q NAMES ST`: a capability asked for in band, answered from the
+//! terminfo entry TERM names.
+//!
+//! The case it exists for is the one a terminfo database cannot serve. Over ssh the
+//! remote host has never heard of `cooked-256color`, so a child there either falls back
+//! to a guess or asks the terminal itself -- and neovim asks, for `Tc`, `RGB`,
+//! `setrgbf` and `Ms`, and runs in 256 colours without OSC 52 when nobody answers.
+
+use super::*;
+use crate::emu::terminfo;
+
+/// Longest XTGETTCAP request collected from one DCS string.
+///
+/// A name is a handful of hex digits, and neovim's whole startup query is under a
+/// hundred bytes, so this is room for every capability in the entry asked for at once
+/// with plenty over. Past it the request is cut back to the last whole name rather than
+/// dropped: a reply stops at the first miss anyway, so answering the names that fit and
+/// then stopping is the same answer a shorter request would have had.
+pub(crate) const XTGETTCAP_BODY_LIMIT: usize = 4096;
+
+/// An XTGETTCAP request being collected.
+#[derive(Debug, Default)]
+pub(super) struct Request {
+    body: Vec<u8>,
+    overran: bool,
+}
+
+impl Request {
+    /// A slice of the payload, kept up to the limit and remembered as overrun past it.
+    pub(super) fn put(&mut self, bytes: &[u8]) {
+        let room = XTGETTCAP_BODY_LIMIT - self.body.len().min(XTGETTCAP_BODY_LIMIT);
+        self.overran |= bytes.len() > room;
+        self.body.extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+}
+
+impl State {
+    /// The string ended: answer the request.
+    ///
+    /// One reply per name, `DCS 1 + r NAME = VALUE ST` for a hit and `DCS 0 + r NAME ST`
+    /// for a miss, with NAME and VALUE hex-encoded. The first miss is the last reply,
+    /// which is xterm's rule and the one clients are written against: they send their
+    /// names in a batch and read replies until one says no, so answering past a miss
+    /// would leave replies on the wire that nothing is waiting to read -- and those
+    /// arrive at the shell as typed input.
+    pub(super) fn capability_report(&mut self, mut request: Request) {
+        if request.overran {
+            let whole = request.body.iter().rposition(|&b| b == b';').unwrap_or(0);
+            request.body.truncate(whole);
+        }
+        let entry = self.terminfo.unwrap_or_else(terminfo::default_entry);
+        for token in request.body.split(|&b| b == b';') {
+            if token.is_empty() {
+                continue;
+            }
+            let answer = hex_decode(token)
+                .and_then(|name| String::from_utf8(name).ok())
+                .and_then(|name| Some((entry.answer(&name)?, name)));
+            match answer {
+                Some((value, name)) if value.is_empty() => {
+                    self.dcs_reply(format_args!("1+r{}", hex_encode(name.as_bytes())));
+                }
+                Some((value, name)) => {
+                    self.dcs_reply(format_args!(
+                        "1+r{}={}",
+                        hex_encode(name.as_bytes()),
+                        hex_encode(&value)
+                    ));
+                }
+                None => {
+                    // The child's own spelling of the name, since there may be no name
+                    // to re-encode: a token that is not hex is a miss too. `dcs_reply`
+                    // refuses it if it carries a control, and then nothing is sent --
+                    // still the end of the answer, which is all a miss has to say.
+                    self.dcs_reply(format_args!("0+r{}", String::from_utf8_lossy(token)));
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    hex.chunks_exact(2)
+        .map(|pair| {
+            let digit = |b: u8| (b as char).to_digit(16);
+            Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8)
+        })
+        .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
+impl Term {
+    /// Tell the emulator which terminfo entry TERM names, for XTGETTCAP to answer from.
+    ///
+    /// Read out of the environment the child was spawned with rather than passed
+    /// separately, so it cannot disagree with what the child was told. A name that is
+    /// not one of ours falls back to [`terminfo::default_entry`]; see there for why that
+    /// beats answering nothing.
+    pub fn set_terminfo(&mut self, term: &str) {
+        self.state.terminfo = terminfo::entry(term);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The replies to asking for NAMES under TERM, as text so a failure reads.
+    fn ask(term: &str, names: &[&str]) -> Vec<String> {
+        let mut t = Term::new(2, 8);
+        t.set_terminfo(term);
+        let hex: Vec<String> = names.iter().map(|n| hex_encode(n.as_bytes())).collect();
+        t.feed(format!("\x1bP+q{}\x1b\\", hex.join(";")).as_bytes());
+        t.drain()
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Reply(bytes) => Some(String::from_utf8(bytes).unwrap()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The reply a hit should produce, spelled out rather than built by the code under
+    /// test: `DCS 1 + r NAME [= VALUE] ST`.
+    fn hit(name: &str, value: &[u8]) -> String {
+        let value = match value {
+            [] => String::new(),
+            _ => format!("={}", hex_encode(value)),
+        };
+        format!("\x1bP1+r{}{value}\x1b\\", hex_encode(name.as_bytes()))
+    }
+
+    #[test]
+    fn tc_round_trips() {
+        // `printf '\eP+q5463\e\\'`, the request in the task, and its answer byte for byte.
+        let mut t = Term::new(2, 8);
+        t.feed(b"\x1bP+q5463\x1b\\");
+        assert_eq!(
+            t.drain().events,
+            vec![Event::Reply(b"\x1bP1+r5463\x1b\\".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_string_without_parameters_is_sent_decoded() {
+        assert_eq!(ask("cooked", &["kbs"]), vec![hit("kbs", b"\x7f")]);
+        assert_eq!(ask("cooked", &["Cr"]), vec![hit("Cr", b"\x1b]112\x07")]);
+    }
+
+    #[test]
+    fn a_string_with_parameters_is_sent_as_written() {
+        let setrgbf = terminfo::default_entry().get("setrgbf");
+        let Some(terminfo::Value::Str(source)) = setrgbf else {
+            panic!("cooked.ti no longer declares setrgbf");
+        };
+        assert!(source.contains("\\E"), "{source}");
+        assert_eq!(
+            ask("cooked", &["setrgbf"]),
+            vec![hit("setrgbf", source.as_bytes())]
+        );
+    }
+
+    #[test]
+    fn the_name_and_colour_count_answer_for_the_entry_term_named() {
+        assert_eq!(ask("cooked", &["TN"]), vec![hit("TN", b"cooked")]);
+        assert_eq!(ask("cooked-256color", &["Co"]), vec![hit("Co", b"256")]);
+        assert_eq!(ask("cooked-direct", &["Co"]), vec![hit("Co", b"16777216")]);
+        assert_eq!(ask("cooked-direct", &["RGB"]), vec![hit("RGB", b"")]);
+    }
+
+    #[test]
+    fn a_term_that_is_not_ours_answers_from_the_first_entry() {
+        let first = terminfo::default_entry().names[0];
+        assert_eq!(
+            ask("xterm-256color", &["TN"]),
+            vec![hit("TN", first.as_bytes())]
+        );
+    }
+
+    #[test]
+    fn the_first_miss_ends_the_answer() {
+        // `RGB` is declared on `cooked-direct` and deliberately not here; see
+        // `Entry::answer`.
+        assert_eq!(
+            ask("cooked-256color", &["Tc", "RGB", "am"]),
+            vec![
+                hit("Tc", b""),
+                format!("\x1bP0+r{}\x1b\\", hex_encode(b"RGB"))
+            ]
+        );
+    }
+
+    #[test]
+    fn lowercase_hex_is_understood() {
+        let mut t = Term::new(2, 8);
+        t.feed(b"\x1bP+q5463;616d\x1b\\");
+        let replies = t.drain().events;
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[1], Event::Reply(hit("am", b"").into_bytes()));
+    }
+
+    #[test]
+    fn a_name_that_is_not_hex_is_a_miss() {
+        let mut t = Term::new(2, 8);
+        t.feed(b"\x1bP+qzz;5463\x1b\\");
+        assert_eq!(
+            t.drain().events,
+            vec![Event::Reply(b"\x1bP0+rzz\x1b\\".to_vec())]
+        );
+    }
+
+    #[test]
+    fn other_dcs_families_are_not_answered() {
+        for request in [&b"\x1bP$q5463\x1b\\"[..], b"\x1bPq5463\x1b\\"] {
+            let mut t = Term::new(2, 8);
+            t.feed(request);
+            assert!(
+                !t.drain()
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, Event::Reply(r) if r.starts_with(b"\x1bP1+r"))),
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlong_request_answers_the_names_that_fit() {
+        let name = hex_encode(b"am");
+        let count = XTGETTCAP_BODY_LIMIT / (name.len() + 1) + 10;
+        let body = vec![name; count].join(";");
+        let mut t = Term::new(2, 8);
+        t.feed(format!("\x1bP+q{body}\x1b\\").as_bytes());
+        let replies = t.drain().events;
+        assert_eq!(replies.len(), XTGETTCAP_BODY_LIMIT / 5);
+        assert!(
+            replies
+                .iter()
+                .all(|r| *r == Event::Reply(hit("am", b"").into_bytes()))
+        );
+    }
+
+    /// The entry and the reply cannot drift: every capability line of every entry in
+    /// `cooked.ti`, read here line by line and not through the parser the core uses, is
+    /// answered under that entry's name with the value the line gives it. A line the
+    /// parser failed to pick up is a miss; a value it misread is a mismatch.
+    ///
+    /// An entry that says `use=` answers everything its parent answers, except what it
+    /// declares itself -- which is how `cooked-direct` comes to answer its own `setaf`
+    /// and every other capability `cooked-256color` has.
+    #[test]
+    fn terminfo_entry_is_answered_in_full() {
+        let source = include_str!("../../../terminfo/cooked.ti");
+        let mut entries: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in source.lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            match line.strip_prefix('\t') {
+                Some(field) => entries
+                    .last_mut()
+                    .expect("a capability before any name line")
+                    .1
+                    .push(field.trim_end_matches(',')),
+                None => entries.push((line.split('|').next().unwrap(), Vec::new())),
+            }
+        }
+        assert!(entries.len() >= 3, "only {} entries read", entries.len());
+
+        let expected = |field: &str| -> (String, Vec<u8>) {
+            if let Some((name, value)) = field.split_once('=') {
+                let bytes = match value.contains('%') {
+                    true => value.as_bytes().to_vec(),
+                    false => terminfo::decode(value),
+                };
+                (name.to_owned(), bytes)
+            } else if let Some((name, number)) = field.split_once('#') {
+                let n = match number.strip_prefix("0x") {
+                    Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
+                    None => number.parse().unwrap(),
+                };
+                (name.to_owned(), n.to_string().into_bytes())
+            } else {
+                (field.to_owned(), Vec::new())
+            }
+        };
+
+        let mut answered = 0;
+        for (entry, fields) in &entries {
+            let own: Vec<(String, Vec<u8>)> = fields
+                .iter()
+                .filter(|f| !f.starts_with("use="))
+                .map(|f| expected(f))
+                .collect();
+            for (name, value) in &own {
+                assert_eq!(
+                    ask(entry, &[name]),
+                    vec![hit(name, value)],
+                    "`{name}' under {entry}"
+                );
+                answered += 1;
+            }
+            for parent in fields.iter().filter_map(|f| f.strip_prefix("use=")) {
+                let (_, inherited) = entries
+                    .iter()
+                    .find(|(e, _)| e == &parent)
+                    .unwrap_or_else(|| panic!("{entry} uses {parent}, which is not here"));
+                for field in inherited.iter().filter(|f| !f.starts_with("use=")) {
+                    let (name, _) = expected(field);
+                    if own.iter().any(|(n, _)| *n == name) {
+                        continue;
+                    }
+                    assert_eq!(
+                        ask(entry, &[&name]),
+                        ask(parent, &[&name]),
+                        "`{name}' under {entry}, inherited from {parent}"
+                    );
+                    answered += 1;
+                }
+            }
+        }
+        // A floor, not a count: the entry grows, and a test that had to be edited each
+        // time it did would be the drift this test is here to prevent.
+        assert!(answered > 200, "only {answered} capabilities checked");
+    }
+}
