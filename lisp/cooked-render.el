@@ -578,6 +578,14 @@ and the region shaped before anything measures it."
          ;; size are measured into once, instead of once per decoration record
          ;; -- see `cooked--deco-pass', which has the numbers.
          (cooked--deco-pass (list 'unset))
+         ;; And a fourth, for the same window: where this drain is putting the
+         ;; child's cursor.  `cooked--apply-levels' is below the render passes and
+         ;; has to stay there, so `cooked--cursor' is still the *previous* drain's
+         ;; answer while the rows are being written -- and a glyph run has to be
+         ;; broken at the cursor this drain puts on it.  See `cooked--deco-cursor'.
+         (cooked--deco-cursor
+          (let ((cursor (cooked--cursor-decode (plist-get update :cursor))))
+            (cons (cooked-cursor-row cursor) (cooked-cursor-col cursor))))
          (viewport (cooked--capture-viewport))
          (pending (cooked--take-pending-input))
          ;; Where this drain's scrollback landed, for resolving a `scrolled'

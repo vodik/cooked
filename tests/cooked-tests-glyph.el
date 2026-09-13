@@ -201,18 +201,22 @@ time a render grew or lost an unrelated call to `cooked--layout-window\='; a
 comparison cannot go stale, and it fails loudly on the defect -- before
 `cooked--deco-pass\=' the wide row cost five times the lookups of the narrow one.
 
-Both rows are drawn with NO-BREAK SPACE between the glyphs rather than an
-ordinary space, because that is what `tree\=' emits and because an ordinary space
-is what `cooked--glyph-claims-next-cell-p\=' looks for; a fixture using one would
-be exercising the claim path as well and measuring two things at once."
+The separator is a letter, and it has to be something that is neither a glyph
+nor a blank: a space and a NO-BREAK SPACE are both absorbed into the run beside
+them now -- which is the whole of `Row::absorb_blank_runs\=' and exactly why
+`tree\=' got cheaper -- so a `tree\=' indent is one record however deep it is and
+would make both rows here identical.  A letter is also what keeps the fixture
+off `cooked--glyph-claims-next-cell-p\=', which looks for a space; a fixture
+using one would be exercising the claim path as well and measuring two things at
+once."
   (let* ((narrow (cooked-tests--deco-lookups
-                  ;; Two records: a horizontal, a NO-BREAK SPACE, a horizontal.
+                  ;; Two records: a horizontal, a letter, a horizontal.
                   '("/bin/sh" "-c"
-                    "printf '\\342\\224\\200\\302\\240\\342\\224\\200\\n'")))
+                    "printf '\\342\\224\\200x\\342\\224\\200\\n'")))
          (wide (cooked-tests--deco-lookups
                 ;; Ten of them, which is an ordinary `tree' nesting depth.
                 '("/bin/sh" "-c"
-                  "printf '\\342\\224\\200\\302\\240%.0s' 1 2 3 4 5 6 7 8 9 10; printf '\\n'"))))
+                  "printf '\\342\\224\\200x%.0s' 1 2 3 4 5 6 7 8 9 10; printf '\\n'"))))
     ;; The premise: the two really do differ in record count, so the comparison
     ;; below is comparing something.  Without this the test would pass just as
     ;; happily on a child that printed nothing.
@@ -221,6 +225,198 @@ be exercising the claim path as well and measuring two things at once."
     ;; And the invariant: the window is measured for the pass, not for the row's
     ;; contents.
     (should (= (car narrow) (car wide)))))
+
+(defun cooked-tests--display-intervals (beg end)
+  "How many `display' intervals cover BEG..END.
+
+`next-single-property-change' compares with `eq', which is exactly the
+comparison Emacs' own redisplay makes when it walks the interval tree -- so this
+counts the thing `find_interval' and `parse_image_spec' are paid per, rather
+than a proxy for it."
+  (let ((n 0)
+        (pos beg))
+    (while (< pos end)
+      (setq n (1+ n)
+            pos (or (next-single-property-change pos 'display nil end) end)))
+    n))
+
+(ert-deftest cooked-a-tree-indent-costs-one-display-interval ()
+  "A `tree' row's whole indent is one image, however deep the row sits.
+
+This is the invariant the milliseconds are a symptom of.  Box-drawing images
+were measured at 67% of a scroll gesture through settled `tree -C /usr/include'
+output -- 11.05ms p50 against 3.61 with `cooked-box-drawing-images' off, a 3.1x
+effect -- and what makes an indent expensive is not the drawing but the interval
+count: a run breaks on any undecorated cell, a space classifies to nothing, and
+so `│   │   ├── ' arrived as one decorated run per nesting level.  86,107
+decoration records for 30,326 rows, 2.84 per row.
+
+Stated as a *ratio* and not as a number, for the reason
+`cooked-a-render-pass-measures-the-window-once-not-once-per-record' states its
+own invariant that way: two rows differing only in how deep they are nested must
+cost the same number of `display' intervals.  A count would have to be revised
+every time something unrelated added or dropped a property; a comparison cannot
+go stale, and it fails loudly on the defect -- before `Row::absorb_blank_runs'
+the deep row cost four times the intervals of the shallow one.
+
+The fixture is `tree''s own indent byte for byte, NO-BREAK SPACEs included: tree
+2.3.2 writes `│   ', and a rule admitting only U+0020 would split every row
+at the first two cells and reach none of this."
+  (cooked-tests--with-session
+      ;; Depth 2 then depth 6, of `│   ' repeated and `└── name'.
+      '("/bin/sh" "-c"
+        "printf '\\342\\224\\202\\302\\240\\302\\240 %.0s' 1 2; \
+printf '\\342\\224\\224\\342\\224\\200\\342\\224\\200 a\\n'; \
+printf '\\342\\224\\202\\302\\240\\302\\240 %.0s' 1 2 3 4 5 6; \
+printf '\\342\\224\\224\\342\\224\\200\\342\\224\\200 b\\n'")
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (save-excursion
+                          (goto-char (point-min))
+                          (forward-line 1)
+                          (get-text-property (point) 'display)))))
+    (save-excursion
+      (goto-char (point-min))
+      (let* ((shallow-end (line-end-position))
+             (shallow (cooked-tests--display-intervals (point) shallow-end))
+             (shallow-width (- shallow-end (point))))
+        (forward-line 1)
+        (let* ((deep-end (line-end-position))
+               (deep (cooked-tests--display-intervals (point) deep-end))
+               (deep-width (- deep-end (point))))
+          ;; The premise: the two rows really do differ in nesting depth, so the
+          ;; comparison below is comparing something.  Without this the test
+          ;; would pass just as happily on a child that printed two blank lines.
+          (should (> deep-width (* 2 shallow-width)))
+          ;; And the invariant: the indent costs one interval at either depth.
+          ;; The name beyond it carries no `display' at all, so the whole row is
+          ;; the indent's interval plus the undecorated tail.
+          (should (= shallow deep))
+          (should (= shallow 2)))))))
+
+(ert-deftest cooked-a-glyph-run-absorbs-the-blanks-between-its-shapes ()
+  "The bitmap is baked for the run's whole pattern, blanks and all.
+
+`Row::absorb_blank_runs' in src/emu/cell.rs hands the gaps of `│ │ ├─' over as
+a reserved blank shape inside one `Deco::Glyphs' run, and `cooked--deco-image'
+rasterizes the whole record list as one image.  Two claims, and the second is
+the one a test asserting only the interval count would miss: the image has to be
+as wide as the span it is put over, or the merge Emacs makes of that span draws
+the row short.  See `cooked-adjacent-box-glyphs-share-only-a-run-wide-image'.
+
+The blanks are still blanks in the buffer -- nothing is deleted and nothing is
+substituted -- which is what keeps a yank, a search and `cooked--check-seam'
+seeing the text the child sent."
+  (cooked-tests--with-session
+      ;; `│ │ ├──': seven cells, three of them blank, one run.
+      '("/bin/sh" "-c"
+        "printf '\\342\\224\\202 \\342\\224\\202 \\342\\224\\234\\342\\224\\200\\342\\224\\200\\n'")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((beg (point-min)))
+      (should (equal (buffer-substring-no-properties beg (+ beg 7))
+                     "│ │ ├──"))
+      ;; One interval over all seven cells, blanks included.
+      (should (= (cooked-tests--display-intervals beg (+ beg 7)) 1))
+      ;; And one image seven cells wide under it, not three cells' worth spread
+      ;; over seven.
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image beg)) :data-width)
+                     (* 7 10))))))
+
+(ert-deftest cooked-trailing-blanks-stay-out-of-a-glyph-runs-image ()
+  "A row's trailing spaces are not baked into a bitmap nobody can see.
+
+The absorbing rule takes a gap *between* two glyph runs and nothing else, which
+is what trims the leading and trailing blanks without a trimming step -- see
+`Row::absorb_blank_runs'.  Asserted from the buffer because that is where it
+would be visible: a run that swallowed the padding out to the right margin would
+carry an image as wide as the screen, and the `display' interval would run past
+the last glyph into text that has nothing to draw.
+
+`leading_and_trailing_blanks_stay_out_of_the_run' is the same claim made in Rust
+against a wrapped row, where the padding is not trimmed before the runs are
+built and so actually reaches the rule."
+  (cooked-tests--with-session
+      ;; Two glyphs with a gap, then a space the row ends on.
+      '("/bin/sh" "-c" "printf '\\342\\224\\200 \\342\\224\\200 x\\n'")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((beg (point-min)))
+      (should (equal (buffer-substring-no-properties beg (+ beg 5)) "─ ─ x"))
+      ;; The run is the three cells the glyphs and their gap occupy.
+      (should (= (cooked-tests--display-intervals beg (+ beg 3)) 1))
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image beg)) :data-width)
+                     (* 3 10)))
+      ;; The space after them belongs to nobody, and neither does the letter.
+      (should-not (get-text-property (+ beg 3) 'display))
+      (should-not (get-text-property (+ beg 3) 'cooked-deco)))))
+
+(ert-deftest cooked-the-cursors-cell-starts-its-own-glyph-run ()
+  "A `display' span never bridges the cell the child's cursor is on.
+
+Emacs draws the cursor at the *start* of a `display' span however many
+characters the span covers, and cooked puts point wherever the child's cursor is
+on every drain.  So a span bridging the cursor's column draws the cursor several
+cells to the left of where the child put it -- and the wider the span, the
+further wrong it is.
+
+This was invisible for as long as a run was identical box glyphs, a cursor
+having no business inside a border, and became visible the moment runs learned
+to bridge the blanks of an indent: an indent is exactly where a cursor does sit.
+The break is a split rather than a per-cell expansion, because the start of a
+span is where Emacs was going to draw it anyway -- so the cost is one extra
+interval on one row.
+
+The fixture writes the row and then addresses the cursor back into the middle of
+it with CUP, which is what a full-screen program does and what no amount of
+plain output would produce.  Without the rule the whole indent is one interval
+and the assertion on the boundary fails."
+  (cooked-tests--with-session
+      ;; `│ │ ├──', then CUP to row 1 column 3 -- the second blank, mid-run.
+      '("/bin/sh" "-c"
+        "printf '\\342\\224\\202 \\342\\224\\202 \\342\\224\\234\\342\\224\\200\\342\\224\\200\\033[1;4H'")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((beg (point-min)))
+      ;; The premise: the cursor really is where the fixture put it, three cells
+      ;; into a run that would otherwise be one span of seven.
+      (should (equal (cooked--cursor-cell) '(0 . 3)))
+      ;; Two spans, and the boundary is the cursor's own cell.
+      (should (= (cooked-tests--display-intervals beg (+ beg 7)) 2))
+      (should (equal (next-single-property-change beg 'display) (+ beg 3)))
+      ;; Each carries an image of its own width, so the row is still as wide as
+      ;; its characters -- the split must not cost the cells it separates.
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image beg)) :data-width)
+                     (* 3 10)))
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image (+ beg 3)))
+                                :data-width)
+                     (* 4 10))))))
+
+(ert-deftest cooked-a-shade-between-blanks-still-keeps-its-own-cell ()
+  "The shade rule survives the blanks now sharing a run with it.
+
+A blank is absorbed into a `Deco::Glyphs' run whatever the shapes around it are,
+so `░ ░' crosses as one run of three records -- and a shade may never share an
+image with anything, its dither phase being a function of the cell's own pixel
+origin.  `cooked--glyph-run-segments' is where the two rules meet, and this is
+the case that reaches it: the run is split into three, and the blank between two
+shades is a segment of its own rather than being folded into either."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\226\\221 \\342\\226\\221\\n'") ; ░ ░
+    (cooked-tests--cell 9 20)             ; odd width, where the phase can differ
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'cooked-deco))))
+    (let ((beg (point-min)))
+      (should (= (cooked-tests--display-intervals beg (+ beg 3)) 3))
+      (dotimes (i 3)
+        (should (equal (cooked--glyph-pattern-cells
+                        (nth 1 (get-text-property (+ beg i) 'cooked-deco)))
+                       1))
+        ;; Each carries its own column, which is what the phase is derived from.
+        (should (equal (nth 2 (get-text-property (+ beg i) 'cooked-deco)) i))))))
 
 (ert-deftest cooked-a-run-of-shades-keeps-a-record-per-cell ()
   "A shade dithers, so its phase is a function of the cell's own pixel origin --
@@ -241,7 +437,14 @@ once per character to once per record, so a flag bit would have bought one
     (should (cooked-tests--settle
              (lambda () (get-text-property (point-min) 'cooked-deco))))
     (let ((beg (point-min)))
-      (should (cooked--box-shade-p (nth 1 (get-text-property beg 'cooked-deco))))
+      (should (cooked--box-shade-p
+               (cooked--glyph-pattern-head
+                (nth 1 (get-text-property beg 'cooked-deco)))))
+      ;; One cell per record, which is the expansion: a shared pattern would
+      ;; carry all three.
+      (should (equal (cooked--glyph-pattern-cells
+                      (nth 1 (get-text-property beg 'cooked-deco)))
+                     1))
       ;; Each cell its own record, so each carries its own column.
       (dotimes (i 3)
         (should (equal (nth 2 (get-text-property (+ beg i) 'cooked-deco)) i)))
@@ -488,8 +691,10 @@ dither carries nothing cell-specific at all."
       '("/bin/sh" "-c" "printf '\\342\\224\\204\\n'") ; ┄
     (should (cooked-tests--settle
              (lambda () (get-text-property (point-min) 'cooked-deco))))
-    ;; `(KIND BITS FG BG ATTRS COLUMN ROW)' -- the descriptor is behind the kind.
-    (let ((bits (cadr (get-text-property (point-min) 'cooked-deco))))
+    ;; `(KIND PATTERN COLUMN ROW)' -- the run's records are behind the kind, and
+    ;; a lone ┄ is a pattern of exactly one of them.
+    (let ((bits (cooked--glyph-pattern-head
+                 (cadr (get-text-property (point-min) 'cooked-deco)))))
       (should (= 3 (cooked--box-dashes bits)))
       ;; ...and it is still a light horizontal line underneath.
       (should (= 1 (cooked--box-weight bits 'left)))

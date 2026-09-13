@@ -2327,7 +2327,7 @@ per *jit-lock chunk*, not per drain — observed chunks are 2–25 lines, so the
 400-line cap never engages in normal use, while a piped reproduction makes
 chunks huge and measures the defence instead of the bug.
 
-** WIP [#A] One image per box-drawing run, blanks and mixed shapes included
+** DONE [#A] One image per box-drawing run, blanks and mixed shapes included
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   none — extends REPORT §2's run-wide image to the shapes it cannot reach
@@ -2335,80 +2335,163 @@ chunks huge and measures the defence instead of the bug.
 :AGENT:    yes
 :END:
 The run-wide glyph image (783b0f4) collapsed a border row from 1920 =display=
-intervals to 24 and moved cooked's scroll ceiling. It cannot help =tree=, and
-measuring the gesture rather than the arrival says how much that costs.
+intervals to 24 and moved cooked's scroll ceiling. It could not help =tree=, and
+measuring the gesture rather than the arrival said how much that cost.
 
-*** Measured: images are two thirds of a scroll through =tree=
+*** Landed
 
-=scripts/bench-tree.el= grew gesture arms. =scroll-down= 10 screen lines over
-settled =tree -C /usr/include=, 100x32 pgtk under the gamescope recipe, 20
-warmups then 60 timed, 3 reps, medians, load 1.4–1.6.
+A =tree= row's whole indent is now *one* =display= interval, and the scroll
+gesture through settled =tree= output is *2.2x faster*.
 
-| arm                        |   p50 |   p90 |
-|----------------------------+-------+-------|
-| baseline                   | 11.05 | 12.72 |
-| =box-drawing-images= nil   |  3.61 |  4.86 |
-| =detect-links= nil         |  9.11 |  9.53 |
-| =glyph-scale-floor= nil    | 11.19 | 13.21 |
-| all off                    |  1.79 |  2.13 |
+Two changes, one on each side of the boundary.
 
-*Images are 67% of the gesture on their own*, a 3.1x effect. Links are 17%,
-which agrees with the 21% measured against a different fixture. Glyph scaling is
-flat for the *third* independent time and should stop being suspected.
+*Rust.* A reserved =BoxGlyph::BLANK= — descriptor 0, which no codepoint
+classifies to and which the Lisp rasterizer already draws as an empty cell with
+no arm of its own — and =Row::absorb_blank_runs=, a post-pass over the runs
+that merges =GLYPHS BLANKS GLYPHS= into one =Deco::Glyphs= run when all three
+agree on =style=, =underline= and =link=.
 
-*** Why the existing coalescing cannot reach it
+Absorbing only a gap *between* two glyph runs is what trims the leading and
+trailing blanks, with no trimming step: a blank run at the end of a row has no
+glyph run after it and is refused structurally. That matters on a wrapped row,
+where =Row::line_runs= hands over the full width and the padding out to the
+right margin would otherwise be baked into a bitmap nobody can see, at a fresh
+cache key per padding width.
 
-Two separate limits, at two different layers, and only one of them is about
-whitespace.
+A post-pass rather than a rule in each builder, because there are three of them
+— =build_runs=, =build_plain_runs= and the =#[cfg(test)]= =runs_to_reference=
+— and stated per cell the rule needs a variable-length lookahead ("is there a
+glyph after this gap, under the same style?"), which is exactly what the fast
+builders' scans get subtly wrong. =runs_to_matches_the_reference= composes the
+pass onto the reference rather than the reference calling it, so the property
+still checks the builders against an independent formulation of everything
+else.
 
-*A record is a run of one shape.* =Deco::packed= run-length encodes
-=(bits, count)= per run of *identical* shapes, so =├──= arrives as =├=x1 then
-=─=x2 and Lisp puts two =display= properties over three cells. The sequence is
-already there on the wire — it is the *encoding* that splits it, not the run
-building. Lisp can bake one bitmap for the whole record list of a run without
-the wire changing at all.
+*Correction to the design: U+00A0 is a blank too.* The task said "a plain
+space". tree(1) 2.3.2 does not indent with one — it emits
+=│= =U+00A0= =U+00A0= =SPACE=, verified with =od -c= — so a rule admitting only
+U+0020 splits every =tree= row at the first two gap cells and reaches none of
+the win. =draws_nothing= is therefore a two-element list, and deliberately a
+short closed list rather than a Unicode property: what qualifies is a character
+the child used as spacing *between box glyphs*, and baking anything else into a
+run's bitmap would hide something the child meant to be seen.
 
-*A run breaks on any undecorated cell.* =Row::build_runs= splits when
-=(Some(deco), None)=, and a space classifies to =None=, so =│   │   ├──= is
-three decorated runs with plain text between them. This is the half that needs
-Rust: a =Deco::Glyphs= run must be able to absorb a plain space as a *blank*
-shape and keep going.
+*Lisp.* A decoration record is now =(glyph PATTERN COLUMN ROW)=, PATTERN being
+a whole run's =(BITS COUNT)= records rather than one of them, and
+=cooked--deco-image= bakes one bitmap for all of them —  =├──= is two records
+and one image three cells wide. =cooked--pack-box-glyph-cell= grew into
+=cooked--pack-box-glyph-run= over =cooked--bitmap-tile=, which lays a list of
+=(BITMAP . COUNT)= side by side. Everything still goes through
+=cooked--deco-display-value=, the rescale path included; =COUNT= there now
+*trims* the pattern (=cooked--glyph-pattern-take=) instead of sizing a repeat,
+which is what keeps a run the buffer has since shortened repairing to the width
+it now has.
 
-For =tree= the second is where the win is. The agent that attributed the
-arrival slowness counted 86,107 decoration records for 30,326 rows — 2.84 per
-row, and a =tree= row wants to be *one*.
+*The cache key is the packed string itself, not a decoded list.*
+=sxhash-equal= walks only the first few elements of a list, so an eleven-record
+=tree= indent keyed as a list would collide with every other indent of the same
+depth and turn each lookup into a linear scan of =equal= comparisons. A string
+is hashed whole, and the wire encoding is already canonical — a count is never
+zero and no two adjacent records share a shape — so two runs that draw the same
+thing key the same.
 
-*** The shape to build
+*** The four rules, and where each one lives
 
-1. *Lisp, contained.* =cooked--apply-glyph-deco= bakes one image for the whole
-   run rather than one per =(BITS COUNT)= record, keyed on the record list.
-   =cooked--deco-image= already takes a =COUNT=; it needs a *pattern* instead.
-2. *Rust, wire.* A reserved blank =BoxGlyph= and an arm in =build_runs= letting
-   a =Glyphs= run absorb a space of identical =style=, =underline= and =link=.
-   Leading and trailing blanks must be *trimmed* from the run, or a row's
-   trailing spaces get baked into a bitmap nobody can see.
+=cooked--glyph-run-segments= is the one place a run is cut, and it argues both
+of the rules that survive to Lisp. The other two never reach it.
 
-*Four rules break a run, and three are already there.* A shade breaks it, and
-must — its dither phase is a function of the cell's own pixel origin, so two
-adjacent =▒= at an odd cell width are genuinely different bitmaps
-(=cooked--box-shade-p=). A style, underline or link change breaks it, as it does
-today. *New:* the cursor's cell breaks it. cooked puts point wherever the child's
-cursor is on every drain, and a =display= spanning several cells makes Emacs
-draw the cursor at the *start* of the whole span — invisible today because a run
-is identical box glyphs and a cursor never sits in a border, and very visible
-once runs bridge the indentation a cursor does sit in.
+- *Style, underline or link* split the run on the wire, in =Row::build_runs=,
+  exactly as before — so they arrive as separate =PACKED= strings and there is
+  nothing here to do.
+- *A shade* breaks it one cell at a time, unchanged. Verified still holding by
+  =cooked-a-run-of-shades-keeps-a-record-per-cell=, and by the new
+  =cooked-a-shade-between-blanks-still-keeps-its-own-cell=, which is the case
+  the change actually creates: =░ ░= is now *one* run of three records, so the
+  shade rule and the absorbing rule meet, and the blank between two shades has
+  to come out as a segment of its own.
+- *The cursor's cell* breaks it, new.
+  =cooked-the-cursors-cell-starts-its-own-glyph-run= fails without it: 1
+  interval where 2 are wanted, and the cursor drawn three cells left of where
+  the child put it.
 
-*The cache is the risk, and the shade rule happens to bound it.* Keyed on a
-pattern rather than shape-and-count, low-entropy content is still cheap — a
-border is one long identical run, =tree='s indent is a handful of patterns for
-thirty thousand rows. btop's shade plots are the high-entropy case that would
-thrash it, and shades are already excluded for the dither reason. Bound the run
-length anyway so a pathological row cannot mint an unbounded bitmap;
-=cooked-box-glyph-run-cache-limit= is the existing knob.
+*A wrinkle the design did not mention, and the one thing left imperfect.* The
+cursor is not =cooked--cursor= at the moment it is needed. =cooked--apply-levels=
+adopts the drain's levels *after* =cooked--render-rows= has written the rows,
+and the render depends on the outgoing grid, so the order cannot simply be
+swapped. The one value the render needs is bound across it instead —
+=cooked--deco-cursor=, in the same =let*= as =cooked--deco-pass=.
 
-Done when: a =tree= row costs one =display= interval for its whole indent, the
-gesture arms above are re-run and recorded, and the cursor rule has a test that
-fails without it.
+The residual: the split is applied when a row is *rendered*, and a bare cursor
+move damages no row (=Screen::goto= touches no dirty flag). So a cursor that
+walks onto an already-drawn glyph run without anything redrawing that row still
+draws at the span's start. Every case anyone will meet redraws — a TUI repaints
+its cursor row, a shell redraws the prompt line on each keystroke — and closing
+it properly means a post-render fixup that also has to *heal* the previous
+cursor row's split, which is more machinery than the defect is worth today.
+Documented on =cooked--deco-cursor=.
+
+*** The cache, checked rather than assumed
+
+Keying on a pattern is a wider key than a run length. The btop worry does not
+materialise, and the reason is structural rather than lucky: a shade never
+reaches these tables as a pattern at all, because it is split to one cell per
+record for the dither reason above, so a shade plot mints the same handful of
+one-record keys it always did. Low-entropy drawing repeats itself — a border is
+one long identical run, and 30,326 =tree= rows share a handful of indents. What
+is left is the progress bar, which minted a key per width before this and mints
+a key per width now; =cooked-box-glyph-run-cache-limit= is the same bound it
+always was, and the run length is bounded by the row width regardless.
+
+*** Measured: the invariant
+
+=display= intervals over settled =tree -C /usr/include=, counted per row
+directly, which is the invariant the milliseconds are a symptom of:
+
+|                            | before | after  |
+|----------------------------+--------+--------|
+| =display= intervals / row  | 2.903  | 1.000  |
+| =cooked--apply-deco= calls | 86,211 | 30,691 |
+
+One interval per decorated row, exactly, for all 10,021 of them. The 86,211
+reproduces the 86,107 the attribution agent counted.
+
+=cooked-a-tree-indent-costs-one-display-interval= states it as a ratio so it
+cannot go stale: two rows differing only in nesting depth must cost the same
+number of intervals. It fails 6 vs 14 without the change.
+
+*** Measured: the gesture
+
+Same recipe as before — =scroll-down= 10 screen lines over settled
+=tree -C /usr/include=, 100x32 pgtk under gamescope =-r 1000=, 20 warmups then
+60 timed, 3 reps, medians. Both arms byte-compiled explicitly (=make compile=
+writes no =.elc=; the =.elc= were removed afterwards), and both run on the same
+machine in the same session, before/after switched by =git stash=. Load 1.8–2.9
+throughout, higher than the 1.4–1.6 the first table was taken at, which is why
+the pair below is what to read rather than the pair across tables.
+
+Two full pairs were run because the first showed the control arm 15% apart; the
+second brought it to 1% and both agree on everything else. Medians of the two:
+
+| arm                      | before p50 | after p50 | before p90 | after p90 |
+|--------------------------+------------+-----------+------------+-----------|
+| baseline                 | 10.18      | 4.65      | 12.13      | 5.98      |
+| =box-drawing-images= nil | 3.29       | 3.17      | 4.68       | 4.39      |
+| =detect-links= nil       | 8.01       | 2.78      | 8.65       | 3.09      |
+| =glyph-scale-floor= nil  | 10.10      | 4.61      | 11.81      | 6.51      |
+| all off                  | 1.56       | 1.58      | 1.89       | 2.01      |
+
+*The gesture is 2.2x faster.* "All off" agrees to 1% across the pair, which is
+what says the rest is the change and not the machine.
+
+Images were 67% of the gesture and a 3.1x effect; they are now *32%* and a 1.5x
+effect — 6.89ms of attributable cost down to 1.48ms, a *4.7x* drop in what
+images charge. Glyph scaling is flat for the fourth time and should stop being
+suspected.
+
+*What is now the largest single component: links.* 4.65 baseline against 2.78
+with =cooked-detect-links= nil is 1.87ms, 40% of a gesture that used to be 21%
+links — the same absolute cost against a baseline half the size. The next task
+below is where that goes.
 
 ** TODO [#B] The file-link scan doubles its syscalls on every name that misses
 :PROPERTIES:

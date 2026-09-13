@@ -107,6 +107,21 @@ impl BoxGlyph {
         Self((if forward { DIAG_FORWARD } else { 0 }) | (if backward { DIAG_BACKWARD } else { 0 }))
     }
 
+    /// The reserved descriptor for a cell that draws nothing.
+    ///
+    /// Not a codepoint: [`classify`] never produces it, which
+    /// `no_codepoint_classifies_as_the_blank_glyph` asserts over the whole Box Drawing
+    /// and Block Elements range. It exists so a blank cell can *join* a run of box
+    /// glyphs rather than end it — see [`Row::absorb_blank_runs`](super::cell::Row) —
+    /// and so the wire needs no second shape for "a hole in this run".
+    ///
+    /// Zero rather than a spare bit, and that is the load-bearing part: an all-zero
+    /// descriptor is a `Line` glyph whose four edges all have [`Weight::None`], no arc,
+    /// no diagonal and no dashes, so `cooked--box-draw-line' in lisp/cooked-glyph.el
+    /// already rasterizes it as an empty cell with no arm of its own. The Lisp side
+    /// needs to know nothing about the reservation.
+    pub const BLANK: Self = Self(0);
+
     pub const fn bits(self) -> u16 {
         self.0
     }
@@ -631,6 +646,31 @@ mod tests {
         let left_eighth = classify('\u{258F}').unwrap();
         assert_eq!(left_eighth.direction(), Direction::Left);
         assert_eq!(left_eighth.fraction(), 1);
+    }
+
+    /// [`BoxGlyph::BLANK`] is only a reservation if nothing real collides with it.
+    ///
+    /// Enumerated over the whole assigned range rather than argued from the bit layout,
+    /// because the layout is what a future shape would change: adding a glyph whose four
+    /// edges are all [`Weight::None`] and which sets no flag would silently make every
+    /// blank absorbed by [`Row::absorb_blank_runs`](super::cell::Row) draw that glyph
+    /// instead of nothing.
+    #[test]
+    fn no_codepoint_classifies_as_the_blank_glyph() {
+        for code in u32::from(FIRST_GLYPH)..=u32::from(LAST_GLYPH) {
+            let ch = char::from_u32(code).expect("the Box Drawing blocks are all scalars");
+            if let Some(glyph) = classify(ch) {
+                assert_ne!(
+                    glyph,
+                    BoxGlyph::BLANK,
+                    "U+{code:04X} classifies as the reserved blank"
+                );
+            }
+        }
+        // And the reservation is reachable from the other direction: a space is not in
+        // the range at all, so nothing but the absorber can mint one.
+        assert_eq!(classify(' '), None);
+        assert_eq!(classify('\u{a0}'), None);
     }
 
     #[test]

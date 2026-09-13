@@ -468,37 +468,58 @@ Bit 0 is the upper left, 1 the upper right, 2 the lower left, 3 the lower right.
 
 ;;;; Repetition
 
+(defun cooked--bitmap-tile (segments)
+  "SEGMENTS laid side by side, as one bitmap as wide as all of them together.
+
+SEGMENTS is a list of (BITMAP . COUNT): COUNT adjacent cells drawing BITMAP's
+shape, in the order they appear across the run.  Every BITMAP must be the same
+size, which is the cell size -- these are cells of one terminal row.
+
+Pixel-for-pixel what those cells draw, which is the whole requirement: a run of
+box drawing is displayed as a single wide image, and that image has to be
+indistinguishable from the row of cell-sized ones it replaces -- see
+`cooked--apply-glyph-deco'.
+
+A list rather than one shape and a count, because the shapes a run wants to
+share an image are not all the same one.  `├──' is two shapes over three cells
+and a `tree' indent is five shapes over eleven, blanks among them, and each of
+those is one image here rather than one per shape -- which is the difference
+between a `display' interval per nesting level and one for the row.
+
+Stretching one cell to a run's width would be cheaper and is wrong for every
+shape that is not constant along the x axis: ─ survives it, │ becomes one thick
+stroke in the middle of the run, and ┌ becomes nothing recognisable.  Tiling is
+the only construction that is correct for an arbitrary shape.
+
+Iterates each source's set pixels rather than the destination's, so the cost is
+the ink in the run rather than the whole rectangle -- and a blank cell, which is
+what a `tree' indent is mostly made of, costs nothing at all."
+  (let* ((first (caar segments))
+         (width (cooked-bitmap-width first))
+         (height (cooked-bitmap-height first))
+         (stride (* width (apply #'+ (mapcar #'cdr segments))))
+         (out (cooked--bitmap-make stride height))
+         (bits (cooked-bitmap-bits out))
+         (offset 0))
+    (pcase-dolist (`(,bitmap . ,count) segments)
+      (let ((source (cooked-bitmap-bits bitmap)))
+        (dotimes (y height)
+          (let ((row (* y width))
+                (base (+ offset (* y stride))))
+            (dotimes (x width)
+              (when (aref source (+ row x))
+                (let ((i (+ base x)))
+                  (dotimes (_ count)
+                    (aset bits i t)
+                    (setq i (+ i width)))))))))
+      (setq offset (+ offset (* width count))))
+    out))
+
 (defun cooked--bitmap-repeat (bitmap count)
   "COUNT copies of BITMAP side by side, as one bitmap COUNT times as wide.
 
-Pixel-for-pixel what COUNT adjacent cells of the same shape draw, which is the
-whole requirement: a run of one glyph is displayed as a single wide image, and
-that image has to be indistinguishable from the row of cell-sized ones it
-replaces — see `cooked--apply-glyph-deco'.
-
-Stretching one cell to COUNT cells' width would be cheaper and is wrong for
-every shape that is not constant along the x axis: ─ survives it, │ becomes one
-thick stroke in the middle of the run, and ┌ becomes nothing recognisable.
-Tiling is the only construction that is correct for an arbitrary shape.
-
-Iterates the source's set pixels rather than the destination's, so the cost is
-the ink in one cell times COUNT rather than the whole COUNT-cell rectangle."
-  (let* ((width (cooked-bitmap-width bitmap))
-         (height (cooked-bitmap-height bitmap))
-         (source (cooked-bitmap-bits bitmap))
-         (out (cooked--bitmap-make (* width count) height))
-         (bits (cooked-bitmap-bits out))
-         (stride (* width count)))
-    (dotimes (y height)
-      (let ((row (* y width))
-            (base (* y stride)))
-        (dotimes (x width)
-          (when (aref source (+ row x))
-            (let ((i (+ base x)))
-              (dotimes (_ count)
-                (aset bits i t)
-                (setq i (+ i width))))))))
-    out))
+The one-shape case of `cooked--bitmap-tile', which is what a border row is."
+  (cooked--bitmap-tile (list (cons bitmap count))))
 
 ;;;; Entry point
 
@@ -520,18 +541,24 @@ half."
       (cooked--box-draw-line bitmap bits))
     bitmap))
 
+(defun cooked--pack-box-glyph-run (segments)
+  "SEGMENTS -- a list of (BITMAP . COUNT) -- tiled and packed for `create-image'.
+
+Cheap next to `cooked--render-box-glyph-cell': no shape math, just copying set
+pixels (`cooked--bitmap-tile') and packing bytes (`cooked--bitmap-pack').  A
+run's pattern varies with content and so has no natural bound the way a shape
+descriptor does, which is what makes it safe for a cache keyed on the pattern to
+throw entries away under memory pressure -- rebuilding one costs this, not the
+trigonometry behind any of the BITMAPs."
+  (cooked--bitmap-pack (if (and (null (cdr segments)) (= (cdar segments) 1))
+                           (caar segments)
+                         (cooked--bitmap-tile segments))))
+
 (defun cooked--pack-box-glyph-cell (bitmap count)
   "COUNT adjacent copies of single-cell BITMAP, packed for `create-image'.
 
-Cheap next to `cooked--render-box-glyph-cell': no shape math, just copying set
-pixels (`cooked--bitmap-repeat') and packing bytes (`cooked--bitmap-pack'). A
-run's length varies with content and so has no natural bound the way a shape
-descriptor does, which is what makes it safe for a cache keyed on COUNT to
-throw entries away under memory pressure -- rebuilding one costs this, not
-BITMAP's trigonometry."
-  (cooked--bitmap-pack (if (and count (> count 1))
-                           (cooked--bitmap-repeat bitmap count)
-                         bitmap)))
+The one-shape case of `cooked--pack-box-glyph-run'."
+  (cooked--pack-box-glyph-run (list (cons bitmap (or count 1)))))
 
 (defun cooked--render-box-glyph (bits width height &optional phase count)
   "Raw XBM bitmap for glyph descriptor BITS at WIDTH x HEIGHT pixels.

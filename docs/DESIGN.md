@@ -1237,13 +1237,31 @@ Every one of those was asked once per character about a row that is one decision
 The core already knew: a run is homogeneous in its kind, and a border row is eighty copies
 of one `BoxGlyph`. It emitted one two-byte record per cell anyway and threw the repetition
 away. So the glyph wire format now carries `(bits, count)` per *run of identical shapes*,
-and `cooked--apply-glyph-deco` spends it: one image-spec lookup for the run, one
-`put-text-property` putting one shared `cooked-deco` record over all of it, and only the
-per-character `display` wrapper consed per cell — which must stay a fresh cons, or Emacs
-merges the run into a single image. Measured 9.5 → 2.8 ms/frame, a 3.4x cut, with the
-plain, styled and URL rows unmoved.
+and `cooked--apply-glyph-deco` spends it: one image-spec lookup for the run, and one
+`put-text-property` each putting one shared `cooked-deco` record and one shared `display`
+value over the whole of it. That last sharing is the merge Emacs makes of adjacent `eq`
+`display` properties, used deliberately rather than avoided — safe only because the bitmap
+is rasterized at the run's width, so the run occupies exactly the pixels its characters
+did. Measured 9.5 → 2.8 ms/frame, a 3.4x cut, with the plain, styled and URL rows unmoved.
 
-Three things fall out of that, and each is a place where the obvious next step is wrong:
+**A run's records are its pattern, and one bitmap is baked for all of them.** A shape
+repeated is the border case; `├──` is two records over three cells and a `tree` indent is
+five over eleven, and one image per *record* would have cost an interval per nesting
+level. So `cooked--box-glyph-image` is memoized on the packed record string itself — the
+string, not a decoded list, because `sxhash-equal` walks only the first few elements of a
+list and eleven-record indents would all collide into one bucket.
+
+**A blank can be part of a run.** A run breaks on any undecorated cell and a space
+classifies to nothing, so `│   │   ├── ` was three decorated runs: 2.90 `display`
+intervals per `tree` row where a row wants one. `Row::absorb_blank_runs` merges a blank
+gap *between* two glyph runs — same style, same underline, same link — into one run of
+`BoxGlyph::BLANK` cells, which is descriptor 0 and which the rasterizer already draws as an
+empty cell. Only a gap between two runs, which is what trims the leading and trailing
+blanks with no trimming step: padding out to a wrapped row's right margin would otherwise
+be baked into a bitmap nobody can see. Measured 2.90 → 1.00 intervals per row, and the
+scroll gesture through settled `tree -C /usr/include` 10.2 → 4.7 ms p50.
+
+Four things fall out of that, and each is a place where the obvious next step is wrong:
 
 - **No flag for "this shape dithers".** `BoxGlyph` knows, and a spare bit could say so.
   But the only use for the answer is deciding whether the phase can vary down the run,
@@ -1261,6 +1279,16 @@ Three things fall out of that, and each is a place where the obvious next step i
   that has to be decompressed again immediately moves nothing off the side that is slow.
   What `cooked--apply-image-deco` hoists instead is the *spec*, which genuinely is one
   thing per placement — and that needed no protocol change at all.
+
+- **The cursor's cell breaks a run, and the shade rule is why that is cheap.** Emacs draws
+  the cursor at the *start* of a `display` span however wide the span is, and cooked puts
+  point on the child's cursor every drain — so a span bridging the cursor's column draws it
+  several cells left of where the child put it. Harmless while a run was identical box
+  glyphs (a cursor does not sit in a border) and very visible once runs bridge an indent.
+  The fix is a split, not a per-cell expansion: the cursor's cell starts a segment, which
+  is where Emacs was going to draw it anyway, so one row pays one extra interval.
+  `cooked--glyph-run-segments` is where that rule and the shade rule both live, and it
+  hands the run straight back unsplit whenever neither applies — which is nearly always.
 
 - **Sharing a record made `cooked--rescale-deco` load-bearing.** It walks with
   `next-single-property-change`, which compares with `eq`, so a shared record is one step

@@ -100,14 +100,26 @@ the buffer.  `cooked--box-glyph-cache\=' is the tier that varies with content
 and needs a bound instead.")
 
 (defcustom cooked-box-glyph-run-cache-limit 512
-  "How many run-widths `cooked--box-glyph-cache' and `cooked--deco-image-cache'
-remember, per buffer, before each starts over.
+  "How many run patterns `cooked--box-glyph-cache' and
+`cooked--deco-image-cache' remember, per buffer, before each starts over.
 
-Both are keyed in part by a box-drawing run\='s length, which a border resizing,
-a progress bar filling in, or `fzf\=' widening its highlight can hand a fresh
-value on every drain -- unlike the shape itself, a run length has no bound of
-its own.  Left unwatched, either cache would grow for as long as such a program
+Both are keyed in part by a box-drawing run\='s *pattern* -- the shapes it
+draws and how many cells each of them covers -- which a border resizing, a
+progress bar filling in, or `fzf\=' widening its highlight can hand a fresh
+value on every drain.  Unlike the shape itself, a pattern has no bound of its
+own.  Left unwatched, either cache would grow for as long as such a program
 kept redrawing, which is most of a session running one.
+
+The pattern is a wider key than the run length it replaced, and what would
+thrash it is content with high entropy *per row*.  Two things keep the real
+cases cheap.  Low-entropy drawing repeats itself: a border is one long
+identical run and thirty thousand `tree\=' rows share a handful of indents, so
+the table holds a few entries however long the session runs.  And the
+high-entropy case that would not -- btop\='s shade plots, a fresh dither across
+the row every frame -- never reaches these tables as a pattern at all, because
+a shade breaks a run for the dither reason `cooked--apply-glyph-deco\=' gives
+and arrives here one cell at a time.  What is left is the progress bar, which
+minted a key per width before this and mints a key per width now.
 
 Raising this trades memory for fewer of the clears below buying back a shape
 `cooked--box-glyph-cell-cache\=' already has for free; lowering it does the
@@ -116,13 +128,14 @@ opposite.  See `cooked--cached-bounded\='."
   :group 'cooked)
 
 (defvar-local cooked--box-glyph-cache nil
-  "Descriptor+pixel-size+phase+run-length -> packed XBM bitmap, per buffer.
+  "Run pattern+pixel-size+phase -> packed XBM bitmap, per buffer.
 
 Bounded by `cooked-box-glyph-run-cache-limit\=': see there and
-`cooked--box-glyph-cell-cache\=' for why the run length is the dimension worth
-capping and the shape is not.  A miss here costs a copy and a pack --
-`cooked--pack-box-glyph-cell\=' -- never the trigonometry
-`cooked--render-box-glyph-cell\=' does, which the cell cache still holds.")
+`cooked--box-glyph-cell-cache\=' for why the pattern is the dimension worth
+capping and the shape is not.  A miss here costs a tile and a pack --
+`cooked--pack-box-glyph-run\=' -- never the trigonometry
+`cooked--render-box-glyph-cell\=' does, which the cell cache still holds, once
+per distinct shape in the pattern however many cells each covers.")
 
 (defvar-local cooked--image-data nil
   "Image id -> (FORMAT DATA PX-WIDTH PX-HEIGHT COLS ROWS), as transmitted.
@@ -217,7 +230,7 @@ not is `:ascent', measured from the default face's font -- which a theme can
 move without moving the cell size, and is why `cooked--flush-deco-cache' still
 empties this on a theme change.
 
-Also bounded by `cooked-box-glyph-run-cache-limit', for the run-length reason
+Also bounded by `cooked-box-glyph-run-cache-limit', for the pattern reason
 `cooked--box-glyph-cache' is: this sits in front of that cache rather than of
 `cooked--box-glyph-cell-cache', so a miss here still costs no more than a
 `create-image' call over bits the other two caches already have between
@@ -257,6 +270,24 @@ beneath every glyph, breaking the continuous vertical borders this exists to
 produce — the same defect `indent-bars' documents for box characters."
   (cons (window-font-width window 'default)
         (window-default-line-height window)))
+
+(defvar cooked--deco-cursor nil
+  "The child\='s cursor as a (ROW . COL) screen cell, for the render pass.
+
+Bound by `cooked--apply\=' in cooked-render.el for exactly as long as the two
+render passes run, and nil everywhere else -- including in a rescale, which
+rebuilds from run boundaries the buffer already holds and so has no cursor
+question to ask.
+
+Not `cooked--cursor\=', which is the same fact one drain out of date at the
+only moment this is read: `cooked--apply-levels\=' adopts the drain\='s levels
+*after* `cooked--render-rows\=' has written the rows, and the rows have to be
+split for the cursor this drain is putting there rather than the one the last
+drain did. Reordering the apply to fix that is not available -- the render
+depends on the outgoing grid -- so the one value the render needs is bound
+across it instead.
+
+Read by `cooked--glyph-run-segments\=', which says what it is for.")
 
 (defvar cooked--deco-pass nil
   "This render pass\='s (WINDOW . CELL), computed at most once, or nil outside one.
@@ -362,18 +393,96 @@ The tier `cooked--box-glyph-bits\=' tiles rather than redraws: see
       (list bits (car size) (cdr size) (or phase 0))
     (cooked--render-box-glyph-cell bits (car size) (cdr size) (or phase 0))))
 
-(defun cooked--box-glyph-bits (bits size &optional phase count)
-  "Cached packed bitmap for glyph BITS at cell SIZE, COUNT cells wide.
+(defun cooked--glyph-pattern (bits count)
+  "A one-record run pattern: COUNT adjacent cells drawing shape BITS.
 
-COUNT, defaulting to 1, is how many adjacent cells draw the shape, and joins the
-key because a run of ten is a genuinely different bitmap from a run of nine --
-see `cooked--box-glyph-cache\=' for why that makes this tier the one that
-needs a bound and `cooked--box-glyph-cell\=' the one that does not.  A miss
-here asks that tier for the shape and only tiles and packs it --
-`cooked--pack-box-glyph-cell\=' -- never redraws it."
+The wire\='s own encoding, built by hand for the two callers that have a shape
+and a width rather than a slice of `Deco::packed\=' to hand on -- see
+`cooked--glyph-run-segments\=', which cuts a run into the parts that may share
+an image, and `cooked--glyph-pattern-take\=', which cuts one down to the width
+the buffer now holds."
+  (unibyte-string (logand bits #xff) (logand (ash bits -8) #xff)
+                  (logand count #xff) (logand (ash count -8) #xff)))
+
+(defun cooked--glyph-pattern-records (pattern)
+  "PATTERN decoded into a list of (BITS . COUNT), left to right.
+
+PATTERN is a run\='s decoration as `Deco::packed\=' in src/emu/cell.rs writes
+it: a unibyte string of four-byte little-endian (BITS COUNT) records.  A whole
+run rather than one record, which is the unit an image is baked at -- see
+`cooked--apply-glyph-deco\='."
+  (let ((out nil)
+        (i 0)
+        (limit (length pattern)))
+    (while (< i limit)
+      (push (cons (cooked--u16 pattern i) (cooked--u16 pattern (+ i 2))) out)
+      (setq i (+ i 4)))
+    (nreverse out)))
+
+(defun cooked--glyph-pattern-cells (pattern)
+  "How many cells PATTERN covers: the sum of its records\=' counts."
+  (let ((cells 0)
+        (i 2)
+        (limit (length pattern)))
+    (while (< i limit)
+      (setq cells (+ cells (cooked--u16 pattern i))
+            i (+ i 4)))
+    cells))
+
+(defun cooked--glyph-pattern-head (pattern)
+  "The shape PATTERN\='s first cell draws.
+
+The only cell whose shape anything outside the rasterizer asks about, and it is
+asked for one thing: the dither phase, which is 0 for everything but a shade and
+a shade is never in a pattern longer than one cell -- see
+`cooked--glyph-run-segments\='."
+  (cooked--u16 pattern 0))
+
+(defun cooked--glyph-pattern-take (pattern count)
+  "PATTERN cut down to its first COUNT cells, or PATTERN itself if it is shorter.
+
+For `cooked--deco-image\=', whose COUNT comes from the *buffer* rather than from
+the wire: `cooked--rescale-deco\=' reads a run\='s width off the text it is
+rebuilding, and a run the buffer has since shortened must be repaired to the
+width it now has rather than to the one it was written at.  Identity when the
+two agree, which is every call on the render path."
+  (if (>= count (cooked--glyph-pattern-cells pattern))
+      pattern
+    (let ((out nil)
+          (left count)
+          (i 0))
+      (while (> left 0)
+        (let* ((bits (cooked--u16 pattern i))
+               (take (min left (cooked--u16 pattern (+ i 2)))))
+          (push (cooked--glyph-pattern bits take) out)
+          (setq left (- left take)
+                i (+ i 4))))
+      (apply #'concat (nreverse out)))))
+
+(defun cooked--box-glyph-bits (pattern size &optional phase)
+  "Cached packed bitmap for run PATTERN at cell SIZE.
+
+PATTERN is a whole run\='s (BITS COUNT) records -- see
+`cooked--glyph-pattern-records\=' -- and joins the key because two runs drawing
+different shapes, or the same shapes over different widths, are genuinely
+different bitmaps.  See `cooked--box-glyph-cache\=' for why that makes this tier
+the one that needs a bound and `cooked--box-glyph-cell\=' the one that does not.
+A miss here asks that tier for each distinct shape and only tiles and packs them
+-- `cooked--pack-box-glyph-run\=' -- never redraws one.
+
+The key is the packed string itself rather than a list of decoded records, and
+that is not incidental: `sxhash-equal\=' walks only the first few elements of a
+list, so an eleven-record `tree\=' indent keyed as a list would collide with
+every other indent of the same depth and turn the lookup into a linear scan of
+`equal\=' comparisons.  A string is hashed whole.  It is also canonical -- a
+count is never zero and no two adjacent records share a shape -- so two runs
+that draw the same thing key the same."
   (cooked--cached-bounded cooked--box-glyph-cache cooked-box-glyph-run-cache-limit
-      (list bits (car size) (cdr size) (or phase 0) (or count 1))
-    (cooked--pack-box-glyph-cell (cooked--box-glyph-cell bits size phase) (or count 1))))
+      (list pattern (car size) (cdr size) (or phase 0))
+    (cooked--pack-box-glyph-run
+     (mapcar (pcase-lambda (`(,bits . ,count))
+               (cons (cooked--box-glyph-cell bits size phase) count))
+             (cooked--glyph-pattern-records pattern)))))
 
 (defun cooked--box-glyph-ascent (window height)
   "Return the `:ascent' that places a bitmap on WINDOW's line box.
@@ -415,8 +524,8 @@ would be stale the moment the buffer is zoomed."
     (logior (logand (* column (car size)) 1)
             (ash (logand (* (or row 0) (cdr size)) 1) 1))))
 
-(defun cooked--box-glyph-image (bits window size phase &optional count)
-  "Image spec for glyph BITS at cell SIZE, COUNT cells wide (default one).
+(defun cooked--box-glyph-image (pattern window size phase)
+  "Image spec for the run PATTERN draws at cell SIZE.
 
 Memoized in `cooked--deco-image-cache'.  Not premature: the bits underneath were
 already cached, but the spec was rebuilt for every box character of every
@@ -438,8 +547,8 @@ at exactly the cell size, so letting that apply would resample a pixel-exact
 edge and the strokes blur into something no better than the font glyphs this
 replaces."
   (cooked--cached-bounded cooked--deco-image-cache cooked-box-glyph-run-cache-limit
-      (list bits (car size) (cdr size) phase (or count 1))
-    (cooked--box-glyph-image-1 bits window size phase (or count 1))))
+      (list pattern (car size) (cdr size) phase)
+    (cooked--box-glyph-image-1 pattern window size phase)))
 
 (defun cooked--uncolored (image)
   "IMAGE with any `:foreground\=' or `:background\=' removed.
@@ -468,10 +577,10 @@ tail of."
       (setq tail (cddr tail)))
     (cons (car image) (nreverse out))))
 
-(defun cooked--box-glyph-image-1 (bits window size phase count)
+(defun cooked--box-glyph-image-1 (pattern window size phase)
   "Build the spec `cooked--box-glyph-image' memoizes.
 
-BITS, WINDOW, SIZE, PHASE and COUNT mean what they do there.
+PATTERN, WINDOW, SIZE and PHASE mean what they do there.
 
 Carries no `:foreground' and no `:background', which is the whole colour model
 rather than an omission.  An XBM given neither is drawn in the colours of the
@@ -499,7 +608,7 @@ now hiding a box glyph as it always did the text beside it."
   ;; rather than describe the bit layout.  Emacs accepts only three `:data' shapes:
   ;; a vector of per-row strings, a whole XBM *file* in a string, or bare bits with
   ;; these three properties.  A packed (WIDTH HEIGHT DATA) list is none of them.
-  (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits bits size phase count)))
+  (pcase-let ((`(,width ,height ,data) (cooked--box-glyph-bits pattern size phase)))
     (cooked--uncolored
      (create-image data 'xbm t
                    :data-width width :data-height height
@@ -957,21 +1066,27 @@ is a function of the shape, the cell size and the dither phase alone, so a whole
 border row wants one image; a picture\='s spec is shared by every cell of the
 placement already, each cutting its own slice out of it.
 
-COUNT is how many adjacent cells the glyph image has to cover, default one.  A
-run of identical shapes is displayed as a single image COUNT cells wide rather
-than as COUNT cell-wide ones, which is where nearly all of the box-drawing
-redisplay cost went -- see `cooked--apply-glyph-deco\='.  It is unread on the
-image side, and that is not because a picture is drawn per cell: it is because
-the spec *is* the whole placement however much of it a span covers, so a wider
-span cuts a wider slice out of the same spec rather than wanting a different
-one.  `cooked--deco-display\=' is where an image run spends its width.
+COUNT is how many adjacent cells the answer has to cover, default the whole of
+what DECO describes.  A glyph run is displayed as a single image as wide as its
+pattern rather than as one image per cell or even one per shape, which is where
+nearly all of the box-drawing redisplay cost went -- see
+`cooked--apply-glyph-deco\='.  So on the glyph side COUNT is not a width to
+build at, the pattern already being one: it *trims* the pattern, and only a
+caller reading a run\='s width off the buffer rather than off the wire can hand
+over one that trims anything.  `cooked--rescale-deco\=' is that caller and
+`cooked--glyph-pattern-take\=' is the trim.
+
+It is unread on the image side, and that is not because a picture is drawn per
+cell: it is because the spec *is* the whole placement however much of it a span
+covers, so a wider span cuts a wider slice out of the same spec rather than
+wanting a different one.  `cooked--deco-display\=' is where an image run spends
+its width.
 
 Hoistable out of a per-character loop exactly where the `cooked-deco\=' record
 itself is shareable, which is not a coincidence: both are shareable when nothing
 in the answer depends on the column.  For a shade that is false -- the phase is
 a function of the cell\='s own pixel origin, see `cooked--box-phase\=' -- so
-`cooked--apply-glyph-deco\=' asks per cell there, with COUNT one, and per run
-everywhere else.
+`cooked--apply-glyph-deco\=' asks per cell there and per run everywhere else.
 
 Both branches memoize underneath, and the hoist still pays: the memo key is a
 freshly consed list and the lookup a hash of it, so eighty identical glyphs cost
@@ -982,11 +1097,12 @@ no cell size to draw against stops before here -- see `cooked--apply-deco\='."
   (pcase deco
     (`(image ,id ,_crow ,_ccol ,cols ,rows)
      (cooked--image-spec id (cons cols rows) size))
-    (`(glyph ,bits . ,where)
-     (cooked--box-glyph-image
-      bits window size
-      (cooked--box-phase bits size (car where) (cadr where))
-      count))))
+    (`(glyph ,pattern . ,where)
+     (let ((pattern (if count (cooked--glyph-pattern-take pattern count) pattern)))
+       (cooked--box-glyph-image
+        pattern window size
+        (cooked--box-phase (cooked--glyph-pattern-head pattern)
+                           size (car where) (cadr where)))))))
 
 (defun cooked--deco-display (deco image size &optional count)
   "Wrap IMAGE as a `display\=' value standing for the text it is put on.
@@ -1014,20 +1130,20 @@ visibly short or long row rather than of anything subtle.
 COUNT is how many adjacent cells the value is going to be put over, default one,
 and it is the same COUNT `cooked--deco-image\=' took.  The two halves each need
 the run\='s width and need it for opposite reasons, which is why it is asked of
-both rather than of one: a glyph run bakes the width into the *bitmap*, because
-the shape is redrawn COUNT times across it, while a picture\='s spec is already
-the whole placement and the width goes into the *slice* cut out of it.  So the
-glyph arm here ignores COUNT and the image arm ignores it there, and neither can
-be sized correctly without the other having been asked.
+both rather than of one: a glyph run has the width in its *pattern*, which COUNT
+can only cut short, while a picture\='s spec is already the whole placement and
+the width goes into the *slice* cut out of it.  So the glyph arm here ignores
+COUNT and the image arm ignores it there, and neither can be sized correctly
+without the other having been asked.
 
-An image cell adds its own `slice\=' to the wrapper, which is why this takes DECO
-and not just IMAGE: the slice names where in the picture the span begins.  DECO
-carries the *first* cell of the span -- its row and column within the picture --
-and COUNT says how far along that row the span runs, so the rectangle cut is
-COUNT cells wide and one cell tall.  A COUNT of one is the degenerate case and
-the shape the fallback path takes; see `cooked--apply-image-deco\=' for when the
-grid forces it.  SIZE is what converts those cell coordinates to pixels, and is
-unread on the glyph side.
+An image cell adds its own `slice\=' to the wrapper, which is why this takes
+DECO and not just IMAGE: the slice names where in the picture the span begins.
+DECO carries the *first* cell of the span -- its row and column within the
+picture -- and COUNT says how far along that row the span runs, so the
+rectangle cut is COUNT cells wide and one cell tall.  A COUNT of one is the
+degenerate case and the shape the fallback path takes; see
+`cooked--apply-image-deco\=' for when the grid forces it.  SIZE is what
+converts those cell coordinates to pixels, and is unread on the glyph side.
 
 Dispatches on the head with `eq\=' rather than by destructuring the record,
 because a picture placed on a row that dithers into per-cell spans still pays
@@ -1044,9 +1160,10 @@ a `pcase\=' to find that out."
   "The `display\=' value DECO should carry at cell SIZE, or nil for none.
 
 DECO is the `cooked-deco\=' property: `(image ID CROW CCOL COLS ROWS)\=' or
-`(glyph BITS COLUMN ROW)\='.  WINDOW is only ever the ascent lookup\='s.  Nil
-SIZE means there is no cell size to draw against yet, and the caller records
-the decoration without displaying anything.
+`(glyph PATTERN COLUMN ROW)\=', PATTERN being a whole run\='s (BITS COUNT) records
+-- see `cooked--glyph-pattern-records\='.  WINDOW is only ever the ascent
+lookup\='s.  Nil SIZE means there is no cell size to draw against yet, and the
+caller records the decoration without displaying anything.
 
 COUNT is how many adjacent cells the answer is going to be put over, default
 one, and it is handed to *both* halves -- so the value handed back is sized to
@@ -1206,6 +1323,96 @@ other one\='s slices were cut."
           (setq pos end
                 i (+ i run)))))))
 
+(defun cooked--glyph-run-segments (packed column cursor)
+  "PACKED cut into the runs that may each share one image, left to right.
+
+PACKED is a whole decoration run\='s (BITS COUNT) records; COLUMN is the screen
+column its first cell stands on, or nil off the screen; CURSOR is the screen
+column the child\='s cursor is on in this row, or nil.  The answer is a list of
+patterns in the same form -- see `cooked--glyph-pattern-records\=' -- whose
+cells add up to PACKED\='s.
+
+Two things break a run here, and the other two never reach this function: a
+style, underline or link change split the run on the *wire*, in
+`Row::build_runs\=' (src/emu/cell.rs), and so arrived as separate PACKED
+strings.
+
+*A shade breaks it, one cell at a time.*  Its dither phase is a function of the
+cell\='s own pixel origin, so two adjacent ▒ at an odd cell width are genuinely
+different bitmaps and a shared record would put the same phase on both and draw
+a doubled column down the seam.  `cooked--box-shade-p\=' is the test, asked once
+per record rather than once per character -- which is why the wire carries no
+flag for it; see `Deco::packed\='.
+
+*The cursor\='s cell breaks it.*  Emacs draws the cursor at the *start* of a
+`display\=' span however many characters the span covers, and cooked puts point
+wherever the child\='s cursor is on every drain.  So a span bridging the
+cursor\='s column draws the cursor several cells to the left of where the child
+put it. This was invisible for as long as a run was identical box glyphs -- a
+cursor does not sit in a border -- and became visible the moment runs learned
+to bridge the blanks of an indent, which is exactly where a cursor does sit.
+The break is a split rather than a per-cell expansion: the cursor\='s cell
+starts a segment, and being at the start of a span is where Emacs was going to
+draw it anyway. `cooked-the-cursors-cell-starts-its-own-glyph-run\=' is the
+pin.
+
+Returns the list `(PACKED)\=' unsplit whenever neither applies, which is nearly
+every run -- so the common case allocates one cons and shares the string the
+drain already handed over, rather than rebuilding it."
+  (let ((limit (length packed)))
+    (if (and (not (cooked--glyph-run-dithers-p packed))
+             (or (null cursor) (null column)
+                 (<= cursor column)
+                 (>= cursor (+ column (cooked--glyph-pattern-cells packed)))))
+        (list packed)
+      (let ((out nil)
+            (pending nil)
+            (col (or column 0))
+            (i 0))
+        (while (< i limit)
+          (let ((bits (cooked--u16 packed i))
+                (count (cooked--u16 packed (+ i 2))))
+            (if (cooked--box-shade-p bits)
+                (progn
+                  (when pending
+                    (push (apply #'concat (nreverse pending)) out)
+                    (setq pending nil))
+                  (dotimes (_ count)
+                    (push (cooked--glyph-pattern bits 1) out)
+                    (setq col (1+ col))))
+              (let ((left count))
+                (while (> left 0)
+                  (when (and pending (eql col cursor))
+                    (push (apply #'concat (nreverse pending)) out)
+                    (setq pending nil))
+                  ;; Everything up to the cursor, then everything after it: the
+                  ;; loop retakes the test above and flushes at the boundary.
+                  (let ((take (if (and cursor (> cursor col) (< cursor (+ col left)))
+                                  (- cursor col)
+                                left)))
+                    (push (cooked--glyph-pattern bits take) pending)
+                    (setq col (+ col take)
+                          left (- left take))))))
+            (setq i (+ i 4))))
+        (when pending
+          (push (apply #'concat (nreverse pending)) out))
+        (nreverse out)))))
+
+(defun cooked--glyph-run-dithers-p (packed)
+  "Whether any record of PACKED names a shade, and so wants a cell of its own.
+
+Separate from the walk in `cooked--glyph-run-segments\=' so that the answer can
+be had without building anything: a run with no shade in it is handed straight
+back as one segment, and that is every run a border, a box or a `tree\=' indent
+is made of."
+  (let ((i 0)
+        (limit (length packed))
+        (found nil))
+    (while (and (not found) (< i limit))
+      (setq found (cooked--box-shade-p (cooked--u16 packed i))
+            i (+ i 4)))
+    found))
+
 (defun cooked--apply-glyph-deco (start packed window size origin row)
   "Apply box-glyph decoration PACKED at START: four bytes per run of one shape.
 
@@ -1215,16 +1422,17 @@ one record rather than eighty.  See `Deco::packed\=' in src/emu/cell.rs for why
 the core counts them rather than leaving this to work it out again: it already
 knew, and Emacs is the half with no time to spare.
 
-ORIGIN and ROW locate the shapes, as in `cooked--apply-deco\='.  SIZE nil records
-them and displays nothing; WINDOW is only ever the ascent lookup\='s, and is nil
-in the same case.
+ORIGIN and ROW locate the shapes, as in `cooked--apply-deco\='.  SIZE nil
+records them and displays nothing; WINDOW is only ever the ascent lookup\='s,
+and is nil in the same case.
 
-A run that does not dither takes the whole point of the encoding: the image is
-rasterized once at COUNT cells wide, and both properties go over the entire run
-with one `put-text-property\=' each.  Emacs then merges the run into a single
-displayed image, which is the intended reading rather than the hazard it would
-be for a cell-wide bitmap: the image is exactly as wide as the span it is put
-over, so the run occupies precisely the pixels its characters did.  See
+*One image for the whole run, not one per record.*  The records of a run are
+its pattern, and the bitmap is rasterized once across all of them -- `├──\=' is
+two records and one image three cells wide -- so both properties go over the
+entire run with one `put-text-property\=' each.  Emacs then merges the run into
+a single displayed image, which is the intended reading rather than the hazard
+it would be for a cell-wide bitmap: the image is exactly as wide as the span it
+is put over, so the run occupies precisely the pixels its characters did.  See
 `cooked--deco-display\=' for the two sides of that merge, and
 `cooked-adjacent-box-glyphs-share-only-a-run-wide-image\=' for the pin.
 
@@ -1234,41 +1442,36 @@ pays `find_interval\=' and `parse_image_spec\=' once per interval rather than
 once per column -- the same shape ghostel gets from a per-row image slice, and
 the reason its scroll ceiling sits where cooked\='s did not.
 
-Sharing the record is safe because nothing in it is
-cell-specific: COLUMN is fed to `cooked--box-phase\=' and nowhere else, and that
-answers 0 for every shape but a shade, so the run\='s start column stands for all
-of it.  `cooked--rescale-deco\=' is written to that sharing rather than to the
-per-cell allocation that preceded it, and
+The pattern is what reaches `tree\=', which the shape alone could not.  A run
+breaks on any undecorated cell and a space classifies to nothing, so `│   │
+├── \=' was three decorated runs -- 86,107 records for 30,326 rows, 2.84 per
+row where a row wants one.  `Row::absorb_blank_runs\=' now hands the gaps over
+as blank shapes inside one run, and this bakes the indent as one image;
+`cooked-a-tree-indent-costs-one-display-interval\=' states it as the ratio it
+is.
+
+Sharing the record is safe because nothing in it is cell-specific: COLUMN is
+fed to `cooked--box-phase\=' and nowhere else, and that answers 0 for every
+shape but a shade, so the run\='s start column stands for all of it.
+`cooked--rescale-deco\=' is written to that sharing rather than to the per-cell
+allocation that preceded it, and
 `cooked-a-rescale-rebuilds-every-cell-of-a-shared-glyph-run\=' pins it.
 
-A shade is the exception and stays per cell, because its dither phase is a
-function of the cell\='s own pixel origin: two adjacent ▒ at an odd cell width
-are genuinely different bitmaps, and one shared record would put the same phase
-on both and draw a doubled column down the seam.  `cooked--box-shade-p\=' is
-asked once per record rather than once per character, which is why the wire
-carries no flag for it -- see `Deco::packed\='."
+What does *not* share is decided by `cooked--glyph-run-segments\=', which is
+where the shade rule and the cursor rule live and where both are argued."
   (let ((pos start)
-        (i 0)
-        (limit (length packed)))
-    (while (< i limit)
-      (let* ((bits (cooked--u16 packed i))
-             (count (cooked--u16 packed (+ i 2)))
-             (end (+ pos count)))
-        (if (cooked--box-shade-p bits)
-            (while (< pos end)
-              (let ((deco (list 'glyph bits (and origin (- pos origin)) row)))
-                (put-text-property pos (1+ pos) 'cooked-deco deco)
-                (when-let* ((display (cooked--deco-display-value deco size window)))
-                  (put-text-property pos (1+ pos) 'display display)))
-              (setq pos (1+ pos)))
-          (let ((deco (list 'glyph bits (and origin (- pos origin)) row)))
-            (put-text-property pos end 'cooked-deco deco)
-            (when-let* ((image (and size (cooked--deco-image
-                                          deco size window count))))
-              (put-text-property pos end 'display
-                                 (cooked--deco-display deco image size))))
-          (setq pos end)))
-      (setq i (+ i 4)))))
+        (cursor (and origin (integerp row)
+                     (eq row (car cooked--deco-cursor))
+                     (cdr cooked--deco-cursor))))
+    (dolist (pattern (cooked--glyph-run-segments
+                      packed (and origin (- start origin)) cursor))
+      (let* ((cells (cooked--glyph-pattern-cells pattern))
+             (end (+ pos cells))
+             (deco (list 'glyph pattern (and origin (- pos origin)) row)))
+        (put-text-property pos end 'cooked-deco deco)
+        (when-let* ((display (cooked--deco-display-value deco size window cells)))
+          (put-text-property pos end 'display display))
+        (setq pos end)))))
 
 (defun cooked--rescale-deco ()
   "Rebuild every decoration in the buffer at the current cell size.

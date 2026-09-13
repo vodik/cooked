@@ -2283,7 +2283,7 @@ replaces: a glyph too wide for its cell does not have to be made smaller if
 there is somewhere for it to go.  Giving it two cells means it is scaled less,
 or not at all, and less scaling is less of the gap that scaling leaves behind.
 
-Three conditions, all of them ghostel\='s and all of them load-bearing.
+Four conditions.  Three are ghostel\='s and all of them are load-bearing.
 
 The glyph must be *relatively wider than the cell* -- aspect against aspect,
 not width against width.  A glyph narrower in proportion than the cell it sits
@@ -2296,6 +2296,11 @@ claiming inconsistently -- this instance widened because of what happened to be
 beside it, the next one not -- looks worse than either answer applied evenly.
 
 And there must *be* a next cell: a glyph in the last column has nowhere to go.
+
+The fourth is cooked\='s own and follows from a space no longer always being
+spare: a blank between two box glyphs is absorbed into their run and carries its
+share of the run\='s image, so a space with a `cooked-deco\=' on it is already
+spoken for.  See `Row::absorb_blank_runs\=' in src/emu/cell.rs.
 
 CELL is the frame's character width in pixels, passed in for the same reason
 `cooked--glyph-scale\=' takes a slot in pixels: `frame-char-width\=' answers 1
@@ -2313,6 +2318,12 @@ all still see the text the child sent."
              (/ (float cell) (+ default-ascent default-descent)))
          (< to end)
          (eq (char-after to) ?\s)
+         ;; And the space must actually be free.  A space between two box glyphs
+         ;; is part of their run and carries its share of the run's image -- see
+         ;; `Row::absorb_blank_runs' in src/emu/cell.rs -- so hiding it at zero
+         ;; width would cut a hole in a bitmap that is still as wide as the cells
+         ;; it was built for, and pull the rest of the row left under it.
+         (not (get-text-property to 'cooked-deco))
          (or (= from (line-beginning-position)) (eq (char-before from) ?\s)))))
 
 (defun cooked--scale-offenders (start end window metrics)

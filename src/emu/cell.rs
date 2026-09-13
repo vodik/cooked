@@ -181,6 +181,23 @@ pub struct Cell {
 
 pub(crate) const CONTINUATION: char = '\0';
 pub(crate) const BLANK: char = ' ';
+/// U+00A0. A blank as far as anything drawn is concerned, and the reason it is named
+/// here: `tree` indents with it. Its rows read `\u{2502}\u{a0}\u{a0} \u{251c}\u{2500}\u{2500} `, so a rule that
+/// absorbed only U+0020 would leave every one of them split at the two no-break spaces
+/// and reach none of the win [`Row::absorb_blank_runs`] exists for.
+pub(crate) const NO_BREAK_SPACE: char = '\u{a0}';
+
+/// Whether CH occupies a cell without drawing anything in it.
+///
+/// The membership test for [`Row::absorb_blank_runs`], and deliberately a short closed
+/// list rather than a Unicode property: what qualifies is a character the child used as
+/// *spacing between box glyphs*, and baking anything else into a run's bitmap would hide
+/// a character the child meant to be seen. `\u{a0}` is in because `tree` puts it there;
+/// a tab never reaches a cell (the grid expands it) and a zero-width space is a
+/// combining mark, which arrives as an attachment rather than as a cell.
+pub(crate) fn draws_nothing(ch: char) -> bool {
+    ch == BLANK || ch == NO_BREAK_SPACE
+}
 
 impl Default for Cell {
     fn default() -> Self {
@@ -297,9 +314,21 @@ impl Deco {
     /// emitting it once per character threw that away and left `cooked--apply-glyph-deco'
     /// to rediscover it by comparison. Emacs is the bottleneck here — the parser runs at
     /// 74-422 MB/s while the apply path manages roughly 21 MB/s equivalent — so work the
-    /// protocol leaves for Lisp to reconstruct is work in the wrong place. With the count
-    /// in hand Lisp looks the image spec up once for the run and hangs one shared
-    /// `cooked-deco' record over all of it, instead of once and one per cell.
+    /// protocol leaves for Lisp to reconstruct is work in the wrong place.
+    ///
+    /// The records of one run are *the run's pattern*, and Lisp bakes one bitmap for all
+    /// of them rather than one per record: `\u{251c}\u{2500}\u{2500}` is two records and one image three
+    /// cells wide. So this string is not merely a compressed list, it is
+    /// the cache key `cooked--box-glyph-image' is memoized on — which is why the encoding
+    /// is fixed-width and canonical (a count is never zero, and no two adjacent records
+    /// share a `bits`): two runs that draw the same thing have to pack to the same bytes
+    /// or they mint two entries for one bitmap.
+    ///
+    /// One of the shapes draws nothing. [`BoxGlyph::BLANK`] is what
+    /// [`Row::absorb_blank_runs`] puts in the gaps of `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}`, so a `tree`
+    /// row's whole indent is one run, one record list and one `display` interval instead
+    /// of three. It needs no tag of its own here: it is a descriptor like any other, and
+    /// the Lisp rasterizer draws it as an empty cell without an arm for it.
     ///
     /// No flag rides along to say a shape dithers, though [`BoxGlyph`] knows: the only
     /// thing Lisp does with that answer is decide whether a cell's dither phase can vary
@@ -1133,6 +1162,11 @@ impl Row {
     /// walks `entries` with a cursor and specialises on a const `EXTRAS`, and this one
     /// searches per column and branches at runtime. Two spellings of the same rules cannot
     /// share a mistake in the spelling.
+    ///
+    /// It stops where the builders stop: [`Row::absorb_blank_runs`] is a post-pass over
+    /// whatever they produced, and `runs_to_matches_the_reference` composes it onto this
+    /// rather than this calling it. Written into both, the merge would be compared against
+    /// itself and the property would say nothing about it.
     #[cfg(test)]
     pub(crate) fn runs_to_reference(&self, end: usize) -> Vec<Run> {
         let entries: &[(u16, Extra)] = self.extras.as_deref().map_or(&[], |e| &e.entries);
@@ -1195,9 +1229,85 @@ impl Row {
     }
 
     fn runs_to(&self, end: usize) -> Vec<Run> {
-        match self.extras.as_deref() {
+        let mut runs = match self.extras.as_deref() {
             Some(extras) => self.build_runs(end, &extras.entries),
             None => self.build_plain_runs(end),
+        };
+        Self::absorb_blank_runs(&mut runs);
+        runs
+    }
+
+    /// Merge `GLYPHS BLANKS GLYPHS` into one box-glyph run, blanks and all.
+    ///
+    /// A run breaks on any undecorated cell, and a space classifies to nothing — so
+    /// `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}` arrives as three decorated runs with plain text between them and
+    /// costs Emacs three `display` intervals for one `tree` row's indent. The measured
+    /// shape of that: 86,107 decoration records over 30,326 rows of `tree -C
+    /// /usr/include`, 2.84 per row where a row wants one. Absorbing the gap as
+    /// [`BoxGlyph::BLANK`] cells makes the whole indent one run, one image and one
+    /// interval.
+    ///
+    /// **Only a gap between two glyph runs is absorbed**, which is what trims the leading
+    /// and trailing blanks without a trimming step. A blank run at the end of a row has no
+    /// glyph run after it, so it is never taken — and it must never be, because
+    /// [`Row::line_runs`] hands a wrapped row its full width: the padding out to the right
+    /// margin would otherwise be baked into a bitmap nobody can see, at the cost of a
+    /// wider image and a cache key per padding width. A blank run at the *start* has no
+    /// glyph run before it and is refused by the same rule.
+    ///
+    /// The three runs must also agree on `style`, `underline` and `link`, exactly as two
+    /// adjacent glyph runs would have to: a blank carrying a different background is a
+    /// visible rectangle, and a link boundary is the one thing carried here that has no
+    /// other way to reach Lisp.
+    ///
+    /// A post-pass over runs rather than a rule inside each builder, and there are three
+    /// builders: [`Row::build_runs`], [`Row::build_plain_runs`] and the `#[cfg(test)]`
+    /// `Row::runs_to_reference`. Stated per cell it needs a variable-length lookahead —
+    /// "is there a glyph after this gap, under the same style?" — which is exactly the
+    /// kind of thing the fast builders' scans get subtly wrong; stated over the runs they
+    /// already produced it is a window of three. `runs_to_matches_the_reference` composes
+    /// this onto the reference rather than the reference calling it, so the property still
+    /// checks the builders against an independent formulation of everything *else*, and
+    /// the merge is checked by the tests named for it below.
+    fn absorb_blank_runs(runs: &mut Vec<Run>) {
+        let blank_gap = |run: &Run| {
+            run.deco.is_none()
+                // Combining marks push characters onto `text` that stand on no column, so
+                // a run whose text is longer than its columns is carrying something other
+                // than the blanks it looks like.
+                && run.text.chars().count() == run.cols
+                && !run.text.is_empty()
+                && run.text.chars().all(draws_nothing)
+        };
+        let mut i = 0;
+        while i + 2 < runs.len() {
+            let joins = matches!(runs[i].deco, Some(Deco::Glyphs(_)))
+                && matches!(runs[i + 2].deco, Some(Deco::Glyphs(_)))
+                && blank_gap(&runs[i + 1])
+                && runs[i].style == runs[i + 1].style
+                && runs[i].style == runs[i + 2].style
+                && runs[i].underline == runs[i + 1].underline
+                && runs[i].underline == runs[i + 2].underline
+                && runs[i].link == runs[i + 1].link
+                && runs[i].link == runs[i + 2].link;
+            if !joins {
+                i += 1;
+                continue;
+            }
+            // Two at a time, and `i` does not advance: the run that just grew is the left
+            // half of the next window, so `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}` collapses in one pass.
+            let tail = runs.remove(i + 1);
+            let next = runs.remove(i + 1);
+            let run = &mut runs[i];
+            run.text.push_str(&tail.text);
+            run.text.push_str(&next.text);
+            run.cols += tail.cols + next.cols;
+            let (Some(Deco::Glyphs(glyphs)), Some(Deco::Glyphs(more))) = (&mut run.deco, next.deco)
+            else {
+                unreachable!("the match above admitted only two glyph runs");
+            };
+            glyphs.extend(std::iter::repeat_n(BoxGlyph::BLANK, tail.cols));
+            glyphs.extend(more);
         }
     }
 
@@ -1680,6 +1790,155 @@ mod tests {
         );
     }
 
+    /// The whole point, stated on the shape it was measured against.
+    ///
+    /// `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500} name` is what a `tree` row is, and the runs it used to arrive as
+    /// were `\u{2502}` / `   ` / `\u{2502}` / `   ` / `\u{251c}\u{2500}\u{2500}` / ` name` -- three decorated runs and
+    /// therefore three `display` intervals for one indent. Afterwards the indent is one
+    /// run carrying eleven glyphs, six of them [`BoxGlyph::BLANK`], and the filename is
+    /// the only thing left beside it.
+    #[test]
+    fn a_tree_indent_is_one_glyph_run() {
+        let style = Style::default();
+        let mut row = Row::new(24);
+        for (col, ch) in "\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500} f"
+            .chars()
+            .enumerate()
+        {
+            row.set(col, Cell { ch, style });
+        }
+
+        let runs = row.runs();
+        assert_eq!(runs.len(), 2, "the indent, then the name: {runs:?}");
+        assert_eq!(
+            runs[0].text,
+            "\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}"
+        );
+        assert_eq!(runs[0].cols, 11);
+        assert_eq!(runs[0].deco.as_ref().map(Deco::len), Some(11));
+        assert_eq!(runs[1].text, " f");
+        assert!(runs[1].deco.is_none());
+
+        // The blanks are the reserved descriptor, not a repeat of the shape beside them:
+        // a run whose gaps drew `\u{2502}` would be a solid ladder.
+        let glyphs = runs[0]
+            .deco
+            .as_ref()
+            .expect("the indent is decorated")
+            .glyphs();
+        for gap in [1, 2, 3, 5, 6, 7] {
+            assert_eq!(glyphs[gap], BoxGlyph::BLANK, "column {gap}");
+        }
+        assert_ne!(glyphs[0], BoxGlyph::BLANK);
+    }
+
+    /// `tree`'s real indent, byte for byte, which is not the one anybody writes by hand.
+    ///
+    /// tree(1) 2.3.2 emits `\u{2502}\u{a0}\u{a0} ` -- U+2502 then two NO-BREAK SPACEs then an ordinary
+    /// space -- so a rule admitting only U+0020 absorbs the third gap cell and splits on
+    /// the first two, leaving the row exactly as expensive as it was. This is why
+    /// [`draws_nothing`] is a list and not `ch == BLANK`.
+    #[test]
+    fn a_no_break_space_is_absorbed_as_a_blank() {
+        let style = Style::default();
+        let mut row = Row::new(24);
+        for (col, ch) in "\u{2502}\u{a0}\u{a0} \u{2514}\u{2500}\u{2500} f"
+            .chars()
+            .enumerate()
+        {
+            row.set(col, Cell { ch, style });
+        }
+
+        let runs = row.runs();
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert_eq!(
+            runs[0].text,
+            "\u{2502}\u{a0}\u{a0} \u{2514}\u{2500}\u{2500}"
+        );
+        assert_eq!(runs[0].deco.as_ref().map(Deco::len), Some(7));
+    }
+
+    /// The trim, and the case that makes it necessary rather than tidy.
+    ///
+    /// [`Row::line_runs`] hands a *wrapped* row its full width, trailing padding included
+    /// -- so a row ending in box drawing would bake every blank column out to the right
+    /// margin into its bitmap, an image nobody can see at a cache key per padding width.
+    /// The gap-between-two-glyph-runs rule refuses it structurally, and the leading blanks
+    /// of an indented row go the same way.
+    #[test]
+    fn leading_and_trailing_blanks_stay_out_of_the_run() {
+        let style = Style::default();
+        let mut row = Row::new(12);
+        for (col, ch) in "  \u{2500}\u{2500}  ".chars().enumerate() {
+            row.set(col, Cell { ch, style });
+        }
+        row.wrapped = true;
+
+        let runs = row.line_runs();
+        assert_eq!(
+            runs.len(),
+            3,
+            "leading blanks, the glyphs, the padding: {runs:?}"
+        );
+        assert_eq!(runs[0].text, "  ");
+        assert!(runs[0].deco.is_none());
+        assert_eq!(runs[1].text, "\u{2500}\u{2500}");
+        assert_eq!(runs[1].deco.as_ref().map(Deco::len), Some(2));
+        // Every column out to `cols`, which is what a wrapped row contributes.
+        assert_eq!(runs[2].text, "        ");
+        assert!(runs[2].deco.is_none());
+    }
+
+    /// A gap only joins what it is between, and only when nothing else changed.
+    #[test]
+    fn a_blank_gap_under_a_different_rendition_still_breaks_the_run() {
+        let red = Style {
+            fg: Color::Indexed(1),
+            ..Style::default()
+        };
+        let mut row = Row::new(12);
+        for (col, ch) in "\u{2500} \u{2500}".chars().enumerate() {
+            row.set(
+                col,
+                Cell {
+                    ch,
+                    // The gap alone is red, which is a visible rectangle if it is baked
+                    // into a neighbour's bitmap.
+                    style: if col == 1 { red } else { Style::default() },
+                },
+            );
+        }
+        assert_eq!(row.runs().len(), 3, "{:?}", row.runs());
+
+        // And a link boundary, which is the one thing carried on a run with no other way
+        // to reach Lisp.
+        let mut row = Row::new(12);
+        for (col, ch) in "\u{2500} \u{2500}".chars().enumerate() {
+            row.set(
+                col,
+                Cell {
+                    ch,
+                    style: Style::default(),
+                },
+            );
+        }
+        row.set_link(2, Some(LinkId(7)));
+        assert_eq!(row.runs().len(), 3, "{:?}", row.runs());
+    }
+
+    /// Plain text between two glyph runs is not a gap, however much of it is blank.
+    #[test]
+    fn text_between_two_glyph_runs_is_not_absorbed() {
+        let style = Style::default();
+        let mut row = Row::new(12);
+        for (col, ch) in "\u{2500} x \u{2500}".chars().enumerate() {
+            row.set(col, Cell { ch, style });
+        }
+        let runs = row.runs();
+        assert_eq!(runs.len(), 3, "{runs:?}");
+        assert_eq!(runs[1].text, " x ");
+    }
+
     #[test]
     fn a_row_that_loses_its_last_attachment_loses_its_table() {
         // The `None` is what keeps `runs` on the specialisation with no side table in it,
@@ -1831,9 +2090,16 @@ mod tests {
                 plain_rows += 1;
             }
             for end in 0..=COLS {
+                // The reference states the builders' job and stops there; the blank
+                // absorption is a shared post-pass and is composed on here rather than
+                // called from inside the reference, so that this still compares two
+                // independent formulations of everything the builders decide. See
+                // `Row::absorb_blank_runs`.
+                let mut expected = row.runs_to_reference(end);
+                Row::absorb_blank_runs(&mut expected);
                 assert_eq!(
                     row.runs_to(end),
-                    row.runs_to_reference(end),
+                    expected,
                     "case {case}, end {end}: runs disagree with the reference"
                 );
             }
