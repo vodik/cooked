@@ -79,6 +79,18 @@ fn each_sgr_flag_sets_clears_and_describes_its_own_bit() {
     }
 }
 
+/// Every single-parameter SGR code, applied to an empty pen, is answered with a reply that
+/// recreates the pen. Walking `sgr::FLAGS` cannot say this: an attribute given a bit of
+/// its own and an arm in `sgr::apply`, but no entry in the table, is invisible to a test
+/// that starts from the table, and `describe` would leave it out of every answer. That
+/// is how overline was once missed.
+#[test]
+fn every_sgr_code_is_described_back_to_the_pen_it_made() {
+    for code in 0..=u16::from(u8::MAX) {
+        decrqss_round_trip(1, 4, format!("\x1b[{code}m").as_bytes(), "m");
+    }
+}
+
 #[test]
 fn decrqss_answers_the_pen_as_the_sgr_that_recreates_it() {
     for (set, want) in [
