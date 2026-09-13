@@ -842,13 +842,40 @@ above is untouched and one scroll away, exactly as scrollback is anywhere else."
            (spec (plist-get (cooked--face nil nil curly 1) :underline)))
       (should (eq (plist-get spec :style) 'wave))
       (should (stringp (plist-get spec :color))))
-    ;; Dotted and dashed have no Emacs rendering, so they fall back to a line —
-    ;; but the color still has to survive.
+    ;; A style with no colour is still a plist, since t would say only `line'.
+    (let ((double (logior cooked--attr-underline
+                          (ash 2 cooked--attr-underline-shift))))
+      (should (equal (plist-get (cooked--face nil nil double nil) :underline)
+                     (if (>= emacs-major-version 30) '(:style double-line) t))))
+    ;; Dotted keeps its colour whether or not this Emacs can draw the dots.
     (let* ((dotted (logior cooked--attr-underline
                            (ash 4 cooked--attr-underline-shift)))
            (spec (plist-get (cooked--face nil nil dotted 1) :underline)))
-      (should (null (plist-get spec :style)))
+      (should (eq (plist-get spec :style)
+                  (and (>= emacs-major-version 30) 'dots)))
       (should (stringp (plist-get spec :color))))))
+
+(ert-deftest cooked-underline-styles-follow-the-emacs-version ()
+  "Emacs 30 draws every SGR 4:x its own way; 29 has only `line' and `wave'.
+Both vectors are checked here whatever Emacs runs the suite, and the one in use
+must be the one this Emacs gets."
+  (should (equal (cooked--underline-styles-for 30)
+                 [nil line double-line wave dots dashes]))
+  (should (equal (cooked--underline-styles-for 29)
+                 [nil line line wave line line]))
+  (should (equal cooked--underline-styles
+                 (cooked--underline-styles-for emacs-major-version)))
+  ;; And the face follows the vector: a plain t where the style is only a line,
+  ;; the style itself everywhere else.
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--face-cache (make-hash-table :test #'equal))
+    (dotimes (i 6)
+      (let ((attrs (logior cooked--attr-underline
+                           (ash i cooked--attr-underline-shift)))
+            (style (aref cooked--underline-styles i)))
+        (should (equal (plist-get (cooked--face nil nil attrs nil) :underline)
+                       (if (memq style '(nil line)) t (list :style style))))))))
 
 (ert-deftest cooked-underline-color-does-not-collide-in-the-face-cache ()
   (with-temp-buffer

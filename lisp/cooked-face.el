@@ -97,25 +97,41 @@ theme, which is what `cooked-theme-change-hook\=' is for."
   (advice-add 'enable-theme :after #'cooked--flush-face-cache)
   (advice-add 'disable-theme :after #'cooked--flush-face-cache))
 
+(defun cooked--underline-styles-for (major)
+  "The `:underline' styles Emacs MAJOR can draw, indexed by SGR 4:x.
+
+Emacs 30 added `double-line', `dots' and `dashes' beside `line' and `wave', so
+from there on every subparameter the Rust side keeps has a rendering of its own:
+4:2 is double, 4:3 curly, 4:4 dotted and 4:5 dashed.  Before 30 only `line' and
+`wave' exist, and the other three fall back to a plain line rather than being
+approximated with overlays or handed a style that Emacs does not know.
+
+A function of the version rather than a test of the running Emacs, so that both
+answers can be checked from whichever Emacs runs the tests."
+  (if (>= major 30)
+      [nil line double-line wave dots dashes]
+    [nil line line wave line line]))
+
 (defconst cooked--underline-styles
-  [nil line line wave line line]
+  (cooked--underline-styles-for emacs-major-version)
   "Emacs `:underline' styles, indexed by the SGR 4:x subparameter.
 
-Emacs renders only `line' and `wave', so double, dotted and dashed all fall
-back to a plain line rather than being approximated with overlays.")
+Chosen once at load time by `cooked--underline-styles-for'; cooked still
+supports Emacs 29, which draws fewer styles than 30.")
 
 (defun cooked--underline-spec (attrs ul)
   "The `:underline' value for the ATTRS bitmask with underline colour UL.
 
 Plain t whenever there is nothing to say beyond \='underlined\=', so the common
-case produces exactly the face plist it did before styled underlines existed."
+case produces exactly the face plist it did before styled underlines existed.
+A `line' style is never spelled out, for the same reason: it is the default."
   (let ((style (aref cooked--underline-styles
                      (min 5 (ash (logand attrs cooked--attr-underline-style)
                                  (- cooked--attr-underline-shift)))))
         (color (and ul (cooked--color ul))))
     (cond ((and (null color) (memq style '(nil line))) t)
           (t (append (and color (list :color color))
-                     (and (eq style 'wave) (list :style 'wave)))))))
+                     (and (not (memq style '(nil line))) (list :style style)))))))
 
 (defface cooked-blink '((t :overline t))
   "How SGR 5 and SGR 6 \\=(blink and rapid blink) are drawn.
