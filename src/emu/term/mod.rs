@@ -77,12 +77,11 @@ impl CursorShape {
 /// stays meaningful after the marked row scrolls away, which a screen row does not.
 ///
 /// Recorded when the mark is parsed rather than read off the drain, because the drain
-/// carries the *end-of-drain* cursor — a different place entirely once more than one
-/// command lands in a single drain, which is exactly what a fast script does.
+/// carries the *end-of-drain* cursor, which is somewhere else entirely once a fast script
+/// lands several commands in one drain.
 ///
-/// Best-effort by construction: a resize between the mark and the drain rewraps the
-/// scrollback and can shift where the anchor resolves. The fallback in that case is the
-/// end-of-drain cursor, which is what this replaced.
+/// Best-effort: a resize between the mark and the drain rewraps the scrollback and can
+/// shift where the anchor resolves, and Lisp then falls back to the end-of-drain cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Anchor {
     pub row: usize,
@@ -111,32 +110,28 @@ pub enum Mark {
 
 /// Something the Lisp side must react to, beyond redrawing cells.
 ///
-/// The division of labour with [`Delta`]'s fields is deliberate, and worth keeping to:
-/// the drain's fields carry everything *redisplay* needs, so they are levels — the state
-/// as of the end of the drain. Events carry what Emacs must *react* to and redisplay does
-/// not cover, so they are occurrences. State consulted only when sending to the child —
-/// bracketed paste — is neither, and is queried live at that moment, which is fresher
-/// than any drain snapshot.
+/// The division of labour with [`Delta`]'s fields is deliberate: the drain's fields carry
+/// everything *redisplay* needs, as levels -- the state at the end of the drain. Events
+/// carry what Emacs must *react* to, as occurrences. State consulted only when sending to
+/// the child, such as bracketed paste, is neither, and is queried live at that moment.
 ///
-/// Sending the same state both ways is what this rules out. An `alt-screen` event
-/// alongside [`Levels::alt`] could only ever restate the field, and did.
+/// No state is sent both ways: an alternate-screen event beside [`Levels::alt`] could only
+/// restate the field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Bell,
     /// Any OSC the terminal does not act on itself, handed over verbatim as
     /// (code, remaining parts, ended with BEL).
     ///
-    /// No OSC changes the grid, so interpreting them is Emacs' business, not ours:
-    /// titles, working directories, hyperlinks, clipboard, editor commands. Keeping
-    /// this generic means a new integration is a few lines of Lisp rather than a
-    /// Rust edit, a rebuild and a release. OSC 133 is the deliberate exception —
-    /// it decides who owns the keyboard, which is core behaviour rather than
-    /// user-extensible policy.
+    /// Interpreting these is Emacs' business: titles, working directories, clipboard,
+    /// editor commands. Keeping this generic makes a new integration a few lines of Lisp
+    /// rather than a Rust release. OSC 133 is the exception, because it decides who owns
+    /// the keyboard; OSC 8 and 66 are grid state and handled here too.
     ///
-    /// The terminator travels with the event because a reply xterm-correctly echoes
-    /// it, and Emacs answers asynchronously: by the time a handler runs we may have
-    /// parsed several more sequences, so "the terminator of the last OSC" would
-    /// answer the wrong query. See [`osc_reply`].
+    /// The terminator travels with the event because a reply echoes it, and Emacs answers
+    /// asynchronously: by the time a handler runs several more sequences may have been
+    /// parsed, so "the terminator of the last OSC" could answer the wrong query. See
+    /// [`osc_reply`].
     Osc(u16, Vec<String>, Terminator),
     /// An OSC 133 mark, and where it landed.
     ///
@@ -154,36 +149,27 @@ pub enum Event {
     SizeReport(Vec<u8>),
     /// `CSI 3 J` — the child asked to erase saved lines, xterm's `clear -x`.
     ///
-    /// Unlike `CSI 2 J`, real xterm's `3 J` touches only the scrollback, leaving the
-    /// visible screen exactly as it was — so the grid does nothing here at all. And
-    /// scrollback lives in the Emacs buffer, not the grid (see the module comment), so
-    /// the grid could not honour this itself even if it wanted to: the text is Emacs'
-    /// to delete. This event is the whole of the response, and Emacs does act on it —
-    /// it is the half of `clear` that actually empties the buffer, the `2 J` before it
-    /// having archived the screen rather than lost it.
+    /// Unlike `CSI 2 J`, xterm's `3 J` touches only the scrollback, so the grid does
+    /// nothing. Scrollback is buffer text, so this event is the whole response: it is the
+    /// half of `clear` that empties the buffer, the `2 J` before it having archived the
+    /// screen.
     EraseScrollback,
     /// `CSI 2 J` — the child finished with this screen.
     ///
-    /// The rows themselves are not lost: [`Screen::erase_display`] archives them, because
-    /// history belongs to Emacs. But the child asked for a blank screen and every other
-    /// terminal gives it one, by scrolling what it cleared out of view. Emacs has no
-    /// viewport of its own to scroll — the transcript and the live screen are one buffer
-    /// — so the window is what moves, and this is the event that asks it to.
+    /// The rows are not lost: [`Screen::erase_display`] archives them. But the child asked
+    /// for a blank screen, and since the transcript and the live screen are one buffer,
+    /// the Emacs window has to move to show one; this event asks it to.
     DisplayCleared,
     /// `ESC c` -- RIS, a full reset of the terminal.
     ///
-    /// Everything RIS puts back inside the emulator it puts back itself, so this event
-    /// says nothing the grid needs; it exists for the state that is *not* in the grid.
-    /// Emacs keeps some of a session's state in Lisp because it is Emacs' to keep --
-    /// OSC 9;4 progress and the OSC 22 pointer stacks -- and a reset that cleared the screen while
-    /// leaving a progress indicator pinned to the mode line would be exactly the sort of
-    /// stuck state `reset` is the cure for. Nothing in Rust can clear it, so RIS has to
-    /// be sayable.
+    /// RIS resets the emulator itself; this event is for state kept in Lisp, such as OSC
+    /// 9;4 progress and the OSC 22 pointer stacks. A reset that cleared the screen but left
+    /// a progress indicator on the mode line would be the stuck state `reset` is typed to
+    /// cure.
     ///
-    /// Deliberately not raised by DECSTR (`CSI ! p`), which every `rs2` and `is2` sends
-    /// on the way past: a soft reset is a program tidying the modes up after itself, and
-    /// a build still running underneath it has not stopped reporting progress. RIS is the
-    /// one that means "forget this session's state", and it is what `reset`'s `rs1` is.
+    /// Not raised by DECSTR (`CSI ! p`), which every `rs2` and `is2` sends: a soft reset is
+    /// a program tidying its modes, and a build running underneath has not stopped
+    /// reporting progress.
     Reset,
     /// XTWINOPS 22/23: push or pop the window title. `smcup`/`rmcup` end in these, so a
     /// full-screen program that sets a title expects it restored when it leaves.
@@ -191,12 +177,10 @@ pub enum Event {
     /// XTWINOPS `8t` or DECSLPP (`CSI Ps t`, Ps of 24 or more): the child asks for a
     /// size, as (rows, columns), with `None` for a dimension it asked to leave alone.
     ///
-    /// Only asked, never done here. The grid follows the window and not the other way
-    /// round, so the one honest way to honour this is to move an Emacs window and let
-    /// the ordinary resize path tell the child -- and whether any window moves at the
-    /// child's say-so is `cooked-resize-requests`, which refuses by default. No reply
-    /// either way: xterm with `allowWindowOps` off sends none, and the child's `18t`
-    /// read-back is what tells it the answer.
+    /// Only asked, never done here. The grid follows the window, so honouring this means
+    /// moving an Emacs window and letting the ordinary resize path tell the child, and
+    /// `cooked-resize-requests` refuses by default. No reply either way, as xterm sends
+    /// none with `allowWindowOps` off; the child reads the answer back with `18t`.
     ResizeRequest(Option<u16>, Option<u16>),
     /// XTWINOPS `19t` (cells) or `15t` (pixels): the size of the *screen*, which in Emacs
     /// is the frame.
@@ -249,11 +233,9 @@ pub enum MouseTracking {
 
 /// How a mouse report spells its coordinates: DEC modes 1006 and 1016.
 ///
-/// One field rather than a flag per mode, because xterm makes the extended coordinate
-/// modes mutually exclusive rather than choosing a precedence among them: setting one
-/// replaces whichever was in force, and resetting one is effective only against the mode
-/// that is actually set. Two booleans could say both at once, and the sender would then
-/// have to invent the precedence xterm declined to.
+/// One field rather than a flag per mode, because xterm makes the two mutually exclusive:
+/// setting one replaces the other, and resetting one only has effect if it is the one set.
+/// Two booleans could say both at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MouseFormat {
     /// The original `CSI M` with three biased bytes, which cannot name a cell past 223.
@@ -315,21 +297,15 @@ pub struct Delta {
     /// Pictures this delta's cells refer to and Emacs has not been given yet, in
     /// transmission order.
     ///
-    /// A field rather than an [`Event`], and the drain's third category: the level/
-    /// occurrence division sorts state by *what redisplay needs* against *what Emacs
-    /// must react to*, and this is neither. It is a resource the rows in this very delta
-    /// refer to, so Lisp has to install it before rendering them — and events are
-    /// dispatched after both render passes, so a semantic mark's anchor has text to
-    /// point at. An image arriving as an event would arrive after the row that needed it.
+    /// A field rather than an [`Event`]: it is neither a level nor an occurrence but a
+    /// resource the rows of this delta refer to, so Lisp installs it before rendering
+    /// them, while events are dispatched after the render.
     ///
-    /// Not everything the child transmitted, which is the part worth reading twice. A
-    /// transmission is not a placement: a child can draw far faster than Emacs redisplays
-    /// and the frames it drew over in between are referred to by nothing by the time this
-    /// is built, so they are dropped and the store is told to forget them. See
-    /// [`State::shed_unplaced_images`]. What is left crosses exactly once, however many
-    /// cells or drains name it afterwards — the cells carry the id, and the geometry to
-    /// draw it at travels with them on each [`Placement`](crate::emu::image::Placement)
-    /// rather than being carried here.
+    /// Not everything the child transmitted. A child can draw faster than Emacs
+    /// redisplays, and frames it drew over in between are referred to by nothing, so they
+    /// are dropped; see [`State::shed_unplaced_images`]. What is left crosses once, however
+    /// many cells name it; the geometry travels on each
+    /// [`Placement`](crate::emu::image::Placement).
     ///
     /// Empty on almost every drain.
     pub images: Vec<ImageData>,
@@ -346,11 +322,9 @@ pub struct Delta {
     pub scrolled_base: usize,
     /// Rows that *moved* during this drain, in the order they moved; see [`Shift`].
     ///
-    /// [`Delta::rows`]'s counterpart, and the two are read together: a shift says which
-    /// buffer text to move where, `rows` says which lines to rewrite afterwards, and the
-    /// indices in `rows` are in *post-shift* coordinates. Applying the shifts first is
-    /// therefore not an optimisation but the contract — the dirty flags travelled with
-    /// their rows through each move so that it could be.
+    /// Read together with [`Delta::rows`]: a shift says which buffer text to move where,
+    /// and the indices in `rows` are in *post-shift* coordinates, so applying the shifts
+    /// first is the contract rather than an optimisation.
     ///
     /// Empty on every drain that did not scroll, which is most of them.
     pub shifts: Vec<Shift>,
@@ -370,22 +344,13 @@ pub struct Delta {
     pub events: Vec<Event>,
     /// Semantic marks whose position changed during this drain, as `(ID, ANCHOR)`.
     ///
-    /// Empty on every drain but a resize, which is the only thing that moves one -- and
-    /// a redraw, which does not move them but destroys the markers naming them; see
-    /// [`Term::touch_all`]. A scroll does neither: rows leave the top and the grid keeps
-    /// its width, so the text
-    /// above a live mark in Emacs' buffer grows by exactly what left the screen and the
-    /// buffer position of everything still on it is unchanged. A *rewrap* re-lays every
-    /// logical line at the new width, and then nothing about the old positions holds --
-    /// which is what this exists to repair, and what it was added for: the fringe marker
-    /// per command, and every other consumer of a command record, drifted off the row it
-    /// described the first time the frame changed width.
+    /// Empty on most drains. A resize fills it, because a rewrap re-lays every logical
+    /// line at the new width and the old buffer positions stop holding; so does a redraw,
+    /// which destroys the markers naming them (see [`Term::touch_all`]); and so does an
+    /// eviction, which moves them by the difference in how the departing row renders.
     ///
-    /// Marks that left the grid during the resize are here too, anchored into this
-    /// drain's scrollback batch: the rewrap can push rows off the top, and a mark on one
-    /// of them is in text Emacs is about to insert rather than on a row it is about to
-    /// rewrite. `anchor_to_lisp` already spells both, so the two cases cost nothing to
-    /// tell apart here.
+    /// Marks that left the grid during a resize are here too, anchored into this drain's
+    /// scrollback batch, which `anchor_to_lisp` already knows how to spell.
     pub marks: Vec<(MarkId, Anchor)>,
 }
 
@@ -422,18 +387,9 @@ pub struct Levels {
 /// One damaged row as a drain reports it: where it is, whether its logical line
 /// continues onto the row below, and the styled runs to rewrite it from.
 ///
-/// A struct rather than the `(usize, Vec<Run>)` pair it grew out of, because `wrapped`
-/// is a third thing that is not either of the other two and a bare triple would have
-/// [`update_to_lisp`](crate::update_to_lisp) reading `.1` and `.2` a screaming distance
-/// from anything saying what they are.
-///
-/// `wrapped` is [`Row::wrapped`](crate::emu::cell::Row::wrapped), which until now left
-/// the emulator only through eviction: the archiver reads it to rejoin a logical line as
-/// it becomes buffer text. On the live grid the same fact was known and never told, so
-/// Emacs saw a screenful of independent lines and had no way to know that two of them
-/// were one. That is the whole of cooked's documented link-detection gap -- a URL broken
-/// across a row boundary matched only as far as the break -- and one bool per damaged
-/// row closes it.
+/// `wrapped` is [`Row::wrapped`](crate::emu::cell::Row::wrapped). Emacs needs it on the
+/// live grid as well as in scrollback, so that a URL broken across a row boundary can be
+/// matched as one string rather than only as far as the break.
 #[derive(Clone, Debug)]
 pub struct DamagedRow {
     pub index: usize,
@@ -443,12 +399,11 @@ pub struct DamagedRow {
 
 /// A reading of everything [`Delta`] carries, cheap enough to take on every read.
 ///
-/// [`Term::feed`] takes one of these either side of a parse and compares them, which is
-/// the whole of "did that produce anything to draw". It has to be a *reading* rather than
-/// a flag set by the code that changes things: the flag would have to be set in every one
-/// of `perform`'s several dozen arms, and the arm that was forgotten would be the one that
-/// stopped repainting. Comparing what a drain would report cannot fall out of step that
-/// way, because the levels are the same [`Levels`] the drain carries.
+/// [`Term::feed`] takes one of these either side of a parse and compares them to decide
+/// whether anything is left to draw. It is a *reading* rather than a flag set by the code
+/// that changes things, because a flag would have to be set in each of `perform`'s dozens
+/// of arms, and a forgotten one would stop repainting. The levels are the same [`Levels`]
+/// the drain carries.
 ///
 /// The queues are counted rather than examined because they only ever grow between
 /// drains. Damage is counted for a subtler reason: it stays up until Emacs drains, so a
@@ -481,16 +436,12 @@ impl Pending {
 
 /// How long a child may hold back a redisplay with DEC mode 2026 before we draw anyway.
 ///
-/// Synchronized output exists so a half-drawn frame is never shown; it is not a licence
-/// to freeze the buffer. A child killed mid-frame never sends the end marker, so without
-/// a cap the last thing the user sees is a partial screen. xterm and contour use 150ms,
-/// kitty 100; the longer of the two is the safer choice on a loaded machine.
+/// Synchronized output exists so a half-drawn frame is never shown, not to freeze the
+/// buffer: a child killed mid-frame never sends the end marker. xterm and contour use
+/// 150ms and kitty 100; the longer is safer on a loaded machine.
 ///
-/// Armed here at every BSU, which makes this a cap on one marker rather than on the frame
-/// a marker is holding. `Notifier::set_sync` is where the difference is settled: a client
-/// that begins its next frame before the last was drawn cannot push the deadline out
-/// again, so this stays the longest the buffer can be held still no matter how the
-/// markers arrive.
+/// Armed at every BSU. `Notifier::set_sync` keeps a client that begins its next frame
+/// before the last was drawn from pushing the deadline out again.
 pub(crate) const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Backlog at which the reader stops pulling from the pty, letting the child block.
@@ -498,26 +449,16 @@ pub const BACKLOG_HIGH_WATER: usize = 8_000;
 
 /// Bytes of pending image payload that count as one unit of [`Term::backlog`].
 ///
-/// A conversion factor, because the backlog is one scalar against one limit and images
-/// are not measured in the same thing as rows and events. At 1KB a unit the cap above
-/// comes to roughly 8MB of undrained pictures, which is the figure to argue with if this
-/// is ever wrong.
+/// A conversion factor, because the backlog is one scalar against one limit. At 1KB a
+/// unit, [`BACKLOG_HIGH_WATER`] comes to roughly 8MB of undrained pictures.
 ///
-/// Why that figure, and not something nearer the megabyte or two that 8000 rows come to:
-/// backpressure and shedding answer two different problems, and this must not take work
-/// away from the one that is free. An animation redrawing in place has its overdrawn
-/// frames shed — see `State::shed_unplaced_images` — which costs the child nothing and
-/// holds at most two payloads however far behind Emacs falls. Throttling that instead
-/// would block the child in `write` and slow the animation down to buy nothing: those
-/// frames were never going to be shown.
-///
-/// So the budget wants to sit above two frames of anything that sheds. `viu`, the case
-/// this was measured on, is 2.1MB a frame — two of those is 4.2MB, comfortably under the
-/// 8MB here. A producer at 4MB a frame would sit on the limit and be throttled
-/// occasionally, which is the right answer at that size rather than a failure of this
-/// one. What the budget is really for is the case shedding cannot touch: many *distinct*
-/// pictures, all still displayed, all genuinely owed to Emacs, arriving faster than they
-/// can be drained.
+/// That figure sits well above what 8000 rows come to because it must not take work away
+/// from shedding. An animation redrawing in place has its overdrawn frames shed (see
+/// `State::shed_unplaced_images`), which holds at most two payloads however far behind
+/// Emacs falls; throttling it instead would slow the animation to buy nothing. `viu` is
+/// 2.1MB a frame, so two frames sit comfortably under 8MB. The budget is for what
+/// shedding cannot touch: many *distinct* pictures, all still displayed, arriving faster
+/// than they can be drained.
 pub(crate) const IMAGE_BACKLOG_UNIT: usize = 1024;
 
 /// Largest OSC payload forwarded to Lisp, in bytes. Well past any real title or
@@ -534,11 +475,9 @@ pub(crate) const MAX_CMDLINE_LEN: usize = 8 << 10;
 /// The longest text one `OSC 66` may carry, which is the spec's own number.
 ///
 /// "the text must be no longer than 4096 bytes. Longer strings than that must be broken
-/// up into multiple escape codes." Not a defensive bound like
-/// [`OSC_PAYLOAD_LIMIT`] — the parser's [`MAX_OSC_RAW`](crate::emu::parser::MAX_OSC_RAW)
-/// is already the wall a hostile stream hits. This is the protocol's, and holding
-/// senders to it is how a sender that has quietly stopped chunking finds out here rather
-/// than in a rendering nobody can explain.
+/// up into multiple escape codes." Not a defensive bound -- the parser's
+/// [`MAX_OSC_RAW`](crate::emu::parser::MAX_OSC_RAW) is that -- but the protocol's, so a
+/// sender that has stopped chunking finds out here rather than in a strange rendering.
 pub(crate) const MAX_TEXT_SIZE_LEN: usize = 4096;
 
 /// Longest sixel body collected from one DCS string.
@@ -554,11 +493,10 @@ const SGR_STACK_LIMIT: usize = 10;
 
 /// Ceiling on the `c=`/`r=` cell span an image placement is honoured for.
 ///
-/// See the comment at its one use in `Term::intern_image`: this bounds how many real
-/// `linefeed`s (and thus scroll-eviction/scrollback-archival passes) a single image
-/// placement can force. 4096 is already far more rows than any legitimate picture
-/// needs — a screen is a few dozen to a few hundred rows — while remaining nowhere
-/// near tight enough to visibly clip anything real.
+/// This bounds how many real `linefeed`s, each a possible scroll and archive, a single
+/// placement can force; see its use in `State::intern_image`. 4096 rows is far more than
+/// any real picture needs and far short of letting one small transmission stall the
+/// reader.
 const MAX_IMAGE_CELL_SPAN: u16 = 4096;
 
 /// A `width=`/`height=` value that is a plain cell count, or 0 for anything else.
@@ -576,11 +514,9 @@ fn plain_cells(value: &str) -> Option<u16> {
 
 /// What `CSI ? 996 n` answers, and what mode 2031 pushes.
 ///
-/// The discriminants are the protocol's own numbers, so that no reporting site spells a
-/// bare `1` or `2`. There is deliberately no third variant: "Emacs has not said yet" is
-/// `Option::None`, kept outside the enum where it cannot be formatted into a reply by
-/// accident. The spec defines these two values and nothing else, so an "unknown" answer
-/// would be one we invented and a child would have no way to read it.
+/// The discriminants are the protocol's own numbers. There is no third variant: "Emacs
+/// has not said yet" is `Option::None`, outside the enum where it cannot be formatted into
+/// a reply, because the spec defines no value a child could read as "unknown".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ColorScheme {
@@ -638,18 +574,14 @@ impl Term {
 
     /// Parse BYTES, reporting whether they changed anything Emacs would draw.
     ///
-    /// The answer is what lets the reader thread not wake Emacs for bytes that turn out
-    /// to be nothing to look at, which is most of them under a graphics protocol: a
-    /// kitty image arrives as megabytes of base64 inside one APC string, and every read
-    /// of it but the last leaves the grid exactly as it was. Measured on `viu` playing a
-    /// gif, 55% of drains carried no rows, no images, no events and no cursor move.
+    /// The answer lets the reader thread avoid waking Emacs for bytes that change nothing,
+    /// which under a graphics protocol is most of them: a kitty image arrives as megabytes
+    /// of base64 in one APC string, and every read of it but the last leaves the grid as
+    /// it was.
     ///
-    /// "Anything Emacs would draw" is [`Delta`]'s own contents, which is why
-    /// [`Pending`] is a field-for-field reading of them rather than a damage flag: a
-    /// [`Delta`] reports the cursor, the alternate screen and the key encoding on every
-    /// drain whether or not a row changed, so a cursor move with no damage is a real
-    /// update — and, in the gif case, the one that has to be *coalesced* rather than
-    /// dropped.
+    /// "Anything Emacs would draw" is [`Delta`]'s contents, which is why [`Pending`] reads
+    /// them field by field rather than checking a damage flag: a cursor move with no
+    /// damage is still a real update.
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
         let before = Pending::of(&self.state);
         self.parser.advance(&mut self.state, bytes);
@@ -667,21 +599,14 @@ impl Term {
     /// Tell the emulator how big one cell is, in pixels.
     ///
     /// Emacs' to measure and ours to answer with. Without it a `width=200px` request
-    /// cannot become a cell count, and the XTWINOPS reports that tools consult before
-    /// deciding whether to draw at all have nothing to say.
+    /// cannot become a cell count, and the XTWINOPS reports that image tools consult have
+    /// nothing to say.
     ///
-    /// Nothing is forgotten when the cell moves, and that is worth stating because it
-    /// used to be. A transmission naming no `c=`/`r=` is measured into cells against the
-    /// metrics of the moment, and the store was dropped whole here so that no id minted
-    /// against the old font could be answered with — every picture the child redrew
-    /// crossed the boundary again, at megabytes a frame, to be remeasured.
-    ///
-    /// `State::intern_image` measures against `self.metrics` at the time of each
-    /// transmission instead, so a recognised id is already laid at the rectangle the
-    /// current font implies and there is nothing stale to protect anyone from. The rows
-    /// already written keep the rectangle they were laid at — it rides every
-    /// [`Placement`](crate::emu::image::Placement) — and `cooked--rescale-deco' re-cuts
-    /// their slices to the new cell, which grows the picture with the text around it.
+    /// Nothing is forgotten when the cell size changes. A transmission is measured into
+    /// cells against the metrics at the time it arrives, and rows already written keep the
+    /// rectangle they were laid at, which rides every
+    /// [`Placement`](crate::emu::image::Placement); `cooked--rescale-deco' re-cuts their
+    /// slices to the new cell.
     pub fn set_cell_metrics(&mut self, metrics: Option<CellMetrics>) {
         self.state.metrics = metrics;
     }
@@ -689,22 +614,16 @@ impl Term {
     /// Resize to ROWS by COLS with cells of METRICS, returning the mode 2048 report owed.
     ///
     /// [`Term::resize`] and [`Term::set_cell_metrics`] together, because the report
-    /// describes both: a font change moves the pixel size with the row count left alone,
-    /// and a child that sizes pictures in pixels is owed that as much as a new width.
-    /// Nothing is owed for a call that changes nothing, and nothing to a child that has
-    /// not set the mode.
+    /// describes both: a font change moves the pixel size with the row count unchanged.
+    /// Nothing is owed for a call that changes nothing, or to a child that has not set the
+    /// mode.
     ///
-    /// The bytes come back rather than being queued as an [`Event::Reply`], for the
-    /// reason [`Term::set_color_scheme`] gives: a resize is Emacs' doing and produces no
-    /// child output, so no drain is coming to carry them. `Session::resize` writes them
-    /// straight after the `TIOCSWINSZ`, which is the point of computing them here: the
-    /// report and the ioctl are read off the one geometry.
+    /// The bytes come back rather than being queued, because a resize produces no child
+    /// output and no drain is coming to carry them. `Session::resize` writes them right
+    /// after the `TIOCSWINSZ`, so the report and the ioctl describe one geometry.
     ///
-    /// A report already queued and not yet drained -- the answer to a `2048 h` the child
-    /// sent a moment ago -- is dropped, since it describes the size this call just
-    /// replaced. Left in, it would reach the child *after* the fresh one, because the
-    /// fresh one leaves at once and the queue waits on the next drain, and the child
-    /// would settle on the old size.
+    /// An undrained report -- the answer to a `2048 h` sent a moment ago -- is dropped,
+    /// because it would reach the child *after* this one and leave it on the old size.
     pub fn set_size(
         &mut self,
         rows: usize,
@@ -734,15 +653,11 @@ impl Term {
     /// Tell the emulator whether Emacs renders light or dark, returning what a subscriber
     /// to mode 2031 is now owed.
     ///
-    /// The bytes come back rather than being pushed as an [`Event::Reply`] because events
-    /// are collected at drain time, and a theme change produces no child output at all --
-    /// nothing wakes the drain, so a subscribed program sitting idle would learn of the
-    /// new theme only when the user next typed. Nor are they written to the pty from
-    /// here, the way an OSC reply is: that path signals on a write error, which is right
-    /// for a query the child is blocking on and wrong for this, which runs from a global
-    /// hook where a child that has just exited is an ordinary race. `cooked--send-if-live'
-    /// is where that policy is already written down, and it is the same route the `996'
-    /// answer leaves through -- one report, one route, one error policy.
+    /// The bytes come back rather than being pushed as an [`Event::Reply`], because a theme
+    /// change produces no child output and nothing would wake a drain; an idle subscriber
+    /// would hear only when the user next typed. Lisp sends them with
+    /// `cooked--send-if-live', since this runs from a global hook where a child that has
+    /// just exited is an ordinary race rather than an error.
     ///
     /// Nothing is owed for a theme reloaded onto itself, and nothing to a child that
     /// never subscribed.
@@ -753,38 +668,28 @@ impl Term {
 
     /// Tell the emulator whether Emacs can show a picture this session transmits.
     ///
-    /// Nothing is owed on a change: none of the three answers it governs is a
-    /// subscription, and a child that asked while the answer was the other one simply
-    /// asks again the next time it starts.
+    /// Nothing is owed on a change: none of the answers it governs is a subscription.
     pub fn set_graphics_shown(&mut self, shown: bool) {
         self.state.graphics_hidden = !shown;
     }
 
     /// Take BYTES as an image and lay it into the grid at the cursor.
     ///
-    /// The two halves of what a transmit-and-display does, together because they share
-    /// the geometry. Interning is content-addressed, so a child redrawing the same
-    /// picture every frame hands the bytes over once; the rest of its transmissions cost
-    /// a placement per cell and nothing else.
-    ///
-    /// Rows are laid top to bottom from the cursor, scrolling when the picture runs past
-    /// the bottom of the screen. The cursor lands at the start of the row below the
-    /// image — `CursorAfterImage::NextLine`, the sixel and iTerm2 disposition; kitty's
-    /// is not reachable from here, because it is the APC handler that knows about `C=`.
+    /// Interning is content-addressed, so a child redrawing the same picture every frame
+    /// hands the bytes over once. Rows are laid top to bottom from the cursor, scrolling
+    /// past the bottom of the screen, and the cursor lands at the start of the row below:
+    /// the sixel and iTerm2 disposition.
     pub fn place_image(&mut self, format: ImageFormat, bytes: &[u8], px: PixelSize) -> ImageId {
         self.state.place_image(format, bytes, px)
     }
 
     /// Emacs has dropped image ID's bytes, so stop believing it has them.
     ///
-    /// Emacs is the only cache -- see [`ImageStore`] -- and this is the one message that
-    /// keeps the module's bookkeeping honest about it. Everything the emulator hangs off
-    /// an id goes at once: the ledger entry and its digest, the geometry, and the
+    /// Emacs is the only cache (see [`ImageStore`]), and this keeps the module's
+    /// bookkeeping honest about it. Everything hung off the id goes at once, including the
     /// client's own name for the picture, so a later `a=p` is answered `ENOENT:image`
-    /// rather than placing cells nothing can draw.
-    ///
-    /// A retransmission of the same bytes afterwards is a new picture as far as the
-    /// module is concerned: a fresh id, and the payload crosses again.
+    /// rather than placing cells nothing can draw. Retransmitting the same bytes later
+    /// mints a fresh id and the payload crosses again.
     pub fn forget_image(&mut self, id: ImageId) {
         self.state.forget_image(id);
     }
@@ -798,13 +703,10 @@ impl Term {
     /// it. The way back from a redisplay that failed part-way and left Emacs' idea of
     /// the screen region disagreeing with ours.
     ///
-    /// Every live mark is reported along with the rows, for the same reason a resize
-    /// reports the ones it moved: Emacs is about to delete the whole screen region and
-    /// build it again, so the markers it holds into that text collapse to the deletion
-    /// point. That the rows come back looking identical does not help -- the markers were
-    /// destroyed by the delete, not by the layout. Repairing them is the difference
-    /// between `cooked-refresh' fixing the picture and it fixing the picture while
-    /// silently taking every command record with it.
+    /// Every live mark is reported along with the rows. Emacs is about to delete the
+    /// screen region and rebuild it, which collapses the markers it holds into that text
+    /// even though the rows come back identical; without the repair, `cooked-refresh' would
+    /// fix the picture and break every command record on screen.
     pub fn touch_all(&mut self) {
         self.state.screen_mut().touch_all();
         self.state.marks_dirty = true;
@@ -821,15 +723,11 @@ impl Term {
 
     /// Drop every grid row above the current prompt, returning how many went.
     ///
-    /// The grid's half of clearing the terminal. Emacs owns the scrollback and deletes
-    /// its own text, but which row the prompt is on is grid arithmetic over state only
-    /// the emulator keeps — [`State::prompt_start`] against [`State::evicted_total`] —
-    /// and asking Emacs to rediscover it from buffer positions would get a two-line
-    /// prompt wrong, cutting at the input row and eating the line above it that the
-    /// shell is still drawing on.
-    ///
-    /// Without OSC 133 there is no prompt to find, so the cursor row stands in: whatever
-    /// the child is on now is the line the user is looking at either way.
+    /// The grid's half of clearing the terminal. Which row the prompt is on is arithmetic
+    /// over state only the emulator keeps -- [`State::prompt_start`] against
+    /// [`State::evicted_total`] -- and rediscovering it from buffer positions would get a
+    /// two-line prompt wrong, cutting at the input row. Without OSC 133 the cursor row
+    /// stands in.
     pub fn clear_to_prompt(&mut self) -> usize {
         self.state.clear_to_prompt()
     }
@@ -884,11 +782,8 @@ impl Term {
 
     /// Test-only: send every character down the per-character print path.
     ///
-    /// The handle a test reaches for to make one `Term` print the slow way while another
-    /// prints the batched way, so the two can be compared character for character. The
-    /// field this sets carries the argument for why that comparison cannot be made any
-    /// other way; see [`State::force_per_character_print`] and
-    /// `batched_and_per_character_printing_agree`.
+    /// Lets a test compare the slow path against the batched one character for character;
+    /// see [`State::force_per_character_print`].
     #[cfg(test)]
     pub(crate) fn force_per_character_print(&mut self) {
         self.state.force_per_character_print = true;
@@ -898,14 +793,11 @@ impl Term {
     ///
     /// Rows and events count themselves. Pictures are counted by weight instead, at
     /// [`IMAGE_BACKLOG_UNIT`] bytes to the unit: a pending image is one item and several
-    /// megabytes, so counting it as an item would let a child hold a gigabyte of frames
-    /// without ever troubling a limit written for rows. That is exactly what it did.
+    /// megabytes, so counting items would let a child queue a gigabyte of frames without
+    /// troubling a limit written for rows.
     ///
-    /// Summed rather than kept as a running total, deliberately. It is the same fact as
-    /// the payloads themselves, and a second copy of a fact is a thing that can disagree
-    /// with the first — which is the shape of the bug the image path has already had once.
-    /// The vector is short (shedding sees to that) and this is called once per read, so
-    /// the sum costs nothing worth a bookkeeping invariant.
+    /// Summed rather than kept as a running total, so there is no second copy of the fact
+    /// to disagree with the payloads. Shedding keeps the vector short, so the sum is cheap.
     pub fn backlog(&self) -> usize {
         let image_bytes: usize = self
             .state
@@ -926,11 +818,9 @@ impl Term {
 
 /// Everything the child negotiated, and nothing else.
 ///
-/// One struct rather than fourteen loose fields on [`State`] because DECSTR and RIS are
-/// defined as "put every negotiated mode back to power-on" -- and with the fields loose,
-/// that definition had to be *restated* as fourteen assignments in `soft_reset`, a list
-/// that could fall out of step with the one in `dec_mode` without anything noticing.
-/// `Modes::default()` is now the whole of the reset, so adding a mode cannot forget it.
+/// One struct because DECSTR and RIS are defined as "put every negotiated mode back to
+/// power-on", and `Modes::default()` says that in one statement, so a new mode cannot be
+/// left out of the reset.
 ///
 /// The `Default` impl is hand-written for one field: DECTCEM starts *set*, so a terminal
 /// powers on with a visible cursor.
@@ -941,22 +831,18 @@ struct Modes {
     /// Whether the last DECSCUSR asked for the blinking spelling of its shape.
     ///
     /// Never rendered -- blink is `blink-cursor-mode`'s, as [`CursorShape`] says -- and
-    /// kept only so that DECRQSS can hand back the setting the child made rather than a
-    /// neighbouring one. A child that saves the cursor style, changes it and restores it
-    /// is owed its own number back; answering `2 q` to a child that set `1 q` would be
-    /// cooked quietly rewriting its request. Starts set, because `CSI 0 SP q` is the
-    /// power-on style and DECSCUSR defines 0 as a blinking block.
+    /// kept only so DECRQSS hands back the setting the child made: a child that set `1 q`
+    /// and saves its style is owed `1 q`, not `2 q`. Starts set, because DECSCUSR defines
+    /// the power-on style 0 as a blinking block.
     cursor_blink: bool,
     /// DEC mode 5, DECSCNM: reverse video across the whole screen.
     ///
-    /// Screen state the child owns, like SGR 7 over every cell, and so not a repeat of
-    /// the reasoning that ignores mode 12: blink is the user's preference, this is what
-    /// the screen looks like. `flash' in our terminfo is a set, a 100ms pause and a
-    /// reset, which is how vim's `visualbell' reaches it.
+    /// Screen state the child owns, like SGR 7 over every cell, unlike mode 12's blink,
+    /// which is the user's preference. `flash' in our terminfo is a set, a 100ms pause and
+    /// a reset, which is how vim's `visualbell' reaches it.
     ///
-    /// Cleared by DECSTR along with everything else here, which the VT510 does not do.
-    /// Kept that way on purpose: `is2' and `rs2' both send DECSTR, and a screen left
-    /// reversed by a child killed mid-flash is exactly what `tput init' and `reset' are
+    /// Cleared by DECSTR, which the VT510 does not do, because `is2' and `rs2' both send
+    /// DECSTR and a screen left reversed by a child killed mid-flash is what `reset' is
     /// typed to fix.
     reverse_screen: bool,
     /// DEC mode 2004. No event: nothing reacts to this. It is read at the one moment it
@@ -965,17 +851,13 @@ struct Modes {
     /// DEC mode 1004: the child wants `CSI I`/`CSI O` when the window gains or loses
     /// focus. Read at the moment focus changes, so it is state rather than a level.
     focus_events: bool,
-    /// DEC mode 2031: the child wants the colour scheme reported again every time it
-    /// changes. The subscription is something the child negotiated and so belongs here;
-    /// the scheme itself is not -- it is Emacs' answer about its own theme -- and lives
-    /// on [`State`], so that a soft reset ends the subscription without also forgetting
-    /// which way the theme points.
+    /// DEC mode 2031: the child wants the colour scheme reported whenever it changes. The
+    /// scheme itself is Emacs' answer and lives on [`State`], so a soft reset ends the
+    /// subscription without forgetting the theme.
     color_scheme_updates: bool,
-    /// DEC mode 2048: the child wants `CSI 48 ; rows ; cols ; hpx ; wpx t` once when it
-    /// subscribes and again on every resize. SIGWINCH does not cross ssh and bytes do, so
-    /// this is how a remote multiplexer learns the size. No event, for the reason 2031
-    /// has none: the report is owed at a resize, which is Emacs' call and not the
-    /// child's, and [`Term::set_size`] is where it is read.
+    /// DEC mode 2048: the child wants `CSI 48 ; rows ; cols ; hpx ; wpx t` when it
+    /// subscribes and on every resize. SIGWINCH does not cross ssh and bytes do, so this is
+    /// how a remote multiplexer learns the size. Read by [`Term::set_size`].
     size_reports: bool,
     /// DEC mode 1007: on the alternate screen, a wheel notch becomes cursor keys. This
     /// is what makes the wheel scroll in `less`, `man` and `git log`.
@@ -995,26 +877,21 @@ struct Modes {
     app_keypad: bool,
     /// xterm's modifyOtherKeys level, or `None` for a level cooked does not honour.
     modify_other_keys: Option<ModifyOtherKeys>,
-    /// Kitty keyboard flag stacks, one per screen. See [`KittyFlags::HONOURED`] for which bits are read.
+    /// Kitty keyboard flag stacks, one per screen; see [`KittyFlags::HONOURED`] for which
+    /// bits are read.
     ///
-    /// Two because the spec says the screens "must maintain their own, independent,
-    /// keyboard mode stacks", and the reason is the failure one shared stack had. A
-    /// full-screen program pushes after it enters the alternate screen; if it dies
-    /// without popping, the shell it drops back to was left reporting keys in a protocol
-    /// it never asked for. With a stack per screen, `?1049l` is the whole of the cleanup.
-    ///
-    /// Nothing clears the alternate stack on the way back in, which is kitty's own
-    /// behaviour: a program that leaves the alternate screen to run a command and returns
-    /// finds its flags where it left them, as it would in kitty.
+    /// The spec says the screens "must maintain their own, independent, keyboard mode
+    /// stacks". A full-screen program pushes after entering the alternate screen, and if
+    /// it dies without popping, a shared stack would leave the shell reporting keys in a
+    /// protocol it never asked for; with one per screen, `?1049l` is the cleanup. As in
+    /// kitty, nothing clears the alternate stack on the way back in.
     kitty_keys: PerScreen<KittyStack>,
     /// LNM (ANSI mode 20): LF also returns the carriage.
     newline_mode: bool,
     /// XTPUSHSGR's stack, innermost last, at most [`SGR_STACK_LIMIT`] deep.
     ///
-    /// Here rather than beside [`State::pen`], because what a reset has to do with it is
-    /// what it does with everything else on this struct. A child that sends DECSTR or RIS
-    /// has said "start over", and a pop after that must not hand it back a pen from
-    /// before it said so.
+    /// Here rather than beside [`State::pen`] so a reset clears it: a pop after DECSTR or
+    /// RIS must not hand back a pen from before the child said "start over".
     pen_stack: Vec<PushedPen>,
     /// XTSAVE's slots: one saved value per private mode, overwritten by a second save.
     ///
@@ -1105,29 +982,21 @@ struct State {
     metrics: Option<CellMetrics>,
     /// The light/dark scheme Emacs reports, for answering `CSI ? 996 n`.
     ///
-    /// Emacs' to know and ours to answer with, exactly as `metrics` is: the theme
-    /// resolves against the buffer's faces, which nothing here can see. Silent until
-    /// Emacs has reported one, on the same grounds as an unreported cell size -- see the
-    /// `14t`/`16t` guards in csi.rs -- and one ground stronger, since there is no number
-    /// for "I do not know" that would not have to be invented.
-    ///
-    /// On [`State`] rather than [`Modes`] for the same reason `metrics` is: it is not
-    /// something the child negotiated, so a soft reset must not clear it.
+    /// Emacs' to know and ours to answer with, as `metrics` is: the theme resolves against
+    /// the buffer's faces. Silent until Emacs reports one, since the protocol has no number
+    /// for "unknown". On [`State`] rather than [`Modes`] because the child did not
+    /// negotiate it, so a soft reset must not clear it.
     color_scheme: Option<ColorScheme>,
     /// Emacs has said nothing this session transmits can be shown: images are off, or
     /// every window on the buffer is on a terminal frame.
     ///
-    /// What it changes is what the child is *told*, not what the grid does with a
-    /// picture that arrives anyway -- DA1 drops its `4`, XTSMGRAPHICS answers failure and
-    /// a kitty `a=q` probe is refused -- because every producer worth the name probes one
-    /// of those first and has a half-block mode to fall back to, which is a picture where
-    /// the alternative is a blank rectangle. `OSC 1337 File=` is the exception and is
-    /// dropped outright, since it has no probe to answer and so no other way to be told.
+    /// It changes what the child is *told* -- DA1 drops its `4`, XTSMGRAPHICS answers
+    /// failure, a kitty `a=q` probe is refused -- because producers probe first and fall
+    /// back to half blocks, which show something where a picture would be a blank
+    /// rectangle. `OSC 1337 File=` has no probe, so it is dropped outright.
     ///
-    /// Negative so the default is the answer cooked always gave: the core cannot see a
-    /// frame, and Lisp reports the truth as the session starts. On [`State`] rather than
-    /// [`Modes`] for the reason `metrics` is -- no reset the child sends can change what
-    /// Emacs is able to display.
+    /// Negative so the default claims graphics until Lisp reports otherwise at session
+    /// start. Not in [`Modes`], because no reset can change what Emacs can display.
     graphics_hidden: bool,
     /// Rows that have ever left the top of the primary screen. Screen row 0 is this row,
     /// counting from the beginning of the session, which is what makes an [`Anchor`]
@@ -1152,12 +1021,10 @@ struct State {
     /// Test-only: force every character through [`State::print`] rather than the batched
     /// [`Perform::print_str`] path.
     ///
-    /// It exists because the two paths are only worth having if they are indistinguishable,
-    /// and nothing else can make a `Term` demonstrate that. Feeding a byte at a time does
-    /// not do it -- `print_str` still runs, just with runs of length one, so a test built
-    /// that way compares the fast path against itself and passes no matter how wrong it
-    /// is. That was the first attempt, and it survived deliberately breaking `write_run`
-    /// twice. See `batched_and_per_character_printing_agree`.
+    /// The two paths are only worth having if they are indistinguishable, and nothing else
+    /// can show that: feeding a byte at a time still runs `print_str`, with runs of length
+    /// one, so it compares the fast path against itself. See
+    /// `batched_and_per_character_printing_agree`.
     ///
     /// `#[cfg(test)]`, so the field and its test do not exist in a release build.
     #[cfg(test)]
@@ -1167,19 +1034,14 @@ struct State {
     underline: Color,
     /// The `OSC 8` hyperlink the child currently has open, if any.
     ///
-    /// Beside [`State::underline`] and read the same way in `print`, and the resemblance
-    /// stops exactly there: an underline colour is `SGR 58`, so `SGR 0` clears it, while
-    /// a hyperlink is *not* an SGR attribute and no rendition change may close one. Real
-    /// terminals hold it open across arbitrary colour changes until an explicit
-    /// `OSC 8 ; ; ST`, which is what makes the common shape — a link the program colours
-    /// as it prints it — work at all. See `hyperlink` for what does close it.
+    /// Read the same way as [`State::underline`] in `print`, but unlike an underline colour
+    /// it is not an SGR attribute, so no rendition change closes it. Terminals hold it open
+    /// until an explicit `OSC 8 ; ; ST`, which is what lets a program colour a link as it
+    /// prints it. See `hyperlink` for what does close it.
     ///
-    /// One field for both screens, exactly as `pen` and `underline` are: an open
-    /// hyperlink is a property of the byte stream, not of the grid being written to, so
-    /// a child that opens one and then switches to the alternate screen goes on writing
-    /// it there. No real terminal saves and restores it across 1049 either, and the
-    /// alternative — closing it on the switch — would silently drop the link from a
-    /// full-screen program that opened it just before taking the screen.
+    /// One field for both screens, like `pen`: an open hyperlink belongs to the byte
+    /// stream, so a child that opens one and then takes the alternate screen goes on
+    /// writing it there.
     link: Option<LinkId>,
     /// Where the shell last said its prompt begins (OSC 133;A), in [`Anchor`] coordinates.
     ///
@@ -1196,13 +1058,10 @@ struct State {
     /// Whether this drain owes Emacs the position of every mark still on the grid.
     ///
     /// Set by a resize, which moves them; by a redraw, which destroys the markers naming
-    /// them; and by an eviction, which moves them by however much the row that left
-    /// renders differently as scrollback than it did as a live row. A flag rather than
-    /// the positions themselves, because the positions are only true at the moment they
-    /// are read: the child is signalled on a resize and answers by redrawing, so a
-    /// snapshot taken when the grid was re-laid is stale by however many rows it scrolls
-    /// before the drain -- which made the repair land a row low, intermittently,
-    /// depending on how the redraw fell across drains.
+    /// them; and by an eviction, which moves them by however much the departing row
+    /// renders differently as scrollback. A flag rather than the positions, because the
+    /// child answers a resize by redrawing, and a snapshot taken at the resize would be
+    /// stale by however many rows it scrolls before the drain.
     marks_dirty: bool,
     /// Marks that have left the grid since the last drain, with the absolute rows they
     /// left on.
@@ -1215,21 +1074,19 @@ struct State {
     modes: Modes,
     /// What DECSC saved of [`Modes::charsets`], for the primary screen and the alternate.
     ///
-    /// Beside the cursor [`Screen::saved`] holds and with the same lifetime, but here
-    /// rather than there, because the charsets are the stream's and not a grid's; the
-    /// grid only decides which save a DECRC reads. VT100 DECSC is defined to save the
-    /// designations and the shift along with the position, and a child that draws a box
-    /// inside a save/restore pair relies on getting its text set back.
+    /// VT100 DECSC saves the designations and the shift along with the cursor, and a child
+    /// that draws a box inside a save/restore pair relies on getting its text set back.
+    /// Here rather than on the [`Screen`] with the saved cursor, because the charsets
+    /// belong to the stream; the screen only decides which save a DECRC reads.
     saved_charsets: PerScreen<Option<Charsets>>,
 }
 
 /// A 94-character set that can be designated into one of G0-G3.
 ///
-/// Only the sets anything still emits. Everything else a child can name -- the national
-/// replacement sets, DEC Supplemental, the 96-character Latin sets -- designates ASCII,
-/// which is xterm's answer for a set it was built without and the right one here: the
-/// stream is UTF-8, so a child that wants a pound sign or an umlaut has a far better way
-/// to ask for it, and ASCII is the only reading that cannot turn text into boxes.
+/// Only the sets anything still emits. Everything else -- the national replacement sets,
+/// DEC Supplemental, the 96-character Latin sets -- designates ASCII, as xterm does for a
+/// set it lacks: the stream is UTF-8, so a child wanting an umlaut has a better way to ask,
+/// and ASCII is the one reading that cannot turn text into boxes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum Charset {
     #[default]
@@ -1264,13 +1121,9 @@ impl Charset {
 /// The four designation slots and the shifts between them, as SCS, SO/SI and the
 /// ISO 2022 shifts leave them.
 ///
-/// This replaced a single `dec_graphics` flag that `ESC ( 0` and SO both set, and
-/// `ESC ( B` and SI both cleared. That was right for the common case, which is ncurses'
-/// `smacs` designating graphics into G0, and wrong the moment the two mechanisms met: SI
-/// after `ESC ( 0` drew letters although G0 still held graphics, and SO drew boxes
-/// whatever G1 held -- including ASCII, which is what G1 powers on with in xterm. A
-/// locking shift chooses a *slot*, and what the slot holds is a separate question, so
-/// the two are kept separately.
+/// A locking shift chooses a *slot*, and what the slot holds is a separate question, so
+/// the two are kept apart. A single graphics flag set by both `ESC ( 0` and SO would draw
+/// letters for SI after `ESC ( 0`, although G0 still holds graphics.
 ///
 /// GL only. There is no GR to invoke anything into: the stream is UTF-8, so the bytes a
 /// GR set would decode are continuation bytes of something else.
