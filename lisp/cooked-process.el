@@ -124,6 +124,7 @@
 
 (require 'cl-lib)
 (require 'cooked)
+(require 'cooked-session)
 
 (cooked--declare-core)
 

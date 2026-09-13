@@ -37,6 +37,7 @@
 (require 'cooked-mode-line)
 (require 'cooked-secret)
 (require 'cooked-bell)
+(require 'cooked-session)
 (require 'comint)
 
 (cooked--declare-core)
