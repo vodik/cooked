@@ -717,6 +717,34 @@ snippets sent the path raw while this decoded it, so that directory arrived as
               (should (equal default-directory (file-name-as-directory awkward))))))
       (delete-directory parent t))))
 
+(ert-deftest cooked-osc-7-repeated-report-does-no-work ()
+  "The shell reports its directory at every prompt, moved or not.  An identical
+report does no stat and no rename -- unless \\[cd] in the buffer has moved
+`default-directory\=' since, in which case the report puts it back."
+  (let ((here (file-name-as-directory (make-temp-file "cooked-osc7-" t)))
+        (stats 0)
+        (renames 0))
+    (unwind-protect
+        (with-temp-buffer
+          (cooked-mode)
+          (let ((url (list (format "file://%s%s" (system-name) here))))
+            (cl-letf* ((real-directory-p (symbol-function 'file-directory-p))
+                       ((symbol-function 'file-directory-p)
+                        (lambda (name) (cl-incf stats) (funcall real-directory-p name)))
+                       (real-rename (symbol-function 'cooked--update-buffer-name))
+                       ((symbol-function 'cooked--update-buffer-name)
+                        (lambda () (cl-incf renames) (funcall real-rename))))
+              (cooked--osc-cwd url)
+              (should (equal default-directory here))
+              (should (equal (list stats renames) '(1 1)))
+              (dotimes (_ 5) (cooked--osc-cwd url))
+              (should (equal (list stats renames) '(1 1)))
+              (setq default-directory "/")
+              (cooked--osc-cwd url)
+              (should (equal default-directory here))
+              (should (equal (list stats renames) '(2 2))))))
+      (delete-directory here t))))
+
 ;; The OSC 7 remote branch.  Every test here asserts about a *string*: setting
 ;; `default-directory' to a TRAMP name opens nothing, and `file-remote-p' is pure
 ;; parsing, so the whole group runs without a network and must keep doing so --

@@ -1099,6 +1099,13 @@ and a fully qualified one in the prefix agree about being one machine."
     ;; this function exists not to do.  A slash needs neither.
     (concat prefix path (unless (string-suffix-p "/" path) "/"))))
 
+(defvar-local cooked--directory-report nil
+  "The last OSC 7 URL acted on, with the `default-directory\=' it left, or nil.
+
+A cons of the two strings.  The shell sends its report at every prompt whether
+or not it moved, so most reports repeat the one before; see
+`cooked--set-directory\=' for why the directory is kept beside the URL.")
+
 (defun cooked--set-directory (url)
   "Track the child's directory from an OSC 7 URL.
 
@@ -1131,8 +1138,16 @@ so there is one encoding on the wire and one decoding here.
 Ends by offering the buffer a rename, foreign host or not: `cooked--host\='
 changed either way, and a `cooked-buffer-name\=' with %h or %p in it wants to
 know about both kinds of move, not just the ones that touch
-`default-directory\='."
-  (pcase-let ((`(,host . ,path) (cooked--parse-file-url url)))
+`default-directory\='.
+
+A report identical to the last one does nothing: no `file-directory-p\=', which
+is a stat per prompt, and no rename.  The directory it left is part of what
+must match, because \\[cd] in the buffer moves `default-directory\=' without the
+shell moving, and the shell\='s next report of the same place has to put it
+back."
+  (pcase-let ((`(,host . ,path)
+               (unless (equal cooked--directory-report (cons url default-directory))
+                 (cooked--parse-file-url url))))
     (when path
       (setq cooked--host host)
       (if (cooked--foreign-host-p)
@@ -1146,7 +1161,8 @@ know about both kinds of move, not just the ones that touch
                     (dir (file-name-as-directory name)))
           (when (file-directory-p dir)
             (setq default-directory dir))))
-      (cooked--update-buffer-name))))
+      (cooked--update-buffer-name)
+      (setq cooked--directory-report (cons url default-directory)))))
 
 ;;;; file: URLs, from OSC 8 and from the text
 
