@@ -147,6 +147,15 @@ impl Perform for State {
                     .charsets
                     .designate(usize::from(slot - b'('), byte);
             }
+            // The 96-character designators, into G1-G3 (there is no G0 form). Every
+            // 96-character set is a Latin supplement, which this terminal lacks, so each
+            // designates ASCII: ignoring one would leave G1 holding whatever was there,
+            // and a `ESC ) 0` from earlier would go on drawing boxes after SO.
+            (Some(slot @ (b'-' | b'.' | b'/')), _) => {
+                self.modes
+                    .charsets
+                    .designate_ascii(usize::from(slot - b','));
+            }
             // LS2 and LS3, and SS2 and SS3: G2 or G3 into GL until told otherwise, or for
             // the next character alone.
             (None, b'n') => self.modes.charsets.lock(2),

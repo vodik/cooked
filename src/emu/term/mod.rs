@@ -1407,6 +1407,13 @@ impl Charsets {
         }
     }
 
+    /// Put ASCII in SLOT, whatever it held, as a 96-character designation does.
+    pub(super) fn designate_ascii(&mut self, slot: usize) {
+        if let Some(set) = self.slots.get_mut(slot) {
+            *set = Charset::Ascii;
+        }
+    }
+
     pub(super) fn lock(&mut self, slot: usize) {
         self.gl = slot.min(3);
     }

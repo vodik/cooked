@@ -426,6 +426,20 @@ fn g2_and_g3_lock_and_single_shift() {
 }
 
 #[test]
+fn a_96_character_designation_puts_ascii_in_its_slot() {
+    // `ESC - A` is Latin-1 into G1, not UK: the final byte means another set under a
+    // 96-character designator, and every such set designates ASCII here.
+    for (designator, shift) in [(b'-', &b"\x0e"[..]), (b'.', b"\x1bn"), (b'/', b"\x1bo")] {
+        let slot = designator - b',' + b'(';
+        let mut input = vec![0x1b, slot, b'0', 0x1b, designator, b'A'];
+        input.extend_from_slice(shift);
+        input.extend_from_slice(b"q#");
+        let t = term(2, 10, &input);
+        assert_eq!(text(&t, 0), "q#", "ESC {}", designator as char);
+    }
+}
+
+#[test]
 fn charsets_are_reset_by_decstr_and_restored_by_decrc() {
     let t = term(2, 10, b"\x1b)0\x0e\x1b[!pq");
     assert_eq!(text(&t, 0), "q", "DECSTR puts G0 back in GL, holding ASCII");
