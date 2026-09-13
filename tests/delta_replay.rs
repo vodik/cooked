@@ -49,6 +49,16 @@ use std::sync::{LazyLock, Mutex};
 const MAX_ROWS: usize = 8;
 const MAX_COLS: usize = 12;
 
+/// How many renditions the replayed terminal holds before it collects the ids nothing
+/// holds, where an ordinary one holds four thousand.
+///
+/// Small so that collections happen every few pens rather than never. Whether an id is
+/// held is decided by a hand-kept list of roots, `State::collect_styles`, and a holder
+/// left off the list has its id reused under it; at this size, removing any of the grids,
+/// the copy of what Emacs shows, or the scrollback waiting to be drained from that list
+/// fails a property within the default case count.
+const STYLE_LIMIT: usize = 4;
+
 // ---------------------------------------------------------------------------
 // The script
 // ---------------------------------------------------------------------------
@@ -273,11 +283,30 @@ fn noise() -> impl Strategy<Value = Vec<u8>> {
     prop::collection::vec(any::<u8>(), 0..12)
 }
 
+/// A few characters, each under a pen of its own: a syntax-highlighted line, or a
+/// gradient drawn a cell at a time.
+///
+/// Here for the rendition table rather than the grid. Every pen is a rendition the store
+/// has to give an id, and the replayed terminals hold only [`STYLE_LIMIT`] before they
+/// collect, so a line of these frees ids and hands them out again while rows, the copy of
+/// what Emacs holds, and scrollback still name the old ones.
+fn painted() -> impl Strategy<Value = Vec<u8>> {
+    prop::collection::vec((sgr(), printable()), 1..8).prop_map(|cells| {
+        let mut bytes = Vec::new();
+        for (pen, ch) in cells {
+            bytes.extend(pen);
+            bytes.extend_from_slice(ch.to_string().as_bytes());
+        }
+        bytes
+    })
+}
+
 /// One write's worth of bytes.
 fn payload() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![
         5 => text(),
         2 => sgr(),
+        2 => painted(),
         3 => control(),
         3 => repaint(),
         3 => rewrite(),
@@ -361,11 +390,31 @@ fn save_resize_restore() -> impl Strategy<Value = Vec<Step>> {
     })
 }
 
+/// A line drawn, drained, then erased and drawn again in another pen before the next drain:
+/// a menu's selection moving, a status line changing colour.
+///
+/// The shape that reaches a collection of the rendition table while only the copy of what
+/// Emacs shows still holds the old pen's id. The erase leaves the grid without it, so the
+/// new pen can be handed the same id for the same characters in the same cells, and a
+/// copy the collection did not mark then calls the row unchanged.
+fn recolour() -> impl Strategy<Value = Vec<Step>> {
+    let lines = vec!["abcdefgh", "hello", "x"];
+    (sgr(), sgr(), prop::sample::select(lines)).prop_map(|(first, second, line)| {
+        let draw = |prefix: &[u8], pen: Vec<u8>, drain| Step::Write {
+            bytes: [prefix, &pen, line.as_bytes()].concat(),
+            splits: Vec::new(),
+            drain,
+        };
+        vec![draw(b"\x1b[H", first, true), draw(b"\x1b[H\x1b[2K", second, false)]
+    })
+}
+
 fn script() -> impl Strategy<Value = Vec<Step>> {
     let group = prop_oneof![
         10 => write_step().prop_map(|s| vec![s]),
         2 => resize_step().prop_map(|s| vec![s]),
         1 => alt_cycle(),
+        1 => recolour(),
         1 => save_resize_restore(),
         1 => Just(vec![Step::ForgetHistory]),
         1 => (0u8..MAX_ROWS as u8).prop_map(|row| vec![Step::Trim { row }]),
@@ -458,6 +507,12 @@ struct Replay {
     ///
     /// What `term` leaves out of a drain is checked against this: every row it skips
     /// must be one the reference sent with exactly the runs the shadow already holds.
+    ///
+    /// Its rendition table is also the ordinary size, while `term`'s collects once
+    /// [`STYLE_LIMIT`] renditions are live, so every row both send is a comparison of what
+    /// a terminal that reuses ids draws against one that never does. An id freed while
+    /// something still named it draws another rendition there, and shows up as a row the
+    /// two sent differently.
     reference: Term,
     rows: usize,
     cols: usize,
@@ -481,7 +536,7 @@ impl Replay {
     /// trimmed out of `Row::runs`.
     fn new(rows: usize, cols: usize) -> Self {
         Self {
-            term: Term::new(rows, cols),
+            term: Term::with_style_limit(rows, cols, STYLE_LIMIT),
             reference: Term::new(rows, cols),
             rows,
             cols,
@@ -938,3 +993,4 @@ proptest! {
         );
     }
 }
+
