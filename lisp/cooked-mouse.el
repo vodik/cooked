@@ -97,6 +97,9 @@ read.")
   (let ((map (make-sparse-keymap)))
     (dolist (event cooked--mouse-events)
       (define-key map (vector event) #'cooked-mouse-event))
+    ;; Reached only where `track-mouse' is on outside a gesture, which cooked
+    ;; arranges only under `cooked-mouse-hover-motion'; see `cooked-mouse-hover'.
+    (define-key map [mouse-movement] #'cooked-mouse-hover)
     map)
   "Mouse bindings for when the child has asked to receive them.
 
@@ -174,7 +177,8 @@ DEC mode 1003: report the pointer whether or not a button is held.
 
 Kept apart from `drag\=' even though cooked drives both from the same tracking
 loop, because the child asked two different questions and `cooked--mouse-track\='
-can only honestly answer one of them; see its docstring.")
+can only honestly answer one of them; see its docstring.  The other one is
+`cooked-mouse-hover\=', and only under `cooked-mouse-hover-motion\='.")
   (pixels nil :documentation "\
 DEC mode 1016: SGR reports carry the pointer\='s pixel instead of its cell.
 
@@ -254,6 +258,47 @@ in for a release the pointer carried off the screen, and it is what makes motion
 reporting affordable -- Emacs manufactures a `mouse-movement' event per pixel,
 and the child only cares about the ones that changed cell.")
 
+(defvar-local cooked--mouse-tracking nil
+  "Non-nil while `cooked--mouse-track' is following a gesture in this buffer.
+
+What keeps `cooked--update-hover-tracking' from writing the variable
+`track-mouse' under a binding it does not own.  The macro of the same name sets
+the variable from C and restores the old value on the way out, into whichever
+binding is current at that moment -- so a drain that made the variable
+buffer-local mid-drag would have the restore land in the new local binding,
+leaving the global value the macro had set stuck at t and every buffer in the
+session generating motion events nobody asked for.")
+
+(defcustom cooked-mouse-hover-motion nil
+  "Whether to report the pointer to a child that asked for any-motion (1003).
+
+Off by default, and not because the reports are expensive -- one per cell
+crossed, and only while the pointer is actually moving.  The cost that needs
+opting into is Emacs\=' rather than cooked\='s: the only way to receive motion
+with no button held is to leave the variable `track-mouse' on for as long as
+the child wants it, and each `mouse-movement' event Emacs then manufactures is a
+full turn of the command loop, with `pre-command-hook' and `post-command-hook'
+and a redisplay behind it.  Emacs already batches those to one per glyph crossed
+unless `mouse-fine-grained-tracking' is set, which is the same granularity the
+child wants, so the turns are bounded by how far the pointer travels.
+
+Off, a 1003 child is still told where the pointer goes while a button is held,
+which is the half `cooked--mouse-track' serves unconditionally.  On, programs
+that highlight what is under the pointer -- htop with its mouse support, menus
+in TUI toolkits -- see it move without a click.
+
+The variable is set buffer-locally, and only in a terminal whose child both
+asked for 1003 and currently has the mouse, so nothing changes in any other
+buffer.  Set through customize and it reaches live terminals at once."
+  :type 'boolean
+  :group 'cooked
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         ;; Guarded because `custom-declare-variable' runs this at load, before
+         ;; the function below exists.
+         (when (fboundp 'cooked--update-hover-tracking)
+           (cooked--dolist-buffers (cooked--update-hover-tracking)))))
+
 (defcustom cooked-alternate-scroll-lines 3
   "Cursor keys sent per wheel notch under alternate scroll (DEC mode 1007).
 Three is xterm's figure."
@@ -286,7 +331,27 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
   ;; The wheel outlives all three of those conditions: an alternate screen is a
   ;; rectangle whether or not the child wanted the mouse, and whether or not the
   ;; keyboard is suspended for a peek.  See `cooked--wheel-map'.
-  (setq cooked--wheel-grab (and cooked--alt (not cooked--mouse-grab) t)))
+  (setq cooked--wheel-grab (and cooked--alt (not cooked--mouse-grab) t))
+  (cooked--update-hover-tracking))
+
+(defun cooked--update-hover-tracking ()
+  "Turn the variable `track-mouse' on here exactly while hover is to be reported.
+
+That is: the user opted in with `cooked-mouse-hover-motion\=', the child asked
+for any-motion, and it has the mouse -- `cooked--mouse-grab\=' rather than
+`enabled\=', so a peek or a prompt that hands clicks back to Emacs hands the
+pointer back too.
+
+Off means the local binding is removed rather than set to nil, so that the
+global value is what governs again and a buffer that never had hover on never
+acquires a local binding it has no use for.  Skipped while a gesture is being
+followed; `cooked--mouse-track' calls this again once it has let go of the
+variable.  See `cooked--mouse-tracking\='."
+  (unless cooked--mouse-tracking
+    (if (and cooked-mouse-hover-motion cooked--mouse-grab
+             (cooked-mouse-state-motion cooked--mouse-state))
+        (setq-local track-mouse t)
+      (kill-local-variable 'track-mouse))))
 
 (defun cooked--mouse-cell (posn)
   "Screen row and column of POSN, or nil if it is outside the screen.
@@ -364,11 +429,12 @@ claim that is not invented."
                     (+ cooked--mouse-x10-offset 1 col)
                     (+ cooked--mouse-x10-offset 1 row))))))
 
-(defun cooked--send-mouse (button row col pressed &optional offset)
+(defun cooked--send-mouse (button row col pressed &optional offset keep-region)
   "Send one report for BUTTON at ROW/COL, PRESSED or not, and drop the region.
 
 OFFSET is where in the cell the pointer is, for a child reporting pixels; see
-`cooked--mouse-report\='.
+`cooked--mouse-report\='.  With KEEP-REGION, leave the region alone; only hover
+motion asks for that.
 
 Deactivating the mark is the point of routing every report through here.  A
 click that the child answers is the child\='s click, and leaving a region behind
@@ -383,8 +449,14 @@ report fired while evil is in visual state says so to evil as well.  A bare
 `deactivate-mark\=' happens to do the right thing from here -- evil reads
 `this-command\=', and there is one -- but only by depending on a fact about the
 caller that the drain, which clears the same selection for the same reason, does
-not share.  One answer for both beats two that agree by accident."
-  (cooked--deactivate-mark)
+not share.  One answer for both beats two that agree by accident.
+
+Hover is the exception because it is not a click.  The pointer drifting across
+the window after a shifted drag has selected text -- the escape hatch for
+selecting out of a program that grabbed the mouse -- would otherwise take the
+selection away before it could be copied."
+  (unless keep-region
+    (cooked--deactivate-mark))
   (setq cooked--mouse-last-cell (cons row col))
   (cooked--send-to-child (cooked--mouse-report button row col pressed offset)))
 
@@ -448,9 +520,9 @@ OFFSET is passed on to `cooked--send-mouse\='."
         (t (setq cooked--mouse-held (delq button cooked--mouse-held))))
   (cooked--send-mouse button row col pressed offset))
 
-(defun cooked--report-motion (row col &optional offset)
+(defun cooked--report-motion (row col &optional offset keep-region)
   "Report the pointer arriving at ROW/COL, if it is a cell it was not already in.
-OFFSET is passed on to `cooked--send-mouse\='.
+OFFSET and KEEP-REGION are passed on to `cooked--send-mouse\='.
 
 `cooked--mouse-motion-bit\=' is added to the button being dragged, or to
 `cooked--mouse-no-button\=' where nothing is held.  Suppressing
@@ -460,7 +532,7 @@ receive several dozen identical reports per cell crossed."
   (unless (equal cooked--mouse-last-cell (cons row col))
     (cooked--send-mouse (+ cooked--mouse-motion-bit
                            (or (car cooked--mouse-held) cooked--mouse-no-button))
-                        row col t offset)))
+                        row col t offset keep-region)))
 
 (defun cooked--mouse-track (window)
   "Follow the pointer into the child until the gesture ends, over WINDOW.
@@ -476,11 +548,25 @@ Whatever ends the loop is pushed back rather than acted on, so the release
 returns through `cooked-mouse-event\=' by its ordinary binding and there is only
 one place that knows how to report a button coming up.
 
-Only the drag half of 1003 is served: any-motion with no button down would mean
-tracking the pointer for as long as the child asks, which costs an event per
-pixel across the whole frame whether or not the user is doing anything.  A
-`track-mouse\=' bounded by a gesture is the affordable part, and it is the part
-every 1003 client also gets from 1002."
+Only the drag half of 1003 is served here: any-motion with no button down means
+tracking the pointer for as long as the child asks, which is a command-loop turn
+per glyph crossed anywhere in the frame whether or not the user is doing
+anything.  A `track-mouse\=' bounded by a gesture is the affordable part, and it
+is the part every 1003 client also gets from 1002; the rest is
+`cooked-mouse-hover\=', behind `cooked-mouse-hover-motion\='.
+
+The form\='s own binding of `track-mouse\=' is why `cooked--mouse-tracking\=' is
+set around it, and why hover tracking is recomputed after it: a drain during the
+drag may have changed what the child wants, and the update it would have made
+was skipped."
+  (setq cooked--mouse-tracking t)
+  (unwind-protect
+      (cooked--mouse-track-1 window)
+    (setq cooked--mouse-tracking nil)
+    (cooked--update-hover-tracking)))
+
+(defun cooked--mouse-track-1 (window)
+  "The loop of `cooked--mouse-track\=' over WINDOW, inside `track-mouse\='."
   (track-mouse
     (let (event)
       (while (progn (setq event (read-event))
@@ -494,6 +580,47 @@ every 1003 client also gets from 1002."
               (cooked--report-motion (car cell) (cdr cell)
                                      (cooked--mouse-offset posn))))))
       (push event unread-command-events))))
+
+(defun cooked-mouse-hover ()
+  "Report the pointer moving with no button held to a child that asked for 1003.
+
+Bound to `mouse-movement\=' in `cooked--mouse-map\=', which Emacs delivers
+outside a gesture only where `track-mouse\=' is on, which
+`cooked--update-hover-tracking\=' arranges only under
+`cooked-mouse-hover-motion\='.  A movement during a drag never reaches here:
+`cooked--mouse-track\=' reads those itself.
+
+The buffer under the pointer is the one asked, for the reason
+`cooked-mouse-event\=' gives -- the binding was found there but the command runs
+in whichever buffer was current -- and it is asked again whether it wants
+motion, since some other package leaving `track-mouse\=' on globally would
+otherwise deliver hover to a child the user never opted into.  Declined
+movements go to the binding Emacs would have used, which in a stock global map
+is `ignore-preserving-kill-region\='.
+
+A pointer over no text -- past the last row, over the fringe -- reports nothing
+rather than a cell it is not in.  Repeats of the last cell are dropped by
+`cooked--report-motion\=', which is the coalescing the task asks for; Emacs
+itself generates at most one event per glyph crossed, but not only for glyphs
+of this window.
+
+`this-command\=' is handed back to `last-command\=' so that a movement between
+two commands is invisible to anything asking what ran before -- a `kill-region\='
+followed by another still appends, as it would with the pointer at rest."
+  (interactive)
+  (let* ((event last-input-event)
+         (posn (event-start event))
+         (target (cooked--mouse-buffer (posn-window posn))))
+    (setq this-command last-command)
+    (if (not (and cooked-mouse-hover-motion target
+                  (buffer-local-value 'cooked--mouse-grab target)
+                  (cooked-mouse-state-motion
+                   (buffer-local-value 'cooked--mouse-state target))))
+        (cooked--mouse-fallback event)
+      (with-current-buffer target
+        (when-let* ((cell (cooked--mouse-cell posn)))
+          (cooked--report-motion (car cell) (cdr cell)
+                                 (cooked--mouse-offset posn) t))))))
 
 (defun cooked--alt-scroll-keys (button)
   "Cursor keys standing in for a wheel notch of BUTTON.

@@ -1895,6 +1895,148 @@ holding a button forever, and the region it never asked for appeared in one jump
         (should (string-match-p (format "\\[<0;%d;%dM" (1+ (cdr a)) (1+ (car a)))
                                 (cooked-tests--text)))))))
 
+(defconst cooked-tests--hover-child
+  '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1003h\\033[?1006h'; \
+                    printf 'alpha\\r\\nbravo'; stty raw -echo; cat -v")
+  "A child on the alt screen asking for any-motion reports in SGR.
+
+Without the tty's own echo, so that one report is one match in the text.")
+
+(ert-deftest cooked-hover-tracking-follows-the-option-and-the-child ()
+  "`track-mouse' is on in a terminal only while the user opted in, the child
+asked for 1003 and the child has the mouse -- and off means no local binding at
+all, so the global value governs everywhere else."
+  (cooked-tests--with-session cooked-tests--hover-child
+    (should (cooked-tests--settle
+             (lambda () (cooked-mouse-state-motion cooked--mouse-state))))
+    (should cooked--mouse-grab)
+    (let ((cooked-mouse-hover-motion nil))
+      (cooked--update-hover-tracking)
+      (should-not (local-variable-p 'track-mouse)))
+    (let ((cooked-mouse-hover-motion t))
+      (cooked--update-hover-tracking)
+      (should (local-variable-p 'track-mouse))
+      (should (eq track-mouse t))
+      (should-not (default-value 'track-mouse))
+      ;; The child dropping to 1002 takes hover away with it.
+      (cooked--set-mouse-state t t t nil nil)
+      (should-not (local-variable-p 'track-mouse))
+      (cooked--set-mouse-state t t nil t nil)
+      (should (eq track-mouse t))
+      ;; So does the child losing the mouse, as a peek or a prompt makes it.
+      (let ((cooked--mouse-state cooked--mouse-state-none))
+        (cooked--update-mouse-grab))
+      (should-not (local-variable-p 'track-mouse)))))
+
+(ert-deftest cooked-hover-reports-once-per-cell-and-keeps-the-region ()
+  "A movement with nothing held is button 3 plus the motion bit, 35.  The same
+cell twice is one report, and the region a shifted drag left behind survives the
+pointer drifting afterwards."
+  (cooked-tests--with-session cooked-tests--hover-child
+    (should (cooked-tests--settle
+             (lambda () (and cooked--alt (cooked-mouse-state-motion cooked--mouse-state)))))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "bravo" (cooked-tests--text)))))
+    (should (eq (lookup-key cooked--mouse-map [mouse-movement]) #'cooked-mouse-hover))
+    (let* ((cooked-mouse-hover-motion t)
+           (from (save-excursion (goto-char (point-min))
+                                 (search-forward "alpha") (- (point) 5)))
+           (to (save-excursion (goto-char (point-min))
+                               (search-forward "bravo") (- (point) 5)))
+           (a (cooked--screen-cell from))
+           (b (cooked--screen-cell to))
+           (pattern (lambda (cell)
+                      (format "\\[<35;%d;%dM" (1+ (cdr cell)) (1+ (car cell))))))
+      (should (and a b (not (equal a b))))
+      (cooked-tests--displayed
+        (set-mark from)
+        (activate-mark)
+        (dolist (pos (list from from to))
+          (let ((last-input-event (list 'mouse-movement (cooked-tests--posn pos))))
+            (cooked-mouse-hover)))
+        (should mark-active))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p (funcall pattern b) (cooked-tests--text)))))
+      (let ((text (cooked-tests--text)))
+        (should (= 1 (how-many (funcall pattern a) (point-min) (point-max))))
+        (should (string-match-p (funcall pattern a) text))))))
+
+(ert-deftest cooked-hover-under-1016-reports-its-pixel ()
+  "Hover passes the pointer\='s place in its glyph on, as a click does, so a child
+that asked for pixels is not handed the corner of every cell it hovers over."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1003h\\033[?1016h'; \
+                        printf 'alpha\\r\\nbravo'; stty raw -echo; cat -v")
+    (should (cooked-tests--settle
+             (lambda () (and cooked--alt
+                             (cooked-mouse-state-motion cooked--mouse-state)
+                             (cooked-mouse-state-pixels cooked--mouse-state)))))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "bravo" (cooked-tests--text)))))
+    (let* ((cooked-mouse-hover-motion t)
+           (pos (save-excursion (goto-char (point-min))
+                                (search-forward "bravo") (- (point) 3)))
+           (cell (cooked--screen-cell pos))
+           (posn (list (selected-window) pos '(0 . 0) 0 nil pos nil nil
+                       '(4 . 7) '(9 . 20))))
+      (should cell)
+      (cooked-tests--displayed
+        ;; As in `cooked-mouse-click-reports-its-pixel': batch has no frame to
+        ;; measure, so the size a real one would have reported is set by hand.
+        (setq-local cooked--last-cell '(9 . 20))
+        (let ((last-input-event (list 'mouse-movement posn)))
+          (cooked-mouse-hover)))
+      (let ((case-fold-search nil))
+        (should (cooked-tests--settle
+                 (lambda ()
+                   (string-match-p (format "\\[<35;%d;%dM"
+                                           (+ 1 (* 9 (cdr cell)) 4)
+                                           (+ 1 (* 20 (car cell)) 7))
+                                   (cooked-tests--text)))))))))
+
+(ert-deftest cooked-hover-is-not-reported-without-the-option ()
+  "Some other package leaving `track-mouse' on globally must not deliver hover
+to a child the user never opted into."
+  (cooked-tests--with-session cooked-tests--hover-child
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "bravo" (cooked-tests--text)))))
+    (let ((cooked-mouse-hover-motion nil)
+          (from (save-excursion (goto-char (point-min))
+                                (search-forward "alpha") (- (point) 5))))
+      (cooked-tests--displayed
+        (let ((last-input-event (list 'mouse-movement (cooked-tests--posn from))))
+          (cooked-mouse-hover)))
+      (should-not cooked--mouse-last-cell))))
+
+(ert-deftest cooked-a-drag-does-not-leave-track-mouse-on-globally ()
+  "The `track-mouse' form restores the old value into whichever binding is
+current when it exits.  A drain that made the variable buffer-local mid-drag
+used to receive that restore, leaving the global value the form had set stuck
+at t -- and every buffer generating motion events from then on."
+  (cooked-tests--with-session cooked-tests--hover-child
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "bravo" (cooked-tests--text)))))
+    (let ((cooked-mouse-hover-motion t)
+          (from (save-excursion (goto-char (point-min))
+                                (search-forward "alpha") (- (point) 5))))
+      ;; Start from 1002, so there is no local binding when the drag begins.
+      (cooked--set-mouse-state t t t nil nil)
+      (should-not (local-variable-p 'track-mouse))
+      (cooked-tests--displayed
+        (let ((unread-command-events
+               (list (list 'mouse-movement (cooked-tests--posn from))
+                     (list 'mouse-1 (cooked-tests--posn from)))))
+          ;; The child asks for 1003 while the pointer is being followed.
+          (cl-letf* ((report (symbol-function 'cooked--report-motion))
+                     ((symbol-function 'cooked--report-motion)
+                      (lambda (&rest args)
+                        (cooked--set-mouse-state t t t t nil)
+                        (apply report args))))
+            (cooked--mouse-track (selected-window)))))
+      (should-not (default-value 'track-mouse))
+      (should (local-variable-p 'track-mouse))
+      (should (eq track-mouse t)))))
+
 (defmacro cooked-tests--with-two-terminals (a b &rest body)
   "Run BODY with two live cooked buffers bound to A and B, side by side.
 A is the selected window\='s; B is the other\='s.  Both children take the alt
