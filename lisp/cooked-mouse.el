@@ -104,19 +104,16 @@ read.")
 Lives in `emulation-mode-map-alists' rather than in `cooked-raw-map' because a
 major mode's local map is near the bottom of Emacs' lookup order, under every
 enabled minor mode.  `pixel-scroll-precision-mode' binds `wheel-up' and
-`wheel-down' in its own minor-mode map, so on a GUI frame it took the wheel
-before the local map was ever consulted — and scrolled the buffer out from
-under a program that had asked for those notches.  A terminal frame did not
-show this, because there the wheel arrives as `mouse-4'/`mouse-5', which
-pixel-scroll does not bind.
+`wheel-down' in its own minor-mode map, so on a GUI frame it would take the
+wheel before the local map was ever consulted and scroll the buffer out from
+under a program that had asked for those notches.  On a terminal frame the
+wheel arrives as `mouse-4'/`mouse-5', which pixel-scroll does not bind.
 
-The `drag-mouse-N' variants have to be here as well as `down-mouse-N'/`mouse-N',
-and their absence was a bug with two faces.  Emacs does not deliver a plain
-`mouse-1' when the pointer moved between press and release; it delivers
-`drag-mouse-1' instead.  Unbound, that fell through to the global
-`mouse-set-region', so the child never learned the button had come up -- it saw
-a button held forever -- while Emacs set a region behind its back, which is why
-a drag appeared in one jump at the end instead of following the pointer.
+The `drag-mouse-N' variants have to be here as well as `down-mouse-N'/`mouse-N'.
+Emacs does not deliver a plain `mouse-1' when the pointer moved between press
+and release; it delivers `drag-mouse-1' instead.  Unbound, that would fall
+through to the global `mouse-set-region', so the child would never learn the
+button had come up and would see it held forever.
 
 Modified variants are deliberately absent: `C-wheel-up' should keep scaling
 text, and shift-scrolling should keep working, as they do in any other buffer.

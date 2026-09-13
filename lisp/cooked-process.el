@@ -660,7 +660,7 @@ so a project where that matters wants a predicate rather than the mode off."
 decoration: `grep' passes `--color=always' on purpose and `grep-filter' turns
 what comes back into the face on each match.  Resolving that away -- which is
 the service this file offers everything else -- would leave a grep buffer
-correct and unhighlighted, which is a worse buffer than the one it replaced.
+correct and unhighlighted, which is worse than leaving it on the pipe.
 
 The general shape of the exception is a consumer that parses the styling, and
 `grep-mode' is the only one in Emacs that does."
