@@ -190,5 +190,76 @@ to take at least four tenths."
         (funcall wait)
         (should (>= (- (float-time) start) 0.4))))))
 
+;; What a `skip-unless' is waiting for, read off its condition.  Only the
+;; spellings that name a dependency count; a skip on `display-graphic-p' or on a
+;; file the checkout may lack describes the run rather than the machine, and
+;; carries no tag.
+(defun cooked-tests--skip-dependencies (form)
+  "Return the dependencies the `skip-unless' forms inside FORM wait for.
+Each is the symbol its tag would be: (skip-unless (executable-find \"zsh\"))
+gives `zsh', and (skip-unless (require \\='evil nil t)) gives `evil'."
+  (let ((found nil))
+    (cl-labels ((condition (form)
+                  (pcase form
+                    (`(executable-find ,(and (pred stringp) name))
+                     (push (intern name) found))
+                    (`(,(or 'require 'featurep) (quote ,feature) . ,_)
+                     (push feature found))
+                    ('(cooked-tests--tmux) (push 'tmux found))
+                    ('(cooked--terminfo-database) (push 'terminfo found))
+                    ((pred proper-list-p) (mapc #'condition form))))
+                (walk (form)
+                  (pcase form
+                    (`(skip-unless ,guard) (condition guard))
+                    ((pred consp)
+                     (while (consp form) (walk (pop form)))))))
+      (walk form))
+    (delete-dups found)))
+
+(ert-deftest cooked-every-dependency-skip-carries-its-tag ()
+  "A test that skips without some dependency is tagged with it.
+
+The tags are how a run selects out what a machine lacks, and a skip reads as a
+pass, so an untagged one is coverage nobody can see is missing.  The convention
+had no check and eroded twice: the fish tests added with vendor injection, and
+`cooked-evil-does-not-blank-a-row-of-spaces\=', which also asked `featurep\='
+rather than requiring evil and so skipped whenever it ran alone.  The walk reads
+every test file the suite loaded and expands its macros, so a skip hidden
+inside a fixture counts too.
+
+Each dependency must also be one the helpers name at load when it is missing,
+`cooked-tests--optional-programs\=' or `cooked-tests--optional-packages\=', so
+a new kind of skip cannot arrive silent."
+  (let ((files (delete-dups (delq nil (mapcar #'ert-test-file-name
+                                              (ert-select-tests t t)))))
+        ;; Leave `skip-unless' itself unexpanded, so the walk can still see it.
+        (environment (cons '(skip-unless) macroexpand-all-environment))
+        ;; What the helpers name at load when it is missing.  The terminfo
+        ;; database is this checkout's own, and says so itself.
+        (announced (append cooked-tests--optional-programs
+                           cooked-tests--optional-packages))
+        (skips 0)
+        (untagged nil))
+    (dolist (file files)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (condition-case nil
+            (while t
+              (pcase (read (current-buffer))
+                (`(ert-deftest ,name ,_ . ,body)
+                 (let ((tags (ert-test-tags (ert-get-test name))))
+                   (dolist (dependency (cooked-tests--skip-dependencies
+                                        (macroexpand-all (cons 'progn body)
+                                                         environment)))
+                     (setq skips (1+ skips))
+                     (unless (and (memq dependency tags)
+                                  (or (eq dependency 'terminfo)
+                                      (member (symbol-name dependency) announced)))
+                       (push (list name dependency) untagged)))))))
+          (end-of-file nil))))
+    ;; A walk that found nothing would pass as well; there are over a hundred.
+    (should (> skips 100))
+    (should-not untagged)))
+
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here

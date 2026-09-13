@@ -1465,6 +1465,7 @@ tested is the arrangement -- that the argv stays plain, that the snippet lands
 where fish will find it, and that the user\='s own data dirs survive.  Whether
 fish honours its own documented path is fish\='s business, and
 `cooked-tests--with-fish\=' exercises the snippet itself."
+  :tags '(fish)
   (skip-unless (executable-find "fish"))
   (pcase-let ((`(,argv ,env ,scratch)
                (cooked--shell-invocation (executable-find "fish"))))
@@ -1489,6 +1490,7 @@ fish honours its own documented path is fish\='s business, and
 
 (ert-deftest cooked-fish-vendor-conf-is-sourced-by-a-real-fish ()
   "The claim the arm rests on, put to the shell itself rather than to its manual."
+  :tags '(fish)
   (skip-unless (executable-find "fish"))
   (let ((dir (make-temp-file "cooked-fish" t)))
     (unwind-protect

@@ -73,6 +73,25 @@ Returns the packages that could not be found."
            (string-join missing ", ")
            (if (cdr missing) "them" "it")))
 
+(defconst cooked-tests--optional-programs
+  '("zsh" "bash" "fish" "tmux" "script" "base64" "git" "htop" "tar" "tic")
+  "Programs a `skip-unless\=' asks PATH for, each also the tag of its tests.
+A new one goes here; `cooked-every-dependency-skip-carries-its-tag\=' fails
+until it does.")
+
+;; Programs cannot be found on the person's behalf the way packages can, but a
+;; missing one skips just as quietly: on a machine with no tmux the tmux tests
+;; went on reading as passes.  So they are named at load too, and
+;; SELECTOR='(not (tag tmux))' is how to make the absence a decision.
+(when-let* ((missing (seq-remove
+                      (lambda (program)
+                        (or (executable-find program)
+                            (and (equal program "tmux") (getenv "COOKED_TEST_TMUX"))))
+                      cooked-tests--optional-programs)))
+  (message "cooked-tests: %s not on PATH -- tests tagged with %s will skip"
+           (string-join missing ", ")
+           (if (cdr missing) "them" "it")))
+
 (require 'cooked)
 (require 'cooked-mode)
 

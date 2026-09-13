@@ -4410,7 +4410,9 @@ row neither can re-derive.
 
 Not a corner case: a frame of any picture is mostly blank rows, and it was found
 by the first bench fixture to contain one."
-  (skip-unless (featurep 'evil))
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
   (with-temp-buffer
     (delay-mode-hooks (cooked-mode))
     (insert "top\n        \nbot\n")
