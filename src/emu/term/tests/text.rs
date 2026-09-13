@@ -1,6 +1,7 @@
 //! Grapheme clusters, mode 2027 and the kitty text sizing protocol (OSC 66).
 
 use super::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// The three cursor positions a client reads while deciding what this terminal supports.
 ///
@@ -159,7 +160,9 @@ fn a_zwj_emoji_family_stands_on_two_cells_and_not_on_six() {
 }
 
 /// The rules DEC mode 2027 is a promise about, measured where a child measures them: by
-/// where the cursor ends up.
+/// where the cursor ends up. And measured where Emacs reads them, by which code points
+/// each cell holds: the cursor column alone cannot tell a variation selector joined to
+/// its cell from one dropped on the floor, since both leave `❤️` on two columns.
 ///
 /// DECRQM answers 3 for 2027 on the strength of this table, so a row that stops passing
 /// is a reason to revisit that answer and not only a width bug. Each case is fed twice,
@@ -263,8 +266,34 @@ fn mode_2027_corpus() {
                 cells + 1,
                 "{what}: {cluster:?} fed {how}"
             );
+            assert_eq!(
+                cell_clusters(t, cells),
+                cluster.graphemes(true).collect::<Vec<_>>(),
+                "{what}: {cluster:?} fed {how}"
+            );
         }
     }
+}
+
+/// The text each cell that starts a cluster holds, over the first COLS columns of row 0.
+///
+/// A continuation cell holds nothing, so a cell's text runs from its own column to the
+/// next cell that is not a continuation. `日|` is `["日"]` over two columns.
+fn cell_clusters(t: &Term, cols: usize) -> Vec<String> {
+    let row = t.screen().row(0).unwrap();
+    let text: Vec<char> = row.to_text().chars().collect();
+    let starts: Vec<usize> = (0..cols)
+        .filter(|&col| !row.cells()[col].is_continuation())
+        .chain([cols])
+        .collect();
+    starts
+        .windows(2)
+        .map(|pair| {
+            text[row.chars_before(pair[0])..row.chars_before(pair[1])]
+                .iter()
+                .collect()
+        })
+        .collect()
 }
 
 #[test]
