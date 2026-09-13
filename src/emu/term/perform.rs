@@ -201,9 +201,28 @@ impl Perform for State {
             (None, b'7') => self.save_restore(true),
             (None, b'8') => self.save_restore(false),
             (None, b'c') => {
-                // RIS is a soft reset that also clears the screen. The pen is default by
-                // the time the erase runs, so this is `bce` with nothing to carry.
+                // RIS is a soft reset that also clears the screen, leaves the alternate
+                // one and puts the tab stops back. The pen is default by the time the
+                // erase runs, so this is `bce` with nothing to carry.
+                //
+                // The alternate screen goes first, and through `set_alt` rather than by
+                // clearing the flag: that is the path `?1049l` and `?47l` take, and it is
+                // how Emacs hears of it, since `Delta::alt` is the level Lisp unpins the
+                // window on. Left up, `reset` run from a shell whose full-screen program
+                // died without its `rmcup` cleared the alt grid and left the user on it,
+                // with the transcript still hidden behind. Before `soft_reset`, too, so
+                // the erase and the home below act on the primary, and the kitty stack
+                // and saved cursor that reset empties are the ones the drain reads.
+                // No `save_restore`: the cursor `?1049h` saved is homed by RIS anyway.
+                self.set_alt(false);
                 self.soft_reset();
+                // Both screens own a stop table, and a child that cleared the stops on
+                // the alternate screen and then reset would otherwise find them still
+                // gone the next time it entered it. Not in `soft_reset`: DECSTR keeps
+                // the stops, as it does on xterm, and `rs1` is the half of `reset` that
+                // is meant to bring them back.
+                self.primary.reset_tabs();
+                self.alt.reset_tabs();
                 let evicted = self
                     .screen_mut()
                     .erase_display(Erase::All, Style::default());

@@ -2925,6 +2925,64 @@ fn a_reset_says_so_where_a_soft_reset_does_not() {
     assert!(t.drain().events.contains(&Event::Reset));
 }
 
+/// `reset` from a shell whose full-screen program died without its `rmcup`: RIS has to
+/// bring the user back to the primary screen, and say so on the drain's `alt` level,
+/// which is the only way Lisp hears of any alt switch.
+#[test]
+fn a_reset_leaves_the_alternate_screen() {
+    let mut t = term(3, 8, b"keep\r\n");
+    t.feed(b"\x1b[?1049hfull");
+    assert!(t.drain().alt);
+    t.feed(b"\x1bc");
+    let delta = t.drain();
+    assert!(!delta.alt, "the drain carries the switch back");
+    assert!(delta.events.contains(&Event::Reset));
+    assert!(
+        delta.events.contains(&Event::DisplayCleared),
+        "the erase ran on the primary, where clearing is worth announcing"
+    );
+    assert!(
+        delta.scrolled.iter().any(|line| runs_text(line) == "keep"),
+        "the primary's text was archived by the erase, as on any RIS"
+    );
+    assert!(
+        !delta.scrolled.iter().any(|line| runs_text(line) == "full"),
+        "nothing from the alternate screen reached scrollback"
+    );
+    assert_eq!(text(&t, 0), "");
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (0, 0));
+    t.feed(b"\x1b[?1049$p");
+    assert!(
+        t.drain()
+            .events
+            .contains(&Event::Reply(b"\x1b[?1049;2$y".to_vec()))
+    );
+    // Nothing the program saved on the way in survives to be restored on a stray
+    // `rmcup` afterwards.
+    t.feed(b"ab\x1b[?1049l");
+    assert_eq!(text(&t, 0), "ab");
+    assert_eq!(t.screen().cursor.col, 2);
+}
+
+/// RIS puts the stops back on both screens; DECSTR, like xterm's, leaves them alone.
+#[test]
+fn a_reset_restores_the_tab_stops_on_both_screens() {
+    let mut t = term(2, 30, b"\x1b[3g\x1b[?1049h\x1b[3g\x1b[?1049l\x1b[!p\tx");
+    assert_eq!(
+        t.screen().cursor.col,
+        29,
+        "a soft reset kept the cleared stops"
+    );
+    t.feed(b"\x1bc\tx");
+    assert_eq!(text(&t, 0), "        x");
+    t.feed(b"\x1b[?1049h\t\ty");
+    assert_eq!(
+        text(&t, 0),
+        "                y",
+        "the alternate screen's stops are back too"
+    );
+}
+
 #[test]
 fn the_alt_screen_never_reports_a_cleared_display() {
     // It archives nothing and is pinned to the top of the window already, so there is

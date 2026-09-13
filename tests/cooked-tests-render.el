@@ -82,6 +82,24 @@ without borrowing a real seam and having its own listeners in the way.")
              (lambda () (string-match-p "keepme" (cooked-tests--text)))))
     (should-not (string-match-p "inalt" (cooked-tests--text)))))
 
+(ert-deftest cooked-reset-leaves-the-alt-screen ()
+  "RIS on the alt screen hands the buffer back to the transcript.
+The `reset' a user types after a full-screen program died without its
+`rmcup': the drain that carries it has to unpin and widen exactly as a
+`?1049l' would, with the primary's text archived rather than lost."
+  (cooked-tests--with-session
+      (list "/bin/sh" "-c"
+            (concat cooked-tests--scrollback-then-alt
+                    "sleep 0.3; printf '\\033c'; printf 'after\\n'; sleep 5"))
+    (should (cooked-tests--settle (lambda () cooked--alt)))
+    (should (buffer-narrowed-p))
+    (should (cooked-tests--settle (lambda () (not cooked--alt))))
+    (should-not (buffer-narrowed-p))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "after" (cooked-tests--text)))))
+    (should (string-match-p "MARKER" (cooked-tests--text)))
+    (should-not (string-match-p "inalt" (cooked-tests--text)))))
+
 (ert-deftest cooked-alt-screen-takes-the-keyboard-from-a-prompt ()
   "Entering the alt screen must swap the keymap even mid-prompt."
   (with-temp-buffer
