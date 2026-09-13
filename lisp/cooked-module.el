@@ -500,8 +500,13 @@ without `cooked--check-core-drift\=' being able to notice it later."
   (setq cooked--core-loaded
         (cons file (file-attribute-modification-time (file-attributes file)))))
 
-(defun cooked--load-module ()
+(defun cooked--load-module (&optional no-build)
   "Load the native core, building or downloading nothing that was not asked for.
+
+With NO-BUILD, a checkout whose core is missing or older than its sources
+signals instead of building.  That is for a caller in a process filter, such as
+`cooked-comint--core', where `cargo build' would hold up Emacs for as long as
+it takes and nobody opening `M-x shell' asked for one.
 
 Three places a core can come from, in this order: `cooked-native-module\=' if it
 is set, the checkout that produced it, and an artifact downloaded by
@@ -538,6 +543,10 @@ command, and every path that finds no usable core ends by naming it."
         (cooked--check-prebuilt (cooked--prebuilt-state)))
       (when (or (not (file-exists-p built))
                 (and ours (cooked--module-stale-p built root)))
+        (when no-build
+          (error "cooked: the native core is %s -- %s"
+                 (if (file-exists-p built) "older than its sources" "not built")
+                 "M-x cooked builds it"))
         (cooked--build-module root built))
       (cooked--map-core built))))
 

@@ -18,7 +18,8 @@
 ;;
 ;; ## A sibling of cooked-process.el, not a layer on cooked.el
 ;;
-;; This file requires `cooked-util' and `cooked-face' and nothing else of cooked's.
+;; This file requires `cooked-util', `cooked-face' and `cooked-module' and nothing else
+;; of cooked's.
 ;; That is a constraint rather than an accident, and `cooked-tests-comint' has a test
 ;; that fails if it is ever broken.  There is no session here: no pty, no grid, no
 ;; keymap, no input region, no `cooked-mode'.  Requiring `cooked.el' would pull all of
@@ -83,10 +84,12 @@ typed.  Set this to nil to keep the guessing, or to keep the directory still."
   :group 'cooked)
 
 (defvar-local cooked-comint--core-filter nil
-  "This buffer's parser handle, from `cooked--make-filter'.
+  "This buffer's parser handle, from `cooked--make-filter', or nil before output.
 
 Buffer-local because the state it holds is the child's: a pen that persists
-across chunks, an open line, and a table of hyperlink destinations.")
+across chunks, an open line, and a table of hyperlink destinations.  Made by
+`cooked-comint--core' when the first chunk arrives rather than when the mode
+is turned on; that docstring says why.")
 
 (defvar-local cooked-comint--open ""
   "The characters of the open line this filter last handed to comint.
@@ -234,6 +237,30 @@ a newline: `cooked-comint--open' holds one unfinished line at most."
         (cooked--install-styles table)
         (cooked-comint--propertize text styles links)))))
 
+(defun cooked-comint--core ()
+  "This buffer's parser handle, loading the native core for it if need be.
+
+Called for the first chunk of output and not when the mode is turned on.  The
+global mode turns this one on from `after-change-major-mode-hook' in every
+comint buffer, and loading there would make every `M-x shell' signal at mode
+setup on an install with no core.  Loading here never builds, either: in a
+checkout whose core is out of date, `cooked--load-module' would otherwise run
+`cargo build' inside a process filter, with the shell's output held up behind
+it.
+
+A core that cannot be had turns the mode off, says why once, and returns nil,
+so the chunk and every later one reach comint as they would without this file."
+  (or cooked-comint--core-filter
+      (condition-case err
+          (progn
+            (cooked--load-module 'no-build)
+            (setq cooked-comint--core-filter (cooked--make-filter)))
+        (error
+         (message "cooked-comint: %s; leaving %s to comint"
+                  (error-message-string err) (buffer-name))
+         (cooked-comint-mode -1)
+         nil))))
+
 (defun cooked-comint--filter (string)
   "Hand STRING to the emulator, on `comint-preoutput-filter-functions'.
 
@@ -243,7 +270,9 @@ symptom is a buffer that quietly stops filling.  A failure gives the chunk back
 untouched, so the worst case is the escape sequences comint would have shown
 before this file existed."
   (condition-case err
-      (cooked-comint--emit string)
+      (if (cooked-comint--core)
+          (cooked-comint--emit string)
+        string)
     (error
      (message "cooked-comint: %S" err)
      string)))
@@ -265,14 +294,17 @@ that a chunk of output can end in the middle of an escape sequence -- and for
 the extraordinary one that a regexp cannot resolve a cursor movement at all.
 
 Turning this on stops `ansi-color' from processing this buffer's output, there
-being nothing left for it to find.  Turning it off does not start it again: the
-buffer already holds text this filter resolved, and the two would then disagree
-about what is in it."
+being nothing left for it to find.  Turning it off does not start it again once
+output has arrived: the buffer already holds text this filter resolved, and the
+two would then disagree about what is in it.
+
+The native core is loaded when the first output arrives, not here, and a core
+that is missing or needs building turns this off again; see
+`cooked-comint--core'."
   :lighter " cooked"
   (if cooked-comint-mode
       (progn
-        (cooked--load-module)
-        (setq cooked-comint--core-filter (cooked--make-filter)
+        (setq cooked-comint--core-filter nil
               cooked-comint--open "")
         ;; comint's own pass over the chunk, which deletes to the start of the line
         ;; where a terminal overwrites.  There is nothing left for it to find in any
@@ -289,12 +321,23 @@ about what is in it."
         (add-hook 'comint-preoutput-filter-functions #'cooked-comint--filter nil t))
     (remove-hook 'comint-preoutput-filter-functions #'cooked-comint--filter t)
     (kill-local-variable 'comint-inhibit-carriage-motion)
+    ;; With no filter made, nothing in the buffer was resolved here, so there is
+    ;; nothing for `ansi-color' to disagree with.  This is the path a missing core
+    ;; takes, and without it that buffer would show escape sequences raw.
+    (unless cooked-comint--core-filter
+      (kill-local-variable 'ansi-color-for-comint-mode))
     (setq cooked-comint--core-filter nil
           cooked-comint--open "")))
 
 (defun cooked-comint--turn-on ()
-  "Enable `cooked-comint-mode' if this buffer is a comint buffer."
-  (when (derived-mode-p 'comint-mode)
+  "Enable `cooked-comint-mode' if this buffer is a comint buffer.
+
+Not in a `cooked-mode' buffer, which derives from `comint-mode' and is a
+terminal already.  Its output reaches the grid through its own wake filter, so
+`comint-preoutput-filter-functions' never runs there, and turning this on would
+only make a parser nothing feeds and add a second \" cooked\" to the mode line."
+  (when (and (derived-mode-p 'comint-mode)
+             (not (derived-mode-p 'cooked-mode)))
     (cooked-comint-mode 1)))
 
 ;;;###autoload

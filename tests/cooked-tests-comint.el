@@ -315,6 +315,18 @@ the last thing in the buffer."
       (cooked-comint-global-mode -1)
       (kill-buffer buffer))))
 
+(ert-deftest cooked-comint-global-mode-leaves-cooked-buffers-alone ()
+  ;; `cooked-mode' derives from `comint-mode', so asking only whether a buffer is
+  ;; comint turned this on inside every terminal, where nothing would ever feed it.
+  (let ((buffer (generate-new-buffer " *cooked-comint-terminal*")))
+    (unwind-protect
+        (progn
+          (cooked-comint-global-mode 1)
+          (with-current-buffer buffer (cooked-mode))
+          (should-not (buffer-local-value 'cooked-comint-mode buffer)))
+      (cooked-comint-global-mode -1)
+      (kill-buffer buffer))))
+
 (ert-deftest cooked-comint-global-mode-leaves-other-buffers-alone ()
   (let ((buffer (generate-new-buffer " *cooked-comint-not-comint*")))
     (unwind-protect
@@ -323,6 +335,51 @@ the last thing in the buffer."
           (should-not (buffer-local-value 'cooked-comint-mode buffer)))
       (cooked-comint-global-mode -1)
       (kill-buffer buffer))))
+
+;;;; Loading the core
+
+(ert-deftest cooked-comint-loads-the-core-for-the-first-output-and-not-before ()
+  ;; The global mode turns this on from `after-change-major-mode-hook', so a core
+  ;; that cannot be loaded must not signal there: every `M-x shell' would fail at
+  ;; mode setup.  It is the first chunk that loads it.
+  (let ((loads 0))
+    (cl-letf (((symbol-function 'cooked--load-module)
+               (lambda (&rest _) (cl-incf loads))))
+      (cooked-tests-comint--with
+        (should (zerop loads))
+        (should-not cooked-comint--core-filter)
+        (cooked-tests-comint--say "abcdefghij\rXYZ\n")
+        (should (= loads 1))
+        (should cooked-comint--core-filter)
+        (cooked-tests-comint--say "more\n")
+        (should (= loads 1))
+        (should (equal (cooked-tests-comint--text) "XYZdefghij\nmore\n"))))))
+
+(ert-deftest cooked-comint-leaves-the-buffer-to-comint-when-there-is-no-core ()
+  ;; A checkout whose core is missing: loading it from the first chunk must not run
+  ;; `cargo build' inside the process filter.  The mode gives up instead, and the
+  ;; chunk reaches comint as it would have without this file, colours and all.
+  (let ((builds 0)
+        (cooked-native-module nil)
+        (featurep* (symbol-function 'featurep)))
+    (cl-letf (((symbol-function 'featurep)
+               (lambda (feature &rest rest)
+                 (unless (eq feature 'cooked-core)
+                   (apply featurep* feature rest))))
+              ((symbol-function 'cooked--source-core)
+               (lambda (_root) "/nonexistent/libcooked.so"))
+              ((symbol-function 'cooked--build-module)
+               (lambda (&rest _) (cl-incf builds)))
+              ((symbol-function 'module-load) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (cooked-tests-comint--with
+        (should cooked-comint-mode)
+        (cooked-tests-comint--say "abcdefghij\rXYZ\n")
+        (should (zerop builds))
+        (should-not cooked-comint-mode)
+        (should-not (local-variable-p 'ansi-color-for-comint-mode))
+        ;; comint's own carriage motion, which deletes to the start of the line.
+        (should (equal (cooked-tests-comint--text) "XYZ\n"))))))
 
 ;;;; Layering
 
@@ -335,20 +392,22 @@ of the source and still put a session's worth of machinery behind a hook
 function.  So this asks the only question that cannot be got wrong -- a fresh
 Emacs loads the file and is asked what it has.
 
-`cooked-face' and `cooked-util' are the two it is allowed, and the test names
-them rather than counting, so adding a permitted dependency is a decision
-somebody makes here on purpose."
+`cooked-face', `cooked-util' and `cooked-module' are the three it is allowed,
+and the test names them rather than counting, so adding a permitted dependency
+is a decision somebody makes here on purpose.  `cooked-module' is only the
+loader for the native core, which the filter cannot do without."
   (let* ((emacs (expand-file-name invocation-name invocation-directory))
          (lisp (expand-file-name "lisp" (cooked--root)))
          (script "(progn (require 'cooked-comint)
                          (prin1 (list (featurep 'cooked)
                                       (featurep 'cooked-face)
-                                      (featurep 'cooked-util))))")
+                                      (featurep 'cooked-util)
+                                      (featurep 'cooked-module))))")
          (output (with-output-to-string
                    (with-current-buffer standard-output
                      (call-process emacs nil t nil
                                    "-Q" "--batch" "-L" lisp "--eval" script)))))
-    (should (equal (car (read-from-string output)) '(nil t t)))))
+    (should (equal (car (read-from-string output)) '(nil t t t)))))
 
 (provide 'cooked-tests-comint)
 ;;; cooked-tests-comint.el ends here

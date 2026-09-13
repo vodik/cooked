@@ -680,8 +680,9 @@ them from below. `cooked-theme-change-hook` is how the upper layer says so inste
 this rather than above or below it, and they are worth reading as a pair, because they
 are the same emulator answering two consumers who both already work. `cooked-process.el`
 requires `cooked.el` and runs a headless session, grid and all, for `compile` and its
-relatives; `cooked-comint.el` requires `cooked-util.el` and `cooked-face.el` and nothing
-else, and drives `emu::stream::Filter`, which has no grid at all.
+relatives; `cooked-comint.el` requires `cooked-util.el`, `cooked-face.el` and
+`cooked-module.el` and nothing else, and drives `emu::stream::Filter`, which has no grid
+at all.
 
 The asymmetry is not an oversight and it is the interesting part. A grid retires a row
 when the row scrolls off it, so `cooked-process-rows` is a latency knob — fine for a
