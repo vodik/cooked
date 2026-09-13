@@ -401,9 +401,10 @@ those are.  The list is the same one, for that reason: OTHERS, as
      :others others
      :relocations (cooked--capture-relocations others))))
 
-(defun cooked--apply-levels (update)
-  "Adopt UPDATE's levels: the state as of this drain, for redisplay to read."
-  (setq cooked--cursor (cooked--cursor-decode (plist-get update :cursor))
+(defun cooked--apply-levels (update cursor)
+  "Adopt UPDATE's levels: the state as of this drain, for redisplay to read.
+CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
+  (setq cooked--cursor cursor
         ;; Before `cooked--fit-screen', which is shaped by it.
         cooked--grid (cooked--grid-make :height (plist-get update :height)
                                         :used (plist-get update :used)
@@ -575,6 +576,9 @@ and the region shaped before anything measures it."
   ;; long is not worth nesting one level deeper.
   (let* ((inhibit-read-only t)
          (buffer-undo-list t)
+         ;; Decoded once, here, for the two readers below that need it at
+         ;; different moments: the render passes and `cooked--apply-levels'.
+         (cursor (cooked--cursor-decode (plist-get update :cursor)))
          ;; A third dynamic binding for the duration of the apply, and here in
          ;; the `let*' rather than wrapped around it precisely because `let*'
          ;; binds in order: the two render passes below are initialisers, and
@@ -588,8 +592,7 @@ and the region shaped before anything measures it."
          ;; answer while the rows are being written -- and a glyph run has to be
          ;; broken at the cursor this drain puts on it.  See `cooked--deco-cursor'.
          (cooked--deco-cursor
-          (let ((cursor (cooked--cursor-decode (plist-get update :cursor))))
-            (cons (cooked-cursor-row cursor) (cooked-cursor-col cursor))))
+          (cons (cooked-cursor-row cursor) (cooked-cursor-col cursor)))
          (viewport (cooked--capture-viewport))
          (pending (cooked--take-pending-input))
          ;; Where this drain's scrollback landed, for resolving a `scrolled'
@@ -607,7 +610,7 @@ and the region shaped before anything measures it."
          (rendered (cooked--render-rows (plist-get update :rows)
                                         (plist-get update :alt)
                                         (cooked-viewport-relocations viewport))))
-    (cooked--apply-levels update)
+    (cooked--apply-levels update cursor)
     ;; Cleared before the events, so a drain that both scrolls and then clears
     ;; stays pinned.
     (when batch-start (setq cooked--pin-screen-top nil))
