@@ -63,11 +63,12 @@
 (declare-function cooked--redraw "ext:cooked-core")
 
 ;; Owned by cooked-mode.el, which requires this file.  One setting the drain is
-;; parameterised by, and two notifications -- the mode the child is in and the
+;; parameterised by, one the bell is handed to, and two notifications -- the mode the child is in and the
 ;; exit it reported -- handed to the layer that owns what they mean.  Reads and
 ;; notifications only, never a question asked upward, which is what keeps the
 ;; list this short.
 (defvar cooked-rejoin-wrapped-lines)
+(defvar cooked-bell-function)
 (declare-function cooked--set-mode "cooked-mode")
 (declare-function cooked--on-exit "cooked-mode")
 
@@ -680,7 +681,11 @@ Events are occurrences only.  State the redisplay depends on rides the drain's
 own fields instead — `:alt' and the rest — so that nothing arrives twice with
 two chances to disagree."
   (pcase event
-    (`(bell) (ding))
+    ;; Handed on rather than rung: whether a bell is a noise, a mark on the
+    ;; buffer or nothing depends on whether anyone can see it, which is the
+    ;; interaction layer's question.  See `cooked-bell-default'.
+    (`(bell) (cooked--protect-seam 'cooked-bell-function
+               (funcall cooked-bell-function)))
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
     (`(reply . ,bytes) (cooked--send-if-live bytes))
     (`(title-stack ,push) (cooked--handle-title-stack push))

@@ -30,6 +30,9 @@
 ;; keep it, and a `require' would only assert a load order cooked-mode.el
 ;; already fixes.
 (defvar cooked--progress)
+;; And `cooked-bell-pending' by cooked-mode.el, which sets it from the bell and
+;; clears it when the buffer is looked at; both readers below only report it.
+(defvar cooked-bell-pending)
 (declare-function cooked-toggle-peek "cooked-mode")
 (declare-function cooked--buffer-name-shows-title-p "cooked-mode")
 
@@ -47,6 +50,13 @@
 Quieter than `cooked-peek', and deliberately: nothing is being held back in
 `still' -- the child is drawing, the buffer is current, only the view is
 staying where it was put.  It is worth saying, not worth warning about."
+  :group 'cooked)
+
+(defface cooked-bell '((t :inherit warning))
+  "Face for the `bell' mark on a session that rang while out of sight.
+
+As loud as `cooked-peek', because it is the same kind of thing: a state that
+wants the user to come and look, which is the whole of what it is for."
   :group 'cooked)
 
 (defface cooked-peek '((t :inherit warning))
@@ -213,15 +223,25 @@ screen."
            cooked-title)
       cooked--foreground-label))
 
+(defun cooked--mode-line-bell ()
+  "The `bell\=' mark, while `cooked-bell-pending\=' says it is owed."
+  (when cooked-bell-pending
+    (propertize " bell" 'face 'cooked-bell
+                'help-echo "cooked: this session rang while out of sight")))
+
 (defun cooked--mode-line ()
   "Compact indicator: what is running, who owns the keyboard, how it went."
   ;; A dead session's buffer-locals do not decay -- they hold whatever they last
   ;; said, forever -- so reporting the state of a child that exited some minutes
   ;; ago is not stale information, it is wrong information wearing the same
   ;; clothes as the live kind.  The exit status is the only thing still true.
+  ;; The bell is the exception: it says something happened, not what is going
+  ;; on, so it stays true after the child is gone -- and a build that rang to
+  ;; say it was done and then exited is the case it most exists for.
   (if cooked--exit
-      (propertize (format " exited %s" cooked--exit)
-                  'face (if (eql cooked--exit 0) 'cooked-success 'cooked-failure))
+      (concat (propertize (format " exited %s" cooked--exit)
+                          'face (if (eql cooked--exit 0) 'cooked-success 'cooked-failure))
+              (cooked--mode-line-bell))
     (let ((state (cooked--mode-line-state))
           (subject (cooked--mode-line-subject))
           (code (cooked-last-exit-code)))
@@ -248,6 +268,7 @@ screen."
          ('semi (propertize " semi" 'face 'shadow))
          ('still (propertize " still" 'face 'cooked-still))
          ('frozen (propertize " frozen" 'face 'cooked-peek)))
+       (cooked--mode-line-bell)
        ;; Quoted, not formatted: both of `cooked--mode-line-subject''s sources are
        ;; the child's own bytes -- a title it set, or the name of the program it
        ;; is running -- so a `%' in either is a specifier unless it is doubled
@@ -321,9 +342,13 @@ candidate string and a consult source hands over the buffer itself.  Nil for
 anything that is not a cooked buffer, so this can sit on a table that mixes
 them.
 
-Four fields, each left out when it has nothing to say: what the session is
-doing (see `cooked--annotation-status'), the title the child set, the directory
-its shell is in, and the input mode when it is anything but the ordinary one.
+Five fields, each left out when it has nothing to say: what the session is
+doing (see `cooked--annotation-status'), `bell' when it rang while out of
+sight (see `cooked-bell-pending'), the title the child set, the directory its
+shell is in, and the input mode when it is anything but the ordinary one.
+The bell sits second, beside the status, because a picker is where someone
+goes looking for the session that wants them, and a mark further right is
+easier to miss.
 The directory is `default-directory', which OSC 7 keeps as a TRAMP name once the
 shell is on another host, and it is abbreviated only when local: abbreviating a
 remote name asks TRAMP for the home directory at the far end, and a completion
@@ -350,8 +375,9 @@ shell\\='s title hook usually sets it to."
                          ('semi (propertize "semi" 'face 'shadow))
                          ('still (propertize "still" 'face 'cooked-still))
                          ('frozen (propertize "frozen" 'face 'cooked-peek)))))
-               (text (concat "  " (string-join (delq nil (list status title directory mode))
-                                               "  "))))
+               (bell (and cooked-bell-pending (propertize "bell" 'face 'cooked-bell)))
+               (fields (list status bell title directory mode))
+               (text (concat "  " (string-join (delq nil fields) "  "))))
           ;; Appended, so the faces set on a field above win over the dim one the
           ;; completion UI gives an annotation as a whole.
           (add-face-text-property 0 (length text) 'completions-annotations t text)

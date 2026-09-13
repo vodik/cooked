@@ -3,7 +3,7 @@
 ;;; Commentary:
 
 ;; The sequences cooked answers in Lisp rather than in Rust: titles, colours,
-;; notifications, the clipboard, and the OSC 51 command channel -- which is also
+;; notifications and the bell, the clipboard, and the OSC 51 command channel -- which is also
 ;; where the opt-in defaults are asserted, since every one of these is something
 ;; a hostile stream can send.
 
@@ -138,6 +138,69 @@ a path on the desktop, which is the mistake testing for `4' alone would make."
         (cooked--osc-notify (list (format "i=%d:d=0" i) "x")))
       (should (<= (length cooked--notification-chunks)
                   (car cooked--notification-chunk-limits))))))
+
+(defun cooked-tests--bell-annotation ()
+  "This buffer's `cooked-buffer-annotation', as plain text."
+  (substring-no-properties (cooked-buffer-annotation (current-buffer))))
+
+(ert-deftest cooked-a-burst-of-bells-rings-once ()
+  "A hundred BELs from one `printf' are one ring, through the real drain.
+
+Visible in the selected frame, which is the case that rings at all.  The second
+half is what tells a rate limit from a latch: once the interval has passed the
+next bell rings again."
+  (let ((rings 0)
+        (cooked--bell-last nil))
+    (cl-letf (((symbol-function 'ding) (lambda (&rest _) (cl-incf rings))))
+      (cooked-tests--with-session
+          '("/bin/sh" "-c" "i=0; while [ $i -lt 100 ]; do printf '\\a'; i=$((i+1)); done; \
+printf 'rang\\n'; sleep 5")
+        (set-window-buffer (selected-window) (current-buffer))
+        (should (cooked-tests--settle
+                 (lambda () (string-match-p "rang" (cooked-tests--text)))))
+        (should (= rings 1))
+        (should-not cooked-bell-pending)
+        (setq cooked--bell-last (- (float-time) 1))
+        (cooked-bell-default)
+        (should (= rings 2))))))
+
+(ert-deftest cooked-a-hidden-bell-waits-in-the-annotation-until-seen ()
+  "Out of sight a bell is a mark rather than a noise, and looking clears it.
+
+Cleared through `cooked--update-attention', the window hook, rather than by
+setting the variable back, because the wiring is the part that can rot."
+  (let ((rings 0)
+        (cooked--bell-last nil))
+    (cl-letf (((symbol-function 'ding) (lambda (&rest _) (cl-incf rings))))
+      (cooked-tests--with-session '("/bin/sh" "-c" "printf 'done\\a\\n'; sleep 5")
+        ;; Batch Emacs displays the session in no window, so this is hidden.
+        (should-not (get-buffer-window (current-buffer)))
+        (should (cooked-tests--settle (lambda () cooked-bell-pending)))
+        (should (= rings 0))
+        (should (string-match-p "\\`  idle  bell\\b" (cooked-tests--bell-annotation)))
+        (should (string-match-p " bell" (cooked--mode-line)))
+        (set-window-buffer (selected-window) (current-buffer))
+        (cooked--update-attention)
+        (should-not cooked-bell-pending)
+        ;; Anchored on the field: the worktree this runs in may have `bell' in its
+        ;; name, and the directory is in the annotation too.
+        (should-not (string-match-p "\\`  idle  bell\\b" (cooked-tests--bell-annotation)))
+        (should-not (string-search "bell" (cooked--mode-line)))))))
+
+(ert-deftest cooked-a-bell-outlives-the-session-that-rang-it ()
+  "A build that rings and exits leaves the mark, and the mark still clears.
+
+`cooked--update-attention' does everything else only for a live session; the
+bell is cleared ahead of that test, since a dead buffer is still one the user
+comes back to."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq cooked--exit 0 cooked-bell-pending t)
+    (should (string-match-p "\\`  exited 0  bell" (cooked-tests--bell-annotation)))
+    (should (string-match-p "exited 0 bell" (cooked--mode-line)))
+    (set-window-buffer (selected-window) (current-buffer))
+    (cooked--update-attention)
+    (should-not cooked-bell-pending)))
 
 (ert-deftest cooked-title-stack-restores-on-pop ()
   "XTWINOPS 22/23, which `smcup'/`rmcup' send around the alternate screen."
