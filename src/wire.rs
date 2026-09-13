@@ -5,6 +5,7 @@
 //! returns, rows become [`Block`]s, events become tagged lists, and every enum that
 //! crosses as a bare symbol is spelled once here.
 
+use crate::emu::cell::Attrs;
 use crate::emu::stream::Filter;
 use crate::emu::{
     self, Anchor, Color, CursorShape, DamagedRow, Deco, Event, ImageData, ImageFormat, ImageId,
@@ -248,11 +249,12 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
 /// position, which STYLE-SPANS already put there, and a second copy would be a staler
 /// answer (see `cooked--box-glyph-image-1').
 ///
-/// A row table rides at the end: one `(START WIDTH UNIFORM WRAPPED)` per *screen row* the
-/// block covers -- where the row's text begins in TEXT, how many columns it occupies,
-/// whether every character is one byte on one cell, and whether the row below continues
-/// its line. The middle two are by-products of work already done and spare Emacs a
-/// measurement per row per drain; see `cooked--guard-row-width'. Per row rather than per
+/// A row table rides at the end: one `(START WIDTH UNIFORM WRAPPED HASH)` per *screen row*
+/// the block covers -- where the row's text begins in TEXT, how many columns it occupies,
+/// how far a byte-per-column reading of it can be trusted (see [`Uniformity`]), whether
+/// the row below continues its line, and a hash of what decides the row's layout. WIDTH,
+/// UNIFORM and HASH are by-products of work already done and spare Emacs a measurement
+/// and a copy of the row per drain; see `cooked--guard-row-width'. Per row rather than per
 /// block, because [`update_to_lisp`] coalesces contiguous damaged rows, and the offsets let
 /// `cooked--render-block' phase a shade glyph's dither against its own row. Scrollback
 /// carries no table, since nothing guards reflowable text.
@@ -279,20 +281,16 @@ pub(crate) struct Block {
     /// Accumulated for the row being built and banked by [`Block::end_row`]. Scrollback
     /// never calls `end_row`, and nothing reads its sum.
     cols: usize,
-    /// Whether any character in `text` took more than one byte or stands on more than
-    /// one cell.
+    /// The worst [`Uniformity`] of any run pushed into the row being built.
     ///
-    /// Not "is this row ASCII": `OSC 66 ; w=1 ; Ha` is two ASCII characters declared to
-    /// occupy one cell. The flag promises what `cooked--guard-row-width' needs to skip a row
-    /// outright: every character occupies exactly one cell, as a byte-per-column reading
-    /// assumes.
-    ///
-    /// Free here, since `push_runs` already counts characters and a UTF-8 string's byte
-    /// length equals that count exactly when every character is one byte.
-    ///
-    /// Per row and reset by [`Block::end_row`], so one nonuniform row neither slows a
-    /// coalesced run nor hides behind a neighbour.
-    nonuniform: bool,
+    /// Per row and reset by [`Block::end_row`], so one mixed row neither slows a coalesced
+    /// run nor hides behind a neighbour.
+    uniformity: Uniformity,
+    /// Where the row being built begins in `text`, in bytes, for hashing its text.
+    row_start_byte: usize,
+    /// The font-changing renditions pushed into the row being built, folded together with
+    /// where they fall; see [`BlockRow::hash`].
+    fonts: u64,
     /// Where the row currently being built begins in `text`, in characters.
     ///
     /// Moved by [`Block::end_row`] and by [`Block::push_newline`], which are the two
@@ -316,7 +314,7 @@ pub(crate) struct Block {
 struct BlockRow {
     start: usize,
     cols: usize,
-    uniform: bool,
+    uniform: Uniformity,
     /// [`Row::wrapped`](crate::emu::cell::Row::wrapped): the row below continues this
     /// row's logical line, so the newline between them is a soft wrap the child never
     /// wrote.
@@ -324,6 +322,71 @@ struct BlockRow {
     /// It rides the width guard's table because it is the same kind of fact: something the
     /// core knows about a rendered row that Emacs cannot see.
     wrapped: bool,
+    /// A hash of everything about the row that decides how Emacs lays it out: its text,
+    /// and where the renditions that change the font fall (bold, faint and italic, the
+    /// faces `cooked--ascii-fixed-pitch-p' probes). Colours and underlines are left out,
+    /// because they move no glyph.
+    ///
+    /// The key `cooked--row-wraps-p' memoises on, which used to copy the row out of the
+    /// buffer to have one: a full-screen program repainting a border paid a string per row
+    /// per frame just to be told the row still fits. A collision can only make the memo
+    /// answer "fits" for a row that wraps, which leaves a soft-wrapped row until something
+    /// rewrites it; it can never delete a character.
+    ///
+    /// Masked to 60 bits so it crosses as a fixnum and costs Emacs no bignum.
+    hash: u64,
+}
+
+/// How much of a byte-per-column reading of a row Emacs can trust, worst case first last.
+///
+/// `cooked--guard-row-width' skips a row outright when nothing in it can render wider
+/// than the grid said, and what it needs to know for that is not quite "is this ASCII".
+///
+/// - [`Uniformity::Ascii`]: every character is one byte on one cell. Not the same as
+///   ASCII text: `OSC 66 ; w=1 ; Ha` is two ASCII characters declared onto one cell, and
+///   is [`Uniformity::Mixed`].
+/// - [`Uniformity::Glyphs`]: as `Ascii`, except that some one-cell characters are inside
+///   box-glyph decoration runs. Those cells show a bitmap cooked draws at exactly the cell
+///   size rather than the font's glyph, so the font cannot widen them -- but only when the
+///   bitmaps are really drawn, which Lisp decides. A `tree` indent of `│` and NO-BREAK
+///   SPACEs is this, since the absorbed blanks ride the glyph run.
+/// - [`Uniformity::Mixed`]: anything else, which the guard has to measure.
+///
+/// Image placements need no case of their own: an image cell is a blank in the text, so
+/// a row of pictures is already `Ascii`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Uniformity {
+    #[default]
+    Ascii,
+    Glyphs,
+    Mixed,
+}
+
+impl Uniformity {
+    /// What one run, of CHARS characters, contributes.
+    fn of(run: &Run, chars: usize) -> Self {
+        if run.cols != chars {
+            Self::Mixed
+        } else if run.text.len() == chars {
+            Self::Ascii
+        } else if matches!(run.deco, Some(Deco::Glyphs(_))) {
+            Self::Glyphs
+        } else {
+            Self::Mixed
+        }
+    }
+}
+
+impl env::IntoLisp for Uniformity {
+    /// `t`, `glyph` and nil, so that the `t` a byte-uniform row always carried reads the
+    /// same to anything testing it for truth.
+    fn into_lisp(self, env: &Env) -> Result<Value> {
+        match self {
+            Self::Ascii => true.into_lisp(env),
+            Self::Glyphs => sym!(env, "glyph"),
+            Self::Mixed => false.into_lisp(env),
+        }
+    }
 }
 
 /// Bytes in one packed style span. See [`Block::push_style`] for the field layout.
@@ -338,7 +401,7 @@ impl Block {
     ///   8..12   FG       `u32`, tagged — see [`Color::packed`]
     ///   12..16  BG       `u32`, tagged
     ///   16..20  UNDERLINE `u32`, tagged; `SGR 58`, the underline's own colour
-    ///   20..22  ATTRS    `u16`, the [`Attrs`](emu::cell::Attrs) bitmask
+    ///   20..22  ATTRS    `u16`, the [`Attrs`] bitmask
     ///
     /// A packed string rather than a list of lists, for the reason [`Deco::packed`] gives:
     /// the Emacs apply path is the bottleneck, and a list costs six to twelve conses a span
@@ -411,10 +474,15 @@ impl Block {
     /// too and it is a scan of the string.
     fn push_run(&mut self, run: &Run, chars: usize) {
         self.cols += run.cols;
-        // Two ways to fail: a multi-byte character, or a run standing on a column count
-        // other than its character count, as `OSC 66 ; w=1 ; Ha` does with two one-byte
-        // characters on one cell.
-        self.nonuniform |= run.text.len() != chars || run.cols != chars;
+        self.uniformity = self.uniformity.max(Uniformity::of(run, chars));
+        let font = (run.style.attrs & (Attrs::BOLD | Attrs::FAINT | Attrs::ITALIC)).bits();
+        if font != 0 {
+            let at = (self.offset - self.row_start) as u64;
+            self.fonts = emu::mix(
+                self.fonts,
+                (at << 32) | ((chars as u64) << 8) | u64::from(font),
+            );
+        }
         if run.style != Style::default() || run.underline != Color::Default {
             self.push_style(chars, run.style, run.underline);
         }
@@ -428,6 +496,7 @@ impl Block {
         // The text of whatever comes next starts after this newline. Scrollback does not
         // need it, and one store is cheaper than a second `push_newline`.
         self.row_start = self.offset;
+        self.row_start_byte = self.text.len();
     }
 
     /// Close the screen row being built: bank where it began and what it measured, and
@@ -436,22 +505,37 @@ impl Block {
     /// Called once per damaged row and never for scrollback: a live row is a fixed-width
     /// slot whose layout Emacs can get wrong, while a scrollback line may wrap.
     fn end_row(&mut self, wrapped: bool) {
+        let text = emu::fast_hash(&self.text.as_bytes()[self.row_start_byte..]);
         self.rows.push(BlockRow {
             start: self.row_start,
             cols: self.cols,
-            uniform: !self.nonuniform,
+            uniform: self.uniformity,
             wrapped,
+            hash: emu::mix(text, self.fonts) & ((1 << 60) - 1),
         });
         self.cols = 0;
-        self.nonuniform = false;
+        self.uniformity = Uniformity::Ascii;
+        self.fonts = 0;
         self.row_start = self.offset;
+        self.row_start_byte = self.text.len();
     }
 
     fn into_lisp(self, env: &Env) -> Result<Value> {
         let rows = self
             .rows
             .iter()
-            .map(|row| list!(*env, [row.start, row.cols, row.uniform, row.wrapped]))
+            .map(|row| {
+                list!(
+                    *env,
+                    [
+                        row.start,
+                        row.cols,
+                        row.uniform,
+                        row.wrapped,
+                        row.hash as i64
+                    ]
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         list!(
             *env,
@@ -715,7 +799,6 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emu::cell::Attrs;
     use emu::{Color, Style};
 
     /// The keys a plist literal in SOURCE starting at MARKER names, in order.
@@ -908,7 +991,7 @@ mod tests {
         block.push_run(&row("cd", 2), 2);
         block.end_row(false);
 
-        let table: Vec<(usize, usize, bool, bool)> = block
+        let table: Vec<(usize, usize, Uniformity, bool)> = block
             .rows
             .iter()
             .map(|r| (r.start, r.cols, r.uniform, r.wrapped))
@@ -916,13 +999,91 @@ mod tests {
         assert_eq!(
             table,
             vec![
-                (0, 2, true, false),
-                (3, 4, false, true),
-                (6, 2, true, false)
+                (0, 2, Uniformity::Ascii, false),
+                (3, 4, Uniformity::Mixed, true),
+                (6, 2, Uniformity::Ascii, false)
             ],
             "text {:?}",
             block.text
         );
+    }
+
+    /// A box-glyph run lifts a row to `Glyphs` and no further, a CJK run makes it `Mixed`
+    /// whatever else it holds, and a row's class does not reach the next row.
+    ///
+    /// `Glyphs` is the class that lets Emacs skip measuring a border, so what matters is
+    /// that it is never given to a row holding a font glyph that could be wider: here the
+    /// second row has a border *and* a CJK character, and has to be measured.
+    #[test]
+    fn a_row_of_box_glyphs_is_uniform_only_while_nothing_else_needs_the_font() {
+        let glyphs = |text: &str| Run {
+            text: text.to_string(),
+            cols: text.chars().count(),
+            deco: Some(Deco::Glyphs(Vec::new())),
+            ..Run::default()
+        };
+        let plain = |text: &str, cols: usize| Run {
+            text: text.to_string(),
+            cols,
+            ..Run::default()
+        };
+        let mut block = Block::default();
+        for run in [glyphs("┌──"), plain(" ok ", 4), glyphs("\u{a0}──┐")] {
+            block.push_run(&run, run.text.chars().count());
+        }
+        block.end_row(false);
+        block.push_newline();
+        for (run, chars) in [(glyphs("│"), 1), (plain("世", 2), 1)] {
+            block.push_run(&run, chars);
+        }
+        block.end_row(false);
+        block.push_newline();
+        block.push_run(&plain("ab", 2), 2);
+        block.end_row(false);
+
+        let classes: Vec<Uniformity> = block.rows.iter().map(|r| r.uniform).collect();
+        assert_eq!(
+            classes,
+            vec![Uniformity::Glyphs, Uniformity::Mixed, Uniformity::Ascii]
+        );
+    }
+
+    /// The layout hash follows the text and the font-changing renditions, and nothing
+    /// else: the same text in another colour lays out identically and must share a key,
+    /// while the same text in bold may not.
+    #[test]
+    fn a_row_hash_changes_with_text_and_font_and_not_with_colour() {
+        let hash = |runs: &[Run]| {
+            let mut block = Block::default();
+            for run in runs {
+                block.push_run(run, run.text.chars().count());
+            }
+            block.end_row(false);
+            block.rows[0].hash
+        };
+        let run = |text: &str, style: Style| Run {
+            text: text.to_string(),
+            cols: text.chars().count(),
+            style,
+            ..Run::default()
+        };
+        let bold = Style {
+            attrs: Attrs::BOLD,
+            ..Style::default()
+        };
+        let red = Style {
+            fg: Color::Indexed(1),
+            ..Style::default()
+        };
+        let base = hash(&[run("hello", Style::default())]);
+        assert_eq!(base, hash(&[run("hello", red)]));
+        assert_ne!(base, hash(&[run("hellO", Style::default())]));
+        assert_ne!(base, hash(&[run("hello", bold)]));
+        assert_ne!(
+            hash(&[run("he", bold), run("llo", Style::default())]),
+            hash(&[run("hel", bold), run("lo", Style::default())])
+        );
+        assert!(base < 1 << 60, "the hash must cross as a fixnum");
     }
 
     /// Dropped rather than truncated, which is the deliberate half of the choice: a lost

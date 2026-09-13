@@ -143,17 +143,18 @@ run of characters, and every span carries offsets in characters into it; spans
 appear only where there is something to say, so a plain unstyled row carries no
 list at all.
 
-ROWS is the block\='s row table: one (START WIDTH UNIFORM WRAPPED) per *screen
-row* the block covers, in order.  A block is a run of contiguous damaged rows
-joined by newlines -- see `cooked--render-rows\=' -- so START is where that
-row\='s text begins in TEXT, WIDTH how many grid cells it occupies, UNIFORM
-whether every character of it takes one byte and stands on one cell, and
-WRAPPED whether the row below continues this row\='s logical line.  All three
-measurements are by-products of the core building the row; the first two are
-`cooked--guard-row-width\='s and the third is
-`cooked--mark-row-wrap\='s, and all three are read by `cooked--render-rows\='
-rather than here.  START is read here, and only for a decoration, which is the
-one thing that has to know which row of the run it landed on.  Scrollback
+ROWS is the block\='s row table: one (START WIDTH UNIFORM WRAPPED HASH) per
+*screen row* the block covers, in order.  A block is a run of contiguous damaged
+rows joined by newlines -- see `cooked--render-rows\=' -- so START is where that
+row\='s text begins in TEXT, WIDTH how many grid cells it occupies, UNIFORM t
+when every character of it is one byte on one cell, `glyph\=' when the ones that
+are not are box glyphs, and nil otherwise, WRAPPED whether the row below
+continues this row\='s logical line, and HASH a key for its layout.  All four
+are by-products of the core building the row; WIDTH, UNIFORM and HASH are
+`cooked--guard-row-width\='s and WRAPPED is `cooked--mark-row-wrap\='s, and
+all four are read by `cooked--render-rows\=' rather than here.  START is read
+here, and only for a decoration, which is the one thing that has to know which
+row of the run it landed on.  Scrollback
 carries no table at all: its lines are ordinary buffer text that is allowed to
 wrap, so there is nothing to guard, no screen row to phase against, and -- with
 `cooked-rejoin-wrapped-lines\=' on, which is the default -- no soft wrap left to
@@ -948,7 +949,16 @@ which has no such seam at all."
         ;; are answers about the font and the geometry rather than about a row,
         ;; and checking that they are still current costs more per row than the
         ;; questions they answer.  See `cooked--wrap-cache'.
-        (cache (and layout (cooked--wrap-cache layout))))
+        (cache (and layout (cooked--wrap-cache layout)))
+        ;; Whether a row the core calls `glyph' -- uniform but for its box
+        ;; glyphs -- counts as uniform.  It does exactly when those glyphs are
+        ;; being drawn as cooked's own bitmaps, which are one cell wide by
+        ;; construction, and those are the conditions `cooked--apply-deco'
+        ;; draws them under.  On a terminal frame there is no cell size, the
+        ;; characters render as the font's own, and the row is measured.
+        ;; `unset' until a `glyph' row asks, so a drain without one pays
+        ;; nothing for the question.
+        (glyphs-drawn 'unset))
     (save-excursion
       (pcase-dolist (`(,index . ,block) rows)
         ;; The short walk, or the whole one.  `bolp' is the same check
@@ -994,15 +1004,26 @@ which has no such seam at all."
           (let ((pos start)
                 (i 0))
             (dolist (row table)
-              (pcase-let ((`(,_ ,cells ,uniform ,wrapped) row))
+              (pcase-let ((`(,_ ,cells ,uniform ,wrapped ,hash) row))
                 (goto-char pos)
-                ;; The row table's own two measurements: how many cells the row
-                ;; occupies on the grid, and whether every character of it takes
-                ;; one byte and stands on one cell.  Both are by-products of the
-                ;; core building the row, so the guard need not measure them; see
-                ;; `cooked--guard-row-width'.
+                ;; The row table's own measurements: how many cells the row
+                ;; occupies on the grid, whether anything in it could render
+                ;; wider than that, and its layout hash.  All three are
+                ;; by-products of the core building the row, so the guard need
+                ;; not measure them; see `cooked--guard-row-width'.
                 (when (and layout cells)
-                  (cooked--guard-row-width pos cells layout uniform cache))
+                  (cooked--guard-row-width
+                   pos cells layout
+                   (if (eq uniform 'glyph)
+                       (if (eq glyphs-drawn 'unset)
+                           (setq glyphs-drawn
+                                 (and cooked-box-drawing-images
+                                      (image-type-available-p 'xbm)
+                                      (cooked--deco-cell-size)
+                                      t))
+                         glyphs-drawn)
+                     uniform)
+                   cache hash))
                 (goto-char pos)
                 ;; After the guard, which is the one thing in this loop that can
                 ;; shorten a row -- and so move the newline this is about.

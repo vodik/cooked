@@ -36,7 +36,7 @@ pub(crate) fn fast_hash(bytes: &[u8]) -> u64 {
 
 /// One round of [`fast_hash`]: the rotate is what keeps the multiply from discarding the
 /// high bits of everything hashed so far, since it alone only ever carries them upward.
-fn mix(hash: u64, word: u64) -> u64 {
+pub(crate) fn mix(hash: u64, word: u64) -> u64 {
     const SEED: u64 = 0x517c_c1b7_2722_0a95;
     (hash.rotate_left(5) ^ word).wrapping_mul(SEED)
 }

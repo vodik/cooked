@@ -559,7 +559,9 @@ sending a block per row would measure a path the module no longer takes.
 Each element of ROWS is (TEXT SPANS DECOS UNIFORM): the row's characters, its
 style spans as (START END FG BG UNDERLINE ATTRS) with offsets *within the row*,
 its (START DECO) decoration spans likewise, and its answer to the guard's
-uniformity question.  Offsets are given per row and re-based here because that
+uniformity question -- t, `glyph\=' or nil, as the core spells it.  The row
+table's layout hash is the row text\='s `sxhash-equal\=': any fixnum that differs
+where the text does is a key the memo can use, which is all the core\='s is.  Offsets are given per row and re-based here because that
 is the only place that knows where a row landed in the assembled text, and
 getting it wrong is a miscolouring rather than an error -- see
 `cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need\='.
@@ -583,7 +585,8 @@ holding the text that scrolled away."
           ;; line that already exists.
           (push "\n" text)
           (setq offset (1+ offset)))
-        (push (list offset (string-width row-text) uniform) table)
+        (push (list offset (string-width row-text) uniform nil (sxhash-equal row-text))
+              table)
         (pcase-dolist (`(,from ,to ,fg ,bg ,ul ,attrs) spans)
           (setq styles (append styles (cooked-bench--style-record
                                        (+ offset from) (+ offset to)
@@ -664,14 +667,12 @@ single record the encoding exists to produce."
   (let ((text (make-string cols ?─))
         (deco (cons 'glyph (unibyte-string #x50 #x00
                                            (logand cols #xff) (ash cols -8)))))
-    ;; UNIFORM is nil, unlike every other fixture here: the box-drawing
-    ;; character is three bytes, and UNIFORM asks about bytes as well as cells.
-    ;; That is not a detail -- it is the flag that decides whether
-    ;; `cooked--guard-row-width' can finish without measuring anything, so a
-    ;; fixture claiming t would make the box rows look like the cheap case and
-    ;; measure the one path this row exists to exercise.
+    ;; UNIFORM is `glyph', which is what the core sends for a row whose only
+    ;; multi-byte characters sit in box-glyph runs.  The guard then skips the
+    ;; row exactly when the bitmaps are drawn, which this fixture arranges, so
+    ;; claiming t or nil here would measure a path production does not take.
     (cooked-bench--run
-     (cl-loop repeat count collect (list text nil (list (list 0 deco)) nil)))))
+     (cl-loop repeat count collect (list text nil (list (list 0 deco)) 'glyph)))))
 
 
 (defconst cooked-bench--tree-indent
@@ -729,10 +730,10 @@ lookup that arrives with it in practice."
     (let ((at (* 4 (1- depth))))
       (push (list at (cons 'glyph (unibyte-string #x45 #x00 1 0))) decos)
       (push (list (1+ at) (cons 'glyph (unibyte-string #x50 #x00 2 0))) decos))
-    ;; UNIFORM is nil for the reason `cooked-bench--box-rows' gives at length,
-    ;; and doubly so here: both the box characters and the padding are
-    ;; multi-byte, so a fixture claiming t would send this row down the cheap
-    ;; path the guard reserves for plain ASCII and measure nothing.
+    ;; UNIFORM is nil: the NO-BREAK SPACE padding is multi-byte and, as the
+    ;; records are written here, outside every glyph run.  The core absorbs
+    ;; that padding into the runs and would send `glyph'; this fixture keeps
+    ;; the unabsorbed shape, so it measures the guard's slow path.
     (list text
           (list (list (length prefix) (length text)
                       (logior (ash 1 24) 4) 0 0 0))

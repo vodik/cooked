@@ -272,6 +272,24 @@ last of which is the one the fixture wrote."
                         (line-beginning-position) (line-end-position))
                        (make-string 40 ?x)))))))
 
+(defun cooked-tests-bench--uniformity (line offset decos)
+  "The UNIFORM the core would send for LINE, given the run\='s DECOS.
+
+OFFSET is added to a decoration\='s start to make it relative to LINE."
+  (if (= (string-bytes line) (length line))
+      t
+    (let ((covered (make-bool-vector (length line) nil)))
+      (dolist (span decos)
+        (pcase span
+          (`(,from (glyph . ,packed))
+           (let ((at (+ from offset)))
+             (dotimes (i (cooked--glyph-pattern-cells packed))
+               (when (< -1 (+ at i) (length line))
+                 (aset covered (+ at i) t)))))))
+      (and (cl-loop for i below (length line)
+                    always (or (< (aref line i) 128) (aref covered i)))
+           'glyph))))
+
 (ert-deftest cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need ()
   "A fixture is one run -- `(0 . BLOCK)\=' -- and a block is (TEXT STYLE-SPANS
 DECO-SPANS LINK-SPANS ROWS), where ROWS has one (START WIDTH UNIFORM) per screen
@@ -290,9 +308,10 @@ said a WIDTH the guard could work with and UNIFORM t, it would have reported the
 fast path's cost for rows that in production take the slow one.
 
 So the table is asserted against the *text*, row by row: START must be where
-that row actually begins, WIDTH its cell count, and UNIFORM whether every
-character of it is one byte on one cell -- which makes the box row, whose
-characters are three bytes each, the one that has to answer nil.  The style and
+that row actually begins, WIDTH its cell count, and UNIFORM t for a row of
+one-byte characters, `glyph\=' for one whose multi-byte characters all sit in
+box-glyph records, and nil otherwise -- which makes the box row `glyph\=' and
+the tree row, whose padding lies outside its records, nil.  The style and
 decoration offsets are checked to land inside the row they were written for,
 since re-basing them onto the assembled text is the one thing
 `cooked-bench--run\=' does that a per-row fixture never had to."
@@ -313,11 +332,13 @@ since re-basing them onto the assembled text is the one thing
         (let ((offset 0))
           (cl-loop for line in lines
                    for row in table
-                   do (pcase-let ((`(,start ,width ,uniform) row))
+                   do (pcase-let ((`(,start ,width ,uniform ,_wrapped ,hash) row))
                         (should (= start offset))
                         (should (= width (string-width line)))
-                        (should (eq (and uniform t)
-                                    (= (string-bytes line) (length line))))
+                        (should (eq uniform
+                                    (cooked-tests-bench--uniformity
+                                     line (- start) decos)))
+                        (should (fixnump hash))
                         (setq offset (+ offset (length line) 1)))))
         ;; The last row ends the text, so nothing may be addressed past it.
         (let ((limit (length text)))
@@ -342,6 +363,53 @@ frames and four sessions, cheap enough to pin."
     (dolist (row rows)
       (should (string-match-p "\\`  alloc, .* conses +[0-9]+ .* intervals +[0-9]+\\'"
                               row)))))
+
+(ert-deftest cooked-a-box-row-drawn-as-bitmaps-is-not-measured ()
+  "A row the core calls `glyph\=' skips the guard while its glyphs are bitmaps.
+
+Every box glyph cooked draws itself is exactly one cell wide, so there is
+nothing for `cooked--scale-offenders\=' to find and nothing to wrap: measuring
+the font\='s glyph for a character the font never draws was nine tenths of what
+a box-drawing frame allocated.  With the bitmaps turned off the font draws the
+characters after all, and the same row has to be measured again."
+  (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
+    (cooked-tests--settle-briefly)
+    (let ((update (cooked-bench--update (cooked-bench--box-rows 4 40) :alt t))
+          (walks 0))
+      (cl-letf* ((real (symbol-function 'cooked--scale-offenders))
+                 ((symbol-function 'cooked--scale-offenders)
+                  (lambda (&rest args) (cl-incf walks) (apply real args))))
+        (cooked--apply update)
+        (should (= walks 0))
+        (let ((cooked-box-drawing-images nil))
+          (cooked--redraw cooked--session)
+          (cooked--apply update))
+        (should (> walks 0))))))
+
+(ert-deftest cooked-a-cjk-row-is-still-scaled ()
+  "A row the font draws still reaches the scale walk, and is scaled.
+
+The other side of `cooked-a-box-row-drawn-as-bitmaps-is-not-measured\=': the
+fast paths added for box drawing must not let a glyph that is really too big
+through.  The metrics are the mock -- batch Emacs has no font to shape with --
+and say the CJK character is half again wider than its two cells."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (cooked-glyph-scale-floor 0.5)
+          (inhibit-read-only t))
+      (insert "漢x\n")
+      (cl-letf (((symbol-function 'cooked--glyph-metrics)
+                 (lambda (beg _end _window _metrics)
+                   (if (eq (char-after beg) ?漢) '(3 15 5 15) '(1 15 5 15))))
+                ((symbol-function 'cooked--default-metrics)
+                 (lambda (&rest _) '(15 5))))
+        (cooked-tests--with-mocked-wrap 10
+          (cooked--guard-row-width (point-min) 3 nil nil nil (sxhash-equal "漢x"))))
+      (let ((display (get-text-property (point-min) 'display)))
+        (should (assq 'height display))
+        (should (< (cadr (assq 'height display)) 1.0))))))
 
 (provide 'cooked-tests-bench)
 ;;; cooked-tests-bench.el ends here

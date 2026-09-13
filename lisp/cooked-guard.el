@@ -227,11 +227,7 @@ while a fresh measurement already answers for the new one, which reads an
 ordinary render as a too-wide row and waves it through to a silent, unmarked
 soft-wrap.
 
-UNIFORM says every character in the row takes exactly one byte and stands on
-exactly one cell -- not \"is ASCII\": a run whose characters are all ASCII but
-were declared a different width by `OSC 66\=' fails it just the same, since what
-it actually promises is that nothing about the row could disagree with a
-byte-per-column reading.  FIXED-PITCH is
+
 `cooked--ascii-fixed-pitch-p\=' for the font in force.  Together they are the
 one case that can be answered without asking Emacs' layout anything at all: a
 uniform row in a font that renders ASCII one cell per character cannot come out
@@ -241,7 +237,7 @@ proportional face is."
   (and (<= width cooked--cols)
        (not (and uniform fixed-pitch))))
 
-(defun cooked--row-wraps-p (start end window memo)
+(defun cooked--row-wraps-p (start end window memo &optional key)
   "Whether Emacs lays the row START..END out on more than one screen line.
 
 The one question about a row that cannot be answered anywhere but here.  Rust
@@ -264,10 +260,15 @@ of box glyphs is most of what the guard costs per row, and across a whole
 screen of them it adds up to more than a 60Hz frame.
 
 Only the negative is stored; see `cooked--wrap-memo\=' for why that is also the
-safety argument.  The key is the row's text as it actually sits in the buffer
-rather than the text the drain said it wrote, because the buffer's copy is what
-`vertical-motion\=' is measuring."
-  (let ((key (and memo (buffer-substring-no-properties start end))))
+safety argument.
+
+KEY is the row\='s layout hash from the drain\='s row table -- its text and the
+renditions that change its font, see `BlockRow::hash\=' in src/wire.rs -- so a
+row is looked up without being copied out of the buffer.  The row has just been
+written from that very text, so the hash describes what `vertical-motion\=' is
+about to measure.  Without one, as for a row driven from Lisp, the row\='s text
+is copied and used instead."
+  (let ((key (and memo (or key (buffer-substring-no-properties start end)))))
     (unless (and key (gethash key memo))
       (let ((wraps (save-excursion
                      (goto-char start)
@@ -571,7 +572,7 @@ the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
               (put-text-property to (1+ to) 'display '(space :width 0))))
           (goto-char to))))))
 
-(defun cooked--guard-row-width (start width &optional window uniform cache)
+(defun cooked--guard-row-width (start width &optional window uniform cache hash)
   "Keep the screen row beginning at START to one screen line.
 
 Every live row is its own hard-newlined buffer line, so Emacs softwrapping one
@@ -583,8 +584,8 @@ classification curses programs expect, so this catches what gets through on the
 one side that can observe the truth: Emacs' own layout, by way of
 `vertical-motion'.
 
-WIDTH is the row's width in grid cells and UNIFORM whether every character in
-it takes one byte and stands on one cell, both carried by the drain --
+WIDTH is the row's width in grid cells and UNIFORM whether nothing in it can
+render wider than a byte-per-column reading, both carried by the drain --
 `cooked--render-rows' reads them off the block it has just rendered, and both
 are required: there is no caller with a row and no block to have got them
 from, so nothing here falls back to measuring the row itself.  They are what
@@ -600,6 +601,9 @@ step exists to keep the next one from running:
      is finished at a hash lookup -- see `cooked--row-wraps-p'.
   3. Only what is left reaches `vertical-motion', and only what that says wraps
      reaches the trim.
+
+HASH is the row\='s layout hash, the key step 2 looks it up by; see
+`cooked--row-wraps-p'.
 
 CACHE is `cooked--wrap-cache' for WINDOW, which steps 1 and 2 are both answers
 out of.  It is an argument for the same reason WINDOW is: it is a fact about the
@@ -637,7 +641,7 @@ was mismeasured rather than an adjacent one."
           ;; too *tall*, such as a CJK character from a fallback font, makes
           ;; the row deeper while its width fits and the wrap check says nil.
           (cooked--scale-offenders start end window metrics)
-          (when (and (cooked--row-wraps-p start end window memo)
+          (when (and (cooked--row-wraps-p start end window memo hash)
                      (cooked--trim-to-one-line start window))
             (goto-char start)
             (cooked--mark-truncation start (1- (line-end-position)) window)))))))

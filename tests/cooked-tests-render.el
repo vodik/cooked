@@ -1902,8 +1902,14 @@ that same block's own text."
                         ;; two numbers beside it are about.
                         (should (equal line (substring text start (+ start (length line)))))
                         (should (equal width (string-width line)))
-                        (should (eq (not (null uniform))
-                                    (not (string-match-p (rx (not ascii)) line))))
+                        ;; t for ASCII, `glyph' for the border, whose three-byte
+                        ;; characters are all box glyphs, and nil for CJK and the
+                        ;; combining mark, which the font draws.
+                        (should (eq uniform
+                                    (cond ((not (string-match-p (rx (not ascii)) line)) t)
+                                          ((string-match-p (rx bos (+ (any (#x2500 . #x257f))) eos)
+                                                           line)
+                                           'glyph))))
                         (unless (string-empty-p line)
                           (setq checked (1+ checked)))))))
       ;; The corpus really did arrive: five non-empty rows, not an empty grid
