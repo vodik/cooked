@@ -37,7 +37,18 @@ pub(crate) fn validated_text(params: &[&[u8]], from: usize, max: usize) -> Optio
 
 impl State {
     /// OSC 133: a shell's semantic mark, anchored where it fell in the stream.
+    ///
+    /// Dropped while the alternate screen is up. Its rows never become buffer text, so
+    /// a mark there has no line to name: the alternate screen scrolls without
+    /// scrollback and the mark cannot move with its row, so after `seq 1 60` a prompt
+    /// mark from a shell inside tmux names a line of output. It would be filed with a
+    /// command record all the same, and `cooked-previous-command` and the fringe would
+    /// point at that line, or, once the primary screen is back, at whatever transcript
+    /// text the position has come to hold.
     pub(super) fn semantic(&mut self, params: &[&[u8]]) {
+        if self.shown.is_alternate() {
+            return;
+        }
         // Parsed before a mark is taken, so an ignored mark leaves no id on the grid that
         // Emacs is never told about.
         let Some(mark) = Self::parse_mark(params) else {
@@ -159,16 +170,12 @@ impl State {
         out
     }
 
-    /// Name the mark at ANCHOR and leave it on the cell the anchor points at.
-    ///
-    /// Nothing is attached while the alternate screen is up: its rows never become buffer
-    /// text, so there is nothing a rewrap could move.
+    /// Name the mark at ANCHOR and leave it on the cell the anchor points at, which is on
+    /// the primary screen, since [`State::semantic`] takes no mark on the alternate one.
     pub(super) fn take_mark(&mut self, at: Anchor) -> MarkId {
         let id = MarkId::from_index(self.next_mark);
         self.next_mark = self.next_mark.wrapping_add(1);
-        if !self.shown.is_alternate()
-            && let Some(row) = at.row.checked_sub(self.evicted_total)
-        {
+        if let Some(row) = at.row.checked_sub(self.evicted_total) {
             self.screens.primary.mark(row, at.col, id);
         }
         id

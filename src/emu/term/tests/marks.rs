@@ -338,6 +338,41 @@ fn leaving_the_alternate_screen_reports_every_mark() {
     }
 }
 
+/// A mark sent while the alternate screen is up is dropped, whichever of the three ways
+/// in put it there, and the primary screen's marks are untouched by it. A shell inside
+/// tmux is the case: tmux draws on the alternate screen and scrolls it with no
+/// scrollback, so the mark's row would name output a moment later.
+#[test]
+fn a_mark_on_the_alternate_screen_is_dropped() {
+    for mode in ["47", "1047", "1049"] {
+        let mut t = term(4, 10, b"\x1b]133;A\x07one\r\n");
+        t.drain();
+        t.feed(
+            format!(
+                "\x1b[?{mode}h\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;C\x07\r\n\x1b]133;D;0\x07"
+            )
+            .as_bytes(),
+        );
+        let delta = t.drain();
+        assert!(
+            !delta.events.iter().any(|e| matches!(e, Event::Mark(..))),
+            "mode {mode}: {:?}",
+            delta.events
+        );
+        t.feed(format!("\x1b[?{mode}l\x1b]133;A\x07").as_bytes());
+        // Back on the primary screen, the mark from before the switch is where it was,
+        // and the next one takes the next id, the dropped ones having taken none.
+        assert_eq!(
+            t.drain().marks,
+            vec![
+                (MarkId::from_index(0), Anchor { row: 0, col: 0 }),
+                (MarkId::from_index(1), Anchor { row: 1, col: 0 }),
+            ],
+            "mode {mode}"
+        );
+    }
+}
+
 /// An anchor outlives the row it was taken from: once the marked row has scrolled
 /// away, its absolute row is below the base of the batch still on the grid.
 #[test]

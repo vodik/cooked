@@ -1777,7 +1777,14 @@ would otherwise be refused as a nested session."
                            "marks input-mark cwd announce")
                    tmux "-S" socket "-f" conf "new-session"
                    "bash" "--rcfile" rc "-i")
-           (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 15))
+           ;; A prompt mark says the shell is ready off the alternate screen.  On it
+           ;; the marks are dropped, and the prompt tmux draws is the only sign.
+           (should (cooked-tests--settle
+                    (lambda ()
+                      (or (eq cooked--semantic 'input)
+                          (and cooked--alt
+                               (string-match-p "^\\$ " (cooked-tests--text)))))
+                    15))
            ,@body)
        (call-process tmux nil nil nil "-S" socket "kill-server")
        (delete-file rc)
@@ -1824,16 +1831,54 @@ carried into scrollback with its row would now name a line of its output."
 (ert-deftest cooked-tmux-on-the-alternate-screen-keeps-the-keyboard ()
   "By default tmux takes the alternate screen, and there the keys stay tmux\\='s.
 
-The marks still arrive and the directory is still tracked, but a prompt mark on
-the alternate screen must not hand Emacs the line: the screen is tmux\\='s frame,
-not a transcript."
+The directory is still tracked, but the prompt marks passed through are
+dropped: the screen is tmux\\='s frame and scrolls with no scrollback, so a mark
+there would name a line of output as soon as the pane scrolled, and no command
+record is filed from one."
   :tags '(tmux bash)
   (skip-unless (cooked-tests--tmux))
   (skip-unless (executable-find "bash"))
   (cooked-tests--with-tmux "set -g allow-passthrough on\n"
-    (cooked-tests--tmux-run "cd /tmp")
-    (should (equal default-directory "/tmp/"))
-    (should (eq (cooked--policy) 'alt))))
+    (should-not (equal default-directory "/usr/"))
+    (cooked--send cooked--session "cd /usr\r")
+    (should (cooked-tests--settle (lambda () (equal default-directory "/usr/")) 10))
+    (should (eq (cooked--policy) 'alt))
+    (should-not cooked--semantic-seen)
+    (should-not cooked--commands)))
+
+(ert-deftest cooked-tmux-hands-on-the-active-pane-directory-through-swd ()
+  "With `set-titles\\=' on, tmux sends the active pane\\='s directory itself, as the
+entry\\='s `Swd\\=', and nothing else\\='s.
+
+`allow-passthrough\\=' stays off, so the snippet\\='s wrapped reports are dropped
+and only tmux\\='s own can move `default-directory\\='.  The panes write plain
+OSC 7, which tmux keeps per pane.  A background pane changing directory moves
+nothing, and selecting it hands its directory on."
+  :tags '(tmux bash)
+  (skip-unless (cooked-tests--tmux))
+  (skip-unless (executable-find "bash"))
+  (cooked-tests--with-tmux "set -g set-titles on\n"
+    (cl-flet ((tmux (&rest args)
+                (should (zerop (apply #'call-process tmux nil nil nil
+                                      "-S" socket args))))
+              (report (dir)
+                (format "printf '\\033]7;file://%s\\007'" dir)))
+      (should-not (member default-directory '("/usr/" "/etc/")))
+      (tmux "send-keys" "-t" "%0" (report "/usr") "Enter")
+      (should (cooked-tests--settle (lambda () (equal default-directory "/usr/")) 10))
+      (tmux "split-window" "-d" "bash" "--rcfile" rc "-i")
+      (tmux "send-keys" "-t" "%1" (report "/etc") "Enter")
+      (cooked-tests--settle #'ignore 1)
+      (should (equal default-directory "/usr/"))
+      (tmux "select-pane" "-t" "%1")
+      (should (cooked-tests--settle (lambda () (equal default-directory "/etc/")) 10)))))
+
+(ert-deftest cooked-osc-7-with-no-path-changes-nothing ()
+  "tmux reports an empty OSC 7 for a pane that has never sent one."
+  (with-temp-buffer
+    (let ((default-directory "/tmp/"))
+      (cooked--osc-cwd '(""))
+      (should (equal default-directory "/tmp/")))))
 
 (provide 'cooked-tests-session)
 ;;; cooked-tests-session.el ends here
