@@ -1625,6 +1625,14 @@ to the child verbatim."
   (add-hook 'context-menu-functions #'cooked--context-menu nil t)
   (add-hook 'kill-buffer-hook #'cooked--cleanup nil t))
 
+;; A buffer of the child's rows, not text to edit, which is what `special' tells
+;; every globalized tidier that asks: `ws-butler-global-mode' skips such a mode,
+;; and would otherwise trim the child's rows on the first save.  Put here rather
+;; than inherited, because `define-derived-mode' copies `comint-mode''s class
+;; only when the mode function first runs, and not at all once the parent is
+;; something else.
+(put 'cooked-mode 'mode-class 'special)
+
 ;; The state maps are installed with `use-local-map', which replaces the local map
 ;; outright. Reparenting them onto `cooked-mode-map' — itself a child of
 ;; `comint-mode-map' — keeps comint's bindings, and anything layered on them by

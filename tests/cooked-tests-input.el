@@ -4779,6 +4779,33 @@ exception lists accepted nothing outside 0-127."
       (use-global-map global)))
   (should (eq (lookup-key cooked-raw-map (kbd "C-;")) #'cooked-send-key)))
 
+(ert-deftest cooked-whitespace-tidiers-leave-the-childs-rows-alone ()
+  "Nothing that tidies whitespace edits a row the child wrote.
+
+A row ending in coloured spaces is text the child put in cells, not slack.
+`delete-trailing-whitespace', `whitespace-cleanup' and the save hook an
+editorconfig `trim_trailing_whitespace' turns on all meet the `read-only'
+property `cooked--protect' puts on it, and each either finds nothing to delete
+or signals.  At a prompt the pending line is the user's own text, and trimming
+it there is theirs to ask for."
+  (require 'whitespace)
+  (require 'editorconfig)
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'abc\\033[41m   \\033[m\\r\\n\\033[42m      \\033[m\\r\\nX'; stty raw -echo; cat -v")
+    (should (cooked-tests--settle
+             (lambda () (string-search "abc   \n      \nX" (cooked-tests--text)))))
+    (let ((rows (cooked-tests--text)))
+      (dolist (tidy (list #'delete-trailing-whitespace
+                          #'whitespace-cleanup
+                          ;; What editorconfig turns on, and what it then runs.
+                          (lambda ()
+                            (funcall editorconfig-trim-whitespaces-mode 1)
+                            (run-hooks 'before-save-hook))))
+        (ert-info ((format "%S" tidy))
+          (ignore-errors (funcall tidy))
+          (should (equal (cooked-tests--text) rows)))))))
+
 (ert-deftest cooked-mode-is-special-enough-to-be-left-alone ()
   "What excuses cooked from every globalized whitespace tidier at once.
 
@@ -4789,10 +4816,19 @@ exception lists accepted nothing outside 0-127."
 trim the lot on the first save.  The same `mode-class\=' convention is what
 `define-globalized-minor-mode\=' users check generally.
 
-cooked does not declare it: `define-derived-mode\=' inherits it from
-`comint-mode\='.  That makes it exactly the kind of thing a refactor away from
-comint would drop without noticing, which is the whole reason to assert it
-here rather than to trust it."
+cooked puts it itself rather than inheriting it from `comint-mode\=', which
+`define-derived-mode\=' copies only when the mode function first runs.  So a
+fresh Emacs is asked, before any cooked buffer exists: an inherited class would
+answer nil there, and would be dropped by a move away from comint unnoticed."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (lisp (expand-file-name "lisp" (cooked--root)))
+         (script "(progn (require 'cooked-mode)
+                         (prin1 (get 'cooked-mode 'mode-class)))")
+         (output (with-output-to-string
+                   (with-current-buffer standard-output
+                     (call-process emacs nil t nil
+                                   "-Q" "--batch" "-L" lisp "--eval" script)))))
+    (should (eq (car (read-from-string output)) 'special)))
   (with-temp-buffer
     (delay-mode-hooks (cooked-mode))
     (should (eq (get 'cooked-mode 'mode-class) 'special))))
