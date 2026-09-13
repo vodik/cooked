@@ -227,7 +227,12 @@ while a fresh measurement already answers for the new one, which reads an
 ordinary render as a too-wide row and waves it through to a silent, unmarked
 soft-wrap.
 
-
+UNIFORM says nothing in the row can come out wider than a byte-per-column
+reading of it, as the caller has already resolved the drain\='s flag: every
+character is one byte on one cell, or the ones that are not are box glyphs
+cooked is drawing as bitmaps of exactly one cell -- see `cooked--render-rows\='.
+It is not \"is ASCII\": a run of ASCII declared a different width by `OSC 66\='
+fails it just the same.  FIXED-PITCH is
 `cooked--ascii-fixed-pitch-p\=' for the font in force.  Together they are the
 one case that can be answered without asking Emacs' layout anything at all: a
 uniform row in a font that renders ASCII one cell per character cannot come out
@@ -338,10 +343,11 @@ surprise it."
 (defun cooked--glyph-metrics (beg end window metrics)
   "What the cluster in BEG..END actually measures, as (WIDTH ASCENT DESCENT PIXEL).
 
-Memoised in METRICS, `cooked--wrap-memo\='s third slot, on the cluster's own
-text *and its face* -- so a border row of five hundred identical characters is
-one measurement and four hundred and ninety-nine hash lookups, while the same
-character in bold is measured again, which it must be: a bold face is a
+Memoised in METRICS, `cooked--wrap-memo\='s third slot, first by face and then
+by the cluster's own character or text -- so a border row of five hundred
+identical characters is one measurement and four hundred and ninety-nine hash
+lookups that allocate nothing, while the same character in bold is measured
+again, which it must be: a bold face is a
 different font and so a different glyph with different metrics.  The cache is
 a prerequisite rather than an optimisation: without one this is a `font-at\='
 and a shaping call per cell per drain.
@@ -357,14 +363,21 @@ at index *2* of the gstring, not 1.  And the font's own metrics come from
 `query-font\=' -- pixel size 2, ascent 4, descent 5 -- not from `font-info\=',
 which is a different vector whose slots 4 and 5 are a baseline offset and a
 compose rule, and which therefore answers 0 for both without complaining."
-  (let ((key (cons (get-text-property beg 'face)
-                   (buffer-substring-no-properties beg end))))
-    (or (gethash key metrics)
+  (let* ((face (get-text-property beg 'face))
+         (table (or (gethash face metrics)
+                    (puthash face (make-hash-table :test #'equal) metrics)))
+         ;; The character itself for the one-character cluster the scale walk
+         ;; always asks about, so a hit allocates nothing; the text otherwise.
+         (key (if (= end (1+ beg))
+                  (char-after beg)
+                (buffer-substring-no-properties beg end))))
+    (or (gethash key table)
         (puthash
          key
          (when-let*
              ((gstring
-               (if-let* ((composition (find-composition beg end nil t)))
+               (if-let* ((composition (and (cooked--composition-possible-p beg)
+                                           (find-composition beg end nil t))))
                    (nth 2 composition)
                  (when-let* ((font (font-at beg window)))
                    (font-shape-gstring
@@ -378,7 +391,22 @@ compose rule, and which therefore answers 0 for both without complaining."
               ((vectorp glyph))
               (info (query-font font)))
            (list (aref glyph 4) (aref info 4) (aref info 5) (aref info 2)))
-         metrics))))
+         table))))
+
+(defun cooked--composition-possible-p (pos)
+  "Whether a composition could cover the character at POS.
+
+`find-composition\=' is the expensive half of a measurement, and nearly every
+character it is asked about composes with nothing.  A composition needs either
+a `composition\=' property, or an entry in `composition-function-table\=' for
+the character or the one after it -- after, because a combining mark or a
+zero-width joiner is what triggers composing the character before it.  So `e\='
+followed by U+0301 is still asked, and `e\=' followed by `f\=' is not."
+  (or (get-text-property pos 'composition)
+      (and auto-composition-mode
+           (or (aref composition-function-table (char-after pos))
+               (when-let* ((next (char-after (1+ pos))))
+                 (aref composition-function-table next))))))
 
 (defun cooked--glyph-fits-p (measured slot default)
   "Whether MEASURED already sits inside SLOT pixels and DEFAULT\='s metrics.
@@ -533,15 +561,15 @@ the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
       (goto-char start)
       (while (< (point) end)
         (let* ((from (point))
-               (to (min end (save-excursion
-                              (goto-char from)
-                              ;; One grapheme cluster, the unit the shaper works
-                              ;; in.  `forward-char' would split a base from its
-                              ;; combining marks and measure a glyph that is
-                              ;; never drawn on its own.
-                              (forward-char 1)
-                              (point))))
-               (cells (string-width (buffer-substring-no-properties from to)))
+               ;; One character.  A base and its combining marks are one glyph,
+               ;; and `cooked--glyph-metrics' measures them together through the
+               ;; composition that covers them; stepping by character here costs
+               ;; no allocation, where finding the position by moving point cost
+               ;; a marker per character.
+               (to (min end (1+ from)))
+               (cells (if (= to (1+ from))
+                          (char-width (char-after from))
+                        (string-width (buffer-substring-no-properties from to))))
                (measured (and (> cells 0)
                               (cooked--glyph-metrics from to window metrics)))
                (default (and measured (cooked--default-metrics window metrics)))
