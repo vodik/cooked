@@ -1942,6 +1942,33 @@ not happen."
                   (pixel (nth 3 measured)))
         (should (= (* pixel scale) (ffloor (* pixel scale))))))))
 
+(ert-deftest cooked-the-scale-floor-clamps-rather-than-refusing ()
+  "The floor says how far a glyph may shrink, not whether it may.
+
+Getting this backwards made the feature useless on the font that needs it most.
+An Iosevka arrow is exactly twice its cell -- 16 pixels in an 8-pixel cell, from
+Iosevka itself rather than a fallback -- so it wants a scale of 0.5, which
+quantizes to 0.46 at a pixel size of 13.  Read as a *threshold* the floor then
+refuses the one glyph the whole mechanism exists for, and btop stays a cell out
+of line on every row carrying an arrow.  Read as a *clamp* it says what it
+means: never shrink more than this, and where that leaves the glyph still a
+little over, a slightly wide character beats an illegible one."
+  (let ((default '(13 4))
+        (cooked-glyph-scale-floor 0.5))
+    ;; Twice its cell: scaled, not refused.
+    (let ((scale (cooked--glyph-scale '(16 13 4 13) 8 default)))
+      (should scale)
+      (should (< scale 1.0)))
+    ;; Four times its cell wants 0.25 and is held at the floor instead, coming
+    ;; out larger than the arithmetic asked for and still readable.
+    (let ((unclamped (cooked--glyph-scale '(32 13 4 13) 8 default))
+          (arrow (cooked--glyph-scale '(16 13 4 13) 8 default)))
+      (should unclamped)
+      (should (= unclamped arrow)))
+    ;; And nil means no scaling at all, which is the off switch.
+    (let ((cooked-glyph-scale-floor nil))
+      (should (cooked--glyph-scale '(16 13 4 13) 8 default)))))
+
 (ert-deftest cooked-glyph-scale-leaves-a-glyph-that-fits-alone ()
   "nil, not 1.0: the caller puts no property on at all, and a `display\=' property
 per cell is exactly the cost the run-wide image work went to remove."

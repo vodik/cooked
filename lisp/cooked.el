@@ -2088,8 +2088,12 @@ of it -- and the loop then eats the newline above START and the row below."
       (delete-region (1- eol) eol))
     trimmed))
 
-(defcustom cooked-glyph-scale-floor nil
+(defcustom cooked-glyph-scale-floor 0.5
   "How far a glyph may be shrunk to make it fit its cell, or nil not to.
+
+A *clamp*, not a threshold: a glyph needing more than this is shrunk to exactly
+this and left slightly over its cell, rather than being refused.  A slightly
+wide character beats an illegible one, and beats a row trimmed to fit.
 
 A glyph needing more than this is left alone and the row is trimmed instead.
 Scaling is a repair, and a repair that renders a character at half size has
@@ -2211,10 +2215,22 @@ hold."
               (`(,default-ascent ,default-descent) default))
     (when (and default-ascent default-descent (> pixel 0)
                (or (> width slot) (> ascent default-ascent) (> descent default-descent)))
-      (let* ((scale (min (if (> width 0) (/ (float slot) width) 1.0)
-                         (if (> ascent 0) (/ (float default-ascent) ascent) 1.0)
-                         (if (> descent 0) (/ (float default-descent) descent) 1.0)))
-             (quantized (/ (ffloor (* pixel scale)) pixel)))
+      (let* ((computed (min (if (> width 0) (/ (float slot) width) 1.0)
+                            (if (> ascent 0) (/ (float default-ascent) ascent) 1.0)
+                            (if (> descent 0) (/ (float default-descent) descent) 1.0)))
+             ;; The floor *clamps*; it does not reject.  Getting this backwards
+             ;; is what made the feature useless on the font that needs it most:
+             ;; an Iosevka arrow is exactly twice its cell, so it wants a scale
+             ;; of 0.5, which quantizes to 0.46 -- and a floor read as a
+             ;; threshold then refuses the one glyph the whole mechanism exists
+             ;; for.  Read as a clamp it says what it means: never shrink a
+             ;; glyph more than this, and where that leaves it still overflowing,
+             ;; a slightly wide character beats an illegible one.
+             (bounded (max computed (or cooked-glyph-scale-floor 0)))
+             ;; After the clamp, not before: `height' scales the font's pixel
+             ;; size and Emacs rounds, so a mathematically exact scale rounds
+             ;; back up and the cell overflows anyway.
+             (quantized (/ (ffloor (* pixel bounded)) pixel)))
         (and (< quantized 1.0) quantized)))))
 
 (defun cooked--default-metrics (window metrics)
@@ -2336,9 +2352,9 @@ the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
                (scale (and measured default (not fits)
                            (cooked--glyph-scale
                             measured (* (frame-char-width) cells) default))))
-          (when (or claim (and scale (>= scale cooked-glyph-scale-floor)))
+          (when (or claim scale)
             (put-text-property from to 'display
-                               (if (and scale (>= scale cooked-glyph-scale-floor))
+                               (if scale
                                    `((min-width (,cells)) (height ,scale))
                                  `((min-width (,cells)))))
             (when claim
