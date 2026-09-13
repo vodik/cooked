@@ -376,3 +376,37 @@ fn an_edit_inside_a_linked_underlined_span_keeps_the_link_and_the_colour() {
     assert!(run.link.is_some());
     assert_eq!(t.style(run.style).underline, Color::Indexed(196));
 }
+
+#[test]
+fn a_washed_row_the_screen_grows_back_over_is_sent() {
+    // Every row is washed inverse, and Emacs trims the region to the cursor's row, so the
+    // two below it are gone from the buffer. The cursor moving down damages nothing, and
+    // the row it reaches still has to arrive in its colour rather than as an empty line.
+    let mut t = settled(3, 10, b"\x1b[7m\x1b[3M");
+    t.feed(b"\r\n");
+    assert_eq!(sent(&mut t), vec![1]);
+    // Emacs holds it now, so nothing more is sent until something changes.
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+}
+
+#[test]
+fn a_blank_row_the_screen_grows_back_over_is_not_sent() {
+    let mut t = settled(3, 10, b"top");
+    t.feed(b"\r\n");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+}
+
+#[test]
+fn a_washed_row_a_scroll_brings_up_from_below_the_region_is_sent() {
+    // Emacs holds only row 0; the washed rows below it were trimmed. Scrolling up by two
+    // moves one of them to row 0 without damaging it.
+    let mut t = settled(5, 10, b"\x1b[42m\x1b[4M");
+    t.feed(b"\x1b[2S");
+    let delta = t.drain();
+    assert_eq!(delta.shifts.len(), 1);
+    assert!(
+        delta.rows.iter().any(|row| row.index == 0),
+        "{:?}",
+        delta.rows
+    );
+}

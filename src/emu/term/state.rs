@@ -467,7 +467,8 @@ impl State {
     /// On the primary screen, the rows below `used` are forgotten afterwards. Emacs trims
     /// its screen region to that many lines, so whatever it held for them is gone, and a
     /// background wash drawn there later must be sent rather than matched against a copy of
-    /// text the buffer no longer has.
+    /// text the buffer no longer has. A wash already there when the screen grows back over
+    /// it is sent too, damaged or not.
     fn damaged_rows(
         &mut self,
         mut damaged: Vec<usize>,
@@ -485,9 +486,23 @@ impl State {
         // cell, so the rows it left and the row it is on are asked about as if damaged.
         // Their cells are what the copy holds, so only the cursor can make them differ.
         let front = &self.front;
+        let screen = &self.screens[self.shown];
+        // A row Emacs trimmed off the bottom of the primary comes back as an empty line when
+        // the screen grows over it, which a cursor moving down or a scroll does without
+        // damaging it. An empty line is what a blank row renders to, but not a row the
+        // child washed with a background, so that one is sent.
+        let used = if self.shown.is_alternate() {
+            0
+        } else {
+            screen.used()
+        };
+        let regrown = (0..used).filter(|&row| {
+            front.trimmed(row) && screen.row(row).is_some_and(|row| !row.is_blank())
+        });
         let moved: Vec<usize> = front
             .cursor_rows()
             .chain(Some(cursor.row).filter(|&row| front.knows(row)))
+            .chain(regrown)
             .filter(|row| damaged.binary_search(row).is_err())
             .collect();
         if !moved.is_empty() {
@@ -546,7 +561,7 @@ impl State {
             })
             .collect();
         if !self.shown.is_alternate() {
-            self.front.forget_from(self.screen().used());
+            self.front.trim_from(self.screen().used());
         }
         rows
     }

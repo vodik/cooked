@@ -24,6 +24,9 @@ use super::super::screen::{Direction, Shift};
 struct Known {
     /// Whether the rest of this means anything. A row that is not known always differs.
     known: bool,
+    /// Whether Emacs trimmed this row off the bottom of the primary screen's region, so
+    /// the buffer holds no line for it at all; see [`Front::trim_from`].
+    trimmed: bool,
     wrapped: bool,
     /// The cursor's column when the row was rendered, if the cursor was on it.
     ///
@@ -79,6 +82,25 @@ impl Front {
         }
     }
 
+    /// Note that Emacs has trimmed its screen region to the rows above FIRST, so it holds
+    /// nothing for the rest.
+    ///
+    /// Forgotten, as rows whose text changed under the copy are, and marked as well: a row
+    /// the guard edited is still in the buffer and only has to be sent when it is next
+    /// damaged, while a trimmed row that holds a background wash has to be sent once the
+    /// screen grows back over it, damaged or not.
+    pub(super) fn trim_from(&mut self, first: usize) {
+        for row in self.rows.iter_mut().skip(first) {
+            row.known = false;
+            row.trimmed = true;
+        }
+    }
+
+    /// Whether row INDEX was trimmed off the buffer and has not been sent since.
+    pub(super) fn trimmed(&self, index: usize) -> bool {
+        self.rows.get(index).is_some_and(|row| row.trimmed)
+    }
+
     /// Stop claiming to know row INDEX.
     pub(super) fn forget(&mut self, index: usize) {
         if let Some(row) = self.rows.get_mut(index) {
@@ -123,6 +145,7 @@ impl Front {
             Cell::fill(&mut self.cells[slot..slot + cols], Cell::default());
             let row = &mut rows[index];
             row.known = true;
+            row.trimmed = false;
             row.wrapped = false;
             row.cursor = None;
             row.extras.clear();
@@ -363,6 +386,7 @@ impl Front {
         let slot = self.order[index] as usize * cols;
         self.cells[slot..slot + cols].copy_from_slice(row.cells());
         known.known = true;
+        known.trimmed = false;
         known.wrapped = row.wrapped();
         known.cursor = cursor;
         known.extras.clear();
