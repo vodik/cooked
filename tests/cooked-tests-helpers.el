@@ -933,5 +933,38 @@ POLICY is the one the buffer must be under, named so a failure says which."
   (should (eq (key-binding (kbd "C-z")) #'evil-emacs-state))
   (should (eq (key-binding (kbd "C-c C-v")) #'cooked-toggle-peek)))
 
+(defmacro cooked-tests--with-mock-tramp (directory &rest body)
+  "Run BODY with DIRECTORY bound to a TRAMP name for a local directory.
+
+The method is tramp-tests.el\='s own `mock\=': a login shell started locally
+with `sh -i\=', driven by tramp-sh exactly as an ssh connection would be.  So a
+name such as /mock::/tmp/x goes through every TRAMP file handler, and
+`process-file\=' and `temporary-file-directory\=' take their remote branches,
+without a network or a key.  The directory is a fresh local one, and both it
+and the connection are gone afterwards."
+  (declare (indent 1))
+  (let ((local (make-symbol "local")))
+    `(progn
+       (require 'tramp)
+       (let* ((tramp-methods
+               (cons `("mock"
+                       (tramp-login-program ,tramp-default-remote-shell)
+                       (tramp-login-args (("-i")))
+                       (tramp-remote-shell ,tramp-default-remote-shell)
+                       (tramp-remote-shell-args ("-c"))
+                       (tramp-connection-timeout 10))
+                     tramp-methods))
+              (tramp-default-host-alist
+               (cons `("\\`mock\\'" nil ,(system-name)) tramp-default-host-alist))
+              (tramp-verbose 0)
+              (tramp-persistency-file-name nil)
+              (,local (make-temp-file "cooked-tramp" t))
+              (,directory (concat "/mock::" (file-name-as-directory ,local))))
+         (unwind-protect
+             (progn ,@body)
+           (ignore-errors
+             (tramp-cleanup-connection (tramp-dissect-file-name ,directory) t t))
+           (delete-directory ,local t))))))
+
 (provide 'cooked-tests-helpers)
 ;;; cooked-tests-helpers.el ends here
