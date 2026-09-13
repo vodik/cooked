@@ -1738,8 +1738,11 @@ on the text. The regression test asserts the *absence* of a decision.
 - *Only the first cluster of a run is measured*, which is right for a border row
   and wrong for a row of mixed CJK — each distinct cluster still costs a shaping
   call the first time it is seen under a given font.
-- =cooked--around-font-scale= (§2's smaller items) is still not done, so a
-  =text-scale-adjust= invalidates the cache correctly but does not re-anchor.
+- =cooked--around-font-scale= is *done* (2157a1a), and the re-anchoring half it
+  was written to want turns out not to exist: ghostel snapshots anchored windows
+  because its anchoring is *latched*, where =cooked--pin-transcript-bottom=
+  computes the view from the buffer on every drain and the resize causes one.
+  Nothing to save and put back.
 
 *** The metrics recipe, and two details a Lisp port gets wrong
 
