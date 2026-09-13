@@ -27,10 +27,15 @@ MODULE_SUFFIX := .so
 endif
 MODULE := target/release/libcooked$(MODULE_SUFFIX)
 
-# Where the evil tests look for evil and its one hard dependency, goto-chg.  -Q is
-# deliberate -- the suite must not inherit your configuration -- so an installed
-# package is not on `load-path' unless it is named here.  A run that cannot find
-# evil says so and skips, which is quiet enough to be mistaken for passing.
+# Extra `-L' directories for the optional packages the suite tests against: evil,
+# goto-chg, evil-collection, annalist, consult and compat.  -Q is deliberate --
+# the suite must not inherit your configuration -- so `cooked-tests-helpers.el'
+# looks for them itself, under straight's build directory and package.el's
+# elpa, and an install there needs nothing here.  This is for anywhere else,
+# and for CI, which clones them into a scratch directory and names each one.
+# Empty by default because the search already covers the portable answers and
+# any path written here would be one machine's.  A run that still cannot find
+# a package names it at load, and its tests skip.
 EVIL_LOAD_PATH ?=
 
 # Every wait in either suite is a deadline on a real child through a real pty,

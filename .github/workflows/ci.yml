@@ -31,16 +31,34 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The end-to-end suite drives real children: zsh for the OSC 133 path, and
-      # `stty -echo' for secrets. Without zsh those tests skip, which reads as
-      # passing.
-      - name: Install zsh
+      # The end-to-end suite drives real children: zsh for the OSC 133 path, fish
+      # and tmux for their own integration, and `stty -echo' for secrets. A test
+      # whose program is missing skips, and a skip reads as passing.
+      - name: Install shells and tmux
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update && sudo apt-get install -y zsh
+            sudo apt-get update && sudo apt-get install -y zsh fish tmux
           else
+            brew install fish tmux
             command -v zsh
           fi
+
+      # The optional Lisp packages the suite tests against, cloned the way
+      # ghostel's CI does and named through EVIL_LOAD_PATH, which every target
+      # that loads the suite passes to Emacs. Without them the evil, evil-collection
+      # and consult tests skip. goto-chg is evil's one hard dependency, annalist is
+      # evil-collection's, and compat is consult's.
+      - name: Install evil, evil-collection and consult
+        run: |
+          deps="$RUNNER_TEMP/elisp"
+          mkdir -p "$deps"
+          for repo in emacs-evil/evil emacs-evil/goto-chg emacs-evil/evil-collection \
+                      noctuid/annalist.el minad/consult emacs-compat/compat; do
+            git clone --depth 1 "https://github.com/$repo.git" "$deps/$(basename "$repo" .el)"
+          done
+          load_path=""
+          for dir in "$deps"/*; do load_path="$load_path -L $dir"; done
+          echo "EVIL_LOAD_PATH=$load_path" >> "$GITHUB_ENV"
 
       - run: make rust-test
       - run: make lisp-test
