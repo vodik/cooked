@@ -725,6 +725,13 @@ the \"genuinely wider row\" case — bind `cooked--cols' themselves."
               (lambda (&rest _) (goto-char (min (point-max) (+ (point) ,wrap-at))))))
      ,@body))
 
+(defun cooked-tests--prompt-lines ()
+  "The text of the line at each of `cooked--prompt-starts\\='."
+  (mapcar (lambda (at) (save-excursion
+                         (goto-char at)
+                         (buffer-substring-no-properties at (line-end-position))))
+          (cooked--prompt-starts)))
+
 (defun cooked-tests--display-buffer ()
   "Show the current buffer in the selected window, and return that window.
 

@@ -521,5 +521,17 @@ impl State {
         // note on `Event` about not sending the same state two ways.
         self.screen_mut().touch_all();
         self.forget_sent(None);
+        // Both screens are drawn over the same buffer region, so a switch either way
+        // replaces the text of every live row, and the markers Emacs holds on those rows
+        // collapse to the region's start. The report on the way back is the one that
+        // matters: without it, the four prompts run before `less` all came back naming
+        // the first line. It is not withheld on the way in, because the rule stays "every
+        // rewrite of the whole screen reports every mark", as for `Term::touch_all`.
+        //
+        // The markers are still wrong while the alternate screen is up, since its own
+        // redraws collapse them again: sticky scroll or command search reading them in
+        // that window sees one position for every prompt on screen until the program
+        // exits. Keeping the primary's rows in the buffer would close that.
+        self.marks_dirty = true;
     }
 }

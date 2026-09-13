@@ -47,6 +47,13 @@ rebuilds every live row from it, and then nothing about the old positions holds
 -- so `Delta::marks' reports where each mark ended up and this moves the marker
 to meet it.
 
+Leaving the alternate screen needs the same repair.  The alternate frame is
+drawn over the text the live primary rows occupied, so entering it collapses
+every marker on them to the start of the screen, and the drain that restores
+the primary rows reports every mark so this can put them back.  Nothing puts
+them back while the frame is up: a prompt run before `less' reads as the first
+line of the screen until `less' exits.
+
 Because the records share these marker objects rather than copying them, moving
 one here fixes every consumer at once: `cooked--command-region' and so
 `next-error' and evil's command text objects, `cooked--prompt-starts' and so

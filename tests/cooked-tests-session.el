@@ -1707,13 +1707,6 @@ would otherwise be refused as a nested session."
                              (eq cooked--semantic 'input)))
              10))))
 
-(defun cooked-tests--prompt-lines ()
-  "The text of the line at each of `cooked--prompt-starts\\='."
-  (mapcar (lambda (at) (save-excursion
-                         (goto-char at)
-                         (buffer-substring-no-properties at (line-end-position))))
-          (cooked--prompt-starts)))
-
 (ert-deftest cooked-prompt-navigation-and-directory-work-inside-tmux ()
   "A shell in tmux in cooked: its directory tracked, its prompts navigable.
 

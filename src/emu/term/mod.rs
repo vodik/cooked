@@ -1117,9 +1117,9 @@ struct State {
     next_mark: u32,
     /// Whether this drain owes Emacs the position of every mark still on the grid.
     ///
-    /// Set by a resize, which moves them; by a redraw, which destroys the markers naming
-    /// them; and by an eviction, which moves them by however much the departing row
-    /// renders differently as scrollback. A flag rather than the positions, because the
+    /// Set by a resize, which moves them; by a redraw or a switch between the screens,
+    /// which destroys the markers naming them; and by an eviction, which moves them by
+    /// however much the departing row renders differently as scrollback. A flag rather than the positions, because the
     /// child answers a resize by redrawing, and a snapshot taken at the resize would be
     /// stale by however many rows it scrolls before the drain.
     marks_dirty: bool,

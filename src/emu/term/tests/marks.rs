@@ -314,6 +314,30 @@ fn a_drain_that_moves_nothing_reports_no_marks() {
     assert!(t.drain().marks.is_empty());
 }
 
+/// Leaving the alternate screen re-sends every primary row over text the alternate
+/// frame had replaced, so the markers Emacs held there have collapsed and every mark
+/// on the grid is reported, just as for a resize. Each way in is checked, since 47
+/// and 1047 switch screens without the cursor save that 1049 adds.
+#[test]
+fn leaving_the_alternate_screen_reports_every_mark() {
+    for mode in ["47", "1047", "1049"] {
+        let mut t = term(4, 10, b"\x1b]133;A\x07one\r\n\x1b]133;A\x07two\r\n");
+        t.drain();
+        t.feed(format!("\x1b[?{mode}hALT").as_bytes());
+        t.drain();
+        t.feed(format!("\x1b[?{mode}l").as_bytes());
+        let marks = t.drain().marks;
+        assert_eq!(
+            marks,
+            vec![
+                (MarkId::from_index(0), Anchor { row: 0, col: 0 }),
+                (MarkId::from_index(1), Anchor { row: 1, col: 0 }),
+            ],
+            "mode {mode}"
+        );
+    }
+}
+
 /// An anchor outlives the row it was taken from: once the marked row has scrolled
 /// away, its absolute row is below the base of the batch still on the grid.
 #[test]

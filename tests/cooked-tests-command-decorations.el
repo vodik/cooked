@@ -257,6 +257,55 @@ primary marks every row damaged, and the re-arm repaints from that."
                              (cooked--command-prompt-position command) command))
                  8))))))
 
+(defun cooked-tests--run-and-settle (command)
+  "Submit COMMAND at the prompt and wait for its record and the next prompt."
+  (let ((before (length cooked--commands)))
+    (cooked--send-input-string command)
+    (should (cooked-tests--settle
+             (lambda () (> (length cooked--commands) before)) 8))
+    (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 8))))
+
+(ert-deftest cooked-command-decorations-and-prompt-marks-survive-the-alt-screen ()
+  "Prompts on screen when a full-screen program starts are still navigable after.
+
+The alternate screen is drawn over the buffer text the primary rows occupied,
+so entering it deletes those rows and every marker on them collapses to the
+start of the screen region.  Leaving it re-sends the primary rows, and the
+markers only go back if that drain also reports where every mark is, as a
+resize or `cooked-refresh' does.  Without that, five of the eight prompt starts
+below came back as one position on the first line, the fringe markers went with
+them, and `cooked-previous-command' stepped over the prompts.
+
+All three ways in are covered: 1049 saves the cursor too, while 47 and 1047
+only switch screens, and all of them go through the same switch in the core."
+  :tags '(zsh)
+  (skip-unless (executable-find "zsh"))
+  (dolist (mode '(1049 47 1047))
+    (ert-info ((format "mode %d" mode))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                ((symbol-function 'color-values) #'tty-color-values))
+        (cooked-tests--with-zsh
+          (let ((round-trip
+                 (format "printf '\\033[?%dh'; printf 'ALT\\n'; sleep 1; printf '\\033[?%dl'"
+                         mode mode)))
+            (mapc #'cooked-tests--run-and-settle
+                  '("echo one" "cd /tmp" "echo two" "true"))
+            (let ((before (length cooked--commands)))
+              (cooked--send-input-string round-trip)
+              ;; Seen on the alternate screen, or a drain that folded the whole
+              ;; round trip into one would pass without deleting anything.
+              (should (cooked-tests--settle (lambda () cooked--alt) 8))
+              (should (cooked-tests--settle
+                       (lambda () (and (> (length cooked--commands) before)
+                                       (eq cooked--semantic 'input)))
+                       8)))
+            (mapc #'cooked-tests--run-and-settle '("echo three" "true"))
+            (should (equal (cooked-tests--prompt-lines)
+                           (mapcar (lambda (input) (concat cooked-tests--prompt input))
+                                   (list "echo one" "cd /tmp" "echo two" "true"
+                                         round-trip "echo three" "true" ""))))
+            (cooked-tests--check-decorations)))))))
+
 (ert-deftest cooked-command-decorations-mark-a-running-command-neutrally ()
   "The third state, and the whole of what makes it a third state rather than a
 third *answer*: it is dim, it carries no exit code, and there is nothing on it
