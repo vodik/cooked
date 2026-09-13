@@ -23,6 +23,7 @@
 (require 'cooked-graphics)
 (require 'cooked-render)
 (require 'cooked-osc)
+(require 'cooked-color)
 
 (cooked--declare-core)
 

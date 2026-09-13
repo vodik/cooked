@@ -56,6 +56,7 @@
 (require 'cooked-osc)
 (require 'cooked-scrollback)
 (require 'cooked-window-ops)
+(require 'cooked-color)
 
 (cooked--declare-core)
 
