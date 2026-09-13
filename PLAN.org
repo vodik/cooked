@@ -1616,6 +1616,52 @@ minibuffer resize exception · medium gating defcustom · bash < 4.4 DEBUG-trap
 fallback · nushell arm · picker annotations (wants =cooked--title= public) ·
 lone-ESC =input-decode-map= filter · pixel-delta wheel accumulation.
 
+*** Audited against the code first, which was worth doing
+
+*"Prompts as an imenu index" was already done* — =cooked-mode.el:1662= onwards,
+and better than a fresh attempt: it has a prompt-line fallback for a shell that
+sends no =cmdline_url=, an exit-status suffix, disambiguation of repeated
+commands, =imenu-max-item-length= awareness, and outline and bookmark
+integration alongside. Found by writing a duplicate and watching the *existing*
+one answer the test. The lesson generalises to the rest of this list: grep before
+building.
+
+State of the other eleven, by whether the code has anything:
+
+| item                              | state                                     |
+|-----------------------------------+-------------------------------------------|
+| lone-ESC =input-decode-map= filter | *DONE*, 65b7916                          |
+| pixel-delta wheel accumulation    | *DONE*, cfe4e85                           |
+| password regex fallback           | absent — nothing in cooked-secret.el      |
+| =cooked-password-functions= chain | absent — the variable does not exist      |
+| minibuffer resize exception       | absent                                    |
+| kitty flags beyond bit 1          | partial — tracked, never change encoding  |
+| =around-font-scale= advice        | partial — hooks exist, no advice          |
+| medium gating defcustom           | partial — one reference in kitty.rs       |
+| bash < 4.4 DEBUG-trap fallback    | partial — DEBUG referenced in the snippet |
+| nushell arm                       | partial — four files mention nu           |
+| picker annotations                | =cooked--title= used in five files        |
+
+**** Done: pixel-delta wheel accumulation (cfe4e85)
+
+Both guards are ghostel's and both are the whole difficulty. A real mouse is
+excluded by *device class*, not by the delta — X11 and pgtk report a notch as
+several rows of pixels with no line count, which arithmetic cannot tell from a
+fast swipe, so a notch would be accumulated, rounded, and a click would go
+missing. And the floor of one press is the event's own *line count*, not a
+constant: macOS reports a notch as one line and fewer pixels than a row when
+=line-spacing= is set, so the row arithmetic yields zero and the notch vanishes.
+
+**** Done: lone-ESC filter (65b7916)
+
+One deliberate departure from ghostel: *confined to the case where the child is
+not reading the keyboard*. ESC is how you leave insert mode in the vim inside
+the terminal, and a translation reaching it would be a bug nobody would connect
+to this setting. Verified against a real tty under foot — wrapped once, still
+once after two more calls.
+
+
+
 * Wave 5 — the big ones                                        :core:feature:
 :PROPERTIES:
 :VISIBILITY: children
