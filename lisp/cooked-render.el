@@ -401,7 +401,7 @@ CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
     (setq cooked--mode mode)
     (cooked--request-refresh)
     (if (eq mode 'secret)
-        (cooked--schedule-secret)
+        (cooked--schedule-secret 'termios)
       (cooked--cancel-secret))))
 
 (defun cooked--place-point (viewport)
@@ -616,7 +616,7 @@ and the region shaped before anything measures it."
     ;; whether a *remote* child is at a password prompt.  The termios detector
     ;; fires on a change of the local tty, which a remote child never makes, so
     ;; there is no transition to hang it off -- see `cooked--check-secret-prompt'.
-    (cooked--check-secret-prompt)
+    (cooked--check-secret-prompt batch-start)
     (cooked--fit-screen)
     (cooked--pad-to-cursor)
     ;; Immediately before the assertion, which is the whole reason it is here

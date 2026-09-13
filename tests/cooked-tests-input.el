@@ -4426,11 +4426,12 @@ by the first bench fixture to contain one."
 (ert-deftest cooked-a-remote-password-prompt-is-caught-by-the-regex ()
   "The arm that reaches a child the termios probe cannot see.
 
-`ssh host sudo ...\=' puts the *far* tty into secret mode; the local one this
+`ssh -t host sudo ...\=' puts the *far* tty into secret mode; the local one this
 session owns never changes, so the detector never fires and the password is
 typed into the buffer in the clear.  Gated on the host being foreign, because
 matching a regex against local output would false-positive on any program
-displaying a file that mentions a password."
+displaying a file that mentions a password.  Remote means a foreign host, or
+one of `cooked-password-remote-programs\=' in the foreground."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (erase-buffer)
@@ -4441,9 +4442,14 @@ displaying a file that mentions a password."
     (insert "simon@host's password: ")
     (goto-char (point-max))
     (cl-letf (((symbol-function 'cooked--cursor-position) (lambda () (point-max))))
-      ;; Local: no regex is even attempted, and nothing is armed.
+      ;; Local: no regex is even attempted, and nothing is armed.  The session is
+      ;; `sh\=', which is not a remote client.
       (cl-letf (((symbol-function 'cooked--foreign-host-p) (lambda () nil)))
-        (should-not (cooked--secret-prompt-on-row-p)))
+        (should-not (cooked--secret-prompt-on-row-p))
+        ;; A remote client in the foreground opens the gate with no OSC 7 at all,
+        ;; which is `ssh -t host sudo …\='.
+        (let ((cooked-password-remote-programs '("sh")))
+          (should (cooked--secret-prompt-on-row-p))))
       ;; Foreign: caught.
       (cl-letf (((symbol-function 'cooked--foreign-host-p) (lambda () t)))
         (should (cooked--secret-prompt-on-row-p))
@@ -4455,6 +4461,117 @@ displaying a file that mentions a password."
         (erase-buffer)
         (insert "[sudo] password for simon: ")
         (should (cooked--secret-prompt-on-row-p))))))
+
+(defmacro cooked-tests--with-remote-prompt (script &rest body)
+  "Run BODY in a session whose SCRIPT stands in for a remote password prompt.
+
+`/bin/sh\=' plays `ssh\=': it is named in `cooked-password-remote-programs\=' for
+the duration, so the regex arm\='s gate opens exactly as it does for a real
+`ssh -t host sudo …\=', and its `stty -icanon -echo\=' is the raw mode `ssh\=' puts
+the local tty in.  `asked\=' counts the reads, answered through
+`cooked-password-function\=' so that no `read-passwd\=' can block batch Emacs,
+and the debounce is short so the real timer is what raises them."
+  (declare (indent 1))
+  `(let* ((asked 0)
+          (cooked-password-function (lambda (_prompt) (setq asked (1+ asked)) "hunter2"))
+          (cooked-password-remote-programs '("sh"))
+          (cooked-secret-debounce 0.05))
+     (cooked-tests--with-session (list "/bin/sh" "-c" ,script)
+       ,@body)))
+
+(ert-deftest cooked-a-remote-password-prompt-is-read-once-and-sent-once ()
+  "The regex arm, end to end: rising edge, timer, read, send, and then quiet.
+
+The prompt stays on the cursor row for a second after it is answered, which is
+the round trip to a real far end drawn out, and every wait below forces a drain
+while it does.  Each of those drains sees a remote child and a matching row, so
+only the answered cell keeps the next one from reading the password again and
+handing it to whatever the far end runs next.
+
+Before the arm had edges it could not read at all: it scheduled a read that
+declined because the tty was not in secret mode."
+  (cooked-tests--with-remote-prompt
+      "stty -icanon -echo; printf '[sudo] password for simon: '; read p; sleep 1; \
+       if [ \"$p\" = hunter2 ]; then printf '\\nACCEPTED\\n'; else printf '\\nDENIED\\n'; fi; sleep 5"
+    (should (cooked-tests--settle (lambda () (= asked 1))))
+    (should (eq cooked--mode 'raw))
+    ;; Still on the prompt row, and drained across the rest of the second.
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "ACCEPTED" (cooked-tests--text)))))
+    (should (= asked 1))
+    (should-not (string-match-p "hunter2" (cooked-tests--text)))))
+
+(ert-deftest cooked-a-remote-password-retry-at-the-foot-of-the-screen-is-asked-again ()
+  "A retry that lands on the cell just answered is still a new prompt.
+
+At the bottom of the screen, `Sorry, try again.\=' and the next prompt scroll the
+answered one away and leave the cursor on the same (ROW . COL) it was on.  The
+scroll is what says the line under that cell is a different one; without it the
+retry is taken for the prompt already answered and never read."
+  (cooked-tests--with-remote-prompt
+      "stty -icanon -echo; i=0; while [ $i -lt 80 ]; do echo; i=$((i+1)); done; \
+       printf '[sudo] password for simon: '; read p; sleep 0.5; \
+       printf '\\nSorry, try again.\\n[sudo] password for simon: '; read q; sleep 0.5; \
+       printf '\\nDONE\\n'; sleep 5"
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "DONE" (cooked-tests--text)))))
+    (should (= asked 2))))
+
+(ert-deftest cooked-a-password-the-termios-arm-read-is-not-asked-for-again ()
+  "The two arms must not both answer one prompt, and the right one answers it.
+
+`ssh\=' reads its own password with the local tty in secret mode, and once it has
+it switches that tty to raw while `simon@host\='s password: \=' is still the cursor
+row.  With `ssh\=' in the foreground the regex arm is open, so the moment the
+tty leaves secret mode it sees a matching row -- and only the cell the termios
+read left behind says that row was already answered.
+
+The first half is a race as well.  The prompt is printed before the tty goes
+into secret mode, and the termios sample that notices trails the text by 50ms,
+longer than the default debounce, so the regex arm\='s timer fires first.  Read
+there, the password goes out while cooked still believes it owns the line, and
+with `read-passwd\=' on screen instead of a function answering, the termios
+arm\='s own schedule would dismiss the read the user is typing into.  So the
+read is attributed: at the default debounce, it has to be the termios arm\='s."
+  (cooked-tests--with-remote-prompt
+      "printf 'Password: '; stty -echo; read p; stty -icanon; sleep 1; \
+       printf '\\nDONE\\n'; sleep 5"
+    (let* ((origins nil)
+           (cooked-secret-debounce 0.03)
+           (cooked-password-function
+            (lambda (_prompt) (push cooked--secret-asking origins) "hunter2")))
+      (should (cooked-tests--settle (lambda () origins)))
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "DONE" (cooked-tests--text)))))
+      (should (equal origins '(termios))))))
+
+(ert-deftest cooked-a-held-remote-password-prompt-is-announced-once ()
+  "An off-screen session says it is waiting once, then asks when you return.
+
+The regex arm used to re-arm on every drain the prompt sat through, and away
+from the buffer each re-arm posted the message again."
+  (let ((announced 0))
+    (cooked-tests--with-remote-prompt
+        "stty -icanon -echo; printf '[sudo] password for simon: '; read p; \
+         printf '\\nGOT\\n'; sleep 5"
+      (setq cooked--attention 'away)
+      (cl-letf* ((real-message (symbol-function 'message))
+                 ((symbol-function 'message)
+                  (lambda (format &rest args)
+                    (when (string-match-p "asking for a password" format)
+                      (setq announced (1+ announced)))
+                    (apply real-message format args))))
+        (should (cooked-tests--settle (lambda () (= announced 1))))
+        ;; Well past the debounce, and a drain on every turn.
+        (cooked-tests--settle #'ignore 0.5)
+        (should (= announced 1))
+        (should (= asked 0)))
+      (set-window-buffer (selected-window) (current-buffer))
+      (cooked--update-attention)
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "GOT" (cooked-tests--text)))))
+      (should (= asked 1)))))
 
 (ert-deftest cooked-password-sources-compose-and-defer-to-the-single-slot ()
   "The chain is asked first, and `cooked-password-function\=' is the last word.
