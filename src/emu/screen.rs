@@ -138,6 +138,11 @@ pub struct Departed {
 }
 
 impl Departed {
+    /// Characters this row puts in the buffer, which is what a head is counted in.
+    fn chars(&self) -> usize {
+        self.runs.iter().map(|run| run.text.chars().count()).sum()
+    }
+
     /// `line_runs` rather than `runs`: these rows are becoming buffer text as part of a
     /// logical line, and a continuation row has to keep the blanks that are interior to
     /// it. See [`Row::line_runs`].
@@ -245,8 +250,15 @@ pub struct Screen {
     /// ([`Row::line_runs`] keeps its trailing blanks), so `carried * cols` is the head's
     /// width. The seam fragment [`Logical::take_front`] cuts is narrower, but it exists to
     /// top the head up to whole rows at the new width, so [`Screen::reflow`] restores the
-    /// property. [`Screen::head`] is the same quantity in characters.
+    /// property.
     carried: usize,
+    /// The same head in characters of the text Emacs holds, which is what
+    /// [`Screen::head`] reports.
+    ///
+    /// Not `carried * cols`: a wide character is one character on two columns and a
+    /// combining mark a character on none, so `日本` handed over as a row of four columns
+    /// is two characters in the buffer, and `e\u{301}` on one column is two.
+    carried_chars: usize,
     /// DECAWM, on by default as every terminal starts. See [`Screen::set_autowrap`].
     autowrap: bool,
     /// IRM. See [`Screen::set_insert_mode`].
@@ -290,6 +302,7 @@ impl Screen {
             touches: 0,
             tabs: default_tabs(cols),
             carried: 0,
+            carried_chars: 0,
             autowrap: true,
             insert_mode: false,
             history: true,
@@ -311,6 +324,7 @@ impl Screen {
     /// Drop the carry: nothing of the top row's line is in Emacs any more.
     pub fn forget_carry(&mut self) {
         self.carried = 0;
+        self.carried_chars = 0;
     }
 
     /// DECAWM. Off means the cursor pins to the last column and overwrites in place,
@@ -340,15 +354,21 @@ impl Screen {
         let Some(last) = evicted.last() else { return };
         if !last.wrapped {
             // The line ended with the rows that left, so row 0 starts a fresh one.
-            self.carried = 0;
+            self.forget_carry();
             return;
         }
         let run = evicted.iter().rev().take_while(|row| row.wrapped).count();
-        self.carried = if run == evicted.len() {
-            self.carried + run
+        let chars: usize = evicted[evicted.len() - run..]
+            .iter()
+            .map(Departed::chars)
+            .sum();
+        if run == evicted.len() {
+            self.carried += run;
+            self.carried_chars += chars;
         } else {
-            run
-        };
+            self.carried = run;
+            self.carried_chars = chars;
+        }
     }
 
     pub fn height(&self) -> usize {
@@ -973,7 +993,7 @@ impl Screen {
         self.order[first..].rotate_left(count);
         self.clear_recycled(height - count..=height - 1, Pen::default());
         if first == 0 {
-            self.carried = 0;
+            self.forget_carry();
         }
         // The cursor rides with the text it was sitting on or below.
         self.cursor.row = if self.cursor.row >= first + count {
@@ -1073,14 +1093,32 @@ impl Screen {
                 // then cleared has a background on every cell, and archiving that would
                 // hand Emacs a screenful of pure colour with nothing written on it.
                 let history = if self.archives() && self.rows().any(|row| row.has_text()) {
-                    Evicted::from_rows(self.rows().take(self.last_used_row() + 1))
+                    let used = self.last_used_row();
+                    let mut history = Evicted::from_rows(self.rows().take(used + 1));
+                    // The last row archived ends its line, whatever its wrap flag says. The
+                    // flag can outlive the row it pointed at: `DL` below a wrapped row
+                    // pulls a blank up in place of the continuation, and the blank is not
+                    // archived. Handed over as wrapped, the row would reach the buffer with
+                    // no newline, leaving the new row 0 appended to it while the carry
+                    // below says row 0 begins a line.
+                    if let (Some(last), Some(row)) = (history.0.last_mut(), self.row(used))
+                        && last.wrapped
+                    {
+                        last.wrapped = false;
+                        last.runs = row.runs();
+                    }
+                    // Whatever was on screen has gone to history whole, so the next row 0
+                    // starts a line rather than continuing one.
+                    self.forget_carry();
+                    history
                 } else {
+                    // Nothing went to history, so the head of row 0's line is still in the
+                    // buffer just above the screen, and the blank row 0 still follows it
+                    // there: a scroll region is set, or the rows that continued a wrapped
+                    // line scrolled away hold no text.
                     Evicted::none()
                 };
                 self.clear_rows(0..last, pen);
-                // Whatever was on screen has gone to history whole, so the next row 0
-                // starts a line rather than continuing one.
-                self.carried = 0;
                 history
             }
         }
@@ -1154,9 +1192,9 @@ impl Screen {
         };
         // Deleting at row 0 looks to `scroll_up` like rows leaving the top, but these are
         // discarded, so what Emacs holds has not changed and the carry must not advance.
-        let carried = self.carried;
+        let carried = (self.carried, self.carried_chars);
         self.scroll_up(n, pen).discard();
-        self.carried = carried;
+        (self.carried, self.carried_chars) = carried;
         self.region = saved;
     }
 
@@ -1269,7 +1307,7 @@ impl Screen {
     /// than rows so the other end never has to reconstruct it from a width, and so it
     /// stays meaningful if a departed row is ever not exactly `cols` wide.
     pub fn head(&self) -> usize {
-        self.carried * self.cols
+        self.carried_chars
     }
 
     /// Resize, returning rows that became scrollback.
@@ -1387,9 +1425,9 @@ impl Screen {
         if head % cols != 0 && !lines.is_empty() {
             let split = (cols - head % cols).min(lines[0].cells.len());
             let ends_here = split == lines[0].cells.len();
-            history.push(Departed::from_row(
-                lines[0].take_front(split, !ends_here).as_ref(),
-            ));
+            let fragment = Departed::from_row(lines[0].take_front(split, !ends_here).as_ref());
+            self.carried_chars += fragment.chars();
+            history.push(fragment);
             head += split;
             if cursor_line == 0 {
                 // Inside the fragment the cursor has left the grid; the nearest cell it
@@ -1403,6 +1441,7 @@ impl Screen {
                 // The line ended inside the fragment, so a newline follows it and row 0
                 // starts a buffer line of its own.
                 head = 0;
+                self.carried_chars = 0;
             }
         }
 
@@ -2134,6 +2173,52 @@ mod tests {
             screen.carried, 1,
             "deleted rows are discarded, so Emacs still holds just the one"
         );
+    }
+
+    #[test]
+    fn the_head_counts_the_characters_emacs_holds_rather_than_columns() {
+        // `e` and a combining acute on one column, twice, then `日` on two and `ab`: a row
+        // of six columns that reaches the buffer as seven characters, and wraps onto `x`.
+        let mut screen = Screen::new(2, 6);
+        write(&mut screen, "e\u{301}e\u{301}日abx");
+        screen.linefeed(Pen::default()).discard();
+        assert_eq!(screen.carried, 1);
+        assert_eq!(screen.head(), 7);
+    }
+
+    #[test]
+    fn clearing_the_display_ends_the_line_it_archives() {
+        let mut screen = Screen::new(4, 5);
+        write(&mut screen, "aaaaabb");
+        // The continuation is deleted, and row 0 still says it wraps onto the blank row
+        // pulled up in its place, which is below the last row holding anything.
+        screen.goto(1, 0);
+        screen.delete_lines(1, Pen::default());
+        assert!(screen.row(0).is_some_and(|row| row.wrapped()));
+
+        let history = screen.erase_display(Erase::All, Pen::default());
+
+        assert_eq!(history.len(), 1);
+        assert!(
+            !history[0].wrapped,
+            "a wrapped row archived last would join the next row 0 onto its line"
+        );
+        assert_eq!(screen.carried, 0);
+    }
+
+    #[test]
+    fn clearing_a_display_that_archives_nothing_keeps_the_carry() {
+        // A wrapped row has left for Emacs, and a scroll region keeps the clear from
+        // archiving anything, so the head it left is still above the screen.
+        let mut screen = Screen::new(2, 5);
+        write(&mut screen, "aaaaabbbbbccccc");
+        assert_eq!(screen.carried, 1);
+        screen.resize(3, 5, Resize::Rewrap).discard();
+        screen.set_region(0, 1);
+
+        screen.erase_display(Erase::All, Pen::default()).discard();
+
+        assert_eq!(screen.carried, 1);
     }
 
     #[test]
