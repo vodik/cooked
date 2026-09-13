@@ -556,12 +556,9 @@ impl Screen {
             .rows
             .get(row)
             .and_then(|r| r.get(lead))
-            .map_or_else(Style::default, |c| c.style);
+            .map_or_else(Style::default, |c| c.style());
         let cell = if after > before {
-            Cell {
-                ch: CONTINUATION,
-                style,
-            }
+            Cell::new(CONTINUATION, style)
         } else {
             Cell::blank(style)
         };
@@ -627,15 +624,9 @@ impl Screen {
                 r.insert_blank(col, width, style);
                 changed = true;
             }
-            changed |= r.set(col, Cell { ch, style });
+            changed |= r.set(col, Cell::new(ch, style));
             for offset in 1..width {
-                changed |= r.set(
-                    col + offset,
-                    Cell {
-                        ch: CONTINUATION,
-                        style,
-                    },
-                );
+                changed |= r.set(col + offset, Cell::new(CONTINUATION, style));
             }
             changed
         });

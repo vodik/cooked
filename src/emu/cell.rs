@@ -32,13 +32,24 @@ impl Color {
     /// and four is the narrowest width that holds 24 bits of `Rgb'. `Default' is all zero
     /// because it is by far the commonest value -- the underline colour of nearly every
     /// span -- and zero is the cheapest thing to test.
-    pub fn packed(self) -> u32 {
+    pub const fn packed(self) -> u32 {
         match self {
             Self::Default => 0,
-            Self::Indexed(i) => (1 << 24) | u32::from(i),
-            Self::Rgb(r, g, b) => {
-                (2 << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
-            }
+            Self::Indexed(i) => (1 << 24) | i as u32,
+            Self::Rgb(r, g, b) => (2 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
+        }
+    }
+
+    /// The colour a [`Color::packed`] field names: the inverse, for a [`Cell`] reading its
+    /// colours back.
+    ///
+    /// Total over every `u32`, although only `packed` ever writes one: an unknown tag reads
+    /// as `Default`, which is the value a zeroed cell has anyway.
+    pub const fn from_packed(bits: u32) -> Self {
+        match bits >> 24 {
+            1 => Self::Indexed(bits as u8),
+            2 => Self::Rgb((bits >> 16) as u8, (bits >> 8) as u8, bits as u8),
+            _ => Self::Default,
         }
     }
 }
@@ -69,6 +80,11 @@ impl Attrs {
 
     pub const fn bits(self) -> u16 {
         self.0
+    }
+
+    /// The set whose [`Attrs::bits`] are BITS, for a [`Cell`] reading its rendition back.
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
     }
 
     /// 0 none, 1 single, 2 double, 3 curly, 4 dotted, 5 dashed.
@@ -161,10 +177,38 @@ impl Style {
 }
 
 /// One screen position. `ch == CONTINUATION` marks the second half of a wide character.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Sixteen bytes of plain data with no padding: the character, the two colours in
+/// [`Color::packed`]'s encoding, the attribute bits, and a spare `u16` that is always zero.
+/// Every byte of a cell is therefore meaningful, so two rows compare equal exactly when
+/// their bytes do -- see [`Cell::bytes`] -- and a comparison of a row against the frame
+/// Emacs already holds can be a `memcmp` rather than a walk through [`Style`]'s enums.
+///
+/// [`Style`] stays the rendition callers speak; [`Cell::new`] packs one and
+/// [`Cell::style`] unpacks it. Code that only needs to know whether two cells share a
+/// rendition asks [`Cell::same_style`], which compares the packed fields directly.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
-    pub style: Style,
+    fg: u32,
+    bg: u32,
+    attrs: u16,
+    /// Always zero. Private so that nothing can set it, which is what lets
+    /// [`Cell::bytes`] treat a cell as bytes.
+    zero: u16,
+}
+
+const _: () = assert!(std::mem::size_of::<Cell>() == 16);
+const _: () = assert!(std::mem::align_of::<Cell>() == 4);
+
+impl std::fmt::Debug for Cell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cell")
+            .field("ch", &self.ch)
+            .field("style", &self.style())
+            .finish()
+    }
 }
 
 pub(crate) const CONTINUATION: char = '\0';
@@ -188,16 +232,84 @@ pub(crate) fn draws_nothing(ch: char) -> bool {
 
 impl Default for Cell {
     fn default() -> Self {
-        Self {
-            ch: BLANK,
-            style: Style::default(),
-        }
+        Self::blank(Style::default())
     }
 }
 
 impl Cell {
-    pub fn blank(style: Style) -> Self {
-        Self { ch: BLANK, style }
+    pub const fn new(ch: char, style: Style) -> Self {
+        Self {
+            ch,
+            fg: style.fg.packed(),
+            bg: style.bg.packed(),
+            attrs: style.attrs.bits(),
+            zero: 0,
+        }
+    }
+
+    pub const fn blank(style: Style) -> Self {
+        Self::new(BLANK, style)
+    }
+
+    /// This cell's rendition, unpacked.
+    pub const fn style(self) -> Style {
+        Style {
+            fg: Color::from_packed(self.fg),
+            bg: Color::from_packed(self.bg),
+            attrs: Attrs::from_bits(self.attrs),
+        }
+    }
+
+    /// The same rendition with CH in it, which costs no re-packing.
+    pub const fn with_char(self, ch: char) -> Self {
+        Self { ch, ..self }
+    }
+
+    /// Whether this cell and OTHER share a rendition, compared packed.
+    pub fn same_style(self, other: Self) -> bool {
+        (self.fg, self.bg, self.attrs) == (other.fg, other.bg, other.attrs)
+    }
+
+    /// Whether this cell is in the default rendition, the test trailing-blank trimming
+    /// asks of every cell it walks.
+    pub fn is_default_style(self) -> bool {
+        (self.fg | self.bg) == 0 && self.attrs == 0
+    }
+
+    /// Set every cell of CELLS to CELL.
+    ///
+    /// By doubling copies rather than `slice::fill`: a store of a sixteen-byte struct is
+    /// four field stores, which LLVM does not turn into `memset`, so a row of blanks was
+    /// written a field at a time. Copying the filled prefix onto the rest is a handful of
+    /// `memcpy`s however wide the row -- nine for a 400-column one.
+    pub fn fill(cells: &mut [Cell], cell: Cell) {
+        let Some(first) = cells.first_mut() else {
+            return;
+        };
+        *first = cell;
+        let mut filled = 1;
+        while filled < cells.len() {
+            let n = filled.min(cells.len() - filled);
+            cells.copy_within(..n, filled);
+            filled += n;
+        }
+    }
+
+    /// CELLS as the bytes they are made of, for comparing whole rows.
+    ///
+    /// Compare rows through this rather than with `==` on the slices. A derived
+    /// `PartialEq` is still a field-by-field walk, which the compiler does not merge into
+    /// a `memcmp`: over a 200x400 grid the slice comparison took about 18 instructions a
+    /// cell, and comparing the bytes about a tenth of that.
+    ///
+    /// Sound because `Cell` is `repr(C)` with every field an integer or a `char`, the
+    /// field order leaves no padding (the asserts beside the type pin its size and
+    /// alignment), and the one spare field is private and always zero. So the bytes of a
+    /// cell are a function of its value, and equal slices of bytes are equal cells.
+    pub fn bytes(cells: &[Cell]) -> &[u8] {
+        // SAFETY: see above -- `Cell` has no padding and no uninitialised bytes, and the
+        // length is the slice's own size in bytes.
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), size_of_val(cells)) }
     }
 
     pub fn is_continuation(self) -> bool {
@@ -794,6 +906,7 @@ impl Row {
     /// Returns whether anything changed, on [`Row::set`]'s terms.
     pub fn fill_run(&mut self, col: usize, text: &str, style: Style) -> bool {
         let attached = self.extras.is_some();
+        let pen = Cell::blank(style);
         let Some(slots) = self.cells.get_mut(col..) else {
             return false;
         };
@@ -805,13 +918,13 @@ impl Row {
             || slots
                 .iter()
                 .zip(text.chars())
-                .any(|(slot, ch)| *slot != Cell { ch, style });
+                .any(|(slot, ch)| *slot != pen.with_char(ch));
         if !changed {
             return false;
         }
         let mut placed = 0;
         for (slot, ch) in slots.iter_mut().zip(text.chars()) {
-            *slot = Cell { ch, style };
+            *slot = pen.with_char(ch);
             placed += 1;
         }
         if attached {
@@ -898,7 +1011,7 @@ impl Row {
             && self
                 .cells
                 .iter()
-                .all(|c| c.ch == BLANK && c.style == Style::default())
+                .all(|c| c.ch == BLANK && c.is_default_style())
     }
 
     /// Blank the row and drop everything attached to it, semantic marks included.
@@ -912,7 +1025,7 @@ impl Row {
     /// recycles, and comparing first would scan the row before overwriting it, 22% of the
     /// plain-text benchmark for an answer that path discards.
     pub fn clear(&mut self, style: Style) {
-        self.cells.fill(Cell::blank(style));
+        Cell::fill(&mut self.cells, Cell::blank(style));
         self.extras = None;
         self.wrapped = false;
     }
@@ -930,7 +1043,7 @@ impl Row {
         let blank = Cell::blank(style);
         let changed =
             self.extras.is_some() || self.wrapped || self.cells.iter().any(|c| *c != blank);
-        self.cells.fill(blank);
+        Cell::fill(&mut self.cells, blank);
         self.prune(0..self.cells.len(), Marks::Keep);
         self.wrapped = false;
         changed
@@ -954,7 +1067,7 @@ impl Row {
         // In place, because `Cell` is `Copy` and the row's length does not change: growing
         // past `cols` and truncating would realloc once per character in insert mode.
         self.cells.copy_within(col..cols - n, col + n);
-        self.cells[col..col + n].fill(Cell::blank(style));
+        Cell::fill(&mut self.cells[col..col + n], Cell::blank(style));
         // The cells from `col` on moved right; their attachments move with them, and
         // whatever was pushed off the end goes.
         self.edit_extras(|extras| extras.shift(col, n as isize, cols));
@@ -988,7 +1101,7 @@ impl Row {
         let cells = self
             .cells
             .iter()
-            .rposition(|c| c.ch != BLANK || c.style != Style::default())
+            .rposition(|c| c.ch != BLANK || !c.is_default_style())
             .map_or(0, |i| i + 1);
         // An attachment can be the last content on the row while its cell is a default
         // blank -- a combining mark on a space, or an image cell, which always is one.
@@ -1063,7 +1176,7 @@ impl Row {
                 .map(DecoCell::Image)
                 .or_else(|| DecoCell::classify(cell.ch));
             let joins = runs.last().is_some_and(|run| {
-                run.style == cell.style
+                run.style == cell.style()
                     && run.underline == underline
                     && run.link == link
                     && match (&run.deco, deco) {
@@ -1083,7 +1196,7 @@ impl Row {
                 runs.push(Run {
                     text: String::from(cell.ch),
                     cols: 1,
-                    style: cell.style,
+                    style: cell.style(),
                     deco: deco.map(Deco::start),
                     underline,
                     link,
@@ -1192,7 +1305,8 @@ impl Row {
                 col += 1;
                 continue;
             }
-            let style = cell.style;
+            let pen = *cell;
+            let style = cell.style();
             let start = col;
             let deco = DecoCell::classify(cell.ch);
             col += 1;
@@ -1203,7 +1317,7 @@ impl Row {
                 while col < end {
                     let next = &cells[col];
                     if !next.is_continuation()
-                        && (next.style != style || DecoCell::classify(next.ch).is_some())
+                        && (!next.same_style(pen) || DecoCell::classify(next.ch).is_some())
                     {
                         break;
                     }
@@ -1300,7 +1414,7 @@ impl Row {
                 .or_else(|| DecoCell::classify(cell.ch));
             match runs.last_mut() {
                 Some(run)
-                    if run.style == cell.style
+                    if run.style == cell.style()
                         && run.underline == underline
                         // A link boundary splits a run even when nothing else changed:
                         // `see <link>foo</link> bar' in one colour is otherwise one run,
@@ -1328,7 +1442,7 @@ impl Row {
                         text
                     },
                     cols: 1,
-                    style: cell.style,
+                    style: cell.style(),
                     deco: deco.map(Deco::start),
                     underline,
                     link,
@@ -1352,6 +1466,59 @@ impl Row {
 mod tests {
     use super::*;
 
+    /// Every byte of a cell is part of its value, which is what [`Cell::bytes`] rests on.
+    ///
+    /// Packs a spread of renditions, including the widest colour and every attribute bit,
+    /// and checks that the spare field reads back zero and that two cells compare equal
+    /// exactly when their bytes do.
+    #[test]
+    fn a_cell_is_sixteen_bytes_with_nothing_undefined_in_them() {
+        let styles = [
+            Style::default(),
+            Style {
+                fg: Color::Indexed(255),
+                bg: Color::Rgb(0xff, 0xff, 0xff),
+                attrs: Attrs::from_bits(u16::MAX),
+            },
+            Style {
+                fg: Color::Rgb(1, 2, 3),
+                bg: Color::Indexed(0),
+                attrs: Attrs::BOLD,
+            },
+        ];
+        let cells: Vec<Cell> = styles
+            .iter()
+            .flat_map(|&style| ['a', CONTINUATION, '\u{10ffff}'].map(|ch| Cell::new(ch, style)))
+            .collect();
+        for cell in &cells {
+            let bytes = Cell::bytes(std::slice::from_ref(cell));
+            assert_eq!(bytes.len(), 16);
+            assert_eq!(&bytes[14..], &[0, 0], "{cell:?}");
+            assert_eq!(cell.style(), Cell::new(cell.ch, cell.style()).style());
+        }
+        for a in &cells {
+            for b in &cells {
+                let same_bytes =
+                    Cell::bytes(std::slice::from_ref(a)) == Cell::bytes(std::slice::from_ref(b));
+                assert_eq!(a == b, same_bytes, "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_packed_colour_unpacks_to_itself() {
+        for color in [
+            Color::Default,
+            Color::Indexed(0),
+            Color::Indexed(255),
+            Color::Rgb(0, 0, 0),
+            Color::Rgb(0x12, 0x34, 0x56),
+            Color::Rgb(0xff, 0xff, 0xff),
+        ] {
+            assert_eq!(Color::from_packed(color.packed()), color);
+        }
+    }
+
     #[test]
     fn runs_merge_by_style_and_trim_trailing_blanks() {
         let mut row = Row::new(10);
@@ -1360,15 +1527,9 @@ mod tests {
             ..Style::default()
         };
         for (i, c) in "hi".chars().enumerate() {
-            row.set(i, Cell { ch: c, style: red });
+            row.set(i, Cell::new(c, red));
         }
-        row.set(
-            2,
-            Cell {
-                ch: '!',
-                style: Style::default(),
-            },
-        );
+        row.set(2, Cell::new('!', Style::default()));
 
         let runs = row.runs();
         assert_eq!(runs.len(), 2);
@@ -1388,15 +1549,9 @@ mod tests {
     fn box_glyphs_do_not_merge_with_adjacent_plain_text() {
         let mut row = Row::new(4);
         let style = Style::default();
-        row.set(0, Cell { ch: 'a', style });
-        row.set(
-            1,
-            Cell {
-                ch: '\u{2500}',
-                style,
-            },
-        ); // ─, same style as its neighbors
-        row.set(2, Cell { ch: 'b', style });
+        row.set(0, Cell::new('a', style));
+        row.set(1, Cell::new('\u{2500}', style)); // ─, same style as its neighbors
+        row.set(2, Cell::new('b', style));
 
         let runs = row.runs();
         assert_eq!(
@@ -1414,7 +1569,7 @@ mod tests {
         let mut row = Row::new(4);
         let style = Style::default();
         for (i, c) in "\u{250C}\u{2500}\u{2510}".chars().enumerate() {
-            row.set(i, Cell { ch: c, style });
+            row.set(i, Cell::new(c, style));
         }
 
         let runs = row.runs();
@@ -1437,20 +1592,8 @@ mod tests {
             fg: Color::Indexed(1),
             ..Style::default()
         };
-        row.set(
-            0,
-            Cell {
-                ch: '\u{2500}',
-                style: Style::default(),
-            },
-        );
-        row.set(
-            1,
-            Cell {
-                ch: '\u{2500}',
-                style: red,
-            },
-        );
+        row.set(0, Cell::new('\u{2500}', Style::default()));
+        row.set(1, Cell::new('\u{2500}', red));
 
         let runs = row.runs();
         assert_eq!(
@@ -1463,13 +1606,7 @@ mod tests {
     #[test]
     fn combining_marks_ride_along_with_their_base() {
         let mut row = Row::new(4);
-        row.set(
-            0,
-            Cell {
-                ch: 'e',
-                style: Style::default(),
-            },
-        );
+        row.set(0, Cell::new('e', Style::default()));
         row.combine(0, '\u{301}');
         assert_eq!(row.to_text(), "e\u{301}");
     }
@@ -1477,41 +1614,17 @@ mod tests {
     #[test]
     fn overwriting_a_cell_drops_its_marks() {
         let mut row = Row::new(4);
-        row.set(
-            0,
-            Cell {
-                ch: 'e',
-                style: Style::default(),
-            },
-        );
+        row.set(0, Cell::new('e', Style::default()));
         row.combine(0, '\u{301}');
-        row.set(
-            0,
-            Cell {
-                ch: 'x',
-                style: Style::default(),
-            },
-        );
+        row.set(0, Cell::new('x', Style::default()));
         assert_eq!(row.to_text(), "x");
     }
 
     #[test]
     fn wide_cells_skip_their_continuation() {
         let mut row = Row::new(4);
-        row.set(
-            0,
-            Cell {
-                ch: '漢',
-                style: Style::default(),
-            },
-        );
-        row.set(
-            1,
-            Cell {
-                ch: CONTINUATION,
-                style: Style::default(),
-            },
-        );
+        row.set(0, Cell::new('漢', Style::default()));
+        row.set(1, Cell::new(CONTINUATION, Style::default()));
         assert_eq!(row.to_text(), "漢");
     }
 
@@ -1519,13 +1632,7 @@ mod tests {
     fn delete_shifts_left_and_backfills() {
         let mut row = Row::new(4);
         for (i, c) in "abcd".chars().enumerate() {
-            row.set(
-                i,
-                Cell {
-                    ch: c,
-                    style: Style::default(),
-                },
-            );
+            row.set(i, Cell::new(c, Style::default()));
         }
         row.delete(1, 2, Style::default());
         assert_eq!(row.to_text(), "ad");
@@ -1565,13 +1672,7 @@ mod tests {
     #[test]
     fn ich_shifts_attachments_with_their_cells() {
         let mut row = Row::new(6);
-        row.set(
-            0,
-            Cell {
-                ch: 'a',
-                style: Style::default(),
-            },
-        );
+        row.set(0, Cell::new('a', Style::default()));
         row.set_underline(0, Color::Indexed(196));
         row.combine(0, '\u{0301}');
 
@@ -1633,7 +1734,7 @@ mod tests {
             .chars()
             .enumerate()
         {
-            row.set(col, Cell { ch, style });
+            row.set(col, Cell::new(ch, style));
         }
 
         let runs = row.runs();
@@ -1674,7 +1775,7 @@ mod tests {
             .chars()
             .enumerate()
         {
-            row.set(col, Cell { ch, style });
+            row.set(col, Cell::new(ch, style));
         }
 
         let runs = row.runs();
@@ -1698,7 +1799,7 @@ mod tests {
         let style = Style::default();
         let mut row = Row::new(12);
         for (col, ch) in "  \u{2500}\u{2500}  ".chars().enumerate() {
-            row.set(col, Cell { ch, style });
+            row.set(col, Cell::new(ch, style));
         }
         row.wrapped = true;
 
@@ -1726,15 +1827,10 @@ mod tests {
         };
         let mut row = Row::new(12);
         for (col, ch) in "\u{2500} \u{2500}".chars().enumerate() {
-            row.set(
-                col,
-                Cell {
-                    ch,
-                    // The gap alone is red, which is a visible rectangle if it is baked
-                    // into a neighbour's bitmap.
-                    style: if col == 1 { red } else { Style::default() },
-                },
-            );
+            // The gap alone is red, which is a visible rectangle if it is baked into a
+            // neighbour's bitmap.
+            let style = if col == 1 { red } else { Style::default() };
+            row.set(col, Cell::new(ch, style));
         }
         assert_eq!(row.runs().len(), 3, "{:?}", row.runs());
 
@@ -1742,13 +1838,7 @@ mod tests {
         // to reach Lisp.
         let mut row = Row::new(12);
         for (col, ch) in "\u{2500} \u{2500}".chars().enumerate() {
-            row.set(
-                col,
-                Cell {
-                    ch,
-                    style: Style::default(),
-                },
-            );
+            row.set(col, Cell::new(ch, Style::default()));
         }
         row.set_link(2, Some(LinkId(7)));
         assert_eq!(row.runs().len(), 3, "{:?}", row.runs());
@@ -1760,7 +1850,7 @@ mod tests {
         let style = Style::default();
         let mut row = Row::new(12);
         for (col, ch) in "\u{2500} x \u{2500}".chars().enumerate() {
-            row.set(col, Cell { ch, style });
+            row.set(col, Cell::new(ch, style));
         }
         let runs = row.runs();
         assert_eq!(runs.len(), 3, "{runs:?}");
@@ -1799,15 +1889,9 @@ mod tests {
         let mut row = Row::new(10);
         let style = Style::default();
         for (col, ch) in [(0, 'a'), (1, '\u{6f22}'), (3, '\u{2500}'), (4, 'e')] {
-            row.set(col, Cell { ch, style });
+            row.set(col, Cell::new(ch, style));
         }
-        row.set(
-            2,
-            Cell {
-                ch: CONTINUATION,
-                style,
-            },
-        );
+        row.set(2, Cell::new(CONTINUATION, style));
         // Zero-width, and attached to the `e`: it adds a character and no column.
         row.combine(4, '\u{301}');
 
@@ -1875,15 +1959,9 @@ mod tests {
                 if col + width > COLS {
                     break;
                 }
-                row.set(col, Cell { ch, style });
+                row.set(col, Cell::new(ch, style));
                 if width == 2 {
-                    row.set(
-                        col + 1,
-                        Cell {
-                            ch: CONTINUATION,
-                            style,
-                        },
-                    );
+                    row.set(col + 1, Cell::new(CONTINUATION, style));
                 }
                 // Attachments, each rare enough that most cells carry none -- which is
                 // also the distribution the real grid has.
@@ -1944,10 +2022,7 @@ mod tests {
 
     #[test]
     fn insert_blank_keeps_the_row_exactly_cols_wide() {
-        let plain = |ch| Cell {
-            ch,
-            style: Style::default(),
-        };
+        let plain = |ch| Cell::new(ch, Style::default());
         let text = |row: &Row| row.cells().iter().map(|c| c.ch).collect::<String>();
 
         let mut row = Row::new(4);
@@ -1981,13 +2056,7 @@ mod tests {
         let mut row = Row::new(4);
         row.mark(1, MarkId(7));
         row.set_underline(1, Color::Indexed(196));
-        row.set(
-            1,
-            Cell {
-                ch: 'a',
-                style: Style::default(),
-            },
-        );
+        row.set(1, Cell::new('a', Style::default()));
         // The underline went with the character it decorated; the mark is a position in
         // the stream and stays. `OSC 133;A' arrives before the prompt is printed, so
         // without this every prompt mark would die to its own prompt's first character.
@@ -2049,23 +2118,11 @@ mod tests {
     #[test]
     fn overwriting_a_cell_retires_everything_attached_to_it() {
         let mut row = Row::new(4);
-        row.set(
-            1,
-            Cell {
-                ch: 'a',
-                style: Style::default(),
-            },
-        );
+        row.set(1, Cell::new('a', Style::default()));
         row.set_underline(1, Color::Indexed(196));
         row.combine(1, '\u{0301}');
 
-        row.set(
-            1,
-            Cell {
-                ch: 'b',
-                style: Style::default(),
-            },
-        );
+        row.set(1, Cell::new('b', Style::default()));
 
         assert!(row.extras().is_empty());
         assert!(row.extras.is_none());
@@ -2076,13 +2133,7 @@ mod tests {
         let mut row = Row::new(4);
         row.set_underline(1, Color::Indexed(1));
         row.set_underline(2, Color::Indexed(2));
-        row.set(
-            1,
-            Cell {
-                ch: 'x',
-                style: Style::default(),
-            },
-        );
+        row.set(1, Cell::new('x', Style::default()));
         assert_eq!(row.extras(), [(2, Extra::Underline(Color::Indexed(2)))]);
     }
 }

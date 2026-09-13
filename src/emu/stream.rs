@@ -107,7 +107,7 @@ impl Default for Column {
 impl Column {
     fn new(ch: char, style: Style, underline: Color, link: Option<LinkId>) -> Self {
         Self {
-            cell: Cell { ch, style },
+            cell: Cell::new(ch, style),
             marks: None,
             underline,
             link,
@@ -143,7 +143,7 @@ impl Column {
 
     /// Whether a run may span this column and the next without a break.
     fn joins(&self, next: &Self) -> bool {
-        self.cell.style == next.cell.style
+        self.cell.same_style(next.cell)
             && self.underline == next.underline
             && self.link == next.link
     }
@@ -309,12 +309,12 @@ impl Stream {
     fn split_wide(&mut self, at: usize) {
         if at < self.line.len() && self.line[at].is_continuation() {
             if let Some(base) = self.line[..at].iter().rposition(|c| !c.is_continuation()) {
-                let style = self.line[base].cell.style;
+                let style = self.line[base].cell.style();
                 self.line[base] = Column::blank(style);
             }
         }
         if at + 1 < self.line.len() && self.line[at + 1].is_continuation() {
-            let style = self.line[at + 1].cell.style;
+            let style = self.line[at + 1].cell.style();
             self.line[at + 1] = Column::blank(style);
         }
     }
@@ -368,8 +368,12 @@ impl Stream {
             for offset in before.max(1)..after {
                 self.split_wide(base + offset);
                 let owner = &self.line[base];
-                let continuation =
-                    Column::new(CONTINUATION, owner.cell.style, owner.underline, owner.link);
+                let continuation = Column::new(
+                    CONTINUATION,
+                    owner.cell.style(),
+                    owner.underline,
+                    owner.link,
+                );
                 self.line[base + offset] = continuation;
             }
             self.col = self.col.max(base + after);
@@ -472,7 +476,7 @@ impl Stream {
             self.out.runs.push(Run {
                 text,
                 cols: columns.len(),
-                style: columns[0].cell.style,
+                style: columns[0].cell.style(),
                 deco: None,
                 underline: columns[0].underline,
                 link: columns[0].link,
