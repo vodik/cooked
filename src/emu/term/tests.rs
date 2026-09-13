@@ -2878,9 +2878,9 @@ fn xtpushsgr_stack_is_bounded_and_pop_on_empty_is_harmless() {
 #[test]
 fn xtsave_restores_a_private_mode() {
     let mut t = term(2, 8, b"\x1b[?1006h\x1b[?1006s\x1b[?1006l");
-    assert!(!t.mouse().sgr);
+    assert!(!t.mouse().sgr());
     t.feed(b"\x1b[?1006r\x1b[?1006$p");
-    assert!(t.mouse().sgr);
+    assert!(t.mouse().sgr());
     assert!(
         t.drain()
             .events
@@ -2903,7 +2903,7 @@ fn xtsave_restores_mouse_tracking_as_one_choice() {
     t.drain();
     t.feed(b"\x1b[?1000;1002;1003;1006s\x1b[?1003;1006h\x1b[?1000;1002;1003;1006r");
     let mouse = t.mouse();
-    assert!(mouse.click && mouse.drag && !mouse.motion && !mouse.sgr);
+    assert!(mouse.click && mouse.drag && !mouse.motion && !mouse.sgr());
     assert!(
         t.drain().events.contains(&Event::Mouse(mouse)),
         "Lisp is told the restored tracking"
@@ -2951,11 +2951,11 @@ fn reset_clears_the_pen_stack_and_saved_modes() {
     let mut t = term(2, 8, b"\x1b[31m\x1b[#{\x1b[?1006h\x1b[?1006s\x1bc");
     t.feed(b"\x1b[32m\x1b[#}a\x1b[?1006r");
     assert_eq!(run_style(&t, "a").0.fg, Color::Indexed(2));
-    assert!(!t.mouse().sgr, "no slot survives to restore");
+    assert!(!t.mouse().sgr(), "no slot survives to restore");
 
     let mut t = term(2, 8, b"\x1b[?1006s\x1b[?1006h");
     t.feed(b"\x1bc\x1b[?1006h\x1b[?1006r");
-    assert!(t.mouse().sgr);
+    assert!(t.mouse().sgr());
 }
 
 #[test]

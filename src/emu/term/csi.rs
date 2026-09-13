@@ -401,7 +401,7 @@ impl State {
             SavedMode::Tracking(saved) => {
                 let now = self.modes.mouse;
                 let restored = Mouse {
-                    sgr: now.sgr,
+                    format: now.format,
                     ..saved
                 };
                 if restored != now {
