@@ -72,6 +72,7 @@ dec_flags! {
     1007 => alt_scroll,
     2004 => bracketed_paste,
     2031 => color_scheme_updates,
+    2048 => size_reports,
 }
 
 use super::*;
@@ -79,6 +80,14 @@ use super::*;
 impl State {
     pub(super) fn dec_mode(&mut self, mode: u16, on: bool) {
         if self.set_flag_mode(mode, on) {
+            // The one flag whose setting is also a report. Subscribing is how the child
+            // learns the size it is starting from, so the answer goes out on every
+            // `2048 h`, set already or not -- a second subscriber in the same session,
+            // a multiplexer reattaching, is asking just as much as the first was.
+            if mode == 2048 && on {
+                let report = self.current_size_report();
+                self.events.push(Event::Reply(report));
+            }
             return;
         }
         match mode {

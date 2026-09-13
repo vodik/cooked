@@ -865,13 +865,13 @@ impl Session {
     /// the `ENOTTY` case instead of special-casing it, and stops as soon as the two
     /// agree — so a child that later sets its own size is left alone.
     pub(crate) fn resize(&self, size: Winsize) -> Result<()> {
-        {
-            let mut term = self.shared.term.held();
-            term.resize(size.rows.into(), size.cols.into());
-            // Reported together because they change together: a font change moves the
-            // cell size and the row and column count in one event.
-            term.set_cell_metrics(size.cell);
-        }
+        // The cell size is reported together with the rows and columns because they
+        // change together: a font change moves both in one event.
+        let report =
+            self.shared
+                .term
+                .held()
+                .set_size(size.rows.into(), size.cols.into(), size.cell);
         *self.shared.pending_resize.held() = Some(size);
         // Wake the reader rather than leaving the retry to its next tick. That tick used
         // to be at most `POLL_TIMEOUT_MS` away, which was near enough to immediate to
@@ -881,11 +881,23 @@ impl Session {
         // A resize is rare and user-driven, so the extra wakeup costs nothing measurable
         // and buys the retry back its old latency in both states.
         self.shared.interrupt.raise();
-        match self.shared.pty.resize(size) {
+        let result = match self.shared.pty.resize(size) {
             // Not ours to set yet; the reader thread keeps trying.
             Err(e) if e.is(Errno::ENOTTY) => Ok(()),
             result => result,
+        };
+        // Mode 2048's report, after the ioctl so that a child answering it by asking the
+        // tty reads the size the report just gave. Written here rather than handed back
+        // to Lisp the way mode 2031's is: the geometry is this call's and nothing about
+        // sending it is a decision, so every caller of `cooked--resize' gets it without
+        // having to know. Straight to the pty rather than through [`Session::send`],
+        // since a resize is not the user interacting, and with the write's error
+        // dropped -- a buffer resized after its child exited is the ordinary case, and
+        // the report is owed to nobody then.
+        if let Some(report) = report {
+            let _ = self.shared.pty.write(&report);
         }
+        result
     }
 
     /// Emacs has dropped an image's bytes; see [`Term::forget_image`].
@@ -1388,7 +1400,7 @@ fn block_sigpipe() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::emu::{self, Event};
+    use crate::emu::{self, CellMetrics, Event};
     use nix::errno::Errno;
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use std::time::{Duration, Instant};
@@ -2483,6 +2495,31 @@ mod tests {
     /// arrives -- which is why it is the test that failed at a load average of 38
     /// while passing in isolation on the same commit. The extra base budget is for
     /// the child's own sleep; `COOKED_TEST_TIMEOUT_SCALE` is for the machine.
+    /// The half of mode 2048 the emulator tests cannot see: the report is written to the
+    /// pty by the resize itself, with no drain and no Lisp in between. The child takes
+    /// its input unbuffered and prints what it read with ESC made visible.
+    #[test]
+    fn a_size_subscriber_is_told_of_a_resize_in_band() {
+        let (session, _read) = session(&[
+            "/bin/sh",
+            "-c",
+            r"stty -icanon -echo; printf '\033[?2048hready\n'; dd bs=1 count=19 2>/dev/null | tr '\033' E",
+        ]);
+        wait_for(&session, |u| rendered(u).contains("ready"));
+        session
+            .resize(Winsize {
+                rows: 12,
+                cols: 40,
+                cell: CellMetrics {
+                    width: 10,
+                    height: 20,
+                },
+            })
+            .expect("resize");
+        let update = wait_for(&session, |u| rendered(u).contains("E[48;12;40;240;400t"));
+        assert!(rendered(&update).contains("E[48;12;40;240;400t"));
+    }
+
     #[test]
     fn resize_reaches_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.3; stty size"]);

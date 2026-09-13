@@ -575,7 +575,36 @@ pub(crate) fn color_scheme_report(scheme: ColorScheme) -> Vec<u8> {
     format!("\x1b[?997;{scheme}n").into_bytes()
 }
 
+/// The mode 2048 report: `CSI 48 ; rows ; cols ; height px ; width px t`.
+///
+/// One function for the same reason [`color_scheme_report`] is one: the report a child
+/// gets for subscribing and the one it gets for a resize must be the same bytes, and two
+/// sites framing them are two that can drift. Height before width in both units, which
+/// is `14t`'s order and not XTSMGRAPHICS'.
+///
+/// The pixel fields are 0 when Emacs has not reported a cell size. That is where this
+/// parts company with `14t`, which falls silent instead: silence there is no answer to a
+/// question, but here it would withhold the row and column count too, which are known.
+/// Zero is also what `ws_xpixel`/`ws_ypixel` already say on the tty in the same case, so
+/// the report and the `TIOCSWINSZ` it travels beside agree about the pixels as well.
+pub(crate) fn size_report(rows: usize, cols: usize, metrics: CellMetrics) -> Vec<u8> {
+    let (hpx, wpx) = if metrics.is_reported() {
+        (
+            rows.saturating_mul(usize::from(metrics.height)),
+            cols.saturating_mul(usize::from(metrics.width)),
+        )
+    } else {
+        (0, 0)
+    };
+    format!("\x1b[48;{rows};{cols};{hpx};{wpx}t").into_bytes()
+}
+
 impl State {
+    /// The mode 2048 report for the screen as it stands.
+    pub(super) fn current_size_report(&self) -> Vec<u8> {
+        size_report(self.screen().height(), self.screen().width(), self.metrics)
+    }
+
     /// Queue `ESC [ BODY` for the child: the CSI reply, framed in one place.
     ///
     /// What [`osc_reply`] is to OSC, and it earns its keep the same two ways. The
@@ -685,6 +714,42 @@ impl Term {
     /// their slices to the new cell, which grows the picture with the text around it.
     pub fn set_cell_metrics(&mut self, metrics: CellMetrics) {
         self.state.metrics = metrics;
+    }
+
+    /// Resize to ROWS by COLS with cells of METRICS, returning the mode 2048 report owed.
+    ///
+    /// [`Term::resize`] and [`Term::set_cell_metrics`] together, because the report
+    /// describes both: a font change moves the pixel size with the row count left alone,
+    /// and a child that sizes pictures in pixels is owed that as much as a new width.
+    /// Nothing is owed for a call that changes nothing, and nothing to a child that has
+    /// not set the mode.
+    ///
+    /// The bytes come back rather than being queued as an [`Event::Reply`], for the
+    /// reason [`Term::set_color_scheme`] gives: a resize is Emacs' doing and produces no
+    /// child output, so no drain is coming to carry them. `Session::resize` writes them
+    /// straight after the `TIOCSWINSZ`, which is the point of computing them here: the
+    /// report and the ioctl are read off the one geometry.
+    ///
+    /// A report already queued and not yet drained -- the answer to a `2048 h` the child
+    /// sent a moment ago -- is dropped, since it describes the size this call just
+    /// replaced. Left in, it would reach the child *after* the fresh one, because the
+    /// fresh one leaves at once and the queue waits on the next drain, and the child
+    /// would settle on the old size.
+    pub fn set_size(&mut self, rows: usize, cols: usize, metrics: CellMetrics) -> Option<Vec<u8>> {
+        let before = self.state.current_size_report();
+        self.resize(rows, cols);
+        self.set_cell_metrics(metrics);
+        if !self.state.modes.size_reports {
+            return None;
+        }
+        let report = self.state.current_size_report();
+        if report == before {
+            return None;
+        }
+        self.state
+            .events
+            .retain(|e| !matches!(e, Event::Reply(bytes) if bytes.starts_with(b"\x1b[48;")));
+        Some(report)
     }
 
     pub fn cell_metrics(&self) -> CellMetrics {
@@ -890,6 +955,12 @@ struct Modes {
     /// on [`State`], so that a soft reset ends the subscription without also forgetting
     /// which way the theme points.
     color_scheme_updates: bool,
+    /// DEC mode 2048: the child wants `CSI 48 ; rows ; cols ; hpx ; wpx t` once when it
+    /// subscribes and again on every resize. SIGWINCH does not cross ssh and bytes do, so
+    /// this is how a remote multiplexer learns the size. No event, for the reason 2031
+    /// has none: the report is owed at a resize, which is Emacs' call and not the
+    /// child's, and [`Term::set_size`] is where it is read.
+    size_reports: bool,
     /// DEC mode 1007: on the alternate screen, a wheel notch becomes cursor keys. This
     /// is what makes the wheel scroll in `less`, `man` and `git log`.
     alt_scroll: bool,
@@ -925,6 +996,7 @@ impl Default for Modes {
             focus_events: false,
             alt_scroll: false,
             color_scheme_updates: false,
+            size_reports: false,
             sync_until: None,
             mouse: Mouse::default(),
             origin_mode: false,

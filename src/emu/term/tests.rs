@@ -405,6 +405,101 @@ fn xtwinops_reports_pixel_geometry_once_emacs_has_reported_a_cell_size() {
     assert_eq!(replies, vec!["\x1b[4;480;800t", "\x1b[6;20;10t"]);
 }
 
+fn size_reports(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Reply(bytes) if bytes.starts_with(b"\x1b[48;") => {
+                Some(String::from_utf8(bytes.clone()).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+const CELL: CellMetrics = CellMetrics {
+    width: 10,
+    height: 20,
+};
+
+/// TERM.org's three cases, in order: subscribing is one report, a resize is one more,
+/// and after unsubscribing a resize is none.
+#[test]
+fn mode_2048_reports_on_set_and_on_resize_and_not_after_reset() {
+    let mut t = with_metrics(24, 80);
+    t.feed(b"\x1b[?2048h");
+    // 24 rows x 20px, 80 cols x 10px: height first in both units.
+    assert_eq!(size_reports(&t.drain().events), ["\x1b[48;24;80;480;800t"]);
+
+    assert_eq!(
+        t.set_size(30, 100, CELL).as_deref(),
+        Some(&b"\x1b[48;30;100;600;1000t"[..])
+    );
+    assert!(
+        size_reports(&t.drain().events).is_empty(),
+        "the resize report is handed back, not queued as well"
+    );
+
+    t.feed(b"\x1b[?2048l");
+    assert_eq!(t.set_size(24, 80, CELL), None);
+    assert!(size_reports(&t.drain().events).is_empty());
+}
+
+#[test]
+fn mode_2048_reports_a_cell_change_and_not_a_resize_to_the_same_size() {
+    let mut t = with_metrics(24, 80);
+    t.feed(b"\x1b[?2048h");
+    t.drain();
+    assert_eq!(t.set_size(24, 80, CELL), None, "nothing moved");
+    // A text-scale zoom: the grid is untouched and every pixel field is not.
+    let zoomed = CellMetrics {
+        width: 12,
+        height: 24,
+    };
+    assert_eq!(
+        t.set_size(24, 80, zoomed).as_deref(),
+        Some(&b"\x1b[48;24;80;576;960t"[..])
+    );
+}
+
+/// Where `14t` falls silent, this still reports: the rows and columns are known, and a
+/// zero pixel field is what the tty's own winsize says in the same case.
+#[test]
+fn mode_2048_reports_zero_pixels_without_a_cell_size() {
+    let mut t = Term::new(24, 80);
+    t.feed(b"\x1b[?2048h");
+    assert_eq!(size_reports(&t.drain().events), ["\x1b[48;24;80;0;0t"]);
+    assert_eq!(
+        t.set_size(10, 40, CellMetrics::default()).as_deref(),
+        Some(&b"\x1b[48;10;40;0;0t"[..])
+    );
+}
+
+/// The subscription's report is queued for the drain and a resize's leaves at once, so
+/// a resize landing between the two would otherwise be overtaken by the older size.
+#[test]
+fn a_resize_supersedes_an_undrained_subscription_report() {
+    let mut t = with_metrics(24, 80);
+    t.feed(b"\x1b[?2048h\x1b[c");
+    assert!(t.set_size(30, 100, CELL).is_some());
+    let events = t.drain().events;
+    assert!(size_reports(&events).is_empty(), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Reply(b) if b.ends_with(b"c"))),
+        "and only that reply is dropped"
+    );
+}
+
+#[test]
+fn a_soft_reset_ends_the_size_subscription() {
+    let mut t = with_metrics(24, 80);
+    t.feed(b"\x1b[?2048h\x1b[!p");
+    t.drain();
+    assert_eq!(t.set_size(30, 100, CELL), None);
+}
+
 #[test]
 fn xtwinops_pixel_geometry_stays_silent_without_a_cell_size() {
     // A terminal frame has no cell size, and answering zero would be a claim.
@@ -1050,6 +1145,8 @@ fn decrqm_answers_honestly_about_every_mode() {
         (&b"\x1b[?7l"[..], 7, 2),
         (&b""[..], 2031, 2),
         (&b"\x1b[?2031h"[..], 2031, 1),
+        (&b""[..], 2048, 2),
+        (&b"\x1b[?2048h"[..], 2048, 1),
         (&b"\x1b[?1004h"[..], 1004, 1),
         (&b"\x1b[?1049h"[..], 1049, 1),
         // Deliberately not implemented — the drop list, machine readable.
@@ -1079,7 +1176,7 @@ fn decrqm_answers_honestly_about_every_mode() {
 /// itself unrecognised, or survive a soft reset that was supposed to clear it.
 #[test]
 fn every_flag_mode_sets_reports_and_soft_resets() {
-    for mode in [1u16, 25, 66, 1004, 1007, 2004, 2031] {
+    for mode in [1u16, 25, 66, 1004, 1007, 2004, 2031, 2048] {
         let mut t = term(4, 8, b"");
 
         // Whatever it powers on as, DECRQM must not answer "never heard of it".

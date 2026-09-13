@@ -71,6 +71,9 @@ Some requests are refused rather than merely unimplemented. `CSI 21t` reports th
 title *on the child\'s input stream*, which turns a title the child set itself into typed
 input at your next prompt; `CSI 3t`, `4t` and `8t` move and resize the window, which is
 Emacs\' business. The read-only `CSI 18t` is answered.
+So is DEC mode 2048: a program that sets it is sent `CSI 48 ; rows ; cols ; height px ;
+width px t` at once and again after every resize, which is how a multiplexer on the far
+side of ssh, where SIGWINCH does not reach, learns the size.
 
 The entry installs itself into `~/.terminfo` on first use — no root needed — and falls
 back to `xterm-256color` when `tic` is unavailable. Set `cooked-term-name` to nil to always
