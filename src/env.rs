@@ -801,6 +801,15 @@ impl FromLisp for bool {
 }
 
 impl FromLisp for Vec<u8> {
+    /// The string's UTF-8 bytes, copied straight out of the Lisp string.
+    ///
+    /// Straight out, with no Lisp copy in between, whatever the string holds: since
+    /// Emacs 28 `copy_string_contents` calls `encode_string_utf_8` with NOCOPY, and that
+    /// hands back the string itself unless it has to change a byte, which a valid
+    /// Unicode string never needs. So a non-ASCII password sent through `send` leaves
+    /// this `Vec`, which `send` zeroes, and nothing else behind in Emacs' heap. A
+    /// multibyte string holding raw eight-bit bytes is refused by Emacs instead of
+    /// re-encoded.
     fn from_lisp(env: &Env, v: Value) -> Result<Self> {
         let mut len = 0isize;
         ffi!(

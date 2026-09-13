@@ -974,6 +974,36 @@ looked at again afterwards.  Before the split, this test read seven NULs."
                (lambda () (string-match-p "ACCEPTED" (cooked-tests--text)))))
       (should (equal (cdr (assoc "sudo" cache)) "hunter2")))))
 
+(ert-deftest cooked-a-password-source-may-answer-with-auth-sources-secret-function ()
+  "auth-source hands out `:secret\=' as a function, and a source may pass it on.
+
+`copy-sequence\=' signals on a function, and that used to escape the prompt with
+the child still blocked in its read.  The function is called for the string
+now.  An answer that is neither is dropped and `read-passwd\=' asks instead."
+  (let ((cooked-secret-debounce 60))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c"
+          "printf 'Password: '; stty -echo; read p; stty echo; \
+           if [ \"$p\" = hunter2 ]; then printf '\\nACCEPTED\\n'; else printf '\\nDENIED\\n'; fi; \
+           printf 'Again: '; stty -echo; read p; stty echo; printf '\\nGOT %s\\n' \"$p\"; sleep 5")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+      (let ((cooked-password-function
+             (lambda (_prompt) (let ((cached "hunter2")) (lambda () cached)))))
+        (cooked--prompt-secret (current-buffer)))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "ACCEPTED" (cooked-tests--text)))))
+      (should (cooked-tests--settle
+               (lambda () (and (string-match-p "Again" (cooked-tests--text))
+                               (eq cooked--mode 'secret)))))
+      (let ((cooked-password-functions (list (lambda (_prompt) 'not-a-password)))
+            (asked nil))
+        (cl-letf (((symbol-function 'cooked--read-passwd)
+                   (lambda (_prompt) (setq asked t) (copy-sequence "typed"))))
+          (cooked--prompt-secret (current-buffer)))
+        (should asked))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "GOT typed" (cooked-tests--text))))))))
+
 (ert-deftest cooked-the-wire-copy-is-cleared-even-when-the-write-throws ()
   "The other half of the split: what cooked allocated is zeroed regardless.
 

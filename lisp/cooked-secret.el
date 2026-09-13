@@ -68,9 +68,26 @@ take the prompt down with it."
 
 The chain first, then the single slot: an existing `cooked-password-function\='
 keeps working, and keeps its meaning as the answer of last resort rather than
-becoming one voice among several."
-  (or (cooked--run-seam-until-success 'cooked-password-functions prompt)
-      (and cooked-password-function (funcall cooked-password-function prompt))))
+becoming one voice among several.
+
+An answer that is a function is called for the string.  That is auth-source\='s
+own convention -- the `:secret\=' of what `auth-source-search\=' finds is a
+closure, so that the plaintext is not lying about in the result -- and a source
+written as (plist-get (car (auth-source-search ...)) :secret) returns it as it
+stands.  It used to reach `copy-sequence\=', which signals on a function, and
+only quit was handled, so the child was left blocked on a read nobody would
+answer.  Any other answer that is not a string is dropped with a message and
+`read-passwd\=' asks instead, which leaves the child with something to wait for."
+  (let ((answer (or (cooked--run-seam-until-success 'cooked-password-functions prompt)
+                    (and cooked-password-function
+                         (funcall cooked-password-function prompt)))))
+    (when (functionp answer)
+      (setq answer (funcall answer)))
+    (if (or (null answer) (stringp answer))
+        answer
+      (message "cooked: a password source answered with a %s, not a string"
+               (type-of answer))
+      nil)))
 
 (defcustom cooked-secret-debounce 0.03
   "Seconds to wait before prompting for a secret.
