@@ -603,7 +603,7 @@ now hiding a box glyph as it always did the text beside it."
 (defun cooked--apply-deco (start deco &optional origin row)
   "Hang DECO's per-character `display' properties on the text at START.
 
-DECO is `(KIND . PACKED)\=', what `deco_to_lisp\=' in src/lib.rs hands over: KIND
+DECO is `(KIND . PACKED)\=', what the `Deco\=' conversion in src/wire.rs hands over: KIND
 names what the run\='s characters display instead of themselves, and PACKED is a
 unibyte string of fixed-width little-endian records.  Packed rather than a list
 because this runs on every damaged row of every frame, and box drawing is what

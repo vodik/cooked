@@ -75,7 +75,7 @@ A pure query: it never extends the buffer, so it is safe to call before
 
 ANCHOR is what the native core attached to a semantic mark, spelled in whichever
 coordinate system survives the drain the mark arrived in — see `anchor_to_lisp'
-in src/lib.rs:
+in src/wire.rs:
 
   (scrolled . OFFSET)  characters into the scrollback this drain just
                        inserted, for a row that scrolled away while the
@@ -161,7 +161,7 @@ mark, the continuation having been joined onto the line above as it was
 written.
 
 STYLE-SPANS is not a list but a unibyte string of fixed-width records, one per
-run that has a rendition to name -- see `Block::push_style\=' in src/lib.rs for
+run that has a rendition to name -- see `Block::push_style\=' in src/wire.rs for
 the layout and `cooked--style-record\=' for the stride.  A DECO-SPAN is (START
 DECO), what its characters display instead of themselves, and a LINK-SPAN
 (START END ID) for an `OSC 8\=' hyperlink.  Neither of the last two repeats the
@@ -881,7 +881,7 @@ the whole run instead of once per row.  What the core will not do is coalesce
 across a row it was not told about: an undamaged row between two damaged ones
 breaks the run, because deleting and reinserting it would destroy every marker
 and overlay anchored in text nothing asked to have rewritten.  See
-`contiguous_runs\=' in src/lib.rs, which is where that decision lives.
+`contiguous_runs\=' in src/wire.rs, which is where that decision lives.
 
 ROWS is expected in ascending index order, which is how the drain reports
 damage.  Order is not required for correctness -- a run out of sequence is

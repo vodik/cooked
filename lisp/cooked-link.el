@@ -378,7 +378,7 @@ damaged row.  Hover is rare; drains are not."
   "Apply SPANS, a block's LINK-SPANS, to text inserted at START.
 
 Each span is (FROM TO ID) with offsets in characters — see `Block' in
-src/lib.rs.  The face is left alone whenever the run carries styling of its
+src/wire.rs.  The face is left alone whenever the run carries styling of its
 own, since the child asked for both and its colours are the more specific
 statement; only unstyled link text is given `cooked-link'.
 

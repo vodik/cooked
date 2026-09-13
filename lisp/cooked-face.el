@@ -197,7 +197,7 @@ that was just computed — are handled separately in `cooked--face'.")
 
 (eval-and-compile
   (defconst cooked--style-record 22
-    "Bytes in one packed style span.  See `Block::push_style\=' in src/lib.rs.
+    "Bytes in one packed style span.  See `Block::push_style\=' in src/wire.rs.
 
 The stride *is* the format: a reader finds the next span by adding this and
 never by decoding a length.  The Rust side asserts the same number under

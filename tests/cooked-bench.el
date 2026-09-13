@@ -553,7 +553,7 @@ The fixtures here hand `cooked--apply\=' what a full-screen repaint actually
 produces, and since the core coalesces contiguous damaged rows that is *one*
 entry -- `(0 . BLOCK)\=' -- whose block holds every row, joined by newlines, with
 a row table saying where each of them begins.  See `contiguous_runs\=' in
-src/lib.rs, and `cooked--render-block\=' for the block's shape.  A fixture still
+src/wire.rs, and `cooked--render-block\=' for the block's shape.  A fixture still
 sending a block per row would measure a path the module no longer takes.
 
 Each element of ROWS is (TEXT SPANS DECOS UNIFORM): the row's characters, its
@@ -613,7 +613,7 @@ standing on one cell."
   (cl-loop for b below bytes collect (logand (ash value (* -8 b)) 255)))
 
 (defun cooked-bench--style-record (start end fg bg ul attrs)
-  "One packed style span, as `Block::push_style\=' in src/lib.rs lays it out.
+  "One packed style span, as `Block::push_style\=' in src/wire.rs lays it out.
 
 START and END are character offsets, FG, BG and UL already-packed colours in
 `Color::packed\=''s tagged encoding, and ATTRS the bitmask.  Hand-built here

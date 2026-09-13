@@ -1480,7 +1480,8 @@ src/pty.rs       pty ownership via nix, setsid/TIOCSCTTY, termios -> Mode, bound
 src/emu/         cell/row/style, grid with damage tracking, vte-driven VT parser
 src/emu/term/    the VT front end: mod (types, Term), csi, osc, graphics, state
 src/session.rs   reader thread, coalesced wakeups, explicit idempotent shutdown
-src/lib.rs       the Lisp-facing surface
+src/lib.rs       the Lisp-facing surface: module init and the defun table
+src/wire.rs      how a drain is spelled for Lisp: blocks, style records, events
 src/platform/    one module per OS; each gets the best facility it actually has rather
                  than levelling down to the intersection (see below)
 lisp/            layered one way, from cooked-util.el up to cooked.el; see "How the

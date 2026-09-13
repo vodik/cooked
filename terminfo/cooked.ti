@@ -48,7 +48,7 @@
 # own `alt' modifier, which cooked does not spell. Meta-sends-escape (1036) is
 # the opposite case, always on, and answers 3. The line below is the declined
 # list for a machine, and `terminfo_entry_matches_what_decrqm_says' in
-# src/emu/term/tests.rs fails if it, the DECRQM answers and the capabilities in
+# src/emu/term/tests/terminfo.rs fails if it, the DECRQM answers and the capabilities in
 # this file disagree.
 #
 # declined-modes: 3 4 12 45 67 69 1005 1015 1034 1039 1045

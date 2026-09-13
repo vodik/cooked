@@ -814,7 +814,7 @@ dither carries nothing cell-specific at all."
 (ert-deftest cooked-box-glyph-bits-match-the-rust-side-encoding ()
   "Descriptors mirror `BoxGlyph' in src/emu/glyph.rs by hand (see this file's own
 \"Mirrors the bit layout\" commentary), and cross the wire as a raw `u16' (see
-`Deco::Glyphs' in lib.rs) -- nothing enforces that the two ends agree on what a
+`Deco::Glyphs' in src/wire.rs) -- nothing enforces that the two ends agree on what a
 bit means. These are the same twelve literals
 `bit_pattern_matches_the_lisp_side_mirror' pins in glyph.rs, written here
 independently rather than read across the boundary: a change to either side's

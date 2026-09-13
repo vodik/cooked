@@ -6,7 +6,7 @@
 ;; actually emits, and the guess `cooked--fontify-links' makes about text that merely
 ;; looks like a URL, using goto-addr's regexps and faces over a scan of its own.  The
 ;; pure-Rust half -- interning, eviction, what closes a link and what must not -- is
-;; tested in src/emu/link.rs and src/emu/term/tests.rs; what is here is what only a
+;; tested in src/emu/link.rs and src/emu/term/tests/osc.rs; what is here is what only a
 ;; real buffer can show: that the id reaches the text, that the two passes agree about
 ;; who wins, and that a link cannot steal a click from a child holding the mouse.
 

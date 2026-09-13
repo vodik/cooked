@@ -213,7 +213,7 @@ with a second stamp would cost more than either table saves."
   "Whether a row is one Emacs may render wider than Rust assumed.
 
 WIDTH is how many cells the row occupies on the grid, which the drain carries
-alongside the text -- see `Block::push_runs\=' in src/lib.rs -- and is always
+alongside the text -- see `Block::push_runs\=' in src/wire.rs -- and is always
 supplied: `cooked--render-rows\=' is the only caller, and a block always has
 one.  A row already wider than `cooked--cols\=' is genuinely long, scrollback
 from a wider grid predating a resize, and should soft-wrap rather than be

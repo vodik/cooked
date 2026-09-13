@@ -1888,7 +1888,7 @@ that same block's own text."
       ;; A redraw damages every row, and every row is contiguous with the next,
       ;; so the whole grid arrives as one block with one row table.  That is the
       ;; coalescing itself, read off the wire rather than asserted about the
-      ;; grouping function -- see `contiguous_runs' in src/lib.rs.
+      ;; grouping function -- see `contiguous_runs' in src/wire.rs.
       (should (= (length rows) 1))
       (should (= (caar rows) 0))
       (pcase-dolist (`(,_first . ,block) rows)
