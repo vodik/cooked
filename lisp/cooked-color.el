@@ -55,13 +55,19 @@ Not a face remap like the other two; see `cooked--sync-cursor-color'.")
 
 (defconst cooked--osc-color-sources
   '((10 . foreground) (11 . background) (12 . cursor)
-    (17 . highlight-background) (19 . highlight-foreground))
+    (13 . pointer-foreground) (14 . pointer-background)
+    (15 . tek-foreground) (16 . tek-background)
+    (17 . highlight-background) (18 . tek-cursor) (19 . highlight-foreground))
   "Which color each OSC code asks about.
 
-17 and 19 are xterm's selection colours, and the `region' face is what Emacs
-selects with, so that is where they are read from.  18 is the Tektronix cursor
-and has no entry: a chained query walks past it without an answer, as it walks
-past any code nobody here can speak for.")
+Every code xterm answers from 10 to 19, because a child that asks one of them
+alone waits for the answer.  13 and 14 are the mouse pointer, which Emacs draws
+in the `mouse' face's background over the default background.  15, 16 and 18
+are the colours of xterm's Tektronix window.  There is no such window here, so
+they are the colours the Tektronix window would have taken them from: the
+default foreground and background, and the cursor.  17 and 19 are xterm's
+selection colours, and the `region' face is what Emacs selects with, so that is
+where they are read from.")
 
 (defconst cooked--osc-settable-colors '(foreground background cursor)
   "The kinds in `cooked--osc-color-sources' that a set may change.
@@ -89,6 +95,12 @@ exists to fix."
                  ('cursor (or cooked--cursor-color
                               (cooked--frame-cursor-color (selected-frame))
                               (face-foreground 'default nil t)))
+                 ('pointer-foreground (or (face-background 'mouse nil t)
+                                          (frame-parameter nil 'mouse-color)))
+                 ('pointer-background (cooked--default-color 'background))
+                 ('tek-foreground (cooked--default-color 'foreground))
+                 ('tek-background (cooked--default-color 'background))
+                 ('tek-cursor (cooked--default-color 'cursor))
                  ;; Inheriting through `default', because a theme whose `region'
                  ;; sets only a background draws selected text in the default
                  ;; foreground, and that is the true answer to 19.
@@ -158,7 +170,7 @@ plain color names."
    ((color-values spec) spec)))
 
 (defun cooked--osc-color (parts)
-  "Answer or apply the OSC 10, 11, 12, 17 or 19 request PARTS.
+  "Answer or apply the OSC 10 to 19 request PARTS.
 
 A `?' is a query and is answered from the buffer's own faces.  Anything else is
 a set, which needs `cooked-allow-color-set' and is only ever honoured for the

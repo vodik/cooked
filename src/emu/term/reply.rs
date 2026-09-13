@@ -218,7 +218,7 @@ mod tests {
         ]
         .into_iter()
         .chain(
-            [10, 11, 12, 17, 19]
+            [10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
                 .into_iter()
                 .flat_map(|code| [format!("{code};?{PAYLOAD}"), format!("{code};{PAYLOAD};?")]),
         );

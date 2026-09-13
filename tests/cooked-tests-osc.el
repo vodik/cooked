@@ -1843,7 +1843,7 @@ shifting the pairs after it, and a set stays silent even with sets allowed."
       (should (equal (cooked--color 1) before)))))
 
 (ert-deftest cooked-osc-17-and-19-answer-from-the-region-face ()
-  "The selection colours are read, chained past 18, and never set."
+  "The selection colours are read, chained through 18, and never set."
   (let ((replies nil)
         (cooked-allow-color-set t)
         (cooked--osc-bell-terminated t))
@@ -1853,7 +1853,7 @@ shifting the pairs after it, and a set stays silent even with sets allowed."
       (with-temp-buffer
         (let ((cooked--osc-code 17))
           (cooked--osc-color '("?" "?" "?")))
-        (should (equal (mapcar #'car (reverse replies)) '(17 19)))
+        (should (equal (mapcar #'car (reverse replies)) '(17 18 19)))
         (should (equal (cdr (assq 17 replies))
                        (cooked--color-to-osc
                         (cooked--default-color 'highlight-background))))
@@ -1862,6 +1862,37 @@ shifting the pairs after it, and a set stays silent even with sets allowed."
             (cooked--osc-color '("#ff0000"))))
         (should-not cooked--color-remaps)
         (should-not face-remapping-alist)))))
+
+(ert-deftest cooked-osc-13-to-18-answer-a-lone-query ()
+  "Every colour xterm answers from 10 to 19 is answered, so a child asking one of
+them alone is not left waiting.  The pointer is the `mouse' face over the
+default background, and xterm\='s Tektronix window, which is not here, has the
+default colours and the cursor\='s.  None of them is settable."
+  (let ((out (make-temp-file "cooked-osc-13")))
+    (unwind-protect
+        (cooked-tests--with-session
+            (cooked-tests--reply-to
+             (mapconcat (lambda (code) (format "\\033]%d;?\\007" code))
+                        '(13 14 15 16 18) "")
+             out)
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "18;rgb:" (cooked-tests--contents out)))))
+          (should (equal (cooked-tests--contents out)
+                         (mapconcat
+                          (pcase-lambda (`(,code . ,kind))
+                            (format "\033]%d;%s\007" code
+                                    (cooked--color-to-osc (cooked--default-color kind))))
+                          '((13 . pointer-foreground) (14 . background)
+                            (15 . foreground) (16 . background) (18 . cursor))
+                          "")))
+          (let ((cooked--osc-bell-terminated t)
+                (cooked-allow-color-set t))
+            (dolist (code '(13 14 15 16 18))
+              (let ((cooked--osc-code code))
+                (cooked--osc-color '("#ff0000"))))
+            (should-not cooked--color-remaps)
+            (should-not cooked--cursor-color)))
+      (delete-file out))))
 
 (ert-deftest cooked-osc-color-sets-are-refused-by-default ()
   "Anything that can write to the terminal can send one, so it is opt-in."
@@ -2174,7 +2205,7 @@ sent last, so its answer marks the point by which everything has come back."
                            (format "%d;%s;?" code payload)
                            (format "%d;%s" code payload)
                            (format "%d;?" code)))
-                   '(10 11 12 17 19))))
+                   '(10 11 12 13 14 15 16 17 18 19))))
          (query (concat (mapconcat (lambda (body) (concat "\\033]" body "\\007"))
                                    bodies "")
                         "\\033[5n"))
