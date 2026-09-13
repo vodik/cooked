@@ -12,6 +12,9 @@
 (require 'cooked-tests-helpers)
 (require 'cooked-osc-eval)
 (require 'cooked-user-var)
+;; Loaded before any test stubs its functions, so a `require' inside cooked
+;; cannot put the real ones back under a stub.
+(require 'notifications nil t)
 
 (ert-deftest cooked-osc-133-drives-the-input-state ()
   (cooked-tests--with-session
@@ -64,6 +67,36 @@
       ;; The assembled notification is forgotten, not left to accumulate.
       (should (null cooked--notification-chunks)))))
 
+(defmacro cooked-tests--raising-notifications (capabilities &rest body)
+  "Run BODY against a stub desktop that advertises CAPABILITIES.
+
+BODY sees `raised\=', the arguments of every `notifications-notify\=' call so
+far, oldest first, and `said\=', every message, and can call `flush\=' to run
+the notifications it has deferred.  They are run before the stubs go in any
+case, so a timer left behind cannot reach the real desktop."
+  (declare (indent 1))
+  `(let ((raised nil)
+         (said nil)
+         (cooked--notification-times nil)
+         (cooked--notification-markup nil))
+     (cl-letf (((symbol-function 'notifications-get-capabilities)
+                (lambda (&rest _) ,capabilities))
+               ((symbol-function 'notifications-notify)
+                (lambda (&rest params) (setq raised (append raised (list params)))))
+               ((symbol-function 'message)
+                (lambda (fmt &rest args)
+                  (setq said (append said (list (apply #'format fmt args)))))))
+       (cl-flet ((flush ()
+                   (let ((deadline (+ (float-time) (cooked-tests-timeout 2))))
+                     (while (and (< (float-time) deadline)
+                                 (seq-find (lambda (timer)
+                                             (eq (timer--function timer)
+                                                 #'cooked--raise-notification))
+                                           timer-list))
+                       (accept-process-output nil 0.01)))))
+         (unwind-protect (progn ,@body)
+           (flush))))))
+
 (ert-deftest cooked-notifications-are-rate-limited ()
   (with-temp-buffer
     (cooked-mode)
@@ -71,22 +104,103 @@
           (cooked-notification-rate '(2 . 10)))
       ;; A `cat\=' of a hostile file must not be able to flood the desktop.  Driven
       ;; through the real `cooked--notify\=', since that is where the limit lives.
-      (let ((raised 0))
-        (cl-letf (((symbol-function 'message) (lambda (&rest _) (cl-incf raised)))
-                  ((symbol-function 'notifications-notify)
-                   (lambda (&rest _) (cl-incf raised))))
-          (dotimes (i 5) (cooked--osc-notify (list "i=1" (format "n%d" i)))))
-        (should (= raised 2)))
-      (setq cooked--notification-times nil)
-      (should (cooked--notification-allowed-p))
-      (push (float-time) cooked--notification-times)
-      (should (cooked--notification-allowed-p))
-      (push (float-time) cooked--notification-times)
-      (should-not (cooked--notification-allowed-p)))))
+      (cooked-tests--raising-notifications '(:body)
+        (dotimes (i 5) (cooked--osc-notify (list "i=1" (format "n%d" i))))
+        (flush)
+        (should (= (length raised) 2))
+        (setq cooked--notification-times nil)
+        (should (cooked--notification-allowed-p))
+        (push (float-time) cooked--notification-times)
+        (should (cooked--notification-allowed-p))
+        (push (float-time) cooked--notification-times)
+        (should-not (cooked--notification-allowed-p))))))
+
+(ert-deftest cooked-notification-rate-is-shared-by-every-session ()
+  "Two sessions share one cap, since the desktop they fill is the same one."
+  (let ((cooked-allow-notifications t)
+        (cooked-notification-rate '(2 . 10))
+        (buffers (list (generate-new-buffer "a") (generate-new-buffer "b"))))
+    (unwind-protect
+        (cooked-tests--raising-notifications '(:body)
+          (dolist (buffer buffers)
+            (with-current-buffer buffer
+              (cooked-mode)
+              (dotimes (_ 2) (cooked--osc-9 '("done")))))
+          (flush)
+          (should (= (length raised) 2)))
+      (mapc #'kill-buffer buffers))))
+
+(ert-deftest cooked-notification-is-raised-outside-the-drain ()
+  "A real child\='s OSC 9 reaches the desktop from a timer, not from its drain.
+
+A desktop notification is a synchronous D-Bus call, and inside the drain a slow
+server would hold up the child\='s output.  The stub records the session\='s
+`cooked--draining\=' when it is called."
+  (let ((cooked-allow-notifications t)
+        (session nil)
+        (during nil))
+    (cooked-tests--raising-notifications '(:body)
+      (cl-letf* ((real-notify (symbol-function 'notifications-notify))
+                 ((symbol-function 'notifications-notify)
+                  (lambda (&rest params)
+                    (push (buffer-local-value 'cooked--draining session) during)
+                    (apply real-notify params))))
+        (cooked-tests--with-session
+            '("/bin/sh" "-c" "printf '\\033]9;build done\\007'; sleep 5")
+          (setq session (current-buffer))
+          (should (cooked-tests--settle (lambda () raised)))
+          (should (equal during '(nil)))
+          (should (equal (plist-get (car raised) :body) "build done"))
+          (should (equal (plist-get (car raised) :title) (buffer-name))))))))
+
+(ert-deftest cooked-notification-body-markup-is-escaped ()
+  "A server that reads markup is sent the body escaped, and one that does not is
+sent it as it came, since it would show the entities literally.  The buffer
+leads the title either way."
+  (with-temp-buffer
+    (rename-buffer "*cooked-notify*" t)
+    (let ((body "<img src=\"file:///etc/passwd\"> & <a href=\"x\">y</a>"))
+      (cooked-tests--raising-notifications '(:body :body-markup)
+        (cooked--notify "Build" body)
+        (flush)
+        (should (equal (car raised)
+                       (list :title (concat (buffer-name) ": Build")
+                             :body (concat "&lt;img src=\"file:///etc/passwd\"&gt; &amp; "
+                                           "&lt;a href=\"x\"&gt;y&lt;/a&gt;")))))
+      (cooked-tests--raising-notifications '(:body)
+        (cooked--notify "Build" body)
+        (flush)
+        (should (equal (plist-get (car raised) :body) body))))))
+
+(ert-deftest cooked-notification-falls-back-to-a-message-without-a-bus ()
+  "With no session bus every call signals, and every notification is a message.
+
+Not just the first: the seam used to report the failure once and then lose
+each notification after it."
+  (with-temp-buffer
+    (rename-buffer "*cooked-notify*" t)
+    (cooked-tests--raising-notifications '(:body)
+      (cl-letf (((symbol-function 'notifications-get-capabilities)
+                 (lambda (&rest _) (signal 'dbus-error '("No session bus")))))
+        (cooked--notify "" "first")
+        (cooked--notify "" "second")
+        (flush)
+        (should-not raised)
+        (should (equal said (list (concat (buffer-name) " first")
+                                  (concat (buffer-name) " second"))))))))
 
 (ert-deftest cooked-notification-strips-control-characters ()
   (should (equal (cooked--notification-clean "a\e]0;evil\007b" 100) "a]0;evilb"))
-  (should (equal (cooked--notification-clean "abcdef" 3) "abc")))
+  (should (equal (cooked--notification-clean "abcdef" 3) "abc"))
+  ;; C1 controls, and format characters such as a right-to-left override, which
+  ;; would draw `txt.exe' as `exe.txt'.
+  (should (equal (cooked--notification-clean "\u009b31m\u202etxt.exe\u200b" 100)
+                 "31mtxt.exe"))
+  ;; Characters dropped do not count against the limit.
+  (should (equal (cooked--notification-clean "\u202e\u202eabc" 3) "abc"))
+  ;; A zero-width joiner holds an emoji sequence together and is kept.
+  (should (equal (cooked--notification-clean "\U0001F469\u200d\U0001F4BB" 100)
+                 "\U0001F469\u200d\U0001F4BB")))
 
 ;; OSC 9 is two protocols under one number, so what is asserted is the split:
 ;; iTerm2's message notifies, and none of ConEmu's numbered commands does.
@@ -107,13 +221,11 @@
                      '(("" . "done") ("" . "built; 3 warnings")
                        ("" . "42 files built"))))
       ;; And the rate cap applies, through the real `cooked--notify\='.
-      (let ((cooked-notification-rate '(2 . 10))
-            (raised 0))
-        (cl-letf (((symbol-function 'notifications-notify)
-                   (lambda (&rest _) (cl-incf raised)))
-                  ((symbol-function 'message) (lambda (&rest _) (cl-incf raised))))
-          (dotimes (_ 5) (cooked--osc-9 '("again"))))
-        (should (= raised 2))))))
+      (let ((cooked-notification-rate '(2 . 10)))
+        (cooked-tests--raising-notifications '(:body)
+          (dotimes (_ 5) (cooked--osc-9 '("again")))
+          (flush)
+          (should (= (length raised) 2)))))))
 
 (ert-deftest cooked-osc-9-conemu-commands-never-notify ()
   "A leading all-digit field is ConEmu's, implemented or not.

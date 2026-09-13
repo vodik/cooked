@@ -207,16 +207,26 @@ your desktop if this is on."
 (defcustom cooked-notification-rate '(3 . 10)
   "Cap on notifications as a cons of COUNT and SECONDS.
 Notifications past the cap are dropped silently.  A child that means well
-sends one when a long build finishes; a child that does not sends thousands."
+sends one when a long build finishes; a child that does not sends thousands.
+The cap is shared by every session, so ten buffers still raise at most COUNT."
   :type '(cons natnum natnum)
   :group 'cooked)
 
 (defconst cooked--notification-limits '(120 . 500)
   "Maximum title and body length, in characters.")
 
-(defvar-local cooked--notification-times nil
-  "Timestamps of recent notifications, newest first.
-See `cooked-notification-rate\='.")
+(defvar cooked--notification-times nil
+  "Timestamps of recent notifications from any session, newest first.
+
+Global rather than buffer-local, as `cooked--bell-last\=' is and for the same
+reason: the desktop is one place, and a cap per buffer would let a dozen
+sessions each fill it.  See `cooked-notification-rate\='.")
+
+(defvar cooked--notification-markup nil
+  "Whether the notification server interprets markup in a body, once known.
+
+nil until a notification has been raised, then a list of one boolean, so that
+a server that answered no is not asked again.")
 
 (defvar-local cooked--notification-chunks nil
   "Partial OSC 99 notifications, as an alist of id to (TITLE . BODY).")
@@ -229,10 +239,28 @@ bounded: without that, `cooked--notification-chunks\=' is a buffer-local leak th
 child controls.")
 
 (defun cooked--notification-clean (text limit)
-  "TEXT with control characters removed, truncated to LIMIT characters."
-  (truncate-string-to-width
-   (replace-regexp-in-string "[[:cntrl:]]" "" (or text ""))
-   limit))
+  "TEXT without control or format characters, cut to at most LIMIT characters.
+
+Format characters, Unicode\='s class Cf, draw nothing and still change what is
+drawn.  U+202E RIGHT-TO-LEFT OVERRIDE before `txt.exe\=' shows `exe.txt\=', so a
+child could make a notification read as something it does not say.  The
+joiners U+200C and U+200D are the exception, being how an emoji sequence such
+as a family is spelled, and they cannot reorder anything.  C1
+controls, U+0080 to U+009F, go with the C0 ones.  The scan stops once LIMIT
+characters are kept, so a megabyte of OSC 9 costs no more than its first
+screenful."
+  (let ((text (or text ""))
+        (index 0)
+        (kept nil)
+        (count 0))
+    (while (and (< index (length text)) (< count limit))
+      (let ((char (aref text index)))
+        (unless (and (memq (get-char-code-property char 'general-category) '(Cc Cf))
+                     (not (memq char '(#x200c #x200d))))
+          (push char kept)
+          (setq count (1+ count))))
+      (setq index (1+ index)))
+    (concat (nreverse kept))))
 
 (defun cooked--notification-allowed-p ()
   "Whether another notification is within `cooked-notification-rate\='."
@@ -244,20 +272,69 @@ child controls.")
                     count))
     (< (length cooked--notification-times) count)))
 
+(defun cooked--notification-escape (text)
+  "TEXT with the three characters that open markup written as entities.
+
+A server advertising `body-markup\=' reads the body as a subset of HTML, so
+`<img src=\"file:///etc/passwd\">\=' in a child\='s message would be
+fetched and drawn, and `<a href>\=' made clickable.  Escaped, both are shown
+as the text they are."
+  (replace-regexp-in-string
+   "[&<>]"
+   (lambda (match) (pcase match ("&" "&amp;") ("<" "&lt;") (_ "&gt;")))
+   text t t))
+
 (defun cooked--notify (title body)
-  "Raise a desktop notification with TITLE and BODY, subject to the rate limit."
+  "Raise a notification with TITLE and BODY from this buffer, within the cap.
+
+The text is cleaned here, but the notification is raised from a timer, by
+`cooked--raise-notification\='.  This runs inside a drain, and a desktop
+notification is a synchronous D-Bus call that a slow or still-starting
+notification service can hold for seconds, with the child\='s output
+waiting behind it."
   (when (cooked--notification-allowed-p)
     (push (float-time) cooked--notification-times)
-    (let ((title (cooked--notification-clean
-                  title (car cooked--notification-limits)))
-          (body (cooked--notification-clean
-                 body (cdr cooked--notification-limits))))
-      ;; `notifications-notify\=' needs D-Bus, which a terminal Emacs may not have.
-      (if (and (fboundp 'notifications-notify) (featurep 'dbusbind))
-          (notifications-notify :title (if (string-empty-p title) "cooked" title)
-                                :body body)
-        ;; Never as a format string: the text is the child's.
-        (message "%s" (string-trim (concat title " " body)))))))
+    (run-at-time 0 nil #'cooked--raise-notification
+                 ;; Cleaned too: a buffer named after the title holds the child's text.
+                 (cooked--notification-clean (buffer-name) (car cooked--notification-limits))
+                 (cooked--notification-clean title (car cooked--notification-limits))
+                 (cooked--notification-clean body (cdr cooked--notification-limits)))))
+
+(declare-function notifications-notify "notifications" (&rest params))
+(declare-function notifications-get-capabilities "notifications" (&optional bus))
+
+(defun cooked--raise-notification (buffer title body)
+  "Show TITLE and BODY, sent from the buffer named BUFFER, on the desktop.
+
+The buffer leads the title, as in `*cooked*<2>: Build failed\=', because a
+notification that does not say which session sent it cannot be acted on.  The
+body is escaped when the server would read markup in it.
+
+Shown with `message\=' instead when there is no desktop to show it on:
+Emacs built without D-Bus, or a terminal Emacs over ssh with no session bus,
+where every call signals.  Falling back on each failure, rather than giving up
+after the first, means a notification is never lost without a trace."
+  (let ((title (if (string-empty-p title)
+                   buffer
+                 (format "%s: %s" buffer title))))
+    (unless (and (featurep 'dbusbind)
+                 (require 'notifications nil t)
+                 (condition-case nil
+                     (progn
+                       (unless cooked--notification-markup
+                         (setq cooked--notification-markup
+                               (list (and (memq :body-markup
+                                                (notifications-get-capabilities))
+                                          t))))
+                       (notifications-notify
+                        :title title
+                        :body (if (car cooked--notification-markup)
+                                  (cooked--notification-escape body)
+                                body))
+                       t)
+                   (error nil)))
+      ;; Never as a format string: the text is the child's.
+      (message "%s" (string-trim (concat title " " body))))))
 
 (defun cooked--osc-99-metadata (meta)
   "Parse META, OSC 99's colon-separated KEY=VALUE list, into an alist.
