@@ -357,6 +357,11 @@ mod tests {
                     Some(c @ '@'..='_') => out.push(c as u8 - b'@'),
                     other => panic!("{value:?}: no expectation for ^{other:?}"),
                 },
+                // A padding delay, `$<100/>` in `flash`, is an instruction to the
+                // program, not bytes for the terminal, and is never sent.
+                '$' if chars.clone().next() == Some('<') => {
+                    chars.by_ref().find(|&c| c == '>').expect("a closed delay");
+                }
                 c => out.push(u8::try_from(c).expect("ASCII")),
             }
         }
