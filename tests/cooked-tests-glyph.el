@@ -883,5 +883,437 @@ tests exists to catch."
     (should (= (logand bits 7) cooked--box-direction-quadrant))
     (should (= (logand (ash bits -3) 15) #b1101))))
 
+;;;; Line geometry, checked against a statement of it
+;;
+;; The tests below do not look at a picture.  Each restates, as rectangles, what a
+;; shape has to be -- where a stroke of each weight sits across its axis, and
+;; where it has to start and stop -- and compares the rasterizer's bitmap against
+;; that pixel for pixel over a sweep of cell sizes.  A failure prints both grids.
+
+(defconst cooked-tests--glyph-sizes
+  (let ((sizes nil))
+    (dolist (width '(5 7 8 9 10 11 16))
+      (dolist (height '(10 15 17 20 23 34))
+        (push (cons width height) sizes)))
+    (nreverse sizes))
+  "Cell sizes the geometry tests sweep: narrow, odd, even, and a large one each way.")
+
+(defun cooked-tests--grid-string (grid)
+  "GRID as rows of `#' and `.', for a failure message a reader can see."
+  (let ((rows nil))
+    (dotimes (y (cooked-bitmap-height grid))
+      (let ((row (make-string (cooked-bitmap-width grid) ?.)))
+        (dotimes (x (cooked-bitmap-width grid))
+          (when (cooked--bitmap-ref grid x y)
+            (aset row x ?#)))
+        (push row rows)))
+    (mapconcat #'identity (nreverse rows) "\n")))
+
+(defun cooked-tests--grid-from-rects (width height rects)
+  "A WIDTH x HEIGHT bitmap with every rectangle of RECTS set.
+Each rectangle is (X0 Y0 X1 Y1), half-open, as `cooked--bitmap-fill' takes it."
+  (let ((grid (cooked--bitmap-make width height)))
+    (pcase-dolist (`(,x0 ,y0 ,x1 ,y1) rects)
+      (cooked--bitmap-fill grid x0 y0 x1 y1))
+    grid))
+
+(defun cooked-tests--grid-mirror (grid axis)
+  "GRID flipped left to right when AXIS is `horizontal', else top to bottom."
+  (let* ((width (cooked-bitmap-width grid))
+         (height (cooked-bitmap-height grid))
+         (out (cooked--bitmap-make width height)))
+    (dotimes (y height)
+      (dotimes (x width)
+        (when (cooked--bitmap-ref grid x y)
+          (if (eq axis 'horizontal)
+              (cooked--bitmap-set out (- width 1 x) y t)
+            (cooked--bitmap-set out x (- height 1 y) t)))))
+    out))
+
+(defun cooked-tests--grid-components (grid &optional diagonal)
+  "How many connected groups of set pixels GRID holds.
+Four-connected, or eight-connected with DIAGONAL."
+  (let* ((width (cooked-bitmap-width grid))
+         (height (cooked-bitmap-height grid))
+         (seen (make-bool-vector (* width height) nil))
+         (steps (append '((1 . 0) (-1 . 0) (0 . 1) (0 . -1))
+                        (and diagonal '((1 . 1) (1 . -1) (-1 . 1) (-1 . -1)))))
+         (count 0))
+    (dotimes (y height)
+      (dotimes (x width)
+        (when (and (cooked--bitmap-ref grid x y)
+                   (not (aref seen (+ x (* y width)))))
+          (setq count (1+ count))
+          (let ((stack (list (cons x y))))
+            (aset seen (+ x (* y width)) t)
+            (while stack
+              (pcase-let ((`(,px . ,py) (pop stack)))
+                (pcase-dolist (`(,dx . ,dy) steps)
+                  (let ((nx (+ px dx)) (ny (+ py dy)))
+                    (when (and (>= nx 0) (>= ny 0) (< nx width) (< ny height)
+                               (cooked--bitmap-ref grid nx ny)
+                               (not (aref seen (+ nx (* ny width)))))
+                      (aset seen (+ nx (* ny width)) t)
+                      (push (cons nx ny) stack))))))))))
+    count))
+
+(defun cooked-tests--light (width height)
+  "Light stroke thickness at WIDTH x HEIGHT."
+  (max 1 (/ (min width height) 8)))
+
+(defun cooked-tests--heavy (width height)
+  "Heavy stroke thickness at WIDTH x HEIGHT."
+  (max 2 (/ (min width height) 4)))
+
+(defun cooked-tests--bands (weight center light heavy)
+  "Where a stroke of WEIGHT sits across its axis, as a list of (LO . HI).
+
+The statement the rasterizer is held to.  A light stroke is LIGHT pixels with
+the odd pixel after CENTER; a heavy one is centred the same way; a double one is
+two light strokes whose gap is exactly where the light stroke would be, so that
+═ and ─ share a centre line and a double line is one light stroke either side."
+  (let ((a (- center (/ light 2))))
+    (pcase weight
+      (1 (list (cons a (+ a light))))
+      (2 (let ((b (- center (/ heavy 2))))
+           (list (cons b (+ b heavy)))))
+      (3 (list (cons (- a light) a)
+               (cons (+ a light) (+ a light light)))))))
+
+(defun cooked-tests--should-grid (bits width height expected)
+  "Assert descriptor BITS draws exactly EXPECTED at WIDTH x HEIGHT."
+  (let ((actual (cooked-tests--glyph-grid bits width height)))
+    (unless (equal (cooked-bitmap-bits actual) (cooked-bitmap-bits expected))
+      (ert-fail (list (format "#x%04x at %dx%d" bits width height)
+                      :expected (cooked-tests--grid-string expected)
+                      :actual (cooked-tests--grid-string actual))))))
+
+(ert-deftest cooked-box-every-edge-meets-its-neighbour-at-the-border ()
+  "The pixels a line glyph puts on the edge of its cell are exactly its band.
+
+This is the property every border depends on: the column of pixels ─ leaves on
+its right edge is the column ┼ picks up on its left, so the two only join if
+both put the same band of the same weight there, and nothing else.  Checked for
+every combination of weights on the four edges, not only the ones Unicode
+names, since each edge is drawn by the same code whatever the others are."
+  (pcase-dolist (`(,width . ,height) '((5 . 10) (8 . 17) (9 . 20) (16 . 34)))
+    (let ((light (cooked-tests--light width height))
+          (heavy (cooked-tests--heavy width height))
+          (cx (/ width 2))
+          (cy (/ height 2)))
+      (dotimes (up 4)
+        (dotimes (down 4)
+          (dotimes (left 4)
+            (dotimes (right 4)
+              (let* ((bits (cooked-tests--line-bits up down left right))
+                     (grid (cooked-tests--glyph-grid bits width height))
+                     (edge-pixels
+                      (lambda (along-fn extent)
+                        (let ((set nil))
+                          (dotimes (i extent)
+                            (when (funcall along-fn i) (push i set)))
+                          (nreverse set))))
+                     (band-pixels
+                      (lambda (weight center)
+                        (let ((set nil))
+                          (pcase-dolist (`(,lo . ,hi)
+                                         (cooked-tests--bands weight center light heavy))
+                            (cl-loop for i from lo below hi do (push i set)))
+                          (sort set #'<)))))
+                (should
+                 (equal (list bits width height
+                              (funcall edge-pixels
+                                       (lambda (x) (cooked--bitmap-ref grid x 0)) width)
+                              (funcall edge-pixels
+                                       (lambda (x) (cooked--bitmap-ref grid x (1- height)))
+                                       width)
+                              (funcall edge-pixels
+                                       (lambda (y) (cooked--bitmap-ref grid 0 y)) height)
+                              (funcall edge-pixels
+                                       (lambda (y) (cooked--bitmap-ref grid (1- width) y))
+                                       height))
+                        (list bits width height
+                              (funcall band-pixels up cx)
+                              (funcall band-pixels down cx)
+                              (funcall band-pixels left cy)
+                              (funcall band-pixels right cy))))))))))))
+
+(defmacro cooked-tests--with-double-geometry (&rest body)
+  "Run BODY once per size in `cooked-tests--glyph-sizes', with the geometry bound.
+
+Binds WIDTH, HEIGHT, L (light thickness), and for each axis the three
+coordinates a double line is built from: X- and X+ are where the left and right
+strokes of a vertical double line start, XL is where a light vertical stroke
+starts; Y-, Y+ and YL likewise across the horizontal axis.  Every stroke is L
+wide, so each band is [coordinate, coordinate + L)."
+  (declare (indent 0))
+  `(pcase-dolist (`(,width . ,height) cooked-tests--glyph-sizes)
+     (let* ((L (cooked-tests--light width height))
+            (xl (- (/ width 2) (/ L 2)))
+            (yl (- (/ height 2) (/ L 2)))
+            (x- (- xl L)) (x+ (+ xl L))
+            (y- (- yl L)) (y+ (+ yl L)))
+       (ignore L xl yl x- x+ y- y+)
+       ,@body)))
+
+(ert-deftest cooked-box-double-corners-nest ()
+  "╔ is two corners, one inside the other, each a single unbroken stroke.
+
+Drawing each edge's pair of strokes out from the centre without looking at the
+other edge left a gap at the outer corner and a stub of the inner stroke poking
+past the inner one.  The outer stroke turns at the outer band on both axes and
+the inner one at the inner band, so the two never touch."
+  (cooked-tests--with-double-geometry
+    ;; ╔ down+right
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 0 3 0 3) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((,x- ,y- ,(+ x- L) ,height) (,x- ,y- ,width ,(+ y- L))
+        (,x+ ,y+ ,(+ x+ L) ,height) (,x+ ,y+ ,width ,(+ y+ L)))))
+    ;; ╝ up+left
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 3 0 3 0) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((,x+ 0 ,(+ x+ L) ,(+ y+ L)) (0 ,y+ ,(+ x+ L) ,(+ y+ L))
+        (,x- 0 ,(+ x- L) ,(+ y- L)) (0 ,y- ,(+ x- L) ,(+ y- L)))))))
+
+(ert-deftest cooked-box-double-cross-is-four-corners ()
+  "╬ has nothing crossing its centre: four inner corners and a clear gap.
+It came out as a # grid, every stroke running straight through the others."
+  (cooked-tests--with-double-geometry
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 3 3 3 3) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `(;; top-left
+        (,x- 0 ,(+ x- L) ,(+ y- L)) (0 ,y- ,(+ x- L) ,(+ y- L))
+        ;; top-right
+        (,x+ 0 ,(+ x+ L) ,(+ y- L)) (,x+ ,y- ,width ,(+ y- L))
+        ;; bottom-left
+        (,x- ,y+ ,(+ x- L) ,height) (0 ,y+ ,(+ x- L) ,(+ y+ L))
+        ;; bottom-right
+        (,x+ ,y+ ,(+ x+ L) ,height) (,x+ ,y+ ,width ,(+ y+ L)))))
+    (should (= 4 (cooked-tests--grid-components
+                  (cooked-tests--glyph-grid
+                   (cooked-tests--line-bits 3 3 3 3) width height))))))
+
+(ert-deftest cooked-box-double-tee-breaks-only-the-inner-line ()
+  "╦ keeps its outer line whole and opens the inner one where the branch leaves."
+  (cooked-tests--with-double-geometry
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 0 3 3 3) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((0 ,y- ,width ,(+ y- L))
+        (0 ,y+ ,(+ x- L) ,(+ y+ L)) (,x- ,y+ ,(+ x- L) ,height)
+        (,x+ ,y+ ,width ,(+ y+ L)) (,x+ ,y+ ,(+ x+ L) ,height))))
+    ;; ╠ is the same shape turned, and must agree with it.
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 3 3 0 3) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((,x- 0 ,(+ x- L) ,height)
+        (,x+ 0 ,(+ x+ L) ,(+ y- L)) (,x+ ,y- ,width ,(+ y- L))
+        (,x+ ,y+ ,(+ x+ L) ,height) (,x+ ,y+ ,width ,(+ y+ L)))))))
+
+(ert-deftest cooked-box-single-meets-double ()
+  "Where a single stroke meets a double line it joins the line the shape needs.
+
+At a corner (╒) it runs on to the far stroke, so the outer corner closes; at a
+tee (╤) it stops at the near stroke and leaves the far one whole; at a cross
+(╪) it runs through both.  ╥ and ╫ are the same three cases with the weights
+exchanged between the axes."
+  (cooked-tests--with-double-geometry
+    ;; ╒ down light, right double
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 0 1 0 3) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((,xl ,y- ,(+ xl L) ,height)
+        (,xl ,y- ,width ,(+ y- L)) (,xl ,y+ ,width ,(+ y+ L)))))
+    ;; ╤ down light, left and right double
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 0 1 3 3) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((0 ,y- ,width ,(+ y- L)) (0 ,y+ ,width ,(+ y+ L))
+        (,xl ,y+ ,(+ xl L) ,height))))
+    ;; ╪ vertical light through a double horizontal
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 1 1 3 3) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((0 ,y- ,width ,(+ y- L)) (0 ,y+ ,width ,(+ y+ L))
+        (,xl 0 ,(+ xl L) ,height))))
+    ;; ╓ down double, right light
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 0 3 0 1) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((,x- ,yl ,width ,(+ yl L))
+        (,x- ,yl ,(+ x- L) ,height) (,x+ ,yl ,(+ x+ L) ,height))))
+    ;; ╫ vertical double through a light horizontal
+    (cooked-tests--should-grid
+     (cooked-tests--line-bits 3 3 1 1) width height
+     (cooked-tests--grid-from-rects
+      width height
+      `((0 ,yl ,width ,(+ yl L))
+        (,x- 0 ,(+ x- L) ,height) (,x+ 0 ,(+ x+ L) ,height))))))
+
+(ert-deftest cooked-box-lines-mirror-where-their-bands-do ()
+  "Swapping left for right draws the mirror image, wherever that is possible.
+
+A band of odd thickness is symmetric in a cell of odd width and one of even
+thickness in a cell of even width; in the other two cases the odd pixel has to
+fall on one side, and mirroring moves it.  So the check runs over the weights
+whose bands are symmetric at each size -- light and double at 9x20, where the
+light stroke is one pixel, and heavy at 8x16, where it is two -- and there it
+catches any junction rule that treats one side differently from the other."
+  (pcase-dolist (`(,width ,height ,weights) '((9 21 (0 1 3)) (8 16 (0 2))))
+    (dolist (up weights)
+      (dolist (down weights)
+        (dolist (left weights)
+          (dolist (right weights)
+            (let ((grid (cooked-tests--glyph-grid
+                         (cooked-tests--line-bits up down left right) width height)))
+              (should (equal (cooked-tests--grid-string
+                              (cooked-tests--grid-mirror grid 'horizontal))
+                             (cooked-tests--grid-string
+                              (cooked-tests--glyph-grid
+                               (cooked-tests--line-bits up down right left)
+                               width height))))
+              (should (equal (cooked-tests--grid-string
+                              (cooked-tests--grid-mirror grid 'vertical))
+                             (cooked-tests--grid-string
+                              (cooked-tests--glyph-grid
+                               (cooked-tests--line-bits down up left right)
+                               width height)))))))))))
+
+;;;; Block and arc geometry
+
+(defun cooked-tests--block-bits (direction eighths)
+  "A block descriptor, mirroring `BoxGlyph::block' in src/emu/glyph.rs."
+  (logior cooked--box-kind-block direction (ash eighths 3)))
+
+(defun cooked-tests--grid-union-disjoint (a b)
+  "Whether A and B together set every pixel exactly once."
+  (let ((ok t))
+    (dotimes (y (cooked-bitmap-height a))
+      (dotimes (x (cooked-bitmap-width a))
+        (unless (and (cooked--bitmap-ref a x y) (not (cooked--bitmap-ref b x y))
+                     t)
+          (unless (and (cooked--bitmap-ref b x y) (not (cooked--bitmap-ref a x y)))
+            (setq ok nil)))))
+    ok))
+
+(ert-deftest cooked-box-complementary-blocks-tile-the-cell ()
+  "▀ and ▄ together cover every pixel once, at every fraction and every size.
+
+A block of F eighths from one side and one of 8-F from the other are the two
+halves of one cut, so they have to agree on where the cut is.  Rounding each to
+its own nearest pixel left `round' to break the tie, and it breaks 8.5 to 8 --
+so at a 17-pixel line ▀ and ▄ were both 8 rows, and a picture drawn from half
+blocks had a blank line through every row of it."
+  (pcase-dolist (`(,width . ,height) cooked-tests--glyph-sizes)
+    (cl-loop
+     for f from 1 to 7 do
+     (should (cooked-tests--grid-union-disjoint
+              (cooked-tests--glyph-grid
+               (cooked-tests--block-bits cooked--box-direction-up f) width height)
+              (cooked-tests--glyph-grid
+               (cooked-tests--block-bits cooked--box-direction-down (- 8 f))
+               width height)))
+     (should (cooked-tests--grid-union-disjoint
+              (cooked-tests--glyph-grid
+               (cooked-tests--block-bits cooked--box-direction-left f) width height)
+              (cooked-tests--glyph-grid
+               (cooked-tests--block-bits cooked--box-direction-right (- 8 f))
+               width height))))))
+
+(ert-deftest cooked-box-half-blocks-cut-where-quadrants-do ()
+  "▀ ▄ ▌ ▐ and the quadrants ▘▝▖▗ share one cut on each axis.
+Otherwise ▌ beside ▙ steps by a pixel at an odd cell width."
+  (pcase-dolist (`(,width . ,height) cooked-tests--glyph-sizes)
+    (dolist (pair `((,cooked--box-direction-up . #b0011)
+                    (,cooked--box-direction-down . #b1100)
+                    (,cooked--box-direction-left . #b0101)
+                    (,cooked--box-direction-right . #b1010)))
+      (should (equal (cooked-tests--grid-string
+                      (cooked-tests--glyph-grid
+                       (cooked-tests--block-bits (car pair) 4) width height))
+                     (cooked-tests--grid-string
+                      (cooked-tests--glyph-grid
+                       (cooked-tests--block-bits cooked--box-direction-quadrant
+                                                 (cdr pair))
+                       width height)))))))
+
+(defconst cooked-tests--arcs
+  '((#x0144 down right) (#x0114 down left) (#x0111 up left) (#x0141 up right))
+  "The four arc descriptors, ╭ ╮ ╯ ╰, and the edges each one joins.")
+
+(ert-deftest cooked-box-arcs-meet-their-lines-and-nothing-else ()
+  "An arc puts on the border exactly what ─ and │ put there, on its two sides only.
+
+That is the same property `cooked-box-every-edge-meets-its-neighbour-at-the-border'
+checks for straight lines, and for the same reason: a rounded box is ╭ and ─
+side by side.  The stroke also has to be one piece."
+  (pcase-dolist (`(,width . ,height) cooked-tests--glyph-sizes)
+    (pcase-dolist (`(,bits . ,edges) cooked-tests--arcs)
+      (let ((grid (cooked-tests--glyph-grid bits width height))
+            (straight (cooked-tests--glyph-grid
+                       (apply #'cooked-tests--line-bits
+                              (mapcar (lambda (edge) (if (memq edge edges) 1 0))
+                                      '(up down left right)))
+                       width height)))
+        (should (= 1 (cooked-tests--grid-components grid t)))
+        (dotimes (x width)
+          (should (eq (cooked--bitmap-ref grid x 0) (cooked--bitmap-ref straight x 0)))
+          (should (eq (cooked--bitmap-ref grid x (1- height))
+                      (cooked--bitmap-ref straight x (1- height)))))
+        (dotimes (y height)
+          (should (eq (cooked--bitmap-ref grid 0 y) (cooked--bitmap-ref straight 0 y)))
+          (should (eq (cooked--bitmap-ref grid (1- width) y)
+                      (cooked--bitmap-ref straight (1- width) y))))))))
+
+(ert-deftest cooked-box-arcs-run-straight-into-their-corner ()
+  "╭ is a straight │ that turns through a circle of the cell's half-width into ─.
+
+The ellipse it replaced spanned the whole quadrant, so the stroke left │'s column
+almost as soon as it entered the cell and the corner read as a slanted line.
+Here every row from the bottom edge up to where the circle begins holds exactly
+the │ band and nothing else, and the circle begins no more than the half-width
+below the centre."
+  (pcase-dolist (`(,width . ,height) cooked-tests--glyph-sizes)
+    (let* ((light (cooked-tests--light width height))
+           (xl (- (/ width 2) (/ light 2)))
+           (yl (- (/ height 2) (/ light 2)))
+           (radius (min (- width (+ xl (/ light 2.0)))
+                        (- height (+ yl (/ light 2.0)))))
+           (grid (cooked-tests--glyph-grid #x0144 width height)))
+      (cl-loop
+       for y from (ceiling (+ yl (/ light 2.0) radius)) below height do
+       (should (equal (list width height y (cooked-tests--row-runs grid y width))
+                      (list width height y (list light))))
+       (should (cooked--bitmap-ref grid xl y))))))
+
+(ert-deftest cooked-box-arcs-are-mirror-images ()
+  "╮ ╯ ╰ are ╭ reflected, wherever the line bands are themselves symmetric.
+See `cooked-box-lines-mirror-where-their-bands-do' for which sizes those are."
+  (pcase-dolist (`(,width . ,height) '((9 . 21) (7 . 15) (11 . 23)))
+    (let ((tl (cooked-tests--glyph-grid #x0144 width height)))
+      (should (equal (cooked-tests--grid-string (cooked-tests--grid-mirror tl 'horizontal))
+                     (cooked-tests--grid-string
+                      (cooked-tests--glyph-grid #x0114 width height))))
+      (should (equal (cooked-tests--grid-string (cooked-tests--grid-mirror tl 'vertical))
+                     (cooked-tests--grid-string
+                      (cooked-tests--glyph-grid #x0141 width height))))
+      (should (equal (cooked-tests--grid-string
+                      (cooked-tests--grid-mirror
+                       (cooked-tests--grid-mirror tl 'vertical) 'horizontal))
+                     (cooked-tests--grid-string
+                      (cooked-tests--glyph-grid #x0111 width height)))))))
+
 (provide 'cooked-tests-glyph)
 ;;; cooked-tests-glyph.el ends here

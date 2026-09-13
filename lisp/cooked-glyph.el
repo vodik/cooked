@@ -210,68 +210,178 @@ feature looking switched off rather than broken."
 
 ;;;; Line glyphs
 
-(defun cooked--box-edge-span (bitmap edge cx cy)
-  "Where EDGE runs, as (AXIS ALONG0 ALONG1 CENTER), on BITMAP with centre CX, CY.
+(defun cooked--box-bands (weight center light heavy)
+  "Where a stroke of WEIGHT sits across its axis, as a list of (LO . HI).
 
-An edge runs from the middle of the cell out to one of its four sides, so the
-axis and the centre line follow from whether it is vertical or horizontal, and
-only which half of the cell it covers changes."
-  (pcase edge
-    ('up (list 'vertical 0 (1+ cy) cx))
-    ('down (list 'vertical cy (cooked-bitmap-height bitmap) cx))
-    ('left (list 'horizontal 0 (1+ cx) cy))
-    ('right (list 'horizontal cx (cooked-bitmap-width bitmap) cy))))
+CENTER is the cell's middle pixel on that axis, LIGHT and HEAVY the stroke
+thicknesses.  Every stroke is biased the same way -- half its thickness before
+CENTER and the rest from it on -- so that a light and a heavy stroke on the same
+axis share a centre line.
 
-(defun cooked--box-draw-edge (bitmap edge weight cx cy light heavy)
-  "Draw EDGE of a line glyph on BITMAP, from the cell centre CX, CY outward.
+A double line is two light strokes whose gap is exactly the light stroke's own
+band.  That is what puts ═ on the same centre line as ─, so a double border
+meets a single one level, and makes the gap one light stroke wide at every size
+rather than a fixed pixel offset that drifted off centre."
+  (let ((a (- center (/ light 2))))
+    (pcase weight
+      (1 (list (cons a (+ a light))))
+      (2 (let ((b (- center (/ heavy 2))))
+           (list (cons b (+ b heavy)))))
+      (3 (list (cons (- a light) a)
+               (cons (+ a light) (+ a light light)))))))
 
-WEIGHT is the descriptor's 2-bit field; LIGHT and HEAVY are the stroke
-thicknesses derived from the cell size.  A double edge is two 1px strokes with
-a 1px gap between them, which is the same stroke twice at a fixed offset rather
-than a shape of its own."
-  (unless (= weight cooked--box-weight-none)
-    (pcase-let ((`(,axis ,from ,to ,center) (cooked--box-edge-span bitmap edge cx cy)))
-      (if (= weight cooked--box-weight-double)
-          (dolist (offset '(-2 1))
-            (cooked--bitmap-stroke bitmap axis from to (+ center offset) 1))
-        (cooked--bitmap-stroke bitmap axis from to center
-                               (if (= weight cooked--box-weight-heavy) heavy light))))))
+(defconst cooked--box-edge-geometry
+  '((up vertical left right down t)
+    (down vertical left right up nil)
+    (left horizontal up down right t)
+    (right horizontal up down left nil))
+  "Each edge as (EDGE AXIS LOW-SIDE HIGH-SIDE OPPOSITE FROM-START).
 
-(defun cooked--box-draw-arc (bitmap cx cy thickness down-p right-p)
-  "Draw into BITMAP a quarter-ellipse joining a rounded corner's two edges.
+AXIS is the direction the edge's strokes run in.  LOW-SIDE and HIGH-SIDE are the
+two perpendicular edges, on the side of the edge's lower and higher coordinates
+across AXIS -- so the left stroke of a double `up' is on the `left' side.
+FROM-START says the edge runs from coordinate 0 inward, rather than from the
+far side of the cell.")
 
-CX and CY place the centre, THICKNESS is the stroke width, and DOWN-P and
-RIGHT-P name the two connected directions.
+(defun cooked--box-band-end (bands from-start near)
+  "Where a stroke coming in from one border stops against BANDS.
 
-The centre sits at whichever cell corner combines the two connected directions
-\(e.g. down+right puts it at the bottom-right corner), and the two radii are the
-distances from that corner to the strokes this arc has to meet: horizontally to
-the vertical stroke's column CX, vertically to the horizontal stroke's row CY.
+FROM-START says the stroke comes from coordinate 0.  NEAR picks the band nearest
+that border rather than the farthest.  The stroke covers the chosen band
+completely, so it ends at the band's far side coming from 0 and begins at its
+near side coming from the other border."
+  (let ((band (car bands)))
+    (dolist (candidate (cdr bands))
+      (when (if (eq near from-start)
+                (< (car candidate) (car band))
+              (> (car candidate) (car band)))
+        (setq band candidate)))
+    (if from-start (cdr band) (car band))))
 
-Deliberately not a circle.  A single radius can satisfy only one axis unless the
-cell is square, and terminal cells are roughly half as wide as they are tall — a
-circle of radius (min CX CY) leaves the arc meeting the horizontal edge far from
-CY, so a rounded corner fails to line up with the ─ beside it.
+(defun cooked--box-draw-edges (bitmap bits light heavy)
+  "Draw every edge of line descriptor BITS on BITMAP, joined at the centre.
 
-THICKNESS is applied by dividing the ellipse's implicit function by the gradient
-magnitude, which approximates true distance to the curve; the naive |d - 1| on
-the normalized radius would vary the stroke width around the sweep."
+LIGHT and HEAVY are the stroke thicknesses.  Each stroke runs from its border
+to an end chosen from the bands of the two perpendicular edges, because where
+a stroke has to stop is a property of the junction and not of the edge: the
+same left stroke of a double line is an outer corner in ╚, an inner corner in
+╝, and part of an unbroken line in ╩.
+
+For a stroke of a double edge, on side S of it:
+- if the edge on side S exists, stop at the nearer of that edge's strokes -- an
+  inner corner, or the inner line of a tee (╝, and ╩'s upper strokes);
+- otherwise, if the other perpendicular edge exists, run on to its farther
+  stroke -- the outer corner (╚), or the outer line of a tee (╦'s top);
+- otherwise meet the opposite edge at the centre (║).
+
+For a single stroke, light or heavy:
+- with no perpendicular edge, meet the opposite edge at the centre (│, ╿);
+- with the opposite edge present, or a perpendicular edge on one side only, run
+  to the farthest perpendicular stroke -- a cross (╪) or a corner (╒);
+- otherwise it is the stem of a tee, and stops at the nearest (╤).
+
+Drawn one stroke at a time into the same bitmap, so strokes that meet simply
+overlap: nothing has to know which pixel a junction belongs to."
   (let* ((width (cooked-bitmap-width bitmap))
          (height (cooked-bitmap-height bitmap))
-         (ccx (if right-p width 0))
-         (ccy (if down-p height 0))
-         (rx (float (max 1 (if right-p (- width cx) cx))))
-         (ry (float (max 1 (if down-p (- height cy) cy))))
-         (half (/ thickness 2.0)))
+         (cx (/ width 2))
+         (cy (/ height 2)))
+    (pcase-dolist (`(,edge ,axis ,low ,high ,opposite ,from-start)
+                   cooked--box-edge-geometry)
+      (let ((weight (cooked--box-weight bits edge)))
+        (unless (= weight cooked--box-weight-none)
+          (let* ((vertical (eq axis 'vertical))
+                 (across-center (if vertical cx cy))
+                 (along-center (if vertical cy cx))
+                 (extent (cooked--bitmap-extent bitmap axis))
+                 (side-bands
+                  (lambda (side)
+                    (cooked--box-bands (cooked--box-weight bits side)
+                                       along-center light heavy)))
+                 (low-bands (funcall side-bands low))
+                 (high-bands (funcall side-bands high))
+                 (centre (cooked--box-band-end
+                          (cooked--box-bands weight along-center light heavy)
+                          from-start nil))
+                 (bands (cooked--box-bands weight across-center light heavy)))
+            (cl-loop
+             for (lo . hi) in bands
+             for index from 0
+             do (let* ((end
+                        (if (= weight cooked--box-weight-double)
+                            (let* ((own (if (= index 0) low-bands high-bands))
+                                   (other (if (= index 0) high-bands low-bands)))
+                              (cond (own (cooked--box-band-end own from-start t))
+                                    (other (cooked--box-band-end other from-start nil))
+                                    (t centre)))
+                          (let ((all (append low-bands high-bands)))
+                            (cond ((null all) centre)
+                                  ((or (/= 0 (cooked--box-weight bits opposite))
+                                       (null low-bands) (null high-bands))
+                                   (cooked--box-band-end all from-start nil))
+                                  (t (cooked--box-band-end all from-start t))))))
+                       (from (if from-start 0 end))
+                       (to (if from-start end extent)))
+                  (cooked--bitmap-fill-axis bitmap axis from to lo hi)))))))))
+
+(defun cooked--box-draw-arc (bitmap light down-p right-p)
+  "Draw into BITMAP a rounded corner joining two light edges.
+
+LIGHT is the stroke thickness, and DOWN-P and RIGHT-P name the two connected
+directions.
+
+The corner is the shape kitty and ghostty draw: the │ stroke runs straight in
+from its border, turns through a quarter circle, and leaves as the ─ stroke.
+The circle's radius is the shorter of the two distances from the strokes' centre
+lines to the borders they reach, which at a cell's usual aspect is about half
+its width -- so the turn is in the corner and the long axis stays straight.
+
+It replaced a quarter-ellipse spanning the whole quadrant.  That did meet both
+lines, but a cell is twice as tall as it is wide, so the stroke left │'s column
+almost as soon as it entered the cell and the corner read as a slanted line
+rather than a rounded one.
+
+Which pixels belong to the stroke is decided by coverage: a pixel is set when at
+least half of an 8x8 grid of samples inside it lies within LIGHT/2 of the path.
+Testing only the pixel's centre against the curve, as the ellipse did, sets a
+pixel or not on a hair's difference, which is what made its steps uneven.
+Everything is in pixel-centre coordinates, as in `cooked--box-draw-diagonal':
+a straight stretch then covers exactly the columns of `cooked--box-bands' and
+nothing beside them, so the ends of the arc are indistinguishable from the
+straight lines they meet."
+  (let* ((width (cooked-bitmap-width bitmap))
+         (height (cooked-bitmap-height bitmap))
+         (half (/ light 2.0))
+         ;; Centre lines of the │ and ─ bands the corner joins.
+         (ax (+ (car (car (cooked--box-bands 1 (/ width 2) light light))) half))
+         (ay (+ (car (car (cooked--box-bands 1 (/ height 2) light light))) half))
+         (radius (min (if right-p (- width ax) ax)
+                      (if down-p (- height ay) ay)))
+         ;; The circle's centre, towards the two borders the corner reaches.
+         (ox (if right-p (+ ax radius) (- ax radius)))
+         (oy (if down-p (+ ay radius) (- ay radius)))
+         (samples 8)
+         (needed (/ (* samples samples) 2)))
     (dotimes (y height)
       (dotimes (x width)
-        (let* ((dx (/ (- x ccx) rx))
-               (dy (/ (- y ccy) ry))
-               (f (- (+ (* dx dx) (* dy dy)) 1.0))
-               (gx (/ (* 2.0 dx) rx))
-               (gy (/ (* 2.0 dy) ry))
-               (g (sqrt (+ (* gx gx) (* gy gy)))))
-          (when (and (> g 0.0) (<= (/ (abs f) g) half))
+        (let ((hits 0))
+          (dotimes (j samples)
+            (let ((py (+ y (/ (+ j 0.5) samples))))
+              (dotimes (i samples)
+                (let* ((px (+ x (/ (+ i 0.5) samples)))
+                       ;; Past the circle towards a border, the path is the
+                       ;; straight stroke; within the corner's quadrant, the arc.
+                       (beyond-y (if down-p (>= py oy) (<= py oy)))
+                       (beyond-x (if right-p (>= px ox) (<= px ox)))
+                       (distance
+                        (cond (beyond-y (abs (- px ax)))
+                              (beyond-x (abs (- py ay)))
+                              (t (abs (- (sqrt (+ (* (- px ox) (- px ox))
+                                                  (* (- py oy) (- py oy))))
+                                         radius))))))
+                  (when (<= distance half)
+                    (setq hits (1+ hits)))))))
+          (when (>= hits needed)
             (cooked--bitmap-set bitmap x y t)))))))
 
 (defun cooked--box-draw-diagonal (bitmap thickness forward backward)
@@ -335,7 +445,7 @@ Runs as a post-pass over the solid line rather than drawing the segments
 directly: Unicode only ever dashes a plain horizontal or vertical stroke, never
 a junction or corner, so nothing else is in the cell for a full-width clear to
 damage — and the stroke keeps the exact thickness and centering
-`cooked--box-draw-edge' gave it.
+`cooked--box-draw-edges' gave it.
 
 Every measurement comes from the cell, never a fixed pixel count, or the dashes
 drift out of phase with the solid lines they join as the font size changes.
@@ -366,13 +476,11 @@ three even dashes into one 2px gap and two that vanished."
   "Draw line-glyph descriptor BITS on BITMAP."
   (let* ((width (cooked-bitmap-width bitmap))
          (height (cooked-bitmap-height bitmap))
-         (cx (/ width 2))
-         (cy (/ height 2))
          (light (max 1 (/ (min width height) 8)))
          (heavy (max 2 (/ (min width height) 4))))
     (cond
      ((/= 0 (logand bits cooked--box-arc))
-      (cooked--box-draw-arc bitmap cx cy light
+      (cooked--box-draw-arc bitmap light
                             (/= 0 (cooked--box-weight bits 'down))
                             (/= 0 (cooked--box-weight bits 'right))))
      ((/= 0 (logand bits (logior cooked--box-diag-forward cooked--box-diag-backward)))
@@ -380,9 +488,7 @@ three even dashes into one 2px gap and two that vanished."
                                  (/= 0 (logand bits cooked--box-diag-forward))
                                  (/= 0 (logand bits cooked--box-diag-backward))))
      (t
-      (dolist (edge '(up down left right))
-        (cooked--box-draw-edge bitmap edge (cooked--box-weight bits edge)
-                               cx cy light heavy))
+      (cooked--box-draw-edges bitmap bits light heavy)
       ;; Dashes only ever appear on a plain horizontal or vertical line, so which
       ;; edges are set is enough to name the axis the stroke runs along.
       (let ((dashes (cooked--box-dashes bits)))
@@ -396,6 +502,17 @@ three even dashes into one 2px gap and two that vanished."
            dashes)))))))
 
 ;;;; Block elements
+
+(defun cooked--box-split (extent eighths)
+  "Where the cut EIGHTHS of the way along EXTENT pixels falls, as a pixel index.
+
+The one place a block element's edge is placed, so that shapes cut from opposite
+sides agree on it: ▀ fills up to the cut at four eighths and ▄ from it, and the
+quadrants use the same cut, so ▀ ▄ tile a cell exactly and ▌ lines up with ▙.
+Each shape used to round its own size instead, and `round' breaks 8.5 to 8, so
+at a 17-pixel line ▀ and ▄ were both 8 rows with a blank one between them.
+Halves round up, the way the quadrants always did."
+  (/ (+ (* extent eighths) 4) 8))
 
 (defconst cooked--box-block-fills
   `((,cooked--box-direction-up vertical start)
@@ -438,8 +555,8 @@ phase — there is no third alignment to represent."
 Bit 0 is the upper left, 1 the upper right, 2 the lower left, 3 the lower right."
   (let* ((width (cooked-bitmap-width bitmap))
          (height (cooked-bitmap-height bitmap))
-         (hw (/ (1+ width) 2))
-         (hh (/ (1+ height) 2)))
+         (hw (cooked--box-split width 4))
+         (hh (cooked--box-split height 4)))
     (pcase-dolist (`(,bit ,x0 ,y0 ,x1 ,y1)
                    `((1 0 0 ,hw ,hh) (2 ,hw 0 ,width ,hh)
                      (4 0 ,hh ,hw ,height) (8 ,hw ,hh ,width ,height)))
@@ -460,11 +577,11 @@ Bit 0 is the upper left, 1 the upper right, 2 the lower left, 3 the lower right.
       (cooked--box-draw-quadrant bitmap fraction))
      ((alist-get direction cooked--box-block-fills)
       (pcase-let* ((`(,axis ,anchor) (alist-get direction cooked--box-block-fills))
-                   (extent (cooked--bitmap-extent bitmap axis))
-                   (amount (round (* extent (/ fraction 8.0)))))
+                   (extent (cooked--bitmap-extent bitmap axis)))
         (if (eq anchor 'start)
-            (cooked--bitmap-band bitmap axis 0 amount)
-          (cooked--bitmap-band bitmap axis (- extent amount) extent)))))))
+            (cooked--bitmap-band bitmap axis 0 (cooked--box-split extent fraction))
+          (cooked--bitmap-band bitmap axis
+                               (cooked--box-split extent (- 8 fraction)) extent)))))))
 
 ;;;; Repetition
 
