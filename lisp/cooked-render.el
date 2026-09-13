@@ -571,6 +571,13 @@ and the region shaped before anything measures it."
   ;; long is not worth nesting one level deeper.
   (let* ((inhibit-read-only t)
          (buffer-undo-list t)
+         ;; A third dynamic binding for the duration of the apply, and here in
+         ;; the `let*' rather than wrapped around it precisely because `let*'
+         ;; binds in order: the two render passes below are initialisers, and
+         ;; they are what this is for.  It is the box the window and the cell
+         ;; size are measured into once, instead of once per decoration record
+         ;; -- see `cooked--deco-pass', which has the numbers.
+         (cooked--deco-pass (list 'unset))
          (viewport (cooked--capture-viewport))
          (pending (cooked--take-pending-input))
          ;; Where this drain's scrollback landed, for resolving a `scrolled'

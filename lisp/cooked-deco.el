@@ -258,6 +258,66 @@ produce — the same defect `indent-bars' documents for box characters."
   (cons (window-font-width window 'default)
         (window-default-line-height window)))
 
+(defvar cooked--deco-pass nil
+  "This render pass\='s (WINDOW . CELL), computed at most once, or nil outside one.
+
+`cooked--cell-size\=' has always said it is \"measured once per render pass and
+passed down, rather than asked per character\".  That was true of the two
+functions immediately below it and false of the path that actually reaches
+them: `cooked--apply-deco\=' asked `cooked--layout-window\=' and
+`cooked--deco-cell-size\=' afresh for *every decoration record*, and a record is
+a run of one shape rather than a row.  A TUI border row is one record and hid
+the cost completely; `tree' in a large directory is the workload that does not,
+because its indent is `U+2502\=' separated by `U+00A0\=' and so arrives as three
+separate runs per nesting level.  Measured on `tree -C /usr/include\=': 86,107
+records for 30,326 rows, against 172,224 `cooked--layout-window\=' walks and
+86,107 cell measurements.  `window-font-width\=' costs 20.8us on pgtk and
+`window-default-line-height\=' a further 8.9us, against `frame-char-width\=''s
+0.085us -- so 2.56s of a 3.10s session was spent asking the same window the same
+question eighty-six thousand times.  With the box, the same session is 311ms and
+the walk count is 17.
+
+A box rather than a plain value because the answer is wanted lazily: a drain
+that decorates nothing should not pay 30us to measure a cell it never uses.
+`unset\=' is the sentinel for \"this pass has not asked yet\", which nil cannot
+be -- nil is the honest answer for a buffer displayed nowhere on a terminal
+frame, and caching it as though it were a miss would re-measure every record on
+exactly the sessions that can least afford it.
+
+Bound in `cooked--apply\=', which is the render pass: nothing between its first
+`cooked--render-scrolled\=' and its last `cooked--render-rows\=' creates, deletes
+or resizes a window, or changes a font.  That is the same argument
+`cooked--render-rows\=' already makes for hoisting `cooked--layout-window\=' out
+of the per-row loop and `cooked--wrap-cache\=' makes for the layout stamp; this
+is the third place it holds and the one nobody had made it in.  Unbound, every
+caller is answered per call, correctly and slowly.")
+
+(defun cooked--deco-geometry ()
+  "This buffer\='s (WINDOW . CELL) for decorating, from `cooked--deco-pass\=' if set.
+
+The one place the two halves are computed, because they are one question asked
+twice: WINDOW is the window a decoration is measured against and CELL is what
+that window measures, so answering them separately means walking
+`get-buffer-window-list\=' twice for a single record."
+  (if (and cooked--deco-pass (not (eq (car cooked--deco-pass) 'unset)))
+      (car cooked--deco-pass)
+    (let* ((window (cooked--layout-window))
+           (answer (cons window
+                         (if window
+                             (cooked--cell-size window)
+                           (and (integerp (car-safe cooked--last-cell))
+                                (integerp (cdr cooked--last-cell))
+                                cooked--last-cell)))))
+      (when cooked--deco-pass (setcar cooked--deco-pass answer))
+      answer)))
+
+(defun cooked--deco-window ()
+  "The window this buffer\='s decorations are measured against, or nil.
+
+`cooked--layout-window\=', by way of `cooked--deco-geometry\=' so that a render
+pass asks for it once."
+  (car (cooked--deco-geometry)))
+
 (defun cooked--deco-cell-size ()
   "The cell size in pixels this buffer\='s decorations are drawn at, or nil.
 
@@ -283,12 +343,11 @@ it went, which is the whole point.
 
 Nil when there is no honest answer at all -- a terminal frame, or a session
 nothing has ever displayed.  Callers decorate nothing rather than guessing; see
-`cooked--apply-deco\='."
-  (if-let* ((window (cooked--layout-window)))
-      (cooked--cell-size window)
-    (and (integerp (car-safe cooked--last-cell))
-         (integerp (cdr cooked--last-cell))
-         cooked--last-cell)))
+`cooked--apply-deco\='.
+
+Asked once per render pass rather than once per decoration record; see
+`cooked--deco-pass\=' for what that was costing and why the pass is the scope."
+  (cdr (cooked--deco-geometry)))
 
 (defun cooked--box-glyph-cell (bits size &optional phase)
   "Cached unpacked single-cell bitmap for glyph BITS at cell SIZE.
@@ -514,8 +573,12 @@ up."
        ;; decoration's business, and the renderer should not have to grow a
        ;; condition every time a kind is added.
        (when (and cooked-box-drawing-images (image-type-available-p 'xbm))
+         ;; `cooked--deco-window' rather than `cooked--layout-window' directly,
+         ;; and the pair rather than either alone: the two are one lookup, and
+         ;; taking them separately walked `get-buffer-window-list' twice per
+         ;; record.  See `cooked--deco-pass'.
          (cooked--apply-glyph-deco
-          start packed (cooked--layout-window)
+          start packed (cooked--deco-window)
           (cooked--deco-cell-size) origin row))))))
 
 (defun cooked--reset-images ()
@@ -882,7 +945,7 @@ scaled to fit."
                       :height (* (cdr cells) (cdr size))
                       :scale 1
                       :ascent (cooked--box-glyph-ascent
-                               (cooked--layout-window) (cdr size)))))))
+                               (cooked--deco-window) (cdr size)))))))
 
 (defun cooked--deco-image (deco size window &optional count)
   "The image DECO displays at cell SIZE, or nil if there is none to be had.

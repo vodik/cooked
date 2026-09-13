@@ -118,6 +118,49 @@ the one call under test."
           (setq pos (1+ pos))))
       (should (= decorated 40)))))
 
+(ert-deftest cooked-bench-tree-rows-carry-a-record-per-run-and-decorate-each-one ()
+  "The `tree\=' fixture is the opposite of the border one, and its whole value is
+in being so: `cooked-bench--box-rows\=' is one record covering eighty cells,
+where a `tree\=' row is a record per nesting level covering one cell each.  A
+fixture that quietly coalesced them -- by padding with an ordinary space that the
+core would not have separated runs on, say -- would look like a second border
+row and measure nothing new, which is exactly the silent staleness this file
+exists to catch.
+
+So both halves are asserted.  The records are counted against the depth, and
+then the fixture is applied and the decorations counted in the buffer, because a
+record naming a cell it does not cover is the failure a byte-level check cannot
+see -- the same argument
+`cooked-bench-box-rows-decorate-every-cell-they-claim\=' makes, and `cooked-debug\='
+is bound here for the same reason it is bound there."
+  ;; Depth six is five verticals, a tee and a two-cell horizontal run: seven
+  ;; records, against the border row's one.
+  (pcase-let* ((`((,_index . (,_text ,_styles ,spans)))
+                (cooked-bench--run (list (cooked-bench--tree-row 6 80)))))
+    (should (= (length spans) 7))
+    ;; Every one is a run of its own, and the horizontals are the only record
+    ;; covering more than a single cell.
+    (should (equal (mapcar (lambda (span)
+                             (cooked--u16 (cdr (cadr span)) 2))
+                           spans)
+                   '(1 1 1 1 1 1 2))))
+  (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
+    (cooked-tests--settle-briefly)
+    (let ((cooked-debug t))
+      (cooked--apply (cooked-bench--update
+                      (cooked-bench--run (list (cooked-bench--tree-row 6 40))))))
+    (let ((decorated 0)
+          (pos (point-min)))
+      (save-restriction
+        (widen)
+        (while (< pos (point-max))
+          (when (get-text-property pos 'cooked-deco)
+            (setq decorated (1+ decorated)))
+          (setq pos (1+ pos))))
+      ;; Five verticals, a tee and two horizontals: eight decorated cells, and
+      ;; the NO-BREAK SPACEs and the filename between them undecorated.
+      (should (= decorated 8)))))
+
 (ert-deftest cooked-bench-image-rows-are-twelve-bytes-a-cell-where-the-reader-looks ()
   "The image fixture is the third copy of a wire format again, and the one the
 suite has no other reason to exercise -- no test in tests/cooked-tests-render.el
@@ -260,6 +303,7 @@ since re-basing them onto the assembled text is the one thing
                       (cooked-bench--styled-rows 2 80)
                       (cooked-bench--url-rows 2 80)
                       (cooked-bench--box-rows 2 80)
+                      (cooked-bench--tree-rows 2 80)
                       (cooked-bench--image-rows 2 80)))
     (should (= (length rows) 1))
     (pcase-let ((`((,first . ,block)) rows))

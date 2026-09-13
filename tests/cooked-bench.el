@@ -674,6 +674,92 @@ single record the encoding exists to produce."
      (cl-loop repeat count collect (list text nil (list (list 0 deco)) nil)))))
 
 
+(defconst cooked-bench--tree-indent
+  (concat (string #x2502) "   ")
+  "One level of `tree\='s indent: a vertical, then three NO-BREAK SPACEs.
+
+Spelled out with a character code because the NO-BREAK SPACE is the whole point
+and is invisible in a source file.  `tree(1)\=' pads with `U+00A0\=', not
+`U+0020\=', so a row of it is non-uniform in both the senses the drain reports:
+two bytes per pad character, three per box character, and nothing about the row
+survives a byte-per-column reading.  A fixture written with ordinary spaces
+would be a different workload wearing this one\='s name.")
+
+(defconst cooked-bench--tree-branch
+  (concat (string #x251c) (string #x2500) (string #x2500) (string #xa0))
+  "`tree\='s branch connector: a tee, two horizontals and a NO-BREAK SPACE.")
+
+(defun cooked-bench--tree-row (depth cols)
+  "One `tree\=' row at DEPTH, COLS wide, as `cooked-bench--run\=' takes a row.
+
+The shape the suite had no fixture for, and the reason nobody could see where
+the time in a large directory was going.  `cooked-bench--box-rows\=' is box
+drawing too, but it is *one* record per row -- a border is a single run of one
+shape, which is the best case the packed encoding was designed around.  A
+`tree\=' row is the worst: every vertical stands alone between NO-BREAK SPACEs,
+so a row at depth six is seven separate runs, and anything paid per decoration
+record is paid seven times a row instead of once.  Measured on
+`tree -C /usr/include\=': 86,107 records over 30,326 rows.
+
+The glyph bits are `BoxGlyph::line\='s, four two-bit weights in up, down, left,
+right order -- see src/emu/glyph.rs, and `cooked-bench--box-rows\=' for the same
+encoding written out for a plain horizontal.  0x05 is `U+2502\=' (up and down
+light), 0x45 is `U+251C\=' (up, down and right), 0x50 is `U+2500\=' (left and
+right).
+
+The filename carries an SGR pair, because `tree -C\=' colours every entry and a
+row with no style span would be measuring the box drawing without the face
+lookup that arrives with it in practice."
+  (let* ((prefix (concat (apply #'concat
+                                (cl-loop repeat (1- depth)
+                                         collect cooked-bench--tree-indent))
+                         cooked-bench--tree-branch))
+         (name (truncate-string-to-width
+                (format "some-header-file-%02d.h" depth)
+                (max 1 (- cols (string-width prefix)))))
+         (text (concat prefix name))
+         (decos nil))
+    ;; One record per vertical, then one for the tee and one for the pair of
+    ;; horizontals: what `Deco::packed' emits for this row, and the count is the
+    ;; whole of what the case exists to exercise.
+    (cl-loop for level below (1- depth)
+             do (push (list (* level 4)
+                            (cons 'glyph (unibyte-string #x05 #x00 1 0)))
+                      decos))
+    (let ((at (* 4 (1- depth))))
+      (push (list at (cons 'glyph (unibyte-string #x45 #x00 1 0))) decos)
+      (push (list (1+ at) (cons 'glyph (unibyte-string #x50 #x00 2 0))) decos))
+    ;; UNIFORM is nil for the reason `cooked-bench--box-rows' gives at length,
+    ;; and doubly so here: both the box characters and the padding are
+    ;; multi-byte, so a fixture claiming t would send this row down the cheap
+    ;; path the guard reserves for plain ASCII and measure nothing.
+    (list text
+          (list (list (length prefix) (length text)
+                      (logior (ash 1 24) 4) 0 0 0))
+          (nreverse decos)
+          nil)))
+
+(defun cooked-bench--tree-rows (count cols)
+  "COUNT `tree\=' rows, cycling through six nesting depths.
+
+Cycled rather than fixed so that the row width, the record count and the
+horizontal position of every glyph all vary down the frame, which is what a real
+listing does and what a frame of identical rows would quietly cache away."
+  (cooked-bench--run
+   (cl-loop for i below count
+            collect (cooked-bench--tree-row (1+ (% i 6)) cols))))
+
+(defun cooked-bench--deco-records (rows)
+  "How many decoration records ROWS carries.
+
+The deterministic half of the `tree\=' case, and a count rather than a time for
+the reason `cooked-bench--property-intervals\=' is one: it is exact, it is the
+same on a busy machine as on a quiet one, and it is the quantity the cost is
+proportional to.  Anything asked once per record -- which until this fixture
+existed included `cooked--layout-window\=' twice over and `cooked--cell-size\='
+once -- is paid this many times per frame."
+  (cl-loop for (_first . block) in rows sum (length (nth 2 block))))
+
 (defun cooked-bench--scrolled-row (index cols)
   "The one damaged row an ordinary scroll leaves, at screen row INDEX, COLS wide.
 
@@ -840,13 +926,15 @@ exactly as they were."
     (cooked-bench--frames "per-frame, 24x80 with a URL per row"
                           (cooked-bench--url-rows 24 80) 200)))
 
-;;;; The two shapes the suite could not see
+;;;; The three shapes the suite could not see
 ;;
-;; Both of these were added after the change they measure had already landed,
-;; and in both cases the reason is the same: the fixtures were box drawing and
-;; plain text, so a change to the image path and a change to the shape of a
-;; scroll report were each invisible here -- flat by construction, which reads
-;; as non-regression and is not evidence of anything.  A benchmark's coverage is
+;; All three were added after the change they measure had already landed, and in
+;; every case the reason is the same: the fixtures were box drawing and plain
+;; text, so a change to the image path, a change to the shape of a scroll report
+;; and a cost paid per decoration record were each invisible here -- flat by
+;; construction, which reads as non-regression and is not evidence of anything.
+;; The third is the one that reached a user before it reached this file.  A
+;; benchmark's coverage is
 ;; part of what it claims, and a suite that cannot reach a path should not be
 ;; read as saying that path is unmoved.
 
@@ -947,6 +1035,48 @@ tests/cooked-tests-render.el pins it."
   (cooked-bench--frames "scroll region 5..10, as a shift"
                         (cooked-bench--scrolled-row 9 80) 200
                         :height 24 :shifts '((4 9 1 t))))
+
+(defun cooked-bench-tree ()
+  "`tree\=' in a large directory: many short decoration runs on every row.
+
+The third shape this file could not see, filed with the other two because the
+lesson is the same one for the third time.  A user reported `tree\=' in a large
+directory as extremely slow and it could not be reproduced from here, because
+every box-drawing figure in this file was taken on `cooked-bench--box-rows\=' --
+a border, which is one decoration record covering the whole row.  That is the
+shape the packed encoding is best at, and it hid a cost that is paid *per
+record* completely.
+
+What the profile said, on `tree -C /usr/include\=' in a pgtk frame under
+gamescope: `cooked--deco-cell-size\=' was 80% of the session, because
+`cooked--apply-deco\=' asked it, and `cooked--layout-window\=' twice, once for
+every one of 86,107 records.  `window-font-width\=' costs 20.8us on pgtk and
+`window-default-line-height\=' 8.9us, against `frame-char-width\=''s 0.085us, so
+the same window answered the same question 86,107 times for 2.56s of a 3.10s
+run.  Hoisting both to once per `cooked--apply\=' -- see `cooked--deco-pass\=' --
+took the session to 311ms.
+
+  wall for `tree -C /usr/include', 100x32 pgtk   3105 ms -> 311 ms
+  `cooked--layout-window' calls per session    172,224 -> 17
+  the same in `emacs --batch' on a tty frame      330 ms -> 210 ms
+
+Both arms byte-compiled, three sessions each, medians, load average 1.6-2.3;
+the graphical pair was re-run and agreed to 3%.
+
+The batch figure is the same change measured where `window-font-width\=' is
+cheap, and it is here to say what the graphical one is *not*: on a terminal
+frame only the redundant walks and the consing are saved, and 1.6x is what that
+alone is worth.  The other 2.5s was pgtk being asked about its font.
+
+Both arms of the pair are run here on one build, as `cooked-bench-scroll\=' does
+and for the same reason -- read the row against `per-frame, 24x80 box drawing\='
+at the same width, and the gap between the two is entirely the record count.
+The count itself is printed beside the row, which is the half that needs no
+clock."
+  (let ((rows (cooked-bench--tree-rows 24 80)))
+    (cooked-bench--frames "per-frame, 24x80 tree listing" rows 200)
+    (message "  %-40s   %d decoration records/frame" ""
+             (cooked-bench--deco-records rows))))
 
 ;;;; Cosmetic passes, and when they are paid
 ;;
@@ -1264,6 +1394,8 @@ a result."
   (cooked-bench-image)
   (message "")
   (cooked-bench-scroll)
+  (message "")
+  (cooked-bench-tree)
   (message "")
   (cooked-bench-deferred)
   (message "")

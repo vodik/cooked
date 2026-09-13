@@ -145,6 +145,83 @@ under it was built COUNT cells wide.  See
       (should (eq (get-text-property beg 'display)
                   (get-text-property (+ beg 3) 'display))))))
 
+(defun cooked-tests--deco-lookups (argv)
+  "Run ARGV and return (LOOKUPS . RECORDS) for the busiest `cooked--apply\=' of it.
+
+LOOKUPS is how many times that apply asked `cooked--layout-window\=' -- the walk
+behind both `cooked--deco-window\=' and `cooked--deco-cell-size\=' -- and RECORDS
+how many decoration records it applied.  Counted per apply rather than per
+session, and by the maximum rather than the total, because the number of drains
+a child\='s output arrives in is not something a test may depend on: the ratio
+between the two figures is the invariant, and it is the same whether the output
+came in one drain or five."
+  (let ((lookups 0) (records 0) (worst-lookups 0) (worst-records 0))
+    (cl-letf* ((layout (symbol-function 'cooked--layout-window))
+               (deco (symbol-function 'cooked--apply-deco))
+               (apply-fn (symbol-function 'cooked--apply))
+               ((symbol-function 'cooked--layout-window)
+                (lambda (&rest args)
+                  (setq lookups (1+ lookups))
+                  (apply layout args)))
+               ((symbol-function 'cooked--apply-deco)
+                (lambda (&rest args)
+                  (setq records (1+ records))
+                  (apply deco args)))
+               ((symbol-function 'cooked--apply)
+                (lambda (&rest args)
+                  (setq lookups 0 records 0)
+                  (prog1 (apply apply-fn args)
+                    (when (> records worst-records)
+                      (setq worst-records records worst-lookups lookups))))))
+      (cooked-tests--with-session argv
+        (cooked-tests--cell)
+        (cooked-tests--settle
+         (lambda () (get-text-property (point-min) 'cooked-deco)))))
+    (cons worst-lookups worst-records)))
+
+(ert-deftest cooked-a-render-pass-measures-the-window-once-not-once-per-record ()
+  "`cooked--cell-size\=' has always said it is \"measured once per render pass and
+passed down, rather than asked per character\", and for a long time the path that
+reaches it did the opposite: `cooked--apply-deco\=' asked `cooked--layout-window\='
+and `cooked--deco-cell-size\=' -- which walks the window list again -- afresh for
+every decoration record.
+
+A border hid that completely, being one record for the whole row, which is why
+no benchmark and no test here caught it.  A `tree\=' listing is the shape that
+does not hide it: `U+2502\=' separated by NO-BREAK SPACE is a record per nesting
+level, so the per-record cost multiplies by the depth.  On
+`tree -C /usr/include\=' that was 172,224 window walks and 86,107 cell
+measurements at 29.7us apiece on pgtk -- 2.56s of a 3.10s session, which the
+hoist took to 311ms.
+
+The invariant is stated as a *ratio* rather than as a number, which is what
+makes it robust: two rows differing only in how many records they carry must
+cost the same number of window lookups.  A count would have to be revised every
+time a render grew or lost an unrelated call to `cooked--layout-window\='; a
+comparison cannot go stale, and it fails loudly on the defect -- before
+`cooked--deco-pass\=' the wide row cost five times the lookups of the narrow one.
+
+Both rows are drawn with NO-BREAK SPACE between the glyphs rather than an
+ordinary space, because that is what `tree\=' emits and because an ordinary space
+is what `cooked--glyph-claims-next-cell-p\=' looks for; a fixture using one would
+be exercising the claim path as well and measuring two things at once."
+  (let* ((narrow (cooked-tests--deco-lookups
+                  ;; Two records: a horizontal, a NO-BREAK SPACE, a horizontal.
+                  '("/bin/sh" "-c"
+                    "printf '\\342\\224\\200\\302\\240\\342\\224\\200\\n'")))
+         (wide (cooked-tests--deco-lookups
+                ;; Ten of them, which is an ordinary `tree' nesting depth.
+                '("/bin/sh" "-c"
+                  "printf '\\342\\224\\200\\302\\240%.0s' 1 2 3 4 5 6 7 8 9 10; printf '\\n'"))))
+    ;; The premise: the two really do differ in record count, so the comparison
+    ;; below is comparing something.  Without this the test would pass just as
+    ;; happily on a child that printed nothing.
+    (should (>= (cdr narrow) 2))
+    (should (>= (cdr wide) (* 4 (cdr narrow))))
+    ;; And the invariant: the window is measured for the pass, not for the row's
+    ;; contents.
+    (should (= (car narrow) (car wide)))))
+
 (ert-deftest cooked-a-run-of-shades-keeps-a-record-per-cell ()
   "A shade dithers, so its phase is a function of the cell's own pixel origin --
 see `cooked--box-phase\='.  The shapes are identical and so cross as one
