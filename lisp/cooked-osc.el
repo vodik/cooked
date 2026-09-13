@@ -50,6 +50,9 @@
     (10 . cooked--osc-color)
     (11 . cooked--osc-color)
     (12 . cooked--osc-color)
+    (17 . cooked--osc-color)
+    (19 . cooked--osc-color)
+    (4 . cooked--osc-palette)
     (110 . cooked--osc-color-reset)
     (111 . cooked--osc-color-reset)
     (112 . cooked--osc-color-reset)
@@ -418,11 +421,26 @@ something is stuck."
   "Alist of color kind to face remapping cookie, so OSC 110/111/112 can undo a set.")
 
 (defconst cooked--osc-color-sources
-  '((10 . foreground) (11 . background) (12 . cursor))
-  "Which default color each OSC code asks about.")
+  '((10 . foreground) (11 . background) (12 . cursor)
+    (17 . highlight-background) (19 . highlight-foreground))
+  "Which color each OSC code asks about.
+
+17 and 19 are xterm's selection colours, and the `region' face is what Emacs
+selects with, so that is where they are read from.  18 is the Tektronix cursor
+and has no entry: a chained query walks past it without an answer, as it walks
+past any code nobody here can speak for.")
+
+(defconst cooked--osc-settable-colors '(foreground background cursor)
+  "The kinds in `cooked--osc-color-sources' that a set may change.
+
+The selection colours are answered and never set.  A child repainting its own
+background is a request about its own terminal; a child repainting `region'
+would be restyling a face every other buffer shares, for a selection the child
+cannot even see, and a buffer-local remap of it would still be a second opinion
+about what the user chose.")
 
 (defun cooked--default-color (kind)
-  "The color this buffer renders for KIND: foreground, background or cursor.
+  "The color this buffer renders for KIND, a kind in `cooked--osc-color-sources'.
 
 Falls back through the frame and then to plain black or white.  On a tty frame
 the face returns `unspecified-fg'/`unspecified-bg', which `color-values' cannot
@@ -434,11 +452,16 @@ exists to fix."
                  ('background (or (face-background 'default nil t)
                                   (frame-parameter nil 'background-color)))
                  ('cursor (or (frame-parameter nil 'cursor-color)
-                              (face-foreground 'default nil t))))))
+                              (face-foreground 'default nil t)))
+                 ;; Inheriting through `default', because a theme whose `region'
+                 ;; sets only a background draws selected text in the default
+                 ;; foreground, and that is the true answer to 19.
+                 ('highlight-background (face-background 'region nil t))
+                 ('highlight-foreground (face-foreground 'region nil t)))))
     (if (and color (color-values color))
         color
       (let ((dark (eq (frame-parameter nil 'background-mode) 'dark)))
-        (if (eq kind 'background)
+        (if (memq kind '(background highlight-background))
             (if dark "black" "white")
           (if dark "white" "black"))))))
 
@@ -499,12 +522,13 @@ plain color names."
    ((color-values spec) spec)))
 
 (defun cooked--osc-color (parts)
-  "Answer or apply the OSC 10, 11 or 12 request PARTS.
+  "Answer or apply the OSC 10, 11, 12, 17 or 19 request PARTS.
 
 A `?' is a query and is answered from the buffer's own faces.  Anything else is
-a set, which needs `cooked-allow-color-set'.  Several may be chained — `ESC ] 10
-; ? ; ? ST' asks for the foreground and then the background — so each part
-advances the code."
+a set, which needs `cooked-allow-color-set' and is only ever honoured for the
+kinds in `cooked--osc-settable-colors'.  Several may be chained — `ESC ] 10 ; ?
+; ? ST' asks for the foreground and then the background — so each part advances
+the code."
   (let ((code cooked--osc-code))
     (dolist (part parts)
       (when-let* ((kind (alist-get code cooked--osc-color-sources)))
@@ -512,7 +536,8 @@ advances the code."
             (when-let* ((payload (cooked--color-to-osc (cooked--default-color kind))))
               (cooked--reply-osc cooked--session code payload
                                  cooked--osc-bell-terminated))
-          (when cooked-allow-color-set
+          (when (and cooked-allow-color-set
+                     (memq kind cooked--osc-settable-colors))
             (cooked--set-default-color kind part))))
       (setq code (1+ code)))))
 
@@ -550,12 +575,54 @@ window edge from the terminal background right next to it."
 
 Three codes and no fourth: OSC 104, \"reset the palette\", is deliberately not
 handled and `oc\=' has been dropped from terminfo/cooked.ti to say so.  There is
-no palette here to reset -- OSC 4 is declined for the reason that entry gives,
-that Emacs owns colour and a per-buffer 256-entry palette is the wrong seam --
-so the only colours a child can have changed are the three defaults above, and
-each of those already has its own undo."
+no palette here to reset -- OSC 4 answers queries but declines every set, for
+the reason that entry gives, that Emacs owns colour and a per-buffer 256-entry
+palette is the wrong seam -- so the only colours a child can have changed are
+the three defaults above, and each of those already has its own undo."
   (when-let* ((kind (alist-get (- cooked--osc-code 100) cooked--osc-color-sources)))
     (cooked--reset-default-color kind)))
+
+;;;; OSC 4 — the palette, answered and never changed
+;;
+;; Setting an entry stays declined, for the reason `ccc' and `initc' give in
+;; terminfo/cooked.ti: Emacs owns colour, and a per-buffer 256-entry palette is the
+;; wrong seam.  But a query has a true answer regardless, because every index already
+;; resolves to one Emacs colour in `cooked--color' -- the sixteen through the
+;; `ansi-color-' faces, the rest through the xterm cube and ramp.  Theme-picking
+;; tools read palette entries before they draw, and each one left unanswered costs
+;; them a timeout.
+;;
+;; No knob: an answer reveals the theme and nothing else, which OSC 10 and 11
+;; already do.
+
+(defun cooked--osc-palette (parts)
+  "Answer the OSC 4 queries in PARTS, and ignore its sets.
+
+PARTS alternate index and specification, so `ESC ] 4 ; 1 ; ? ; 196 ; ? ST'
+asks for two entries and gets two replies, each of the form `4;N;rgb:...'.  A
+specification other than `?' is a set, which gets no reply and changes
+nothing -- what xterm does with allowColorOps off -- and a malformed or
+out-of-range index is skipped without disturbing the pairs after it.
+
+The colour comes from `cooked--color', the function that paints cells, so the
+answer is whatever a cell in that colour is actually drawn in rather than a
+second table that could disagree with it."
+  (while parts
+    (let ((index (pop parts))
+          (spec (pop parts)))
+      (when (and (equal spec "?")
+                 (string-match-p "\\`[0-9]\\{1,3\\}\\'" index))
+        (let ((n (string-to-number index)))
+          (when-let* (((<= n 255))
+                      ;; A tty frame can leave an `ansi-color-' face reading as
+                      ;; `unspecified-fg', which has no value to report; the
+                      ;; fallback palette is then the nearest true answer.
+                      (payload (or (cooked--color-to-osc (cooked--color n))
+                                   (and (< n 16)
+                                        (cooked--color-to-osc
+                                         (aref cooked-color-names n))))))
+            (cooked--reply-osc cooked--session 4 (format "%d;%s" n payload)
+                               cooked--osc-bell-terminated)))))))
 
 ;;;; OSC 51 — the child asking Emacs to do something
 ;;

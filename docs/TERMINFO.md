@@ -45,7 +45,7 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 
 | Capability | Why |
 |---|---|
-| `ccc`, `initc` | palette redefinition via OSC 4. Emacs owns colour; a per-buffer 256-entry palette is the wrong seam |
+| `ccc`, `initc` | palette redefinition via OSC 4. Emacs owns colour; a per-buffer 256-entry palette is the wrong seam. A query is still answered, from the colour each index is drawn in; a set is ignored |
 | `flash` | visual bell via DECSCNM |
 | `mc0`, `mc4`, `mc5`, `mc5i` | printer control. There is no printer behind an Emacs buffer, and `mc5` is a child-driven exfiltration channel with nothing to show for it |
 | `mgc`, `smglp`, `smglr`, `smgrp` | left/right margins. The grid, the reflow and the transcript model are all row-oriented — and `CSI s` is already save-cursor, so honouring these would corrupt it |

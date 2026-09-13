@@ -1128,6 +1128,68 @@ so a terminal that never answers costs them their whole timeout on startup."
                                   (cooked-tests--contents out))))
       (delete-file out))))
 
+(ert-deftest cooked-osc-4-answers-palette-queries-and-ignores-sets ()
+  "Each entry is answered in xterm's form from the colour a cell is drawn in, and
+a set in front of them produces neither a reply nor a change."
+  (let ((out (make-temp-file "cooked-osc4")))
+    (unwind-protect
+        (cooked-tests--with-session
+            (cooked-tests--reply-to
+             (concat "\\033]4;196;rgb:0/f/0\\007"
+                     "\\033]4;1;?\\007\\033]4;196;?\\007\\033]4;244;?\\007")
+             out)
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "244;rgb:" (cooked-tests--contents out)))))
+          (should (equal (cooked-tests--contents out)
+                         (mapconcat
+                          (lambda (n)
+                            (format "\033]4;%d;%s\007"
+                                    n (cooked--color-to-osc (cooked--color n))))
+                          '(1 196 244))))
+          (should (string-match-p
+                   "\\`\\(\033\\]4;[0-9]+;rgb:[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}\007\\)\\{3\\}\\'"
+                   (cooked-tests--contents out))))
+      (delete-file out))))
+
+(ert-deftest cooked-osc-4-walks-its-pairs ()
+  "A chained query gets one reply per `?', a bad index is skipped without
+shifting the pairs after it, and a set stays silent even with sets allowed."
+  (let ((replies nil)
+        (before (cooked--color 1))
+        (cooked-allow-color-set t)
+        (cooked--osc-bell-terminated nil))
+    (cl-letf (((symbol-function 'cooked--reply-osc)
+               (lambda (_session code payload bell)
+                 (push (list code payload bell) replies))))
+      (with-temp-buffer
+        (cooked--osc-palette '("1" "#00ff00" "x" "?" "256" "?" "7" "?" "9"))
+        (should-not face-remapping-alist))
+      (should (equal (mapcar #'car replies) '(4)))
+      (should (string-prefix-p "7;rgb:" (nth 1 (car replies))))
+      (should-not (nth 2 (car replies)))
+      (should (equal (cooked--color 1) before)))))
+
+(ert-deftest cooked-osc-17-and-19-answer-from-the-region-face ()
+  "The selection colours are read, chained past 18, and never set."
+  (let ((replies nil)
+        (cooked-allow-color-set t)
+        (cooked--osc-bell-terminated t))
+    (cl-letf (((symbol-function 'cooked--reply-osc)
+               (lambda (_session code payload _bell)
+                 (push (cons code payload) replies))))
+      (with-temp-buffer
+        (let ((cooked--osc-code 17))
+          (cooked--osc-color '("?" "?" "?")))
+        (should (equal (mapcar #'car (reverse replies)) '(17 19)))
+        (should (equal (cdr (assq 17 replies))
+                       (cooked--color-to-osc
+                        (cooked--default-color 'highlight-background))))
+        (dolist (code '(17 19))
+          (let ((cooked--osc-code code))
+            (cooked--osc-color '("#ff0000"))))
+        (should-not cooked--color-remaps)
+        (should-not face-remapping-alist)))))
+
 (ert-deftest cooked-osc-color-sets-are-refused-by-default ()
   "Anything that can write to the terminal can send one, so it is opt-in."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
