@@ -205,9 +205,13 @@ impl IntoIterator for Evicted {
 pub struct Screen {
     rows: Vec<Row>,
     cols: usize,
-    pub cursor: Cursor,
-    pub region: Region,
-    pub saved: Option<Cursor>,
+    /// Private so that every move goes through a method that keeps [`Cursor::wrap_pending`]
+    /// honest: a pending wrap only means something on the last column, and a caller
+    /// writing `col` directly could leave one armed anywhere.
+    cursor: Cursor,
+    region: Region,
+    /// What DECSC saved, for DECRC to put back.
+    saved: Option<Cursor>,
     dirty: Vec<bool>,
     /// Row moves since the last drain, in the order they happened; see [`Shift`].
     ///
@@ -840,6 +844,43 @@ impl Screen {
         if let Some(r) = self.touch(row) {
             r.set_link(col, link);
         }
+    }
+
+    pub fn cursor(&self) -> Cursor {
+        self.cursor
+    }
+
+    /// The scroll region DECSTBM set, inclusive at both ends.
+    pub fn region(&self) -> Region {
+        self.region
+    }
+
+    /// Put the cursor back exactly as CURSOR describes it, clamped to the grid.
+    ///
+    /// For a caller that took [`Screen::cursor`] and has since moved it, such as a kitty
+    /// placement with `C=1`. The pending wrap survives only where it can mean something,
+    /// on the last column.
+    pub fn put_cursor(&mut self, cursor: Cursor) {
+        let wrap_pending = cursor.wrap_pending;
+        self.goto(cursor.row, cursor.col);
+        self.cursor.wrap_pending = wrap_pending && self.cursor.col + 1 == self.cols;
+    }
+
+    /// DECSC's half of the cursor: remember where it is.
+    pub fn save_cursor(&mut self) {
+        self.saved = Some(self.cursor);
+    }
+
+    /// DECRC's half: go back to the saved position, if there is one, and forget it.
+    pub fn restore_cursor(&mut self) {
+        if let Some(saved) = self.saved.take() {
+            self.goto(saved.row, saved.col);
+        }
+    }
+
+    /// DECSTR and RIS: nothing is saved any more.
+    pub fn forget_saved_cursor(&mut self) {
+        self.saved = None;
     }
 
     pub fn carriage_return(&mut self) {

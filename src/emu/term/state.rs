@@ -7,7 +7,7 @@ impl Levels {
     pub(super) fn of(state: &State) -> Self {
         let modes = &state.modes;
         Self {
-            cursor: state.screen().cursor,
+            cursor: state.screen().cursor(),
             cursor_visible: modes.cursor_visible,
             cursor_shape: modes.cursor_shape,
             reverse_screen: modes.reverse_screen,
@@ -158,7 +158,7 @@ impl State {
         if self.shown.is_alternate() {
             return 0;
         }
-        let cursor = self.screens.primary.cursor.row;
+        let cursor = self.screens.primary.cursor().row;
         let keep = self
             .prompt_start
             .and_then(|at| at.row.checked_sub(self.evicted_total))
@@ -212,7 +212,7 @@ impl State {
 
     /// Where the cursor is now, in the coordinates an [`Anchor`] keeps.
     pub(super) fn anchor(&self) -> Anchor {
-        let cursor = self.screen().cursor;
+        let cursor = self.screen().cursor();
         Anchor {
             row: self.evicted_total + cursor.row,
             col: cursor.col,

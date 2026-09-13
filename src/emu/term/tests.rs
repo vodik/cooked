@@ -748,7 +748,7 @@ fn an_iterm_inline_image_is_not_drawn_where_it_cannot_be_shown() {
             .iter()
             .any(|e| matches!(e, Event::Osc(1337, ..)))
     );
-    let cursor = t.screen().cursor;
+    let cursor = t.screen().cursor();
     assert_eq!((cursor.row, cursor.col), (0, 0), "no rows were laid for it");
 }
 
@@ -1001,7 +1001,7 @@ fn kitty_leaves_the_cursor_on_the_pictures_last_row() {
     kitty_image(&mut t, "a=T,f=100,c=3,r=2,i=1");
     // Row 1 is the picture's last, and column 3 is one past its right edge. This is
     // kitty's rule, and its clients print their own newline on top of it.
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (1, 3));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (1, 3));
 }
 
 #[test]
@@ -1010,7 +1010,7 @@ fn a_sixel_leaves_the_cursor_on_the_line_below() {
     // The same 3x2-cell picture by the route sixel and iTerm2 take. xterm scrolls a
     // sixel to the next line, so the disposition genuinely differs from kitty's.
     t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(30, 40));
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (2, 0));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (2, 0));
 }
 
 #[test]
@@ -1019,7 +1019,7 @@ fn a_kitty_picture_reaching_the_right_edge_wraps_to_the_next_line() {
     kitty_image(&mut t, "a=T,f=100,c=4,r=1,i=1");
     // Column 4 is off a four-column screen, so there is nowhere on this row for the
     // cursor to rest -- which is the one case kitty's clients expect the move for.
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (1, 0));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (1, 0));
 }
 
 #[test]
@@ -1029,11 +1029,11 @@ fn an_animation_redrawn_in_place_does_not_walk_down_the_screen() {
     // row a frame, and the picture crawls off the bottom.
     let mut t = with_metrics(24, 80);
     t.feed(b"\x1b[6;1H");
-    let top = t.screen().cursor.row;
+    let top = t.screen().cursor().row;
     for _ in 0..4 {
         kitty_image(&mut t, "a=T,f=100,c=3,r=2,i=1");
         t.feed(b"\r\n\x1b[2A");
-        assert_eq!(t.screen().cursor.row, top, "the frame drifted");
+        assert_eq!(t.screen().cursor().row, top, "the frame drifted");
     }
 }
 
@@ -1051,7 +1051,7 @@ fn an_echo_inside_a_frame_does_not_leave_the_shell_to_erase_the_picture() {
     // everything below — leaving the first row of the picture and the prompt in the hole.
     let mut t = with_metrics(24, 80);
     t.feed(b"\x1b[6;1H");
-    let top = t.screen().cursor.row;
+    let top = t.screen().cursor().row;
     // A frame, then the newline viu prints after one and its climb back to the picture's
     // top row, which is where it rests between frames.
     let whole = format!("\x1b_Ga=T,f=32,s=6,v=2,c=3,r=2,i=1;{}\x1b\\", b64(&[9; 48]));
@@ -1065,7 +1065,10 @@ fn an_echo_inside_a_frame_does_not_leave_the_shell_to_erase_the_picture() {
     let (head, tail) = payload.split_at(payload.len() / 2);
     t.feed(format!("\x1b_Ga=T,f=32,s=6,v=2,c=3,r=2,i=1;{head}^C{tail}\x1b\\").as_bytes());
     // The picture's last row, one past its right edge: where an untouched frame ends.
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (top + 1, 3));
+    assert_eq!(
+        (t.screen().cursor().row, t.screen().cursor().col),
+        (top + 1, 3)
+    );
 
     // So the newline and the prompt land below the picture, and both its rows survive.
     t.feed(b"\r\n\x1b[J");
@@ -1077,9 +1080,9 @@ fn an_echo_inside_a_frame_does_not_leave_the_shell_to_erase_the_picture() {
 fn kitty_c_leaves_the_cursor_exactly_where_it_was() {
     let mut t = with_metrics(24, 80);
     t.feed(b"\x1b[3;6H");
-    let entry = t.screen().cursor;
+    let entry = t.screen().cursor();
     kitty_image(&mut t, "a=T,f=100,c=3,r=2,i=1,C=1");
-    assert_eq!(t.screen().cursor, entry);
+    assert_eq!(t.screen().cursor(), entry);
     // The picture was still drawn, from the cursor as usual.
     assert_eq!(placements(&t, 2).len(), 3);
 }
@@ -2022,17 +2025,17 @@ fn a_tab_count_is_bounded_by_the_width() {
     // count runs out, so the work past `cols` was provably nothing -- measured at 158x
     // slower than plain text on a 24x200 grid.
     let t = term(2, 24, b"\x1b[65535I");
-    assert_eq!(t.screen().cursor.col, 23);
+    assert_eq!(t.screen().cursor().col, 23);
     let t = term(2, 24, b"\x1b[20G\x1b[65535Z");
-    assert_eq!(t.screen().cursor.col, 0);
+    assert_eq!(t.screen().cursor().col, 0);
 }
 
 #[test]
 fn back_tab_walks_to_the_previous_stop() {
     let t = term(2, 24, b"\x1b[20G\x1b[Z");
-    assert_eq!(t.screen().cursor.col, 16);
+    assert_eq!(t.screen().cursor().col, 16);
     let t = term(2, 24, b"\x1b[20G\x1b[3Z");
-    assert_eq!(t.screen().cursor.col, 0, "floors at column zero");
+    assert_eq!(t.screen().cursor().col, 0, "floors at column zero");
 }
 
 #[test]
@@ -2971,7 +2974,7 @@ fn a_reset_leaves_the_alternate_screen() {
         "nothing from the alternate screen reached scrollback"
     );
     assert_eq!(text(&t, 0), "");
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (0, 0));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (0, 0));
     t.feed(b"\x1b[?1049$p");
     assert!(
         t.drain()
@@ -2982,7 +2985,7 @@ fn a_reset_leaves_the_alternate_screen() {
     // `rmcup` afterwards.
     t.feed(b"ab\x1b[?1049l");
     assert_eq!(text(&t, 0), "ab");
-    assert_eq!(t.screen().cursor.col, 2);
+    assert_eq!(t.screen().cursor().col, 2);
 }
 
 /// RIS puts the stops back on both screens; DECSTR, like xterm's, leaves them alone.
@@ -2990,7 +2993,7 @@ fn a_reset_leaves_the_alternate_screen() {
 fn a_reset_restores_the_tab_stops_on_both_screens() {
     let mut t = term(2, 30, b"\x1b[3g\x1b[?1049h\x1b[3g\x1b[?1049l\x1b[!p\tx");
     assert_eq!(
-        t.screen().cursor.col,
+        t.screen().cursor().col,
         29,
         "a soft reset kept the cleared stops"
     );
@@ -3022,7 +3025,11 @@ fn clearing_to_the_prompt_keeps_the_prompt_and_drops_what_is_above_it() {
     assert_eq!(t.clear_to_prompt(), 2);
     assert_eq!(text(&t, 0), "$ ls");
     assert_eq!(text(&t, 1), "");
-    assert_eq!(t.screen().cursor.row, 0, "the cursor rides up with its row");
+    assert_eq!(
+        t.screen().cursor().row,
+        0,
+        "the cursor rides up with its row"
+    );
 }
 
 #[test]
@@ -3115,14 +3122,14 @@ fn leaving_the_alt_screen_restores_the_cursor_the_primary_saved() {
     // the one thing which relocates the primary's cursor while the alt screen is up.
     // So the line here is wrapped, and the resize below re-chunks it.
     let mut t = term(6, 4, b"aaaabb");
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (1, 2));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (1, 2));
     t.feed(b"\x1b[?1049h");
     t.feed(b"\x1b[1;1Hframe");
     // Widening rejoins the two rows into one, putting the primary's cursor at (0, 6).
     t.resize(6, 8);
     t.feed(b"\x1b[?1049l");
     assert_eq!(
-        (t.screen().cursor.row, t.screen().cursor.col),
+        (t.screen().cursor().row, t.screen().cursor().col),
         (1, 2),
         "the primary's saved cursor is the one 1049 restores"
     );
@@ -3235,7 +3242,7 @@ fn decaln_fills_the_screen_with_e() {
             "row {row} is in the default rendition"
         );
     }
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (0, 0));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (0, 0));
     let delta = t.drain();
     let scrolled: Vec<_> = delta.scrolled.iter().map(runs_text).collect();
     assert_eq!(
@@ -3251,7 +3258,10 @@ fn decaln_fills_the_screen_with_e() {
     // Margins go back to the whole screen. The erase still happens under the margins the
     // child set, exactly as `CSI 2J` would, so a partitioned screen archives nothing.
     let mut t = term(4, 6, b"hi\x1b[2;3r\x1b#8");
-    assert_eq!((t.screen().region.top, t.screen().region.bottom), (0, 3));
+    assert_eq!(
+        (t.screen().region().top, t.screen().region().bottom),
+        (0, 3)
+    );
     assert!(t.drain().scrolled.is_empty());
 }
 
@@ -3268,7 +3278,7 @@ fn decst8c_puts_the_stops_back_every_eight_columns() {
     // `CSI 5 W` without the `?` is CTC, which is not this.
     let t = term(2, 30, b"\x1b[3g\x1b[5W\tx");
     assert_eq!(
-        t.screen().cursor.col,
+        t.screen().cursor().col,
         29,
         "no stops: the tab ran to the margin"
     );
@@ -3608,18 +3618,21 @@ fn xtsave_slots_are_shared_within_each_mouse_group() {
 #[test]
 fn xtrestore_of_an_unchanged_mode_does_not_move_the_cursor() {
     let t = term(4, 8, b"\x1b[?6s\x1b[3;3H\x1b[?6r");
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (2, 2));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (2, 2));
 }
 
 /// `CSI ? s` and `CSI ? r` are not SCOSC and DECSTBM, which have no private byte.
 #[test]
 fn xtsave_is_not_save_cursor_and_xtrestore_is_not_decstbm() {
     let t = term(4, 8, b"\x1b[2;3H\x1b[?25s\x1b[4;4H\x1b[u");
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (3, 3));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (3, 3));
 
     let t = term(4, 8, b"\x1b[2;3r\x1b[3;3H\x1b[?25r");
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (2, 2));
-    assert_eq!((t.screen().region.top, t.screen().region.bottom), (1, 2));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (2, 2));
+    assert_eq!(
+        (t.screen().region().top, t.screen().region().bottom),
+        (1, 2)
+    );
 }
 
 /// Both stacks are negotiated state, and RIS is the child starting over.
@@ -4027,7 +4040,7 @@ fn batched_and_per_character_printing_agree() {
         let runs = (0..4)
             .map(|i| t.screen().row(i).map(Row::runs).unwrap_or_default())
             .collect();
-        let cursor = (t.screen().cursor.row, t.screen().cursor.col);
+        let cursor = (t.screen().cursor().row, t.screen().cursor().col);
         (screen, runs, cursor, scrolled)
     }
 
@@ -4402,13 +4415,13 @@ fn a_declared_width_overrides_what_a_width_table_would_say() {
         2,
         "four characters standing on the two cells the child declared"
     );
-    assert_eq!(t.screen().cursor.col, 2);
+    assert_eq!(t.screen().cursor().col, 2);
 }
 
 #[test]
 fn a_declared_width_lays_down_continuation_cells_like_any_wide_character() {
     let t = term(2, 20, b"\x1b]66;w=3;x\x07y");
-    assert_eq!(t.screen().cursor.col, 4);
+    assert_eq!(t.screen().cursor().col, 4);
     let cells = t.screen().row(0).unwrap().cells();
     assert_eq!(cells[0].ch, 'x');
     assert!(cells[1].is_continuation() && cells[2].is_continuation());
@@ -4424,7 +4437,7 @@ fn a_block_that_cannot_fit_the_screen_is_discarded() {
     // terminal must discard the character." Six cells declared on a five-column screen.
     let t = term(2, 5, b"\x1b]66;w=6;x\x07");
     assert_eq!(text(&t, 0), "");
-    assert_eq!(t.screen().cursor.col, 0);
+    assert_eq!(t.screen().cursor().col, 0);
 }
 
 #[test]
@@ -4432,7 +4445,7 @@ fn a_block_that_does_not_fit_the_line_wraps_whole_under_decawm() {
     let t = term(3, 6, b"abcde\x1b]66;w=2;x\x07");
     assert_eq!(text(&t, 0), "abcde", "the block did not straddle the edge");
     assert_eq!(text(&t, 1), "x");
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (1, 2));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (1, 2));
 }
 
 #[test]
@@ -4441,7 +4454,7 @@ fn with_wrapping_off_a_block_backs_up_far_enough_to_land_whole() {
     // last position where all of it fits and overwrites what was there.
     let t = term(3, 6, b"\x1b[?7labcde\x1b]66;w=2;x\x07");
     assert_eq!(text(&t, 0), "abcdx");
-    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (0, 5));
+    assert_eq!((t.screen().cursor().row, t.screen().cursor().col), (0, 5));
 }
 
 #[test]
@@ -4453,7 +4466,7 @@ fn text_longer_than_the_protocol_allows_is_dropped_rather_than_truncated() {
     // of some other limit sitting lower.
     let ok = format!("\x1b]66;w=1;{}\x07", "a".repeat(MAX_TEXT_SIZE_LEN - 8));
     let t = term(2, 20, ok.as_bytes());
-    assert_eq!(t.screen().cursor.col, 1);
+    assert_eq!(t.screen().cursor().col, 1);
 }
 
 #[test]
@@ -4465,7 +4478,7 @@ fn a_value_outside_its_range_drops_the_whole_escape() {
     assert_eq!(text(&t, 0), "");
     // An unknown key is a *newer* sender, not a broken one, and is ignored.
     let t = term(2, 20, b"\x1b]66;w=2:q=9;x\x07");
-    assert_eq!(t.screen().cursor.col, 2);
+    assert_eq!(t.screen().cursor().col, 2);
 }
 
 #[test]
@@ -4473,7 +4486,7 @@ fn the_keys_this_declines_are_parsed_and_then_ignored() {
     // Fractional scale and alignment change nothing about how many cells the text takes,
     // by the spec's own definition, so accepting and dropping them is not a divergence.
     let t = term(2, 20, b"\x1b]66;n=1:d=2:v=2:h=1:w=1;ab\x07");
-    assert_eq!(t.screen().cursor.col, 1);
+    assert_eq!(t.screen().cursor().col, 1);
     assert_eq!(t.screen().row(0).unwrap().runs()[0].text, "ab");
 }
 
@@ -4486,7 +4499,7 @@ fn w_zero_splits_the_payload_by_grapheme_cluster() {
         20,
         "\x1b]66;;a\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}b\x07".as_bytes(),
     );
-    assert_eq!(t.screen().cursor.col, 4);
+    assert_eq!(t.screen().cursor().col, 4);
 }
 
 #[test]
@@ -4500,7 +4513,7 @@ fn a_zwj_emoji_family_stands_on_two_cells_and_not_on_six() {
         20,
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}|".as_bytes(),
     );
-    assert_eq!(t.screen().cursor.col, 3);
+    assert_eq!(t.screen().cursor().col, 3);
     let cells = t.screen().row(0).unwrap().cells();
     assert_eq!(cells[0].ch, '\u{1F468}');
     assert!(cells[1].is_continuation());
@@ -4615,7 +4628,7 @@ fn mode_2027_corpus() {
         }
         for (how, t) in [("whole", &whole), ("a byte at a time", &bytewise)] {
             assert_eq!(
-                t.screen().cursor.col,
+                t.screen().cursor().col,
                 cells + 1,
                 "{what}: {cluster:?} fed {how}"
             );
@@ -4632,7 +4645,7 @@ fn mode_2027_cannot_be_reset() {
     for setup in [&b"\x1b[?2027l"[..], b"\x1b[!p", b"\x1bc"] {
         let mut t = term(2, 20, setup);
         t.feed(family.as_bytes());
-        assert_eq!(t.screen().cursor.col, 3, "after {setup:?}");
+        assert_eq!(t.screen().cursor().col, 3, "after {setup:?}");
     }
 }
 
@@ -4641,9 +4654,9 @@ fn a_variation_selector_resizes_the_cell_it_lands_on() {
     // U+2714 is one column bare. VS16 promotes it to emoji presentation, which is two —
     // retroactively, since the cell was written a code point ago.
     let bare = term(2, 20, "\u{2714}|".as_bytes());
-    assert_eq!(bare.screen().cursor.col, 2);
+    assert_eq!(bare.screen().cursor().col, 2);
     let wide = term(2, 20, "\u{2714}\u{FE0F}|".as_bytes());
-    assert_eq!(wide.screen().cursor.col, 3);
+    assert_eq!(wide.screen().cursor().col, 3);
     let cells = wide.screen().row(0).unwrap().cells();
     assert!(cells[1].is_continuation());
     assert_eq!(cells[2].ch, '|');
@@ -4670,7 +4683,7 @@ fn a_cluster_split_across_two_feeds_is_still_one_cluster() {
     let mut t = Term::new(2, 20);
     t.feed("\u{1F468}\u{200D}".as_bytes());
     t.feed("\u{1F469}|".as_bytes());
-    assert_eq!(t.screen().cursor.col, 3);
+    assert_eq!(t.screen().cursor().col, 3);
 }
 
 #[test]
@@ -4678,7 +4691,7 @@ fn a_mark_after_a_declared_block_joins_the_block() {
     // The block was declared three cells wide, so the cell it occupies starts three
     // columns back — not one, and not wherever a width table would put it.
     let t = term(2, 20, "\x1b]66;w=3;x\x07\u{301}".as_bytes());
-    assert_eq!(t.screen().cursor.col, 3);
+    assert_eq!(t.screen().cursor().col, 3);
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs[0].text, "x\u{301}");
     assert_eq!(runs[0].cols, 3);
@@ -4728,13 +4741,13 @@ fn decrqss_round_trip(rows: usize, cols: usize, set: &[u8], name: &str) -> Strin
     assert_eq!(second.state.underline, first.state.underline, "{set:?}");
     assert_eq!(second.state.modes, first.state.modes, "{set:?}");
     assert_eq!(
-        second.screen().region.top,
-        first.screen().region.top,
+        second.screen().region().top,
+        first.screen().region().top,
         "{set:?}"
     );
     assert_eq!(
-        second.screen().region.bottom,
-        first.screen().region.bottom,
+        second.screen().region().bottom,
+        first.screen().region().bottom,
         "{set:?}"
     );
     body.to_owned()

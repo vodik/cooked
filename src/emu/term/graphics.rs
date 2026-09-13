@@ -220,9 +220,10 @@ impl State {
             return;
         };
         let pen = self.pen.erase();
-        let start_col = self.screen().cursor.col;
+        let start_col = self.screen().cursor().col;
         for cell_row in 0..cells.rows {
-            self.screen_mut().cursor.col = start_col;
+            let row = self.screen().cursor().row;
+            self.screen_mut().goto(row, start_col);
             self.screen_mut().place_image_row(id, cell_row, cells, pen);
             // The linefeed after the *last* row is what separates the two dispositions:
             // running it there is what puts the cursor on the line below the picture,
@@ -239,8 +240,8 @@ impl State {
             CursorAfterImage::PastRightEdge => {
                 let end = start_col + usize::from(cells.cols);
                 if end < self.screen().width() {
-                    self.screen_mut().cursor.col = end;
-                    self.screen_mut().cursor.wrap_pending = false;
+                    let row = self.screen().cursor().row;
+                    self.screen_mut().goto(row, end);
                 } else {
                     // The picture reached the right edge, so the column past it is not
                     // on this line. A real linefeed rather than a clamp, because this is
@@ -365,10 +366,10 @@ impl State {
     /// a picture tall enough to scroll pushed it up: the row restored is the same screen
     /// row, which is what a terminal that never scrolls at all would have left anyway.
     fn kitty_place(&mut self, id: ImageId, freeze_cursor: bool) {
-        let entry = self.screen().cursor;
+        let entry = self.screen().cursor();
         self.lay_image(id, CursorAfterImage::PastRightEdge);
         if freeze_cursor {
-            self.screen_mut().cursor = entry;
+            self.screen_mut().put_cursor(entry);
         }
     }
 }

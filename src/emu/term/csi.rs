@@ -346,7 +346,7 @@ impl State {
             screen.reset_region();
             screen.set_autowrap(true);
             screen.set_insert_mode(false);
-            screen.saved = None;
+            screen.forget_saved_cursor();
         }
         self.saved_charsets = PerScreen::default();
         if had_mouse {
@@ -364,9 +364,9 @@ impl State {
         }
         let screen = self.screen_mut();
         if save {
-            screen.saved = Some(screen.cursor);
-        } else if let Some(cursor) = screen.saved.take() {
-            screen.goto(cursor.row, cursor.col);
+            screen.save_cursor();
+        } else {
+            screen.restore_cursor();
         }
     }
 
@@ -572,12 +572,12 @@ impl State {
                 self.screen_mut().carriage_return();
             }
             (None, 'G' | '`') => {
-                let row = self.screen().cursor.row;
+                let row = self.screen().cursor().row;
                 self.screen_mut().goto(row, params.coord(0));
             }
             (None, 'H' | 'f') => {
                 let top = if self.modes.origin_mode {
-                    self.screen().region.top
+                    self.screen().region().top
                 } else {
                     0
                 };
@@ -585,7 +585,7 @@ impl State {
                 self.screen_mut().goto(row, col);
             }
             (None, 'd') => {
-                let col = self.screen().cursor.col;
+                let col = self.screen().cursor().col;
                 self.screen_mut().goto(params.coord(0), col);
             }
             (None, 'g') => self.screen_mut().clear_tabs(params.arg(0, 0) == 3),
@@ -890,7 +890,7 @@ impl State {
                 self.csi_reply(format_args!("0n"));
             }
             (None, 'n') if params.arg(0, 0) == 6 => {
-                let Cursor { row, col, .. } = self.screen().cursor;
+                let Cursor { row, col, .. } = self.screen().cursor();
                 self.csi_reply(format_args!("{};{}R", row + 1, col + 1));
             }
             // The colour scheme, `CSI ? 996 n`. Silent until Emacs has reported one: the
@@ -938,7 +938,7 @@ impl State {
                 self.dcs_reply(format_args!("1$r{sgr}m"));
             }
             b"r" => {
-                let region = self.screen().region;
+                let region = self.screen().region();
                 let (top, bottom) = (region.top + 1, region.bottom + 1);
                 self.dcs_reply(format_args!("1$r{top};{bottom}r"));
             }
