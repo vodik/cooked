@@ -1279,12 +1279,19 @@ scroll gesture through settled `tree -C /usr/include` 10.2 → 4.7 ms p50.
 
 Four things fall out of that, and each is a place where the obvious next step is wrong:
 
-- **No flag for "this shape dithers".** `BoxGlyph` knows, and a spare bit could say so.
-  But the only use for the answer is deciding whether the phase can vary down the run,
-  and run-length encoding already demotes that question from once per character to once
-  per record. `cooked--box-shade-p` keeps asking, and the count field stays a plain `u16`.
-  A field that has to mean the same thing on both sides of the boundary forever should buy
-  more than one `logand` per eighty cells.
+- **No flag for "this shape is a shade".** `BoxGlyph` knows, and a spare bit could say
+  so. But run-length encoding already demotes the question from once per character to
+  once per record. `cooked--box-shade-p` keeps asking, and the count field stays a plain
+  `u16`. A field that has to mean the same thing on both sides of the boundary forever
+  should buy more than one `logand` per eighty cells.
+
+- **Shades are painted, not drawn.** ░▒▓ were one-bit dithers phased against each cell's
+  pixel origin, which cost a segment per cell, a phase in every cache key and a seam on
+  scrolled rows. They are now a stretch of space whose face background is the cell's
+  foreground over its background at 25/50/75% coverage, mixed in linear light (what
+  ghostty draws, and what a stipple averages to). `cooked--apply-shade` keeps the
+  rendition beside the blend so `cooked--reblend-shades` can follow OSC 10/11, DECSCNM and
+  theme changes.
 
 - **Images stay one record per character.** The same compression is available on the wire
   and was declined: every cell of a picture displays its own slice, named by that cell's

@@ -19,6 +19,8 @@
 (require 'cooked-face)
 (require 'cooked-osc)
 
+(declare-function cooked--reblend-shades "cooked-deco")
+
 (cooked--declare-core)
 
 ;;;; OSC 10/11/12 — the default colors
@@ -402,7 +404,9 @@ newest."
   (let ((on (and on t)))
     (unless (eq on cooked--reverse-screen)
       (setq cooked--reverse-screen on)
-      (cooked--apply-reverse-screen))))
+      (cooked--apply-reverse-screen)
+      ;; A shade in the default colours was blended from them as they were.
+      (cooked--reblend-shades))))
 
 (defun cooked--refresh-reverse-screen ()
   "Swap the new theme's colors, if the screen is reversed.

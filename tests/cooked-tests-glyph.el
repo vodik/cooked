@@ -395,61 +395,122 @@ and the assertion on the boundary fails."
                                 :data-width)
                      (* 4 10))))))
 
-(ert-deftest cooked-a-shade-between-blanks-still-keeps-its-own-cell ()
-  "The shade rule survives the blanks now sharing a run with it.
+(defconst cooked-tests--white-on-black "\\033[38;2;255;255;255m\\033[48;2;0;0;0m"
+  "SGR for white on black in truecolor, so a blend has colours a test can name.
+The palette resolves through the theme\='s `ansi-color\=' faces, which a batch
+Emacs does not pin down.")
 
-A blank is absorbed into a `Deco::Glyphs' run whatever the shapes around it are,
-so `░ ░' crosses as one run of three records -- and a shade may never share an
-image with anything, its dither phase being a function of the cell's own pixel
-origin.  `cooked--glyph-run-segments' is where the two rules meet, and this is
-the case that reaches it: the run is split into three, and the blank between two
-shades is a segment of its own rather than being folded into either."
+(defun cooked-tests--shade-color (pos)
+  "The colour the shade at POS is painted in, asserting it paints both halves."
+  (let ((blend (car-safe (get-text-property pos 'face))))
+    (when (keywordp (car-safe (get-text-property pos 'face)))
+      (setq blend (get-text-property pos 'face)))
+    (should (equal (plist-get blend :foreground) (plist-get blend :background)))
+    (plist-get blend :background)))
+
+(ert-deftest cooked-blend-mixes-in-linear-light ()
+  "A shade is its two colours mixed as light, not as sRGB numbers.
+Half white over black is #bcbcbc, what a stipple of the two averages to; a
+per-channel mix would say #808080."
+  (should (equal (cooked--blend "#ffffff" "#000000" 0.25) "#898989"))
+  (should (equal (cooked--blend "#ffffff" "#000000" 0.5) "#bcbcbc"))
+  (should (equal (cooked--blend "#ffffff" "#000000" 0.75) "#e1e1e1"))
+  (should (equal (cooked--blend "#336699" "#336699" 0.5) "#336699"))
+  (should (equal (cooked--blend "#ffffff" "#123456" 0.0) "#123456"))
+  (should (equal (cooked--blend "#abcdef" "#000000" 1.0) "#abcdef")))
+
+(ert-deftest cooked-a-run-of-shades-is-one-blended-stretch ()
+  "▒▒▒ is one stretch of space three cells wide, in the blend of its colours.
+
+No bitmap and no dither: the stretch is painted in the face\='s background, and
+`cooked--apply-shade\=' has made that background the blend.  The foreground is
+the same colour, so the character stays invisible wherever no stretch is drawn."
   (cooked-tests--with-session
-      '("/bin/sh" "-c" "printf '\\342\\226\\221 \\342\\226\\221\\n'") ; ░ ░
-    (cooked-tests--cell 9 20)             ; odd width, where the phase can differ
+      `("/bin/sh" "-c"
+        ,(concat "printf '" cooked-tests--white-on-black
+                 "\\342\\226\\222\\342\\226\\222\\342\\226\\222\\033[0m\\n'"))
+    (cooked-tests--cell 9 20)
     (should (cooked-tests--settle
-             (lambda () (get-text-property (point-min) 'cooked-deco))))
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((beg (point-min)))
+      (should (= (cooked-tests--display-intervals beg (+ beg 3)) 1))
+      (should (equal (get-text-property beg 'display) '(space :width (27))))
+      (should (equal (cooked-tests--shade-color beg) "#bcbcbc"))
+      (should (equal (car (get-text-property beg 'cooked-shade)) 2)))))
+
+(ert-deftest cooked-the-blank-between-shades-draws-nothing ()
+  "`░ ░\=' puts no `display\=' on the blank the wire absorbed between the shades.
+It would be a picture of the background the space already shows."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\226\\221 \\342\\226\\221\\n'")
+    (cooked-tests--cell 9 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (let ((beg (point-min)))
+      (should (equal (get-text-property beg 'display) '(space :width (9))))
+      (should-not (get-text-property (1+ beg) 'display))
+      (should (equal (get-text-property (+ beg 2) 'display) '(space :width (9))))
+      (should-not (get-text-property (1+ beg) 'cooked-shade)))))
+
+(ert-deftest cooked-a-shade-blends-the-colours-its-cell-shows ()
+  "Reverse video blends the exchanged pair, and concealment blends to nothing."
+  (cooked-tests--with-session
+      `("/bin/sh" "-c"
+        ,(concat "printf '" cooked-tests--white-on-black
+                 "\\033[7m\\342\\226\\223\\033[27;8m\\342\\226\\223\\033[0m\\n'"))
+    (cooked-tests--cell 9 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (1+ (point-min)) 'cooked-shade))))
+    (let ((beg (point-min)))
+      ;; ▓ is black over white once reversed: a quarter of white.
+      (should (equal (cooked-tests--shade-color beg) "#898989"))
+      (should (equal (cooked-tests--shade-color (1+ beg)) "#000000")))))
+
+(ert-deftest cooked-a-shade-follows-the-default-colours ()
+  "An OSC 11 set blends an already drawn shade in the default colours again.
+The text beside it follows the remapped `default' live, so the shade must too."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\226\\222\\n'; sleep 5")
+    (cooked-tests--cell 9 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'cooked-shade))))
+    (let ((beg (point-min))
+          (foreground (cooked--screen-color 'foreground)))
+      (should (equal (cooked-tests--shade-color beg)
+                     (cooked--blend foreground (cooked--screen-color 'background) 0.5)))
+      (cooked--set-default-color 'background "#ff0000")
+      (should (equal (cooked-tests--shade-color beg)
+                     (cooked--blend foreground "#ff0000" 0.5))))))
+
+(ert-deftest cooked-shades-and-lines-split-into-image-stretch-image ()
+  "`─▒─\=' is an image, a stretch and an image, each exactly its cells wide."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\342\\224\\200\\342\\226\\222\\342\\224\\200\\n'")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
     (let ((beg (point-min)))
       (should (= (cooked-tests--display-intervals beg (+ beg 3)) 3))
-      (dotimes (i 3)
-        (should (equal (cooked--glyph-pattern-cells
-                        (nth 1 (get-text-property (+ beg i) 'cooked-deco)))
-                       1))
-        ;; Each carries its own column, which is what the phase is derived from.
-        (should (equal (nth 2 (get-text-property (+ beg i) 'cooked-deco)) i))))))
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image beg)) :data-width) 10))
+      (should (equal (get-text-property (1+ beg) 'display) '(space :width (10))))
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image (+ beg 2))) :data-width)
+                     10)))))
 
-(ert-deftest cooked-a-run-of-shades-keeps-a-record-per-cell ()
-  "A shade dithers, so its phase is a function of the cell's own pixel origin --
-see `cooked--box-phase\='.  The shapes are identical and so cross as one
-run-length record like any other repeat, but `cooked--apply-glyph-deco\=' expands
-that record per cell rather than sharing it: a shared record carries one column
-for the whole run, and `cooked--rescale-deco\=' rebuilding from it would phase
-every cell as though it sat where the first one does, drawing a doubled column
-down each seam at an odd cell width.
-
-The distinction is in the reader and not in the wire, which is the decision
-`Deco::packed\=' argues: run-length encoding already moved the shade test from
-once per character to once per record, so a flag bit would have bought one
-`logand\=' per run."
+(ert-deftest cooked-the-cursor-splits-a-shade-stretch ()
+  "The cursor rule holds for a stretch as it does for an image; see
+`cooked-the-cursors-cell-starts-its-own-glyph-run'."
   (cooked-tests--with-session
-      '("/bin/sh" "-c" "printf '\\342\\226\\222\\342\\226\\222\\342\\226\\222\\n'") ; ▒▒▒
-    (cooked-tests--cell 9 20)             ; odd width, where the phase can differ
+      '("/bin/sh" "-c"
+        "printf '\\342\\226\\222\\342\\226\\222\\342\\226\\222\\342\\226\\222\\033[1;3H'")
+    (cooked-tests--cell 10 20)
     (should (cooked-tests--settle
-             (lambda () (get-text-property (point-min) 'cooked-deco))))
+             (lambda () (get-text-property (point-min) 'display))))
     (let ((beg (point-min)))
-      (should (cooked--box-shade-p
-               (cooked--glyph-pattern-head
-                (nth 1 (get-text-property beg 'cooked-deco)))))
-      ;; One cell per record, which is the expansion: a shared pattern would
-      ;; carry all three.
-      (should (equal (cooked--glyph-pattern-cells
-                      (nth 1 (get-text-property beg 'cooked-deco)))
-                     1))
-      ;; Each cell its own record, so each carries its own column.
-      (dotimes (i 3)
-        (should (equal (nth 2 (get-text-property (+ beg i) 'cooked-deco)) i)))
-      (should-not (eq (get-text-property beg 'cooked-deco)
-                      (get-text-property (1+ beg) 'cooked-deco))))))
+      (should (equal (cooked--cursor-cell) '(0 . 2)))
+      (should (= (cooked-tests--display-intervals beg (+ beg 4)) 2))
+      (should (equal (get-text-property beg 'display) '(space :width (20))))
+      (should (equal (get-text-property (+ beg 2) 'display) '(space :width (20)))))))
 
 (ert-deftest cooked-a-rescale-rebuilds-every-cell-of-a-shared-glyph-run ()
   "`cooked--rescale-deco\=' walks with `next-single-property-change\=', which
@@ -469,8 +530,8 @@ here rather than to that accident.
 
 Glyphs and not an image placement, and the difference is the point: an image
 record carries the cell\='s own row and column within the picture, so no two
-cells of one placement can share it.  A glyph record for a shape that does not
-dither carries nothing cell-specific at all."
+cells of one placement can share it.  A glyph record carries nothing
+cell-specific at all."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'") ; ───
     (cooked-tests--cell)
@@ -740,33 +801,6 @@ dither carries nothing cell-specific at all."
     ;; A cell that ends set and starts set would join across the seam.
     (should-not (and (cooked--bitmap-ref grid 0 row)
                      (cooked--bitmap-ref grid (1- width) row)))))
-
-;; A 9-pixel cell is odd, so a dither phased from cell-local coordinates repeats a
-;; column at every seam: the last column of one cell and the first of the next are
-;; both set, drawing a doubled line down the join between two ▒ cells.
-(ert-deftest cooked-box-shade-dither-tiles-across-an-odd-cell-width ()
-  (let* ((width 9) (height 8)
-         (medium (logior cooked--box-kind-block cooked--box-direction-shade (ash 2 3)))
-         (unphased (cooked-tests--glyph-grid medium width height 0))
-         ;; The phase the next cell along gets at this width.
-         (phase (logand width 1))
-         (phased (cooked-tests--glyph-grid medium width height phase)))
-    (should (= phase 1))
-    (should-not (equal unphased phased))
-    ;; Walking off the right edge of one cell into the left edge of the next must
-    ;; alternate exactly as it does inside a cell.
-    (dotimes (y height)
-      (should-not (eq (cooked--bitmap-ref unphased (1- width) y)
-                      (cooked--bitmap-ref phased 0 y))))))
-
-(ert-deftest cooked-box-shade-phase-is-zero-unless-it-can-matter ()
-  (let ((window (selected-window))
-        (medium (logior cooked--box-kind-block cooked--box-direction-shade (ash 2 3)))
-        (solid (cooked-tests--line-bits 0 0 1 1)))
-    ;; Nothing but a shade is phase-sensitive, so nothing else doubles its cache.
-    (should (= 0 (cooked--box-phase solid window 3 5)))
-    ;; Nor is a shade whose column is unknown.
-    (should (= 0 (cooked--box-phase medium window nil 5)))))
 
 ;; A diagonal has to reach the two corners it shares with its neighbours, or a run
 ;; of ╱ breaks at every cell join — and it has to put a pixel on every scanline, or

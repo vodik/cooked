@@ -13,6 +13,7 @@
 
 ;;; Code:
 
+(require 'color)
 (require 'cooked-util)
 
 (defconst cooked--attr-bold 1)
@@ -307,6 +308,53 @@ span: resolving a face is an `aref\=' into `cooked--style-faces\='."
                    (,link (and (/= ,linked 0) ,linked)))
                ,@body)))
          (setq ,i (+ ,i ,cooked--style-record))))))
+
+(defun cooked--color-rgb (color)
+  "COLOR as a list of three channels from 0.0 to 1.0, or nil if unreadable.
+
+A hex spelling is read here rather than handed to `color-name-to-rgb\=', which
+asks the frame: a frame with few colours -- a tty, or batch -- answers with the
+nearest one it has, and a blend of those is not the blend of the colours the
+child sent.  Names still go to the frame, having no other source."
+  (if (and (stringp color)
+           (string-match "\\`#\\(?:[[:xdigit:]]\\{3\\}\\)\\{1,4\\}\\'" color))
+      (let* ((digits (/ (1- (length color)) 3))
+             (scale (float (1- (ash 1 (* 4 digits))))))
+        (mapcar (lambda (i)
+                  (/ (string-to-number
+                      (substring color (+ 1 (* i digits)) (+ 1 (* (1+ i) digits)))
+                      16)
+                     scale))
+                '(0 1 2)))
+    (color-name-to-rgb color)))
+
+(defun cooked--blend (fg bg alpha)
+  "FG laid over BG at coverage ALPHA, mixed in linear light, as a hex colour.
+
+What a shade glyph is drawn in -- see `cooked--shade-face\=' in cooked-deco.el.
+The mix is done on light rather than on the sRGB numbers, because that is what
+the eye does with a fine stipple of the two: half white and half black averages
+to #bcbcbc, and a naive per-channel mix would say #808080, visibly darker than
+the ▒ it stands for.  So each channel is decoded from sRGB to linear, mixed, and
+encoded back.
+
+A colour `color-name-to-rgb\=' cannot read -- a tty frame\='s unspecified pair --
+leaves nothing to mix, and the nearer of the two colours stands in."
+  (let ((front (cooked--color-rgb fg))
+        (back (cooked--color-rgb bg)))
+    (if (not (and front back))
+        (if (>= alpha 0.5) fg bg)
+      (cl-flet ((decode (c) (if (<= c 0.04045)
+                                (/ c 12.92)
+                              (expt (/ (+ c 0.055) 1.055) 2.4)))
+                (encode (l) (if (<= l 0.0031308)
+                                (* l 12.92)
+                              (- (* 1.055 (expt l (/ 1 2.4))) 0.055))))
+        (apply #'format "#%02x%02x%02x"
+               (cl-mapcar (lambda (f b)
+                            (round (* 255 (encode (+ (* alpha (decode f))
+                                                     (* (- 1 alpha) (decode b)))))))
+                          front back))))))
 
 (defun cooked--face (fg bg attrs &optional ul)
   "Face plist for FG, BG, the ATTRS bitmask and underline colour UL.

@@ -524,32 +524,6 @@ Halves round up, the way the quadrants always did."
 ▀ ▄ ▌ ▐ and their eighth-steps are one shape in four orientations: a band
 covering some fraction of one axis, anchored at that axis' start or end.")
 
-(defun cooked--box-draw-shade (bitmap level phase)
-  "Fill BITMAP with an ordered dither at LEVEL, one of the shades ░▒▓.
-
-PHASE positions the pattern in absolute screen space: bit 0 offsets the columns,
-bit 1 the rows, as `cooked--box-phase' computes them.  Without it the dither
-restarts at every cell, which tiles only when the cell is even-sized — and a
-cell is very often 9 pixels wide.  At an odd width the last column of one cell
-and the first of the next are both set, drawing a doubled column down every seam
-between adjacent shade cells; an odd line-box height (which `line-spacing' can
-easily produce) does the same horizontally.
-
-All three patterns have period 2 on both axes, so one bit per axis is the whole
-phase — there is no third alignment to represent."
-  (let ((dx (logand phase 1))
-        (dy (logand (ash phase -1) 1)))
-    (dotimes (y (cooked-bitmap-height bitmap))
-      (dotimes (x (cooked-bitmap-width bitmap))
-        ;; The shifted coordinates choose the pattern; the plain ones address the
-        ;; bitmap, which is always cell-local.
-        (let ((px (+ x dx)) (py (+ y dy)))
-          (when (pcase level
-                  (1 (and (cl-evenp px) (cl-evenp py)))
-                  (2 (cl-evenp (+ px py)))
-                  (_ (not (and (cl-evenp px) (cl-evenp py)))))
-            (cooked--bitmap-set bitmap x y t)))))))
-
 (defun cooked--box-draw-quadrant (bitmap mask)
   "Fill whichever quarters of BITMAP MASK selects, for the ten 2x2 quadrant glyphs.
 Bit 0 is the upper left, 1 the upper right, 2 the lower left, 3 the lower right."
@@ -563,16 +537,18 @@ Bit 0 is the upper left, 1 the upper right, 2 the lower left, 3 the lower right.
       (when (/= 0 (logand mask bit))
         (cooked--bitmap-fill bitmap x0 y0 x1 y1)))))
 
-(defun cooked--box-draw-block (bitmap bits phase)
-  "Draw block-element descriptor BITS on BITMAP, dithered at PHASE."
+(defun cooked--box-draw-block (bitmap bits)
+  "Draw block-element descriptor BITS on BITMAP.
+
+A shade (░▒▓) draws nothing here.  It is not a shape but a blend of two
+colours, which a one-bit bitmap cannot hold, so cooked-deco.el paints it as a
+background instead -- see `cooked--apply-shade'."
   (let ((direction (logand bits 7))
         (fraction (logand (ash bits -3) 15)))
     (cond
      ((= direction cooked--box-direction-full)
       (cooked--bitmap-fill bitmap 0 0 (cooked-bitmap-width bitmap)
                            (cooked-bitmap-height bitmap)))
-     ((= direction cooked--box-direction-shade)
-      (cooked--box-draw-shade bitmap fraction phase))
      ((= direction cooked--box-direction-quadrant)
       (cooked--box-draw-quadrant bitmap fraction))
      ((alist-get direction cooked--box-block-fills)
@@ -640,21 +616,17 @@ The one-shape case of `cooked--bitmap-tile', which is what a border row is."
 
 ;;;; Entry point
 
-(defun cooked--render-box-glyph-cell (bits width height &optional phase)
+(defun cooked--render-box-glyph-cell (bits width height)
   "Unpacked single-cell bitmap for glyph descriptor BITS at WIDTH x HEIGHT.
 
-PHASE, defaulting to 0, positions patterns that have to line up with the
-neighbouring cell rather than with this one — see `cooked--box-draw-shade'.
-
-The shape math -- `cooked--box-draw-arc\='s per-pixel trigonometry among it --
+The shape math -- `cooked--box-draw-arc\='s per-pixel coverage among it --
 lives entirely here and nowhere else, which is what makes this the one half of
 `cooked--render-box-glyph\=' worth caching without a run length in the key: a
-shape at a given size and phase is drawn exactly once no matter how many
-adjacent cells later tile it.  See `cooked--pack-box-glyph-cell\=' for the other
-half."
+shape at a given size is drawn exactly once no matter how many adjacent cells
+later tile it.  See `cooked--pack-box-glyph-cell\=' for the other half."
   (let ((bitmap (cooked--bitmap-make width height)))
     (if (cooked--box-block-p bits)
-        (cooked--box-draw-block bitmap bits (or phase 0))
+        (cooked--box-draw-block bitmap bits)
       (cooked--box-draw-line bitmap bits))
     bitmap))
 
@@ -677,7 +649,7 @@ trigonometry behind any of the BITMAPs."
 The one-shape case of `cooked--pack-box-glyph-run'."
   (cooked--pack-box-glyph-run (list (cons bitmap (or count 1)))))
 
-(defun cooked--render-box-glyph (bits width height &optional phase count)
+(defun cooked--render-box-glyph (bits width height &optional count)
   "Raw XBM bitmap for glyph descriptor BITS at WIDTH x HEIGHT pixels.
 
 COUNT, defaulting to 1, is how many adjacent cells draw this shape: the bitmap
@@ -687,7 +659,7 @@ and `cooked--pack-box-glyph-cell\=' kept for callers -- tests among them -- that
 want the raw pixels in one call and have no reason to cache the two halves
 separately; `cooked--box-glyph-bits\=' in cooked-deco.el is the caller that does."
   (cooked--pack-box-glyph-cell
-   (cooked--render-box-glyph-cell bits width height phase) count))
+   (cooked--render-box-glyph-cell bits width height) count))
 
 (provide 'cooked-glyph)
 ;;; cooked-glyph.el ends here

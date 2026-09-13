@@ -451,7 +451,7 @@ for on purpose. A run of identical shapes is rasterized once at the run's full w
 carries one `display` property over exactly the cells it was built for, which is one
 interval where there were eighty — a 24x80 frame of border drops from 1920 `display`
 intervals to 24, and redisplay parses one image spec per run rather than one per column.
-A shade stays per cell, its dither phase being a function of the cell's own pixel origin.
+A shade is not an image: it is a stretch of space painted in its two colours blended in linear light.
 None of this is visible in batch, where nothing is drawn and every character had a
 correct `display` property throughout; the suite was green for a commit.
 `cooked-adjacent-box-glyphs-share-only-a-run-wide-image` guards it now by reading the

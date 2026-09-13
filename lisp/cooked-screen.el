@@ -185,20 +185,18 @@ which comint leaves at (nil t) -- under that setting any fontification of the
 buffer unfontifies it first and strips a bare `face\='.
 
 ROW is the screen row BLOCK\='s *first* row is, where the caller knows it: the
-live screen does, scrollback does not.  It also stands in for the origin a shade
-glyph\='s dither is phased against.  Scrollback passes neither and loses at most
-a seam on that one glyph kind.
+live screen does, scrollback does not.  With the origin it says which cell of a
+glyph run the child\='s cursor is on, which is where the run is split.
+Scrollback passes neither, having no cursor.
 
 Each further row of the run is ROW plus its place in the row table, and its
 origin is where the table says its text begins.  That bookkeeping is why the
-table carries START at all: a shade\='s dither phase is a function of the cell\='s
-absolute screen position, so phasing every row of a coalesced run against the
-first row\='s origin would draw a doubled column down each row below the first --
-the very seam the per-cell record exists to avoid.
+table carries START at all: a cursor column is measured from its own row\='s
+start, not from the first row\='s.
 
 ORIGIN, when given, is where the row begins in the buffer, for a BLOCK that
-replaces only part of a row: its text starts partway along, and the dither phase
-is still measured from the row\='s own start.
+replaces only part of a row: its text starts partway along, and the cursor
+column is still measured from the row\='s own start.
 
 Returns the position the text was inserted at."
   (pcase-let ((`(,text ,styles ,decos ,table) block))
@@ -316,17 +314,7 @@ from the buffer as it stands after the delete rather than computed from where
 the rows used to be.  For UP that index is BOTTOM+1-COUNT in the new numbering,
 which is the same line the rows below the region begin at -- so a scroll region
 leaves everything under it exactly where it was, which is the whole point of
-there being a region.
-
-One thing a moved row keeps that it arguably should not: a shade glyph's dither
-phase, which `cooked--box-phase' takes from the cell's pixel origin and so from
-its screen *row*.  A row that moved up by one and is not re-rendered keeps the
-phase it was drawn at, and at an odd cell height that is a one-pixel horizontal
-seam across ░▒▓ cells until something damages the row for its own reasons.  The
-alternative is damaging every row carrying a shade, which is every row of a TUI
-that shades its background, so the seam is accepted -- as it already is on the
-way out to scrollback, which `cooked--render-scrolled' renders with no row index
-at all for the same reason."
+there being a region."
   (save-excursion
     (if up
         (progn (cooked--delete-screen-rows top count)
@@ -398,9 +386,8 @@ Widens first: history can arrive while the alt screen is up — a resize evicts
 rows from the primary even when a full-screen program is showing — and the
 insertion point is above the region `cooked--apply-alt-pin' confines us to.
 
-No row index is passed to `cooked--render-block': scrollback has no screen
-column to phase a shade glyph's dither against, which costs at most a seam on
-that one glyph kind, exactly as a live row rendered without a known origin does."
+No row index is passed to `cooked--render-block': scrollback has no cursor to
+split a glyph run at."
   (save-restriction
     (widen)
     (save-excursion

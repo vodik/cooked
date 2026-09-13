@@ -735,13 +735,9 @@ buffer on screen before there is any trimming to assert about."
   (set-window-buffer (selected-window) (current-buffer))
   (selected-window))
 
-(defun cooked-tests--glyph-grid (bits width height &optional phase)
+(defun cooked-tests--glyph-grid (bits width height)
   "The pixel bitmap `cooked--render-box-glyph' would pack, for BITS."
-  (let ((bitmap (cooked--bitmap-make width height)))
-    (if (cooked--box-block-p bits)
-        (cooked--box-draw-block bitmap bits (or phase 0))
-      (cooked--box-draw-line bitmap bits))
-    bitmap))
+  (cooked--render-box-glyph-cell bits width height))
 
 (defun cooked-tests--line-bits (up down left right &optional dash)
   "A line descriptor, mirroring `BoxGlyph::line' in src/emu/glyph.rs.
