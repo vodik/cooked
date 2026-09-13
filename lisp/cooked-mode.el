@@ -1346,8 +1346,27 @@ the trigger for `cooked--rescale-deco\='."
     (pcase-let* ((`(,rows . ,cols) (cooked--window-size))
                  (cell (cooked--session-cell-size))
                  (moved (not (equal cooked--last-cell cell)))
-                 (resized (not (equal cooked--last-size (cons rows cols)))))
-      (unless (and (not resized) (not moved))
+                 (resized (not (equal cooked--last-size (cons rows cols))))
+                 ;; A minibuffer opening and closing changes the *rows* every
+                 ;; window on the frame has and nothing else, and every one of
+                 ;; those is a SIGWINCH the child answers.  fish clears and
+                 ;; re-emits its prompt on each one, so an `M-x' cycle -- grow
+                 ;; then shrink -- produces two prompt repaints for a gesture
+                 ;; that never touched this window's width.  A visible flicker
+                 ;; for nothing.
+                 ;;
+                 ;; Only where the *width* is unchanged, which is what makes
+                 ;; this safe rather than a guess: a rewrap is what a child
+                 ;; actually needs to be told about, and the height it will be
+                 ;; told at the next real resize.  And not on the alternate
+                 ;; screen, where a full-screen program has laid itself out
+                 ;; against a row count and would draw into rows that are no
+                 ;; longer there.
+                 (deferred (and (active-minibuffer-window)
+                                (eql cols (cdr cooked--last-size))
+                                (not cooked--alt))))
+      (unless (or (and (not resized) (not moved))
+                  (and deferred (not moved)))
         (setq cooked--last-size (cons rows cols)
               cooked--last-cell cell
               cooked--rows rows

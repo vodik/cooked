@@ -2027,6 +2027,64 @@ neither `window-configuration-change-hook\=' nor
           (funcall change)
           (should (> synced 0)))))))
 
+(ert-deftest cooked-a-minibuffer-does-not-resize-the-child ()
+  "A minibuffer costs every window on the frame a row, and each is a SIGWINCH.
+
+fish clears and re-emits its prompt on every one, so an `M-x\=' cycle -- grow
+then shrink -- produces two prompt repaints for a gesture that never touched
+this window\='s width.  Deferred only where the width is unchanged, which is
+what makes it safe: a rewrap is what a child actually has to be told about, and
+the height reaches it at the next real resize."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    ;; Settle the cell first: `cooked--last-cell' starts nil, so the very first
+    ;; sync counts as the cell having moved and resizes whatever else is true.
+    (cooked--sync-size)
+    (let ((resizes 0))
+      (cl-letf* ((real (symbol-function 'cooked--resize))
+                 ((symbol-function 'cooked--resize)
+                  (lambda (&rest args) (cl-incf resizes) (apply real args))))
+        (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () t)))
+          ;; Same width, one row fewer: the minibuffer taking its line.
+          (setq cooked--last-size (cons (1+ (car cooked--last-size))
+                                        (cdr cooked--last-size))
+                resizes 0)
+          (cooked--sync-size)
+          (should (= resizes 0))
+          ;; A width change is a rewrap and reaches the child regardless.
+          (setq cooked--last-size (cons (car cooked--last-size)
+                                        (+ 7 (cdr cooked--last-size)))
+                resizes 0)
+          (cooked--sync-size)
+          (should (> resizes 0)))
+        ;; And with no minibuffer up, a rows-only change is an ordinary resize.
+        (cl-letf (((symbol-function 'active-minibuffer-window) (lambda () nil)))
+          (setq cooked--last-size (cons (1+ (car cooked--last-size))
+                                        (cdr cooked--last-size))
+                resizes 0)
+          (cooked--sync-size)
+          (should (> resizes 0)))))))
+
+(ert-deftest cooked-the-alt-screen-is-resized-even-under-a-minibuffer ()
+  "A full-screen program has laid itself out against a row count.
+
+Deferring there would leave it drawing into rows that are no longer on the
+screen, which is worse than the repaint the deferral exists to avoid."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (cooked--sync-size)
+    (let ((resizes 0))
+      (cl-letf* ((real (symbol-function 'cooked--resize))
+                 ((symbol-function 'cooked--resize)
+                  (lambda (&rest args) (cl-incf resizes) (apply real args)))
+                 ((symbol-function 'active-minibuffer-window) (lambda () t)))
+        (setq cooked--alt t
+              cooked--last-size (cons (1+ (car cooked--last-size))
+                                      (cdr cooked--last-size))
+              resizes 0)
+        (cooked--sync-size)
+        (should (> resizes 0))))))
+
 (provide 'cooked-tests-render)
 ;;; cooked-tests-render.el ends here
 
