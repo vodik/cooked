@@ -219,10 +219,15 @@ Returns the position the text was inserted at."
       ;; way: `insert' inherits no properties, so a rewritten row reads as
       ;; unfontified whether or not `jit-lock-after-change' ran on it.  See
       ;; `cooked-rewriting-a-row-still-gets-it-scanned'.
-      (let ((inhibit-modification-hooks t))
-        (cooked--do-style-spans (from to face _link styles)
+      (let ((inhibit-modification-hooks t)
+            (links nil))
+        ;; Links are collected on the same walk and applied after the decorations,
+        ;; so a block with none -- nearly every block -- is walked once.
+        (cooked--do-style-spans (from to face link styles)
           (when face
-            (put-text-property (+ start from) (+ start to) 'face face)))
+            (put-text-property (+ start from) (+ start to) 'face face))
+          (when (and link (not unlinked))
+            (push (list from to link) links)))
         ;; The row table and the decoration spans are both in ascending offset
         ;; order, so which row a span fell on is a pointer walked forward once
         ;; across the whole block rather than a search per span.  `rest' is the
@@ -238,8 +243,8 @@ Returns the position the text was inserted at."
                                   (and row (or origin
                                                (+ start (if rest (caar rest) 0))))
                                   (and row (+ row seen))))))
-        (when (and styles (not unlinked))
-          (cooked--render-link-spans start styles)))
+        (when links
+          (cooked--render-link-spans start links)))
       start)))
 
 ;;;; Moving rows the emulator moved

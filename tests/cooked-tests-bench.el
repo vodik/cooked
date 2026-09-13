@@ -343,14 +343,14 @@ since re-basing them onto the assembled text is the one thing
 so a crash there costs the whole run its only machine-independent rows.  It
 once called `cooked-bench--update\=' positionally after that helper had become
 keyword-only, and nothing but a full benchmark run would have said so; the
-byte-compiler does not check keyword arguments.  Running it here is seven
-frames and seven sessions, cheap enough to pin."
+byte-compiler does not check keyword arguments.  Running it here is eight
+frames and eight sessions, cheap enough to pin."
   (let (rows)
     (cl-letf (((symbol-function 'message)
                (lambda (format &rest args)
                  (push (apply #'format-message format args) rows))))
       (cooked-bench-allocation))
-    (should (= (length rows) 7))
+    (should (= (length rows) 8))
     (dolist (row rows)
       (should (string-match-p "\\`  alloc, .* conses +[0-9]+ .* intervals +[0-9]+\\'"
                               row)))))

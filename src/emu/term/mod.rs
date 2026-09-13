@@ -1100,6 +1100,9 @@ struct State {
     force_per_character_print: bool,
     /// The renditions the grids' cells name by id; see [`crate::emu::style`].
     styles: StyleStore,
+    /// The ids [`State::pen`] last gave the pen, with the rendition they were looked up
+    /// for, so a run of characters in one pen looks the pen up once.
+    pen_ids: Option<(Style, Pen)>,
     /// The `OSC 8` hyperlink the child currently has open, if any.
     ///
     /// Written into every cell printed while it is open, beside the pen's rendition, but

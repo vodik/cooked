@@ -566,13 +566,14 @@ impl State {
     ///
     /// Returns whether the sequence belonged to this family.
     fn csi_edit(&mut self, private: Option<u8>, action: char, params: &Params) -> bool {
-        // `bce`: an erase or a scroll leaves the pen's background behind.  See
-        // `Style::erase`.
-        let pen = self.pen();
+        // `bce`: an erase or a scroll leaves the pen's background behind, so each arm that
+        // erases asks for the pen as it writes -- see `Style::erase` -- and the arms that
+        // only change the pen, `SGR` above all, do not pay for one.
         match (private, action) {
             (None, 'J') => {
                 let param = params.arg(0, 0) as u16;
                 if let Some(how) = Erase::from_param(param) {
+                    let pen = self.pen();
                     self.erase_display(how, pen);
                 }
                 if param == 3 {
@@ -581,19 +582,38 @@ impl State {
             }
             (None, 'K') => {
                 if let Some(how) = Erase::from_param(params.arg(0, 0) as u16) {
+                    let pen = self.pen();
                     self.screen_mut().erase_line(how, pen);
                 }
             }
-            (None, 'L') => self.screen_mut().insert_lines(params.arg(0, 1), pen),
-            (None, 'M') => self.screen_mut().delete_lines(params.arg(0, 1), pen),
-            (None, 'P') => self.screen_mut().delete_chars(params.arg(0, 1), pen),
+            (None, 'L') => {
+                let pen = self.pen();
+                self.screen_mut().insert_lines(params.arg(0, 1), pen);
+            }
+            (None, 'M') => {
+                let pen = self.pen();
+                self.screen_mut().delete_lines(params.arg(0, 1), pen);
+            }
+            (None, 'P') => {
+                let pen = self.pen();
+                self.screen_mut().delete_chars(params.arg(0, 1), pen);
+            }
             (None, 'S') => {
-                let n = params.arg(0, 1);
+                let (n, pen) = (params.arg(0, 1), self.pen());
                 self.evicting(|screen| screen.scroll_up(n, pen));
             }
-            (None, 'T') => self.screen_mut().scroll_down(params.arg(0, 1), pen),
-            (None, 'X') => self.screen_mut().erase_chars(params.arg(0, 1), pen),
-            (None, '@') => self.screen_mut().insert_chars(params.arg(0, 1), pen),
+            (None, 'T') => {
+                let pen = self.pen();
+                self.screen_mut().scroll_down(params.arg(0, 1), pen);
+            }
+            (None, 'X') => {
+                let pen = self.pen();
+                self.screen_mut().erase_chars(params.arg(0, 1), pen);
+            }
+            (None, '@') => {
+                let pen = self.pen();
+                self.screen_mut().insert_chars(params.arg(0, 1), pen);
+            }
             (None, 'm') => self.sgr(params),
             // XTPUSHSGR and XTPOPSGR, in both of xterm's spellings: `{`/`}` and the
             // older `p`/`q`.
@@ -609,6 +629,7 @@ impl State {
             (None, 'b') => {
                 if let Some(ch) = self.last_print {
                     let cap = self.screen().width() * self.screen().height();
+                    let pen = self.pen();
                     for _ in 0..params.arg(0, 1).min(cap) {
                         self.evicting(|screen| screen.write(ch, pen));
                     }

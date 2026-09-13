@@ -19,6 +19,7 @@
 //! anything.
 
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use super::cell::{Attrs, Style};
 
@@ -59,7 +60,7 @@ pub(crate) struct StyleStore {
     /// Every slot, by id. A freed slot keeps its old rendition until it is reused, and is
     /// found through `free` rather than by what it holds.
     styles: Vec<Style>,
-    ids: HashMap<Style, StyleId>,
+    ids: HashMap<Style, StyleId, BuildHasherDefault<StyleHasher>>,
     /// Slots available for reuse, most recently freed last.
     free: Vec<StyleId>,
     /// The last two renditions looked up, which covers a writer alternating between its
@@ -79,7 +80,7 @@ pub(crate) struct StyleStore {
 
 impl Default for StyleStore {
     fn default() -> Self {
-        let mut ids = HashMap::new();
+        let mut ids = HashMap::default();
         ids.insert(Style::default(), StyleId::DEFAULT);
         Self {
             styles: vec![Style::default()],
@@ -192,6 +193,54 @@ impl StyleStore {
             .into_iter()
             .map(|id| (id, styles[id.0 as usize]))
             .collect()
+    }
+}
+
+/// A hasher for the rendition map, which is asked on every change of pen.
+///
+/// The default hasher is SipHash, built to resist a child searching for collisions, and
+/// a collision here costs a bucket a longer scan and nothing else: every hit is compared
+/// in full. So this is the same rotate-xor-multiply [`super::mix`] the content stores
+/// use, which a styled log that changes pen several times a line measured as worth a
+/// fifth of its throughput.
+#[derive(Default)]
+pub(crate) struct StyleHasher(u64);
+
+impl Hasher for StyleHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0u8; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.0 = super::mix(self.0, u64::from_le_bytes(word));
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.0 = super::mix(self.0, u64::from(value));
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.0 = super::mix(self.0, u64::from(value));
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.0 = super::mix(self.0, u64::from(value));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = super::mix(self.0, value);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.0 = super::mix(self.0, value as u64);
+    }
+
+    fn write_isize(&mut self, value: isize) {
+        self.0 = super::mix(self.0, value as u64);
     }
 }
 

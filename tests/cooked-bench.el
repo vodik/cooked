@@ -845,7 +845,7 @@ happens before any timing starts; the timed loop only ever applies the result."
             (cooked--resize cooked--session rows cols)
             (cooked--send cooked--session "\n")
             (let ((deadline (+ (float-time) 10))
-                  (tail (replace-regexp-in-string "\e\\[[0-9;]*m" ""
+                  (tail (replace-regexp-in-string "\e\\[[0-9;]*m\\|\e\\][^\a]*\a" ""
                                                   (car (last shown)))))
               (while (and (< (float-time) deadline)
                           (not (string-search tail (buffer-string))))
@@ -876,6 +876,23 @@ spans it carries.  Measured on `tree -C /usr/include\=': 86,107 records over
 The listing mixes depths one to six, continuing and finished levels, and every
 colour `tree\=' emits, so a frame is not one row cached twenty-four times."
   (cooked-bench--core-rows (cooked-bench--tree-lines) count cols))
+
+(defun cooked-bench--linked-rows (count cols)
+  "COUNT rows in which every cell is a link drawn with a coloured underline.
+
+What an editor listing search results or diagnostics draws: each row a link to
+its location, underlined in a colour of its own.  The rows come from the core,
+as `cooked-bench--tree-rows\=' does, so the records carry the links the way
+production sends them."
+  (cooked-bench--core-rows
+   (cl-loop for row from 1 to count
+            collect (format "\e]8;;file:///src/file%03d.rs#%d\a\e[4;58;5;%dm%s\e[0m\e]8;;\a"
+                            row row (1+ (% row 8))
+                            (truncate-string-to-width
+                             (concat (format "src/file%03d.rs:%d: " row row)
+                                     (make-string cols ?x))
+                             (1- cols))))
+   count cols))
 
 (defun cooked-bench--deco-records (rows)
   "How many decoration records ROWS carries.
@@ -1071,6 +1088,8 @@ exactly as they were."
   ;; `cooked-bench--frames' paints the alternate screen, where the URL scan is off
   ;; by default -- see `cooked-detect-links-on-alt-screen'.  What is under test is
   ;; the scan, not which screen it runs on, so it is asked for here.
+  (cooked-bench--frames "per-frame, 24x80 every cell linked and underlined"
+                        (cooked-bench--linked-rows 24 80) 200)
   (let ((cooked-detect-links-on-alt-screen t))
     (cooked-bench--frames "per-frame, 24x80 with a URL per row"
                           (cooked-bench--url-rows 24 80) 200)))
@@ -1529,6 +1548,8 @@ go and why the obvious quarter of them was measured and left alone."
   (cooked-bench--allocation "alloc, 24x80 styled, one cell, as an edit"
                             nil 24 :prime (cooked-bench--styled-rows 24 80)
                             :edits (list (cooked-bench--edit 0 8 9 80 "x")))
+  (cooked-bench--allocation "alloc, 24x80 every cell linked and underlined"
+                            (cooked-bench--linked-rows 24 80))
   (cooked-bench--allocation "alloc, 24x80 with a URL per row"
                             (cooked-bench--url-rows 24 80)))
 
