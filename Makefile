@@ -365,13 +365,23 @@ citations:
 # finishes -- from a `trap', so it happens when the bench fails or is interrupted
 # too, and a stale `.elc' cannot follow you into the next test run.
 #
+# One shell line, with the trap set before the compile, and that is what makes the
+# trap mean anything.  Make runs each recipe line in a shell of its own and stops
+# at the first that fails, so a trap on the last line was never installed when the
+# cargo step failed, or when the compile stopped on a warning after writing half
+# the `.elc' -- which are exactly the runs that leave files behind.  The removal
+# hangs off EXIT alone, and an interrupt is turned into an exit: a handler that
+# merely ran on INT would return to the `&&' chain, and the next step would run
+# with the `.elc' already gone.
+#
 # `lisp-test' stays interpreted.  A readable backtrace is worth more there than
 # speed, and the suite is not measuring anything.
 bench:
-	$(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
-	  -f batch-byte-compile $(wildcard lisp/*.el)
-	cargo test --release --test throughput -- --ignored --nocapture
-	@trap 'rm -f lisp/*.elc' EXIT INT TERM; $(BATCH) -l cooked-bench.el -f cooked-bench
+	trap 'rm -f lisp/*.elc' EXIT; trap 'exit 130' INT TERM; \
+	  $(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
+	    -f batch-byte-compile $(wildcard lisp/*.el) && \
+	  cargo test --release --test throughput -- --ignored --nocapture && \
+	  $(BATCH) -l cooked-bench.el -f cooked-bench
 
 # The same benchmarks, sized to finish inside ten seconds, for the question
 # "did I just make it slower by an order of magnitude" -- which is worth asking
@@ -393,9 +403,9 @@ bench:
 # loads.  The Rust throughput benchmark is left to `bench' -- it is a release
 # build, so it cannot be made to fit in ten seconds by asking for fewer samples.
 bench-quick:
-	$(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
-	  -f batch-byte-compile $(wildcard lisp/*.el)
-	@trap 'rm -f lisp/*.elc' EXIT INT TERM; \
+	trap 'rm -f lisp/*.elc' EXIT; trap 'exit 130' INT TERM; \
+	  $(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
+	    -f batch-byte-compile $(wildcard lisp/*.el) && \
 	  COOKED_BENCH_FORCE=1 $(BATCH) \
 	    --eval '(setq cooked-bench-min-duration 0.02)' \
 	    -l cooked-bench.el -f cooked-bench
