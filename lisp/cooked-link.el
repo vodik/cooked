@@ -148,6 +148,21 @@ Empty by default: this is the seam `cooked-file-link.el' adds itself to for
 local-file linking, and with that file not loaded there is nothing on the hook
 and no second switch that could disagree with its absence.")
 
+(defvar cooked-link-url-handlers nil
+  "Extra `browse-url-handlers\=' entries for while cooked opens a link.
+
+Each is (REGEXP-OR-PREDICATE . FUNCTION), in `browse-url-handlers\=' own
+shape, contributed by the layer that knows the scheme.  The `file:\=' one is
+cooked-osc.el\='s, because opening a file URL safely needs the host the child
+last reported and the TRAMP prefix built from it, and this file is below both.
+
+Appended to the user\='s own list rather than put in front of it, so a
+`file:\=' handler you configured yourself still wins, and put in front of
+`browse-url-default-handlers\=', so cooked\='s answer beats Emacs\=' generic
+one.  Everything else -- `mailto:\=', `man:\=', the web -- falls through to
+those defaults untouched, which is what keeps an `OSC 8\=' destination, a
+detected URL and goto-addr\='s own match opening the same things the same way.")
+
 (defvar cooked-link-scan-functions nil
   "Abnormal hook run over each batch of output that has settled into scrollback.
 
@@ -193,27 +208,47 @@ arrive too late for the row that needed it."
 
 ;;;; Following
 
+(defun cooked-link--with-url-handlers (function &rest args)
+  "Call FUNCTION with ARGS while `cooked-link-url-handlers\=' are in force.
+
+They go between the user\='s `browse-url-handlers\=' and Emacs\=' defaults, and
+are bound around the call rather than set: the list is only right while cooked
+is the one following, so a `browse-url\=' from anywhere else in Emacs gets the
+handlers it would have had with cooked not loaded."
+  (let ((browse-url-handlers
+         (append browse-url-handlers cooked-link-url-handlers)))
+    (apply function args)))
+
+(defun cooked-link-browse (uri)
+  "Open URI the way every kind of cooked link is opened.
+
+One function, so an `OSC 8\=' destination, a URL the scan detected and a match
+goto-addr reads out of the text cannot drift into three different ideas of
+what `file:///x#L3\=' means."
+  (cooked-link--with-url-handlers #'browse-url uri))
+
 (defun cooked--open-link-at-point ()
   "Open whatever at point counts as a link, in the order the sources rank.
 
 An `OSC 8\=' destination first, because the child named it and nothing here has
 to guess; then `cooked-link-follow-functions\=', which is where local files are
 answered when that layer is loaded; then goto-addr\='s own
-`goto-address-at-point\=', which handles both the URL and the mail case.
+`goto-address-at-point\=', which handles both the URL and the mail case.  Every
+branch that ends in a URL ends in `cooked-link-browse\=', goto-addr\='s included.
 
 The shared tail of `cooked-follow-link\=' and `cooked-follow-link-at-point\=',
 which differ only in what they do *before* deciding to open anything."
   (if-let* ((uri (cooked-link-uri)))
-      (browse-url uri)
+      (cooked-link-browse uri)
     (or (cooked--run-seam-until-success 'cooked-link-follow-functions)
         ;; The detected URL as the scan recorded it, before goto-addr is asked to
         ;; read it out of the text again.  For an ordinary match the two agree; for
         ;; one the child wrapped across a row they cannot, because the text at
         ;; point is half of it and `goto-address-at-point' would open that half.
         (when-let* ((url (get-text-property (point) 'cooked-link-url)))
-          (browse-url url)
+          (cooked-link-browse url)
           t)
-        (goto-address-at-point))))
+        (cooked-link--with-url-handlers #'goto-address-at-point))))
 
 (defun cooked-follow-link (&optional event)
   "Open the link at point, or hand EVENT to the child if it owns the input.

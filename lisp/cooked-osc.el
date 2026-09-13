@@ -27,6 +27,7 @@
 (require 'url-util)
 (require 'cooked-util)
 (require 'cooked-state)
+(require 'cooked-link)
 
 (cooked--declare-core)
 
@@ -846,6 +847,31 @@ TRAMP\='s *own* syntax out of a position where it would be read as syntax; see
 `cooked--remote-directory\='.  An IPv6 literal does not match and is declined,
 which costs a rare case a rewrite it would otherwise have got.")
 
+(defun cooked--remote-prefix (host)
+  "The TRAMP prefix, `/METHOD:HOST:\=' or longer, that names HOST, or nil.
+
+Two ways to get one, and `cooked--remote-directory\=' has why each is shaped as
+it is.  The prefix `default-directory\=' already carries is reused whenever it
+names HOST, hops and user and method included.  Otherwise one is built, but
+only for `cooked--host\=' -- the host the child has already announced -- and
+only if that name passes `cooked--host-name-regexp\='.  A HOST that is neither
+the connection in use nor the announced host gets nil, so no caller can make
+Emacs dial a machine by passing a name through here."
+  (or (and (cooked--same-host-p (file-remote-p default-directory 'host) host)
+           (when-let* ((local (file-remote-p default-directory 'localname)))
+             (substring default-directory
+                        0 (- (length default-directory) (length local)))))
+      (and (cooked--same-host-p host cooked--host)
+           (string-match-p cooked--host-name-regexp cooked--host)
+           ;; Only here, and only on this branch: reading
+           ;; `tramp-default-method' is the one thing that needs the
+           ;; library, and an inherited prefix already carries a method.
+           (progn
+             (require 'tramp)
+             (format "/%s:%s:"
+                     (or cooked-tramp-default-method tramp-default-method)
+                     cooked--host)))))
+
 (defun cooked--remote-directory (path)
   "PATH on the host the child last reported, as a TRAMP directory name, or nil.
 
@@ -909,21 +935,7 @@ old host\='s connection -- the same class of wrong-file error this whole handler
 exists to avoid, arrived at from the other side.  `cooked--same-host-p\=' is the
 comparison, shared with `cooked--foreign-host-p\=' so that a short name from zsh
 and a fully qualified one in the prefix agree about being one machine."
-  (when-let* ((prefix
-               (or (and (cooked--same-host-p (file-remote-p default-directory 'host)
-                                             cooked--host)
-                        (when-let* ((local (file-remote-p default-directory 'localname)))
-                          (substring default-directory
-                                     0 (- (length default-directory) (length local)))))
-                   (and (string-match-p cooked--host-name-regexp cooked--host)
-                        ;; Only here, and only on this branch: reading
-                        ;; `tramp-default-method' is the one thing that needs the
-                        ;; library, and an inherited prefix already carries a method.
-                        (progn
-                          (require 'tramp)
-                          (format "/%s:%s:"
-                                  (or cooked-tramp-default-method tramp-default-method)
-                                  cooked--host))))))
+  (when-let* ((prefix (cooked--remote-prefix cooked--host)))
     ;; The trailing slash is appended as a string operation, and
     ;; `file-name-as-directory' is not used on either half, because both would
     ;; dispatch to TRAMP.  On the finished name that is the same reassembly
@@ -981,6 +993,134 @@ know about both kinds of move, not just the ones that touch
           (when (file-directory-p dir)
             (setq default-directory dir))))
       (cooked--update-buffer-name))))
+
+;;;; file: URLs, from OSC 8 and from the text
+
+;; OSC 7 and a file hyperlink are the same URL with different jobs.  One says
+;; where the shell is and the other names a file to open, but the host half means
+;; the same thing in both, and so does the danger: the path half is a string the
+;; child chose, and under TRAMP a path can be a connection.  So a link is opened
+;; through the same two checks a `cd' is -- `cooked--local-name' on this machine,
+;; `cooked--remote-prefix' on another -- and it lives here, beside them, rather
+;; than in cooked-link.el, which is below the state both of them read.
+;;
+;; Emacs' own handler gets neither.  `browse-url-emacs' ignores the host, so
+;; `ls --hyperlink' over ssh opens the same path on this machine, and it hands
+;; the path to `find-file' as it stands, so `file:///ssh:elsewhere:/tmp' dials
+;; elsewhere.  It also ignores the line, which is most of why a tool bothers to
+;; link a file at all.
+
+(defcustom cooked-file-url-display #'find-file-other-window
+  "How a followed `file:\=' link is opened.
+
+`find-file-other-window\=' by default, for the reason
+`cooked-file-link-display\=' gives: the terminal is usually the window you are
+in."
+  :type 'function
+  :group 'cooked)
+
+(defun cooked--file-url-position (spec)
+  "LINE and COLUMN from SPEC, a `file:\=' URL\='s fragment, as a list, or nil.
+
+The fragment is where the tools that put a line in a file link disagree most.
+`L12\=' is GitHub\='s and what most editors\=' \"copy link\" produce, a bare
+`12\=' is kitty\='s and ripgrep\='s `kitty\=' format, and a column rides after a
+`C\=', a `:\=' or a `,\=' depending on who wrote it.  A range, `L12-L20\=',
+opens at its start.
+Anything else is a fragment that means something to somebody else and is
+ignored rather than misread as a line."
+  (when (and spec
+             (string-match
+              "\\`L?\\([0-9]+\\)\\(?:[C:,]\\([0-9]+\\)\\)?\\(?:-.*\\)?\\'" spec))
+    (list (string-to-number (match-string 1 spec))
+          (when (match-string 2 spec)
+            (string-to-number (match-string 2 spec))))))
+
+(defun cooked--file-url-split (path local)
+  "PATH less a trailing `:LINE\=' or `:LINE:COL\=', as (PATH LINE COL).
+
+The other place a line turns up: delta\='s and several build tools\=' link
+formats append it to the path.  A file can end in `:12\=' too, so on this
+machine -- LOCAL non-nil -- a PATH that exists as it stands is kept whole.
+Another machine is not asked, since asking is the connection; there the suffix
+is read as a line, and a file really named that way is the rare case that pays."
+  (if (or (not (string-match
+                "\\`\\(.*?\\):\\([0-9]+\\)\\(?::\\([0-9]+\\)\\)?\\'" path))
+          (and local (file-exists-p path)))
+      (list path nil nil)
+    (list (match-string 1 path)
+          (string-to-number (match-string 2 path))
+          (when (match-string 3 path)
+            (string-to-number (match-string 3 path))))))
+
+(defun cooked--file-url-target (url)
+  "The (FILE LINE COL) a `file:\=' URL names, or nil having refused it.
+
+Both authority forms are accepted: `file:///x\=' and `file://host/x\=' are
+what `ls --hyperlink\=' and ripgrep send, and `file:/x\=' is the short spelling
+RFC 8089 allows.  The fragment is split off before the path is decoded, so a
+`#\=' that is part of a file name -- sent as `%23\=' -- stays in the name.
+
+A local host has its path put through `cooked--local-name\=' before anything so
+much as looks at it.  Another host is opened only through
+`cooked--remote-prefix\=', which answers for the connection already in use or
+the host the child has announced, and for nothing else: a link naming a third
+machine is refused, because following it would be the byte stream choosing
+where Emacs connects.  The path is appended after that complete prefix, where
+TRAMP has stopped reading syntax.  `cooked-remote-directory\=' set to nil
+refuses every remote link, as it refuses every remote `cd\='."
+  (when (string-match "\\`\\([^#]*\\)\\(?:#\\(.*\\)\\)?\\'" url)
+    (let* ((fragment (match-string 2 url))
+           (base (match-string 1 url))
+           (parsed (cooked--parse-file-url
+                    (if (string-match "\\`file:\\(/[^/].*\\)\\'" base)
+                        (concat "file://" (match-string 1 base))
+                      base))))
+      (pcase-let ((`(,host . ,path) parsed))
+        (cond
+         ((not path)
+          (message "cooked: refused `%s' (not a file URL cooked can read)" url)
+          nil)
+         ((cooked--local-host-p host)
+          (when-let* ((name (cooked--local-name path)))
+            (pcase-let ((`(,file ,line ,col) (cooked--file-url-split name t)))
+              (if-let* ((position (cooked--file-url-position fragment)))
+                  (cons name position)
+                (list file line col)))))
+         ((not (eq cooked-remote-directory 'tramp))
+          (message "cooked: refused `%s' (remote file links are off)" url)
+          nil)
+         ((not (and (string-match-p cooked--host-name-regexp host)
+                    (cooked--remote-prefix host)))
+          (message "cooked: refused `%s' (%s is not this terminal's host)"
+                   url host)
+          nil)
+         (t
+          (let ((prefix (cooked--remote-prefix host)))
+            (pcase-let ((`(,file ,line ,col) (cooked--file-url-split path nil)))
+              (if-let* ((position (cooked--file-url-position fragment)))
+                  (cons (concat prefix path) position)
+                (list (concat prefix file) line col))))))))))
+
+(defun cooked--browse-file-url (url &rest _)
+  "Open the file URL names, at its line if it names one.
+
+The `file:\=' entry in `cooked-link-url-handlers\='.  Every `file:\=' URL is
+claimed, the ones refused included: a refusal that fell through would reach
+`browse-url-emacs\=', which opens exactly what this declined."
+  (pcase-let ((`(,file ,line ,col) (cooked--file-url-target url)))
+    (when file
+      (funcall cooked-file-url-display file)
+      (when line
+        (goto-char (point-min))
+        (forward-line (1- line))
+        (when col
+          (move-to-column (max 0 (1- col))))))))
+
+(unless (assoc "\\`file:" cooked-link-url-handlers)
+  (setq cooked-link-url-handlers
+        (append cooked-link-url-handlers
+                (list (cons "\\`file:" #'cooked--browse-file-url)))))
 
 (provide 'cooked-osc)
 ;;; cooked-osc.el ends here

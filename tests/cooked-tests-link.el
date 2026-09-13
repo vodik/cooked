@@ -251,6 +251,143 @@ cursor can have moved, and puts the row back on jit-lock\='s unfontified list."
           (cooked-follow-link nil))
         (should browsed)))))
 
+;;;; file: URLs
+
+(defmacro cooked-tests--with-file-url-display (var &rest body)
+  "Run BODY with `cooked-file-url-display' recording what it opens in VAR.
+The file is visited without a window, and its buffer made current, so BODY can
+ask where point landed."
+  (declare (indent 1))
+  `(let ((,var nil))
+     (cl-letf (((symbol-value 'cooked-file-url-display)
+                (lambda (file)
+                  (setq ,var file)
+                  (set-buffer (if (file-remote-p file)
+                                  (get-buffer-create " *remote visit*")
+                                (find-file-noselect file))))))
+       ,@body)))
+
+(ert-deftest cooked-osc-8-file-link-opens-at-the-line-it-names ()
+  "What the change was for: a file hyperlink with a line in it lands on the line.
+
+`browse-url-emacs\=' opens the file and drops the fragment, so `#L3\=' used to
+arrive at the top of the file.  End to end, from the escape sequence, so the
+OSC 8 branch of `cooked--open-link-at-point\=' is what is exercised."
+  (let ((file (make-temp-file "cooked-link" nil ".txt" "one\ntwo\nthree\nfour\n")))
+    (unwind-protect
+        (cooked-tests--with-session
+            `("/bin/sh" "-c"
+              ,(format "printf '\\033]8;;file://%s#L3\\033\\\\here\\033]8;;\\033\\\\\\n'; sleep 5"
+                       file))
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "here" (cooked-tests--text)))))
+          (goto-char (cooked-tests--link-at "here"))
+          (cooked-tests--with-file-url-display opened
+            (save-current-buffer
+              (cooked--open-link-at-point)
+              (should (equal opened file))
+              (should (= (line-number-at-pos) 3))
+              (kill-buffer))))
+      (delete-file file))))
+
+(ert-deftest cooked-file-url-reads-a-line-wherever-the-tools-put-it ()
+  "GitHub's `#L12\=', kitty's `#12\=', a column after `C\=' or `:\=', a range, the
+short `file:/x\=' spelling, and delta's `:LINE:COL\=' on the end of the path."
+  (let ((dir (make-temp-file "cooked-link" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((plain (expand-file-name "plain.rs" dir))
+                (colon (expand-file-name "odd:12" dir)))
+            (should (equal (cooked--file-url-target (concat "file://" plain "#L12"))
+                           (list plain 12 nil)))
+            (should (equal (cooked--file-url-target (concat "file://" plain "#12"))
+                           (list plain 12 nil)))
+            (should (equal (cooked--file-url-target (concat "file://" plain "#L4C9"))
+                           (list plain 4 9)))
+            (should (equal (cooked--file-url-target (concat "file://" plain "#7:2"))
+                           (list plain 7 2)))
+            (should (equal (cooked--file-url-target (concat "file://" plain "#L5-L9"))
+                           (list plain 5 nil)))
+            (should (equal (cooked--file-url-target (concat "file:" plain))
+                           (list plain nil nil)))
+            (should (equal (cooked--file-url-target
+                            (concat "file://localhost" plain ":30:4"))
+                           (list plain 30 4)))
+            ;; A fragment that is not a line is somebody else's, not a line.
+            (should (equal (cooked--file-url-target (concat "file://" plain "#intro"))
+                           (list plain nil nil)))
+            ;; A `#' in the name arrives encoded and must stay in the name.
+            (should (equal (cooked--file-url-target
+                            (concat "file://" dir "/a%23b.txt#L2"))
+                           (list (concat dir "/a#b.txt") 2 nil)))
+            ;; A file that really ends in `:12' is kept whole on this machine,
+            ;; where asking is free.
+            (write-region "" nil colon)
+            (should (equal (cooked--file-url-target (concat "file://" colon))
+                           (list colon nil nil)))))
+      (delete-directory dir t))))
+
+(ert-deftest cooked-file-url-refuses-a-tramp-name-in-the-path ()
+  "The hole `browse-url-emacs\=' leaves: it hands the path to `find-file\=' as it
+stands, so a link to `file:///ssh:evil.example:/etc\=' -- which `cat\=' of a
+hostile file can print -- would dial out when clicked.  Refused before anything
+looks at it, and refused *by the handler*, so it cannot fall through to Emacs'
+own and be opened there instead."
+  (with-temp-buffer
+    (cooked-tests--with-file-url-display opened
+      (cl-letf (((symbol-function 'browse-url-emacs)
+                 (lambda (url &rest _) (setq opened (list 'emacs url)))))
+        (cooked-link-browse "file:///ssh:evil.example:/etc/motd")
+        (should-not opened)
+        (cooked-link-browse "file:///sudo::/etc/shadow#L1")
+        (should-not opened)))))
+
+(ert-deftest cooked-file-url-on-another-host-opens-over-tramp-or-not-at-all ()
+  "`ls --hyperlink\=' over ssh names the far machine, and Emacs' handler opens the
+same path here, which is a real file and the wrong one.  The host the child
+announced over OSC 7 maps to TRAMP exactly as a `cd\=' does; a host the child
+never announced is refused, since following it would let the byte stream choose
+where Emacs connects; and `cooked-remote-directory\=' nil turns the lot off."
+  (with-temp-buffer
+    (setq-local cooked--host "other.example")
+    (let ((default-directory "/tmp/")
+          (cooked-tramp-default-method "ssh")
+          (cooked-remote-directory 'tramp))
+      (should (equal (cooked--file-url-target "file://other.example/srv/app/main.rs#L8")
+                     (list "/ssh:other.example:/srv/app/main.rs" 8 nil)))
+      ;; The far `HOST' is often the short name, and it is the same machine.
+      (should (equal (cooked--file-url-target "file://other/srv/app/main.rs:8")
+                     (list "/ssh:other.example:/srv/app/main.rs" 8 nil)))
+      ;; A machine nobody announced.
+      (should-not (cooked--file-url-target "file://evil.example/etc/motd"))
+      ;; TRAMP punctuation in the authority, the same refusal OSC 7 makes.
+      (should-not (cooked--file-url-target "file://a%7Csudo%3A/etc/shadow"))
+      (let ((cooked-remote-directory nil))
+        (should-not (cooked--file-url-target "file://other.example/srv/app/main.rs"))))
+    ;; The connection already in use is reused, hops and user included, even
+    ;; with no OSC 7 to have announced anything.
+    (setq-local cooked--host nil)
+    (let ((default-directory "/ssh:jump.example|ssh:me@other.example:/tmp/"))
+      (should (equal (cooked--file-url-target "file://other.example/srv/x.rs#3")
+                     (list "/ssh:jump.example|ssh:me@other.example:/srv/x.rs"
+                           3 nil))))))
+
+(ert-deftest cooked-link-browse-leaves-other-schemes-and-your-handlers-alone ()
+  "`cooked-link-url-handlers\=' is spliced *after* the user's own list, so a
+`file:\=' handler you configured still wins; and nothing but `file:\=' is
+touched, so `mailto:\=' reaches `browse-url-mailto-function\=' as it always did."
+  (with-temp-buffer
+    (let ((mailed nil) (mine nil))
+      (let ((browse-url-mailto-function (lambda (url &rest _) (setq mailed url))))
+        (cooked-link-browse "mailto:someone@example.com")
+        (should (equal mailed "mailto:someone@example.com")))
+      (let ((browse-url-handlers
+             (list (cons "\\`file:" (lambda (url &rest _) (setq mine url))))))
+        (cooked-tests--with-file-url-display opened
+          (cooked-link-browse "file:///tmp/x#L2")
+          (should (equal mine "file:///tmp/x#L2"))
+          (should-not opened))))))
+
 (ert-deftest cooked-a-link-follows-when-no-layer-claims-the-input ()
   "The base layer alone must not decide who owns a click.
 

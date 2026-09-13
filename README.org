@@ -360,7 +360,10 @@ is an entry in an alist, not a change to the native core.
 *Links.* OSC 8 hyperlinks are first-class — the core attaches a link id to the covered
 cells and carries it through wraps, rewraps and scrollback eviction. Text that merely
 /looks/ like a URL is linkified by ~goto-address~. With =cooked-file-link= loaded, file
-names in output become links too.
+names in output become links too. Every kind opens through ~browse-url~, where a
+=file:= link opens in Emacs at the line it names (=#L12=, =#12=, =:12:3=). A link from
+another host opens over TRAMP if that host is the one the shell reported with OSC 7,
+and is refused otherwise.
 
 *Box drawing.* Box-drawing and block characters are rasterized to XBM at the current
 cell size rather than left to the font, so borders in =htop=, =ranger= or =fzf= tile
