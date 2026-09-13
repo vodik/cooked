@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
-use super::cell::{Attrs, Style};
+use super::cell::{Attrs, Color, Style};
 
 /// The name of one rendition in a [`StyleStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
@@ -60,13 +60,13 @@ pub(crate) struct StyleStore {
     /// Every slot, by id. A freed slot keeps its old rendition until it is reused, and is
     /// found through `free` rather than by what it holds.
     styles: Vec<Style>,
-    ids: HashMap<Style, StyleId, BuildHasherDefault<StyleHasher>>,
+    ids: HashMap<StyleKey, StyleId, BuildHasherDefault<StyleHasher>>,
     /// Slots available for reuse, most recently freed last.
     free: Vec<StyleId>,
     /// The last two renditions looked up, which covers a writer alternating between its
     /// pen and the blank an erase leaves, so the hash map is consulted only when the pen
     /// actually changes.
-    recent: [(Style, StyleId); 2],
+    recent: [(StyleKey, StyleId); 2],
     /// For each slot, the bits of its rendition that change the font: bold, faint and
     /// italic. See [`StyleStore::font_bits`].
     fonts: Vec<u8>,
@@ -81,13 +81,13 @@ pub(crate) struct StyleStore {
 impl Default for StyleStore {
     fn default() -> Self {
         let mut ids = HashMap::default();
-        ids.insert(Style::default(), StyleId::DEFAULT);
+        ids.insert(StyleKey::of(Style::default()), StyleId::DEFAULT);
         Self {
             styles: vec![Style::default()],
             fonts: vec![0],
             ids,
             free: Vec::new(),
-            recent: [(Style::default(), StyleId::DEFAULT); 2],
+            recent: [(StyleKey::DEFAULT, StyleId::DEFAULT); 2],
             unsent: Vec::new(),
             limit: STYLE_TABLE_CAPACITY,
         }
@@ -97,15 +97,16 @@ impl Default for StyleStore {
 impl StyleStore {
     /// The id STYLE already has, if it has one.
     pub(crate) fn lookup(&mut self, style: Style) -> Option<StyleId> {
-        if self.recent[0].0 == style {
+        let key = StyleKey::of(style);
+        if self.recent[0].0 == key {
             return Some(self.recent[0].1);
         }
-        if self.recent[1].0 == style {
+        if self.recent[1].0 == key {
             self.recent.swap(0, 1);
             return Some(self.recent[0].1);
         }
-        let id = *self.ids.get(&style)?;
-        self.recent = [(style, id), self.recent[0]];
+        let id = *self.ids.get(&key)?;
+        self.recent = [(key, id), self.recent[0]];
         Some(id)
     }
 
@@ -129,9 +130,10 @@ impl StyleStore {
                 id
             }
         };
-        self.ids.insert(style, id);
+        let key = StyleKey::of(style);
+        self.ids.insert(key, id);
         self.unsent.push(id);
-        self.recent = [(style, id), self.recent[0]];
+        self.recent = [(key, id), self.recent[0]];
         id
     }
 
@@ -178,7 +180,7 @@ impl StyleStore {
         );
         // A freed id that was never announced does not need to be: nothing names it.
         self.unsent.retain(|id| live[id.0 as usize]);
-        self.recent = [(Style::default(), StyleId::DEFAULT); 2];
+        self.recent = [(StyleKey::DEFAULT, StyleId::DEFAULT); 2];
         // Half full after a collection is the point to grow rather than collect again on
         // the next few renditions, which would make a screenful of distinct colours
         // quadratic.
@@ -193,6 +195,35 @@ impl StyleStore {
             .into_iter()
             .map(|id| (id, styles[id.0 as usize]))
             .collect()
+    }
+}
+
+/// A rendition packed into two machine words, which is what the store compares and hashes.
+///
+/// [`Style`]'s derived comparison walks three [`Color`] enums tag by tag, and the store
+/// compares a rendition against its recent entries on every change of pen: a log that
+/// alternates `SGR 31` and `SGR 0` on every line does it twice a line. Packed, the same
+/// question is two integer compares, and the hash is two mixes instead of a walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct StyleKey(u64, u64);
+
+impl StyleKey {
+    const DEFAULT: Self = Self(0, 0);
+
+    /// Each colour is a tag in its top byte (0 default, 1 indexed, 2 direct) and its value
+    /// below, so the default rendition packs to zero and no two renditions share a key.
+    fn of(style: Style) -> Self {
+        const fn color(c: Color) -> u64 {
+            match c {
+                Color::Default => 0,
+                Color::Indexed(i) => (1 << 24) | i as u64,
+                Color::Rgb(r, g, b) => (2 << 24) | (r as u64) << 16 | (g as u64) << 8 | b as u64,
+            }
+        }
+        Self(
+            color(style.fg) << 32 | color(style.bg),
+            color(style.underline) << 32 | u64::from(style.attrs.bits()),
+        )
     }
 }
 
