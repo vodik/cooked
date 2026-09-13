@@ -282,10 +282,18 @@ lint: compile checkdoc citations
 # time here, and `\z' is not an escape Elisp strings know -- it collapsed to the
 # regexp `[.]elz', which matches nothing, so this target compiled no files and
 # reported success for years.  A gate that cannot fail is worse than no gate.
+#
+# One Emacs per file, and that is the half of the gate that checks the layering.
+# Compiled in one batch, every file loads the files it requires and leaves their
+# definitions behind for the files compiled after it, so a function called
+# without being required reads as defined as long as some earlier file happened
+# to load its home.  In a fresh Emacs a missing `require' is a warning, and so an
+# error.
 compile:
-	$(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
-	  -f batch-byte-compile $(wildcard lisp/*.el)
-	@rm -f lisp/*.elc
+	@status=0; for f in $(wildcard lisp/*.el); do \
+	  $(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
+	    -f batch-byte-compile "$$f" || status=1; \
+	done; rm -f lisp/*.elc; exit $$status
 
 # Advisory rather than gating.  Three of checkdoc's rules disagree with this tree
 # on purpose: the `cooked: ' prefix every message carries, evil's own lowercase
