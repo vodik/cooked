@@ -1626,6 +1626,85 @@ drain and cancel out before the buffer has seen the first."
       (should (equal (car (alist-get 'default face-remapping-alist))
                      '(:background "#00ff00"))))))
 
+(defun cooked-tests--drawn-colors (face)
+  "The foreground and background Emacs paints FACE in, as a list of two.
+
+Emacs's own rule, written out because batch mode realizes no faces to ask: a
+colour the plist does not name comes from `default' as this buffer remaps it,
+the first relative spec naming the attribute winning, and `:inverse-video'
+swaps the pair only after that.  The order is the load-bearing part, and it was
+read off the pixels of a headless pgtk frame rather than assumed: reversed
+default-coloured text there followed an OSC 11 remap, and under the three
+DECSCNM remaps came out in normal video."
+  (let ((specs (alist-get 'default face-remapping-alist)))
+    (cl-flet ((resolve (property kind)
+                (or (plist-get face property)
+                    (seq-some (lambda (spec)
+                                (and (consp spec) (plist-get spec property)))
+                              specs)
+                    (cooked--default-color kind))))
+      (let ((foreground (resolve :foreground 'foreground))
+            (background (resolve :background 'background)))
+        (if (plist-get face :inverse-video)
+            (list background foreground)
+          (list foreground background))))))
+
+(ert-deftest cooked-reverse-video-swaps-default-colors-too ()
+  "SGR 7 on text in the default colours draws it reversed, as `smso' promises.
+
+The face used to swap two nils and name no colour at all, so `less\=''s status
+line and every other standout in the default pair came out as plain text.  A
+cell with colours of its own still swaps them; a default one follows an OSC 11
+set; and under DECSCNM, which has already reversed `default', it reads as
+normal video again."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let* ((cooked-allow-color-set t)
+           (cooked--osc-bell-terminated t)
+           (foreground (cooked--default-color 'foreground))
+           (background (cooked--default-color 'background))
+           (reverse (cooked--face nil nil cooked--attr-reverse)))
+      (should (equal (cooked-tests--drawn-colors reverse)
+                     (list background foreground)))
+      ;; Explicit colours: red on blue becomes blue on red.
+      (should (equal (cooked-tests--drawn-colors
+                      (cooked--face 1 4 cooked--attr-reverse))
+                     (list (cooked--color 4) (cooked--color 1))))
+      ;; One of each: the default half is the buffer's, not a hole.
+      (should (equal (cooked-tests--drawn-colors
+                      (cooked--face 1 nil cooked--attr-reverse))
+                     (list background (cooked--color 1))))
+      ;; Concealed and reversed is still concealed: the glyph takes the colour
+      ;; the swap put behind it.
+      (let ((drawn (cooked-tests--drawn-colors
+                    (cooked--face 1 4 (logior cooked--attr-reverse
+                                              cooked--attr-conceal)))))
+        (should (equal (car drawn) (cadr drawn)))
+        (should (equal (cadr drawn) (cooked--color 1))))
+      (let ((cooked--osc-code 11))
+        (cooked--osc-color '("#ff0000")))
+      (should (equal (cooked-tests--drawn-colors
+                      (cooked--face nil nil cooked--attr-reverse))
+                     (list "#ff0000" foreground)))
+      (cooked--set-reverse-screen t)
+      (should (equal (cooked-tests--drawn-colors
+                      (cooked--face nil nil cooked--attr-reverse))
+                     (list foreground "#ff0000")))
+      ;; And the plain text beside it is the one that is reversed now.
+      (should (equal (cooked-tests--drawn-colors (cooked--face nil nil 0))
+                     (list "#ff0000" foreground))))))
+
+(ert-deftest cooked-reverse-video-from-a-child-reaches-the-buffer ()
+  "`printf \\='\\e[7mX\\e[m\\=' leaves X in a face that draws reversed."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'a\\033[7mX\\033[mb\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "aXb" (cooked-tests--text)))))
+    (goto-char (point-min))
+    (search-forward "aXb")
+    (should (equal (cooked-tests--drawn-colors
+                    (get-text-property (- (point) 2) 'face))
+                   (list (cooked--default-color 'background)
+                         (cooked--default-color 'foreground))))))
+
 (ert-deftest cooked-color-scheme-follows-the-rendered-background ()
   "Read from the same background OSC 11 answers with, so a child that reacts to a
 scheme change by querying the background cannot be told two different things."

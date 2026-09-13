@@ -351,22 +351,40 @@ the key being computed in one place, here."
         (cooked--face-build fg bg attrs ul)))))
 
 (defun cooked--face-build (fg bg attrs ul)
-  "Build the face plist `cooked--face' memoizes for FG, BG, ATTRS and UL."
+  "Build the face plist `cooked--face' memoizes for FG, BG, ATTRS and UL.
+
+Reverse video is `:inverse-video', with the colours left where the child put
+them, and not a swap done here.  A swap can only exchange what it is given, and
+for text in the default colours that is two nils: the face named no colour at
+all, so SGR 7 drew plain text and `smso' stood out from nothing.  Resolving the
+nils here instead would bake in the colours of the moment, and a face in
+`cooked--face-cache' outlives them -- an OSC 11 set, a theme change or DECSCNM
+would each leave reversed text in the old pair.  Emacs swaps an inverse face
+after merging it with `default' as this buffer remaps it, so the one attribute
+follows all three with nothing to invalidate.  Under DECSCNM that makes
+reversed text read as normal video, which is what xterm does.  This was checked
+by its pixels in a headless pgtk frame, and a cell with colours of its own
+still comes out with the two exchanged."
   (let* ((reverse (cooked--attr-p attrs cooked--attr-reverse))
-         (fg* (cooked--color (if reverse bg fg)))
-         (bg* (cooked--color (if reverse fg bg)))
+         (fg* (cooked--color fg))
+         (bg* (cooked--color bg))
          (face nil))
     (when fg* (setq face (plist-put face :foreground fg*)))
     (when bg* (setq face (plist-put face :background bg*)))
+    (when reverse (setq face (plist-put face :inverse-video t)))
     (pcase-dolist (`(,bit ,property ,value) cooked--attr-face-properties)
       (when (cooked--attr-p attrs bit)
         (setq face (plist-put face property value))))
     (when (cooked--attr-p attrs cooked--attr-underline)
       (setq face (plist-put face :underline (cooked--underline-spec attrs ul))))
-    ;; Last, and after the foreground it overrides: concealed text is drawn in the
-    ;; background colour, which is only known once reverse video has been settled.
+    ;; Last, and after the colour it overrides: concealed text is drawn in the
+    ;; colour it sits on.  Which property that is depends on reverse video, since
+    ;; an inverse face paints its `:foreground' as the background -- so a
+    ;; reversed cell has its `:background' matched to its foreground instead.
     (when (cooked--attr-p attrs cooked--attr-conceal)
-      (setq face (plist-put face :foreground (or bg* (face-background 'default))))
+      (setq face (if reverse
+                     (plist-put face :background (or fg* (face-foreground 'default)))
+                   (plist-put face :foreground (or bg* (face-background 'default)))))
       ;; And it outranks blink.  `cooked-blink' is a visible mark on the cell, and
       ;; on a concealed cell that mark is the one thing SGR 8 was asked to keep
       ;; quiet: a box drawn round apparently blank text says there is text
