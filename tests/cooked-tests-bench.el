@@ -115,48 +115,43 @@ the one call under test."
           (setq pos (1+ pos))))
       (should (= decorated 40)))))
 
-(ert-deftest cooked-bench-tree-rows-carry-a-record-per-run-and-decorate-each-one ()
-  "The `tree\=' fixture is the opposite of the border one, and its whole value is
-in being so: `cooked-bench--box-rows\=' is one record covering eighty cells,
-where a `tree\=' row is a record per nesting level covering one cell each.  A
-fixture that quietly coalesced them -- by padding with an ordinary space that the
-core would not have separated runs on, say -- would look like a second border
-row and measure nothing new, which is exactly the silent staleness this file
-exists to catch.
+(ert-deftest cooked-bench-tree-rows-take-the-path-real-tree-output-takes ()
+  "The `tree\=' fixture is what the core sends for a `tree -C\=' listing.
 
-So both halves are asserted.  The records are counted against the depth, and
-then the fixture is applied and the decorations counted in the buffer, because a
-record naming a cell it does not cover is the failure a byte-level check cannot
-see -- the same argument
-`cooked-bench-box-rows-decorate-every-cell-they-claim\=' makes, and `cooked-debug\='
-is bound here for the same reason it is bound there."
-  ;; Depth six is five verticals, a tee and a two-cell horizontal run: seven
-  ;; records, against the border row's one.
-  (pcase-let* ((`((,_index . (,_text ,_styles ,spans)))
-                (cooked-bench--run (list (cooked-bench--tree-row 6 80)))))
-    (should (= (length spans) 7))
-    ;; Every one is a run of its own, and the horizontals are the only record
-    ;; covering more than a single cell.
-    (should (equal (mapcar (lambda (span)
-                             (cooked--u16 (cdr (cadr span)) 2))
-                           spans)
-                   '(1 1 1 1 1 1 2))))
-  (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
-    (let ((cooked-debug t))
-      (cooked--apply (cooked-bench--update
-                      (cooked-bench--run (list (cooked-bench--tree-row 6 40))))))
-    (let ((decorated 0)
-          (pos (point-min)))
+It used to be written by hand, with its NO-BREAK SPACE padding outside every
+glyph record, so each row was flagged nil and measured the width guard\='s slow
+path -- a path real `tree\=' output never takes, because the core absorbs the
+blanks between two glyph runs into the run.  Now the rows come from the
+emulator, and this pins the two facts that make the fixture honest.
+
+Every row drawn with box glyphs is flagged `glyph\=' and carries one decoration
+record, since a vertical, its padding and the branch after it are one run.  And
+once applied, every box-drawing character is decorated while the names beside
+them are not, which is the check a byte-level assertion cannot make."
+  (pcase-let* ((rows (cooked-bench--tree-rows 24 80))
+               (`((,first . (,text ,_styles ,decos ,_links ,table))) rows)
+               (lines (split-string text "\n")))
+    (should (= first 0))
+    (should (= (length table) 24))
+    (cl-loop for line in lines
+             for row in table
+             do (should (eq (nth 2 row)
+                            (if (string-match-p "[─-╿]" line) 'glyph t))))
+    (should (= (length decos)
+               (cl-count-if (lambda (line) (string-match-p "[─-╿]" line))
+                            lines)))
+    (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
+      (cooked-tests--settle-briefly)
+      (let ((cooked-debug t))
+        (cooked--apply (cooked-bench--update rows :alt t)))
       (save-restriction
         (widen)
-        (while (< pos (point-max))
-          (when (get-text-property pos 'cooked-deco)
-            (setq decorated (1+ decorated)))
-          (setq pos (1+ pos))))
-      ;; Five verticals, a tee and two horizontals: eight decorated cells, and
-      ;; the NO-BREAK SPACEs and the filename between them undecorated.
-      (should (= decorated 8)))))
+        (goto-char (point-min))
+        (while (re-search-forward "[─-╿]" nil t)
+          (should (get-text-property (match-beginning 0) 'cooked-deco)))
+        (goto-char (point-min))
+        (while (re-search-forward "[a-z]" nil t)
+          (should-not (get-text-property (match-beginning 0) 'cooked-deco)))))))
 
 (ert-deftest cooked-bench-image-rows-are-twelve-bytes-a-cell-where-the-reader-looks ()
   "The image fixture is the third copy of a wire format again, and the one the
@@ -311,8 +306,8 @@ So the table is asserted against the *text*, row by row: START must be where
 that row actually begins, WIDTH its cell count, and UNIFORM t for a row of
 one-byte characters, `glyph\=' for one whose multi-byte characters all sit in
 box-glyph records, and nil otherwise -- which makes the box row `glyph\=' and
-the tree row, whose padding lies outside its records, nil.  The style and
-decoration offsets are checked to land inside the row they were written for,
+so too the tree listing\='s rows, whose padding the core absorbs into their
+glyph runs.  The style and decoration offsets are checked to land inside the row they were written for,
 since re-basing them onto the assembled text is the one thing
 `cooked-bench--run\=' does that a per-row fixture never had to."
   (dolist (rows (list (cooked-bench--plain-rows 2 80)

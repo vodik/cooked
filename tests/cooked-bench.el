@@ -675,80 +675,129 @@ single record the encoding exists to produce."
      (cl-loop repeat count collect (list text nil (list (list 0 deco)) 'glyph)))))
 
 
-(defconst cooked-bench--tree-indent
-  (concat (string #x2502) "   ")
-  "One level of `tree\='s indent: a vertical, then three NO-BREAK SPACEs.
+(defconst cooked-bench--tree-continuing
+  (concat (string #x2502) (string #xa0) (string #xa0) " ")
+  "One level of `tree\='s indent while that level has more entries below.
 
-Spelled out with a character code because the NO-BREAK SPACE is the whole point
-and is invisible in a source file.  `tree(1)\=' pads with `U+00A0\=', not
-`U+0020\=', so a row of it is non-uniform in both the senses the drain reports:
-two bytes per pad character, three per box character, and nothing about the row
-survives a byte-per-column reading.  A fixture written with ordinary spaces
-would be a different workload wearing this one\='s name.")
+A vertical, two NO-BREAK SPACEs and an ordinary space, which is what
+`tree -C\=' writes byte for byte.  Spelled with character codes because the
+NO-BREAK SPACEs are invisible in a source file, and they are the reason a row of
+this is multi-byte in places the box glyphs alone would not be.")
 
-(defconst cooked-bench--tree-branch
-  (concat (string #x251c) (string #x2500) (string #x2500) (string #xa0))
-  "`tree\='s branch connector: a tee, two horizontals and a NO-BREAK SPACE.")
+(defconst cooked-bench--tree-finished "    "
+  "One level of `tree\='s indent once that level has no entries left below it.")
 
-(defun cooked-bench--tree-row (depth cols)
-  "One `tree\=' row at DEPTH, COLS wide, as `cooked-bench--run\=' takes a row.
+(defun cooked-bench--tree-entries (depth)
+  "The entries of a directory at DEPTH in the synthetic listing, sorted by name.
 
-The shape the suite had no fixture for, and the reason nobody could see where
-the time in a large directory was going.  `cooked-bench--box-rows\=' is box
-drawing too, but it is *one* record per row -- a border is a single run of one
-shape, which is the best case the packed encoding was designed around.  A
-`tree\=' row is the worst: every vertical stands alone between NO-BREAK SPACEs,
-so a row at depth six is seven separate runs, and anything paid per decoration
-record is paid seven times a row instead of once.  Measured on
-`tree -C /usr/include\=': 86,107 records over 30,326 rows.
+Each entry is (NAME KIND . CHILDREN), where KIND is `dir\=', `exec\=',
+`link\=' or `file\=', so that every colour `tree -C\=' uses turns up on
+screen.  A directory at depth six holds only files, which keeps the listing
+finite and puts the deepest rows six verticals in."
+  (if (>= depth 6)
+      (list (list (format "leaf-%d-a.h" depth) 'file)
+            (list (format "leaf-%d-b.h" depth) 'file))
+    (list (cons (format "dir-%d" depth)
+                (cons 'dir (cooked-bench--tree-entries (1+ depth))))
+          (list (format "header-%d.h" depth) 'file)
+          (list (format "link-%d" depth) 'link)
+          (list (format "script-%d" depth) 'exec))))
 
-The glyph bits are `BoxGlyph::line\='s, four two-bit weights in up, down, left,
-right order -- see src/emu/glyph.rs, and `cooked-bench--box-rows\=' for the same
-encoding written out for a plain horizontal.  0x05 is `U+2502\=' (up and down
-light), 0x45 is `U+251C\=' (up, down and right), 0x50 is `U+2500\=' (left and
-right).
+(defun cooked-bench--tree-lines ()
+  "The synthetic directory as `tree -C\=' prints it, one string per line.
 
-The filename carries an SGR pair, because `tree -C\=' colours every entry and a
-row with no style span would be measuring the box drawing without the face
-lookup that arrives with it in practice."
-  (let* ((prefix (concat (apply #'concat
-                                (cl-loop repeat (1- depth)
-                                         collect cooked-bench--tree-indent))
-                         cooked-bench--tree-branch))
-         (name (truncate-string-to-width
-                (format "some-header-file-%02d.h" depth)
-                (max 1 (- cols (string-width prefix)))))
-         (text (concat prefix name))
-         (decos nil))
-    ;; One record per vertical, then one for the tee and one for the pair of
-    ;; horizontals: what `Deco::packed' emits for this row, and the count is the
-    ;; whole of what the case exists to exercise.
-    (cl-loop for level below (1- depth)
-             do (push (list (* level 4)
-                            (cons 'glyph (unibyte-string #x05 #x00 1 0)))
-                      decos))
-    (let ((at (* 4 (1- depth))))
-      (push (list at (cons 'glyph (unibyte-string #x45 #x00 1 0))) decos)
-      (push (list (1+ at) (cons 'glyph (unibyte-string #x50 #x00 2 0))) decos))
-    ;; UNIFORM is nil: the NO-BREAK SPACE padding is multi-byte and, as the
-    ;; records are written here, outside every glyph run.  The core absorbs
-    ;; that padding into the runs and would send `glyph'; this fixture keeps
-    ;; the unabsorbed shape, so it measures the guard's slow path.
-    (list text
-          (list (list (length prefix) (length text)
-                      (logior (ash 1 24) 4) 0 0 0))
-          (nreverse decos)
-          nil)))
+Colours are `tree\='s own: bold blue for a directory, bold cyan for a symlink
+followed by its target, bold green for an executable, and `00\=' for a plain
+file, each closed with `ESC [ 0 m\='."
+  (let ((lines (list "\e[01;34m.\e[0m")))
+    (cl-labels
+        ((walk (entries prefix)
+           (while entries
+             (pcase-let* ((`(,name ,kind . ,children) (car entries))
+                          (last (null (cdr entries)))
+                          (branch (concat (string (if last #x2514 #x251c))
+                                          (string #x2500 #x2500) " "))
+                          (label (pcase kind
+                                   ('dir (format "\e[01;34m%s\e[0m" name))
+                                   ('exec (format "\e[01;32m%s\e[0m" name))
+                                   ('link
+                                    (format (concat "\e[01;36m%s\e[0m"
+                                                    " -> \e[00mheader.h\e[0m")
+                                            name))
+                                   (_ (format "\e[00m%s\e[0m" name)))))
+               (push (concat prefix branch label) lines)
+               (when children
+                 (walk children
+                       (concat prefix (if last
+                                          cooked-bench--tree-finished
+                                        cooked-bench--tree-continuing)))))
+             (setq entries (cdr entries)))))
+      (walk (list (cons "include" (cons 'dir (cooked-bench--tree-entries 1)))
+                  (cons "share" (cons 'dir (cooked-bench--tree-entries 1))))
+            ""))
+    (nreverse lines)))
+
+(defun cooked-bench--core-rows (lines rows cols)
+  "The damaged-row runs the core sends for LINES on a ROWS by COLS screen.
+
+The text goes through the real emulator rather than being described by hand, so
+the runs, the absorbed blanks, the decoration records and the row table's
+uniformity flag are whatever production would send.  A hand-written `tree\=' row
+got that wrong once: it left the NO-BREAK SPACEs outside every glyph run, so its
+rows took the width guard\='s slow path, which real `tree\=' output never does.
+
+A child prints the first ROWS lines on the alternate screen and then sleeps, so
+nothing moves while the grid is read.  Once the last line has arrived the screen
+is marked damaged and drained once, which hands back every row as one run.  This
+happens before any timing starts; the timed loop only ever applies the result."
+  (let ((file (make-temp-file "cooked-bench-tree-"))
+        (buffer (generate-new-buffer "*cooked-bench-capture*"))
+        (shown (seq-take lines rows)))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'utf-8-unix))
+            (with-temp-file file
+              (insert "\e[?1049h\e[H" (string-join shown "\r\n"))))
+          (with-current-buffer buffer
+            (cooked-mode)
+            (cooked--start (list "/bin/sh" "-c"
+                                 (format "read _; cat %s; exec sleep 300"
+                                         (shell-quote-argument file))))
+            (cooked--refresh-keymap)
+            (setq cooked--rows rows cooked--cols cols
+                  cooked--last-size (cons rows cols))
+            (cooked--resize cooked--session rows cols)
+            (cooked--send cooked--session "\n")
+            (let ((deadline (+ (float-time) 10))
+                  (tail (replace-regexp-in-string "\e\\[[0-9;]*m" ""
+                                                  (car (last shown)))))
+              (while (and (< (float-time) deadline)
+                          (not (string-search tail (buffer-string))))
+                (accept-process-output nil 0.02)
+                (cooked--apply (cooked--drain cooked--session
+                                              cooked-rejoin-wrapped-lines)))
+              (unless (string-search tail (buffer-string))
+                (error "cooked-bench: the listing never reached the screen")))
+            (cooked--redraw cooked--session)
+            (plist-get (cooked--drain cooked--session cooked-rejoin-wrapped-lines)
+                       :rows)))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer)
+      (delete-file file))))
 
 (defun cooked-bench--tree-rows (count cols)
-  "COUNT `tree\=' rows, cycling through six nesting depths.
+  "COUNT rows of a `tree -C\=' listing, COLS wide, as the core sends them.
 
-Cycled rather than fixed so that the row width, the record count and the
-horizontal position of every glyph all vary down the frame, which is what a real
-listing does and what a frame of identical rows would quietly cache away."
-  (cooked-bench--run
-   (cl-loop for i below count
-            collect (cooked-bench--tree-row (1+ (% i 6)) cols))))
+Box drawing, but not the border kind.  `cooked-bench--box-rows\=' is one
+decoration record covering the whole row, the best case the packed encoding
+was designed for, while a `tree\=' row interleaves verticals, indentation and
+coloured names, so the depth of every row changes how many records and style
+spans it carries.  Measured on `tree -C /usr/include\=': 86,107 records over
+30,326 rows.
+
+The listing mixes depths one to six, continuing and finished levels, and every
+colour `tree\=' emits, so a frame is not one row cached twenty-four times."
+  (cooked-bench--core-rows (cooked-bench--tree-lines) count cols))
 
 (defun cooked-bench--deco-records (rows)
   "How many decoration records ROWS carries.
@@ -1073,7 +1122,15 @@ Both arms of the pair are run here on one build, as `cooked-bench-scroll\=' does
 and for the same reason -- read the row against `per-frame, 24x80 box drawing\='
 at the same width, and the gap between the two is entirely the record count.
 The count itself is printed beside the row, which is the half that needs no
-clock."
+clock.
+
+The rows come from the core rather than being described by hand, so they carry
+what production does: the blanks between two glyph runs absorbed into the run,
+one record per box-drawn row, and every such row flagged `glyph\='.  A 24x80
+frame is 23 records and applies at about 0.12ms p50 with 915 conses.  The
+hand-written rows it replaced left their padding unabsorbed, and so measured
+108 records, 0.56ms and 3,079 conses on a width-guard path `tree\=' never
+takes."
   (let ((rows (cooked-bench--tree-rows 24 80)))
     (cooked-bench--frames "per-frame, 24x80 tree listing" rows 200)
     (message "  %-40s   %d decoration records/frame" ""
@@ -1308,12 +1365,11 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
 ;; strings.  Nothing about box drawing needed more.  The core tells the guard a
 ;; row whose only multi-byte characters are box glyphs apart from one the font
 ;; draws, and a glyph drawn as cooked's own one-cell bitmap cannot be wider than
-;; its cell, so such a row is not measured at all.  Rows that are measured -- CJK,
-;; emoji, or the `tree' fixture's unabsorbed padding -- key the wrap memo on a
-;; layout hash the core sends rather than on a copy of the row, and the metrics
-;; memo on the character rather than on a fresh string, so a 24x80 `tree' frame
-;; allocates 31 string characters and 3 strings as well; its remaining conses
-;; are the measuring itself.  A hash is a safe key because only the negative is
+;; its cell, so such a row is not measured at all; a `tree' listing's rows are
+;; this kind too, since the core absorbs their padding into the glyph runs.  Rows
+;; that are measured -- CJK, emoji, font fallback -- key the wrap memo on a layout
+;; hash the core sends rather than on a copy of the row, and the metrics memo on
+;; the character rather than on a fresh string.  A hash is a safe key because only the negative is
 ;; memoized: a collision can leave a row soft-wrapped until it is rewritten, and
 ;; can never delete a character -- see `cooked--wrap-memo'.
 
