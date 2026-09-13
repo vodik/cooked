@@ -16,8 +16,7 @@ use crate::session::Update;
 
 /// The crate's id newtypes, which are all one integer wide.
 ///
-/// Without these every id crossed the boundary as `i64::from(id.0)`, which reached past
-/// the newtype to the field it exists to hide.
+/// So an id crosses the boundary without reaching past the newtype to its field.
 macro_rules! into_lisp_id {
     ($($t:ty),* $(,)?) => {
         $(impl env::IntoLisp for $t {
@@ -31,10 +30,8 @@ macro_rules! into_lisp_id {
 into_lisp_id!(MarkId, LinkId, ImageId);
 
 // Every enum this module sends as a bare symbol, and the symbol each variant is. One
-// list per type, so the drain's `:mode' and `cooked--sample-mode' cannot drift into
-// disagreeing about what to call the same state -- they now reach the same table through
-// the same impl, where before one went through an impl here and the other interned
-// `Mode::as_str' on its own.
+// list per type, so the drain's `:mode' and `cooked--sample-mode' cannot disagree about
+// what to call the same state.
 lisp_enum! {
     Mode {
         Cooked => "cooked",
@@ -127,22 +124,17 @@ pub(crate) fn emission_to_lisp(env: Env, filter: &Filter) -> Result<Value> {
 
 /// The damaged rows split into maximal runs of *consecutive* indices.
 ///
-/// The whole of the coalescing decision, kept as a pure function over the slice so that
-/// it can be tested without an Emacs — everything else on this path needs an `Env` and
-/// so can only be exercised by the Lisp suite.
+/// A pure function over the slice so it can be tested without an Emacs.
 ///
-/// Ascending order is what makes a run a run, and [`crate::emu::screen::Screen::drain_damage`] produces it
-/// by construction: it walks the dirty flags by index. Nothing here *relies* on that,
-/// which is deliberate. The condition is `next == this + 1` rather than "not known to be
-/// clean", so a list that arrived out of order or with a repeat simply coalesces less;
-/// it cannot merge rows that are not neighbours.
+/// [`crate::emu::screen::Screen::drain_damage`] produces ascending indices, but nothing
+/// here relies on it: the condition is `next == this + 1` rather than "not known to be
+/// clean", so an out-of-order list coalesces less rather than merging rows that are not
+/// neighbours.
 ///
-/// That condition is the whole hazard. ghostel's equivalent breaks a span only on a row
-/// it knows to be clean, so a page-granularity false positive is amplified into one
-/// giant reinsert — and a reinsert is `delete-region` then `insert`, which destroys
-/// every marker and overlay anchored inside it. Coalescing runs of *genuinely damaged*
-/// rows cannot do that: an undamaged row between two damaged ones is never inside a
-/// block, so nothing anchored to it is touched.
+/// That condition is the whole hazard. ghostel breaks a span only on a row it knows to be
+/// clean, so a false positive becomes one giant reinsert, and a reinsert destroys every
+/// marker and overlay inside it. Here an undamaged row between two damaged ones is never
+/// inside a block.
 fn contiguous_runs(rows: &[DamagedRow]) -> impl Iterator<Item = &[DamagedRow]> {
     rows.chunk_by(|this, next| next.index == this.index + 1)
 }
@@ -158,12 +150,9 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
     // Lisp handles both. FIRST is the index of the block's *first* row; its table says
     // how many follow it and where each begins.
     //
-    // Newlines go *between* the rows of a run and never after the last one, which is the
-    // same rule the old row-at-a-time shape stated as "a damaged row carries no
-    // newline": a live row is written into a buffer line that already exists, so the
-    // newline that ends the run's last row is the one already sitting there. Emacs pays
-    // for every edit, so a 24-row repaint that was 24 `delete-region's and 24 `insert's
-    // is one of each here.
+    // Newlines go *between* the rows of a run and never after the last one: a live row
+    // is written into a buffer line that already exists, whose newline is already there.
+    // A 24-row repaint is one `delete-region' and one `insert' rather than 24 of each.
     let rows = contiguous_runs(&update.delta.rows)
         .map(|run| {
             let mut block = Block::default();
@@ -178,9 +167,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
         })
         .collect::<Result<Vec<_>>>()?;
     // `(TOP BOTTOM COUNT UP)` per move, in the order they happened; see [`Shift`]. A list
-    // per move rather than a packed record because there is at most a handful of them in
-    // a drain and usually none: the packing idiom earns its keep at one record per
-    // character, not at one per scroll region per frame.
+    // rather than a packed record, since a drain holds a handful at most.
     let shifts = update
         .delta
         .shifts
@@ -247,58 +234,31 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
 
 /// A run of buffer text with its styling and decoration held off to the side.
 ///
-/// The one shape rendered text crosses in, for the live screen and for scrollback alike
-/// — one encoder here and one renderer in Lisp, which is the point: a second shape means
-/// every field has to be taught to both, and they drift.
+/// The one shape rendered text crosses in, for the live screen and scrollback alike, so
+/// one encoder here and one renderer in Lisp share every field.
 ///
-/// Sparse rather than a run per damaged row, because Emacs pays for every `insert`. One
-/// insert of one string, plus properties only where they depart from the default, beats
-/// N inserts and N property calls, and it keeps roughly a million cons cells from
-/// crossing the boundary on a flood. A plain unstyled row — the overwhelming majority on
-/// the primary screen — pays for no spans at all, not even an empty string, and a row of
-/// eight styled runs costs one insert rather than eight. Sparseness survived the move to
-/// packed records precisely because it is the property the flood path rests on: an
-/// unstyled block still allocates nothing, and the `plain` benchmark row is the control
-/// that says so.
+/// Sparse, because Emacs pays for every `insert`: one insert of one string, with
+/// properties only where they depart from the default, keeps roughly a million cons
+/// cells from crossing on a flood. A plain unstyled row, the usual case, pays for no spans
+/// at all; the `plain` benchmark row is the control for that.
 ///
-/// STYLE-SPANS is a unibyte string of fixed-width records rather than a list, and it is
-/// the only one carrying a rendition — see [`Block::push_style`] for the layout and for
-/// why the live-row path cannot afford the conses. DECO-SPANS is `(START DECO)` and
-/// LINK-SPANS `(START END ID)`, both for the same reason: neither says anything about
-/// how its characters are *coloured*.
-/// Emacs draws a box glyph in the colours of the face at the position it sits on, which
-/// STYLE-SPANS has already put there over exactly those characters, so a decoration
-/// span repeating them would be handing Lisp a second, staler answer to a question it
-/// has already had — see `cooked--box-glyph-image-1' for what reading that second copy
-/// cost. A hyperlink is the same story: whatever style it has is in STYLE-SPANS, and
-/// Lisp deliberately leaves it alone.
+/// STYLE-SPANS is a unibyte string of fixed-width records, the only span kind carrying a
+/// rendition; see [`Block::push_style`]. DECO-SPANS is `(START DECO)` and LINK-SPANS
+/// `(START END ID)`. Neither repeats colours: a box glyph is drawn in the face at its
+/// position, which STYLE-SPANS already put there, and a second copy would be a staler
+/// answer (see `cooked--box-glyph-image-1').
 ///
-/// A row table rides at the end of the list, after the spans: one `(START WIDTH
-/// UNIFORM)` per *screen row* the block covers, in order — where that row's text begins
-/// as a character offset into TEXT, how many columns it occupies on the grid, and
-/// whether every character of it is one byte standing on one cell. The last two are
-/// by-products of work already done ([`Run::cols`] is accumulated as the run is built,
-/// and uniformity falls out of the character count `push_runs` takes anyway), and both
-/// replace a measurement Emacs was making per rendered row per drain — see
-/// `cooked--guard-row-width'.
+/// A row table rides at the end: one `(START WIDTH UNIFORM WRAPPED)` per *screen row* the
+/// block covers -- where the row's text begins in TEXT, how many columns it occupies,
+/// whether every character is one byte on one cell, and whether the row below continues
+/// its line. The middle two are by-products of work already done and spare Emacs a
+/// measurement per row per drain; see `cooked--guard-row-width'. Per row rather than per
+/// block, because [`update_to_lisp`] coalesces contiguous damaged rows, and the offsets let
+/// `cooked--render-block' phase a shade glyph's dither against its own row. Scrollback
+/// carries no table, since nothing guards reflowable text.
 ///
-/// **A table rather than the two scalars it replaced, because a block is no longer one
-/// row.** [`update_to_lisp`] coalesces a run of contiguous damaged rows into a single
-/// block, so each of the guard's two questions has an answer per row rather than one
-/// per block, and the offsets are what let `cooked--render-block' phase a shade glyph's
-/// dither against the row it actually sits on rather than against the first row of the
-/// run. The table's length is also how Lisp knows how many rows the block covers;
-/// nothing counts newlines. It is a list of three-element lists rather than a packed
-/// record for the reason the packing idiom itself gives: packing earns its keep where
-/// the alternative is thousands of conses per frame, and a screenful of rows is at most
-/// a hundred. The scrollback block carries no table at all — nothing guards or phases
-/// scrollback, whose lines are Emacs' own reflowable text — so a flood of twenty
-/// thousand lines pays nothing for this.
-///
-/// A decoration span needs no END either: its packed records account for every
-/// character it covers, whether one apiece or one per run of them — see
-/// `deco_to_lisp`. The link id is resolved against the `:links` table the same drain
-/// carries.
+/// A decoration span needs no END: its packed records account for every character it
+/// covers.
 #[derive(Default)]
 pub(crate) struct Block {
     text: String,
@@ -308,48 +268,30 @@ pub(crate) struct Block {
     offset: usize,
     /// Columns `text` occupies on the grid, summed from [`Run::cols`].
     ///
-    /// The measurement Emacs would otherwise take for itself. `cooked--guard-row-width'
-    /// has to know how wide a rendered row *should* be before it can decide whether
-    /// Emacs laid it out wider than that, and its only way of asking was `string-width',
-    /// which is the same East Asian Width model the grid already applied when it placed
-    /// the continuation cells — measured at 1.5us a row for ASCII, 59us for CJK and
-    /// 100us for box drawing, per rendered row per drain, to recompute a number this
-    /// side had already computed and thrown away.
+    /// `cooked--guard-row-width' needs to know how wide a row *should* be, and asking
+    /// `string-width' costs 59us a row for CJK and 100us for box drawing, to recompute
+    /// what the grid already knew.
     ///
-    /// Carried rather than re-derived for a second reason that outlives the
-    /// microseconds: it is the only route a *declared* width has to Emacs. Under kitty's
-    /// Text Sizing Protocol (OSC 66 `w=N`) the child states how many cells a run
-    /// occupies, and that statement can legitimately disagree with what a width table
-    /// says about the same characters. While Emacs answers the question itself it can
-    /// only ever give the Unicode answer, so the child's would have nowhere to go. This
-    /// field is where it goes: see `State::text_size`, which honours `w=` by writing a
-    /// block of the declared width onto the grid, from where it is counted here like any
-    /// other run of cells.
+    /// It is also the only route a *declared* width has to Emacs: under `OSC 66 w=N` the
+    /// child states how many cells a run occupies, which can disagree with any width table.
+    /// See `State::text_size`.
     ///
-    /// Accumulated for the row being built and banked by [`Block::end_row`], because a
-    /// live block now holds a whole run of contiguous rows and the guard asks its
-    /// question of each of them separately. Left to run on across the whole scrollback
-    /// block, which never calls `end_row` and whose sum nothing reads.
+    /// Accumulated for the row being built and banked by [`Block::end_row`]. Scrollback
+    /// never calls `end_row`, and nothing reads its sum.
     cols: usize,
     /// Whether any character in `text` took more than one byte or stands on more than
     /// one cell.
     ///
     /// Not "is this row ASCII": `OSC 66 ; w=1 ; Ha` is two ASCII characters declared to
-    /// occupy one cell, and that breaks this exactly as a wide or multi-byte character
-    /// would — see `push_runs`. What the flag actually promises is the one thing
-    /// `cooked--guard-row-width' needs to skip a row outright: every character here
-    /// occupies exactly the one cell a byte-per-column reading would assume, so nothing
-    /// about it can disagree with the grid.
+    /// occupy one cell. The flag promises what `cooked--guard-row-width' needs to skip a row
+    /// outright: every character occupies exactly one cell, as a byte-per-column reading
+    /// assumes.
     ///
-    /// Free, and the reason it is computed here rather than off the cells: `push_runs`
-    /// already counts a run's characters, and a UTF-8 string's byte length equals that
-    /// count exactly when every character in it is one byte. Lisp's own version of this
-    /// question was a `string-match-p' over the row.
+    /// Free here, since `push_runs` already counts characters and a UTF-8 string's byte
+    /// length equals that count exactly when every character is one byte.
     ///
-    /// Per row and reset by [`Block::end_row`], for the reason [`Block::cols`] gives:
-    /// one nonuniform row in a coalesced run must not make the whole run take the slow
-    /// path, and — the half that actually matters — must not be able to hide behind a
-    /// neighbour either, since the flag is an *or* over what has been pushed.
+    /// Per row and reset by [`Block::end_row`], so one nonuniform row neither slows a
+    /// coalesced run nor hides behind a neighbour.
     nonuniform: bool,
     /// Where the row currently being built begins in `text`, in characters.
     ///
@@ -379,10 +321,8 @@ struct BlockRow {
     /// row's logical line, so the newline between them is a soft wrap the child never
     /// wrote.
     ///
-    /// The only field here that is not the width guard's. It rides the same table
-    /// because it is the same kind of fact -- something the core knows about a rendered
-    /// row that Emacs cannot see for itself -- and a second per-row list to carry one
-    /// bool would cost a cons per row per drain to say less clearly.
+    /// It rides the width guard's table because it is the same kind of fact: something the
+    /// core knows about a rendered row that Emacs cannot see.
     wrapped: bool,
 }
 
@@ -400,50 +340,23 @@ impl Block {
     ///   16..20  UNDERLINE `u32`, tagged; `SGR 58`, the underline's own colour
     ///   20..22  ATTRS    `u16`, the [`Attrs`](emu::cell::Attrs) bitmask
     ///
-    /// A packed string rather than a list of lists, for the reason [`Deco::packed`]
-    /// gives at greater length: Rust parses at 74-422 MB/s while the Emacs apply path
-    /// manages roughly 21 MB/s equivalent, so anything the protocol declines to say
-    /// outright is rediscovered on the slow side, on every damaged row of every frame.
-    /// A span used to cross as `(START END FG BG ATTRS UNDERLINE)` — six conses, and up
-    /// to twelve once an RGB colour spelled itself as a three-element list.
+    /// A packed string rather than a list of lists, for the reason [`Deco::packed`] gives:
+    /// the Emacs apply path is the bottleneck, and a list costs six to twelve conses a span
+    /// on every damaged row of every frame.
     ///
-    /// Measured 1.20 -> 1.03 ms/frame on a 24x80 frame of eight-run rows, three runs
-    /// either side at a background load of ~2. That is about 0.9us of the 6.5us a span
-    /// cost, and it is worth writing down that the estimate which motivated this change
-    /// was three times larger: attribution had put ~3.5us of the 6.5 in construction and
-    /// marshalling, on the reasoning that `cooked--face' was 1.1us and
-    /// `put-text-property' 1.8us. The missing three quarters are that the two of those
-    /// dominate more of the remainder than subtracting them suggested, and that building
-    /// a short list on the Rust side was never as expensive as the Lisp-side allocation
-    /// it was grouped with. The saving is real and the direction was right; the size was
-    /// not, and a microbenchmark also under-counts what it removes, since ~1500-2300
-    /// fewer cons cells per frame is collector pressure that shows up later and
-    /// elsewhere.
+    /// **START and END are `u32`.** [`Update::scrolled_rows`] assembles a whole drain's
+    /// scrollback into *one* `Block`, so offsets are bounded by the flood rather than a row:
+    /// the flood benchmark reaches 200k characters in one block and a 20k-line paste goes
+    /// past 600k. A `u16` would wrap at 65536 and silently style the wrong characters.
     ///
-    /// **START and END are `u32`, and that is not over-provisioning.** A `u16` is the
-    /// trap here and it fails silently. [`Update::scrolled_rows`] assembles a whole
-    /// drain's scrollback into *one* `Block`, so offsets are not bounded by a row or
-    /// even by a screen: the flood benchmark reaches 200k characters in a single block
-    /// and a 20k-line paste goes past 600k. A `u16` start would wrap at 65536 and hand
-    /// Lisp a span that styles the wrong characters, with no error anywhere to point at
-    /// — the buffer would simply come out miscoloured somewhere far from the cause.
+    /// A span whose offsets do not fit is dropped rather than clamped. It takes 4.29
+    /// billion characters between two drains, but dropping loses the colour of text far
+    /// off screen, while clamping would paint it over text that is on screen.
     ///
-    /// A span whose offsets do not fit is dropped rather than truncated. It is not
-    /// reachable — 4.29 billion characters would have to arrive between two drains —
-    /// but the two failure modes are not equally bad, and the choice should be the
-    /// deliberate one: dropping loses the colour of a run that is already off the far
-    /// end of anything a user can see, while clamping would paint it over text that is
-    /// on screen. Wrong-but-plausible is the expensive kind of wrong.
-    ///
-    /// The rendition is packed inline rather than interned behind an id minted through
-    /// [`Ledger`](emu::intern::Ledger), the way `:links` and `:images` are. Interning
-    /// would save Lisp about three `u32` decodes per span and cost it an id lifetime:
-    /// ids are per-session, so Lisp would need a reset on session start — the hazard
-    /// `cooked--cached' warns about — and the ledger's cap means eviction must either
-    /// never reuse an id or announce when it does. A reused id read against a stale
-    /// Lisp cache is wrong colours with no error, which is the same silent-miscolouring
-    /// failure the `u32` offsets are chosen to avoid. Three decodes is not worth buying
-    /// that.
+    /// The rendition is packed inline rather than interned behind a
+    /// [`Ledger`](emu::intern::Ledger) id as `:links` and `:images` are. Interning would
+    /// save Lisp three `u32` decodes a span and cost it an id lifetime, where a reused id
+    /// read against a stale cache is wrong colours with no error.
     fn push_style(&mut self, chars: usize, style: Style, underline: Color) {
         let (Ok(start), Ok(end)) = (
             u32::try_from(self.offset),
@@ -459,10 +372,8 @@ impl Block {
         self.styles
             .extend_from_slice(&underline.packed().to_le_bytes());
         self.styles.extend_from_slice(&attrs.bits().to_le_bytes());
-        // The stride is the format: Lisp walks the packed string by adding
-        // [`STYLE_RECORD`] and never by decoding a length, so a field added to the
-        // record without widening the constant would desynchronise the two sides at the
-        // second span of the first styled row.
+        // The stride is the format: Lisp walks the string by adding [`STYLE_RECORD`], so a
+        // field added without widening the constant would desynchronise the two sides.
         debug_assert_eq!(
             self.styles.len() % STYLE_RECORD,
             0,
@@ -474,10 +385,8 @@ impl Block {
     fn push_runs(&mut self, env: Env, runs: &[Run]) -> Result<()> {
         for run in runs {
             let chars = run.text.chars().count();
-            // The two span kinds that need an `Env` to say anything, taken before
-            // `push_run` advances the offset they are measured from. They go on vectors
-            // of their own, so nothing turns on their being filled before the style
-            // record rather than after it.
+            // The two span kinds that need an `Env`, taken before `push_run` advances the
+            // offset they are measured from.
             if let Some(link) = run.link {
                 self.links
                     .push(list!(env, [self.offset, self.offset + chars, link])?);
@@ -502,14 +411,9 @@ impl Block {
     /// too and it is a scan of the string.
     fn push_run(&mut self, run: &Run, chars: usize) {
         self.cols += run.cols;
-        // Two ways to fail the "uniform" test, and the second one is why this is not
-        // simply a byte-length comparison. Lisp reads the flag as "this row is
-        // `frame-char-width` per character, so there is nothing to measure" and skips
-        // the guard outright on it. A run whose characters are all one byte but which
-        // stands on a number of columns other than its character count breaks exactly
-        // that assumption — `OSC 66 ; w=1 ; Ha` is two ASCII characters declared to
-        // occupy one cell — so it is not uniform for this purpose whatever its bytes
-        // say.
+        // Two ways to fail: a multi-byte character, or a run standing on a column count
+        // other than its character count, as `OSC 66 ; w=1 ; Ha` does with two one-byte
+        // characters on one cell.
         self.nonuniform |= run.text.len() != chars || run.cols != chars;
         if run.style != Style::default() || run.underline != Color::Default {
             self.push_style(chars, run.style, run.underline);
@@ -521,19 +425,16 @@ impl Block {
     fn push_newline(&mut self) {
         self.text.push('\n');
         self.offset += 1;
-        // The text of whatever comes next starts after this newline. Bookkeeping the
-        // scrollback path does not need and pays a store for, which is cheaper than a
-        // second `push_newline` that differs only in keeping it.
+        // The text of whatever comes next starts after this newline. Scrollback does not
+        // need it, and one store is cheaper than a second `push_newline`.
         self.row_start = self.offset;
     }
 
     /// Close the screen row being built: bank where it began and what it measured, and
     /// start the next one.
     ///
-    /// Called once per damaged row and never for scrollback, which is exactly the
-    /// distinction the table encodes — a live row is a fixed-width slot on the grid
-    /// whose layout Emacs can get wrong, while a scrollback line is ordinary buffer text
-    /// that is allowed to wrap.
+    /// Called once per damaged row and never for scrollback: a live row is a fixed-width
+    /// slot whose layout Emacs can get wrong, while a scrollback line may wrap.
     fn end_row(&mut self, wrapped: bool) {
         self.rows.push(BlockRow {
             start: self.row_start,
@@ -596,12 +497,9 @@ impl Update {
                 start,
                 chars: block.offset - start,
             });
-            // A wrapped row is a continuation, so it joins the line above rather
-            // than starting a new one — except when it is the batch's last row and
-            // the alt screen is up. Then what follows at screen-start is the alt
-            // grid's own row 0, not this row's continuation on the primary grid, and
-            // joining onto it would permanently weld this frozen scrollback text to
-            // the front of a live row that gets rewritten every redraw.
+            // A wrapped row joins the line above -- except the batch's last row while the
+            // alt screen is up, where what follows is the alt grid's own row 0, and joining
+            // would weld frozen scrollback to a live row rewritten every redraw.
             if !(rejoin && line.wrapped && !(i == last && self.delta.levels.alt)) {
                 block.push_newline();
             }
@@ -618,9 +516,8 @@ impl Update {
     /// Lisp because the arithmetic is over Rust's absolute row numbering, which is not
     /// something the Lisp side should have to hold a copy of.
     ///
-    /// `nil` when neither applies. Unreachable as things stand — events and scrollback
-    /// are taken by the same drain, so nothing can be older than the batch it arrives
-    /// with — and Lisp falls back to the cursor, which is what it used before anchors.
+    /// `nil` when neither applies, which cannot happen while events and scrollback are
+    /// taken by the same drain; Lisp then falls back to the cursor.
     fn anchor_to_lisp(&self, env: Env, at: Anchor, rows: &[RowSpan]) -> Result<Value> {
         let base = self.delta.scrolled_base;
         let on_grid = base + self.delta.scrolled.len();
@@ -649,12 +546,8 @@ impl Update {
 /// per frame pays for the transfer on the first frame and for placements thereafter.
 /// DATA is unibyte and handed straight to `create-image`; FORMAT is its type symbol.
 ///
-/// The record stops at the pixel size, and deliberately carries no cell rectangle. It
-/// used to: the rectangle rode the picture, which is one answer to a question that has
-/// one per *placement* — the same image can be on screen at two sizes at once, and a
-/// `viu` reshape retransmits bytes we already have with nothing but a new `c=`/`r=`. It
-/// lives on [`Placement`](crate::emu::image::Placement) now, repeated on every cell of
-/// the rectangle, and reaches Lisp with the rows rather than with the payload.
+/// No cell rectangle: that belongs to each *placement*, since the same image can be on
+/// screen at two sizes. It rides [`Placement`](crate::emu::image::Placement) with the rows.
 fn images_to_lisp(env: Env, images: &[ImageData]) -> Result<Vec<Value>> {
     images
         .iter()
@@ -699,33 +592,19 @@ fn links_to_lisp(env: Env, links: &[(LinkId, String)]) -> Result<Vec<Value>> {
 ///             column within that image, then the rectangle that placement was laid at,
 ///             as `u16`s.
 ///
-/// That the two kinds count differently is the point rather than an inconsistency, and
-/// [`Deco::packed`] argues it: a glyph run is genuinely one decision repeated, while
-/// every cell of a picture carries its own place within it and so needs its own record
-/// whatever the wire says. What reaches the *buffer* is a run either way —
-/// `cooked--apply-image-deco' coalesces the cells of a row back into one `display'
-/// interval, which is where the redisplay cost was, and does it against the records it
-/// has already decoded rather than against a second wire shape.
+/// The two kinds count differently on purpose; [`Deco::packed`] explains why. The
+/// rectangle is repeated on every image cell because it belongs to the placement (see
+/// [`Placement`](emu::image::Placement)), four bytes a cell against a picture's megabytes.
 ///
-/// The rectangle is repeated on every image cell rather than carried once per image
-/// because it belongs to the placement — see [`Placement`](emu::image::Placement). Four
-/// bytes a cell against a picture's own megabytes, and it is what lets two placements of
-/// one id at two sizes both draw correctly.
-///
-/// A packed string rather than a list because this is the live-row path: box drawing is
-/// what full-screen programs are made of, so a list would cons per character of every
-/// damaged row of every frame — the same cost `scrolled_rows` goes out of its way to
-/// avoid on the flood path, paid on the one that redraws continuously. One allocation
-/// per run instead, unibyte so Emacs neither decodes nor copies it again.
+/// A packed string rather than a list because a list would cons per character of every
+/// damaged row of every frame of box drawing. One unibyte allocation per run instead.
 impl env::IntoLisp for Option<&Deco> {
     fn into_lisp(self, env: &Env) -> Result<Value> {
         let Some(deco) = self else {
             return Ok(env.nil());
         };
-        // The bytes are [`Deco::packed`]'s, which is where the record layouts are
-        // written down and where the tests that pin them can reach them; what belongs
-        // here is only the kind tag, because `sym!' needs its literal at the call site
-        // to do the lookup at compile time.
+        // The bytes are [`Deco::packed`]'s; only the kind tag is spelled here, because
+        // `sym!' needs its literal at the call site.
         let packed = env.into_lisp(deco.packed().as_slice())?;
         match deco {
             Deco::Glyphs(_) => env.cons(sym!(env, "glyph")?, packed),
@@ -790,14 +669,10 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
                 *id,
             ]
         ),
-        // (mouse ENABLED SGR DRAG MOTION PIXELS). Flattening this to a single "wants
-        // the mouse" bit lost the reach of the request: 1002 and 1003 ask to be told
-        // where the pointer went, not merely which cell it was pressed in, and the
-        // sender cannot manufacture motion reports it was never told to send.
-        //
-        // The format goes as two booleans rather than a symbol: SGR says which frame the
-        // report is written in and PIXELS which unit fills it, and the sender asks those
-        // two questions in two different places.
+        // (mouse ENABLED SGR DRAG MOTION PIXELS). Not a single "wants the mouse" bit,
+        // because 1002 and 1003 ask to be told where the pointer went, which the sender
+        // cannot know otherwise. The format is two booleans because the sender asks which
+        // frame and which unit in two different places.
         Event::Mouse(m) => list!(
             env,
             [
@@ -924,10 +799,8 @@ mod tests {
 
     #[test]
     fn the_underline_colour_has_its_own_field_and_does_not_alias_the_foreground() {
-        // `SGR 58' is a colour of its own, and it shared a slot with nothing before the
-        // record existed -- it rode a tail cons. A field that aliased fg would show up
-        // only on text that is both coloured and underlined, which is rare enough to
-        // ship.
+        // A field that aliased fg would show up only on text both coloured and
+        // underlined, which is rare enough to ship unnoticed.
         let packed = record(
             Style {
                 fg: Color::Indexed(1),
@@ -1010,12 +883,9 @@ mod tests {
         assert_eq!(runs_of(&[1, 1]), vec![vec![1], vec![1]]);
     }
 
-    /// One row's measurements must not leak into the next one's, which is the whole
-    /// reason the two scalars became a table. A wide or multi-byte row makes the run's
-    /// flag say "not uniform"; if that were still a per-block answer, every plain row
-    /// beside it would take the guard's slow path -- and worse, a plain row's width
-    /// would read as the sum of everything before it and the guard would compare Emacs'
-    /// layout against a number several times too large.
+    /// One row's measurements must not leak into the next one's. A shared answer would
+    /// send every plain row beside a wide one down the guard's slow path, and make a plain
+    /// row's width read as the sum of everything before it.
     #[test]
     fn each_row_of_a_block_carries_its_own_width_and_uniformity() {
         let row = |text: &str, cols: usize| Run {
