@@ -512,7 +512,7 @@ is per row rather than per frame reads this, and the grid height does too --
 `cooked--fit-screen\=' then trimmed the other twenty-three rows down to."
   (cl-loop for (_first . block) in rows sum (length (nth 4 block))))
 
-(cl-defun cooked-bench--update (rows &key alt images shifts height)
+(cl-defun cooked-bench--update (rows &key alt images shifts height edits)
   "An update plist of ROWS, shaped exactly as `cooked--drain' returns one.
 
 `:height', `:used' and `:head' are not optional: `cooked--apply' builds a
@@ -539,12 +539,27 @@ and leaves this nil for the frames it times.
 SHIFTS is the drain's `:shifts', a list of (TOP BOTTOM COUNT UP) moves that
 `cooked--apply-shifts' replays as one deletion and one insertion each.  Keywords
 rather than positional arguments from here on: four optional trailing values
-whose meanings are unrelated is exactly the call site nobody can read."
+whose meanings are unrelated is exactly the call site nobody can read.
+
+EDITS is the drain\='s `:edits\=', rows of which only part is replaced; see
+`cooked-bench--edit\='."
   (let ((height (or height (cooked-bench--row-count rows))))
-    (list :scrolled nil :rows rows :shifts shifts :images images
+    (list :scrolled nil :rows rows :edits edits :shifts shifts :images images
           :height height :used height :head 0
           :cursor '(0 0 t block) :alt alt
           :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
+
+(defun cooked-bench--edit (index char-start char-end length text)
+  "One `:edits' entry replacing CHAR-START..CHAR-END of row INDEX with TEXT.
+
+LENGTH is the row\='s length afterwards, as the core sends it.  TEXT is plain,
+and its block\='s row table is TEXT\='s own, which for a uniform ASCII row is the
+same answer the whole row\='s would be."
+  (cons index
+        (cons char-start
+              (cons char-end
+                    (cons length
+                          (cdar (cooked-bench--run (list (list text nil nil t)) index)))))))
 
 (defun cooked-bench--run (rows &optional first)
   "ROWS, each a description of one screen row, as the single run the module sends.
@@ -915,7 +930,7 @@ would have been given had a real child transmitted it."
               (* cols (car cooked-bench--cell))
               (* count (cdr cooked-bench--cell)))))
 
-(cl-defun cooked-bench--frames (label rows &optional frames &key images height shifts)
+(cl-defun cooked-bench--frames (label rows &optional frames &key images height shifts edits prime)
   "Apply ROWS as a damaged-row update, one frame per iteration.
 
 The unit is one `cooked--apply' rather than a batch of them, which the earlier
@@ -948,7 +963,10 @@ exactly as they were."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-tests--settle-briefly)
     (when images (cooked--install-images images))
-    (let ((update (cooked-bench--update rows :alt t :height height :shifts shifts)))
+    (when prime
+      (cooked--apply (cooked-bench--update prime :alt t :height height)))
+    (let ((update (cooked-bench--update rows :alt t :height height :shifts shifts
+                                        :edits edits)))
       (when shifts (cooked--apply update))
       (cooked-bench--measure label 1
                              (lambda () (cooked--apply update))
@@ -975,6 +993,18 @@ exactly as they were."
   ;; the same repaint cost when every damaged row was sent.
   (cooked-bench--frames "per-frame, 24x80 styled, 3 rows changed"
                         (cooked-bench--styled-rows 3 80) 200 :height 24)
+  ;; One cell of a styled screen changing, as a spinner does: first as the whole row
+  ;; the core used to send, then as the one-character edit it sends now.
+  (cooked-bench--frames "per-frame, 24x80 styled, one cell, as a row"
+                        (cooked-bench--styled-rows 1 80) 200
+                        :height 24 :prime (cooked-bench--styled-rows 24 80))
+  (cooked-bench--frames "per-frame, 24x80 styled, one cell, as an edit"
+                        nil 200 :height 24 :prime (cooked-bench--styled-rows 24 80)
+                        :edits (list (cooked-bench--edit 0 8 9 80 "x")))
+  ;; And a progress bar's last ten cells, the other shape an edit is for.
+  (cooked-bench--frames "per-frame, 24x80 styled, bar tail, as an edit"
+                        nil 200 :height 24 :prime (cooked-bench--styled-rows 24 80)
+                        :edits (list (cooked-bench--edit 0 70 nil 80 "##########")))
   ;; `cooked-bench--frames' paints the alternate screen, where the URL scan is off
   ;; by default -- see `cooked-detect-links-on-alt-screen'.  What is under test is
   ;; the scan, not which screen it runs on, so it is asked for here.
@@ -1379,11 +1409,12 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
 ;; memoized: a collision can leave a row soft-wrapped until it is rewritten, and
 ;; can never delete a character -- see `cooked--wrap-memo'.
 
-(defun cooked-bench--allocation (label rows &optional height)
+(cl-defun cooked-bench--allocation (label rows &optional height &key edits prime)
   "Print what one steady-state `cooked--apply' of ROWS allocates, under LABEL.
 
 HEIGHT is the screen's, for a fixture whose rows do not fill it; see
-`cooked-bench--update'.
+`cooked-bench--update'.  EDITS are the update's `:edits', and PRIME rows applied
+once beforehand, so that an edit has a screen to edit.
 
 The fields are `memory-use-counts'\='s, whose order is easy to transpose and
 worth naming: (CONSES FLOATS VECTOR-CELLS SYMBOLS STRING-CHARS INTERVALS
@@ -1397,7 +1428,9 @@ allocates differently print different ones, which is the property a timing does
 not have."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-tests--settle-briefly)
-    (let ((update (cooked-bench--update rows :alt t :height height)))
+    (when prime
+      (cooked--apply (cooked-bench--update prime :alt t :height height)))
+    (let ((update (cooked-bench--update rows :alt t :height height :edits edits)))
       ;; Three warm frames: the first builds the face cache, the glyph caches
       ;; and the wrap memo, and a fixture charged for those is reporting a
       ;; session's start-up once per frame.  Three rather than one because the
@@ -1427,6 +1460,12 @@ go and why the obvious quarter of them was measured and left alone."
   (cooked-bench--allocation "alloc, 24x80 box drawing" (cooked-bench--box-rows 24 80))
   (cooked-bench--allocation "alloc, 24x80 styled, 3 rows changed"
                             (cooked-bench--styled-rows 3 80) 24)
+  (cooked-bench--allocation "alloc, 24x80 styled, one cell, as a row"
+                            (cooked-bench--styled-rows 1 80) 24
+                            :prime (cooked-bench--styled-rows 24 80))
+  (cooked-bench--allocation "alloc, 24x80 styled, one cell, as an edit"
+                            nil 24 :prime (cooked-bench--styled-rows 24 80)
+                            :edits (list (cooked-bench--edit 0 8 9 80 "x")))
   (cooked-bench--allocation "alloc, 24x80 with a URL per row"
                             (cooked-bench--url-rows 24 80)))
 
