@@ -104,13 +104,21 @@ a line, which is most of the time.")
 
 Read off TEXT rather than tracked, because after an insert the buffer's own
 answer to \"what is the unfinished line?\" is exactly this, and the two must not
-be able to disagree."
-  (save-match-data
-    (string-match "[^\n]*\\'" text)
-    (cons (substring text (match-beginning 0))
+be able to disagree.
+
+Found by stepping `string-search' from one newline to the next, which scans
+in C and visits each newline once.  Emacs has no search from the end of a
+string, and the regexp this replaced, a match for the characters before the
+end, was retried from every position of every line: a chunk of 800 lines of 80
+columns cost it 20 ms, and a 10,000-character line then a prompt cost 375 ms."
+  (let ((start 0)
+        newline)
+    (while (setq newline (string-search "\n" text start))
+      (setq start (1+ newline)))
+    (cons (substring text start)
           ;; Whether TEXT closed a line at all, which decides whether the
           ;; previous open line is finished or merely extended.
-          (> (match-beginning 0) 0))))
+          (> start 0))))
 
 (defun cooked-comint--intact-p (mark)
   "Whether `cooked-comint--open' is still the text just before MARK.

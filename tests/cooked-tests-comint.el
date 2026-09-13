@@ -141,6 +141,24 @@ the last thing in the buffer."
     (cooked-tests-comint--say "\rXYZ\n")
     (should (equal (cooked-tests-comint--text) "XYZdefghij\n"))))
 
+;;;; The open line
+
+(ert-deftest cooked-comint-reads-the-open-line-off-the-end-of-a-chunk ()
+  (should (equal (cooked-comint--tail "") '("" . nil)))
+  (should (equal (cooked-comint--tail "$ ") '("$ " . nil)))
+  (should (equal (cooked-comint--tail "one\n") '("" . t)))
+  (should (equal (cooked-comint--tail "one\ntwo\n$ ") '("$ " . t))))
+
+(ert-deftest cooked-comint-finds-the-open-line-after-a-long-one-in-linear-time ()
+  ;; A regexp for the characters before the end of the string is tried again from
+  ;; every position of a line that turns out to end in a newline, so a long line
+  ;; followed by a prompt costs the square of its length: over a second for this one.
+  ;; The bound is loose enough that only that shape can miss it.
+  (let* ((text (concat (make-string 20000 ?x) "\n$ "))
+         (started (float-time)))
+    (should (equal (cooked-comint--tail text) '("$ " . t)))
+    (should (< (- (float-time) started) (cooked-tests-timeout 0.25)))))
+
 ;;;; Where the buffer stops being ours
 
 (ert-deftest cooked-comint-does-not-repeat-a-prompt-the-user-typed-after ()
