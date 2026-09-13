@@ -153,10 +153,17 @@ afterwards, so a read from a timer fails the test that caused it.")
   "Call FUNCTION with ARGS, unless the answer would come from stdin.
 NAME is what FUNCTION is called, for the error and the record.  EVENTS
 non-nil means FUNCTION reads events, and so is answered by a pending
-`unread-command-events' as well as by a keyboard macro."
+`unread-command-events' as well as by a keyboard macro.
+
+An event read with a timeout is let through too.  It gives up instead of
+blocking, and it is how Lisp waits for something other than a key:
+`dbus-call-method' polls with (read-event nil nil 0.001) until the bus answers,
+so refusing it made loading `notifications' signal."
   (if (or (not noninteractive)
           executing-kbd-macro
-          (and events unread-command-events))
+          (and events unread-command-events)
+          (and (memq name '(read-event read-char read-char-exclusive))
+               (nth 2 args)))
       (apply function args)
     (push (list name (car args)) cooked-tests--refused-reads)
     (signal 'cooked-tests-terminal-read (list name (car args)))))
