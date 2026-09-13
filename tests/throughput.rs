@@ -462,6 +462,57 @@ fn hyperlinks() {
     }
 }
 
+/// A frame in which every cell is inside a hyperlink with its own underline colour.
+///
+/// What an editor listing search results or diagnostics looks like: each row a link to
+/// its location, drawn with a coloured underline. Every frame changes every row, so the
+/// drain sends them all, and what this measures is the cost of carrying a link and an
+/// underline colour per cell through printing and run building.
+fn linked_frames(frames: usize, rows: usize, cols: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    for frame in 0..frames {
+        out.extend_from_slice(b"\x1b[H");
+        for row in 1..=rows {
+            let text: String = format!("{frame:08} src/file{row:03}.rs:{row}: ")
+                .chars()
+                .chain(std::iter::repeat('x'))
+                .take(cols)
+                .collect();
+            out.extend_from_slice(
+                format!(
+                    "\x1b[{row};1H\x1b]8;;file:///src/file{row:03}.rs#{row}\x07\x1b[4;58:5:{}m{text}\x1b[0m\x1b]8;;\x07",
+                    row % 8 + 1
+                )
+                .as_bytes(),
+            );
+        }
+    }
+    out
+}
+
+/// Fully linked frames, drained once per frame; see [`linked_frames`].
+#[test]
+#[ignore = "benchmark"]
+fn linked_repaint() {
+    let (frames, rows, cols) = (1_000, 24, 80);
+    let data = linked_frames(frames, rows, cols);
+    let mut term = Term::new(rows, cols);
+    let mut sent = 0usize;
+    timed("linked repaint, drain every frame", data.len(), || {
+        for frame in data
+            .split_inclusive(|b| *b == b'H')
+            .collect::<Vec<_>>()
+            .chunks(rows + 1)
+        {
+            for piece in frame {
+                term.feed(piece);
+            }
+            sent += term.drain().rows.len();
+        }
+    });
+    println!("{:>44}({sent} rows handed to Lisp)", "");
+}
+
 /// How much does an OSC cost, given they arrive a handful of times per command?
 #[test]
 #[ignore = "benchmark"]
