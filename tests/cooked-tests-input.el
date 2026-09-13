@@ -2506,6 +2506,41 @@ the overhang reported into the next column.  A two-cell character keeps both."
     ;; Horizontal notches have no cursor-key spelling and send nothing.
     (should (equal (cooked--alt-scroll-keys 66) ""))))
 
+(ert-deftest cooked-alternate-scroll-sends-a-trackpads-rows-not-its-events ()
+  "Under `pixel-scroll-precision-mode' every trackpad tick is an event carrying a
+few pixels, and alternate scroll sent three lines for each of them, so a gentle
+swipe in `less' scrolled pages.  Travel is a line per row crossed, carried
+between events as a mouse report\='s notches are."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--app-cursor nil)
+    (let ((cooked-alternate-scroll-lines 3)
+          (cooked--scroll-pending 0.0)
+          (mwheel-coalesce-scroll-events nil)
+          sent)
+      (cl-letf (((symbol-function 'cooked--alt-scroll-active-p) (lambda () t))
+                ((symbol-function 'cooked--mouse-buffer) (lambda (_) (current-buffer)))
+                ((symbol-function 'cooked--send-to-child)
+                 (lambda (text) (push text sent)))
+                ((symbol-function 'default-line-height) (lambda () 20))
+                ((symbol-function 'device-class) nil))
+        (fmakunbound 'device-class)
+        (cooked-tests--displayed
+          (dolist (pixels '(8 14 45))
+            (let ((last-input-event
+                   (list 'wheel-down (cooked-tests--posn nil) 0 0 (cons 0 pixels))))
+              (cooked-mouse-event)))
+          ;; 8 pixels is under a row, 22 has crossed one, and 67 has crossed three.
+          (should (equal (reverse sent) '("" "\e[B" "\e[B\e[B")))
+          ;; A notch is still a notch's worth, which is what the option is for.
+          (setq sent nil)
+          (let ((mwheel-coalesce-scroll-events t)
+                (last-input-event
+                 (list 'wheel-down (cooked-tests--posn nil) 1 1 '(0 . 40))))
+            (cooked-mouse-event))
+          (should (equal sent '("\e[B\e[B\e[B"))))))))
+
+
 (ert-deftest cooked-alternate-scroll-grabs-the-wheel-without-mouse-mode ()
   "The keymap gate must widen, or the whole feature is unreachable."
   (with-temp-buffer

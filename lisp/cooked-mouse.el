@@ -575,14 +575,7 @@ notch as one line and *fewer pixels than a row* when `line-spacing\=' is set,
 so the row arithmetic yields zero and the notch would vanish.  Taking the larger
 of the two means a sub-row trackpad tick still accumulates -- its line count is
 0 -- while a notch that undershoots a row still reports once."
-  (let ((delta (cdr-safe (nth 4 event)))
-        (lines (nth 3 event)))
-    (if (or (null delta)
-            (not (boundp 'mwheel-coalesce-scroll-events))
-            mwheel-coalesce-scroll-events
-            (and (fboundp 'device-class)
-                 (eq (device-class last-event-frame last-event-device) 'mouse)))
-        1
+  (if-let* ((delta (cooked--wheel-pixel-delta event)))
       (let* ((row (let ((window (posn-window (event-start event))))
                     (if (windowp window)
                         (with-selected-window window (default-line-height))
@@ -590,7 +583,22 @@ of the two means a sub-row trackpad tick still accumulates -- its line count is
              (pending (+ cooked--scroll-pending delta))
              (rows (truncate pending row)))
         (setq cooked--scroll-pending (- pending (* rows row)))
-        (max (abs rows) (min 1 (or lines 0)))))))
+        (max (abs rows) (min 1 (or (nth 3 event) 0))))
+    1))
+
+(defun cooked--wheel-pixel-delta (event)
+  "The vertical pixel delta EVENT carries, if it is travel rather than a notch.
+
+Nil for a notch, which is whatever `cooked--wheel-presses\=' counts as one:
+an event with no delta, one Emacs has already coalesced, and one from a device
+that reports itself as a mouse."
+  (let ((delta (cdr-safe (nth 4 event))))
+    (and delta
+         (boundp 'mwheel-coalesce-scroll-events)
+         (not mwheel-coalesce-scroll-events)
+         (not (and (fboundp 'device-class)
+                   (eq (device-class last-event-frame last-event-device) 'mouse)))
+         delta)))
 
 (defun cooked--report-button (button row col pressed &optional offset)
   "Report BUTTON at ROW/COL as PRESSED or released, remembering that it is held.
@@ -703,15 +711,16 @@ followed by another still appends, as it would with the pointer at rest."
           (cooked--report-motion (car cell) (cdr cell)
                                  (cooked--mouse-offset posn) t))))))
 
-(defun cooked--alt-scroll-keys (button)
-  "Cursor keys standing in for a wheel notch of BUTTON.
+(defun cooked--alt-scroll-keys (button &optional lines)
+  "Cursor keys standing in for LINES of wheel travel of BUTTON.
 
-Only the vertical notches translate; a horizontal one has no cursor-key
+LINES defaults to `cooked-alternate-scroll-lines\=', which is what one notch is
+worth.  Only the vertical notches translate; a horizontal one has no cursor-key
 spelling a pager would understand, so it sends nothing."
   (if-let* ((final (cond ((= button (alist-get 'wheel-up cooked--mouse-buttons)) "A")
                          ((= button (alist-get 'wheel-down cooked--mouse-buttons)) "B"))))
       (let ((key (cooked--cursor-key final)))
-        (mapconcat #'identity (make-list cooked-alternate-scroll-lines key)))
+        (mapconcat #'identity (make-list (or lines cooked-alternate-scroll-lines) key)))
     ""))
 
 (defun cooked--mouse-buffer (window)
@@ -800,8 +809,16 @@ into by the time it comes up."
            ;; Checked before the mouse report: `cooked--alt-scroll-active-p' is
            ;; already false when the child asked for the mouse, so the two can
            ;; never both apply.
+           ;;
+           ;; A trackpad's pixels are worth a line per row of travel, as they
+           ;; would be scrolling any other buffer, and not a notch's worth per
+           ;; event: under `pixel-scroll-precision-mode' every tick is an event
+           ;; of its own, and three lines apiece flooded `less'.
            ((and here wheel button (cooked--alt-scroll-active-p))
-            (cooked--send-to-child (cooked--alt-scroll-keys button)))
+            (cooked--send-to-child
+             (cooked--alt-scroll-keys button
+                                      (and (cooked--wheel-pixel-delta event)
+                                           (cooked--wheel-presses event)))))
            ;; Nowhere to scroll to: the buffer is restricted to the screen the
            ;; child is drawing, so every notch here can only move the picture off
            ;; the window.  Asked of the restriction rather than of `cooked--alt'
