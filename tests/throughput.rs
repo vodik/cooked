@@ -255,6 +255,45 @@ fn scroll_region() {
     }
 }
 
+/// A region scrolled a few lines between drains, the way holding a key in vim scrolls its
+/// text area above the status line.
+///
+/// Unlike [`scroll_region`], whose drains each carry more lines than the region is tall,
+/// every drain here carries a shift Emacs replays over rows it already holds. So this is
+/// the case where the drain's copy of what Emacs shows has to follow the shift rather
+/// than forget the region, at 50x200 with the region one row short of each edge.
+#[test]
+#[ignore = "benchmark"]
+fn region_scroll_small_drains() {
+    let (rows, cols, frames, per_frame) = (50, 200, 20_000, 3);
+    let mut data = format!("\x1b[2;{}r\x1b[{};1H", rows - 1, rows - 1).into_bytes();
+    let setup = data.len();
+    let mut line = 0usize;
+    let mut frames_at = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        for _ in 0..per_frame {
+            data.extend_from_slice(
+                format!("\r\n{line:06} {}", "text ".repeat(cols / 6)).as_bytes(),
+            );
+            line += 1;
+        }
+        frames_at.push(data.len());
+    }
+    let mut term = Term::new(rows, cols);
+    term.feed(&data[..setup]);
+    term.drain();
+    let mut shifts = 0usize;
+    timed("region scroll, 3 lines a drain", data.len() - setup, || {
+        let mut at = setup;
+        for &end in &frames_at {
+            term.feed(&data[at..end]);
+            shifts += term.drain().shifts.len();
+            at = end;
+        }
+    });
+    println!("{:>44}({shifts} shifts over {frames} drains)", "");
+}
+
 /// What hyperlinks cost, which is a question about `LinkStore` rather than the parser.
 ///
 /// Here because the other four benchmarks emit no `OSC 8` at all, so the store they all
