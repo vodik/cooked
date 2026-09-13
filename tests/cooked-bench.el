@@ -512,21 +512,41 @@ is per row rather than per frame reads this, and the grid height does too --
 `cooked--fit-screen\=' then trimmed the other twenty-three rows down to."
   (cl-loop for (_first . block) in rows sum (length (nth 4 block))))
 
-(defun cooked-bench--update (rows &optional alt)
+(cl-defun cooked-bench--update (rows &key alt images shifts height)
   "An update plist of ROWS, shaped exactly as `cooked--drain' returns one.
 
 `:height', `:used' and `:head' are not optional: `cooked--apply' builds a
 `cooked-grid' from them and `cooked--fit-screen' does arithmetic on it, so a
 plist without them fails on a nil rather than benchmarking anything.  They were
 missing here from the moment the drain grew them, which is how
-`cooked-bench-per-frame' came to error out instead of reporting."
-  (let ((height (cooked-bench--row-count rows)))
-    (list :scrolled nil :rows rows
+`cooked-bench-per-frame' came to error out instead of reporting.
+
+HEIGHT defaults to the rows damaged, which is right for every fixture that
+repaints the whole screen and wrong for the one that does not.  A scroll damages
+*one* row of a twenty-four row screen, and a plist that let the default stand
+would declare a one-row screen -- which `cooked--fit-screen' then obeys,
+deleting the twenty-three rows the shift just moved and turning the case into an
+expensive way of measuring a truncation.  `cooked-bench-scroll' passes it
+through `cooked-bench--frames', and it is the whole reason this argument
+exists.
+
+IMAGES is the drain's `:images', the (ID FORMAT DATA PX-WIDTH PX-HEIGHT) records
+`cooked--install-images' files before anything names an id.  Only the first
+frame of a run needs it -- the module sends a picture once however often it is
+placed -- so `cooked-bench--frames' installs it once, outside the timed loop,
+and leaves this nil for the frames it times.
+
+SHIFTS is the drain's `:shifts', a list of (TOP BOTTOM COUNT UP) moves that
+`cooked--apply-shifts' replays as one deletion and one insertion each.  Keywords
+rather than positional arguments from here on: four optional trailing values
+whose meanings are unrelated is exactly the call site nobody can read."
+  (let ((height (or height (cooked-bench--row-count rows))))
+    (list :scrolled nil :rows rows :shifts shifts :images images
           :height height :used height :head 0
           :cursor '(0 0 t block) :alt alt
           :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
 
-(defun cooked-bench--run (rows)
+(defun cooked-bench--run (rows &optional first)
   "ROWS, each a description of one screen row, as the single run the module sends.
 
 The fixtures here hand `cooked--apply\=' what a full-screen repaint actually
@@ -542,7 +562,14 @@ its (START DECO) decoration spans likewise, and its answer to the guard's
 uniformity question.  Offsets are given per row and re-based here because that
 is the only place that knows where a row landed in the assembled text, and
 getting it wrong is a miscolouring rather than an error -- see
-`cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need\='."
+`cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need\='.
+
+FIRST is the screen row the run begins at, defaulting to 0 because every
+fixture that repaints a whole screen begins there.  A scroll does not: the row
+a line feed recycles is the *last* one, so `cooked-bench--scrolled-row\=' asks
+for 23.  The index is what `cooked--render-rows\=' seeks to, so a run at the
+wrong one would rewrite the top of the screen and leave the recycled row
+holding the text that scrolled away."
   (let ((text nil)
         (styles nil)
         (decos nil)
@@ -565,11 +592,12 @@ getting it wrong is a miscolouring rather than an error -- see
           (push (list (+ offset from) deco) decos))
         (push row-text text)
         (setq offset (+ offset (length row-text)))))
-    (list (cons 0 (list (apply #'concat (nreverse text))
-                        (and styles (apply #'unibyte-string styles))
-                        (nreverse decos)
-                        nil
-                        (nreverse table))))))
+    (list (cons (or first 0)
+                (list (apply #'concat (nreverse text))
+                      (and styles (apply #'unibyte-string styles))
+                      (nreverse decos)
+                      nil
+                      (nreverse table))))))
 
 (defun cooked-bench--plain-rows (count cols)
   "COUNT damaged rows of unstyled text, the cheapest thing to render.
@@ -645,7 +673,113 @@ single record the encoding exists to produce."
     (cooked-bench--run
      (cl-loop repeat count collect (list text nil (list (list 0 deco)) nil)))))
 
-(defun cooked-bench--frames (label rows &optional frames)
+
+(defun cooked-bench--scrolled-row (index cols)
+  "The one damaged row an ordinary scroll leaves, at screen row INDEX, COLS wide.
+
+A line feed at the foot of a full screen moves twenty-three rows up by one and
+recycles the twenty-fourth, and since 25365a1 that is what the module reports:
+a `Shift' saying the text moved, and damage on the single row that genuinely
+holds something new.  Everything else about the frame is plain text, so read
+this against `cooked-bench--plain-rows' at the same width -- the difference
+between the two is entirely the *shape* of the report, which is what the
+change was."
+  (cooked-bench--run (list (list (make-string cols ?x) nil nil t)) index))
+
+;; A picture, and the scroll that moves one.  Both were added after the changes
+;; they measure had already landed, and both were added because the changes
+;; could not be measured: cooked-bench.el was box drawing and plain text, so a
+;; run-wide `display' slice and a scroll expressed as a scroll were each
+;; reported flat by a suite with no fixture that reached them.  A benchmark that
+;; cannot see a fortyfold reduction is not a neutral benchmark, it is a wrong one.
+
+(defconst cooked-bench--png
+  (base64-decode-string
+   (concat "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAEUlEQVR4nGNkYGD4"
+           "DwABBAEAcCBlBQRbYf8AAAAASUVORK5CYII="))
+  "A one-pixel PNG, so the fixture needs no file on disk.
+
+Valid rather than plausible, because `cooked--image-spec\=' hands it to
+`create-image\=' and a spec built over bytes Emacs would refuse is not the spec
+production builds.  One pixel because nothing here rasterizes -- batch has no
+glyph matrix -- so the decode cost is not what these rows are about, and a
+larger picture would only make the fixture slower to load.
+
+Byte for byte the PNG `cooked-tests--png\=' assembles from chunks and CRCs in
+tests/cooked-tests-render.el, and kept as a literal here instead: that file
+builds it because its tests are partly *about* the format, and this one only
+needs something Emacs will accept.")
+
+(defun cooked-bench--image-cell (id crow ccol cols rows)
+  "The twelve bytes `cooked--apply-image-deco\=' reads for one image cell.
+
+A `u32\=' ID, then the cell\='s row CROW and column CCOL *within the picture*,
+then the cell rectangle COLS by ROWS the placement was laid at, all
+little-endian.
+See `Deco::packed\=' in src/emu/cell.rs for the encoder, and
+`cooked--apply-image-deco\=' for the walk that coalesces these back into runs."
+  (append (cooked-bench--le id 4)
+          (cooked-bench--le crow 2) (cooked-bench--le ccol 2)
+          (cooked-bench--le cols 2) (cooked-bench--le rows 2)))
+
+(defun cooked-bench--image-rows (count cols)
+  "COUNT damaged rows holding one COUNT-row picture, COLS cells wide.
+
+The workload the run-wide `display\=' slice was built for and the one nothing
+here could measure before: a full-screen picture, redrawn every frame, which is
+what
+`icat\=', an image browser paging a directory, or a plotting TUI actually does.
+
+Per cell on the wire and per run in the buffer, and the fixture has to be
+per-cell or it measures the wrong side of that split.  The module addresses a
+picture one cell at a time -- that is what makes it survive an overwrite, a
+scroll and a rewrap -- and `cooked--apply-image-deco\=' coalesces the records
+back into a maximal run of cells agreeing on the picture, the rectangle, the row
+within it and the next column along.  Emitting one record per row here would
+hand the renderer the answer and time the arithmetic that is left.
+
+So CCOL rises by one across each row and CROW is the screen row\='s own index,
+which is the shape a freshly drawn picture has and therefore coalesces to
+exactly one `display\=' property and one `cooked-deco\=' per row -- 47 intervals
+over a 24x80 frame against the 1943 the per-cell code left, which is the figure
+this fixture exists to put a time against.  (One fewer than 94b43e6\='s 48 and
+1944, and the difference is the trailing newline: the last of these rows ends
+the buffer, so `cooked-bench--property-intervals\=' has 23 separators to walk and
+not 24.  Same measurement, one boundary apart.)
+
+The text is spaces because an image cell *is* a blank in the default style: see
+`Cell::is_content\=' in src/emu/cell.rs, where the placement is what keeps such
+a row from measuring as empty and being trimmed off the end.  UNIFORM is
+therefore t, honestly and not by convenience -- a space is one byte on one cell
+-- and the guard finishes this row at step 1 as it does a plain one.  What separates this
+fixture from `cooked-bench--plain-rows\=' is the decoration and nothing else,
+which is what makes the gap between the two readable as the picture\='s cost."
+  (cooked-bench--run
+   (cl-loop
+    for row below count
+    collect (list (make-string cols ?\s)
+                  nil
+                  (list (list 0 (cons 'image
+                                      (apply #'unibyte-string
+                                             (cl-loop for col below cols
+                                                      append (cooked-bench--image-cell
+                                                              1 row col cols count))))))
+                  t))))
+
+(defun cooked-bench--image-resources (count cols)
+  "The `:images\=' records for the placement `cooked-bench--image-rows\=' makes.
+
+COUNT rows by COLS columns, the same rectangle those rows claim.
+
+One entry, because ids are content-addressed and the module sends a picture
+exactly once however often the child places it.  The pixel dimensions are the
+rectangle at the cell size the bench pins, which is what `cooked--image-spec\='
+would have been given had a real child transmitted it."
+  (list (list 1 'png cooked-bench--png
+              (* cols (car cooked-bench--cell))
+              (* count (cdr cooked-bench--cell)))))
+
+(cl-defun cooked-bench--frames (label rows &optional frames &key images height shifts)
   "Apply ROWS as a damaged-row update, one frame per iteration.
 
 The unit is one `cooked--apply' rather than a batch of them, which the earlier
@@ -656,10 +790,30 @@ the thousandth frame costs what the first did.  That was checked before the
 loop was allowed to auto-scale, not assumed.
 
 FRAMES is the floor, defaulting to the 200 the earlier batches used, so a
-declared count is never lower than what the recorded numbers were taken at."
+declared count is never lower than what the recorded numbers were taken at.
+
+IMAGES is installed once, before the loop and outside it, and deliberately does
+not ride the timed update.  `cooked--install-images' is the drain's resource
+pass and the module sends a picture once however many frames place it, so
+charging every frame for a `puthash' and an eviction sweep would measure the
+protocol wrongly -- it would put the picture's cost somewhere it is not.  What
+the timed frames then measure is the placement alone, which is where the
+interval tree is written and where the run-wide slice does its work.
+
+HEIGHT and SHIFTS go straight to `cooked-bench--update'; see there.  A case
+passing SHIFTS is also primed with one untimed apply first, because
+`cooked--apply-shift' deletes and reopens rows *by index* and the child here has
+left the buffer one line long: the first shift would be asked to move rows that
+do not exist yet.  One apply is enough, `cooked--fit-screen' growing the screen
+to HEIGHT, and every timed frame then starts from a full screen -- which is the
+state a scroll actually arrives in.  The priming is conditional rather than
+unconditional so that the cases recorded before it existed are still being run
+exactly as they were."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-tests--settle-briefly)
-    (let ((update (cooked-bench--update rows t)))
+    (when images (cooked--install-images images))
+    (let ((update (cooked-bench--update rows :alt t :height height :shifts shifts)))
+      (when shifts (cooked--apply update))
       (cooked-bench--measure label 1
                              (lambda () (cooked--apply update))
                              (or frames 200))
@@ -685,6 +839,114 @@ declared count is never lower than what the recorded numbers were taken at."
   (let ((cooked-detect-links-on-alt-screen t))
     (cooked-bench--frames "per-frame, 24x80 with a URL per row"
                           (cooked-bench--url-rows 24 80) 200)))
+
+;;;; The two shapes the suite could not see
+;;
+;; Both of these were added after the change they measure had already landed,
+;; and in both cases the reason is the same: the fixtures were box drawing and
+;; plain text, so a change to the image path and a change to the shape of a
+;; scroll report were each invisible here -- flat by construction, which reads
+;; as non-regression and is not evidence of anything.  A benchmark's coverage is
+;; part of what it claims, and a suite that cannot reach a path should not be
+;; read as saying that path is unmoved.
+
+(defun cooked-bench--property-intervals (property)
+  "How many runs of PROPERTY the current buffer holds.
+
+The deterministic half of the image case, and the figure 94b43e6 was measured
+on: what Emacs' redisplay walks is the interval tree, so a frame of picture is
+`find_interval' and `parse_image_spec' once per interval whether or not any
+pixels change.  A count rather than a time because it is exact -- the same
+number on a busy machine as on a quiet one -- and because it is the quantity
+the change was about, the milliseconds being a consequence of it.
+
+Counted with `next-single-property-change' rather than by asking the interval
+tree directly: it is what a redisplay walk does, and it merges neighbouring
+intervals that happen to agree, which is exactly the merge the run-wide slice is
+asking Emacs for and would be wrong to count twice."
+  (save-restriction
+    (widen)
+    (let ((pos (point-min))
+          (runs 0))
+      (while (< pos (point-max))
+        (setq pos (or (next-single-property-change pos property) (point-max))
+              runs (1+ runs)))
+      runs)))
+
+(defun cooked-bench-image ()
+  "A full-screen picture, redrawn every frame: what `icat' and a plotting TUI do.
+
+The case 94b43e6 needed and did not have.  It moved a placement's `display' and
+`cooked-deco' properties from one per cell to one per run, and `make bench'
+reported the change as flat because nothing here placed an image at all.  With
+this row, reverting that one commit's cooked-deco.el hunk and rerunning says:
+
+  display intervals over the frame  1943 -> 47
+  cooked-deco intervals             1943 -> 47
+  per-frame p50, three runs a side  5.98-7.15 ms -> 2.28-2.42 ms
+  collections per 200 frames        64 -> 20
+
+Two figures, and the interval count is the headline.  It is deterministic, it is
+the quantity the change was about, and it is the one that can be compared across
+machines and across a year of commits; the time is what that costs on this
+machine today.  Read the time against `per-frame, 24x80 plain' rather than in
+isolation -- the fixture is plain spaces plus a placement, so the gap between
+the two rows is the picture and nothing else."
+  (let ((rows (cooked-bench--image-rows 24 80)))
+    (cooked-bench--frames "per-frame, 24x80 image" rows 200
+                          :images (cooked-bench--image-resources 24 80))
+    ;; Counted in a session of its own rather than at the end of the timed one:
+    ;; the loop above leaves whatever the last frame wrote, and a count taken
+    ;; there would be reporting the state a benchmark happened to stop in.
+    (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
+      (cooked-tests--settle-briefly)
+      (cooked--install-images (cooked-bench--image-resources 24 80))
+      (cooked--apply (cooked-bench--update rows :alt t))
+      (message "  %-40s   %d display intervals, %d cooked-deco" ""
+               (cooked-bench--property-intervals 'display)
+               (cooked-bench--property-intervals 'cooked-deco)))))
+
+(defun cooked-bench-scroll ()
+  "One line of ordinary scrolling, reported both ways.
+
+The pair 25365a1 needed and did not have.  Before it, a line feed at the foot of
+a full screen was twenty-four damaged rows -- true, since after a `rotate_left'
+every index does hold different text, but silent about the text having *moved*.
+After it the same operation is one `Shift' and one damaged row, and
+`cooked--apply-shifts' turns the shift into a single deletion and insertion that
+the surviving rows' markers, overlays and fontification ride through.
+
+  damaged rows per frame            24 -> 1
+  per-frame p50, three runs a side  0.098-0.102 ms -> 0.039-0.041 ms
+
+No collection figure in that table, unlike the image row's: the two arms run to
+a wall clock rather than to a frame count, so the faster one fits twice as many
+frames into the same half second and its collection count is not comparable
+with the other's.  The row count is the deterministic half and it is printed beside each row by
+`cooked-bench--frames' already, which is what makes this pair readable without
+trusting a clock at all.
+
+Both rows are run here, on one build, and that is the honest comparison rather
+than a shortcut around one: the change split across Rust and Lisp, but the Lisp
+half is purely additive -- `cooked--apply-shifts' did not exist and now does --
+so the whole of what Emacs saved is the difference between the two plists the
+module can send for the same event.  Feeding it both says exactly that, and says
+it without a second build to be wrong about.
+
+What the difference does *not* include is the half that motivated the change:
+markers surviving.  That is not a time, it is a fact about the buffer, and
+tests/cooked-tests-render.el pins it."
+  (cooked-bench--frames "scroll one line, as 24 damaged rows (before)"
+                        (cooked-bench--plain-rows 24 80) 200)
+  (cooked-bench--frames "scroll one line, as a shift (after)"
+                        (cooked-bench--scrolled-row 23 80) 200
+                        :height 24 :shifts '((0 23 1 t)))
+  ;; A scroll region, which is the case cooked was already narrower than ghostel
+  ;; on and must not regress: six rows move, one is recycled, and the eighteen
+  ;; rows outside the region are not touched at all.
+  (cooked-bench--frames "scroll region 5..10, as a shift"
+                        (cooked-bench--scrolled-row 9 80) 200
+                        :height 24 :shifts '((4 9 1 t))))
 
 ;;;; Cosmetic passes, and when they are paid
 ;;
@@ -760,7 +1022,7 @@ shape reported."
     ;; The primary screen: the alternate one has the URL scan off by default,
     ;; and what is under test is when the scan is paid rather than which screen
     ;; pays it.  See `cooked-detect-links-on-alt-screen'.
-    (let ((update (cooked-bench--update rows nil)))
+    (let ((update (cooked-bench--update rows)))
       (cooked-bench--measure
        label ratio
        (lambda ()
@@ -893,6 +1155,10 @@ a result."
   (cooked-bench-box-drawing)
   (message "")
   (cooked-bench-per-frame)
+  (message "")
+  (cooked-bench-image)
+  (message "")
+  (cooked-bench-scroll)
   (message "")
   (cooked-bench-deferred)
   (message "")

@@ -118,6 +118,120 @@ the one call under test."
           (setq pos (1+ pos))))
       (should (= decorated 40)))))
 
+(ert-deftest cooked-bench-image-rows-are-twelve-bytes-a-cell-where-the-reader-looks ()
+  "The image fixture is the third copy of a wire format again, and the one the
+suite has no other reason to exercise -- no test in tests/cooked-tests-render.el
+reads `cooked-bench--image-cell', and no benchmark reads `Deco::packed'.  So the
+stride and every field are asserted against the same decoders
+`cooked--apply-image-deco' walks the records with.
+
+A stride check alone would not be enough here and was not enough for the box
+row either: twelve bytes of anything is twelve bytes, and a record with CROW and
+CCOL transposed reads as a picture drawn down its own left column.  What makes
+that visible is asking for the *second* cell of the *second* row, the only
+position at which every one of the four fields is distinct."
+  (pcase-let* ((`((,_index . (,_text ,_styles ,spans ,_links ,_table)))
+                (cooked-bench--image-rows 2 80))
+               (`(,_start (image . ,packed)) (cadr spans)))
+    ;; Row 1 of the picture, eighty cells of it, twelve bytes each.
+    (should (= (length packed) (* 12 80)))
+    (let ((base (* 12 1)))
+      (should (= (cooked--u32 packed base) 1))          ; id
+      (should (= (cooked--u16 packed (+ base 4)) 1))    ; crow: the second row
+      (should (= (cooked--u16 packed (+ base 6)) 1))    ; ccol: the second cell
+      (should (= (cooked--u16 packed (+ base 8)) 80))   ; cols
+      (should (= (cooked--u16 packed (+ base 10)) 2)))))  ; rows
+
+(ert-deftest cooked-bench-image-rows-coalesce-to-one-run-a-row ()
+  "The consequence, and the assertion that would survive a wire format this file
+has not thought of: applying the fixture has to leave one `display\=' run and one
+`cooked-deco\=' run *per screen row*, forty cells wide, because that is the state
+94b43e6 produced and the whole of what `cooked-bench-image\=' claims to be timing.
+
+The failure this guards is not a crash.  A fixture whose CCOLs did not rise by
+one -- every cell claiming column 0, say, which is the shape a per-row record
+would decode to -- still applies, still decorates every cell, and still reports
+a number.  It would just report the per-cell cost the change removed, labelled
+as the coalesced one, and the benchmark would say the commit did nothing.
+Reverting 94b43e6\='s cooked-deco.el hunk turns the seven runs below into a
+hundred and sixty-three, so this is the assertion that fails on the old code.
+
+Asserted as \"every decorated run is a whole row wide\" and not as a total over
+the buffer, which is what it said first, because a total is hostage to how many
+rows the buffer has and one thing in the suite takes a row away.  `evil-mode\='
+is a global minor mode, `cooked-a-mouse-report-in-visual-state-leaves-evil-agreeing\='
+turns it on and nothing turns it off, so every test after it in the run has evil
+loaded -- and with evil loaded, `cooked--set-mode\=' drives an evil state exit,
+whose hook calls `evil-maybe-remove-spaces\=', which deletes a line consisting
+entirely of whitespace.  An image cell *is* a blank, so a frame of picture loses
+the row point is standing on and the total comes back one short.  That is worth
+knowing and is not this test\='s subject: the run width says exactly what
+coalescing means and says it about whichever rows survived.
+
+`cooked-debug\=' bound for the reason `cooked-bench-box-rows-decorate-every-cell-they-claim\='
+binds it: `cooked--apply-deco\=' runs inside `cooked--protect-seam\=', which outside
+the flag swallows a malformed record and lets the row come back plausible."
+  (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
+    (cooked-tests--settle-briefly)
+    (let ((cooked-debug t)
+          (rows (cooked-bench--image-rows 4 40)))
+      (cooked--install-images (cooked-bench--image-resources 4 40))
+      (cooked--apply (cooked-bench--update rows :alt t)))
+    (save-restriction
+      (widen)
+      (let ((pos (point-min))
+            (runs 0))
+        (while (< pos (point-max))
+          (let ((next (or (next-single-property-change pos 'display) (point-max))))
+            (when (get-text-property pos 'cooked-deco)
+              (setq runs (1+ runs))
+              ;; The whole row in one interval, both properties over the same
+              ;; extent -- a `cooked-deco' per cell would leave the interval tree
+              ;; exactly as long however few `display' values it held, which is
+              ;; why the commit moved both and why both are checked.
+              (should (= (- next pos) 40))
+              (should (= (or (next-single-property-change pos 'cooked-deco)
+                             (point-max))
+                         next)))
+            (setq pos next)))
+        ;; At least three of the four rows: see the docstring for the fourth.
+        (should (>= runs 3))))))
+
+(ert-deftest cooked-bench-a-scroll-damages-the-row-it-names-and-no-other ()
+  "The scroll fixture has two halves that have to agree, and nothing else in the
+suite would notice them disagreeing.
+
+FIRST is the screen row the run lands at, and it has to be the row the shift
+recycled: a shift of (0 23 1 t) moves rows 1..23 up and leaves row 23 holding
+whatever the reopened line has, so a run at row 0 would rewrite the top of the
+screen and leave the recycled row blank -- a fixture measuring the same amount
+of work at the wrong end of the buffer, which is exactly the quiet kind of wrong
+this file exists for.
+
+HEIGHT is the other half.  `cooked-bench--update' defaults it to the rows
+damaged, and one damaged row means a one-row screen, which `cooked--fit-screen'
+obeys by deleting the twenty-three the shift had just carefully preserved.  Both
+are asserted here as a screen that still has twenty-four rows after a frame, the
+last of which is the one the fixture wrote."
+  (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
+    (cooked-tests--settle-briefly)
+    (let ((update (cooked-bench--update (cooked-bench--scrolled-row 23 40)
+                                        :alt t :height 24
+                                        :shifts '((0 23 1 t)))))
+      ;; Twice: the first apply grows the screen and the second is the one that
+      ;; actually scrolls a screen that was already full, which is the state the
+      ;; benchmark times and the only one in which the shift moves real rows.
+      (cooked--apply update)
+      (cooked--apply update))
+    (let ((start (cooked--screen-start-position)))
+      (should start)
+      (should (= (count-lines start (point-max)) 24))
+      (save-excursion
+        (goto-char (point-max))
+        (should (equal (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position))
+                       (make-string 40 ?x)))))))
+
 (ert-deftest cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need ()
   "A fixture is one run -- `(0 . BLOCK)\=' -- and a block is (TEXT STYLE-SPANS
 DECO-SPANS LINK-SPANS ROWS), where ROWS has one (START WIDTH UNIFORM) per screen
@@ -145,7 +259,8 @@ since re-basing them onto the assembled text is the one thing
   (dolist (rows (list (cooked-bench--plain-rows 2 80)
                       (cooked-bench--styled-rows 2 80)
                       (cooked-bench--url-rows 2 80)
-                      (cooked-bench--box-rows 2 80)))
+                      (cooked-bench--box-rows 2 80)
+                      (cooked-bench--image-rows 2 80)))
     (should (= (length rows) 1))
     (pcase-let ((`((,first . ,block)) rows))
       (should (= first 0))
