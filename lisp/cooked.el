@@ -2088,8 +2088,8 @@ of it -- and the loop then eats the newline above START and the row below."
       (delete-region (1- eol) eol))
     trimmed))
 
-(defcustom cooked-glyph-scale-floor 0.5
-  "How far a glyph may be shrunk to make it fit its cell.
+(defcustom cooked-glyph-scale-floor nil
+  "How far a glyph may be shrunk to make it fit its cell, or nil not to.
 
 A glyph needing more than this is left alone and the row is trimmed instead.
 Scaling is a repair, and a repair that renders a character at half size has
@@ -2097,7 +2097,19 @@ stopped repairing and started hiding: below some ratio an unreadable glyph in
 the right place is worse than a truncation arrow saying plainly that something
 did not fit.
 
-nil disables scaling entirely and restores the trim-only behaviour."
+*nil by default, and that is a retreat rather than a design.* Scaling shipped
+on and immediately misrendered htop and btop: their box-drawing and block
+characters come from fallback fonts whose ascent or descent differs from the
+default face\=', so the scaler fired on *every* glyph in a border and shrank a
+whole TUI out of alignment.  A repair whose failure mode is worse than the
+problem has to be asked for, not assumed, until it can tell a genuinely
+overflowing glyph from a fallback font with roomier metrics.
+
+Set it to a number -- 0.5 was the shipped default -- to turn scaling on.  Below
+that ratio a glyph is left alone and the row is trimmed instead: a repair that
+renders a character at half size has stopped repairing and started hiding, and
+an unreadable glyph in the right place is worse than a truncation arrow saying
+plainly that something did not fit."
   :type '(choice (const :tag "Never scale, only trim" nil) number)
   :group 'cooked)
 
