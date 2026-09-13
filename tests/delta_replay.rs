@@ -559,9 +559,13 @@ impl Replay {
         }
         let sent: Vec<usize> = delta.rows.iter().map(|r| r.index).collect();
         for row in &delta.rows {
+            // A row nothing wrote to is still sent when the cursor moves into or out of a
+            // glyph run on it, which the reference, knowing no row, never asks about. Its
+            // runs are then the ones Emacs already holds.
             let theirs = reference.rows.iter().find(|r| r.index == row.index);
             assert!(
-                theirs.is_some_and(|r| r.runs == row.runs),
+                theirs.map_or(shadow.get(row.index) == Some(&row.runs), |r| r.runs
+                    == row.runs),
                 "row {} was sent without the reference sending it the same way",
                 row.index
             );

@@ -81,7 +81,7 @@ fn a_row_moved_by_a_scroll_is_matched_where_it_went() {
 
 #[test]
 fn a_cursor_moving_within_a_row_of_box_glyphs_sends_the_row() {
-    // Lisp splits a glyph run at the cursor's cell, so the row renders differently.
+    // Lisp cuts a glyph run around the cursor's cell, so the row renders differently.
     let mut t = settled(2, 10, "\u{2502}   \u{2502}".as_bytes());
     t.feed("\x1b[1;1H\x1b[2K\u{2502}   \u{2502}\x1b[1;3H".as_bytes());
     assert_eq!(sent(&mut t), vec![0]);
@@ -213,7 +213,7 @@ fn a_change_after_a_glyph_run_leaves_the_run_alone() {
 
 #[test]
 fn a_cursor_leaving_a_glyph_run_redraws_the_run() {
-    // Lisp split the run at the cursor's cell, so when the cursor leaves the run it is
+    // Lisp cut the run around the cursor's cell, so when the cursor leaves the run it is
     // drawn again as one, even though the change that damaged the row is further along.
     let row = "a label then \u{2500}\u{2500}  \u{2500}\u{2500} and the rest";
     let mut t = settled(2, 40, format!("{row}\x1b[1;16H").as_bytes());
@@ -226,6 +226,96 @@ fn a_cursor_leaving_a_glyph_run_redraws_the_run() {
             32,
             "\u{2500}\u{2500}  \u{2500}\u{2500} and the rex".to_string()
         )))
+    );
+}
+
+#[test]
+fn a_bare_cursor_move_out_of_a_glyph_run_redraws_the_run() {
+    // The lone `┌`: the border was drained with the cursor on its second column, where
+    // Lisp cut the run, and then the cursor moved away without writing anything. No row
+    // is damaged, and the run must still be drawn again as one.
+    let mut t = settled(
+        3,
+        40,
+        "a \u{250c}\u{2500}\u{2500}\u{2510} b\x1b[1;4H".as_bytes(),
+    );
+    t.feed(b"\x1b[3;1H");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((
+            2,
+            Some(6),
+            8,
+            "\u{250c}\u{2500}\u{2500}\u{2510}".to_string()
+        )))
+    );
+    // Once drawn, the row is settled, and the next move elsewhere sends nothing.
+    t.feed(b"\x1b[2;1H");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+}
+
+#[test]
+fn a_bare_cursor_move_into_a_glyph_run_redraws_the_run() {
+    let mut t = settled(
+        3,
+        40,
+        "a \u{250c}\u{2500}\u{2500}\u{2510} b\x1b[3;1H".as_bytes(),
+    );
+    t.feed(b"\x1b[1;5H");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((
+            2,
+            Some(6),
+            8,
+            "\u{250c}\u{2500}\u{2500}\u{2510}".to_string()
+        )))
+    );
+}
+
+#[test]
+fn a_bare_cursor_move_across_plain_rows_sends_nothing() {
+    let mut t = settled(3, 40, b"one\r\ntwo\x1b[1;2H");
+    t.feed(b"\x1b[2;2H");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+    t.feed(b"\x1b[3;1H");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+}
+
+#[test]
+fn a_cursor_on_the_first_cell_of_a_glyph_run_is_inside_it() {
+    // Lisp cuts after the cursor's cell as well as before it, so the corner a cursor sits
+    // on is drawn apart from the rest of its border.
+    let mut t = settled(
+        3,
+        40,
+        "a \u{250c}\u{2500}\u{2500}\u{2510} b\x1b[3;1H".as_bytes(),
+    );
+    t.feed(b"\x1b[1;3H");
+    assert_eq!(sent(&mut t), vec![0]);
+}
+
+#[test]
+fn a_cursor_on_a_lone_glyph_changes_nothing() {
+    // A one-cell run cut on both sides is the run it was.
+    let mut t = settled(3, 40, "a \u{2502} b\x1b[3;1H".as_bytes());
+    t.feed(b"\x1b[1;3H");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+}
+
+#[test]
+fn a_cursor_moving_into_a_glyph_run_after_a_wide_character_edits_the_run() {
+    // `日` takes columns 0 and 1 and one character, so the run in columns 3 to 6 starts
+    // two characters in, and that is where the edit has to start for Lisp to find it.
+    let mut t = settled(
+        3,
+        40,
+        "\u{65e5} \u{2500}\u{2500}\u{2500}\u{2500} rest\x1b[1;2H".as_bytes(),
+    );
+    t.feed(b"\x1b[1;6H");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((2, Some(6), 11, "\u{2500}".repeat(4))))
     );
 }
 

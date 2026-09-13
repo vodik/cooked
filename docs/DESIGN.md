@@ -1305,12 +1305,14 @@ Four things fall out of that, and each is a place where the obvious next step is
   thing per placement — and that needed no protocol change at all.
 
 - **The cursor's cell breaks a run, and the shade rule is why that is cheap.** Emacs draws
-  the cursor at the *start* of a `display` span however wide the span is, and cooked puts
-  point on the child's cursor every drain — so a span bridging the cursor's column draws it
-  several cells left of where the child put it. Harmless while a run was identical box
-  glyphs (a cursor does not sit in a border) and very visible once runs bridge an indent.
-  The fix is a split, not a per-cell expansion: the cursor's cell starts a segment, which
-  is where Emacs was going to draw it anyway, so one row pays one extra interval.
+  a block cursor on a `display` span at the span's start and as wide as the span, and
+  cooked puts point on the child's cursor every drain — so a span bridging the cursor's
+  cell draws a box around the span, starting cells left of where the child put it.
+  Harmless while a run was identical box glyphs (a cursor does not sit in a border) and
+  very visible once runs bridge an indent or an empty input field. The fix is two cuts,
+  not a per-cell expansion: the cursor's cell is a segment of its own, so one row pays two
+  extra intervals. The core measures the cursor in characters of its row for this, and
+  asks again about the rows the cursor left and entered, since a move damages none.
   `cooked--glyph-run-segments` is where that rule and the shade rule both live, and it
   hands the run straight back unsplit whenever neither applies — which is nearly always.
 

@@ -353,28 +353,23 @@ built and so actually reaches the rule."
       (should-not (get-text-property (+ beg 3) 'display))
       (should-not (get-text-property (+ beg 3) 'cooked-deco)))))
 
-(ert-deftest cooked-the-cursors-cell-starts-its-own-glyph-run ()
+(ert-deftest cooked-the-cursors-cell-is-a-glyph-segment-of-its-own ()
   "A `display' span never bridges the cell the child's cursor is on.
 
-Emacs draws the cursor at the *start* of a `display' span however many
-characters the span covers, and cooked puts point wherever the child's cursor is
-on every drain.  So a span bridging the cursor's column draws the cursor several
-cells to the left of where the child put it -- and the wider the span, the
-further wrong it is.
-
-This was invisible for as long as a run was identical box glyphs, a cursor
-having no business inside a border, and became visible the moment runs learned
-to bridge the blanks of an indent: an indent is exactly where a cursor does sit.
-The break is a split rather than a per-cell expansion, because the start of a
-span is where Emacs was going to draw it anyway -- so the cost is one extra
-interval on one row.
+Emacs draws a block cursor on a `display' span as wide as the span, at its
+start, and cooked puts point wherever the child's cursor is on every drain.  So
+a span bridging the cursor's cell draws the cursor as a box around the span --
+and in an empty bordered input field that is a box around the field.  Cutting
+only before the cell put the box's left edge in the right place and left it as
+wide as the rest of the run, so the run is cut on both sides, and the cursor's
+segment is one cell.
 
 The fixture writes the row and then addresses the cursor back into the middle of
 it with CUP, which is what a full-screen program does and what no amount of
-plain output would produce.  Without the rule the whole indent is one interval
-and the assertion on the boundary fails."
+plain output would produce.  Without the cut before the cell the whole indent is
+one interval, and without the cut after it the cursor's segment is four cells."
   (cooked-tests--with-session
-      ;; `│ │ ├──', then CUP to row 1 column 3 -- the second blank, mid-run.
+      ;; `│ │ ├──', then CUP to row 1 column 4 -- the second blank, mid-run.
       '("/bin/sh" "-c"
         "printf '\\342\\224\\202 \\342\\224\\202 \\342\\224\\234\\342\\224\\200\\342\\224\\200\\033[1;4H'")
     (cooked-tests--cell 10 20)
@@ -384,16 +379,24 @@ and the assertion on the boundary fails."
       ;; The premise: the cursor really is where the fixture put it, three cells
       ;; into a run that would otherwise be one span of seven.
       (should (equal (cooked--cursor-cell) '(0 . 3)))
-      ;; Two spans, and the boundary is the cursor's own cell.
-      (should (= (cooked-tests--display-intervals beg (+ beg 7)) 2))
+      (should (= (point) (+ beg 3)))
+      ;; Three spans: the cells before the cursor, its own, and the rest.
+      (should (= (cooked-tests--display-intervals beg (+ beg 7)) 3))
       (should (equal (next-single-property-change beg 'display) (+ beg 3)))
-      ;; Each carries an image of its own width, so the row is still as wide as
-      ;; its characters -- the split must not cost the cells it separates.
+      (should (equal (next-single-property-change (+ beg 3) 'display) (+ beg 4)))
+      ;; The cursor's segment is exactly one cell.  It is a blank, which draws
+      ;; nothing and so is left the space it is rather than given an image.
+      (should (= (cooked--glyph-pattern-cells
+                  (nth 1 (get-text-property (+ beg 3) 'cooked-deco)))
+                 1))
+      (should-not (get-text-property (+ beg 3) 'display))
+      ;; Either side carries an image of its own width, so the row is still as
+      ;; wide as its characters -- the cuts must not cost the cells they separate.
       (should (equal (plist-get (cdr (cooked-tests--glyph-image beg)) :data-width)
                      (* 3 10)))
-      (should (equal (plist-get (cdr (cooked-tests--glyph-image (+ beg 3)))
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image (+ beg 4)))
                                 :data-width)
-                     (* 4 10))))))
+                     (* 3 10))))))
 
 (ert-deftest cooked-the-cursor-is-found-by-character-after-a-wide-one ()
   "On `日本X' with the cursor on `本', point is on `本'.
@@ -410,6 +413,64 @@ edits are measured by."
     (let ((beg (point-min)))
       (should (equal (buffer-substring-no-properties beg (+ beg 3)) "日本X"))
       (should (= (cooked--cursor-position) (1+ beg))))))
+
+(ert-deftest cooked-a-glyph-run-after-a-wide-character-is-cut-at-the-cursor ()
+  "The cursor's cut in a glyph run lands on its cell after a wide character too.
+
+`日│ │ ├──' with the cursor on `├', column 6 and the sixth character: counted
+as a column, the cuts fell one character late, and the box around the cursor was
+drawn around the first `─' instead of the corner."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\346\\227\\245\\342\\224\\202 \\342\\224\\202 \\342\\224\\234\\342\\224\\200\\342\\224\\200\\033[1;7H'; sleep 5")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (1+ (point-min)) 'display))))
+    (let ((beg (point-min)))
+      (should (equal (cooked--cursor-cell) '(0 . 6)))
+      (should (equal (next-single-property-change (1+ beg) 'display) (+ beg 5)))
+      (should (equal (next-single-property-change (+ beg 5) 'display) (+ beg 6)))
+      (should (equal (plist-get (cdr (cooked-tests--glyph-image (+ beg 5)))
+                                :data-width)
+                     10)))))
+
+(ert-deftest cooked-a-bare-cursor-move-redraws-the-glyph-run-it-left ()
+  "A border drained with the cursor on it is drawn whole once the cursor leaves.
+
+The report was `┌───┐' showing `┌' as one image and the rest as another.  A
+program that drew the border and parked the cursor on its second cell for a
+drain had it cut there, and moving the cursor on damages no row, so the cut
+stayed for as long as nothing wrote to the row.  The core now asks again about
+the rows the cursor was on and is on, and resends the run.
+
+The second half is the same from a wide character's column into the run, where
+the core's cell and Lisp's character have to agree on which run the cursor is
+in: `日 ┌──┐' with the cursor moved onto the first `─' is cut around it."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\200\\342\\224\\220\\033[1;2H'; sleep 0.5; printf '\\033[3;1H'; sleep 5")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (equal (cooked--cursor-cell) '(0 . 1)))))
+    (let ((beg (point-min)))
+      (should (= (cooked-tests--display-intervals beg (+ beg 4)) 3))
+      (should (cooked-tests--settle
+               (lambda () (equal (cooked--cursor-cell) '(2 . 0)))))
+      (should (cooked-tests--settle
+               (lambda () (= (cooked-tests--display-intervals beg (+ beg 4)) 1))
+               1))))
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\346\\227\\245 \\342\\224\\214\\342\\224\\200\\342\\224\\200\\342\\224\\220\\033[1;2H'; sleep 0.5; printf '\\033[1;5H'; sleep 5")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (equal (cooked--cursor-cell) '(0 . 4)))))
+    (let ((beg (point-min)))
+      (should (cooked-tests--settle
+               (lambda () (= (cooked-tests--display-intervals (+ beg 2) (+ beg 6)) 3))
+               1))
+      (should (equal (next-single-property-change (+ beg 2) 'display) (+ beg 3)))
+      (should (equal (next-single-property-change (+ beg 3) 'display) (+ beg 4))))))
 
 (defconst cooked-tests--white-on-black "\\033[38;2;255;255;255m\\033[48;2;0;0;0m"
   "SGR for white on black in truecolor, so a blend has colours a test can name.
@@ -515,7 +576,7 @@ The text beside it follows the remapped `default' live, so the shade must too."
 
 (ert-deftest cooked-the-cursor-splits-a-shade-stretch ()
   "The cursor rule holds for a stretch as it does for an image; see
-`cooked-the-cursors-cell-starts-its-own-glyph-run'."
+`cooked-the-cursors-cell-is-a-glyph-segment-of-its-own'."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\342\\226\\222\\342\\226\\222\\342\\226\\222\\342\\226\\222\\033[1;3H'")
@@ -524,9 +585,10 @@ The text beside it follows the remapped `default' live, so the shade must too."
              (lambda () (get-text-property (point-min) 'display))))
     (let ((beg (point-min)))
       (should (equal (cooked--cursor-cell) '(0 . 2)))
-      (should (= (cooked-tests--display-intervals beg (+ beg 4)) 2))
+      (should (= (cooked-tests--display-intervals beg (+ beg 4)) 3))
       (should (equal (get-text-property beg 'display) '(space :width (20))))
-      (should (equal (get-text-property (+ beg 2) 'display) '(space :width (20)))))))
+      (should (equal (get-text-property (+ beg 2) 'display) '(space :width (10))))
+      (should (equal (get-text-property (+ beg 3) 'display) '(space :width (10)))))))
 
 (ert-deftest cooked-a-rescale-rebuilds-every-cell-of-a-shared-glyph-run ()
   "`cooked--rescale-deco\=' walks with `next-single-property-change\=', which

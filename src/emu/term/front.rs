@@ -27,10 +27,11 @@ struct Known {
     wrapped: bool,
     /// The cursor's column when the row was rendered, if the cursor was on it.
     ///
-    /// Rendering depends on it when the cursor is inside a run of box glyphs: Lisp splits
-    /// the run at the cursor's cell, because Emacs draws the cursor at the start of a
-    /// `display` span however wide the span is. Anywhere else the cursor changes nothing
-    /// about how the row is drawn.
+    /// Rendering depends on it when the cursor is inside a run of box glyphs: Lisp cuts
+    /// the run on both sides of the cursor's cell, because Emacs draws the cursor as wide
+    /// as the `display` span it sits on. Anywhere else the cursor changes nothing about
+    /// how the row is drawn, and a row that matched with the cursor elsewhere takes the
+    /// new column without being sent; see [`Front::cursor_rows`].
     cursor: Option<u16>,
     /// The row's attachments, less its semantic marks, which change nothing Emacs draws
     /// and reach it through the drain's `:marks` instead.
@@ -128,6 +129,39 @@ impl Front {
         }
     }
 
+    /// The known rows that were rendered with the cursor on them, which a cursor move
+    /// alone can leave drawn wrong.
+    ///
+    /// A move damages no row, so without asking these again a run cut for the cursor
+    /// stays cut after it leaves: a border drained while the cursor sat on its second
+    /// column shows `┌` as one image and the rest as another for as long as nothing
+    /// writes to the row. [`Front::settle_cursor`] keeps this to the row or two the
+    /// cursor has actually been on since.
+    pub(super) fn cursor_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.known && row.cursor.is_some())
+            .map(|(index, _)| index)
+    }
+
+    /// Whether Emacs' text for row INDEX is known.
+    pub(super) fn knows(&self, index: usize) -> bool {
+        self.rows.get(index).is_some_and(|row| row.known)
+    }
+
+    /// Note that row INDEX, which [`Front::matches`] has just said Emacs already shows,
+    /// is drawn as it would be with the cursor at CURSOR.
+    ///
+    /// True of any row that matched, since a match with the cursor elsewhere means the
+    /// cursor is in no glyph run of it either way, and it keeps a row the cursor left
+    /// from being asked about again on every drain.
+    pub(super) fn settle_cursor(&mut self, index: usize, cursor: Option<u16>) {
+        if let Some(row) = self.rows.get_mut(index) {
+            row.cursor = cursor;
+        }
+    }
+
     /// Whether ROW, rendered with the cursor at CURSOR, is what Emacs already shows at
     /// INDEX.
     pub(super) fn matches(&self, index: usize, row: RowRef<'_>, cursor: Option<u16>) -> bool {
@@ -158,7 +192,7 @@ impl Front {
     /// its own: out to whole wide characters, and out to the ends of any run of box glyphs
     /// a boundary would cut, because Lisp draws a glyph run as one image over the whole run
     /// and a replacement that cut one would leave half an image behind. A glyph run the
-    /// cursor has moved into or out of is included too, since Lisp splits a run at the
+    /// cursor has moved into or out of is included too, since Lisp cuts a run around the
     /// cursor's cell. The row is sent whole instead when:
     ///
     /// - the copy is not known;
@@ -236,8 +270,8 @@ impl Front {
             return None;
         }
         let glyphs = has_glyphs(row) || old.iter().any(|c| is_glyph(*c));
-        // A glyph run the cursor sat inside, or now sits inside, is split at the cursor's
-        // cell when Lisp draws it, so a move of the cursor redraws that run whole.
+        // A glyph run the cursor sat inside, or now sits inside, is cut around the
+        // cursor's cell when Lisp draws it, so a move of the cursor redraws that run whole.
         if known.cursor != cursor && glyphs {
             let runs = [known.cursor, cursor].map(|at| self.cursor_run(index, row, at));
             for (first, last) in runs.into_iter().flatten() {
@@ -308,11 +342,15 @@ impl Front {
     /// The glyph run of row INDEX, in the copy or in ROW, that the cursor at column AT
     /// sits inside, as its first and last columns.
     ///
-    /// Lisp starts a new glyph segment at the cursor's cell, so a run the cursor is inside
-    /// renders differently from the same run with the cursor elsewhere, and a run it is
-    /// not inside renders the same wherever the cursor is.
+    /// Lisp cuts a glyph run before and after the cursor's cell, so a run the cursor is
+    /// inside renders differently from the same run with the cursor elsewhere, and a run
+    /// it is not inside renders the same wherever the cursor is. Inside means either cut
+    /// falls within the run: on the first cell of `┌──┐` only the cut after it does, and
+    /// on a lone `┌` neither does, since cutting a one-cell run leaves it as it was.
     fn cursor_run(&self, index: usize, row: RowRef<'_>, at: Option<u16>) -> Option<(usize, usize)> {
-        glyph_run_across(self.cells(index), row.cells(), usize::from(at?))
+        let at = usize::from(at?);
+        let (old, new) = (self.cells(index), row.cells());
+        glyph_run_across(old, new, at).or_else(|| glyph_run_across(old, new, at + 1))
     }
 
     /// Every cell of the copy, known rows or not, in slot order; see [`Screen::all_cells`].

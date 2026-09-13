@@ -459,7 +459,7 @@ impl State {
     /// text the buffer no longer has.
     fn damaged_rows(
         &mut self,
-        damaged: Vec<usize>,
+        mut damaged: Vec<usize>,
         shifts: &[Shift],
         cursor: Cursor,
     ) -> Vec<DamagedRow> {
@@ -470,6 +470,20 @@ impl State {
         for shift in shifts {
             self.front.shift(*shift);
         }
+        // A cursor move damages no row, and yet Lisp cuts a glyph run around the cursor's
+        // cell, so the rows it left and the row it is on are asked about as if damaged.
+        // Their cells are what the copy holds, so only the cursor can make them differ.
+        let front = &self.front;
+        let moved: Vec<usize> = front
+            .cursor_rows()
+            .chain(Some(cursor.row).filter(|&row| front.knows(row)))
+            .filter(|row| damaged.binary_search(row).is_err())
+            .collect();
+        if !moved.is_empty() {
+            damaged.extend(moved);
+            damaged.sort_unstable();
+            damaged.dedup();
+        }
         let screen = &self.screens[self.shown];
         // Row 0 of the primary screen continues the scrollback above it when the head is
         // not empty, so its text in the buffer begins mid-line.
@@ -479,9 +493,14 @@ impl State {
         let changed: Vec<usize> = damaged
             .into_iter()
             .filter(|&index| {
-                screen
-                    .row(index)
-                    .is_some_and(|row| !front.matches(index, row, at(index)))
+                let Some(row) = screen.row(index) else {
+                    return false;
+                };
+                let same = front.matches(index, row, at(index));
+                if same {
+                    front.settle_cursor(index, at(index));
+                }
+                !same
             })
             .collect();
         let rows = changed

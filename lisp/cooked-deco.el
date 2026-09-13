@@ -1427,17 +1427,22 @@ as a background blended from the run\='s two colours -- see
 them.  Each shade record is one segment, however many cells it covers: a record
 is already one density, and a run of ▒ is one stretch of one colour.
 
-*The cursor\='s cell breaks it.*  Emacs draws the cursor at the *start* of a
-`display\=' span however many characters the span covers, and cooked puts point
-wherever the child\='s cursor is on every drain.  So a span bridging the
-cursor\='s column draws the cursor several cells to the left of where the child
-put it. This was invisible for as long as a run was identical box glyphs -- a
-cursor does not sit in a border -- and became visible the moment runs learned
-to bridge the blanks of an indent, which is exactly where a cursor does sit.
-The break is a split rather than a per-cell expansion: the cursor\='s cell
-starts a segment, and being at the start of a span is where Emacs was going to
-draw it anyway. `cooked-the-cursors-cell-starts-its-own-glyph-run\=' is the
-pin.
+*The cursor\='s cell is a segment of its own.*  Emacs draws a block cursor on a
+`display\=' span as wide as the whole span, and at its start, and cooked puts
+point wherever the child\='s cursor is on every drain.  So a span bridging the
+cursor\='s cell draws the cursor as a box around the span: in an empty bordered
+input field the cursor outlines the field.  Cutting before the cell only moved
+that box\='s left edge to the right place.  The cut is on both sides, so the
+cursor\='s segment is exactly one cell and the cursor exactly as wide:
+`│ │ ├──\=' with the cursor on the second blank is `│ │\=', the blank, and
+`├──\='.  This was invisible for as long as a run was identical box glyphs -- a
+cursor does not sit in a border -- and became visible the moment runs learned to
+bridge the blanks of an indent, which is exactly where a cursor does sit.
+`cooked-the-cursors-cell-is-a-glyph-segment-of-its-own\=' is the pin.
+
+The core decides by the same rule whether a cursor move changes how a row is
+drawn, and resends the run when it does; see `Front::cursor_run\=' in
+src/emu/term/front.rs.
 
 Returns `((glyph . PACKED))\=' unsplit whenever neither applies, which is nearly
 every run -- so the common case allocates two conses and shares the string the
@@ -1445,7 +1450,7 @@ drain already handed over, rather than rebuilding it."
   (let ((limit (length packed)))
     (if (and (not (cooked--glyph-run-shades-p packed))
              (or (null cursor) (null column)
-                 (<= cursor column)
+                 (< cursor column)
                  (>= cursor (+ column (cooked--glyph-pattern-cells packed)))))
         (list (cons 'glyph packed))
       (let ((out nil)
@@ -1468,13 +1473,15 @@ drain already handed over, rather than rebuilding it."
                 (flush))
               (setq pending-kind kind)
               (while (> left 0)
-                (when (and pending (eql col cursor))
+                (when (and pending cursor
+                           (or (eql col cursor) (eql col (1+ cursor))))
                   (flush))
-                ;; Everything up to the cursor, then everything after it: the
-                ;; loop retakes the test above and flushes at the boundary.
-                (let ((take (if (and cursor (> cursor col) (< cursor (+ col left)))
-                                (- cursor col)
-                              left)))
+                ;; Up to the next cut inside this record, the cursor's cell or the
+                ;; one after it, and the loop retakes the test above there.
+                (let* ((cut (cond ((and cursor (< col cursor (+ col left))) cursor)
+                                  ((and cursor (< col (1+ cursor) (+ col left)))
+                                   (1+ cursor))))
+                       (take (if cut (- cut col) left)))
                   (push (cooked--glyph-pattern bits take) pending)
                   (setq col (+ col take)
                         left (- left take)))))
