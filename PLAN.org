@@ -1788,6 +1788,25 @@ Worth recording as a test-writing trap: the first version used
 =user@host password: =, which =comint-password-prompt-regexp= does *not* match
 because it anchors the prompt. The test was testing itself.
 
+**** Done: the two password items (780e8f8)
+
+The chain is asked *before* the single slot, so no existing
+=cooked-password-function= changes meaning — it keeps working as the answer of
+last resort rather than becoming one voice among several. Through
+=cooked--run-seam-until-success=, so a broken auth-source backend gives no
+answer and the next source is asked rather than taking the prompt down.
+
+The regex arm's gate is the whole of why a regex is safe here: matched against
+*local* output it would fire on any program displaying a file that mentions a
+password. Asked of the cursor's row, and asked *per drain* rather than on a
+state change — a remote child changes the far tty and the local one never moves,
+so there is no transition to hang it off. A local session pays one string
+comparison and never reaches the regexp.
+
+A test-writing trap worth recording: the first version used
+=user@host password: =, which =comint-password-prompt-regexp= does *not* match,
+because it anchors the prompt. The test was testing itself.
+
 **** Done: the font-scale advice (2157a1a) and the minibuffer exception
 
 =buffer-face-set=, =variable-pitch-mode= and =buffer-face-toggle= all rescale
