@@ -59,8 +59,9 @@
 ;; from immediately before the process mark -- and only after checking that they are
 ;; still the characters it put there.  Between two chunks comint may well have inserted
 ;; the user's input, which is what happens at every prompt; the check notices, the
-;; deletion does not happen, and the filter appends only what is new.  Nothing is ever
-;; deleted that this file did not write.
+;; deletion does not happen, and the core starts the child's next output on a line of
+;; its own, the prompt's line having been ended by the input.  Nothing is ever deleted
+;; that this file did not write.
 
 ;;; Code:
 
@@ -191,8 +192,8 @@ before the return value is inserted at the same place: the core reports how many
 characters of the open line it is taking back, and they are deleted from
 immediately before the process mark.  The core is told first, in RETRACT-P,
 whether they are still there to delete -- so a chunk arriving after comint
-inserted the user's input is answered with an append rather than a correction,
-and the deletion below cannot run at all.
+inserted the user's input starts a line of its own after that input rather than
+correcting the prompt before it, and the deletion below cannot run at all.
 
 Nothing is deleted that this filter did not emit, and nothing is deleted across
 a newline: `cooked-comint--open' holds one unfinished line at most."
@@ -210,7 +211,10 @@ a newline: `cooked-comint--open' holds one unfinished line at most."
             (let ((inhibit-read-only t))
               (delete-region (- mark retract) mark))))
         (setq cooked-comint--open
-              (if closed
+              (if (or closed (not intact))
+                  ;; The old line is finished, by a newline in TEXT or by the
+                  ;; user's input, which the core gave it up for before parsing.
+                  ;; Either way the open line is the one TEXT started.
                   tail
                 ;; The line was extended rather than finished, so what comint now
                 ;; holds for it is what was left after the retraction plus what is

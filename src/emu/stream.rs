@@ -56,8 +56,9 @@
 //! before the insertion point are no longer true -- and the Lisp side deletes exactly
 //! that many, having first checked that those characters are still the ones it emitted.
 //! When they are not (comint inserted the user's input in between, which is the ordinary
-//! case at every prompt), the caller says so by passing `retract: false`, and this falls
-//! back to appending only what is new. See [`Stream::flush`] for what that costs.
+//! case at every prompt), the caller says so by passing `retract: false`, and the open line
+//! is given up on without a word: the line the buffer now ends in is the user's, and what
+//! the child writes next starts a line of its own.
 
 use super::cell::{BLANK, CONTINUATION, Cell, Color, Run, Style};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
@@ -186,8 +187,8 @@ impl Filter {
     /// RETRACT is the caller's answer to "are the characters you were last handed for
     /// the open line still sitting where you put them?". Only the caller can know: it
     /// owns the buffer, and comint inserts the user's input into the middle of this
-    /// conversation every time a command is entered. A `false` here never loses text; it
-    /// costs the ability to correct text already shown. See [`Stream::flush`].
+    /// conversation every time a command is entered. A `false` retires the open line
+    /// before BYTES are parsed, and retires it silently; see [`Stream::abandon`].
     ///
     /// The parser is resumable, so a chunk ending in the middle of an escape sequence
     /// costs nothing and needs no buffering here: the next call continues it. That is
@@ -195,8 +196,10 @@ impl Filter {
     /// rendition set in one chunk still colours text in the next.
     pub(crate) fn feed(&mut self, bytes: &[u8], retract: bool) {
         self.stream.out.clear();
-        self.stream.retract_allowed = retract;
         self.stream.flushed = false;
+        if !retract {
+            self.stream.abandon();
+        }
         self.parser.advance(&mut self.stream, bytes);
         // The open line, every time: a prompt that never ends in a newline has to arrive
         // when it is written, not when the next line is. Whatever this hands over is
@@ -248,8 +251,6 @@ struct Stream {
     /// asked of it is where the new line and the old one first differ -- a progress bar
     /// that rewrites only its percentage should retract only its percentage.
     emitted: Vec<Column>,
-    /// Whether this feed's caller can still see [`Stream::emitted`] where it left it.
-    retract_allowed: bool,
     /// Whether anything has been flushed during this feed, which is what makes
     /// [`Stream::emitted`] stale rather than authoritative.
     flushed: bool,
@@ -408,6 +409,31 @@ impl Stream {
     /// Hand the open line over as a finished line and start an empty one.
     fn retire(&mut self) {
         self.flush(true);
+        self.forget();
+    }
+
+    /// Start an empty line without handing the open one over, because the buffer has
+    /// already moved past it.
+    ///
+    /// The case is every command run from a prompt. A comint pty does not echo, so when
+    /// the user enters `pip install x` the child never ends the line its `$ ` prompt is
+    /// on: comint inserts `pip install x` and a newline of comint's own after the prompt,
+    /// and the child's next write is its output. That output is not a rewrite of the
+    /// prompt's line, although this buffer still holds `$ ` with the cursor at column 2.
+    /// Treating it as one is what went wrong: `\rDownloading 10%` overwrote the prompt
+    /// here, only the columns past the two already emitted could be appended, and the
+    /// buffer showed `wnloading 10%` with every later redraw of it lost.
+    ///
+    /// Nothing is emitted, not even the newline that retiring would add: the characters
+    /// the line held are already in the buffer, followed by text that is not the
+    /// child's. The pen and the open link carry on, as they would across a newline.
+    fn abandon(&mut self) {
+        self.seg.reset();
+        self.forget();
+    }
+
+    /// Empty the open line and everything that describes it.
+    fn forget(&mut self) {
         self.line.clear();
         self.emitted.clear();
         self.col = 0;
@@ -417,40 +443,24 @@ impl Stream {
     /// Hand over whatever of the open line Emacs has not got, and remember what that
     /// leaves it holding. NEWLINE closes the line off.
     ///
-    /// The reconciliation is the whole of this function, and there are two versions of
-    /// it because there are two things the caller can know.
-    ///
-    /// **When the emitted text is still the last thing in the buffer** (`retract:
-    /// true`), the two lines are compared and the emission starts at the first column
+    /// The reconciliation is the whole of this function. The line as it stands and the
+    /// line as it was emitted are compared, and the emission starts at the first column
     /// they differ on: everything after that point is retracted and re-sent. A progress
     /// bar rewriting `[###   ] 42%` into `[####  ] 51%` retracts eight characters, not
     /// the line, and `printf 'abcdefghij\rXYZ'` retracts ten and sends `XYZdefghij` --
     /// the overwrite semantics this filter exists for.
     ///
-    /// **When it is not** (`retract: false`), nothing before the insertion point may be
-    /// touched, so only the columns past what was already emitted can be sent. That is
-    /// exactly right for the case it exists for -- comint has inserted the user's input
-    /// after our prompt, and the child's next act is to finish the line the prompt was
-    /// on -- and it is lossy for one case that is not: a child that *rewrites* an open
-    /// line after the user has typed. There the rewrite is dropped rather than shown
-    /// twice, up to the point where the new line grows past the old one. Losing an
-    /// update is recoverable and duplicating a prompt is not, which is why it falls this
-    /// way; the caller can always make it moot by verifying, which is what
-    /// `cooked-comint--emit' does.
+    /// That is only safe while the emitted text is still the last thing in the buffer,
+    /// and a feed whose caller said it is not has already emptied [`Stream::emitted`] in
+    /// [`Stream::abandon`], so there is nothing here to retract.
     fn flush(&mut self, newline: bool) {
-        let common = if self.retract_allowed {
-            self.line
-                .iter()
-                .zip(&self.emitted)
-                .take_while(|(a, b)| a == b)
-                .count()
-        } else {
-            // Not a prefix comparison: the emitted columns are immovable whether or not
-            // they are still true, so the only thing that can be said is what comes
-            // after them.
-            self.emitted.len().min(self.line.len())
-        };
-        let retract = self.emitted[common.min(self.emitted.len())..]
+        let common = self
+            .line
+            .iter()
+            .zip(&self.emitted)
+            .take_while(|(a, b)| a == b)
+            .count();
+        let retract = self.emitted[common..]
             .iter()
             .map(Column::chars)
             .sum::<usize>();
@@ -1031,7 +1041,30 @@ mod tests {
     }
 
     #[test]
-    fn an_unsynced_feed_still_shows_what_the_line_grows_by() {
+    fn output_after_a_prompt_is_a_line_of_its_own() {
+        // A comint pty does not echo, so the prompt's line is never ended by the child:
+        // comint ends it, with the user's input. A progress bar that starts with `\r`
+        // is then the start of the command's output, not a rewrite of `$ `, and every
+        // later frame of it has to land.
+        let mut buffer = Buffer::new();
+        assert_eq!(buffer.feed("$ "), "$ ");
+        buffer.text.push_str("pip install x\n");
+        assert_eq!(
+            buffer.feed_unsynced("\rDownloading 10%"),
+            "$ pip install x\nDownloading 10%"
+        );
+        assert_eq!(
+            buffer.feed("\rDownloading 20%"),
+            "$ pip install x\nDownloading 20%"
+        );
+        assert_eq!(
+            buffer.feed("\rDownloading 100%\n$ "),
+            "$ pip install x\nDownloading 100%\n$ "
+        );
+    }
+
+    #[test]
+    fn an_unsynced_feed_shows_everything_the_child_writes_after_it() {
         let mut buffer = Buffer::new();
         assert_eq!(buffer.feed("part"), "part");
         buffer.text.push('!');
@@ -1131,12 +1164,20 @@ mod tests {
                     text.push_str(&run.text);
                 }
                 let tail = text.rsplit('\n').next().unwrap_or_default();
-                if text.contains('\n') {
+                if text.contains('\n') || !intact {
                     self.open = tail.to_string();
                 } else {
                     let keep = self.open.chars().count() - emission.retract;
                     self.open = self.open.chars().take(keep).collect::<String>() + tail;
                 }
+            }
+
+            /// What `comint-send-input' does to the buffer: INPUT inserted after the
+            /// output, in no rendition of the child's. The open line is left alone, as
+            /// comint leaves `cooked-comint--open', and so no longer ends the buffer.
+            fn type_input(&mut self, input: &str) {
+                self.shown
+                    .extend(input.chars().map(|c| (c, Style::default(), None)));
             }
 
             /// SCRIPT cut at CUTS, each a fraction of its length in 256ths, and moved to
@@ -1204,6 +1245,45 @@ mod tests {
                 failure_persistence: None,
                 ..ProptestConfig::default()
             })]
+
+            /// The same, across the one place a comint buffer is edited by somebody else.
+            ///
+            /// A prompt, the user's input with the newline comint gives it, and the
+            /// command's output. However either stretch of output is cut, the buffer must
+            /// read as if the input's newline had been the child's: the prompt as it was
+            /// drawn, the input, and then the output exactly as a filter would show it on a
+            /// fresh line with the prompt's rendition still set.
+            ///
+            /// Except where the prompt left an open line with no text in it, such as `\t`
+            /// or `abc\x1b[2K` on their own. The buffer then ends in nothing the filter
+            /// can check, so the input goes unnoticed and the output starts at the column
+            /// the prompt left the cursor on. That costs some leading blanks and nothing
+            /// else, and the expected side follows it rather than pretending otherwise.
+            #[test]
+            fn output_after_typed_input_starts_a_line_however_it_is_cut(
+                prompt in script(),
+                input in "[a-z ]{0,8}",
+                output in script(),
+                prompt_cuts in cuts(),
+                output_cuts in cuts(),
+            ) {
+                let input = input + "\n";
+                let mut expected = Consumer::new();
+                expected.feed(&prompt);
+                if !expected.open.is_empty() {
+                    let shown = expected.shown.clone();
+                    expected.feed("\n");
+                    expected.shown = shown;
+                }
+                expected.type_input(&input);
+                expected.feed(&output);
+
+                let mut actual = Consumer::new();
+                actual.feed_cut(&prompt, &prompt_cuts);
+                actual.type_input(&input);
+                actual.feed_cut(&output, &output_cuts);
+                prop_assert_eq!(actual.shown, expected.shown);
+            }
 
             #[test]
             fn cutting_the_output_into_reads_changes_nothing(script in script(), cuts in cuts()) {

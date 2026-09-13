@@ -156,12 +156,30 @@ the last thing in the buffer."
 (ert-deftest cooked-comint-never-deletes-text-it-did-not-write ()
   ;; The check that makes the retraction safe.  Here the child *does* rewrite its open
   ;; line, but the user's input is in the way, so nothing before the process mark may
-  ;; be touched -- and in particular the user's own text must survive intact.
+  ;; be touched -- and in particular the user's own text must survive intact.  The
+  ;; rewrite is not lost either: it lands after the input, where the child's output
+  ;; now begins.
   (cooked-tests-comint--with
     (cooked-tests-comint--say "$ ")
     (cooked-tests-comint--type "typed by the user")
     (cooked-tests-comint--say "\rZZ\n")
-    (should (string-prefix-p "$ typed by the user" (cooked-tests-comint--text)))))
+    (should (equal (cooked-tests-comint--text) "$ typed by the userZZ\n"))))
+
+(ert-deftest cooked-comint-draws-a-progress-bar-that-follows-a-prompt ()
+  ;; What every command run from `M-x shell' looks like to the filter.  The pty does not
+  ;; echo, so the child never ends the prompt's line; comint does, with the input.  A
+  ;; bar that starts with a carriage return is the command's output and not a rewrite
+  ;; of the prompt, and each of its frames has to replace the last.  This used to show
+  ;; "wnloading 10%" and then stop, the prompt's two columns taken off the front.
+  (cooked-tests-comint--with
+    (cooked-tests-comint--say "$ ")
+    (cooked-tests-comint--type "pip install x\n")
+    (cooked-tests-comint--say "\rDownloading 10%")
+    (should (equal (cooked-tests-comint--text) "$ pip install x\nDownloading 10%"))
+    (cooked-tests-comint--say "\rDownloading 42%")
+    (cooked-tests-comint--say "\rDownloading 100%\n$ ")
+    (should (equal (cooked-tests-comint--text)
+                   "$ pip install x\nDownloading 100%\n$ "))))
 
 ;;;; Colours
 
