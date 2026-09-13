@@ -14,8 +14,8 @@
 
 ;;; Code:
 
+(require 'face-remap)
 (require 'cooked-util)
-(require 'cooked-state)
 (require 'cooked-face)
 (require 'cooked-osc)
 

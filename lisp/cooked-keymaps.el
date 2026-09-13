@@ -26,8 +26,6 @@
 (require 'cooked-keys)
 (require 'cooked-input)
 
-(declare-function cooked--refresh-keymap "cooked-mode")
-
 (defconst cooked--escape-key ?\C-c
   "Prefix reserved for cooked's own commands while the child owns the keyboard.
 Everything `cooked-raw-map' and `cooked-alt-map' cover is otherwise forwarded
@@ -517,7 +515,7 @@ Then KEY, once the shell\='s cursor is back where the user\='s was."
                (after (- end (max start (min (point) end)))))
     (cooked--clear-input-region)
     (setq cooked--delegated t)
-    (cooked--refresh-keymap)
+    (cooked--request-refresh)
     (cooked--send-to-child
      (concat text (apply #'concat (make-list after (cooked--csi "D"))) key))))
 

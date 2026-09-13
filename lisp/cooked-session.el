@@ -22,7 +22,6 @@
 (require 'cooked-pending)
 (require 'cooked-graphics)
 (require 'cooked-render)
-(require 'cooked-osc)
 (require 'cooked-color)
 
 (cooked--declare-core)
@@ -35,6 +34,11 @@
 ;; first.  Drawing what the child sends is cooked-render.el and capping how much
 ;; of it the buffer keeps is cooked-scrollback.el; both used to be filed here,
 ;; under a heading broad enough to have accepted them.
+
+;; Defined by the two `defcustom's below, which name this function as their
+;; `:set' and so need it to exist first.
+(defvar cooked-min-redisplay-interval)
+(defvar cooked-backlog-limit)
 
 (defun cooked--set-tuning-option (symbol value)
   "Set SYMBOL to VALUE and hand the pair to every session already running.

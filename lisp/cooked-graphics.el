@@ -15,7 +15,6 @@
 
 (require 'cl-lib)
 (require 'cooked-util)
-(require 'cooked-state)
 (require 'cooked-deco)
 
 (cooked--declare-core)

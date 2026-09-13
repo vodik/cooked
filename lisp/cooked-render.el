@@ -48,25 +48,24 @@
 
 (require 'cl-lib)
 (require 'seq)
-(require 'cooked)
+(require 'jit-lock)
 (require 'cooked-util)
+(require 'cooked-state)
 (require 'cooked-deco)
 (require 'cooked-link)
+(require 'cooked-screen)
+(require 'cooked-pending)
+(require 'cooked-cursor)
+(require 'cooked-semantic)
+(require 'cooked-bell)
+(require 'cooked-secret)
 (require 'cooked-mouse)
 (require 'cooked-osc)
-(require 'cooked-scrollback)
-(require 'cooked-window-ops)
 (require 'cooked-color)
+(require 'cooked-window-ops)
+(require 'cooked-scrollback)
 
 (cooked--declare-core)
-
-;; Owned by cooked-mode.el, which requires this file.  One setting the drain is
-;; parameterised by, one the bell is handed to, and two notifications -- the
-;; mode the child is in and the exit it reported -- handed to the layer that
-;; owns what they mean.  Reads and notifications only, never a question asked
-;; upward, which is what keeps the list this short.
-(defvar cooked-rejoin-wrapped-lines)
-(defvar cooked-bell-function)
 
 ;;;; Draining
 
@@ -418,7 +417,7 @@ CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
   "Adopt MODE, switching keymaps and handling secret prompts on a change."
   (unless (eq mode cooked--mode)
     (setq cooked--mode mode)
-    (cooked--refresh-keymap)
+    (cooked--request-refresh)
     (if (eq mode 'secret)
         (cooked--schedule-secret)
       (cooked--cancel-secret))))
@@ -766,7 +765,7 @@ See docs/DESIGN.md."
     (unless (eq on cooked--alt)
       (setq cooked--alt on)
       (cooked--sync-fontification)
-      (cooked--refresh-keymap)
+      (cooked--request-refresh)
       (run-hooks 'cooked-alt-change-hook))))
 
 (defun cooked--sync-fontification ()
@@ -1024,7 +1023,7 @@ and a session that exits and is then killed goes through both."
   ;; exited while the buffer was suspended -- evil in normal state, or a
   ;; deliberate peek -- would otherwise leave it read-only under `cooked-peek-map'
   ;; with nothing left to thaw it.
-  (cooked--refresh-keymap)
+  (cooked--request-refresh)
   ;; Deferred: this runs from inside the drain, which keeps working with the
   ;; buffer and its locals after we return.  Killing here would pull them out
   ;; from under it, and would run `kill-buffer-hook' — arbitrary user code —

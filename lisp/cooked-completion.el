@@ -21,7 +21,9 @@
 
 ;;; Code:
 
-(require 'cooked)
+(require 'cooked-util)
+(require 'cooked-state)
+(require 'cooked-pending)
 
 (defgroup cooked-completion nil
   "Completing at a cooked prompt."

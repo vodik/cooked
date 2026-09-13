@@ -23,14 +23,11 @@
 
 ;;; Code:
 
-(require 'cooked)
 (require 'url-util)
+(require 'cooked-util)
+(require 'cooked-state)
 
 (cooked--declare-core)
-
-;; Calls upward into cooked-mode.el.
-(declare-function cooked--defer "cooked-mode")
-(declare-function cooked--foreground-program "cooked-keys")
 
 ;; Loaded on demand by `cooked--remote-directory' and nowhere else: requiring
 ;; TRAMP at load time would put a large library into every session that only

@@ -49,8 +49,6 @@
 (require 'cooked-util)
 (require 'cooked-keys)
 
-(declare-function cooked--send-paste "cooked-keys")
-
 (defgroup cooked-dnd nil
   "Dropping files and images into a terminal."
   :group 'cooked)

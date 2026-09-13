@@ -15,26 +15,12 @@
 
 ;;; Code:
 
-(require 'cooked)
+(require 'cooked-util)
+(require 'cooked-state)
 (require 'cooked-command)
-
-;; Owned by the layer that requires this file: `cooked--foreground-label' by
-;; cooked-keys.el, the rest by cooked-mode.el.  A label the foreground program
-;; supplies, a record of who last held the keyboard, and the command the state
-;; segment is a click away from.
-(defvar cooked--foreground-label)
-(defvar cooked--ownership)
-;; And `cooked--progress' by cooked-osc.el, which parses OSC 9;4 down to the two
-;; values `cooked-progress-function' is handed.  Declared rather than required
-;; for the same reason as the two above: this file reads that state, it does not
-;; keep it, and a `require' would only assert a load order cooked-mode.el
-;; already fixes.
-(defvar cooked--progress)
-;; And `cooked-bell-pending' by cooked-mode.el, which sets it from the bell and
-;; clears it when the buffer is looked at; both readers below only report it.
-(defvar cooked-bell-pending)
-(declare-function cooked-toggle-peek "cooked-peek")
-(declare-function cooked--buffer-name-shows-title-p "cooked-osc")
+(require 'cooked-bell)
+(require 'cooked-osc)
+(require 'cooked-peek)
 
 (defface cooked-failure '((t :inherit error))
   "Face for a non-zero exit status in the mode line."

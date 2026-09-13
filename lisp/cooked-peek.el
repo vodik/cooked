@@ -17,8 +17,6 @@
 (require 'cooked-state)
 (require 'cooked-render)
 
-(declare-function cooked--refresh-keymap "cooked-mode")
-
 ;;;; Suspending: peek, and what evil's states ask for
 ;;
 ;; While the child owns the keyboard there is, by design, almost no way back to
@@ -79,7 +77,7 @@ same door rather than the only one."
   (let ((was cooked--input-mode))
     (setq cooked--peek-explicit nil)
     (when cooked--input-mode
-      (cooked--refresh-keymap))
+      (cooked--request-refresh))
     (when (and cooked--session (eq was 'frozen) (cooked--frozen-p))
       (cooked--drain-and-apply))))
 
@@ -114,7 +112,7 @@ door for everyone else."
   (if cooked--peek-explicit
       (cooked--resume-forwarding)
     (setq cooked--peek-explicit t)
-    (cooked--refresh-keymap)
+    (cooked--request-refresh)
     (message "Peeking (read-only) -- type, RET, or C-c C-v to resume")))
 
 (provide 'cooked-peek)

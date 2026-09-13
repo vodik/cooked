@@ -44,7 +44,7 @@
 
 ;;; Code:
 
-(require 'cooked-mode)
+(require 'cooked)
 
 ;; consult is `require'd by the commands below and the sources register once it is
 ;; loaded, never at this file's load: a top-level `require' would be evaluated by

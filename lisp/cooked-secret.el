@@ -15,7 +15,10 @@
 
 ;;; Code:
 
-(require 'cooked)
+(require 'comint)
+(require 'cooked-util)
+(require 'cooked-state)
+(require 'cooked-screen)
 
 (cooked--declare-core)
 

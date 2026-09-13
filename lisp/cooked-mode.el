@@ -26,25 +26,32 @@
 (require 'cl-lib)
 (require 'format-spec)
 (require 'seq)
-(require 'cooked)
+(require 'comint)
+(require 'cooked-util)
+(require 'cooked-state)
+(require 'cooked-deco)
+(require 'cooked-command)
+(require 'cooked-screen)
+(require 'cooked-pending)
+(require 'cooked-cursor)
+(require 'cooked-graphics)
 (require 'cooked-osc)
-(require 'cooked-render)
+(require 'cooked-color)
+(require 'cooked-mouse)
+(require 'cooked-secret)
+(require 'cooked-bell)
 (require 'cooked-scrollback)
+(require 'cooked-render)
+(require 'cooked-session)
+(require 'cooked-peek)
 (require 'cooked-keys)
 (require 'cooked-input)
 (require 'cooked-keymaps)
 (require 'cooked-completion)
-(require 'cooked-mouse)
 (require 'cooked-shell-integration)
 (require 'cooked-mode-line)
-(require 'cooked-secret)
-(require 'cooked-bell)
-(require 'cooked-session)
-(require 'comint)
 
 (cooked--declare-core)
-
-(declare-function cooked--cell-size "cooked-deco")
 
 (defvar cooked-mode-syntax-table (make-syntax-table comint-mode-syntax-table)
   "Syntax table for `cooked-mode\='.
@@ -67,6 +74,11 @@ class they used to have.")
 Kept so the next realization can hand them back to the parent table.  Without
 it, removing a character from `cooked-word-boundary-string\=' would leave it a
 boundary forever.")
+
+;; Defined by the two `defcustom's below, whose setters call this function and
+;; so need it to exist first.
+(defvar cooked-word-constituent-string)
+(defvar cooked-word-boundary-string)
 
 (defun cooked--realize-syntax-table ()
   "Put the two boundary customs into `cooked-mode-syntax-table\=', in place."
@@ -559,6 +571,10 @@ are the ones left standing."
         (setq cooked--ownership owner)
         (unless cooked--quiet-refresh
           (run-hooks 'cooked-state-change-hook))))))
+
+;; The layers below report a change through `cooked--request-refresh' rather
+;; than calling this, since they sit under the file that defines it.
+(add-hook 'cooked--refresh-hook #'cooked--refresh-keymap)
 
 (defun cooked--get-old-input ()
   "The command line at point, for `comint-get-old-input\='.

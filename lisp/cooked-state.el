@@ -544,6 +544,21 @@ directly cannot go stale when another state arrives."
 `unset' until the first refresh, so a session starting against a child that
 already owns the keyboard still counts as a change and is announced.")
 
+(defvar cooked--refresh-hook nil
+  "Normal hook run when something a buffer\='s keymap is derived from changes.
+
+The alternate screen going up, the tty\='s mode moving, a shell mark arriving,
+a peek beginning or ending, the child exiting: each changes what
+`cooked--policy\=' or the input mode would answer, and each is noticed in a
+file below the one that installs the keymap.  Those files run this hook through
+`cooked--request-refresh\=' rather than naming that function, and
+cooked-mode.el puts `cooked--refresh-keymap\=' on it.")
+
+(defun cooked--request-refresh ()
+  "Have this buffer\='s keymap and input mode derived again.
+See `cooked--refresh-hook\='."
+  (run-hooks 'cooked--refresh-hook))
+
 (defcustom cooked-rejoin-wrapped-lines t
   "Whether a line the terminal wrapped becomes one buffer line again.
 

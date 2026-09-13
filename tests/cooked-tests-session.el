@@ -126,15 +126,14 @@ is, and the child is still there afterwards to prove nothing was guessed at."
 
 `package.el' and `use-package's `:commands' both autoload `cooked' from
 \"cooked\", so the command has to be reachable by loading cooked.el and nothing
-else.  It lived in cooked-mode.el, which cooked.el does not require, and an
-autoload cookie there does not help: an autoload that forwards to a second file
-is not followed, it is signalled.
+else.  It lived in cooked-mode.el once, and an autoload cookie there does not
+help: an autoload that forwards to a second file is not followed, it is
+signalled.
 
-Reaching the command is only half of it: it also has to *run*.  Each of these
-passes a display action as an argument, which is evaluated before the callee's
-own `require' of cooked-mode -- so an option defined over there is read while it
-is still void.  That is why `cooked-display-action' lives in cooked.el, and
-calling the command rather than merely resolving it is what says so.
+Reaching the command is only half of it: it also has to *run*, which means
+everything it reads -- the display action it passes, the session it starts --
+has to be loaded by that one file.  Calling the command rather than merely
+resolving it is what says so.
 
 Run in a fresh Emacs, because in this one the whole suite is already loaded and
 there is no autoload left to resolve."

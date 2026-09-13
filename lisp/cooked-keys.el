@@ -34,30 +34,12 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'cooked)
 (require 'cooked-util)
-(require 'cooked-mouse)
+(require 'cooked-state)
+(require 'cooked-cursor)
 (require 'cooked-peek)
-;; For `cooked-link-delegate-function', the slot this file fills at the bottom.
-(require 'cooked-link)
 
 (cooked--declare-core)
-
-;; Owned by cooked-mode.el, which requires this file.  Point management around a
-;; send, the two halves of stepping out of forwarding, and the commands
-;; `cooked--build-input-map' binds -- all of them state this layer only reaches
-;; into, never maintains, which is the one shape a back-edge here is allowed to
-;; have.
-(declare-function cooked--snap-to-cursor "cooked-mode")
-(declare-function cooked--resume-forwarding "cooked-peek")
-(declare-function cooked--refresh-keymap "cooked-mode")
-(declare-function cooked--peek-resume-and-send "cooked-mode")
-(declare-function cooked-send-input "cooked-mode")
-(declare-function cooked-newline "cooked-mode")
-(declare-function cooked-delete-char-or-eof "cooked-mode")
-(declare-function cooked-previous-input "cooked-mode")
-(declare-function cooked-next-input "cooked-mode")
-(declare-function cooked-beginning-of-line "cooked-mode")
 
 ;;;; Key encoding
 

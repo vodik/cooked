@@ -28,10 +28,10 @@
 ;;
 ;; Emulation happens in a Rust module, built on first use with cargo.
 ;;
-;; This file is the core: rendering, colours, and the OSC handlers that are inert
-;; enough to be on by default.  `cooked-mode' has the interaction.  The layers above
-;; it are separate because you should choose them, and choosing one is `require'ing
-;; its file rather than setting a variable: `cooked-evil', `cooked-osc-eval',
+;; This file is the package's front door: the commands an installation names, on
+;; top of `cooked-mode' and everything it requires.  The layers above it are
+;; separate because you should choose them, and choosing one is `require'ing its
+;; file rather than setting a variable: `cooked-evil', `cooked-osc-eval',
 ;; `cooked-shell-completion', `cooked-project', `cooked-file-link',
 ;; `cooked-next-error', `cooked-command-decorations', `cooked-dnd' and
 ;; `cooked-user-var'.  The snippet above names only the four most people want; the
@@ -53,45 +53,20 @@
 ;; edit; it just does not get a second opinion about the shape it is editing to.
 ;; `cooked--check-seam' is that boundary stated as an assertion.
 
+;; The files underneath require one another in one direction only.  From the
+;; floor up: cooked-util.el; the base tier that knows nothing of a session
+;; (faces, glyphs, decorations, links, command records, the module loader);
+;; cooked-state.el, a session's state and who owns the keyboard; the screen as
+;; buffer text and the row guard under it; the pending input, the cursor, the
+;; shell marks; the OSC handlers, the mouse and the bell; the drain pipeline in
+;; cooked-render.el; starting a session; peek, the key encoding, the line's
+;; commands and the keymaps; and `cooked-mode' at the top.  Where a lower file
+;; has to report a change the keymap depends on, it runs
+;; `cooked--refresh-hook' rather than naming the function above it.
+
 ;;; Code:
 
-(require 'cl-lib)
-(require 'jit-lock)
-(require 'comint)
-(require 'face-remap)
-(require 'cooked-util)
-(require 'cooked-state)
-(require 'cooked-screen)
-(require 'cooked-pending)
-(require 'cooked-cursor)
-(require 'cooked-semantic)
-(require 'cooked-graphics)
-(require 'cooked-module)
-(require 'cooked-command)
-(require 'cooked-face)
-(require 'cooked-deco)
-(require 'cooked-link)
-
-(cooked--declare-core)
-
-;; Everything this file calls in the layers above it, which is to say everything
-;; it calls upward.  Each one is a notification that something changed and the
-;; layer that owns keymaps, buffer names or the buffer's own life should react —
-;; never a question asked of that layer, which is why the list is short and stays
-;; short.  Anything cooked.el needs an *answer* to belongs at this level instead;
-;; see "Who owns the keyboard" below, which is where that rule moved the policy.
-;;
-;; `cooked--on-wake' is owned by cooked-render.el and is the same shape read from
-;; the other end: `cooked--start' installs the wake pipe's filter because the
-;; pipe is part of spawning a child, and the filter's whole body is "the core has
-;; something; draw it" -- a notification handed to the pipeline, not a question
-;; put to it.  It is the only thing this file needs of that one.
-(declare-function cooked--refresh-keymap "cooked-mode")
-(declare-function cooked--update-mouse-grab "cooked-mouse")
-(declare-function cooked--defer "cooked-mode")
-(declare-function cooked--update-buffer-name "cooked-osc")
-(defvar cooked-rejoin-wrapped-lines)
-(defvar cooked--last-size)
+(require 'cooked-mode)
 
 ;;;; Entry points
 
@@ -99,12 +74,7 @@
 ;; because this is the file an installation names: `package.el' autoloads from it
 ;; and a `:load-path' install autoloads `cooked' from "cooked".  An autoload that
 ;; forwards to a second file does not chain -- Emacs signals rather than following
-;; it -- so the commands themselves have to be reachable from here, and they pull
-;; the interaction layer in when first called.
-
-(declare-function cooked--display "cooked-mode")
-(declare-function cooked--start-session "cooked-mode")
-(declare-function cooked--live-buffers "cooked-mode")
+;; it -- so the commands themselves have to be defined here.
 
 (defcustom cooked-display-action '((display-buffer-same-window
                                     display-buffer-pop-up-window))
@@ -129,10 +99,7 @@ one to avoid.
 
 Here rather than in cooked-mode.el with the other session options, because
 every command that reads it is here or in cooked-project.el, and each reads it
-as an *argument* -- evaluated before the callee\='s `require\=' of cooked-mode
-could have run.  Defined beside its readers, an autoloaded `\\[cooked]\=' in an
-Emacs that has never loaded the interaction layer finds a value rather than a
-void variable."
+as an *argument*."
   ;; `sexp' rather than a hand-written (FUNCTIONS . ALIST) type: Emacs has no
   ;; public widget for a display action, and the one thing a narrower type here
   ;; could have caught -- the missing parentheses above -- it would only have
@@ -155,7 +122,6 @@ has already been told what to do.")
 The body `cooked\=' and `cooked-other-window\=' share; NEW and COMMAND mean what
 they do there.  cooked-project.el has its own, which differs in looking for a
 session already rooted at a particular directory rather than for any at all."
-  (require 'cooked-mode)
   (cooked--display (or (unless new (car (cooked--live-buffers)))
                        (cooked--start-session command))
                    action))

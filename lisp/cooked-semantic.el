@@ -20,8 +20,6 @@
 (require 'cooked-command)
 (require 'cooked-screen)
 
-(declare-function cooked--refresh-keymap "cooked-mode")
-
 (defun cooked--register-mark (id at batch-start)
   "A marker at ANCHOR AT, remembered under mark id ID.
 
@@ -104,7 +102,7 @@ older three-element shape."
            cooked--prompt-continued t))
     (`(prompt-end ,_ . ,_)
      (setq cooked--semantic 'input)
-     (cooked--refresh-keymap))
+     (cooked--request-refresh))
     ;; A second `C' with no prompt since the first is ignored, rather than moving the
     ;; start of the output region down to it.  Two shells both emitting the marks --
     ;; the `no-marks' negotiation exists to prevent exactly this, and says nothing
@@ -161,7 +159,7 @@ older three-element shape."
          (set-marker comint-last-output-start start)
          (run-hook-with-args 'cooked-command-started-functions
                              (cooked--running-anchor)))
-       (cooked--refresh-keymap)))
+       (cooked--request-refresh)))
     (`(command-end ,code ,at . ,id)
      (setq cooked--semantic nil)
      (cooked--mark-command-end code (cooked--register-mark (car id) at batch-start)))))

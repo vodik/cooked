@@ -28,19 +28,10 @@
 (require 'project)
 (require 'cooked)
 
-(declare-function cooked--display "cooked-mode")
-(declare-function cooked--start-session "cooked-mode")
-;; The reuse rule described in the commentary above, and not a second copy of
-;; it: `cooked--session-in-directory' is the same question `cooked-bookmark-jump'
-;; asks, so the two ask it of the one function.  Reached only from
-;; `cooked-project--session', which requires cooked-mode first.
-(declare-function cooked--session-in-directory "cooked-mode")
-
 (defun cooked-project--session (root new display-action)
   "Display a cooked session rooted at ROOT, reusing one unless NEW.
 
 Passes DISPLAY-ACTION to `cooked--display'."
-  (require 'cooked-mode)
   (let ((default-directory root))
     (cooked--display (or (unless new (cooked--session-in-directory root))
                          (cooked--start-session))

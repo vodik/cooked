@@ -29,16 +29,13 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'cooked)
 (require 'cooked-util)
+(require 'cooked-state)
+(require 'cooked-deco)
+(require 'cooked-screen)
+(require 'cooked-osc)
 
 (cooked--declare-core)
-
-(defvar cooked--last-cell)
-
-;; Bound by `cooked--handle-osc' around the OSC 22 handler below, which lives
-;; here rather than in cooked-osc.el because what it decides is the pointer.
-(defvar cooked--osc-bell-terminated)
 
 (defconst cooked--mouse-buttons
   '((mouse-1 . 0) (mouse-2 . 1) (mouse-3 . 2)
