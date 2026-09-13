@@ -353,41 +353,114 @@ variable.  See `cooked--mouse-tracking\='."
         (setq-local track-mouse t)
       (kill-local-variable 'track-mouse))))
 
-(defun cooked--mouse-cell (posn)
+(defun cooked--mouse-cell-width (posn)
+  "Width in pixels of one cell of the screen POSN is over.
+
+`cooked--last-cell\=' first, because it is the width `CSI 16 t\=' reported and
+the width every decoration was cut to, so a pointer measured against anything
+else could land in a different cell from the one the child and the picture
+agree on.  A terminal frame has no pixel size there, and its frame reports one
+character as one unit instead: `posn-object-x-y\=' counts in characters on such
+a frame, so 1 is the right divisor rather than a guess."
+  (let ((width (car-safe cooked--last-cell))
+        (window (posn-window posn)))
+    (if (and (natnump width) (> width 0))
+        width
+      (frame-char-width (cond ((windowp window) (window-frame window))
+                              ((framep window) window))))))
+
+(defun cooked--mouse-glyph (posn)
+  "Where POSN points on the screen text, as (POS CELLS . DX), or nil for no text.
+
+POS is `posn-point\='.  CELLS is how many cells to the right of POS\='s own cell
+the pointer is, and DX how many pixels into that cell.  Nil when POSN is over a
+fringe or margin, whose `posn-point\=' is the position of the row beside it and
+not a cell the pointer is in: a click in the left fringe used to report
+column 0.
+
+Emacs names a position per glyph, and three kinds of glyph are wider than the
+one cell POS stands for, so the offset into the glyph is what recovers the rest:
+
+- A decoration drawn as one image over a run of cells.  POS is the run\='s
+  first character, so a click in the middle of an empty panel of box-drawing
+  characters used to report the panel\='s left border.  Twenty cells of 9-pixel
+  cells with the pointer 50 pixels in is CELLS 5 and DX 5.
+- The newline ending a row, whose trailing blanks are never inserted.  Its
+  glyph stretches to the window\='s edge, so a click ten cells past the text of
+  `ls\=' used to report the column where the text stopped.
+- A character whose glyph is wider than its cells, a fallback font\='s, which
+  would otherwise report the part that overhangs as the next column.  DX is
+  clamped to the cells the character stands on, so a two-cell character still
+  reports both of its cells and a one-cell one only its own.
+
+The width of a run or character is `string-width\=' of its text without its
+properties, which is the cells the grid gave it.  Not the difference of two
+`current-column\='s: that counts an image as its pixels divided by the frame\='s
+character width, which is a different number once `text-scale-mode\=' has
+changed the cell."
+  (let ((pos (posn-point posn)))
+    (when (and pos (null (posn-area posn)))
+      (let* ((width (cooked--mouse-cell-width posn))
+             (dx (max 0 (or (car (posn-object-x-y posn)) 0)))
+             (cells (unless (save-excursion (goto-char pos) (eolp))
+                      ;; One `display' value over a run is one glyph, which is
+                      ;; how `cooked--apply-deco' draws it.
+                      (let ((end (if (and (get-text-property pos 'cooked-deco)
+                                          (get-text-property pos 'display))
+                                     (next-single-property-change
+                                      pos 'display nil
+                                      (save-excursion (goto-char pos)
+                                                      (line-end-position)))
+                                   (1+ pos))))
+                        (max 1 (string-width
+                                (buffer-substring-no-properties pos end))))))
+             (dx (if cells (min dx (1- (* cells width))) dx)))
+        (cons pos (cons (/ dx width) (% dx width)))))))
+
+(defun cooked--mouse-cell (posn &optional glyph)
   "Screen row and column of POSN, or nil if it is outside the screen.
 
+GLYPH is what `cooked--mouse-glyph\=' answers for POSN, for a caller that
+already has it.
+
 A posn rather than an event because the interesting end of an event is not
-always the same one: `drag-mouse-1' is a release, and where the button came up
-is `event-end'.  Reading `event-start' there reported the release at the cell
+always the same one: `drag-mouse-1\=' is a release, and where the button came up
+is `event-end\='.  Reading `event-start\=' there reported the release at the cell
 the press was already reported in, which is a gesture with no extent at all.
 
-`cooked--screen-cell' rather than a count of lines and columns from the marker:
+`cooked--screen-cell\=' rather than a count of lines and columns from the marker:
 row 0 does not always begin its buffer line — when the row handed to scrollback
-last was wrapped, `cooked--screen-start' sits mid-line — and a plain
-`current-column' there counts the characters ahead of the marker, which are
+last was wrapped, `cooked--screen-start\=' sits mid-line — and a plain
+`current-column\=' there counts the characters ahead of the marker, which are
 scrollback and not on the screen at all.  Reporting those to the child puts
-every click on row 0 to the right of where it was made."
-  (when-let* ((pos (posn-point posn)))
-    (cooked--screen-cell pos)))
+every click on row 0 to the right of where it was made.
 
-(defun cooked--mouse-offset (posn)
-  "Where in its glyph POSN points, as (DX . DY) pixels, if the child wants to know.
+The column never passes the last one the child was given: a window a few
+pixels wider than its grid has blank space past it that is not a cell."
+  (when-let* ((glyph (or glyph (cooked--mouse-glyph posn)))
+              (cell (cooked--screen-cell (car glyph))))
+    (cons (car cell)
+          (min (+ (cdr cell) (cadr glyph))
+               (max (cdr cell) (1- cooked--cols))))))
 
-Nil unless the child asked for pixel reports, so that a session reporting cells
-pays nothing for a measurement it would throw away.
+(defun cooked--mouse-offset (posn &optional glyph)
+  "Where in its cell POSN points, as (DX . DY) pixels, if the child wants to know.
 
-Only the offset *within* the glyph is taken from Emacs; the cell it sits in is
+GLYPH is what `cooked--mouse-glyph\=' answers for POSN, for a caller that
+already has it.  Nil unless the child asked for pixel reports, so that a session
+reporting cells pays nothing for a measurement it would throw away.
+
+Only the offset *within* the cell is taken from Emacs; the cell it sits in is
 still `cooked--mouse-cell\='s, and `cooked--mouse-report\=' scales that by the
 cell size.  Adding `posn-x-y\=' to the screen\='s origin instead would have to
 find that origin in pixels, and it is not a constant: row 0 is wherever
 `cooked--screen-start\=' happens to be drawn, which moves with scrollback,
 `window-start\=' and the header line.  A glyph-relative offset needs none of
-that.  It is also right past the end of a row, where the glyph is the newline
-and the offset runs out to the pointer, and over a decoration image spanning a
-run of cells, where the offset is measured from the run\='s first cell -- which
-is the cell `cooked--mouse-cell\=' names."
-  (and (cooked-mouse-state-pixels cooked--mouse-state)
-       (posn-object-x-y posn)))
+that, and `cooked--mouse-glyph\=' has already divided the part of it that is
+whole cells out into the column."
+  (when (cooked-mouse-state-pixels cooked--mouse-state)
+    (when-let* ((glyph (or glyph (cooked--mouse-glyph posn))))
+      (cons (cddr glyph) (or (cdr (posn-object-x-y posn)) 0)))))
 
 (defun cooked--mouse-report (button row col pressed &optional offset)
   "Encode a report for BUTTON at ROW/COL, PRESSED or not.
@@ -405,10 +478,18 @@ OFFSET, which is a report whose position stood in for the pointer\='s (a
 wheel notch over the fringe, a release carried off the screen), the cell\='s
 top-left pixel is sent.  DY is clamped into the row because a row holding a
 taller fallback glyph is drawn taller than the cell, and its excess must not
-read as the row below; DX is not, because a wide glyph really does extend
-past one cell.  On a terminal frame there is no cell size, and the report
-degrades to cells counted from 1: a unit of one pixel per cell is the only
-claim that is not invented."
+read as the row below.  DX needs no clamp here, because `cooked--mouse-glyph\='
+has already clamped it to the cells its character stands on and moved the whole
+cells into COL.
+
+On a terminal frame there is no cell size, and the report degrades to cells
+counted from 1: a unit of one pixel per cell is the only claim that is not
+invented.  DECRQM still answers that 1016 is set, because the core answers it
+and cannot know what kind of frame the buffer is shown on.  What a child does
+learn is that `CSI 16 t\=' reports no size, and a child cannot scale pixels
+without asking that first.  The size is the one `cooked--sync-size\=' measured
+in `cooked--layout-window\=', so a buffer shown on a graphical and a terminal
+frame at once reports in whichever unit that window\='s frame has."
   (cond
    ((cooked-mouse-state-pixels cooked--mouse-state)
     (pcase-let* ((`(,width . ,height) cooked--last-cell)

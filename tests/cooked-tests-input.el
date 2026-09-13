@@ -2395,6 +2395,102 @@ as far as the child knows.  Falling through to Emacs there left it held forever.
       (should (equal sent '("\e[<0;10;5m"))))
     (should-not cooked--mouse-held)))
 
+(defmacro cooked-tests--with-mouse-rows (rows &rest body)
+  "Run BODY in a cooked buffer whose screen is ROWS, one string each.
+
+No session: the screen marker is put at the top by hand, the grid is 80
+columns, and cells are 9 by 20 pixels, as a graphical frame would have
+reported them."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (cooked-mode)
+     (insert (mapconcat #'identity ,rows "\n"))
+     (setq-local cooked--screen-start (copy-marker (point-min))
+                 cooked--cols 80
+                 cooked--last-cell '(9 . 20))
+     ,@body))
+
+(defun cooked-tests--glyph-posn (pos dx &optional area)
+  "A posn over buffer POS, DX pixels into its glyph, in AREA of the window.
+AREA nil is the text area; `left-fringe\=' is the fringe beside POS\='s row."
+  (list (selected-window) (or area pos) '(0 . 0) 0 nil pos nil nil
+        (cons dx 7) '(9 . 20)))
+
+(ert-deftest cooked-mouse-cell-inside-a-decoration-run-is-the-pointers-own ()
+  "Emacs draws a run of box-drawing cells as one image and names the run\='s first
+character for every pixel of it, so a click in an empty panel reported the panel\='s
+left border.  The offset into the image recovers the cell."
+  (cooked-tests--with-mouse-rows '("ab" "┌────────┐")
+    (let* ((start (save-excursion (goto-char (point-min)) (forward-line 1) (point)))
+           (image '(image :type xbm :width 90 :height 20)))
+      ;; One `display' value over the whole run, as `cooked--apply-deco' puts it.
+      (add-text-properties start (+ start 10)
+                           (list 'cooked-deco '(glyph nil 0 1) 'display image))
+      (should (equal (cooked--mouse-cell (cooked-tests--glyph-posn start 50))
+                     '(1 . 5)))
+      (should (equal (cooked--mouse-cell (cooked-tests--glyph-posn start 0))
+                     '(1 . 0)))
+      ;; The last pixel of the run is its last cell, and no further.
+      (should (equal (cooked--mouse-cell (cooked-tests--glyph-posn start 89))
+                     '(1 . 9)))
+      (should (equal (cooked--mouse-cell (cooked-tests--glyph-posn start 400))
+                     '(1 . 9)))
+      ;; A pixel report is the same cell plus what is left of the offset.
+      (cooked-tests--mouse :enabled t :sgr t :pixels t)
+      (let ((posn (cooked-tests--glyph-posn start 50)))
+        (should (equal (cooked--mouse-offset posn) '(5 . 7)))))))
+
+(ert-deftest cooked-mouse-cell-past-a-rows-end-and-over-the-fringe ()
+  "Rows are inserted without their trailing blanks, so a click past the text lands
+on the newline, whose glyph runs to the window\='s edge.  It reported the column
+the text ended at.  And a fringe posn names the row beside it, which reported
+column 0 of that row for a pointer over no cell at all."
+  (cooked-tests--with-mouse-rows '("ls" "x")
+    ;; Ten cells past the end of `ls', the pointer four pixels into the tenth.
+    (should (equal (cooked--mouse-cell (cooked-tests--glyph-posn 3 94)) '(0 . 12)))
+    ;; The last row has no newline and ends the buffer; the same holds there.
+    (should (equal (cooked--mouse-cell (cooked-tests--glyph-posn 5 20)) '(1 . 3)))
+    ;; A window wider than its grid does not report a column the child lacks.
+    (should (equal (cooked--mouse-cell (cooked-tests--glyph-posn 3 9000)) '(0 . 79)))
+    (should-not (cooked--mouse-cell (cooked-tests--glyph-posn 1 0 'left-fringe)))
+    (should-not (cooked--mouse-cell (cooked-tests--glyph-posn 1 0 'right-margin)))
+    ;; End to end in cell mode: the click is reported where it was made, and a
+    ;; click in the fringe is left to Emacs rather than reported at column 0.
+    (cooked-tests--mouse :enabled t :sgr t)
+    (let (sent fallback)
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (text) (push text sent)))
+                ((symbol-function 'cooked--mouse-buffer)
+                 (lambda (_window) (current-buffer)))
+                ((symbol-function 'cooked--mouse-fallback)
+                 (lambda (event) (push event fallback))))
+        (cooked-tests--displayed
+          (let ((last-input-event (list 'down-mouse-1 (cooked-tests--glyph-posn 3 94))))
+            (cooked-mouse-event))
+          (let ((last-input-event
+                 (list 'down-mouse-1 (cooked-tests--glyph-posn 1 0 'left-fringe))))
+            (cooked-mouse-event))))
+      (should (equal sent '("\e[<0;13;1M")))
+      (should (= (length fallback) 1)))))
+
+(ert-deftest cooked-mouse-offset-stays-inside-the-characters-cells ()
+  "A fallback font can draw a character wider than the cells it stands on, and
+the overhang reported into the next column.  A two-cell character keeps both."
+  (cooked-tests--with-mouse-rows '("a中b")
+    (cooked-tests--mouse :enabled t :sgr t :pixels t)
+    ;; `a' is one cell: 30 pixels into its glyph is still its last pixel.
+    (let ((posn (cooked-tests--glyph-posn 1 30)))
+      (should (equal (cooked--mouse-cell posn) '(0 . 0)))
+      (should (equal (cooked--mouse-offset posn) '(8 . 7))))
+    ;; The wide character's right half is its second cell.
+    (let ((posn (cooked-tests--glyph-posn 2 12)))
+      (should (equal (cooked--mouse-cell posn) '(0 . 2)))
+      (should (equal (cooked--mouse-offset posn) '(3 . 7))))
+    (let ((posn (cooked-tests--glyph-posn 2 40)))
+      (should (equal (cooked--mouse-cell posn) '(0 . 2)))
+      (should (equal (cooked--mouse-offset posn) '(8 . 7))))))
+
+
 (ert-deftest cooked-alternate-scroll-sends-cursor-keys ()
   "A pager that never asked for the mouse still gets the wheel."
   (with-temp-buffer
