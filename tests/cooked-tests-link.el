@@ -183,6 +183,32 @@ cursor can have moved, and puts the row back on jit-lock\='s unfontified list."
       (should (equal (get-text-property at 'cooked-link-url)
                      "https://later.example/")))))
 
+(ert-deftest cooked-a-url-scrolled-far-back-is-linked-when-its-chunk-is-shown ()
+  "Scrolling back must not lose links to the cursor\='s hold.
+
+The row the cursor sits on is declined by splitting the chunk around it, and
+that split used to be made whether or not the row was in the chunk at all.  A
+chunk far above the cursor was then scanned from its start all the way down to
+the cursor, and once that span passed `goto-address-fontify-maximum-size\=' it
+was not scanned at all -- while jit-lock marked it done.  So a URL 180 KB back
+never became a link.  `cooked-tests--fontify\=' fontifies the whole buffer,
+which holds the cursor\='s row inside the one chunk, so this has to ask for a
+chunk of its own the way scrolling there does."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'old https://scrolled.example/\\n'; awk 'BEGIN { for (i = 0; i < 2400; i++) printf \"%079d\\n\", i }'; printf 'done'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (save-excursion
+                          (goto-char (point-max))
+                          (search-backward "done" nil t)))
+             10))
+    (let ((at (cooked-tests--link-at "https://scrolled.example/")))
+      (should at)
+      (should (> (- (point-max) at) goto-address-fontify-maximum-size))
+      (jit-lock-fontify-now at (+ at 500))
+      (should (equal (get-text-property at 'cooked-link-url)
+                     "https://scrolled.example/")))))
+
 (ert-deftest cooked-an-explicit-link-wins-over-the-guess ()
   ;; The text is a URL *and* an OSC 8 span pointing somewhere else.  What the child
   ;; said wins, and the guess is dropped rather than layered underneath it.

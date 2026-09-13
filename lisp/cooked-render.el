@@ -923,7 +923,14 @@ stranded by having been skipped here."
       ;;
       ;; Split rather than shrunk: text on both sides of the held row is still
       ;; scanned, so a URL in the line above a spinner appears at once.
-      (if (not held)
+      ;;
+      ;; Only when the held row is inside the chunk, though.  Scrolled back, the
+      ;; chunk is far above the cursor, and splitting it there anyway scans from
+      ;; the chunk all the way down to the cursor: asking for 500 characters of
+      ;; old output scanned 67 KB.  Past `goto-address-fontify-maximum-size' the
+      ;; scan is skipped outright, and jit-lock still marks the chunk done, so
+      ;; the URLs in it were never linked at all.
+      (if (not (and held (< from (cdr held)) (< (car held) to)))
           (cooked--fontify-links from to)
         (when (< from (car held)) (cooked--fontify-links from (car held)))
         (when (> to (cdr held)) (cooked--fontify-links (cdr held) to))
