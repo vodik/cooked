@@ -1898,6 +1898,38 @@ while [ ! -e %s ]; do sleep 0.05; done; seq 100 160; echo scrolled; exec sleep 3
           (should (eq (get-char-property (cooked--screen-start-position) 'pointer) 'hand)))
       (ignore-errors (delete-file go)))))
 
+(ert-deftest cooked-osc-22-leaves-the-overlay-alone-when-nothing-moved ()
+  "A drain that scrolls nothing, and a set of the shape already on top, do not
+move the overlay.  A move to the same bounds still marks the buffer's overlays
+changed, which costs redisplay its shortcuts for an unchanged buffer."
+  (let ((go (make-temp-name (expand-file-name "cooked-osc22-go" temporary-file-directory)))
+        (moves 0))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "stty -icanon -echo; printf '\\033[?1000h\\033]22;pointer\\007'; \
+while [ ! -e %s ]; do sleep 0.05; done; \
+printf 'x\\033]22;pointer\\007\\033]22;=hand\\007\\033]22;>pointer\\007\\033]22;<\\007done'; \
+exec sleep 30"
+                          go))
+          (should (cooked-tests--settle
+                   (lambda () (eq (get-char-property (cooked--screen-start-position) 'pointer)
+                                  'hand))))
+          (let ((overlay cooked--pointer-overlay))
+            (cl-letf* ((real-move (symbol-function 'move-overlay))
+                       ((symbol-function 'move-overlay)
+                        (lambda (&rest args) (cl-incf moves) (apply real-move args))))
+              (write-region "" nil go)
+              (should (cooked-tests--settle
+                       (lambda () (save-excursion
+                                    (goto-char (point-min))
+                                    (search-forward "done" nil t))))))
+            (should (eq cooked--pointer-overlay overlay))
+            (should (eq (overlay-get overlay 'pointer) 'hand))
+            (should (= (overlay-start overlay) (cooked--screen-start-position)))
+            (should (= moves 0))))
+      (ignore-errors (delete-file go)))))
+
 (ert-deftest cooked-osc-22-stacks-per-screen-and-honours-the-knob ()
   "Push, pop and set move the top of the current screen's stack; the other
 screen's stack is untouched; a reset empties both; and with the knob off a set

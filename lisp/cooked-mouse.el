@@ -886,14 +886,17 @@ A query is always answered, knob or not, with 1 or 0 per name -- or, for
                     names ",")
          cooked--osc-bell-terminated)
       (when cooked-allow-pointer-shape
-        (setf (alist-get screen cooked--pointer-stacks)
-              (pcase op
-                (?< (cdr stack))
-                (?> (seq-take (append (reverse names) stack)
-                              cooked--pointer-stack-limit))
-                ;; The first name only; a set carrying none has nothing to act on.
-                (_ (if names (cons (car names) (cdr stack)) stack))))
-        (cooked--sync-pointer-shape)))))
+        (let ((new (pcase op
+                     (?< (cdr stack))
+                     (?> (seq-take (append (reverse names) stack)
+                                   cooked--pointer-stack-limit))
+                     ;; The first name only; a set carrying none has nothing to act on.
+                     (_ (if names (cons (car names) (cdr stack)) stack)))))
+          ;; A program with hover reporting re-sends its shape on every motion,
+          ;; and nearly all of those name the shape already on top.
+          (unless (equal new stack)
+            (setf (alist-get screen cooked--pointer-stacks) new)
+            (cooked--sync-pointer-shape)))))))
 
 (defun cooked--pointer-query (name current)
   "The OSC 22 query answer for NAME, with CURRENT the name on top of the stack.
@@ -922,6 +925,12 @@ simply takes the new text in.  Its start does not follow a scroll by itself --
 scrollback is inserted at the start and would be taken in too -- so
 `cooked--apply\=' calls this after every drain to put it back on the marker.
 
+It is moved only when its bounds differ.  `move-overlay\=' to the bounds it
+already has still counts as a change to the buffer\='s overlays, and that costs
+redisplay the shortcuts it takes for a buffer whose text and overlays are as it
+last drew them -- on every drain, which is the path those shortcuts are for.
+`overlay-put\=' of the value already there costs nothing, so it is not guarded.
+
 Past the end of a row\='s text there is no buffer position for any property to
 sit on, and Emacs shows `void-text-area-pointer\=' there.  That variable is read
 in whatever buffer is current when the pointer moves, not the one under it, so
@@ -939,7 +948,9 @@ selected; the blank tail of a short row keeps Emacs\=' own pointer instead."
         (save-restriction
           (widen)
           (if cooked--pointer-overlay
-              (move-overlay cooked--pointer-overlay start (point-max))
+              (unless (and (eql (overlay-start cooked--pointer-overlay) start)
+                           (eql (overlay-end cooked--pointer-overlay) (point-max)))
+                (move-overlay cooked--pointer-overlay start (point-max)))
             ;; Front-advance nil and rear-advance t: a row reinserted at either
             ;; end of the screen lands inside the overlay rather than beside it.
             (setq cooked--pointer-overlay (make-overlay start (point-max) nil nil t)))
