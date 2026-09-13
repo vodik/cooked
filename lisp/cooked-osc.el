@@ -1044,7 +1044,20 @@ names HOST, hops and user and method included.  Otherwise one is built, but
 only for `cooked--host\=' -- the host the child has already announced -- and
 only if that name passes `cooked--host-name-regexp\='.  A HOST that is neither
 the connection in use nor the announced host gets nil, so no caller can make
-Emacs dial a machine by passing a name through here."
+Emacs dial a machine by passing a name through here.
+
+Whether the prefix names HOST is decided by name, and a name is all either side
+has.  So an ssh-config alias reads as a move: a buffer at `/ssh:prod:\=' whose
+shell reports `ip-10-0-0-1\=', `prod\=' being that machine\='s alias, looks the
+same as one whose shell has gone on from prod to a second machine by that name,
+and both get a prefix built for `ip-10-0-0-1\='.  The second is the case worth
+getting right, since keeping `/ssh:prod:\=' there would open a file of the same
+name on the wrong machine.  The cost falls on the first: where the reported name
+does not resolve from here, the next \\[find-file] fails to connect.  A built
+prefix names no user either, so TRAMP\='s default for the host applies, which is
+usually your local user and not the one the alias logs in as.  A `Host
+ip-10-0-0-1\=' entry in ~/.ssh/config, with the alias\='s HostName and User,
+makes the built name work."
   (or (and (cooked--same-host-p (file-remote-p default-directory 'host) host)
            (when-let* ((local (file-remote-p default-directory 'localname)))
              (substring default-directory

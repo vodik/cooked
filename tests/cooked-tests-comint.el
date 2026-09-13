@@ -250,6 +250,21 @@ the last thing in the buffer."
       (cooked-tests-comint--say (format "\e]7;file://%s%s\a$ " (system-name) dir))
       (should (equal default-directory dir)))))
 
+(ert-deftest cooked-comint-tracks-a-utf-8-directory-name ()
+  ;; The same decoding the terminal does, since both go through
+  ;; `cooked--parse-file-url': `é' on the wire is `%C3%A9'.
+  (let* ((parent (make-temp-file "cooked-comint-" t))
+         (dir (file-name-as-directory (expand-file-name "café" parent))))
+    (unwind-protect
+        (progn
+          (make-directory dir)
+          (cooked-tests-comint--with
+            (cooked-tests-comint--say
+             (format "\e]7;file://%s%s\a$ " (system-name)
+                     (url-hexify-string dir (cons ?/ url-unreserved-chars))))
+            (should (equal default-directory dir))))
+      (delete-directory parent t))))
+
 (ert-deftest cooked-comint-refuses-a-directory-on-another-host ()
   ;; A `cat' of a hostile file can put anything here, and the refusal has to come
   ;; before anything asks the filesystem about the path -- under TRAMP the asking is

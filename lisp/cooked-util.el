@@ -578,11 +578,24 @@ percent-encoded on the wire because that is what a URL is: a directory called
 `100%20cake\=' arrives as `100%2520cake\=', and decoding it once gives the name
 back.  Nothing here looks at the file system; deciding what the path means is
 the caller\='s, and has to come after `cooked--local-host-p\=' and
-`cooked--local-name\='."
+`cooked--local-name\='.
+
+The escapes are bytes of UTF-8, as every shell that sends one encodes them, so
+they are decoded as UTF-8 after unescaping: `caf%C3%A9\=' is `café\='.
+`url-unhex-string\=' alone leaves the two bytes as two raw-byte characters, a
+name that matches no directory.  A character sent unescaped is encoded first,
+so the bytes decoded are the bytes the shell wrote."
   (when (and (stringp url)
              (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url))
-    (cons (url-unhex-string (match-string 1 url))
-          (url-unhex-string (match-string 2 url)))))
+    (let ((host (match-string 1 url))
+          (path (match-string 2 url)))
+      ;; Both halves taken before either is unescaped, since
+      ;; `url-unhex-string' matches and would replace the match data.
+      (cl-flet ((unescape (part)
+                  (decode-coding-string
+                   (url-unhex-string (encode-coding-string part 'utf-8))
+                   'utf-8)))
+        (cons (unescape host) (unescape path))))))
 
 (defun cooked--decode-base64 (data)
   "The bytes base64 DATA encodes, as a unibyte string, or nil if it is not base64.

@@ -803,6 +803,28 @@ snippets sent the path raw while this decoded it, so that directory arrived as
               (should (equal default-directory (file-name-as-directory awkward))))))
       (delete-directory parent t))))
 
+(ert-deftest cooked-osc-7-decodes-a-utf-8-directory-name ()
+  "A non-ASCII directory arrives as percent-escaped UTF-8 bytes, and is found.
+
+`café' is reported as `caf%C3%A9'.  Unescaping alone gave two raw-byte
+characters in place of the `é', a name that exists nowhere, so tracking stopped
+at the first directory whose name was not ASCII."
+  (let* ((parent (make-temp-file "cooked-osc7-" t))
+         (dir (expand-file-name "café" parent)))
+    (unwind-protect
+        (progn
+          (make-directory dir)
+          (with-temp-buffer
+            (cooked-mode)
+            (let ((default-directory "/"))
+              (cooked--osc-cwd
+               (list (concat "file://" (system-name)
+                             (url-hexify-string
+                              dir (cons ?/ url-unreserved-chars)))))
+              (should (string-search "caf%C3%A9" (car cooked--directory-report)))
+              (should (equal default-directory (file-name-as-directory dir))))))
+      (delete-directory parent t))))
+
 (ert-deftest cooked-osc-7-repeated-report-does-no-work ()
   "The shell reports its directory at every prompt, moved or not.  An identical
 report does no stat and no rename -- unless \\[cd] in the buffer has moved
