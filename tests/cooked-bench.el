@@ -535,6 +535,25 @@ r=1; while [ $r -le 24 ]; do printf '\\033[%s;1H' $r; \
 printf '\\342\\224\\200%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; \
 r=$((r+1)); done; f=$((f+1)); done; printf '\\033[?1049l'")))
 
+(defun cooked-bench-bottom-row ()
+  "A still screen whose bottom row is rewritten, over a real child.
+
+What a status line, a spinner under a full-screen listing or `watch' with one
+changing figure look like: twenty-three rows drawn once, then two thousand
+rewrites of the last, with a 10 ms pause every fifty so that they arrive over
+forty-odd wakeups rather than two.  The core compares each rewrite with the row Emacs holds
+and sends that one row, so this is the live counterpart of the synthetic
+`per-frame, 24x80 styled, one cell, as a row', paced by the real wake pipe.  A
+drain that sends more than the bottom row shows here as time per drain rising
+towards `repaint, 400 frames x 24 rows'."
+  (cooked-bench--session
+   "live, still screen, bottom row x2000"
+   '("/bin/sh" "-c" "printf '\\033[?1049h\\033[H'; r=1; while [ $r -lt 24 ]; do \
+printf 'row %s the quick brown fox jumps over the lazy dog\\r\\n' $r; r=$((r+1)); done; \
+i=0; while [ $i -lt 2000 ]; do printf '\\033[999;1Hstatus %s' $i; \
+[ $((i % 50)) -eq 0 ] && sleep 0.01; i=$((i+1)); done; \
+printf '\\033[?1049l'")))
+
 (defun cooked-bench-marshalling ()
   "Cost of `cooked--drain' alone, with nothing applied to the buffer.
 
@@ -1147,14 +1166,13 @@ exactly as they were."
   (cooked-bench--frames "per-frame, 24x80 styled, bar tail, as an edit"
                         nil 200 :height 24 :prime (cooked-bench--styled-rows 24 80)
                         :edits (list (cooked-bench--edit 0 70 nil 80 "##########")))
-  ;; `cooked-bench--frames' paints the alternate screen, where the URL scan is off
-  ;; by default -- see `cooked-detect-links-on-alt-screen'.  What is under test is
-  ;; the scan, not which screen it runs on, so it is asked for here.
+  ;; There was a URL-per-row frame after this one, on the alternate screen with
+  ;; `cooked-detect-links-on-alt-screen' bound.  The scan runs from jit-lock and
+  ;; not from the render, batch never redisplays, and that option is read by
+  ;; nothing, so the row scanned no URLs at all.  `cooked-bench-links' times the
+  ;; scan itself.
   (cooked-bench--frames "per-frame, 24x80 every cell linked and underlined"
-                        (cooked-bench--linked-rows 24 80) 200)
-  (let ((cooked-detect-links-on-alt-screen t))
-    (cooked-bench--frames "per-frame, 24x80 with a URL per row"
-                          (cooked-bench--url-rows 24 80) 200)))
+                        (cooked-bench--linked-rows 24 80) 200))
 
 ;;;; The three shapes the suite could not see
 ;;
@@ -1493,6 +1511,108 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
                            (lambda () (cooked--rescale-deco)))
     (message "  %-40s   %s" "" "the gate `cooked--sync-size' relies on")))
 
+;;;; Link scans over settled scrollback
+;;
+;; The two passes that find links in text nobody marked up: the URL scan
+;; `cooked--fontify-links' and the file-name scan `cooked-file-link-scan'.  Both
+;; run from jit-lock, so a figure taken by calling `cooked--apply' measures
+;; neither, and the alternate-screen URL row this file used to carry reported the
+;; floor under that name.  These time what redisplay would run over a stretch of
+;; scrollback, and print how many links the scan left behind, which is the proof
+;; that it scanned.
+
+(defconst cooked-bench--url-lines
+  '("See https://example.com/docs/errors/E0042 for details"
+    "Download: https://cdn.example.org/releases/v2.1.0/pkg.tar.gz"
+    "More info: https://github.com/user/repo/issues/42"
+    "nothing to find on this line but words and more words")
+  "Lines of output carrying URLs, three in four, cycled to fill the scrollback.")
+
+(defconst cooked-bench--path-lines
+  '("src/session.rs:423:9: warning: unused variable"
+    "  --> src/emu/screen.rs:422:5"
+    "lisp/cooked-render.el:111: in cooked--drain-and-apply"
+    "tests/delta_replay.rs:562 property failed"
+    "pkg/server/handler.go:128:5: undefined: Foo"
+    "ERROR in src/components/Button.tsx:17 TS2304: Cannot find name"
+    "  File lib/python3/site.py, line 73, in main"
+    "warning: unused variable at ./src/render.zig:156:13")
+  "Build-log lines naming files, the first four of which exist in this tree.
+
+Resolved against the top of the tree, so the four that exist are found in
+`default-directory' and the four that do not cost the project-root retry as
+well: a miss is the expensive answer, and a real build log holds plenty.
+Paths relative to the tree rather than ghostel's /opt and /usr, which it chose
+because a miss under /home goes through autofs on macOS; nothing here reads
+an absolute path at all.")
+
+(defun cooked-bench--count-property-runs (property from to)
+  "How many runs between FROM and TO carry a non-nil PROPERTY."
+  (save-restriction
+    (widen)
+    (let ((pos from)
+          (runs 0))
+      (while (< pos to)
+        (let ((next (next-single-property-change pos property nil to)))
+          (when (get-text-property pos property)
+            (setq runs (1+ runs)))
+          (setq pos next)))
+      runs)))
+
+(defun cooked-bench--scan-scrollback (label lines count property)
+  "Time the link scans over COUNT settled LINES, and report PROPERTY's runs.
+
+LINES are cycled to COUNT lines, printed by a child on the primary screen so
+that all but a screenful settle into scrollback, and the child then sleeps.
+One iteration marks the scrollback unfontified, untimed, and times
+`jit-lock-fontify-now' over it, which runs `cooked--fontify-region' chunk by
+chunk as redisplay would.  The scans in force are whatever the caller bound.
+
+The detail line gives PROPERTY's run count after the last scan, which is what
+makes the row evidence: a scan that found nothing, or never ran, prints 0."
+  (let ((file (make-temp-file "cooked-bench-links-")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (dotimes (i count)
+              (insert (nth (% i (length lines)) lines) "\r\n")))
+          (cooked-bench--with-session
+              (list "/bin/sh" "-c"
+                    (format "stty -onlcr; cat %s; printf DONE; exec sleep 300"
+                            (shell-quote-argument file)))
+            (setq default-directory (file-name-as-directory (cooked--root)))
+            (let ((deadline (+ (float-time) 10)))
+              (while (and (< (float-time) deadline)
+                          (not (save-excursion
+                                 (goto-char (point-max))
+                                 (search-backward "DONE" nil t))))
+                (accept-process-output nil 0.02)))
+            (let ((from (point-min))
+                  (to (cooked--screen-start-position)))
+              (cooked-bench--measure
+               label (count-lines from to)
+               (lambda ()
+                 (with-silent-modifications
+                   (put-text-property from to 'fontified nil))
+                 (let ((t0 (float-time)))
+                   (jit-lock-fontify-now from to)
+                   (- (float-time) t0))))
+              (message "  %-40s   %d lines of scrollback, %d runs carry `%s'"
+                       "" (count-lines from to)
+                       (cooked-bench--count-property-runs property from to) property))))
+      (delete-file file))))
+
+(defun cooked-bench-links ()
+  "The URL scan and the file-name scan, each alone, over settled scrollback."
+  (let ((cooked-link-scan-functions nil))
+    (cooked-bench--scan-scrollback "URL scan, 200 lines of scrollback"
+                                   cooked-bench--url-lines 224 'cooked-link-url))
+  (require 'cooked-file-link)
+  (let ((cooked-detect-links nil)
+        (cooked-link-scan-functions (list #'cooked-file-link-scan)))
+    (cooked-bench--scan-scrollback "file-link scan, 200 lines, half missing"
+                                   cooked-bench--path-lines 224 'cooked-file-link)))
+
 ;;;; Allocation per frame, which is a count and not a time
 ;;
 ;; Every other case in this file is a clock, and a clock cannot answer the
@@ -1629,38 +1749,66 @@ a result."
            (* 1000 (apply #'+ (mapcar (lambda (row) (apply #'+ (cadr row)))
                                       cooked-bench-results)))))
 
-(defun cooked-bench ()
-  "Run every benchmark in this file."
-  (setq cooked-bench-results nil)
+(defconst cooked-bench-cases
+  '(("marshalling" . cooked-bench-marshalling)
+    ("flood" . cooked-bench-flood)
+    ("styled" . cooked-bench-styled)
+    ("repaint" . cooked-bench-repaint)
+    ("box-drawing" . cooked-bench-box-drawing)
+    ("bottom-row" . cooked-bench-bottom-row)
+    ("per-frame" . cooked-bench-per-frame)
+    ("image" . cooked-bench-image)
+    ("scroll" . cooked-bench-scroll)
+    ("tree" . cooked-bench-tree)
+    ("links" . cooked-bench-links)
+    ("deferred" . cooked-bench-deferred)
+    ("rescale" . cooked-bench-rescale)
+    ("allocation" . cooked-bench-allocation))
+  "Every case `cooked-bench' runs, in order, as (NAME . FUNCTION).
+
+NAME is what `cooked-bench-run-one' and `make bench CASE=NAME' accept, so that
+a change aimed at one path can be measured on that path in seconds, and run
+again under `perf record' without the rest of the suite in the profile.  The
+allocation rows are last because they are the only rows that do not depend on
+the machine, and so the ones worth quoting when the load line at the top has
+scrolled away.")
+
+(defun cooked-bench--header ()
+  "Print the run's header and apply the load guard."
   (message "cooked: Emacs-side cost per workload (drain + apply only)")
   (message "per-iteration distribution; read the p50 -- see the Commentary")
   ;; Before anything is timed, and before the header is complete: the load is
   ;; part of the run's provenance, so it is printed whether or not it passes.
-  (cooked-bench--check-load)
-  (message "")
-  (cooked-bench-marshalling)
-  (cooked-bench-flood)
-  (cooked-bench-styled)
-  (cooked-bench-repaint)
-  (cooked-bench-box-drawing)
-  (message "")
-  (cooked-bench-per-frame)
-  (message "")
-  (cooked-bench-image)
-  (message "")
-  (cooked-bench-scroll)
-  (message "")
-  (cooked-bench-tree)
-  (message "")
-  (cooked-bench-deferred)
-  (message "")
-  (cooked-bench-rescale)
-  (message "")
-  ;; Last, and after the load line has long scrolled off: these are the only
-  ;; rows in the file that do not depend on the machine at all, so they are the
-  ;; ones worth quoting when the machine is in doubt.
-  (cooked-bench-allocation)
+  (cooked-bench--check-load))
+
+(defun cooked-bench ()
+  "Run every benchmark in this file, in the order of `cooked-bench-cases'."
+  (setq cooked-bench-results nil)
+  (cooked-bench--header)
+  (pcase-dolist (`(,_name . ,function) cooked-bench-cases)
+    (message "")
+    (funcall function))
   (cooked-bench--report))
+
+(defun cooked-bench-run-one (name)
+  "Run the one case of `cooked-bench-cases' called NAME.
+
+For example `(cooked-bench-run-one \"tree\")', which is what `make bench
+CASE=tree' evaluates.  An unknown NAME is an error that lists the names, and in
+batch exits 1 with that sentence."
+  (interactive (list (completing-read "Benchmark case: " cooked-bench-cases nil t)))
+  (let ((function (cdr (assoc name cooked-bench-cases))))
+    (unless function
+      (let ((complaint (format "no case named %S; the cases are %s" name
+                               (mapconcat #'car cooked-bench-cases ", "))))
+        (if noninteractive
+            (progn (message "cooked-bench: %s" complaint) (kill-emacs 1))
+          (user-error "cooked-bench: %s" complaint))))
+    (setq cooked-bench-results nil)
+    (cooked-bench--header)
+    (message "")
+    (funcall function)
+    (cooked-bench--report)))
 
 (provide 'cooked-bench)
 ;;; cooked-bench.el ends here

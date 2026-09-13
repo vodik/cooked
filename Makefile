@@ -403,12 +403,18 @@ citations:
 #
 # `lisp-test' stays interpreted.  A readable backtrace is worth more there than
 # speed, and the suite is not measuring anything.
+#
+# CASE=NAME runs the one case of `cooked-bench-cases' called NAME, and skips the
+# Rust throughput run: `make bench CASE=tree' is for measuring one path in
+# seconds, or under `perf record' with nothing else in the profile.
+BENCH_RUN = $(if $(CASE),--eval '(cooked-bench-run-one "$(CASE)")',-f cooked-bench)
+
 bench:
 	trap 'rm -f lisp/*.elc' EXIT; trap 'exit 130' INT TERM; \
 	  $(BATCH) -l bytecomp --eval '(setq byte-compile-error-on-warn t)' \
 	    -f batch-byte-compile $(wildcard lisp/*.el) && \
-	  cargo test --release --test throughput -- --ignored --nocapture && \
-	  $(BATCH) -l cooked-bench.el -f cooked-bench
+	  $(if $(CASE),,cargo test --release --test throughput -- --ignored --nocapture &&) \
+	  $(BATCH) -l cooked-bench.el $(BENCH_RUN)
 
 # The same benchmarks, sized to finish inside ten seconds, for the question
 # "did I just make it slower by an order of magnitude" -- which is worth asking
@@ -435,7 +441,7 @@ bench-quick:
 	    -f batch-byte-compile $(wildcard lisp/*.el) && \
 	  COOKED_BENCH_FORCE=1 $(BATCH) \
 	    --eval '(setq cooked-bench-min-duration 0.02)' \
-	    -l cooked-bench.el -f cooked-bench
+	    -l cooked-bench.el $(BENCH_RUN)
 
 # `cargo clean' only reaches CARGO_TARGET_DIR, so the installed core -- which is
 # deliberately not cargo's to manage -- has to be named here or it survives.

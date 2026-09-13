@@ -451,6 +451,57 @@ pauses between lines so that there is more than one drain to count."
       (should (> drains 1))
       (should (= (car cooked-bench--last-counts) drains)))))
 
+;;;; Named cases
+
+(ert-deftest cooked-bench-every-case-is-named-and-runs-alone ()
+  "`cooked-bench-run-one\=' runs the case it is named and no other.
+
+Every name in `cooked-bench-cases\=' must reach a defined function, or
+`make bench CASE=NAME\=' fails for the one case somebody asked for, and an unknown
+name must say so rather than run nothing and print an empty table."
+  (dolist (entry cooked-bench-cases)
+    (should (fboundp (cdr entry))))
+  (should (equal (length cooked-bench-cases)
+                 (length (delete-dups (mapcar #'car cooked-bench-cases)))))
+  (let* ((ran nil)
+         (cooked-bench-cases `(("one" . ,(lambda () (push 'one ran)))
+                               ("two" . ,(lambda () (push 'two ran)))))
+         (process-environment (cons "COOKED_BENCH_FORCE=1" process-environment)))
+    (cl-letf (((symbol-function 'message) #'ignore))
+      (cooked-bench-run-one "two")
+      (should (equal ran '(two)))
+      (let ((noninteractive nil))
+        (should-error (cooked-bench-run-one "three") :type 'user-error))
+      (should (equal ran '(two))))))
+
+(ert-deftest cooked-bench-link-scans-leave-links-behind ()
+  "The link cases scan, and what they scan for is there to be found.
+
+The URL row they replace timed an apply on the alternate screen, where no scan
+runs, and reported the floor.  So the proof a scan ran is what it left in the
+buffer: both rows report a non-zero count of link runs.  The file-name fixture
+also names four files in this tree and four that are not, and a rename in the
+tree would quietly make every name a miss."
+  (let ((root (cooked--root)))
+    (should (cl-every (lambda (name) (file-exists-p (expand-file-name name root)))
+                      '("src/session.rs" "src/emu/screen.rs" "lisp/cooked-render.el"
+                        "tests/delta_replay.rs")))
+    (should-not (cl-some (lambda (name) (file-exists-p (expand-file-name name root)))
+                         '("pkg/server/handler.go" "src/components/Button.tsx"
+                           "lib/python3/site.py" "src/render.zig"))))
+  (let ((cooked-bench-min-duration 0.01)
+        (rows nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (format &rest args)
+                 (push (apply #'format-message format args) rows))))
+      (cooked-bench-links))
+    (let ((counts (delq nil (mapcar (lambda (row)
+                                      (and (string-match "\\([0-9]+\\) runs carry" row)
+                                           (string-to-number (match-string 1 row))))
+                                    rows))))
+      (should (= (length counts) 2))
+      (should (cl-every #'cl-plusp counts)))))
+
 ;;;; The graphical scripts' prelude
 
 (defvar cooked-tests--bench-script-args nil
