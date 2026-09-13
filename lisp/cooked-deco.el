@@ -705,9 +705,9 @@ the plist.  The background is what a stretch of space shows; the foreground
 matching it is what keeps the character invisible where there is no cell size
 to draw a stretch against.
 
-Concealed text needs nothing here: `cooked--face-build\=' has already made its
-foreground the background, and a blend of one colour with itself is that
-colour.
+Concealed text has its foreground made the background, whether
+`cooked--face-build\=' named that colour or left it to be inherited, and a
+blend of one colour with itself is that colour.
 
 Memoized in `cooked--face-cache\=', so a theme change forgets it with every
 other colour resolved against the old theme."
@@ -718,6 +718,11 @@ other colour resolved against the old theme."
                      (if cooked--reverse-screen 'foreground 'background)))
          (fg (or (plist-get plist :foreground) screen-fg))
          (bg (or (plist-get plist :background) screen-bg)))
+    ;; Concealed in a default colour, the cell names no colour to hide in and
+    ;; inherits one; `cooked--face-build\=' says which.
+    (pcase (plist-get plist :inherit)
+      ('cooked--concealed (setq fg bg))
+      ('cooked--concealed-reversed (setq bg fg)))
     (when (plist-get plist :inverse-video)
       (cl-rotatef fg bg))
     (cooked--cached cooked--face-cache (list 'shade level fg bg)

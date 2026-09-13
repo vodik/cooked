@@ -567,6 +567,24 @@ It would be a picture of the background the space already shows."
       (should (equal (cooked-tests--shade-color beg) "#898989"))
       (should (equal (cooked-tests--shade-color (1+ beg)) "#000000")))))
 
+(ert-deftest cooked-a-concealed-shade-in-the-default-colours-blends-to-nothing ()
+  "A shade concealed on the default colours takes the colour it hides in.
+Its face names no colour for the blend to read, only one it inherits, so the
+blend has to know which: the background, or once reversed the foreground."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\033[8m\\342\\226\\223\\033[7m\\342\\226\\223\\033[0m\\n'")
+    (cooked-tests--cell 9 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (1+ (point-min)) 'cooked-shade))))
+    ;; Blended with itself, so the colour comes back spelt as the blend spells it.
+    (cl-flet ((alone (color) (cooked--blend color color 0.5)))
+      (let ((beg (point-min)))
+        (should (equal (cooked-tests--shade-color beg)
+                       (alone (cooked--screen-color 'background))))
+        (should (equal (cooked-tests--shade-color (1+ beg))
+                       (alone (cooked--screen-color 'foreground))))))))
+
 (ert-deftest cooked-a-shade-follows-the-default-colours ()
   "An OSC 11 set blends an already drawn shade in the default colours again.
 The text beside it follows the remapped `default' live, so the shade must too."

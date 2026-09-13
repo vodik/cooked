@@ -2230,6 +2230,56 @@ normal video again."
       (should (equal (cooked-tests--drawn-colors (cooked--face nil nil 0))
                      (list "#ff0000" foreground))))))
 
+(ert-deftest cooked-concealed-default-text-stays-hidden-as-the-colours-move ()
+  "SGR 8 on the default colours hides its text under OSC 11 and DECSCNM too.
+
+Read off what a real tty frame draws, not a model of it.  Concealment used to
+name the global `default' background as the foreground, which ignored the
+buffer's remaps: after an OSC 11 set, or under the three DECSCNM remaps, the
+text came out in the old background over the new one, plainly legible.  Q is
+concealed in the default colours, R is concealed and reversed, and the a
+beside them is ordinary text, there to show each step really moved the colours."
+  (cooked-tests--with-tty-frame
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "printf 'a\\033[8mQ\\033[7mR\\033[m\\n'; sleep 5")
+      (should (cooked-tests--settle
+               (lambda () (string-search "aQR" (cooked-tests--text)))))
+      (let ((cooked-allow-color-set t)
+            (cooked--osc-bell-terminated t)
+            (buffer (current-buffer)))
+        ;; A reversed cell sits on the foreground, so that is what R hides in.
+        (cl-flet ((hidden (foreground background)
+                    (should (equal (cooked-tests--realized-colors buffer ?Q)
+                                   (list background background)))
+                    (should (equal (cooked-tests--realized-colors buffer ?R)
+                                   (list foreground foreground)))))
+          (should (equal (cooked-tests--realized-colors buffer ?a)
+                         '("#e0e0e0" "#101010")))
+          (hidden "#e0e0e0" "#101010")
+          (let ((cooked--osc-code 11))
+            (cooked--osc-color '("#ff0000")))
+          (should (equal (cooked-tests--realized-colors buffer ?a)
+                         '("#e0e0e0" "#ff0000")))
+          (hidden "#e0e0e0" "#ff0000")
+          (cooked--set-reverse-screen t)
+          (should (equal (cooked-tests--realized-colors buffer ?a)
+                         '("#ff0000" "#e0e0e0")))
+          (hidden "#ff0000" "#e0e0e0")
+          (let ((cooked--osc-code 10))
+            (cooked--osc-color '("#00ff00")))
+          (hidden "#ff0000" "#00ff00")
+          (cooked--set-reverse-screen nil)
+          (hidden "#00ff00" "#ff0000")
+          ;; A new theme: its background is the one hidden in once OSC 110/111
+          ;; hand the defaults back.
+          (let ((cooked--osc-code 110)) (cooked--osc-color-reset nil))
+          (let ((cooked--osc-code 111)) (cooked--osc-color-reset nil))
+          (set-frame-parameter nil 'background-color "#202040")
+          (cooked--flush-face-cache)
+          (should (equal (cooked-tests--realized-colors buffer ?a)
+                         '("#e0e0e0" "#202040")))
+          (hidden "#e0e0e0" "#202040"))))))
+
 (ert-deftest cooked-reverse-video-from-a-child-reaches-the-buffer ()
   "`printf \\='\\e[7mX\\e[m\\=' leaves X in a face that draws reversed."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'a\\033[7mX\\033[mb\\n'; sleep 5")

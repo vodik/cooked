@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'color)
+(require 'face-remap)
 (require 'cooked-util)
 
 (defconst cooked--attr-bold 1)
@@ -194,6 +195,41 @@ always been allowed to render blink as a static distinction, and that is what
 this is: the compromise `cooked--face-build\=' already makes for conceal, which
 paints foreground over background rather than reaching for `invisible\='."
   :group 'cooked)
+
+(defface cooked--concealed '((t))
+  "Internal: what concealed text on the default background inherits.
+
+Not for customizing, since the buffer remaps it: `cooked--remap-concealed\='
+gives it a `:foreground\=' of the background this buffer draws, whatever OSC 11
+and DECSCNM have made that.  A face plist cannot say \='the colour of the default
+background\=' any other way, and naming the colour itself would freeze it at the
+moment the plist was built."
+  :group 'cooked)
+
+(defface cooked--concealed-reversed '((t))
+  "Internal: what reversed concealed text on the default foreground inherits.
+
+The mirror of `cooked--concealed\=': remapped to a `:background\=' of the default
+foreground, which inverse video then paints as the glyph over a cell that is
+that same colour."
+  :group 'cooked)
+
+(defvar-local cooked--concealed-remaps nil
+  "The cookies remapping `cooked--concealed\=' and its reversed twin, or nil.")
+
+(defun cooked--remap-concealed (foreground background)
+  "Draw concealed default-coloured text in FOREGROUND and BACKGROUND from now on.
+
+The two are the colours this buffer draws as its defaults, swapped already if
+the screen is reversed.  Every concealed cell that inherits the faces follows
+at once, including the ones already on the screen, which is why this is a
+remap rather than a colour baked into the cell\='s face: a password prompt\='s
+hidden echo must stay hidden when an OSC 11 set lands after it."
+  (mapc #'face-remap-remove-relative cooked--concealed-remaps)
+  (setq cooked--concealed-remaps
+        (list (face-remap-add-relative 'cooked--concealed :foreground background)
+              (face-remap-add-relative 'cooked--concealed-reversed
+                                       :background foreground))))
 
 (defconst cooked--attr-face-properties
   `((,cooked--attr-bold :weight bold)
@@ -382,9 +418,16 @@ reversed text read as normal video, which is what xterm does.  This was checked
 by its pixels in a headless pgtk frame, and a cell with colours of its own
 still comes out with the two exchanged."
   (let* ((reverse (cooked--attr-p attrs cooked--attr-reverse))
+         (conceal (cooked--attr-p attrs cooked--attr-conceal))
          (fg* (cooked--color fg))
          (bg* (cooked--color bg))
          (face nil))
+    ;; Concealed text is drawn in the colour it sits on.  Which property that is
+    ;; depends on reverse video, since an inverse face paints its `:foreground'
+    ;; as the background -- so a reversed cell has its background matched to its
+    ;; foreground instead.
+    (when conceal
+      (if reverse (setq bg* fg*) (setq fg* bg*)))
     (when fg* (setq face (plist-put face :foreground fg*)))
     (when bg* (setq face (plist-put face :background bg*)))
     (when reverse (setq face (plist-put face :inverse-video t)))
@@ -393,20 +436,26 @@ still comes out with the two exchanged."
         (setq face (plist-put face property value))))
     (when (cooked--attr-p attrs cooked--attr-underline)
       (setq face (plist-put face :underline (cooked--underline-spec attrs ul))))
-    ;; Last, and after the colour it overrides: concealed text is drawn in the
-    ;; colour it sits on.  Which property that is depends on reverse video, since
-    ;; an inverse face paints its `:foreground' as the background -- so a
-    ;; reversed cell has its `:background' matched to its foreground instead.
-    (when (cooked--attr-p attrs cooked--attr-conceal)
-      (setq face (if reverse
-                     (plist-put face :background (or fg* (face-foreground 'default)))
-                   (plist-put face :foreground (or bg* (face-background 'default)))))
-      ;; And it outranks blink.  `cooked-blink' is a visible mark on the cell, and
-      ;; on a concealed cell that mark is the one thing SGR 8 was asked to keep
-      ;; quiet: a box drawn round apparently blank text says there is text
-      ;; there.  A hardware terminal blinking a concealed glyph shows nothing
-      ;; either, so dropping it is the faithful answer as well as the careful one.
-      (setq face (plist-put face :inherit nil)))
+    (when conceal
+      ;; A default colour to hide in is not a colour this can name, for the same
+      ;; reason reverse video names none: the cache would outlive it.  So the
+      ;; face inherits one of two that the buffer remaps to the colours it draws.
+      ;; A buffer that has not remapped them yet -- no OSC 10/11 set and no
+      ;; DECSCNM, which remap them as they change the colours -- draws the
+      ;; theme's own.
+      (unless (or (if reverse fg* bg*) cooked--concealed-remaps)
+        (cooked--remap-concealed (face-foreground 'default nil t)
+                                 (face-background 'default nil t)))
+      ;; And the inheritance replaces blink's.  `cooked-blink' is a visible mark
+      ;; on the cell, and on a concealed cell that mark is the one thing SGR 8 was
+      ;; asked to keep quiet: a box drawn round apparently blank text says there
+      ;; is text there.  A hardware terminal blinking a concealed glyph shows
+      ;; nothing either, so dropping it is the faithful answer as well as the
+      ;; careful one.
+      (setq face (plist-put face :inherit
+                            (cond ((if reverse fg* bg*) nil)
+                                  (reverse 'cooked--concealed-reversed)
+                                  (t 'cooked--concealed)))))
     face))
 
 (provide 'cooked-face)

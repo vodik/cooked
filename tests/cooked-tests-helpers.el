@@ -364,6 +364,94 @@ draining here."
   (let ((deadline (+ (float-time) (cooked-tests-timeout seconds))))
     (while (< (float-time) deadline) (accept-process-output nil 0.05))))
 
+(defmacro cooked-tests--with-tty-frame (&rest body)
+  "Run BODY with a real tty frame selected, drawing into a pty nobody reads.
+
+Batch Emacs realizes no faces on its initial frame, so a test of what a face
+*looks* like has nothing to ask there.  A tty frame is different: it is opened
+on the slave side of a pty that a `sleep' child holds, redisplay really runs
+on it, and every face it draws is merged, remapped and realized by Emacs
+itself before it goes out as escape sequences.  The master side's output lands
+in the child's process filter, where `cooked-tests--realized-colors' reads it
+back.  The frame is `xterm-direct' so each colour goes out as its own RGB
+triple, and its default colours are named, #e0e0e0 on #101010, so that nothing
+resolves to the unspecified pair a real tty would report.
+
+Skipped where the `xterm-direct' terminfo entry is not installed."
+  (declare (indent 0))
+  `(let* ((pty (make-process :name "cooked-tests-tty" :command '("sleep" "60")
+                             :connection-type 'pty :noquery t
+                             :filter (lambda (proc string)
+                                       (process-put proc 'output
+                                                    (concat (process-get proc 'output)
+                                                            string)))))
+          (frame (progn
+                   (set-process-window-size pty 10 40)
+                   (condition-case nil
+                       (make-terminal-frame
+                        `((tty . ,(process-tty-name pty))
+                          (tty-type . "xterm-direct")
+                          (foreground-color . "#e0e0e0")
+                          (background-color . "#101010")
+                          (cooked-tests-pty . ,pty)))
+                     (error nil)))))
+     (unwind-protect
+         (progn
+           (skip-unless frame)
+           (with-selected-frame frame ,@body))
+       (when (frame-live-p frame) (delete-frame frame t))
+       (delete-process pty))))
+
+(defun cooked-tests--realized-colors (buffer char)
+  "The foreground and background the selected tty frame draws CHAR in.
+
+BUFFER is shown in the frame, which is redrawn from scratch so that every cell
+goes out again, and the output is read up to the first CHAR: the colours in
+force there, after any inverse video, are returned as a list of two #rrggbb
+strings.  A colour the frame left as its default comes back as that default.
+Only for a frame from `cooked-tests--with-tty-frame', and CHAR should appear once."
+  (let* ((frame (selected-frame))
+         (pty (frame-parameter frame 'cooked-tests-pty))
+         (default-fg (frame-parameter frame 'foreground-color))
+         (default-bg (frame-parameter frame 'background-color)))
+    (set-window-buffer (frame-root-window frame) buffer)
+    (accept-process-output pty 0.05)
+    (process-put pty 'output "")
+    (redraw-frame frame)
+    (redisplay t)
+    (let ((deadline (+ (float-time) (cooked-tests-timeout 2))))
+      (while (and (not (seq-contains-p (process-get pty 'output) char))
+                  (< (float-time) deadline))
+        (accept-process-output pty 0.05)))
+    (let ((output (process-get pty 'output))
+          (pos 0) fg bg inverse found)
+      (while (and (not found) (< pos (length output)))
+        (cond
+         ((eq (string-match "\e\\[\\([0-9:;]*\\)m" output pos) pos)
+          (setq pos (match-end 0))
+          (dolist (param (split-string (match-string 1 output) ";"))
+            (cond ((member param '("0" "")) (setq fg nil bg nil inverse nil))
+                  ((equal param "39") (setq fg nil))
+                  ((equal param "49") (setq bg nil))
+                  ((equal param "7") (setq inverse t))
+                  ((equal param "27") (setq inverse nil))
+                  ((string-match "\\`\\([34]\\)8:2::\\([0-9]+\\):\\([0-9]+\\):\\([0-9]+\\)\\'"
+                                 param)
+                   (let ((color (apply #'format "#%02x%02x%02x"
+                                       (mapcar (lambda (n)
+                                                 (string-to-number (match-string n param)))
+                                               '(2 3 4)))))
+                     (if (equal (match-string 1 param) "3")
+                         (setq fg color)
+                       (setq bg color)))))))
+         ((eq (string-match "\e\\[[^@-~]*[@-~]" output pos) pos)
+          (setq pos (match-end 0)))
+         ((eq (aref output pos) char)
+          (let ((drawn (list (or fg default-fg) (or bg default-bg))))
+            (setq found (if inverse (reverse drawn) drawn))))
+         (t (setq pos (1+ pos)))))
+      found)))
+
 (defun cooked-tests--text ()
   "Visible buffer text with trailing blank lines removed."
   (string-trim-right (buffer-substring-no-properties (point-min) (point-max))))

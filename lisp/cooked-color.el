@@ -408,7 +408,20 @@ newest."
                 (background (cooked--screen-color 'background)))
             (list (face-remap-add-relative 'default :foreground background)
                   (face-remap-add-relative 'default :background foreground)
-                  (face-remap-add-relative 'fringe :background foreground))))))
+                  (face-remap-add-relative 'fringe :background foreground)))))
+  (cooked--apply-concealed))
+
+(defun cooked--apply-concealed ()
+  "Hide concealed default-coloured text in the colors this buffer draws now.
+
+Called wherever those colors move -- an OSC 10/11 set or reset, DECSCNM, a theme
+change -- so text already concealed on the screen stays hidden rather than
+showing in the colors of the moment it was drawn.  See `cooked--face-build\='."
+  (let ((foreground (cooked--screen-color 'foreground))
+        (background (cooked--screen-color 'background)))
+    (if cooked--reverse-screen
+        (cooked--remap-concealed background foreground)
+      (cooked--remap-concealed foreground background))))
 
 (defun cooked--set-reverse-screen (on)
   "Adopt DECSCNM state ON from the drain, remapping only when it changes."
@@ -426,6 +439,7 @@ On `cooked-theme-change-hook'."
     (cooked--apply-reverse-screen)))
 
 (add-hook 'cooked-theme-change-hook #'cooked--refresh-reverse-screen)
+(add-hook 'cooked-theme-change-hook #'cooked--apply-concealed)
 
 (provide 'cooked-color)
 ;;; cooked-color.el ends here
