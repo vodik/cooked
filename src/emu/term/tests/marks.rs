@@ -1,0 +1,429 @@
+//! OSC 133 semantic marks, their anchors, and clearing to the prompt.
+
+use super::*;
+
+#[test]
+fn osc_133_becomes_semantic_events() {
+    let mut t = term(
+        4,
+        20,
+        b"\x1b]133;A\x07$ \x1b]133;B\x07ls\x1b]133;C\x07out\x1b]133;D;3\x07",
+    );
+    let events = t.drain().events;
+    let at = |row, col| Anchor { row, col };
+    assert_eq!(
+        events,
+        vec![
+            // Anchored where each mark actually fell on the one row this writes:
+            // column 0, then after "$ ", then after "ls", then after "out".
+            // The ids are the order the marks were parsed in, which is what pairs
+            // each one back up with the marker Emacs makes for it.
+            Event::Mark(Mark::PromptStart, at(0, 0), MarkId(0)),
+            Event::Mark(Mark::PromptEnd, at(0, 2), MarkId(1)),
+            Event::Mark(Mark::CommandStart(None), at(0, 4), MarkId(2)),
+            Event::Mark(Mark::CommandEnd(Some(3)), at(0, 7), MarkId(3)),
+        ]
+    );
+}
+
+/// PS2. The mark the shell puts on a continuation prompt has to reach Emacs as
+/// something other than a fresh prompt, or the command record for a multi-line
+/// construct begins at its last line instead of at the prompt it was typed at.
+#[test]
+fn osc_133_marks_a_continuation_prompt() {
+    let mut t = term(4, 20, b"\x1b]133;A\x07> \x1b]133;A;k=s\x07\x1b]133;B\x07");
+    let events = t.drain().events;
+    let at = |row, col| Anchor { row, col };
+    assert_eq!(
+        events,
+        vec![
+            Event::Mark(Mark::PromptStart, at(0, 0), MarkId(0)),
+            Event::Mark(Mark::PromptContinuation, at(0, 2), MarkId(1)),
+            Event::Mark(Mark::PromptEnd, at(0, 2), MarkId(2)),
+        ]
+    );
+}
+
+/// The proposal hangs `k=` off `P` and calls `A` shorthand for `P;k=i`, and Ghostty
+/// emits `P` from its prompt strings to dodge `A`'s implied fresh line. cooked has no
+/// fresh-line behaviour, so `P` would be the same mark under a second name -- and
+/// nothing that sends it can reach this parser, since the shipped snippets are gated on
+/// `TERM_PROGRAM=cooked` and write `A`, as does a fish 4 marking its own prompts. So a
+/// `P` is a kind this parser has never heard of, and is dropped whole like any other:
+/// no event, no mark id spent, and in particular no prompt start, which is the one
+/// outcome that would move state on a mark nobody here meant to send.
+#[test]
+fn osc_133_ignores_the_other_spelling_of_the_prompt_mark() {
+    let mut t = term(4, 20, b"\x1b]133;P;k=s\x07\x1b]133;P\x07\x1b]133;A\x07");
+    assert_eq!(
+        t.drain().events,
+        vec![Event::Mark(
+            Mark::PromptStart,
+            Anchor { row: 0, col: 0 },
+            MarkId(0)
+        )]
+    );
+}
+
+/// The bug this cost: `k=r` is the prompt drawn to the *right* of the input line, not
+/// a continuation of anything. No `B` follows one, so reading it as a `PS2` left Emacs
+/// in `prompt` for the rest of the session with the input line gone for good.
+///
+/// A kind nobody here has heard of joins it: the safe answer for an unknown mark is to
+/// move no state, and both of the other answers move some.
+#[test]
+fn osc_133_drops_a_prompt_kind_that_is_neither_initial_nor_a_continuation() {
+    for kind in [&b"r"[..], b"z", b"unheard-of"] {
+        let mut t = Term::new(4, 20);
+        t.feed(b"\x1b]133;A\x07");
+        t.feed(format!("\x1b]133;A;k={}\x07", String::from_utf8_lossy(kind)).as_bytes());
+        assert_eq!(
+            t.drain().events,
+            vec![Event::Mark(
+                Mark::PromptStart,
+                Anchor { row: 0, col: 0 },
+                MarkId(0)
+            )],
+            "k={} should have been dropped whole",
+            String::from_utf8_lossy(kind)
+        );
+    }
+}
+
+/// `c` is the proposal's spelling of the same thing kitty calls `s`.
+#[test]
+fn osc_133_reads_both_spellings_of_a_continuation() {
+    let mut t = term(4, 20, b"\x1b]133;A;k=c\x07\x1b]133;A;k=s\x07");
+    let at = |row, col| Anchor { row, col };
+    assert_eq!(
+        t.drain().events,
+        vec![
+            Event::Mark(Mark::PromptContinuation, at(0, 0), MarkId(0)),
+            Event::Mark(Mark::PromptContinuation, at(0, 0), MarkId(1)),
+        ]
+    );
+}
+
+/// The proposal gives the kind a default of `i`, so `k=` with nothing after it is an
+/// emitter saying nothing rather than an emitter naming a kind we have never heard of.
+#[test]
+fn osc_133_treats_an_empty_prompt_kind_as_initial() {
+    let mut t = term(4, 20, b"\x1b]133;A;k=\x07");
+    assert_eq!(
+        t.drain().events,
+        vec![Event::Mark(
+            Mark::PromptStart,
+            Anchor { row: 0, col: 0 },
+            MarkId(0)
+        )]
+    );
+}
+
+/// The options real terminals actually send, none of which is a `k=`: kitty's
+/// `click_events=` (which is what fish 4 emits), Ghostty's `redraw=` and `cl=`, and
+/// ble.sh's `aid=`. Every one of them is an ordinary prompt start.
+#[test]
+fn osc_133_ignores_the_options_that_are_not_a_prompt_kind() {
+    for opts in [
+        &b"click_events=1"[..],
+        b"redraw=last;cl=line;aid=123",
+        b"cl=line",
+    ] {
+        let mut t = Term::new(4, 20);
+        t.feed(&[b"\x1b]133;A;", opts, b"\x07"].concat());
+        assert_eq!(
+            t.drain().events,
+            vec![Event::Mark(
+                Mark::PromptStart,
+                Anchor { row: 0, col: 0 },
+                MarkId(0)
+            )],
+            "{} should have been an initial prompt",
+            String::from_utf8_lossy(opts)
+        );
+    }
+}
+
+/// The kind field is matched whole. Reading only its first byte had `Dfoo` agreeing to
+/// be a `D`, which is the parser inventing consent from a sender that meant something
+/// else. The examples are spelled with kinds this parser *does* accept, because those
+/// are the ones a prefix match would wrongly swallow -- a suffix on a kind nobody reads
+/// is dropped either way and would prove nothing.
+#[test]
+fn osc_133_matches_the_kind_field_exactly() {
+    let mut t = term(4, 20, b"\x1b]133;Dfoo\x07\x1b]133;Az\x07\x1b]133;\x07");
+    assert!(t.drain().events.is_empty());
+}
+
+/// `clear_to_prompt` cuts at the prompt the construct began at, so a continuation
+/// must leave that anchor alone -- the whole reason `k=` is parsed rather than dropped.
+#[test]
+fn a_continuation_prompt_does_not_move_the_clear_anchor() {
+    let mut t = Term::new(6, 20);
+    t.feed(b"noise\r\n\x1b]133;A\x07$ for x in 1 2; do\r\n");
+    t.feed(b"\x1b]133;A;k=s\x07> echo $x\r\n");
+    t.drain();
+    // Two rows kept: the prompt row and the continuation under it. Had the
+    // continuation moved the anchor, only the second would have survived.
+    assert_eq!(t.clear_to_prompt(), 1);
+    assert_eq!(text(&t, 0), "$ for x in 1 2; do");
+}
+
+#[test]
+fn osc_133_d_without_a_status() {
+    let mut t = term(4, 20, b"\x1b]133;D\x07");
+    assert_eq!(
+        t.drain().events,
+        vec![Event::Mark(
+            Mark::CommandEnd(None),
+            Anchor { row: 0, col: 0 },
+            MarkId(0)
+        )]
+    );
+}
+
+#[test]
+fn osc_133_stays_typed() {
+    let mut t = term(4, 20, b"\x1b]133;A\x07");
+    assert_eq!(
+        t.drain().events,
+        vec![Event::Mark(
+            Mark::PromptStart,
+            Anchor { row: 0, col: 0 },
+            MarkId(0)
+        )]
+    );
+}
+
+/// The bug anchors exist for: two commands inside one drain must not collapse onto
+/// the end-of-drain cursor, which is where the *second* one ended.
+#[test]
+fn marks_in_one_drain_keep_their_own_positions() {
+    let mut t = term(
+        8,
+        20,
+        b"\x1b]133;C\x07one\r\n\x1b]133;D;0\x07\x1b]133;C\x07two\r\n\x1b]133;D;0\x07",
+    );
+    let starts: Vec<Anchor> = t
+        .drain()
+        .events
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Mark(Mark::CommandStart(_), at, _) => Some(at),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts,
+        vec![Anchor { row: 0, col: 0 }, Anchor { row: 1, col: 0 }]
+    );
+}
+
+/// The exception in `Row::retire`, and the whole reason marks can be moved at all:
+/// `OSC 133;A` arrives before the shell prints its prompt, so the very first
+/// character of that prompt is written over the cell the mark landed on.
+#[test]
+fn a_mark_survives_the_prompt_printed_over_it() {
+    let t = term(4, 20, b"\x1b]133;A\x07$ ");
+    let marks: Vec<_> = t.screen().row(0).unwrap().marks().collect();
+    assert_eq!(marks, vec![(0, MarkId(0))], "the mark is still on column 0");
+    assert_eq!(text(&t, 0), "$", "and the prompt is still drawn");
+}
+
+/// The reported bug: a resize rewraps the grid, Emacs rebuilds every live row from
+/// it, and the buffer markers it took from the original anchors are left pointing at
+/// text that has moved. The mark comes through the rewrap on the cell it went in on,
+/// so the drain can say where that cell is now.
+#[test]
+fn a_rewrap_reports_where_each_mark_moved_to() {
+    // Twelve cells of one logical line at ten columns: row 0 wrapped, row 1 holding
+    // "ab", and the mark on the cell after them.
+    let mut t = term(4, 10, b"0123456789ab\x1b]133;A\x07");
+    t.drain();
+    assert!(
+        t.screen().row(1).unwrap().marks().any(|(col, _)| col == 2),
+        "the mark starts on row 1, column 2"
+    );
+
+    t.resize(4, 7);
+    let delta = t.drain();
+    // Offset 12 into the line, re-chunked at seven columns: row 1, column 5.
+    assert_eq!(delta.marks, vec![(MarkId(0), Anchor { row: 1, col: 5 })]);
+}
+
+/// The other half of the same drain: a rewrap narrow enough pushes rows off the top,
+/// and a mark on one of them is in text Emacs is about to *insert* rather than on a
+/// row it is about to rewrite. Both spellings are what `anchor_to_lisp` exists for.
+#[test]
+fn a_mark_evicted_by_a_rewrap_is_reported_in_the_batch() {
+    // Two rows of one logical line at ten columns, with the mark at the top of it.
+    // Re-chunked at four columns that line needs five rows, and the grid has four.
+    let mut t = term(4, 10, b"\x1b]133;A\x070123456789abcdefghij");
+    t.drain();
+    t.resize(4, 4);
+    let delta = t.drain();
+    let (_, at) = delta
+        .marks
+        .iter()
+        .find(|(id, _)| *id == MarkId(0))
+        .expect("the mark is still accounted for");
+    assert!(
+        at.row < delta.scrolled_base + delta.scrolled.len(),
+        "its row is in this drain's scrollback batch, not on the grid: {at:?}"
+    );
+}
+
+/// A scroll re-anchors too, and the difference from a rewrap is only one of degree.
+/// Emacs rebuilds its live text around every row that leaves -- the row goes in above
+/// as scrollback while the rows below move up a slot -- and the two renderings of that
+/// row are not the same length, because `cooked-rejoin-wrapped-lines' withholds the
+/// newline from a continuation row. One character per wrapped row that leaves is
+/// enough for a long-running command's marker to walk off its own prompt.
+#[test]
+fn a_scroll_reports_the_marks_it_moved() {
+    let mut t = term(3, 10, b"\x1b]133;A\x07one\r\n");
+    t.drain();
+    t.feed(b"two\r\nthree\r\nfour\r\n");
+    let delta = t.drain();
+    let (id, at) = delta
+        .marks
+        .first()
+        .copied()
+        .expect("the mark is accounted for");
+    assert_eq!(id, MarkId(0));
+    assert!(
+        at.row < delta.scrolled_base + delta.scrolled.len(),
+        "it left with its row, so it is spelled into the batch: {at:?}"
+    );
+}
+
+/// And a drain that moved nothing says nothing, which is what keeps this off the
+/// ordinary path: a screen with room left scrolls no rows and re-anchors no marks.
+#[test]
+fn a_drain_that_moves_nothing_reports_no_marks() {
+    let mut t = term(8, 10, b"\x1b]133;A\x07one\r\n");
+    t.drain();
+    t.feed(b"two\r\n");
+    assert!(t.drain().marks.is_empty());
+}
+
+/// An anchor outlives the row it was taken from: once the marked row has scrolled
+/// away, its absolute row is below the base of the batch still on the grid.
+#[test]
+fn an_anchor_survives_the_row_scrolling_off() {
+    let mut t = term(3, 20, b"\x1b]133;C\x07start\r\n");
+    t.feed(b"a\r\nb\r\nc\r\nd\r\n");
+    let delta = t.drain();
+    let Some(Event::Mark(Mark::CommandStart(_), at, _)) = delta.events.first() else {
+        panic!("no command-start: {:?}", delta.events);
+    };
+    assert_eq!(at.row, 0, "the mark fell on the first row written");
+    assert!(
+        at.row < delta.scrolled_base + delta.scrolled.len(),
+        "the marked row is in this batch of scrollback, not on the grid"
+    );
+    assert_eq!(delta.scrolled_base, 0, "nothing scrolled before this drain");
+}
+
+#[test]
+fn clearing_to_the_prompt_keeps_the_prompt_and_drops_what_is_above_it() {
+    let mut t = term(4, 8, b"one\r\ntwo\r\n\x1b]133;A\x1b\\$ ls");
+    t.drain();
+    assert_eq!(t.clear_to_prompt(), 2);
+    assert_eq!(text(&t, 0), "$ ls");
+    assert_eq!(text(&t, 1), "");
+    assert_eq!(
+        t.screen().cursor().row,
+        0,
+        "the cursor rides up with its row"
+    );
+}
+
+#[test]
+fn clearing_to_the_prompt_falls_back_to_the_cursor_row() {
+    // No OSC 133 to go on: whatever the child is on now is the line being looked at.
+    let mut t = term(4, 8, b"one\r\ntwo\r\nthree");
+    t.drain();
+    assert_eq!(t.clear_to_prompt(), 2);
+    assert_eq!(text(&t, 0), "three");
+}
+
+#[test]
+fn clearing_to_the_prompt_twice_still_knows_where_the_prompt_is() {
+    // The mark is absolute, and rows removed this way are discarded rather than
+    // archived, so the count they are absolute against does not move: the anchor has
+    // to come down instead, or the second call cuts at the cursor and eats the prompt.
+    let mut t = term(4, 8, b"one\r\ntwo\r\n\x1b]133;A\x1b\\$ ls");
+    t.drain();
+    t.clear_to_prompt();
+    t.feed(b"\r\nout");
+    t.drain();
+    assert_eq!(t.clear_to_prompt(), 0, "the prompt is already on row 0");
+    assert_eq!(text(&t, 0), "$ ls");
+    assert_eq!(text(&t, 1), "out");
+}
+
+#[test]
+fn removing_rows_brings_the_prompt_mark_down_with_them() {
+    // `cooked-delete-output' removes a finished command's rows, which sit above the
+    // prompt. The mark is absolute and these rows are discarded rather than archived,
+    // so nothing else moves it: left alone it names a row past the cursor, fails
+    // `clear_to_prompt's own sanity filter, and silently falls back to cutting at the
+    // cursor -- eating the first line of a two-line prompt.
+    let mut t = term(6, 8, b"out1\r\nout2\r\n\x1b]133;A\x1b\\user\r\n$ ");
+    t.drain();
+    // The two output rows above the prompt.
+    t.remove_rows(0, 2);
+    assert_eq!(text(&t, 0), "user");
+    assert_eq!(text(&t, 1), "$");
+    // The prompt is two rows tall and now starts at row 0, so there is nothing above
+    // it left to clear. Without the rebase this cuts one row, taking `user' with it.
+    assert_eq!(t.clear_to_prompt(), 0);
+    assert_eq!(text(&t, 0), "user", "the prompt's first line must survive");
+    assert_eq!(text(&t, 1), "$");
+}
+
+#[test]
+fn removing_the_prompts_own_row_clamps_the_mark_rather_than_losing_it() {
+    let mut t = term(6, 8, b"out\r\n\x1b]133;A\x1b\\$ ls");
+    t.drain();
+    // Takes the output row and the prompt row with it.
+    t.remove_rows(0, 2);
+    // The mark clamps to the row that closed the gap, exactly as the cursor does, so
+    // it stays a row on the grid rather than one past the end of it.
+    assert_eq!(t.clear_to_prompt(), 0);
+}
+
+#[test]
+fn removing_rows_below_the_prompt_leaves_the_mark_where_it_is() {
+    let mut t = term(6, 8, b"\x1b]133;A\x1b\\$ ls\r\nout1\r\nout2\r\ntail");
+    t.drain();
+    t.remove_rows(2, 1);
+    assert_eq!(text(&t, 0), "$ ls");
+    assert_eq!(text(&t, 1), "out1");
+    assert_eq!(text(&t, 2), "tail");
+    assert_eq!(t.clear_to_prompt(), 0, "the prompt is still on row 0");
+}
+
+#[test]
+fn removing_alt_screen_rows_does_not_move_the_primarys_prompt_mark() {
+    let mut t = term(6, 8, b"out\r\n\x1b]133;A\x1b\\$ ls");
+    t.drain();
+    t.feed(b"\x1b[?1049h\x1b[1;1Haaa\r\nbbb");
+    t.drain();
+    t.remove_rows(0, 1);
+    t.feed(b"\x1b[?1049l");
+    t.drain();
+    // The primary's rows never moved, so the mark must still name row 1.
+    assert_eq!(t.clear_to_prompt(), 1);
+    assert_eq!(text(&t, 0), "$ ls");
+}
+
+#[test]
+fn clearing_to_the_prompt_leaves_the_alt_screen_alone() {
+    let mut t = term(3, 8, b"aaa");
+    t.feed(b"\x1b[?1049h\x1b[2;1Hbbb");
+    t.drain();
+    assert_eq!(t.clear_to_prompt(), 0);
+    assert_eq!(text(&t, 1), "bbb");
+}
