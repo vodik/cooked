@@ -188,15 +188,32 @@ impl State {
             // Cursor *blink*, deliberately ignored: that is `blink-cursor-mode', which is
             // the user's setting and not the child's to drive. Visibility is mode 25.
             12 => {}
-            1000 | 1002 | 1003 | 1006 => {
+            1000 | 1002 | 1003 | 1006 | 1016 => {
+                let mouse = &mut self.modes.mouse;
                 match mode {
-                    1000 => self.modes.mouse.click = on,
-                    1002 => (self.modes.mouse.click, self.modes.mouse.drag) = (on, on),
-                    1003 => (self.modes.mouse.click, self.modes.mouse.motion) = (on, on),
-                    _ => self.modes.mouse.sgr = on,
+                    1000 => mouse.click = on,
+                    1002 => (mouse.click, mouse.drag) = (on, on),
+                    1003 => (mouse.click, mouse.motion) = (on, on),
+                    _ => {
+                        let format = if mode == 1006 {
+                            MouseFormat::Sgr
+                        } else {
+                            MouseFormat::SgrPixels
+                        };
+                        // xterm's rule, and the reason this is one field: a set replaces
+                        // whichever coordinate mode was in force, and a reset is effective
+                        // only against its own. A child that sets 1016 over 1006 and then
+                        // resets 1006 on the way out of some subroutine has not asked for
+                        // X10 back, and would be handed it by a flag cleared blindly.
+                        if on {
+                            mouse.format = format;
+                        } else if mouse.format == format {
+                            mouse.format = MouseFormat::X10;
+                        }
+                    }
                 }
                 // Emitted inside the arm rather than after the match: out there it would
-                // have to re-test the same four numbers to know one of them was handled.
+                // have to re-test the same five numbers to know one of them was handled.
                 self.events.push(Event::Mouse(self.modes.mouse));
             }
             47 | 1047 => self.set_alt(on),
@@ -243,7 +260,8 @@ impl State {
             1000 => (mouse.click && !mouse.drag && !mouse.motion).into(),
             1002 => mouse.drag.into(),
             1003 => mouse.motion.into(),
-            1006 => mouse.sgr.into(),
+            1006 => (mouse.format == MouseFormat::Sgr).into(),
+            1016 => mouse.pixels().into(),
             2026 => self
                 .modes
                 .sync_until

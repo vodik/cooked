@@ -36,6 +36,7 @@
 ;; see it; cooked.el and cooked-mode.el declare what they need of that set the
 ;; same way.
 (declare-function cooked--alt-scroll-p "ext:cooked-core")
+(defvar cooked--last-cell)
 
 (defconst cooked--mouse-buttons
   '((mouse-1 . 0) (mouse-2 . 1) (mouse-3 . 2)
@@ -164,7 +165,8 @@ Never mutated in place.  `cooked--set-mouse-state\=' replaces it wholesale on
 every `mouse\=' event, which is what makes `cooked--mouse-state-none\=' safe to
 share as the default across every buffer that has never been told anything."
   (enabled nil :documentation "Whether the child asked for mouse reports at all.")
-  (sgr nil :documentation "Whether to encode reports as SGR (1006).")
+  (sgr nil :documentation "\
+Whether to encode reports as SGR (1006), in cells or in pixels.")
   (drag nil :documentation "\
 DEC mode 1002: report the pointer while a button is held.")
   (motion nil :documentation "\
@@ -172,7 +174,13 @@ DEC mode 1003: report the pointer whether or not a button is held.
 
 Kept apart from `drag\=' even though cooked drives both from the same tracking
 loop, because the child asked two different questions and `cooked--mouse-track\='
-can only honestly answer one of them; see its docstring."))
+can only honestly answer one of them; see its docstring.")
+  (pixels nil :documentation "\
+DEC mode 1016: SGR reports carry the pointer\='s pixel instead of its cell.
+
+Never set without `sgr\=': the core keeps the coordinate modes mutually
+exclusive, as xterm does, so 1016 is a unit for the SGR form rather than a form
+of its own.  See `cooked--mouse-report\='."))
 
 (defconst cooked--mouse-state-none (cooked--mouse-state-make)
   "The state of a child that has asked for nothing.
@@ -187,17 +195,18 @@ reader.")
 (defvar-local cooked--mouse-state cooked--mouse-state-none
   "What the child last asked for about the mouse; see `cooked-mouse-state'.")
 
-(defun cooked--set-mouse-state (enabled sgr drag motion)
-  "Adopt ENABLED, SGR, DRAG and MOTION, and re-gate the keymap.
+(defun cooked--set-mouse-state (enabled sgr drag motion pixels)
+  "Adopt ENABLED, SGR, DRAG, MOTION and PIXELS, and re-gate the keymap.
 
-The four fields of the drain\='s `mouse\=' event, in the order it carries them.
+The five fields of the drain\='s `mouse\=' event, in the order it carries them.
 
 Called from `cooked--handle-event\=', which is in cooked-render.el and requires
 this file, so the call is an ordinary one -- but it is still a notification that
 something changed rather than a question asked upward, which is why the state
 and the keymap it gates both live on this side of it."
   (setq cooked--mouse-state (cooked--mouse-state-make
-                             :enabled enabled :sgr sgr :drag drag :motion motion))
+                             :enabled enabled :sgr sgr :drag drag :motion motion
+                             :pixels pixels))
   ;; The keymap that outranks `pixel-scroll-precision-mode' is gated on this, so
   ;; it has to move when the child changes its mind about the mouse.
   (cooked--update-mouse-grab))
@@ -296,21 +305,70 @@ every click on row 0 to the right of where it was made."
   (when-let* ((pos (posn-point posn)))
     (cooked--screen-cell pos)))
 
-(defun cooked--mouse-report (button row col pressed)
+(defun cooked--mouse-offset (posn)
+  "Where in its glyph POSN points, as (DX . DY) pixels, if the child wants to know.
+
+Nil unless the child asked for pixel reports, so that a session reporting cells
+pays nothing for a measurement it would throw away.
+
+Only the offset *within* the glyph is taken from Emacs; the cell it sits in is
+still `cooked--mouse-cell\='s, and `cooked--mouse-report\=' scales that by the
+cell size.  Adding `posn-x-y\=' to the screen\='s origin instead would have to
+find that origin in pixels, and it is not a constant: row 0 is wherever
+`cooked--screen-start\=' happens to be drawn, which moves with scrollback,
+`window-start\=' and the header line.  A glyph-relative offset needs none of
+that.  It is also right past the end of a row, where the glyph is the newline
+and the offset runs out to the pointer, and over a decoration image spanning a
+run of cells, where the offset is measured from the run\='s first cell -- which
+is the cell `cooked--mouse-cell\=' names."
+  (and (cooked-mouse-state-pixels cooked--mouse-state)
+       (posn-object-x-y posn)))
+
+(defun cooked--mouse-report (button row col pressed &optional offset)
   "Encode a report for BUTTON at ROW/COL, PRESSED or not.
 
 SGR is preferred wherever the child asked for it, because X10 cannot count
-past column 223."
-  (if (cooked-mouse-state-sgr cooked--mouse-state)
-      (cooked--csi-private "<" (if pressed "M" "m") button (1+ col) (1+ row))
+past column 223.
+
+Under DEC mode 1016 the coordinates are pixels: ROW and COL scaled by the cell
+size last reported to the child, plus OFFSET, the (DX . DY) returned by
+`cooked--mouse-offset\='.  Counted from 1, as xterm counts them, so that
+pixel P lies in cell (P - 1) / WIDTH -- the size `CSI 16 t\=' answers with is
+what the child will divide by, so it is the size multiplied by here rather
+than a fresh measurement of the window that could disagree with it.  With no
+OFFSET, which is a report whose position stood in for the pointer\='s (a
+wheel notch over the fringe, a release carried off the screen), the cell\='s
+top-left pixel is sent.  DY is clamped into the row because a row holding a
+taller fallback glyph is drawn taller than the cell, and its excess must not
+read as the row below; DX is not, because a wide glyph really does extend
+past one cell.  On a terminal frame there is no cell size, and the report
+degrades to cells counted from 1: a unit of one pixel per cell is the only
+claim that is not invented."
+  (cond
+   ((cooked-mouse-state-pixels cooked--mouse-state)
+    (pcase-let* ((`(,width . ,height) cooked--last-cell)
+                 (measured (and (natnump width) (natnump height)
+                                (> width 0) (> height 0)))
+                 (`(,dx . ,dy) (or (and measured offset) '(0 . 0))))
+      (cooked--csi-private
+       "<" (if pressed "M" "m") button
+       (+ 1 (* col (if measured width 1)) (max 0 dx))
+       (+ 1 (* row (if measured height 1))
+          (if measured (min (max 0 dy) (1- height)) 0)))))
+   ((cooked-mouse-state-sgr cooked--mouse-state)
+    (cooked--csi-private "<" (if pressed "M" "m") button (1+ col) (1+ row)))
+   (t
     (concat (cooked--csi "M")
             (string (+ cooked--mouse-x10-offset
                        (if pressed button cooked--mouse-no-button))
                     (+ cooked--mouse-x10-offset 1 col)
-                    (+ cooked--mouse-x10-offset 1 row)))))
+                    (+ cooked--mouse-x10-offset 1 row))))))
 
-(defun cooked--send-mouse (button row col pressed)
+(defun cooked--send-mouse (button row col pressed &optional offset)
   "Send one report for BUTTON at ROW/COL, PRESSED or not, and drop the region.
+
+OFFSET is where in the cell the pointer is, for a child reporting pixels; see
+`cooked--mouse-report\='.
 
 Deactivating the mark is the point of routing every report through here.  A
 click that the child answers is the child\='s click, and leaving a region behind
@@ -328,7 +386,7 @@ caller that the drain, which clears the same selection for the same reason, does
 not share.  One answer for both beats two that agree by accident."
   (cooked--deactivate-mark)
   (setq cooked--mouse-last-cell (cons row col))
-  (cooked--send-to-child (cooked--mouse-report button row col pressed)))
+  (cooked--send-to-child (cooked--mouse-report button row col pressed offset)))
 
 (defvar mwheel-coalesce-scroll-events)
 (defvar last-event-device)
@@ -381,16 +439,18 @@ of the two means a sub-row trackpad tick still accumulates -- its line count is
         (setq cooked--scroll-pending (- pending (* rows row)))
         (max (abs rows) (min 1 (or lines 0)))))))
 
-(defun cooked--report-button (button row col pressed)
-  "Report BUTTON at ROW/COL as PRESSED or released, remembering that it is held."
+(defun cooked--report-button (button row col pressed &optional offset)
+  "Report BUTTON at ROW/COL as PRESSED or released, remembering that it is held.
+OFFSET is passed on to `cooked--send-mouse\='."
   (cond ((memq button cooked--mouse-wheel-numbers)) ; a notch cannot be held
         (pressed (unless (memq button cooked--mouse-held)
                    (push button cooked--mouse-held)))
         (t (setq cooked--mouse-held (delq button cooked--mouse-held))))
-  (cooked--send-mouse button row col pressed))
+  (cooked--send-mouse button row col pressed offset))
 
-(defun cooked--report-motion (row col)
+(defun cooked--report-motion (row col &optional offset)
   "Report the pointer arriving at ROW/COL, if it is a cell it was not already in.
+OFFSET is passed on to `cooked--send-mouse\='.
 
 `cooked--mouse-motion-bit\=' is added to the button being dragged, or to
 `cooked--mouse-no-button\=' where nothing is held.  Suppressing
@@ -400,7 +460,7 @@ receive several dozen identical reports per cell crossed."
   (unless (equal cooked--mouse-last-cell (cons row col))
     (cooked--send-mouse (+ cooked--mouse-motion-bit
                            (or (car cooked--mouse-held) cooked--mouse-no-button))
-                        row col t)))
+                        row col t offset)))
 
 (defun cooked--mouse-track (window)
   "Follow the pointer into the child until the gesture ends, over WINDOW.
@@ -431,7 +491,8 @@ every 1003 client also gets from 1002."
           ;; rather than a position translated out of the wrong text.
           (when (eq (posn-window posn) window)
             (when-let* ((cell (cooked--mouse-cell posn)))
-              (cooked--report-motion (car cell) (cdr cell))))))
+              (cooked--report-motion (car cell) (cdr cell)
+                                     (cooked--mouse-offset posn))))))
       (push event unread-command-events))))
 
 (defun cooked--alt-scroll-keys (button)
@@ -521,7 +582,12 @@ into by the time it comes up."
                          ;; Report it where it was last seen rather than handing
                          ;; the tail of the child's gesture to Emacs.
                          (and (not pressed) (memq button cooked--mouse-held)
-                              (or cooked--mouse-last-cell (cooked--cursor-cell)))))))
+                              (or cooked--mouse-last-cell (cooked--cursor-cell))))))
+               ;; Only a cell that is the pointer's own has a pixel offset to go
+               ;; with it; one standing in for the pointer reports its corner.
+               (offset (and cell here (cooked-mouse-state-pixels cooked--mouse-state)
+                            (equal cell (cooked--mouse-cell posn))
+                            (cooked--mouse-offset posn))))
           (cond
            ;; Checked before the mouse report: `cooked--alt-scroll-active-p' is
            ;; already false when the child asked for the mouse, so the two can
@@ -542,7 +608,7 @@ into by the time it comes up."
             ;; when the pointing device speaks in pixels; everything else is
             ;; worth exactly one.  See `cooked--wheel-presses'.
             (dotimes (_ (if wheel (cooked--wheel-presses event) 1))
-              (cooked--report-button button (car cell) (cdr cell) pressed))
+              (cooked--report-button button (car cell) (cdr cell) pressed offset))
             ;; Take the whole gesture or none of it: having reported a press to a
             ;; child that asked where the pointer goes, the motion is ours to
             ;; deliver, and the only way to be given it is to sit in `track-mouse'

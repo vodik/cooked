@@ -706,8 +706,8 @@ two chances to disagree."
     ;; Decoded into a record at the boundary, like the cursor and the grid; see
     ;; `cooked-mouse-state'.  cooked-mouse.el owns it because it is the only
     ;; reader, and re-gates its own keymap on the way through.
-    (`(mouse ,enabled ,sgr ,drag ,motion)
-     (cooked--set-mouse-state enabled sgr drag motion))
+    (`(mouse ,enabled ,sgr ,drag ,motion ,pixels)
+     (cooked--set-mouse-state enabled sgr drag motion pixels))
     ((or `(prompt-start ,_ . ,_) `(prompt-continuation ,_ . ,_)
          `(prompt-end ,_ . ,_)
          `(command-start ,_ ,_ . ,_) `(command-end ,_ ,_ . ,_))

@@ -1498,13 +1498,24 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
                 *id,
             ]
         ),
-        // (mouse ENABLED SGR DRAG MOTION). Flattening this to a single "wants the
-        // mouse" bit lost the reach of the request: 1002 and 1003 ask to be told
+        // (mouse ENABLED SGR DRAG MOTION PIXELS). Flattening this to a single "wants
+        // the mouse" bit lost the reach of the request: 1002 and 1003 ask to be told
         // where the pointer went, not merely which cell it was pressed in, and the
         // sender cannot manufacture motion reports it was never told to send.
+        //
+        // The format goes as two booleans rather than a symbol: SGR says which frame the
+        // report is written in and PIXELS which unit fills it, and the sender asks those
+        // two questions in two different places.
         Event::Mouse(m) => list!(
             env,
-            [sym!(env, "mouse")?, m.enabled(), m.sgr, m.drag, m.motion,]
+            [
+                sym!(env, "mouse")?,
+                m.enabled(),
+                m.sgr(),
+                m.drag,
+                m.motion,
+                m.pixels(),
+            ]
         ),
         Event::Reply(bytes) => env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?),
         Event::EraseScrollback => list!(env, [sym!(env, "erase-scrollback")?]),

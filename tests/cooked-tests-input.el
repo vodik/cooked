@@ -1762,6 +1762,71 @@ CSI encoding while ncurses (via `smkx') expects SS3, and nothing happened."
     ;; Release is button 3 in X10, which cannot say which button was let go.
     (should (equal (cooked--mouse-report 0 0 0 nil) "\e[M#!!"))))
 
+(ert-deftest cooked-mouse-sgr-pixels-survives-the-ffi ()
+  "Mode 1016 reaches Lisp as SGR in pixels, not as a third encoding to guess at."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1000h\\033[?1006h\\033[?1016h'; exec cat")
+    (should (cooked-tests--settle
+             (lambda () (cooked-mouse-state-pixels cooked--mouse-state))))
+    (should (cooked-mouse-state-sgr cooked--mouse-state))
+    (should (cooked-mouse-state-enabled cooked--mouse-state))))
+
+(ert-deftest cooked-mouse-pixel-reports-scale-the-reported-cell ()
+  "A pixel report is the cell times the size `CSI 16 t' answers, plus the offset.
+Counted from 1 as xterm counts, so the child dividing by that same size lands
+back in the cell the pointer was in."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--mouse :enabled t :sgr t :pixels t)
+    (setq-local cooked--last-cell '(9 . 20))
+    ;; Row 3, column 5, four pixels right and seven down inside it.
+    (should (equal (cooked--mouse-report 0 3 5 t '(4 . 7)) "\e[<0;50;68M"))
+    (should (equal (cooked--mouse-report 0 3 5 nil '(4 . 7)) "\e[<0;50;68m"))
+    (let ((x 50) (y 68))
+      (should (= (/ (1- x) 9) 5))
+      (should (= (/ (1- y) 20) 3)))
+    ;; No offset is a position standing in for the pointer: the cell's corner.
+    (should (equal (cooked--mouse-report 64 3 5 t) "\e[<64;46;61M"))
+    ;; A glyph taller than the cell must not report into the row below it, and
+    ;; an image's ascent can put the pointer above its top.  A wide glyph's
+    ;; offset is real, though, and passes through.
+    (should (equal (cooked--mouse-report 0 3 5 t '(4 . 25)) "\e[<0;50;80M"))
+    (should (equal (cooked--mouse-report 0 3 5 t '(14 . -2)) "\e[<0;60;61M"))
+    ;; A terminal frame has no pixels to report; cells counted from 1 are the
+    ;; only unit that is not made up.
+    (setq-local cooked--last-cell '(nil . nil))
+    (should (equal (cooked--mouse-report 0 3 5 t '(4 . 7)) "\e[<0;6;4M"))))
+
+(ert-deftest cooked-mouse-click-reports-its-pixel ()
+  "A click in a 1016 child carries where in the cell it landed, end to end."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1016h'; \
+                        printf 'alpha\\r\\nbravo'; stty raw; cat -v")
+    (should (cooked-tests--settle
+             (lambda () (and cooked--alt
+                             (cooked-mouse-state-pixels cooked--mouse-state)))))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "bravo" (cooked-tests--text)))))
+    (let* ((pos (save-excursion (goto-char (point-min))
+                                (search-forward "bravo") (- (point) 3)))
+           (cell (cooked--screen-cell pos))
+           (posn (list (selected-window) pos '(0 . 0) 0 nil pos nil nil
+                       '(4 . 7) '(9 . 20))))
+      (should cell)
+      (cooked-tests--displayed
+        ;; Batch has no graphical window to measure, so the size a real frame
+        ;; would have reported is set by hand, immediately before the click.
+        (setq-local cooked--last-cell '(9 . 20))
+        (let ((last-input-event (list 'down-mouse-1 posn)))
+          (cooked-mouse-event)))
+      (let ((case-fold-search nil))
+        (should (cooked-tests--settle
+                 (lambda ()
+                   (string-match-p (format "\\[<0;%d;%dM"
+                                           (+ 1 (* 9 (cdr cell)) 4)
+                                           (+ 1 (* 20 (car cell)) 7))
+                                   (cooked-tests--text)))))))))
+
 (ert-deftest cooked-mouse-is-left-to-emacs-when-unrequested ()
   "A child that never asked for mouse reports must not steal the click."
   (cooked-tests--with-session '("/bin/cat")

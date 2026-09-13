@@ -200,12 +200,42 @@ pub struct Mouse {
     pub click: bool,
     pub drag: bool,
     pub motion: bool,
-    pub sgr: bool,
+    pub format: MouseFormat,
+}
+
+/// How a mouse report spells its coordinates: DEC modes 1006 and 1016.
+///
+/// One field rather than a flag per mode, because xterm makes the extended coordinate
+/// modes mutually exclusive rather than choosing a precedence among them: setting one
+/// replaces whichever was in force, and resetting one is effective only against the mode
+/// that is actually set. Two booleans could say both at once, and the sender would then
+/// have to invent the precedence xterm declined to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseFormat {
+    /// The original `CSI M` with three biased bytes, which cannot name a cell past 223.
+    #[default]
+    X10,
+    /// DEC mode 1006: `CSI < B ; COL ; ROW M`, cells counted from 1.
+    Sgr,
+    /// DEC mode 1016: the SGR form with the cell replaced by the pointer's pixel, counted
+    /// from 1 at the screen's top-left as xterm does. For a program placing the pointer
+    /// inside a picture, where a cell is too coarse to say which part was clicked.
+    SgrPixels,
 }
 
 impl Mouse {
     pub fn enabled(self) -> bool {
         self.click || self.drag || self.motion
+    }
+
+    /// Whether a report takes the SGR form, whichever unit its coordinates are in.
+    pub fn sgr(self) -> bool {
+        self.format != MouseFormat::X10
+    }
+
+    /// Whether a report's coordinates are pixels rather than cells.
+    pub fn pixels(self) -> bool {
+        self.format == MouseFormat::SgrPixels
     }
 }
 

@@ -2180,7 +2180,7 @@ fn an_anchor_survives_the_row_scrolling_off() {
 fn mouse_modes_accumulate_and_report() {
     let mut t = term(4, 20, b"\x1b[?1002h\x1b[?1006h");
     let mouse = t.mouse();
-    assert!(mouse.click && mouse.drag && mouse.sgr);
+    assert!(mouse.click && mouse.drag && mouse.sgr());
     assert!(
         t.drain()
             .events
@@ -2190,6 +2190,44 @@ fn mouse_modes_accumulate_and_report() {
 
     t.feed(b"\x1b[?1002l\x1b[?1006l");
     assert!(!t.mouse().enabled());
+}
+
+/// 1006 and 1016 are one choice, not two flags: xterm makes the extended coordinate
+/// modes mutually exclusive, a set replacing whatever was in force and a reset effective
+/// only against its own mode.
+#[test]
+fn mouse_coordinate_modes_replace_each_other() {
+    let rqm = |t: &mut Term, mode: u16| {
+        t.feed(format!("\x1b[?{mode}$p").as_bytes());
+        let events = t.drain().events;
+        [1u8, 2]
+            .into_iter()
+            .find(|v| events.contains(&Event::Reply(format!("\x1b[?{mode};{v}$y").into_bytes())))
+    };
+
+    let mut t = term(4, 20, b"\x1b[?1000h\x1b[?1006h\x1b[?1016h");
+    assert_eq!(t.mouse().format, MouseFormat::SgrPixels);
+    assert!(t.mouse().sgr() && t.mouse().pixels());
+    assert_eq!((rqm(&mut t, 1006), rqm(&mut t, 1016)), (Some(2), Some(1)));
+
+    // Resetting the mode that is not in force changes nothing...
+    t.feed(b"\x1b[?1006l");
+    assert_eq!(t.mouse().format, MouseFormat::SgrPixels);
+    // ...and resetting the one that is falls back to X10, not to the SGR it replaced.
+    t.feed(b"\x1b[?1016l");
+    assert_eq!(t.mouse().format, MouseFormat::X10);
+
+    // The report goes out on every change, pixels included, and a soft reset clears it.
+    t.feed(b"\x1b[?1016h");
+    assert!(
+        t.drain()
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Mouse(m) if m.pixels()))
+    );
+    t.feed(b"\x1b[!p");
+    assert_eq!(t.mouse(), Mouse::default());
+    assert_eq!(rqm(&mut t, 1016), Some(2));
 }
 
 #[test]
