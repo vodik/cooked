@@ -23,6 +23,8 @@
 ;;   cooked-tests-display.el     where a session lands, and the Emacs
 ;;                               subsystems `cooked-mode' answers for
 ;;   cooked-tests-comint.el      the VT filter on somebody else's comint buffer
+;;   cooked-tests-module.el      provisioning the native core: digests, the
+;;                               sidecar, and what is refused before it is mapped
 ;;   cooked-tests-bench.el       the benchmark's fixtures, against the protocol
 ;;
 ;; Run them all:
@@ -85,6 +87,7 @@
 (require 'cooked-tests-display)
 (require 'cooked-tests-process)
 (require 'cooked-tests-comint)
+(require 'cooked-tests-module)
 (require 'cooked-tests-bench)
 
 ;; Running one file's tests without loading only that file.

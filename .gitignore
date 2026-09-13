@@ -1,6 +1,12 @@
 target/
 *.elc
 
+# What `make dist' assembles: release tarballs, and the SHA256SUMS over them.
+# Build products of a tag rather than sources -- the copy of those digests that
+# does any work is the one pasted into `cooked--prebuilt-digests', which is
+# committed.
+dist/
+
 # Claude Code's per-project state: agent worktrees and local settings.  The
 # worktrees in particular are checkouts of this same repository, so leaving them
 # untracked means `git status' reports the whole tree twice over.

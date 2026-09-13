@@ -69,8 +69,24 @@ endif
 #   make lisp-test SELECTOR='(tag evil)'
 SELECTOR ?= t
 
+# What this machine's release artifact is called.  The two halves of the tag have
+# to agree with `cooked--platform-tag', which arrives at the same answer from
+# `system-configuration' and `system-type' rather than from uname -- an artifact
+# named one way and looked for the other is a 404 that reads like a missing
+# release.  The normalizations are the same two: amd64 and arm64 are spellings of
+# x86_64 and aarch64 rather than other architectures.
+DIST_ARCH := $(shell uname -m | sed -e s/amd64/x86_64/ -e s/arm64/aarch64/)
+DIST_OS   := $(shell uname -s | sed -e s/Linux/linux/ -e s/Darwin/macos/)
+VERSION   := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+ASSET     := cooked-$(VERSION)-$(DIST_ARCH)-$(DIST_OS).tar.gz
+
+# GNU coreutils spells it one way and macOS the other, and a release is built on
+# both.  Both print `<digest>  <file>', which is what the `cut' below reads.
+SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo 'shasum -a 256')
+
 .PHONY: all test rust-test lisp-test lisp-test-parallel lint checkdoc citations \
-        compile bench bench-quick clean module terminfo
+        compile bench bench-quick clean module terminfo \
+        dist dist-checksums dist-digests
 
 all: test
 
@@ -194,6 +210,65 @@ terminfo:
 	      diff -u terminfo/rt.ti - || exit 1; \
 	  done && rm -rf terminfo/rt.ti terminfo/rt.db && \
 	  find terminfo/db -type f | sort | sed 's/^/  /'
+
+# The release artifact, for the install that cannot build one: a tarball holding
+# the core, the compiled terminfo database, and a sidecar naming what both are.
+#
+# The database is in there because a machine with no Rust toolchain is not
+# reliably a machine with a `tic' either, and a download that ships only the .so
+# leaves the child with no description of the terminal it is talking to -- TERM
+# falls back and every capability terminfo/cooked.ti exists to state is silently
+# lost.  `terminfo' is a prerequisite rather than an assumption, so the database
+# in the tarball is one that has just been round-tripped through infocmp.
+#
+# The sidecar is the only thing a downloaded install can be asked about itself:
+# there is no checkout beside it, so there is no Cargo.toml to read a version out
+# of and no terminfo/cooked.ti to be newer than the compiled entry.  It carries
+# the core's version, which `cooked--minimum-core-version' is compared against
+# before the .so is mapped, and the digest of the terminfo source, which
+# `cooked--terminfo-digest' is compared against before the database is used.  A
+# digest and not a version for the second one because nobody has to remember to
+# bump a digest -- the suite recomputes it from the checkout.
+#
+# Written into dist/stage and tarred by name rather than by `.', so the archive
+# holds exactly the three members `cooked--check-unpacked' will accept and the
+# staging directory cannot leak into it.
+dist: module terminfo
+	@rm -rf dist/stage && mkdir -p dist/stage
+	cp $(MODULE) dist/stage/libcooked$(MODULE_SUFFIX)
+	cp -R terminfo/db dist/stage/terminfo
+	@printf '(:core "%s" :terminfo "%s" :platform "%s")\n' \
+	  '$(VERSION)' "$$($(SHA256) terminfo/cooked.ti | cut -d' ' -f1)" \
+	  '$(DIST_ARCH)-$(DIST_OS)' > dist/stage/cooked-module.version
+	tar -czf dist/$(ASSET) -C dist/stage \
+	  libcooked$(MODULE_SUFFIX) cooked-module.version terminfo
+	@rm -rf dist/stage
+	@$(SHA256) dist/$(ASSET)
+
+# SHA256SUMS for the release page, over every tarball currently in dist/.  A
+# release is built on one machine per platform, so the way to get all of them
+# into one file is to collect the tarballs into one dist/ and run this there.
+dist-checksums:
+	@cd dist && $(SHA256) *.tar.gz > SHA256SUMS && cat SHA256SUMS
+	@echo
+	@echo "Upload SHA256SUMS beside the tarballs, then run 'make dist-digests'."
+
+# The same digests as an alist to paste into `cooked--prebuilt-digests', which is
+# where they actually do any work.  SHA256SUMS on the release page proves nothing
+# on its own -- whoever can replace a tarball can replace the file that lists its
+# digest -- so the copy that gets checked is the one that travels with the Lisp.
+#
+# This is why `cooked--prebuilt-release' trails the tree by a release: the digests
+# cannot exist until the artifacts do, so tag, build, paste, and the constants
+# land in the commit after the tag they name.
+dist-digests:
+	@echo '(defconst cooked--prebuilt-digests'
+	@echo "  '("
+	@cd dist && for f in *.tar.gz; do \
+	  printf '    ("%s" . "%s")\n' "$$f" "$$($(SHA256) "$$f" | cut -d' ' -f1)"; \
+	done
+	@echo '    )'
+	@echo '  "...")'
 
 lint: compile checkdoc citations
 	cargo fmt --check
@@ -321,5 +396,5 @@ bench-quick:
 # deliberately not cargo's to manage -- has to be named here or it survives.
 clean:
 	cargo clean
-	rm -rf target/test-stamps
+	rm -rf target/test-stamps dist
 	rm -f lisp/*.elc tests/*.elc $(MODULE) $(MODULE).new

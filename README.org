@@ -117,6 +117,13 @@ The native core is built with =cargo= on first use and rebuilt whenever the Rust
 are newer than the artifact, so there's no separate build step to remember. The first
 =M-x cooked= after installing will take a minute and say so.
 
+There is a second road for machines with no toolchain — =M-x cooked-download-module=
+fetches a prebuilt core and the compiled terminfo beside it, checked against a SHA-256
+compiled into the Lisp so that what vouches for the download is the package rather than
+whoever served it. *No release publishes those artifacts yet*, so today the command
+declines and says why; the machinery, and the =make dist= that produces what it would
+fetch, are in place for when one does.
+
 #+begin_src emacs-lisp
 ;; straight.el
 (use-package cooked
