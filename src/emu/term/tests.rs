@@ -56,6 +56,22 @@ fn sgr_sets_colors_and_attributes() {
 }
 
 #[test]
+fn overline_is_set_by_53_and_cleared_by_55_and_0() {
+    let style = |input: &[u8]| term(2, 20, input).screen().row(0).unwrap().runs()[0].style;
+    assert!(style(b"\x1b[53mx").attrs.contains(Attrs::OVERLINE));
+    // Its own bit, not a reading of another: 55 leaves an underline alone, and 24
+    // leaves the overline alone.
+    let both = style(b"\x1b[4:3;53m\x1b[55mx").attrs;
+    assert!(!both.contains(Attrs::OVERLINE));
+    assert_eq!(both.underline_style(), 3);
+    let kept = style(b"\x1b[4:3;53m\x1b[24mx").attrs;
+    assert!(kept.contains(Attrs::OVERLINE));
+    assert!(!kept.contains(Attrs::UNDERLINE));
+    assert!(!style(b"\x1b[53;5m\x1b[0mx").attrs.contains(Attrs::OVERLINE));
+    assert!(style(b"\x1b[53m\x1b[25mx").attrs.contains(Attrs::OVERLINE));
+}
+
+#[test]
 fn truecolor_arrives_in_both_spellings() {
     let semi = term(2, 20, b"\x1b[38;2;10;20;30mx");
     assert_eq!(

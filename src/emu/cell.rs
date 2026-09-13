@@ -73,6 +73,11 @@ impl Attrs {
     const UL_SHIFT: u16 = 8;
     const UL_MASK: u16 = 0b111 << Self::UL_SHIFT;
 
+    /// `SGR 53`, above the underline-style field rather than in the spare bits below it,
+    /// which that field has already spent. `cooked--attr-overline` in
+    /// lisp/cooked-face.el mirrors it.
+    pub const OVERLINE: Self = Self(1 << 11);
+
     pub const fn bits(self) -> u16 {
         self.0
     }

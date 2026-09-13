@@ -877,6 +877,31 @@ must be the one this Emacs gets."
         (should (equal (plist-get (cooked--face nil nil attrs nil) :underline)
                        (if (memq style '(nil line)) t (list :style style))))))))
 
+;; `cooked-blink' was drawn as an overline until SGR 53 needed that channel for
+;; itself, so the one thing to check is that the two no longer look alike.
+(ert-deftest cooked-overline-and-blink-are-drawn-differently ()
+  "SGR 53 is `:overline t'; blink inherits `cooked-blink', which must not be.
+A blinking cell and an overlined one would otherwise come out identical, which
+is the collision `cooked-blink' was written to avoid in the first place."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--face-cache (make-hash-table :test #'equal))
+    (let ((over (cooked--face nil nil cooked--attr-overline nil))
+          (blink (cooked--face nil nil cooked--attr-blink nil))
+          (both (cooked--face nil nil (logior cooked--attr-overline
+                                              cooked--attr-blink)
+                              nil)))
+      (should (eq (plist-get over :overline) t))
+      (should-not (plist-member over :inherit))
+      (should (eq (plist-get blink :inherit) 'cooked-blink))
+      (should-not (plist-member blink :overline))
+      (should (eq (plist-get both :overline) t))
+      (should (eq (plist-get both :inherit) 'cooked-blink)))
+    ;; And the default face spec itself: no overline, and a box drawn inward so a
+    ;; blinking run keeps its width on the grid.
+    (should (equal (face-default-spec 'cooked-blink)
+                   '((t :box (:line-width (-1 . -1))))))))
+
 (ert-deftest cooked-underline-color-does-not-collide-in-the-face-cache ()
   (with-temp-buffer
     (cooked-mode)

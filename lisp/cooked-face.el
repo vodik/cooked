@@ -26,6 +26,8 @@
 (defconst cooked--attr-underline-shift 8
   "Bit position of the underline-style field.  See `Attrs' in src/emu/cell.rs.")
 (defconst cooked--attr-underline-style (ash 7 cooked--attr-underline-shift))
+(defconst cooked--attr-overline (ash 1 11)
+  "SGR 53, above the underline-style field.  See `Attrs' in src/emu/cell.rs.")
 
 (defcustom cooked-color-names
   ["black" "red3" "green3" "yellow3" "blue2" "magenta3" "cyan3" "gray90"
@@ -133,7 +135,7 @@ A `line' style is never spelled out, for the same reason: it is the default."
           (t (append (and color (list :color color))
                      (and (not (memq style '(nil line))) (list :style style)))))))
 
-(defface cooked-blink '((t :overline t))
+(defface cooked-blink '((t :box (:line-width (-1 . -1))))
   "How SGR 5 and SGR 6 \\=(blink and rapid blink) are drawn.
 
 Emacs has no per-character blink attribute, and this is the substitute: a face
@@ -143,12 +145,20 @@ in every session follows; set it to nothing at all and blink renders as plain
 text again, which is the honest way to turn this off.  It is the whole of the
 policy, which is why there is no separate variable saying the same thing twice.
 
-The default is an overline because that is the one channel nothing else here
+The default is a hairline box because that is the one channel nothing else here
 uses.  Weight is bold and faint, slant is italic, `:underline\=' is a whole
-sub-protocol of its own, `:strike-through\=' is SGR 9, and reverse and conceal
-both spend the two colours — so any of those would make blinking text
-indistinguishable from text carrying the attribute it collided with, which is
-the bug this face exists to fix rather than move.
+sub-protocol of its own, `:strike-through\=' is SGR 9, `:overline\=' is SGR 53,
+and reverse and conceal both spend the two colours — so any of those would make
+blinking text indistinguishable from text carrying the attribute it collided
+with, which is the bug this face exists to fix rather than move.  It used to be
+the overline, until SGR 53 arrived and claimed it.
+
+The box is drawn inward, which is what the negative widths say: it takes its
+pixels from the cells it surrounds rather than adding a column either side, so
+a blinking run occupies exactly the width it would unstyled and the grid stays
+aligned.  A positive width would push every cell after the run to the right.
+One box surrounds each run of identically styled text, not each character, so
+a blinking word reads as a framed word.
 
 Inherited rather than merged, so anything the rendition itself sets wins: a
 blinking cell that also names a foreground gets that foreground, not this
@@ -173,7 +183,8 @@ paints foreground over background rather than reaching for `invisible\='."
     (,cooked--attr-faint :weight light)
     (,cooked--attr-italic :slant italic)
     (,cooked--attr-blink :inherit cooked-blink)
-    (,cooked--attr-strike :strike-through t))
+    (,cooked--attr-strike :strike-through t)
+    (,cooked--attr-overline :overline t))
   "SGR attribute bits that map straight onto a face property and a constant value.
 
 The attributes needing more than a constant — underline, whose style and colour
@@ -358,7 +369,7 @@ the key being computed in one place, here."
       (setq face (plist-put face :foreground (or bg* (face-background 'default))))
       ;; And it outranks blink.  `cooked-blink' is a visible mark on the cell, and
       ;; on a concealed cell that mark is the one thing SGR 8 was asked to keep
-      ;; quiet: an overline hanging over apparently blank text says there is text
+      ;; quiet: a box drawn round apparently blank text says there is text
       ;; there.  A hardware terminal blinking a concealed glyph shows nothing
       ;; either, so dropping it is the faithful answer as well as the careful one.
       (setq face (plist-put face :inherit nil)))

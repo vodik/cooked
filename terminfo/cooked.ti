@@ -60,6 +60,10 @@
 #   setrgbb           capability)
 #   Smulx, Setulc     styled and coloured underlines, mapped onto Emacs'
 #   Setulc1           :underline face attribute
+#   Smol              overline (SGR 53), onto :overline. tmux's name for it;
+#                     there is no standard one, and no Rmol either -- tmux
+#                     clears it with sgr0, and SGR 55 is there for anything
+#                     that does not
 #   Sync              synchronized output (mode 2026)
 #
 # Everything else xterm-256color declares is kept, and is now implemented. That
@@ -410,6 +414,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	Smulx=\E[4:%p1%dm,
 	Setulc=\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%dm,
 	Setulc1=\E[58:5:%p1%dm,
+	Smol=\E[53m,
 	Ss=\E[%p1%d q,
 	Se=\E[2 q,
 	fe=\E[?1004h,

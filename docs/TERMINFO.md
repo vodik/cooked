@@ -39,6 +39,7 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 |---|---|
 | `Tc`, `setrgbf`, `setrgbb` | direct colour; `COLORTERM=truecolor` is a convention, not a capability |
 | `Smulx`, `Setulc` | styled and coloured underlines, onto Emacs\' `:underline` |
+| `Smol` | overline (`SGR 53`, cleared by `55`), onto `:overline`. The name is tmux\'s |
 | `Sync` | synchronized output, which suppresses the Emacs wakeup for a frame |
 
 **Removed, being things we do not implement and do not intend to:**

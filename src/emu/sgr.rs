@@ -64,6 +64,10 @@ pub(crate) fn apply(params: &Params, pen: &mut Style, underline: &mut Color) {
             40..=47 => pen.bg = Color::Indexed((code - 40) as u8),
             48 => pen.bg = extended(param, &mut iter).unwrap_or(pen.bg),
             49 => pen.bg = Color::Default,
+            // `SGR 53`/`55`. 54 would be ECMA-48's "not framed or encircled", which
+            // clears 51 and 52; neither is kept, so 54 has nothing to clear.
+            53 => pen.attrs |= Attrs::OVERLINE,
+            55 => pen.attrs.remove(Attrs::OVERLINE),
             // `SGR 58`/`59`: the underline's own colour, parsed by the same
             // `extended` as 38 and 48, so `58:2::r:g:b` and `58:5:n` come free.
             58 => *underline = extended(param, &mut iter).unwrap_or(*underline),
