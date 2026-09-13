@@ -131,7 +131,7 @@ pub(crate) mod terminfo;
 pub(crate) mod text;
 
 pub(crate) use cell::{Color, Deco, MarkId, Style};
-pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ImageId};
+pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ImageId, ShownFormats};
 pub(crate) use link::LinkId;
 pub(crate) use term::{
     Anchor, ColorScheme, CursorShape, Event, KeyEncoding, Mark, StackOp, Terminator, Unit,

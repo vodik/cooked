@@ -1,6 +1,7 @@
 //! Pictures: kitty graphics, sixel and iTerm2 inline images, and how they are placed and shed.
 
 use super::*;
+use crate::emu::ShownFormats;
 
 /// An RGBA buffer encoded the way the emulator would encode it.
 fn rgba_png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
@@ -156,7 +157,7 @@ fn graphics_answers_follow_what_emacs_can_show() {
     t.feed(probes);
     assert_eq!(reply_strings(&mut t), shown);
 
-    t.set_graphics_shown(false);
+    t.set_graphics_shown(ShownFormats::NONE);
     t.feed(probes);
     assert_eq!(
         reply_strings(&mut t),
@@ -168,9 +169,36 @@ fn graphics_answers_follow_what_emacs_can_show() {
         ]
     );
 
-    t.set_graphics_shown(true);
+    t.set_graphics_shown(ShownFormats::ALL);
     t.feed(probes);
     assert_eq!(reply_strings(&mut t), shown);
+}
+
+#[test]
+fn a_build_without_png_refuses_what_would_reach_emacs_as_one() {
+    // An Emacs with images but no libpng still decodes binary P6, so a kitty `f=24` probe
+    // is told OK. `f=100` and `f=32` would reach Emacs as a PNG, and so would a sixel, so
+    // those probes are refused and DA1 loses its `4`.
+    let mut t = with_metrics(24, 80);
+    t.set_graphics_shown(ShownFormats::of([
+        ImageFormat::Jpeg,
+        ImageFormat::Gif,
+        ImageFormat::Ppm,
+    ]));
+    t.feed(b"\x1b[c\x1b[?1;1S");
+    t.feed(b"\x1b_Gi=1,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
+    t.feed(b"\x1b_Gi=2,s=1,v=1,a=q,t=d,f=32;AAAAAA==\x1b\\");
+    t.feed(b"\x1b_Gi=3,a=q,t=d,f=100;AAAA\x1b\\");
+    assert_eq!(
+        reply_strings(&mut t),
+        vec![
+            "\x1b[?62;22c",
+            "\x1b[?1;3S",
+            "\x1b_Gi=1;OK\x1b\\",
+            "\x1b_Gi=2;ENOTSUPPORTED:format\x1b\\",
+            "\x1b_Gi=3;ENOTSUPPORTED:format\x1b\\",
+        ]
+    );
 }
 
 #[test]
@@ -178,7 +206,7 @@ fn hidden_graphics_survive_a_reset() {
     // What Emacs can display is not something the child negotiated, so neither DECSTR
     // nor RIS may put the `4` back.
     let mut t = with_metrics(10, 20);
-    t.set_graphics_shown(false);
+    t.set_graphics_shown(ShownFormats::NONE);
     t.feed(b"\x1b[!p\x1bc\x1b[c");
     assert_eq!(reply_strings(&mut t), vec!["\x1b[?62;22c"]);
 }
@@ -191,7 +219,7 @@ fn a_refused_probe_leaves_a_transfer_in_flight_alone() {
     let body = b64(&png);
     let (head, tail) = body.split_at(body.len() / 2);
     let mut t = with_metrics(10, 20);
-    t.set_graphics_shown(false);
+    t.set_graphics_shown(ShownFormats::NONE);
     t.feed(format!("\x1b_Ga=T,f=100,i=7,m=1;{head}\x1b\\").as_bytes());
     t.feed(b"\x1b_Ga=q,i=8,s=1,v=1,f=24;AAAA\x1b\\");
     t.feed(format!("\x1b_Gm=0;{tail}\x1b\\").as_bytes());
@@ -210,7 +238,7 @@ fn an_iterm_inline_image_is_not_drawn_where_it_cannot_be_shown() {
     // blank rectangle in the transcript with nothing to say why.
     let png = rgba_png(30, 20, &[0; 30 * 20 * 4]);
     let mut t = with_metrics(10, 20);
-    t.set_graphics_shown(false);
+    t.set_graphics_shown(ShownFormats::NONE);
     t.feed(format!("\x1b]1337;File=inline=1:{}\x07", b64(&png)).as_bytes());
     assert!(placements(&t, 0).is_empty());
     let delta = t.drain();

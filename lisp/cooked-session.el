@@ -211,12 +211,17 @@ wherever Emacs is, and is not a request to be second-guessed."
   (set-marker-insertion-type (process-mark cooked--wake) nil)
   (cooked--sync-query-flag)
   (cooked--set-input-mark nil)
+  ;; Told at the spawn rather than after it, with the frame the buffer is about to
+  ;; appear on: a child can probe before this function returns, and the core answers
+  ;; a probe from what it was spawned with.  See `cooked--graphics-answer'.
+  (setq cooked--graphics-shown (cooked--graphics-answer (selected-frame)))
   (setq cooked--session
         (cooked--spawn argv (cooked--child-environment extra-env) cooked--rows cooked--cols cooked--wake
                       (when directory
                         (expand-file-name (or (cooked--local-name directory) "~")))
                       (round (* 1000 cooked-min-redisplay-interval))
-                      cooked-backlog-limit))
+                      cooked-backlog-limit
+                      cooked--graphics-shown))
   ;; Once, at the start: the core answers `CSI ? 996 n' from what Emacs last reported,
   ;; and a session that outlives no theme change would otherwise answer with silence for
   ;; its whole life.  Here rather than in `cooked--start-session' so that the callers who
@@ -230,9 +235,6 @@ wherever Emacs is, and is not a request to be second-guessed."
   ;; signal on a frame that claims to be graphical without a window system behind it.
   (cooked--protect-seam 'cooked--sync-color-scheme
     (cooked--sync-color-scheme))
-  ;; Before the child can have read much of its rc file, and with the frame the
-  ;; buffer is about to appear on -- see `cooked--sync-graphics'.
-  (cooked--sync-graphics (selected-frame))
   cooked--session)
 
 (defun cooked--child-environment (&optional extra)

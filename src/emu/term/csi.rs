@@ -957,7 +957,7 @@ impl State {
                     // answer worth giving: failure, which a producer that ignored the
                     // missing `4` in DA1 reads the same way. Registers and geometry
                     // alike, because a palette size is only a promise about a picture.
-                    1 | 2 if self.graphics_hidden => {
+                    1 | 2 if !self.graphics.shows(ImageFormat::Png) => {
                         self.csi_reply(format_args!("?{item};3S"));
                     }
                     // Colour registers, fixed at the palette the sixel decoder allocates.
@@ -1013,9 +1013,11 @@ impl State {
             (Some(b'!'), 'p') => self.soft_reset(),
             // Primary DA, for what we implement and nothing else: VT220 level (62) with
             // sixel graphics (4) and ANSI colour (22). The 4 is how sixel producers decide
-            // whether to emit one at all, so it goes when Emacs cannot show a picture
-            // (`graphics_hidden`), and chafa or timg draw with half blocks instead.
-            (None, 'c') if self.graphics_hidden => self.csi_reply(format_args!("?62;22c")),
+            // whether to emit one at all, so it goes when Emacs cannot show the PNG a sixel
+            // becomes (see `State::graphics`), and chafa or timg draw with half blocks.
+            (None, 'c') if !self.graphics.shows(ImageFormat::Png) => {
+                self.csi_reply(format_args!("?62;22c"))
+            }
             (None, 'c') => self.csi_reply(format_args!("?62;4;22c")),
             // Secondary DA. Unanswered, a child that queries and waits hangs.
             (Some(b'>'), 'c') => self.csi_reply(format_args!(">0;0;0c")),

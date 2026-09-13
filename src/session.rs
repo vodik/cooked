@@ -567,6 +567,14 @@ pub(crate) struct Options {
     pub frame_ceiling: std::time::Duration,
     /// See [`Shared::backlog_limit`].
     pub backlog_limit: usize,
+    /// The pictures Emacs can show, set on the emulator before the child runs.
+    ///
+    /// Nothing by default. A child can probe in its first instant, before Lisp has had a
+    /// chance to say anything after the spawn returns, and that probe used to be answered
+    /// from the emulator's own default, which claims everything. Hidden-until-told is the
+    /// answer that is never a blank rectangle: a producer wrongly refused draws in half
+    /// blocks.
+    pub graphics: crate::emu::ShownFormats,
 }
 
 impl Options {
@@ -586,6 +594,7 @@ impl Options {
             quiescence: QUIESCENCE,
             frame_ceiling: min_redisplay_interval,
             backlog_limit: crate::emu::BACKLOG_HIGH_WATER,
+            graphics: crate::emu::ShownFormats::NONE,
         }
     }
 }
@@ -635,6 +644,7 @@ impl Session {
         }
         // The reader sends what it can answer itself, so a reply never waits on a drain.
         term.answer_directly();
+        term.set_graphics_shown(options.graphics);
         let shared = Arc::new(Shared {
             pty,
             term: Mutex::new(term),

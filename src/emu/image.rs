@@ -57,6 +57,57 @@ pub enum ImageFormat {
     Ppm,
 }
 
+/// Which [`ImageFormat`]s Emacs can show for a session, as the child's answers see them.
+///
+/// Empty when nothing can be shown -- images are off, or every window on the buffer is on
+/// a terminal frame -- and otherwise the formats the Emacs build decodes. The answers ask
+/// by format because they are about different ones: sixel arrives here as a PNG, so DA1's
+/// `4` needs PNG, while a kitty `f=24` probe becomes binary P6 and needs only `pbm`, which
+/// every Emacs with images has. A build without libpng can show the second and not the
+/// first.
+///
+/// `Default` shows everything, which is what a bare emulator implements. A session starts
+/// from [`ShownFormats::NONE`] instead, until Emacs says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShownFormats(u8);
+
+impl ShownFormats {
+    /// Nothing can be shown.
+    pub const NONE: Self = Self(0);
+    /// Every format Emacs is ever handed.
+    pub const ALL: Self = Self(
+        Self::bit(ImageFormat::Png)
+            | Self::bit(ImageFormat::Jpeg)
+            | Self::bit(ImageFormat::Gif)
+            | Self::bit(ImageFormat::Ppm),
+    );
+
+    const fn bit(format: ImageFormat) -> u8 {
+        1 << format as u8
+    }
+
+    /// The set holding exactly FORMATS.
+    pub fn of(formats: impl IntoIterator<Item = ImageFormat>) -> Self {
+        Self(formats.into_iter().fold(0, |bits, f| bits | Self::bit(f)))
+    }
+
+    /// Whether a picture in FORMAT would be shown.
+    pub fn shows(self, format: ImageFormat) -> bool {
+        self.0 & Self::bit(format) != 0
+    }
+
+    /// Whether any picture at all would be shown.
+    pub fn any(self) -> bool {
+        self != Self::NONE
+    }
+}
+
+impl Default for ShownFormats {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// A size in pixels.
 ///
 /// A named pair rather than `(u32, u32)`, because `.0`/`.1` at a call site says nothing

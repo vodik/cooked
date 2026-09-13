@@ -6,6 +6,7 @@
 use super::cell::{Deco, Extra, MarkId, Pen, RowRef, Run, Style};
 use super::image::{
     CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, Interned, PixelSize,
+    ShownFormats,
 };
 use super::kitty::{Kitty, Outcome, decode_base64};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
@@ -901,11 +902,11 @@ impl Term {
         (changed && self.state.modes.color_scheme_updates).then(|| color_scheme_report(scheme))
     }
 
-    /// Tell the emulator whether Emacs can show a picture this session transmits.
+    /// Tell the emulator which pictures this session transmits Emacs can show.
     ///
     /// Nothing is owed on a change: none of the answers it governs is a subscription.
-    pub fn set_graphics_shown(&mut self, shown: bool) {
-        self.state.graphics_hidden = !shown;
+    pub fn set_graphics_shown(&mut self, shown: ShownFormats) {
+        self.state.graphics = shown;
     }
 
     /// Take BYTES as an image and lay it into the grid at the cursor.
@@ -1253,17 +1254,21 @@ struct State {
     /// for "unknown". On [`State`] rather than [`Modes`] because the child did not
     /// negotiate it, so a soft reset must not clear it.
     color_scheme: Option<ColorScheme>,
-    /// Emacs has said nothing this session transmits can be shown: images are off, or
-    /// every window on the buffer is on a terminal frame.
+    /// Which pictures Emacs has said it can show for this session: none when images are
+    /// off or every window on the buffer is on a terminal frame, and otherwise the
+    /// formats its build decodes.
     ///
-    /// It changes what the child is *told* -- DA1 drops its `4`, XTSMGRAPHICS answers
-    /// failure, a kitty `a=q` probe is refused -- because producers probe first and fall
-    /// back to half blocks, which show something where a picture would be a blank
-    /// rectangle. `OSC 1337 File=` has no probe, so it is dropped outright.
+    /// It changes what the child is *told* -- DA1 drops its `4` and XTSMGRAPHICS answers
+    /// failure where a sixel, which arrives as a PNG, could not be shown, and a kitty
+    /// `a=q` probe is refused for a format that could not -- because producers probe
+    /// first and fall back to half blocks, which show something where a picture would be
+    /// a blank rectangle. `OSC 1337 File=` has no probe, so with nothing shown it is
+    /// dropped outright.
     ///
-    /// Negative so the default claims graphics until Lisp reports otherwise at session
-    /// start. Not in [`Modes`], because no reset can change what Emacs can display.
-    graphics_hidden: bool,
+    /// The default shows everything, for a bare emulator; a session sets it from the
+    /// spawn arguments before the child runs. Not in [`Modes`], because no reset can
+    /// change what Emacs can display.
+    graphics: ShownFormats,
     /// Rows that have ever left the top of the primary screen. Screen row 0 is this row,
     /// counting from the beginning of the session, which is what makes an [`Anchor`]
     /// outlive the grid position it was taken from.

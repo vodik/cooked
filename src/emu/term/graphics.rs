@@ -143,7 +143,7 @@ impl State {
         // Emacs cannot show it. Refused rather than laid as blanks, because this protocol
         // has no probe to answer "no" to -- `imgcat` just sends -- and a picture-sized hole
         // in the transcript would explain nothing.
-        if self.graphics_hidden {
+        if !self.graphics.any() {
             return true;
         }
 
@@ -306,11 +306,12 @@ impl State {
     /// the performer nothing.
     pub(super) fn apc(&mut self, bytes: &[u8]) {
         // A probe is how a kitty client decides whether to transmit at all, so this is
-        // the kitty half of what DA1's missing `4` says to a sixel producer. Answered
-        // before `feed` sees it, which is also what `feed` does with a probe arriving
+        // the kitty half of what DA1's missing `4` says to a sixel producer. Skipped when
+        // everything can be shown, so a transfer's chunks are not parsed twice for a
+        // refusal that cannot come. Answered before `feed` sees it, which is also what `feed` does with a probe arriving
         // mid-transfer: the transfer in flight is left alone.
-        if self.graphics_hidden
-            && let Some(refusal) = crate::emu::kitty::refuse_probe(bytes)
+        if self.graphics != ShownFormats::ALL
+            && let Some(refusal) = crate::emu::kitty::refuse_probe(bytes, self.graphics)
         {
             self.push_reply(Event::Reply(refusal));
             return;

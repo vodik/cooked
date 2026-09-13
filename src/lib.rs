@@ -23,7 +23,7 @@ pub(crate) mod replies;
 pub(crate) mod session;
 mod wire;
 
-use emu::{CellMetrics, ColorScheme, ImageId};
+use emu::{CellMetrics, ColorScheme, ImageFormat, ImageId, ShownFormats};
 use env::{Env, Result, Runtime, Value, plist, sym};
 use nix::sys::signal::Signal;
 use pty::Winsize;
@@ -140,8 +140,10 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// milliseconds, floors how often a rapidly-rewriting child (a spinner, a progress meter)
         /// triggers a redisplay; it defaults to 8 when omitted or nil. BACKLOG-LIMIT caps the items
         /// awaiting collection before the child is left to block on its own writes; it defaults to
-        /// 8000 when omitted or nil.
-        "cooked--spawn" 5..=8 => spawn;
+        /// 8000 when omitted or nil. GRAPHICS is what `cooked--set-graphics-shown' takes, set
+        /// before the child runs so a probe in its first instant is answered from it; omitted
+        /// or nil, no picture is claimed until Lisp says otherwise.
+        "cooked--spawn" 5..=9 => spawn;
 
         /// Collect everything that changed in SESSION since the last call.
         /// Returns a plist with :scrolled, :shifts, :rows, :edits, :height, :used, :head,
@@ -313,11 +315,14 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// query arrives, rather than by waking Lisp to ask about a theme it already said.
         "cooked--set-color-scheme" 2..=2 => set_color_scheme;
 
-        /// Tell SESSION whether Emacs can show the pictures its child transmits.
+        /// Tell SESSION which pictures its child transmits Emacs can show.
         ///
-        /// SHOWN nil withdraws the claim to graphics from every answer that makes one: the
+        /// SHOWN is nil, or a list of the image types that can be shown, like (png jpeg gif
+        /// pbm).  Nil withdraws the claim to graphics from every answer that makes one: the
         /// primary DA loses its `4', XTSMGRAPHICS answers failure, a kitty `a=q' probe is
-        /// told `ENOTSUPPORTED', and an iTerm2 inline image is not drawn.  A producer that
+        /// told `ENOTSUPPORTED', and an iTerm2 inline image is not drawn.  A list without
+        /// `png' withdraws the sixel claims, since a sixel reaches Emacs as a PNG, and
+        /// refuses a kitty probe for a format that is not in it.  A producer that
         /// probes then picks its own half-block renderer, which shows something where a
         /// picture cooked cannot display would show nothing.  Held here, like the colour
         /// scheme, so each query is answered where it arrives.
@@ -559,6 +564,10 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
         backlog_limit: env
             .opt::<i64>(args, 7)?
             .map_or(defaults.backlog_limit, |n| n.max(1) as usize),
+        graphics: match args.get(8) {
+            Some(&shown) => shown_formats(env, shown)?,
+            None => defaults.graphics,
+        },
         ..defaults
     };
 
@@ -680,10 +689,29 @@ fn set_color_scheme(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 fn set_graphics_shown(env: Env, args: &[Value]) -> Result<Value> {
-    // Nil-or-not, as `set_attended` reads its flag.
-    let shown = env.from_lisp(args[1])?;
+    let shown = shown_formats(env, args[1])?;
     handle(env, args[0])?.term().set_graphics_shown(shown);
     Ok(env.nil())
+}
+
+/// SHOWN as `cooked--set-graphics-shown' and `cooked--spawn' take it: nil, or a list of
+/// Emacs image type symbols.
+///
+/// Compared by identity against the four types a picture is ever handed to Emacs as. A
+/// type outside them, `svg' say, names nothing a child can transmit and is skipped rather
+/// than refused, so Lisp can pass what `image-types' says without filtering it first.
+fn shown_formats(env: Env, list: Value) -> Result<ShownFormats> {
+    let formats = each(env, list, |item| {
+        Ok([
+            (sym!(env, "png")?, ImageFormat::Png),
+            (sym!(env, "jpeg")?, ImageFormat::Jpeg),
+            (sym!(env, "gif")?, ImageFormat::Gif),
+            (sym!(env, "pbm")?, ImageFormat::Ppm),
+        ]
+        .into_iter()
+        .find_map(|(name, format)| env.eq(item, name).then_some(format)))
+    })?;
+    Ok(ShownFormats::of(formats.into_iter().flatten()))
 }
 
 fn signal(env: Env, args: &[Value]) -> Result<Value> {

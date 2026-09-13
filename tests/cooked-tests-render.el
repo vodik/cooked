@@ -3420,6 +3420,70 @@ with nothing but the toggle to set it off."
                                     (cooked-tests--graphics-replies out)))))
       (delete-file out))))
 
+(ert-deftest cooked-graphics-answers-follow-a-killed-local-toggle ()
+  "`kill-local-variable' puts the default back, and the answers follow it there.
+
+The watcher is told `makunbound' with a NEWVAL of nil, which read as the new
+value would leave the child refused while the buffer shows pictures again."
+  (let ((out (make-temp-file "cooked-graphics-local"))
+        (cooked-inline-images t))
+    (unwind-protect
+        (cl-letf (((symbol-function 'cooked--frame-shows-images-p) #'always))
+          (cooked-tests--with-session (cooked-tests--graphics-prober out)
+            (setq-local cooked-inline-images nil)
+            (should (string-match-p "\033\\[\\?62;22c"
+                                    (cooked-tests--graphics-replies out)))
+            (kill-local-variable 'cooked-inline-images)
+            (should cooked-inline-images)
+            (should (string-match-p "\033\\[\\?62;4;22c"
+                                    (cooked-tests--graphics-replies out)))))
+      (delete-file out))))
+
+(ert-deftest cooked-graphics-answers-are-known-before-the-child-runs ()
+  "A probe sent in the child's first instant is answered from the spawn.
+
+`cooked--set-graphics-shown' is made to do nothing here, so the only way the core
+can know the answer is the argument `cooked--spawn' was given, and the child
+probes as its first act.  Before, the core started out claiming graphics and
+was told otherwise only after the spawn returned, so the same probe on a
+terminal frame could be told to send a sixel.  Also here: a build that shows
+images but has no PNG support keeps the kitty RGB probe, which arrives as
+`pbm', and loses the sixel claim, which arrives as PNG."
+  ;; Loaded first, so the definition `cl-letf' puts back is the module's rather
+  ;; than the void one it would find in an Emacs that has not started a session.
+  (cooked--load-module)
+  (let ((cooked-inline-images t)
+        (graphical nil)
+        (types '(png jpeg gif pbm)))
+    (cl-letf (((symbol-function 'cooked--set-graphics-shown) #'ignore)
+              ((symbol-function 'cooked--frame-shows-images-p)
+               (lambda (_frame) graphical))
+              ((symbol-function 'image-type-available-p)
+               (lambda (type) (memq type types))))
+      (cl-flet ((first-replies ()
+                  (let ((out (make-temp-file "cooked-graphics-spawn")))
+                    (unwind-protect
+                        (cooked-tests--with-session
+                            (cooked-tests--reply-to cooked-tests--graphics-probes out)
+                          (should (cooked-tests--settle
+                                   (lambda ()
+                                     (string-match-p "_Gi=31;[^\033]*\033\\\\\\'"
+                                                     (cooked-tests--contents out)))))
+                          (cooked-tests--contents out))
+                      (delete-file out)))))
+        (let ((replies (first-replies)))
+          (should (string-match-p "\033\\[\\?62;22c" replies))
+          (should (string-match-p "_Gi=31;ENOTSUPPORTED:display" replies)))
+        (setq graphical t)
+        (let ((replies (first-replies)))
+          (should (string-match-p "\033\\[\\?62;4;22c" replies))
+          (should (string-match-p "_Gi=31;OK" replies)))
+        (setq types '(jpeg gif pbm))
+        (let ((replies (first-replies)))
+          (should (string-match-p "\033\\[\\?62;22c" replies))
+          (should (string-match-p "\033\\[\\?1;3S" replies))
+          (should (string-match-p "_Gi=31;OK" replies)))))))
+
 (ert-deftest cooked-graphics-answers-drop-sixel-on-a-terminal-frame ()
   "A buffer shown only on a frame that cannot display images drops the `4' from
 DA1, and a graphical window showing it too brings it back.

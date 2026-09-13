@@ -71,8 +71,14 @@ cannot change its answer when the buffer moves.
 be shown: with `cooked-inline-images` off, or a buffer shown only on a terminal frame, the
 primary DA drops its `4`, XTSMGRAPHICS answers failure and a kitty `a=q` probe is refused,
 so that chafa and timg pick their half-block renderers instead of drawing a blank
-rectangle. A static entry cannot follow a per-buffer answer, and declared it would have
-tmux forward sixel the buffer has just refused. Ask DA1.
+rectangle. An Emacs built without PNG support drops the same sixel claims, since a sixel
+reaches Emacs as a PNG, and refuses kitty probes for the formats that would. A static entry
+cannot follow a per-buffer answer, and declared it would have tmux forward sixel the buffer
+has just refused. Ask DA1.
+
+tmux does ask DA1, but once, when a client attaches. Turning `cooked-inline-images` on or
+off, or moving the buffer between a graphical and a terminal frame, does not reach a tmux
+already running inside it: detach and attach again, and it asks again.
 
 A child does not have to take our word for any of it. DECRQM (`CSI ? Ps $ p`) answers 1 or
 2 for a mode we implement, 4 — "permanently reset" — for every one in that last table, 3 —

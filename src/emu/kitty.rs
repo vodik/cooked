@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use super::image::{CellSize, ImageFormat, ImageId, PixelSize};
+use super::image::{CellSize, ImageFormat, ImageId, PixelSize, ShownFormats};
 use super::png::{PixelFormat, Pixels};
 
 /// Largest payload reassembled from a chunked transmission.
@@ -54,6 +54,17 @@ pub(crate) enum Payload {
 }
 
 impl Payload {
+    /// The format Emacs is handed this payload in, once `feed` has converted it.
+    ///
+    /// Raw RGB is wrapped as binary P6, and RGBA encoded as a PNG because P6 has no alpha;
+    /// see `Pixels::encode`.
+    fn image_format(self) -> ImageFormat {
+        match self {
+            Self::Rgb => ImageFormat::Ppm,
+            Self::Rgba | Self::Png => ImageFormat::Png,
+        }
+    }
+
     /// The pixel layout this payload is, or `None` if it is a file rather than pixels.
     fn pixels(self) -> Option<PixelFormat> {
         match self {
@@ -465,14 +476,19 @@ fn join(first: Option<Vec<u8>>, second: Option<Vec<u8>>) -> Option<Vec<u8>> {
     }
 }
 
-/// The refusal owed to PAYLOAD if it is an `a=q` probe, when Emacs cannot show pictures.
+/// The refusal owed to PAYLOAD if it is an `a=q` probe for a picture Emacs could not show.
 ///
-/// `None` for anything that is not a probe -- including a probe the child asked to hear
-/// nothing about, whose `q=` is honoured as it is for every other answer -- and for
-/// anything not addressed to `G`. A free function rather than a method, because a probe
-/// leaves no trace whether it is answered or refused, so there is nothing of `Kitty`'s
-/// it could need.
-pub(crate) fn refuse_probe(payload: &[u8]) -> Option<Vec<u8>> {
+/// With SHOWN empty every probe is refused as `ENOTSUPPORTED:display`. Otherwise a probe
+/// is refused as `ENOTSUPPORTED:format` when the format its payload would reach Emacs in
+/// is not in SHOWN: `f=100` or `f=32` on a build without PNG, which would otherwise be
+/// told `OK` and then transmit a picture that never appears.
+///
+/// `None` for a probe that would be shown, for anything that is not a probe -- including
+/// a probe the child asked to hear nothing about, whose `q=` is honoured as it is for
+/// every other answer -- and for anything not addressed to `G`. A free function rather
+/// than a method, because a probe leaves no trace whether it is answered or refused, so
+/// there is nothing of `Kitty`'s it could need.
+pub(crate) fn refuse_probe(payload: &[u8], shown: ShownFormats) -> Option<Vec<u8>> {
     let control = payload.strip_prefix(b"G")?;
     let control = control.split(|&b| b == b';').next().unwrap_or_default();
     let cmd = Command::parse(&String::from_utf8_lossy(control));
@@ -481,7 +497,13 @@ pub(crate) fn refuse_probe(payload: &[u8]) -> Option<Vec<u8>> {
     if cmd.explicit_action != Some(Action::Query) {
         return None;
     }
-    response(&cmd, Some("ENOTSUPPORTED:display"))
+    if !shown.any() {
+        response(&cmd, Some("ENOTSUPPORTED:display"))
+    } else if !shown.shows(cmd.format.image_format()) {
+        response(&cmd, Some("ENOTSUPPORTED:format"))
+    } else {
+        None
+    }
 }
 
 /// The answer owed to the child, honouring `q=`.
