@@ -19,29 +19,19 @@ impl Color {
     /// This colour as the tagged `u32` a style span carries. `cooked--color-spec' in
     /// lisp/cooked-face.el is the only reader, and its docstring restates this layout.
     ///
-    /// The tag is the *top* byte, which is the whole point of the arrangement rather
-    /// than an arbitrary choice of where to put it. Records go over the boundary
-    /// little-endian, so the tag lands at byte 3 of the field and Lisp can dispatch on a
-    /// single `aref' — and for the two common variants it never has to assemble the
-    /// other three bytes at all. `Default' reads one byte and stops; `Indexed' reads the
-    /// tag and byte 0. Only `Rgb', which is rare in practice because the palette is what
-    /// shells and TUIs actually emit, pays for three more.
+    /// The tag is the *top* byte. Records cross little-endian, so the tag lands at byte 3
+    /// of the field and Lisp can dispatch on a single `aref': `Default' reads one byte and
+    /// stops, `Indexed' reads the tag and byte 0, and only `Rgb', which is rare, reads all
+    /// four.
     ///
     ///   tag 0  `Default' — the remaining bytes are zero, so the whole field is zero
     ///   tag 1  `Indexed' — the index in bits 0-7
     ///   tag 2  `Rgb'     — r in bits 16-23, g in 8-15, b in 0-7
     ///
-    /// A fixed four bytes rather than a variable-length spelling, because the span
-    /// record it sits in has to be steppable by a constant: Lisp walks the packed string
-    /// by adding a stride, and a colour that changed the stride would force it to decode
-    /// every field of every span merely to find the next one. Four bytes is also the
-    /// narrowest fixed width that can hold all three variants — `Rgb' alone needs 24
-    /// bits of value — so nothing is being spent here that a smaller field would save.
-    ///
-    /// `Default' encoding as all-zero is worth the byte ordering it costs: it is by far
-    /// the commonest value, appearing as the underline colour of essentially every span
-    /// and as the background of most, and it makes the Lisp fast path a comparison
-    /// against a byte that is already in hand.
+    /// A fixed four bytes, because Lisp steps through span records by a constant stride,
+    /// and four is the narrowest width that holds 24 bits of `Rgb'. `Default' is all zero
+    /// because it is by far the commonest value -- the underline colour of nearly every
+    /// span -- and zero is the cheapest thing to test.
     pub fn packed(self) -> u32 {
         match self {
             Self::Default => 0,
@@ -68,8 +58,7 @@ impl Attrs {
     pub const STRIKE: Self = Self(1 << 7);
 
     /// Bits 8-10 hold the underline *style* — kitty's `SGR 4:1`-`4:5`. [`Attrs::UNDERLINE`]
-    /// keeps its old meaning of "underlined at all", so every existing test of that bit
-    /// still reads true regardless of style, and `SGR 4` alone is style 1.
+    /// means "underlined at all", whatever the style, and `SGR 4` alone is style 1.
     const UL_SHIFT: u16 = 8;
     const UL_MASK: u16 = 0b111 << Self::UL_SHIFT;
 
@@ -149,20 +138,14 @@ impl Style {
     /// strength of — it sets a background and erases rather than writing spaces, so
     /// dropping the pen here loses every coloured panel and status bar.
     ///
-    /// Deliberately *not* the whole pen. `Row::content_len` counts a styled blank as
-    /// content, so filling with a pen that merely has a foreground or an attribute set
-    /// would make `SGR 31` followed by `EL` append trailing cells to the row — trailing
-    /// whitespace in the scrollback of essentially every coloured shell prompt. Reducing
-    /// to the background means that when no background is set the result is
-    /// `Style::default()`, and the common case stays exactly as it was.
+    /// Not the whole pen. `Row::content_len` counts a styled blank as content, so `SGR 31`
+    /// followed by `EL` would otherwise leave trailing whitespace in the scrollback of every
+    /// coloured shell prompt. With no background set the result is `Style::default()`.
     ///
     /// Reverse video survives because it is resolved in `cooked--face-build`, where the
     /// bar's colour is then the foreground; dropping the flag would erase the drawing.
     pub fn erase(self) -> Self {
         if self.attrs.contains(Attrs::REVERSE) {
-            // Every field named, so no `..Self::default()` tail: `Style` has exactly these
-            // three, and a tail that updates nothing is a lint rather than a hedge against
-            // a fourth arriving later.
             Self {
                 fg: self.fg,
                 bg: self.bg,
@@ -186,10 +169,9 @@ pub struct Cell {
 
 pub(crate) const CONTINUATION: char = '\0';
 pub(crate) const BLANK: char = ' ';
-/// U+00A0. A blank as far as anything drawn is concerned, and the reason it is named
-/// here: `tree` indents with it. Its rows read `\u{2502}\u{a0}\u{a0} \u{251c}\u{2500}\u{2500} `, so a rule that
-/// absorbed only U+0020 would leave every one of them split at the two no-break spaces
-/// and reach none of the win [`Row::absorb_blank_runs`] exists for.
+/// U+00A0, named because `tree` indents with it: its rows read
+/// `\u{2502}\u{a0}\u{a0} \u{251c}\u{2500}\u{2500} `, and a rule that absorbed only U+0020 would leave each split at
+/// the no-break spaces, defeating [`Row::absorb_blank_runs`].
 pub(crate) const NO_BREAK_SPACE: char = '\u{a0}';
 
 /// Whether CH occupies a cell without drawing anything in it.
@@ -231,10 +213,9 @@ impl Cell {
 /// What one character displays in place of the glyph its font would draw.
 ///
 /// The unit before grouping. A box-drawing character resolves to a shape Emacs
-/// rasterizes; an image cell will resolve to a slice of a transmitted image. Both are
-/// the same arrangement — Rust names a thing per character, Emacs renders it, caches it,
-/// and hangs it on the text as a `display` property — which is why they share a type
-/// rather than each growing one.
+/// rasterizes, and an image cell to a slice of a transmitted image. Both work the same way
+/// -- Rust names a thing per character and Emacs renders it as a `display` property -- so
+/// they share a type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DecoCell {
     Glyph(BoxGlyph),
@@ -257,11 +238,11 @@ impl DecoCell {
     /// The shape this character resolves to from the character itself, if any.
     ///
     /// Derived rather than stored: a box-drawing character *is* its own descriptor, so
-    /// there is nothing to keep on the row and nothing to maintain when the cell is
-    /// overwritten. Attachments held in [`Extras`] are the other source, and they cannot
-    /// work this way because no character stands for them.
-    /// `#[inline]` because it is a one-line forwarder on the per-cell path; see
-    /// [`glyph::classify`], which carries the fast path this hands through to.
+    /// nothing needs maintaining when the cell is overwritten. Images come from
+    /// [`Extras`] instead, since no character stands for them.
+    ///
+    /// `#[inline]` because it is a forwarder on the per-cell path; see
+    /// [`glyph::classify`].
     #[inline]
     fn classify(ch: char) -> Option<Self> {
         glyph::classify(ch).map(Self::Glyph)
@@ -308,66 +289,33 @@ impl Deco {
     /// The run's decoration as the unibyte string Lisp decodes, little-endian
     /// throughout. `cooked--apply-deco' in lisp/cooked-deco.el is the only reader.
     ///
-    /// Packed rather than a list of Lisp objects because this is on the path every
-    /// damaged row of every frame takes, and box drawing is what full-screen programs
-    /// are made of. The two kinds pack differently, and the difference is not an
-    /// accident of how each grew:
+    /// Packed rather than a list of Lisp objects because every damaged row of every frame
+    /// takes this path, and box drawing is what full-screen programs are made of. Emacs is
+    /// the bottleneck -- the parser runs at 74-422 MB/s, the apply path at roughly 21 MB/s
+    /// -- so nothing Rust already knows should be left for Lisp to rediscover.
     ///
-    /// **Glyphs** are `(bits: u16, count: u16)` per *run of identical shapes* — four
-    /// bytes for a whole border row rather than two bytes eighty times. The saving that
-    /// matters is not the bytes: it is that Rust already knows the shape repeats, and
-    /// emitting it once per character threw that away and left `cooked--apply-glyph-deco'
-    /// to rediscover it by comparison. Emacs is the bottleneck here — the parser runs at
-    /// 74-422 MB/s while the apply path manages roughly 21 MB/s equivalent — so work the
-    /// protocol leaves for Lisp to reconstruct is work in the wrong place.
+    /// **Glyphs** are `(bits: u16, count: u16)` per *run of identical shapes*: four bytes
+    /// for a whole border row. The records of one run are its pattern, and Lisp bakes one
+    /// bitmap for all of them -- `\u{251c}\u{2500}\u{2500}` is two records and one image three cells wide --
+    /// so this string is also the key `cooked--box-glyph-image' is memoized on. That is
+    /// why the encoding is canonical: a count is never zero and no two adjacent records
+    /// share `bits`, so two runs that draw the same thing pack to the same bytes.
     ///
-    /// The records of one run are *the run's pattern*, and Lisp bakes one bitmap for all
-    /// of them rather than one per record: `\u{251c}\u{2500}\u{2500}` is two records and one image three
-    /// cells wide. So this string is not merely a compressed list, it is
-    /// the cache key `cooked--box-glyph-image' is memoized on — which is why the encoding
-    /// is fixed-width and canonical (a count is never zero, and no two adjacent records
-    /// share a `bits`): two runs that draw the same thing have to pack to the same bytes
-    /// or they mint two entries for one bitmap.
+    /// [`BoxGlyph::BLANK`] draws nothing; [`Row::absorb_blank_runs`] puts it in the gaps
+    /// of `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}`, so a `tree` row's whole indent is one run. It needs no
+    /// tag of its own. No flag says a shape dithers either: run-length encoding already
+    /// makes that a question per record rather than per character, and
+    /// `cooked--box-shade-p' asks it.
     ///
-    /// One of the shapes draws nothing. [`BoxGlyph::BLANK`] is what
-    /// [`Row::absorb_blank_runs`] puts in the gaps of `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}`, so a `tree`
-    /// row's whole indent is one run, one record list and one `display` interval instead
-    /// of three. It needs no tag of its own here: it is a descriptor like any other, and
-    /// the Lisp rasterizer draws it as an empty cell without an arm for it.
+    /// **Images** are one 12-byte record per character -- `(id: u32, cell_row: u16,
+    /// cell_col: u16, cols: u16, rows: u16)`. Unlike a glyph run, a placement is not one
+    /// decision repeated: every cell carries its own place in the picture, which is what
+    /// lets per-cell addressing survive a scroll or a rewrap. Lisp coalesces the cells of a
+    /// row into one `display' interval (see `cooked--apply-image-deco'), where the cost of
+    /// `put-text-property' actually is, so a second run-shaped wire format would buy little.
     ///
-    /// No flag rides along to say a shape dithers, though [`BoxGlyph`] knows: the only
-    /// thing Lisp does with that answer is decide whether a cell's dither phase can vary
-    /// down the run, and run-length encoding already demotes that question from once per
-    /// character to once per record. A bit that saves one `logand` per eighty cells is
-    /// not worth a field that has to mean the same thing on both sides of the boundary
-    /// forever. `cooked--box-shade-p' keeps asking, and the count field stays a plain
-    /// u16 with no reserved bits.
-    ///
-    /// **Images** stay one 12-byte record per character — `(id: u32, cell_row: u16,
-    /// cell_col: u16, cols: u16, rows: u16)` — and this is the one place the two kinds
-    /// are asymmetric for a reason that is *not* about what the far side wants.
-    ///
-    /// A glyph run is one decision repeated, and the run-length record exists because
-    /// Rust already knew it repeated: emitting it per character threw that knowledge
-    /// away and left Lisp to rediscover it by comparison. An image placement is not one
-    /// decision repeated. Every cell carries its own row and column within the picture,
-    /// which is what makes the grid's per-cell addressing survive a scroll, an overwrite
-    /// and a rewrap — so there is nothing here Rust knows and Lisp would have to
-    /// rediscover. The records *are* the knowledge.
-    ///
-    /// Lisp nonetheless coalesces them into runs before they reach the buffer, one
-    /// `display' interval per row of a placement instead of one per column, and that is
-    /// where the redisplay cost was — see `cooked--apply-image-deco'. Sending the runs
-    /// from here instead would save that loop four integer comparisons per cell and cost
-    /// a second wire shape both ends have to keep meaning the same thing forever. The
-    /// comparisons are not the expensive half; `put-text-property' is, and Lisp saves
-    /// that either way. REPORT.org §2 expected this record to become
-    /// `(id, crow, start-col, ncols, cols, rows)'; it does not need to, and the run
-    /// boundary is better derived where the properties are actually put.
-    ///
-    /// A count is never zero, and is capped at [`u16::MAX`] by splitting the record —
-    /// unreachable at any terminal width, since a run cannot outlast its row, but the
-    /// format is total rather than merely adequate for the widths that exist.
+    /// A glyph count is capped at [`u16::MAX`] by splitting the record, which no terminal
+    /// width reaches, so the format is total.
     pub fn packed(&self) -> Vec<u8> {
         match self {
             Self::Glyphs(glyphs) => {
@@ -423,15 +371,12 @@ pub struct Run {
     pub text: String,
     /// Columns this run occupies on the grid, continuation cells included.
     ///
-    /// Not derivable from `text` without redoing the width classification the grid
-    /// already did: `text` holds one character per *cell*, so a wide character is one
-    /// `char` standing on two columns and a combining mark is a `char` standing on none.
-    /// Accumulated as the run is built, out of the cells being walked anyway — see
-    /// [`Row::build_plain_runs`] — because the whole point is that nobody downstream
-    /// should have to ask a width table a second time. `Block::push_runs` in the crate
-    /// root sums it per row and hands the total to Emacs, which would otherwise call
-    /// `string-width' on every rendered row of every frame; see
-    /// `cooked--row-mismeasured-p', which is what the total is asked for.
+    /// Not derivable from `text` without redoing the grid's width classification: a wide
+    /// character is one `char` on two columns and a combining mark a `char` on none.
+    /// Accumulated as the run is built (see [`Row::build_plain_runs`]), and summed per row
+    /// by `Block::push_runs` so Emacs need not call `string-width' on every rendered row;
+    /// see `cooked--row-mismeasured-p'. It is also how an `OSC 66` declared width reaches
+    /// Emacs.
     pub cols: usize,
     pub style: Style,
     /// One decoration per character in `text`, index-aligned with `text.chars()`;
@@ -444,9 +389,8 @@ pub struct Run {
     /// The `OSC 8` hyperlink these characters are part of, if any.
     ///
     /// A side-table attachment like the underline colour, and a run boundary in its own
-    /// right — see [`Row::build_runs`] — so a destination that opens or closes without
-    /// any style changing still splits the run. Nothing else can express that: the id
-    /// is the only thing Lisp has to hang a keymap on the right characters with.
+    /// right (see [`Row::build_runs`]), so a link opening without any style change still
+    /// splits the run. The id is what Lisp hangs a keymap on.
     pub link: Option<LinkId>,
 }
 
@@ -461,21 +405,16 @@ pub(crate) const MARKS_PER_ROW: usize = 8;
 /// The wire name for one OSC 133 semantic mark, so Emacs can be told where a mark it
 /// already holds a buffer marker for has *moved* to.
 ///
-/// A dense counter rather than anything derived from the position, which is the whole
-/// point: the position is what a rewrap changes. Handed out in `term::State`,
-/// stored only in [`Extra::Mark`], and never reused -- see the module docs on
-/// `Delta::marks` for the round trip.
+/// A counter rather than anything derived from the position, because the position is
+/// what a rewrap changes. Handed out in `term::State`, stored only in [`Extra::Mark`], and
+/// never reused; see `Delta::marks` for the round trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MarkId(pub u32);
 
 /// Something attached to one column that is too rare to live in a [`Cell`].
 ///
-/// One enum rather than a side table per feature. The tables it replaces had drifted
-/// apart — marks were pruned by [`Row::set`] while underline colours were repaired a
-/// layer up, ICH and DCH dropped one and shifted neither, and the rewrap carried both
-/// through four near-identical rebase loops. Every such divergence was a place a third
-/// kind could be maintained wrongly without any test noticing, and images are that third
-/// kind.
+/// One enum rather than a side table per feature, so that every edit -- an overwrite,
+/// ICH and DCH, a rewrap -- maintains every kind of attachment through the same code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Extra {
     /// Zero-width characters — combining marks, variation selectors — riding the cell.
@@ -488,13 +427,10 @@ pub enum Extra {
     Link(LinkId),
     /// An OSC 133 semantic mark that fell on this cell.
     ///
-    /// The odd one out, and deliberately: the other three describe how the cell is
-    /// *drawn*, while this describes a position in the byte stream that happened to be
-    /// here. It rides a cell for one reason -- so that everything which moves a cell
-    /// moves the mark with it. A rewrap re-lays the grid at a new width and Emacs
-    /// rebuilds every live row from it, which leaves the buffer markers it took from the
-    /// original anchor pointing at text that has moved; the mark comes out of the rewrap
-    /// on the cell it went in on, and the drain reports where that is now.
+    /// The others describe how the cell is *drawn*; this is a position in the byte stream
+    /// that happened to fall here. It rides a cell so that everything which moves a cell
+    /// moves the mark: after a rewrap the mark is still on its cell, and the drain reports
+    /// where that cell is now.
     ///
     /// Never read by the renderer. [`Row::build_runs`] ignores it, `is_content` says no,
     /// and no [`Run`] carries it -- the only consumer is `State::marks_in`.
@@ -538,11 +474,9 @@ impl Extra {
             // still a run of blanks. A row that carries nothing but a hyperlink's
             // trailing spaces must still measure as empty.
             Self::Link(_) => false,
-            // Emphatically not content. A prompt mark lands on the cell the cursor was
-            // on, which is routinely a blank one -- an `A' arrives before the prompt is
-            // printed and a `D' after the last newline -- and a mark that made its row
-            // measure as occupied would keep a screenful of blank rows alive across
-            // every resize.
+            // Not content. A prompt mark routinely lands on a blank cell -- an `A' arrives
+            // before the prompt is printed -- and counting it would keep blank rows alive
+            // across every resize.
             Self::Mark(_) => false,
         }
     }
@@ -599,12 +533,9 @@ impl Extras {
 
 /// Whether a prune spares semantic marks.
 ///
-/// The exception is not a corner case, which is why it is a parameter rather than a
-/// second function: [`Marks::Keep`] is the path an erase takes, and a shell redraws its
-/// prompt line with `CSI K` on every keystroke. A mark dropped there would be gone within
-/// one character of being made. What is being erased is the *drawing*; the mark is a
-/// position in the byte stream that happens to be at this column, and no amount of
-/// redrawing over it moves it.
+/// [`Marks::Keep`] is the path an erase takes. A shell redraws its prompt line with
+/// `CSI K` on every keystroke, and an erase removes the *drawing*, not a position in the
+/// byte stream that happens to be at this column.
 ///
 /// [`Marks::Drop`] is for the one case where the column itself ceases to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -629,17 +560,13 @@ pub struct Row {
     cells: Vec<Cell>,
     /// Marks, underline colours and anything else attached to a single column.
     ///
-    /// All of it is rare — combining marks are, and an underline colour is essentially
-    /// only an editor drawing LSP diagnostics — and none of it can go in [`Cell`]: a
-    /// `Color` in [`Style`] would grow it from 16 bytes to 20, which measured as an
-    /// 8-13% throughput loss across the whole grid for a feature almost nothing uses.
+    /// All of it is rare -- an underline colour is essentially an editor drawing LSP
+    /// diagnostics -- and none of it can go in [`Cell`]: a `Color` in [`Style`] would grow
+    /// it from 16 bytes to 20, an 8-13% throughput loss across the grid.
     ///
-    /// Boxed, and one field rather than two, because the *inline* size of `Row` is what
-    /// matters: rows are cloned on every scroll, and an inline `Vec` here measured as a
-    /// 12% loss on the repaint benchmark before it was boxed away. `Option<Vec<_>>` is
-    /// 24 bytes and `Option<Box<[_]>>` 16, while `Option<Box<Extras>>` is 8 — one
-    /// null-optimised pointer. Collapsing the two tables into one took `Row` from 32
-    /// bytes of side-table to 8.
+    /// Boxed, because the *inline* size of `Row` matters: rows are cloned on every scroll,
+    /// and an inline `Vec` cost 12% on the repaint benchmark. `Option<Box<Extras>>` is one
+    /// null-optimised pointer, 8 bytes.
     ///
     /// `None` whenever there is nothing attached, which is almost always, so
     /// [`Row::runs`] can specialise on a null check instead of asking per cell.
@@ -682,11 +609,9 @@ impl Row {
 
     /// Edit the side table, dropping it if the edit empties it.
     ///
-    /// The single maintenance path, and the one statement of the invariant `Row` rests
-    /// on: an empty table is spelled `None`, never `Some` of an empty `Extras`. Every
-    /// mutator routes here rather than restating that by hand, because [`Row::runs`]
-    /// specialises on the null check -- so a table left `Some` but empty is not merely
-    /// untidy, it silently costs the fast path.
+    /// The one statement of the invariant `Row` rests on: an empty table is `None`, never
+    /// `Some` of an empty `Extras`. [`Row::runs`] specialises on the null check, so a table
+    /// left `Some` but empty would silently cost the fast path.
     fn edit_extras(&mut self, f: impl FnOnce(&mut Extras)) {
         if let Some(extras) = &mut self.extras {
             f(extras);
@@ -703,17 +628,14 @@ impl Row {
 
     /// [`Row::prune`] for exactly one column, out of line and marked cold.
     ///
-    /// Both of those matter, and neither is fussiness. `Row::set` is the per-character
-    /// write path — one `movups` per cell, and the whole benchmark lives in it — so it
-    /// has to stay straight-line code. Calling `prune` with a `RangeInclusive` instead
-    /// cost ~4% of the full-screen repaint benchmark: the range is three words with an
-    /// exhausted flag, and the optimiser built it on the stack *before* testing whether
-    /// the row had any attachments at all, so every character written paid for it.
-    /// A semantic mark is kept, and that exception is the whole of why marks work.
-    /// `OSC 133;A' arrives *before* the shell prints its prompt, so the mark lands on a
-    /// cell that is about to be written -- and a mark retired by the first character of
-    /// the prompt would never survive to be moved by anything. The mark is a position in
-    /// the stream, not a property of whatever character ends up standing there.
+    /// `Row::set` is the per-character write path and has to stay straight-line code.
+    /// Calling `prune` with a `RangeInclusive` cost about 4% of the full-screen repaint
+    /// benchmark, because the optimiser built the range before testing whether the row had
+    /// any attachments at all.
+    ///
+    /// A semantic mark is kept. `OSC 133;A' arrives *before* the shell prints its prompt,
+    /// so the mark lands on a cell about to be written, and retiring it there would lose it
+    /// at once.
     #[cold]
     #[inline(never)]
     fn retire(&mut self, col: usize) {
@@ -726,9 +648,8 @@ impl Row {
 
     /// Set or clear the underline colour at `col`.
     ///
-    /// `Color::Default` only removes, so a row that has stopped being underlined returns
-    /// to having no table at all rather than carrying an empty one for as long as it
-    /// lives — which is what keeps [`Row::runs`] on its plain path.
+    /// `Color::Default` only removes, so a row that stops being underlined goes back to
+    /// having no table, which keeps [`Row::runs`] on its plain path.
     pub fn set_underline(&mut self, col: usize, color: Color) {
         self.edit_extras(|extras| extras.prune_kind(col, |e| matches!(e, Extra::Underline(_))));
         if color != Color::Default && col < self.cells.len() {
@@ -738,9 +659,7 @@ impl Row {
 
     /// Set or clear the hyperlink at `col`.
     ///
-    /// `None` only removes, so a row that has stopped being a link returns to having no
-    /// table at all — the same discipline [`Row::set_underline`] keeps, and for the same
-    /// reason: [`Row::runs`] specialises on the table being absent.
+    /// `None` only removes, for the reason [`Row::set_underline`] gives.
     pub fn set_link(&mut self, col: usize, link: Option<LinkId>) {
         self.edit_extras(|extras| extras.prune_kind(col, |e| matches!(e, Extra::Link(_))));
         if let Some(id) = link
@@ -752,20 +671,14 @@ impl Row {
 
     /// Attach a semantic mark to `col`, without disturbing anything already there.
     ///
-    /// No `prune_kind' counterpart to [`Row::set_link`]'s, and several marks on one cell
-    /// is a state to design for rather than avoid: `OSC 133;B' and `;C' arrive at the
-    /// same cell whenever the shell submits an empty line, and a prompt reprinted over
-    /// the row it was already on legitimately carries the old command's marks and the new
-    /// ones. Each names a different record in Emacs, and dropping one leaves that record
-    /// unable to be moved.
+    /// Several marks on one cell is normal: `OSC 133;B' and `;C' land on the same cell when
+    /// the shell submits an empty line, and each names a different record in Emacs, so
+    /// none replaces another.
     ///
-    /// Bounded per row at [`MARKS_PER_ROW`], oldest first, because nothing else bounds
-    /// it. Every other attachment is overwritten in place -- one underline colour per
-    /// column, one link, one image -- while a mark is deliberately never retired by what
-    /// is drawn over it, so a child that emits `OSC 133' without ever moving off the row
-    /// grows this table without limit. That is not hypothetical: it is the `osc_dispatch'
-    /// throughput benchmark, where it turned a linear feed quadratic and cost two orders
-    /// of magnitude before this cap went in.
+    /// Bounded per row at [`MARKS_PER_ROW`], oldest first, because nothing else bounds it:
+    /// a mark is never retired by what is drawn over it, so a child emitting `OSC 133'
+    /// without moving off the row would grow the table without limit and turn a linear
+    /// feed quadratic, as the `osc_dispatch' benchmark does.
     pub fn mark(&mut self, col: usize, id: MarkId) {
         if col >= self.cells.len() {
             return;
@@ -787,17 +700,13 @@ impl Row {
     /// Make room for one more mark on a row that is at [`MARKS_PER_ROW`], returning
     /// whether the new mark has already been written in place.
     ///
-    /// Out of line and cold for the reason [`Row::retire`] is: the caller is on the OSC
-    /// path, and an ordinary row -- a prompt's four marks, an underline colour, a link --
-    /// never reaches it. Only a child emitting `OSC 133' over and over without moving the
-    /// cursor does, which is what the bound exists for.
+    /// Out of line and cold: an ordinary row never reaches it, only a child emitting
+    /// `OSC 133' over and over without moving the cursor.
     ///
-    /// The oldest goes, being the one whose record Emacs is least likely to still be
-    /// holding: ids are handed out in stream order, while entries are kept in column
-    /// order, so this asks for the smallest id rather than for the front of the table.
-    /// When that entry is on this very column it is overwritten in place, which keeps the
-    /// sort order and skips a remove and an insert -- and is exactly the runaway case, so
-    /// the path that repeats is the cheap one.
+    /// The oldest goes, as the one whose record Emacs is least likely to still hold. Ids
+    /// are in stream order while entries are in column order, so this looks for the
+    /// smallest id. When that entry is on this very column -- the runaway case -- it is
+    /// overwritten in place, keeping the sort order.
     #[cold]
     #[inline(never)]
     fn evict_oldest_mark(extras: &mut Extras, col: usize, id: MarkId) -> bool {
@@ -850,23 +759,17 @@ impl Row {
 
     /// Write CELL at COL, retiring everything the old occupant had attached to it.
     ///
-    /// One `Option` check on the write path. The obvious alternative -- an unconditional
-    /// `Vec::retain` -- costs every write regardless of whether the row has attachments at
-    /// all, and measured 5% of the repaint benchmark. A null test on a pointer the row
-    /// already has in cache does not, so the retirement can happen here rather than being
-    /// repaired a layer up behind a screen-wide latch.
+    /// One `Option` check on the write path. An unconditional `Vec::retain` would cost
+    /// every write about 5% of the repaint benchmark; a null test on a pointer already in
+    /// cache does not.
     ///
-    /// Returns whether the row now differs from what it was, which is what
-    /// [`Screen::edit`](crate::emu::screen::Screen) turns into damage. A cell written over
-    /// an identical cell is not a repaint: a TUI redrawing a frame that did not change
-    /// would otherwise have Emacs delete, reinsert and re-propertize every row of it.
+    /// Returns whether the row now differs, which [`Screen::edit`](crate::emu::screen::Screen)
+    /// turns into damage. A TUI redrawing an unchanged frame should not make Emacs rewrite
+    /// every row of it.
     ///
-    /// A row carrying attachments answers `true` unconditionally, and that is the
-    /// conservative half. The retirement below is itself a change -- an image placement or
-    /// an underline colour goes when the character under it is rewritten, even to the same
-    /// character -- and asking the side table which of its entries this column had would
-    /// cost the write path exactly the scan the `Option` check exists to avoid. Rows with
-    /// attachments are rare; rows repainted identically are not.
+    /// A row carrying attachments answers `true` unconditionally: the retirement is itself
+    /// a change, and asking the side table what this column had would cost the scan the
+    /// `Option` check avoids. Rows with attachments are rare; identical repaints are not.
     pub fn set(&mut self, col: usize, cell: Cell) -> bool {
         let attached = self.extras.is_some();
         let Some(slot) = self.cells.get_mut(col) else {
@@ -882,31 +785,22 @@ impl Row {
 
     /// Place a run of characters from COL, each one column wide.
     ///
-    /// [`Row::set`] in bulk, and identical to calling it per character -- including the
-    /// retirement of whatever the old occupants had attached. The `extras` test is
-    /// hoisted out of the loop because it is a property of the row, not of the cell, and
-    /// a row carrying attachments is the rare case; that hoist is the whole point of
-    /// having this beside `set` rather than looping over it.
+    /// [`Row::set`] in bulk, with the same effect as calling it per character. The
+    /// `extras` test is hoisted out of the loop, since it is a property of the row.
     ///
     /// Writes only as far as the row goes, so an over-long run is truncated rather than
-    /// panicking. Callers size the run themselves; this is the backstop.
+    /// panicking.
     ///
-    /// Returns whether anything about the row changed, on [`Row::set`]'s terms and for
-    /// its reasons -- the comparison per cell is one 16-byte test against a slot the
-    /// store is about to write anyway, and it is what lets a repainted frame of
-    /// unchanged text cost nothing on the Emacs side.
+    /// Returns whether anything changed, on [`Row::set`]'s terms.
     pub fn fill_run(&mut self, col: usize, text: &str, style: Style) -> bool {
         let attached = self.extras.is_some();
         let Some(slots) = self.cells.get_mut(col..) else {
             return false;
         };
-        // The comparison is a pass of its own, ahead of the stores, rather than a test
-        // folded into the write loop. Both spellings answer the same question and the
-        // costs are not close: `any` stops at the first cell that differs, which for a
-        // frame that changed at all is almost always the first cell it writes, while the
-        // folded form loads every slot it is about to store to and measured a 24%
-        // throughput loss on the plain-text benchmark. A frame that did *not* change
-        // pays one pass and skips the stores entirely, which is the case this is for.
+        // The comparison is a pass of its own rather than a test folded into the write
+        // loop: `any` stops at the first differing cell, usually the first, while the
+        // folded form cost 24% on the plain-text benchmark. An unchanged frame pays one
+        // pass and skips the stores.
         let changed = attached
             || slots
                 .iter()
@@ -987,10 +881,9 @@ impl Row {
 
     /// Whether the row holds any text, as opposed to only a background wash.
     ///
-    /// Distinct from `is_blank`, and the distinction only exists because of `bce`: a row a
-    /// full-screen program painted and then cleared is no longer blank — every cell
-    /// carries a background — but it is not transcript either, and archiving it would push
-    /// a screenful of pure colour into the scrollback.
+    /// Distinct from `is_blank` because of `bce`: a row a full-screen program painted and
+    /// cleared carries a background in every cell, but archiving it would push a screenful
+    /// of pure colour into the scrollback.
     pub fn has_text(&self) -> bool {
         self.extras().iter().any(|(_, e)| e.is_content())
             || self.cells.iter().any(|c| c.ch != BLANK)
@@ -1011,20 +904,13 @@ impl Row {
     /// Blank the row and drop everything attached to it, semantic marks included.
     ///
     /// This is the row *ceasing to be what it was*: recycled at the bottom of a scroll,
-    /// backfilled behind a removed row, wiped by an erase of the display. A mark left on
-    /// a recycled row would be a second copy of one already archived with the row's own
-    /// text -- which is how the relocation first went wrong, reporting one id twice in a
-    /// drain and letting the later, blanker answer win.
+    /// backfilled behind a removed row, wiped by an erase of the display. A mark left on a
+    /// recycled row would duplicate one already archived with the row's text, and a drain
+    /// would report its id twice. [`Row::erase_all`] is the spelling for `CSI 2K`.
     ///
-    /// [`Row::erase_all`] is the other spelling, for `CSI 2K` alone.
-    ///
-    /// Returns nothing, where the other writers return whether they changed anything.
-    /// This one is on the scroll path -- `Screen::scroll_up` clears every row it
-    /// recycles, on every line of ordinary output -- and the comparison it would need is
-    /// a scan of the whole row before the fill that overwrites it, which measured 22% of
-    /// the plain-text benchmark for an answer that path throws away. The callers that
-    /// want the answer are erasing a display, where a screen that is already blank is not
-    /// the case worth optimising for.
+    /// Returns nothing, unlike the other writers: `Screen::scroll_up` clears every row it
+    /// recycles, and comparing first would scan the row before overwriting it, 22% of the
+    /// plain-text benchmark for an answer that path discards.
     pub fn clear(&mut self, style: Style) {
         self.cells.fill(Cell::blank(style));
         self.extras = None;
@@ -1034,14 +920,12 @@ impl Row {
     /// `CSI 2K`: blank every column, keeping semantic marks.
     ///
     /// The one whole-row erase that is not the row ending: a shell wipes its prompt line
-    /// with this and immediately redraws it, on every keystroke of a completion or a
-    /// history search. What goes is the drawing; the mark is a position in the stream and
-    /// the prompt is about to be printed over it again. Same argument as [`Row::retire`]
-    /// and [`Extras::prune`], which is the range-wise erase this is the whole-row form of.
-    /// Returns whether that changed anything: a shell wiping a prompt line it is about to
-    /// redraw identically is the single commonest thing a terminal is asked to do, and it
-    /// need not cost a repaint. `wrapped` counts as content here — it decides where a
-    /// logical line ends, which Emacs renders from.
+    /// with this and redraws it on every keystroke of a history search, so the marks stay,
+    /// as in [`Row::retire`].
+    ///
+    /// Returns whether that changed anything, so a prompt redrawn identically costs no
+    /// repaint. `wrapped` counts as content here, since it decides where a logical line
+    /// ends.
     pub fn erase_all(&mut self, style: Style) -> bool {
         let blank = Cell::blank(style);
         let changed =
@@ -1067,10 +951,8 @@ impl Row {
             return;
         }
         let n = count.min(cols - col);
-        // In place, because `Cell` is `Copy` and the row's length does not change. The
-        // `splice`-then-`truncate` this replaces grew `cells` past `cols` before cutting
-        // it back, and the row's capacity is exactly `cols` -- so IRM cost a realloc per
-        // character written in insert mode.
+        // In place, because `Cell` is `Copy` and the row's length does not change: growing
+        // past `cols` and truncating would realloc once per character in insert mode.
         self.cells.copy_within(col..cols - n, col + n);
         self.cells[col..col + n].fill(Cell::blank(style));
         // The cells from `col` on moved right; their attachments move with them, and
@@ -1086,9 +968,8 @@ impl Row {
         let gone = (col + count).min(cols) - col;
         self.cells.drain(col..(col + count).min(cols));
         self.cells.resize(cols, Cell::blank(style));
-        // The deleted columns take their attachments with them; everything to their
-        // right closes the gap. Dropping the whole table here would be simpler and would
-        // lose colours on columns DCH never touched.
+        // The deleted columns take their attachments with them; everything to their right
+        // closes the gap.
         self.prune(col..col + gone, Marks::Keep);
         self.edit_extras(|extras| extras.shift(col + gone, -(gone as isize), cols));
     }
@@ -1109,9 +990,8 @@ impl Row {
             .iter()
             .rposition(|c| c.ch != BLANK || c.style != Style::default())
             .map_or(0, |i| i + 1);
-        // An attachment can be the last content on the row while its cell is a blank in
-        // the default style — a combining mark on a space, and later an image cell, which
-        // is *always* one. Guarded, so the ordinary row keeps the `rposition` alone.
+        // An attachment can be the last content on the row while its cell is a default
+        // blank -- a combining mark on a space, or an image cell, which always is one.
         if self.extras.is_none() {
             return cells;
         }
@@ -1124,29 +1004,20 @@ impl Row {
 
     /// Style-grouped runs with trailing default-styled blanks trimmed.
     ///
-    /// Dispatches on whether the row has a side table at all: [`Row::build_plain_runs`]
-    /// when it has none, which is nearly every row, and [`Row::build_runs`] when it has.
-    /// Attachments are rare and looking one up per cell measured as ~2% of the
-    /// full-screen repaint benchmark — this is the hottest read in the emulator, run
-    /// over every damaged row of every frame, so the ordinary row is answered by a
-    /// function with no side table in it at all rather than by a branch it retakes per
-    /// cell.
+    /// Dispatches on whether the row has a side table: [`Row::build_plain_runs`] for
+    /// nearly every row, [`Row::build_runs`] otherwise. This is the hottest read in the
+    /// emulator, and a per-cell lookup cost about 2% of the full-screen repaint benchmark.
     pub fn runs(&self) -> Vec<Run> {
         self.runs_to(self.content_len())
     }
 
     /// Runs for a row on its way into the buffer as part of a logical line.
     ///
-    /// A continuation row contributes every column it has. Its trailing blanks are interior
-    /// to the line — the text goes on below — and Emacs joins a wrapped row onto the line
-    /// above without a newline, so trimming them would pull the continuation forward by
-    /// however many columns the child left blank. [`Logical::push_row`](super::screen)
-    /// measures the same rows the same way when a rewrap reassembles them; the two have to
-    /// agree or a resize stops round-tripping.
-    ///
-    /// It also keeps every departed row exactly `cols` wide, which is the invariant
-    /// [`Screen::carried`](super::screen::Screen) rests on to measure the head of the line
-    /// straddling the seam.
+    /// A continuation row contributes every column: its trailing blanks are interior to a
+    /// line that goes on below, and trimming them would pull the continuation forward.
+    /// [`Logical::push_row`](super::screen) measures rows the same way during a rewrap, and
+    /// the two must agree for a resize to round-trip. It also keeps every departed row
+    /// exactly `cols` wide, which [`Screen::carried`](super::screen::Screen) relies on.
     pub fn line_runs(&self) -> Vec<Run> {
         if self.wrapped {
             self.runs_to(self.len())
@@ -1157,21 +1028,13 @@ impl Row {
 
     /// The simplest correct statement of what [`Row::runs_to`] must produce.
     ///
-    /// A reference implementation, for `runs_to_matches_the_reference` to check the fast
-    /// one against. It exists because `build_runs` is the hottest read in the emulator and
-    /// therefore the most tempting to optimise, while also being the thing every character
-    /// Emacs renders passes through -- so an optimisation there needs something to be
-    /// *equivalent to*, not merely a suite that happened to keep passing.
+    /// A reference implementation for `runs_to_matches_the_reference` to check the fast
+    /// builders against. They are the hottest read in the emulator and so the most
+    /// tempting to optimise, and an optimisation needs something to be equivalent to.
     ///
-    /// Deliberately an independent formulation rather than a copy: the shipping version
-    /// walks `entries` with a cursor and specialises on a const `EXTRAS`, and this one
-    /// searches per column and branches at runtime. Two spellings of the same rules cannot
-    /// share a mistake in the spelling.
-    ///
-    /// It stops where the builders stop: [`Row::absorb_blank_runs`] is a post-pass over
-    /// whatever they produced, and `runs_to_matches_the_reference` composes it onto this
-    /// rather than this calling it. Written into both, the merge would be compared against
-    /// itself and the property would say nothing about it.
+    /// An independent formulation rather than a copy -- it searches per column where the
+    /// builders walk a cursor -- so the two cannot share a mistake. It stops where the
+    /// builders stop: the test composes [`Row::absorb_blank_runs`] onto it.
     #[cfg(test)]
     pub(crate) fn runs_to_reference(&self, end: usize) -> Vec<Run> {
         let entries: &[(u16, Extra)] = self.extras.as_deref().map_or(&[], |e| &e.entries);
@@ -1244,36 +1107,18 @@ impl Row {
 
     /// Merge `GLYPHS BLANKS GLYPHS` into one box-glyph run, blanks and all.
     ///
-    /// A run breaks on any undecorated cell, and a space classifies to nothing — so
-    /// `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}` arrives as three decorated runs with plain text between them and
-    /// costs Emacs three `display` intervals for one `tree` row's indent. The measured
-    /// shape of that: 86,107 decoration records over 30,326 rows of `tree -C
-    /// /usr/include`, 2.84 per row where a row wants one. Absorbing the gap as
-    /// [`BoxGlyph::BLANK`] cells makes the whole indent one run, one image and one
-    /// interval.
+    /// A run breaks on any undecorated cell and a space classifies to nothing, so
+    /// `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}` would cost Emacs three `display` intervals for one `tree` row's
+    /// indent -- 2.84 decoration records per row over `tree -C /usr/include`, where a row
+    /// wants one. Absorbing the gap as [`BoxGlyph::BLANK`] cells makes it one run.
     ///
-    /// **Only a gap between two glyph runs is absorbed**, which is what trims the leading
-    /// and trailing blanks without a trimming step. A blank run at the end of a row has no
-    /// glyph run after it, so it is never taken — and it must never be, because
-    /// [`Row::line_runs`] hands a wrapped row its full width: the padding out to the right
-    /// margin would otherwise be baked into a bitmap nobody can see, at the cost of a
-    /// wider image and a cache key per padding width. A blank run at the *start* has no
-    /// glyph run before it and is refused by the same rule.
+    /// **Only a gap between two glyph runs is absorbed.** A trailing blank run is never
+    /// taken, because [`Row::line_runs`] hands a wrapped row its full width, and the
+    /// padding would otherwise be baked into a bitmap nobody sees. The three runs must
+    /// also agree on `style`, `underline` and `link`, as adjacent glyph runs would.
     ///
-    /// The three runs must also agree on `style`, `underline` and `link`, exactly as two
-    /// adjacent glyph runs would have to: a blank carrying a different background is a
-    /// visible rectangle, and a link boundary is the one thing carried here that has no
-    /// other way to reach Lisp.
-    ///
-    /// A post-pass over runs rather than a rule inside each builder, and there are three
-    /// builders: [`Row::build_runs`], [`Row::build_plain_runs`] and the `#[cfg(test)]`
-    /// `Row::runs_to_reference`. Stated per cell it needs a variable-length lookahead —
-    /// "is there a glyph after this gap, under the same style?" — which is exactly the
-    /// kind of thing the fast builders' scans get subtly wrong; stated over the runs they
-    /// already produced it is a window of three. `runs_to_matches_the_reference` composes
-    /// this onto the reference rather than the reference calling it, so the property still
-    /// checks the builders against an independent formulation of everything *else*, and
-    /// the merge is checked by the tests named for it below.
+    /// A post-pass rather than a rule inside each builder, because per cell it needs a
+    /// variable-length lookahead, while over runs it is a window of three.
     fn absorb_blank_runs(runs: &mut Vec<Run>) {
         let blank_gap = |run: &Run| {
             run.deco.is_none()
@@ -1325,13 +1170,9 @@ impl Row {
     /// -- one `runs.last_mut()`, one capacity check and one join test per *run* instead of
     /// per cell.
     ///
-    /// It is worth having as its own function rather than another `EXTRAS` specialisation
-    /// because it is a different shape, not a different constant: the general form walks
-    /// cell by cell because an attachment can land on any one of them.
-    ///
-    /// `runs_to_matches_the_reference` is what keeps this honest -- it is checked against
-    /// `Row::runs_to_reference` over randomised rows, including the wide characters and
-    /// box glyphs that make the two disagree if the scan is wrong.
+    /// `runs_to_matches_the_reference` checks it against `Row::runs_to_reference` over
+    /// randomised rows, including the wide characters and box glyphs a wrong scan would
+    /// mishandle.
     fn build_plain_runs(&self, end: usize) -> Vec<Run> {
         let mut runs = Vec::<Run>::with_capacity(4);
         let cells = &self.cells[..end];
@@ -1411,17 +1252,9 @@ impl Row {
 
     /// The row's cells as runs, for a row that has attachments to read.
     ///
-    /// The attachment-free row does not come here at all: [`Row::build_plain_runs`]
-    /// answers it, because it is a different shape rather than this one with the lookup
-    /// switched off. That split replaced a `const EXTRAS: bool` parameter on this
-    /// function, which had become dead once the plain form existed to take the `false`
-    /// case -- so ENTRIES is never empty here in practice and the lookup is never
-    /// skipped.
-    ///
-    /// ENTRIES is walked with a cursor rather than searched per column. Both sides
-    /// advance through columns in order, so the whole row costs one pass over the table
-    /// rather than a lookup per character — which the per-column form pays whether or not
-    /// the row has a single mark on it.
+    /// The attachment-free row goes to [`Row::build_plain_runs`] instead, so ENTRIES is
+    /// never empty here in practice. It is walked with a cursor rather than searched per
+    /// column, so the whole row costs one pass over the table.
     fn build_runs(&self, end: usize, entries: &[(u16, Extra)]) -> Vec<Run> {
         // Four, not `end`: the row's dominant shapes are one run of plain text and a
         // handful for a coloured prompt, so a capacity of one per column would be a far
@@ -1453,9 +1286,7 @@ impl Row {
                     Extra::Image(p) => placed = Some(*p),
                     Extra::Link(id) => link = Some(*id),
                     // Nothing to draw and nothing to split a run on: a mark is a
-                    // position, not a property of the characters. Silently skipping
-                    // it here is what keeps `Row::runs' byte-identical to what it
-                    // was before marks existed.
+                    // position, not a property of the characters.
                     Extra::Mark(_) => {}
                 }
             }
@@ -1471,11 +1302,9 @@ impl Row {
                 Some(run)
                     if run.style == cell.style
                         && run.underline == underline
-                        // A link boundary splits a run even when nothing else changed,
-                        // which is the whole point of carrying it here: a program that
-                        // prints `see <link>foo</link> bar' in one colour gives Lisp one
-                        // run of identical style, and only this tells it where the
-                        // clickable part of it is.
+                        // A link boundary splits a run even when nothing else changed:
+                        // `see <link>foo</link> bar' in one colour is otherwise one run,
+                        // with nothing to say which part is clickable.
                         && run.link == link
                         && match (&run.deco, deco) {
                             (None, None) => true,
@@ -1490,11 +1319,9 @@ impl Row {
                     }
                 }
                 _ => runs.push(Run {
-                    // The run cannot outgrow the columns left in the row, and for the
-                    // ASCII that dominates, bytes and columns are the same number -- so
-                    // this is one allocation where growing from `String::from(char)`'s
-                    // capacity of 1 took roughly five. Over-allocates for a run that ends
-                    // early, which the reallocation it replaces cost more than.
+                    // A run cannot outgrow the columns left, and for ASCII bytes and
+                    // columns are the same, so this is one allocation where growing from
+                    // a capacity of 1 took about five.
                     text: {
                         let mut text = String::with_capacity(end - col);
                         text.push(cell.ch);
@@ -1795,13 +1622,9 @@ mod tests {
         );
     }
 
-    /// The whole point, stated on the shape it was measured against.
-    ///
-    /// `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500} name` is what a `tree` row is, and the runs it used to arrive as
-    /// were `\u{2502}` / `   ` / `\u{2502}` / `   ` / `\u{251c}\u{2500}\u{2500}` / ` name` -- three decorated runs and
-    /// therefore three `display` intervals for one indent. Afterwards the indent is one
-    /// run carrying eleven glyphs, six of them [`BoxGlyph::BLANK`], and the filename is
-    /// the only thing left beside it.
+    /// `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500} name` is what a `tree` row is. Without absorption it would be
+    /// three decorated runs with blanks between; with it the indent is one run of eleven
+    /// glyphs, six of them [`BoxGlyph::BLANK`], beside the filename.
     #[test]
     fn a_tree_indent_is_one_glyph_run() {
         let style = Style::default();
