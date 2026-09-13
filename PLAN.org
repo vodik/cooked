@@ -172,7 +172,7 @@ items should be judged on the redisplay-driven rows rather than on =apply=.
 :REPORT:   §7 "The highest-information measurement available right now"
 :GAIN:     may delete the guard/wrap-cache/mark-truncation subsystem
 :BRANCH:   16b9be2
-:RESULT:   confirmed on a gesture — flat at ordinary wrapping, p90 doubles at 10x
+:RESULT:   confirmed on a gesture — flat at ordinary wrapping, p90 doubles at 10x; styling amplifies it but does not create it at 3x
 :END:
 No code. =cooked-toggle-rejoin-wrapped-lines= already exists
 (=cooked-mode.el:147=). The three scroll causes are not independent: =rejoin=t=
@@ -275,11 +275,58 @@ as a scroll crosses into each new logical line".
 
 *Reconciling with 2026-09-05*, which measured p50 7.42 / p90 19.81 on against
 1.94 / 2.33 off: the p90 pair matches this closely and the effect is confirmed.
-What does *not* reproduce is its size at *three* rows per line — that run's
-"styled long prose" showed it where this content shows nothing. Either its lines
-were longer than 3x, or face density does contribute after all, which its own
-diff-hunk control was read as ruling out. *Unresolved, and the one thing worth
-settling before acting on this.*
+What did *not* reproduce is its size at *three* rows per line — that run's
+"styled long prose" showed it where this content showed nothing. Settled below.
+
+*** Measurement (styled: does face density explain 2026-09-05?)
+
+The harness gained =ceil--styled=, an SGR change every eight columns, and the
+question was put directly. Three runs, 100x32 frame → 29x99 terminal, load
+average 1.0–1.9, everything else as the gesture run above. Note the geometry is
+the *small* one, not the 44x249 the table above used, so read the ratios and
+not the absolute milliseconds.
+
+| content    | run | p50 t | p50 nil | p90 t | p90 nil | *p90 t/nil* |
+|------------+-----+-------+---------+-------+---------+-------------|
+| 3x plain   |   1 |  2.27 |    2.31 |  3.10 |    2.88 |        1.07 |
+| 3x plain   |   2 |  2.24 |    2.68 |  3.43 |    3.09 |        1.11 |
+| 3x plain   |   3 |  2.33 |    2.30 |  3.06 |    2.95 |        1.04 |
+| 3x styled  |   1 |  3.81 |    4.93 |  5.49 |    7.11 |        0.77 |
+| 3x styled  |   2 |  4.05 |    3.83 |  5.93 |    4.94 |        1.20 |
+| 3x styled  |   3 |  4.05 |    3.87 |  6.33 |    5.09 |        1.24 |
+|------------+-----+-------+---------+-------+---------+-------------|
+| 10x plain  |   1 |  2.64 |    2.52 |  3.93 |    3.25 |        1.21 |
+| 10x plain  |   2 |  2.84 |    2.51 |  3.90 |    3.32 |        1.18 |
+| 10x plain  |   3 |  2.96 |    2.66 |  4.10 |    3.34 |        1.23 |
+| 10x styled |   1 |  5.91 |    4.20 |  9.66 |    5.69 |      *1.70* |
+| 10x styled |   2 |  6.20 |    4.27 | 10.11 |    5.99 |      *1.69* |
+| 10x styled |   3 |  6.21 |    4.15 | 10.18 |    5.38 |      *1.89* |
+
+*Face density contributes, and it is not what 2026-09-05 saw.* Two separate
+things fall out, and conflating them is how that run got read wrong:
+
+1. *Styling roughly doubles a gesture outright*, at both wrap depths and with
+   rejoining in either state — 3x goes 2.3 → 4.0 ms and 10x goes 2.8 → 6.2.
+   That cost is the SGR runs themselves and has nothing to do with rejoining.
+2. *Styling then amplifies the rejoin penalty, but only where the penalty
+   already exists.* At ten rows per line the p90 ratio goes from a plain 1.2 to
+   a styled 1.7, stable to within 0.1 across three runs. At three rows per line
+   it stays flat and changes sign between runs, exactly as the plain content
+   does — 0.77, 1.20, 1.24 is noise around 1.0, not an effect.
+
+So the answer to the question left open above is *no*: face density does not
+produce the effect at three screen rows per line, and the diff-hunk control was
+right to rule it out. What remains for 2026-09-05 is the other branch — its
+"styled long prose" was wrapping deeper than three rows, or its far wider
+geometry (44x249, against 29x99 here) crosses logical lines more often per
+gesture. Both are consistent with everything measured; neither changes the
+conclusion, because both put the effect back at deep wrapping where the gesture
+table already found it.
+
+*One thing the small geometry says on its own*: plain 10x here is a p90 ratio
+of 1.2, where the same content at 44x249 was 2.15. The blowup scales with
+window width, which is the expected shape if the cost is laying out a continued
+line from its start.
 
 *** What this means for the subsystem
 
@@ -287,8 +334,10 @@ The =:GAIN:= — deleting =cooked--guard-row-width=, =cooked--wrap-cache= and
 =cooked--mark-truncation= — is *live again*, but narrower than the report hoped.
 The case for hard-splitting rows is a *tail-latency* case at deep wrapping, not
 a throughput case: nothing measurable is lost at the wrapping a shell session
-actually produces. Anyone making it should argue about the hitch, and should
-settle the three-rows question above first.
+actually produces. Anyone making it should argue about the hitch. The
+three-rows question is now settled and settles *against* deleting the
+subsystem: the effect needs both deep wrapping and a wide window, and neither
+is what a shell session ordinarily produces.
 
 *** Superseded: the append run, and why it answered the wrong question
 
@@ -1913,6 +1962,109 @@ not reading the keyboard*. ESC is how you leave insert mode in the vim inside
 the terminal, and a translation reaching it would be a bug nobody would connect
 to this setting. Verified against a real tty under foot — wrapped once, still
 once after two more calls.
+
+** TODO [#B] =cooked-consult.el= — a terminal picker
+:PROPERTIES:
+:EFFORT:   4h
+:REPORT:   none — ghostel's =extensions/consult-ghostel/consult-ghostel.el=
+:GATE:     "picker annotations" in Remaining smaller items (=cooked--title= public)
+:BRANCH:
+:END:
+=consult-buffer= already reaches cooked buffers; this is a picker for terminals
+only, and the value over ghostel's is what cooked can annotate with. ghostel
+shows the title and nothing else. cooked knows the OSC 7 directory (TRAMP-mapped),
+whether a command is running and which (=cooked--running-anchor= and
+=cooked--command-input= — /not/ a record, since none exists until =D=), the
+last exit status, and the input mode.
+
+Shape, taken from ghostel where it is right:
+
+- =consult-cooked= over =consult--multi=: this project's terminals, all
+  terminals, and create-on-miss (a name that matches nothing starts a session
+  named that). =C-u= behaves like =cooked=.
+- A hidden source in =consult-buffer-sources= and
+  =consult-project-buffer-sources=, reachable by a narrow key.
+- Annotations through completion metadata (=annotation-function= /
+  =affixation-function=), not through consult, so vertico and marginalia users
+  get them without consult loaded. ghostel instead wraps marginalia's annotator.
+
+Departure from ghostel: an *optional layer*, =require=-to-enable like
+=cooked-evil=, not a separate package — and nothing below =cooked-consult.el=
+may learn that consult exists.
+
+Done when: the picker previews, narrows and creates-on-miss; annotations show
+under plain =completing-read= with consult unloaded; a test covers the
+annotation for a running, a failed and an idle session.
+
+** TODO [#B] Search the session's commands, across every buffer
+:PROPERTIES:
+:EFFORT:   1d
+:REPORT:   none
+:GATE:     =cooked-consult.el= — a terminal picker (the file it lands in)
+:BRANCH:
+:END:
+Not shell history. =cooked-history= reads the shell's history file and *types*
+the pick; this searches the *transcript* and *jumps*. History says what you
+typed; this says where you ran it and what it printed, which neither the shell
+nor ghostel can answer.
+
+Most of it exists: =consult-imenu= over =cooked--imenu-index= already gives one
+candidate per command, landing on the prompt, with preview. What is missing:
+
+- *Annotations*: exit status, output size in lines, directory if a record ever
+  carries one (none does today — see =cooked--imenu-index='s docstring).
+- *Narrowing*: failed / succeeded. "Where did the build break" is the everyday
+  case.
+- *Actions*: jump, copy input, copy output, rerun — each an existing
+  command-record function, not a new one.
+- *Every buffer*: candidates from every cooked buffer's =cooked--commands=,
+  grouped by buffer, preview switching the window to it.
+- *Running commands too* — the =python -m http.server= left in some buffer,
+  found again in two keystrokes. A narrow key for running, and running
+  candidates sort first.
+
+*A running command has no record, and the candidate must not fake one.*
+=cooked--commands= holds finished commands only; a =cooked-command= is built at
+=D= because that is what supplies =code=, and a half-built one would read as
+exit 0 (DESIGN.md, "The running command's marker"). So the running candidate is
+synthesised per buffer from =cooked--running-anchor=, =cooked--command-input=
+and =cooked--command-start= — one per buffer at most, since one command runs at
+a time — and carries its own type, so no action written for records (copy
+output, rerun) can be handed it by accident.
+
+Its actions differ, and the default differs most: *jump lands on the live
+tail*, following, not on the prompt — coming back to a server means reading
+what it has printed since. Also: interrupt (the =C-c C-c= command, not a new
+one), and copy input. Not rerun: it is still running. Its annotation says
+=running= and how long, never an exit status.
+
+It goes stale by construction — the command can finish between building the
+list and the pick. Resolve at action time: if the anchor is gone, find the
+record whose =prompt= is that marker's position and act on it as finished.
+
+*Multiline commands.* =input= is the command text, not positions, so a
+multiline command is just a string with newlines. Two readings to choose
+between, deliberately left open:
+
+- Collapse whitespace, as =cooked--imenu-label= already does. One line, matches
+  across line boundaries, loses where the lines broke.
+- Join with a visible separator (=⏎=) and cap long ones (heredocs) at the first
+  line plus =(+N lines)=, matching against the full text.
+
+Either way copy and rerun use the original string, never the display form. A
+multiline *prompt* is a non-issue: the candidate is labelled by its input and
+lands on the =A= mark. Nil =input= (no =cmdline_url=, typed while the child
+owned the keyboard) falls back to the prompt line, as the imenu label does —
+reuse it, do not re-derive it.
+
+Positions, not markers, for the same reason the imenu index gives: rebuild per
+invocation.
+
+Done when: failed-only narrowing works across two buffers; a running server
+in a buffer not shown is found by the running narrow and the pick leaves point
+following its tail; a command that finishes while the picker is open resolves
+to its record; a multiline =for= loop is findable by a word on its second line
+and reruns byte-identical; a test covers the nil-=input= fallback.
 
 
 
