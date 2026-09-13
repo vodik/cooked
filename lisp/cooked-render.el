@@ -55,6 +55,7 @@
 (require 'cooked-mouse)
 (require 'cooked-osc)
 (require 'cooked-scrollback)
+(require 'cooked-window-ops)
 
 (cooked--declare-core)
 
