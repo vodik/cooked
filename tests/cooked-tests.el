@@ -14,6 +14,8 @@
 ;;   cooked-tests-history.el     the optional shell-history layer
 ;;   cooked-tests-consult.el     the optional terminal picker, and the
 ;;                               annotations it shares with plain completion
+;;   cooked-tests-command-search.el  the optional search over every buffer's
+;;                               commands
 ;;   cooked-tests-osc.el         the sequences answered in Lisp
 ;;   cooked-tests-link.el        URLs, OSC 8 hyperlinks, the optional file layer
 ;;   cooked-tests-completion.el  both completion backends
@@ -79,6 +81,7 @@
 (require 'cooked-tests-dnd)
 (require 'cooked-tests-history)
 (require 'cooked-tests-consult)
+(require 'cooked-tests-command-search)
 (require 'cooked-tests-osc)
 (require 'cooked-tests-link)
 (require 'cooked-tests-completion)

@@ -1092,6 +1092,7 @@ older three-element shape."
                ;; now it is neither's.
                cooked--delegated nil
                cooked--command-start marker
+               cooked--command-started-at (float-time)
                ;; What the shell said it was about to run, and only failing that what
                ;; we last submitted.  The shell's account wins where both exist: ours
                ;; is the text Emacs *sent*, glued together across the lines of a

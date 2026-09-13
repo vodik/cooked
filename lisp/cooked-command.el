@@ -87,6 +87,19 @@ Moved into `cooked--command-prompt' when a command starts, the way
 (defvar-local cooked--command-input nil
   "The running command's own line, as cooked submitted it.")
 
+(defvar-local cooked--command-started-at nil
+  "When the running command's `C' mark was handled, as a `float-time'.
+
+Set beside `cooked--command-start' rather than stamped by a consumer from
+`cooked-command-started-functions', because the consumer that wants it is a
+picker loaded on first use.  A hook added then would have missed every command
+already running -- and the server left running in some buffer an hour ago is
+exactly the one worth asking how long it has been going.  One `float-time' per
+command is the whole cost.
+
+The running command's only: a finished record carries no duration, since
+nothing has asked for one yet.")
+
 (defvar-local cooked--commands nil
   "Finished `cooked-command' records, newest first.")
 
@@ -172,7 +185,8 @@ each record with a private copy nothing could reach."
                                            :prompt cooked--command-prompt)))
         (push command cooked--commands)
         (run-hook-with-args 'cooked-command-finished-functions command))))
-  (setq cooked--command-start nil cooked--command-input nil cooked--command-prompt nil))
+  (setq cooked--command-start nil cooked--command-input nil cooked--command-prompt nil
+        cooked--command-started-at nil))
 
 ;;;; Asking after the records
 

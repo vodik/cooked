@@ -1761,28 +1761,44 @@ a command Emacs did not submit, and a prompt line that has since been
 repainted to nothing -- and an entry with an empty name is one the completing
 read cannot be pointed at.")
 
-(defun cooked--imenu-prompt-line (command)
-  "The prompt line COMMAND was typed at, as it stands in the buffer.
+(defun cooked--imenu-prompt-line (position)
+  "The line at POSITION, the prompt a command was typed at, as it stands now.
 
-The fallback for a record with no `input'.  One line rather than a scan: the
+The fallback for a command with no `input'.  One line rather than a scan: the
 record says where the prompt is, so this is a `buffer-substring' of known
 bounds and the index stays O(commands)."
-  (when-let* ((position (or (cooked--command-prompt-position command)
-                            (cooked--command-start-position command))))
+  (when position
     (save-excursion
       (goto-char position)
       (buffer-substring-no-properties (pos-bol) (pos-eol)))))
 
+(defun cooked--command-name (input anchor)
+  "A command's line as one line of text, or nil if nothing names it.
+
+INPUT is the command line the shell said it was about to run, and ANCHOR the
+position of the prompt it was typed at -- or of its output, for a shell that
+sent no prompt mark.  The two halves rather than a record, because the command
+still running has no record and must be named the same way.
+
+INPUT with whitespace collapsed, so that a `for' loop typed over three lines is
+one name rather than a string with newlines in it.  Failing that the line at
+ANCHOR as it stands in the buffer, which is the same string with the prompt
+still on the front of it -- the best a session whose shell sends no
+`cmdline_url=' can do, and much better than nothing, since that is exactly the
+session where the user is reading the prompt line anyway.
+
+Shared by the `imenu' index and `cooked-command-search', which name commands
+for the same reader and must not drift into naming them differently.  A name
+only: copying and rerunning read `cooked-command-input' itself, so the
+newlines this drops are never lost to anything that sends the line."
+  (let* ((text (or input (cooked--imenu-prompt-line anchor) ""))
+         (line (string-trim (replace-regexp-in-string "[ \t\n]+" " " text))))
+    (unless (string-empty-p line) line)))
+
 (defun cooked--imenu-label (command)
   "What COMMAND is called in the `imenu' index, before it is made unique.
 
-The command line the shell said it was about to run, whitespace collapsed so
-that a `for' loop typed over three lines is one entry rather than a name with
-newlines in it.  Failing that the prompt line as it stands in the buffer,
-which is the same string with the prompt still on the front of it -- the best
-a session whose shell sends no `cmdline_url=' can do, and much better than
-nothing, since that is exactly the session where the user is reading the
-prompt line anyway.
+`cooked--command-name', or `cooked--imenu-unnamed' when that is nil.
 
 A non-zero exit is spelled out rather than coloured.  An index entry is data
 as much as it is display: `which-function-mode' puts this string in the mode
@@ -1796,10 +1812,10 @@ Elided to leave room for the suffix and for the disambiguator
 would otherwise take the exit status and the `<2>' with it -- which is the one
 way this index can lose an entry, two failures of the same long command
 becoming one name that points at the first."
-  (let* ((text (or (cooked-command-input command)
-                   (cooked--imenu-prompt-line command)
-                   ""))
-         (line (string-trim (replace-regexp-in-string "[ \t\n]+" " " text)))
+  (let* ((line (cooked--command-name
+                (cooked-command-input command)
+                (or (cooked--command-prompt-position command)
+                    (cooked--command-start-position command))))
          (code (cooked-command-code command))
          (suffix (if (eql code 0) "" (format " [exit %s]" code)))
          ;; Four characters is `<9>' and the ellipsis the elision itself costs.
@@ -1810,7 +1826,7 @@ becoming one name that points at the first."
          (room (if (numberp limit)
                    (max 8 (- limit (length suffix) 4))
                  most-positive-fixnum)))
-    (if (string-empty-p line)
+    (if (null line)
         cooked--imenu-unnamed
       (concat (truncate-string-to-width line room nil nil t) suffix))))
 

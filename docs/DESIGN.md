@@ -1347,6 +1347,45 @@ written, and they are not redundant: `filename` is what `bookmark-bmenu-list` pr
 what `bookmark-relocate` edits, `directory` is what the handler reads — so relocating a
 bookmark does not silently move the column and leave the shell where it was.
 
+### Searching every buffer's commands, and the one that has not finished
+
+`cooked-command-search` is the index widened to every cooked buffer, grouped by buffer,
+with an exit status and an output size beside each entry and a prefix argument to
+narrow to the failed, the succeeded or the running. It is not shell history:
+`cooked-history` reads the shell's file and *types* the pick, this reads the records and
+*goes to* it, and the difference is that only the transcript knows what a command
+printed.
+
+**The running command is offered and is not a record.** It is synthesised per buffer
+from `cooked--running-anchor`, `cooked--command-input` and `cooked--command-started-at`
+as a type of its own, for the reason given under "The running command's marker": a
+`cooked-command` built before the `D` mark reads as exit 0. Its default action lands on
+the live tail, following, rather than on the prompt — coming back to a server means
+reading what it printed since — and it offers interrupt and copy, never rerun or copy
+output.
+
+`cooked--command-started-at` is stamped in the core, beside `cooked--command-start`,
+rather than from `cooked-command-started-functions` by the layer that reads it. The layer
+is loaded on first use, and a hook added then misses every command already running —
+which is precisely the server left going an hour ago.
+
+**A candidate goes stale by construction** and is resolved at action time. The running
+candidate holds the anchor marker itself — not a copy, and not a new marker — because
+`cooked--mark-command-end` builds the record on that same marker: if the anchor is no
+longer the running one, the record whose `prompt` (or `start`) is `eq` to it is the
+command that just finished, found exactly even if scrollback was trimmed in between. A
+position would have moved; making markers per candidate is the cost the index's
+docstring declines, and holding one that exists costs nothing.
+
+**A multiline command is named with its whitespace collapsed**, by the same
+`cooked--command-name` the index uses. The alternative was a visible `⏎` join with
+long entries capped at the first line plus `(+N lines)`, matched against the full text.
+It reads better and cannot be built portably: the text behind the cap has to be in the
+candidate string to be matched and hidden to be capped, and completion UIs honour
+`invisible` differently or not at all. Collapsed, what matches is what is shown in every
+UI. Copying and rerunning read `cooked-command-input`, so the display form never reaches
+the child.
+
 ---
 
 ## Leaving: a buffer kill is not the only way out
@@ -1405,9 +1444,10 @@ lisp/            cooked-util.el is the floor everything else requires; cooked.el
                  to it and pulls in the rest. The opt-in files (cooked-evil,
                  cooked-osc-eval, cooked-shell-completion, cooked-file-link,
                  cooked-next-error, cooked-command-decorations, cooked-project,
-                 cooked-consult, cooked-dnd) sit on top and are `require`d, not toggled by a
-                 variable. cooked-process.el is opt-in too, but as an autoloaded
-                 minor mode rather than by being loaded
+                 cooked-consult, cooked-dnd, cooked-history, cooked-command-search)
+                 sit on top and are `require`d, not toggled by a variable.
+                 cooked-process.el is opt-in too, but as an autoloaded minor mode
+                 rather than by being loaded
 shell-integration/  bash, zsh, fish, plus zsh's completion capture
 docs/            this file, plus KEYBOARD, FEATURES, SHELL, TERMINFO, IMAGES, ROADMAP
 tests/           cooked-tests.el loads the suite; the rest are split by subject
