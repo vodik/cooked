@@ -161,6 +161,85 @@ redisplay plus the child plus every wait on either."
            'cooked-glyph-scale-floor nil 'cooked-detect-links nil
            'cooked-scrollback-lines 100000)
 
+
+;;;; The gesture arms
+;;
+;; Arrival and scrollback are different questions and the arms above only answer
+;; the first.  What a user feels scrolling *back* through settled `tree' output
+;; is redisplay laying rows out again, and the passes that cost there are not
+;; the passes that cost on the drain path.
+;;
+;; The child must stay alive for this to measure anything real.
+;; `cooked--fontify-region' declines outright once `cooked--session' is nil, so
+;; scrolling a buffer whose child has exited silently skips the link scan and
+;; reports a clean bill of health -- the trap that made the first attempt at
+;; this measure zero scans.  So the child is `tree' followed by `sleep', and the
+;; settle test is the buffer size holding still rather than the process exiting.
+
+(defvar tree--gesture-log nil)
+
+(defun tree--pct (sorted p)
+  (nth (min (1- (length sorted))
+            (floor (* p (length sorted))))
+       sorted))
+
+(defun tree--gesture (label &rest bindings)
+  "Scroll back through settled `tree' output with BINDINGS in force.
+
+Timed per gesture around `scroll-down' plus a forced `redisplay', which is the
+whole of what the viewport moving costs -- nothing drains while this runs."
+  (let ((p50s nil) (p90s nil))
+    (dotimes (_ tree--reps)
+      (let ((buffer (generate-new-buffer (format "*tree-gesture %s*" label))))
+        (unwind-protect
+            (with-current-buffer buffer
+              (cl-progv (cl-loop for (k _) on bindings by #'cddr collect k)
+                  (cl-loop for (_ v) on bindings by #'cddr collect v)
+                (cooked-mode)
+                (set-window-buffer (selected-window) buffer)
+                (cooked--start
+                 (list "/bin/sh" "-c"
+                       (format "tree -C %s; exec sleep 3600"
+                               (shell-quote-argument tree--dir))))
+                (cooked--refresh-keymap)
+                ;; Settled = three consecutive polls at the same size.
+                (let ((last -1) (still 0) (deadline (+ (float-time) 300)))
+                  (while (and (< still 3) (< (float-time) deadline))
+                    (sit-for 0.2)
+                    (if (= (buffer-size) last)
+                        (setq still (1+ still))
+                      (setq still 0 last (buffer-size)))))
+                (goto-char (point-max))
+                (redisplay t)
+                (let ((samples nil))
+                  ;; Warmups discarded: the first gestures fault in fonts and
+                  ;; fill every cache the later ones then hit.
+                  (dotimes (_ 20) (ignore-errors (scroll-down 10)) (redisplay t))
+                  (dotimes (_ 60)
+                    (let ((t0 (float-time)))
+                      (ignore-errors (scroll-down 10))
+                      (redisplay t)
+                      (push (* 1000 (- (float-time) t0)) samples)))
+                  (let ((sorted (sort samples #'<)))
+                    (push (tree--pct sorted 0.50) p50s)
+                    (push (tree--pct sorted 0.90) p90s)))))
+          (with-current-buffer buffer (cooked--cleanup))
+          (kill-buffer buffer))))
+    (tree--say "GESTURE %-28s p50=%7.3f  p90=%7.3f"
+               label (tree--median p50s) (tree--median p90s))))
+
+(tree--gesture "baseline")
+;; The suspect this section exists for: every box glyph in a `tree' row is a run
+;; of one, so the run-wide image coalescing has nothing to coalesce and each one
+;; costs its own `display' interval at every redisplay.
+(tree--gesture "box-drawing-images nil" 'cooked-box-drawing-images nil)
+;; Measured at 21% of a scroll gesture while attributing the arrival slowness.
+(tree--gesture "detect-links nil" 'cooked-detect-links nil)
+(tree--gesture "glyph-scale-floor nil" 'cooked-glyph-scale-floor nil)
+(tree--gesture "all off"
+               'cooked-box-drawing-images nil 'cooked-detect-links nil
+               'cooked-glyph-scale-floor nil)
+
 (with-temp-file tree--out
   (insert (mapconcat #'identity (nreverse tree--log) "\n") "\n"))
 (when noninteractive (princ (format "wrote %s\n" tree--out)))
