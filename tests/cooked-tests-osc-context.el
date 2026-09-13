@@ -156,13 +156,45 @@ ask the mode line for nothing; opening and closing `elevate' does."
     (should (equal (car (last cooked-osc-context--stack)) '("root" . elevate)))
     (should (equal (cooked-tests--context-shown) " root"))))
 
+(ert-deftest cooked-osc-context-elevate-cannot-be-hidden ()
+  "The three probes of a child hiding `root'.
+An inner context with a label of its own does not replace it, and a stack
+filled to the limit first does not keep it out.  An update that leaves out
+`type=' does drop it: the spec resets every field an update does not resend."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--context "start=a;type=elevate" "start=b;type=container")
+    (should (equal (cooked-tests--context-shown) " root"))
+    (should (eq (get-text-property 1 'face (cooked-osc-context--mode-line))
+                'cooked-osc-context-elevate))
+    ;; Without `elevate' in the labels, the innermost labelled one is shown.
+    (let ((cooked-osc-context-labels (assq-delete-all
+                                      'elevate (copy-alist cooked-osc-context-labels))))
+      (should (equal (cooked-tests--context-shown) " container")))
+    (setq cooked-osc-context--stack nil)
+    ;; Filled with typeless junk, the stack still admits an elevate, but only one.
+    (dotimes (i cooked-osc-context--depth)
+      (cooked-tests--context (format "start=junk%d" i)))
+    (cooked-tests--context "start=r;type=elevate")
+    (should (equal (cooked-tests--context-shown) " root"))
+    (should (= (length cooked-osc-context--stack) (1+ cooked-osc-context--depth)))
+    (cooked-tests--context "start=r2;type=elevate" "start=v;type=vm")
+    (should (= (length cooked-osc-context--stack) (1+ cooked-osc-context--depth)))
+    (should-not (assoc "r2" cooked-osc-context--stack))
+    ;; An update without `type=' forgets it, as the spec says.
+    (cooked-tests--context "start=r;user=root")
+    (should (equal (cooked-tests--context-shown) ""))))
+
 (ert-deftest cooked-osc-context-labels-are-the-knob ()
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--context "start=a;type=elevate" "start=b;type=chpriv;targetuser=nobody")
     (should (equal (cooked-tests--context-shown) " root"))
     (let ((cooked-osc-context-labels (cons '(chpriv . "100% user") cooked-osc-context-labels)))
+      ;; Labelled, but inside a root shell, which still says so.
+      (should (equal (cooked-tests--context-shown) " root"))
       ;; Escaped once, so the mode line prints the `%' rather than reading it.
+      (cooked-tests--context "end=a" "start=b;type=chpriv;targetuser=nobody")
       (should (equal (cooked-tests--context-shown) " 100% user")))
     (let ((cooked-osc-context-labels nil))
       (should-not (cooked-osc-context--mode-line)))

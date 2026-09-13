@@ -75,7 +75,9 @@ that idea."
 
 The innermost open context whose type appears here is shown; any other type is
 passed over as though it were not open, so the stock systemd prompt snippet's
-`shell' and `command' contexts do not hide the `elevate' underneath them.  An
+`shell' and `command' contexts do not hide the `elevate' underneath them.
+An open `elevate' is shown wherever it is in the stack, so a `container'
+started from a root shell still says `root'.  An
 empty list shows nothing and leaves the stack still being kept.
 
 The types are the spec's twelve: `boot', `container', `vm', `elevate',
@@ -121,7 +123,12 @@ The spec asks for a limit without naming one, and says to keep the outermost
 contexts and drop the newest rather than the other way round -- otherwise a
 child could push its elevation off the bottom of the stack by opening enough
 `subcontext's on top of it.  Thirty-two is far past any honest nesting: the
-stock prompt snippet costs two per shell level.")
+stock prompt snippet costs two per shell level.
+
+Keeping the outermost is not enough on its own, because a child can fill the
+stack first and so refuse an `elevate' opened after it.  An `elevate' is
+admitted past the limit while no other is open, so the stack holds at most one
+more than this.")
 
 (defvar-local cooked-osc-context--stack nil
   "Open OSC 3008 contexts in this buffer, innermost first.
@@ -179,7 +186,7 @@ cannot say which context it means cannot safely be applied to any of them.
 
 The mode line is repainted only when the context it names has changed.  The
 stock prompt snippet opens two or three contexts per command, and nearly none
-of them change the label: a `command\=' opened inside a `shell\=' shows nothing
+of them change the label: a `command' opened inside a `shell' shows nothing
 before and after."
   (let ((shown (cooked-osc-context--current)))
     (pcase (cooked-osc-context--parse-head (or (car parts) ""))
@@ -188,7 +195,9 @@ before and after."
                                (cdr (assoc field cooked-osc-context--types)))
                              (cdr parts))))
          (cooked-osc-context--close id)
-         (when (< (length cooked-osc-context--stack) cooked-osc-context--depth)
+         (when (or (< (length cooked-osc-context--stack) cooked-osc-context--depth)
+                   (and (eq type 'elevate)
+                        (not (rassq 'elevate cooked-osc-context--stack))))
            (push (cons id type) cooked-osc-context--stack))))
       (`(end . ,id)
        (cooked-osc-context--close id)))
@@ -196,10 +205,19 @@ before and after."
       (force-mode-line-update))))
 
 (defun cooked-osc-context--current ()
-  "The type of the innermost open context `cooked-osc-context-labels' names."
-  (seq-some (lambda (entry)
-              (and (assq (cdr entry) cooked-osc-context-labels) (cdr entry)))
-            cooked-osc-context--stack))
+  "The type of the context to name in the mode line, or nil.
+
+`elevate' whenever one is open and `cooked-osc-context-labels' names it, and
+otherwise the innermost open context that list names.  Only the innermost would
+let anything opened inside a root shell -- a `container', or a `cat' of a
+file that opens one -- replace `root' with a quieter label, and the shell the
+user types into next is still root."
+  (if (and (assq 'elevate cooked-osc-context-labels)
+           (rassq 'elevate cooked-osc-context--stack))
+      'elevate
+    (seq-some (lambda (entry)
+                (and (assq (cdr entry) cooked-osc-context-labels) (cdr entry)))
+              cooked-osc-context--stack)))
 
 (defun cooked-osc-context--mode-line ()
   "The context segment of the mode line, or nil.
