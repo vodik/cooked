@@ -222,7 +222,9 @@ Returns the position the text was inserted at."
       ;; user has added is entitled to see an edit.  Links are found either
       ;; way: `insert' inherits no properties, so a rewritten row reads as
       ;; unfontified whether or not `jit-lock-after-change' ran on it.  See
-      ;; `cooked-rewriting-a-row-still-gets-it-scanned'.
+      ;; `cooked-rewriting-a-row-still-gets-it-scanned', and for where this
+      ;; binding sits,
+      ;; `cooked-a-repaint-announces-its-rewrite-and-not-its-properties'.
       (let ((inhibit-modification-hooks t)
             (links nil))
         ;; Links are collected on the same walk and applied after the decorations,

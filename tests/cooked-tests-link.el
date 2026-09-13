@@ -951,6 +951,56 @@ sleep 5")
       (let ((pos (cooked-tests--link-at text)))
         (should (get-text-property pos 'cooked-link-url))))))
 
+(ert-deftest cooked-a-repaint-announces-its-rewrite-and-not-its-properties ()
+  "Where `cooked--render-block\='s `inhibit-modification-hooks\=' binding sits.
+
+`cooked-rewriting-a-row-still-gets-it-scanned\=' holds with the binding gone and
+with it widened, so this watches the hook itself.  A change hook sees the
+rewrite -- the deletion and the insertion of the two repainted rows -- because a
+hook a user has added is entitled to see an edit.  It does not see the faces and
+glyphs applied to the new text, one call per span, because those are what the
+binding is there to keep quiet.  A property change is the one call whose length
+equals its extent, so on `go to https://...\=' with `to\=' in bold, the bold
+span would arrive as a change of 2 over 2 characters inside the rewrite."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'go \\033[1mto\\033[0m https://one.example/ now\\n'; \
+printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 https://two.example/\\n'; \
+read x; \
+printf '\\033[1;1Hgo \\033[1mto\\033[0m https://three.example/ now'; \
+printf '\\033[2;1H\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 https://four.example/'; \
+printf '\\033[3;1H'; \
+sleep 5")
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "two.example" (cooked-tests--text)))))
+    (let ((changes nil))
+      (add-hook 'after-change-functions
+                (lambda (beg end length) (push (list beg end length) changes))
+                nil t)
+      (cooked--send-to-child "\n")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "four.example" (cooked-tests--text)))))
+      (should (get-text-property (cooked-tests--link-at "to") 'face))
+      (should (get-text-property (cooked-tests--link-at "─") 'display))
+      (let ((insertions (seq-filter (lambda (c) (zerop (nth 2 c))) changes)))
+        ;; The rewrite is seen, and it covers both repainted rows.
+        (should insertions)
+        (dolist (text '("three.example" "four.example"))
+          (let ((pos (cooked-tests--link-at text)))
+            (should (seq-some (lambda (c) (<= (car c) pos (nth 1 c)))
+                              insertions))))
+        ;; No property change falls inside the text a repaint inserted.
+        (should-not
+         (seq-some (lambda (change)
+                     (pcase-let ((`(,beg ,end ,length) change))
+                       (and (> length 0)
+                            (= length (- end beg))
+                            (seq-some (lambda (i)
+                                        (and (<= (car i) beg) (<= end (nth 1 i))))
+                                      insertions))))
+                   changes))))))
+
 (ert-deftest cooked-the-scan-is-not-armed-when-it-has-nothing-to-scan ()
   "Registering jit-lock is not free: it hangs `jit-lock-after-change\=' on every
 text property the renderer applies, which measured at +21% on plain rows and
