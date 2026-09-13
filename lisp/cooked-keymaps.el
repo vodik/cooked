@@ -514,7 +514,7 @@ Then KEY, once the shell\='s cursor is back where the user\='s was."
                (text (buffer-substring-no-properties start end))
                (after (- end (max start (min (point) end)))))
     (cooked--clear-input-region)
-    (setq cooked--delegated t)
+    (setf (cooked-line-delegated (cooked--line)) t)
     (cooked--request-refresh)
     (cooked--send-to-child
      (concat text (apply #'concat (make-list after (cooked--csi "D"))) key))))

@@ -76,7 +76,7 @@ keyboard or one the shell ran itself."))
 (defvar-local cooked--prompt-start nil
   "Marker where the prompt now on screen began, from the OSC 133 `A' mark.
 Moved into `cooked--command-prompt' when a command starts, the way
-`cooked--submitted-input' is moved into `cooked--command-input'.")
+`cooked-line-submitted-input' is moved into `cooked--command-input'.")
 
 (defvar-local cooked--command-prompt nil
   "Marker where the prompt that ran the current command began.")

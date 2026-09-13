@@ -521,13 +521,14 @@ instead of leaving the last one standing: a garbled announcement is the shell
 failing to make a claim, and the safe reading of no claim is no license."
   (pcase (split-string payload ";")
     (`("" "2" ,nonce . ,rest)
-     (setq cooked--completion-nonce nonce
+     (setf (cooked-line-completion-nonce (cooked--line)) nonce
            ;; Field 3 is the reply capability, absent in snippets that predate
            ;; it -- which could only announce when they could also reply, so
            ;; their silence means capable.
-           cooked--completion-reply-capable (not (equal (car rest) "0"))))
-    (_ (setq cooked--completion-nonce nil
-             cooked--completion-reply-capable nil))))
+           (cooked-line-completion-reply-capable (cooked--line))
+           (not (equal (car rest) "0"))))
+    (_ (setf (cooked-line-completion-nonce (cooked--line)) nil
+             (cooked-line-completion-reply-capable (cooked--line)) nil))))
 
 (defvar-local cooked--eval-refused nil
   "Whether this buffer has already reported an ignored OSC 51;E request.")

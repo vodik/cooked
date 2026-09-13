@@ -370,56 +370,62 @@ Latched, because `cooked--semantic' goes back to nil between `command-end' and
 the next `prompt-start' and so cannot answer \"is the integration working?\".
 Once a shell has spoken at all, it will keep speaking, and everything it does
 not say becomes informative -- see `cooked--policy'.")
-(defvar-local cooked--delegated nil
-  "Whether this line has been handed to the child\='s own line editor.
+(cl-defstruct (cooked-line (:constructor cooked--line-make) (:copier nil))
+  "What the shell has said about the line being typed, and what Emacs did with it.
 
-Set by `cooked-delegate-key\=', and the reason delegation is a state rather than
-a send: once the line is in the pty, the shell is echoing it and editing it, so
-Emacs going on believing it owns an input region would render the line twice and
-edit a copy the child will never see.
+Every one of these is a claim about one line, so all of them end when a command
+starts: `cooked--handle-semantic\=' drops the whole record at `command-start\=',
+and a field added here is cleared there without anyone remembering to.  A fresh
+prompt ends two of them sooner, as their slots say.
 
-Cleared where the line ends -- a command starting or a fresh prompt -- so it
-lasts exactly as long as the line it was about.  There is no way back before
-then, and that is the honest cost: ZLE is still a line editor, so `C-a\=',
-`C-w\=' and the arrows all still work, but they are the shell\='s now.  It is
-vterm\='s ordinary state, entered on purpose and for one line.")
-(defvar-local cooked--completion-nonce nil
-  "Nonce from the prompt\='s OSC 51;CH announcement, or nil if it did not announce.
+Read and written through `cooked--line\=', which makes the record on first use."
+  (delegated nil :documentation "\
+Whether this line has been handed to the child\='s own line editor.
 
-Kept here, in the always-on core, rather than with the completion layer that
-consumes it, because it is two signals wearing one name.  To
-`cooked-shell-completion\=' it is the token a request must carry.  To
-`cooked--policy\=' it is a *license to own the input line*: the shell asserting,
-for this line, that a widget is bound and reading -- which is the only
-corroboration available once termios has gone dark behind an `ssh\='.  The
-second reading has to work whether or not anyone loaded the first, so the
-announcement is believed unconditionally and only the requests are opt-in.
+Set by `cooked-delegate-key\='.  Delegation is a state rather than a send: once
+the line is in the pty the shell is echoing and editing it, so Emacs going on
+believing it owns an input region would render the line twice and edit a copy
+the child never sees.  Cleared at a fresh prompt as well as at a command, so it
+lasts exactly as long as the line it was about.  ZLE is still a line editor, so
+`C-a\=', `C-w\=' and the arrows keep working; they are the shell\='s now.")
+  (completion-nonce nil :documentation "\
+Nonce from the prompt\='s OSC 51;CH announcement, or nil if it did not announce.
 
-Cleared at `command-start\=' by `cooked--handle-semantic\=', which is what keeps
-it a claim about the present.  Without that, `ssh host\=' would leave the local
-shell\='s nonce standing and the bare remote prompt would inherit a license
-nothing on that host ever issued -- the precise failure the license exists to
-rule out.")
-(defvar-local cooked--completion-reply-capable nil
-  "Whether the announcing shell can also answer completion requests.
+Two signals wearing one name.  To `cooked-shell-completion\=' it is the token a
+request must carry.  To `cooked--policy\=' it is a license to own the input line:
+the shell asserting, for this line, that a widget is bound and reading, which is
+the only corroboration left once termios has gone dark behind an `ssh\='.  So the
+announcement is believed whether or not the completion layer is loaded.
 
-Separate from `cooked--completion-nonce\=' because the two questions came apart:
-framing a reply needs `base64\=', owning the input line does not.  A shell
-without it announces anyway and says so here, so it keeps its editable line and
-merely has nothing to offer `completion-at-point\='.")
-(defvar-local cooked--prompt-continued nil
-  "Whether the prompt now on screen continues the line already submitted.
+Dropped at `command-start\=' with the rest of the record, which keeps it a claim
+about the present: without that, `ssh host\=' would leave the local shell\='s
+nonce standing and the bare remote prompt would inherit a license nothing on
+that host ever issued.")
+  (completion-reply-capable nil :documentation "\
+Whether the announcing shell can also answer completion requests.
+
+Separate from the nonce because framing a reply needs `base64\=' and owning the
+line does not.  A shell without it announces anyway and says so here, keeping
+its editable line with nothing to offer `completion-at-point\='.")
+  (prompt-continued nil :documentation "\
+Whether the prompt on screen continues the line already submitted.
 
 Set by the OSC 133 `A;k=s\=' mark a shell puts on its `PS2\=' and cleared at the
-next real prompt or at `command-start\='.  One boolean rather than a counter:
-what reads it only asks whether the next submission extends the last one, and a
-construct twenty lines deep is that question answered twenty times.
+next real prompt.  `cooked--send-input-string\=' reads it: without it the record
+for \"for x in 1 2; do ... done\" would say only `done\=', because each
+continuation line is submitted separately and would overwrite the one before.")
+  (submitted-input nil :documentation "\
+The line last submitted, waiting for the OSC 133 mark that says it started."))
 
-`cooked--send-input-string\=' is the reader.  Without this the record for
-\"for x in 1 2; do ... done\" would say only `done\=', because each continuation
-line is submitted separately and would overwrite the one before it.")
-(defvar-local cooked--submitted-input nil
-  "The last line submitted, waiting for the OSC 133 mark that says it started.")
+(defvar-local cooked--line-record nil
+  "This buffer\='s `cooked-line\=', or nil before anything has been said.
+Go through `cooked--line\=', which makes one when there is none.")
+
+(defun cooked--line ()
+  "The `cooked-line\=' for the line being typed in this buffer, made on first use."
+  (or cooked--line-record
+      (setq cooked--line-record (cooked--line-make))))
+
 (defvar-local cooked--marks nil
   "Hash of OSC 133 mark id to the buffer marker made for it.
 
@@ -477,7 +483,7 @@ extents, exit codes, `next-error\=', rerun -- works there unchanged."
         ;; approximate, `cooked--semantic' is exact and in-band.  But a mark is
         ;; only a claim, so it takes the keyboard only with a license behind it.
         ((and (eq cooked--semantic 'input)
-              (not cooked--delegated)
+              (not (cooked-line-delegated (cooked--line)))
               (cooked--ownership-license))
          'cooked)
         ((eq cooked--mode 'cooked) 'cooked)
@@ -501,7 +507,7 @@ Two things corroborate it, and they are different in kind:
   every local path the line might name is a path that is really there.
   `cooked--host\=' is how that is known, and it comes from the same snippet as
   the mark, so it is present exactly when the mark is.
-- *A live announcement.*  `cooked--completion-nonce\=' is re-emitted per ZLE
+- *A live announcement.*  `cooked-line-completion-nonce\=' is re-emitted per ZLE
   line from `zle-line-init\=' -- after the widget is bound and the keyboard is
   ZLE\='s, which is precisely the condition being claimed -- and cleared when a
   command starts.  It is the one signal that is both byte-transparent and
@@ -517,7 +523,7 @@ Unlicensed, a marked prompt is not a broken state: the shell keeps its own line,
 its own history and its own completion, and cooked keeps the extents, exit codes
 and rerun that the marks were always the point of."
   (or (not (cooked--foreign-host-p))
-      (and cooked--completion-nonce t)))
+      (and (cooked-line-completion-nonce (cooked--line)) t)))
 
 (defun cooked--secret-p ()
   "Whether the child is reading with echo off.

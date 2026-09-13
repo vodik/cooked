@@ -61,18 +61,20 @@ construct reaches the shell one line at a time -- Emacs owns each `PS2' line
 the same way it owns the first -- so the record for
 \"for x in 1 2; do ... done\" would otherwise say only `done', which is the
 line submitted last rather than the command that ran.  See
-`cooked--prompt-continued'."
-  (setq cooked--submitted-input
-        (let ((line (and (not (string-blank-p text)) text)))
-          (if (and cooked--prompt-continued cooked--submitted-input
-                   ;; A continuation continues *something*.  Without this the flag has
-                   ;; no path that clears it when the `A' and the `C' it expects never
-                   ;; arrive -- a shell emitting `A;k=s' with the plain marks turned
-                   ;; off does exactly that -- and every later line was appended to the
-                   ;; last, growing one record's input without bound.
-                   cooked--prompt-start)
-              (concat cooked--submitted-input "\n" (or line ""))
-            line)))
+`cooked-line-prompt-continued'."
+  (let ((record (cooked--line)))
+    (setf (cooked-line-submitted-input record)
+          (let ((line (and (not (string-blank-p text)) text))
+                (submitted (cooked-line-submitted-input record)))
+            (if (and (cooked-line-prompt-continued record) submitted
+                     ;; A continuation continues *something*.  Without this the flag
+                     ;; has no path that clears it when the `A' and the `C' it expects
+                     ;; never arrive -- a shell emitting `A;k=s' with the plain marks
+                     ;; turned off does exactly that -- and every later line would be
+                     ;; appended to the last, growing one record's input without bound.
+                     cooked--prompt-start)
+                (concat submitted "\n" (or line ""))
+              line))))
   (cooked--send-to-child
    ;; A multi-line submission has to arrive as a paste, or the shell's line editor
    ;; treats every embedded newline as its own Enter and runs the fragments one at

@@ -412,7 +412,7 @@ to separate, and the one this whole indicator is judged on."
                 cooked--semantic nil
                 cooked--semantic-seen nil
                 cooked--host nil
-                cooked--completion-nonce nil
+                cooked--line-record nil
                 cooked--exit nil
                 cooked-title nil
                 cooked--foreground-label "htop")
@@ -478,7 +478,7 @@ nobody asked for, and easy to reintroduce by inlining the obvious call."
                 cooked--semantic nil
                 cooked--semantic-seen nil
                 cooked--host nil
-                cooked--completion-nonce nil
+                cooked--line-record nil
                 cooked--exit nil
                 cooked-title nil
                 cooked--foreground-label "htop")
@@ -500,7 +500,7 @@ exit status is the only thing about a dead session still true."
                 cooked--semantic nil
                 cooked--semantic-seen nil
                 cooked--host nil
-                cooked--completion-nonce nil
+                cooked--line-record nil
                 cooked-title nil
                 cooked--foreground-label "htop"
                 cooked--input-mode 'frozen
@@ -1354,7 +1354,7 @@ no integration at all\" only exists as a latch."
                   cooked--semantic semantic
                   cooked--semantic-seen seen
                   cooked--host nil
-                  cooked--completion-nonce nil
+                  cooked--line-record nil
                   cooked-title nil
                   cooked--foreground-label nil
                   cooked--exit nil)
@@ -1380,7 +1380,7 @@ the same certainty a local one does, by the same bytes."
                 cooked--semantic 'input
                 cooked--semantic-seen t
                 cooked--host nil
-                cooked--completion-nonce nil
+                cooked--line-record nil
                 cooked-title nil
                 cooked--foreground-label nil
                 cooked--exit nil)
@@ -1402,7 +1402,7 @@ the same certainty a local one does, by the same bytes."
     ;; said where it was, and a shell at its own prompt wants every key.
     (should (eq (cooked--state-keymap nil 'prompt) cooked-command-map))
     ;; The same remote host, running the full snippet.
-    (setq-local cooked--completion-nonce "1234")
+    (setf (cooked-line-completion-nonce (cooked--line)) "1234")
     (should (eq (cooked--policy) 'cooked))
     (should (cooked--input-state-p))
     ;; The host stays named -- it is still not this machine, and that is what
@@ -1429,7 +1429,7 @@ cost one byte each."
       ;; The full line, then one left-arrow for the one character after point.
       (should (equal sent "echo hello\e[D\C-r")))
     ;; Ownership is gone, and the keys now go where the line did.
-    (should cooked--delegated)
+    (should (cooked-line-delegated (cooked--line)))
     (should-not (cooked--input-state-p))
     (should (eq (cooked--policy) 'prompt))
     (should (cooked--child-owns-keyboard-p))
@@ -1446,9 +1446,9 @@ A fresh prompt is a fresh line, and Emacs may have it back."
     (insert "true")
     (cl-letf (((symbol-function 'cooked--send-to-child) #'ignore))
       (cooked-delegate-key "\C-r"))
-    (should cooked--delegated)
+    (should (cooked-line-delegated (cooked--line)))
     (cooked--handle-semantic '(prompt-start (screen 0 . 0)) nil)
-    (should-not cooked--delegated)))
+    (should-not (cooked-line-delegated (cooked--line)))))
 
 (ert-deftest cooked-delegate-keys-put-back-what-they-replaced ()
   "`TAB\=' is not delegated by default, and naming it must not be a one-way

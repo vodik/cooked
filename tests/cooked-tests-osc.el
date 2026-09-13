@@ -2011,13 +2011,13 @@ the whole session's history attached to whichever command finally closed."
   (cooked-tests--with-session
       (cooked-tests--marks "\\033]133;A;k=s\\007> \\033]133;B\\007")
     (should (cooked-tests--settle (lambda () (eq cooked--semantic 'input)) 8))
-    (should cooked--prompt-continued)
+    (should (cooked-line-prompt-continued (cooked--line)))
     ;; No `A' came, so there is no prompt for this to be a continuation *of*.
     (should-not cooked--prompt-start)
     (cooked--send-input-string "one")
     (cooked--send-input-string "two")
     ;; Replaced, not appended: the second line is its own submission.
-    (should (equal cooked--submitted-input "two"))))
+    (should (equal (cooked-line-submitted-input (cooked--line)) "two"))))
 
 (ert-deftest cooked-zsh-marks-its-continuation-prompt ()
   "The end to end version, and the reason PS2 is worth touching at all: without
@@ -2035,13 +2035,13 @@ whole construct would say only its last line."
     (cooked-send-input)
     ;; The continuation prompt arrives and Emacs still owns the line.
     (should (cooked-tests--settle
-             (lambda () (and cooked--prompt-continued
+             (lambda () (and (cooked-line-prompt-continued (cooked--line))
                              (eq cooked--semantic 'input)
                              (cooked--input-start-position)))
              8))
     (should (cooked--input-state-p))
     ;; Waiting on the next prompt has to be a wait for the input region to *move*.
-    ;; `cooked--prompt-continued' is already set from the prompt above and stays set
+    ;; `cooked-line-prompt-continued' is already set from the prompt above and stays set
     ;; for the whole construct, so a settle on it returns at once and the line below
     ;; would be typed at a prompt the shell has not drawn yet.
     (let ((line (cooked--input-start-position)))
@@ -2049,7 +2049,7 @@ whole construct would say only its last line."
       (cooked-send-input)
       (should (cooked-tests--settle
                (lambda () (let ((now (cooked--input-start-position)))
-                            (and now (> now line) cooked--prompt-continued)))
+                            (and now (> now line) (cooked-line-prompt-continued (cooked--line)))))
                8)))
     (cooked--replace-input "done")
     (cooked-send-input)

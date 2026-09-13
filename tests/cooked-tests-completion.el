@@ -168,7 +168,7 @@ exactly what makes it useless to the code under test."
 request is a line of input.  Nothing is sent until the shell says it is listening."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
-    (should-not cooked--completion-nonce)
+    (should-not (cooked-line-completion-nonce (cooked--line)))
     (should-not (cooked--shell-completions "git chec" 8))
     ;; And the CAPF still completes, in Emacs.
     (goto-char cooked--input-end)
@@ -195,7 +195,7 @@ question this test is named for."
     (cooked--handle-semantic '(command-start nil (screen 0 . 0)) nil)
     (should (eq cooked--semantic 'output))
     (cooked--osc-emacs '("CH;2;abcd;1"))
-    (should (equal cooked--completion-nonce "abcd"))
+    (should (equal (cooked-line-completion-nonce (cooked--line)) "abcd"))
     ;; Ownership has *not* changed, which is the case this covers.
     (should (cooked--input-state-p))
     (let (sent)
@@ -216,7 +216,7 @@ the shell you are typing at, over a line it has never seen."
          :name "*cooked-complete*"
          :directory (file-name-directory (directory-file-name cooked--source-directory))
          ;; The nonce is the shell saying its widget is bound and ZLE is reading.
-         :settle (lambda () (and (cooked--input-start-position) cooked--completion-nonce)))
+         :settle (lambda () (and (cooked--input-start-position) (cooked-line-completion-nonce (cooked--line)))))
       (goto-char cooked--input-end)
       (insert "cd shell-int")
       (let ((before (cooked-tests--text))
@@ -272,7 +272,7 @@ after the cursor to make the difference visible."
         ("zsh"
          :name "*cooked-complete*"
          :directory (file-name-directory (directory-file-name cooked--source-directory))
-         :settle (lambda () (and (cooked--input-start-position) cooked--completion-nonce)))
+         :settle (lambda () (and (cooked--input-start-position) (cooked-line-completion-nonce (cooked--line)))))
       (goto-char cooked--input-end)
       (insert "cat shell-int README.org")
       ;; Back onto the end of `shell-int', leaving ` README.org' after point.
@@ -336,8 +336,8 @@ somebody else\='s package."
           ;; this one can also answer.
           (should (cooked-tests--settle
                    (lambda () (and (cooked--input-start-position)
-                                   cooked--completion-nonce
-                                   cooked--completion-reply-capable))
+                                   (cooked-line-completion-nonce (cooked--line))
+                                   (cooked-line-completion-reply-capable (cooked--line))))
                    10))
           (let ((cooked-completion-timeout 5))
             (pcase-let ((`(,prefix ,_suffix ,_truncated . ,records)
@@ -371,8 +371,8 @@ replies."
       ;; Believed with no layer loaded: this is an ownership signal, not a
       ;; completion one.
       (cooked--osc-emacs '("CH;2;1234;1"))
-      (should (equal cooked--completion-nonce "1234"))
-      (should cooked--completion-reply-capable)
+      (should (equal (cooked-line-completion-nonce (cooked--line)) "1234"))
+      (should (cooked-line-completion-reply-capable (cooked--line)))
       ;; And the CAPF still answers from Emacs without sending anything.
       (cl-letf (((symbol-function 'cooked--send-if-live)
                  (lambda (&rest _) (setq sent t))))
@@ -393,18 +393,18 @@ their silence reads as capable."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (cooked--osc-emacs '("CH;2;1234;1"))
-    (should (equal cooked--completion-nonce "1234"))
-    (should cooked--completion-reply-capable)
+    (should (equal (cooked-line-completion-nonce (cooked--line)) "1234"))
+    (should (cooked-line-completion-reply-capable (cooked--line)))
     (cooked--osc-emacs '("CH;2;5678;0"))
-    (should (equal cooked--completion-nonce "5678"))
-    (should-not cooked--completion-reply-capable)
+    (should (equal (cooked-line-completion-nonce (cooked--line)) "5678"))
+    (should-not (cooked-line-completion-reply-capable (cooked--line)))
     (cooked--osc-emacs '("CH;2;9012"))
-    (should (equal cooked--completion-nonce "9012"))
-    (should cooked--completion-reply-capable)
+    (should (equal (cooked-line-completion-nonce (cooked--line)) "9012"))
+    (should (cooked-line-completion-reply-capable (cooked--line)))
     ;; A version we do not speak is a shell failing to make a claim, and the safe
     ;; reading of no claim is no license.
     (cooked--osc-emacs '("CH;3;3456;1"))
-    (should-not cooked--completion-nonce)))
+    (should-not (cooked-line-completion-nonce (cooked--line)))))
 
 (ert-deftest cooked-completion-nonce-does-not-outlive-its-prompt ()
   "`ssh host\=' must not leave the local shell\='s license standing.
@@ -416,10 +416,29 @@ hand a bare remote prompt a license nothing on that host ever issued."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (cooked--osc-emacs '("CH;2;1234;1"))
-    (should (equal cooked--completion-nonce "1234"))
+    (should (equal (cooked-line-completion-nonce (cooked--line)) "1234"))
     (cooked--handle-semantic '(command-start nil (screen 0 . 0)) nil)
-    (should-not cooked--completion-nonce)
-    (should-not cooked--completion-reply-capable)))
+    (should-not (cooked-line-completion-nonce (cooked--line)))
+    (should-not (cooked-line-completion-reply-capable (cooked--line)))))
+
+(ert-deftest cooked-a-command-starting-forgets-everything-said-about-the-line ()
+  "Every field of `cooked-line' ends with the line, not only the nonce.
+
+A delegated line, a continuation prompt, a submission waiting for its mark and an
+announcement are all claims about the line just typed.  `command-start' drops the
+record whole, so a field added later is cleared there by construction; this
+fills every slot first so a record that kept one would fail here."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle #'cooked--input-start-position))
+    (let ((record (cooked--line)))
+      (setf (cooked-line-delegated record) t
+            (cooked-line-completion-nonce record) "1234"
+            (cooked-line-completion-reply-capable record) t
+            (cooked-line-prompt-continued record) t
+            (cooked-line-submitted-input record) "echo hi"))
+    (cooked--handle-semantic '(command-start nil (screen 0 . 0)) nil)
+    (should (equal cooked--command-input "echo hi"))
+    (should (equal (cooked--line) (cooked--line-make)))))
 
 (ert-deftest cooked-completion-layer-decides-what-the-shell-is-told ()
   "The zsh capture cannot retract a `compadd' shadow, so whether to install one
@@ -463,7 +482,7 @@ flags have already said everything, so `_git' offers nothing and explains why."
         ("zsh"
          :name "*cooked-complete*"
          :directory (file-name-directory (directory-file-name cooked--source-directory))
-         :settle (lambda () (and (cooked--input-start-position) cooked--completion-nonce)))
+         :settle (lambda () (and (cooked--input-start-position) (cooked-line-completion-nonce (cooked--line)))))
       (goto-char cooked--input-end)
       (insert "git commit -am ")
       (let ((before (cooked-tests--text))

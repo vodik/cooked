@@ -80,15 +80,15 @@ older three-element shape."
   (pcase event
     (`(prompt-start ,at . ,id)
      (setq cooked--semantic 'prompt
-           ;; A fresh prompt is a fresh line, and Emacs may have it back.
-           cooked--delegated nil
            ;; Where the prompt is about to be drawn, which is what
            ;; `cooked-previous-command' moves between and where the outer half of
            ;; an `evil' command text object starts.  The mark arrives before the
            ;; prompt itself, so this is column 0 of its first row.
-           cooked--prompt-start (cooked--register-mark (car id) at batch-start)
-           ;; Whatever was being continued is over: this prompt is a new line.
-           cooked--prompt-continued nil))
+           cooked--prompt-start (cooked--register-mark (car id) at batch-start))
+     ;; A fresh prompt is a fresh line: Emacs may have it back, and whatever was
+     ;; being continued is over.
+     (setf (cooked-line-delegated (cooked--line)) nil
+           (cooked-line-prompt-continued (cooked--line)) nil))
     ;; A continuation prompt -- `PS2' -- is the same command still being typed.  It
     ;; deliberately does *not* touch `cooked--prompt-start': that marker is where the
     ;; construct began, which is what the command record is filed under and what
@@ -96,10 +96,10 @@ older three-element shape."
     ;; the last continuation line.  The `B' that follows still arrives, so Emacs owns
     ;; the continuation line exactly as it owns the first one.
     (`(prompt-continuation ,_ . ,_)
-     (setq cooked--semantic 'prompt
-           ;; A fresh line, whoever it continues, and Emacs may have it back.
-           cooked--delegated nil
-           cooked--prompt-continued t))
+     (setq cooked--semantic 'prompt)
+     ;; A fresh line, whoever it continues, and Emacs may have it back.
+     (setf (cooked-line-delegated (cooked--line)) nil
+           (cooked-line-prompt-continued (cooked--line)) t))
     (`(prompt-end ,_ . ,_)
      (setq cooked--semantic 'input)
      (cooked--request-refresh))
@@ -122,14 +122,6 @@ older three-element shape."
        (let* ((marker (cooked--register-mark (car id) at batch-start))
               (start (marker-position marker)))
          (setq cooked--semantic 'output
-               ;; The announcement covered the line that just ended.  Anything the
-               ;; command spawns -- an `ssh', a nested shell, a REPL -- announces
-               ;; for itself or does not announce at all.
-               cooked--completion-nonce nil
-               cooked--completion-reply-capable nil
-               ;; The delegated line has been submitted; it was the shell's, and
-               ;; now it is neither's.
-               cooked--delegated nil
                cooked--command-start marker
                cooked--command-started-at (float-time)
                ;; What the shell said it was about to run, and only failing that what
@@ -139,19 +131,21 @@ older three-element shape."
                ;; shell's is what its parser actually made of it.  And it is the only
                ;; account at all in every case where the shell kept the line -- a
                ;; remote prompt, a program reading input of its own, a `no-input-mark'
-               ;; session -- where `cooked--submitted-input' is nil and the record
-               ;; used to carry nothing.  See `State::cmdline' on the Rust side.
+               ;; session -- where nothing was submitted from Emacs.  See
+               ;; `State::cmdline' on the Rust side.
                cooked--command-input (or cmdline
-                                         (prog1 cooked--submitted-input
-                                           (setq cooked--submitted-input nil)))
-               cooked--submitted-input nil
+                                         (cooked-line-submitted-input (cooked--line)))
                ;; The prompt this was typed at stops being the live one here, and
                ;; becomes the running command's.
                cooked--command-prompt (prog1 cooked--prompt-start
                                         (setq cooked--prompt-start nil))
-               ;; The construct has been submitted in full; the next line submitted
-               ;; starts a command of its own.
-               cooked--prompt-continued nil)
+               ;; The line is over, and everything said about it with it: the
+               ;; announcement covered this line, and anything the command spawns
+               ;; -- an `ssh', a nested shell, a REPL -- announces for itself or not
+               ;; at all; the delegated line has been submitted; the construct has
+               ;; been submitted in full, so the next line starts a command of its
+               ;; own.
+               cooked--line-record nil)
          ;; Output begins here, so this is where the input ended.  `comint-delete-output',
          ;; `comint-show-output' and `comint-write-output' all measure from it; it sat at
          ;; `point-min' until now, which is why deleting output flushed the whole buffer.

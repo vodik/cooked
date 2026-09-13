@@ -105,7 +105,7 @@ which the reply has to wait for."
 ;; REPLIES is 1 or 0: whether the shell can frame the third line at all, which
 ;; needs `base64' out there and the rest of the exchange does not.  A shell that
 ;; answers 0 still announces, because the announcement is also what licenses the
-;; Emacs input region -- see `cooked--completion-nonce' -- and losing an editable
+;; Emacs input region -- see `cooked-line-completion-nonce' -- and losing an editable
 ;; line over a missing encoder would be an unrelated punishment.
 ;;
 ;; The announcement is what makes this safe to send at all.  Without a widget bound
@@ -146,7 +146,7 @@ which the reply has to wait for."
 Only `R' arrives here.  The `H' announcement is handled in `cooked-osc.el'
 without any opt-in, because the core reads it as a license to own the input
 line and has to keep doing so in sessions that never load this file; see
-`cooked--completion-nonce'.  What is left is the half that is genuinely this
+`cooked-line-completion-nonce'.  What is left is the half that is genuinely this
 layer's: an answer to a question only this layer asks."
   (pcase (and (not (string-empty-p payload)) (aref payload 0))
     (?R (pcase (split-string (substring payload 1) ";")
@@ -168,11 +168,11 @@ Returns (PREFIX SUFFIX TRUNCATED . RECORDS), or nil if the shell cannot
 or does not answer.  Blocks for at most `cooked-completion-timeout': the
 reply arrives through the wake pipe like every other byte the child
 writes, so pumping that process is what lets it in."
-  (when (and cooked--completion-nonce
+  (when (and (cooked-line-completion-nonce (cooked--line))
              ;; The shell announced but cannot frame a reply -- no `base64' out
              ;; there.  It still owns a license to the input line; it just has
              ;; nothing to say to this.
-             cooked--completion-reply-capable
+             (cooked-line-completion-reply-capable (cooked--line))
              ;; ZLE is still the thing reading.  The core does forget the nonce at
              ;; `command-start', which covers the shell being replaced underneath
              ;; us, but not this: policy stays `cooked' for a *command* that reads
@@ -185,7 +185,7 @@ writes, so pumping that process is what lets it in."
       (cooked--send-if-live
        (concat (cooked--csi-private ">" "u" 99)
                (format "%s;%d;%d;%s\n"
-                       cooked--completion-nonce serial point
+                       (cooked-line-completion-nonce (cooked--line)) serial point
                        (cooked--completion-encode line))))
       (let ((deadline (+ (float-time) cooked-completion-timeout)))
         ;; `with-local-quit' rather than nothing: this is the one place cooked
