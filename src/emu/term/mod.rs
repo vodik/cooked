@@ -18,6 +18,7 @@ use super::text::{self, Segmenter, Step, Width};
 use csi::{PushedPen, SavedMode};
 use keys::KittyStack;
 pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};
+use pen::PenState;
 use reply::{Framing, color_scheme_report, size_report};
 pub(crate) use reply::{Terminator, osc_reply};
 use screens::{PerScreen, ScreenId};
@@ -29,6 +30,7 @@ mod graphics;
 mod keys;
 mod modes;
 pub(crate) mod osc;
+mod pen;
 mod perform;
 pub(crate) mod reply;
 mod screens;
@@ -1026,7 +1028,8 @@ struct State {
     screens: PerScreen<Screen>,
     /// The grid being written to and shown.
     shown: ScreenId,
-    pen: Style,
+    /// The rendition and hyperlink the child is writing with; see [`PenState`].
+    pen: PenState,
     pending_scrollback: VecDeque<Scrolled>,
     images: ImageStore,
     kitty: Kitty,
@@ -1100,21 +1103,6 @@ struct State {
     force_per_character_print: bool,
     /// The renditions the grids' cells name by id; see [`crate::emu::style`].
     styles: StyleStore,
-    /// The ids [`State::pen`] last gave the pen, with the rendition they were looked up
-    /// for, so a run of characters in one pen looks the pen up once.
-    pen_ids: Option<(Style, Pen)>,
-    /// The `OSC 8` hyperlink the child currently has open, if any.
-    ///
-    /// Written into every cell printed while it is open, beside the pen's rendition, but
-    /// unlike anything in the pen it is not an SGR attribute, so no rendition change
-    /// closes it. Terminals hold it open
-    /// until an explicit `OSC 8 ; ; ST`, which is what lets a program colour a link as it
-    /// prints it. See `hyperlink` for what does close it.
-    ///
-    /// One field for both screens, like `pen`: an open hyperlink belongs to the byte
-    /// stream, so a child that opens one and then takes the alternate screen goes on
-    /// writing it there.
-    link: Option<LinkId>,
     /// Where the shell last said its prompt begins (OSC 133;A), in [`Anchor`] coordinates.
     ///
     /// Emacs keeps markers for the *command* regions it renders; this keeps the one row

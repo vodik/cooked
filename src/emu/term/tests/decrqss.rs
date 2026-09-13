@@ -42,7 +42,7 @@ fn decrqss_round_trip(rows: usize, cols: usize, set: &[u8], name: &str) -> Strin
         reply,
         "{set:?} did not survive replay"
     );
-    assert_eq!(second.state.pen, first.state.pen, "{set:?}");
+    assert_eq!(second.state.pen.style(), first.state.pen.style(), "{set:?}");
     assert_eq!(second.state.modes, first.state.modes, "{set:?}");
     assert_eq!(
         second.screen().region().top,
@@ -63,14 +63,14 @@ fn decrqss_round_trip(rows: usize, cols: usize, set: &[u8], name: &str) -> Strin
 fn each_sgr_flag_sets_clears_and_describes_its_own_bit() {
     for flag in crate::emu::sgr::FLAGS {
         let mut t = term(1, 4, format!("\x1b[{}m", flag.set).as_bytes());
-        assert_eq!(t.state.pen.attrs, flag.attr, "SGR {}", flag.set);
+        assert_eq!(t.state.pen.style().attrs, flag.attr, "SGR {}", flag.set);
         assert_eq!(
             decrqss(&mut t, "m"),
             format!("\x1bP1$r0;{}m\x1b\\", flag.set)
         );
         t.feed(format!("\x1b[{}m", flag.reset).as_bytes());
         assert_eq!(
-            t.state.pen.attrs,
+            t.state.pen.style().attrs,
             Attrs::default(),
             "SGR {} after {}",
             flag.reset,

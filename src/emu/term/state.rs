@@ -224,17 +224,13 @@ impl State {
     /// What a write with the pen as it stands puts in the cells it touches: the pen's
     /// rendition and open link, and the rendition an erase leaves.
     ///
-    /// Asked per character on the print path, where it costs a comparison against the pen
-    /// the ids were last looked up for; the store is consulted only when the pen or the
-    /// open link has changed since.
+    /// Asked per character on the print path, where it is a cached answer: the store is
+    /// consulted only after [`PenState`] has dropped the ids because the pen changed.
     pub(super) fn pen(&mut self) -> Pen {
-        let (style, link) = (self.pen, self.link);
-        if let Some((cached, pen)) = self.pen_ids
-            && cached == style
-            && pen.link == link
-        {
+        if let Some(pen) = self.pen.ids() {
             return pen;
         }
+        let (style, link) = (self.pen.style(), self.pen.link());
         let erase = style.erase();
         let pen = Pen {
             style: self.style_id(style),
@@ -247,7 +243,7 @@ impl State {
                 self.style_id(erase)
             },
         };
-        self.pen_ids = Some((style, pen));
+        self.pen.remember(pen);
         pen
     }
 
@@ -270,7 +266,7 @@ impl State {
     /// can be recoloured by an id's reuse.
     fn collect_styles(&mut self) {
         // The pen's own ids may be among those freed, if nothing has been written with it.
-        self.pen_ids = None;
+        self.pen.forget_ids();
         let Self {
             screens,
             front,

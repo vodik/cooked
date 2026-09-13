@@ -307,11 +307,11 @@ impl State {
     /// scrollback are not touched, which is why `rs2` can be sent without losing the
     /// transcript.
     pub(super) fn soft_reset(&mut self) {
-        self.pen = Style::default();
+        self.pen.set_style(Style::default());
         // Closed here and *only* here, not by SGR: DECSTR and RIS are the child saying
         // "start over", which is a different statement from any rendition change. See
-        // [`State::link`].
-        self.link = None;
+        // [`PenState`].
+        self.pen.set_link(None);
         self.last_print = None;
         // The whole negotiated state in one statement; see [`Modes`].
         let had_mouse = self.modes.mouse != Mouse::default();
@@ -416,7 +416,7 @@ impl State {
     fn push_pen(&mut self, params: &Params) {
         if self.modes.pen_stack.len() < SGR_STACK_LIMIT {
             self.modes.pen_stack.push(PushedPen {
-                pen: self.pen,
+                pen: self.pen.style(),
                 parts: PenParts::from_params(params),
             });
         }
@@ -428,30 +428,31 @@ impl State {
             return;
         };
         let Some(parts) = parts else {
-            self.pen = pen;
+            self.pen.set_style(pen);
             return;
         };
+        let current = self.pen.style_mut();
         for flag in PUSHABLE.iter().map(|flag| flag.attr) {
             if !parts.flags.contains(flag) {
                 continue;
             }
             if pen.attrs.contains(flag) {
-                self.pen.attrs |= flag;
+                current.attrs |= flag;
             } else {
-                self.pen.attrs.remove(flag);
+                current.attrs.remove(flag);
             }
         }
         if parts.underline {
-            self.pen
+            current
                 .attrs
                 .set_underline_style(pen.attrs.underline_style());
-            self.pen.underline = pen.underline;
+            current.underline = pen.underline;
         }
         if parts.fg {
-            self.pen.fg = pen.fg;
+            current.fg = pen.fg;
         }
         if parts.bg {
-            self.pen.bg = pen.bg;
+            current.bg = pen.bg;
         }
     }
 
@@ -460,7 +461,7 @@ impl State {
     /// The arm is [`sgr::apply`](crate::emu::sgr::apply), shared with the comint filter,
     /// which keeps a pen of its own.
     pub(super) fn sgr(&mut self, params: &Params) {
-        crate::emu::sgr::apply(params, &mut self.pen);
+        crate::emu::sgr::apply(params, self.pen.style_mut());
     }
 
     /// Dispatch one `CSI` sequence.
@@ -873,7 +874,7 @@ impl State {
     pub(super) fn status_report(&mut self, name: &[u8]) {
         match name {
             b"m" => {
-                let sgr = crate::emu::sgr::describe(self.pen);
+                let sgr = crate::emu::sgr::describe(self.pen.style());
                 self.dcs_reply(format_args!("1$r{sgr}m"));
             }
             b"r" => {

@@ -217,7 +217,7 @@ impl State {
 
     /// `OSC 8 ; PARAMS ; URI ST` — open a hyperlink, or close the one that is open.
     ///
-    /// An empty URI closes, and apart from a reset nothing else does; see [`State::link`]
+    /// An empty URI closes, and apart from a reset nothing else does; see [`PenState`]
     /// for why an SGR reset must not.
     ///
     /// PARAMS is ignored. The only one anybody sends is `id=`, and content-addressing
@@ -230,14 +230,14 @@ impl State {
             return;
         };
         if uri.is_empty() {
-            self.link = None;
+            self.pen.set_link(None);
             return;
         }
         let (id, fresh) = self.links.intern(&uri);
         if fresh {
             self.pending_links.push((id, uri));
         }
-        self.link = Some(id);
+        self.pen.set_link(Some(id));
     }
 
     /// `OSC 66 ; METADATA ; TEXT ST` — kitty's [text sizing protocol], width only.
