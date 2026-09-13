@@ -2308,8 +2308,13 @@ before and after the fix (2824 vs 3105 pre-fix, 284 vs 311 post-fix — noise,
 and sometimes the wrong sign), and the walk never appears in the profile. The
 per-cluster walk is not the cost.
 
-*Left behind:* =cooked-bench-tree= in =tests/cooked-bench.el= — 108 decoration
-records per frame against the border fixture's 24, the shape the suite lacked;
+*Left behind:* =cooked-bench-tree= in =tests/cooked-bench.el=, the shape the suite
+lacked. It first measured 108 decoration records per frame against the border
+fixture's 24, but those rows were built by hand, and their NO-BREAK SPACE
+padding fell outside the glyph runs. Since ebe835a (2026-09-13) the fixture
+feeds a =tree -C= listing through the core, so it gets the blank absorption and
+the =glyph= row flag real output gets: 23 records per frame, p50 0.55 → ~0.12 ms,
+3,079 → 915 conses, 175 → 55 vector cells, 239 → 79 intervals per 24x80 frame;
 =scripts/bench-tree.el=, which drives a real =tree= through the *wake pipe* via
 =sit-for= rather than a drain loop of its own (an =accept-process-output= loop
 hands the module the whole flood at once, four huge deltas come out, and the
