@@ -37,8 +37,8 @@
 //! it would mean vendoring `EastAsianWidth.txt` and `emoji-sequences.txt` and keeping
 //! them current, to disagree with the shipped tables in one place. So this defers, and
 //! states the two disagreements outright. The second, a cap of two columns on any one
-//! cluster, is written up on [`cluster_cells`]. The first is a **lone regional indicator**. `unicode-width`
-//! gives `U+1F1E6..=U+1F1FF` one column each, since their East Asian Width is Neutral;
+//! cluster, is written up on [`cluster_cells`]. The first is a **lone regional
+//! indicator**. `unicode-width` gives `U+1F1E6..=U+1F1FF` one column each, since their East Asian Width is Neutral;
 //! the spec gives them two. A *pair* of them is one cluster either way and comes out at
 //! two columns under both readings, so the correction only shows on an unpaired one —
 //! half a flag, which is what a truncated line of output leaves behind.
@@ -60,8 +60,7 @@
 //! ghostty — whose mode 2027 names the same draft — does too; contour is alone in the
 //! literal reading. A child measuring with Rust's `unicode-width` gets the narrow
 //! answer, and so does one written against kitty or ghostty; that column is the one
-//! this has to match. The
-//! corpus that pins every rule the mode is about, and this divergence with it, is
+//! this has to match. The corpus that pins every rule the mode is about, and this divergence with it, is
 //! `mode_2027_corpus` in `term/tests.rs`.
 //!
 //! [text sizing protocol]: https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
