@@ -531,3 +531,123 @@ fn a_mark_scrolled_away_after_a_wide_character_is_anchored_by_characters() {
     );
     assert_eq!(delta.marks, vec![(MarkId::from_index(0), anchor)]);
 }
+
+// A command's input modes, handed over at `C` and taken back at `D`.
+
+/// Every mode [`Handover`] covers, as the `h` that sets it, with the DECRQM number that
+/// reads it back. The keyboard pair has no DECRQM number and is read through `keys`.
+const HANDED_OVER: &[(&str, u16)] = &[
+    ("\x1b[?1003h", 1003),
+    ("\x1b[?1006h", 1006),
+    ("\x1b[?1004h", 1004),
+    ("\x1b[?2031h", 2031),
+    ("\x1b[?2048h", 2048),
+    ("\x1b[?1007h", 1007),
+    ("\x1b[?1h", 1),
+    ("\x1b=", 66),
+];
+
+fn mode_set(t: &Term, number: u16) -> bool {
+    t.state.dec_mode_report(number) == crate::emu::term::modes::ModeReport::Set
+}
+
+/// The crash the handover exists for: a command sets every input mode, pushes kitty
+/// flags on the primary screen, and dies without undoing any of it. The shell's `D`
+/// puts all of it back, and tells Emacs the mouse is off.
+#[test]
+fn a_dead_command_leaves_the_shell_the_input_modes_it_handed_over() {
+    let mut t = term(4, 40, b"\x1b]133;C\x07");
+    for (set, _) in HANDED_OVER {
+        t.feed(set.as_bytes());
+    }
+    t.feed(b"\x1b[>4;2m\x1b[>1u");
+    for (_, number) in HANDED_OVER {
+        assert!(mode_set(&t, *number), "{number} took");
+    }
+    assert!(matches!(t.keys(), KeyEncoding::Kitty(_)));
+    t.drain();
+
+    t.feed(b"\x1b]133;D;139\x07");
+    for (_, number) in HANDED_OVER {
+        assert!(!mode_set(&t, *number), "{number} is the shell's again");
+    }
+    assert_eq!(
+        t.keys(),
+        KeyEncoding::Legacy,
+        "kitty flags and modifyOtherKeys both"
+    );
+    assert_eq!(t.mouse(), Mouse::default());
+    let events = t.drain().events;
+    assert!(
+        events.contains(&Event::Mouse(Mouse::default())),
+        "{events:?}"
+    );
+}
+
+/// Restored, not reset: a mode the shell had on when it ran the command is on again
+/// afterwards even though the command turned it off, and a `D` with no `C` before it
+/// touches nothing.
+#[test]
+fn the_shell_gets_back_its_own_modes_and_a_bare_d_moves_none() {
+    let mut t = term(4, 40, b"\x1b[?1004h\x1b[>1u\x1b]133;D\x07");
+    assert!(mode_set(&t, 1004), "zsh's first prompt sends a D with no C");
+    assert_eq!(t.kitty_flags().bits(), 1);
+
+    t.feed(b"\x1b]133;C\x07\x1b[?1004l\x1b[<u\x1b[?2048h\x1b]133;D\x07");
+    assert!(mode_set(&t, 1004));
+    assert_eq!(t.kitty_flags().bits(), 1);
+    assert!(!mode_set(&t, 2048));
+
+    t.feed(b"\x1b[?2048h\x1b]133;D\x07");
+    assert!(
+        mode_set(&t, 2048),
+        "the handover is spent by the D that used it"
+    );
+}
+
+/// bash, zsh and fish each set bracketed paste before the prompt that carries `A`, so
+/// neither mark may touch it. The sequence is bash 5.3's, as recorded on a pty.
+#[test]
+fn bracketed_paste_is_left_to_the_shell() {
+    let mut t = term(
+        4,
+        40,
+        b"\x1b[?2004h\x1b]133;A\x07$ \x1b]133;B\x07\x1b[?2004l\r\n\x1b]133;C\x07\
+          \x1b[?2004h\x1b]133;D;1\x07",
+    );
+    assert!(
+        t.bracketed_paste(),
+        "a command's stale set is the shell's to clear"
+    );
+    t.feed(b"\x1b[?2004h\x1b]133;A\x07$ ");
+    assert!(t.bracketed_paste());
+}
+
+/// A program that leaves the alternate screen without popping its kitty flags hands them
+/// to the next one that does not push its own. After a `D` nothing is alive there.
+#[test]
+fn a_command_end_empties_the_alternate_kitty_stack() {
+    let mut t = term(4, 40, b"\x1b]133;C\x07\x1b[?1049h\x1b[>5u\x1b[?1049l");
+    t.feed(b"\x1b]133;D\x07\x1b]133;C\x07\x1b[?1049h");
+    assert_eq!(t.keys(), KeyEncoding::Legacy);
+}
+
+/// tmux passes its panes' marks through while it holds the mouse and the size reports
+/// on the alternate screen. A `C` or `D` there is not the outer shell's and moves nothing.
+#[test]
+fn marks_on_the_alternate_screen_leave_the_modes_alone() {
+    let mut t = term(
+        4,
+        40,
+        b"\x1b]133;C\x07\x1b[?1049h\x1b[?1002h\x1b[?2048h\x1b[>1u",
+    );
+    t.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;C\x07\x1b]133;D;0\x07");
+    assert!(mode_set(&t, 1002));
+    assert!(mode_set(&t, 2048));
+    assert_eq!(t.kitty_flags().bits(), 1);
+
+    // tmux exits, and the outer shell's `D` still has the handover from before it.
+    t.feed(b"\x1b[?1049l\x1b]133;D;0\x07");
+    assert!(!mode_set(&t, 1002));
+    assert!(!mode_set(&t, 2048));
+}

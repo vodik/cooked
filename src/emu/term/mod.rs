@@ -15,7 +15,7 @@ use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
 use super::style::{StyleId, StyleStore};
 use super::text::{self, Segmenter, Step, Width};
-use csi::{PushedPen, SavedMode};
+use csi::{Handover, PushedPen, SavedMode};
 pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};
 use keys::{KittySetMode, KittyStack};
 use pen::PenState;
@@ -1142,7 +1142,8 @@ struct Modes {
     /// stacks". A full-screen program pushes after entering the alternate screen, and if
     /// it dies without popping, a shared stack would leave the shell reporting keys in a
     /// protocol it never asked for; with one per screen, `?1049l` is the cleanup. As in
-    /// kitty, nothing clears the alternate stack on the way back in.
+    /// kitty, nothing clears the alternate stack on the way back in, but the shell's OSC
+    /// 133 `D` empties it and restores the primary one; see [`State::take_back`].
     kitty_keys: PerScreen<KittyStack>,
     /// LNM (ANSI mode 20): LF also returns the carriage.
     newline_mode: bool,
@@ -1335,6 +1336,13 @@ struct State {
     /// [`Levels::reverse_screen_toggles`]. Beside [`Modes`] rather than in it, so that a
     /// reset, which puts every mode back, does not also make a count go backwards.
     reverse_screen_toggles: u32,
+    /// The input modes as the shell left them when it handed the terminal to a command,
+    /// at OSC 133 `C`, to be put back at the `D` that ends it; see [`Handover`].
+    ///
+    /// On [`State`] rather than [`Modes`], because it is the shell's and not the child's:
+    /// `reset` typed at a prompt runs as a command, and the modes its RIS clears are the
+    /// ones the `D` after it has to restore.
+    handover: Option<Handover>,
     /// What DECSC saved of [`Modes::charsets`], for the primary screen and the alternate.
     ///
     /// VT100 DECSC saves the designations and the shift along with the cursor, and a child

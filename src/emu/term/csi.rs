@@ -113,6 +113,49 @@ pub(super) enum SavedMode {
     Format(MouseFormat),
 }
 
+/// The modes that make the terminal send the child something it did not type, as they
+/// stood when the shell handed the terminal to a command. See [`State::take_back`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Handover {
+    mouse: Mouse,
+    focus_events: bool,
+    color_scheme_updates: bool,
+    size_reports: bool,
+    alt_scroll: bool,
+    app_cursor: bool,
+    app_keypad: bool,
+    modify_other_keys: Option<ModifyOtherKeys>,
+    primary_keys: KittyStack,
+}
+
+impl Handover {
+    fn capture(modes: &Modes) -> Self {
+        Self {
+            mouse: modes.mouse,
+            focus_events: modes.focus_events,
+            color_scheme_updates: modes.color_scheme_updates,
+            size_reports: modes.size_reports,
+            alt_scroll: modes.alt_scroll,
+            app_cursor: modes.app_cursor,
+            app_keypad: modes.app_keypad,
+            modify_other_keys: modes.modify_other_keys,
+            primary_keys: modes.kitty_keys.primary.clone(),
+        }
+    }
+
+    fn restore(self, modes: &mut Modes) {
+        modes.mouse = self.mouse;
+        modes.focus_events = self.focus_events;
+        modes.color_scheme_updates = self.color_scheme_updates;
+        modes.size_reports = self.size_reports;
+        modes.alt_scroll = self.alt_scroll;
+        modes.app_cursor = self.app_cursor;
+        modes.app_keypad = self.app_keypad;
+        modes.modify_other_keys = self.modify_other_keys;
+        modes.kitty_keys.primary = self.primary_keys;
+    }
+}
+
 impl State {
     pub(super) fn dec_mode(&mut self, mode: DecMode, on: bool) {
         match mode {
@@ -377,6 +420,66 @@ impl State {
         self.saved_charsets = PerScreen::default();
         if had_mouse {
             self.events.push(Event::Mouse(self.modes.mouse));
+        }
+    }
+
+    /// OSC 133 `C`: note the input modes the shell is handing to the command.
+    ///
+    /// Only on the primary screen. A `C` on the alternate screen comes from a shell inside
+    /// a multiplexer such as tmux, which passes its panes' marks through while it holds
+    /// the mouse and the size reports itself, and a capture there would hand tmux's modes
+    /// to the outer shell's `D`.
+    pub(super) fn hand_over(&mut self) {
+        if !self.shown.is_alternate() {
+            self.handover = Some(Handover::capture(&self.modes));
+        }
+    }
+
+    /// OSC 133 `D`: the command is over, so the input modes go back to what the shell
+    /// handed over at its `C`, and the alternate screen's kitty stack is emptied.
+    ///
+    /// A command that dies with a mode set leaves the shell reading reports it never
+    /// asked for. With 2048 on, every resize types `ESC [ 48 ; 24 ; 80 ; ... t` at the
+    /// prompt; with 1003 on, every cell the pointer crosses does the same; with a kitty
+    /// flag pushed on the primary screen, bash's `C-r` arrives as `CSI 114 ; 5 u`. The
+    /// shell's own marks are the one signal that the program is gone however it went, and
+    /// no other terminal has them: ghostty, kitty, wezterm and foot record the marks for
+    /// navigation and reset nothing on them.
+    ///
+    /// `D` and not `A`, which a prompt mark would suggest. bash 5.3, zsh 5.9 and fish 4.9
+    /// were all watched on a pty: each turns on the modes its line editor wants (bracketed
+    /// paste; fish also 2031, modifyOtherKeys and the keypad) *before* printing the prompt
+    /// that carries `A`, and turns them off again before `C`. A reset at `A` would take
+    /// them away from the shell that has just asked for them, and would do it again at
+    /// every redraw, since a resize or zsh's `reset-prompt` reprints the prompt and its
+    /// mark. Every shell emits `D` before its line editor starts.
+    ///
+    /// Restored rather than reset to their power-on values, so a mode the shell set for
+    /// itself is kept: a `.zshrc` that turns on focus reports has them on at every `C`.
+    /// A `D` with no `C` before it, such as the one zsh sends at its first prompt, puts
+    /// nothing back. Neither does a program that runs a command without marks, so
+    /// `vim`'s `:!make` keeps vim's own modes across the round trip.
+    ///
+    /// Bracketed paste is not among the modes, though it is the one most often left on.
+    /// Every line editor that uses it sets it at each prompt and clears it before each
+    /// command, so a stale one never outlives the next prompt, and a prompt theme that
+    /// draws its `D` inside `PS1`, after readline has set it, would lose it here.
+    ///
+    /// The alternate screen is emptied rather than restored because nothing can be alive
+    /// on it once the shell is prompting on the primary screen, and a kitty flag left
+    /// there would otherwise be handed to the next full-screen program that does not push
+    /// its own.
+    pub(super) fn take_back(&mut self) {
+        if self.shown.is_alternate() {
+            return;
+        }
+        self.modes.kitty_keys.alternate = KittyStack::default();
+        if let Some(handover) = self.handover.take() {
+            let mouse = self.modes.mouse;
+            handover.restore(&mut self.modes);
+            if self.modes.mouse != mouse {
+                self.events.push(Event::Mouse(self.modes.mouse));
+            }
         }
     }
 

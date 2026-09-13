@@ -60,8 +60,12 @@ impl State {
         // Only an initial prompt moves `prompt_start`. A continuation prompt is the same
         // command still being typed, so the prompt it began at is the one
         // `clear_to_prompt` must keep and the one Emacs files the command record under.
-        if mark == Mark::PromptStart {
-            self.prompt_start = Some(at);
+        // The command marks move the input modes; see [`State::take_back`].
+        match mark {
+            Mark::PromptStart => self.prompt_start = Some(at),
+            Mark::CommandStart(_) => self.hand_over(),
+            Mark::CommandEnd(_) => self.take_back(),
+            Mark::PromptContinuation | Mark::PromptEnd => {}
         }
         self.events.push(Event::Mark(mark, at, id));
     }
