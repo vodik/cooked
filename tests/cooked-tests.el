@@ -141,5 +141,33 @@ everything that is not a positive number and the caller falls back to 1."
   (should (> cooked-tests-timeout-scale 0))
   (should (equal (* 5 cooked-tests-timeout-scale) (cooked-tests-timeout 5))))
 
+(ert-deftest cooked-the-test-suite-refuses-to-read-the-terminal ()
+  "A batch read that would take its answer from stdin signals instead.
+
+Under a pipe that is open and silent such a read blocks, and under `</dev/null'
+`read-key\=' blocks too, so the suite stops with nothing on screen to say where.
+A pushed event answers the event readers and is let through, but it does not
+answer `read-from-minibuffer\=', which in batch reads stdin whatever is queued.
+A refusal raised from a timer only prints, so it is recorded as well, and the
+session fixtures fail the test that left one behind."
+  (let ((cooked-tests--refused-reads nil))
+    (let ((unread-command-events (list ?a ?\r)))
+      (should-error (read-from-minibuffer "Name: ") :type 'cooked-tests-terminal-read))
+    (should-error (read-string "Name: ") :type 'cooked-tests-terminal-read)
+    (should-error (read-passwd "Password: ") :type 'cooked-tests-terminal-read)
+    (should-error (read-key "Send key: ") :type 'cooked-tests-terminal-read)
+    (should-error (read-event) :type 'cooked-tests-terminal-read)
+    (let ((unread-command-events (list ?a)))
+      (should (eq ?a (read-event))))
+    (should (equal (mapcar #'car cooked-tests--refused-reads)
+                   '(read-event read-key read-string read-string read-from-minibuffer))))
+  ;; From a timer, inside a session: the error is swallowed where it is raised,
+  ;; and the fixture still fails the test.
+  (should-error
+   (cooked-tests--with-session '("/bin/sh" "-c" "exec cat")
+     (run-at-time 0 nil (lambda () (ignore-errors (read-passwd "Password: "))))
+     (cooked-tests--pump 0.2))
+   :type 'ert-test-failed))
+
 (provide 'cooked-tests)
 ;;; cooked-tests.el ends here

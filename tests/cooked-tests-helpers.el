@@ -100,26 +100,57 @@ Returns the packages that could not be found."
 ;; the `Selecting deleted buffer' timer error in every run.
 ;;
 ;; So any such read is refused outright while the suite runs in batch, with the
-;; prompt in the message.  From inside a test that fails the test; from a timer
-;; it prints an error naming the prompt, which is loud where a hang is silent.
-;; A read that has real input to consume -- a keyboard macro, or
-;; `unread-command-events' -- is left alone, since that is how a test legitimately
-;; answers one.  `read-string' and `yes-or-no-p' are guarded by name as well as
+;; prompt in the message.  From inside a test that fails the test.  From a timer
+;; the error only prints and the test passes, which is no louder than the
+;; `</dev/null' run this replaced, so every refusal is also recorded in
+;; `cooked-tests--refused-reads' and the session fixtures fail a test that
+;; leaves one there.
+;;
+;; A keyboard macro is real input and is let through.  `unread-command-events'
+;; is real input only to the event readers: `read-event', `read-key' and their
+;; kin take the pushed event, which is how the mouse-tracking tests end a drag,
+;; but a batch `read-from-minibuffer' never looks at the queue and reads stdin
+;; regardless -- with (?a ?\r) pushed it returns the next line of the pipe.
+;;
+;; The event readers are guarded as well as the minibuffer ones, because under
+;; `</dev/null' they are worse: `read-key' with nothing pushed blocks forever
+;; rather than failing, and cooked calls it from `cooked-send-literal-key'.
+;; `read-string' and `yes-or-no-p' are guarded by name as well as
 ;; `read-from-minibuffer', because they reach it from C, where no advice sees
-;; the call.
+;; the call.  `read-multiple-choice', `read-char-choice', `y-or-n-p' and
+;; `read-passwd' need no entry of their own: each is Lisp that ends in one of
+;; these.
 
-(defun cooked-tests--refuse-terminal-read (name function prompt &rest args)
-  "Call FUNCTION with PROMPT and ARGS, unless the answer would come from stdin.
-NAME is what FUNCTION is called, for the error."
-  (if (and noninteractive
-           (not executing-kbd-macro)
-           (null unread-command-events))
-      (error "cooked-tests: %s would read stdin for %S" name prompt)
-    (apply function prompt args)))
+(define-error 'cooked-tests-terminal-read "cooked-tests: this would read stdin")
+
+(defvar cooked-tests--refused-reads nil
+  "Each read `cooked-tests--refuse-terminal-read' refused, newest first.
+An entry is the guarded reader and its prompt: a `read-passwd' from a timer
+leaves (read-string \"Password: \").
+A session fixture binds this around its body and asserts it is still empty
+afterwards, so a read from a timer fails the test that caused it.")
+
+(defun cooked-tests--refuse-terminal-read (name events function &rest args)
+  "Call FUNCTION with ARGS, unless the answer would come from stdin.
+NAME is what FUNCTION is called, for the error and the record.  EVENTS
+non-nil means FUNCTION reads events, and so is answered by a pending
+`unread-command-events' as well as by a keyboard macro."
+  (if (or (not noninteractive)
+          executing-kbd-macro
+          (and events unread-command-events))
+      (apply function args)
+    (push (list name (car args)) cooked-tests--refused-reads)
+    (signal 'cooked-tests-terminal-read (list name (car args)))))
 
 (dolist (function '(read-from-minibuffer read-string yes-or-no-p))
   (advice-add function :around
-              (apply-partially #'cooked-tests--refuse-terminal-read function)
+              (apply-partially #'cooked-tests--refuse-terminal-read function nil)
+              '((name . cooked-tests--refuse-terminal-read))))
+
+(dolist (function '(read-event read-char read-char-exclusive read-key
+                    read-key-sequence read-key-sequence-vector))
+  (advice-add function :around
+              (apply-partially #'cooked-tests--refuse-terminal-read function t)
               '((name . cooked-tests--refuse-terminal-read))))
 
 ;;;; Waiting, and how long for
@@ -248,16 +279,22 @@ assertion that buffer text still equals the grid, is gated on it too and
 otherwise never runs at all.
 
 A test that is *about* containment has to bind it back to nil for the duration;
-see `cooked-osc-handler-errors-do-not-break-redisplay'."
+see `cooked-osc-handler-errors-do-not-break-redisplay'.
+
+BODY also fails if anything it ran, a timer included, tried to read the
+terminal: a secret prompt raised 30ms after BODY pumped past it signals only
+inside the timer, and `cooked-tests--refused-reads' is what reaches the test."
   (declare (indent 1))
   `(let ((buffer (generate-new-buffer "*cooked-test*"))
-         (cooked-debug t))
+         (cooked-debug t)
+         (cooked-tests--refused-reads nil))
      (unwind-protect
          (with-current-buffer buffer
            (cooked-mode)
            (cooked--start ,argv)
            (cooked--refresh-keymap)
-           ,@body)
+           (prog1 (progn ,@body)
+             (should-not cooked-tests--refused-reads)))
        (with-current-buffer buffer (cooked--cleanup))
        (kill-buffer buffer))))
 
@@ -457,6 +494,9 @@ the only handle on the generated startup files, and `cooked--cleanup\=' removes
 them through it.  The helper this replaces discarded it, and so left one
 temporary directory behind per test that used it.
 
+Like `cooked-tests--with-session\=', it fails a BODY that left a refused
+terminal read in `cooked-tests--refused-reads\='.
+
 The default settle condition asks for the editable line as well as the mark,
 because \"the prompt has arrived\" is what callers mean and `cooked--semantic\='
 alone is true a moment before the input region exists."
@@ -464,7 +504,8 @@ alone is true a moment before the input region exists."
   (let ((invocation (gensym "invocation"))
         (extra (gensym "extra")))
     `(let ((buffer (generate-new-buffer (or ,name (format "*cooked-%s*" ,shell))))
-           (,extra ,env))
+           (,extra ,env)
+           (cooked-tests--refused-reads nil))
        (unwind-protect
            (with-current-buffer buffer
              (cooked-mode)
@@ -479,7 +520,8 @@ alone is true a moment before the input region exists."
                            '(lambda () (and (eq cooked--semantic 'input)
                                             (cooked--input-start-position))))
                       ,timeout))
-             ,@body)
+             (prog1 (progn ,@body)
+               (should-not cooked-tests--refused-reads)))
          (with-current-buffer buffer (cooked--cleanup))
          (kill-buffer buffer)))))
 
