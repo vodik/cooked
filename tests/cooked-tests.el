@@ -83,6 +83,7 @@
 (require 'cooked-tests-consult)
 (require 'cooked-tests-command-search)
 (require 'cooked-tests-osc)
+(require 'cooked-tests-osc-context)
 (require 'cooked-tests-link)
 (require 'cooked-tests-completion)
 (require 'cooked-tests-glyph)

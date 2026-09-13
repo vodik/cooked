@@ -226,6 +226,7 @@ already loaded and running is a switch in name only — these are separate files
   (require 'cooked-file-link)
   (require 'cooked-next-error)
   (require 'cooked-command-decorations)
+  (require 'cooked-osc-context)
   (require 'cooked-project)
   (require 'cooked-command-search)
   (require 'cooked-consult)             ; wants consult
@@ -284,6 +285,14 @@ Puts the emulator on *any* comint buffer — =M-x shell=, =run-python=,
 
 A fringe marker per command, coloured by exit status — running, succeeded, failed — so
 you can see how a scrollback full of commands went without reading any of it.
+
+** cooked-osc-context
+
+Says in the mode line when the shell is somewhere else than it started: =root= under
+=run0=, =container= under =systemd-nspawn= or =machinectl shell=, =vm= under
+=systemd-vmspawn=. systemd 258 and later announce these with OSC 3008, so nothing
+scrapes the prompt; only the context's type is read, never text the child chose.
+~cooked-osc-context-labels~ picks which types are named.
 
 ** cooked-project
 
