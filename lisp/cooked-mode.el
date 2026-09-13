@@ -1119,6 +1119,34 @@ corrupt a redisplay cooked cannot see, let alone repair."
                              first-row (1+ (- last-row first-row))))
       (cooked--drain-and-apply))))
 
+(defun cooked-clear-scrollback ()
+  "Delete everything above the current prompt.
+
+comint's \\[cooked-clear-scrollback] read literally, and the seam between the emulator's grid
+and Emacs\=' scrollback is not the user's business: whether what is above the
+prompt has scrolled off the grid yet or is still on it, it goes.  Scrollback
+alone was the old behaviour and looked inert at exactly the moment it is reached
+for -- a few commands into a session nothing has scrolled off at all, and every
+line on screen is a row the emulator still holds.
+
+Each side is asked for its own half.  `cooked--clear-to-prompt\=' removes the
+rows, because rows have one owner and only the emulator knows which of them are
+above the prompt; the scrollback is buffer text, so Emacs deletes that itself;
+and the drain repaints what moved -- the shape of `cooked-delete-output\='.
+
+The prompt line and anything typed at it stay, and end up at the top.  comint
+deletes its prompt because there it is only text; here it is a row the shell is
+still drawing on, and taking it would corrupt a redisplay cooked cannot repair.
+
+On the alternate screen the grid belongs to a running program rather than to a
+transcript, so only the scrollback goes -- see `cooked--clear-to-prompt\='."
+  (interactive)
+  (when cooked--session
+    (cooked--clear-to-prompt cooked--session))
+  (cooked--discard-scrollback (cooked--screen-start-position))
+  (when cooked--session
+    (cooked--drain-and-apply)))
+
 (defun cooked-toggle-fold ()
   "Hide or reveal the output of the command at point.
 
