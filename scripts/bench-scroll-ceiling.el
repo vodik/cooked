@@ -32,8 +32,15 @@
 (defconst ceil--out (or (getenv "COOKED_CEILING_OUT") "/tmp/cooked-ceiling.out"))
 
 (defconst ceil--awk-program "\
-BEGIN { L = \"\"; for (i = 0; i < WIDTH; i++) L = L substr(CHARS, (i % length(CHARS)) + 1, 1) }
-{ for (i = 0; i < 10; i++) printf \"%s%04d\\r\\n\", substr(L, 1, WIDTH - 4), NR
+BEGIN {
+  L = \"\"
+  for (i = 0; i < WIDTH; i++) {
+    if (STYLED == 1 && i % 8 == 0) L = L sprintf(\"\\033[3%dm\", (i / 8) % 8)
+    L = L substr(CHARS, (i % length(CHARS)) + 1, 1)
+  }
+  if (STYLED == 1) L = L \"\\033[0m\"
+}
+{ for (i = 0; i < 10; i++) printf \"%s%04d\\r\\n\", L, NR
   fflush() }
 "
   "Ten lines of WIDTH columns per line read on stdin, so the burst is on demand.
@@ -44,6 +51,20 @@ where a flood would interleave the child's writes with the measurement.")
 
 (defconst ceil--awk
   (let ((f (make-temp-file "cooked-burst" nil ".awk" ceil--awk-program))) f))
+
+(defvar ceil--styled nil
+  "Whether the generated content carries an SGR change every eight columns.
+
+The 2026-09-05 measurement this file has to be reconciled with used styled long
+prose and saw the rejoin effect at *three* screen rows per logical line, where
+plain generated text shows none.  Either its lines were longer than they looked
+or face density contributes after all -- its own diff-hunk control was read as
+ruling that out, and this is the variable that settles which.
+
+Note the styled line is *not* truncated to WIDTH the way the plain one is: an
+escape sequence cut in half is not a shorter line, it is a broken one.  So a
+styled row is WIDTH visible columns plus its escapes, which is the same amount
+of *text* and more bytes -- and the bytes are the thing being varied.")
 
 (defvar ceil--log nil)
 (setq gc-cons-threshold (* 512 1024 1024) gc-cons-percentage 0.8)
@@ -89,8 +110,8 @@ what is timed is redisplay and nothing else."
           ;; and scroll an empty buffer.
           (cooked--start
            (list "/bin/sh" "-c"
-                 (format "stty raw -echo; exec awk -v WIDTH=%d -v CHARS=abcdefghijklmnopqrstuvwxyz0123456789 -f %s"
-                         width (shell-quote-argument ceil--awk))))
+                 (format "stty raw -echo; exec awk -v WIDTH=%d -v STYLED=%d -v CHARS=abcdefghijklmnopqrstuvwxyz0123456789 -f %s"
+                         width (if ceil--styled 1 0) (shell-quote-argument ceil--awk))))
           (cooked--refresh-keymap)
           ;; Fill: ask for enough bursts that the scrollback is deep enough to
           ;; scroll back through without hitting the top.
@@ -136,8 +157,8 @@ what is timed is redisplay and nothing else."
           ;; therefore has to write CR LF itself.
           (cooked--start
            (list "/bin/sh" "-c"
-                 (format "stty raw -echo; exec awk -v WIDTH=%d -v CHARS=abcdefghijklmnopqrstuvwxyz0123456789 -f %s"
-                         width (shell-quote-argument ceil--awk))))
+                 (format "stty raw -echo; exec awk -v WIDTH=%d -v STYLED=%d -v CHARS=abcdefghijklmnopqrstuvwxyz0123456789 -f %s"
+                         width (if ceil--styled 1 0) (shell-quote-argument ceil--awk))))
           (cooked--refresh-keymap)
           (dotimes (_ 10) (accept-process-output nil 0.05)
             (when cooked--session
@@ -220,7 +241,15 @@ what is timed is redisplay and nothing else."
   (ceil--gesture "GESTURE 3x-wrapped, rejoin=t"    t   (* 3 cols)  10 60 20)
   (ceil--gesture "GESTURE 3x-wrapped, rejoin=nil"  nil (* 3 cols)  10 60 20)
   (ceil--gesture "GESTURE 10x-wrapped, rejoin=t"   t   (* 10 cols) 10 60 20)
-  (ceil--gesture "GESTURE 10x-wrapped, rejoin=nil" nil (* 10 cols) 10 60 20)))
+  (ceil--gesture "GESTURE 10x-wrapped, rejoin=nil" nil (* 10 cols) 10 60 20)
+  ;; The same three, styled.  This is the variable that reconciles the
+  ;; 2026-09-05 measurement, which saw the effect at three rows per line on
+  ;; styled prose where plain text shows none.
+  (let ((ceil--styled t))
+    (ceil--gesture "GESTURE styled 3x, rejoin=t"    t   (* 3 cols)  10 60 20)
+    (ceil--gesture "GESTURE styled 3x, rejoin=nil"  nil (* 3 cols)  10 60 20)
+    (ceil--gesture "GESTURE styled 10x, rejoin=t"   t   (* 10 cols) 10 60 20)
+    (ceil--gesture "GESTURE styled 10x, rejoin=nil" nil (* 10 cols) 10 60 20))))
 
 (with-temp-file ceil--out
   (insert (format "load-average %s\n" (load-average))
