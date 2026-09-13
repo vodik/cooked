@@ -507,6 +507,19 @@ pub struct Run {
     pub link: Option<LinkId>,
 }
 
+impl Run {
+    /// A description of the decoration on this run's character INDEX, for a test that
+    /// compares what two sequences of runs draw character by character.
+    #[doc(hidden)]
+    pub fn deco_at(&self, index: usize) -> Option<String> {
+        match &self.deco {
+            Some(Deco::Glyphs(glyphs)) => glyphs.get(index).map(|g| format!("{g:?}")),
+            Some(Deco::Images(places)) => places.get(index).map(|p| format!("{p:?}")),
+            None => None,
+        }
+    }
+}
+
 /// How many semantic marks one row will hold before the oldest is dropped.
 ///
 /// Eight covers the real shapes several times over -- a prompt row carries the previous
@@ -964,6 +977,28 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             }
         }
         runs
+    }
+
+    /// Runs for the columns START..END alone, as they would render if the row began at
+    /// START.
+    ///
+    /// What a span edit sends: the replacement for part of a row Emacs already holds. The
+    /// caller chooses START and END on whole cells and outside any box-glyph run, so the
+    /// runs here are the same characters, renditions and decorations the full row's runs
+    /// carry over those columns; only where a run happens to be cut differs.
+    pub(crate) fn runs_between(&self, start: usize, end: usize) -> Vec<Run> {
+        let end = end.min(self.len());
+        let start = start.min(end);
+        if start == 0 {
+            return self.runs_to(end);
+        }
+        let extras = self
+            .extras()
+            .iter()
+            .filter(|(at, _)| (start..end).contains(&usize::from(*at)))
+            .map(|(at, extra)| (*at - start as u16, extra.clone()))
+            .collect();
+        Row::from_parts(self.cells()[start..end].to_vec(), extras, false).runs_to(end - start)
     }
 
     fn runs_to(&self, end: usize) -> Vec<Run> {

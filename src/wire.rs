@@ -136,8 +136,14 @@ pub(crate) fn emission_to_lisp(env: Env, filter: &Filter) -> Result<Value> {
 /// clean, so a false positive becomes one giant reinsert, and a reinsert destroys every
 /// marker and overlay inside it. Here an undamaged row between two damaged ones is never
 /// inside a block.
+///
+/// A row sent as an [`Edit`](emu::Edit) is not a whole row, so it belongs to no run: it
+/// breaks the run it would have joined, and it goes out in `:edits` instead.
 fn contiguous_runs(rows: &[DamagedRow]) -> impl Iterator<Item = &[DamagedRow]> {
-    rows.chunk_by(|this, next| next.index == this.index + 1)
+    rows.chunk_by(|this, next| {
+        next.index == this.index + 1 && this.edit.is_none() && next.edit.is_none()
+    })
+    .filter(|run| run[0].edit.is_none())
 }
 
 /// `(:scrolled ROWS :rows ((FIRST . BLOCK)...) :height N :used N :head N
@@ -165,6 +171,34 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
                 block.end_row(row.wrapped);
             }
             env.cons(env.into_lisp(run[0].index)?, block.into_lisp(&env)?)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // `(INDEX CHAR-START CHAR-END LENGTH . BLOCK)` per row sent as a replacement for part
+    // of itself. The block holds only the replacement's text, while its row table
+    // describes the whole row, since that is what the width guard and the wrap mark
+    // measure. LENGTH is the whole row's characters afterwards; see `Edit::chars`.
+    let edits = update
+        .delta
+        .rows
+        .iter()
+        .filter_map(|row| row.edit.as_ref().map(|edit| (row, edit)))
+        .map(|(row, edit)| {
+            let mut block = Block::default();
+            block.push_runs(env, &edit.runs)?;
+            block.rows.push(BlockRow {
+                start: 0,
+                ..Block::measure(&row.runs, row.wrapped)
+            });
+            env.cons(
+                env.into_lisp(row.index)?,
+                env.cons(
+                    env.into_lisp(edit.char_start)?,
+                    env.cons(
+                        env.into_lisp(edit.char_end)?,
+                        env.cons(env.into_lisp(edit.chars)?, block.into_lisp(&env)?)?,
+                    )?,
+                )?,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     // `(TOP BOTTOM COUNT UP)` per move, in the order they happened; see [`Shift`]. A list
@@ -214,6 +248,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
         ":scrolled"    => scrolled,
         ":shifts"      => shifts,
         ":rows"        => rows,
+        ":edits"       => edits,
         ":height"      => update.delta.height,
         ":used"        => update.delta.used,
         ":head"        => update.delta.head,
@@ -488,6 +523,19 @@ impl Block {
         }
         self.text.push_str(&run.text);
         self.offset += chars;
+    }
+
+    /// The row table entry for RUNS, a whole row, without sending its text.
+    ///
+    /// For a row sent as an edit: the replacement is only part of the row, and the width
+    /// guard and the wrap mark still need the measurements of all of it.
+    fn measure(runs: &[Run], wrapped: bool) -> BlockRow {
+        let mut block = Block::default();
+        for run in runs {
+            block.push_run(run, run.text.chars().count());
+        }
+        block.end_row(wrapped);
+        block.rows[0]
     }
 
     fn push_newline(&mut self) {
@@ -926,6 +974,7 @@ mod tests {
                 index: *i,
                 wrapped: false,
                 runs: Vec::new(),
+                edit: None,
             })
             .collect();
         contiguous_runs(&rows)

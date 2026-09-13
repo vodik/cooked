@@ -979,5 +979,26 @@ character rather than a line break."
     (put-text-property 3 4 'cooked-wrap t)
     (should-not (cooked-link--join-wrapped (point-min) (point-max)))))
 
+(ert-deftest cooked-a-url-an-edit-changed-is-found-again-whole ()
+  "An edit that rewrites part of a URL leaves the guess covering the new URL.
+
+The edit replaces only the characters that changed, and jit-lock is told
+only about those; the link pass rounds out to the whole line, so the part of
+the URL the edit did not touch is scanned again with the rest."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'see https://example.com/aaa for the full report today\\n'; sleep 0.4; printf '\\033[1;25Hbbb\\033[3;1Hsync'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "aaa" (cooked-tests--text)))))
+    (cooked-tests--fontify)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "sync" (cooked-tests--text)))))
+    (cooked-tests--fontify)
+    (let ((at (cooked-tests--link-at "https://example.com/bbb")))
+      (should (equal (get-text-property at 'cooked-link-url)
+                     "https://example.com/bbb"))
+      (should (equal (get-text-property (+ at 22) 'cooked-link-url)
+                     "https://example.com/bbb")))))
+
 (provide 'cooked-tests-link)
 ;;; cooked-tests-link.el ends here

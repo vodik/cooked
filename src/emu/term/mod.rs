@@ -395,6 +395,39 @@ pub struct Levels {
 pub struct DamagedRow {
     pub index: usize,
     pub wrapped: bool,
+    /// The whole row, which is what the row table is measured from even when only part
+    /// of it is sent.
+    pub runs: Vec<Run>,
+    /// Part of the row to replace in Emacs' copy instead of the whole of it, when Emacs
+    /// holds the rest already; see [`Edit`].
+    pub edit: Option<Edit>,
+}
+
+/// A replacement for part of a row Emacs already shows.
+///
+/// A spinner turning, a clock ticking or a progress bar growing changes a few cells of a
+/// row, and rewriting the whole row costs Emacs the insertion and the text properties of
+/// everything around them, and takes every marker and overlay on the row along. So the
+/// drain names the characters to replace instead: CHAR-START..CHAR-END of the buffer's
+/// text for the row, counted in characters as the buffer holds them, and the runs that
+/// go there.
+///
+/// Offsets are characters of the text *Emacs* holds, not columns of the grid: a wide
+/// character is one character on two columns, and a combining mark is a character on
+/// none. The core counts them from its copy of what it last sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Edit {
+    /// Characters of the row before the replaced text.
+    pub char_start: usize,
+    /// Where the replaced text ends, or `None` for the end of the line, which is how a
+    /// change that reaches the row's old last character is spelled: it also takes any
+    /// spaces Lisp padded the row with.
+    pub char_end: Option<usize>,
+    /// Characters of the whole row once the edit is made. Text past it in the buffer is
+    /// padding Lisp added for a cursor that has since moved on, which rewriting the row
+    /// would have removed, and so does an edit.
+    pub chars: usize,
+    /// What replaces it.
     pub runs: Vec<Run>,
 }
 

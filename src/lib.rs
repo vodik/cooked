@@ -143,9 +143,9 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         "cooked--spawn" 5..=8 => spawn;
 
         /// Collect everything that changed in SESSION since the last call.
-        /// Returns a plist with :scrolled, :shifts, :rows, :height, :used, :head, :cursor,
-        /// :reverse, :marks, :alt, :app-cursor, :keys, :kitty-flags, :modify-other-keys,
-        /// :mode, :images, :links, :events and :exit.
+        /// Returns a plist with :scrolled, :shifts, :rows, :edits, :height, :used, :head,
+        /// :cursor, :reverse, :marks, :alt, :app-cursor, :keys, :kitty-flags,
+        /// :modify-other-keys, :mode, :images, :links, :events and :exit.
         ///
         /// :scrolled and :rows are the same shape, so one renderer handles both: a block is
         /// (TEXT STYLES DECOS LINKS ROWS), where the spans carry character offsets into TEXT
@@ -154,6 +154,11 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// damaged screen rows.  With REJOIN non-nil (the default), a line the terminal
         /// wrapped is emitted as one line rather than one per screen row.  :shifts lists the
         /// row moves to apply before :rows, whose indices are in post-shift coordinates.
+        /// :edits replaces part of a row Emacs already holds, as (INDEX CHAR-START CHAR-END
+        /// LENGTH . BLOCK): the characters CHAR-START to CHAR-END of the row, or to the end
+        /// of the line when CHAR-END is nil, give way to BLOCK's text, whose row table
+        /// describes the whole row, and anything past LENGTH characters goes.  Its indices
+        /// are post-shift too, and no row is in both lists.
         ///
         /// :height, :used and :head describe the grid's shape, so the buffer is shaped by what
         /// the emulator has rather than by a second opinion of it: the grid's row count, how many

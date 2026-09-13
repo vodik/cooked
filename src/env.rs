@@ -247,6 +247,7 @@ symbols! {
     Scrolled => ":scrolled",
     Shifts => ":shifts",
     Rows => ":rows",
+    Edits => ":edits",
     Height => ":height",
     Used => ":used",
     Head => ":head",

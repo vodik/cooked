@@ -151,4 +151,4 @@ pub(crate) use term::{
 // nothing here is more exposed than `cooked--apply' already assumes.
 pub use cell::Run;
 pub use screen::{Direction, Shift};
-pub use term::{BACKLOG_HIGH_WATER, DamagedRow, Delta, Levels, Scrolled, Term};
+pub use term::{BACKLOG_HIGH_WATER, DamagedRow, Delta, Edit, Levels, Scrolled, Term};

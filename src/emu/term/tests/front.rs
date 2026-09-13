@@ -125,3 +125,133 @@ fn a_mark_alone_changes_nothing_emacs_draws() {
     t.feed(b"\x1b]133;A\x07\x1b[1;1H\x1b[2K$ ");
     assert_eq!(sent(&mut t), Vec::<usize>::new());
 }
+
+/// What the next drain of T sends for row INDEX: `None` when the row is not sent,
+/// `Some(None)` when it is sent whole, and `Some(Some(..))` for an edit, as its offsets
+/// and its replacement text.
+#[allow(clippy::type_complexity)]
+fn edit_of(t: &mut Term, index: usize) -> Option<Option<(usize, Option<usize>, usize, String)>> {
+    let row = t.drain().rows.into_iter().find(|r| r.index == index)?;
+    Some(row.edit.map(|e| {
+        let text = e.runs.iter().map(|r| r.text.as_str()).collect();
+        (e.char_start, e.char_end, e.chars, text)
+    }))
+}
+
+#[test]
+fn a_turning_spinner_is_sent_as_its_one_character() {
+    let mut t = settled(2, 40, b"working | on the build");
+    t.feed(b"\x1b[1;9H/\x1b[2;1H");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((8, Some(9), 22, "/".to_string())))
+    );
+}
+
+#[test]
+fn a_growing_tail_runs_to_the_end_of_the_line() {
+    let mut t = settled(2, 40, b"progress [##");
+    t.feed(b"#]");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((12, None, 14, "#]".to_string())))
+    );
+}
+
+#[test]
+fn a_shorter_line_deletes_to_the_end_of_the_line() {
+    // The blank before the change is a trailing blank of the new text, so it goes too.
+    let mut t = settled(2, 40, b"a fairly long line of text ab");
+    t.feed(b"\x1b[1;28H\x1b[K");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((26, None, 26, String::new())))
+    );
+}
+
+#[test]
+fn an_edit_counts_a_wide_character_as_one_character() {
+    let mut t = settled(2, 40, "\u{4e00}\u{4e8c} x and some more".as_bytes());
+    t.feed(b"\x1b[1;6Hy\x1b[2;1H");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((3, Some(4), 18, "y".to_string())))
+    );
+}
+
+#[test]
+fn an_edit_counts_a_combining_mark_as_a_character_of_its_own() {
+    let mut t = settled(2, 40, "cafe\u{301} x and some more".as_bytes());
+    t.feed(b"\x1b[1;6Hy\x1b[2;1H");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((6, Some(7), 21, "y".to_string())))
+    );
+}
+
+#[test]
+fn a_change_inside_a_glyph_run_replaces_the_whole_run() {
+    let row = "status: \u{2500}\u{2500}\u{2500}\u{2500} \u{2500}\u{2500}\u{2500}\u{2500} old";
+    let mut t = settled(2, 40, row.as_bytes());
+    t.feed("\x1b[1;13H\u{2500}\x1b[2;1H".as_bytes());
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((8, Some(17), 21, "\u{2500}".repeat(9))))
+    );
+}
+
+#[test]
+fn a_change_after_a_glyph_run_leaves_the_run_alone() {
+    let row = "status: \u{2500}\u{2500}\u{2500}\u{2500} old";
+    let mut t = settled(2, 40, row.as_bytes());
+    t.feed(b"\x1b[1;14Hnew\x1b[2;1H");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((13, None, 16, "new".to_string())))
+    );
+}
+
+#[test]
+fn a_cursor_leaving_a_glyph_run_redraws_the_run() {
+    // Lisp split the run at the cursor's cell, so when the cursor leaves the run it is
+    // drawn again as one, even though the change that damaged the row is further along.
+    let row = "a label then \u{2500}\u{2500}  \u{2500}\u{2500} and the rest";
+    let mut t = settled(2, 40, format!("{row}\x1b[1;16H").as_bytes());
+    t.feed(b"\x1b[1;31Hx\x1b[2;1H");
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((
+            13,
+            Some(31),
+            32,
+            "\u{2500}\u{2500}  \u{2500}\u{2500} and the rex".to_string()
+        )))
+    );
+}
+
+#[test]
+fn a_change_to_most_of_the_row_is_sent_whole() {
+    let mut t = settled(2, 10, b"abcdefghij");
+    t.feed(b"\x1b[1;2HBCDEFG\x1b[2;1H");
+    assert_eq!(edit_of(&mut t, 0), Some(None));
+}
+
+#[test]
+fn a_row_with_an_image_is_sent_whole() {
+    let mut t = with_metrics(3, 40);
+    t.feed(b"caption text that is long enough\x1b[1;35H");
+    let pixels = b64(&[255; 12]);
+    t.feed(format!("\x1b_Ga=T,f=24,s=2,v=2,c=2,r=1,C=1;{pixels}\x1b\\").as_bytes());
+    t.drain();
+    t.feed(b"\x1b[1;2HX\x1b[3;1H");
+    assert_eq!(edit_of(&mut t, 0), Some(None));
+}
+
+#[test]
+fn row_zero_continuing_the_scrollback_is_sent_whole() {
+    // Row 0 begins mid-line in the buffer when the row that scrolled off above it wrapped.
+    let mut t = settled(2, 10, b"0123456789abcdefghijklmnopqrs");
+    assert!(t.screen().head() > 0, "the fixture must leave a seam");
+    t.feed(b"\x1b[1;2HX\x1b[2;1H");
+    assert_eq!(edit_of(&mut t, 0), Some(None));
+}

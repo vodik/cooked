@@ -393,12 +393,19 @@ still pass if the core stopped coalescing altogether."
            (mark (copy-marker (1+ middle)))
            (overlay (make-overlay middle (+ middle 3)))
            (runs nil)
-           (capture (lambda (rows &rest _)
-                      (push (mapcar (lambda (entry)
-                                      ;; (FIRST . ROWS-IN-THE-BLOCK), which is
-                                      ;; the length of the block's row table.
-                                      (cons (car entry) (length (nth 4 (cdr entry)))))
-                                    rows)
+           (capture (lambda (rows &optional _alt _relocations edits)
+                      (push (sort (append
+                                   (mapcar (lambda (entry)
+                                             ;; (FIRST . ROWS-IN-THE-BLOCK), which
+                                             ;; is the length of the block's row
+                                             ;; table.
+                                             (cons (car entry)
+                                                   (length (nth 4 (cdr entry)))))
+                                           rows)
+                                   ;; An edit is one row replaced in part, which
+                                   ;; is as narrow as a run of one row.
+                                   (mapcar (lambda (edit) (cons (car edit) 1)) edits))
+                                  #'car-less-than-car)
                             runs))))
       (advice-add 'cooked--render-rows :before capture)
       (unwind-protect
@@ -3417,6 +3424,108 @@ repainting the same cells afterwards gets them in the new colours."
                  (lambda (handle row) (push (cons handle row) unsent))))
         (cooked--flush-face-cache))
       (should (member (cons session nil) unsent)))))
+
+;;;; Edits: part of a row replaced in place
+
+(defun cooked-tests--screen-row-text (row)
+  "The buffer text of screen ROW."
+  (save-excursion
+    (cooked--goto-screen-row row)
+    (buffer-substring-no-properties (point) (line-end-position))))
+
+(defun cooked-tests--cell-marker (row column)
+  "A marker at COLUMN characters into screen ROW."
+  (save-excursion
+    (cooked--goto-screen-row row)
+    (copy-marker (+ (point) column))))
+
+(defun cooked-tests--marker-column (marker row)
+  "How many characters into screen ROW MARKER sits."
+  (save-excursion
+    (cooked--goto-screen-row row)
+    (- marker (point))))
+
+(ert-deftest cooked-an-edit-turns-a-spinner-without-rewriting-the-row ()
+  "One changed cell is replaced in place, and a marker elsewhere on the row stays."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'working | on the build'; sleep 0.4; printf '\\033[1;9H/\\033[3;1Hsync'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "build" (cooked-tests--text)))))
+    (let ((marker (cooked-tests--cell-marker 0 14)))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "sync" (cooked-tests--text)))))
+      (should (equal (cooked-tests--screen-row-text 0) "working / on the build"))
+      (should (= (cooked-tests--marker-column marker 0) 14)))))
+
+(ert-deftest cooked-an-edit-grows-the-tail-of-a-progress-bar ()
+  "A bar\'s tail is replaced in place, and its label keeps its markers."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'downloading the thing  [##        ]'; sleep 0.4; printf '\\033[1;26H###\\033[3;1Hsync'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "##" (cooked-tests--text)))))
+    (let ((marker (cooked-tests--cell-marker 0 4)))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "sync" (cooked-tests--text)))))
+      (should (equal (cooked-tests--screen-row-text 0) "downloading the thing  [####      ]"))
+      (should (= (cooked-tests--marker-column marker 0) 4)))))
+
+(ert-deftest cooked-an-edit-beside-a-wide-character-counts-characters ()
+  "The replaced text is found by characters, which a wide character is one of."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\344\\270\\200\\344\\272\\214 x and some more text'; sleep 0.4; printf '\\033[1;6Hy\\033[3;1Hsync'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "more" (cooked-tests--text)))))
+    (let ((marker (cooked-tests--cell-marker 0 1)))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "sync" (cooked-tests--text)))))
+      (should (equal (cooked-tests--screen-row-text 0) "一二 y and some more text"))
+      (should (= (cooked-tests--marker-column marker 0) 1)))))
+
+(ert-deftest cooked-an-edit-beside-box-glyphs-replaces-the-whole-run ()
+  "A change inside a run of box glyphs replaces the run, never half of one.
+
+Lisp draws a glyph run as one decoration over the whole run, so an edit that
+replaced part of one would leave the rest carrying a decoration drawn for a run
+that no longer exists.  Filling the gap between two borders joins them into one
+run, and every glyph of it has to carry the same decoration afterwards."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'status: \\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 \\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200 old'; sleep 0.4; printf '\\033[1;13H\\342\\224\\200\\033[3;1Hsync'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "old" (cooked-tests--text)))))
+    (let ((marker (cooked-tests--cell-marker 0 3)))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "sync" (cooked-tests--text)))))
+      (should (equal (cooked-tests--screen-row-text 0)
+                     (concat "status: " (make-string 9 ?─) " old")))
+      (should (= (cooked-tests--marker-column marker 0) 3))
+      (save-excursion
+        (cooked--goto-screen-row 0)
+        (let* ((bol (point))
+               (deco (get-text-property (+ bol 8) 'cooked-deco)))
+          (should deco)
+          (dotimes (i 9)
+            (should (eq (get-text-property (+ bol 8 i) 'cooked-deco) deco))))))))
+
+(ert-deftest cooked-an-edit-before-the-cursor-keeps-the-prompts-padding ()
+  "An edit inside a prompt leaves the space the cursor stands after in place."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'ready now$ '; sleep 0.4; printf '\\0337\\033[1;1HR\\0338'; exec cat")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "ready" (cooked-tests--text)))))
+    (should (cooked-tests--settle
+             (lambda ()
+               (let ((case-fold-search nil))
+                 (string-match-p "Ready" (cooked-tests--text))))))
+    (should (cooked--input-start-position))
+    (should (equal (buffer-substring-no-properties
+                    (save-excursion (cooked--goto-screen-row 0) (point))
+                    (cooked--input-start-position))
+                   "Ready now$ "))))
 
 (provide 'cooked-tests-render)
 ;;; cooked-tests-render.el ends here
