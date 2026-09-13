@@ -452,6 +452,9 @@ position itself, and a source is not blocked by one it outranks."
 
 (ert-deftest cooked-the-file-link-layer-registers-itself-below-the-others ()
   "cooked-file-link.el appends its own rank rather than the base layer naming it."
+  ;; Required here, not assumed: the suite loads the layer only from the tests
+  ;; that use it, so a selector that runs none of those left it unloaded.
+  (require 'cooked-file-link)
   (should (eq (car (car (last cooked-link-claim-functions))) 'guessed))
   (should (memq 'osc-8 (mapcar #'car cooked-link-claim-functions)))
   ;; Loading the layer twice must not stack a second entry.
