@@ -510,7 +510,7 @@ table is what says how many of them there are.  Every figure in this file that
 is per row rather than per frame reads this, and the grid height does too --
 `:height\=' taken as the entry count declared a one-row screen, which
 `cooked--fit-screen\=' then trimmed the other twenty-three rows down to."
-  (cl-loop for (_first . block) in rows sum (length (nth 4 block))))
+  (cl-loop for (_first . block) in rows sum (length (nth 3 block))))
 
 (cl-defun cooked-bench--update (rows &key alt images shifts height edits)
   "An update plist of ROWS, shaped exactly as `cooked--drain' returns one.
@@ -543,6 +543,11 @@ whose meanings are unrelated is exactly the call site nobody can read.
 
 EDITS is the drain\='s `:edits\=', rows of which only part is replaced; see
 `cooked-bench--edit\='."
+  ;; The renditions the fixtures name go into this buffer here, once, rather than on
+  ;; the plist: an update is applied over and over inside the timed loops, and a
+  ;; `:styles' installed each time would charge every frame for resolving its faces
+  ;; afresh, which a real session pays once per rendition.
+  (cooked--install-styles (cooked-bench--style-table))
   (let ((height (or height (cooked-bench--row-count rows))))
     (list :scrolled nil :rows rows :edits edits :shifts shifts :images images
           :height height :used height :head 0
@@ -572,7 +577,8 @@ src/wire.rs, and `cooked--render-block\=' for the block's shape.  A fixture stil
 sending a block per row would measure a path the module no longer takes.
 
 Each element of ROWS is (TEXT SPANS DECOS UNIFORM): the row's characters, its
-style spans as (START END FG BG UNDERLINE ATTRS) with offsets *within the row*,
+style spans as (START END FG BG UNDERLINE ATTRS) with offsets *within the row* and
+colours in the tagged encoding `cooked-bench--color-spec\=' reads,
 its (START DECO) decoration spans likewise, and its answer to the guard's
 uniformity question -- t, `glyph\=' or nil, as the core spells it.  The row
 table's layout hash is the row text\='s `sxhash-equal\=': any fixnum that differs
@@ -605,7 +611,8 @@ holding the text that scrolled away."
         (pcase-dolist (`(,from ,to ,fg ,bg ,ul ,attrs) spans)
           (setq styles (append styles (cooked-bench--style-record
                                        (+ offset from) (+ offset to)
-                                       fg bg ul attrs))))
+                                       (cooked-bench--style-id fg bg ul attrs)
+                                       0))))
         (pcase-dolist (`(,from ,deco) row-decos)
           (push (list (+ offset from) deco) decos))
         (push row-text text)
@@ -614,7 +621,6 @@ holding the text that scrolled away."
                 (list (apply #'concat (nreverse text))
                       (and styles (apply #'unibyte-string styles))
                       (nreverse decos)
-                      nil
                       (nreverse table))))))
 
 (defun cooked-bench--plain-rows (count cols)
@@ -630,18 +636,73 @@ standing on one cell."
   "VALUE as BYTES little-endian bytes, as a list."
   (cl-loop for b below bytes collect (logand (ash value (* -8 b)) 255)))
 
-(defun cooked-bench--style-record (start end fg bg ul attrs)
+(defun cooked-bench--style-record (start end id link)
   "One packed style span, as `Block::push_style\=' in src/wire.rs lays it out.
 
-START and END are character offsets, FG, BG and UL already-packed colours in
-`Color::packed\=''s tagged encoding, and ATTRS the bitmask.  Hand-built here
-because the point of these fixtures is to hand `cooked--apply\=' exactly what the
-module would, without a child having to produce it -- so the layout is spelled
-out on this side too, and `cooked--style-record\=' is the number that has to
-agree."
+START and END are character offsets, ID the rendition\='s id and LINK the link\='s,
+0 for none.  Hand-built here because the point of these fixtures is to hand
+`cooked--apply\=' exactly what the module would, without a child having to
+produce it -- so the layout is spelled out on this side too, and
+`cooked--style-record\=' is the number that has to agree."
   (append (cooked-bench--le start 4) (cooked-bench--le end 4)
-          (cooked-bench--le fg 4) (cooked-bench--le bg 4)
-          (cooked-bench--le ul 4) (cooked-bench--le attrs 2)))
+          (cooked-bench--le id 4) (cooked-bench--le link 4)))
+
+(defvar cooked-bench--styles (make-hash-table :test #'equal)
+  "Every rendition a fixture has named, as (FG BG UL ATTRS) to its id.
+
+Shared by every fixture, the way a session\='s store is shared by every row, and
+numbered from 1 because 0 is the default rendition in the core too.")
+
+(defun cooked-bench--color-spec (packed)
+  "PACKED, a colour tagged in its top byte, in `cooked--color\=''s spelling.
+Tag 0 is the default, 1 a palette index in the low byte, 2 a direct colour."
+  (pcase (ash packed -24)
+    (0 nil)
+    (1 (logand packed 255))
+    (_ (list (logand (ash packed -16) 255) (logand (ash packed -8) 255)
+             (logand packed 255)))))
+
+(defun cooked-bench--style-id (fg bg ul attrs)
+  "The id of the rendition with tagged colours FG, BG and UL, and ATTRS."
+  (cooked-bench--spec-id (list (cooked-bench--color-spec fg)
+                               (cooked-bench--color-spec bg)
+                               (cooked-bench--color-spec ul)
+                               attrs)))
+
+(defun cooked-bench--spec-id (spec)
+  "The id of SPEC, a rendition as (FG BG UL ATTRS) in `cooked--color\=''s spelling."
+  (or (gethash spec cooked-bench--styles)
+      (puthash spec (1+ (hash-table-count cooked-bench--styles))
+               cooked-bench--styles)))
+
+(defun cooked-bench--adopt-styles (rows specs)
+  "ROWS, a drain\='s `:rows\=' from another session, renumbered into the fixtures\=' ids.
+
+The session that produced ROWS numbered its renditions in its own buffer, as
+SPECS, and the buffer a benchmark applies them in knows only the fixtures\=' table.
+Each record\='s id is rewritten to the id the same rendition has there, so the
+captured rows resolve to the colours they were drawn in."
+  (dolist (entry rows rows)
+    (when-let* ((styles (nth 2 entry)))
+      (let ((i 0))
+        (while (< i (length styles))
+          (let* ((at (+ i cooked--style-id))
+                 (theirs (cooked--u32 styles at))
+                 (ours (if (zerop theirs)
+                           0
+                         (cooked-bench--spec-id (aref specs theirs)))))
+            (dotimes (b 4)
+              (aset styles (+ at b) (logand (ash ours (* -8 b)) 255))))
+          (setq i (+ i cooked--style-record)))))))
+
+(defun cooked-bench--style-table ()
+  "Every rendition named so far, as a drain\='s `:styles\=' spells them."
+  (let (table)
+    (maphash (lambda (spec id)
+               (pcase-let ((`(,fg ,bg ,ul ,attrs) spec))
+                 (push (list id fg bg ul attrs) table)))
+             cooked-bench--styles)
+    table))
 
 (defun cooked-bench--styled-rows (count cols)
   "COUNT damaged rows split into eight differently-styled spans.
@@ -794,8 +855,10 @@ happens before any timing starts; the timed loop only ever applies the result."
               (unless (string-search tail (buffer-string))
                 (error "cooked-bench: the listing never reached the screen")))
             (cooked--redraw cooked--session)
-            (plist-get (cooked--drain cooked--session cooked-rejoin-wrapped-lines)
-                       :rows)))
+            (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines)))
+              (cooked--install-styles (plist-get update :styles))
+              (cooked-bench--adopt-styles (plist-get update :rows)
+                                          cooked--style-specs))))
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer)
       (delete-file file))))

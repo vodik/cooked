@@ -304,6 +304,13 @@ impl Front {
         glyph_run_across(self.cells(index), row.cells(), usize::from(at?))
     }
 
+    /// Every cell of the copy, known rows or not; see [`Screen::all_cells`].
+    ///
+    /// [`Screen::all_cells`]: super::super::screen::Screen::all_cells
+    pub(super) fn all_cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
     /// Row INDEX's cells in the copy.
     fn cells(&self, index: usize) -> &[Cell] {
         &self.cells[index * self.cols..][..self.cols]

@@ -282,7 +282,7 @@ impl State {
         if text.is_empty() {
             return;
         }
-        let (pen, cols) = (self.pen, self.screen().width());
+        let (pen, cols) = (self.pen(), self.screen().width());
         // "If the multicell block is larger than the screen size in either dimension,
         // the terminal must discard the character." Drawing part of it would move the
         // cursor by something other than the declared width.
@@ -296,7 +296,6 @@ impl State {
                     continue;
                 }
                 self.evicting(|screen| screen.write_cluster(cluster, cells, pen));
-                self.attach(cells);
                 last = Some((cluster.to_owned(), cells));
             }
             // The cursor is left on the last block drawn, so a combining mark arriving
@@ -312,7 +311,6 @@ impl State {
             return;
         }
         self.evicting(|screen| screen.write_cluster(&text, width, pen));
-        self.attach(width);
         // Seeded with the *declared* width, not the measured one: that is where the cell
         // begins as far as the grid is concerned, so it is what [`Screen::join`] needs to
         // find it again.
@@ -348,26 +346,6 @@ impl State {
             }
         }
         Some(width)
-    }
-
-    /// Hang the pen's underline colour and open hyperlink on the WIDTH cells just written.
-    ///
-    /// Both writers locate their cell by backing up over the width just written, so a
-    /// block from `OSC 66` passes its whole width and a character its own. Nothing is
-    /// attached at width 0, since a zero-width character rides the cell to its left and
-    /// owns neither. Each writer runs only when there is something to record: retiring
-    /// the previous occupant's colour or link is `Row::set`'s job, so no screen-wide latch
-    /// is needed, and one `SGR 58` early in a session does not tax every later character.
-    #[inline]
-    pub(super) fn attach(&mut self, width: usize) {
-        let (underline, link) = (self.underline, self.link);
-        let screen = self.screen_mut();
-        if width > 0 && underline != Color::Default {
-            screen.mark_underline(underline, width);
-        }
-        if width > 0 && link.is_some() {
-            screen.mark_link(link, width);
-        }
     }
 
     pub(super) fn osc(&mut self, params: &[&[u8]], bell_terminated: bool) {

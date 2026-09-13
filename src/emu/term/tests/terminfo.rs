@@ -384,9 +384,5 @@ fn the_extended_names_tmux_reads_do_what_they_say() {
     reset.extend(terminfo_decode(value("ol")));
     reset.push(b'x');
     let t = term(2, 8, &reset);
-    assert_eq!(
-        t.screen().row(0).unwrap().runs()[0].underline,
-        Color::Default,
-        "`ol'"
-    );
+    assert_eq!(run_style_at(&t, 0, 0).underline, Color::Default, "`ol'");
 }

@@ -5,8 +5,8 @@
 //! returns, rows become [`Block`]s, events become tagged lists, and every enum that
 //! crosses as a bare symbol is spelled once here.
 
-use crate::emu::cell::Attrs;
 use crate::emu::stream::Filter;
+use crate::emu::style::StyleId;
 use crate::emu::{
     self, Anchor, Color, CursorShape, DamagedRow, Deco, Event, ImageData, ImageFormat, ImageId,
     KeyEncoding, LinkId, Mark, MarkId, Run, Style,
@@ -72,14 +72,16 @@ impl env::IntoLisp for Pid {
     }
 }
 
-/// `(RETRACT TEXT STYLES LINKS DIRECTORY)` for one chunk of a child's output.
+/// `(RETRACT TEXT STYLES LINKS DIRECTORY STYLE-TABLE)` for one chunk of a child's output.
 ///
 /// TEXT and STYLES are the first two fields of the block shape the grid's renderer
-/// already takes -- see [`Block::push_style`] for the packed layout -- so Lisp decodes
-/// both with the same `cooked--face-packed', one face cache and one set of colours.
+/// already takes -- see [`Block::push_style`] for the packed layout -- and STYLE-TABLE is
+/// the drain's `:styles` for the filter's own renditions, so Lisp resolves both through
+/// the same face vector code.
 ///
-/// LINKS carries the destination itself rather than a `LinkId`. An id resolves through a
-/// table local to a *session*, and a comint buffer has no session to look it up in.
+/// LINKS carries the destination itself rather than a `LinkId`, and a record's LINK field
+/// is left zero. An id resolves through a table local to a *session*, and a comint buffer
+/// has no session to look it up in.
 ///
 /// RETRACT is how many characters immediately before the insertion point the filter is
 /// taking back, nonzero only when the caller said its provisional text was still there.
@@ -94,12 +96,16 @@ pub(crate) fn emission_to_lisp(env: Env, filter: &Filter) -> Result<Value> {
     if emission.is_empty() {
         return Ok(env.nil());
     }
-    let mut block = Block::default();
+    // No session holds a link table here, so the records carry no link ids and LINKS
+    // carries the destinations instead.
+    let mut block = Block {
+        unlinked: true,
+        ..Block::default()
+    };
     let mut links = Vec::new();
     for run in &emission.runs {
         let chars = run.text.chars().count();
-        // Before `push_run`, which advances the offset the span is measured from -- the
-        // same order `Block::push_runs` takes them in.
+        // Before `push_run`, which advances the offset the span is measured from.
         if let Some(id) = run.link
             && let Some(uri) = filter.uri(id)
         {
@@ -118,7 +124,8 @@ pub(crate) fn emission_to_lisp(env: Env, filter: &Filter) -> Result<Value> {
             block.text.as_str(),
             block.styles.as_slice(),
             links,
-            directory
+            directory,
+            styles_to_lisp(env, &emission.styles)?
         ]
     )
 }
@@ -162,7 +169,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
     // A 24-row repaint is one `delete-region' and one `insert' rather than 24 of each.
     let rows = contiguous_runs(&update.delta.rows)
         .map(|run| {
-            let mut block = Block::default();
+            let mut block = Block::new(&update.delta.fonts);
             for (i, row) in run.iter().enumerate() {
                 if i > 0 {
                     block.push_newline();
@@ -183,11 +190,11 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
         .iter()
         .filter_map(|row| row.edit.as_ref().map(|edit| (row, edit)))
         .map(|(row, edit)| {
-            let mut block = Block::default();
+            let mut block = Block::new(&update.delta.fonts);
             block.push_runs(env, &edit.runs)?;
             block.rows.push(BlockRow {
                 start: 0,
-                ..Block::measure(&row.runs, row.wrapped)
+                ..Block::measure(&update.delta.fonts, &row.runs, row.wrapped)
             });
             env.cons(
                 env.into_lisp(row.index)?,
@@ -263,6 +270,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
         ":mode"        => update.mode,
         ":images"      => images_to_lisp(env, &update.delta.images)?,
         ":links"       => links_to_lisp(env, &update.delta.links)?,
+        ":styles"      => styles_to_lisp(env, &update.delta.styles)?,
         ":events"      => events,
         ":exit"        => update.exit.map(i64::from),
     })
@@ -278,11 +286,11 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
 /// cells from crossing on a flood. A plain unstyled row, the usual case, pays for no spans
 /// at all; the `plain` benchmark row is the control for that.
 ///
-/// STYLE-SPANS is a unibyte string of fixed-width records, the only span kind carrying a
-/// rendition; see [`Block::push_style`]. DECO-SPANS is `(START DECO)` and LINK-SPANS
-/// `(START END ID)`. Neither repeats colours: a box glyph is drawn in the face at its
-/// position, which STYLE-SPANS already put there, and a second copy would be a staler
-/// answer (see `cooked--box-glyph-image-1').
+/// STYLE-SPANS is a unibyte string of fixed-width records naming each span's rendition
+/// and link by id; see [`Block::push_style`]. DECO-SPANS is `(START DECO)`, and repeats
+/// no colours: a box glyph is drawn in the face at its position, which STYLE-SPANS already
+/// put there, and a second copy would be a staler answer (see
+/// `cooked--box-glyph-image-1').
 ///
 /// A row table rides at the end: one `(START WIDTH UNIFORM WRAPPED HASH)` per *screen row*
 /// the block covers -- where the row's text begins in TEXT, how many columns it occupies,
@@ -297,12 +305,19 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
 /// A decoration span needs no END: its packed records account for every character it
 /// covers.
 #[derive(Default)]
-pub(crate) struct Block {
+pub(crate) struct Block<'a> {
     text: String,
     styles: Vec<u8>,
     decos: Vec<Value>,
-    links: Vec<Value>,
     offset: usize,
+    /// The font bits of every rendition id the runs may name, indexed by id; see
+    /// `StyleStore::font_bits`. Read only for the layout hash, which is why an empty
+    /// table -- scrollback, the comint filter -- costs nothing but a hash that ignores
+    /// fonts where nothing reads it.
+    font_bits: &'a [u8],
+    /// Leave the LINK field of every record zero, for an encoding whose consumer has no
+    /// table to resolve an id through.
+    unlinked: bool,
     /// Columns `text` occupies on the grid, summed from [`Run::cols`].
     ///
     /// `cooked--guard-row-width' needs to know how wide a row *should* be, and asking
@@ -425,22 +440,30 @@ impl env::IntoLisp for Uniformity {
 }
 
 /// Bytes in one packed style span. See [`Block::push_style`] for the field layout.
-const STYLE_RECORD: usize = 22;
+const STYLE_RECORD: usize = 16;
 
-impl Block {
-    /// Pack one style span onto `styles`: the run's extent, its rendition, and its
-    /// underline colour, as fixed-width little-endian fields.
+impl<'a> Block<'a> {
+    /// A block whose layout hashes read font bits from FONT_BITS.
+    fn new(font_bits: &'a [u8]) -> Self {
+        Self {
+            font_bits,
+            ..Self::default()
+        }
+    }
+
+    /// Pack one style span onto `styles`: the run's extent, the id of its rendition and
+    /// the id of its link, as little-endian `u32`s.
     ///
-    ///   0..4    START    `u32`, character offset into [`Block::text`]
-    ///   4..8    END      `u32`, exclusive
-    ///   8..12   FG       `u32`, tagged — see [`Color::packed`]
-    ///   12..16  BG       `u32`, tagged
-    ///   16..20  UNDERLINE `u32`, tagged; `SGR 58`, the underline's own colour
-    ///   20..22  ATTRS    `u16`, the [`Attrs`] bitmask
+    ///   0..4    START    character offset into [`Block::text`]
+    ///   4..8    END      exclusive
+    ///   8..12   STYLE    a [`StyleId`], resolved through the drain's `:styles`
+    ///   12..16  LINK     a [`LinkId`], resolved through `:links`, or 0 for none
     ///
     /// A packed string rather than a list of lists, for the reason [`Deco::packed`] gives:
-    /// the Emacs apply path is the bottleneck, and a list costs six to twelve conses a span
-    /// on every damaged row of every frame.
+    /// the Emacs apply path is the bottleneck, and a list costs conses a span on every
+    /// damaged row of every frame. And ids rather than colours, so that resolving a span's
+    /// face is an `aref' into a vector Lisp keeps per session, rather than a decode of
+    /// three colour fields and a hash lookup per span.
     ///
     /// **START and END are `u32`.** [`Update::scrolled_rows`] assembles a whole drain's
     /// scrollback into *one* `Block`, so offsets are bounded by the flood rather than a row:
@@ -450,26 +473,22 @@ impl Block {
     /// A span whose offsets do not fit is dropped rather than clamped. It takes 4.29
     /// billion characters between two drains, but dropping loses the colour of text far
     /// off screen, while clamping would paint it over text that is on screen.
-    ///
-    /// The rendition is packed inline rather than interned behind a
-    /// [`Ledger`](emu::intern::Ledger) id as `:links` and `:images` are. Interning would
-    /// save Lisp three `u32` decodes a span and cost it an id lifetime, where a reused id
-    /// read against a stale cache is wrong colours with no error.
-    fn push_style(&mut self, chars: usize, style: Style, underline: Color) {
+    fn push_style(&mut self, chars: usize, style: StyleId, link: Option<LinkId>) {
         let (Ok(start), Ok(end)) = (
             u32::try_from(self.offset),
             u32::try_from(self.offset + chars),
         ) else {
             return;
         };
-        let Style { fg, bg, attrs } = style;
+        let link = if self.unlinked {
+            0
+        } else {
+            link.map_or(0, LinkId::get)
+        };
         self.styles.extend_from_slice(&start.to_le_bytes());
         self.styles.extend_from_slice(&end.to_le_bytes());
-        self.styles.extend_from_slice(&fg.packed().to_le_bytes());
-        self.styles.extend_from_slice(&bg.packed().to_le_bytes());
-        self.styles
-            .extend_from_slice(&underline.packed().to_le_bytes());
-        self.styles.extend_from_slice(&attrs.bits().to_le_bytes());
+        self.styles.extend_from_slice(&style.get().to_le_bytes());
+        self.styles.extend_from_slice(&link.to_le_bytes());
         // The stride is the format: Lisp walks the string by adding [`STYLE_RECORD`], so a
         // field added without widening the constant would desynchronise the two sides.
         debug_assert_eq!(
@@ -483,12 +502,7 @@ impl Block {
     fn push_runs(&mut self, env: Env, runs: &[Run]) -> Result<()> {
         for run in runs {
             let chars = run.text.chars().count();
-            // The two span kinds that need an `Env`, taken before `push_run` advances the
-            // offset they are measured from.
-            if let Some(link) = run.link {
-                self.links
-                    .push(list!(env, [self.offset, self.offset + chars, link])?);
-            }
+            // Taken before `push_run` advances the offset it is measured from.
             if run.deco.is_some() {
                 let deco = env.into_lisp(run.deco.as_ref())?;
                 self.decos.push(list!(env, [self.offset, deco])?);
@@ -510,7 +524,11 @@ impl Block {
     fn push_run(&mut self, run: &Run, chars: usize) {
         self.cols += run.cols;
         self.uniformity = self.uniformity.max(Uniformity::of(run, chars));
-        let font = (run.style.attrs & (Attrs::BOLD | Attrs::FAINT | Attrs::ITALIC)).bits();
+        let font = self
+            .font_bits
+            .get(run.style.get() as usize)
+            .copied()
+            .unwrap_or(0);
         if font != 0 {
             let at = (self.offset - self.row_start) as u64;
             self.fonts = emu::mix(
@@ -518,8 +536,8 @@ impl Block {
                 (at << 32) | ((chars as u64) << 8) | u64::from(font),
             );
         }
-        if run.style != Style::default() || run.underline != Color::Default {
-            self.push_style(chars, run.style, run.underline);
+        if !run.style.is_default() || run.link.is_some() {
+            self.push_style(chars, run.style, run.link);
         }
         self.text.push_str(&run.text);
         self.offset += chars;
@@ -529,8 +547,8 @@ impl Block {
     ///
     /// For a row sent as an edit: the replacement is only part of the row, and the width
     /// guard and the wrap mark still need the measurements of all of it.
-    fn measure(runs: &[Run], wrapped: bool) -> BlockRow {
-        let mut block = Block::default();
+    fn measure(font_bits: &[u8], runs: &[Run], wrapped: bool) -> BlockRow {
+        let mut block = Block::new(font_bits);
         for run in runs {
             block.push_run(run, run.text.chars().count());
         }
@@ -587,13 +605,7 @@ impl Block {
             .collect::<Result<Vec<_>>>()?;
         list!(
             *env,
-            [
-                self.text.as_str(),
-                self.styles.as_slice(),
-                self.decos,
-                self.links,
-                rows
-            ]
+            [self.text.as_str(), self.styles.as_slice(), self.decos, rows]
         )
     }
 }
@@ -707,6 +719,38 @@ fn links_to_lisp(env: Env, links: &[(LinkId, String)]) -> Result<Vec<Value>> {
     links
         .iter()
         .map(|(id, uri)| env.cons(env.into_lisp(*id)?, env.into_lisp(uri.as_str())?))
+        .collect()
+}
+
+/// Renditions first named this drain, each as `(ID FG BG UL ATTRS)`.
+///
+/// [`links_to_lisp`]'s sibling: the rows of the same drain name these by id, and Lisp
+/// installs them before rendering. FG, BG and UL are in `cooked--color''s spelling --
+/// nil for the terminal default, an integer for a palette index, `(R G B)` for a direct
+/// colour -- so Lisp builds a face from them without decoding anything, and ATTRS is the
+/// [`Attrs`] bitmask.
+fn styles_to_lisp(env: Env, styles: &[(StyleId, Style)]) -> Result<Vec<Value>> {
+    let color = |color: Color| -> Result<Value> {
+        match color {
+            Color::Default => Ok(env.nil()),
+            Color::Indexed(index) => env.into_lisp(index),
+            Color::Rgb(r, g, b) => list!(env, [r, g, b]),
+        }
+    };
+    styles
+        .iter()
+        .map(|(id, style)| {
+            list!(
+                env,
+                [
+                    id.get(),
+                    color(style.fg)?,
+                    color(style.bg)?,
+                    color(style.underline)?,
+                    style.attrs.bits()
+                ]
+            )
+        })
         .collect()
 }
 
@@ -847,7 +891,6 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emu::{Color, Style};
 
     /// The keys a plist literal in SOURCE starting at MARKER names, in order.
     fn plist_keys(source: &str, marker: &str) -> Vec<String> {
@@ -883,13 +926,10 @@ mod tests {
         assert_eq!(documented, emitted);
     }
 
-    /// The trailing fields of a record, as a `Block` holding exactly one would have them.
-    fn record(style: Style, underline: Color) -> Vec<u8> {
-        let mut block = Block {
-            offset: 0,
-            ..Default::default()
-        };
-        block.push_style(1, style, underline);
+    /// The record a `Block` holding exactly one span would have.
+    fn record(style: StyleId, link: Option<LinkId>) -> Vec<u8> {
+        let mut block = Block::default();
+        block.push_style(1, style, link);
         block.styles
     }
 
@@ -899,55 +939,35 @@ mod tests {
 
     #[test]
     fn a_style_record_is_exactly_the_stride_lisp_steps_by() {
-        let packed = record(Style::default(), Color::Default);
+        let packed = record(StyleId::DEFAULT, None);
         assert_eq!(
             packed.len(),
             STYLE_RECORD,
-            "`cooked--style-record' in cooked.el is this number: {packed:?}"
+            "`cooked--style-record' in cooked-face.el is this number: {packed:?}"
         );
     }
 
+    /// STYLE and LINK sit where `cooked--do-style-spans' reads them, and a missing link is
+    /// the zero `LinkId`'s niche makes it.
     #[test]
-    fn each_colour_variant_survives_the_round_trip_through_a_record() {
-        // The three tags `cooked--color-spec' in cooked-face.el decodes, in the layout
-        // its docstring states: tag in the top byte, value in the low three.
-        for (colour, expected) in [
-            (Color::Default, 0u32),
-            (Color::Indexed(0), 1 << 24),
-            (Color::Indexed(255), (1 << 24) | 255),
-            (Color::Rgb(0x12, 0x34, 0x56), (2 << 24) | 0x123456),
-        ] {
-            let packed = record(
-                Style {
-                    fg: colour,
-                    ..Style::default()
-                },
-                Color::Default,
-            );
-            assert_eq!(u32_at(&packed, 8), expected, "fg {colour:?}: {packed:?}");
-        }
-    }
-
-    #[test]
-    fn the_underline_colour_has_its_own_field_and_does_not_alias_the_foreground() {
-        // A field that aliased fg would show up only on text both coloured and
-        // underlined, which is rare enough to ship unnoticed.
-        let packed = record(
-            Style {
-                fg: Color::Indexed(1),
-                bg: Color::Indexed(2),
-                attrs: Attrs::UNDERLINE,
-            },
-            Color::Indexed(3),
-        );
-        assert_eq!(u32_at(&packed, 8), (1 << 24) | 1, "fg");
-        assert_eq!(u32_at(&packed, 12), (1 << 24) | 2, "bg");
-        assert_eq!(u32_at(&packed, 16), (1 << 24) | 3, "underline");
+    fn a_record_carries_the_rendition_and_the_link_by_id() {
+        let packed = record(StyleId::from_raw(7), Some(LinkId::from_index(2)));
+        assert_eq!(u32_at(&packed, 8), 7, "style");
+        assert_eq!(u32_at(&packed, 12), 3, "link, which counts from 1");
         assert_eq!(
-            u16::from_le_bytes([packed[20], packed[21]]),
-            Attrs::UNDERLINE.bits(),
-            "attrs"
+            u32_at(&record(StyleId::from_raw(7), None), 12),
+            0,
+            "no link"
         );
+
+        // The comint filter's records name no link: its consumer has no table to find one
+        // in, and gets the destinations beside the records instead.
+        let mut block = Block {
+            unlinked: true,
+            ..Block::default()
+        };
+        block.push_style(1, StyleId::from_raw(7), Some(LinkId::from_index(2)));
+        assert_eq!(u32_at(&block.styles, 12), 0);
     }
 
     /// The `u16` trap the field widths exist to avoid, stated as a test rather than only
@@ -961,7 +981,7 @@ mod tests {
             offset: 70_000,
             ..Default::default()
         };
-        block.push_style(5, Style::default(), Color::Default);
+        block.push_style(5, StyleId::DEFAULT, None);
         assert_eq!(u32_at(&block.styles, 0), 70_000, "start");
         assert_eq!(u32_at(&block.styles, 4), 70_005, "end");
     }
@@ -1102,35 +1122,30 @@ mod tests {
     /// while the same text in bold may not.
     #[test]
     fn a_row_hash_changes_with_text_and_font_and_not_with_colour() {
+        // Id 1 is bold and id 2 red, which is what the font table says of them.
+        let (plain, bold, red) = (StyleId::DEFAULT, StyleId::from_raw(1), StyleId::from_raw(2));
+        let fonts = [0, 1, 0];
         let hash = |runs: &[Run]| {
-            let mut block = Block::default();
+            let mut block = Block::new(&fonts);
             for run in runs {
                 block.push_run(run, run.text.chars().count());
             }
             block.end_row(false);
             block.rows[0].hash
         };
-        let run = |text: &str, style: Style| Run {
+        let run = |text: &str, style: StyleId| Run {
             text: text.to_string(),
             cols: text.chars().count(),
             style,
             ..Run::default()
         };
-        let bold = Style {
-            attrs: Attrs::BOLD,
-            ..Style::default()
-        };
-        let red = Style {
-            fg: Color::Indexed(1),
-            ..Style::default()
-        };
-        let base = hash(&[run("hello", Style::default())]);
+        let base = hash(&[run("hello", plain)]);
         assert_eq!(base, hash(&[run("hello", red)]));
-        assert_ne!(base, hash(&[run("hellO", Style::default())]));
+        assert_ne!(base, hash(&[run("hellO", plain)]));
         assert_ne!(base, hash(&[run("hello", bold)]));
         assert_ne!(
-            hash(&[run("he", bold), run("llo", Style::default())]),
-            hash(&[run("hel", bold), run("lo", Style::default())])
+            hash(&[run("he", bold), run("llo", plain)]),
+            hash(&[run("hel", bold), run("lo", plain)])
         );
         assert!(base < 1 << 60, "the hash must cross as a fixnum");
     }
@@ -1145,7 +1160,7 @@ mod tests {
             offset: usize::try_from(u32::MAX).unwrap(),
             ..Default::default()
         };
-        block.push_style(2, Style::default(), Color::Default);
+        block.push_style(2, StyleId::DEFAULT, None);
         assert!(
             block.styles.is_empty(),
             "an unrepresentable span leaves no record: {:?}",

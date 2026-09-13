@@ -63,6 +63,7 @@ use super::cell::{BLANK, CONTINUATION, Cell, Color, Run, Style};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
 use super::sgr;
+use super::style::{StyleId, StyleStore};
 use super::term::osc::validated_text;
 use super::text::{self, Segmenter, Step, Width};
 
@@ -81,46 +82,22 @@ const TAB_WIDTH: usize = 8;
 
 /// One column of the open line.
 ///
-/// [`Cell`] is the grid's own cell -- a character and a rendition -- and the other three
-/// fields are what the grid keeps in a side table per row (see
-/// [`Extras`](super::cell::Extras)). They ride the column here instead: a side table
-/// buys the grid a smaller `Cell` across tens of thousands of them, and there is exactly
-/// one line here.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`Cell`] is the grid's own cell -- a character, a rendition id and a link -- and the
+/// combining marks are what the grid keeps in a side table per row (see
+/// [`Extras`](super::cell::Extras)). They ride the column here instead: a side table buys
+/// the grid a smaller `Cell` across tens of thousands of them, and there is exactly one
+/// line here.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct Column {
     cell: Cell,
     /// Zero-width characters -- combining marks, variation selectors -- riding this
     /// column, in stream order. `None` for the overwhelming majority of columns.
     marks: Option<Box<str>>,
-    /// `SGR 58`, the underline's own colour.
-    underline: Color,
-    /// The `OSC 8` hyperlink this column is part of, if any.
-    link: Option<LinkId>,
-}
-
-impl Default for Column {
-    fn default() -> Self {
-        Self::blank(Style::default())
-    }
 }
 
 impl Column {
-    fn new(ch: char, style: Style, underline: Color, link: Option<LinkId>) -> Self {
-        Self {
-            cell: Cell::new(ch, style),
-            marks: None,
-            underline,
-            link,
-        }
-    }
-
-    fn blank(style: Style) -> Self {
-        Self {
-            cell: Cell::blank(style),
-            marks: None,
-            underline: Color::Default,
-            link: None,
-        }
+    fn new(cell: Cell) -> Self {
+        Self { cell, marks: None }
     }
 
     fn is_continuation(&self) -> bool {
@@ -143,9 +120,7 @@ impl Column {
 
     /// Whether a run may span this column and the next without a break.
     fn joins(&self, next: &Self) -> bool {
-        self.cell.same_style(next.cell)
-            && self.underline == next.underline
-            && self.link == next.link
+        self.cell.same_pen(next.cell)
     }
 }
 
@@ -157,6 +132,9 @@ pub(crate) struct Emission {
     pub(crate) retract: usize,
     /// The styled text, in the shape the grid's renderer already takes.
     pub(crate) runs: Vec<Run>,
+    /// Renditions the runs name that the consumer has not been told about, as the grid's
+    /// drain sends them; see [`StyleStore`].
+    pub(crate) styles: Vec<(StyleId, Style)>,
     /// The last `OSC 7` the chunk carried, if any: the child's working directory as of
     /// the end of it. Last rather than every one, because the consumer of this is
     /// `default-directory', which only has room for the answer.
@@ -167,12 +145,18 @@ impl Emission {
     fn clear(&mut self) {
         self.retract = 0;
         self.runs.clear();
+        self.styles.clear();
         self.directory = None;
     }
 
     /// Whether anything at all needs to reach Emacs.
     pub(crate) fn is_empty(&self) -> bool {
-        self.retract == 0 && self.runs.is_empty() && self.directory.is_none()
+        // The styles too: a table the consumer never receives would leave a later run
+        // naming an id it cannot resolve.
+        self.retract == 0
+            && self.runs.is_empty()
+            && self.styles.is_empty()
+            && self.directory.is_none()
     }
 }
 
@@ -218,6 +202,7 @@ impl Filter {
         // when it is written, not when the next line is. Whatever this hands over is
         // remembered as provisional, and the next feed reconciles against it.
         self.stream.flush(false);
+        self.stream.out.styles = self.stream.styles.take_unsent();
     }
 
     /// What the last [`Filter::feed`] produced.
@@ -226,6 +211,12 @@ impl Filter {
     /// borrow outliving the feed would forbid holding the runs while asking about links.
     pub(crate) fn emission(&self) -> &Emission {
         &self.stream.out
+    }
+
+    /// The rendition ID names, for tests reading an emission back.
+    #[cfg(test)]
+    pub(crate) fn style(&self, id: StyleId) -> Style {
+        self.stream.styles.get(id)
     }
 
     /// The destination of the `OSC 8` link ID names, for turning a link span into
@@ -264,8 +255,9 @@ struct Stream {
     flushed: bool,
     seg: Segmenter,
     pen: Style,
-    underline: Color,
     link: Option<LinkId>,
+    /// The renditions the line's cells name; see [`StyleStore`].
+    styles: StyleStore,
     /// `OSC 8` destinations, interned so a run can name one in a word. Session-lifetime
     /// like the grid's, and bounded by the same caps -- a child sending a fresh URI per
     /// cell forever is a memory leak otherwise.
@@ -292,9 +284,9 @@ impl Stream {
     /// Blank COUNT columns from AT with the pen's background, the `bce` rule.
     fn erase(&mut self, at: usize, count: usize) {
         self.pad(at + count);
-        let pen = self.pen;
+        let blank = Column::new(self.blank_cell());
         for column in &mut self.line[at..at + count] {
-            *column = Column::blank(pen);
+            *column = blank.clone();
         }
     }
 
@@ -309,13 +301,13 @@ impl Stream {
     fn split_wide(&mut self, at: usize) {
         if at < self.line.len() && self.line[at].is_continuation() {
             if let Some(base) = self.line[..at].iter().rposition(|c| !c.is_continuation()) {
-                let style = self.line[base].cell.style();
-                self.line[base] = Column::blank(style);
+                let style = self.line[base].cell.style;
+                self.line[base] = Column::new(Cell::blank(style));
             }
         }
         if at + 1 < self.line.len() && self.line[at + 1].is_continuation() {
-            let style = self.line[at + 1].cell.style();
-            self.line[at + 1] = Column::blank(style);
+            let style = self.line[at + 1].cell.style;
+            self.line[at + 1] = Column::new(Cell::blank(style));
         }
     }
 
@@ -328,13 +320,13 @@ impl Stream {
         for offset in 0..width {
             self.split_wide(self.col + offset);
         }
-        let (pen, underline, link) = (self.pen, self.underline, self.link);
-        self.line[self.col] = Column::new(ch, pen, underline, link);
+        let cell = self.pen_cell(ch);
+        self.line[self.col] = Column::new(cell);
         // The columns a wide character stands on beyond its first hold no character of
         // their own and contribute no text, but they do carry the rendition, so that a
         // background painted under a CJK character covers both halves of it.
         for offset in 1..width {
-            self.line[self.col + offset] = Column::new(CONTINUATION, pen, underline, link);
+            self.line[self.col + offset] = Column::new(cell.with_char(CONTINUATION));
         }
         self.base = Some(self.col);
         self.col += width;
@@ -367,18 +359,48 @@ impl Stream {
             self.pad(base + after);
             for offset in before.max(1)..after {
                 self.split_wide(base + offset);
-                let owner = &self.line[base];
-                let continuation = Column::new(
-                    CONTINUATION,
-                    owner.cell.style(),
-                    owner.underline,
-                    owner.link,
-                );
+                let continuation = Column::new(self.line[base].cell.with_char(CONTINUATION));
                 self.line[base + offset] = continuation;
             }
             self.col = self.col.max(base + after);
         }
         self.seg.settle(after);
+    }
+
+    /// CH as the pen writes it: its rendition and the open link.
+    fn pen_cell(&mut self, ch: char) -> Cell {
+        Cell::linked(ch, self.style_id(self.pen), self.link)
+    }
+
+    /// The blank an erase leaves: the pen's rendition without its underline colour, and no
+    /// link.
+    fn blank_cell(&mut self) -> Cell {
+        let style = Style {
+            underline: Color::Default,
+            ..self.pen
+        };
+        Cell::blank(self.style_id(style))
+    }
+
+    /// The id STYLE has, giving it one if it has none; see `State::style_id`.
+    ///
+    /// A collection marks the open line, the copy of what was last emitted, and the runs
+    /// this feed has already produced, which are every place an id lives until the feed
+    /// hands its table over.
+    fn style_id(&mut self, style: Style) -> StyleId {
+        if let Some(id) = self.styles.lookup(style) {
+            return id;
+        }
+        if self.styles.is_full() {
+            let (line, emitted, runs) = (&self.line, &self.emitted, &self.out.runs);
+            self.styles.collect(|mark| {
+                line.iter()
+                    .chain(emitted)
+                    .for_each(|column| mark(column.cell.style));
+                runs.iter().for_each(|run| mark(run.style));
+            });
+        }
+        self.styles.insert(style)
     }
 
     // -- retirement and emission -------------------------------------------------
@@ -476,10 +498,9 @@ impl Stream {
             self.out.runs.push(Run {
                 text,
                 cols: columns.len(),
-                style: columns[0].cell.style(),
+                style: columns[0].cell.style,
                 deco: None,
-                underline: columns[0].underline,
-                link: columns[0].link,
+                link: columns[0].cell.link,
             });
         }
     }
@@ -494,9 +515,8 @@ impl Stream {
         self.out.runs.push(Run {
             text: "\n".to_string(),
             cols: 0,
-            style: Style::default(),
+            style: StyleId::DEFAULT,
             deco: None,
-            underline: Color::Default,
             link: None,
         });
     }
@@ -559,9 +579,9 @@ impl Perform for Stream {
             self.pad(self.col + plain);
             self.split_wide(self.col);
             self.split_wide(self.col + plain - 1);
-            let (pen, underline, link) = (self.pen, self.underline, self.link);
+            let cell = self.pen_cell(BLANK);
             for (offset, c) in rest[..plain].chars().enumerate() {
-                self.line[self.col + offset] = Column::new(c, pen, underline, link);
+                self.line[self.col + offset] = Column::new(cell.with_char(c));
             }
             self.col += plain;
             self.base = Some(self.col - 1);
@@ -613,7 +633,7 @@ impl Perform for Stream {
         // Omitted or zero means one, as it does for nearly every `CSI` with a count.
         let n = params.arg(0, 1);
         match action {
-            'm' => sgr::apply(params, &mut self.pen, &mut self.underline),
+            'm' => sgr::apply(params, &mut self.pen),
             // CUF and CUB. Within the line, and never past its start.
             'C' => self.col += n,
             'D' => self.col = self.col.saturating_sub(n),
@@ -648,9 +668,8 @@ impl Perform for Stream {
             // ICH: open a gap, the other half of the same line editing. Declined past
             // the end of the line, where there is nothing to push rightward.
             '@' if self.col <= self.line.len() => {
-                let (pen, at) = (self.pen, self.col);
-                self.line
-                    .splice(at..at, std::iter::repeat_n(Column::blank(pen), n));
+                let (blank, at) = (Column::new(self.blank_cell()), self.col);
+                self.line.splice(at..at, std::iter::repeat_n(blank, n));
             }
             // Everything else, and it is most of the table: cursor addressing between
             // rows, scroll regions, erase-in-display, modes, reports, the alternate
@@ -669,7 +688,6 @@ impl Perform for Stream {
         // session comes out in that rendition.
         if intermediates.is_empty() && byte == b'c' {
             self.pen = Style::default();
-            self.underline = Color::Default;
             self.link = None;
         }
     }
@@ -878,7 +896,7 @@ mod tests {
         filter.feed(b"\x1b[31m", true);
         filter.feed(b"red\n", true);
         let emission = filter.emission();
-        assert_eq!(emission.runs[0].style.fg, Color::Indexed(1));
+        assert_eq!(filter.style(emission.runs[0].style).fg, Color::Indexed(1));
     }
 
     #[test]
@@ -889,7 +907,7 @@ mod tests {
         filter.feed(b"1mred\n", true);
         let emission = filter.emission();
         assert_eq!(emission.runs[0].text, "red");
-        assert_eq!(emission.runs[0].style.fg, Color::Indexed(1));
+        assert_eq!(filter.style(emission.runs[0].style).fg, Color::Indexed(1));
     }
 
     #[test]
@@ -897,7 +915,7 @@ mod tests {
         // Otherwise a background painted by the child runs to the window's edge.
         let runs = runs("\x1b[41mred\n");
         assert_eq!(runs.last().unwrap().text, "\n");
-        assert_eq!(runs.last().unwrap().style, Style::default());
+        assert_eq!(runs.last().unwrap().style, StyleId::DEFAULT);
     }
 
     #[test]
@@ -911,9 +929,13 @@ mod tests {
     fn a_rewritten_column_carries_the_rendition_it_was_rewritten_in() {
         // The line buffer holds cells, not a string with spans over it, which is what
         // makes a partial overwrite in a new colour come out right.
-        let runs = runs("\x1b[31mabcdef\r\x1b[32mXY\n");
-        let coloured: Vec<(&str, Color)> =
-            runs.iter().map(|r| (r.text.as_str(), r.style.fg)).collect();
+        let mut filter = Filter::new();
+        filter.feed(b"\x1b[31mabcdef\r\x1b[32mXY\n", true);
+        let runs = &filter.emission().runs;
+        let coloured: Vec<(&str, Color)> = runs
+            .iter()
+            .map(|r| (r.text.as_str(), filter.style(r.style).fg))
+            .collect();
         assert_eq!(
             coloured,
             [

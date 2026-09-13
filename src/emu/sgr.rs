@@ -8,13 +8,9 @@
 //! a crash but a divergence -- `SGR 4:3` curly-underlining a terminal buffer and plainly
 //! underlining a comint one, for a year, until somebody notices.
 //!
-//! A free function over `&mut Style` and `&mut Color` rather than a trait or a `Pen`
-//! struct, because those are the two things both callers already hold as separate
-//! fields, for their own reasons: the grid's pen is copied onto every cell it writes and
-//! wants to stay [`Copy`] and small, while the underline colour rides a side table
-//! (see [`Row::extras`](super::cell::Extras)) precisely because it is rare enough not to
-//! belong in a per-cell word. Bundling them here would have pushed that choice back onto
-//! both callers to buy nothing.
+//! A free function over `&mut Style`, which is the whole rendition, underline colour
+//! included: both callers intern the result into a [`StyleId`](super::style::StyleId)
+//! when they write with it.
 
 use super::cell::{Attrs, Color, Style};
 use super::parser::{Params, ParamsIter};
@@ -80,25 +76,17 @@ pub(crate) const FLAGS: [Flag; 8] = [
 /// overline.
 pub(crate) const PUSHABLE: &[Flag] = FLAGS.split_at(7).0;
 
-/// Apply one `CSI Ps m` to PEN and UNDERLINE.
-///
-/// UNDERLINE is `SGR 58`'s colour, which is separate from PEN for the reason the module
-/// docs give, and is reset by `SGR 0` and by an empty parameter list along with
-/// everything in PEN -- so a caller cannot hold one of the two back and stay correct.
-pub(crate) fn apply(params: &Params, pen: &mut Style, underline: &mut Color) {
+/// Apply one `CSI Ps m` to PEN.
+pub(crate) fn apply(params: &Params, pen: &mut Style) {
     if params.is_empty() {
         *pen = Style::default();
-        *underline = Color::Default;
         return;
     }
     let mut iter = params.iter();
     while let Some(param) = iter.next() {
         let Some(&code) = param.first() else { continue };
         match code {
-            0 => {
-                *pen = Style::default();
-                *underline = Color::Default;
-            }
+            0 => *pen = Style::default(),
             // `SGR 4` is single; `4:0`-`4:5` name a style. Only the first
             // subparameter is read, which is all the protocol defines.
             4 => match param.get(1) {
@@ -118,8 +106,8 @@ pub(crate) fn apply(params: &Params, pen: &mut Style, underline: &mut Color) {
             49 => pen.bg = Color::Default,
             // `SGR 58`/`59`: the underline's own colour, parsed by the same
             // `extended` as 38 and 48, so `58:2::r:g:b` and `58:5:n` come free.
-            58 => *underline = extended(param, &mut iter).unwrap_or(*underline),
-            59 => *underline = Color::Default,
+            58 => pen.underline = extended(param, &mut iter).unwrap_or(pen.underline),
+            59 => pen.underline = Color::Default,
             90..=97 => pen.fg = Color::Indexed((code - 90 + 8) as u8),
             100..=107 => pen.bg = Color::Indexed((code - 100 + 8) as u8),
             // The one-bit attributes. 54, ECMA-48's "not framed or encircled", clears 51
@@ -158,7 +146,7 @@ fn extended(param: &[u16], iter: &mut ParamsIter<'_>) -> Option<Color> {
     }
 }
 
-/// PEN and UNDERLINE as the `CSI Ps m` parameters that would recreate them from nothing:
+/// PEN as the `CSI Ps m` parameters that would recreate them from nothing:
 /// [`apply`] run backwards, for DECRQSS.
 ///
 /// Always led by `0`, which is what xterm sends and what makes the answer a *setting*
@@ -182,7 +170,7 @@ fn extended(param: &[u16], iter: &mut ParamsIter<'_>) -> Option<Color> {
 /// Lossy exactly where [`apply`] is: `SGR 6` (rapid blink) reads back as `5`, and `21`
 /// as nothing, because the pen does not keep the difference. The answer describes the
 /// pen, not the bytes that built it.
-pub(crate) fn describe(pen: Style, underline: Color) -> String {
+pub(crate) fn describe(pen: Style) -> String {
     let mut out = String::from("0");
     let mut push = |param: std::fmt::Arguments<'_>| {
         use std::fmt::Write as _;
@@ -218,6 +206,6 @@ pub(crate) fn describe(pen: Style, underline: Color) -> String {
     };
     color(pen.fg, 38, true);
     color(pen.bg, 48, true);
-    color(underline, 58, false);
+    color(pen.underline, 58, false);
     out
 }

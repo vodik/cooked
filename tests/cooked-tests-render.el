@@ -400,7 +400,7 @@ still pass if the core stopped coalescing altogether."
                                              ;; is the length of the block's row
                                              ;; table.
                                              (cons (car entry)
-                                                   (length (nth 4 (cdr entry)))))
+                                                   (length (nth 3 (cdr entry)))))
                                            rows)
                                    ;; An edit is one row replaced in part, which
                                    ;; is as narrow as a run of one row.
@@ -1899,7 +1899,7 @@ that same block's own text."
       (should (= (length rows) 1))
       (should (= (caar rows) 0))
       (pcase-dolist (`(,_first . ,block) rows)
-        (pcase-let* ((`(,text ,_styles ,_decos ,_links ,table) block)
+        (pcase-let* ((`(,text ,_styles ,_decos ,table) block)
                      (lines (split-string text "\n")))
           (should (= (length table) (length lines)))
           (cl-loop for line in lines
@@ -3529,3 +3529,44 @@ run, and every glyph of it has to carry the same decoration afterwards."
 
 (provide 'cooked-tests-render)
 ;;; cooked-tests-render.el ends here
+
+(ert-deftest cooked-a-theme-change-resolves-renditions-again-without-the-core-resending-them ()
+  "Faces are resolved from the renditions Lisp already holds, not asked for again.
+
+The core announces each rendition id once, as a drain\='s `:styles\=', and a theme
+change must not need it to announce them again: the buffer keeps the renditions
+and forgets only the faces made from them, so the next repaint of the same text
+comes out in the new theme\='s colours from ids the core already sent."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\033[31mred\\033[0m'; read _; printf '\\033[31mred\\033[0m'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "red" (cooked-tests--text)))))
+    (let* ((start (cooked--screen-start-position))
+           (before (get-text-property start 'face))
+           (announced nil))
+      (should before)
+      (cl-letf* ((original (symbol-function 'cooked--install-styles))
+                 ((symbol-function 'cooked--install-styles)
+                  (lambda (styles)
+                    (when styles (push styles announced))
+                    (funcall original styles)))
+                 ((symbol-function 'cooked--color)
+                  (let ((color (symbol-function 'cooked--color)))
+                    (lambda (spec)
+                      (if (eql spec 1) "#123456" (funcall color spec))))))
+        (cooked--flush-face-cache)
+        (should-not (seq-some #'identity cooked--style-faces))
+        (cooked--send cooked--session "\n")
+        ;; The line after the echoed newline is drawn with the rendition id the core
+        ;; announced for the first one.
+        (should (cooked-tests--settle
+                 (lambda ()
+                   (save-excursion
+                     (goto-char (point-max))
+                     (and (search-backward "red" start t)
+                          (> (point) start)
+                          (equal (plist-get (get-text-property (point) 'face)
+                                            :foreground)
+                                 "#123456"))))))
+        (should-not announced)))))

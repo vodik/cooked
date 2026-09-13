@@ -436,7 +436,7 @@ the everyday shape of this."
 
 (ert-deftest cooked-a-link-survives-scrolling-into-the-scrollback ()
   ;; The id travels with the row through eviction, because both live and scrolled
-  ;; rows go through the same `Row::runs' -- which is also why `Extra::Link' needed no
+  ;; rows go through the same `Row::runs' -- which is also why a cell's link needed no
   ;; work of its own to get there.
   (cooked-tests--with-session
       '("/bin/sh" "-c"

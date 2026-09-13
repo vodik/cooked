@@ -91,8 +91,8 @@ impl State {
     /// go to history and Emacs is told the display was cleared. DECALN and RIS both erase
     /// this way before drawing, so a pattern or a reset never paints over a transcript
     /// that `CSI 2 J` would have kept.
-    pub(super) fn erase_display(&mut self, how: Erase, style: Style) {
-        self.evicting(|screen| screen.erase_display(how, style));
+    pub(super) fn erase_display(&mut self, how: Erase, pen: Pen) {
+        self.evicting(|screen| screen.erase_display(how, pen));
         if how == Erase::All {
             self.cleared_display();
         }
@@ -217,8 +217,59 @@ impl State {
     }
 
     pub(super) fn linefeed(&mut self) {
-        let pen = self.pen;
+        let pen = self.pen();
         self.evicting(|screen| screen.linefeed(pen));
+    }
+
+    /// What a write with the pen as it stands puts in the cells it touches: the pen's
+    /// rendition and open link, and the rendition an erase leaves.
+    ///
+    /// Asked per character on the print path, where it costs two comparisons against the
+    /// store's most recent renditions; the store's map is consulted only when the pen has
+    /// changed since.
+    pub(super) fn pen(&mut self) -> Pen {
+        let style = self.pen;
+        Pen {
+            style: self.style_id(style),
+            link: self.link,
+            erase: self.style_id(style.erase()),
+        }
+    }
+
+    /// The id STYLE has, giving it one if it has none.
+    fn style_id(&mut self, style: Style) -> StyleId {
+        if let Some(id) = self.styles.lookup(style) {
+            return id;
+        }
+        if self.styles.is_full() {
+            self.collect_styles();
+        }
+        self.styles.insert(style)
+    }
+
+    /// Free the rendition ids nothing holds any more.
+    ///
+    /// Everything that can hold an id until the next drain is marked: every cell of both
+    /// grids, the copy of what Emacs shows, and the rows waiting to reach it as
+    /// scrollback. Emacs' own text holds faces rather than ids, so nothing already drawn
+    /// can be recoloured by an id's reuse.
+    fn collect_styles(&mut self) {
+        let Self {
+            screens,
+            front,
+            pending_scrollback,
+            styles,
+            ..
+        } = self;
+        styles.collect(|mark| {
+            for screen in screens.each() {
+                screen.all_cells().iter().for_each(|cell| mark(cell.style));
+            }
+            front.all_cells().iter().for_each(|cell| mark(cell.style));
+            for scrolled in pending_scrollback.iter() {
+                scrolled.runs.iter().for_each(|run| mark(run.style));
+            }
+        });
     }
 
     pub(super) fn resize(&mut self, rows: usize, cols: usize) {
@@ -321,10 +372,16 @@ impl State {
         let marks = self.take_marks();
         let levels = Levels::of(self);
         let rows = self.damaged_rows(damaged, &shifts, levels.cursor);
+        // Last, after everything that could have named a new id: the rows, edits and
+        // scrollback above were all built from cells written before this drain began.
+        let styles = self.styles.take_unsent();
+        let fonts = self.styles.font_bits().to_vec();
         let screen = self.screen();
         Delta {
             images,
             links,
+            styles,
+            fonts,
             scrolled,
             scrolled_base,
             shifts,
@@ -439,11 +496,11 @@ impl State {
         if on {
             // Dropped rather than archived: this is the previous full-screen program's
             // leftover frame, which was never history to begin with.
-            // `Style::default()`, not the pen: a freshly entered alt screen is not the
+            // The default pen, not the child's: a freshly entered alt screen is not the
             // outgoing program's background wash.
             let alternate = &mut self.screens.alternate;
             alternate
-                .erase_display(Erase::All, Style::default())
+                .erase_display(Erase::All, Pen::default())
                 .discard();
             alternate.goto(0, 0);
         }

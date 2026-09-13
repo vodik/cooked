@@ -262,6 +262,7 @@ symbols! {
     Mode => ":mode",
     Images => ":images",
     Links => ":links",
+    Styles => ":styles",
     Events => ":events",
     Exit => ":exit",
     Intr => ":intr",

@@ -125,6 +125,7 @@ pub(crate) mod screen;
 pub(crate) mod sgr;
 pub(crate) mod sixel;
 pub(crate) mod stream;
+pub(crate) mod style;
 pub(crate) mod term;
 pub(crate) mod terminfo;
 pub(crate) mod text;
@@ -151,4 +152,5 @@ pub(crate) use term::{
 // nothing here is more exposed than `cooked--apply' already assumes.
 pub use cell::Run;
 pub use screen::{Direction, Shift};
+pub use style::StyleId;
 pub use term::{BACKLOG_HIGH_WATER, DamagedRow, Delta, Edit, Levels, Scrolled, Term};

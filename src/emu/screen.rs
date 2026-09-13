@@ -1,10 +1,8 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
-use super::cell::{
-    CONTINUATION, Cell, Color, Extra, MarkId, Row, RowMeta, RowMut, RowRef, Run, Style,
-};
+use super::cell::{CONTINUATION, Cell, Extra, MarkId, Pen, Row, RowMeta, RowMut, RowRef, Run};
 use super::image::{CellSize, ImageId, Placement};
-use super::link::LinkId;
+use super::style::StyleId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
@@ -534,6 +532,12 @@ impl Screen {
         n < height
     }
 
+    /// Every cell of the grid, slots in storage order rather than screen order, for a walk
+    /// that only needs to see each cell once -- collecting rendition ids no cell names.
+    pub(crate) fn all_cells(&self) -> &[Cell] {
+        &self.cells
+    }
+
     /// How many times a row has been marked damaged over this screen's life.
     ///
     /// The question [`Screen::drain_damage`] answers, asked without the answer being
@@ -566,13 +570,13 @@ impl Screen {
     /// and the tests. Ordinary printing goes through [`Screen::place`] and [`Screen::join`]
     /// with a width the [`Segmenter`](crate::emu::text::Segmenter) measured, because width
     /// belongs to a grapheme cluster rather than a code point.
-    pub fn write(&mut self, ch: char, style: Style) -> Evicted {
+    pub fn write(&mut self, ch: char, pen: Pen) -> Evicted {
         match crate::emu::text::char_cells(ch) {
             0 => {
                 self.join(ch, 0, 0);
                 Evicted::none()
             }
-            width => self.place(ch, width, style),
+            width => self.place(ch, width, pen),
         }
     }
 
@@ -581,9 +585,9 @@ impl Screen {
     ///
     /// BEFORE is how many columns that cell stood on, which is what locates it: the
     /// cursor has moved past it by exactly that much, or is pinned at the last column
-    /// with a deferred wrap armed, in which case the cell ends at the right edge. It is the
-    /// arithmetic [`Screen::mark_underline`] does, because a mark on a continuation cell is
-    /// one [`Row::runs`] skips. A BEFORE of zero means there was no such cell (a combining
+    /// with a deferred wrap armed, in which case the cell ends at the right edge. The lead
+    /// cell and not its continuation, because a mark on a continuation cell is one
+    /// [`Row::runs`] skips. A BEFORE of zero means there was no such cell (a combining
     /// mark first thing on a row), and the mark folds onto the cell to the left.
     ///
     /// AFTER differs from BEFORE only for a variation selector -- `U+FE0F` promoting a
@@ -612,16 +616,16 @@ impl Screen {
         if after > before && lead + after > cols {
             return before;
         }
-        // The resized columns take the lead cell's own style, so a widened emoji does not
-        // leave a differently-coloured half behind it.
-        let style = self
+        // The resized columns take the lead cell's own rendition and link, so a widened
+        // emoji does not leave a differently-coloured half behind it.
+        let lead_cell = self
             .row(row)
-            .and_then(|r| r.get(lead).map(|c| c.style()))
+            .and_then(|r| r.get(lead).copied())
             .unwrap_or_default();
         let cell = if after > before {
-            Cell::new(CONTINUATION, style)
+            lead_cell.with_char(CONTINUATION)
         } else {
-            Cell::blank(style)
+            Cell::blank(lead_cell.style)
         };
         self.edit(row, |r| {
             let mut changed = false;
@@ -645,7 +649,7 @@ impl Screen {
     /// `OSC 66` carries a width the *child* declared. Everything else here — the
     /// deferred wrap, DECAWM, the scroll a wrap can trigger, the continuation cells, the
     /// insert-mode shift — is unchanged and is the only copy of it.
-    pub fn place(&mut self, ch: char, width: usize, style: Style) -> Evicted {
+    pub fn place(&mut self, ch: char, width: usize, pen: Pen) -> Evicted {
         let cols = self.cols;
         // Read before `touch` borrows `self` mutably below.
         let insert_mode = self.insert_mode;
@@ -660,7 +664,7 @@ impl Screen {
                 // again on every character it prints there.
                 self.edit(self.cursor.row, |r| !r.set_wrapped(true));
                 self.cursor.col = 0;
-                evicted = self.linefeed(style);
+                evicted = self.linefeed(pen);
             } else {
                 // DECAWM off: the cursor never leaves the row. Back up far enough that a
                 // wide character lands whole rather than half over the edge.
@@ -680,12 +684,12 @@ impl Screen {
                 // wide character does not tear the cell it displaces. Unconditional damage:
                 // the shift moves every cell from `col` on, so what a comparison at `col`
                 // would say is not the question.
-                r.insert_blank(col, width, style);
+                r.insert_blank(col, width, pen.erase);
                 changed = true;
             }
-            changed |= r.set(col, Cell::new(ch, style));
+            changed |= r.set(col, pen.cell(ch));
             for offset in 1..width {
-                changed |= r.set(col + offset, Cell::new(CONTINUATION, style));
+                changed |= r.set(col + offset, pen.cell(CONTINUATION));
             }
             changed
         });
@@ -724,7 +728,7 @@ impl Screen {
     ///
     /// A WIDTH of zero folds the whole thing onto the cell before, which is the honest
     /// reading of a cluster that begins with a combining mark.
-    pub fn write_cluster(&mut self, text: &str, width: usize, style: Style) -> Evicted {
+    pub fn write_cluster(&mut self, text: &str, width: usize, pen: Pen) -> Evicted {
         let mut chars = text.chars();
         let Some(base) = chars.next() else {
             return Evicted::none();
@@ -733,7 +737,7 @@ impl Screen {
             self.join(base, 0, 0);
             Evicted::none()
         } else {
-            self.place(base, width, style)
+            self.place(base, width, pen)
         };
         for mark in chars {
             // `width` and not the measurement: `join` locates the cell by how wide it
@@ -758,7 +762,7 @@ impl Screen {
     /// Insert mode and a pending wrap both bail out entirely rather than being handled:
     /// IRM shifts the row per character, and a pending wrap means the next character
     /// scrolls.
-    pub fn write_run(&mut self, text: &str, style: Style) -> usize {
+    pub fn write_run(&mut self, text: &str, pen: Pen) -> usize {
         if self.insert_mode || self.cursor.wrap_pending {
             return 0;
         }
@@ -768,7 +772,7 @@ impl Screen {
         if n == 0 {
             return 0;
         }
-        if !self.edit(row, |r| r.fill_run(col, &text[..n], style)) {
+        if !self.edit(row, |r| r.fill_run(col, &text[..n], pen)) {
             return 0;
         }
         self.cursor.col = col + n;
@@ -781,45 +785,6 @@ impl Screen {
 
     pub fn insert_mode(&self) -> bool {
         self.insert_mode
-    }
-
-    /// Record the pen's underline colour on the cell the cursor just wrote.
-    ///
-    /// Separate from [`Screen::write`] rather than a parameter to it: this is the rare
-    /// path, and `write` is the hottest call in the emulator. Called after the write, so
-    /// the column is the one the write settled on after any wrap.
-    pub fn mark_underline(&mut self, color: Color, width: usize) {
-        let (row, cols) = (self.cursor.row, self.cols);
-        // The lead column of the character just written. The cursor has advanced past it
-        // by its full width — or pinned at the last column, where the character ends
-        // rather than begins. Taking the width into account is what keeps a colour off
-        // the continuation cell of a wide character, which `Row::runs` skips, and where
-        // it would therefore vanish.
-        let col = if self.cursor.wrap_pending {
-            cols.saturating_sub(width)
-        } else {
-            self.cursor.col.saturating_sub(width)
-        };
-        if let Some(mut r) = self.touch(row) {
-            r.set_underline(col, color);
-        }
-    }
-
-    /// Record the pen's open hyperlink on the cell the cursor just wrote.
-    ///
-    /// [`Screen::mark_underline`]'s twin, including the wide-character arithmetic that puts
-    /// the id on the lead column. See `State::link` for how an open link differs from an
-    /// underline colour.
-    pub fn mark_link(&mut self, link: Option<LinkId>, width: usize) {
-        let (row, cols) = (self.cursor.row, self.cols);
-        let col = if self.cursor.wrap_pending {
-            cols.saturating_sub(width)
-        } else {
-            self.cursor.col.saturating_sub(width)
-        };
-        if let Some(mut r) = self.touch(row) {
-            r.set_link(col, link);
-        }
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -879,7 +844,7 @@ impl Screen {
         id: ImageId,
         cell_row: u16,
         cells: CellSize,
-        pen: Style,
+        style: StyleId,
     ) -> u16 {
         let (row, start) = (self.cursor.row, self.cursor.col);
         let width = usize::from(cells.cols).min(self.cols.saturating_sub(start));
@@ -894,7 +859,7 @@ impl Screen {
                         cols: cells.cols,
                         rows: cells.rows,
                     },
-                    pen,
+                    style,
                 );
             }
         }
@@ -902,7 +867,7 @@ impl Screen {
     }
 
     /// LF/IND: down one, scrolling the region if already at its bottom.
-    pub fn linefeed(&mut self, pen: Style) -> Evicted {
+    pub fn linefeed(&mut self, pen: Pen) -> Evicted {
         self.cursor.wrap_pending = false;
         match self.cursor.row {
             row if row == self.region.bottom => self.scroll_up(1, pen),
@@ -915,7 +880,7 @@ impl Screen {
     }
 
     /// RI: up one, scrolling the region down if already at its top.
-    pub fn reverse_index(&mut self, pen: Style) {
+    pub fn reverse_index(&mut self, pen: Pen) {
         self.cursor.wrap_pending = false;
         match self.cursor.row {
             row if row == self.region.top => self.scroll_down(1, pen),
@@ -931,7 +896,7 @@ impl Screen {
     }
 
     /// Shift the region up by `n`, returning rows that became scrollback.
-    pub fn scroll_up(&mut self, n: usize, pen: Style) -> Evicted {
+    pub fn scroll_up(&mut self, n: usize, pen: Pen) -> Evicted {
         let Region { top, bottom } = self.region;
         let n = n.min(self.region.height());
         if n == 0 {
@@ -992,7 +957,7 @@ impl Screen {
         // The removed rows' slots go to the bottom and are blanked there, which is the
         // same grid as removing them and appending blanks.
         self.order[first..].rotate_left(count);
-        self.clear_recycled(height - count..=height - 1, Style::default());
+        self.clear_recycled(height - count..=height - 1, Pen::default());
         if first == 0 {
             self.carried = 0;
         }
@@ -1008,7 +973,7 @@ impl Screen {
         self.touch_range(first..=height - 1);
     }
 
-    pub fn scroll_down(&mut self, n: usize, pen: Style) {
+    pub fn scroll_down(&mut self, n: usize, pen: Pen) {
         let Region { top, bottom } = self.region;
         let n = n.min(self.region.height());
         if n == 0 {
@@ -1056,10 +1021,10 @@ impl Screen {
         self.goto(row, col);
     }
 
-    pub fn erase_line(&mut self, how: Erase, pen: Style) {
+    pub fn erase_line(&mut self, how: Erase, pen: Pen) {
         let (col, cols) = (self.cursor.col, self.cols);
         let row = self.cursor.row;
-        let style = pen.erase();
+        let style = pen.erase;
         self.edit(row, |r| match how {
             Erase::ToEnd => r.fill(col..cols, style),
             Erase::ToStart => r.fill(0..=col.min(cols - 1), style),
@@ -1076,7 +1041,7 @@ impl Screen {
     ///
     /// A partial erase archives nothing: the child is rewriting part of a screen it is
     /// still drawing on, not finishing with one.
-    pub fn erase_display(&mut self, how: Erase, pen: Style) -> Evicted {
+    pub fn erase_display(&mut self, how: Erase, pen: Pen) -> Evicted {
         let (row, last) = (self.cursor.row, self.height());
         match how {
             Erase::ToEnd => {
@@ -1109,8 +1074,8 @@ impl Screen {
 
     /// Unconditionally damaged, unlike the other erase paths: see [`Row::clear`] for why
     /// it does not answer the question [`Screen::edit`] would ask it.
-    fn clear_rows(&mut self, range: std::ops::Range<usize>, pen: Style) {
-        let style = pen.erase();
+    fn clear_rows(&mut self, range: std::ops::Range<usize>, pen: Pen) {
+        let style = pen.erase;
         for i in range {
             if let Some(mut r) = self.touch(i) {
                 r.clear(style);
@@ -1120,8 +1085,8 @@ impl Screen {
 
     /// Blank the rows in RANGE for reuse, without damaging them: a scroll that recycles
     /// rows damages them itself, with the shift it reports.
-    fn clear_recycled(&mut self, range: std::ops::RangeInclusive<usize>, pen: Style) {
-        let style = pen.erase();
+    fn clear_recycled(&mut self, range: std::ops::RangeInclusive<usize>, pen: Pen) {
+        let style = pen.erase;
         for index in range {
             if let Some(mut row) = self.row_mut(index) {
                 row.clear(style);
@@ -1129,29 +1094,29 @@ impl Screen {
         }
     }
 
-    pub fn erase_chars(&mut self, n: usize, pen: Style) {
+    pub fn erase_chars(&mut self, n: usize, pen: Pen) {
         let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols);
-        let style = pen.erase();
+        let style = pen.erase;
         self.edit(row, |r| r.fill(col..(col + n).min(cols), style));
     }
 
-    pub fn insert_chars(&mut self, n: usize, pen: Style) {
+    pub fn insert_chars(&mut self, n: usize, pen: Pen) {
         let (row, col) = (self.cursor.row, self.cursor.col);
         if let Some(mut r) = self.touch(row) {
-            r.insert_blank(col, n, pen.erase());
+            r.insert_blank(col, n, pen.erase);
         }
     }
 
-    pub fn delete_chars(&mut self, n: usize, pen: Style) {
+    pub fn delete_chars(&mut self, n: usize, pen: Pen) {
         let (row, col) = (self.cursor.row, self.cursor.col);
         if let Some(mut r) = self.touch(row) {
-            r.delete(col, n, pen.erase());
+            r.delete(col, n, pen.erase);
         }
     }
 
     /// IL/DL operate on a temporary region starting at the cursor row. Lines deleted this
     /// way are destroyed, never archived.
-    pub fn insert_lines(&mut self, n: usize, pen: Style) {
+    pub fn insert_lines(&mut self, n: usize, pen: Pen) {
         if !self.region.contains(self.cursor.row) {
             return;
         }
@@ -1164,7 +1129,7 @@ impl Screen {
         self.region = saved;
     }
 
-    pub fn delete_lines(&mut self, n: usize, pen: Style) {
+    pub fn delete_lines(&mut self, n: usize, pen: Pen) {
         if !self.region.contains(self.cursor.row) {
             return;
         }
@@ -1252,7 +1217,7 @@ impl Screen {
     pub fn align(&mut self) {
         let pattern = "E".repeat(self.cols);
         for i in 0..self.height() {
-            self.edit(i, |row| row.fill_run(0, &pattern, Style::default()));
+            self.edit(i, |row| row.fill_run(0, &pattern, Pen::default()));
         }
         self.reset_region();
         self.goto(0, 0);
@@ -1320,7 +1285,7 @@ impl Screen {
         if cols != self.cols {
             self.tabs = default_tabs(cols);
             for row in &mut grid {
-                row.resize(cols, Style::default());
+                row.resize(cols, StyleId::DEFAULT);
             }
         }
 
@@ -1660,7 +1625,7 @@ mod tests {
 
     fn write(screen: &mut Screen, text: &str) {
         for ch in text.chars() {
-            screen.write(ch, Style::default()).discard();
+            screen.write(ch, Pen::default()).discard();
         }
     }
 
@@ -1682,7 +1647,7 @@ mod tests {
         screen.set_region(1, 4);
         let before = screen.cells.clone();
         let recycled = screen.order[1] as usize;
-        screen.scroll_up(1, Style::default()).discard();
+        screen.scroll_up(1, Pen::default()).discard();
 
         let texts: Vec<String> = screen.rows().map(|row| row.to_text()).collect();
         assert_eq!(texts, ["top", "two", "three", "four", "", "bottom"]);
@@ -1715,9 +1680,9 @@ mod tests {
         let mut screen = Screen::new(2, 4);
         write(&mut screen, "aa");
         screen.carriage_return();
-        screen.linefeed(Style::default()).discard();
+        screen.linefeed(Pen::default()).discard();
         write(&mut screen, "bb");
-        let evicted = screen.linefeed(Style::default());
+        let evicted = screen.linefeed(Pen::default());
 
         assert_eq!(evicted.len(), 1);
         assert_eq!(evicted[0].to_text(), "aa");
@@ -1796,7 +1761,7 @@ mod tests {
         let mut screen = Screen::new(2, 4);
         write(&mut screen, "aaaa");
         write(&mut screen, "bb");
-        screen.scroll_up(1, Style::default()).discard();
+        screen.scroll_up(1, Pen::default()).discard();
         assert_ne!(screen.head(), 0, "precondition: something was carried");
 
         screen.remove_rows(0, 1);
@@ -1836,7 +1801,7 @@ mod tests {
         }
         screen.set_region(1, 2);
         screen.goto(2, 0);
-        let evicted = screen.linefeed(Style::default());
+        let evicted = screen.linefeed(Pen::default());
 
         assert!(
             evicted.is_empty(),
@@ -1868,7 +1833,7 @@ mod tests {
         let mut screen = Screen::new(2, 6);
         write(&mut screen, "abcdef");
         screen.goto(0, 3);
-        screen.erase_line(Erase::ToEnd, Style::default());
+        screen.erase_line(Erase::ToEnd, Pen::default());
         assert_eq!(screen.row(0).unwrap().to_text(), "abc");
     }
 
@@ -1938,7 +1903,7 @@ mod tests {
         // previous frame to compare against, and there is deliberately none here.
         screen.goto(2, 0);
         let before = screen.touches();
-        screen.erase_line(Erase::All, Style::default());
+        screen.erase_line(Erase::All, Pen::default());
         assert_eq!(
             screen.touches(),
             before,
@@ -1999,8 +1964,8 @@ mod tests {
 
         // Both scroll the full region, so `archives' alone cannot tell them apart;
         // `history' is what stops the scratch grid building departure records.
-        assert_eq!(primary.scroll_up(1, Style::default()).len(), 1);
-        assert!(scratch.scroll_up(1, Style::default()).is_empty());
+        assert_eq!(primary.scroll_up(1, Pen::default()).len(), 1);
+        assert!(scratch.scroll_up(1, Pen::default()).is_empty());
 
         // The scroll itself still happened: this is about what leaves, not what moves.
         assert_eq!(scratch.row(0).unwrap().to_text(), "");
@@ -2129,12 +2094,12 @@ mod tests {
         let mut screen = Screen::new(2, 5);
         write(&mut screen, "aaaaabbbbbccccc");
         screen.carriage_return();
-        screen.linefeed(Style::default()).discard();
+        screen.linefeed(Pen::default()).discard();
         assert_eq!(screen.carried, 2);
 
         write(&mut screen, "new");
         screen.carriage_return();
-        screen.linefeed(Style::default()).discard();
+        screen.linefeed(Pen::default()).discard();
 
         assert_eq!(
             screen.carried, 0,
@@ -2149,7 +2114,7 @@ mod tests {
         assert_eq!(screen.carried, 1);
 
         screen.goto(0, 0);
-        screen.delete_lines(1, Style::default());
+        screen.delete_lines(1, Pen::default());
 
         assert_eq!(
             screen.carried, 1,
@@ -2163,7 +2128,7 @@ mod tests {
         write(&mut screen, "aaaaabbbbbccccc");
         assert_eq!(screen.carried, 1);
 
-        screen.erase_display(Erase::All, Style::default()).discard();
+        screen.erase_display(Erase::All, Pen::default()).discard();
 
         assert_eq!(screen.carried, 0);
     }
@@ -2264,10 +2229,10 @@ mod tests {
         for line in ["a", "b"] {
             write(&mut screen, line);
             screen.carriage_return();
-            screen.linefeed(Style::default()).discard();
+            screen.linefeed(Pen::default()).discard();
         }
         screen.goto(0, 0);
-        screen.insert_lines(1, Style::default());
+        screen.insert_lines(1, Pen::default());
         assert_eq!(screen.row(0).unwrap().to_text(), "");
         assert_eq!(screen.row(1).unwrap().to_text(), "a");
         assert_eq!(screen.row(2).unwrap().to_text(), "b");

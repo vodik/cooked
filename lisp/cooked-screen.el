@@ -136,10 +136,10 @@ at all."
 
 ;;;; Putting styled text in the buffer
 
-(defun cooked--render-block (block &optional row origin)
+(defun cooked--render-block (block &optional row origin unlinked)
   "Insert BLOCK at point, with its styling and decoration applied.
 
-BLOCK is (TEXT STYLE-SPANS DECO-SPANS LINK-SPANS ROWS), the one shape rendered
+BLOCK is (TEXT STYLE-SPANS DECO-SPANS ROWS), the one shape rendered
 text crosses the module boundary in -- see `cooked--drain\='.  TEXT is the whole
 run of characters, and every span carries offsets in characters into it; spans
 appear only where there is something to say, so a plain unstyled row carries no
@@ -164,15 +164,16 @@ mark, the continuation having been joined onto the line above as it was
 written.
 
 STYLE-SPANS is not a list but a unibyte string of fixed-width records, one per
-run that has a rendition to name -- see `Block::push_style\=' in src/wire.rs for
-the layout and `cooked--style-record\=' for the stride.  A DECO-SPAN is (START
-DECO), what its characters display instead of themselves, and a LINK-SPAN
-(START END ID) for an `OSC 8\=' hyperlink.  Neither of the last two repeats the
-colours, because neither is drawn in colours of its own: a box glyph takes them
-from the face at the position it sits on, which the style span has just put
-there over exactly the same characters.  Links are applied last, over the
-decorations, so they can see which cells turned out to be an image and leave
-those alone.
+run that has a rendition or a link to name, both by id -- see
+`Block::push_style\=' in src/wire.rs for the layout and `cooked--style-record\='
+for the stride.  A rendition resolves through `cooked--style-faces\=', which the
+drain\='s `:styles\=' filled, and a link through `cooked--link-uris\='.  A
+DECO-SPAN is (START DECO), what its characters display instead of themselves,
+and repeats no colours: a box glyph takes them from the face at the position it
+sits on, which the style span has just put there.  Links are applied last, over
+the decorations, so they can see which cells turned out to be an image and
+leave those alone.  UNLINKED leaves them off altogether, for text headed
+somewhere no link id can be followed from.
 
 One insert plus properties, rather than an insert per run: Emacs pays for every
 `insert\=', and building a propertized string in Lisp and inserting that instead
@@ -200,7 +201,7 @@ replaces only part of a row: its text starts partway along, and the dither phase
 is still measured from the row\='s own start.
 
 Returns the position the text was inserted at."
-  (pcase-let ((`(,text ,styles ,decos ,links ,table) block))
+  (pcase-let ((`(,text ,styles ,decos ,table) block))
     (let ((start (point)))
       (insert text)
       ;; The `insert' is outside the binding below and the property phases are
@@ -219,8 +220,9 @@ Returns the position the text was inserted at."
       ;; unfontified whether or not `jit-lock-after-change' ran on it.  See
       ;; `cooked-rewriting-a-row-still-gets-it-scanned'.
       (let ((inhibit-modification-hooks t))
-        (cooked--do-style-spans (from to face styles)
-          (put-text-property (+ start from) (+ start to) 'face face))
+        (cooked--do-style-spans (from to face _link styles)
+          (when face
+            (put-text-property (+ start from) (+ start to) 'face face)))
         ;; The row table and the decoration spans are both in ascending offset
         ;; order, so which row a span fell on is a pointer walked forward once
         ;; across the whole block rather than a search per span.  `rest' is the
@@ -236,8 +238,8 @@ Returns the position the text was inserted at."
                                   (and row (or origin
                                                (+ start (if rest (caar rest) 0))))
                                   (and row (+ row seen))))))
-        (when links
-          (cooked--render-link-spans start links)))
+        (when (and styles (not unlinked))
+          (cooked--render-link-spans start styles)))
       start)))
 
 ;;;; Moving rows the emulator moved
@@ -1025,7 +1027,7 @@ which has no such seam at all."
                ;; produces is shaped that way, but the guard must not be handed
                ;; a nil width, which is a `wrong-type-argument' several layers
                ;; from anything that would explain it.
-               (table (or (nth 4 block) '((0 nil nil))))
+               (table (or (nth 3 block) '((0 nil nil))))
                (end (cond ((null span)
                            (cooked--goto-screen-run-end start index (length table)))
                           ((nth 1 span)

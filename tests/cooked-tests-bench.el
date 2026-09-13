@@ -37,34 +37,30 @@
 and never by decoding a length, so a fixture whose records are a different width
 does not fail -- it reads every span after the first out of its neighbour's
 bytes.  One record, one stride, asserted against the constant itself."
-  (should (= (length (cooked-bench--style-record 0 8 0 0 0 0))
+  (should (= (length (cooked-bench--style-record 0 8 0 0))
              cooked--style-record))
-  ;; And the offsets are where the reader looks for them, which is the half a
+  ;; And the fields are where the reader looks for them, which is the half a
   ;; stride check cannot see: a record of the right width with START and END
   ;; transposed would style backwards.
-  (let ((packed (apply #'unibyte-string
-                       (cooked-bench--style-record 3 11 0 0 0 0))))
-    (should (= (cooked--u32 packed 0) 3))
-    (should (= (cooked--u32 packed 4) 11))))
+  (let ((packed (apply #'unibyte-string (cooked-bench--style-record 3 11 5 7))))
+    (should (= (cooked--u32 packed cooked--style-start) 3))
+    (should (= (cooked--u32 packed cooked--style-end) 11))
+    (should (= (cooked--u32 packed cooked--style-id) 5))
+    (should (= (cooked--u32 packed cooked--style-link) 7))))
 
-(ert-deftest cooked-bench-style-records-decode-to-the-rendition-they-name ()
-  "The fixture's colour fields go through `cooked--face-packed\=', so this asks the
-reader itself what the fixture said and compares it against the same rendition
-spelled out.  `cooked--face\=' is the entry point for a caller holding decoded
-colours, which makes it the independent statement of the answer.
-
-Both a palette colour and a truecolor one, because they take different paths
-through the cache key -- a fixnum for the first, the record's own bytes for the
-second -- and a fixture that packed the tag wrong would still look right on
-whichever of the two happened to be tested."
+(ert-deftest cooked-bench-style-records-resolve-to-the-rendition-they-name ()
+  "A fixture\='s rendition id resolves, through the table the fixture installs,
+to the face the same rendition spelled out has.  `cooked--face\=' is the entry
+point for a caller holding decoded colours, which makes it the independent
+statement of the answer.  Both a palette colour and a truecolor one, because a
+fixture that packed the tag wrong would still look right on one of them."
   (with-temp-buffer
     (dolist (case '((#x01000002 2)          ; tag 1, indexed 2
                     (#x020A141E (10 20 30)))) ; tag 2, rgb
       (pcase-let* ((`(,packed-fg ,spec) case)
-                   (record (apply #'unibyte-string
-                                  (cooked-bench--style-record
-                                   0 4 packed-fg 0 0 cooked--attr-bold))))
-        (should (equal (cooked--face-packed record 0)
+                   (id (cooked-bench--style-id packed-fg 0 0 cooked--attr-bold)))
+        (cooked--install-styles (cooked-bench--style-table))
+        (should (equal (cooked--style-face id)
                        (cooked--face spec nil cooked--attr-bold nil)))))))
 
 (ert-deftest cooked-bench-box-rows-carry-one-record-per-run-not-per-cell ()
@@ -129,7 +125,7 @@ record, since a vertical, its padding and the branch after it are one run.  And
 once applied, every box-drawing character is decorated while the names beside
 them are not, which is the check a byte-level assertion cannot make."
   (pcase-let* ((rows (cooked-bench--tree-rows 24 80))
-               (`((,first . (,text ,_styles ,decos ,_links ,table))) rows)
+               (`((,first . (,text ,_styles ,decos ,table))) rows)
                (lines (split-string text "\n")))
     (should (= first 0))
     (should (= (length table) 24))
@@ -165,7 +161,7 @@ row either: twelve bytes of anything is twelve bytes, and a record with CROW and
 CCOL transposed reads as a picture drawn down its own left column.  What makes
 that visible is asking for the *second* cell of the *second* row, the only
 position at which every one of the four fields is distinct."
-  (pcase-let* ((`((,_index . (,_text ,_styles ,spans ,_links ,_table)))
+  (pcase-let* ((`((,_index . (,_text ,_styles ,spans ,_table)))
                 (cooked-bench--image-rows 2 80))
                (`(,_start (image . ,packed)) (cadr spans)))
     ;; Row 1 of the picture, eighty cells of it, twelve bytes each.
@@ -319,8 +315,8 @@ since re-basing them onto the assembled text is the one thing
     (should (= (length rows) 1))
     (pcase-let ((`((,first . ,block)) rows))
       (should (= first 0))
-      (should (= (length block) 5))
-      (pcase-let* ((`(,text ,styles ,decos ,_links ,table) block)
+      (should (= (length block) 4))
+      (pcase-let* ((`(,text ,styles ,decos ,table) block)
                    (lines (split-string text "\n")))
         (should (= (length table) 2))
         (should (= (length lines) 2))

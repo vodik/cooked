@@ -43,7 +43,6 @@ fn decrqss_round_trip(rows: usize, cols: usize, set: &[u8], name: &str) -> Strin
         "{set:?} did not survive replay"
     );
     assert_eq!(second.state.pen, first.state.pen, "{set:?}");
-    assert_eq!(second.state.underline, first.state.underline, "{set:?}");
     assert_eq!(second.state.modes, first.state.modes, "{set:?}");
     assert_eq!(
         second.screen().region().top,

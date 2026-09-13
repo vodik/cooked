@@ -202,13 +202,14 @@ impl State {
         let Some(cells) = self.images.cells(id, self.metrics) else {
             return;
         };
-        let pen = self.pen.erase();
+        let pen = self.pen();
         let entry = self.screen().cursor();
         let start_col = entry.col;
         for cell_row in 0..cells.rows {
             let row = self.screen().cursor().row;
             self.screen_mut().goto(row, start_col);
-            self.screen_mut().place_image_row(id, cell_row, cells, pen);
+            self.screen_mut()
+                .place_image_row(id, cell_row, cells, pen.erase);
             // The linefeed after the *last* row is what separates the two dispositions:
             // running it there is what puts the cursor on the line below the picture,
             // and skipping it is what leaves it on the picture's last row.

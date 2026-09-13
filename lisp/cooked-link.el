@@ -75,6 +75,7 @@
 ;; This file is base tier, so cooked-util.el is the one place in the graph those
 ;; can be reached from.
 (require 'cooked-util)
+(require 'cooked-face)
 
 ;; Whether a click or a RET on a link belongs to the child is an input-ownership
 ;; question: the answer depends on the mouse grab, on whether keys are being
@@ -367,13 +368,14 @@ damaged row.  Hover is rare; drains are not."
         (format "%s\n%s" uri cooked--link-keys)
       cooked--link-keys)))
 
-(defun cooked--render-link-spans (start spans)
-  "Apply SPANS, a block's LINK-SPANS, to text inserted at START.
+(defun cooked--render-link-spans (start styles)
+  "Hang the links STYLES names on text inserted at START.
 
-Each span is (FROM TO ID) with offsets in characters — see `Block' in
-src/wire.rs.  The face is left alone whenever the run carries styling of its
-own, since the child asked for both and its colours are the more specific
-statement; only unstyled link text is given `cooked-link'.
+STYLES is a block\='s packed style records, each carrying the id of the link its
+span is part of -- see `Block' in src/wire.rs.  The face is left alone whenever
+the run carries styling of its own, since the child asked for both and its
+colours are the more specific statement; only unstyled link text is given
+`cooked-link'.
 
 Image cells are skipped.  They are blanks carrying a `display' slice, so a
 `mouse-face' on one would highlight a rectangle of a picture and a keymap would
@@ -382,15 +384,20 @@ claim a click the image had a better claim to."
   ;; convenience laid over text that has already been inserted, and no failure of
   ;; it may take the redisplay with it.
   (cooked--protect-seam 'cooked--render-link-spans
-    (pcase-dolist (`(,from ,to ,id) spans)
-      (let ((beg (+ start from))
-            (end (+ start to)))
-        (unless (eq (car-safe (get-text-property beg 'cooked-deco)) 'image)
-          (cooked-link--propertize beg end
-                                   'cooked-link-id id
-                                   'help-echo #'cooked--link-help-echo)
-          (unless (get-text-property beg 'face)
-            (put-text-property beg end 'face 'cooked-link)))))))
+    (let ((i 0)
+          (limit (length styles)))
+      (while (< i limit)
+        (let ((id (cooked--u32 styles (+ i (eval-when-compile cooked--style-link)))))
+          (unless (zerop id)
+            (let ((beg (+ start (cooked--u32 styles i)))
+                  (end (+ start (cooked--u32 styles (+ i 4)))))
+              (unless (eq (car-safe (get-text-property beg 'cooked-deco)) 'image)
+                (cooked-link--propertize beg end
+                                         'cooked-link-id id
+                                         'help-echo #'cooked--link-help-echo)
+                (unless (get-text-property beg 'face)
+                  (put-text-property beg end 'face 'cooked-link))))))
+        (setq i (+ i cooked--style-record))))))
 
 ;;;; Soft wrap: putting a logical line back together to match against
 ;;

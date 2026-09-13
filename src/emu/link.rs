@@ -28,8 +28,8 @@ use super::intern::{Ledger, dense_id};
 dense_id! {
     /// The wire name for one distinct hyperlink destination.
     ///
-    /// A dense index rather than the hash itself, so an [`super::cell::Extra::Link`] is four
-    /// bytes. The hash decides *which* index — see [`LinkStore::intern`].
+    /// A dense index rather than the hash itself, so a cell's link is four bytes. The hash
+    /// decides *which* index — see [`LinkStore::intern`].
     pub struct LinkId;
 }
 

@@ -3,7 +3,7 @@
 //! Scrollback deliberately lives in the Emacs buffer, not here. Rows that fall off the
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
-use super::cell::{Color, Deco, Extra, MarkId, RowRef, Run, Style};
+use super::cell::{Deco, Extra, MarkId, Pen, RowRef, Run, Style};
 use super::image::{
     CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, Interned, PixelSize,
 };
@@ -13,6 +13,7 @@ use super::parser::{Params, Parser, Perform};
 use super::png::png_dimensions;
 use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
+use super::style::{StyleId, StyleStore};
 use super::text::{self, Segmenter, Step, Width};
 use csi::{PushedPen, SavedMode};
 use keys::KittyStack;
@@ -316,6 +317,17 @@ pub struct Delta {
     /// delta name by id, so Lisp has to record it before it renders them, and each URI
     /// crosses exactly once however many cells or drains refer to it.
     pub links: Vec<(LinkId, String)>,
+    /// Renditions first named, or named anew, since the last drain, as `(ID, STYLE)`.
+    ///
+    /// A resource like [`Delta::links`]: the runs in this delta name renditions by
+    /// [`StyleId`], and Lisp keeps the table they index, so an id crosses with its
+    /// rendition once and is installed before anything naming it renders. An id the store
+    /// freed and handed out again crosses again, before any row names it in its new
+    /// meaning.
+    pub styles: Vec<(StyleId, Style)>,
+    /// Which renditions change the font, indexed by [`StyleId`], for the layout hash the
+    /// row table carries; see `StyleStore::font_bits`.
+    pub fonts: Vec<u8>,
     /// Scrolled-off lines, already reduced to styled runs.
     pub scrolled: Vec<Scrolled>,
     /// Absolute index of `scrolled`'s first line, so an [`Anchor`] can be told apart
@@ -776,6 +788,19 @@ impl Term {
         self.state.clear_to_prompt()
     }
 
+    /// The rendition a cell or run's [`StyleId`] names, as of now.
+    ///
+    /// For reading a grid back -- the tests, and anything else holding rows outside a
+    /// drain. A drain's own runs are resolved by the `:styles` the same drain carries.
+    pub fn style(&self, id: StyleId) -> Style {
+        self.state.styles.get(id)
+    }
+
+    /// How many renditions the store holds ids for, which a collection keeps bounded.
+    pub fn styles_held(&self) -> usize {
+        self.state.styles.len()
+    }
+
     pub fn screen(&self) -> &Screen {
         self.state.screen()
     }
@@ -1073,13 +1098,13 @@ struct State {
     /// `#[cfg(test)]`, so the field and its test do not exist in a release build.
     #[cfg(test)]
     force_per_character_print: bool,
-    /// The pen's underline colour (`SGR 58`). Not part of [`Style`]: it is stored per row
-    /// in a side table, so that a rare feature does not grow every cell on the grid.
-    underline: Color,
+    /// The renditions the grids' cells name by id; see [`crate::emu::style`].
+    styles: StyleStore,
     /// The `OSC 8` hyperlink the child currently has open, if any.
     ///
-    /// Read the same way as [`State::underline`] in `print`, but unlike an underline colour
-    /// it is not an SGR attribute, so no rendition change closes it. Terminals hold it open
+    /// Written into every cell printed while it is open, beside the pen's rendition, but
+    /// unlike anything in the pen it is not an SGR attribute, so no rendition change
+    /// closes it. Terminals hold it open
     /// until an explicit `OSC 8 ; ; ST`, which is what lets a program colour a link as it
     /// prints it. See `hyperlink` for what does close it.
     ///

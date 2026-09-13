@@ -52,11 +52,6 @@ use crate::emu::sgr::PUSHABLE;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PushedPen {
     pen: Style,
-    /// `SGR 58`'s colour, pushed with the pen for the reason [`sgr::apply`] gives for
-    /// never holding one of the two back.
-    ///
-    /// [`sgr::apply`]: crate::emu::sgr::apply
-    underline: Color,
     /// `None` for a bare push, which restores the whole pen.
     ///
     /// An `Option` rather than a selection with every part ticked, so a bare pop stays
@@ -313,7 +308,6 @@ impl State {
     /// transcript.
     pub(super) fn soft_reset(&mut self) {
         self.pen = Style::default();
-        self.underline = Color::Default;
         // Closed here and *only* here, not by SGR: DECSTR and RIS are the child saying
         // "start over", which is a different statement from any rendition change. See
         // [`State::link`].
@@ -423,7 +417,6 @@ impl State {
         if self.modes.pen_stack.len() < SGR_STACK_LIMIT {
             self.modes.pen_stack.push(PushedPen {
                 pen: self.pen,
-                underline: self.underline,
                 parts: PenParts::from_params(params),
             });
         }
@@ -431,16 +424,11 @@ impl State {
 
     /// XTPOPSGR, `CSI # }`. A pop with nothing pushed changes nothing.
     fn pop_pen(&mut self) {
-        let Some(PushedPen {
-            pen,
-            underline,
-            parts,
-        }) = self.modes.pen_stack.pop()
-        else {
+        let Some(PushedPen { pen, parts }) = self.modes.pen_stack.pop() else {
             return;
         };
         let Some(parts) = parts else {
-            (self.pen, self.underline) = (pen, underline);
+            self.pen = pen;
             return;
         };
         for flag in PUSHABLE.iter().map(|flag| flag.attr) {
@@ -457,7 +445,7 @@ impl State {
             self.pen
                 .attrs
                 .set_underline_style(pen.attrs.underline_style());
-            self.underline = underline;
+            self.pen.underline = pen.underline;
         }
         if parts.fg {
             self.pen.fg = pen.fg;
@@ -472,7 +460,7 @@ impl State {
     /// The arm is [`sgr::apply`](crate::emu::sgr::apply), shared with the comint filter,
     /// which keeps a pen of its own.
     pub(super) fn sgr(&mut self, params: &Params) {
-        crate::emu::sgr::apply(params, &mut self.pen, &mut self.underline);
+        crate::emu::sgr::apply(params, &mut self.pen);
     }
 
     /// Dispatch one `CSI` sequence.
@@ -580,7 +568,7 @@ impl State {
     fn csi_edit(&mut self, private: Option<u8>, action: char, params: &Params) -> bool {
         // `bce`: an erase or a scroll leaves the pen's background behind.  See
         // `Style::erase`.
-        let pen = self.pen;
+        let pen = self.pen();
         match (private, action) {
             (None, 'J') => {
                 let param = params.arg(0, 0) as u16;
@@ -621,7 +609,6 @@ impl State {
             (None, 'b') => {
                 if let Some(ch) = self.last_print {
                     let cap = self.screen().width() * self.screen().height();
-                    let pen = self.pen;
                     for _ in 0..params.arg(0, 1).min(cap) {
                         self.evicting(|screen| screen.write(ch, pen));
                     }
@@ -865,7 +852,7 @@ impl State {
     pub(super) fn status_report(&mut self, name: &[u8]) {
         match name {
             b"m" => {
-                let sgr = crate::emu::sgr::describe(self.pen, self.underline);
+                let sgr = crate::emu::sgr::describe(self.pen);
                 self.dcs_reply(format_args!("1$r{sgr}m"));
             }
             b"r" => {

@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthChar;
 use super::glyph::{self, BoxGlyph};
 use super::image::Placement;
 use super::link::LinkId;
+use super::style::StyleId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum Color {
@@ -14,45 +15,6 @@ pub enum Color {
     Default,
     Indexed(u8),
     Rgb(u8, u8, u8),
-}
-
-impl Color {
-    /// This colour as the tagged `u32` a style span carries. `cooked--color-spec' in
-    /// lisp/cooked-face.el is the only reader, and its docstring restates this layout.
-    ///
-    /// The tag is the *top* byte. Records cross little-endian, so the tag lands at byte 3
-    /// of the field and Lisp can dispatch on a single `aref': `Default' reads one byte and
-    /// stops, `Indexed' reads the tag and byte 0, and only `Rgb', which is rare, reads all
-    /// four.
-    ///
-    ///   tag 0  `Default' — the remaining bytes are zero, so the whole field is zero
-    ///   tag 1  `Indexed' — the index in bits 0-7
-    ///   tag 2  `Rgb'     — r in bits 16-23, g in 8-15, b in 0-7
-    ///
-    /// A fixed four bytes, because Lisp steps through span records by a constant stride,
-    /// and four is the narrowest width that holds 24 bits of `Rgb'. `Default' is all zero
-    /// because it is by far the commonest value -- the underline colour of nearly every
-    /// span -- and zero is the cheapest thing to test.
-    pub const fn packed(self) -> u32 {
-        match self {
-            Self::Default => 0,
-            Self::Indexed(i) => (1 << 24) | i as u32,
-            Self::Rgb(r, g, b) => (2 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
-        }
-    }
-
-    /// The colour a [`Color::packed`] field names: the inverse, for a [`Cell`] reading its
-    /// colours back.
-    ///
-    /// Total over every `u32`, although only `packed` ever writes one: an unknown tag reads
-    /// as `Default`, which is the value a zeroed cell has anyway.
-    pub const fn from_packed(bits: u32) -> Self {
-        match bits >> 24 {
-            1 => Self::Indexed(bits as u8),
-            2 => Self::Rgb((bits >> 16) as u8, (bits >> 8) as u8, bits as u8),
-            _ => Self::Default,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -141,11 +103,18 @@ impl Not for Attrs {
     }
 }
 
+/// A rendition: everything SGR sets that decides how a character is drawn.
+///
+/// What the pen holds and what a [`StyleId`] names. The underline's own colour
+/// (`SGR 58`) is part of it, like the foreground and background: a cell names one id for
+/// all four, so none of them costs a cell more than another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct Style {
     pub fg: Color,
     pub bg: Color,
     pub attrs: Attrs,
+    /// `SGR 58`, the underline's own colour.
+    pub underline: Color,
 }
 
 impl Style {
@@ -167,6 +136,7 @@ impl Style {
                 fg: self.fg,
                 bg: self.bg,
                 attrs: Attrs::REVERSE,
+                underline: Color::Default,
             }
         } else {
             Self {
@@ -179,38 +149,28 @@ impl Style {
 
 /// One screen position. `ch == CONTINUATION` marks the second half of a wide character.
 ///
-/// Sixteen bytes of plain data with no padding: the character, the two colours in
-/// [`Color::packed`]'s encoding, the attribute bits, and a spare `u16` that is always zero.
-/// Every byte of a cell is therefore meaningful, so two rows compare equal exactly when
-/// their bytes do -- see [`Cell::bytes`] -- and a comparison of a row against the frame
-/// Emacs already holds can be a `memcmp` rather than a walk through [`Style`]'s enums.
+/// Sixteen bytes of plain data with no padding: the character, the [`StyleId`] of its
+/// rendition, the `OSC 8` link it is part of, and a spare word that is always zero. The
+/// rendition and the link are ids, so a cell costs the same whatever it is drawn in and
+/// whether or not it is linked: a coloured underline or a link is a field written with
+/// the character rather than an entry in a side table found per column.
 ///
-/// [`Style`] stays the rendition callers speak; [`Cell::new`] packs one and
-/// [`Cell::style`] unpacks it. Code that only needs to know whether two cells share a
-/// rendition asks [`Cell::same_style`], which compares the packed fields directly.
+/// Every byte of a cell is meaningful, so two rows compare equal exactly when their bytes
+/// do -- see [`Cell::bytes`] -- and a comparison against the frame Emacs already holds
+/// covers the character, the rendition and the link in one `memcmp`.
 #[repr(C)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
-    fg: u32,
-    bg: u32,
-    attrs: u16,
+    pub style: StyleId,
+    pub link: Option<LinkId>,
     /// Always zero. Private so that nothing can set it, which is what lets
     /// [`Cell::bytes`] treat a cell as bytes.
-    zero: u16,
+    zero: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<Cell>() == 16);
 const _: () = assert!(std::mem::align_of::<Cell>() == 4);
-
-impl std::fmt::Debug for Cell {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cell")
-            .field("ch", &self.ch)
-            .field("style", &self.style())
-            .finish()
-    }
-}
 
 pub(crate) const CONTINUATION: char = '\0';
 pub(crate) const BLANK: char = ' ';
@@ -233,48 +193,44 @@ pub(crate) fn draws_nothing(ch: char) -> bool {
 
 impl Default for Cell {
     fn default() -> Self {
-        Self::blank(Style::default())
+        Self::blank(StyleId::DEFAULT)
     }
 }
 
 impl Cell {
-    pub const fn new(ch: char, style: Style) -> Self {
+    pub const fn new(ch: char, style: StyleId) -> Self {
+        Self::linked(ch, style, None)
+    }
+
+    /// CH in STYLE, part of LINK.
+    pub const fn linked(ch: char, style: StyleId, link: Option<LinkId>) -> Self {
         Self {
             ch,
-            fg: style.fg.packed(),
-            bg: style.bg.packed(),
-            attrs: style.attrs.bits(),
+            style,
+            link,
             zero: 0,
         }
     }
 
-    pub const fn blank(style: Style) -> Self {
+    pub const fn blank(style: StyleId) -> Self {
         Self::new(BLANK, style)
     }
 
-    /// This cell's rendition, unpacked.
-    pub const fn style(self) -> Style {
-        Style {
-            fg: Color::from_packed(self.fg),
-            bg: Color::from_packed(self.bg),
-            attrs: Attrs::from_bits(self.attrs),
-        }
-    }
-
-    /// The same rendition with CH in it, which costs no re-packing.
+    /// The same rendition and link with CH in it.
     pub const fn with_char(self, ch: char) -> Self {
         Self { ch, ..self }
     }
 
-    /// Whether this cell and OTHER share a rendition, compared packed.
-    pub fn same_style(self, other: Self) -> bool {
-        (self.fg, self.bg, self.attrs) == (other.fg, other.bg, other.attrs)
+    /// Whether this cell and OTHER are drawn alike: the same rendition and the same link.
+    pub fn same_pen(self, other: Self) -> bool {
+        self.style == other.style && self.link == other.link
     }
 
     /// Whether this cell is in the default rendition, the test trailing-blank trimming
-    /// asks of every cell it walks.
+    /// asks of every cell it walks. A link does not count: a run of blanks inside a link
+    /// is still blanks, and trims like any other.
     pub fn is_default_style(self) -> bool {
-        (self.fg | self.bg) == 0 && self.attrs == 0
+        self.style.is_default()
     }
 
     /// Set every cell of CELLS to CELL.
@@ -303,10 +259,11 @@ impl Cell {
     /// a `memcmp`: over a 200x400 grid the slice comparison took about 18 instructions a
     /// cell, and comparing the bytes about a tenth of that.
     ///
-    /// Sound because `Cell` is `repr(C)` with every field an integer or a `char`, the
-    /// field order leaves no padding (the asserts beside the type pin its size and
-    /// alignment), and the one spare field is private and always zero. So the bytes of a
-    /// cell are a function of its value, and equal slices of bytes are equal cells.
+    /// Sound because `Cell` is `repr(C)` with four four-byte fields and so no padding (the
+    /// asserts beside the type pin its size and alignment); `Option<LinkId>` is guaranteed
+    /// the layout of a `u32` with `None` as zero; and the spare field is private and
+    /// always zero. So the bytes of a cell are a function of its value, and equal slices of
+    /// bytes are equal cells.
     pub fn bytes(cells: &[Cell]) -> &[u8] {
         // SAFETY: see above -- `Cell` has no padding and no uninitialised bytes, and the
         // length is the slice's own size in bytes.
@@ -320,6 +277,32 @@ impl Cell {
     /// Columns occupied; wide characters claim two.
     pub fn width(self) -> usize {
         self.ch.width().unwrap_or(1).max(1)
+    }
+}
+
+/// What a writer puts in the cells it touches: the pen's rendition and open link for a
+/// character, and the rendition an erase leaves behind.
+///
+/// Two renditions because `bce` erases in the pen's background and nothing else (see
+/// [`Style::erase`]), and the grid never sees a [`Style`] to derive one from the other.
+/// An erase leaves no link either: a hyperlink belongs to the characters written inside
+/// it, not to the blanks a later `CSI K` paints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pen {
+    pub style: StyleId,
+    pub link: Option<LinkId>,
+    pub erase: StyleId,
+}
+
+impl Pen {
+    /// CH as this pen writes it.
+    pub const fn cell(self, ch: char) -> Cell {
+        Cell::linked(ch, self.style, self.link)
+    }
+
+    /// The blank an erase with this pen leaves.
+    pub const fn blank(self) -> Cell {
+        Cell::blank(self.erase)
     }
 }
 
@@ -491,19 +474,16 @@ pub struct Run {
     /// see `cooked--row-mismeasured-p'. It is also how an `OSC 66` declared width reaches
     /// Emacs.
     pub cols: usize,
-    pub style: Style,
+    /// The rendition, named in the store of whatever built the run.
+    pub style: StyleId,
     /// One decoration per character in `text`, index-aligned with `text.chars()`;
     /// `None` for an ordinary text run. Never mixed with a `None` run, nor with a run
     /// of another kind, even when `style` matches — see [`Row::build_runs`].
     pub deco: Option<Deco>,
-    /// `SGR 58`, the underline's own colour. Held on the run rather than in [`Style`]
-    /// because it lives in a side table on the row — see [`Row::extras`].
-    pub underline: Color,
     /// The `OSC 8` hyperlink these characters are part of, if any.
     ///
-    /// A side-table attachment like the underline colour, and a run boundary in its own
-    /// right (see [`Row::build_runs`]), so a link opening without any style change still
-    /// splits the run. The id is what Lisp hangs a keymap on.
+    /// A run boundary in its own right, so a link opening without any change of rendition
+    /// still splits the run. The id is what Lisp hangs a keymap on.
     pub link: Option<LinkId>,
 }
 
@@ -546,12 +526,8 @@ super::intern::dense_id! {
 pub enum Extra {
     /// Zero-width characters — combining marks, variation selectors — riding the cell.
     Marks(Box<str>),
-    /// `SGR 58`, the underline's own colour.
-    Underline(Color),
     /// One cell of a transmitted image.
     Image(Placement),
-    /// One cell of an `OSC 8` hyperlink, naming its destination.
-    Link(LinkId),
     /// An OSC 133 semantic mark that fell on this cell.
     ///
     /// The others describe how the cell is *drawn*; this is a position in the byte stream
@@ -584,23 +560,15 @@ impl Extra {
     /// would otherwise be blank.
     ///
     /// The distinction `content_len`, [`Row::has_text`] and [`Row::is_blank`] turn on.
-    /// A combining mark is text — dropping it loses a character. An underline colour is
-    /// not, and must not be: [`Row::runs`] cannot see one either, and the two have to
-    /// agree or a rewrap stops round-tripping what was on screen.
+    /// A combining mark is text — dropping it loses a character.
     pub fn is_content(&self) -> bool {
         match self {
             Self::Marks(_) => true,
-            Self::Underline(_) => false,
             // An image cell is a blank in the default style, so without this the row it
             // sits on measures as empty: trimmed off the end by `Row::content_len`,
             // judged textless by `Row::has_text`, absorbed by `Row::is_blank`. This is
             // the case the whole `is_content` distinction exists for.
             Self::Image(_) => true,
-            // Decoration, like an underline colour and for the same reason: a link is a
-            // property *of* the characters under it, and a run of blanks inside one is
-            // still a run of blanks. A row that carries nothing but a hyperlink's
-            // trailing spaces must still measure as empty.
-            Self::Link(_) => false,
             // Not content. A prompt mark routinely lands on a blank cell -- an `A' arrives
             // before the prompt is printed -- and counting it would keep blank rows alive
             // across every resize.
@@ -625,12 +593,6 @@ impl Extras {
     fn prune(&mut self, range: impl std::ops::RangeBounds<usize>, marks: Marks) {
         self.entries
             .retain(|(at, extra)| !range.contains(&usize::from(*at)) || marks.keeps(extra));
-    }
-
-    /// Drop the attachments on `col` that `which` selects, keeping the rest.
-    fn prune_kind(&mut self, col: usize, which: impl Fn(&Extra) -> bool) {
-        self.entries
-            .retain(|(at, extra)| usize::from(*at) != col || !which(extra));
     }
 
     /// Move every attachment from `col` onward by `by`, dropping what falls off `cols`.
@@ -685,11 +647,11 @@ impl Marks {
 /// whether its line goes on below.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RowMeta {
-    /// Marks, underline colours and anything else attached to a single column.
+    /// Combining marks, image placements and semantic marks: what is attached to a single
+    /// column and cannot be a field of [`Cell`].
     ///
-    /// All of it is rare -- an underline colour is essentially an editor drawing LSP
-    /// diagnostics -- and none of it can go in [`Cell`]: a `Color` in [`Style`] would grow
-    /// it from 16 bytes to 20, an 8-13% throughput loss across the grid.
+    /// All of it is rare, and each kind carries more than a cell has room for -- a string
+    /// of marks, a placement's rectangle -- or, for a semantic mark, is not drawn at all.
     ///
     /// Boxed, because a row's metadata is small and fixed-size that way, which keeps the
     /// per-slot table in `Screen` dense: `Option<Box<Extras>>` is one null-optimised
@@ -776,7 +738,7 @@ impl Row {
     /// `cols` there is no longer a cell for it to be attached to. Only the non-rewrapping
     /// paths reach here -- the alternate screen, and a `Resize::Clamp` -- and neither has
     /// buffer text under it for a mark to be describing.
-    pub fn resize(&mut self, cols: usize, style: Style) {
+    pub fn resize(&mut self, cols: usize, style: StyleId) {
         self.cells.resize(cols, Cell::blank(style));
         self.prune(cols.., Marks::Drop);
     }
@@ -932,14 +894,11 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 }
                 continue;
             }
-            let (mut underline, mut marks, mut placed, mut link) =
-                (Color::Default, None, None, None);
+            let (mut marks, mut placed) = (None, None);
             for (_, extra) in entries.iter().filter(|(at, _)| usize::from(*at) == col) {
                 match extra {
-                    Extra::Underline(color) => underline = *color,
                     Extra::Marks(text) => marks = Some(&**text),
                     Extra::Image(p) => placed = Some(*p),
-                    Extra::Link(id) => link = Some(*id),
                     Extra::Mark(_) => {}
                 }
             }
@@ -947,9 +906,8 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 .map(DecoCell::Image)
                 .or_else(|| DecoCell::classify(cell.ch));
             let joins = runs.last().is_some_and(|run| {
-                run.style == cell.style()
-                    && run.underline == underline
-                    && run.link == link
+                run.style == cell.style
+                    && run.link == cell.link
                     && match (&run.deco, deco) {
                         (None, None) => true,
                         (Some(d), Some(c)) => d.accepts(c),
@@ -967,10 +925,9 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 runs.push(Run {
                     text: String::from(cell.ch),
                     cols: 1,
-                    style: cell.style(),
+                    style: cell.style,
                     deco: deco.map(Deco::start),
-                    underline,
-                    link,
+                    link: cell.link,
                 });
             }
             if let (Some(marks), Some(run)) = (marks, runs.last_mut()) {
@@ -1021,7 +978,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// **Only a gap between two glyph runs is absorbed.** A trailing blank run is never
     /// taken, because [`Row::line_runs`] hands a wrapped row its full width, and the
     /// padding would otherwise be baked into a bitmap nobody sees. The three runs must
-    /// also agree on `style`, `underline` and `link`, as adjacent glyph runs would.
+    /// also agree on `style` and `link`, as adjacent glyph runs would.
     ///
     /// A post-pass rather than a rule inside each builder, because per cell it needs a
     /// variable-length lookahead, while over runs it is a window of three.
@@ -1042,8 +999,6 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 && blank_gap(&runs[i + 1])
                 && runs[i].style == runs[i + 1].style
                 && runs[i].style == runs[i + 2].style
-                && runs[i].underline == runs[i + 1].underline
-                && runs[i].underline == runs[i + 2].underline
                 && runs[i].link == runs[i + 1].link
                 && runs[i].link == runs[i + 2].link;
             if !joins {
@@ -1069,9 +1024,9 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
 
     /// [`Row::build_runs`] for a row with nothing attached, which is nearly every row.
     ///
-    /// With no attachments there is no underline colour, no link and no image placement,
-    /// so the only things that can end a run are the pen changing and a character that
-    /// draws a shape. That collapses the per-cell decision the general form has to make
+    /// With no attachments there are no combining marks and no image placements, so the
+    /// only things that can end a run are the pen -- rendition or link -- changing and a
+    /// character that draws a shape. That collapses the per-cell decision the general form has to make
     /// into a scan for the end of the run, after which the whole span is appended at once
     /// -- one `runs.last_mut()`, one capacity check and one join test per *run* instead of
     /// per cell.
@@ -1099,7 +1054,6 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 continue;
             }
             let pen = *cell;
-            let style = cell.style();
             let start = col;
             let deco = DecoCell::classify(cell.ch);
             col += 1;
@@ -1110,7 +1064,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 while col < end {
                     let next = &cells[col];
                     if !next.is_continuation()
-                        && (!next.same_style(pen) || DecoCell::classify(next.ch).is_some())
+                        && (!next.same_pen(pen) || DecoCell::classify(next.ch).is_some())
                     {
                         break;
                     }
@@ -1123,7 +1077,8 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 .map(|c| c.ch);
             match runs.last_mut() {
                 Some(run)
-                    if run.style == style
+                    if run.style == pen.style
+                        && run.link == pen.link
                         && match (&run.deco, deco) {
                             (None, None) => true,
                             (Some(d), Some(c)) => d.accepts(c),
@@ -1146,10 +1101,9 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                         // Every cell of the span, continuations included: the scan above
                         // ran to `col` over columns, and that span is the run's width.
                         cols: col - start,
-                        style,
+                        style: pen.style,
                         deco: deco.map(Deco::start),
-                        underline: Color::Default,
-                        link: None,
+                        link: pen.link,
                     });
                 }
             }
@@ -1176,10 +1130,8 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 }
                 continue;
             }
-            let mut underline = Color::Default;
             let mut marks = None;
             let mut placed = None;
-            let mut link = None;
             while at < entries.len() && usize::from(entries[at].0) < col {
                 at += 1;
             }
@@ -1188,10 +1140,8 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 .take_while(|(c, _)| usize::from(*c) == col)
             {
                 match extra {
-                    Extra::Underline(color) => underline = *color,
                     Extra::Marks(text) => marks = Some(&**text),
                     Extra::Image(p) => placed = Some(*p),
-                    Extra::Link(id) => link = Some(*id),
                     // Nothing to draw and nothing to split a run on: a mark is a
                     // position, not a property of the characters.
                     Extra::Mark(_) => {}
@@ -1207,12 +1157,11 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 .or_else(|| DecoCell::classify(cell.ch));
             match runs.last_mut() {
                 Some(run)
-                    if run.style == cell.style()
-                        && run.underline == underline
+                    if run.style == cell.style
                         // A link boundary splits a run even when nothing else changed:
                         // `see <link>foo</link> bar' in one colour is otherwise one run,
                         // with nothing to say which part is clickable.
-                        && run.link == link
+                        && run.link == cell.link
                         && match (&run.deco, deco) {
                             (None, None) => true,
                             (Some(d), Some(c)) => d.accepts(c),
@@ -1235,10 +1184,9 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                         text
                     },
                     cols: 1,
-                    style: cell.style(),
+                    style: cell.style,
                     deco: deco.map(Deco::start),
-                    underline,
-                    link,
+                    link: cell.link,
                 }),
             }
             // Combining marks never legitimately attach to a box-drawing base
@@ -1314,29 +1262,6 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
                 .entries
                 .retain(|(at, extra)| usize::from(*at) != col || matches!(extra, Extra::Mark(_)));
         });
-    }
-
-    /// Set or clear the underline colour at `col`.
-    ///
-    /// `Color::Default` only removes, so a row that stops being underlined goes back to
-    /// having no table, which keeps [`Row::runs`] on its plain path.
-    pub fn set_underline(&mut self, col: usize, color: Color) {
-        self.edit_extras(|extras| extras.prune_kind(col, |e| matches!(e, Extra::Underline(_))));
-        if color != Color::Default && col < self.cells().len() {
-            self.attach(col, Extra::Underline(color));
-        }
-    }
-
-    /// Set or clear the hyperlink at `col`.
-    ///
-    /// `None` only removes, for the reason [`Row::set_underline`] gives.
-    pub fn set_link(&mut self, col: usize, link: Option<LinkId>) {
-        self.edit_extras(|extras| extras.prune_kind(col, |e| matches!(e, Extra::Link(_))));
-        if let Some(id) = link
-            && col < self.cells().len()
-        {
-            self.attach(col, Extra::Link(id));
-        }
     }
 
     /// Attach a semantic mark to `col`, without disturbing anything already there.
@@ -1438,9 +1363,9 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
     /// panicking.
     ///
     /// Returns whether anything changed, on [`Row::set`]'s terms.
-    pub fn fill_run(&mut self, col: usize, text: &str, style: Style) -> bool {
+    pub fn fill_run(&mut self, col: usize, text: &str, pen: Pen) -> bool {
         let attached = self.meta().extras.is_some();
-        let pen = Cell::blank(style);
+        let pen = pen.cell(BLANK);
         let Some(slots) = self.cells_mut().get_mut(col..) else {
             return false;
         };
@@ -1475,7 +1400,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
     /// rewraps and yanks as text — a picture pasted out of the scrollback comes out as
     /// the whitespace it occupied, which is the only honest plain-text rendering of it.
     /// [`Extra::is_content`] is what stops that blank being trimmed away.
-    pub fn place(&mut self, col: usize, placement: Placement, style: Style) {
+    pub fn place(&mut self, col: usize, placement: Placement, style: StyleId) {
         if col >= self.cells().len() {
             return;
         }
@@ -1503,7 +1428,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
 
     /// Blank a span of columns, returning whether that changed anything; see [`Row::set`]
     /// for what the answer is for.
-    pub fn fill(&mut self, range: impl IntoIterator<Item = usize>, style: Style) -> bool {
+    pub fn fill(&mut self, range: impl IntoIterator<Item = usize>, style: StyleId) -> bool {
         // Not `set` per column. `fill` is the erase path — a full-screen program clears
         // rows every frame — and a per-cell side-table check in the loop stops this being
         // a bulk write. The tables are pruned once, outside it.
@@ -1536,7 +1461,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
     /// Returns nothing, unlike the other writers: `Screen::scroll_up` clears every row it
     /// recycles, and comparing first would scan the row before overwriting it, 22% of the
     /// plain-text benchmark for an answer that path discards.
-    pub fn clear(&mut self, style: Style) {
+    pub fn clear(&mut self, style: StyleId) {
         Cell::fill(self.cells_mut(), Cell::blank(style));
         self.meta_mut().extras = None;
         self.meta_mut().wrapped = false;
@@ -1551,7 +1476,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
     /// Returns whether that changed anything, so a prompt redrawn identically costs no
     /// repaint. `wrapped` counts as content here, since it decides where a logical line
     /// ends.
-    pub fn erase_all(&mut self, style: Style) -> bool {
+    pub fn erase_all(&mut self, style: StyleId) -> bool {
         let blank = Cell::blank(style);
         let changed = self.meta().extras.is_some()
             || self.meta().wrapped
@@ -1562,7 +1487,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
         changed
     }
 
-    pub fn insert_blank(&mut self, col: usize, count: usize, style: Style) {
+    pub fn insert_blank(&mut self, col: usize, count: usize, style: StyleId) {
         let cols = self.cells().len();
         if col >= cols {
             return;
@@ -1577,7 +1502,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
         self.edit_extras(|extras| extras.shift(col, n as isize, cols));
     }
 
-    pub fn delete(&mut self, col: usize, count: usize, style: Style) {
+    pub fn delete(&mut self, col: usize, count: usize, style: StyleId) {
         let cols = self.cells().len();
         if col >= cols {
             return;
@@ -1601,33 +1526,29 @@ mod tests {
 
     /// Every byte of a cell is part of its value, which is what [`Cell::bytes`] rests on.
     ///
-    /// Packs a spread of renditions, including the widest colour and every attribute bit,
-    /// and checks that the spare field reads back zero and that two cells compare equal
-    /// exactly when their bytes do.
+    /// A spread of characters, rendition ids and links, including no link, which is the
+    /// niche: the spare word reads back zero, and two cells compare equal exactly when
+    /// their bytes do.
     #[test]
     fn a_cell_is_sixteen_bytes_with_nothing_undefined_in_them() {
-        let styles = [
-            Style::default(),
-            Style {
-                fg: Color::Indexed(255),
-                bg: Color::Rgb(0xff, 0xff, 0xff),
-                attrs: Attrs::from_bits(u16::MAX),
-            },
-            Style {
-                fg: Color::Rgb(1, 2, 3),
-                bg: Color::Indexed(0),
-                attrs: Attrs::BOLD,
-            },
+        let pens = [
+            (StyleId::DEFAULT, None),
+            (StyleId::from_raw(u32::MAX), None),
+            (StyleId::from_raw(1), Some(LinkId::from_index(0))),
+            (StyleId::DEFAULT, Some(LinkId::from_index(u32::MAX - 1))),
         ];
-        let cells: Vec<Cell> = styles
+        let cells: Vec<Cell> = pens
             .iter()
-            .flat_map(|&style| ['a', CONTINUATION, '\u{10ffff}'].map(|ch| Cell::new(ch, style)))
+            .flat_map(|&(style, link)| {
+                ['a', CONTINUATION, '\u{10ffff}'].map(|ch| Cell::linked(ch, style, link))
+            })
             .collect();
         for cell in &cells {
             let bytes = Cell::bytes(std::slice::from_ref(cell));
             assert_eq!(bytes.len(), 16);
-            assert_eq!(&bytes[14..], &[0, 0], "{cell:?}");
-            assert_eq!(cell.style(), Cell::new(cell.ch, cell.style()).style());
+            assert_eq!(&bytes[12..], &[0, 0, 0, 0], "{cell:?}");
+            let link = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
+            assert_eq!(link, cell.link.map_or(0, LinkId::get), "{cell:?}");
         }
         for a in &cells {
             for b in &cells {
@@ -1639,30 +1560,13 @@ mod tests {
     }
 
     #[test]
-    fn a_packed_colour_unpacks_to_itself() {
-        for color in [
-            Color::Default,
-            Color::Indexed(0),
-            Color::Indexed(255),
-            Color::Rgb(0, 0, 0),
-            Color::Rgb(0x12, 0x34, 0x56),
-            Color::Rgb(0xff, 0xff, 0xff),
-        ] {
-            assert_eq!(Color::from_packed(color.packed()), color);
-        }
-    }
-
-    #[test]
     fn runs_merge_by_style_and_trim_trailing_blanks() {
         let mut row = Row::new(10);
-        let red = Style {
-            fg: Color::Indexed(1),
-            ..Style::default()
-        };
+        let red = StyleId::from_raw(1);
         for (i, c) in "hi".chars().enumerate() {
             row.set(i, Cell::new(c, red));
         }
-        row.set(2, Cell::new('!', Style::default()));
+        row.set(2, Cell::new('!', StyleId::DEFAULT));
 
         let runs = row.runs();
         assert_eq!(runs.len(), 2);
@@ -1681,7 +1585,7 @@ mod tests {
     #[test]
     fn box_glyphs_do_not_merge_with_adjacent_plain_text() {
         let mut row = Row::new(4);
-        let style = Style::default();
+        let style = StyleId::DEFAULT;
         row.set(0, Cell::new('a', style));
         row.set(1, Cell::new('\u{2500}', style)); // ─, same style as its neighbors
         row.set(2, Cell::new('b', style));
@@ -1700,7 +1604,7 @@ mod tests {
     #[test]
     fn adjacent_box_glyphs_of_the_same_style_merge_into_one_run() {
         let mut row = Row::new(4);
-        let style = Style::default();
+        let style = StyleId::DEFAULT;
         for (i, c) in "\u{250C}\u{2500}\u{2510}".chars().enumerate() {
             row.set(i, Cell::new(c, style));
         }
@@ -1721,11 +1625,8 @@ mod tests {
     #[test]
     fn box_glyph_run_splits_on_style_change() {
         let mut row = Row::new(4);
-        let red = Style {
-            fg: Color::Indexed(1),
-            ..Style::default()
-        };
-        row.set(0, Cell::new('\u{2500}', Style::default()));
+        let red = StyleId::from_raw(1);
+        row.set(0, Cell::new('\u{2500}', StyleId::DEFAULT));
         row.set(1, Cell::new('\u{2500}', red));
 
         let runs = row.runs();
@@ -1739,7 +1640,7 @@ mod tests {
     #[test]
     fn combining_marks_ride_along_with_their_base() {
         let mut row = Row::new(4);
-        row.set(0, Cell::new('e', Style::default()));
+        row.set(0, Cell::new('e', StyleId::DEFAULT));
         row.combine(0, '\u{301}');
         assert_eq!(row.to_text(), "e\u{301}");
     }
@@ -1747,17 +1648,17 @@ mod tests {
     #[test]
     fn overwriting_a_cell_drops_its_marks() {
         let mut row = Row::new(4);
-        row.set(0, Cell::new('e', Style::default()));
+        row.set(0, Cell::new('e', StyleId::DEFAULT));
         row.combine(0, '\u{301}');
-        row.set(0, Cell::new('x', Style::default()));
+        row.set(0, Cell::new('x', StyleId::DEFAULT));
         assert_eq!(row.to_text(), "x");
     }
 
     #[test]
     fn wide_cells_skip_their_continuation() {
         let mut row = Row::new(4);
-        row.set(0, Cell::new('漢', Style::default()));
-        row.set(1, Cell::new(CONTINUATION, Style::default()));
+        row.set(0, Cell::new('漢', StyleId::DEFAULT));
+        row.set(1, Cell::new(CONTINUATION, StyleId::DEFAULT));
         assert_eq!(row.to_text(), "漢");
     }
 
@@ -1765,9 +1666,9 @@ mod tests {
     fn delete_shifts_left_and_backfills() {
         let mut row = Row::new(4);
         for (i, c) in "abcd".chars().enumerate() {
-            row.set(i, Cell::new(c, Style::default()));
+            row.set(i, Cell::new(c, StyleId::DEFAULT));
         }
-        row.delete(1, 2, Style::default());
+        row.delete(1, 2, StyleId::DEFAULT);
         assert_eq!(row.to_text(), "ad");
     }
 
@@ -1792,11 +1693,14 @@ mod tests {
     }
 
     #[test]
-    fn an_underline_colour_alone_is_not_content() {
+    fn a_link_on_blanks_alone_is_not_content() {
         // The invariant `content_len`'s contract rests on: it and `runs` must agree about
-        // where a line ends, and `runs` cannot see a colour on a cell with nothing in it.
+        // where a line ends, and a run of blanks inside a link is still a run of blanks.
         let mut row = Row::new(4);
-        row.set_underline(1, Color::Indexed(196));
+        row.set(
+            1,
+            Cell::linked(BLANK, StyleId::DEFAULT, Some(LinkId::from_index(0))),
+        );
         assert_eq!(row.content_len(), 0);
         assert!(!row.has_text());
         assert!(row.is_blank());
@@ -1805,17 +1709,17 @@ mod tests {
     #[test]
     fn ich_shifts_attachments_with_their_cells() {
         let mut row = Row::new(6);
-        row.set(0, Cell::new('a', Style::default()));
-        row.set_underline(0, Color::Indexed(196));
+        row.set(0, Cell::new('a', StyleId::DEFAULT));
         row.combine(0, '\u{0301}');
+        row.mark(0, MarkId::from_index(1));
 
-        row.insert_blank(0, 2, Style::default());
+        row.insert_blank(0, 2, StyleId::DEFAULT);
 
         assert_eq!(
             row.extras(),
             [
-                (2, Extra::Underline(Color::Indexed(196))),
                 (2, Extra::Marks("\u{0301}".into())),
+                (2, Extra::Mark(MarkId::from_index(1))),
             ]
         );
     }
@@ -1823,13 +1727,13 @@ mod tests {
     #[test]
     fn ich_drops_only_what_it_pushes_off_the_end() {
         let mut row = Row::new(4);
-        row.set_underline(0, Color::Indexed(1));
-        row.set_underline(3, Color::Indexed(2));
+        row.combine(0, '\u{301}');
+        row.combine(3, '\u{302}');
 
-        row.insert_blank(0, 2, Style::default());
+        row.insert_blank(0, 2, StyleId::DEFAULT);
 
         // Column 0 moved to 2; column 3 went off the end at 5.
-        assert_eq!(row.extras(), [(2, Extra::Underline(Color::Indexed(1)))]);
+        assert_eq!(row.extras(), [(2, Extra::Marks("\u{301}".into()))]);
         assert!(
             row.extras()
                 .iter()
@@ -1840,18 +1744,18 @@ mod tests {
     #[test]
     fn dch_closes_the_gap_and_spares_the_columns_before_it() {
         let mut row = Row::new(6);
-        row.set_underline(0, Color::Indexed(1));
-        row.set_underline(3, Color::Indexed(2));
-        row.set_underline(5, Color::Indexed(3));
+        row.combine(0, '\u{301}');
+        row.combine(3, '\u{302}');
+        row.combine(5, '\u{303}');
 
         // Delete columns 3 and 4. Column 0 is untouched; column 5 closes up to 3.
-        row.delete(3, 2, Style::default());
+        row.delete(3, 2, StyleId::DEFAULT);
 
         assert_eq!(
             row.extras(),
             [
-                (0, Extra::Underline(Color::Indexed(1))),
-                (3, Extra::Underline(Color::Indexed(3))),
+                (0, Extra::Marks("\u{301}".into())),
+                (3, Extra::Marks("\u{303}".into())),
             ]
         );
     }
@@ -1861,7 +1765,7 @@ mod tests {
     /// glyphs, six of them [`BoxGlyph::BLANK`], beside the filename.
     #[test]
     fn a_tree_indent_is_one_glyph_run() {
-        let style = Style::default();
+        let style = StyleId::DEFAULT;
         let mut row = Row::new(24);
         for (col, ch) in "\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500} f"
             .chars()
@@ -1902,7 +1806,7 @@ mod tests {
     /// [`draws_nothing`] is a list and not `ch == BLANK`.
     #[test]
     fn a_no_break_space_is_absorbed_as_a_blank() {
-        let style = Style::default();
+        let style = StyleId::DEFAULT;
         let mut row = Row::new(24);
         for (col, ch) in "\u{2502}\u{a0}\u{a0} \u{2514}\u{2500}\u{2500} f"
             .chars()
@@ -1929,7 +1833,7 @@ mod tests {
     /// of an indented row go the same way.
     #[test]
     fn leading_and_trailing_blanks_stay_out_of_the_run() {
-        let style = Style::default();
+        let style = StyleId::DEFAULT;
         let mut row = Row::new(12);
         for (col, ch) in "  \u{2500}\u{2500}  ".chars().enumerate() {
             row.set(col, Cell::new(ch, style));
@@ -1954,15 +1858,12 @@ mod tests {
     /// A gap only joins what it is between, and only when nothing else changed.
     #[test]
     fn a_blank_gap_under_a_different_rendition_still_breaks_the_run() {
-        let red = Style {
-            fg: Color::Indexed(1),
-            ..Style::default()
-        };
+        let red = StyleId::from_raw(1);
         let mut row = Row::new(12);
         for (col, ch) in "\u{2500} \u{2500}".chars().enumerate() {
             // The gap alone is red, which is a visible rectangle if it is baked into a
             // neighbour's bitmap.
-            let style = if col == 1 { red } else { Style::default() };
+            let style = if col == 1 { red } else { StyleId::DEFAULT };
             row.set(col, Cell::new(ch, style));
         }
         assert_eq!(row.runs().len(), 3, "{:?}", row.runs());
@@ -1971,16 +1872,16 @@ mod tests {
         // to reach Lisp.
         let mut row = Row::new(12);
         for (col, ch) in "\u{2500} \u{2500}".chars().enumerate() {
-            row.set(col, Cell::new(ch, Style::default()));
+            let link = (col == 2).then(|| LinkId::from_index(7));
+            row.set(col, Cell::linked(ch, StyleId::DEFAULT, link));
         }
-        row.set_link(2, Some(LinkId::from_index(7)));
         assert_eq!(row.runs().len(), 3, "{:?}", row.runs());
     }
 
     /// Plain text between two glyph runs is not a gap, however much of it is blank.
     #[test]
     fn text_between_two_glyph_runs_is_not_absorbed() {
-        let style = Style::default();
+        let style = StyleId::DEFAULT;
         let mut row = Row::new(12);
         for (col, ch) in "\u{2500} x \u{2500}".chars().enumerate() {
             row.set(col, Cell::new(ch, style));
@@ -1995,9 +1896,9 @@ mod tests {
         // The `None` is what keeps `runs` on the specialisation with no side table in it,
         // so returning to it matters as much as getting off it.
         let mut row = Row::new(4);
-        row.set_underline(1, Color::Indexed(196));
+        row.combine(1, '\u{301}');
         assert!(row.meta.extras.is_some());
-        row.set_underline(1, Color::Default);
+        row.set(1, Cell::new('a', StyleId::DEFAULT));
         assert!(row.meta.extras.is_none());
     }
 
@@ -2020,7 +1921,7 @@ mod tests {
         // contract of `Run::cols`, and `cooked-carried-row-width-agrees-with-string-width'
         // in tests/cooked-tests-render.el is the same assertion made from the other side.
         let mut row = Row::new(10);
-        let style = Style::default();
+        let style = StyleId::DEFAULT;
         for (col, ch) in [(0, 'a'), (1, '\u{6f22}'), (3, '\u{2500}'), (4, 'e')] {
             row.set(col, Cell::new(ch, style));
         }
@@ -2053,11 +1954,17 @@ mod tests {
         };
 
         const COLS: usize = 24;
-        let palette = [
-            Color::Default,
-            Color::Indexed(1),
-            Color::Indexed(200),
-            Color::Rgb(10, 20, 30),
+        let styles = [
+            StyleId::DEFAULT,
+            StyleId::from_raw(1),
+            StyleId::from_raw(2),
+            StyleId::from_raw(3),
+        ];
+        let links = [
+            None,
+            None,
+            Some(LinkId::from_index(0)),
+            Some(LinkId::from_index(1)),
         ];
         // Plain ASCII, a box glyph, a shade block, a wide character and a zero-width
         // mark -- every branch `DecoCell::classify` and the width logic can take.
@@ -2079,22 +1986,15 @@ mod tests {
             while col < COLS {
                 let r = next();
                 let ch = chars[(r % chars.len() as u64) as usize];
-                let style = Style {
-                    fg: palette[((r >> 8) % 4) as usize],
-                    bg: palette[((r >> 16) % 4) as usize],
-                    attrs: if (r >> 24) % 3 == 0 {
-                        Attrs::BOLD
-                    } else {
-                        Attrs::NONE
-                    },
-                };
+                let style = styles[((r >> 8) % 4) as usize];
+                let link = links[((r >> 16) % 4) as usize];
                 let width = if ch == '\u{6f22}' { 2 } else { 1 };
                 if col + width > COLS {
                     break;
                 }
-                row.set(col, Cell::new(ch, style));
+                row.set(col, Cell::linked(ch, style, link));
                 if width == 2 {
-                    row.set(col + 1, Cell::new(CONTINUATION, style));
+                    row.set(col + 1, Cell::linked(CONTINUATION, style, link));
                 }
                 // Attachments, each rare enough that most cells carry none -- which is
                 // also the distribution the real grid has.
@@ -2103,9 +2003,7 @@ mod tests {
                 } else {
                     u64::MAX
                 } {
-                    0 => row.set_underline(col, Color::Indexed(196)),
-                    1 => row.set_link(col, Some(LinkId::from_index(((r >> 40) % 3) as u32))),
-                    2 => row.combine(col, '\u{301}'),
+                    0..=2 => row.combine(col, '\u{301}'),
                     3 => row.mark(col, MarkId::from_index(((r >> 40) % 4) as u32)),
                     4 => row.place(
                         col,
@@ -2155,7 +2053,7 @@ mod tests {
 
     #[test]
     fn insert_blank_keeps_the_row_exactly_cols_wide() {
-        let plain = |ch| Cell::new(ch, Style::default());
+        let plain = |ch| Cell::new(ch, StyleId::DEFAULT);
         let text = |row: &Row| row.cells().iter().map(|c| c.ch).collect::<String>();
 
         let mut row = Row::new(4);
@@ -2164,14 +2062,14 @@ mod tests {
         }
 
         // The ordinary shift: `d` falls off the end rather than widening the row.
-        row.insert_blank(1, 1, Style::default());
+        row.insert_blank(1, 1, StyleId::DEFAULT);
         assert_eq!(row.len(), 4);
         assert_eq!(text(&row), "a bc");
 
         // The boundary the in-place rewrite has to get right: `count` at or past the
         // columns remaining leaves an empty copy range, so the tail is filled and nothing
         // is read from beyond the row.
-        row.insert_blank(2, 99, Style::default());
+        row.insert_blank(2, 99, StyleId::DEFAULT);
         assert_eq!(row.len(), 4);
         assert_eq!(text(&row), "a   ");
 
@@ -2180,7 +2078,7 @@ mod tests {
         for (col, ch) in "abcd".chars().enumerate() {
             row.set(col, plain(ch));
         }
-        row.insert_blank(3, 1, Style::default());
+        row.insert_blank(3, 1, StyleId::DEFAULT);
         assert_eq!(text(&row), "abc ");
     }
 
@@ -2188,11 +2086,12 @@ mod tests {
     fn a_mark_outlives_what_is_drawn_over_it() {
         let mut row = Row::new(4);
         row.mark(1, MarkId::from_index(7));
-        row.set_underline(1, Color::Indexed(196));
-        row.set(1, Cell::new('a', Style::default()));
-        // The underline went with the character it decorated; the mark is a position in
-        // the stream and stays. `OSC 133;A' arrives before the prompt is printed, so
-        // without this every prompt mark would die to its own prompt's first character.
+        row.combine(1, '\u{301}');
+        row.set(1, Cell::new('a', StyleId::DEFAULT));
+        // The combining mark went with the character it rode; the semantic mark is a
+        // position in the stream and stays. `OSC 133;A' arrives before the prompt is
+        // printed, so without this every prompt mark would die to its own prompt's first
+        // character.
         assert_eq!(
             row.marks().collect::<Vec<_>>(),
             vec![(1, MarkId::from_index(7))]
@@ -2200,17 +2099,17 @@ mod tests {
         assert!(
             !row.extras()
                 .iter()
-                .any(|(_, e)| matches!(e, Extra::Underline(_)))
+                .any(|(_, e)| matches!(e, Extra::Marks(_)))
         );
 
         // An erase is the same case reached the other way: a shell redrawing its prompt
         // line wipes it with `CSI K` on every keystroke.
-        row.fill(0..4, Style::default());
+        row.fill(0..4, StyleId::DEFAULT);
         assert_eq!(
             row.marks().collect::<Vec<_>>(),
             vec![(1, MarkId::from_index(7))]
         );
-        row.erase_all(Style::default());
+        row.erase_all(StyleId::DEFAULT);
         assert_eq!(
             row.marks().collect::<Vec<_>>(),
             vec![(1, MarkId::from_index(7))]
@@ -2218,10 +2117,10 @@ mod tests {
 
         // The row ceasing to be what it was does take it: recycled at the bottom of a
         // scroll, or with the column it sat on gone.
-        row.clear(Style::default());
+        row.clear(StyleId::DEFAULT);
         assert!(row.marks().next().is_none());
         row.mark(1, MarkId::from_index(8));
-        row.resize(1, Style::default());
+        row.resize(1, StyleId::DEFAULT);
         assert!(row.marks().next().is_none());
     }
 
@@ -2264,11 +2163,10 @@ mod tests {
     #[test]
     fn overwriting_a_cell_retires_everything_attached_to_it() {
         let mut row = Row::new(4);
-        row.set(1, Cell::new('a', Style::default()));
-        row.set_underline(1, Color::Indexed(196));
+        row.set(1, Cell::new('a', StyleId::DEFAULT));
         row.combine(1, '\u{0301}');
 
-        row.set(1, Cell::new('b', Style::default()));
+        row.set(1, Cell::new('b', StyleId::DEFAULT));
 
         assert!(row.extras().is_empty());
         assert!(row.meta.extras.is_none());
@@ -2277,9 +2175,9 @@ mod tests {
     #[test]
     fn attachments_on_other_columns_survive_a_write() {
         let mut row = Row::new(4);
-        row.set_underline(1, Color::Indexed(1));
-        row.set_underline(2, Color::Indexed(2));
-        row.set(1, Cell::new('x', Style::default()));
-        assert_eq!(row.extras(), [(2, Extra::Underline(Color::Indexed(2)))]);
+        row.combine(1, '\u{301}');
+        row.combine(2, '\u{302}');
+        row.set(1, Cell::new('x', StyleId::DEFAULT));
+        assert_eq!(row.extras(), [(2, Extra::Marks("\u{302}".into()))]);
     }
 }

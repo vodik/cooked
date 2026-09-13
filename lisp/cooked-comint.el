@@ -29,9 +29,9 @@
 ;; What it does share is the two things worth sharing.  The parse is the emulator's own,
 ;; through `cooked--filter-feed' -- so an escape sequence split across two reads costs
 ;; nothing, which is the entire argument for owning a parser rather than a regexp.  And
-;; the colours are `cooked--face-packed', the same decoder, the same packed span format
-;; and the same per-buffer face cache the terminal uses, so a rendition looks the same
-;; in a shell buffer as it does in a cooked one.
+;; the colours go through `cooked--do-style-spans', the same packed span format, the
+;; same rendition ids and the same per-buffer faces the terminal uses, so a rendition
+;; looks the same in a shell buffer as it does in a cooked one.
 ;;
 ;; ## What the child's control characters actually do here
 ;;
@@ -134,7 +134,8 @@ allowed to be outside a narrowing."
 
 STYLES is the packed span format `Block::push_style' writes and
 `cooked--do-style-spans' walks, the terminal's own format read by its own
-walker, which is what makes one face cache serve both.
+walker, naming renditions by the ids the filter announced beside it -- which
+`cooked-comint--emit' has installed in this buffer by the time this runs.
 
 Both `face' and `font-lock-face' are set, to the same value, and that pair is
 argued out at length in `cooked-process--text': neither alone covers both
@@ -152,9 +153,10 @@ belonging to a session, and there is none here.  It becomes `help-echo' and
 nothing more.  A keymap would be the obvious next step and is deliberately not
 taken -- this is a buffer whose keys belong to comint, and binding RET or mouse
 clicks over the child's output would take them from it."
-  (cooked--do-style-spans (from to face styles)
-    (put-text-property from to 'face face text)
-    (put-text-property from to 'font-lock-face face text))
+  (cooked--do-style-spans (from to face _link styles)
+    (when face
+      (put-text-property from to 'face face text)
+      (put-text-property from to 'font-lock-face face text)))
   (pcase-dolist (`(,from ,to ,uri) links)
     (put-text-property from to 'help-echo uri text))
   text)
@@ -200,7 +202,7 @@ a newline: `cooked-comint--open' holds one unfinished line at most."
          (result (cooked--filter-feed cooked-comint--core-filter string intact)))
     (if (null result)
         ""
-      (pcase-let* ((`(,retract ,text ,styles ,links ,directory) result)
+      (pcase-let* ((`(,retract ,text ,styles ,links ,directory ,table) result)
                    (`(,tail . ,closed) (cooked-comint--tail text)))
         (when (> retract 0)
           (save-restriction
@@ -217,6 +219,7 @@ a newline: `cooked-comint--open' holds one unfinished line at most."
                                    0 (- (length cooked-comint--open) retract))
                         tail)))
         (when directory (cooked-comint--set-directory directory))
+        (cooked--install-styles table)
         (cooked-comint--propertize text styles links)))))
 
 (defun cooked-comint--filter (string)

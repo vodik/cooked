@@ -255,3 +255,22 @@ fn row_zero_continuing_the_scrollback_is_sent_whole() {
     t.feed(b"\x1b[1;2HX\x1b[2;1H");
     assert_eq!(edit_of(&mut t, 0), Some(None));
 }
+
+/// An edit's replacement carries the link and the underline colour of the cells it
+/// replaces, so a change inside a linked, underlined span keeps both.
+#[test]
+fn an_edit_inside_a_linked_underlined_span_keeps_the_link_and_the_colour() {
+    let mut t = settled(
+        2,
+        40,
+        b"see \x1b]8;;https://example.com/\x1b\\\x1b[4;58;5;196mnumber 1\x1b[0m\x1b]8;;\x1b\\ here",
+    );
+    t.feed(b"\x1b]8;;https://example.com/\x1b\\\x1b[4;58;5;196m\x1b[1;12H2\x1b[0m\x1b]8;;\x1b\\\x1b[2;1H");
+    let row = t.drain().rows.into_iter().find(|r| r.index == 0).unwrap();
+    let edit = row.edit.expect("sent as an edit");
+    assert_eq!(edit.runs.len(), 1, "{:?}", edit.runs);
+    let run = &edit.runs[0];
+    assert_eq!(run.text, "2");
+    assert!(run.link.is_some());
+    assert_eq!(t.style(run.style).underline, Color::Indexed(196));
+}

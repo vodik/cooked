@@ -517,8 +517,8 @@ Two kinds, and they are not the same kind of thing.
 
 A program can *say* a span of its output is a hyperlink, with `OSC 8` — what `ls
 --hyperlink=auto`, `gcc -fdiagnostics-urls=always`, `delta` and `gh` emit. That half is
-first-class and goes through the emulator: the cells carry a link id in the same sparse
-side table an underline colour lives in, so a link survives wrapping, a reflow and
+first-class and goes through the emulator: every cell carries a link id beside its
+rendition, so a link survives wrapping, a reflow and
 scrolling off into the transcript, and the URI itself crosses into Emacs exactly once
 however many cells point at it. Try it:
 

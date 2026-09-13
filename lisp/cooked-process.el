@@ -316,7 +316,7 @@ one `compilation-start' rather than advising every caller of it."
   "BLOCK\='s text, carrying the child\='s colours when they are wanted.
 
 BLOCK is what `cooked--drain\=' hands back for a run of rendered text --
-`(TEXT STYLE-SPANS DECO-SPANS LINK-SPANS ROWS)\=', the shape
+`(TEXT STYLE-SPANS DECO-SPANS ROWS)\=', the shape
 `cooked--render-block\=' takes.  Only the first two are used, and that is a
 decision each.  The text can be several screen rows separated by newlines, since
 the core coalesces contiguous damaged rows into one block;
@@ -358,7 +358,7 @@ one face and not as two."
       (let ((start (point-max)))
         (save-excursion
           (goto-char start)
-          (cooked--render-block (list (car block) (cadr block) nil nil))
+          (cooked--render-block (list (car block) (cadr block) nil nil) nil nil t)
           (let ((end (point)))
             (let ((pos start))
               (while (< pos end)
@@ -510,6 +510,7 @@ simply stopped filling."
             (let* ((update (cooked--drain cooked-process--session cooked-process--rejoin))
                    (scrolled (plist-get update :scrolled))
                    (exit (plist-get update :exit)))
+              (cooked--install-styles (plist-get update :styles))
               (when scrolled
                 (cooked-process--emit (cooked-process--text scrolled)))
               (cooked-process--remember-rows (plist-get update :rows)
@@ -544,7 +545,9 @@ whether it continues the line above rather than starting one."
           (cols cooked-process--columns))
       (cooked--resize session 1 cols)
       (let* ((update (cooked--drain session cooked-process--rejoin))
-             (scrolled (cooked-process--text (plist-get update :scrolled)))
+             (scrolled (progn
+                         (cooked--install-styles (plist-get update :styles))
+                         (cooked-process--text (plist-get update :scrolled))))
              (head (plist-get update :head))
              (rows (plist-get update :rows))
              ;; A `:rows' entry is a run of contiguous damaged rows, but the grid

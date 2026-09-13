@@ -145,11 +145,12 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Collect everything that changed in SESSION since the last call.
         /// Returns a plist with :scrolled, :shifts, :rows, :edits, :height, :used, :head,
         /// :cursor, :reverse, :marks, :alt, :app-cursor, :keys, :kitty-flags,
-        /// :modify-other-keys, :mode, :images, :links, :events and :exit.
+        /// :modify-other-keys, :mode, :images, :links, :styles, :events and :exit.
         ///
         /// :scrolled and :rows are the same shape, so one renderer handles both: a block is
-        /// (TEXT STYLES DECOS LINKS ROWS), where the spans carry character offsets into TEXT
-        /// and appear only where there is something to say.  :scrolled is one block for the
+        /// (TEXT STYLES DECOS ROWS), where the spans carry character offsets into TEXT and
+        /// appear only where there is something to say.  STYLES names each span's rendition
+        /// and link by id.  :scrolled is one block for the
         /// whole batch; :rows is an alist of (FIRST . BLOCK), one per run of contiguous
         /// damaged screen rows.  With REJOIN non-nil (the default), a line the terminal
         /// wrapped is emitted as one line rather than one per screen row.  :shifts lists the
@@ -171,9 +172,11 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// not cover.  Nothing is sent both ways.  :marks, (ID . ANCHOR) per semantic mark a
         /// resize or redraw moved, is empty on almost every drain.
         ///
-        /// :images and :links are neither, and must be consumed *before* :scrolled and :rows
-        /// are rendered: they carry resources those rows refer to by id.  Each crosses once,
-        /// however often the child sends or places it.
+        /// :images, :links and :styles are neither, and must be consumed *before* :scrolled
+        /// and :rows are rendered: they carry resources those rows refer to by id.  Each
+        /// crosses once, however often the child sends or places it.  :styles is
+        /// (ID FG BG UL ATTRS) per rendition first named, or named anew after its id was
+        /// freed and reused.
         "cooked--drain" 1..=2 => drain;
 
         /// Write STRING to the pty of SESSION.
@@ -185,7 +188,8 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// already has one.
         "cooked--make-filter" 0..=0 => make_filter;
 
-        /// Resolve STRING through FILTER, returning (RETRACT TEXT STYLES LINKS DIRECTORY).
+        /// Resolve STRING through FILTER, returning
+        /// (RETRACT TEXT STYLES LINKS DIRECTORY STYLE-TABLE).
         ///
         /// Nil when the chunk asked for nothing -- an escape sequence with no text to show
         /// for it, which is what a shell sends around every prompt.
@@ -194,9 +198,11 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// tabs and erases have been applied to the line they addressed -- a `\r' overwrites
         /// rather than deleting, which is the whole difference from `comint-carriage-motion'
         /// and from `ansi-color'. STYLES is the same packed span format a drain's blocks
-        /// carry, so `cooked--face-packed' decodes both. LINKS is (START END URI) per `OSC 8'
-        /// span, carrying the destination itself because there is no session here to resolve
-        /// an id through. DIRECTORY is the last `OSC 7' URL of the chunk, or nil.
+        /// carry, naming renditions by id, and STYLE-TABLE is (ID FG BG UL ATTRS) for the ids
+        /// this filter has not named before, as a drain's `:styles' is. LINKS is
+        /// (START END URI) per `OSC 8' span, carrying the destination itself because there is
+        /// no session here to resolve an id through. DIRECTORY is the last `OSC 7' URL of
+        /// the chunk, or nil.
         ///
         /// RETRACT is how many characters immediately before the insertion point are no
         /// longer true and must be deleted before TEXT is inserted -- a line already handed

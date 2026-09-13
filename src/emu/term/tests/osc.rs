@@ -4,10 +4,10 @@ use super::*;
 
 // OSC 8 hyperlinks.
 //
-// The link is `Extra::Link` in the same side table as the underline colour, so most
-// of what could go wrong here is already covered by the underline's own tests. What
-// is not, and what these are for, is the *lifetime* of the pen's open link — which
-// is the one place OSC 8 is not shaped like an SGR attribute.
+// The link is a field of every cell written while it is open, beside the rendition, so
+// wrapping, rewrapping and scrolling carry it the way they carry colour. What these are
+// for is the *lifetime* of the pen's open link, which is the one place OSC 8 is not
+// shaped like an SGR attribute.
 
 #[test]
 fn a_hyperlink_marks_only_the_cells_it_covers() {

@@ -35,8 +35,10 @@
 //! decoration and the link id, and a stale face over correct characters is exactly the
 //! class of miss a text-only oracle waves through.
 
-use cooked::emu::{Delta, Direction, Edit, Run, Scrolled, Shift, Term};
+use cooked::emu::{Delta, Direction, Edit, Run, Scrolled, Shift, StyleId, Term};
 use proptest::prelude::*;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 /// The upper bound on a generated grid, in both directions.
 ///
@@ -146,9 +148,9 @@ fn sgr() -> impl Strategy<Value = Vec<u8>> {
         (30u8..48).prop_map(|n| format!("\x1b[{n}m")),
         (0u8..255).prop_map(|n| format!("\x1b[38;5;{n}m")),
         (0u8..255, 0u8..255, 0u8..255).prop_map(|(r, g, b)| format!("\x1b[48;2;{r};{g};{b}m")),
-        // `SGR 58` is the underline colour, which lives in the row's side table rather
-        // than in `Style` and rides the `Run` separately. A shadow grid comparing only
-        // `Style` would miss it; comparing whole `Run`s does not.
+        // `SGR 58` is the underline colour, part of the rendition a run names by id. The
+        // shadow compares renditions through what each drain announced its ids to mean,
+        // so a colour lost on the way shows up as a different rendition.
         (0u8..255).prop_map(|n| format!("\x1b[58;5;{n}m")),
         Just("\x1b[0m".to_string()),
     ]
@@ -401,6 +403,53 @@ struct Batch {
     alt: bool,
 }
 
+/// Every rendition any replay has seen, by its `Debug` spelling, numbered in the order
+/// first seen and shared by every case, so that two replays of the same bytes agree.
+///
+/// A drain names renditions by the ids of the terminal that drained it, and two terminals
+/// fed the same bytes need not hand out the same ids: a collection frees what each
+/// terminal's own copy of the screen no longer holds, and the two copies differ. So every
+/// run is renumbered here before it is compared, through the rendition the drain said its
+/// id meant -- which also checks that every id a run names was announced.
+static RENDITIONS: LazyLock<Mutex<HashMap<String, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::from([(String::from("default"), 0)])));
+
+/// One terminal's ids, as its drains have announced them in `Delta::styles`.
+#[derive(Default)]
+struct Announced(HashMap<StyleId, String>);
+
+impl Announced {
+    /// Learn DELTA's announcements, then renumber every run in it; see [`RENDITIONS`].
+    fn canonical(&mut self, mut delta: Delta) -> Delta {
+        for (id, style) in &delta.styles {
+            self.0.insert(*id, format!("{style:?}"));
+        }
+        let rows = delta.rows.iter_mut().flat_map(|row| {
+            std::iter::once(&mut row.runs).chain(row.edit.as_mut().map(|edit| &mut edit.runs))
+        });
+        let scrolled = delta.scrolled.iter_mut().map(|line| &mut line.runs);
+        for runs in rows.chain(scrolled) {
+            for run in runs {
+                run.style = self.renumber(run.style);
+            }
+        }
+        delta
+    }
+
+    fn renumber(&self, id: StyleId) -> StyleId {
+        let key = if id == StyleId::DEFAULT {
+            "default"
+        } else {
+            self.0
+                .get(&id)
+                .unwrap_or_else(|| panic!("a run names {id:?}, which no drain announced"))
+        };
+        let mut renditions = RENDITIONS.lock().unwrap();
+        let next = renditions.len() as u32;
+        StyleId::from_raw(*renditions.entry(key.to_owned()).or_insert(next))
+    }
+}
+
 /// A terminal being driven by a script, with the shadow grid the deltas built.
 struct Replay {
     term: Term,
@@ -420,6 +469,8 @@ struct Replay {
     /// Each shadow row's wrap flag as last sent, which Lisp marks the row's newline by.
     wrapped: Vec<bool>,
     scrollback: Vec<Batch>,
+    /// What each of `term` and `reference` has announced its rendition ids to mean.
+    announced: [Announced; 2],
 }
 
 impl Replay {
@@ -438,6 +489,7 @@ impl Replay {
             trimmed: vec![false; rows],
             wrapped: vec![false; rows],
             scrollback: Vec::new(),
+            announced: Default::default(),
         }
     }
 
@@ -688,9 +740,9 @@ impl Replay {
 
     /// Drain both terminals and absorb what they said.
     fn drain(&mut self) {
-        let delta = self.term.drain();
+        let delta = self.announced[0].canonical(self.term.drain());
         self.reference.forget_sent(None);
-        let reference = self.reference.drain();
+        let reference = self.announced[1].canonical(self.reference.drain());
         self.absorb(delta, reference);
     }
 
@@ -705,23 +757,18 @@ impl Replay {
         // wake, so the shadow is up to date before it is compared.
         self.drain();
         self.term.touch_all();
-        self.term.drain()
+        let full = self.term.drain();
+        self.announced[0].canonical(full)
     }
 }
 
-/// RUNS as what Emacs draws for each character: the character, its rendition, underline
-/// colour and link, and its decoration.
+/// RUNS as what Emacs draws for each character: the character, its rendition and link,
+/// and its decoration.
 fn drawn(runs: &[Run]) -> Vec<String> {
     runs.iter()
         .flat_map(|run| {
             run.text.chars().enumerate().map(move |(i, c)| {
-                format!(
-                    "{c:?} {:?} {:?} {:?} {:?}",
-                    run.style,
-                    run.underline,
-                    run.link,
-                    run.deco_at(i)
-                )
+                format!("{c:?} {:?} {:?} {:?}", run.style, run.link, run.deco_at(i))
             })
         })
         .collect()

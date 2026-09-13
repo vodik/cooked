@@ -23,7 +23,7 @@ impl Perform for State {
         // The designated set, and any single shift, before anything else sees the
         // character: the segmenter has to measure what is drawn, not what was sent.
         let c = self.modes.charsets.print(c);
-        let pen = self.pen;
+        let pen = self.pen();
         // The segmenter, not a width table. A code point that continues the cluster on
         // the cell to the left costs no column of its own however wide it looks alone,
         // which is the whole of what makes a ZWJ emoji family two cells rather than six.
@@ -35,15 +35,9 @@ impl Perform for State {
                 // to be told, since that number is how it finds the cell next time.
                 let settled = self.screen_mut().join(c, before, after);
                 self.text.settle(settled);
-                // Zero, so `attach` leaves the cell alone: a combining mark neither owns
-                // an underline colour nor opens a link, and moving either onto the cell
-                // it rides would take it off the character that actually carries it.
                 (0, Evicted::none())
             }
         };
-        // After the write, so it lands on the cell the write actually chose, which a wrap
-        // or DECAWM may have moved.
-        self.attach(width);
         self.evicted(evicted);
         if width > 0 {
             self.last_print = Some(c);
@@ -62,19 +56,17 @@ impl Perform for State {
     /// and that would have ended the run, so the conditions are tested once here rather
     /// than per character.
     fn print_str(&mut self, text: &str) {
-        // `mark_underline` and `mark_link` attach to each cell written, and a designated
-        // set or a single shift substitutes the character; each is per-character work the
-        // run form does not do, so their presence disqualifies the whole run rather than
-        // being reimplemented. A single shift spends itself on the run's first character,
-        // after which the rest of the run is plain again but goes the slow way anyway --
-        // an `ESC N` is rare enough that re-deciding mid-run is not worth a second test.
-        let batched = self.modes.charsets.is_plain()
-            && self.underline == Color::Default
-            && self.link.is_none();
+        // A designated set or a single shift substitutes the character, which is
+        // per-character work the run form does not do, so either disqualifies the whole
+        // run. A single shift spends itself on the run's first character, after which the
+        // rest of the run is plain again but goes the slow way anyway -- an `ESC N` is rare
+        // enough that re-deciding mid-run is not worth a second test. The pen's rendition
+        // and link are fields of every cell written, so neither needs the slow path.
+        let batched = self.modes.charsets.is_plain();
         // Compiled out of a release build entirely; see `State::force_per_character_print`.
         #[cfg(test)]
         let batched = batched && !self.force_per_character_print;
-        let pen = self.pen;
+        let pen = self.pen();
 
         let mut rest = text;
         while !rest.is_empty() {
@@ -159,7 +151,7 @@ impl Perform for State {
             // DECALN. Erased first, exactly as `CSI 2J` erases, so a primary screen's
             // contents reach history before the pattern covers them; see `Screen::align`.
             (Some(b'#'), b'8') => {
-                self.erase_display(Erase::All, Style::default());
+                self.erase_display(Erase::All, Pen::default());
                 self.screen_mut().align();
             }
             (None, b'D') => self.linefeed(),
@@ -168,7 +160,7 @@ impl Perform for State {
                 self.linefeed();
             }
             (None, b'M') => {
-                let pen = self.pen;
+                let pen = self.pen();
                 self.screen_mut().reverse_index(pen);
             }
             (None, b'H') => self.screen_mut().set_tab(),
@@ -194,7 +186,7 @@ impl Perform for State {
                 for screen in self.screens.each_mut() {
                     screen.reset_tabs();
                 }
-                self.erase_display(Erase::All, Style::default());
+                self.erase_display(Erase::All, Pen::default());
                 self.screen_mut().goto(0, 0);
                 // Last, so a Lisp handler sees the reset already done; see [`Event::Reset`].
                 self.events.push(Event::Reset);

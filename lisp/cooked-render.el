@@ -266,13 +266,14 @@ window that fell behind."
                 (delq (selected-window) (get-buffer-window-list nil nil t)))))
 
 (defun cooked--install-resources (update)
-  "Record the images and links UPDATE's rows refer to by id.
+  "Record the images, links and renditions UPDATE's rows refer to by id.
 
 Before any rendering: this is the drain's third category -- neither a level
 redisplay reads nor an occurrence to react to, but a resource the rows depend
 on.  Touches no buffer text, so it needs no `inhibit-read-only'."
   (cooked--install-images (plist-get update :images))
-  (cooked--install-links (plist-get update :links)))
+  (cooked--install-links (plist-get update :links))
+  (cooked--install-styles (plist-get update :styles)))
 
 (cl-defstruct (cooked-viewport (:constructor cooked--viewport-make) (:copier nil))
   "What the view looked like before a drain rewrote the screen under it.

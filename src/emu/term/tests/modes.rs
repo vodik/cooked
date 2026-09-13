@@ -420,7 +420,7 @@ fn xtsave_is_not_save_cursor_and_xtrestore_is_not_decstbm() {
 fn reset_clears_the_pen_stack_and_saved_modes() {
     let mut t = term(2, 8, b"\x1b[31m\x1b[#{\x1b[?1006h\x1b[?1006s\x1bc");
     t.feed(b"\x1b[32m\x1b[#}a\x1b[?1006r");
-    assert_eq!(run_style(&t, "a").0.fg, Color::Indexed(2));
+    assert_eq!(run_style(&t, "a").fg, Color::Indexed(2));
     assert!(!t.mouse().sgr(), "no slot survives to restore");
 
     let mut t = term(2, 8, b"\x1b[?1006s\x1b[?1006h");

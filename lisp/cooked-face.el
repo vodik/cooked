@@ -49,6 +49,21 @@ so a theme that styles those faces wins."
 
 (defvar-local cooked--face-cache nil)
 
+(defvar-local cooked--style-specs nil
+  "Renditions by id, as the core announced them in a drain\='s `:styles\='.
+
+A vector indexed by id, each slot (FG BG UL ATTRS) in `cooked--color\=''s
+spelling, or nil for an id not announced.  Kept for the whole session, because
+the core announces an id once and names it by number from then on; an id it
+frees and hands out again is announced again, and overwrites its slot.")
+
+(defvar-local cooked--style-faces nil
+  "Faces by rendition id, resolved from `cooked--style-specs\=' as they are needed.
+
+A slot is nil until the id is first drawn, and `none\=' for a rendition that
+needs no face at all.  Cleared by a theme change, which is what resolves every
+rendition again against the new theme without the core having to resend one.")
+
 ;;;; Colors and faces
 
 (defun cooked--xterm-256 (index)
@@ -88,6 +103,8 @@ theme, which is what `cooked-theme-change-hook\=' is for."
   (cooked--dolist-buffers
     (when (hash-table-p cooked--face-cache)
       (clrhash cooked--face-cache))
+    (when cooked--style-faces
+      (fillarray cooked--style-faces nil))
     (run-hooks 'cooked-theme-change-hook)))
 
 ;; `enable-theme-functions' arrived in Emacs 29, and `add-hook' on an unbound variable
@@ -195,193 +212,111 @@ that was just computed — are handled separately in `cooked--face'.")
   (/= 0 (logand attrs bit)))
 
 (eval-and-compile
-  (defconst cooked--style-record 22
+  (defconst cooked--style-record 16
     "Bytes in one packed style span.  See `Block::push_style\=' in src/wire.rs.
 
 The stride *is* the format: a reader finds the next span by adding this and
-never by decoding a length.  The Rust side asserts the same number under
-`debug_assert\=', so a field added to the record on one side without widening
-it on both desynchronises the two at the second span of the first styled row,
-where every later span reads its neighbour\='s bytes and the buffer comes out
-miscoloured with nothing to point at.
+never by decoding a length.  The Rust side asserts the same number, so a field
+added to the record on one side without widening it on both desynchronises the
+two at the second span of the first styled row, where every later span reads
+its neighbour\='s bytes and the buffer comes out miscoloured with nothing to
+point at.
 
-The fields are at the offsets the constants below name, and those are the
-layout `Block::push_style\=' documents: START and END as `u32\=' character
-offsets, FG, BG and UNDERLINE as four-byte tagged colours, and ATTRS as a
-`u16\='.  They are available at compile time so that `cooked--do-style-spans\='
-and `cooked--face-packed\=' add literals rather than look up variables on the
-render path.")
+The fields are `u32\='s at the offsets the constants below name: START and END
+as character offsets, then the ids of the span\='s rendition and link.  They are
+available at compile time so that `cooked--do-style-spans\=' adds literals rather
+than look up variables on the render path.")
 
   (defconst cooked--style-start 0 "Offset of START in a style record.")
   (defconst cooked--style-end 4 "Offset of END in a style record.")
-  (defconst cooked--style-fg 8 "Offset of FG in a style record.")
-  (defconst cooked--style-bg 12 "Offset of BG in a style record.")
-  (defconst cooked--style-underline 16 "Offset of UNDERLINE in a style record.")
-  (defconst cooked--style-attrs 20 "Offset of ATTRS in a style record."))
+  (defconst cooked--style-id 8 "Offset of the rendition id in a style record.")
+  (defconst cooked--style-link 12
+    "Offset of the link id in a style record, 0 for none."))
 
-(defconst cooked--color-tag-default 0)
-(defconst cooked--color-tag-indexed 1)
-(defconst cooked--color-tag-rgb 2)
+(defun cooked--install-styles (styles)
+  "Record STYLES, a drain\='s `:styles\=', before anything naming them renders.
 
-(defsubst cooked--color-spec (packed i)
-  "Decode the four-byte colour field at offset I of PACKED.
+Each entry is (ID FG BG UL ATTRS).  A redefined id forgets the face it had,
+since the id now names a different rendition."
+  (pcase-dolist (`(,id ,fg ,bg ,ul ,attrs) styles)
+    (let ((size (length cooked--style-specs)))
+      (when (>= id size)
+        (let ((grown (max 64 (* 2 (1+ id)))))
+          (setq cooked--style-specs
+                (vconcat cooked--style-specs (make-vector (- grown size) nil))
+                cooked--style-faces
+                (vconcat cooked--style-faces
+                         (make-vector (- grown (length cooked--style-faces)) nil))))))
+    (aset cooked--style-specs id (list fg bg ul attrs))
+    (aset cooked--style-faces id nil)))
 
-Returns what `cooked--color\=' takes: nil for the terminal default, an integer
-for a palette index, or a list of R G B.  The encoding is `Color::packed\=' in
-src/emu/cell.rs, little-endian, and the two sides must agree on it forever:
+(defun cooked--reset-styles ()
+  "Forget every rendition id, for a session starting in this buffer."
+  (setq cooked--style-specs nil
+        cooked--style-faces nil))
 
-  tag 0  default  -- the whole field is zero
-  tag 1  indexed  -- the index in bits 0-7
-  tag 2  rgb      -- r in bits 16-23, g in 8-15, b in 0-7
+(defun cooked--style-face-resolve (id)
+  "Resolve rendition ID into a face, remembering the answer.
 
-The tag is the top byte, so little-endian order puts it at I+3 and the two
-common variants never assemble the other three bytes at all.  Only rgb pays for
-the full decode, and it is the rare one: palette colours are what shells and
-TUIs actually emit."
-  (let ((tag (aref packed (+ i 3))))
-    (cond ((eq tag cooked--color-tag-default) nil)
-          ((eq tag cooked--color-tag-indexed) (aref packed i))
-          (t (list (aref packed (+ i 2)) (aref packed (+ i 1)) (aref packed i))))))
+Out of line from `cooked--style-face\=' because it runs once per id per theme
+rather than once per span."
+  (pcase-let* ((`(,fg ,bg ,ul ,attrs)
+                (and (< id (length cooked--style-specs))
+                     (aref cooked--style-specs id)))
+               (face (and attrs (cooked--face fg bg attrs ul))))
+    (when (< id (length cooked--style-faces))
+      (aset cooked--style-faces id (or face 'none)))
+    face))
 
-(defsubst cooked--color-code (packed i)
-  "Cache-key code for the colour field at offset I of PACKED, or nil for rgb.
-
-0 for the terminal default and 1+INDEX for a palette index, so the codes of the
-256 palette colours and the default occupy 0-256 and fit in nine bits.  Nil for
-an rgb colour, which has 24 bits of value and cannot be squeezed alongside two
-more of its kind -- see `cooked--face-key\=' for what that nil is for."
-  (let ((tag (aref packed (+ i 3))))
-    (cond ((eq tag cooked--color-tag-default) 0)
-          ((eq tag cooked--color-tag-indexed) (1+ (aref packed i)))
-          (t nil))))
-
-(defun cooked--face-key (fgc bgc ulc attrs)
-  "Cache key for colour codes FGC, BGC and ULC with the ATTRS bitmask.
-
-A single fixnum whenever all three codes are non-nil, which is to say whenever
-no colour is rgb -- and that is the overwhelmingly common case, since the
-palette is what shells and TUIs emit.  Nil when any code is nil, and the caller
-falls back to a consed list.
-
-The key exists because a consed list per span, looked up in an `equal\=' table,
-costs several times what a fixnum does.  Almost none of that is the hash: it is
-the allocation and the element-by-element `equal\=' walk, neither of which a
-fixnum has.
-
-The layout packs into 43 bits -- ATTRS is 16, each code is 9 -- which a 64-bit
-Emacs holds in a fixnum with 18 to spare.  On a 32-bit build the shifts spill
-into a bignum instead, which is slower but still a perfectly good `equal\=' key,
-so nothing here has to check the word size to stay correct.  That is the reason
-the fallback below is chosen for rgb rather than for narrow fixnums: the first
-is a real limit of the encoding, the second is only a matter of speed."
-  (and fgc bgc ulc
-       (logior attrs (ash fgc 16) (ash bgc 25) (ash ulc 34))))
-
-(defun cooked--face-packed (packed i)
-  "Face plist for the rendition packed at offset I of PACKED.
-
-I is the start of a style record -- see `cooked--style-record\=' for the layout,
-of which this reads the rendition: FG, BG and UNDERLINE, then ATTRS.
-
-The whole point is that a hit decodes nothing.  The key is built from four
-`aref\='s of the two low bytes of each colour field, and the specs the face is
-actually built from are decoded only inside the memoized body, on the miss --
-which a full-screen repaint takes a few dozen times and then never again.
-
-Memoized per buffer in `cooked--face-cache\=', the same table and the same
-lifetime as before, so `cooked--flush-face-cache\=' still reaches every resolved
-colour with one `clrhash\=' when the theme changes."
-  ;; The field offsets are added at each use rather than bound once: a hit reads
-  ;; each of them exactly once, and three extra bindings per span measured as a
-  ;; 2% slower styled frame.  The miss below recomputes them, which it can afford.
-  (let* ((attrs (cooked--u16 packed (+ i (eval-when-compile cooked--style-attrs))))
-         (key (or (cooked--face-key
-                   (cooked--color-code packed (+ i (eval-when-compile cooked--style-fg)))
-                   (cooked--color-code packed (+ i (eval-when-compile cooked--style-bg)))
-                   (cooked--color-code packed
-                                       (+ i (eval-when-compile cooked--style-underline)))
-                   attrs)
-                  ;; An rgb colour somewhere in the rendition, so there is no fixnum
-                  ;; to be had.  The key becomes the record's own rendition bytes,
-                  ;; FG through the end of ATTRS, which is the one thing that always
-                  ;; identifies it exactly: one short unibyte string, compared by
-                  ;; `equal' as a memcmp rather than walked.
-                  ;;
-                  ;; A consed key of decoded specs would make truecolor the
-                  ;; slowest thing in the renderer: a `(list r g b)' per colour
-                  ;; field, a key holding them, and an `equal' hash descending
-                  ;; into the nesting.  `ls --color' is not the only thing that
-                  ;; emits colour, and a build log full of `38;2' is exactly the
-                  ;; flood this path is for.
-                  ;; Never `equal' to a fixnum, so the two kinds of key share one
-                  ;; table with no chance of colliding -- which is what keeps
-                  ;; `cooked--flush-face-cache' a single `clrhash' over everything
-                  ;; holding a resolved colour.
-                  (substring packed (+ i (eval-when-compile cooked--style-fg))
-                             (+ i cooked--style-record)))))
-    (cooked--cached cooked--face-cache key
-      ;; Decoded on the miss only, which a full-screen repaint takes a few dozen
-      ;; times and then never again.  The old fallback decoded before it had even
-      ;; looked, and then handed the specs to `cooked--face' to build a second key
-      ;; out of.
-      (cooked--face-build
-       (cooked--color-spec packed (+ i (eval-when-compile cooked--style-fg)))
-       (cooked--color-spec packed (+ i (eval-when-compile cooked--style-bg)))
-       attrs
-       (cooked--color-spec packed (+ i (eval-when-compile cooked--style-underline)))))))
+(defsubst cooked--style-face (id)
+  "The face rendition ID is drawn in, or nil for none."
+  (let ((face (and (< id (length cooked--style-faces))
+                   (aref cooked--style-faces id))))
+    (cond ((eq face 'none) nil)
+          (face)
+          (t (cooked--style-face-resolve id)))))
 
 (defmacro cooked--do-style-spans (spec &rest body)
-  "Run BODY for each styled span in the packed style records STYLES.
+  "Run BODY for each span in the packed style records STYLES.
 
-SPEC is (FROM TO FACE STYLES): FROM and TO are bound to the span\='s START and
-END character offsets and FACE to its face plist, from `cooked--face-packed\='.
-A record whose rendition resolves to no face runs nothing.
+SPEC is (FROM TO FACE LINK STYLES): FROM and TO are bound to the span\='s START
+and END character offsets, FACE to the face its rendition resolves to or nil,
+and LINK to its link id or nil.  A span with neither runs nothing.
 
 The one walker for the records, shared by the terminal\='s renderer and the
 comint filter.  It steps by `cooked--style-record\=' and allocates nothing per
-span, which is the reason the spans arrive packed at all: no cons for the span,
-none for its colours, and none for the cache key."
-  (declare (indent 1) (debug ((symbolp symbolp symbolp form) body)))
-  (pcase-let ((`(,from ,to ,face ,styles) spec)
+span: resolving a face is an `aref\=' into `cooked--style-faces\='."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp symbolp form) body)))
+  (pcase-let ((`(,from ,to ,face ,link ,styles) spec)
               (packed (make-symbol "packed"))
               (i (make-symbol "i"))
-              (limit (make-symbol "limit")))
+              (limit (make-symbol "limit"))
+              (resolved (make-symbol "face"))
+              (linked (make-symbol "link")))
     `(let* ((,packed ,styles)
             (,i 0)
             (,limit (length ,packed)))
        (while (< ,i ,limit)
-         (when-let* ((,face (cooked--face-packed ,packed ,i)))
-           (let ((,from (cooked--u32 ,packed (+ ,i ,cooked--style-start)))
-                 (,to (cooked--u32 ,packed (+ ,i ,cooked--style-end))))
-             ,@body))
+         (let ((,resolved (cooked--style-face
+                           (cooked--u32 ,packed (+ ,i ,cooked--style-id))))
+               (,linked (cooked--u32 ,packed (+ ,i ,cooked--style-link))))
+           (when (or ,resolved (/= ,linked 0))
+             (let ((,from (cooked--u32 ,packed (+ ,i ,cooked--style-start)))
+                   (,to (cooked--u32 ,packed (+ ,i ,cooked--style-end)))
+                   (,face ,resolved)
+                   (,link (and (/= ,linked 0) ,linked)))
+               ,@body)))
          (setq ,i (+ ,i ,cooked--style-record))))))
 
 (defun cooked--face (fg bg attrs &optional ul)
   "Face plist for FG, BG, the ATTRS bitmask and underline colour UL.
 
-FG, BG and UL are in `cooked--color\=''s spelling: nil, an index, or a list of
-R G B.  Memoized per buffer.
-
-The entry point for callers holding decoded colours -- tests, and
-`cooked--face-packed\=''s rgb fallback.  The render path does not come through
-here; it calls `cooked--face-packed\=' and never spells a colour out at all
-unless the cache misses.  Both share one table and must therefore agree on the
-key for a rendition they can both describe, or the same face would be built
-twice and compare non-`eq\='.  The test that walks both paths for one rendition
-is `cooked-bench-style-records-decode-to-the-rendition-they-name\=', and it is
-worth knowing how far it reaches: it compares the two results with `equal\=', so
-it catches the two paths disagreeing about the *rendition* and would not catch
-them agreeing about it under two different keys.  The sharing itself rests on
-the key being computed in one place, here."
-  (let ((code (lambda (spec) (cond ((null spec) 0)
-                                   ((consp spec) nil)
-                                   (t (1+ spec))))))
-    (if-let* ((key (cooked--face-key (funcall code fg) (funcall code bg)
-                                     (funcall code ul) attrs)))
-        (cooked--cached cooked--face-cache key
-          (cooked--face-build fg bg attrs ul))
-      (cooked--cached cooked--face-cache (list fg bg attrs ul)
-        (cooked--face-build fg bg attrs ul)))))
+FG, BG and UL are in `cooked--color\='s spelling: nil, an index, or a list of
+R G B.  Memoized per buffer in `cooked--face-cache\=', so every rendition id that
+names the same rendition shares one face, and a theme change flushes them all
+with one `clrhash\='."
+  (cooked--cached cooked--face-cache (list fg bg attrs ul)
+    (cooked--face-build fg bg attrs ul)))
 
 (defun cooked--face-build (fg bg attrs ul)
   "Build the face plist `cooked--face' memoizes for FG, BG, ATTRS and UL.

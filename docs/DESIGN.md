@@ -693,7 +693,7 @@ not be the first one with the height turned down.
 What they share, they share deliberately and in the two places it costs nothing.
 `emu::sgr::apply` decodes `CSI Ps m` for both performers, so a rendition cannot mean one
 thing on a grid and another in a stream. And both hand Emacs the same packed style
-records, read by the same `cooked--face-packed` against the same per-buffer cache — which
+records, resolved through the same per-buffer vector of faces by rendition id — which
 is what keeps `cooked-face.el` below both of them, and why `cooked--style-record` lives
 there rather than beside either reader.
 
