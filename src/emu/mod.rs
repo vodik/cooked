@@ -156,4 +156,4 @@ pub(crate) use term::{Anchor, ColorScheme, CursorShape, Event, KeyEncoding, osc_
 // nothing here is more exposed than `cooked--apply' already assumes.
 pub use cell::Run;
 pub use screen::Shift;
-pub use term::{BACKLOG_HIGH_WATER, DamagedRow, Delta, Scrolled, Term};
+pub use term::{BACKLOG_HIGH_WATER, DamagedRow, Delta, Levels, Scrolled, Term};

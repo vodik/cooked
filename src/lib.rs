@@ -522,19 +522,24 @@ lisp_enum! {
         Underline => "underline",
         Bar => "bar",
     }
-    /// What the child negotiated, which decides how a modified key is encoded on the way
-    /// back. See [`KeyEncoding`] for why the default is the conservative one.
-    KeyEncoding {
-        Legacy => "legacy",
-        ModifyOtherKeys => "modify-other",
-        Kitty => "kitty",
-    }
     /// The type symbol handed to `create-image'.
     ImageFormat {
         Png => "png",
         Jpeg => "jpeg",
         Gif => "gif",
         Ppm => "pbm",
+    }
+}
+
+/// What the child negotiated, as the symbol `:keys' carries. The flags or the level the
+/// encoding holds cross beside it as `:kitty-flags' and `:modify-other-keys'.
+impl env::IntoLisp for KeyEncoding {
+    fn into_lisp(self, env: &Env) -> Result<Value> {
+        match self {
+            KeyEncoding::Legacy => sym!(env, "legacy"),
+            KeyEncoding::ModifyOtherKeys(_) => sym!(env, "modify-other"),
+            KeyEncoding::Kitty(_) => sym!(env, "kitty"),
+        }
     }
 }
 
@@ -923,13 +928,14 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
         .iter()
         .map(|s| list!(env, [s.top, s.bottom, s.count, s.up]))
         .collect::<Result<Vec<_>>>()?;
+    let levels = &update.delta.levels;
     let cursor = list!(
         env,
         [
-            update.delta.cursor.row,
-            update.delta.cursor.col,
-            update.delta.cursor_visible,
-            update.delta.cursor_shape,
+            levels.cursor.row,
+            levels.cursor.col,
+            levels.cursor_visible,
+            levels.cursor_shape,
         ]
     )?;
     let events = update
@@ -960,13 +966,13 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
         ":used"        => update.delta.used,
         ":head"        => update.delta.head,
         ":cursor"      => cursor,
-        ":reverse"     => update.delta.reverse_screen,
+        ":reverse"     => levels.reverse_screen,
         ":marks"       => marks,
-        ":alt"         => update.delta.alt,
-        ":app-cursor"  => update.delta.app_cursor,
-        ":keys"        => update.delta.keys,
-        ":kitty-flags" => u32::from(update.delta.kitty_flags),
-        ":modify-other-keys" => u32::from(update.delta.modify_other_keys),
+        ":alt"         => levels.alt,
+        ":app-cursor"  => levels.app_cursor,
+        ":keys"        => levels.keys,
+        ":kitty-flags" => u32::from(levels.keys.kitty_flags().bits()),
+        ":modify-other-keys" => u32::from(levels.keys.modify_other_keys_level()),
         ":mode"        => update.mode,
         ":images"      => images_to_lisp(env, &update.delta.images)?,
         ":links"       => links_to_lisp(env, &update.delta.links)?,
@@ -1332,7 +1338,7 @@ impl Update {
             // grid's own row 0, not this row's continuation on the primary grid, and
             // joining onto it would permanently weld this frozen scrollback text to
             // the front of a live row that gets rewritten every redraw.
-            if !(rejoin && line.wrapped && !(i == last && self.delta.alt)) {
+            if !(rejoin && line.wrapped && !(i == last && self.delta.levels.alt)) {
                 block.push_newline();
             }
         }

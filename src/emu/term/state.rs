@@ -2,6 +2,22 @@
 
 use super::*;
 
+impl Levels {
+    /// Read every level off the emulator as it stands.
+    pub(super) fn of(state: &State) -> Self {
+        let modes = &state.modes;
+        Self {
+            cursor: state.screen().cursor,
+            cursor_visible: modes.cursor_visible,
+            cursor_shape: modes.cursor_shape,
+            reverse_screen: modes.reverse_screen,
+            alt: state.on_alt,
+            app_cursor: modes.app_cursor,
+            keys: state.key_encoding(),
+        }
+    }
+}
+
 impl State {
     pub(super) fn new(rows: usize, cols: usize) -> Self {
         // Only the two grids need a size; everything else powers on at its zero value,
@@ -17,48 +33,22 @@ impl State {
         }
     }
 
-    /// Kitty wins when both are on: a child that pushed kitty flags is speaking the newer
-    /// protocol deliberately, and libraries that enable both expect kitty to take effect.
-    ///
-    /// Bit 8 turns kitty on as surely as bit 1 does -- reporting every key as an escape
-    /// code disambiguates them all by construction -- while 4 and 16 alone do not: each
-    /// only adds a field to an escape code something else already chose to send.
+    /// The key encoding the child's negotiation settles on; see [`KeyEncoding::negotiate`].
     pub(super) fn key_encoding(&self) -> KeyEncoding {
-        match (self.kitty_flags(), self.modify_other_keys()) {
-            (flags, _) if flags & 0b1001 != 0 => KeyEncoding::Kitty,
-            (_, 1 | 2) => KeyEncoding::ModifyOtherKeys,
-            _ => KeyEncoding::Legacy,
-        }
+        KeyEncoding::negotiate(self.kitty_stack().top(), self.modes.modify_other_keys)
     }
 
-    /// The modifyOtherKeys level Lisp should encode for: 1, 2, or 0 for anything else.
-    ///
-    /// Both levels are honoured, and they differ in which keys they cover, not in how a
-    /// covered key is spelled -- the rules are xterm's and live with the encoder, in
-    /// `cooked--modify-other-p`. Level 1 is the one `emacs -nw` asks for, from
-    /// `xterm--init-modify-other-keys`, so it is not a curiosity.
-    ///
-    /// Level 3 reads as 0. It sends unmodified keys as escapes too, which nothing here
-    /// does, and a child given its modified keys in level 2's spelling would still be
-    /// waiting for every plain one; legacy at least types.
-    pub(super) fn modify_other_keys(&self) -> u8 {
-        match self.modes.modify_other_keys {
-            level @ (1 | 2) => level,
-            _ => 0,
-        }
-    }
-
-    /// The top of the kitty flag stack, less what cooked does not honour.
-    pub(super) fn kitty_flags(&self) -> u8 {
-        self.kitty_stack().last().copied().unwrap_or(0) & KITTY_HONOURED
+    /// The top of the shown screen's kitty flag stack, less what cooked does not honour.
+    pub(super) fn kitty_flags(&self) -> KittyFlags {
+        self.kitty_stack().top().honoured()
     }
 
     /// The kitty flag stack of the screen being shown; see [`Modes::kitty_keys`].
-    pub(super) fn kitty_stack(&self) -> &Vec<u8> {
+    pub(super) fn kitty_stack(&self) -> &KittyStack {
         &self.modes.kitty_keys[usize::from(self.on_alt)]
     }
 
-    pub(super) fn kitty_stack_mut(&mut self) -> &mut Vec<u8> {
+    pub(super) fn kitty_stack_mut(&mut self) -> &mut KittyStack {
         &mut self.modes.kitty_keys[usize::from(self.on_alt)]
     }
 
@@ -347,15 +337,7 @@ impl State {
         // the child is signalled on a resize and answers by redrawing, and anything it
         // scrolls in between moves every mark still on the grid with its row.
         let marks = self.take_marks();
-        let (cursor_visible, alt, app_cursor) = (
-            self.modes.cursor_visible,
-            self.on_alt,
-            self.modes.app_cursor,
-        );
-        let (cursor_shape, reverse_screen) = (self.modes.cursor_shape, self.modes.reverse_screen);
-        let keys = self.key_encoding();
-        let kitty_flags = self.kitty_flags();
-        let modify_other_keys = self.modify_other_keys();
+        let levels = Levels::of(self);
         let screen = self.screen();
         Delta {
             images,
@@ -377,16 +359,8 @@ impl State {
             used: screen.used(),
             // The seam is a property of the primary: the alt screen contributes no
             // scrollback, and its row 0 begins a buffer line of its own.
-            head: if alt { 0 } else { screen.head() },
-            cursor: screen.cursor,
-            cursor_visible,
-            cursor_shape,
-            reverse_screen,
-            alt,
-            app_cursor,
-            keys,
-            kitty_flags,
-            modify_other_keys,
+            head: if levels.alt { 0 } else { screen.head() },
+            levels,
             events,
             marks,
         }
@@ -407,7 +381,7 @@ impl State {
                 .discard();
             self.alt.goto(0, 0);
         }
-        // No event to match: `Delta::alt` is the level, and Lisp acts on that. See the
+        // No event to match: `Levels::alt` is the level, and Lisp acts on that. See the
         // note on `Event` about not sending the same state two ways.
         self.screen_mut().touch_all();
     }

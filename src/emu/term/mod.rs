@@ -15,10 +15,13 @@ use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
 use super::text::{self, Segmenter, Step};
 use csi::{PushedPen, SavedMode};
+use keys::KittyStack;
+pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};
 use std::collections::{HashSet, VecDeque};
 
 mod csi;
 mod graphics;
+mod keys;
 pub(crate) mod osc;
 mod perform;
 mod state;
@@ -102,7 +105,7 @@ pub(super) enum PromptKind {
 /// than any drain snapshot.
 ///
 /// Sending the same state both ways is what this rules out. An `alt-screen` event
-/// alongside [`Delta::alt`] could only ever restate the field, and did.
+/// alongside [`Levels::alt`] could only ever restate the field, and did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Bell,
@@ -205,26 +208,6 @@ pub enum Event {
     /// the one window it is laid out for, and that is `18t` and `14t`; the frame
     /// around it is Emacs' to measure.
     FrameSize(bool),
-}
-
-/// How the child wants keys that have no classical encoding — modified Return, Tab,
-/// Escape and Backspace — to be spelled.
-///
-/// This has to be negotiated rather than assumed. `ESC [ 27 ; 2 ; 13 ~` sent to a program
-/// that never asked for it is not a shift+enter, it is six characters of garbage in its
-/// input, so [`KeyEncoding::Legacy`] is the only safe default and the extended forms are
-/// unlocked by the child itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KeyEncoding {
-    /// Nothing negotiated: a modified Return is just CR, as it has always been.
-    #[default]
-    Legacy,
-    /// xterm's `modifyOtherKeys` (`CSI > 4 ; 1 m` or `CSI > 4 ; 2 m`): `CSI 27 ; MOD ;
-    /// CHAR ~`. Which keys take that spelling depends on the level, which crosses beside
-    /// this as [`Delta::modify_other_keys`].
-    ModifyOtherKeys,
-    /// The kitty keyboard protocol (`CSI > FLAGS u`): `CSI CHAR ; MOD u`.
-    Kitty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -339,27 +322,8 @@ pub struct Delta {
     pub height: usize,
     pub used: usize,
     pub head: usize,
-    pub cursor: Cursor,
-    pub cursor_visible: bool,
-    pub cursor_shape: CursorShape,
-    /// DECSCNM (DEC mode 5): the child wants the whole screen in reverse video.
-    ///
-    /// A level, since what it changes is how every default-coloured cell is drawn.
-    /// Emacs renders it as a swap of the buffer's default foreground and background,
-    /// so nothing in [`Delta::rows`] changes with it and no row is damaged.
-    pub reverse_screen: bool,
-    pub alt: bool,
-    /// DECCKM: cursor keys must be sent as SS3 (`ESC O A`), not CSI (`ESC [ A`).
-    /// ncurses turns this on via `smkx`, and terminfo's `kcuu1` assumes it.
-    pub app_cursor: bool,
-    /// How to spell modified Return, Tab, Escape and Backspace for this child.
-    pub keys: KeyEncoding,
-    /// The kitty flags in force, masked to [`KITTY_HONOURED`]: which parts of the kitty
-    /// encoding apply once `keys` says kitty at all.
-    pub kitty_flags: u8,
-    /// The modifyOtherKeys level in force, 1 or 2, or 0: which of xterm's two rule sets
-    /// applies once `keys` says modifyOtherKeys at all.
-    pub modify_other_keys: u8,
+    /// Everything else a drain restates in full every time; see [`Levels`].
+    pub levels: Levels,
     pub events: Vec<Event>,
     /// Semantic marks whose position changed during this drain, as `(ID, ANCHOR)`.
     ///
@@ -380,6 +344,36 @@ pub struct Delta {
     /// rewrite. `anchor_to_lisp` already spells both, so the two cases cost nothing to
     /// tell apart here.
     pub marks: Vec<(MarkId, Anchor)>,
+}
+
+/// The state a drain restates in full every time, as of the end of that drain.
+///
+/// These are the levels of the level/occurrence division [`Event`] describes: what Emacs
+/// renders from and encodes keys by, rather than anything it must react to. They are
+/// gathered into one struct because they are read three times -- by [`Delta`] for Lisp,
+/// by [`Pending`] to decide whether a read changed anything, and by the wire encoding --
+/// and a field that one of those readers forgot would be a change nobody draws.
+/// [`Levels::of`] is the one place a new level is read from the emulator.
+///
+/// The grid's shape (`height`, `used`, `head`) is not here, because none of the three can
+/// move without damaging or evicting a row, and [`Pending`] counts both of those already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Levels {
+    pub cursor: Cursor,
+    pub cursor_visible: bool,
+    pub cursor_shape: CursorShape,
+    /// DECSCNM (DEC mode 5): the child wants the whole screen in reverse video.
+    ///
+    /// Emacs renders it as a swap of the buffer's default foreground and background, so
+    /// nothing in [`Delta::rows`] changes with it and no row is damaged.
+    pub reverse_screen: bool,
+    pub alt: bool,
+    /// DECCKM: cursor keys must be sent as SS3 (`ESC O A`), not CSI (`ESC [ A`).
+    /// ncurses turns this on via `smkx`, and terminfo's `kcuu1` assumes it.
+    pub app_cursor: bool,
+    /// How to spell modified keys for this child, with the kitty flags or the
+    /// modifyOtherKeys level that spelling needs.
+    pub keys: KeyEncoding,
 }
 
 /// One damaged row as a drain reports it: where it is, whether its logical line
@@ -411,16 +405,12 @@ pub struct DamagedRow {
 /// a flag set by the code that changes things: the flag would have to be set in every one
 /// of `perform`'s several dozen arms, and the arm that was forgotten would be the one that
 /// stopped repainting. Comparing what a drain would report cannot fall out of step that
-/// way — a field added to [`Delta`] and not to this is the only failure mode left, and it
-/// is one line away from the field it belongs to.
+/// way, because the levels are the same [`Levels`] the drain carries.
 ///
 /// The queues are counted rather than examined because they only ever grow between
-/// drains, and the level fields are copied because a [`Delta`] restates them every time.
-/// Damage is counted for a subtler reason: it stays up until Emacs drains, so a flag
-/// would read `true` on both sides of a read and make a program repainting flat out look
-/// like one doing nothing at all. See [`Screen::touches`].
-/// [`Delta::height`], `used` and `head` are the three left out, and deliberately: none can
-/// move without either damaging a row or evicting one, both of which are already here.
+/// drains. Damage is counted for a subtler reason: it stays up until Emacs drains, so a
+/// flag would read `true` on both sides of a read and make a program repainting flat out
+/// look like one doing nothing at all. See [`Screen::touches`].
 #[derive(PartialEq, Eq)]
 struct Pending {
     touches: u64,
@@ -429,15 +419,7 @@ struct Pending {
     links: usize,
     events: usize,
     marks: (bool, usize),
-    cursor: Cursor,
-    cursor_visible: bool,
-    cursor_shape: CursorShape,
-    reverse_screen: bool,
-    alt: bool,
-    app_cursor: bool,
-    keys: KeyEncoding,
-    kitty_flags: u8,
-    modify_other_keys: u8,
+    levels: Levels,
 }
 
 impl Pending {
@@ -449,15 +431,7 @@ impl Pending {
             links: state.pending_links.len(),
             events: state.events.len(),
             marks: (state.marks_dirty, state.evicted_marks.len()),
-            cursor: state.screen().cursor,
-            cursor_visible: state.modes.cursor_visible,
-            cursor_shape: state.modes.cursor_shape,
-            reverse_screen: state.modes.reverse_screen,
-            alt: state.on_alt,
-            app_cursor: state.modes.app_cursor,
-            keys: state.key_encoding(),
-            kitty_flags: state.kitty_flags(),
-            modify_other_keys: state.modify_other_keys(),
+            levels: Levels::of(state),
         }
     }
 }
@@ -530,35 +504,6 @@ pub(crate) const MAX_TEXT_SIZE_LEN: usize = 4096;
 /// smaller than it looks: a full-screen picture is comfortably inside it, and the decoded
 /// result is bounded again, and more tightly, by [`sixel::MAX_PIXELS`].
 pub(crate) const SIXEL_BODY_LIMIT: usize = 8 << 20;
-
-/// The kitty keyboard flags cooked actually implements.
-///
-/// Bits 1 (disambiguate escape codes), 4 (report alternate keys), 8 (report all keys as
-/// escape codes) and 16 (report associated text). The encoder is Lisp's, which is where
-/// the key event is; this constant is what crosses to it as `:kitty-flags`, and what a
-/// `CSI ? u` reply is masked with, so the two cannot disagree about what was granted.
-///
-/// Bit 2 (report event types) is the one left out, and for good: Emacs delivers no key
-/// release events and no way to tell a repeat from a press, so a child told yes would
-/// wait for releases that never come. The stack still keeps it -- a pop has to restore
-/// exactly what its matching push put there -- and nothing reads it.
-///
-/// Two parts of what is granted are narrower than kitty's own, both because Emacs does
-/// not have the fact to send. Bit 4's *base layout key* needs the physical key, which an
-/// Emacs event does not carry, so only the shifted key is sent; the protocol makes both
-/// alternates optional. And bit 8's report of a bare modifier press is never sent, since
-/// Emacs reports modifiers only as part of another key.
-pub(crate) const KITTY_HONOURED: u8 = 0b11101;
-
-/// Depth of each kitty keyboard flag stack. Real clients push once around a full-screen
-/// session; anything deeper is a child that never pops.
-///
-/// A push onto a full stack evicts the *oldest* entry rather than being dropped, as the
-/// spec requires. Dropping it was the worse failure: the child's next pop would then take
-/// away the entry *beneath* its push, so from then on every pop restored the wrong flags.
-/// Evicting keeps the pairing exact for the innermost sixteen, which are the ones a child
-/// that is still popping will ever reach.
-const KITTY_STACK_LIMIT: usize = 16;
 
 /// Depth of the XTPUSHSGR pen stack: xterm's own `MAX_SAVED_SGR`. A push past it is
 /// dropped, as xterm drops it, so a child written against xterm sees the same pops here.
@@ -988,19 +933,15 @@ impl Term {
         self.state.modes.app_cursor
     }
 
-    /// How the child wants modified Return, Tab, Escape and Backspace spelled.
+    /// How the child wants modified keys spelled.
     pub fn keys(&self) -> KeyEncoding {
         self.state.key_encoding()
     }
 
-    /// The kitty keyboard flags in force, as far as cooked honours them.
-    pub fn kitty_flags(&self) -> u8 {
+    /// The kitty keyboard flags on the shown screen's stack, as far as cooked honours
+    /// them: what `CSI ? u` answers, whether or not they switch the kitty encoding on.
+    pub fn kitty_flags(&self) -> KittyFlags {
         self.state.kitty_flags()
-    }
-
-    /// The modifyOtherKeys level in force, as far as cooked honours it: 0, 1 or 2.
-    pub fn modify_other_keys(&self) -> u8 {
-        self.state.modify_other_keys()
     }
 
     /// Test-only: send every character down the per-character print path.
@@ -1114,11 +1055,10 @@ struct Modes {
     charsets: Charsets,
     app_cursor: bool,
     app_keypad: bool,
-    /// xterm's modifyOtherKeys level, as set. 1 and 2 are honoured; 3, which sends even
-    /// unmodified keys as escapes, is not, and reads as 0. See [`State::modify_other_keys`].
-    modify_other_keys: u8,
+    /// xterm's modifyOtherKeys level, or `None` for a level cooked does not honour.
+    modify_other_keys: Option<ModifyOtherKeys>,
     /// Kitty keyboard flag stacks, as pushed, innermost last: the primary screen's first
-    /// and the alternate screen's second. See [`KITTY_HONOURED`] for which bits are read.
+    /// and the alternate screen's second. See [`KittyFlags::HONOURED`] for which bits are read.
     ///
     /// Two because the spec says the screens "must maintain their own, independent,
     /// keyboard mode stacks", and the reason is the failure one shared stack had. A
@@ -1129,7 +1069,7 @@ struct Modes {
     /// Nothing clears the alternate stack on the way back in, which is kitty's own
     /// behaviour: a program that leaves the alternate screen to run a command and returns
     /// finds its flags where it left them, as it would in kitty.
-    kitty_keys: [Vec<u8>; 2],
+    kitty_keys: [KittyStack; 2],
     /// LNM (ANSI mode 20): LF also returns the carriage.
     newline_mode: bool,
     /// XTPUSHSGR's stack, innermost last, at most [`SGR_STACK_LIMIT`] deep.
@@ -1166,8 +1106,8 @@ impl Default for Modes {
             charsets: Charsets::default(),
             app_cursor: false,
             app_keypad: false,
-            modify_other_keys: 0,
-            kitty_keys: [Vec::new(), Vec::new()],
+            modify_other_keys: None,
+            kitty_keys: Default::default(),
             newline_mode: false,
             pen_stack: Vec::new(),
             saved_modes: Vec::new(),

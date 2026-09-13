@@ -383,7 +383,7 @@ impl Replay {
         if !delta.scrolled.is_empty() {
             self.scrollback.push(Batch {
                 lines: delta.scrolled,
-                alt: delta.alt,
+                alt: delta.levels.alt,
             });
         }
     }

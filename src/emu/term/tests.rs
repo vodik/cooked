@@ -1715,7 +1715,11 @@ fn the_extended_names_tmux_reads_do_what_they_say() {
     };
 
     let mut t = term(2, 20, &terminfo_decode(value("Eneks")));
-    assert_eq!(t.keys(), KeyEncoding::ModifyOtherKeys, "`Eneks'");
+    assert_eq!(
+        t.keys(),
+        KeyEncoding::ModifyOtherKeys(ModifyOtherKeys::Level2),
+        "`Eneks'"
+    );
     t.feed(&terminfo_decode(value("Dseks")));
     assert_eq!(t.keys(), KeyEncoding::Legacy, "`Dseks'");
 
@@ -1777,13 +1781,13 @@ fn focus_reporting_is_off_until_asked_for() {
 #[test]
 fn reverse_screen_rides_the_drain() {
     let mut t = term(2, 8, b"ab");
-    assert!(!t.drain().reverse_screen);
+    assert!(!t.drain().levels.reverse_screen);
     assert!(t.feed(b"\x1b[?5h"), "setting it is an update of its own");
     let delta = t.drain();
-    assert!(delta.reverse_screen);
+    assert!(delta.levels.reverse_screen);
     assert!(delta.rows.is_empty(), "no cell changed");
     assert!(t.feed(b"\x1b[?5l"), "and so is clearing it");
-    assert!(!t.drain().reverse_screen);
+    assert!(!t.drain().levels.reverse_screen);
 }
 
 /// `flash' from our terminfo, and the reset `reset' sends: both have to leave the screen
@@ -1791,9 +1795,9 @@ fn reverse_screen_rides_the_drain() {
 #[test]
 fn a_reset_puts_the_screen_the_right_way_round() {
     let mut t = term(2, 8, b"\x1b[?5h");
-    assert!(t.drain().reverse_screen);
+    assert!(t.drain().levels.reverse_screen);
     t.feed(b"\x1bc");
-    assert!(!t.drain().reverse_screen);
+    assert!(!t.drain().levels.reverse_screen);
     t.feed(b"\x1b[?5$p");
     assert!(
         t.drain()
@@ -1819,20 +1823,20 @@ fn decscusr_names_a_shape() {
         (&b"\x1b[6 q"[..], CursorShape::Bar),
     ] {
         let mut t = term(2, 8, input);
-        assert_eq!(t.drain().cursor_shape, want, "{input:?}");
+        assert_eq!(t.drain().levels.cursor_shape, want, "{input:?}");
     }
 }
 
 #[test]
 fn an_unknown_cursor_shape_is_left_alone() {
     let mut t = term(2, 8, b"\x1b[5 q\x1b[9 q");
-    assert_eq!(t.drain().cursor_shape, CursorShape::Bar);
+    assert_eq!(t.drain().levels.cursor_shape, CursorShape::Bar);
 }
 
 #[test]
 fn a_soft_reset_returns_the_cursor_to_a_block() {
     let mut t = term(2, 8, b"\x1b[5 q\x1b[!p");
-    assert_eq!(t.drain().cursor_shape, CursorShape::Block);
+    assert_eq!(t.drain().levels.cursor_shape, CursorShape::Block);
 }
 
 #[test]
@@ -2082,7 +2086,7 @@ fn insert_mode_shifts_by_a_wide_characters_full_width() {
 fn soft_reset_keeps_the_screen_but_clears_the_modes() {
     let mut t = term(2, 10, b"hello\x1b[?7l\x1b[4h\x1b[31m\x1b[?25l\x1b[!p");
     assert_eq!(text(&t, 0), "hello", "DECSTR is not RIS");
-    assert!(t.drain().cursor_visible, "mode 25 is back on");
+    assert!(t.drain().levels.cursor_visible, "mode 25 is back on");
 
     // Autowrap and insert mode are back to their power-on values.
     t.feed(b"\x1b[6Gabcdefg");
@@ -2312,11 +2316,11 @@ fn alt_screen_output_never_reaches_scrollback() {
         delta.scrolled.is_empty(),
         "alt screen must not pollute history"
     );
-    assert!(delta.alt);
+    assert!(delta.levels.alt);
 
     t.feed(b"\x1b[?1049l");
     let back = t.drain();
-    assert!(!back.alt);
+    assert!(!back.levels.alt);
     assert_eq!(text(&t, 0), "keep");
 }
 
@@ -2932,10 +2936,10 @@ fn a_reset_says_so_where_a_soft_reset_does_not() {
 fn a_reset_leaves_the_alternate_screen() {
     let mut t = term(3, 8, b"keep\r\n");
     t.feed(b"\x1b[?1049hfull");
-    assert!(t.drain().alt);
+    assert!(t.drain().levels.alt);
     t.feed(b"\x1bc");
     let delta = t.drain();
-    assert!(!delta.alt, "the drain carries the switch back");
+    assert!(!delta.levels.alt, "the drain carries the switch back");
     assert!(delta.events.contains(&Event::Reset));
     assert!(
         delta.events.contains(&Event::DisplayCleared),
@@ -3268,11 +3272,11 @@ fn application_cursor_keys_are_tracked() {
     // wrong encoding and simply do nothing.
     let mut t = term(4, 20, b"\x1b[?1h");
     assert!(t.app_cursor());
-    assert!(t.drain().app_cursor);
+    assert!(t.drain().levels.app_cursor);
 
     t.feed(b"\x1b[?1l");
     assert!(!t.app_cursor());
-    assert!(!t.drain().app_cursor);
+    assert!(!t.drain().levels.app_cursor);
 }
 
 #[test]
@@ -3285,22 +3289,20 @@ fn modify_other_keys_is_negotiated() {
     );
 
     t.feed(b"\x1b[>4;2m");
-    assert_eq!(t.keys(), KeyEncoding::ModifyOtherKeys);
-    let delta = t.drain();
-    assert_eq!(delta.keys, KeyEncoding::ModifyOtherKeys);
-    assert_eq!(delta.modify_other_keys, 2);
+    let level2 = KeyEncoding::ModifyOtherKeys(ModifyOtherKeys::Level2);
+    assert_eq!(t.keys(), level2);
+    assert_eq!(t.drain().levels.keys, level2);
 
     // Level 1 is the protocol too, with fewer keys; the level says which, and a change
     // in the level alone is something to tell Lisp.
     assert!(t.feed(b"\x1b[>4;1m"), "a level change alone is an update");
-    assert_eq!(t.keys(), KeyEncoding::ModifyOtherKeys);
-    assert_eq!(t.modify_other_keys(), 1);
-    assert_eq!(t.drain().modify_other_keys, 1);
+    let level1 = KeyEncoding::ModifyOtherKeys(ModifyOtherKeys::Level1);
+    assert_eq!(t.keys(), level1);
+    assert_eq!(t.drain().levels.keys.modify_other_keys_level(), 1);
 
     // Level 3 also sends unmodified keys, which cooked does not, so it is not claimed.
     t.feed(b"\x1b[>4;3m");
     assert_eq!(t.keys(), KeyEncoding::Legacy);
-    assert_eq!(t.modify_other_keys(), 0);
 
     t.feed(b"\x1b[>4;2m\x1b[>4m");
     assert_eq!(
@@ -3308,26 +3310,24 @@ fn modify_other_keys_is_negotiated() {
         KeyEncoding::Legacy,
         "a bare reset turns it back off"
     );
-    assert_eq!(t.modify_other_keys(), 0);
 }
 
 #[test]
 fn kitty_wins_over_modify_other_keys_but_the_level_survives_it() {
     let mut t = term(4, 20, b"\x1b[>4;1m\x1b[>1u");
-    assert_eq!(t.keys(), KeyEncoding::Kitty);
+    assert_eq!(t.keys(), KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE));
     t.feed(b"\x1b[<u");
     assert_eq!(
         t.keys(),
-        KeyEncoding::ModifyOtherKeys,
+        KeyEncoding::ModifyOtherKeys(ModifyOtherKeys::Level1),
         "popping kitty uncovers level 1"
     );
-    assert_eq!(t.modify_other_keys(), 1);
 }
 
 #[test]
 fn kitty_keyboard_flags_stack() {
     let mut t = term(4, 20, b"\x1b[>1u");
-    assert_eq!(t.keys(), KeyEncoding::Kitty);
+    assert_eq!(t.keys(), KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE));
 
     t.feed(b"\x1b[>0u");
     assert_eq!(
@@ -3339,7 +3339,7 @@ fn kitty_keyboard_flags_stack() {
     t.feed(b"\x1b[<u");
     assert_eq!(
         t.keys(),
-        KeyEncoding::Kitty,
+        KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE),
         "popping restores what was underneath"
     );
 
@@ -3363,27 +3363,27 @@ fn each_screen_keeps_its_own_kitty_stack() {
     );
 
     t.feed(b"\x1b[>8u");
-    assert_eq!(t.kitty_flags(), 8);
+    assert_eq!(t.kitty_flags().bits(), 8);
     t.feed(b"\x1b[?1049l");
     assert_eq!(
-        t.kitty_flags(),
+        t.kitty_flags().bits(),
         1,
         "the push on the alternate screen is gone, the primary's is back"
     );
 
     t.feed(b"\x1b[<u");
-    assert_eq!(t.kitty_flags(), 0);
+    assert_eq!(t.kitty_flags().bits(), 0);
     t.feed(b"\x1b[?1049h");
     assert_eq!(
-        t.kitty_flags(),
+        t.kitty_flags().bits(),
         8,
         "a pop on the primary screen does not reach the alternate one"
     );
 
     t.feed(b"\x1bc");
-    assert_eq!(t.kitty_flags(), 0, "RIS empties both stacks");
+    assert_eq!(t.kitty_flags().bits(), 0, "RIS empties both stacks");
     t.feed(b"\x1b[?1049l");
-    assert_eq!(t.kitty_flags(), 0);
+    assert_eq!(t.kitty_flags().bits(), 0);
 }
 
 /// A push onto a full stack evicts the oldest entry instead of being dropped, so every
@@ -3394,26 +3394,28 @@ fn a_push_onto_a_full_kitty_stack_evicts_the_oldest() {
     for flags in 1..=17 {
         t.feed(format!("\x1b[>{flags}u").as_bytes());
     }
-    assert_eq!(t.state.kitty_stack().len(), 16);
     assert_eq!(
-        t.state.kitty_stack().first(),
-        Some(&2),
-        "the first push was evicted"
-    );
-    assert_eq!(
-        t.state.kitty_stack().last(),
-        Some(&17),
+        t.state.kitty_stack().top().bits(),
+        17,
         "the 17th push is on top"
     );
 
     t.feed(b"\x1b[<15u");
-    assert_eq!(t.state.kitty_stack().as_slice(), &[2]);
+    assert_eq!(
+        t.state.kitty_stack().top().bits(),
+        2,
+        "the first push was evicted, so fifteen pops land on the second"
+    );
+    t.feed(b"\x1b[<u");
+    assert!(
+        t.state.kitty_stack().top().is_empty(),
+        "one more pop empties it"
+    );
     t.feed(b"\x1b[<5u");
     assert!(
-        t.state.kitty_stack().is_empty(),
-        "popping past the bottom empties it"
+        t.kitty_flags().is_empty(),
+        "popping past the bottom is harmless"
     );
-    assert_eq!(t.kitty_flags(), 0);
 }
 
 #[test]
@@ -3444,7 +3446,7 @@ fn a_kitty_query_is_answered_with_what_is_honoured() {
     // The reply is exactly the constant's mask, so widening one widens the other.
     assert_eq!(
         reply(b"\x1b[>255u\x1b[?u"),
-        Some(format!("\x1b[?{KITTY_HONOURED}u").into_bytes())
+        Some(format!("\x1b[?{}u", KittyFlags::HONOURED).into_bytes())
     );
 
     // The stack still carries what the child asked for: a pop has to restore exactly
@@ -3602,26 +3604,31 @@ fn kitty_flags_reach_the_drain() {
     // The encoder is Lisp's, so the flags have to cross with the drain -- and a change
     // of flags alone, with the encoding still kitty either side, is still a change.
     let mut t = term(4, 20, b"\x1b[>1u");
-    assert_eq!(t.drain().kitty_flags, 1);
+    assert_eq!(t.drain().levels.keys.kitty_flags().bits(), 1);
     assert!(t.feed(b"\x1b[=29u"), "a flag change alone is an update");
     let d = t.drain();
-    assert_eq!(d.keys, KeyEncoding::Kitty);
-    assert_eq!(d.kitty_flags, 29);
+    assert_eq!(
+        d.levels.keys,
+        KeyEncoding::Kitty(KittyFlags::from_bits_retain(29))
+    );
     // Masked on the way out, as the query reply is.
     t.feed(b"\x1b[=2;2u");
-    assert_eq!(t.kitty_flags(), 29);
+    assert_eq!(t.kitty_flags().bits(), 29);
 }
 
 #[test]
 fn kitty_report_all_keys_turns_kitty_on_by_itself() {
     // Reporting every key as an escape code disambiguates by construction, so bit 8
     // needs no bit 1 beside it.
-    assert_eq!(term(4, 20, b"\x1b[>8u").keys(), KeyEncoding::Kitty);
+    assert_eq!(
+        term(4, 20, b"\x1b[>8u").keys(),
+        KeyEncoding::Kitty(KittyFlags::REPORT_ALL_KEYS)
+    );
     // Alternate keys and associated text only add fields to an escape code something
     // else chose to send; alone, nothing is sent as one, and the spelling is legacy.
     assert_eq!(term(4, 20, b"\x1b[>4u").keys(), KeyEncoding::Legacy);
     assert_eq!(term(4, 20, b"\x1b[>16u").keys(), KeyEncoding::Legacy);
-    assert_eq!(term(4, 20, b"\x1b[>20u").kitty_flags(), 20);
+    assert_eq!(term(4, 20, b"\x1b[>20u").kitty_flags().bits(), 20);
 }
 
 #[test]
@@ -3629,19 +3636,23 @@ fn kitty_set_honours_its_mode() {
     // `CSI = FLAGS ; MODE u`: 1 replaces, 2 sets bits, 3 clears them.
     let mut t = term(4, 20, b"\x1b[>1u");
     t.feed(b"\x1b[=16;2u");
-    assert_eq!(t.kitty_flags(), 17, "mode 2 adds to what was there");
+    assert_eq!(t.kitty_flags().bits(), 17, "mode 2 adds to what was there");
     t.feed(b"\x1b[=1;3u");
-    assert_eq!(t.kitty_flags(), 16, "mode 3 takes away only what it names");
+    assert_eq!(
+        t.kitty_flags().bits(),
+        16,
+        "mode 3 takes away only what it names"
+    );
     t.feed(b"\x1b[=4u");
-    assert_eq!(t.kitty_flags(), 4, "mode 1, the default, replaces");
+    assert_eq!(t.kitty_flags().bits(), 4, "mode 1, the default, replaces");
     t.feed(b"\x1b[=9;1u");
-    assert_eq!(t.kitty_flags(), 9);
+    assert_eq!(t.kitty_flags().bits(), 9);
 }
 
 #[test]
 fn reset_clears_negotiated_keyboard_modes() {
     let mut t = term(4, 20, b"\x1b[>4;2m\x1b[>1u");
-    assert_eq!(t.keys(), KeyEncoding::Kitty);
+    assert_eq!(t.keys(), KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE));
     t.feed(b"\x1bc");
     assert_eq!(t.keys(), KeyEncoding::Legacy);
 }

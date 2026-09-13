@@ -667,49 +667,23 @@ impl State {
     ) -> bool {
         match (private, action) {
             // XTMODKEYS, `CSI > 4 ; Ps m`. Bare `CSI > 4 m` means "back to the default",
-            // which is level 0 for our purposes.
+            // which is no level at all for our purposes.
             (Some(b'>'), 'm') => {
                 if params.arg(0, 4) == 4 {
-                    self.modes.modify_other_keys = params
-                        .iter()
-                        .nth(1)
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(0) as u8;
+                    self.modes.modify_other_keys =
+                        ModifyOtherKeys::from_param(params.arg(1, 0) as u16);
                 }
             }
             // Kitty keyboard protocol: push, pop, and set, each on the stack of the screen
-            // being shown. The stack is capped because a child can push without ever
-            // popping; a push onto a full one evicts the oldest entry, as the spec says,
-            // for the reason given at `KITTY_STACK_LIMIT`.
+            // being shown. See [`KittyStack`] for the cap and why a full push evicts.
             (Some(b'>'), 'u') => {
-                let stack = self.kitty_stack_mut();
-                if stack.len() >= KITTY_STACK_LIMIT {
-                    stack.remove(0);
-                }
-                stack.push(params.arg(0, 0) as u8);
+                let flags = KittyFlags::from_bits_retain(params.arg(0, 0) as u8);
+                self.kitty_stack_mut().push(flags);
             }
-            (Some(b'<'), 'u') => {
-                let stack = self.kitty_stack_mut();
-                let keep = stack.len().saturating_sub(params.arg(0, 1).max(1));
-                stack.truncate(keep);
-            }
-            // The second parameter says how: 1 (the default) replaces the top, 2 sets the
-            // given bits and 3 clears them. Read as a plain replace, `CSI = 16 ; 2 u` --
-            // "add associated text" -- would have dropped disambiguation on the way.
+            (Some(b'<'), 'u') => self.kitty_stack_mut().pop(params.arg(0, 1)),
             (Some(b'='), 'u') => {
-                let flags = params.arg(0, 0) as u8;
-                let mode = params.arg(1, 1);
-                let stack = self.kitty_stack_mut();
-                let top = stack.last().copied().unwrap_or(0);
-                let flags = match mode {
-                    2 => top | flags,
-                    3 => top & !flags,
-                    _ => flags,
-                };
-                match stack.last_mut() {
-                    Some(top) => *top = flags,
-                    None => stack.push(flags),
-                }
+                let flags = KittyFlags::from_bits_retain(params.arg(0, 0) as u8);
+                self.kitty_stack_mut().set(flags, params.arg(1, 1));
             }
             // A child that probes and gets no answer may wait for one.
             //

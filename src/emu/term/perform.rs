@@ -207,7 +207,7 @@ impl Perform for State {
                 //
                 // The alternate screen goes first, and through `set_alt` rather than by
                 // clearing the flag: that is the path `?1049l` and `?47l` take, and it is
-                // how Emacs hears of it, since `Delta::alt` is the level Lisp unpins the
+                // how Emacs hears of it, since `Levels::alt` is the level Lisp unpins the
                 // window on. Left up, `reset` run from a shell whose full-screen program
                 // died without its `rmcup` cleared the alt grid and left the user on it,
                 // with the transcript still hidden behind. Before `soft_reset`, too, so
