@@ -35,7 +35,7 @@
 //! decoration and the link id, and a stale face over correct characters is exactly the
 //! class of miss a text-only oracle waves through.
 
-use cooked::emu::{Delta, Direction, Run, Scrolled, Shift, Term};
+use cooked::emu::{Delta, Direction, Edit, Run, Scrolled, Shift, Term};
 use proptest::prelude::*;
 
 /// The upper bound on a generated grid, in both directions.
@@ -180,6 +180,22 @@ fn rewrite() -> impl Strategy<Value = Vec<u8>> {
     .prop_map(String::into_bytes)
 }
 
+/// A few cells of one row changed where they stand: a spinner turning, a digit of a
+/// clock, a tail erased.
+///
+/// What a drain sends as an edit rather than a whole row, which it does only for a row
+/// whose neighbours did not change, so this touches one row and nothing either side of it.
+/// The replacements are the shapes that make character offsets and columns disagree -- a
+/// blank, a box glyph, a wide character, a combining mark -- and an erase to the end of
+/// the line, which shortens the row.
+fn poke() -> impl Strategy<Value = Vec<u8>> {
+    let pieces = vec![
+        " ", "x", "\u{2500}", "\u{4e00}", "e\u{301}", "\x1b[K", "  ", "ab",
+    ];
+    (1usize..9, 1usize..13, prop::sample::select(pieces))
+        .prop_map(|(row, col, piece)| format!("\x1b[{row};{col}H{piece}").into_bytes())
+}
+
 /// Cursor motion, erasure and the line/character editing operators.
 ///
 /// Every parameter is small, because the grids are small and a `CUP` to row 4000 is the
@@ -263,6 +279,7 @@ fn payload() -> impl Strategy<Value = Vec<u8>> {
         3 => control(),
         3 => repaint(),
         3 => rewrite(),
+        3 => poke(),
         2 => box_run(),
         1 => noise(),
     ]
@@ -449,6 +466,9 @@ impl Replay {
             Self::shift(&mut self.wrapped, shift);
         }
         for damaged in delta.rows {
+            if let (Some(edit), Some(row)) = (&damaged.edit, self.shadow.get(damaged.index)) {
+                Self::check_edit(damaged.index, row, edit, &damaged.runs);
+            }
             if let Some(row) = self.shadow.get_mut(damaged.index) {
                 *row = damaged.runs;
                 self.trimmed[damaged.index] = false;
@@ -507,6 +527,56 @@ impl Replay {
                 "row {} was left out of the drain with a different wrap flag",
                 row.index
             );
+        }
+    }
+
+    /// Check that applying EDIT to the shadow's row INDEX, OLD, by character offsets, as
+    /// `cooked--render-rows' applies it to the buffer, gives what the whole row FULL
+    /// draws, character by character: the same text, renditions, links and decorations.
+    ///
+    /// Also that neither boundary cuts a run of box glyphs in the old row or the new one,
+    /// since Lisp draws such a run as one image and half of one left behind is wrong
+    /// however right the characters are.
+    fn check_edit(index: usize, old: &[Run], edit: &Edit, full: &[Run]) {
+        let before = drawn(old);
+        let start = edit.char_start;
+        assert!(
+            start <= before.len(),
+            "row {index}: an edit from character {start} of a {}-character row",
+            before.len()
+        );
+        let mut after = before[..start].to_vec();
+        after.extend(drawn(&edit.runs));
+        if let Some(end) = edit.char_end {
+            assert!(
+                (start..=before.len()).contains(&end),
+                "row {index}: an edit of characters {start}..{end} of {}",
+                before.len()
+            );
+            after.extend_from_slice(&before[end..]);
+        }
+        after.truncate(edit.chars);
+        assert_eq!(
+            after,
+            drawn(full),
+            "row {index}: the edit {edit:?} does not reproduce the row"
+        );
+        // The old text is cut at START and END, the new text at START and wherever the
+        // replacement ends in it.
+        let replaced = drawn(&edit.runs).len();
+        let cuts = [
+            (old, Some(start)),
+            (old, edit.char_end),
+            (full, Some(start)),
+            (full, edit.char_end.map(|_| start + replaced)),
+        ];
+        for (runs, cut) in cuts {
+            if let Some(cut) = cut {
+                assert!(
+                    !inside_glyph_run(runs, cut),
+                    "row {index}: an edit boundary at character {cut} cuts a glyph run"
+                );
+            }
         }
     }
 
@@ -637,6 +707,38 @@ impl Replay {
         self.term.touch_all();
         self.term.drain()
     }
+}
+
+/// RUNS as what Emacs draws for each character: the character, its rendition, underline
+/// colour and link, and its decoration.
+fn drawn(runs: &[Run]) -> Vec<String> {
+    runs.iter()
+        .flat_map(|run| {
+            run.text.chars().enumerate().map(move |(i, c)| {
+                format!(
+                    "{c:?} {:?} {:?} {:?} {:?}",
+                    run.style,
+                    run.underline,
+                    run.link,
+                    run.deco_at(i)
+                )
+            })
+        })
+        .collect()
+}
+
+/// Whether character offset AT falls strictly inside a run of RUNS that carries box
+/// glyphs.
+fn inside_glyph_run(runs: &[Run], at: usize) -> bool {
+    let mut start = 0;
+    for run in runs {
+        let len = run.text.chars().count();
+        if run.deco_at(0).is_some() && start < at && at < start + len {
+            return true;
+        }
+        start += len;
+    }
+    false
 }
 
 /// The scrollback as one string, under one setting of `cooked-rejoin-wrapped-lines`.
