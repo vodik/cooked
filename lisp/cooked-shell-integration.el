@@ -26,10 +26,15 @@
   `none\='    never inject; the snippet is yours to source
   `zsh\=', `bash\='  force that scheme regardless of the name
 
-There is no `fish\=' scheme.  The snippet is shipped and honours the feature
-list like the others, but injecting it would mean being right about `-C\='
-ordering and config.fish sourcing against a shell nothing here has ever run.
-Source it by hand; it is the same one line.
+  `fish\='   force fish regardless of the name
+
+There *is* a `fish\=' scheme now, and the reason there was not is worth keeping:
+injecting it looked like it meant being right about `-C\=' ordering and
+config.fish sourcing against a shell nothing here had run.  It does not.  fish
+sources `fish/vendor_conf.d/*.fish\=' out of every directory in
+`XDG_DATA_DIRS\=', at startup, interactive and login alike -- its own documented
+autoload path, with no ordering to be right about and nothing of the user\='s to
+shadow.  cooked prepends a scratch directory and drops one file in it.
 
 Injection generates startup files that source the user\='s own, so nobody\='s
 configuration is bypassed or edited, and the generated directory is deleted with
@@ -124,8 +129,8 @@ learn that a setting grew values."
   (let ((setting (if (eq cooked-shell-integration t) 'detect cooked-shell-integration)))
     (pcase setting
       ('detect (let ((name (file-name-nondirectory shell)))
-                (and (member name '("zsh" "bash")) (intern name))))
-      ((or 'zsh 'bash) setting)
+                (and (member name '("zsh" "bash" "fish")) (intern name))))
+      ((or 'zsh 'bash 'fish) setting)
       (_ nil))))
 
 (defun cooked--integration-feature-p (feature)
@@ -265,6 +270,30 @@ arrives."
                  ;; Distinguishes "put it back" from "there was none", so we do not
                  ;; leave every cooked child exporting ZDOTDIR=$HOME for life.
                  ,@(when (getenv "ZDOTDIR") '(("COOKED_USER_ZDOTDIR_SET" . "1"))))
+               scratch)))
+      ('fish
+       ;; fish's own documented autoload path, which is why this arm can exist at
+       ;; all where the docstring above refused one.  Every directory in
+       ;; `XDG_DATA_DIRS' has its `fish/vendor_conf.d/*.fish' sourced at startup,
+       ;; interactive and login alike -- so cooked prepends a scratch directory and
+       ;; drops one file in it.  No `-C', no ordering to be right about, and
+       ;; nothing of the user's to source or shadow: `config.fish' runs afterwards
+       ;; exactly as it always did, and a snippet that loses a race with it would
+       ;; lose the same race under any scheme.
+       ;;
+       ;; The user's own XDG_DATA_DIRS is appended rather than replaced, and its
+       ;; default is spelled out when unset -- POSIX says an empty value means the
+       ;; default, but fish reads the variable rather than the specification, so
+       ;; leaving it empty would hide every vendor completion on the system.
+       (let* ((scratch (cooked--scratch-directory))
+              (conf (expand-file-name "fish/vendor_conf.d" scratch))
+              (existing (or (getenv "XDG_DATA_DIRS") "/usr/local/share:/usr/share")))
+         (make-directory conf t)
+         (with-temp-file (expand-file-name "cooked.fish" conf)
+           (insert "source " (shell-quote-argument
+                              (expand-file-name "cooked.fish" dir)) "\n"))
+         (list (list shell "-i")
+               `(,@env ("XDG_DATA_DIRS" . ,(concat scratch ":" existing)))
                scratch)))
       (_ (list (list shell) env nil)))))
 

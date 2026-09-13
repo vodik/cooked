@@ -1420,5 +1420,59 @@ against a buffer holding half of it."
     (should (= (cooked-tests--seam-offset) (cooked-grid-head cooked--grid)))
     (cooked--check-seam)))
 
+(ert-deftest cooked-fish-is-injected-through-its-own-vendor-path ()
+  "fish is injected now, and by the path fish documents rather than by guessing.
+
+The scheme was refused because injecting looked like it meant being right about
+`-C\=' ordering and config.fish sourcing against a shell nothing here had run.
+It does not: fish sources `fish/vendor_conf.d/*.fish\=' out of every directory
+in `XDG_DATA_DIRS\=', at startup, interactive and login alike.
+
+Asserted on the *invocation* rather than on a live fish, because what is being
+tested is the arrangement -- that the argv stays plain, that the snippet lands
+where fish will find it, and that the user\='s own data dirs survive.  Whether
+fish honours its own documented path is fish\='s business, and
+`cooked-tests--with-fish\=' exercises the snippet itself."
+  (skip-unless (executable-find "fish"))
+  (pcase-let ((`(,argv ,env ,scratch)
+               (cooked--shell-invocation (executable-find "fish"))))
+    (unwind-protect
+        (let ((dirs (alist-get "XDG_DATA_DIRS" env nil nil #'equal)))
+          ;; No `-C', which is the whole point.
+          (should-not (member "-C" argv))
+          (should (member "-i" argv))
+          (should dirs)
+          (should (string-prefix-p (concat scratch ":") dirs))
+          ;; The user's own directories are appended, not replaced -- dropping them
+          ;; would hide every vendor completion on the system.
+          (should (string-search "/usr/share" dirs))
+          ;; And the snippet is where fish looks.
+          (let ((file (expand-file-name "fish/vendor_conf.d/cooked.fish" scratch)))
+            (should (file-exists-p file))
+            (should (string-search "cooked.fish"
+                                   (with-temp-buffer
+                                     (insert-file-contents file)
+                                     (buffer-string))))))
+      (when scratch (delete-directory scratch t)))))
+
+(ert-deftest cooked-fish-vendor-conf-is-sourced-by-a-real-fish ()
+  "The claim the arm rests on, put to the shell itself rather than to its manual."
+  (skip-unless (executable-find "fish"))
+  (let ((dir (make-temp-file "cooked-fish" t)))
+    (unwind-protect
+        (let ((conf (expand-file-name "fish/vendor_conf.d" dir)))
+          (make-directory conf t)
+          (with-temp-file (expand-file-name "probe.fish" conf)
+            (insert "set -g COOKED_VENDOR_RAN yes\n"))
+          (let ((process-environment
+                 (cons (concat "XDG_DATA_DIRS=" dir ":/usr/share") process-environment)))
+            (should (string-search
+                     "yes"
+                     (with-output-to-string
+                       (with-current-buffer standard-output
+                         (call-process "fish" nil t nil
+                                       "-c" "echo $COOKED_VENDOR_RAN")))))))
+      (delete-directory dir t))))
+
 (provide 'cooked-tests-session)
 ;;; cooked-tests-session.el ends here
