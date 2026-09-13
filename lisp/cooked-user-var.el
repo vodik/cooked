@@ -92,39 +92,80 @@ BUFFER defaults to the current buffer."
   (cdr (assoc name (buffer-local-value 'cooked-user-vars
                                        (or buffer (current-buffer))))))
 
+(defconst cooked-user-var--refusal-interval 1.0
+  "The fewest seconds between two refusal messages from one buffer.")
+
+(defvar-local cooked-user-var--refused-at nil
+  "When this buffer last reported a refused set, as a `float-time\=', or nil.")
+
+(defun cooked-user-var--refuse (format-string &rest args)
+  "Report a refused set with FORMAT-STRING and ARGS, at most once a second.
+
+A stream of oversized sets would otherwise put one line each in the echo area
+and `*Messages*\='.  The first says what happened and names the knob, and the
+rest of a burst would only repeat it, so they are dropped rather than
+deferred."
+  (let ((now (float-time)))
+    (unless (and cooked-user-var--refused-at
+                 (< (- now cooked-user-var--refused-at)
+                    cooked-user-var--refusal-interval))
+      (setq cooked-user-var--refused-at now)
+      (apply #'message format-string args))))
+
+(defun cooked-user-var--name-for-message (name)
+  "NAME shortened for a refusal message, with its format controls removed.
+The name is the child\='s text, so a right-to-left override in it could
+otherwise reorder the message around it."
+  (truncate-string-to-width
+   (replace-regexp-in-string "[[:cntrl:]\u200e\u200f\u202a-\u202e\u2066-\u2069]" "" name)
+   40 nil nil t))
+
 (defun cooked-user-var--set (name data)
   "Store user variable NAME from base64 DATA and run the hook, or refuse.
-Return non-nil when the variable was stored."
-  (let ((size (+ (length name) (length data))))
-    (cond
-     ((> size cooked-user-var-max-size)
-      (message "cooked: refused a %d-character user variable `%s' (see `cooked-user-var-max-size')"
-               size (truncate-string-to-width name 40 nil nil t))
-      nil)
-     ((and (not (assoc name cooked-user-vars))
-           (>= (length cooked-user-vars) cooked-user-var-limit))
-      (message "cooked: refused user variable `%s', already holding %d (see `cooked-user-var-limit')"
-               (truncate-string-to-width name 40 nil nil t) cooked-user-var-limit)
-      nil)
-     (t
-      ;; Malformed base64 is dropped quietly, as OSC 52 drops it: that is the
-      ;; child's bug, where an over-bound set may be a limit set too low.
-      (when-let* ((value (cooked--decode-base64-utf8 data)))
-        (setf (alist-get name cooked-user-vars nil nil #'equal) value)
-        (cooked--run-seam 'cooked-user-var-functions name value)
-        t)))))
+Return non-nil when the variable was stored.
+
+The size bound is checked by the caller, before DATA is copied out of the
+payload; this checks the name limit and the decoding."
+  (cond
+   ((and (not (assoc name cooked-user-vars))
+         (>= (length cooked-user-vars) cooked-user-var-limit))
+    (cooked-user-var--refuse
+     "cooked: refused user variable `%s', already holding %d (see `cooked-user-var-limit')"
+     (cooked-user-var--name-for-message name) cooked-user-var-limit)
+    nil)
+   (t
+    ;; Malformed base64 is dropped quietly, as OSC 52 drops it: that is the
+    ;; child's bug, where an over-bound set may be a limit set too low.  So is
+    ;; a value that is not UTF-8, which would otherwise reach the hook as
+    ;; raw bytes that no consumer can compare with a string of its own.
+    (when-let* ((value (cooked--decode-base64-utf8 data))
+                ((not (string-match-p "[\x3fff80-\x3fffff]" value))))
+      (setf (alist-get name cooked-user-vars nil nil #'equal) value)
+      (cooked--run-seam 'cooked-user-var-functions name value)
+      t))))
 
 (defun cooked-user-var--osc (parts)
   "Handle an OSC 1337 payload PARTS, acting only on SetUserVar.
 
-The value is base64 and so never contains a `;\\=', but the parts are rejoined
-anyway: splitting is the core\\='s generic treatment of every OSC, not something
-this payload asked for.  The name ends at the first `=\\=' and may not be
-empty, which is also how WezTerm reads it."
-  (let ((payload (string-join parts ";")))
-    (when (string-match "\\`SetUserVar=\\([^=]+\\)=" payload)
-      (cooked-user-var--set (match-string 1 payload)
-                            (substring payload (match-end 0))))))
+The value is base64 and so never contains a `;\=', so a SetUserVar the core
+split into more than one part is malformed and ignored, and the one part is
+read where it lies rather than rejoined.  The name ends at the first `=\=' and
+may not be empty, which is also how WezTerm reads it.
+
+The size bound is checked from the match positions, before the value is copied
+out: the core lets an OSC 1337 through at up to eight megabytes, and a copy of
+that is the cost the bound exists to avoid."
+  (let ((payload (car parts)))
+    (when (and payload (null (cdr parts))
+               (string-match "\\`SetUserVar=\\([^=]+\\)=" payload))
+      (let* ((name (match-string 1 payload))
+             (start (match-end 0))
+             (size (+ (length name) (- (length payload) start))))
+        (if (> size cooked-user-var-max-size)
+            (cooked-user-var--refuse
+             "cooked: refused a %d-character user variable `%s' (see `cooked-user-var-max-size')"
+             size (cooked-user-var--name-for-message name))
+          (cooked-user-var--set name (substring payload start)))))))
 
 (add-to-list 'cooked-osc-handlers '(1337 . cooked-user-var--osc) t)
 

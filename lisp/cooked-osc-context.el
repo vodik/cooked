@@ -175,19 +175,25 @@ this file does not recognise -- the spec asks for leniency, and a malformed
 field costs only the type it might have declared.
 
 A head that does not parse leaves the stack untouched, since a sequence that
-cannot say which context it means cannot safely be applied to any of them."
-  (pcase (cooked-osc-context--parse-head (or (car parts) ""))
-    (`(start . ,id)
-     (let ((type (seq-some (lambda (field)
-                             (cdr (assoc field cooked-osc-context--types)))
-                           (cdr parts))))
-       (cooked-osc-context--close id)
-       (when (< (length cooked-osc-context--stack) cooked-osc-context--depth)
-         (push (cons id type) cooked-osc-context--stack))
-       (force-mode-line-update)))
-    (`(end . ,id)
-     (when (cooked-osc-context--close id)
-       (force-mode-line-update)))))
+cannot say which context it means cannot safely be applied to any of them.
+
+The mode line is repainted only when the context it names has changed.  The
+stock prompt snippet opens two or three contexts per command, and nearly none
+of them change the label: a `command\=' opened inside a `shell\=' shows nothing
+before and after."
+  (let ((shown (cooked-osc-context--current)))
+    (pcase (cooked-osc-context--parse-head (or (car parts) ""))
+      (`(start . ,id)
+       (let ((type (seq-some (lambda (field)
+                               (cdr (assoc field cooked-osc-context--types)))
+                             (cdr parts))))
+         (cooked-osc-context--close id)
+         (when (< (length cooked-osc-context--stack) cooked-osc-context--depth)
+           (push (cons id type) cooked-osc-context--stack))))
+      (`(end . ,id)
+       (cooked-osc-context--close id)))
+    (unless (eq shown (cooked-osc-context--current))
+      (force-mode-line-update))))
 
 (defun cooked-osc-context--current ()
   "The type of the innermost open context `cooked-osc-context-labels' names."

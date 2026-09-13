@@ -108,6 +108,25 @@ every cooked buffer's mode line, placed ahead of cooked's own."
     (cooked-tests--context "end=D")
     (should (equal cooked-osc-context--stack '(("A"))))))
 
+(ert-deftest cooked-osc-context-repaints-only-when-the-label-changes ()
+  "The stock snippet's `shell' and `command' contexts change no label, so they
+ask the mode line for nothing; opening and closing `elevate' does."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((repaints 0))
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&rest _) (cl-incf repaints))))
+        (dotimes (_ 3)
+          (cooked-tests--context "start=S;type=shell" "start=C;type=command"
+                                 "end=C;exit=success"))
+        (should (= repaints 0))
+        (cooked-tests--context "start=R;type=elevate")
+        (should (= repaints 1))
+        (cooked-tests--context "start=I;type=shell" "end=I" "start=I;type=command")
+        (should (= repaints 1))
+        (cooked-tests--context "end=R")
+        (should (= repaints 2))))))
+
 (ert-deftest cooked-osc-context-no-child-text-reaches-the-mode-line ()
   "Every field the child chose is ignored, and a malformed head is refused."
   (with-temp-buffer

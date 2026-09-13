@@ -2769,6 +2769,54 @@ while [ ! -e %1$s.3 ]; do sleep 0.05; done; exit 3"
       (should (= (length said) 1))
       (should (string-match-p "refused.*big.*cooked-user-var-max-size" (car said))))))
 
+(ert-deftest cooked-user-var-refusals-are-rate-limited-and-checked-before-a-copy ()
+  "A burst of refused sets says so once, and an oversized value is refused from
+its length without being copied out of the payload."
+  (with-temp-buffer
+    (cooked-mode)
+    (let* ((said nil)
+           (copies 0)
+           (cooked-user-var-max-size 16)
+           (payload (concat "SetUserVar=big=" (base64-encode-string (make-string 64 ?x)))))
+      (cl-letf* ((real-substring (symbol-function 'substring))
+                 ((symbol-function 'substring)
+                  (lambda (string &rest args)
+                    (let ((copy (apply real-substring string args)))
+                      ;; The name is copied, and is short; the value is not.
+                      (when (and (stringp string) (>= (length string) (length payload))
+                                 (> (length copy) 16))
+                        (cl-incf copies))
+                      copy)))
+                 (real-join (symbol-function 'string-join))
+                 ((symbol-function 'string-join)
+                  (lambda (&rest args) (cl-incf copies) (apply real-join args)))
+                 ((symbol-function 'message)
+                  (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (dotimes (_ 50) (cooked-user-var--osc (list payload)))
+        (should (= copies 0))
+        (should (= (length said) 1))
+        ;; A second later, the next refusal is reported again.
+        (setq cooked-user-var--refused-at (- (float-time) 2))
+        (cooked-user-var--osc (list payload))
+        (should (= (length said) 2))
+        ;; The name in the message has lost its bidi override.
+        (setq cooked-user-var--refused-at nil)
+        (cooked-user-var--osc (list (concat "SetUserVar=a\u202eb=" (make-string 20 ?A))))
+        (should (string-match-p "`ab'" (car said)))))))
+
+(ert-deftest cooked-user-var-refuses-a-value-that-is-not-utf-8 ()
+  "Bytes that do not decode as UTF-8 never reach the hook as raw-byte characters."
+  (with-temp-buffer
+    (cooked-mode)
+    (let* ((seen nil)
+           (cooked-user-var-functions (list (lambda (&rest args) (push args seen)))))
+      (cooked-user-var--osc (list (concat "SetUserVar=bad=" (base64-encode-string "a\377b"))))
+      (should-not seen)
+      (should-not cooked-user-vars)
+      (cooked-user-var--osc (list (concat "SetUserVar=good="
+                                          (base64-encode-string (encode-coding-string "ü" 'utf-8)))))
+      (should (equal seen '(("good" "ü")))))))
+
 (ert-deftest cooked-user-var-limit-refuses-new-names-but-not-updates ()
   (with-temp-buffer
     (cooked-mode)
