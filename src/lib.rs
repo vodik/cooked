@@ -28,11 +28,11 @@ pub(crate) mod session;
 mod wire;
 
 use emu::{CellMetrics, ColorScheme, ImageId};
-use env::{Env, Result, Runtime, Value, list, plist, sym};
+use env::{Env, Result, Runtime, Value, plist, sym};
 use nix::sys::signal::Signal;
 use pty::Winsize;
 use session::Session;
-use wire::{Block, update_to_lisp};
+use wire::{emission_to_lisp, update_to_lisp};
 
 /// Join the `///` lines of a table entry into the docstring Emacs will show.
 ///
@@ -145,30 +145,32 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         "cooked--spawn" 5..=8 => spawn;
 
         /// Collect everything that changed in SESSION since the last call.
-        /// Returns a plist with :scrolled, :rows, :height, :used, :head, :cursor, :alt,
-        /// :app-cursor, :keys, :kitty-flags, :modify-other-keys, :mode, :images, :events and
-        /// :exit.
+        /// Returns a plist with :scrolled, :shifts, :rows, :height, :used, :head, :cursor,
+        /// :reverse, :marks, :alt, :app-cursor, :keys, :kitty-flags, :modify-other-keys,
+        /// :mode, :images, :links, :events and :exit.
         ///
         /// :scrolled and :rows are the same shape, so one renderer handles both: a block is
-        /// (TEXT STYLE-SPANS DECO-SPANS), where the spans carry character offsets into TEXT and
-        /// appear only where there is something to say.  :scrolled is one block for the whole
-        /// batch; :rows is an alist of (INDEX . BLOCK), one per damaged screen row.
-        /// With REJOIN non-nil (the default), a line the terminal wrapped is emitted as one
-        /// line rather than one per screen row.
+        /// (TEXT STYLES DECOS LINKS ROWS), where the spans carry character offsets into TEXT
+        /// and appear only where there is something to say.  :scrolled is one block for the
+        /// whole batch; :rows is an alist of (FIRST . BLOCK), one per run of contiguous
+        /// damaged screen rows.  With REJOIN non-nil (the default), a line the terminal
+        /// wrapped is emitted as one line rather than one per screen row.  :shifts lists the
+        /// row moves to apply before :rows, whose indices are in post-shift coordinates.
         ///
         /// :height, :used and :head describe the grid's shape, so the buffer is shaped by what
         /// the emulator has rather than by a second opinion of it: the grid's row count, how many
         /// of those rows are occupied, and how many characters of screen row 0's logical line are
-        /// already in the buffer above the screen. The last is the seam — 0 unless the last row
+        /// already in the buffer above the screen.  The last is the seam, 0 unless the last row
         /// handed to scrollback was a wrapped one that row 0 continues.
         ///
-        /// The fields are levels — the state as of this drain — and carry everything redisplay
-        /// needs. :events are occurrences, for what Emacs must react to that redisplay does not
-        /// cover. Nothing is sent both ways.
+        /// The fields are levels, the state as of this drain, and carry everything redisplay
+        /// needs.  :events are occurrences, for what Emacs must react to that redisplay does
+        /// not cover.  Nothing is sent both ways.  :marks, (ID . ANCHOR) per semantic mark a
+        /// resize or redraw moved, is empty on almost every drain.
         ///
-        /// :images is neither, and is the one thing that must be consumed *before* :scrolled and
-        /// :rows are rendered: it carries resources those rows refer to by id. Each image crosses
-        /// once, however often the child sends or places it.
+        /// :images and :links are neither, and must be consumed *before* :scrolled and :rows
+        /// are rendered: they carry resources those rows refer to by id.  Each crosses once,
+        /// however often the child sends or places it.
         "cooked--drain" 1..=2 => drain;
 
         /// Write STRING to the pty of SESSION.
@@ -442,20 +444,19 @@ fn handle<'e>(env: Env<'e>, value: Value) -> Result<&'e Session> {
     env.get_user_ptr::<Session>(value)
 }
 
+/// The longest list [`each`] will walk before giving up.
+///
+/// A cyclic list would otherwise spin forever on the thread holding the `emacs_env`,
+/// wedging all of Emacs. `argv` and the environment alist are built by `cooked.el'
+/// rather than by a child, so this guards against a bug on that side rather than a
+/// hostile input, but the cost of getting it wrong is too high to take on trust.
+const MAX_LIST_LEN: usize = 1 << 20;
+
 /// Walk a proper list, handing each element to `f`.
 ///
 /// `car`/`cdr` rather than `nth` per index: `nth` restarts at the head every time, which
-/// makes reading a list off the boundary quadratic in its length. Nothing we are handed
-/// is long enough today for that to matter, but the environment alist is the child's to
-/// grow, and this is not the place to let it decide how much work we do.
-/// A cyclic list would otherwise spin this forever on the thread holding the
-/// `emacs_env` — see `env.rs`'s own rule against that. `argv`/env alists are built by
-/// `cooked.el` itself rather than arriving from a child process, so this is a guard
-/// against a bug on that side rather than a hostile input, but the cost of getting it
-/// wrong (all of Emacs wedged) is exactly the kind this crate otherwise refuses to
-/// accept on trust elsewhere in this file.
-const MAX_LIST_LEN: usize = 1 << 20;
-
+/// makes reading a list quadratic in its length, and the environment alist is the
+/// child's to grow.
 fn each<T>(env: Env, mut list: Value, mut f: impl FnMut(Value) -> Result<T>) -> Result<Vec<T>> {
     let mut out = Vec::new();
     while !env.is_nil(list) {
@@ -731,73 +732,20 @@ fn make_filter(env: Env, _args: &[Value]) -> Result<Value> {
     env.user_ptr(FilterCell::new(emu::stream::Filter::new()))
 }
 
-/// `(RETRACT TEXT STYLES LINKS DIRECTORY)` for one chunk of a child's output.
-///
-/// TEXT and STYLES are the first two fields of the block shape the grid's renderer
-/// already takes -- see [`Block::push_style`] for the packed layout, which Lisp decodes
-/// with the very same `cooked--face-packed' the terminal uses. That sharing is the point:
-/// one face cache, one decoder, one set of colours, whether the text came off a grid or
-/// out of this.
-///
-/// LINKS carries the destination itself rather than the `LinkId` the grid's `:links`
-/// alist carries. An id resolves through a table that is buffer-local to a *session*,
-/// and there is no session here -- `cooked-process--text' already refused to send ids
-/// into a consumer's buffer for exactly that reason. A URI is a string a comint buffer
-/// can act on with nothing else to hold.
-///
-/// RETRACT is how many characters immediately before the insertion point the filter is
-/// taking back, and is nonzero only when the caller said its provisional text was still
-/// there. The whole reconciliation is [`Stream::flush`](emu::stream); the caller's half
-/// is `cooked-comint--emit'.
+/// Resolve one chunk of a comint child's output; see `cooked--filter-feed'.
 fn filter_feed(env: Env, args: &[Value]) -> Result<Value> {
     let filter = env.get_user_ptr::<FilterCell>(args[0])?;
     // The chunk arrives as an Emacs string rather than as bytes, because
-    // `comint-preoutput-filter-functions' is handed output that the process coding
-    // system has already decoded -- and it is decoded there rather than here for a good
-    // reason, since Emacs is the one holding back a multibyte character split across two
-    // reads. `copy_string_contents' re-encodes it as UTF-8, which is what the parser
-    // wants; a byte the coding system could not decode makes the round trip as itself
-    // and reaches the parser as the invalid sequence it is.
+    // `comint-preoutput-filter-functions' is handed output the process coding system has
+    // already decoded, and Emacs is the one holding back a multibyte character split
+    // across two reads. `copy_string_contents' re-encodes it as UTF-8 for the parser; a
+    // byte the coding system could not decode reaches the parser as the invalid
+    // sequence it is.
     let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
     let retract = !env.is_nil(args[2]);
     let mut filter = filter
         .try_borrow_mut()
         .map_err(|_| env.signal("error", "cooked: this filter is already running"))?;
     filter.feed(&bytes, retract);
-    let filter = &*filter;
-    let emission = filter.emission();
-    // Nothing to say, which is a real and common case rather than a defensive check: a
-    // chunk can be nothing but escape sequences -- the bracketed-paste mode set that
-    // brackets every prompt bash prints, a rendition change with no text after it yet --
-    // and answering nil lets the Lisp side return without touching the buffer at all.
-    if emission.is_empty() {
-        return Ok(env.nil());
-    }
-    let mut block = Block::default();
-    let mut links = Vec::new();
-    for run in &emission.runs {
-        let chars = run.text.chars().count();
-        // Before `push_run`, which is what advances the offset the span is measured
-        // from -- the same order `Block::push_runs` takes them in.
-        if let Some(id) = run.link
-            && let Some(uri) = filter.uri(id)
-        {
-            links.push(list!(env, [block.offset, block.offset + chars, uri])?);
-        }
-        block.push_run(run, chars);
-    }
-    let directory = match &emission.directory {
-        Some(url) => env.into_lisp(url.as_str())?,
-        None => env.nil(),
-    };
-    list!(
-        env,
-        [
-            emission.retract,
-            block.text.as_str(),
-            block.styles.as_slice(),
-            links,
-            directory
-        ]
-    )
+    emission_to_lisp(env, &filter)
 }

@@ -5,6 +5,7 @@
 //! returns, rows become [`Block`]s, events become tagged lists, and every enum that
 //! crosses as a bare symbol is spelled once here.
 
+use crate::emu::stream::Filter;
 use crate::emu::{
     self, Anchor, Color, CursorShape, DamagedRow, Deco, Event, ImageData, ImageFormat, ImageId,
     KeyEncoding, LinkId, Mark, MarkId, Run, Style,
@@ -71,6 +72,57 @@ impl env::IntoLisp for Pid {
     fn into_lisp(self, env: &Env) -> Result<Value> {
         self.get().into_lisp(env)
     }
+}
+
+/// `(RETRACT TEXT STYLES LINKS DIRECTORY)` for one chunk of a child's output.
+///
+/// TEXT and STYLES are the first two fields of the block shape the grid's renderer
+/// already takes -- see [`Block::push_style`] for the packed layout -- so Lisp decodes
+/// both with the same `cooked--face-packed', one face cache and one set of colours.
+///
+/// LINKS carries the destination itself rather than a `LinkId`. An id resolves through a
+/// table local to a *session*, and a comint buffer has no session to look it up in.
+///
+/// RETRACT is how many characters immediately before the insertion point the filter is
+/// taking back, nonzero only when the caller said its provisional text was still there.
+/// The reconciliation is [`Stream::flush`](emu::stream); the caller's half is
+/// `cooked-comint--emit'.
+pub(crate) fn emission_to_lisp(env: Env, filter: &Filter) -> Result<Value> {
+    let emission = filter.emission();
+    // Nothing to say, which is a real and common case rather than a defensive check: a
+    // chunk can be nothing but escape sequences -- the bracketed-paste mode set that
+    // brackets every prompt bash prints -- and nil lets Lisp return without touching the
+    // buffer at all.
+    if emission.is_empty() {
+        return Ok(env.nil());
+    }
+    let mut block = Block::default();
+    let mut links = Vec::new();
+    for run in &emission.runs {
+        let chars = run.text.chars().count();
+        // Before `push_run`, which advances the offset the span is measured from -- the
+        // same order `Block::push_runs` takes them in.
+        if let Some(id) = run.link
+            && let Some(uri) = filter.uri(id)
+        {
+            links.push(list!(env, [block.offset, block.offset + chars, uri])?);
+        }
+        block.push_run(run, chars);
+    }
+    let directory = match &emission.directory {
+        Some(url) => env.into_lisp(url.as_str())?,
+        None => env.nil(),
+    };
+    list!(
+        env,
+        [
+            emission.retract,
+            block.text.as_str(),
+            block.styles.as_slice(),
+            links,
+            directory
+        ]
+    )
 }
 
 /// The damaged rows split into maximal runs of *consecutive* indices.
@@ -249,11 +301,11 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
 /// carries.
 #[derive(Default)]
 pub(crate) struct Block {
-    pub(crate) text: String,
-    pub(crate) styles: Vec<u8>,
+    text: String,
+    styles: Vec<u8>,
     decos: Vec<Value>,
     links: Vec<Value>,
-    pub(crate) offset: usize,
+    offset: usize,
     /// Columns `text` occupies on the grid, summed from [`Run::cols`].
     ///
     /// The measurement Emacs would otherwise take for itself. `cooked--guard-row-width'
@@ -448,7 +500,7 @@ impl Block {
     ///
     /// CHARS is `run.text`'s character count, taken by the caller because it needs it
     /// too and it is a scan of the string.
-    pub(crate) fn push_run(&mut self, run: &Run, chars: usize) {
+    fn push_run(&mut self, run: &Run, chars: usize) {
         self.cols += run.cols;
         // Two ways to fail the "uniform" test, and the second one is why this is not
         // simply a byte-length comparison. Lisp reads the flag as "this row is
@@ -790,6 +842,40 @@ mod tests {
     use super::*;
     use emu::cell::Attrs;
     use emu::{Color, Style};
+
+    /// The keys a plist literal in SOURCE starting at MARKER names, in order.
+    fn plist_keys(source: &str, marker: &str) -> Vec<String> {
+        let from = source.find(marker).expect("marker present");
+        let body = &source[from..];
+        let body = &body[..body.find("})").expect("plist closes")];
+        body.lines()
+            .filter_map(|line| line.trim().strip_prefix('"'))
+            .filter_map(|rest| rest.split('"').next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The `cooked--drain' docstring lists every key the drain emits, in the order it
+    /// emits them. It is hand-written prose next to the defun, and a key added to
+    /// `update_to_lisp` without it is a key `C-h f' never mentions.
+    #[test]
+    fn the_drain_docstring_names_every_key_the_drain_emits() {
+        let emitted = plist_keys(
+            include_str!("wire.rs"),
+            "plist!(env, {\n        \":scrolled\"",
+        );
+        let lib = include_str!("lib.rs");
+        let doc_start = lib.find("Returns a plist with").expect("drain docstring");
+        let sentence = &lib[doc_start..];
+        let sentence = &sentence[..sentence.find(".\n").expect("sentence ends")];
+        let documented: Vec<String> = sentence
+            .split(|c: char| !(c == ':' || c == '-' || c.is_ascii_alphanumeric()))
+            .filter(|word| word.starts_with(':'))
+            .map(str::to_owned)
+            .collect();
+        assert!(emitted.len() > 10, "found only {emitted:?}");
+        assert_eq!(documented, emitted);
+    }
 
     /// The trailing fields of a record, as a `Block` holding exactly one would have them.
     fn record(style: Style, underline: Color) -> Vec<u8> {
