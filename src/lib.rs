@@ -633,10 +633,13 @@ fn row_unsent(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 fn image_forget(env: Env, args: &[Value]) -> Result<Value> {
-    // An id outside the module's own range is one it cannot hold, so it is the same
-    // no-op as an id already retired.
-    if let Ok(id) = u32::try_from(env.from_lisp::<i64>(args[1])?) {
-        handle(env, args[0])?.term().forget_image(ImageId(id));
+    // An id outside the module's own range, zero included, is one it cannot hold, so it
+    // is the same no-op as an id already retired.
+    if let Some(id) = u32::try_from(env.from_lisp::<i64>(args[1])?)
+        .ok()
+        .and_then(ImageId::from_wire)
+    {
+        handle(env, args[0])?.term().forget_image(id);
     }
     Ok(env.nil())
 }

@@ -164,7 +164,7 @@ impl State {
     /// Nothing is attached while the alternate screen is up: its rows never become buffer
     /// text, so there is nothing a rewrap could move.
     pub(super) fn take_mark(&mut self, at: Anchor) -> MarkId {
-        let id = MarkId(self.next_mark);
+        let id = MarkId::from_index(self.next_mark);
         self.next_mark = self.next_mark.wrapping_add(1);
         if !self.shown.is_alternate()
             && let Some(row) = at.row.checked_sub(self.evicted_total)

@@ -23,14 +23,15 @@
 use std::collections::HashMap;
 
 use super::fast_hash;
-use super::intern::{Id, Ledger};
+use super::intern::{Ledger, dense_id};
 
-/// The wire name for one distinct hyperlink destination.
-///
-/// A dense index rather than the hash itself, so an [`super::cell::Extra::Link`] is four
-/// bytes. The hash decides *which* index — see [`LinkStore::intern`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct LinkId(pub u32);
+dense_id! {
+    /// The wire name for one distinct hyperlink destination.
+    ///
+    /// A dense index rather than the hash itself, so an [`super::cell::Extra::Link`] is four
+    /// bytes. The hash decides *which* index — see [`LinkStore::intern`].
+    pub struct LinkId;
+}
 
 /// Distinct destinations whose URIs are remembered.
 ///
@@ -64,12 +65,6 @@ pub(crate) struct LinkStore {
     ledger: Ledger<LinkId>,
     uris: HashMap<LinkId, String>,
     bytes: usize,
-}
-
-impl Id for LinkId {
-    fn from_index(index: u32) -> Self {
-        Self(index)
-    }
 }
 
 impl LinkStore {
@@ -186,7 +181,7 @@ mod tests {
     #[test]
     fn a_shared_hash_bucket_does_not_alias_a_different_uri() {
         let mut store = LinkStore::default();
-        let decoy = LinkId(999);
+        let decoy = LinkId::from_index(999);
         store
             .uris
             .insert(decoy, "https://decoy.example/".to_owned());

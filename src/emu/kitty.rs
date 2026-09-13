@@ -883,11 +883,11 @@ mod tests {
     #[test]
     fn placing_a_bound_id_finds_it_again() {
         let mut k = Kitty::default();
-        k.bind(9, ImageId(42));
+        k.bind(9, ImageId::from_index(42));
         assert_eq!(
             k.feed(b"Ga=p,i=9").0,
             Outcome::Place {
-                id: ImageId(42),
+                id: ImageId::from_index(42),
                 cursor: CursorMove::Advance,
             }
         );

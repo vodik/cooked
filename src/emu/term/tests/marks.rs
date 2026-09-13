@@ -18,10 +18,10 @@ fn osc_133_becomes_semantic_events() {
             // column 0, then after "$ ", then after "ls", then after "out".
             // The ids are the order the marks were parsed in, which is what pairs
             // each one back up with the marker Emacs makes for it.
-            Event::Mark(Mark::PromptStart, at(0, 0), MarkId(0)),
-            Event::Mark(Mark::PromptEnd, at(0, 2), MarkId(1)),
-            Event::Mark(Mark::CommandStart(None), at(0, 4), MarkId(2)),
-            Event::Mark(Mark::CommandEnd(Some(3)), at(0, 7), MarkId(3)),
+            Event::Mark(Mark::PromptStart, at(0, 0), MarkId::from_index(0)),
+            Event::Mark(Mark::PromptEnd, at(0, 2), MarkId::from_index(1)),
+            Event::Mark(Mark::CommandStart(None), at(0, 4), MarkId::from_index(2)),
+            Event::Mark(Mark::CommandEnd(Some(3)), at(0, 7), MarkId::from_index(3)),
         ]
     );
 }
@@ -37,9 +37,9 @@ fn osc_133_marks_a_continuation_prompt() {
     assert_eq!(
         events,
         vec![
-            Event::Mark(Mark::PromptStart, at(0, 0), MarkId(0)),
-            Event::Mark(Mark::PromptContinuation, at(0, 2), MarkId(1)),
-            Event::Mark(Mark::PromptEnd, at(0, 2), MarkId(2)),
+            Event::Mark(Mark::PromptStart, at(0, 0), MarkId::from_index(0)),
+            Event::Mark(Mark::PromptContinuation, at(0, 2), MarkId::from_index(1)),
+            Event::Mark(Mark::PromptEnd, at(0, 2), MarkId::from_index(2)),
         ]
     );
 }
@@ -60,7 +60,7 @@ fn osc_133_ignores_the_other_spelling_of_the_prompt_mark() {
         vec![Event::Mark(
             Mark::PromptStart,
             Anchor { row: 0, col: 0 },
-            MarkId(0)
+            MarkId::from_index(0)
         )]
     );
 }
@@ -82,7 +82,7 @@ fn osc_133_drops_a_prompt_kind_that_is_neither_initial_nor_a_continuation() {
             vec![Event::Mark(
                 Mark::PromptStart,
                 Anchor { row: 0, col: 0 },
-                MarkId(0)
+                MarkId::from_index(0)
             )],
             "k={} should have been dropped whole",
             String::from_utf8_lossy(kind)
@@ -98,8 +98,8 @@ fn osc_133_reads_both_spellings_of_a_continuation() {
     assert_eq!(
         t.drain().events,
         vec![
-            Event::Mark(Mark::PromptContinuation, at(0, 0), MarkId(0)),
-            Event::Mark(Mark::PromptContinuation, at(0, 0), MarkId(1)),
+            Event::Mark(Mark::PromptContinuation, at(0, 0), MarkId::from_index(0)),
+            Event::Mark(Mark::PromptContinuation, at(0, 0), MarkId::from_index(1)),
         ]
     );
 }
@@ -114,7 +114,7 @@ fn osc_133_treats_an_empty_prompt_kind_as_initial() {
         vec![Event::Mark(
             Mark::PromptStart,
             Anchor { row: 0, col: 0 },
-            MarkId(0)
+            MarkId::from_index(0)
         )]
     );
 }
@@ -136,7 +136,7 @@ fn osc_133_ignores_the_options_that_are_not_a_prompt_kind() {
             vec![Event::Mark(
                 Mark::PromptStart,
                 Anchor { row: 0, col: 0 },
-                MarkId(0)
+                MarkId::from_index(0)
             )],
             "{} should have been an initial prompt",
             String::from_utf8_lossy(opts)
@@ -177,7 +177,7 @@ fn osc_133_d_without_a_status() {
         vec![Event::Mark(
             Mark::CommandEnd(None),
             Anchor { row: 0, col: 0 },
-            MarkId(0)
+            MarkId::from_index(0)
         )]
     );
 }
@@ -190,7 +190,7 @@ fn osc_133_stays_typed() {
         vec![Event::Mark(
             Mark::PromptStart,
             Anchor { row: 0, col: 0 },
-            MarkId(0)
+            MarkId::from_index(0)
         )]
     );
 }
@@ -226,7 +226,11 @@ fn marks_in_one_drain_keep_their_own_positions() {
 fn a_mark_survives_the_prompt_printed_over_it() {
     let t = term(4, 20, b"\x1b]133;A\x07$ ");
     let marks: Vec<_> = t.screen().row(0).unwrap().marks().collect();
-    assert_eq!(marks, vec![(0, MarkId(0))], "the mark is still on column 0");
+    assert_eq!(
+        marks,
+        vec![(0, MarkId::from_index(0))],
+        "the mark is still on column 0"
+    );
     assert_eq!(text(&t, 0), "$", "and the prompt is still drawn");
 }
 
@@ -248,7 +252,10 @@ fn a_rewrap_reports_where_each_mark_moved_to() {
     t.resize(4, 7);
     let delta = t.drain();
     // Offset 12 into the line, re-chunked at seven columns: row 1, column 5.
-    assert_eq!(delta.marks, vec![(MarkId(0), Anchor { row: 1, col: 5 })]);
+    assert_eq!(
+        delta.marks,
+        vec![(MarkId::from_index(0), Anchor { row: 1, col: 5 })]
+    );
 }
 
 /// The other half of the same drain: a rewrap narrow enough pushes rows off the top,
@@ -265,7 +272,7 @@ fn a_mark_evicted_by_a_rewrap_is_reported_in_the_batch() {
     let (_, at) = delta
         .marks
         .iter()
-        .find(|(id, _)| *id == MarkId(0))
+        .find(|(id, _)| *id == MarkId::from_index(0))
         .expect("the mark is still accounted for");
     assert!(
         at.row < delta.scrolled_base + delta.scrolled.len(),
@@ -290,7 +297,7 @@ fn a_scroll_reports_the_marks_it_moved() {
         .first()
         .copied()
         .expect("the mark is accounted for");
-    assert_eq!(id, MarkId(0));
+    assert_eq!(id, MarkId::from_index(0));
     assert!(
         at.row < delta.scrolled_base + delta.scrolled.len(),
         "it left with its row, so it is spelled into the batch: {at:?}"

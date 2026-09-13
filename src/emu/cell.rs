@@ -457,7 +457,7 @@ impl Deco {
             Self::Images(places) => {
                 let mut packed = Vec::with_capacity(places.len() * 12);
                 for place in places {
-                    packed.extend_from_slice(&place.id.0.to_le_bytes());
+                    packed.extend_from_slice(&place.id.get().to_le_bytes());
                     packed.extend_from_slice(&place.cell_row.to_le_bytes());
                     packed.extend_from_slice(&place.cell_col.to_le_bytes());
                     packed.extend_from_slice(&place.cols.to_le_bytes());
@@ -528,14 +528,15 @@ impl Run {
 /// [`Row::mark`] for why a bound is needed at all.
 pub(crate) const MARKS_PER_ROW: usize = 8;
 
-/// The wire name for one OSC 133 semantic mark, so Emacs can be told where a mark it
-/// already holds a buffer marker for has *moved* to.
-///
-/// A counter rather than anything derived from the position, because the position is
-/// what a rewrap changes. Handed out in `term::State`, stored only in [`Extra::Mark`], and
-/// never reused; see `Delta::marks` for the round trip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MarkId(pub u32);
+super::intern::dense_id! {
+    /// The wire name for one OSC 133 semantic mark, so Emacs can be told where a mark it
+    /// already holds a buffer marker for has *moved* to.
+    ///
+    /// A counter rather than anything derived from the position, because the position is
+    /// what a rewrap changes. Handed out in `term::State`, stored only in [`Extra::Mark`], and
+    /// never reused; see `Delta::marks` for the round trip.
+    pub struct MarkId;
+}
 
 /// Something attached to one column that is too rare to live in a [`Cell`].
 ///
@@ -1972,7 +1973,7 @@ mod tests {
         for (col, ch) in "\u{2500} \u{2500}".chars().enumerate() {
             row.set(col, Cell::new(ch, Style::default()));
         }
-        row.set_link(2, Some(LinkId(7)));
+        row.set_link(2, Some(LinkId::from_index(7)));
         assert_eq!(row.runs().len(), 3, "{:?}", row.runs());
     }
 
@@ -2103,13 +2104,13 @@ mod tests {
                     u64::MAX
                 } {
                     0 => row.set_underline(col, Color::Indexed(196)),
-                    1 => row.set_link(col, Some(LinkId(((r >> 40) % 3) as u32))),
+                    1 => row.set_link(col, Some(LinkId::from_index(((r >> 40) % 3) as u32))),
                     2 => row.combine(col, '\u{301}'),
-                    3 => row.mark(col, MarkId(((r >> 40) % 4) as u32)),
+                    3 => row.mark(col, MarkId::from_index(((r >> 40) % 4) as u32)),
                     4 => row.place(
                         col,
                         Placement {
-                            id: crate::emu::image::ImageId(((r >> 40) % 2) as u32),
+                            id: crate::emu::image::ImageId::from_index(((r >> 40) % 2) as u32),
                             cell_row: 0,
                             cell_col: 0,
                             cols: 1,
@@ -2186,13 +2187,16 @@ mod tests {
     #[test]
     fn a_mark_outlives_what_is_drawn_over_it() {
         let mut row = Row::new(4);
-        row.mark(1, MarkId(7));
+        row.mark(1, MarkId::from_index(7));
         row.set_underline(1, Color::Indexed(196));
         row.set(1, Cell::new('a', Style::default()));
         // The underline went with the character it decorated; the mark is a position in
         // the stream and stays. `OSC 133;A' arrives before the prompt is printed, so
         // without this every prompt mark would die to its own prompt's first character.
-        assert_eq!(row.marks().collect::<Vec<_>>(), vec![(1, MarkId(7))]);
+        assert_eq!(
+            row.marks().collect::<Vec<_>>(),
+            vec![(1, MarkId::from_index(7))]
+        );
         assert!(
             !row.extras()
                 .iter()
@@ -2202,15 +2206,21 @@ mod tests {
         // An erase is the same case reached the other way: a shell redrawing its prompt
         // line wipes it with `CSI K` on every keystroke.
         row.fill(0..4, Style::default());
-        assert_eq!(row.marks().collect::<Vec<_>>(), vec![(1, MarkId(7))]);
+        assert_eq!(
+            row.marks().collect::<Vec<_>>(),
+            vec![(1, MarkId::from_index(7))]
+        );
         row.erase_all(Style::default());
-        assert_eq!(row.marks().collect::<Vec<_>>(), vec![(1, MarkId(7))]);
+        assert_eq!(
+            row.marks().collect::<Vec<_>>(),
+            vec![(1, MarkId::from_index(7))]
+        );
 
         // The row ceasing to be what it was does take it: recycled at the bottom of a
         // scroll, or with the column it sat on gone.
         row.clear(Style::default());
         assert!(row.marks().next().is_none());
-        row.mark(1, MarkId(8));
+        row.mark(1, MarkId::from_index(8));
         row.resize(1, Style::default());
         assert!(row.marks().next().is_none());
     }
@@ -2219,7 +2229,7 @@ mod tests {
     fn marks_on_one_row_are_bounded() {
         let mut row = Row::new(4);
         for i in 0..(MARKS_PER_ROW as u32 * 3) {
-            row.mark(1, MarkId(i));
+            row.mark(1, MarkId::from_index(i));
         }
         let marks: Vec<_> = row.marks().collect();
         assert_eq!(marks.len(), MARKS_PER_ROW, "the bound holds");
@@ -2228,7 +2238,7 @@ mod tests {
         // holds markers for are the recent ones.
         assert_eq!(
             marks.last().map(|(_, id)| *id),
-            Some(MarkId(MARKS_PER_ROW as u32 * 3 - 1))
+            Some(MarkId::from_index(MARKS_PER_ROW as u32 * 3 - 1))
         );
         assert!(marks.iter().all(|(at, _)| *at == 1));
     }
@@ -2238,12 +2248,16 @@ mod tests {
         let mut row = Row::new(4);
         // `OSC 133;B` and `;C` land on the same cell whenever an empty line is submitted,
         // and each names a different record in Emacs.
-        row.mark(0, MarkId(1));
-        row.mark(0, MarkId(2));
-        row.mark(3, MarkId(3));
+        row.mark(0, MarkId::from_index(1));
+        row.mark(0, MarkId::from_index(2));
+        row.mark(3, MarkId::from_index(3));
         assert_eq!(
             row.marks().collect::<Vec<_>>(),
-            vec![(0, MarkId(1)), (0, MarkId(2)), (3, MarkId(3))]
+            vec![
+                (0, MarkId::from_index(1)),
+                (0, MarkId::from_index(2)),
+                (3, MarkId::from_index(3))
+            ]
         );
     }
 

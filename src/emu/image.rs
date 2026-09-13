@@ -29,15 +29,16 @@ use std::collections::HashMap;
 use std::num::NonZeroU16;
 
 use super::content_hash;
-use super::intern::{Id, Ledger};
+use super::intern::{Ledger, dense_id};
 
-/// The wire name for one distinct image.
-///
-/// A dense index rather than the content hash itself, so a placement costs four bytes
-/// per cell. The hash decides *which* index — see [`ImageStore::intern`] — which is what
-/// makes the identity content-addressed while keeping the name narrow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ImageId(pub u32);
+dense_id! {
+    /// The wire name for one distinct image.
+    ///
+    /// A dense index rather than the content hash itself, so a placement costs four bytes
+    /// per cell. The hash decides *which* index — see [`ImageStore::intern`] — which is what
+    /// makes the identity content-addressed while keeping the name narrow.
+    pub struct ImageId;
+}
 
 /// What Emacs should hand `create-image` as its type symbol.
 ///
@@ -276,12 +277,6 @@ pub(crate) struct Interned {
     pub retired: Vec<ImageId>,
 }
 
-impl Id for ImageId {
-    fn from_index(index: u32) -> Self {
-        Self(index)
-    }
-}
-
 impl ImageStore {
     /// Take BYTES as an image, returning its id and whether Lisp has yet to see it.
     ///
@@ -449,7 +444,7 @@ mod tests {
     #[test]
     fn a_shared_hash_bucket_does_not_alias_different_bytes() {
         let mut store = ImageStore::default();
-        let decoy = ImageId(999);
+        let decoy = ImageId::from_index(999);
         store.images.insert(
             decoy,
             Image {

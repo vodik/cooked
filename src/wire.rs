@@ -22,7 +22,7 @@ macro_rules! into_lisp_id {
     ($($t:ty),* $(,)?) => {
         $(impl env::IntoLisp for $t {
             fn into_lisp(self, env: &Env) -> Result<Value> {
-                self.0.into_lisp(env)
+                self.get().into_lisp(env)
             }
         })*
     };

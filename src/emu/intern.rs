@@ -17,6 +17,61 @@ pub(crate) trait Id: Copy + Eq + Hash {
     fn from_index(index: u32) -> Self;
 }
 
+/// Define a dense id: a `NonZeroU32` holding its index plus one.
+///
+/// Non-zero so that `Option<Id>` is the same four bytes as the id, with `None` as zero:
+/// a cell can hold an optional link without growing, and a wire field can spell "none"
+/// as 0. Index 0 is the first id handed out, so ids reach Lisp as 1, 2, 3 and nothing
+/// that counts from 0 has to change. The one conversion each way lives here.
+macro_rules! dense_id {
+    ($(#[$attr:meta])* $vis:vis struct $name:ident;) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        $vis struct $name(std::num::NonZeroU32);
+
+        const _: () = assert!(std::mem::size_of::<Option<$name>>() == 4);
+
+        #[allow(dead_code)]
+        impl $name {
+            /// The id for dense index INDEX, which counts from 0.
+            ///
+            /// An index of `u32::MAX` has no room for the offset and saturates to the
+            /// first id; four billion ids is past anything a session hands out.
+            $vis const fn from_index(index: u32) -> Self {
+                match std::num::NonZeroU32::new(index.wrapping_add(1)) {
+                    Some(id) => Self(id),
+                    None => Self(std::num::NonZeroU32::MIN),
+                }
+            }
+
+            /// The dense index this id was made from.
+            $vis const fn index(self) -> u32 {
+                self.0.get() - 1
+            }
+
+            /// The id as it crosses to Lisp, never zero.
+            $vis const fn get(self) -> u32 {
+                self.0.get()
+            }
+
+            /// The id a wire value names, or `None` for 0.
+            $vis const fn from_wire(value: u32) -> Option<Self> {
+                match std::num::NonZeroU32::new(value) {
+                    Some(id) => Some(Self(id)),
+                    None => None,
+                }
+            }
+        }
+
+        impl $crate::emu::intern::Id for $name {
+            fn from_index(index: u32) -> Self {
+                Self::from_index(index)
+            }
+        }
+    };
+}
+pub(crate) use dense_id;
+
 /// One id's place in the ordering, and the bucket it was filed under.
 ///
 /// `older`/`newer` make [`Ledger::entries`] a doubly-linked list threaded through the map
@@ -222,18 +277,13 @@ impl<K: Id> Ledger<K> {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    struct TestId(u32);
-
-    impl Id for TestId {
-        fn from_index(index: u32) -> Self {
-            Self(index)
-        }
+    dense_id! {
+        struct TestId;
     }
 
     /// The order as `lru` reports it, which is the only view either store has of it.
     fn order(ledger: &Ledger<TestId>) -> Vec<u32> {
-        ledger.lru().map(|TestId(i)| i).collect()
+        ledger.lru().map(TestId::index).collect()
     }
 
     /// Both ends and every link, walked from both directions. The list is threaded through
@@ -245,7 +295,7 @@ mod tests {
         assert_eq!(forward.len(), ledger.len(), "lru must reach every entry");
         let mut backward: Vec<u32> =
             std::iter::successors(ledger.newest, |&id| ledger.entries[&id].older)
-                .map(|TestId(i)| i)
+                .map(TestId::index)
                 .collect();
         backward.reverse();
         assert_eq!(forward, backward, "the two directions must agree");
@@ -277,13 +327,13 @@ mod tests {
         }
         // From the middle, from the oldest end, and from the newest end, which is the
         // case `touch` short-circuits.
-        assert_eq!(ledger.find(1, |_| true), Some(TestId(1)));
+        assert_eq!(ledger.find(1, |_| true), Some(TestId::from_index(1)));
         check(&ledger);
         assert_eq!(order(&ledger), [0, 2, 3, 1]);
-        assert_eq!(ledger.find(0, |_| true), Some(TestId(0)));
+        assert_eq!(ledger.find(0, |_| true), Some(TestId::from_index(0)));
         check(&ledger);
         assert_eq!(order(&ledger), [2, 3, 1, 0]);
-        assert_eq!(ledger.find(0, |_| true), Some(TestId(0)));
+        assert_eq!(ledger.find(0, |_| true), Some(TestId::from_index(0)));
         check(&ledger);
         assert_eq!(order(&ledger), [2, 3, 1, 0]);
     }
@@ -306,14 +356,14 @@ mod tests {
             ledger.insert(h);
         }
         ledger.find(0, |_| true); // 0 is now newest, so 1 is the oldest
-        assert_eq!(ledger.evict_oldest(), Some(TestId(1)));
+        assert_eq!(ledger.evict_oldest(), Some(TestId::from_index(1)));
         check(&ledger);
         assert_eq!(order(&ledger), [2, 0]);
         assert_eq!(ledger.tracked(), 2, "the evicted id leaves its bucket");
         assert_eq!(ledger.find(1, |_| true), None, "and its hash goes with it");
         assert_eq!(
             ledger.find(2, |_| true),
-            Some(TestId(2)),
+            Some(TestId::from_index(2)),
             "other buckets survive"
         );
     }
@@ -352,16 +402,41 @@ mod tests {
         assert_eq!(order(&ledger), [3]);
     }
 
+    /// An id is its index plus one, so `None` is the zero no id can be, and an optional
+    /// id costs nothing over a bare one.
+    #[test]
+    fn an_optional_id_is_four_bytes_with_none_as_zero() {
+        assert_eq!(std::mem::size_of::<Option<TestId>>(), 4);
+        let first = TestId::from_index(0);
+        assert_eq!((first.index(), first.get()), (0, 1));
+        assert_eq!(TestId::from_wire(0), None);
+        assert_eq!(TestId::from_wire(1), Some(first));
+        // SAFETY: `Option<NonZeroU32>` is guaranteed to be a `u32` with `None` as zero,
+        // which is the layout this checks.
+        let none: Option<TestId> = None;
+        assert_eq!(
+            unsafe { std::mem::transmute::<Option<TestId>, u32>(none) },
+            0
+        );
+    }
+
     #[test]
     fn a_planted_id_has_no_place_in_the_order() {
         // What the two stores' collision tests rely on: a decoy occupies a bucket without
         // becoming evictable, and a `find` that reaches it must not try to move it.
         let mut ledger = Ledger::<TestId>::default();
         let real = ledger.insert(5);
-        ledger.plant(5, TestId(999));
+        ledger.plant(5, TestId::from_index(999));
         assert_eq!(ledger.len(), 1);
-        assert_eq!(ledger.find(5, |id| id == TestId(999)), Some(TestId(999)));
+        assert_eq!(
+            ledger.find(5, |id| id == TestId::from_index(999)),
+            Some(TestId::from_index(999))
+        );
         check(&ledger);
-        assert_eq!(order(&ledger), [real.0], "the planted id joins no order");
+        assert_eq!(
+            order(&ledger),
+            [real.index()],
+            "the planted id joins no order"
+        );
     }
 }
