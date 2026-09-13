@@ -969,6 +969,12 @@ exactly as they were."
                         (cooked-bench--styled-rows 24 80) 200)
   (cooked-bench--frames "per-frame, 24x80 box drawing"
                         (cooked-bench--box-rows 24 80) 200)
+  ;; A repaint in which only three rows ended up different: what the core sends for
+  ;; `watch' or htop once it compares each erased-and-rewritten row with what the
+  ;; buffer holds.  Read it against the full 24-row styled frame above, which is what
+  ;; the same repaint cost when every damaged row was sent.
+  (cooked-bench--frames "per-frame, 24x80 styled, 3 rows changed"
+                        (cooked-bench--styled-rows 3 80) 200 :height 24)
   ;; `cooked-bench--frames' paints the alternate screen, where the URL scan is off
   ;; by default -- see `cooked-detect-links-on-alt-screen'.  What is under test is
   ;; the scan, not which screen it runs on, so it is asked for here.
@@ -1373,8 +1379,11 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
 ;; memoized: a collision can leave a row soft-wrapped until it is rewritten, and
 ;; can never delete a character -- see `cooked--wrap-memo'.
 
-(defun cooked-bench--allocation (label rows)
+(defun cooked-bench--allocation (label rows &optional height)
   "Print what one steady-state `cooked--apply' of ROWS allocates, under LABEL.
+
+HEIGHT is the screen's, for a fixture whose rows do not fill it; see
+`cooked-bench--update'.
 
 The fields are `memory-use-counts'\='s, whose order is easy to transpose and
 worth naming: (CONSES FLOATS VECTOR-CELLS SYMBOLS STRING-CHARS INTERVALS
@@ -1388,7 +1397,7 @@ allocates differently print different ones, which is the property a timing does
 not have."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-tests--settle-briefly)
-    (let ((update (cooked-bench--update rows :alt t)))
+    (let ((update (cooked-bench--update rows :alt t :height height)))
       ;; Three warm frames: the first builds the face cache, the glyph caches
       ;; and the wrap memo, and a fixture charged for those is reporting a
       ;; session's start-up once per frame.  Three rather than one because the
@@ -1416,6 +1425,8 @@ go and why the obvious quarter of them was measured and left alone."
   (cooked-bench--allocation "alloc, 24x80 styled (8 runs/row)"
                             (cooked-bench--styled-rows 24 80))
   (cooked-bench--allocation "alloc, 24x80 box drawing" (cooked-bench--box-rows 24 80))
+  (cooked-bench--allocation "alloc, 24x80 styled, 3 rows changed"
+                            (cooked-bench--styled-rows 3 80) 24)
   (cooked-bench--allocation "alloc, 24x80 with a URL per row"
                             (cooked-bench--url-rows 24 80)))
 
