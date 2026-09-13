@@ -113,7 +113,8 @@ impl Perform for State {
                 // to have no per-character lookups in it.
                 if let Some(last) = last {
                     let mut buf = [0u8; 4];
-                    self.text.restart(last.encode_utf8(&mut buf), 1, false);
+                    self.text
+                        .restart(last.encode_utf8(&mut buf), Width::Measured(1));
                 }
                 rest = &rest[placed..];
             }

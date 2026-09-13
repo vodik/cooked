@@ -68,7 +68,7 @@ use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
 use super::sgr;
 use super::term::osc::validated_text;
-use super::text::{self, Segmenter, Step};
+use super::text::{self, Segmenter, Step, Width};
 
 /// Columns one logical line may reach before it is retired to keep it bounded.
 ///
@@ -573,7 +573,8 @@ impl Perform for Stream {
             // `Prepend' case this declines.
             let last = rest[..plain].chars().next_back().unwrap_or(BLANK);
             let mut buf = [0u8; 4];
-            self.seg.restart(last.encode_utf8(&mut buf), 1, false);
+            self.seg
+                .restart(last.encode_utf8(&mut buf), Width::Measured(1));
             rest = &rest[plain..];
         }
     }

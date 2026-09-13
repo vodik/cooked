@@ -170,6 +170,15 @@ pub(crate) enum Step {
     Join { before: usize, after: usize },
 }
 
+/// How many columns a cell stands on, and on whose word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Width {
+    /// What the characters measure.
+    Measured(usize),
+    /// What `OSC 66 ; w=N` said, which a code point joining the cell must not re-measure.
+    Declared(usize),
+}
+
 /// The code points already on the cell under the cursor, and how wide that cell is.
 ///
 /// One per [`State`](crate::emu::term), reset by every dispatch that is not a print.
@@ -203,7 +212,7 @@ impl Segmenter {
         self.declared = false;
     }
 
-    /// Begin a cell holding exactly CLUSTER, standing on CELLS columns.
+    /// Begin a cell holding exactly CLUSTER, standing on WIDTH columns.
     ///
     /// Two callers, both of which placed text without coming through [`Segmenter::push`]:
     /// the batched ASCII run in `print_str`, which seeds the last character it placed so
@@ -211,11 +220,13 @@ impl Segmenter {
     /// seeds the block it just drew along with the width the child *declared* for it —
     /// so a mark following a declared-width block attaches to the block rather than
     /// splitting it.
-    pub(crate) fn restart(&mut self, cluster: &str, cells: usize, declared: bool) {
+    pub(crate) fn restart(&mut self, cluster: &str, width: Width) {
         self.cluster.clear();
         self.cluster.push_str(cluster);
-        self.cells = cells;
-        self.declared = declared;
+        (self.cells, self.declared) = match width {
+            Width::Measured(cells) => (cells, false),
+            Width::Declared(cells) => (cells, true),
+        };
     }
 
     /// Correct the recorded width to what the grid actually managed.

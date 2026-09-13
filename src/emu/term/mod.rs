@@ -13,7 +13,7 @@ use super::parser::{Params, Parser, Perform};
 use super::png::png_dimensions;
 use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
-use super::text::{self, Segmenter, Step};
+use super::text::{self, Segmenter, Step, Width};
 use csi::{PushedPen, SavedMode};
 use keys::KittyStack;
 pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};
