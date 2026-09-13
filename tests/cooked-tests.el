@@ -94,6 +94,7 @@
 (require 'cooked-tests-display)
 (require 'cooked-tests-process)
 (require 'cooked-tests-comint)
+(require 'cooked-tests-oracle)
 (require 'cooked-tests-module)
 (require 'cooked-tests-bench)
 

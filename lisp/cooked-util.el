@@ -27,7 +27,7 @@
 (eval-and-compile
   (defconst cooked--core-functions
     '(cooked--alt-scroll-p cooked--bracketed-paste-p cooked--clear-to-prompt
-      cooked--core-version cooked--drain cooked--filter-feed
+      cooked--core-version cooked--drain cooked--feed cooked--filter-feed
       cooked--focus-events-p cooked--foreground-pid cooked--forget-history
       cooked--image-forget cooked--job-control cooked--kill
       cooked--live-p cooked--make-filter cooked--pid

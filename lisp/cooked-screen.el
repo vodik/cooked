@@ -55,7 +55,11 @@ because row 0 owns the remainder of the shared one."
     ;; line's end rather than at the start of the row we asked for.  Rendering
     ;; the next row then appends to the previous one — which is how a command's
     ;; output and the following prompt end up sharing a line.
-    (unless (or (zerop index) (bolp))
+    ;;
+    ;; Unless point never left `cooked--screen-start': row 0 continuing a line at
+    ;; `point-max' is a row that exists but has no text yet, and `forward-line'
+    ;; counted nothing for it.  Counting it again put the row a line too low.
+    (unless (or (zerop index) (bolp) (= (point) cooked--screen-start))
       (setq missing (1+ missing)))
     (when (and extend (> missing 0))
       (goto-char (point-max))

@@ -194,6 +194,16 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// that has stopped reading for long enough loses the reply instead.
         "cooked--reply" 2..=2 => reply;
 
+        /// Parse STRING in SESSION's emulator as though its child had written it.
+        ///
+        /// The emulator takes the bytes at once, and nothing is woken: the caller drains
+        /// when it chooses, so what a drain holds is exactly what was fed before it.  That
+        /// is what a render test needs and a child through a pty cannot give it, since a
+        /// reader thread decides where one read ends and the next begins.  Replies the
+        /// bytes ask for are queued as the reader's would be, and leave at the next
+        /// `cooked--ready'.
+        "cooked--feed" 2..=2 => feed;
+
         /// A VT filter with no terminal behind it, for a comint buffer.
         /// Holds a resumable parser, a pen and one line of cells; see `cooked--filter-feed'.
         /// Unrelated to a session: it spawns nothing, owns no pty, and is fed by whatever
@@ -607,6 +617,12 @@ fn send(env: Env, args: &[Value]) -> Result<Value> {
 fn reply(env: Env, args: &[Value]) -> Result<Value> {
     let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
     handle(env, args[0])?.reply(&bytes);
+    Ok(env.nil())
+}
+
+fn feed(env: Env, args: &[Value]) -> Result<Value> {
+    let bytes = env.from_lisp::<Vec<u8>>(args[1])?;
+    handle(env, args[0])?.term().feed(&bytes);
     Ok(env.nil())
 }
 
