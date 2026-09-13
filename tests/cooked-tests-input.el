@@ -1928,6 +1928,31 @@ all, so the global value governs everywhere else."
         (cooked--update-mouse-grab))
       (should-not (local-variable-p 'track-mouse)))))
 
+(ert-deftest cooked-hover-tracking-and-the-pointer-shape-share-one-gate ()
+  "The OSC 22 pointer and hover reporting both follow `cooked--mouse-grab', but
+only hover stands down while a gesture is being followed: the pointer a child
+set over a button stays while that button is dragged."
+  (cooked-tests--with-session cooked-tests--hover-child
+    (should (cooked-tests--settle
+             (lambda () (cooked-mouse-state-motion cooked--mouse-state))))
+    (let ((cooked-mouse-hover-motion t)
+          (cooked--osc-bell-terminated t))
+      (cooked--osc-pointer-shape '("pointer"))
+      (cooked--update-mouse-grab)
+      (should (eq track-mouse t))
+      (should (eq (overlay-get cooked--pointer-overlay 'pointer) 'hand))
+      ;; Mid-gesture, a re-gate leaves `track-mouse' to the gesture and still
+      ;; answers for the pointer.
+      (let ((cooked--mouse-tracking t))
+        (cooked--set-mouse-state t t nil nil nil)
+        (should (eq track-mouse t))
+        (should (eq (overlay-get cooked--pointer-overlay 'pointer) 'hand)))
+      ;; Losing the mouse takes both away together.
+      (let ((cooked--mouse-state cooked--mouse-state-none))
+        (cooked--update-mouse-grab))
+      (should-not (local-variable-p 'track-mouse))
+      (should-not cooked--pointer-overlay))))
+
 (ert-deftest cooked-hover-reports-once-per-cell-and-keeps-the-region ()
   "A movement with nothing held is button 3 plus the motion bit, 35.  The same
 cell twice is one report, and the region a shifted drag left behind survives the

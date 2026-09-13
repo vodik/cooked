@@ -644,6 +644,10 @@ and the region shaped before anything measures it."
     (cooked--protect (or (and (cooked--input-state-p) (cooked--input-start-position))
                          (point-max)))
     (cooked--apply-alt-pin)
+    ;; After the rows and the scrollback have both landed: the pointer overlay's
+    ;; start has to be put back on the screen marker a scroll just moved, or it
+    ;; spreads up into history.  See `cooked--sync-pointer-shape'.
+    (when cooked--pointer-overlay (cooked--sync-pointer-shape))
     ;; Before the point block, not after it: under evil this leaves visual state,
     ;; and evil adjusts point on the way into normal state -- so cooked's own pin
     ;; has to be the last thing to speak about where point ends up.
@@ -700,12 +704,12 @@ two chances to disagree."
      (cooked--discard-scrollback (cooked--screen-start-position)))
     (`(display-cleared) (setq cooked--pin-screen-top t))
     ;; `ESC c'.  Everything RIS resets inside the emulator the emulator resets
-    ;; itself; this event exists for the state Emacs holds on its behalf, of
-    ;; which the OSC 9;4 progress indicator is currently the whole list.  A
+    ;; itself; this event exists for the state Emacs holds on its behalf: the
+    ;; OSC 9;4 progress indicator and the OSC 22 pointer stacks.  A
     ;; `reset' that blanked the screen and left the mode line still claiming a
     ;; build was 60% through would be stuck in the one way the user has no
     ;; second thing to type their way out of.
-    (`(reset) (cooked--reset-progress))
+    (`(reset) (cooked--reset-progress) (cooked--reset-pointer-shapes))
     ;; Decoded into a record at the boundary, like the cursor and the grid; see
     ;; `cooked-mouse-state'.  cooked-mouse.el owns it because it is the only
     ;; reader, and re-gates its own keymap on the way through.

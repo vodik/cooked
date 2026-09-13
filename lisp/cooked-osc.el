@@ -59,6 +59,7 @@
     (51 . cooked--osc-emacs)
     (52 . cooked--osc-clipboard)
     (9 . cooked--osc-9)
+    (22 . cooked--osc-pointer-shape)
     (99 . cooked--osc-notify)
     (777 . cooked--osc-notify-777))
   "Alist of OSC code to a function taking the remaining payload parts.

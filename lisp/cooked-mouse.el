@@ -36,7 +36,12 @@
 ;; see it; cooked.el and cooked-mode.el declare what they need of that set the
 ;; same way.
 (declare-function cooked--alt-scroll-p "ext:cooked-core")
+(declare-function cooked--reply-osc "ext:cooked-core")
 (defvar cooked--last-cell)
+
+;; Bound by `cooked--handle-osc' around the OSC 22 handler below, which lives
+;; here rather than in cooked-osc.el because what it decides is the pointer.
+(defvar cooked--osc-bell-terminated)
 
 (defconst cooked--mouse-buttons
   '((mouse-1 . 0) (mouse-2 . 1) (mouse-3 . 2)
@@ -332,7 +337,14 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
   ;; rectangle whether or not the child wanted the mouse, and whether or not the
   ;; keyboard is suspended for a peek.  See `cooked--wheel-map'.
   (setq cooked--wheel-grab (and cooked--alt (not cooked--mouse-grab) t))
-  (cooked--update-hover-tracking))
+  (cooked--update-hover-tracking)
+  ;; The pointer shape a child set is shown under the same gate, so every path
+  ;; that moves the gate has to move the pointer with it.  Beside the hover
+  ;; call rather than inside it: that one stands down while a gesture is being
+  ;; followed, and the pointer has no reason to.  The two do not otherwise
+  ;; meet -- Emacs reads a `pointer' property whenever the mouse moves, whether
+  ;; or not `track-mouse' is delivering the movement as events.
+  (cooked--sync-pointer-shape))
 
 (defun cooked--update-hover-tracking ()
   "Turn the variable `track-mouse' on here exactly while hover is to be reported.
@@ -779,6 +791,163 @@ the buffer that was current, and that is the half of the question a plain
       (setq last-command-event event
             this-command command)
       (call-interactively command))))
+
+;; Pointer shape, OSC 22.
+;;
+;; kitty's protocol, which ghostty and foot also read: a child that reports the
+;; mouse can say what the pointer should look like over it -- a hand over a
+;; button, a resize arrow over a split -- by CSS cursor name.  Emacs has its own
+;; short list of pointers, so only the names with an equivalent are shown and
+;; the rest are remembered and not drawn.
+;;
+;; It is shown only while the child is being sent mouse reports.  kitty applies
+;; it regardless, and that is the one place this departs from the protocol on
+;; purpose: with reporting off, a click selects text in the ordinary Emacs way,
+;; and an Emacs pointer is the honest thing to show over text Emacs will select.
+
+(defcustom cooked-allow-pointer-shape t
+  "Whether the child may set the mouse pointer over its screen, via OSC 22.
+
+On by default, unlike `cooked-allow-color-set\=', because what it can reach is
+narrower: the pointer changes over this terminal\='s own grid and only while
+the child is being sent mouse reports, so a hostile stream can do no more than
+draw a hand over text it already controls.  When off, sets are ignored and a
+query is told that no shape is supported, which is the truth about what a set
+would then do."
+  :type 'boolean
+  :group 'cooked)
+
+(defconst cooked--pointer-shapes
+  '(("text" . text) ("xterm" . text)
+    ("pointer" . hand) ("hand" . hand) ("hand1" . hand) ("hand2" . hand)
+    ("default" . arrow) ("left_ptr" . arrow)
+    ("ew-resize" . hdrag) ("col-resize" . hdrag)
+    ("e-resize" . hdrag) ("w-resize" . hdrag) ("sb_h_double_arrow" . hdrag)
+    ("ns-resize" . vdrag) ("row-resize" . vdrag)
+    ("n-resize" . vdrag) ("s-resize" . vdrag) ("sb_v_double_arrow" . vdrag)
+    ("wait" . hourglass) ("progress" . hourglass) ("watch" . hourglass))
+  "OSC 22 shape names Emacs can show, each with the `pointer\=' value showing it.
+
+The CSS names kitty specifies, plus the X11 cursor-font spellings it permits as
+aliases, restricted to the ones with an Emacs pointer to stand for them.
+`crosshair\=', `grab\=', `not-allowed\=' and the diagonal resizes have none, so
+they are absent and a query answers 0 for them.  `nhdrag\=' and `modeline\=' go
+the other way: Emacs has them and CSS has no name that means them.")
+
+(defconst cooked--pointer-stack-limit 16
+  "How many shapes each screen's OSC 22 stack holds before dropping its bottom.
+Sixteen is the minimum kitty requires of a terminal.")
+
+(defvar-local cooked--pointer-stacks nil
+  "OSC 22 shape stacks, an alist of `main\=' or `alt\=' to names, top first.
+
+One per screen, as the protocol asks: a full-screen program that pushes a shape
+and exits without popping it leaves it on the alternate screen\='s stack, so the
+shell underneath does not inherit it.  A drain applies its events after its
+screen switch, so an OSC 22 sent in the same drain as the switch lands on the
+stack of the screen the drain ends on.  That is the price of deciding this in
+Lisp, and a small one: a program sets a shape as the pointer moves, long after
+it took the screen.
+
+Names are kept whether or not `cooked--pointer-shapes\=' knows them, which is
+what keeps a push and its pop paired for a child that pushes a shape Emacs
+cannot draw.")
+
+(defvar-local cooked--pointer-overlay nil
+  "Overlay carrying the child\='s pointer over the screen, or nil if none is.")
+
+(defun cooked--pointer-screen ()
+  "Which of `cooked--pointer-stacks\=' the child is drawing on."
+  (if cooked--alt 'alt 'main))
+
+(defun cooked--osc-pointer-shape (parts)
+  "Set, push, pop or query the pointer shape, from the OSC 22 payload PARTS.
+
+The payload is an operation character and a comma-separated list of names:
+`=\=' or nothing sets the top of the stack to the first name, `>\=' pushes each
+name in turn, `<\=' pops one and ignores the names, and `?\=' asks about each.
+A query is always answered, knob or not, with 1 or 0 per name -- or, for
+`__current__\=', the name on top of the stack, and 0 when it is empty."
+  (let* ((payload (string-join parts ";"))
+         (op (and (> (length payload) 0)
+                  (memq (aref payload 0) '(?= ?> ?< ??))
+                  (aref payload 0)))
+         (names (split-string (if op (substring payload 1) payload) "," t))
+         (screen (cooked--pointer-screen))
+         (stack (alist-get screen cooked--pointer-stacks)))
+    (if (eq op ??)
+        (cooked--reply-osc
+         cooked--session 22
+         (mapconcat (lambda (name) (cooked--pointer-query name (car stack)))
+                    names ",")
+         cooked--osc-bell-terminated)
+      (when cooked-allow-pointer-shape
+        (setf (alist-get screen cooked--pointer-stacks)
+              (pcase op
+                (?< (cdr stack))
+                (?> (seq-take (append (reverse names) stack)
+                              cooked--pointer-stack-limit))
+                ;; The first name only; a set carrying none has nothing to act on.
+                (_ (if names (cons (car names) (cdr stack)) stack))))
+        (cooked--sync-pointer-shape)))))
+
+(defun cooked--pointer-query (name current)
+  "The OSC 22 query answer for NAME, with CURRENT the name on top of the stack.
+
+`__default__\=' and `__grabbed__\=' ask what the pointer is when no child shape is
+in force, with and without mouse reporting.  cooked changes nothing for either,
+so both are Emacs\=' own pointer over buffer text."
+  (pcase name
+    ("__current__" (or current "0"))
+    ((or "__default__" "__grabbed__") "text")
+    (_ (if (and cooked-allow-pointer-shape (assoc name cooked--pointer-shapes))
+           "1"
+         "0"))))
+
+(defun cooked--sync-pointer-shape ()
+  "Show the child\='s pointer shape over the screen if it may be, or remove it.
+
+Shown while the child is being sent mouse reports: the reporting gate is
+`cooked--mouse-grab\=', and `enabled\=' is asked as well because that gate also
+opens for alternate scroll, where the child asked for nothing about the mouse.
+
+An overlay rather than a text property, and from `cooked--screen-start\=' to
+the end: the rows under it are deleted and reinserted on every redraw, which
+would take a text property with them, while an overlay whose end advances
+simply takes the new text in.  Its start does not follow a scroll by itself --
+scrollback is inserted at the start and would be taken in too -- so
+`cooked--apply\=' calls this after every drain to put it back on the marker.
+
+Past the end of a row\='s text there is no buffer position for any property to
+sit on, and Emacs shows `void-text-area-pointer\=' there.  That variable is read
+in whatever buffer is current when the pointer moves, not the one under it, so
+setting it here would repaint the void of every window while this one was
+selected; the blank tail of a short row keeps Emacs\=' own pointer instead."
+  (let ((pointer (and cooked-allow-pointer-shape
+                      cooked--session
+                      cooked--mouse-grab
+                      (cooked-mouse-state-enabled cooked--mouse-state)
+                      (cdr (assoc (car (alist-get (cooked--pointer-screen)
+                                                  cooked--pointer-stacks))
+                                  cooked--pointer-shapes))))
+        (start (cooked--screen-start-position)))
+    (if (and pointer start)
+        (save-restriction
+          (widen)
+          (if cooked--pointer-overlay
+              (move-overlay cooked--pointer-overlay start (point-max))
+            ;; Front-advance nil and rear-advance t: a row reinserted at either
+            ;; end of the screen lands inside the overlay rather than beside it.
+            (setq cooked--pointer-overlay (make-overlay start (point-max) nil nil t)))
+          (overlay-put cooked--pointer-overlay 'pointer pointer))
+      (when cooked--pointer-overlay
+        (delete-overlay cooked--pointer-overlay)
+        (setq cooked--pointer-overlay nil)))))
+
+(defun cooked--reset-pointer-shapes ()
+  "Empty both OSC 22 stacks, on RIS, as the protocol requires."
+  (setq cooked--pointer-stacks nil)
+  (cooked--sync-pointer-shape))
 
 (provide 'cooked-mouse)
 ;;; cooked-mouse.el ends here

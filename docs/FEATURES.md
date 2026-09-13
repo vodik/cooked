@@ -340,6 +340,16 @@ anything that can write to the terminal can send one. When enabled the change is
 buffer-local face remapping — the child repaints its own terminal, not your whole
 Emacs — and OSC 110/111/112 put the theme's colours back.
 
+A program that asks for mouse reports can also set the pointer over its screen with OSC
+22, kitty's pointer-shape protocol: a hand over a button, a resize arrow over a split. The
+CSS names with an Emacs pointer behind them are shown — `text`, `pointer`, `default`, the
+horizontal and vertical resizes, `wait` and `progress` — and the rest are kept on the stack
+but not drawn, so a push and its pop stay paired. The shape covers the screen and not the
+scrollback, and only while reporting is on: with it off a click selects text, and Emacs'
+own pointer is the right one for that. `?name,name` is answered with 1 or 0 for each. It is
+on by default because it reaches nothing outside the terminal; `cooked-allow-pointer-shape`
+turns it off, and then a query is told nothing is supported.
+
 ## Images
 
 Three protocols arrive and all of them end in the same place: the kitty graphics

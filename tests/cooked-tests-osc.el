@@ -1360,6 +1360,105 @@ shifting the pairs after it, and a set stays silent even with sets allowed."
         (cooked--osc-color-reset nil))
       (should-not cooked--color-remaps))))
 
+(ert-deftest cooked-osc-22-query-says-which-shapes-can-be-shown ()
+  "One answer per name, in order: 1 for a shape Emacs has a pointer for, 0 for
+one it has not, and the top of the stack -- empty, so 0 -- for `__current__'."
+  (let ((out (make-temp-file "cooked-osc22")))
+    (unwind-protect
+        (cooked-tests--with-session
+            (cooked-tests--reply-to "\\033]22;?pointer,crosshair,ew-resize,__current__\\033\\\\" out)
+          (should (cooked-tests--settle
+                   (lambda () (string-suffix-p "\033\\" (cooked-tests--contents out)))))
+          (should (equal (cooked-tests--contents out) "\033]22;1,0,1,0\033\\")))
+      (delete-file out))))
+
+(ert-deftest cooked-osc-22-shape-covers-the-grid-only-while-reporting ()
+  "The pointer changes over the screen and not the scrollback above it, stays off
+the scrollback when more output scrolls the screen down, and is gone the moment
+the child stops asking for mouse reports."
+  (let ((go (make-temp-name (expand-file-name "cooked-osc22-go" temporary-file-directory))))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "stty -icanon -echo; seq 60; printf '\\033[?1000h\\033]22;pointer\\007'; \
+while [ ! -e %s ]; do sleep 0.05; done; seq 100 160; echo scrolled; exec sleep 30"
+                          go))
+          (should (cooked-tests--settle
+                   (lambda () (eq (get-char-property (cooked--screen-start-position) 'pointer)
+                                  'hand))))
+          (should (> (cooked--screen-start-position) (point-min)))
+          (should-not (get-char-property (point-min) 'pointer))
+          (should-not (get-char-property (1- (cooked--screen-start-position)) 'pointer))
+          ;; Scroll the screen: rows leave it for history, and the shape must not
+          ;; leave with them.
+          (let ((before (cooked--screen-start-position)))
+            (write-region "" nil go)
+            ;; Nothing after the scroll touches the shape, so only the drain
+            ;; itself can have put the overlay back on the marker.
+            (should (cooked-tests--settle
+                     (lambda () (save-excursion
+                                  (goto-char (point-min))
+                                  (search-forward "scrolled" nil t)))))
+            (should (eq (get-char-property (cooked--screen-start-position) 'pointer) 'hand))
+            (should (> (cooked--screen-start-position) before))
+            (should-not (get-char-property before 'pointer))
+            (should (= (overlay-start cooked--pointer-overlay)
+                       (cooked--screen-start-position))))
+          ;; Reporting off drops the shape; back on restores it, since the child
+          ;; did not pop it.
+          (cooked--set-mouse-state nil nil nil nil nil)
+          (should-not cooked--pointer-overlay)
+          (should-not (get-char-property (cooked--screen-start-position) 'pointer))
+          (cooked--set-mouse-state t nil nil nil nil)
+          (should (eq (get-char-property (cooked--screen-start-position) 'pointer) 'hand)))
+      (ignore-errors (delete-file go)))))
+
+(ert-deftest cooked-osc-22-stacks-per-screen-and-honours-the-knob ()
+  "Push, pop and set move the top of the current screen's stack; the other
+screen's stack is untouched; a reset empties both; and with the knob off a set
+does nothing and a query is told nothing is supported."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; printf '\\033[?1000h'; exec sleep 30")
+    (should (cooked-tests--settle (lambda () cooked--mouse-grab)))
+    (let ((cooked--osc-bell-terminated t)
+          (replies nil))
+      (cl-letf (((symbol-function 'cooked--reply-osc)
+                 (lambda (_session code payload _bell) (push (cons code payload) replies))))
+        (cl-flet ((shown () (and cooked--pointer-overlay
+                                 (overlay-get cooked--pointer-overlay 'pointer)))
+                  (osc (payload) (cooked--osc-pointer-shape (list payload))))
+          (osc ">text,pointer")
+          (should (eq (shown) 'hand))
+          (osc "<")
+          (should (eq (shown) 'text))
+          ;; A shape Emacs cannot draw is still pushed, so its pop stays paired;
+          ;; while it is on top, Emacs' own pointer shows.
+          (osc ">crosshair")
+          (should-not (shown))
+          (osc "?__current__")
+          (should (equal (pop replies) '(22 . "crosshair")))
+          (osc "<")
+          (should (eq (shown) 'text))
+          (osc "=wait")
+          (should (eq (shown) 'hourglass))
+          (should (equal (alist-get 'main cooked--pointer-stacks) '("wait")))
+          ;; The alternate screen starts with a stack of its own.
+          (let ((cooked--alt t))
+            (cooked--sync-pointer-shape)
+            (should-not (shown))
+            (osc "hand")
+            (should (eq (shown) 'hand)))
+          (cooked--sync-pointer-shape)
+          (should (eq (shown) 'hourglass))
+          (cooked--reset-pointer-shapes)
+          (should-not cooked--pointer-stacks)
+          (should-not (shown))
+          (let ((cooked-allow-pointer-shape nil))
+            (osc "pointer")
+            (should-not cooked--pointer-stacks)
+            (should-not (shown))
+            (osc "?pointer,text")
+            (should (equal (pop replies) '(22 . "0,0")))))))))
+
 (ert-deftest cooked-color-scheme-follows-the-rendered-background ()
   "Read from the same background OSC 11 answers with, so a child that reacts to a
 scheme change by querying the background cannot be told two different things."

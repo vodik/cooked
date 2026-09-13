@@ -174,7 +174,7 @@ pub enum Event {
     /// Everything RIS puts back inside the emulator it puts back itself, so this event
     /// says nothing the grid needs; it exists for the state that is *not* in the grid.
     /// Emacs keeps some of a session's state in Lisp because it is Emacs' to keep --
-    /// OSC 9;4 progress is the current one -- and a reset that cleared the screen while
+    /// OSC 9;4 progress and the OSC 22 pointer stacks -- and a reset that cleared the screen while
     /// leaving a progress indicator pinned to the mode line would be exactly the sort of
     /// stuck state `reset` is the cure for. Nothing in Rust can clear it, so RIS has to
     /// be sayable.
