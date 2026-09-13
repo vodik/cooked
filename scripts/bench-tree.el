@@ -27,15 +27,21 @@
 
 (setq debug-on-error t)
 
-(let ((root (file-name-directory
-             (directory-file-name
-              (file-name-directory (or load-file-name buffer-file-name))))))
-  (add-to-list 'load-path (expand-file-name "lisp" root)))
+;; Compiled, and refused on a busy machine: see bench-prelude.el.  Nothing below
+;; the `cooked-bench-script-start' call runs interpreted.
+(eval-and-compile
+  (unless (featurep 'bench-prelude)
+    (load (expand-file-name "bench-prelude"
+                            (file-name-directory
+                             (or load-file-name
+                                 (bound-and-true-p byte-compile-current-file))))
+          nil t)))
+(defconst tree--out (or (getenv "COOKED_TREE_OUT") "/tmp/cooked-tree.out"))
+(cooked-bench-script-start tree--out)
 (require 'cooked)
 (require 'cooked-mode)
 (require 'cooked-link)
 
-(defconst tree--out (or (getenv "COOKED_TREE_OUT") "/tmp/cooked-tree.out"))
 (defconst tree--dir (or (getenv "COOKED_TREE_DIR") "/usr/include"))
 (defconst tree--reps (string-to-number (or (getenv "COOKED_TREE_REPS") "3")))
 
@@ -140,7 +146,7 @@ redisplay plus the child plus every wait on either."
                   (string-to-number (or (getenv "COOKED_TREE_ROWS") "32"))))
 (redisplay t)
 
-(tree--say "load-average %s" (load-average))
+(tree--say "%s" (cooked-bench-script-provenance))
 (tree--say "frame %dx%d chars, window %dx%d, framep=%s graphic=%s, dir=%s"
            (frame-width) (frame-height)
            (window-body-width) (window-body-height)

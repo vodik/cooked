@@ -25,14 +25,20 @@
 
 (setq debug-on-error t)
 
-(let ((root (file-name-directory
-             (directory-file-name
-              (file-name-directory (or load-file-name buffer-file-name))))))
-  (add-to-list 'load-path (expand-file-name "lisp" root)))
+;; Compiled, and refused on a busy machine: see bench-prelude.el.  Nothing below
+;; the `cooked-bench-script-start' call runs interpreted.
+(eval-and-compile
+  (unless (featurep 'bench-prelude)
+    (load (expand-file-name "bench-prelude"
+                            (file-name-directory
+                             (or load-file-name
+                                 (bound-and-true-p byte-compile-current-file))))
+          nil t)))
+(defconst latency--out (or (getenv "COOKED_LATENCY_OUT") "/tmp/cooked-latency.out"))
+(cooked-bench-script-start latency--out)
 (require 'cooked)
 (require 'cooked-mode)
 
-(defconst latency--out (or (getenv "COOKED_LATENCY_OUT") "/tmp/cooked-latency.out"))
 
 (defvar latency--log nil)
 
@@ -132,6 +138,7 @@ changes.  That is the decorated-buffer risk §9 C is looking for."
                   (string-to-number (or (getenv "COOKED_LATENCY_ROWS") "32"))))
 (redisplay t)
 
+(push (cooked-bench-script-provenance) latency--log)
 (push (format "frame %dx%d, framep=%s graphic=%s, load %s"
               (frame-width) (frame-height) (framep (selected-frame))
               (display-graphic-p) (car (load-average)))

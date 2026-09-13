@@ -184,6 +184,10 @@ TEST_SHARED := tests/cooked-tests.el tests/cooked-tests-helpers.el tests/cooked-
 
 lisp-test-parallel: $(TEST_STAMPS)
 
+# The one test file that loads something outside `tests/': the graphical bench
+# scripts' prelude, whose compile step and load guard it runs end to end.
+target/test-stamps/cooked-tests-bench.stamp: scripts/bench-prelude.el
+
 $(MODULE): module ;
 
 target/test-stamps/%.stamp: tests/%.el $(TEST_SHARED) $(wildcard lisp/*.el) $(MODULE)

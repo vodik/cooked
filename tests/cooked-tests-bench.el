@@ -402,5 +402,78 @@ and say the CJK character is half again wider than its two cells."
         (should (assq 'height display))
         (should (< (cadr (assq 'height display)) 1.0))))))
 
+;;;; The graphical scripts' prelude
+
+(defvar cooked-tests--bench-script-args nil
+  "Arguments `cooked-tests--bench-script' passes to Emacs before the script.")
+
+(defun cooked-tests--bench-script (body)
+  "Run a bench script whose measuring part is BODY, in a batch Emacs.
+
+BODY is a string of forms placed after the prelude and its start call, as
+scripts/bench-tree.el places its own; `probe--out' names the output file in it.
+Return (EXIT . OUTPUT), OUTPUT being what the output file holds afterwards, or
+nil if there is none.  The child gets `cooked-tests--bench-script-args' before
+the script, and the caller's `process-environment'."
+  (let* ((dir (make-temp-file "cooked-tests-script-" t))
+         (script (expand-file-name "bench-probe.el" dir))
+         (out (expand-file-name "probe.out" dir))
+         (prelude (expand-file-name "scripts/bench-prelude" (cooked--root))))
+    (unwind-protect
+        (progn
+          (with-temp-file script
+            (insert ";;; bench-probe.el --- a probe  -*- lexical-binding: t; -*-\n"
+                    (format "(eval-and-compile (load %S nil t))\n" prelude)
+                    (format "(defconst probe--out %S)\n" out)
+                    "(cooked-bench-script-start probe--out)\n"
+                    body "\n(kill-emacs 0)\n"))
+          (let ((exit (apply #'call-process
+                             (expand-file-name invocation-name invocation-directory)
+                             nil nil nil
+                             `("-Q" "--batch" ,@cooked-tests--bench-script-args
+                               "-l" ,script))))
+            (cons exit (and (file-exists-p out)
+                            (with-temp-buffer
+                              (insert-file-contents out)
+                              (buffer-string))))))
+      (delete-directory dir t))))
+
+(ert-deftest cooked-bench-script-refuses-a-busy-machine-unless-forced ()
+  "The scripts judge the load by the batch bench\='s own rule.
+
+A load of 9 over 16 CPUs is refused at the default fraction of one half, 7 is
+not, and `COOKED_BENCH_FORCE\=' lets the refused one through.  The sentence
+names the limit, because a refusal that does not say how quiet is quiet enough
+sends the reader to the source."
+  (load (expand-file-name "scripts/bench-prelude" (cooked--root)) nil t)
+  (let ((cooked-bench-load-fraction 0.5))
+    (should (string-match-p "load 9.00 over 16 cpus, limit 8.00"
+                            (cooked-bench-script--refusal '(9.0 . 16) nil)))
+    (should-not (cooked-bench-script--refusal '(7.0 . 16) nil))
+    (should-not (cooked-bench-script--refusal '(9.0 . 16) "1"))))
+
+(ert-deftest cooked-bench-script-runs-compiled-or-writes-why-it-did-not ()
+  "A script measures compiled cooked, and on a busy machine measures nothing.
+
+End to end, through a child Emacs, because both failures are silent from
+inside.  An interpreted run reports numbers three times too slow with nothing
+to say so, and a refusal printed to stdout under gamescope is never seen.  So
+the refusal has to reach the output file with exit status 1 and the body must
+not run, and a forced run must record `.elc\=' for both the script and
+`cooked--apply\='.  A load fraction of 0 makes any machine busy."
+  (let ((cooked-tests--bench-script-args
+         '("--eval" "(setq cooked-bench-load-fraction 0.0)"))
+        (body "(with-temp-file probe--out (insert (cooked-bench-script-provenance)))"))
+    (let* ((process-environment (cons "COOKED_BENCH_FORCE" process-environment))
+           (refused (cooked-tests--bench-script body)))
+      (should (equal (car refused) 1))
+      (should (string-match-p "\\`cooked-bench: machine is busy" (cdr refused))))
+    (let* ((process-environment (cons "COOKED_BENCH_FORCE=1" process-environment))
+           (ran (cooked-tests--bench-script body)))
+      (should (equal (car ran) 0))
+      (should (string-match-p
+               "\\`compiled: bench-probe\\.elc, cooked--apply from .*/cooked-render\\.elc (byte-code); load .* BUSY, forced"
+               (cdr ran))))))
+
 (provide 'cooked-tests-bench)
 ;;; cooked-tests-bench.el ends here

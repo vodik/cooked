@@ -34,14 +34,20 @@
 
 (setq debug-on-error t)
 
-(let ((root (file-name-directory
-             (directory-file-name
-              (file-name-directory (or load-file-name buffer-file-name))))))
-  (add-to-list 'load-path (expand-file-name "lisp" root)))
+;; Compiled, and refused on a busy machine: see bench-prelude.el.  Nothing below
+;; the `cooked-bench-script-start' call runs interpreted.
+(eval-and-compile
+  (unless (featurep 'bench-prelude)
+    (load (expand-file-name "bench-prelude"
+                            (file-name-directory
+                             (or load-file-name
+                                 (bound-and-true-p byte-compile-current-file))))
+          nil t)))
+(defconst hover--out (or (getenv "COOKED_HOVER_OUT") "/tmp/cooked-hover.out"))
+(cooked-bench-script-start hover--out)
 (require 'cooked)
 (require 'cooked-mode)
 
-(defconst hover--out (or (getenv "COOKED_HOVER_OUT") "/tmp/cooked-hover.out"))
 
 (defvar hover--log nil)
 
@@ -122,6 +128,7 @@
   (set-frame-size (selected-frame) 100 32))
 (redisplay t)
 
+(push (cooked-bench-script-provenance) hover--log)
 (push (format "frame %dx%d, framep=%s graphic=%s, load %s"
               (frame-width) (frame-height) (framep (selected-frame))
               (display-graphic-p) (load-average t))

@@ -21,15 +21,19 @@
 
 (setq debug-on-error t)
 
-;; Resolved from this file so the script runs from any directory.
-(let ((root (file-name-directory
-             (directory-file-name
-              (file-name-directory (or load-file-name buffer-file-name))))))
-  (add-to-list 'load-path (expand-file-name "lisp" root)))
+;; Compiled, and refused on a busy machine: see bench-prelude.el.  Nothing below
+;; the `cooked-bench-script-start' call runs interpreted.
+(eval-and-compile
+  (unless (featurep 'bench-prelude)
+    (load (expand-file-name "bench-prelude"
+                            (file-name-directory
+                             (or load-file-name
+                                 (bound-and-true-p byte-compile-current-file))))
+          nil t)))
+(defconst ceil--out (or (getenv "COOKED_CEILING_OUT") "/tmp/cooked-ceiling.out"))
+(cooked-bench-script-start ceil--out)
 (require 'cooked)
 (require 'cooked-mode)
-
-(defconst ceil--out (or (getenv "COOKED_CEILING_OUT") "/tmp/cooked-ceiling.out"))
 
 (defconst ceil--awk-program "\
 BEGIN {
@@ -212,6 +216,7 @@ what is timed is redisplay and nothing else."
 
 (let ((cols (window-body-width))
       (rows (window-body-height)))
+  (push (cooked-bench-script-provenance) ceil--log)
   (push (format "frame %dx%d chars, window %dx%d, framep=%s graphic=%s"
                 (frame-width) (frame-height) cols rows
                 (framep (selected-frame))
