@@ -617,11 +617,14 @@ never reach the kill ring, so a program can round-trip its own text through
 them without being able to read anything you copied.  This is eat\='s middle
 ground.
 
-`ask\=' prompts, naming the program in the foreground, before answering a shared
-selection; the cut buffers are answered as under `private\='.  The prompt waits
-until the handler has returned rather than running inside the process filter,
-and a query that arrives while one is already open is refused rather than
-stacked behind it.
+`ask\=' prompts, naming the buffer and the program in the foreground, before
+answering a shared selection; the cut buffers are answered as under `private\='.
+The prompt waits until the handler has returned rather than running inside the
+process filter, and a query that arrives while one is already open is refused
+rather than stacked behind it.  It wants a typed `yes\=', after discarding
+input already queued, so a `y\=' meant for the program cannot answer it.
+The program is only what the child calls itself, and `ssh\=' for anything
+remote, so the buffer is the better guide to who is asking.
 
 t answers `c\=' and `s\=' from the kill ring, which is the system clipboard
 when `interprogram-paste-function\=' is set, `p\=' from PRIMARY and `q\=' from
@@ -742,12 +745,38 @@ one on the wire, so text with raw bytes in it can be refused a little early."
           "")))
     ""))
 
+(defun cooked--osc-52-ask (program target)
+  "Whether the user lets PROGRAM read the shared selection TARGET.
+
+A child can print \"[y/n]\" and then query, so the `y\=' the user types for
+the child must not be the answer.  Input already queued is discarded first, and
+the question is a `yes-or-no-p\=', with `use-short-answers\=' bound to nil,
+because a single `y\=' arriving a moment after the prompt opens cannot finish a
+typed `yes\='.  A `read-multiple-choice\=' would also discard typeahead, but a
+keystroke racing the prompt would still answer it; this is also the prompt
+Emacs uses for other questions that are expensive to get wrong, such as
+killing the child in `cooked-kill-session\='."
+  (discard-input)
+  (let ((use-short-answers nil))
+    (yes-or-no-p
+     (format "Let %s in %s read the %s? "
+             (or program "the child")
+             (buffer-name)
+             (pcase target
+               (?p "primary selection")
+               (?q "secondary selection")
+               (_ "clipboard"))))))
+
 (defun cooked--osc-52-query (targets)
   "Answer the OSC 52 query for TARGETS, exactly once.
 
 xterm answers with the first selection named, and so does this.  Under `ask\='
 the reply leaves this function in a deferred prompt, carrying the terminator it
-was asked with, since `cooked--osc-bell-terminated\=' is unbound by then."
+was asked with, since `cooked--osc-bell-terminated\=' is unbound by then.  The
+program is named as it was when the query arrived, since by the time the prompt
+runs a short-lived `cat\=' may have exited and handed the foreground back to
+the shell.  Any error inside the prompt is an empty reply rather than none,
+because the child is still waiting for one."
   (let* ((target (car targets))
          (index (cooked--osc-52-cut-buffer target)))
     (cond
@@ -763,25 +792,24 @@ was asked with, since `cooked--osc-bell-terminated\=' is unbound by then."
       (if cooked--clipboard-prompting
           (cooked--osc-52-reply target "")
         (setq cooked--clipboard-prompting t)
-        (let ((bell cooked--osc-bell-terminated))
+        (let ((bell cooked--osc-bell-terminated)
+              (program (ignore-errors (cooked--foreground-program))))
           (cooked--defer
            (lambda ()
              (unwind-protect
                  (let ((cooked--osc-bell-terminated bell))
                    (cooked--osc-52-reply
                     target
-                    (if (condition-case nil
-                            (y-or-n-p
-                             (format "Let %s read the %s? "
-                                     (or (cooked--foreground-program) "the child")
-                                     (pcase target
-                                       (?p "primary selection")
-                                       (?q "secondary selection")
-                                       (_ "clipboard"))))
-                          (quit nil))
-                        (cooked--osc-52-encode
-                         (cooked--osc-52-shared-contents target))
-                      "")))
+                    (condition-case err
+                        (if (cooked--osc-52-ask program target)
+                            (cooked--osc-52-encode
+                             (cooked--osc-52-shared-contents target))
+                          "")
+                      (quit "")
+                      (error
+                       (message "cooked: answered a clipboard read with nothing: %s"
+                                (error-message-string err))
+                       ""))))
                (setq cooked--clipboard-prompting nil)))))))
      (t
       (cooked--osc-52-reply

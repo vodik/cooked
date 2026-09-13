@@ -1361,7 +1361,7 @@ queued behind it."
     (cooked-tests--with-kill "secret"
       (let ((cooked-clipboard-read 'ask)
             (prompts nil))
-        (cl-letf (((symbol-function 'y-or-n-p)
+        (cl-letf (((symbol-function 'yes-or-no-p)
                    (lambda (prompt) (push prompt prompts) yes)))
           (cooked-tests--osc-52-replies "\\033]52;c;?\\007\\033]52;c;?\\007"
             (should (equal (replies (lambda (s) (>= (cl-count ?\a s) 2)))
@@ -1370,6 +1370,67 @@ queued behind it."
             (should (= (length prompts) 1))
             (should (string-match-p "clipboard" (car prompts)))
             (should-not cooked--clipboard-prompting)))))))
+
+(defmacro cooked-tests--osc-52-ask (answer &rest body)
+  "Run BODY around an OSC 52 query under `ask\=', answered by ANSWER.
+
+ANSWER is called in place of both `y-or-n-p\=' and `yes-or-no-p\=' with the
+prompt.  BODY sees `query\=', which asks for the clipboard as `cat\=' and
+returns the deferred prompt without running it, `replies\=', the payloads sent
+so far, and `prompts\=', the prompts shown."
+  (declare (indent 1))
+  `(cooked-tests--with-kill "secret"
+     (with-temp-buffer
+       (let ((cooked-clipboard-read 'ask)
+             (program "cat")
+             (deferred nil)
+             (replies nil)
+             (prompts nil))
+         (cl-letf (((symbol-function 'y-or-n-p) ,answer)
+                   ((symbol-function 'yes-or-no-p) ,answer)
+                   ((symbol-function 'cooked--foreground-program) (lambda () program))
+                   ((symbol-function 'cooked--defer) (lambda (f) (setq deferred f)))
+                   ((symbol-function 'cooked--osc-52-reply)
+                    (lambda (_target payload) (push payload replies))))
+           (cl-flet ((query ()
+                       (cooked--osc-52-query '(?c))
+                       ;; The query has returned; the child is gone by the time
+                       ;; the prompt runs.
+                       (setq program "zsh")
+                       deferred))
+             ,@body))))))
+
+(ert-deftest cooked-osc-52-ask-is-not-answered-by-typeahead ()
+  "A `y\=' already queued when the prompt opens does not hand over the clipboard.
+
+The stub answers yes to any prompt that finds a `y\=' waiting, as `y-or-n-p\='
+does, so only discarding the input first keeps it out.  The prompt must also
+refuse the short answers a single key could give, and name the buffer and the
+program that asked, as it was when it asked."
+  (cooked-tests--osc-52-ask
+      (lambda (prompt)
+        (push prompt prompts)
+        (should-not use-short-answers)
+        (eq (car unread-command-events) ?y))
+    (let ((prompt (query))
+          (use-short-answers t))
+      (let ((unread-command-events (list ?y)))
+        (funcall prompt))
+      (should (equal replies '("")))
+      (should (string-search "cat" (car prompts)))
+      (should (string-search (buffer-name) (car prompts)))
+      (should-not cooked--clipboard-prompting))))
+
+(ert-deftest cooked-osc-52-ask-answers-empty-when-the-prompt-fails ()
+  "An error inside the prompt is an empty reply, since the child still waits.
+
+For example a daemon with no usable frame to prompt on."
+  (cooked-tests--osc-52-ask
+      (lambda (_prompt) (error "No usable frame"))
+    (let ((inhibit-message t))
+      (ignore-errors (funcall (query))))
+    (should (equal replies '("")))
+    (should-not cooked--clipboard-prompting)))
 
 (ert-deftest cooked-osc-52-read-over-the-size-bound-is-answered-empty ()
   "`cooked-clipboard-max-size\=' bounds replies as it bounds writes.  A kill that
@@ -1389,7 +1450,7 @@ deferred prompt rather than in the filter."
                       (when (and fmt (string-search "cooked-clipboard-max-size" fmt))
                         (push (apply #'format fmt args) refusals))
                       (apply real-message fmt args)))
-                   ((symbol-function 'y-or-n-p) (lambda (_) t)))
+                   ((symbol-function 'yes-or-no-p) (lambda (_) t)))
           (cooked-tests--osc-52-replies "\\033]52;c;?\\007"
             (should (equal (replies (lambda (s) (not (string-empty-p s))))
                            "\033]52;c;\007"))

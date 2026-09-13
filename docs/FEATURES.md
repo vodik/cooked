@@ -195,8 +195,9 @@ neovim's OSC 52 paste provider hangs on a terminal that stays silent. What the a
 holds is `cooked-clipboard-read`. The default, nil, answers every query with an empty
 payload, since replying with the clipboard would hand it to whatever asked. `private`
 answers only the cut buffers `0`–`7`, which OSC 52 writes fill per buffer and which never
-reach the kill ring. `ask` prompts, naming the program, before handing over the
-clipboard. `t` answers from the kill ring, or PRIMARY for `p`, without asking. A reply
+reach the kill ring. `ask` prompts, naming the buffer and the program, before handing
+over the clipboard, and wants a typed `yes` so that a `y` meant for the program cannot
+answer it. `t` answers from the kill ring, or PRIMARY for `p`, without asking. A reply
 larger than `cooked-clipboard-max-size` goes out empty, with a message saying so.
 
 A child asking to resize the terminal (`resize -s`, or `CSI 8 ; rows ; cols t`) is refused
