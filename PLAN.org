@@ -591,6 +591,34 @@ links. Fixed rather than filtered: a crate-root allow for the private-item
 class, and docs built with =--document-private-items= — without which rustdoc
 documents about four items and checks almost no links at all.
 
+** NEXT [#B] The evil blank-row bug, and what else evil edits
+:PROPERTIES:
+:EFFORT:   2h
+:REPORT:   none — found by the first bench fixture containing a blank row
+:BRANCH:   73b2a6d for the fix; the sweep is what remains
+:END:
+*Fixed* (73b2a6d): entering evil insert state arms =evil-maybe-remove-spaces= on
+=post-command-hook= and leaving calls it, and it deletes the whitespace from a
+line holding nothing else. In a cooked buffer that line is a *screen row* and
+its spaces are cells the child put there, so the grid said eight columns and the
+buffer said none. Reproduced end to end and refused wholesale.
+
+*What remains is the question the bug implies*, which is bigger than the bug:
+=evil-maybe-remove-spaces= is not the only thing evil does to a buffer on its
+own initiative, and cooked's buffer is not an ordinary one. Sweep evil for
+anything else that edits text outside a command the user typed — auto-indent on
+state change, =evil-cleanup-insert-state=, the repeat machinery replaying edits,
+=evil-maybe-remove-spaces='s siblings. Each one is a candidate for the same
+failure, and the failure is silent.
+
+The general shape is worth stating because it will recur beyond evil: *anything
+that tidies whitespace treats a terminal row as slack*. =delete-trailing-whitespace=
+on save, =ws-butler=, =whitespace-cleanup=, an editorconfig hook. A cooked buffer
+should probably refuse all of them the way it now refuses this one.
+
+Done when: the sweep has a verdict per candidate, and whatever it finds is either
+fixed or written down as declined.
+
 ** DONE [#C] Test-suite ergonomics
 :PROPERTIES:
 :EFFORT:   4h
@@ -963,13 +991,19 @@ The merge hazard =cooked-adjacent-box-glyphs-do-not-share-a-display-property=
 guards does *not* apply: a spec sized to exactly the range it covers is meant to
 merge.
 
-** WIP [#B] An image case in the bench suite
+** DONE [#B] An image case in the bench suite
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   none — found while landing the row-range image work
-:BRANCH:   cooked/bench-fixtures
-:AGENT:    yes
+:BRANCH:   880a296
 :END:
+*Both* fixtures, image and scroll, since the scroll work hit the same gap. The
+image change measures 1943 → *47* intervals and 5.98–7.15 → *2.28–2.42* ms p50,
+the scroll one 24 → *1* damaged rows and 0.098–0.102 → *0.039–0.041* ms.
+
+A third trap beyond the two 116572d found: =cooked-bench--update= defaulted
+=:height= to the number of rows *damaged*, which for a shift is one — and
+=cooked--fit-screen= obeys it by deleting the 23 rows the shift just preserved.
 =cooked-bench.el= has no image fixture: every case is box drawing or plain text.
 So the change that took a frame of picture from 1944 =display= intervals to 48
 could only be shown by counting intervals, and its before/after on the bench was
@@ -1036,14 +1070,29 @@ Note cooked already *beats* ghostel under a scroll region and on the alt screen,
 where their page-dirty flag degrades to a whole-viewport repaint. Do not
 regress that.
 
-** WIP [#B] Allocation per frame
+** DONE [#B] Allocation per frame
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §9 — the lever the =gc-cons-threshold= bracket was reaching for
 :GATE:     =make bench= must byte-compile
-:BRANCH:   cooked/allocation
-:AGENT:    yes
+:BRANCH:   0cdad13
 :END:
+*Closed as done, and the lead was a red herring in an interesting way.* The
+683-vs-299 conses are neither a leak nor an overstatement: instrumented, the
+packed walk over 192 spans conses *15 cells in total*, 0.08 per span, so the
+docstring is exactly right. The two conses per span are one layer down and are
+Emacs' own — =add_text_properties= builds a fresh plist per property per
+interval, 6.05 cells for three properties, 2.05 for one.
+
+Every cons of a styled frame now accounted for: 53 floor + 384 spans + *1300
+from =cooked--protect=* + 13 = 1750. So *96% is the interval machinery and
+=protect= is three quarters of it* — not the render, which is where the task and
+I both expected to look.
+
+One lever measured and declined: moving =rear-nonsticky= to
+=text-property-default-nonsticky= is behaviourally identical and saves 430 cells,
+which buys nothing measurable — 7 KB against an 800 KB threshold.
+=cooked-bench-allocation= is now in =make bench= so this is re-checkable.
 Refusing the GC bracket above leaves the real question standing: *the only thing
 that removes a collection is not allocating.* Compiled, a styled 24x80 apply
 still conses 1,858 cells and a box frame 432 vec-slots, and the residual p99
@@ -1057,14 +1106,29 @@ conses 683 against plain's 299, about *two conses per style span* on a path
 whose docstring describes it as allocation-free per span. Either a real leak in
 the packed walk or a docstring that overstates; find out which.
 
-** WIP [#B] =adjustRegion= mechanical floor
+** DONE [#B] =adjustRegion= mechanical floor
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §7 "Marker preservation"
 :GATE:     Coalesce contiguous damaged rows into one Block
-:BRANCH:   cooked/adjust-region
-:AGENT:    yes
+:BRANCH:   c000dfe
 :END:
+*Both drawer notes were true and neither closed it* — four tests were watched to
+fail on main. The freeze *lifting* releases a catch-up drain, and by then
+=mark-active= is nil so =cooked--deactivate-mark= has nothing to say; the mark
+collapses to the rewritten row's start, which is where the next
+\\[exchange-point-and-mark] goes.
+
+*One departure from =adjustRegion=, forced by coalescing.* ghostel replaces one
+row per edit, so clamping an inside position to the region's new end is exact.
+cooked coalesces, so a full-height repaint is a *single* edit and that clamp
+would put a mark from row 1 at the last column of row 23. The row table already
+says where each row begins, so a position keeps row *and* column — degenerating
+to ghostel's answer for a one-row run.
+
+Evidence the two positions were genuinely uncarried, and that they are separate
+bugs: a mark collapses to the run's *start*, a =window-point= is pushed to its
+*end*.
 Keep =editing=/=wandered=/=follow= exactly as they are — they answer questions
 arithmetic cannot. Add the floor underneath for the two cases that have no
 rescue today: the *mark* (currently just deactivated) and the =window-point= of
@@ -1186,14 +1250,30 @@ the matching bounds alist, and =file-name-at-point-functions=. Installed from
 straddle is the point. embark, =browse-url-at-point=, ffap and =find-file='s
 =M-n= all light up with no embark dependency.
 
-** WIP [#B] Soft-wrap joining for detection
+** DONE [#B] Soft-wrap joining for detection
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   §6 detection matrix
 :GATE:     Deferred, coalesced link detection
-:BRANCH:   cooked/soft-wrap-join
-:AGENT:    yes
+:BRANCH:   bc05388
 :END:
+The flag rides the per-row table, which became =(START WIDTH UNIFORM WRAPPED)=
+— the right home for a fact the core knows about a rendered row that Emacs
+cannot see, where a parallel list would cost a cons per row per drain.
+
+*Two things the task did not name, without which it is not finished.*
+=cooked--fontify-region='s rounding had to widen from whole *buffer* lines to
+whole *logical* lines; and following went through =goto-address-at-point=, which
+reads the URL out of the text and so would have opened the fragment point is in.
+
+*=cooked-link.el='s Commentary was wrong and is rewritten.* It said closing this
+gap "means detecting links against the *grid* rather than the buffer, which is a
+different design and a much larger one". It does not — one bool per damaged row
+and ghostel's join. §6's matrix was right; the file's own note overstated it.
+
+Known limitation, documented rather than fixed: with =cooked-rejoin-wrapped-lines=
+*off*, scrollback rows stay separate and carry no wrap flag, so a URL wrapped up
+there is still unmatched. The live screen is covered either way.
 Closes cooked's one documented detection gap: a URL wrapped across a live row.
 Prerequisite — =Row::wrapped= exists (=screen.rs:99=) but is used only for the
 eviction rejoin, so it needs exposing in the drain blocks.
