@@ -47,6 +47,18 @@ impl CursorShape {
             _ => None,
         }
     }
+
+    /// The DECSCUSR parameter that sets this shape, blinking or not: the inverse of
+    /// [`CursorShape::from_param`], for DECRQSS. `0` never comes back, being a synonym
+    /// for `1`.
+    fn param(self, blink: bool) -> u8 {
+        let steady = match self {
+            Self::Block => 2,
+            Self::Underline => 4,
+            Self::Bar => 6,
+        };
+        steady - u8::from(blink)
+    }
 }
 
 /// Where in the output stream a mark landed.
@@ -1020,6 +1032,15 @@ impl Term {
 struct Modes {
     cursor_visible: bool,
     cursor_shape: CursorShape,
+    /// Whether the last DECSCUSR asked for the blinking spelling of its shape.
+    ///
+    /// Never rendered -- blink is `blink-cursor-mode`'s, as [`CursorShape`] says -- and
+    /// kept only so that DECRQSS can hand back the setting the child made rather than a
+    /// neighbouring one. A child that saves the cursor style, changes it and restores it
+    /// is owed its own number back; answering `2 q` to a child that set `1 q` would be
+    /// cooked quietly rewriting its request. Starts set, because `CSI 0 SP q` is the
+    /// power-on style and DECSCUSR defines 0 as a blinking block.
+    cursor_blink: bool,
     /// DEC mode 2004. No event: nothing reacts to this. It is read at the one moment it
     /// matters, by [`Term::bracketed_paste`] as a multi-line submission is being framed.
     bracketed_paste: bool,
@@ -1084,6 +1105,7 @@ impl Default for Modes {
             // DECTCEM: the one mode whose power-on value is not the zero value.
             cursor_visible: true,
             cursor_shape: CursorShape::default(),
+            cursor_blink: true,
             bracketed_paste: false,
             focus_events: false,
             alt_scroll: false,
@@ -1104,6 +1126,23 @@ impl Default for Modes {
     }
 }
 
+/// A DCS string cooked answers, with its payload so far.
+///
+/// Both are collected whole and acted on at the terminator, because neither means
+/// anything until it is complete; what differs is how much either may hold.
+enum DcsString {
+    /// `DCS P1;P2;P3 q` -- a picture. Collected rather than decoded incrementally because
+    /// a sixel's size is not known until its last band -- see [`sixel::decode`].
+    Sixel(Vec<u8>),
+    /// `DCS $ q Pt` -- DECRQSS, naming a setting in at most two bytes. Capped at
+    /// [`DECRQSS_BODY_LIMIT`], which is past the longest name answered, so an over-long
+    /// request is still refused rather than truncated into a valid one.
+    StatusRequest(Vec<u8>),
+}
+
+/// How much of a DECRQSS payload is kept. See [`DcsString::StatusRequest`].
+const DECRQSS_BODY_LIMIT: usize = 3;
+
 #[derive(Default)]
 struct State {
     primary: Screen,
@@ -1119,12 +1158,11 @@ struct State {
     links: LinkStore,
     /// Destinations first seen since the last drain, awaiting their one trip to Lisp.
     pending_links: Vec<(LinkId, String)>,
-    /// The body of a sixel DCS string being collected, if one is open.
+    /// The DCS string being collected, if one is open and it is one of ours.
     ///
     /// `None` for every other DCS: the parser hands over the payload of whatever string
-    /// is running, and only `q` is ours. Collected rather than decoded incrementally
-    /// because a sixel's size is not known until its last band -- see [`sixel::decode`].
-    sixel: Option<Vec<u8>>,
+    /// is running, and only the introducers [`DcsString`] names are collected.
+    dcs: Option<DcsString>,
     /// The cell size Emacs reports, for turning pixels into a cell rectangle.
     metrics: CellMetrics,
     /// The light/dark scheme Emacs reports, for answering `CSI ? 996 n`.

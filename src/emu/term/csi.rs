@@ -872,8 +872,10 @@ impl State {
             // DECSCUSR. A level, not an event: the shape is state Emacs renders from,
             // so it rides the drain rather than arriving twice.
             (Some(b' '), 'q') => {
-                if let Some(shape) = CursorShape::from_param(params.arg(0, 1)) {
+                let param = params.arg(0, 1);
+                if let Some(shape) = CursorShape::from_param(param) {
                     self.modes.cursor_shape = shape;
+                    self.modes.cursor_blink = param < 2 || param % 2 == 1;
                 }
             }
             // DECSTR. Unlike RIS this keeps the screen and the scrollback.
@@ -920,5 +922,48 @@ impl State {
             _ => return false,
         }
         true
+    }
+
+    /// DECRQSS, `DCS $ q Pt ST`: answer with the sequence that would recreate the
+    /// setting NAME names, as `DCS 1 $ r <sequence> ST`, or `DCS 0 $ r ST` for a name
+    /// not answered.
+    ///
+    /// Beside the CSI reports rather than with the DCS plumbing in graphics.rs because
+    /// every setting it can name is a CSI one, and the answer is read off the same state
+    /// those arms write. What is answered is what cooked implements and nothing more:
+    ///
+    /// - `m`, the pen, spelled by [`sgr::describe`](crate::emu::sgr::describe) so that it
+    ///   parses back through the one decoder to the same pen. This is the one a real
+    ///   client leans on: neovim sets `48:2::1:2:3`, asks, and turns on `termguicolors`
+    ///   if it gets the colour back -- the truecolour probe that works over ssh, where
+    ///   no terminfo entry is.
+    /// - `r`, DECSTBM, the active screen's region, one-based and inclusive as it is set.
+    /// - `SP q`, DECSCUSR, with the blink the child asked for; see `Modes::cursor_blink`.
+    /// - `"p`, DECSCL, as `62;1` -- VT220 level, matching the `62` in the primary DA, with
+    ///   7-bit controls, which are the only kind any reply here is sent in.
+    ///
+    /// `s` (DECSLRM) is refused with the rest: left and right margins are declined, and
+    /// answering with the full width would claim a setting a child cannot make.
+    ///
+    /// Every refusal still replies. The protocol has a spelling for "no", and a child
+    /// that asks and hears nothing waits out its timeout.
+    pub(super) fn status_report(&mut self, name: &[u8]) {
+        match name {
+            b"m" => {
+                let sgr = crate::emu::sgr::describe(self.pen, self.underline);
+                self.dcs_reply(format_args!("1$r{sgr}m"));
+            }
+            b"r" => {
+                let region = self.screen().region;
+                let (top, bottom) = (region.top + 1, region.bottom + 1);
+                self.dcs_reply(format_args!("1$r{top};{bottom}r"));
+            }
+            b" q" => {
+                let style = self.modes.cursor_shape.param(self.modes.cursor_blink);
+                self.dcs_reply(format_args!("1$r{style} q"));
+            }
+            b"\"p" => self.dcs_reply(format_args!("1$r62;1\"p")),
+            _ => self.dcs_reply(format_args!("0$r")),
+        }
     }
 }

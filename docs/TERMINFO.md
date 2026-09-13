@@ -82,6 +82,12 @@ capability names answers 0, a declined mode answers anything but 4 or is set by 
 capability, or one of the queries `u7`, `u9`, `RV` and `XR` goes unanswered. Re-adding
 `flash` without DECSCNM is the change it exists to refuse.
 
+DECRQSS (`DCS $ q Pt ST`) does the same for settings rather than modes: it answers the pen
+(`m`, as the SGR that recreates it, direct colour included), the scroll region (`r`), the
+cursor style (`SP q`) and the conformance level (`"p`, VT220 as DA1 says), and refuses
+everything else with `DCS 0 $ r ST`. The pen is what matters in practice: it is how neovim
+confirms truecolour over ssh, where the terminfo entry is not installed.
+
 Some requests are refused rather than merely unimplemented. `CSI 21t` reports the window
 title *on the child\'s input stream*, which turns a title the child set itself into typed
 input at your next prompt; `CSI 3t`, `4t`, `9t`, `10t` and `13t` move the frame, size it

@@ -254,9 +254,10 @@ impl State {
         }
     }
 
-    /// `ESC P ... q` — the start of a sixel image, and nothing else so far.
+    /// `ESC P ... q` — the start of a sixel image or of a DECRQSS, and nothing else so
+    /// far.
     ///
-    /// Every other DCS is let through untouched: DECRQSS, DECRSPS and the rest are not
+    /// Every other DCS is let through untouched: DECRSPS and the rest are not
     /// implemented, and collecting a payload we would only discard is worse than not
     /// collecting it. `ignore` is the parser saying the introducer was malformed.
     pub(super) fn dcs_hook(&mut self, intermediates: &[u8], ignore: bool, action: char) {
@@ -267,7 +268,11 @@ impl State {
         // P1, P2 and P3 are aspect ratio, background mode and grid size. None of the
         // three survives the trip: the picture is scaled to a cell rectangle, and what
         // "background" means here is Emacs' buffer face, which alpha already defers to.
-        self.sixel = (action == 'q' && intermediates.is_empty() && !ignore).then(Vec::new);
+        self.dcs = match (action, intermediates, ignore) {
+            ('q', [], false) => Some(DcsString::Sixel(Vec::new())),
+            ('q', [b'$'], false) => Some(DcsString::StatusRequest(Vec::new())),
+            _ => None,
+        };
     }
 
     /// A slice of the running DCS string's payload.
@@ -275,19 +280,26 @@ impl State {
     /// Slices rather than a call per byte is the vendored parser's doing, and it is what
     /// makes collecting a megabyte of sixel a handful of appends.
     pub(super) fn dcs_put(&mut self, bytes: &[u8]) {
-        if let Some(body) = &mut self.sixel {
-            // Truncated rather than dropped, unlike an over-long APC: a sixel body is a
-            // sequence of independent bands, so its prefix is a shorter picture and not
-            // a parse error. A child that overruns this gets the top of its image.
-            let room = SIXEL_BODY_LIMIT - body.len().min(SIXEL_BODY_LIMIT);
-            body.extend_from_slice(&bytes[..bytes.len().min(room)]);
-        }
+        // Truncated rather than dropped, unlike an over-long APC: a sixel body is a
+        // sequence of independent bands, so its prefix is a shorter picture and not a
+        // parse error. A child that overruns this gets the top of its image. A status
+        // request's limit is past every name it could validly carry, so there the
+        // truncation cannot turn a long request into a short one that is answered.
+        let (body, limit) = match &mut self.dcs {
+            Some(DcsString::Sixel(body)) => (body, SIXEL_BODY_LIMIT),
+            Some(DcsString::StatusRequest(body)) => (body, DECRQSS_BODY_LIMIT),
+            None => return,
+        };
+        let room = limit - body.len().min(limit);
+        body.extend_from_slice(&bytes[..bytes.len().min(room)]);
     }
 
-    /// The DCS string ended: decode what was collected, if it was a sixel.
+    /// The DCS string ended: act on what was collected, if it was one of ours.
     pub(super) fn dcs_unhook(&mut self) {
-        let Some(body) = self.sixel.take() else {
-            return;
+        let body = match self.dcs.take() {
+            Some(DcsString::Sixel(body)) => body,
+            Some(DcsString::StatusRequest(name)) => return self.status_report(&name),
+            None => return,
         };
         let Some(bitmap) = sixel::decode(&body) else {
             return;

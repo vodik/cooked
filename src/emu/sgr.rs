@@ -99,3 +99,73 @@ fn extended(param: &[u16], iter: &mut ParamsIter<'_>) -> Option<Color> {
         _ => None,
     }
 }
+
+/// PEN and UNDERLINE as the `CSI Ps m` parameters that would recreate them from nothing:
+/// [`apply`] run backwards, for DECRQSS.
+///
+/// Always led by `0`, which is what xterm sends and what makes the answer a *setting*
+/// rather than a delta: a child that saves the reply and replays it later gets this pen
+/// whatever the pen had become in between. neovim's truecolour probe accepts the reply
+/// with or without it.
+///
+/// Every value has exactly one spelling, chosen to be the one [`apply`] reads back to
+/// the same value, and that constraint decides the two cases where the protocol offers a
+/// choice:
+///
+/// - A palette index below 16 is written `31` or `91` rather than `38:5:1`. The two are
+///   one [`Color::Indexed`] once parsed, so nothing distinguishes them to answer with,
+///   and the short form is what every child that has not asked for 256 colours sent.
+/// - A direct colour is written in the colon form with an empty colour-space id,
+///   `48:2::1:2:3`. That is the only spelling that is a single parameter, so the reply
+///   cannot be misread by a parser that splits on semicolons first, and it is the form
+///   neovim sets and then looks for when it decides whether to turn on
+///   `termguicolors`.
+///
+/// Lossy exactly where [`apply`] is: `SGR 6` (rapid blink) reads back as `5`, and `21`
+/// as nothing, because the pen does not keep the difference. The answer describes the
+/// pen, not the bytes that built it.
+pub(crate) fn describe(pen: Style, underline: Color) -> String {
+    let mut out = String::from("0");
+    let mut push = |param: std::fmt::Arguments<'_>| {
+        use std::fmt::Write as _;
+        // Cannot fail: `String`'s `write_fmt` is infallible.
+        let _ = write!(out, ";{param}");
+    };
+    let attrs = pen.attrs;
+    for (flag, code) in [(Attrs::BOLD, 1), (Attrs::FAINT, 2), (Attrs::ITALIC, 3)] {
+        if attrs.contains(flag) {
+            push(format_args!("{code}"));
+        }
+    }
+    match attrs.underline_style() {
+        0 => {}
+        1 => push(format_args!("4")),
+        style => push(format_args!("4:{style}")),
+    }
+    for (flag, code) in [
+        (Attrs::BLINK, 5),
+        (Attrs::REVERSE, 7),
+        (Attrs::CONCEAL, 8),
+        (Attrs::STRIKE, 9),
+    ] {
+        if attrs.contains(flag) {
+            push(format_args!("{code}"));
+        }
+    }
+    // The base is the parameter that introduces the extended form, 38, 48 or 58; the
+    // short forms sit at fixed offsets from it only for the first two, which is why
+    // the underline colour passes `false` and always takes the long spelling.
+    let mut color = |color: Color, base: u16, short: bool| match color {
+        Color::Default => {}
+        Color::Indexed(i) if short && i < 8 => push(format_args!("{}", base - 8 + u16::from(i))),
+        Color::Indexed(i) if short && i < 16 => {
+            push(format_args!("{}", base + 52 + u16::from(i) - 8))
+        }
+        Color::Indexed(i) => push(format_args!("{base}:5:{i}")),
+        Color::Rgb(r, g, b) => push(format_args!("{base}:2::{r}:{g}:{b}")),
+    };
+    color(pen.fg, 38, true);
+    color(pen.bg, 48, true);
+    color(underline, 58, false);
+    out
+}
