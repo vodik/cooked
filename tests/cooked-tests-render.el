@@ -2393,9 +2393,6 @@ catch it -- the text was never wrong, only what was hung on it."
     ;; want the slot held at its budgeted width.
     (should-not (cooked--glyph-fits-p '(15 15 5 15) 18 default))))
 
-(provide 'cooked-tests-render)
-;;; cooked-tests-render.el ends here
-
 ;;;; Inline images
 ;;
 ;; Driven through `cooked--apply' with a synthetic update rather than through a
@@ -3368,3 +3365,58 @@ rectangle of exactly the right size in exactly the right place, which is what a
       (cooked--apply (cooked-tests--image-update 2 3 1 (make-string 300 ?x)))
       (should (gethash 2 cooked--image-data))
       (should-not (cooked-tests--image-cells-without-display)))))
+
+(ert-deftest cooked-a-line-written-back-unchanged-is-not-rewritten ()
+  "A child that erases a line and writes the same text back leaves the row alone.
+
+The core compares the row with its copy of what Emacs holds and leaves it out of
+the drain, so the buffer text is never deleted and reinserted.  A marker in the
+middle of the row is the witness: a rewrite collapses it to the start of the
+row, and an untouched row keeps it where it was.  The write to row 2 afterwards
+is only there to say the rewrite has arrived."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'status'; sleep 0.3; printf '\\033[1;1H\\033[2Kstatus\\033[2;1Hdone'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "status" (cooked-tests--text)))))
+    (let ((marker (save-excursion
+                    (goto-char (cooked--screen-start-position))
+                    (copy-marker (+ (point) 3)))))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "done" (cooked-tests--text)))))
+      (should (= (- marker (cooked--screen-start-position)) 3)))))
+
+(ert-deftest cooked-a-row-the-guard-trimmed-is-forgotten-by-the-core ()
+  "Each row the width guard shortens is reported to the core by its screen index.
+
+The core would otherwise match a later repaint of the same cells against the
+text it sent, which is no longer what the buffer holds."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one\\ntwo'; sleep 5")
+    (cooked-tests--display-buffer)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "two" (cooked-tests--text)))))
+    (let ((cooked-rejoin-wrapped-lines t)
+          (unsent nil))
+      (cl-letf (((symbol-function 'cooked--guard-row-width) (lambda (&rest _) t))
+                ((symbol-function 'cooked--row-unsent)
+                 (lambda (_session row) (push row unsent))))
+        (cooked--redraw cooked--session)
+        (cooked--apply (cooked--drain cooked--session t)))
+      (should (member 0 unsent))
+      (should (member 1 unsent)))))
+
+(ert-deftest cooked-a-theme-change-makes-the-core-send-every-row-again ()
+  "A theme change leaves faces resolved against the old theme on every row.
+
+So the core is told its copy of the screen is out of date, and a child
+repainting the same cells afterwards gets them in the new colours."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one'; sleep 5")
+    (let ((unsent nil)
+          (session cooked--session))
+      (cl-letf (((symbol-function 'cooked--row-unsent)
+                 (lambda (handle row) (push (cons handle row) unsent))))
+        (cooked--flush-face-cache))
+      (should (member (cons session nil) unsent)))))
+
+(provide 'cooked-tests-render)
+;;; cooked-tests-render.el ends here

@@ -225,6 +225,18 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// deleted, and archiving would return them to the buffer as scrollback.
         "cooked--remove-rows" 3..=3 => remove_rows;
 
+        /// Tell SESSION that Emacs has edited its own text for screen row ROW.
+        ///
+        /// The core keeps a copy of what Emacs is showing, and leaves a damaged row out of
+        /// the next drain when it matches that copy -- a program that erases a line and
+        /// writes the same text back costs nothing.  An edit Lisp makes to a live row
+        /// itself, such as the width guard deleting characters off a row that wrapped,
+        /// makes the copy wrong for that row, and this says so: the row is sent the next
+        /// time it is damaged, whatever it holds.  ROW nil forgets every row, for a theme
+        /// change, after which a repaint of the same cells has to arrive in the new
+        /// colours.
+        "cooked--row-unsent" 2..=2 => row_unsent;
+
         /// Set SESSION's redisplay interval to MILLISECONDS and its backlog to LIMIT.
         ///
         /// Only the first is a pace, and cooked has exactly one of those: the frame ceiling
@@ -598,6 +610,20 @@ fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
     let first = env.from_lisp::<i64>(args[1])?.max(0) as usize;
     let count = env.from_lisp::<i64>(args[2])?.max(0) as usize;
     handle(env, args[0])?.term().remove_rows(first, count);
+    Ok(env.nil())
+}
+
+fn row_unsent(env: Env, args: &[Value]) -> Result<Value> {
+    // A negative row names no row, which is the same no-op as one past the bottom.
+    let row = if env.is_nil(args[1]) {
+        None
+    } else {
+        match usize::try_from(env.from_lisp::<i64>(args[1])?) {
+            Ok(row) => Some(row),
+            Err(_) => return Ok(env.nil()),
+        }
+    };
+    handle(env, args[0])?.term().forget_sent(row);
     Ok(env.nil())
 }
 

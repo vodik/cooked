@@ -649,6 +649,9 @@ chance when it is displayed.  Computing WINDOW means asking
 that per row would run `select-window' advice in the middle of a render; see
 docs/DESIGN.md.
 
+Returns non-nil when characters were deleted, which makes the buffer\='s row
+differ from what the core sent; the caller says so with `cooked--row-unsent\='.
+
 The cut is marked with the truncation bitmap `truncate-lines' would show, by
 hand, because `cooked-rejoin-wrapped-lines' keeps `truncate-lines' off
 buffer-wide so a genuinely wrapped scrollback line still reflows for free.
@@ -672,7 +675,8 @@ was mismeasured rather than an adjacent one."
           (when (and (cooked--row-wraps-p start end window memo hash)
                      (cooked--trim-to-one-line start window))
             (goto-char start)
-            (cooked--mark-truncation start (1- (line-end-position)) window)))))))
+            (cooked--mark-truncation start (1- (line-end-position)) window)
+            t))))))
 
 (defcustom cooked-truncation-bitmap nil
   "Fringe bitmap `cooked--truncation-bitmap' draws for a trimmed row.

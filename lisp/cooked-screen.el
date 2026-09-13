@@ -23,6 +23,8 @@
 (require 'cooked-link)
 (require 'cooked-guard)
 
+(cooked--declare-core)
+
 ;;;; Locating a cell in the buffer
 ;;
 ;; The grid outlives the text.  A redraw deletes and reinserts whole rows, so a
@@ -1011,19 +1013,24 @@ which has no such seam at all."
                 ;; wider than that, and its layout hash.  All three are
                 ;; by-products of the core building the row, so the guard need
                 ;; not measure them; see `cooked--guard-row-width'.
-                (when (and layout cells)
-                  (cooked--guard-row-width
-                   pos cells layout
-                   (if (eq uniform 'glyph)
-                       (if (eq glyphs-drawn 'unset)
-                           (setq glyphs-drawn
-                                 (and cooked-box-drawing-images
-                                      (image-type-available-p 'xbm)
-                                      (cooked--deco-cell-size)
-                                      t))
-                         glyphs-drawn)
-                     uniform)
-                   cache hash))
+                (when (and layout cells
+                           (cooked--guard-row-width
+                            pos cells layout
+                            (if (eq uniform 'glyph)
+                                (if (eq glyphs-drawn 'unset)
+                                    (setq glyphs-drawn
+                                          (and cooked-box-drawing-images
+                                               (image-type-available-p 'xbm)
+                                               (cooked--deco-cell-size)
+                                               t))
+                                  glyphs-drawn)
+                              uniform)
+                            cache hash)
+                           (user-ptrp cooked--session))
+                  ;; The guard deleted characters off the row, so what Emacs shows
+                  ;; is no longer what the core sent, and a repaint of the same
+                  ;; cells has to be sent rather than matched against its copy.
+                  (cooked--row-unsent cooked--session (+ index i)))
                 (goto-char pos)
                 ;; After the guard, which is the one thing in this loop that can
                 ;; shorten a row -- and so move the newline this is about.
@@ -1055,6 +1062,20 @@ which has no such seam at all."
                       i (1+ i)
                       pos (min (1+ eol) (point-max)))))))))
     (nreverse rendered)))
+
+(defun cooked--forget-sent-rows ()
+  "Make the core send every live row again the next time it is damaged.
+
+The core leaves a damaged row out of a drain when its cells match what it last
+sent, which is right while the text Emacs holds for the row is still what that
+drain rendered.  A theme change breaks that without touching a character: the
+faces on the rows were resolved against the old theme, and a full-screen
+program that repaints the same frame afterwards expects the new colours.  On
+`cooked-theme-change-hook\=', which runs with each buffer current."
+  (when (user-ptrp cooked--session)
+    (cooked--row-unsent cooked--session nil)))
+
+(add-hook 'cooked-theme-change-hook #'cooked--forget-sent-rows)
 
 (defun cooked--notify-rows-rendered (bounds)
   "Hand BOUNDS, this drain\='s rewritten live rows, to the optional layers.

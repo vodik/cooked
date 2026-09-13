@@ -23,6 +23,7 @@ use screens::{PerScreen, ScreenId};
 use std::collections::{HashSet, VecDeque};
 
 mod csi;
+mod front;
 mod graphics;
 mod keys;
 mod modes;
@@ -710,6 +711,16 @@ impl Term {
     pub fn touch_all(&mut self) {
         self.state.screen_mut().touch_all();
         self.state.marks_dirty = true;
+        self.state.forget_sent(None);
+    }
+
+    /// Emacs has edited its own text for screen row INDEX, or for every row when INDEX is
+    /// `None`, so the row is sent the next time it is damaged even if its cells match what
+    /// was sent last. The width guard deleting characters off a row that wrapped is the
+    /// edit this exists for, and a theme change is the reason for the whole-screen form: a
+    /// repaint of the same cells has to pick up the new colours.
+    pub fn forget_sent(&mut self, index: Option<usize>) {
+        self.state.forget_sent(index);
     }
 
     /// Remove `count` grid rows starting at `first`; see [`Screen::remove_rows`].
@@ -1063,6 +1074,9 @@ struct State {
     /// child answers a resize by redrawing, and a snapshot taken at the resize would be
     /// stale by however many rows it scrolls before the drain.
     marks_dirty: bool,
+    /// What Emacs is showing of the live screen, so a drain can leave out a damaged row
+    /// that ended up the same as the copy it already has. See [`front`].
+    front: front::Front,
     /// Marks that have left the grid since the last drain, with the absolute rows they
     /// left on.
     ///

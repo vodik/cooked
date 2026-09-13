@@ -62,6 +62,7 @@ fn run_style(t: &Term, text: &str) -> (Style, Color) {
 }
 
 mod decrqss;
+mod front;
 mod images;
 mod keyboard;
 mod marks;

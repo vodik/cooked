@@ -32,7 +32,7 @@
       cooked--image-forget cooked--job-control cooked--kill
       cooked--live-p cooked--make-filter cooked--pid
       cooked--prompt-text cooked--ready cooked--redraw
-      cooked--remove-rows cooked--reply-osc cooked--resize
+      cooked--remove-rows cooked--reply-osc cooked--resize cooked--row-unsent
       cooked--sample-mode cooked--send cooked--set-attended
       cooked--set-color-scheme cooked--set-graphics-shown cooked--set-tuning
       cooked--signal cooked--spawn)

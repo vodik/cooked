@@ -8,7 +8,7 @@
 //!
 //! The first half is written against `Delta::rows` alone, no `Delta::shifts`, so that the
 //! same file can be run against a build from before this change and say what a scroll cost
-//! there: 24, 6, 24, 24 and 13 against the 1, 1, 1, 1 and 3 asserted below. Keeping that
+//! there: 24, 6, 24, 24 and 13 against the 0, 0, 0, 0 and 0 asserted below. Keeping that
 //! property is worth the small awkwardness, because a damage figure nobody can reproduce
 //! against the old code is a claim rather than a measurement.
 //!
@@ -47,15 +47,16 @@ fn damage(script: &[u8]) -> usize {
 fn an_ordinary_scroll_damages_only_the_row_it_opened() {
     // A line feed on the last row: the commonest thing a terminal is asked to do, and
     // the case the report measured at 25 rows against ghostel's 2. Rows 0..22 moved and
-    // row 23 is new, so one row is damaged and nothing else.
-    assert_eq!(damage(b"\x1b[24;1H\n"), 1);
+    // row 23 is new. The new row is blank, and Emacs opened an empty line for it when it
+    // applied the shift, so nothing at all is sent.
+    assert_eq!(damage(b"\x1b[24;1H\n"), 0);
 }
 
 #[test]
 fn a_scroll_region_damages_only_the_row_it_opened() {
     // cooked already beat ghostel here — their page-dirty flag turns a three-row status
-    // region into a whole-viewport repaint — and the floor is the same one row.
-    assert_eq!(damage(b"\x1b[5;10r\x1b[10;1H\n"), 1);
+    // region into a whole-viewport repaint — and the floor is the same as a full scroll.
+    assert_eq!(damage(b"\x1b[5;10r\x1b[10;1H\n"), 0);
 }
 
 #[test]
@@ -70,22 +71,31 @@ fn a_scroll_on_the_alt_screen_damages_only_the_row_it_opened() {
     }
     term.drain();
     term.feed(b"\x1b[24;1H\n");
-    assert_eq!(term.drain().rows.len(), 1);
+    assert_eq!(term.drain().rows.len(), 0);
 }
 
 #[test]
 fn a_reverse_scroll_damages_only_the_row_it_opened() {
     // `RI` at the top of the region: the same trade in the other direction, and what a
     // pager scrolling backwards does on every keystroke.
-    assert_eq!(damage(b"\x1b[1;1H\x1bM"), 1);
+    assert_eq!(damage(b"\x1b[1;1H\x1bM"), 0);
 }
 
 #[test]
 fn insert_and_delete_line_damage_only_what_they_opened() {
     // `IL`/`DL` were already at what the report calls the correct minimum — every row
-    // from the cursor down — and are now at the real one: the lines the operator made.
-    assert_eq!(damage(b"\x1b[12;1H\x1b[3L"), 3);
-    assert_eq!(damage(b"\x1b[12;1H\x1b[3M"), 3);
+    // from the cursor down — and are now at the real one: the lines the operator made,
+    // which are blank and so already match the empty lines Emacs opened for them.
+    assert_eq!(damage(b"\x1b[12;1H\x1b[3L"), 0);
+    assert_eq!(damage(b"\x1b[12;1H\x1b[3M"), 0);
+}
+
+#[test]
+fn an_opened_row_with_a_background_is_still_sent() {
+    // With `bce` a scroll paints the opened row in the pen's background, which the empty
+    // line Emacs opened does not have, so that row is sent.
+    assert_eq!(damage(b"\x1b[44m\x1b[24;1H\n"), 1);
+    assert_eq!(damage(b"\x1b[44m\x1b[12;1H\x1b[3L"), 3);
 }
 
 #[test]
@@ -169,5 +179,5 @@ fn a_write_that_rides_a_scroll_is_reported_at_the_index_it_ended_at() {
     term.feed(b"\x1b[6;1Hmarker\x1b[24;1H\n");
     let delta = term.drain();
     let rows: Vec<usize> = delta.rows.iter().map(|r| r.index).collect();
-    assert_eq!(rows, vec![4, 23]);
+    assert_eq!(rows, vec![4]);
 }

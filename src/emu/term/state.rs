@@ -183,6 +183,9 @@ impl State {
     /// to cutting at the cursor, which is wrong for a multi-line prompt.
     pub(super) fn remove_rows(&mut self, first: usize, count: usize) {
         self.screen_mut().remove_rows(first, count);
+        // The rows below the cut moved on the grid and not in the buffer, and they are all
+        // damaged; forgetting them sends them, as it did before there was a copy to consult.
+        self.front.forget_from(first);
         // The alt grid holds a running program's frame, not a transcript; no anchor
         // points into it, and the primary's rows have not moved.
         if self.shown.is_alternate() {
@@ -223,6 +226,8 @@ impl State {
         // up. Every mark is reported, not only those a rewrap re-laid: a height-only change
         // evicts too, and re-anchoring a mark where it already was costs one `set-marker'.
         self.marks_dirty = true;
+        // Every row is re-laid and sent whole, so nothing the copy holds is worth trusting.
+        self.forget_sent(None);
         let evicted = self.screens.primary.resize(rows, cols, Resize::Rewrap);
         // The alt screen contributes no scrollback -- it is a fixed-size scratch grid,
         // never transcript -- so its rewrap has nothing to hand anyone.
@@ -315,6 +320,7 @@ impl State {
         // scrolls in between moves every mark still on the grid with its row.
         let marks = self.take_marks();
         let levels = Levels::of(self);
+        let rows = self.damaged_rows(damaged, &shifts, levels.cursor);
         let screen = self.screen();
         Delta {
             images,
@@ -322,16 +328,7 @@ impl State {
             scrolled,
             scrolled_base,
             shifts,
-            rows: damaged
-                .into_iter()
-                .filter_map(|i| {
-                    screen.row(i).map(|r| DamagedRow {
-                        index: i,
-                        wrapped: r.wrapped(),
-                        runs: r.runs(),
-                    })
-                })
-                .collect(),
+            rows,
             height: screen.height(),
             used: screen.used(),
             // The seam is a property of the primary: the alt screen contributes no
@@ -340,6 +337,62 @@ impl State {
             levels,
             events,
             marks,
+        }
+    }
+
+    /// The damaged rows Emacs does not already have, recording them as sent.
+    ///
+    /// SHIFTS are applied to the copy first, as Emacs applies them to its text, because the
+    /// damage indices are in the coordinates they leave behind. Then a damaged row that
+    /// matches the copy is left out, which is a repaint that wrote the same thing back.
+    ///
+    /// On the primary screen, the rows below `used` are forgotten afterwards. Emacs trims
+    /// its screen region to that many lines, so whatever it held for them is gone, and a
+    /// background wash drawn there later must be sent rather than matched against a copy of
+    /// text the buffer no longer has.
+    fn damaged_rows(
+        &mut self,
+        damaged: Vec<usize>,
+        shifts: &[Shift],
+        cursor: Cursor,
+    ) -> Vec<DamagedRow> {
+        let (height, width) = (self.screen().height(), self.screen().width());
+        if !self.front.fits(height, width) {
+            self.front.reset(height, width);
+        }
+        for shift in shifts {
+            self.front.shift(*shift);
+        }
+        let screen = &self.screens[self.shown];
+        let front = &mut self.front;
+        let rows = damaged
+            .into_iter()
+            .filter_map(|index| {
+                let row = screen.row(index)?;
+                let at = (cursor.row == index).then_some(cursor.col as u16);
+                if front.matches(index, row, at) {
+                    return None;
+                }
+                front.record(index, row, at);
+                Some(DamagedRow {
+                    index,
+                    wrapped: row.wrapped(),
+                    runs: row.runs(),
+                })
+            })
+            .collect();
+        if !self.shown.is_alternate() {
+            self.front.forget_from(self.screen().used());
+        }
+        rows
+    }
+
+    /// Emacs has changed its own text for row INDEX, or for every row when INDEX is `None`,
+    /// so the next time the row is damaged it has to be sent whatever it holds.
+    pub(super) fn forget_sent(&mut self, index: Option<usize>) {
+        match index {
+            Some(index) => self.front.forget(index),
+            None => self.front.forget_from(0),
         }
     }
 
@@ -367,5 +420,6 @@ impl State {
         // No event to match: `Levels::alt` is the level, and Lisp acts on that. See the
         // note on `Event` about not sending the same state two ways.
         self.screen_mut().touch_all();
+        self.forget_sent(None);
     }
 }
