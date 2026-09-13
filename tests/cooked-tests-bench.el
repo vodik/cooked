@@ -61,13 +61,10 @@ whichever of the two happened to be tested."
     (dolist (case '((#x01000002 2)          ; tag 1, indexed 2
                     (#x020A141E (10 20 30)))) ; tag 2, rgb
       (pcase-let* ((`(,packed-fg ,spec) case)
-                   ;; Offset 8 is where `cooked--render-block' hands the reader a
-                   ;; record: START and END are the walker's business, the
-                   ;; rendition is the face layer's.
                    (record (apply #'unibyte-string
                                   (cooked-bench--style-record
                                    0 4 packed-fg 0 0 cooked--attr-bold))))
-        (should (equal (cooked--face-packed record 8)
+        (should (equal (cooked--face-packed record 0)
                        (cooked--face spec nil cooked--attr-bold nil)))))))
 
 (ert-deftest cooked-bench-box-rows-carry-one-record-per-run-not-per-cell ()

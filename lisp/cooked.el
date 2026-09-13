@@ -532,19 +532,8 @@ Returns the position the text was inserted at."
       ;; because the saving is entirely in the loops and there is nothing to buy
       ;; by moving it.
       (let ((inhibit-modification-hooks t))
-        ;; Walked with an index rather than mapped, because the whole reason
-        ;; the spans arrive packed is that nothing per span should be allocated
-        ;; on this path: no cons for the span, none for its colours, and none
-        ;; for the cache key `cooked--face-packed' looks the face up by.  See
-        ;; `Block::push_style'.
-        (let ((i 0)
-              (limit (length styles)))
-          (while (< i limit)
-            (when-let* ((face (cooked--face-packed styles (+ i 8))))
-              (put-text-property (+ start (cooked--u32 styles i))
-                                 (+ start (cooked--u32 styles (+ i 4)))
-                                 'face face))
-            (setq i (+ i cooked--style-record))))
+        (cooked--do-style-spans (from to face styles)
+          (put-text-property (+ start from) (+ start to) 'face face))
         ;; The row table and the decoration spans are both in ascending offset
         ;; order, so which row a span fell on is a pointer walked forward once
         ;; across the whole block rather than a search per span.  `rest' is the

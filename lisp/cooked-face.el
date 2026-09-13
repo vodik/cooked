@@ -195,21 +195,30 @@ that was just computed — are handled separately in `cooked--face'.")
   "Whether BIT is set in the ATTRS bitmask."
   (/= 0 (logand attrs bit)))
 
-(defconst cooked--style-record 22
-  "Bytes in one packed style span.  See `Block::push_style\=' in src/lib.rs.
+(eval-and-compile
+  (defconst cooked--style-record 22
+    "Bytes in one packed style span.  See `Block::push_style\=' in src/lib.rs.
 
 The stride *is* the format: a reader finds the next span by adding this and
-never by decoding a length, which is what makes a hit cost four `aref\='s and no
-arithmetic at all.  The Rust side asserts the same number under `debug_assert\=',
-so a field added to the record on one side without widening it on both
-desynchronises the two at the second span of the first styled row -- where every
-span after it reads its neighbour\='s bytes and the buffer comes out miscoloured
-with nothing to point at.  Change it in three places or none.
+never by decoding a length.  The Rust side asserts the same number under
+`debug_assert\=', so a field added to the record on one side without widening
+it on both desynchronises the two at the second span of the first styled row,
+where every later span reads its neighbour\='s bytes and the buffer comes out
+miscoloured with nothing to point at.
 
-Here rather than beside `cooked--render-block\=', which was the only reader when
-it was written and is now one of two: `cooked-comint.el\=' walks the same records
-with the same stride and cannot require cooked.el.  The stride belongs with the
-decoder it steps between calls to, which is `cooked--face-packed\=' below.")
+The fields are at the offsets the constants below name, and those are the
+layout `Block::push_style\=' documents: START and END as `u32\=' character
+offsets, FG, BG and UNDERLINE as four-byte tagged colours, and ATTRS as a
+`u16\='.  They are available at compile time so that `cooked--do-style-spans\='
+and `cooked--face-packed\=' add literals rather than look up variables on the
+render path.")
+
+  (defconst cooked--style-start 0 "Offset of START in a style record.")
+  (defconst cooked--style-end 4 "Offset of END in a style record.")
+  (defconst cooked--style-fg 8 "Offset of FG in a style record.")
+  (defconst cooked--style-bg 12 "Offset of BG in a style record.")
+  (defconst cooked--style-underline 16 "Offset of UNDERLINE in a style record.")
+  (defconst cooked--style-attrs 20 "Offset of ATTRS in a style record."))
 
 (defconst cooked--color-tag-default 0)
 (defconst cooked--color-tag-indexed 1)
@@ -273,9 +282,8 @@ is a real limit of the encoding, the second is only a matter of speed."
 (defun cooked--face-packed (packed i)
   "Face plist for the rendition packed at offset I of PACKED.
 
-I points at the FG field of a style record -- see `Block::push_style\=' in
-src/lib.rs for the layout, of which this reads the trailing fourteen bytes: FG,
-BG and UNDERLINE as four-byte tagged colours, then ATTRS as a `u16\='.
+I is the start of a style record -- see `cooked--style-record\=' for the layout,
+of which this reads the rendition: FG, BG and UNDERLINE, then ATTRS.
 
 The whole point is that a hit decodes nothing.  The key is built from four
 `aref\='s of the two low bytes of each colour field, and the specs the face is
@@ -285,17 +293,19 @@ which a full-screen repaint takes a few dozen times and then never again.
 Memoized per buffer in `cooked--face-cache\=', the same table and the same
 lifetime as before, so `cooked--flush-face-cache\=' still reaches every resolved
 colour with one `clrhash\=' when the theme changes."
-  (let* ((attrs (cooked--u16 packed (+ i 12)))
-         (key (or (cooked--face-key (cooked--color-code packed i)
-                                    (cooked--color-code packed (+ i 4))
-                                    (cooked--color-code packed (+ i 8))
+  (let* ((fg (+ i (eval-when-compile cooked--style-fg)))
+         (bg (+ i (eval-when-compile cooked--style-bg)))
+         (ul (+ i (eval-when-compile cooked--style-underline)))
+         (attrs (cooked--u16 packed (+ i (eval-when-compile cooked--style-attrs))))
+         (key (or (cooked--face-key (cooked--color-code packed fg)
+                                    (cooked--color-code packed bg)
+                                    (cooked--color-code packed ul)
                                     attrs)
                   ;; An rgb colour somewhere in the rendition, so there is no fixnum
-                  ;; to be had -- and the key becomes the record's own fourteen
-                  ;; rendition bytes -- I points at FG, so that is I through I+14,
-                  ;; the four-byte colour triple plus the two of ATTRS -- which is the
-                  ;; one thing that always identifies it exactly.  One short unibyte string, compared by `equal' as a
-                  ;; memcmp rather than walked.
+                  ;; to be had.  The key becomes the record's own rendition bytes,
+                  ;; FG through the end of ATTRS, which is the one thing that always
+                  ;; identifies it exactly: one short unibyte string, compared by
+                  ;; `equal' as a memcmp rather than walked.
                   ;;
                   ;; It was a consed list of decoded specs, and that made truecolor
                   ;; the slowest thing in the renderer: a `(list r g b)' per colour
@@ -312,16 +322,42 @@ colour with one `clrhash\=' when the theme changes."
                   ;; table with no chance of colliding -- which is what keeps
                   ;; `cooked--flush-face-cache' a single `clrhash' over everything
                   ;; holding a resolved colour.
-                  (substring packed i (+ i 14)))))
+                  (substring packed fg (+ i cooked--style-record)))))
     (cooked--cached cooked--face-cache key
       ;; Decoded on the miss only, which a full-screen repaint takes a few dozen
       ;; times and then never again.  The old fallback decoded before it had even
       ;; looked, and then handed the specs to `cooked--face' to build a second key
       ;; out of.
-      (cooked--face-build (cooked--color-spec packed i)
-                          (cooked--color-spec packed (+ i 4))
+      (cooked--face-build (cooked--color-spec packed fg)
+                          (cooked--color-spec packed bg)
                           attrs
-                          (cooked--color-spec packed (+ i 8))))))
+                          (cooked--color-spec packed ul)))))
+
+(defmacro cooked--do-style-spans (spec &rest body)
+  "Run BODY for each styled span in the packed style records STYLES.
+
+SPEC is (FROM TO FACE STYLES): FROM and TO are bound to the span\='s START and
+END character offsets and FACE to its face plist, from `cooked--face-packed\='.
+A record whose rendition resolves to no face runs nothing.
+
+The one walker for the records, shared by the terminal\='s renderer and the
+comint filter.  It steps by `cooked--style-record\=' and allocates nothing per
+span, which is the reason the spans arrive packed at all: no cons for the span,
+none for its colours, and none for the cache key."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp form) body)))
+  (pcase-let ((`(,from ,to ,face ,styles) spec)
+              (packed (make-symbol "packed"))
+              (i (make-symbol "i"))
+              (limit (make-symbol "limit")))
+    `(let* ((,packed ,styles)
+            (,i 0)
+            (,limit (length ,packed)))
+       (while (< ,i ,limit)
+         (when-let* ((,face (cooked--face-packed ,packed ,i)))
+           (let ((,from (cooked--u32 ,packed (+ ,i ,cooked--style-start)))
+                 (,to (cooked--u32 ,packed (+ ,i ,cooked--style-end))))
+             ,@body))
+         (setq ,i (+ ,i ,cooked--style-record))))))
 
 (defun cooked--face (fg bg attrs &optional ul)
   "Face plist for FG, BG, the ATTRS bitmask and underline colour UL.

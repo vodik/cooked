@@ -135,9 +135,8 @@ allowed to be outside a narrowing."
   "Apply STYLES and LINKS to TEXT and return it.
 
 STYLES is the packed span format `Block::push_style' writes and
-`cooked--face-packed' reads -- see `cooked--style-record' for why it is walked
-by a stride rather than decoded.  It is the terminal's own format and its own
-decoder, which is what makes one face cache serve both.
+`cooked--do-style-spans' walks, the terminal's own format read by its own
+walker, which is what makes one face cache serve both.
 
 Both `face' and `font-lock-face' are set, to the same value, and that pair is
 argued out at length in `cooked-process--text': neither alone covers both
@@ -155,15 +154,9 @@ belonging to a session, and there is none here.  It becomes `help-echo' and
 nothing more.  A keymap would be the obvious next step and is deliberately not
 taken -- this is a buffer whose keys belong to comint, and binding RET or mouse
 clicks over the child's output would take them from it."
-  (let ((i 0)
-        (limit (length styles)))
-    (while (< i limit)
-      (when-let* ((face (cooked--face-packed styles (+ i 8))))
-        (let ((from (cooked--u32 styles i))
-              (to (cooked--u32 styles (+ i 4))))
-          (put-text-property from to 'face face text)
-          (put-text-property from to 'font-lock-face face text)))
-      (setq i (+ i cooked--style-record))))
+  (cooked--do-style-spans (from to face styles)
+    (put-text-property from to 'face face text)
+    (put-text-property from to 'font-lock-face face text))
   (pcase-dolist (`(,from ,to ,uri) links)
     (put-text-property from to 'help-echo uri text))
   text)
