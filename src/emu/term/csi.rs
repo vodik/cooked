@@ -161,9 +161,14 @@ impl State {
             // child that reads 3 concludes the mode cannot be reset.
             1048 => ModeReport::Set,
             // Dropped from our terminfo, and this is where a child finds that out
-            // without having to guess: 12 is cursor blink (`blink-cursor-mode' is the
-            // user's), 69 left-right margins, 1034 meta-sends-escape.
-            12 | 69 | 1034 => ModeReport::PermanentlyReset,
+            // without having to guess: 5 is reverse screen (`flash'), 12 cursor blink
+            // (`blink-cursor-mode' is the user's), 69 left-right margins, 1034
+            // meta-sends-escape. 3 and 4 were never claimed, but `is2' and `rs2' reset
+            // them -- 132 columns and smooth scroll, neither of which a buffer has -- so
+            // a child reading the entry has seen their numbers and may well ask. The
+            // list is `# declined-modes:' in cooked.ti, and the audit test holds the
+            // two in step.
+            3 | 4 | 5 | 12 | 69 | 1034 => ModeReport::PermanentlyReset,
             _ => ModeReport::Unknown,
         }
     }

@@ -57,7 +57,15 @@ A child does not have to take our word for any of it. DECRQM (`CSI ? Ps $ p`) an
 2 for a mode we implement, 4 — "permanently reset" — for every one in that last table, and
 0 for one we have never heard of. That includes 2031, the colour-scheme subscription,
 which is the mode a child is most likely to probe before deciding whether to bother
-asking.
+asking. DECCOLM (3) and DECSCLM (4) answer 4 as well: `is2` and `rs2` reset them, and
+nothing here sets them.
+
+None of that rests on a reading of the file any more. The entry's header carries a
+`# declined-modes:` line, and `terminfo_entry_matches_what_decrqm_says` in
+`src/emu/term/tests.rs` reads `cooked.ti` at compile time and fails if a mode a
+capability names answers 0, a declined mode answers anything but 4 or is set by a
+capability, or one of the queries `u7`, `u9`, `RV` and `XR` goes unanswered. Re-adding
+`flash` without DECSCNM is the change it exists to refuse.
 
 Some requests are refused rather than merely unimplemented. `CSI 21t` reports the window
 title *on the child\'s input stream*, which turns a title the child set itself into typed

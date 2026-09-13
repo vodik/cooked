@@ -41,7 +41,13 @@
 #                     visibility on its own.
 #
 # A child does not have to take our word for any of that: DECRQM answers 4,
-# "permanently reset", for every mode named above.
+# "permanently reset", for every mode named above. Two more answer 4 without a
+# capability of their own: DECCOLM (3) and DECSCLM (4), which `is2' and `rs2'
+# reset and nothing here ever sets. The line below is that list for a machine,
+# and `terminfo_entry_matches_what_decrqm_says' in src/emu/term/tests.rs fails if
+# it, the DECRQM answers and the capabilities in this file disagree.
+#
+# declined-modes: 3 4 5 12 69 1034
 #
 # Added, being things we implement that xterm-256color does not declare at all:
 #

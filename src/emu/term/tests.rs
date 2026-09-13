@@ -1053,6 +1053,7 @@ fn decrqm_answers_honestly_about_every_mode() {
         (&b"\x1b[?1004h"[..], 1004, 1),
         (&b"\x1b[?1049h"[..], 1049, 1),
         // Deliberately not implemented — the drop list, machine readable.
+        (&b""[..], 5, 4),
         (&b""[..], 12, 4),
         (&b""[..], 69, 4),
         (&b""[..], 1034, 4),
@@ -1123,6 +1124,148 @@ fn decrqm_answers_for_ansi_modes_too() {
             .events
             .contains(&Event::Reply(b"\x1b[4;1$y".to_vec()))
     );
+}
+
+/// The capabilities of every entry in `terminfo/cooked.ti`, as `(name, value)`, with
+/// booleans and numbers carrying an empty value. One capability per line is the
+/// file's own layout, which is what makes a parser this small enough to trust; a line
+/// that does not start with a tab is an entry's name line, and `#` is a comment.
+fn terminfo_capabilities() -> Vec<(&'static str, &'static str)> {
+    include_str!("../../../terminfo/cooked.ti")
+        .lines()
+        .filter(|line| line.starts_with('\t'))
+        .map(|line| {
+            let field = line.trim().trim_end_matches(',');
+            field.split_once('=').unwrap_or((field, ""))
+        })
+        .collect()
+}
+
+/// A terminfo string with no `%` parameters, decoded to the bytes it sends.
+fn terminfo_decode(value: &str) -> Vec<u8> {
+    assert!(!value.contains('%'), "{value:?} is parametrised");
+    let mut out = Vec::new();
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('E' | 'e') => out.push(0x1b),
+                Some(escaped) => out.push(escaped as u8),
+                None => panic!("{value:?} ends in a backslash"),
+            },
+            '^' => out.push(chars.next().expect("^ ends the string") as u8 & 0x1f),
+            _ => out.push(c as u8),
+        }
+    }
+    out
+}
+
+/// The modes a terminfo string sets or resets, as `(private, mode, sets)`.
+///
+/// A mode is a run of digits and semicolons after `\E[` or `\E[?`, ended by `h` or
+/// `l`. A private run ended by `%` is a mode too -- that is how `XM` and `Sync` choose
+/// between the two at run time, so it counts as setting -- but an ANSI one is not,
+/// being `sgr`'s `\E[0%?...m`. Anything else ending the run (`\E[6n`, `\E[3g`) is
+/// some other control.
+fn terminfo_modes(value: &str) -> Vec<(bool, u16, bool)> {
+    let mut modes = Vec::new();
+    for (at, _) in value.match_indices("\\E[") {
+        let rest = &value[at + 3..];
+        let (private, rest) = match rest.strip_prefix('?') {
+            Some(rest) => (true, rest),
+            None => (false, rest),
+        };
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit() && c != ';')
+            .unwrap_or(rest.len());
+        let sets = match rest[digits..].chars().next() {
+            Some('h') => true,
+            Some('%') if private => true,
+            Some('l') => false,
+            _ => continue,
+        };
+        for mode in rest[..digits].split(';').filter(|m| !m.is_empty()) {
+            modes.push((private, mode.parse().unwrap(), sets));
+        }
+    }
+    modes
+}
+
+/// The header of `cooked.ti` argues that every capability has been checked against
+/// the code. This is that check, so that the argument is no longer a person reading.
+///
+/// Three things are held together. A mode a capability names answers DECRQM with 1
+/// or 2 -- never 0, which would mean the entry claims what the core has never heard
+/// of. A mode on the `# declined-modes:` line answers 4, and no capability may set
+/// one: re-adding `flash` without DECSCNM is the case in point. And a query the
+/// entry declares gets a reply, since a query claimed and not answered is a child
+/// waiting out its timeout.
+#[test]
+fn terminfo_entry_matches_what_decrqm_says() {
+    let source = include_str!("../../../terminfo/cooked.ti");
+    let declined: Vec<u16> = source
+        .lines()
+        .find_map(|line| line.strip_prefix("# declined-modes:"))
+        .expect("cooked.ti has lost its declined-modes line")
+        .split_whitespace()
+        .map(|mode| mode.parse().unwrap())
+        .collect();
+    let decrqm = |private: bool, mode: u16| -> u8 {
+        let q = if private { "?" } else { "" };
+        let mut t = term(4, 8, b"");
+        t.feed(format!("\x1b[{q}{mode}$p").as_bytes());
+        let prefix = format!("\x1b[{q}{mode};");
+        t.drain()
+            .events
+            .iter()
+            .find_map(|event| match event {
+                Event::Reply(bytes) => bytes
+                    .strip_prefix(prefix.as_bytes())
+                    .and_then(|rest| rest.strip_suffix(b"$y"))
+                    .map(|status| status[0] - b'0'),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no DECRQM reply for mode {q}{mode}"))
+    };
+
+    for &mode in &declined {
+        assert_eq!(
+            decrqm(true, mode),
+            4,
+            "declined mode ?{mode} is not answered 4"
+        );
+    }
+
+    let capabilities = terminfo_capabilities();
+    for &(name, value) in &capabilities {
+        for (private, mode, sets) in terminfo_modes(value) {
+            let q = if private { "?" } else { "" };
+            if private && declined.contains(&mode) {
+                assert!(!sets, "`{name}' sets ?{mode}, which is declined");
+                continue;
+            }
+            let status = decrqm(private, mode);
+            assert!(
+                status == 1 || status == 2,
+                "`{name}' names mode {q}{mode}, and DECRQM answers {status}"
+            );
+        }
+    }
+
+    for query in ["u7", "u9", "RV", "XR"] {
+        let (_, value) = capabilities
+            .iter()
+            .find(|(name, _)| *name == query)
+            .unwrap_or_else(|| panic!("cooked.ti no longer declares `{query}'"));
+        let mut t = term(4, 8, &terminfo_decode(value));
+        assert!(
+            t.drain()
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Reply(_))),
+            "`{query}' ({value}) gets no reply"
+        );
+    }
 }
 
 #[test]
