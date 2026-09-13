@@ -269,11 +269,12 @@ Off by default, and not because the reports are expensive -- one per cell
 crossed, and only while the pointer is actually moving.  The cost that needs
 opting into is Emacs\=' rather than cooked\='s: the only way to receive motion
 with no button held is to leave the variable `track-mouse' on for as long as
-the child wants it, and each `mouse-movement' event Emacs then manufactures is a
-full turn of the command loop, with `pre-command-hook' and `post-command-hook'
-and a redisplay behind it.  Emacs already batches those to one per glyph crossed
-unless `mouse-fine-grained-tracking' is set, which is the same granularity the
-child wants, so the turns are bounded by how far the pointer travels.
+the child wants it, and Emacs then manufactures a `mouse-movement' event per
+glyph crossed -- per pixel over an image, which is how a panel\='s box drawing
+is shown -- and `read-key-sequence' reads every one.  `cooked--hover-translate'
+answers them inside that read, so none of them is a command with hooks behind
+it, but each is still an event read and a redisplay checked, and that cost has
+not been measured on a graphical frame.
 
 Off, a 1003 child is still told where the pointer goes while a button is held,
 which is the half `cooked--mouse-track' serves unconditionally.  On, programs
@@ -346,11 +347,21 @@ Off means the local binding is removed rather than set to nil, so that the
 global value is what governs again and a buffer that never had hover on never
 acquires a local binding it has no use for.  Skipped while a gesture is being
 followed; `cooked--mouse-track' calls this again once it has let go of the
-variable.  See `cooked--mouse-tracking\='."
+variable.  See `cooked--mouse-tracking\='.
+
+Turning it on also puts `cooked--hover-translate\=' on `key-translation-map\=',
+which is what keeps the movements this lets in out of the middle of a key."
   (unless cooked--mouse-tracking
     (if (and cooked-mouse-hover-motion cooked--mouse-grab
              (cooked-mouse-state-motion cooked--mouse-state))
-        (setq-local track-mouse t)
+        (progn
+          ;; Installed the first time hover is on anywhere, and never over a
+          ;; translation some other package has put there.  It answers nothing
+          ;; in a buffer whose child does not have the mouse.
+          (unless (lookup-key key-translation-map [mouse-movement])
+            (define-key key-translation-map [mouse-movement]
+                        #'cooked--hover-translate))
+          (setq-local track-mouse t))
       (kill-local-variable 'track-mouse))))
 
 (defun cooked--mouse-cell-width (posn)
@@ -638,11 +649,12 @@ returns through `cooked-mouse-event\=' by its ordinary binding and there is only
 one place that knows how to report a button coming up.
 
 Only the drag half of 1003 is served here: any-motion with no button down means
-tracking the pointer for as long as the child asks, which is a command-loop turn
-per glyph crossed anywhere in the frame whether or not the user is doing
-anything.  A `track-mouse\=' bounded by a gesture is the affordable part, and it
-is the part every 1003 client also gets from 1002; the rest is
-`cooked-mouse-hover\=', behind `cooked-mouse-hover-motion\='.
+tracking the pointer for as long as the child asks, which is an event read per
+glyph crossed anywhere in the frame whether or not the user is doing anything.
+A `track-mouse\=' bounded by a gesture is the affordable part, and it is the
+part every 1003 client also gets from 1002; the rest is
+`cooked--hover-translate\=' and `cooked-mouse-hover\=', behind
+`cooked-mouse-hover-motion\='.
 
 The form\='s own binding of `track-mouse\=' is why `cooked--mouse-tracking\=' is
 set around it, and why hover tracking is recomputed after it: a drain during the
@@ -670,6 +682,72 @@ was skipped."
                                      (cooked--mouse-offset posn))))))
       (push event unread-command-events))))
 
+(defun cooked--hover-report (posn)
+  "Report POSN as hover to the child under it, and say whether it takes hover.
+
+Non-nil when the buffer under POSN is a terminal whose user opted in with
+`cooked-mouse-hover-motion\=' and whose child asked for any-motion and has the
+mouse, whether or not the movement was worth a report.  That buffer is asked
+rather than the current one, for the reason `cooked-mouse-event\=' gives, and
+it is asked again whether it wants motion, since some other package leaving
+`track-mouse\=' on globally would otherwise deliver hover to a child the user
+never opted into.
+
+A pointer over no text -- past the last row, over the fringe -- reports nothing
+rather than a cell it is not in.  Repeats of the last cell are dropped by
+`cooked--report-motion\='."
+  (when-let* ((target (cooked--mouse-buffer (posn-window posn))))
+    (with-current-buffer target
+      (when (and cooked-mouse-hover-motion cooked--mouse-grab
+                 (cooked-mouse-state-motion cooked--mouse-state))
+        (when-let* ((glyph (cooked--mouse-glyph posn))
+                    (cell (cooked--mouse-cell posn glyph)))
+          (cooked--report-motion (car cell) (cdr cell)
+                                 (cooked--mouse-offset posn glyph) t))
+        t))))
+
+(defun cooked--hover-translate (_prompt)
+  "Take a `mouse-movement\=' out of the key being read, reporting it if it is hover.
+
+On `key-translation-map\=' under `[mouse-movement]\=', where
+`cooked--update-hover-tracking\=' puts it.  Answers the empty key, which deletes
+the movement from the sequence, or nil to leave it alone.
+
+A movement is ordinary input to `read-key-sequence\=', and nothing in Emacs
+keeps one out of the middle of a key.  With `track-mouse\=' left on for hover, a
+pointer twitch after \\`C-c' made the key \\`C-c <mouse-movement>', which is
+undefined, and the \\`C-c' was lost -- and \\`C-c' is the only way back to Emacs
+from a full-screen program.  The same went for \\`C-x', \\`C-h' and \\`ESC'.  A
+translation map is consulted between the keys of a sequence, which a keymap
+binding is not: binding the movement under each prefix would still end the key
+there.  So a movement after the first key of a sequence is always deleted.
+
+A movement that starts one is deleted too when it is ours to answer: the binding
+it would reach is `cooked-mouse-hover\=', and it either was reported as hover or
+would have fallen back to a command that does nothing.  That keeps hover out of
+the command loop altogether.  Before, every glyph crossed was a command, with
+`pre-command-hook\=' and `post-command-hook\=' behind it: \\[universal-argument]
+was spent on the movement rather than on the command it was typed for,
+`tooltip-hide\=' took down a link\='s help on the first glyph, and
+`cooked--track-wandering\=' counted the lines above point each time.
+
+A movement some other binding wants is left alone.  `mouse-drag-region\=' reads
+the drag it selects text with as bound movements in a transient map, and the
+shifted drag is how text is selected out of a program that has the mouse."
+  (let ((event last-input-event))
+    (when (and (mouse-movement-p event) cooked--mouse-grab)
+      (let* ((ours (eq (key-binding (vector event)) #'cooked-mouse-hover))
+             (reported (and ours (cooked--hover-report (event-start event)))))
+        (and (or reported
+                 ;; Everything read so far, the movement included, minus the
+                 ;; movements: a key already begun is one being cut in half.
+                 (seq-some (lambda (key) (not (mouse-movement-p key)))
+                           (this-command-keys-vector))
+                 (and ours
+                      (memq (cooked--mouse-fallback-binding event (vector event))
+                            '(nil ignore ignore-preserving-kill-region))))
+             [])))))
+
 (defun cooked-mouse-hover ()
   "Report the pointer moving with no button held to a child that asked for 1003.
 
@@ -679,37 +757,19 @@ outside a gesture only where `track-mouse\=' is on, which
 `cooked-mouse-hover-motion\='.  A movement during a drag never reaches here:
 `cooked--mouse-track\=' reads those itself.
 
-The buffer under the pointer is the one asked, for the reason
-`cooked-mouse-event\=' gives -- the binding was found there but the command runs
-in whichever buffer was current -- and it is asked again whether it wants
-motion, since some other package leaving `track-mouse\=' on globally would
-otherwise deliver hover to a child the user never opted into.  Declined
-movements go to the binding Emacs would have used, which in a stock global map
-is `ignore-preserving-kill-region\='.
-
-A pointer over no text -- past the last row, over the fringe -- reports nothing
-rather than a cell it is not in.  Repeats of the last cell are dropped by
-`cooked--report-motion\=', which is the coalescing the task asks for; Emacs
-itself generates at most one event per glyph crossed, but not only for glyphs
-of this window.
+Rarely a command in practice.  `cooked--hover-translate\=' answers the movement
+before any binding is looked up whenever it is hover, and whenever declining it
+would do nothing, so what is left to run here is a movement over some other
+buffer whose own binding wants it -- which goes to that binding.
 
 `this-command\=' is handed back to `last-command\=' so that a movement between
 two commands is invisible to anything asking what ran before -- a `kill-region\='
 followed by another still appends, as it would with the pointer at rest."
   (interactive)
-  (let* ((event last-input-event)
-         (posn (event-start event))
-         (target (cooked--mouse-buffer (posn-window posn))))
+  (let ((event last-input-event))
     (setq this-command last-command)
-    (if (not (and cooked-mouse-hover-motion target
-                  (buffer-local-value 'cooked--mouse-grab target)
-                  (cooked-mouse-state-motion
-                   (buffer-local-value 'cooked--mouse-state target))))
-        (cooked--mouse-fallback event)
-      (with-current-buffer target
-        (when-let* ((cell (cooked--mouse-cell posn)))
-          (cooked--report-motion (car cell) (cdr cell)
-                                 (cooked--mouse-offset posn) t))))))
+    (unless (cooked--hover-report (event-start event))
+      (cooked--mouse-fallback event))))
 
 (defun cooked--alt-scroll-keys (button &optional lines)
   "Cursor keys standing in for LINES of wheel travel of BUTTON.
@@ -869,14 +929,22 @@ property and the local map consulted are the ones under the *pointer*.  Emacs
 settles a click\='s binding in the buffer the pointer is over and then runs it in
 the buffer that was current, and that is the half of the question a plain
 `lookup-key\=' cannot even ask."
-  (let* ((emulation-mode-map-alists
-          (remq 'cooked--mouse-map-alist emulation-mode-map-alists))
-         (command (key-binding (this-command-keys-vector) nil nil
-                               (and (consp event) (event-start event)))))
+  (let ((command (cooked--mouse-fallback-binding event)))
     (when (and (commandp command) (not (eq command #'cooked-mouse-event)))
       (setq last-command-event event
             this-command command)
       (call-interactively command))))
+
+(defun cooked--mouse-fallback-binding (event &optional keys)
+  "What EVENT would be bound to without cooked\='s mouse maps.
+
+KEYS is the key it ends, by default `this-command-keys-vector\=', which carries
+the prefix a click in the mode line is read with.  The lookup
+`cooked--mouse-fallback\=' makes; see there."
+  (let ((emulation-mode-map-alists
+         (remq 'cooked--mouse-map-alist emulation-mode-map-alists)))
+    (key-binding (or keys (this-command-keys-vector)) nil nil
+                 (and (consp event) (event-start event)))))
 
 ;; Pointer shape, OSC 22.
 ;;

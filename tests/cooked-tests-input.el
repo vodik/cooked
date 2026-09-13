@@ -2051,6 +2051,79 @@ to a child the user never opted into."
           (cooked-mouse-hover)))
       (should-not cooked--mouse-last-cell))))
 
+(defmacro cooked-tests--with-hover (&rest body)
+  "Run BODY in a live terminal reporting hover, with `from' over its text.
+
+The child is `cooked-tests--hover-child\=', the option is on, `track-mouse' is
+on in the buffer as it would be, and the buffer is in the selected window."
+  (declare (indent 0))
+  `(cooked-tests--with-session cooked-tests--hover-child
+     (should (cooked-tests--settle
+              (lambda () (and cooked--alt (cooked-mouse-state-motion cooked--mouse-state)))))
+     (should (cooked-tests--settle
+              (lambda () (string-match-p "bravo" (cooked-tests--text)))))
+     (let ((cooked-mouse-hover-motion t)
+           (key-translation-map (copy-keymap key-translation-map))
+           (from (save-excursion (goto-char (point-min))
+                                 (search-forward "alpha") (- (point) 5))))
+       (ignore from)
+       (cooked--update-mouse-grab)
+       (should (eq track-mouse t))
+       (cooked-tests--displayed
+         ,@body))))
+
+(ert-deftest cooked-hover-does-not-break-a-prefix-key ()
+  "A movement is ordinary input to `read-key-sequence\=', so a pointer twitch
+after \\`C-c' made \\`C-c <mouse-movement>', which is undefined, and \\`C-c' was
+gone -- the only way back to Emacs from a full-screen program.  The movement is
+taken out of the key, and still reported."
+  (cooked-tests--with-hover
+    (let ((over-text (list 'mouse-movement (cooked-tests--posn from)))
+          (over-nothing (list 'mouse-movement (cooked-tests--posn nil))))
+      (dolist (movements (list (list over-text) (list over-nothing over-text)))
+        (let* ((unread-command-events `(?\C-c ,@movements ?\C-v))
+               (keys (read-key-sequence nil)))
+          (should (equal (vconcat keys) [?\C-c ?\C-v]))
+          (should (eq (key-binding keys) #'cooked-toggle-peek))))
+      (should (equal cooked--mouse-last-cell (cooked--screen-cell from))))))
+
+(ert-deftest cooked-hover-is-not-a-command ()
+  "Every movement used to be a turn of the command loop.  That spent a
+\\[universal-argument] on the movement, ran `tooltip-hide\=' from
+`pre-command-hook\=' so a link\='s help vanished on the first glyph crossed, and
+counted lines in `post-command-hook\='.  A movement that is hover never becomes a
+key at all -- and one that some other binding wants still does."
+  (cooked-tests--with-hover
+    (let ((movement (list 'mouse-movement (cooked-tests--posn from))))
+      (let ((unread-command-events (list movement ?\C-c ?\C-v)))
+        (should (equal (vconcat (read-key-sequence nil)) [?\C-c ?\C-v])))
+      ;; Through the command loop itself: no command ran for the movement.
+      (let ((hidden 0)
+            (pre-command-hook pre-command-hook))
+        (cl-letf (((symbol-function 'tooltip-hide)
+                   (lambda (&rest _) (setq hidden (1+ hidden)))))
+          (add-hook 'pre-command-hook #'tooltip-hide)
+          (execute-kbd-macro (vector movement movement)))
+        (should (= hidden 0)))
+      ;; A drag in `mouse-drag-region' reads its movements through a map of
+      ;; its own, and gets them.
+      (let ((overriding-terminal-local-map (make-sparse-keymap))
+            (unread-command-events (list movement)))
+        (define-key overriding-terminal-local-map [mouse-movement] #'forward-char)
+        (should (equal (vconcat (read-key-sequence nil)) (vector movement)))))))
+
+(ert-deftest cooked-literal-key-skips-the-pointer-moving ()
+  "`read-key\=' returns a movement like any key, so with hover on the pointer
+drifting while \\`C-c C-q' waited was the key sent, and the real one was lost."
+  (cooked-tests--with-hover
+    (let ((unread-command-events
+           (list (list 'mouse-movement (cooked-tests--posn nil)) ?a))
+          sent)
+      (cl-letf (((symbol-function 'cooked--send-to-child)
+                 (lambda (text) (push text sent))))
+        (cooked-send-literal-key))
+      (should (equal sent '("a"))))))
+
 (ert-deftest cooked-a-drag-does-not-leave-track-mouse-on-globally ()
   "The `track-mouse' form restores the old value into whichever binding is
 current when it exits.  A drain that made the variable buffer-local mid-drag

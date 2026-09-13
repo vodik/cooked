@@ -506,9 +506,14 @@ the line -- see `cooked-send-string', which shares the reasoning."
   (cooked--resume-forwarding)
   (when (cooked--input-state-p)
     (user-error "Emacs already owns the line; type directly instead"))
-  (let* ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys))
-         (bytes (cooked--encode-event (read-key "Send key: "))))
-    (when bytes
+  (let ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys))
+        (event (read-key "Send key: ")))
+    ;; With hover on, the pointer drifting while the key is awaited is a key
+    ;; too, and `read-key' returns it; the key meant for the child would then
+    ;; reach Emacs instead.
+    (while (mouse-movement-p event)
+      (setq event (read-key "Send key: ")))
+    (when-let* ((bytes (cooked--encode-event event)))
       (cooked--snap-to-cursor)
       (cooked--send-to-child bytes))))
 
