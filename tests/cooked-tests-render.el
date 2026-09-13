@@ -3576,6 +3576,48 @@ repainting the same cells afterwards gets them in the new colours."
         (cooked--flush-face-cache))
       (should (member (cons session nil) unsent)))))
 
+(ert-deftest cooked-a-zoom-makes-the-core-send-every-row-again ()
+  "Rows rendered under one layout are sent again once the layout moves.
+
+The width guard measured, scaled and trimmed them against the font that has
+just gone, and the core\='s copy of the screen would leave every one of them out
+of a drain until its cells changed -- so a zoom that kept the grid size left
+the rows on screen scaled for the old font for as long as a program repainted
+the same frame.  The stamp moving is what says so, and nothing is sent while it
+stays put."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one\\ntwo'; sleep 5")
+    (cooked-tests--display-buffer)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "two" (cooked-tests--text)))))
+    (let ((cooked-rejoin-wrapped-lines t))
+      (cooked--wrap-cache (selected-window))
+      (cooked--apply (cooked--drain cooked--session t))
+      (cooked--wrap-cache (selected-window))
+      (should-not (plist-get (cooked--drain cooked--session t) :rows))
+      (text-scale-increase 1)
+      (cooked--wrap-cache (selected-window))
+      (let ((rows (plist-get (cooked--drain cooked--session t) :rows)))
+        (should (assq 0 rows))))))
+
+(ert-deftest cooked-turning-box-drawing-off-redraws-the-screen-at-once ()
+  "An option that changes how the same cells are drawn reaches the screen now.
+
+A border already drawn as a bitmap stayed one after
+`cooked-box-drawing-images\=' was turned off, because nothing renders a row
+again until the child sends different cells for it.  Its `:set\=' redraws every
+running screen instead."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'; sleep 5")
+    (cooked-tests--cell)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'display))))
+    (unwind-protect
+        (progn
+          (customize-set-variable 'cooked-box-drawing-images nil)
+          (should (string-prefix-p "┌─┐" (cooked-tests--text)))
+          (should-not (get-text-property (point-min) 'display)))
+      (customize-set-variable 'cooked-box-drawing-images t))))
+
 ;;;; Edits: part of a row replaced in place
 
 (defun cooked-tests--screen-row-text (row)

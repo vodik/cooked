@@ -55,8 +55,12 @@ current font and colored from the active theme — the same approach VTE, Kitty
 and Alacritty take.
 
 Falls back to plain colored text, exactly as when this is nil, if Emacs lacks
-XBM image support or bitmap generation fails for a glyph."
+XBM image support or bitmap generation fails for a glyph.
+
+Setting it through `customize\=' or `setopt\=' redraws the screens already
+running; see `cooked--set-rendering-option\='."
   :type 'boolean
+  :set #'cooked--set-rendering-option
   :group 'cooked)
 
 (defvar-local cooked--last-cell nil

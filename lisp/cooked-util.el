@@ -364,6 +364,55 @@ would abort the rest of the redisplay."
   (when-let* ((session (cooked--live-session)))
     (cooked--send session bytes)))
 
+(defun cooked--forget-sent-rows (&optional redraw)
+  "Make the core send every live row again the next time it is damaged.
+
+The core leaves a damaged row out of a drain when its cells match what it last
+sent, which is right while the text Emacs holds for the row is still what that
+drain rendered.  Anything that changes how the same cells are drawn breaks
+that without touching a character.  A theme change is one: the faces on the
+rows were resolved against the old theme, and a full-screen program that
+repaints the same frame afterwards expects the new colours.
+
+With REDRAW the rows are damaged as well, so the next drain sends every one of
+them whether the child repaints or not.  That is for a change a row has to be
+rendered again to show at all, rather than one a repaint merely picks up: a
+zoom leaves the glyph scaling on a row measured against the old font, and a
+shell sitting at its prompt never repaints to replace it.
+
+The one way the copy is cleared, so that the theme, the layout stamp moving and
+the options that change rendering all mean the same thing by it.  On
+`cooked-theme-change-hook\=', which runs with each buffer current; from
+`cooked--wrap-cache\=' when `cooked--layout-stamp\=' moves; and from
+`cooked--set-rendering-option\='."
+  (when (user-ptrp cooked--session)
+    (if redraw
+        ;; Damaging every row forgets the copy too; see `Term::touch_all'.
+        (cooked--redraw cooked--session)
+      (cooked--row-unsent cooked--session nil))))
+
+(declare-function cooked--drain-and-apply "cooked-render")
+
+(defun cooked--set-rendering-option (symbol value)
+  "Set SYMBOL to VALUE and redraw every live screen under it.
+
+The `:set\=' behind the options that change how the same cells are drawn, such
+as `cooked-box-drawing-images\=' and `cooked-glyph-scale-floor\='.  Neither is
+read anywhere but in rendering a row, so without this a screen already drawn
+keeps the old answer: a border stays a bitmap after box drawing is turned off,
+until the child happens to repaint it with different cells.
+
+Drained here rather than left to the child, for the same reason
+`cooked-refresh\=' drains: a customization is a request to see the result, and
+an idle prompt would not show it until the next keystroke.  At load, when
+`custom-declare-variable\=' calls this to set the default, there is no cooked
+buffer to walk and nothing but the `set-default\=' happens."
+  (set-default symbol value)
+  (cooked--dolist-buffers
+    (when (user-ptrp cooked--session)
+      (cooked--forget-sent-rows 'redraw)
+      (cooked--drain-and-apply))))
+
 (defconst cooked--source-directory
   (file-name-directory
    (file-truename (or load-file-name buffer-file-name default-directory)))

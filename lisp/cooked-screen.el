@@ -1106,18 +1106,7 @@ which has no such seam at all."
                       pos (min (1+ eol) (point-max)))))))))
     (nreverse rendered)))
 
-(defun cooked--forget-sent-rows ()
-  "Make the core send every live row again the next time it is damaged.
-
-The core leaves a damaged row out of a drain when its cells match what it last
-sent, which is right while the text Emacs holds for the row is still what that
-drain rendered.  A theme change breaks that without touching a character: the
-faces on the rows were resolved against the old theme, and a full-screen
-program that repaints the same frame afterwards expects the new colours.  On
-`cooked-theme-change-hook\=', which runs with each buffer current."
-  (when (user-ptrp cooked--session)
-    (cooked--row-unsent cooked--session nil)))
-
+;; A theme changes how the same cells are drawn; see `cooked--forget-sent-rows'.
 (add-hook 'cooked-theme-change-hook #'cooked--forget-sent-rows)
 
 (defun cooked--notify-rows-rendered (bounds)

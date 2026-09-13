@@ -91,9 +91,15 @@ STAMP is `cooked--layout-stamp\='.")
   "Everything about WINDOW that can change what Emacs' layout makes of a row.
 
 The memo's validity, stated as a value rather than as a hook.  The events that
-matter are a font change, a face remap (`text-scale-adjust\=' is one), and a
-change in how much room the text area has; each of them moves one of these
-five values, and nothing else here is expected to.
+matter are a font change, a face remap (`text-scale-adjust\=' is one), a change
+in how much room the text area has, and a change of `line-spacing\='; each of
+them moves one of these six values, and nothing else here is expected to.
+
+`line-spacing\=' does not move where a row wraps.  It is here because a moving
+stamp also says every row on screen was rendered for a layout that has gone, and
+`cooked--wrap-cache\=' has the core send them all again: a box-drawing bitmap is
+placed on the line box, which `line-spacing\=' changes, and a row the child does
+not repaint would otherwise keep the old placement.
 
 Observed rather than notified, which is a deliberate choice against hanging
 this off `cooked--rescale-deco\=' -- the other place in this package that reacts
@@ -105,7 +111,7 @@ wraps.  Comparing the stamp cannot miss an event it was not told about; it can
 only be too conservative, and being too conservative here costs one rebuilt
 hash table.
 
-Four of the five are cheap accessors, none of which selects a window.  The
+Five of the six are cheap accessors, none of which selects a window.  The
 `font\=' frame parameter is the expensive one and is here anyway: it names the
 font outright, where the rest only describe its metrics, so without it a font
 swapped for another of exactly the same cell size would leave the memo answering
@@ -125,7 +131,8 @@ it, and a fringe or margin change does not move it at all."
           (frame-char-width frame)
           (frame-char-height frame)
           (frame-parameter frame 'font)
-          face-remapping-alist)))
+          face-remapping-alist
+          line-spacing)))
 
 (defconst cooked--string-pixel-width-takes-buffer
   (let ((most (cdr (func-arity #'string-pixel-width))))
@@ -199,10 +206,22 @@ font it was measured under.
 WRAPS memoises which rows Emacs lays out on one line, and METRICS what a
 cluster actually measures.  They share one cache because the same events
 invalidate both, and because the stamp is the expensive part: a second cache
-with a second stamp would cost more than either table saves."
+with a second stamp would cost more than either table saves.
+
+The rows already on screen were measured, scaled and trimmed under the stamp
+that has just gone, so a move also has the core send every row again with
+`cooked--forget-sent-rows\='.  Otherwise the copy of the screen the core keeps
+would leave them out: a zoom that keeps the grid size, followed by a program
+repainting the same cells, would keep every CJK character on screen scaled for
+the old font.  The rows are damaged rather than only forgotten, for a screen
+nothing repaints, and they arrive with the next drain rather than this one,
+which is already rendering.  Not on the first stamp a buffer builds, which has
+no earlier layout to disagree with."
   (let ((stamp (cooked--layout-stamp window)))
     (if (equal (car cooked--wrap-memo) stamp)
         (cdr cooked--wrap-memo)
+      (when cooked--wrap-memo
+        (cooked--forget-sent-rows 'redraw))
       (cdr (setq cooked--wrap-memo
                  (cons stamp
                        (list (cooked--ascii-fixed-pitch-p window)
@@ -335,9 +354,13 @@ worse than a truncation arrow saying plainly that something did not fit.
 answer.  Worth reaching for if a font of yours renders worse with this on than
 without: the scaling only touches a glyph whose measured size disagrees with
 its cells, but that judgement rests on font metrics, and a font can always
-surprise it."
+surprise it.
+
+Setting it through `customize\=' or `setopt\=' redraws the screens already
+running; see `cooked--set-rendering-option\='."
   :type '(choice (const :tag "Never scale, only trim" nil)
                  (number :tag "Smallest scale a glyph may be shrunk to"))
+  :set #'cooked--set-rendering-option
   :group 'cooked)
 
 (defun cooked--glyph-metrics (beg end window metrics)
