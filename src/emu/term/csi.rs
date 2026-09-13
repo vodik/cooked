@@ -303,15 +303,53 @@ impl State {
                 }
             }
             AnsiMode::Newline => self.modes.newline_mode = on,
+            // Declined or permanent; see [`State::ansi_mode_report`].
+            AnsiMode::GuardedAreaTransfer
+            | AnsiMode::KeyboardAction
+            | AnsiMode::ControlRepresentation
+            | AnsiMode::StatusReportTransfer
+            | AnsiMode::VerticalEditing
+            | AnsiMode::HorizontalEditing
+            | AnsiMode::PositioningUnit
+            | AnsiMode::SendReceive
+            | AnsiMode::FormatEffectorAction
+            | AnsiMode::FormatEffectorTransfer
+            | AnsiMode::MultipleAreaTransfer
+            | AnsiMode::TransferTermination
+            | AnsiMode::SelectedAreaTransfer
+            | AnsiMode::TabulationStop
+            | AnsiMode::EditingBoundary => {}
         }
     }
 
     /// DECRQM's answer for an ANSI mode.
+    ///
+    /// The numbers xterm answers for, `misc.c`'s `do_ansi_rqm`, answered the same way
+    /// wherever cooked is in the same state. Two differ, both because xterm implements
+    /// what cooked declines: KAM, which xterm lets a child lock the keyboard with, and
+    /// CRM, which xterm answers 2.
     fn ansi_mode_report(&self, number: u16) -> ModeReport {
-        match AnsiMode::try_from(number) {
-            Ok(AnsiMode::Insert) => self.screen().insert_mode().into(),
-            Ok(AnsiMode::Newline) => self.modes.newline_mode.into(),
-            Err(_) => ModeReport::Unknown,
+        let Ok(mode) = AnsiMode::try_from(number) else {
+            return ModeReport::Unknown;
+        };
+        match mode {
+            AnsiMode::Insert => self.screen().insert_mode().into(),
+            AnsiMode::Newline => self.modes.newline_mode.into(),
+            AnsiMode::SendReceive => ModeReport::PermanentlySet,
+            AnsiMode::GuardedAreaTransfer
+            | AnsiMode::KeyboardAction
+            | AnsiMode::ControlRepresentation
+            | AnsiMode::StatusReportTransfer
+            | AnsiMode::VerticalEditing
+            | AnsiMode::HorizontalEditing
+            | AnsiMode::PositioningUnit
+            | AnsiMode::FormatEffectorAction
+            | AnsiMode::FormatEffectorTransfer
+            | AnsiMode::MultipleAreaTransfer
+            | AnsiMode::TransferTermination
+            | AnsiMode::SelectedAreaTransfer
+            | AnsiMode::TabulationStop
+            | AnsiMode::EditingBoundary => ModeReport::PermanentlyReset,
         }
     }
 

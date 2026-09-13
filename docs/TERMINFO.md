@@ -85,6 +85,10 @@ and urxvt mouse encodings (1005, 1015, superseded by 1006), DECBKM (67, fixed by
 `kbs=^?`) and Alt-sends-escape (1039). Meta-sends-escape (1036) answers 3, "permanently
 set", because Meta is spelled as a leading ESC whatever the child asks.
 
+The ANSI form, `CSI Ps $ p`, answers for the modes xterm answers for. Insert (4) and
+linefeed-newline (20) answer 1 or 2, send/receive (12) answers 3 because there is never
+local echo, and keyboard lock (2) and the ECMA-48 block-mode modes answer 4.
+
 `CSI = c`, tertiary DA, answers `DCS ! | 00000000 ST`: a unit id of zero, as xterm's.
 
 None of that rests on a reading of the file any more. The entry's header carries a

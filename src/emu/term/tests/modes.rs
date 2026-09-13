@@ -86,11 +86,51 @@ fn every_flag_mode_sets_reports_and_soft_resets() {
 
 #[test]
 fn decrqm_answers_for_ansi_modes_too() {
-    let mut t = term(2, 8, b"\x1b[4h\x1b[4$p");
-    assert!(
-        t.drain()
-            .events
-            .contains(&Event::Reply(b"\x1b[4;1$y".to_vec()))
+    for (setup, mode, want) in [
+        (&b"\x1b[4h"[..], 4u16, 1u8),
+        (&b""[..], 4, 2),
+        (&b"\x1b[20h"[..], 20, 1),
+        // KAM: nothing locks the keyboard, and a set does not either.
+        (&b""[..], 2, 4),
+        (&b"\x1b[2h"[..], 2, 4),
+        // SRM: there is never local echo, so it is set and stays set.
+        (&b""[..], 12, 3),
+        (&b"\x1b[12l"[..], 12, 3),
+        // The ECMA-48 block-mode modes xterm also answers 4.
+        (&b""[..], 1, 4),
+        (&b""[..], 3, 4),
+        (&b""[..], 19, 4),
+        // Never heard of it.
+        (&b""[..], 6, 0),
+        (&b""[..], 21, 0),
+    ] {
+        let mut t = term(2, 8, setup);
+        t.feed(format!("\x1b[{mode}$p").as_bytes());
+        let want = Event::Reply(format!("\x1b[{mode};{want}$y").into_bytes());
+        assert!(
+            t.drain().events.contains(&want),
+            "ANSI mode {mode} after {setup:?}"
+        );
+    }
+}
+
+/// A mode number past what a parameter holds saturates at 65535, which names no mode,
+/// rather than wrapping onto one that does: `67540` is 2004 plus 65536.
+#[test]
+fn decrqm_for_a_mode_past_the_parameter_range_is_unknown() {
+    let mut t = term(2, 8, b"\x1b[?2004h\x1b[?67540$p\x1b[67540$p");
+    let replies: Vec<_> = t
+        .drain()
+        .events
+        .into_iter()
+        .filter(|event| matches!(event, Event::Reply(_)))
+        .collect();
+    assert_eq!(
+        replies,
+        vec![
+            Event::Reply(b"\x1b[?65535;0$y".to_vec()),
+            Event::Reply(b"\x1b[65535;0$y".to_vec()),
+        ]
     );
 }
 

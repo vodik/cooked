@@ -158,11 +158,46 @@ impl DecMode {
 }
 
 numbered_modes! {
-    /// An ANSI mode, `CSI Pm h/l`. Only two are real; every other number is a mode cooked
-    /// neither implements nor advertises.
+    /// An ANSI mode, `CSI Pm h/l`, that cooked implements or has an answer about.
+    ///
+    /// Only two are real. The rest are the ECMA-48 modes xterm's DECRQM answers for, and
+    /// each is either always in the one state cooked has or describes a block-mode
+    /// terminal that has never existed here; a set or reset of any of them does nothing.
     AnsiMode {
+        /// GATM, guarded area transfer. Declined: there are no guarded areas.
+        GuardedAreaTransfer = 1,
+        /// KAM, keyboard action: a set locks the keyboard. Declined: nothing a child sends
+        /// takes the keyboard away from Emacs.
+        KeyboardAction = 2,
+        /// CRM, control representation: controls shown rather than acted on. Declined.
+        ControlRepresentation = 3,
         /// IRM: insert rather than replace.
         Insert = 4,
+        /// SRTM, status report transfer. Declined.
+        StatusReportTransfer = 5,
+        /// VEM, vertical editing. Declined.
+        VerticalEditing = 7,
+        /// HEM, horizontal editing. Declined.
+        HorizontalEditing = 10,
+        /// PUM, positioning unit. Declined: positions are always in cells.
+        PositioningUnit = 11,
+        /// SRM, send/receive. Permanently set, which is "no local echo": a key reaches
+        /// the child and is shown only if the child echoes it.
+        SendReceive = 12,
+        /// FEAM, format effector action. Declined.
+        FormatEffectorAction = 13,
+        /// FETM, format effector transfer. Declined.
+        FormatEffectorTransfer = 14,
+        /// MATM, multiple area transfer. Declined.
+        MultipleAreaTransfer = 15,
+        /// TTM, transfer termination. Declined.
+        TransferTermination = 16,
+        /// SATM, selected area transfer. Declined.
+        SelectedAreaTransfer = 17,
+        /// TSM, tabulation stop. Declined.
+        TabulationStop = 18,
+        /// EBM, editing boundary. Declined.
+        EditingBoundary = 19,
         /// LNM: LF also returns the carriage.
         Newline = 20,
     }
