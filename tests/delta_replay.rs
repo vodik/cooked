@@ -64,7 +64,15 @@ enum Step {
     /// `splits` holds fractions of the byte length rather than offsets, so that a shrunk
     /// case keeps splitting somewhere sensible after proptest has shortened `bytes` — the
     /// same reason the resize below is a delta rather than an absolute size.
-    Write { bytes: Vec<u8>, splits: Vec<u8> },
+    ///
+    /// `drain` says whether Emacs drains after this write or lets the next step's output
+    /// pile up behind it, which is how several writes come to share one drain -- and one
+    /// drain can then see a row both changed and changed back.
+    Write {
+        bytes: Vec<u8>,
+        splits: Vec<u8>,
+        drain: bool,
+    },
     /// A resize, as a signed delta on each axis, clamped to at least one row and column.
     ///
     /// Relative rather than absolute so that shrinking the *initial* size cannot turn a
@@ -73,6 +81,13 @@ enum Step {
     Resize { rows: i8, cols: i8 },
     /// Emacs discarded its transcript, so the grid's top row continues nothing.
     ForgetHistory,
+    /// The width guard deleted a character off the end of screen row `row` after
+    /// rendering it, and said so with `forget_sent`.
+    ///
+    /// The one edit Lisp makes to a live row's text by itself. The shadow takes the edit,
+    /// so a later drain that leaves the row out on the strength of the core's copy -- a
+    /// copy the edit made wrong -- shows up as a shadow row that no longer matches.
+    Trim { row: u8 },
 }
 
 impl Step {
@@ -136,6 +151,31 @@ fn sgr() -> impl Strategy<Value = Vec<u8>> {
         // `Style` would miss it; comparing whole `Run`s does not.
         (0u8..255).prop_map(|n| format!("\x1b[58;5;{n}m")),
         Just("\x1b[0m".to_string()),
+    ]
+    .prop_map(String::into_bytes)
+}
+
+/// A line erased and written back as it was, and a whole screen cleared and redrawn.
+///
+/// The repaint `watch`, htop and tmux do, and the case the core's copy of what Emacs holds
+/// exists for: every cell of the row changes twice and none in the end, so the row is
+/// damaged and can be left out of the drain. The lines are fixed so that the rewrite
+/// really does put back what the erase took away.
+fn rewrite() -> impl Strategy<Value = Vec<u8>> {
+    let lines = vec![
+        "abcdefgh",
+        "hello",
+        "\u{2502} \u{2500}\u{2500}",
+        "\u{4e00}x",
+    ];
+    prop_oneof![
+        (1usize..9, prop::sample::select(lines.clone()))
+            .prop_map(|(row, line)| format!("\x1b[{row};1H\x1b[2K{line}")),
+        (
+            prop::sample::select(lines.clone()),
+            prop::sample::select(lines)
+        )
+            .prop_map(|(first, second)| format!("\x1b[H\x1b[2J{first}\r\n{second}")),
     ]
     .prop_map(String::into_bytes)
 }
@@ -222,6 +262,7 @@ fn payload() -> impl Strategy<Value = Vec<u8>> {
         2 => sgr(),
         3 => control(),
         3 => repaint(),
+        3 => rewrite(),
         2 => box_run(),
         1 => noise(),
     ]
@@ -234,8 +275,16 @@ fn payload() -> impl Strategy<Value = Vec<u8>> {
 /// paste and every flood, and a naive fuzzer that hands whole sequences over never
 /// reaches the states behind it.
 fn write_step() -> impl Strategy<Value = Step> {
-    (payload(), prop::collection::vec(any::<u8>(), 0..3))
-        .prop_map(|(bytes, splits)| Step::Write { bytes, splits })
+    (
+        payload(),
+        prop::collection::vec(any::<u8>(), 0..3),
+        prop::bool::weighted(0.75),
+    )
+        .prop_map(|(bytes, splits, drain)| Step::Write {
+            bytes,
+            splits,
+            drain,
+        })
 }
 
 fn resize_step() -> impl Strategy<Value = Step> {
@@ -255,6 +304,7 @@ fn alt_cycle() -> impl Strategy<Value = Vec<Step>> {
             Step::Write {
                 bytes: b"\x1b[?1049h".to_vec(),
                 splits: vec![128],
+                drain: true,
             },
             before,
             resize,
@@ -262,6 +312,7 @@ fn alt_cycle() -> impl Strategy<Value = Vec<Step>> {
             Step::Write {
                 bytes: b"\x1b[?1049l".to_vec(),
                 splits: Vec::new(),
+                drain: true,
             },
         ]
     })
@@ -278,12 +329,14 @@ fn save_resize_restore() -> impl Strategy<Value = Vec<Step>> {
             Step::Write {
                 bytes: b"\x1b[s".to_vec(),
                 splits: vec![100],
+                drain: true,
             },
             resize,
             write,
             Step::Write {
                 bytes: b"\x1b[u".to_vec(),
                 splits: Vec::new(),
+                drain: true,
             },
         ]
     })
@@ -296,6 +349,7 @@ fn script() -> impl Strategy<Value = Vec<Step>> {
         1 => alt_cycle(),
         1 => save_resize_restore(),
         1 => Just(vec![Step::ForgetHistory]),
+        1 => (0u8..MAX_ROWS as u8).prop_map(|row| vec![Step::Trim { row }]),
     ];
     prop::collection::vec(group, 1..14).prop_map(|groups| groups.concat())
 }
@@ -333,10 +387,21 @@ struct Batch {
 /// A terminal being driven by a script, with the shadow grid the deltas built.
 struct Replay {
     term: Term,
+    /// The same terminal, told before every drain that Emacs has lost its copy of every
+    /// row, so that it reports every damaged row whether or not Emacs already has it.
+    ///
+    /// What `term` leaves out of a drain is checked against this: every row it skips
+    /// must be one the reference sent with exactly the runs the shadow already holds.
+    reference: Term,
     rows: usize,
     cols: usize,
     /// Every row Emacs would be holding, as the deltas described it.
     shadow: Vec<Vec<Run>>,
+    /// The shadow rows a [`Step::Trim`] edited and no drain has rewritten since, which
+    /// are expected to differ from the grid: that difference is what Lisp left there.
+    trimmed: Vec<bool>,
+    /// Each shadow row's wrap flag as last sent, which Lisp marks the row's newline by.
+    wrapped: Vec<bool>,
     scrollback: Vec<Batch>,
 }
 
@@ -349,9 +414,12 @@ impl Replay {
     fn new(rows: usize, cols: usize) -> Self {
         Self {
             term: Term::new(rows, cols),
+            reference: Term::new(rows, cols),
             rows,
             cols,
             shadow: vec![Vec::new(); rows],
+            trimmed: vec![false; rows],
+            wrapped: vec![false; rows],
             scrollback: Vec::new(),
         }
     }
@@ -364,8 +432,11 @@ impl Replay {
     /// that reports the shape the rows in it were read at. Growth needs no filling in
     /// beyond the blank vectors: `Screen::resize` damages the whole grid, so every row of
     /// the new shape arrives in this same delta.
-    fn absorb(&mut self, delta: Delta) {
+    fn absorb(&mut self, delta: Delta, reference: Delta) {
+        self.check_skipped(&delta, &reference);
         self.shadow.resize(delta.height, Vec::new());
+        self.trimmed.resize(delta.height, false);
+        self.wrapped.resize(delta.height, false);
         // Before the rows and after the resize, which is the order `cooked--apply' works
         // in and the order the contract requires: a scroll reports the rows it *moved*
         // rather than damaging them, and the damage indices that follow are in the
@@ -374,10 +445,14 @@ impl Replay {
         // many, the shadow keeps the row the grid recycled and property 1 fails.
         for shift in delta.shifts {
             Self::shift(&mut self.shadow, shift);
+            Self::shift(&mut self.trimmed, shift);
+            Self::shift(&mut self.wrapped, shift);
         }
         for damaged in delta.rows {
             if let Some(row) = self.shadow.get_mut(damaged.index) {
                 *row = damaged.runs;
+                self.trimmed[damaged.index] = false;
+                self.wrapped[damaged.index] = damaged.wrapped;
             }
         }
         if !delta.scrolled.is_empty() {
@@ -385,6 +460,53 @@ impl Replay {
                 lines: delta.scrolled,
                 alt: delta.levels.alt,
             });
+        }
+    }
+
+    /// Check that every row DELTA left out is one Emacs already had.
+    ///
+    /// REFERENCE is the same drain with nothing left out. Its rows are a superset of
+    /// DELTA's, and each row only it names must already sit in the shadow, once the
+    /// drain's shifts have moved the shadow's rows, with exactly the runs the reference
+    /// would have sent. A row the core's copy wrongly matched -- one Lisp trimmed, one a
+    /// shift moved without the copy following, one left behind by a resize -- differs
+    /// from the shadow here, and this is where it is caught rather than in the whole-grid
+    /// comparison at the end, which a later write over the same row could hide.
+    fn check_skipped(&self, delta: &Delta, reference: &Delta) {
+        assert_eq!(
+            delta.shifts, reference.shifts,
+            "the two drains moved different rows"
+        );
+        let mut shadow = self.shadow.clone();
+        let mut wrapped = self.wrapped.clone();
+        shadow.resize(delta.height, Vec::new());
+        wrapped.resize(delta.height, false);
+        for shift in &delta.shifts {
+            Self::shift(&mut shadow, *shift);
+            Self::shift(&mut wrapped, *shift);
+        }
+        let sent: Vec<usize> = delta.rows.iter().map(|r| r.index).collect();
+        for row in &delta.rows {
+            let theirs = reference.rows.iter().find(|r| r.index == row.index);
+            assert!(
+                theirs.is_some_and(|r| r.runs == row.runs),
+                "row {} was sent without the reference sending it the same way",
+                row.index
+            );
+        }
+        for row in reference.rows.iter().filter(|r| !sent.contains(&r.index)) {
+            assert_eq!(
+                shadow.get(row.index),
+                Some(&row.runs),
+                "row {} was left out of the drain, but Emacs does not have it",
+                row.index
+            );
+            assert_eq!(
+                wrapped.get(row.index),
+                Some(&row.wrapped),
+                "row {} was left out of the drain with a different wrap flag",
+                row.index
+            );
         }
     }
 
@@ -403,7 +525,7 @@ impl Replay {
     /// the delta's own height does not have would leave the shadow untouched and every
     /// comparison after it meaningless. It cannot arise — a resize is the only thing that
     /// changes the row count, and it clears the log — so say so here.
-    fn shift(shadow: &mut [Vec<Run>], shift: Shift) {
+    fn shift<T: Default>(shadow: &mut [T], shift: Shift) {
         assert!(
             shift.bottom < shadow.len(),
             "shift past the grid: {shift:?}"
@@ -426,7 +548,7 @@ impl Replay {
             }
         };
         for row in &mut span[recycled] {
-            *row = Vec::new();
+            *row = T::default();
         }
     }
 
@@ -438,16 +560,25 @@ impl Replay {
     /// boundary did not matter".
     fn step(&mut self, step: &Step, fragment: bool) {
         match step {
-            Step::Write { bytes, splits } => {
-                if fragment {
-                    let mut at = 0;
-                    for cut in Step::cuts(bytes, splits) {
-                        self.term.feed(&bytes[at..cut]);
-                        at = cut;
+            Step::Write {
+                bytes,
+                splits,
+                drain,
+            } => {
+                for term in [&mut self.term, &mut self.reference] {
+                    if fragment {
+                        let mut at = 0;
+                        for cut in Step::cuts(bytes, splits) {
+                            term.feed(&bytes[at..cut]);
+                            at = cut;
+                        }
+                        term.feed(&bytes[at..]);
+                    } else {
+                        term.feed(bytes);
                     }
-                    self.term.feed(&bytes[at..]);
-                } else {
-                    self.term.feed(bytes);
+                }
+                if !drain {
+                    return;
                 }
             }
             Step::Resize { rows, cols } => {
@@ -460,11 +591,37 @@ impl Replay {
                 self.cols =
                     (self.cols as i32 + i32::from(*cols)).clamp(1, MAX_COLS as i32) as usize;
                 self.term.resize(self.rows, self.cols);
+                self.reference.resize(self.rows, self.cols);
             }
-            Step::ForgetHistory => self.term.forget_history(),
+            Step::ForgetHistory => {
+                self.term.forget_history();
+                self.reference.forget_history();
+            }
+            Step::Trim { row } => {
+                // The guard runs as a drain is rendered, so the drain comes first.
+                self.drain();
+                let row = usize::from(*row);
+                let Some(runs) = self.shadow.get_mut(row) else {
+                    return;
+                };
+                let Some(run) = runs.iter_mut().rev().find(|run| !run.text.is_empty()) else {
+                    return;
+                };
+                run.text.pop();
+                self.trimmed[row] = true;
+                self.term.forget_sent(Some(row));
+                return;
+            }
         }
+        self.drain();
+    }
+
+    /// Drain both terminals and absorb what they said.
+    fn drain(&mut self) {
         let delta = self.term.drain();
-        self.absorb(delta);
+        self.reference.forget_sent(None);
+        let reference = self.reference.drain();
+        self.absorb(delta, reference);
     }
 
     /// The grid as the emulator itself reads it: everything damaged, one drain.
@@ -474,6 +631,9 @@ impl Replay {
     /// its own way — it is the same `Row::runs` the incremental path uses, asked for every
     /// row instead of for the rows something claimed to have changed.
     fn full(&mut self) -> Delta {
+        // Whatever the script left undrained is drained first, as it would be by the next
+        // wake, so the shadow is up to date before it is compared.
+        self.drain();
         self.term.touch_all();
         self.term.drain()
     }
@@ -511,7 +671,7 @@ fn render(scrollback: &[Batch], rejoin: bool) -> String {
 /// grid of styled runs is several screens of `Debug` output with the one differing field
 /// somewhere inside it. This is §9's first-difference visualization: say which row, which
 /// run, and show only that pair.
-fn difference(shadow: &[Vec<Run>], full: &[Vec<Run>]) -> Option<String> {
+fn difference(shadow: &[Vec<Run>], full: &[Vec<Run>], skip: &[bool]) -> Option<String> {
     if shadow.len() != full.len() {
         return Some(format!(
             "row count: replayed {} rows, the grid has {}",
@@ -520,7 +680,7 @@ fn difference(shadow: &[Vec<Run>], full: &[Vec<Run>]) -> Option<String> {
         ));
     }
     for (row, (mine, theirs)) in shadow.iter().zip(full).enumerate() {
-        if mine == theirs {
+        if mine == theirs || skip.get(row).copied().unwrap_or(false) {
             continue;
         }
         let at = mine
@@ -585,7 +745,7 @@ proptest! {
         }
         let full = replay.full();
         let grid = dense(&full)?;
-        if let Some(where_) = difference(&replay.shadow, &grid) {
+        if let Some(where_) = difference(&replay.shadow, &grid, &replay.trimmed) {
             return Err(TestCaseError::fail(format!(
                 "replaying the deltas did not reproduce the grid — {where_}"
             )));
@@ -605,7 +765,7 @@ proptest! {
         }
         let (a, b) = (split.full(), whole.full());
         let (a, b) = (dense(&a)?, dense(&b)?);
-        if let Some(where_) = difference(&a, &b) {
+        if let Some(where_) = difference(&a, &b, &[]) {
             return Err(TestCaseError::fail(format!(
                 "the same bytes cut differently produced different grids — {where_}"
             )));
