@@ -3884,5 +3884,30 @@ line there is no such claim on the byte."
                 (cooked-tty-escape-delay nil))
         (should (eq (cooked--tty-esc map) map))))))
 
+(ert-deftest cooked-evil-does-not-blank-a-row-of-spaces ()
+  "A whitespace-only line in a cooked buffer is a *screen row*, not slack.
+
+Entering evil insert state hangs `evil-maybe-remove-spaces\=' on
+`post-command-hook\=' and arms it; leaving calls it directly, and it deletes the
+whitespace from a line holding nothing else.  In an ordinary buffer that is a
+kindness.  Here the spaces are cells the child put there, so blanking them is
+data loss -- the grid says eight columns and the buffer then says none, about a
+row neither can re-derive.
+
+Not a corner case: a frame of any picture is mostly blank rows, and it was found
+by the first bench fixture to contain one."
+  (skip-unless (featurep 'evil))
+  (with-temp-buffer
+    (delay-mode-hooks (cooked-mode))
+    (insert "top\n        \nbot\n")
+    (goto-char 6)
+    (evil-local-mode 1)
+    (evil-insert-state)
+    (evil-normal-state)
+    (should (equal (nth 1 (split-string (buffer-substring-no-properties
+                                         (point-min) (point-max))
+                                        "\n"))
+                   "        "))))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

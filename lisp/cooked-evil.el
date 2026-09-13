@@ -141,6 +141,31 @@ Non-nil is the point of the integration: typing reaches the child, while ESC,
 policy's own map does, making insert state indistinguishable from emacs state."
   :type 'boolean :group 'cooked)
 
+(defun cooked-evil--keep-spaces-p (&rest _)
+  "Whether evil may strip the whitespace-only line point is on.  Never here.
+
+`:before-while\=' advice on `evil-maybe-remove-spaces\='.
+
+Entering evil insert state hangs that function on `post-command-hook\=' and arms
+it, and leaving insert state calls it directly; what it does is delete the
+indentation from a line holding nothing else, which in an ordinary buffer is a
+kindness -- you opened a line, typed nothing, and evil tidies up after you.
+
+In a cooked buffer the line *is a screen row* and its spaces are cells the child
+put there.  Blanking them is data loss: the grid says twenty columns and the
+buffer then says none, the two disagree about a row neither can re-derive, and
+nothing in the drain put it there to notice.  A frame of any picture is mostly
+blank rows, so this is not a corner -- it is every image, and every TUI with
+empty space in it.
+
+Refused wholesale rather than for the alt screen or the live region alone.
+Scrollback rows are the child's text just as much, and there is no line in one
+of these buffers Emacs is entitled to tidy."
+  (not (derived-mode-p 'cooked-mode)))
+
+(unless (advice-member-p #'cooked-evil--keep-spaces-p 'evil-maybe-remove-spaces)
+  (advice-add 'evil-maybe-remove-spaces :before-while #'cooked-evil--keep-spaces-p))
+
 (defun cooked-evil-sync ()
   "Match evil's state to who owns the keyboard.
 A TUI needs every keystroke, so evil must not be interpreting them; at a prompt
