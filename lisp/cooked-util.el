@@ -367,6 +367,29 @@ prebuilt artifact instead."
     (or (locate-dominating-file dir "Cargo.toml")
         (file-name-directory (directory-file-name dir)))))
 
+(defun cooked--decode-base64 (data)
+  "The bytes base64 DATA encodes, as a unibyte string, or nil if it is not base64.
+
+The standard alphabet, since that is what `base64' and every shell snippet
+emit: a clipboard write of `hello?>' arrives as `aGVsbG8/Pg==', and the URL
+alphabet would refuse the `/' in it.  Missing padding is restored first,
+because a sender that strips the trailing `=' is making a cosmetic choice
+rather than sending something malformed.
+
+Several payloads the child controls are base64 -- OSC 52, the user variables
+of OSC 1337 and the shell's completion replies -- and each of them treats a
+malformed one as the child's bug to be dropped quietly, which is the nil."
+  (and (stringp data)
+       (ignore-errors
+         (base64-decode-string
+          (concat data (make-string (% (- 4 (% (length data) 4)) 4) ?=))))))
+
+(defun cooked--decode-base64-utf8 (data)
+  "The text base64 DATA encodes as UTF-8, or nil if it is not base64.
+See `cooked--decode-base64' for what is accepted."
+  (when-let* ((bytes (cooked--decode-base64 data)))
+    (decode-coding-string bytes 'utf-8)))
+
 (defun cooked--local-name (name)
   "Return NAME, or nil having refused it for naming a remote file.
 

@@ -1227,6 +1227,30 @@ tracking where it sits; moving it would corrupt a redisplay cooked cannot see."
       (should (cooked-tests--settle
                (lambda () (equal (car kill-ring) "hello world")))))))
 
+;; `+' and `/' are two of the sixty-four characters of the standard alphabet, so
+;; most real text encodes with at least one of them.  `<<??>>' is `PDw/Pz4+'.
+(ert-deftest cooked-osc-52-decodes-the-standard-base64-alphabet ()
+  (with-temp-buffer
+    (let ((kill-ring nil)
+          (cooked-clipboard-write t)
+          (inhibit-message t))
+      (cooked--osc-52-write '(?c) "PDw/Pz4+")
+      (should (equal (car kill-ring) "<<??>>"))
+      ;; Unpadded, and multibyte: `héllo ?>~ ü' with its trailing `==' stripped.
+      (cooked--osc-52-write '(?c) "aMOpbGxvID8+fiDDvA")
+      (should (equal (car kill-ring) "héllo ?>~ ü"))
+      ;; Not base64 at all is dropped rather than half-copied.
+      (cooked--osc-52-write '(?c) "not base64!")
+      (should (equal (car kill-ring) "héllo ?>~ ü")))))
+
+(ert-deftest cooked-decode-base64-refuses-garbage-and-restores-padding ()
+  (should (equal (cooked--decode-base64 "aGk") "hi"))
+  (should (equal (cooked--decode-base64 "aGk=") "hi"))
+  (should (equal (cooked--decode-base64-utf8 "w7w") "ü"))
+  (should-not (cooked--decode-base64 "a"))
+  (should-not (cooked--decode-base64 "*!*!"))
+  (should-not (cooked--decode-base64 nil)))
+
 (defmacro cooked-tests--osc-52-replies (query &rest body)
   "Run BODY in a session that sends QUERY, with `replies' bound to a function.
 

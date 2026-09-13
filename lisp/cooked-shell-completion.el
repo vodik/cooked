@@ -153,9 +153,7 @@ layer's: an answer to a question only this layer asks."
           (`("" ,serial ,prefix ,suffix ,truncated ,blob . ,_)
            ;; The blob is bytes the child chose; a truncated or corrupt one is a
            ;; failed completion, not a broken redisplay.
-           (when-let* ((decoded (ignore-errors
-                                  (decode-coding-string (base64-decode-string blob)
-                                                        'utf-8))))
+           (when-let* ((decoded (cooked--decode-base64-utf8 blob)))
              (setq cooked--completion-reply
                    `(,(string-to-number serial)
                      ,(string-to-number prefix)

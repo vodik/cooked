@@ -92,17 +92,6 @@ BUFFER defaults to the current buffer."
   (cdr (assoc name (buffer-local-value 'cooked-user-vars
                                        (or buffer (current-buffer))))))
 
-(defun cooked-user-var--decode (data)
-  "DATA decoded from base64 and then UTF-8, or nil if it is not base64.
-
-Missing padding is restored first: `base64-decode-string\\=' refuses it, and a
-snippet that strips the trailing `=\\=' is making a cosmetic choice rather than
-sending something malformed."
-  (when-let* ((bytes (ignore-errors
-                       (base64-decode-string
-                        (concat data (make-string (% (- 4 (% (length data) 4)) 4) ?=))))))
-    (decode-coding-string bytes 'utf-8)))
-
 (defun cooked-user-var--set (name data)
   "Store user variable NAME from base64 DATA and run the hook, or refuse.
 Return non-nil when the variable was stored."
@@ -120,7 +109,7 @@ Return non-nil when the variable was stored."
      (t
       ;; Malformed base64 is dropped quietly, as OSC 52 drops it: that is the
       ;; child's bug, where an over-bound set may be a limit set too low.
-      (when-let* ((value (cooked-user-var--decode data)))
+      (when-let* ((value (cooked--decode-base64-utf8 data)))
         (setf (alist-get name cooked-user-vars nil nil #'equal) value)
         (cooked--run-seam 'cooked-user-var-functions name value)
         t)))))

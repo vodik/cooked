@@ -1197,7 +1197,7 @@ however many of `c\=' and `s\=' were named."
       ;; Refuse out loud: a silent drop looks like the copy simply failed.
       (message "cooked: refused a %d-character clipboard write (see `cooked-clipboard-max-size')"
                (length data))
-    (when-let* ((bytes (ignore-errors (base64-decode-string data t))))
+    (when-let* ((bytes (cooked--decode-base64 data)))
       (let ((text (decode-coding-string bytes 'utf-8))
             (killed nil))
         (dolist (target targets)
