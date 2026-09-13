@@ -1884,8 +1884,17 @@ buffer does not drain, so the core must not send DA1 on ahead of it."
 
 (ert-deftest cooked-osc-4-answers-palette-queries-and-ignores-sets ()
   "Each entry is answered in xterm's form from the colour a cell is drawn in, and
-a set in front of them produces neither a reply nor a change."
-  (let ((out (make-temp-file "cooked-osc4")))
+a set in front of them produces neither a reply nor a change.
+
+The expected colours are read before the child sends its set.  Read after it,
+they would move with a set that took effect, and the comparison would still
+hold."
+  (let ((out (make-temp-file "cooked-osc4"))
+        (expected (mapconcat
+                   (lambda (n)
+                     (format "\033]4;%d;%s\007"
+                             n (cooked--color-to-osc (cooked--color n))))
+                   '(1 196 244))))
     (unwind-protect
         (cooked-tests--with-session
             (cooked-tests--reply-to
@@ -1894,12 +1903,7 @@ a set in front of them produces neither a reply nor a change."
              out)
           (should (cooked-tests--settle
                    (lambda () (string-match-p "244;rgb:" (cooked-tests--contents out)))))
-          (should (equal (cooked-tests--contents out)
-                         (mapconcat
-                          (lambda (n)
-                            (format "\033]4;%d;%s\007"
-                                    n (cooked--color-to-osc (cooked--color n))))
-                          '(1 196 244))))
+          (should (equal (cooked-tests--contents out) expected))
           (should (string-match-p
                    "\\`\\(\033\\]4;[0-9]+;rgb:[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}\007\\)\\{3\\}\\'"
                    (cooked-tests--contents out))))
