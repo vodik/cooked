@@ -664,19 +664,19 @@ pub(crate) fn color_scheme_report(scheme: ColorScheme) -> Vec<u8> {
 /// question, but here it would withhold the row and column count too, which are known.
 /// Zero is also what `ws_xpixel`/`ws_ypixel` already say on the tty in the same case, so
 /// the report and the `TIOCSWINSZ` it travels beside agree about the pixels as well.
-pub(crate) fn size_report(rows: usize, cols: usize, metrics: CellMetrics) -> Vec<u8> {
-    let (hpx, wpx) = if metrics.is_reported() {
-        (
-            rows.saturating_mul(usize::from(metrics.height)),
-            cols.saturating_mul(usize::from(metrics.width)),
-        )
-    } else {
-        (0, 0)
-    };
+pub(crate) fn size_report(rows: usize, cols: usize, metrics: Option<CellMetrics>) -> Vec<u8> {
+    let area = metrics.map_or_else(PixelSize::default, |m| m.text_area(rows, cols));
+    let (hpx, wpx) = (area.h, area.w);
     format!("\x1b[48;{rows};{cols};{hpx};{wpx}t").into_bytes()
 }
 
 impl State {
+    /// The shown screen's text area in pixels, or `None` before Emacs reports a cell size.
+    pub(super) fn text_area(&self) -> Option<PixelSize> {
+        let screen = self.screen();
+        Some(self.metrics?.text_area(screen.height(), screen.width()))
+    }
+
     /// The mode 2048 report for the screen as it stands.
     pub(super) fn current_size_report(&self) -> Vec<u8> {
         size_report(self.screen().height(), self.screen().width(), self.metrics)
@@ -789,7 +789,7 @@ impl Term {
     /// already written keep the rectangle they were laid at — it rides every
     /// [`Placement`](crate::emu::image::Placement) — and `cooked--rescale-deco' re-cuts
     /// their slices to the new cell, which grows the picture with the text around it.
-    pub fn set_cell_metrics(&mut self, metrics: CellMetrics) {
+    pub fn set_cell_metrics(&mut self, metrics: Option<CellMetrics>) {
         self.state.metrics = metrics;
     }
 
@@ -812,7 +812,12 @@ impl Term {
     /// replaced. Left in, it would reach the child *after* the fresh one, because the
     /// fresh one leaves at once and the queue waits on the next drain, and the child
     /// would settle on the old size.
-    pub fn set_size(&mut self, rows: usize, cols: usize, metrics: CellMetrics) -> Option<Vec<u8>> {
+    pub fn set_size(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        metrics: Option<CellMetrics>,
+    ) -> Option<Vec<u8>> {
         let before = self.state.current_size_report();
         self.resize(rows, cols);
         self.set_cell_metrics(metrics);
@@ -829,7 +834,7 @@ impl Term {
         Some(report)
     }
 
-    pub fn cell_metrics(&self) -> CellMetrics {
+    pub fn cell_metrics(&self) -> Option<CellMetrics> {
         self.state.metrics
     }
 
@@ -1201,7 +1206,7 @@ struct State {
     /// does not change what TERM said.
     terminfo: Option<&'static crate::emu::terminfo::Entry>,
     /// The cell size Emacs reports, for turning pixels into a cell rectangle.
-    metrics: CellMetrics,
+    metrics: Option<CellMetrics>,
     /// The light/dark scheme Emacs reports, for answering `CSI ? 996 n`.
     ///
     /// Emacs' to know and ours to answer with, exactly as `metrics` is: the theme

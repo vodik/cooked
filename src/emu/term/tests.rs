@@ -397,10 +397,7 @@ fn placements(t: &Term, row: usize) -> Vec<Placement> {
 
 fn with_metrics(rows: usize, cols: usize) -> Term {
     let mut t = Term::new(rows, cols);
-    t.set_cell_metrics(CellMetrics {
-        width: 10,
-        height: 20,
-    });
+    t.set_cell_metrics(CellMetrics::new(10, 20));
     t
 }
 
@@ -433,10 +430,7 @@ fn size_reports(events: &[Event]) -> Vec<String> {
         .collect()
 }
 
-const CELL: CellMetrics = CellMetrics {
-    width: 10,
-    height: 20,
-};
+const CELL: Option<CellMetrics> = CellMetrics::new(10, 20);
 
 /// TERM.org's three cases, in order: subscribing is one report, a resize is one more,
 /// and after unsubscribing a resize is none.
@@ -468,10 +462,7 @@ fn mode_2048_reports_a_cell_change_and_not_a_resize_to_the_same_size() {
     t.drain();
     assert_eq!(t.set_size(24, 80, CELL), None, "nothing moved");
     // A text-scale zoom: the grid is untouched and every pixel field is not.
-    let zoomed = CellMetrics {
-        width: 12,
-        height: 24,
-    };
+    let zoomed = CellMetrics::new(12, 24);
     assert_eq!(
         t.set_size(24, 80, zoomed).as_deref(),
         Some(&b"\x1b[48;24;80;576;960t"[..])
@@ -486,7 +477,7 @@ fn mode_2048_reports_zero_pixels_without_a_cell_size() {
     t.feed(b"\x1b[?2048h");
     assert_eq!(size_reports(&t.drain().events), ["\x1b[48;24;80;0;0t"]);
     assert_eq!(
-        t.set_size(10, 40, CellMetrics::default()).as_deref(),
+        t.set_size(10, 40, None).as_deref(),
         Some(&b"\x1b[48;10;40;0;0t"[..])
     );
 }
@@ -1881,10 +1872,7 @@ fn xtsmgraphics_answers_the_questions_a_sixel_producer_asks() {
 
     // Geometry, once Emacs has said how big a cell is: the same product `14t` reports.
     let mut t = Term::new(24, 80);
-    t.set_cell_metrics(CellMetrics {
-        width: 10,
-        height: 20,
-    });
+    t.set_cell_metrics(CellMetrics::new(10, 20));
     t.feed(b"\x1b[?2;1S");
     assert!(
         t.drain()
@@ -4084,10 +4072,7 @@ fn a_replayed_picture_is_measured_against_the_cell_it_is_replayed_at() {
     let first_id = first[0].id;
 
     // The font doubles. Rows and columns arrive by the same route and are unchanged.
-    t.set_cell_metrics(CellMetrics {
-        width: 20,
-        height: 40,
-    });
+    t.set_cell_metrics(CellMetrics::new(20, 40));
     t.feed(b"\x1b[H");
     t.feed(apc.as_bytes());
     let again = t.drain();
@@ -4128,10 +4113,7 @@ fn a_reshape_that_does_not_move_the_cell_keeps_every_picture() {
     let first = t.drain().images[0].id;
 
     t.resize(20, 40);
-    t.set_cell_metrics(CellMetrics {
-        width: 10,
-        height: 20,
-    });
+    t.set_cell_metrics(CellMetrics::new(10, 20));
     t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(20, 40));
     let delta = t.drain();
     assert!(
@@ -4160,10 +4142,7 @@ fn a_client_name_survives_a_cell_change_and_is_replaced_at_the_new_size() {
     t.feed(format!("\x1b_Ga=t,f=24,s=40,v=60,i=7;{}\x1b\\", b64(&pixels)).as_bytes());
     t.drain();
 
-    t.set_cell_metrics(CellMetrics {
-        width: 20,
-        height: 40,
-    });
+    t.set_cell_metrics(CellMetrics::new(20, 40));
     t.feed(b"\x1b_Ga=p,i=7\x1b\\");
     let delta = t.drain();
     let replies: Vec<_> = delta

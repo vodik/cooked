@@ -2517,10 +2517,7 @@ mod tests {
             .resize(Winsize {
                 rows: 12,
                 cols: 40,
-                cell: CellMetrics {
-                    width: 10,
-                    height: 20,
-                },
+                cell: CellMetrics::new(10, 20),
             })
             .expect("resize");
         let update = wait_for(&session, |u| rendered(u).contains("E[48;12;40;240;400t"));

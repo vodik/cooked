@@ -151,17 +151,17 @@ impl Pid {
 pub struct Winsize {
     pub rows: u16,
     pub cols: u16,
-    /// One cell in pixels, zero when unreported.
+    /// One cell in pixels, or `None` when unreported.
     ///
-    /// A terminal frame has no such thing and leaves this at zero, which is what the
-    /// struct meant before it carried the field at all. On a graphical frame it is the
+    /// A terminal frame has no such thing, and the tty is then told zero pixels, which
+    /// is how `winsize` says "not reported". On a graphical frame it is the
     /// font's, and it moves with `text-scale-mode` as well as with the font — so it is
     /// reported alongside the row and column count rather than sampled once.
     ///
     /// The child needs it: an image protocol sizes a transmission in pixels, and tools
     /// consult `ws_xpixel`/`ws_ypixel` — or the XTWINOPS reports built from them —
     /// before deciding whether to draw a picture at all.
-    pub cell: CellMetrics,
+    pub cell: Option<CellMetrics>,
 }
 
 impl From<Winsize> for libc::winsize {
@@ -170,8 +170,10 @@ impl From<Winsize> for libc::winsize {
             ws_row: w.rows,
             ws_col: w.cols,
             // The text area, which is what these fields mean: cells times cell size.
-            ws_xpixel: w.cols.saturating_mul(w.cell.width),
-            ws_ypixel: w.rows.saturating_mul(w.cell.height),
+            ws_xpixel: w.cell.map_or(0, |cell| w.cols.saturating_mul(cell.width())),
+            ws_ypixel: w
+                .cell
+                .map_or(0, |cell| w.rows.saturating_mul(cell.height())),
         }
     }
 }
@@ -357,10 +359,10 @@ impl Pty {
         Ok(Winsize {
             rows: ws.ws_row,
             cols: ws.ws_col,
-            cell: CellMetrics {
-                width: ws.ws_xpixel.checked_div(ws.ws_col.max(1)).unwrap_or(0),
-                height: ws.ws_ypixel.checked_div(ws.ws_row.max(1)).unwrap_or(0),
-            },
+            cell: CellMetrics::new(
+                ws.ws_xpixel / ws.ws_col.max(1),
+                ws.ws_ypixel / ws.ws_row.max(1),
+            ),
         })
     }
 
@@ -728,7 +730,7 @@ mod tests {
             Winsize {
                 rows: 24,
                 cols: 80,
-                cell: CellMetrics::default(),
+                cell: None,
             },
             None,
         )
@@ -788,7 +790,7 @@ mod tests {
             Winsize {
                 rows: 24,
                 cols: 80,
-                cell: CellMetrics::default(),
+                cell: None,
             },
             None,
         )
@@ -805,7 +807,7 @@ mod tests {
             Winsize {
                 rows: 24,
                 cols: 80,
-                cell: CellMetrics::default(),
+                cell: None,
             },
             None,
         )
@@ -825,7 +827,7 @@ mod tests {
             Winsize {
                 rows: 24,
                 cols: 80,
-                cell: CellMetrics::default(),
+                cell: None,
             },
             None,
         )
@@ -849,7 +851,7 @@ mod tests {
             Winsize {
                 rows: 24,
                 cols: 80,
-                cell: CellMetrics::default(),
+                cell: None,
             },
             None,
         )
@@ -866,7 +868,7 @@ mod tests {
         let size = Winsize {
             rows: 24,
             cols: 80,
-            cell: CellMetrics::default(),
+            cell: None,
         };
         let pty = Pty::spawn(&["/bin/cat"], &[("TERM", "dumb")], size, None).expect("spawn");
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -879,7 +881,7 @@ mod tests {
         let size = Winsize {
             rows: 24,
             cols: 80,
-            cell: CellMetrics::default(),
+            cell: None,
         };
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "stty -echo; read x"],

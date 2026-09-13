@@ -574,7 +574,7 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
         cols: env.from_lisp::<u16>(args[3])?.max(1),
         // Reported by the first resize rather than at spawn: the buffer usually has no
         // window yet here, so there is no font to measure.
-        cell: CellMetrics::default(),
+        cell: None,
     };
     let wake = env.open_channel(args[4])?;
     let cwd = env.opt::<String>(args, 5)?;
@@ -655,10 +655,7 @@ fn resize(env: Env, args: &[Value]) -> Result<Value> {
     let size = Winsize {
         rows: env.from_lisp::<u16>(args[1])?.max(1),
         cols: env.from_lisp::<u16>(args[2])?.max(1),
-        cell: CellMetrics {
-            width: cell(3)?,
-            height: cell(4)?,
-        },
+        cell: CellMetrics::new(cell(3)?, cell(4)?),
     };
     handle(env, args[0])?.resize(size).or_signal(env)?;
     Ok(env.nil())

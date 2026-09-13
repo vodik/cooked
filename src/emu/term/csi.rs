@@ -740,17 +740,17 @@ impl State {
                 // producer asks before deciding whether to draw at all. Silent when
                 // nothing has been reported — a terminal frame has no cell size, and
                 // answering zero would be a claim rather than an absence.
-                14 if self.metrics.is_reported() => {
-                    let (h, w) = (self.screen().height(), self.screen().width());
-                    let (ph, pw) = (
-                        h.saturating_mul(usize::from(self.metrics.height)),
-                        w.saturating_mul(usize::from(self.metrics.width)),
-                    );
-                    self.csi_reply(format_args!("4;{ph};{pw}t"));
+                14 => {
+                    if let Some(area) = self.text_area() {
+                        let (ph, pw) = (area.h, area.w);
+                        self.csi_reply(format_args!("4;{ph};{pw}t"));
+                    }
                 }
-                16 if self.metrics.is_reported() => {
-                    let (ch, cw) = (self.metrics.height, self.metrics.width);
-                    self.csi_reply(format_args!("6;{ch};{cw}t"));
+                16 => {
+                    if let Some(metrics) = self.metrics {
+                        let (ch, cw) = (metrics.height(), metrics.width());
+                        self.csi_reply(format_args!("6;{ch};{cw}t"));
+                    }
                 }
                 18 => {
                     let (h, w) = (self.screen().height(), self.screen().width());
@@ -828,18 +828,15 @@ impl State {
                     // waiting on an answer is owed one. Setting or resetting the geometry
                     // is refused the same way: the window is Emacs' and not the child's,
                     // which is why `3t`/`4t` are refused above and `8t` only asks.
-                    2 if self.metrics.is_reported() && (action == 1 || action == 4) => {
-                        let (h, w) = (self.screen().height(), self.screen().width());
-                        let (pw, ph) = (
-                            w.saturating_mul(usize::from(self.metrics.width)),
-                            h.saturating_mul(usize::from(self.metrics.height)),
-                        );
+                    2 => match self.text_area().filter(|_| action == 1 || action == 4) {
                         // Width first here, where `14t` above reports height first. The
-                        // two sequences genuinely disagree about the order, and reading
-                        // one off the other is the way to get this wrong.
-                        self.csi_reply(format_args!("?2;0;{pw};{ph}S"));
-                    }
-                    2 => self.csi_reply(format_args!("?2;3S")),
+                        // two sequences genuinely disagree about the order.
+                        Some(area) => {
+                            let (pw, ph) = (area.w, area.h);
+                            self.csi_reply(format_args!("?2;0;{pw};{ph}S"));
+                        }
+                        None => self.csi_reply(format_args!("?2;3S")),
+                    },
                     // ReGIS (3) and anything else: an item we do not have, which is what
                     // status 1 means.
                     other => self.csi_reply(format_args!("?{other};1S")),

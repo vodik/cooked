@@ -26,6 +26,7 @@
 //! cannot make two pictures share a key.
 
 use std::collections::HashMap;
+use std::num::NonZeroU16;
 
 use super::content_hash;
 use super::intern::{Id, Ledger};
@@ -120,35 +121,63 @@ impl CellSize {
 /// The size of one cell in pixels, as Emacs measures it.
 ///
 /// Emacs' to know and ours to answer with: it is the frame's font metrics, and it moves
-/// with `text-scale-mode` as well as with the font. Zero means "not reported", which is
-/// what a terminal frame stays at, and what every caller here has to tolerate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// with `text-scale-mode` as well as with the font. Both axes are nonzero by
+/// construction. A terminal frame has no cell size at all, and that is spelled
+/// `Option::<CellMetrics>::None` wherever it can arise, so every reader has to decide what
+/// an unreported size means rather than dividing by a zero it forgot to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellMetrics {
-    pub width: u16,
-    pub height: u16,
+    width: NonZeroU16,
+    height: NonZeroU16,
 }
 
 impl CellMetrics {
-    /// How many cells across and down an image of `px` pixels covers.
-    ///
-    /// Rounded up, because a picture that does not divide evenly into cells still has to
-    /// own the cell it spills into — the alternative is a strip of the image with no cell
-    /// to hang it on. Falls back to one cell per axis when the metrics are unreported,
-    /// which keeps a placement well-formed on a terminal frame even though nothing will
-    /// draw it.
-    pub fn cells_for(self, px: PixelSize) -> CellSize {
-        let axis = |size: u32, cell: u16| -> u16 {
-            if cell == 0 {
-                return 1;
-            }
-            u16::try_from(size.div_ceil(u32::from(cell)).max(1)).unwrap_or(u16::MAX)
-        };
-        CellSize::new(axis(px.w, self.width), axis(px.h, self.height))
+    /// A cell WIDTH by HEIGHT pixels, or `None` if either is zero -- which is what an
+    /// unreported size arrives as on both of the wires it crosses.
+    pub const fn new(width: u16, height: u16) -> Option<Self> {
+        match (NonZeroU16::new(width), NonZeroU16::new(height)) {
+            (Some(width), Some(height)) => Some(Self { width, height }),
+            _ => None,
+        }
     }
 
-    /// Whether Emacs has told us the font metrics yet; see the note on the struct.
-    pub fn is_reported(self) -> bool {
-        self.width != 0 && self.height != 0
+    pub const fn width(self) -> u16 {
+        self.width.get()
+    }
+
+    pub const fn height(self) -> u16 {
+        self.height.get()
+    }
+
+    /// How many pixels ROWS by COLS of these cells cover.
+    ///
+    /// The one place that product is taken, for every report that states it: `14t`,
+    /// XTSMGRAPHICS, the mode 2048 report and `TIOCSWINSZ`. The reports disagree about
+    /// which axis comes first, and a named pair is what stops one being read off another.
+    pub fn text_area(self, rows: usize, cols: usize) -> PixelSize {
+        let axis = |cells: usize, cell: NonZeroU16| {
+            u32::try_from(cells)
+                .unwrap_or(u32::MAX)
+                .saturating_mul(u32::from(cell.get()))
+        };
+        PixelSize::new(axis(cols, self.width), axis(rows, self.height))
+    }
+}
+
+impl PixelSize {
+    /// How many cells across and down a picture of this size covers in cells of METRICS.
+    ///
+    /// Rounded up, because a picture that does not divide evenly into cells still has to
+    /// own the cell it spills into. Without metrics each axis is one cell, which keeps a
+    /// placement well-formed on a terminal frame even though nothing will draw it.
+    pub fn cells(self, metrics: Option<CellMetrics>) -> CellSize {
+        let Some(metrics) = metrics else {
+            return CellSize::new(1, 1);
+        };
+        let axis = |size: u32, cell: NonZeroU16| -> u16 {
+            u16::try_from(size.div_ceil(u32::from(cell.get())).max(1)).unwrap_or(u16::MAX)
+        };
+        CellSize::new(axis(self.w, metrics.width), axis(self.h, metrics.height))
     }
 }
 
@@ -324,9 +353,9 @@ impl ImageStore {
     /// nobody was using any more.
     ///
     /// `None` for an id the store has forgotten.
-    pub(crate) fn cells(&self, id: ImageId, metrics: CellMetrics) -> Option<CellSize> {
+    pub(crate) fn cells(&self, id: ImageId, metrics: Option<CellMetrics>) -> Option<CellSize> {
         let image = self.images.get(&id)?;
-        Some(image.asked.unwrap_or_else(|| metrics.cells_for(image.px)))
+        Some(image.asked.unwrap_or_else(|| image.px.cells(metrics)))
     }
 
     /// Record whether the child named a rectangle for this picture, and which.
@@ -378,10 +407,7 @@ impl ImageStore {
 mod tests {
     use super::*;
 
-    const METRICS: CellMetrics = CellMetrics {
-        width: 10,
-        height: 20,
-    };
+    const METRICS: Option<CellMetrics> = CellMetrics::new(10, 20);
 
     /// Frame N of an animation: three megabytes, as a raw RGBA frame of a picture worth
     /// looking at is, and distinct from every other N.
@@ -412,16 +438,10 @@ mod tests {
     #[test]
     fn cell_coverage_rounds_up() {
         // A picture that does not divide evenly still owns the cell it spills into.
+        assert_eq!(PixelSize::new(10, 20).cells(METRICS), CellSize::new(1, 1));
+        assert_eq!(PixelSize::new(11, 21).cells(METRICS), CellSize::new(2, 2));
         assert_eq!(
-            METRICS.cells_for(PixelSize::new(10, 20)),
-            CellSize::new(1, 1)
-        );
-        assert_eq!(
-            METRICS.cells_for(PixelSize::new(11, 21)),
-            CellSize::new(2, 2)
-        );
-        assert_eq!(
-            METRICS.cells_for(PixelSize::new(100, 200)),
+            PixelSize::new(100, 200).cells(METRICS),
             CellSize::new(10, 10)
         );
     }
@@ -430,15 +450,12 @@ mod tests {
     fn unreported_metrics_still_give_a_well_formed_placement() {
         // A terminal frame never reports a cell size; nothing will draw the image, but
         // the geometry must not come out zero-sized and put placements nowhere.
-        assert_eq!(
-            CellMetrics::default().cells_for(PixelSize::new(640, 480)),
-            CellSize::new(1, 1)
-        );
+        assert_eq!(PixelSize::new(640, 480).cells(None), CellSize::new(1, 1));
     }
 
     #[test]
     fn a_zero_sized_image_still_covers_one_cell() {
-        assert_eq!(METRICS.cells_for(PixelSize::new(0, 0)), CellSize::new(1, 1));
+        assert_eq!(PixelSize::new(0, 0).cells(METRICS), CellSize::new(1, 1));
     }
 
     #[test]
