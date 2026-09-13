@@ -2666,7 +2666,7 @@ fn an_anchor_survives_the_row_scrolling_off() {
 fn mouse_modes_accumulate_and_report() {
     let mut t = term(4, 20, b"\x1b[?1002h\x1b[?1006h");
     let mouse = t.mouse();
-    assert!(mouse.click && mouse.drag && mouse.sgr());
+    assert!(mouse.drag() && !mouse.motion() && mouse.sgr());
     assert!(
         t.drain()
             .events
@@ -2676,6 +2676,35 @@ fn mouse_modes_accumulate_and_report() {
 
     t.feed(b"\x1b[?1002l\x1b[?1006l");
     assert!(!t.mouse().enabled());
+}
+
+/// Resetting any tracking mode turns tracking off, whichever one was set, as xterm's
+/// single `send_mouse_pos` does. Flag by flag, `1002 h` then `1000 l` left drag reporting
+/// on with click reporting off, which is a report no terminal sends.
+#[test]
+fn resetting_any_tracking_mode_turns_tracking_off() {
+    for reset in [1000, 1002, 1003] {
+        let mut t = term(4, 20, b"\x1b[?1002h");
+        t.feed(format!("\x1b[?{reset}l").as_bytes());
+        assert_eq!(t.mouse().tracking, MouseTracking::Off, "?{reset}l");
+        t.feed(b"\x1b[?1002$p");
+        assert!(
+            t.drain()
+                .events
+                .contains(&Event::Reply(b"\x1b[?1002;2$y".to_vec())),
+            "?{reset}l leaves 1002 reporting reset"
+        );
+    }
+
+    // A set replaces rather than accumulates, so DECRQM names exactly one mode.
+    let mut t = term(4, 20, b"\x1b[?1002h\x1b[?1003h\x1b[?1000h");
+    assert_eq!(t.mouse().tracking, MouseTracking::Click);
+    t.feed(b"\x1b[?1000$p\x1b[?1002$p\x1b[?1003$p");
+    let events = t.drain().events;
+    for (mode, answer) in [(1000, 1), (1002, 2), (1003, 2)] {
+        let reply = format!("\x1b[?{mode};{answer}$y").into_bytes();
+        assert!(events.contains(&Event::Reply(reply)), "{mode}: {events:?}");
+    }
 }
 
 /// 1006 and 1016 are one choice, not two flags: xterm makes the extended coordinate
@@ -3544,7 +3573,8 @@ fn xtsave_restores_mouse_tracking_as_one_choice() {
     t.drain();
     t.feed(b"\x1b[?1000;1002;1003;1006s\x1b[?1003;1006h\x1b[?1000;1002;1003;1006r");
     let mouse = t.mouse();
-    assert!(mouse.click && mouse.drag && !mouse.motion && !mouse.sgr());
+    assert_eq!(mouse.tracking, MouseTracking::Drag);
+    assert!(!mouse.sgr());
     assert!(
         t.drain().events.contains(&Event::Mouse(mouse)),
         "Lisp is told the restored tracking"

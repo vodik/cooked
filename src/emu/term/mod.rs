@@ -212,12 +212,30 @@ pub enum Event {
     FrameSize(bool),
 }
 
+/// What the child asked to hear from the mouse, and how the reports are to be spelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Mouse {
-    pub click: bool,
-    pub drag: bool,
-    pub motion: bool,
+    pub tracking: MouseTracking,
     pub format: MouseFormat,
+}
+
+/// Which pointer events are reported: DEC modes 1000, 1002 and 1003.
+///
+/// One choice rather than three flags, as xterm keeps it: its `send_mouse_pos` holds a
+/// single mode, setting any of the three numbers replaces whichever was in force, and
+/// resetting any of them turns reporting off (`set_mousemode` in charproc.c assigns
+/// `MOUSE_OFF` on every reset). Three flags could say "drag without click", which no
+/// terminal has a report for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MouseTracking {
+    #[default]
+    Off,
+    /// DEC mode 1000: presses and releases.
+    Click,
+    /// DEC mode 1002: presses, releases, and motion while a button is held.
+    Drag,
+    /// DEC mode 1003: presses, releases, and all motion, held or not.
+    Motion,
 }
 
 /// How a mouse report spells its coordinates: DEC modes 1006 and 1016.
@@ -242,7 +260,21 @@ pub enum MouseFormat {
 
 impl Mouse {
     pub fn enabled(self) -> bool {
-        self.click || self.drag || self.motion
+        self.tracking != MouseTracking::Off
+    }
+
+    /// Whether the mode in force is 1002, button-event tracking.
+    ///
+    /// 1003 reports held motion too, but it is its own mode on the wire: Lisp is told
+    /// `drag` and `motion` as the two modes, and asks `(or drag motion)` where it means
+    /// held motion.
+    pub fn drag(self) -> bool {
+        self.tracking == MouseTracking::Drag
+    }
+
+    /// Whether motion with no button held is reported, which only 1003 asks for.
+    pub fn motion(self) -> bool {
+        self.tracking == MouseTracking::Motion
     }
 
     /// Whether a report takes the SGR form, whichever unit its coordinates are in.

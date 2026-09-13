@@ -155,13 +155,11 @@ impl PenParts {
 pub(super) enum SavedMode {
     /// A mode that is on or off, restored through [`State::dec_mode`] like any `h`/`l`.
     Flag(bool),
-    /// 1000, 1002 and 1003, which are not three flags but one choice of what to report.
-    ///
-    /// Saved whole, as xterm saves its single mouse-mode value for any of the three
-    /// numbers. Restoring them as flags cannot work: with 1002 on, 1000 reads as reset,
-    /// and replaying `1000 l` would clear the click reporting 1002 depends on. The
-    /// encoding bit, 1006, is a separate mode and is left out of this.
-    Tracking(Mouse),
+    /// 1000, 1002 and 1003, which are one choice of what to report rather than three
+    /// flags, and so are saved whole under whichever number was named. Replaying them as
+    /// flags cannot work: with 1002 on, 1000 reads as reset, and `1000 l` would turn
+    /// reporting off. The coordinate format, 1006 and 1016, is a separate mode.
+    Tracking(MouseTracking),
 }
 
 impl State {
@@ -193,9 +191,16 @@ impl State {
             1000 | 1002 | 1003 | 1006 | 1016 => {
                 let mouse = &mut self.modes.mouse;
                 match mode {
-                    1000 => mouse.click = on,
-                    1002 => (mouse.click, mouse.drag) = (on, on),
-                    1003 => (mouse.click, mouse.motion) = (on, on),
+                    // A set chooses the tracking mode and a reset of any of the three
+                    // turns tracking off, whichever was in force; see [`MouseTracking`].
+                    1000 | 1002 | 1003 => {
+                        mouse.tracking = match (on, mode) {
+                            (false, _) => MouseTracking::Off,
+                            (true, 1000) => MouseTracking::Click,
+                            (true, 1002) => MouseTracking::Drag,
+                            (true, _) => MouseTracking::Motion,
+                        };
+                    }
                     _ => {
                         let format = if mode == 1006 {
                             MouseFormat::Sgr
@@ -259,9 +264,9 @@ impl State {
         match mode {
             6 => self.modes.origin_mode.into(),
             7 => self.screen().autowrap().into(),
-            1000 => (mouse.click && !mouse.drag && !mouse.motion).into(),
-            1002 => mouse.drag.into(),
-            1003 => mouse.motion.into(),
+            1000 => (mouse.tracking == MouseTracking::Click).into(),
+            1002 => (mouse.tracking == MouseTracking::Drag).into(),
+            1003 => (mouse.tracking == MouseTracking::Motion).into(),
             1006 => (mouse.format == MouseFormat::Sgr).into(),
             1016 => mouse.pixels().into(),
             2026 => self
@@ -384,7 +389,7 @@ impl State {
     /// frame, which restored later would hold redisplay for a frame nobody is drawing.
     fn save_mode(&mut self, mode: u16) {
         let value = match mode {
-            1000 | 1002 | 1003 => SavedMode::Tracking(self.modes.mouse),
+            1000 | 1002 | 1003 => SavedMode::Tracking(self.modes.mouse.tracking),
             1048 | 2026 => return,
             _ => match self.dec_mode_state(mode) {
                 ModeReport::Set => SavedMode::Flag(true),
@@ -422,14 +427,9 @@ impl State {
                 }
             }
             SavedMode::Tracking(saved) => {
-                let now = self.modes.mouse;
-                let restored = Mouse {
-                    format: now.format,
-                    ..saved
-                };
-                if restored != now {
-                    self.modes.mouse = restored;
-                    self.events.push(Event::Mouse(restored));
+                if self.modes.mouse.tracking != saved {
+                    self.modes.mouse.tracking = saved;
+                    self.events.push(Event::Mouse(self.modes.mouse));
                 }
             }
         }

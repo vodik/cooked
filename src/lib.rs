@@ -1538,8 +1538,8 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
                 sym!(env, "mouse")?,
                 m.enabled(),
                 m.sgr(),
-                m.drag,
-                m.motion,
+                m.drag(),
+                m.motion(),
                 m.pixels(),
             ]
         ),
