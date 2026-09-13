@@ -41,8 +41,16 @@ struct Known {
 #[derive(Debug, Default)]
 pub(super) struct Front {
     cols: usize,
-    /// Every known row's cells, `cols` to a row, in display order.
+    /// Every row's cells, `cols` to a slot, in no particular order; see `order`.
     cells: Vec<Cell>,
+    /// The slot holding each display row's cells.
+    ///
+    /// A shift moves Emacs' text a few rows at a time, and following it by moving cells
+    /// would copy the whole region for every drain that scrolls it: holding a key in vim
+    /// shifts a 48-row text area by a line or two per redisplay, which is 150KB of cells
+    /// per drain at 50x200. Rotating these indices follows the same shift for a few bytes,
+    /// exactly as the grid itself scrolls.
+    order: Vec<u32>,
     rows: Vec<Known>,
 }
 
@@ -57,6 +65,8 @@ impl Front {
         self.cols = cols;
         self.cells.clear();
         self.cells.resize(rows * cols, Cell::default());
+        self.order.clear();
+        self.order.extend(0..rows as u32);
         self.rows.clear();
         self.rows.resize(rows, Known::default());
     }
@@ -93,25 +103,23 @@ impl Front {
             return;
         }
         let cols = self.cols;
-        let cells = &mut self.cells[top * cols..(bottom + 1) * cols];
+        let order = &mut self.order[top..=bottom];
         let rows = &mut self.rows[top..=bottom];
         let recycled = match direction {
             Direction::Up => {
-                cells.rotate_left(count * cols);
+                order.rotate_left(count);
                 rows.rotate_left(count);
                 rows.len() - count..rows.len()
             }
             Direction::Down => {
-                cells.rotate_right(count * cols);
+                order.rotate_right(count);
                 rows.rotate_right(count);
                 0..count
             }
         };
         for index in recycled {
-            Cell::fill(
-                &mut cells[index * cols..(index + 1) * cols],
-                Cell::default(),
-            );
+            let slot = order[index] as usize * cols;
+            Cell::fill(&mut self.cells[slot..slot + cols], Cell::default());
             let row = &mut rows[index];
             row.known = true;
             row.wrapped = false;
@@ -132,8 +140,7 @@ impl Front {
                 || self.cursor_run(index, row, known.cursor).is_none()
                     && self.cursor_run(index, row, cursor).is_none())
             && row.len() == self.cols
-            && Cell::bytes(row.cells())
-                == Cell::bytes(&self.cells[index * self.cols..][..self.cols])
+            && Cell::bytes(row.cells()) == Cell::bytes(self.cells(index))
             && known.extras.iter().eq(drawn(row.extras()))
     }
 
@@ -304,7 +311,7 @@ impl Front {
         glyph_run_across(self.cells(index), row.cells(), usize::from(at?))
     }
 
-    /// Every cell of the copy, known rows or not; see [`Screen::all_cells`].
+    /// Every cell of the copy, known rows or not, in slot order; see [`Screen::all_cells`].
     ///
     /// [`Screen::all_cells`]: super::super::screen::Screen::all_cells
     pub(super) fn all_cells(&self) -> &[Cell] {
@@ -313,7 +320,8 @@ impl Front {
 
     /// Row INDEX's cells in the copy.
     fn cells(&self, index: usize) -> &[Cell] {
-        &self.cells[index * self.cols..][..self.cols]
+        let slot = self.order[index] as usize * self.cols;
+        &self.cells[slot..slot + self.cols]
     }
 
     /// Note that Emacs now shows ROW at INDEX, rendered with the cursor at CURSOR.
@@ -322,7 +330,8 @@ impl Front {
         let (Some(known), true) = (self.rows.get_mut(index), row.len() == cols) else {
             return;
         };
-        self.cells[index * cols..][..cols].copy_from_slice(row.cells());
+        let slot = self.order[index] as usize * cols;
+        self.cells[slot..slot + cols].copy_from_slice(row.cells());
         known.known = true;
         known.wrapped = row.wrapped();
         known.cursor = cursor;
