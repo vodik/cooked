@@ -197,7 +197,7 @@ fn a_kitty_query_is_answered_with_what_is_honoured() {
 
     // The reply is exactly the constant's mask, so widening one widens the other.
     assert_eq!(
-        reply(b"\x1b[>255u\x1b[?u"),
+        reply(b"\x1b[>31u\x1b[?u"),
         Some(format!("\x1b[?{}u", KittyFlags::HONOURED).into_bytes())
     );
 
@@ -257,6 +257,98 @@ fn kitty_set_honours_its_mode() {
     assert_eq!(t.kitty_flags().bits(), 4, "mode 1, the default, replaces");
     t.feed(b"\x1b[=9;1u");
     assert_eq!(t.kitty_flags().bits(), 9);
+}
+
+/// `CSI = FLAGS ; MODE u` on the alternate screen changes that screen's stack and only
+/// that one, in each of the modes that combine with what is there.
+#[test]
+fn kitty_set_adds_and_removes_on_the_alternate_stack() {
+    let mut t = term(4, 20, b"\x1b[>4u\x1b[?1049h\x1b[>1u");
+    t.feed(b"\x1b[=8;2u");
+    assert_eq!(
+        t.kitty_flags().bits(),
+        9,
+        "mode 2 adds to the alternate top"
+    );
+    t.feed(b"\x1b[=1;3u");
+    assert_eq!(
+        t.kitty_flags().bits(),
+        8,
+        "mode 3 clears on the alternate top"
+    );
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(
+        t.kitty_flags().bits(),
+        4,
+        "the primary's top is as it was pushed"
+    );
+}
+
+/// A set with nothing pushed creates the entry it changes, so the flags take effect,
+/// and a pop takes them away again.
+#[test]
+fn kitty_set_on_an_empty_stack_takes_effect() {
+    let mut t = term(4, 20, b"\x1b[=1u");
+    assert_eq!(t.kitty_flags().bits(), 1);
+    t.feed(b"\x1b[<u\x1b[=8;2u");
+    assert_eq!(
+        t.kitty_flags().bits(),
+        8,
+        "mode 2 adds to the empty default"
+    );
+    t.feed(b"\x1b[<u\x1b[=8;3u");
+    assert!(
+        t.kitty_flags().is_empty(),
+        "mode 3 on nothing leaves nothing"
+    );
+}
+
+/// A flag value past the five bits the protocol defines is ignored, not truncated:
+/// read as a byte, 257 would push 1 and turn disambiguation on. 31 is the widest value
+/// accepted and 32 the first refused, as in ghostty.
+#[test]
+fn kitty_flags_out_of_range_are_ignored() {
+    let mut t = term(4, 20, b"\x1b[>4u\x1b[>257u");
+    assert_eq!(t.kitty_flags().bits(), 4, "the push of 257 did nothing");
+    t.feed(b"\x1b[<u");
+    assert!(
+        t.kitty_flags().is_empty(),
+        "one pop undoes the one push that happened"
+    );
+
+    t.feed(b"\x1b[>32u");
+    assert!(t.kitty_flags().is_empty(), "32 is past the defined bits");
+    t.feed(b"\x1b[>31u");
+    assert_eq!(t.state.kitty_stack().top().bits(), 31);
+
+    t.feed(b"\x1b[=256u\x1b[=65535;2u");
+    assert_eq!(
+        t.state.kitty_stack().top().bits(),
+        31,
+        "a set out of range leaves the top alone"
+    );
+}
+
+/// A set mode the protocol does not define is ignored, where reading it as a replace
+/// would throw away every flag it did not name.
+#[test]
+fn kitty_set_with_an_unknown_mode_is_ignored() {
+    let mut t = term(4, 20, b"\x1b[>9u\x1b[=1;4u");
+    assert_eq!(t.kitty_flags().bits(), 9);
+    t.feed(b"\x1b[=4;0u");
+    assert_eq!(
+        t.kitty_flags().bits(),
+        4,
+        "0 is the default mode, replace, like an empty parameter"
+    );
+}
+
+/// `CSI < 0 u` pops one, like `CSI < u`. The parser hands both over as a single 0, so
+/// ghostty's pop of nothing for a written 0 cannot be told apart from the bare form.
+#[test]
+fn kitty_pop_of_zero_pops_one() {
+    let t = term(4, 20, b"\x1b[>1u\x1b[>8u\x1b[<0u");
+    assert_eq!(t.kitty_flags().bits(), 1);
 }
 
 #[test]

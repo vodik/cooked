@@ -662,14 +662,20 @@ impl State {
             }
             // Kitty keyboard protocol: push, pop, and set, each on the stack of the screen
             // being shown. See [`KittyStack`] for the cap and why a full push evicts.
+            // A parameter out of range drops the whole sequence, as it does in ghostty.
             (Some(b'>'), 'u') => {
-                let flags = KittyFlags::from_bits_retain(params.arg(0, 0) as u8);
-                self.kitty_stack_mut().push(flags);
+                if let Some(flags) = KittyFlags::from_param(params.value(0).unwrap_or(0)) {
+                    self.kitty_stack_mut().push(flags);
+                }
             }
             (Some(b'<'), 'u') => self.kitty_stack_mut().pop(params.arg(0, 1)),
             (Some(b'='), 'u') => {
-                let flags = KittyFlags::from_bits_retain(params.arg(0, 0) as u8);
-                self.kitty_stack_mut().set(flags, params.arg(1, 1));
+                if let (Some(flags), Some(mode)) = (
+                    KittyFlags::from_param(params.value(0).unwrap_or(0)),
+                    KittySetMode::from_param(params.arg(1, 1)),
+                ) {
+                    self.kitty_stack_mut().set(flags, mode);
+                }
             }
             // A child that probes and gets no answer may wait for one.
             //

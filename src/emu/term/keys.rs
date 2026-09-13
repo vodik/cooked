@@ -48,6 +48,20 @@ impl KittyFlags {
         Self(bits)
     }
 
+    /// The flags a `CSI > FLAGS u` or `CSI = FLAGS u` parameter names, or `None` for a
+    /// value no combination of the five defined bits adds up to.
+    ///
+    /// Rejected rather than masked, as ghostty does. Truncating to a byte read
+    /// `CSI > 257 u` as a push of 1, turning disambiguation on for a child that had
+    /// asked for no flag the protocol defines; ignoring it leaves the stack as it was.
+    pub const fn from_param(value: u16) -> Option<Self> {
+        if value < 32 {
+            Some(Self(value as u8))
+        } else {
+            None
+        }
+    }
+
     pub const fn bits(self) -> u8 {
         self.0
     }
@@ -130,24 +144,56 @@ impl KittyStack {
     }
 
     /// `CSI < N u`: pop N entries, at least one.
+    ///
+    /// ghostty pops nothing for a written 0, but the parser cannot tell `CSI < 0 u` from
+    /// `CSI < u`: both dispatch one parameter of 0, as they do in vte. Reading 0 as the
+    /// default is the usual CSI convention, and the bare form is the one children send.
     pub(super) fn pop(&mut self, count: usize) {
         let keep = self.0.len().saturating_sub(count.max(1));
         self.0.truncate(keep);
     }
 
-    /// `CSI = FLAGS ; MODE u`: 1 (the default) replaces the top, 2 sets the given bits
-    /// and 3 clears them. Read as a plain replace, `CSI = 16 ; 2 u` -- add associated
-    /// text -- would drop disambiguation on the way.
-    pub(super) fn set(&mut self, flags: KittyFlags, mode: usize) {
+    /// `CSI = FLAGS ; MODE u`, which changes the top entry in place, or creates it on an
+    /// empty stack. Read as a plain replace, `CSI = 16 ; 2 u` -- add associated text --
+    /// would drop disambiguation on the way.
+    pub(super) fn set(&mut self, flags: KittyFlags, mode: KittySetMode) {
         let top = self.top();
         let flags = match mode {
-            2 => top | flags,
-            3 => top & !flags,
-            _ => flags,
+            KittySetMode::Replace => flags,
+            KittySetMode::Add => top | flags,
+            KittySetMode::Remove => top & !flags,
         };
         match self.0.last_mut() {
             Some(top) => *top = flags,
             None => self.0.push(flags),
+        }
+    }
+}
+
+/// How `CSI = FLAGS ; MODE u` combines FLAGS with the top of the stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum KittySetMode {
+    /// Mode 1, the default: FLAGS become the top entry.
+    Replace,
+    /// Mode 2: the bits in FLAGS are turned on, and the rest left alone.
+    Add,
+    /// Mode 3: the bits in FLAGS are turned off, and the rest left alone.
+    Remove,
+}
+
+impl KittySetMode {
+    /// The mode a parameter names, or `None` for one the protocol does not define.
+    ///
+    /// An unknown mode is ignored rather than read as a replace, as ghostty does, since
+    /// `CSI = 1 ; 4 u` may be a later protocol's mode 4, and replacing would discard every
+    /// flag but disambiguation. A 0 is the default, as for [`KittyStack::pop`], because
+    /// `CSI = 1 ; u` reaches here as one.
+    pub(super) fn from_param(mode: usize) -> Option<Self> {
+        match mode {
+            1 => Some(Self::Replace),
+            2 => Some(Self::Add),
+            3 => Some(Self::Remove),
+            _ => None,
         }
     }
 }
