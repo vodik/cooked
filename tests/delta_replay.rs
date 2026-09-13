@@ -266,11 +266,13 @@ fn control() -> impl Strategy<Value = Vec<u8>> {
         ])
         .prop_map(str::to_string),
         // DECALN fills the screen with `E` and damages every row; DECSCNM inverts the whole
-        // screen, a level with no row to carry it; XTPUSHSGR and XTPOPSGR stack the pen.
+        // screen, a level with no row to carry it, and a set and reset in one write is
+        // `flash`, which only the toggle count shows; XTPUSHSGR and XTPOPSGR stack the pen.
         prop::sample::select(vec![
             "\x1b#8",
             "\x1b[?5h",
             "\x1b[?5l",
+            "\x1b[?5h\x1b[?5l",
             "\x1b[#{",
             "\x1b[1;31#{",
             "\x1b[#}"
@@ -1074,8 +1076,9 @@ proptest! {
                 "replaying the deltas did not reproduce the grid — {where_}"
             )));
         }
-        // The levels too: the cursor, DECSCNM's reverse video, the alt screen and the key
-        // encoding are what Emacs draws and encodes from, and none of them is in a row.
+        // The levels too: the cursor, DECSCNM's reverse video and its toggle count, the alt
+        // screen and the key encoding are what Emacs draws and encodes from, and none of
+        // them is in a row.
         prop_assert_eq!(
             replay.levels,
             (full.levels, full.cursor_chars),
