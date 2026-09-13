@@ -1749,8 +1749,8 @@ State of the other eleven, by whether the code has anything:
 |-----------------------------------+-------------------------------------------|
 | lone-ESC =input-decode-map= filter | *DONE*, 65b7916                          |
 | pixel-delta wheel accumulation    | *DONE*, cfe4e85                           |
-| password regex fallback           | absent — nothing in cooked-secret.el      |
-| =cooked-password-functions= chain | absent — the variable does not exist      |
+| password regex fallback           | *DONE*, 780e8f8                           |
+| =cooked-password-functions= chain | *DONE*, 780e8f8                           |
 | minibuffer resize exception       | *DONE*, 2157a1a's sibling                 |
 | kitty flags beyond bit 1          | partial — tracked, never change encoding  |
 | =around-font-scale= advice        | *DONE*, 2157a1a                           |
@@ -1768,6 +1768,25 @@ fast swipe, so a notch would be accumulated, rounded, and a click would go
 missing. And the floor of one press is the event's own *line count*, not a
 constant: macOS reports a notch as one line and fewer pixels than a row when
 =line-spacing= is set, so the row arithmetic yields zero and the notch vanishes.
+
+**** Done: the two password items (780e8f8)
+
+The chain is asked *before* the single slot, so no existing
+=cooked-password-function= changes meaning — it keeps working as the answer of
+last resort rather than becoming one voice among several. Through
+=cooked--run-seam-until-success=, so a broken auth-source backend gives no
+answer and the next source is asked.
+
+The regex arm's gate is the whole of why a regex is safe: matched against
+*local* output it would fire on any program displaying a file that mentions a
+password. Asked of the cursor's row, and asked *per drain* rather than on a
+state change, because a remote child changes the far tty and the local one never
+moves — there is no transition to hang it off. A local session pays one string
+comparison and never reaches the regexp.
+
+Worth recording as a test-writing trap: the first version used
+=user@host password: =, which =comint-password-prompt-regexp= does *not* match
+because it anchors the prompt. The test was testing itself.
 
 **** Done: the font-scale advice (2157a1a) and the minibuffer exception
 
