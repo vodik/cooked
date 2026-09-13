@@ -2965,8 +2965,10 @@ protocol without negotiating (Claude Code) is no longer listening for that."
     (should (equal (cooked--encode-event 'C-backtab) "\e[Z"))
     (should (equal (cooked--encode-event 'M-backtab) "\e\e[Z"))
 
+    ;; xterm sends Shift+Tab as `ESC [ Z' under modifyOtherKeys too, and spells
+    ;; it only with another modifier held beside Shift.
     (setq cooked--keys 'modify-other)
-    (should (equal (cooked--encode-event 'backtab) "\e[27;2;9~"))
+    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
     (should (equal (cooked--encode-event 'C-backtab) "\e[27;6;9~"))
 
     (setq cooked--keys 'kitty)
@@ -3163,7 +3165,11 @@ as a bare ESC -- the ambiguity the level exists to remove."
     (should (equal (cooked--encode-event ?!) "!"))
     (should (equal (cooked--encode-event ?É) "É"))
     (should (equal (cooked--encode-event ?a) "a"))
-    ;; The literal keys are as they were.
+    ;; The literal keys are as they were, but for Shift+Tab, which is `ESC [ Z'
+    ;; unless something besides Shift is held.
+    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
+    (should (equal (cooked--encode-event 'S-tab) "\e[Z"))
+    (should (equal (cooked--encode-event 'C-backtab) "\e[27;6;9~"))
     (should (equal (cooked--encode-event 'S-return) "\e[27;2;13~"))
     (should (equal (cooked--encode-event 'M-escape) "\e[27;3;27~"))
     (should (equal (cooked--encode-event 'return) "\r"))
@@ -3194,13 +3200,23 @@ does at this level."
     (should (equal (cooked--encode-event ?\M-\C-a) "\e\C-a"))
     ;; Where the rest re-spells, Meta counts in the parameter.
     (should (equal (cooked--encode-event ?\M-\C-\;) "\e[27;7;59~"))
-    ;; Return and Tab under Shift or Control; Escape and Backspace never.
+    ;; Return and Tab under Shift or Control, but Meta takes itself and Control
+    ;; out first, as xterm's `filterAltMeta' does.
     (should (equal (cooked--encode-event 'S-return) "\e[27;2;13~"))
     (should (equal (cooked--encode-event 'C-tab) "\e[27;5;9~"))
     (should (equal (cooked--encode-event 'M-return) "\e\r"))
-    (should (equal (cooked--encode-event 'M-S-return) "\e[27;4;13~"))
+    (should (equal (cooked--encode-event 'C-M-return) "\e\r"))
+    (should (equal (cooked--encode-event 'M-S-return) "\e[27;2;13~"))
+    ;; Shift+Tab is `ESC [ Z' at this level whatever else is held.
+    (should (equal (cooked--encode-event 'backtab) "\e[Z"))
+    (should (equal (cooked--encode-event 'C-backtab) "\e[Z"))
+    ;; Escape only with Meta and Control or Shift; Backspace never.
     (should (equal (cooked--encode-event 'S-escape) "\e"))
-    (should (equal (cooked--encode-event 'C-backspace) "\177"))))
+    (should (equal (cooked--encode-event 'C-S-escape) "\e"))
+    (should (equal (cooked--encode-event 'C-M-escape) "\e[27;7;27~"))
+    (should (equal (cooked--encode-event 'C-backspace) "\177"))
+    ;; Super has no bit in xterm's parameter, and is dropped from a chord.
+    (should (equal (cooked--encode-event (aref (kbd "C-s-;") 0)) "\e[27;5;59~"))))
 
 (ert-deftest cooked-modify-other-keys-guessed-re-spells-only-the-literal-keys ()
   "`modify-other' with no level is `cooked-key-protocol-overrides' guessing,
@@ -3345,9 +3361,9 @@ from a bug that silently ignored `CSI ? u'."
       (let ((sent nil))
         (cl-letf (((symbol-function 'cooked--send)
                    (lambda (_s text) (push text sent))))
-          (let ((last-command-event 'backtab))
+          (let ((last-command-event 'S-return))
             (cooked-send-key))
-          (should (equal sent '("\e[27;2;9~"))))))))
+          (should (equal sent '("\e[27;2;13~"))))))))
 
 (ert-deftest cooked-key-protocol-override-is-inert-when-emacs-owns-the-line ()
   "Same gating as `cooked-key-overrides', and for the same reason: this is

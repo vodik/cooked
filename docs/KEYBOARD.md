@@ -35,7 +35,9 @@ or `C-1`, which has none, is spelled out. Return and Tab are spelled out under S
 Control, Escape and Backspace never are, and Meta is the leading ESC it always was unless
 the rest of the chord is being spelled out anyway. The same two narrowings as kitty
 apply: Control+Shift+1 is reported as Control+`!`, and C-i, C-m and C-[ are Tab, Return
-and Escape.
+and Escape. Shift+Tab is `CSI Z` at both levels, as in xterm, and spelled out only at
+level 2 with another modifier held beside Shift. `CSI > 4 n` switches modifyOtherKeys off,
+and `CSI ? 4 m` asks for the level.
 
 Which byte Control makes follows X11's table, not a five-bit mask, whether or not
 anything was negotiated: `C-2` is NUL, `C-/` is US, and `C-;`, which has no control form,

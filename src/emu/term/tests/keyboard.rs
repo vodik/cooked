@@ -59,6 +59,28 @@ fn modify_other_keys_is_negotiated() {
 }
 
 #[test]
+fn modify_other_keys_is_disabled_and_queried_as_xterm_does() {
+    // `CSI > 4 n` is xterm's way to switch the resource off, and was ignored: a child
+    // that turned modifyOtherKeys off that way went on receiving `ESC [ 27 ; ...`.
+    let mut t = term(4, 20, b"\x1b[>4;2m");
+    t.feed(b"\x1b[>4n");
+    assert_eq!(t.keys(), KeyEncoding::Legacy);
+
+    // Another resource's switch leaves this one alone, and so does a bare `CSI > n`,
+    // which names modifyFunctionKeys.
+    t.feed(b"\x1b[>4;1m\x1b[>1n\x1b[>n");
+    assert_eq!(
+        t.keys(),
+        KeyEncoding::ModifyOtherKeys(ModifyOtherKeys::Level1)
+    );
+
+    // XTQMODKEYS reports the level the encoder honours, and 0 once there is none.
+    t.drain();
+    t.feed(b"\x1b[?4m\x1b[>4;3m\x1b[?4m\x1b[?1m");
+    assert_eq!(reply_strings(&mut t), ["\x1b[>4;1m", "\x1b[>4;0m"]);
+}
+
+#[test]
 fn kitty_wins_over_modify_other_keys_but_the_level_survives_it() {
     let mut t = term(4, 20, b"\x1b[>4;1m\x1b[>1u");
     assert_eq!(

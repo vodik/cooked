@@ -210,12 +210,13 @@ instead."
         (level (cooked--modify-other-level)))
     (cond
      ((= param 1) (cooked--meta-prefixed mods seq))
-     ;; A level the child set says which of these keys it covers; a guess from
-     ;; `cooked-key-protocol-overrides\=' has no level and covers them all, as it
-     ;; always has.
-     ((and (eq cooked--keys 'modify-other)
-           (or (not level) (cooked--modify-other-p level code mods)))
-      (cooked--csi "~" 27 param code))
+     ;; A level the child set says which of these keys it covers.  A guess from
+     ;; `cooked-key-protocol-overrides\=' has no level and is read as level 2,
+     ;; which re-spells these four keys under any modifier -- as the guess always
+     ;; has -- but for Shift+Tab, which even level 2 leaves as `ESC [ Z\='.
+     ((and-let* (((eq cooked--keys 'modify-other))
+                 (spelled (cooked--modify-other-mods (or level 2) code mods)))
+        (cooked--csi "~" 27 (cooked--modifier-param spelled) code)))
      ((eq cooked--keys 'kitty) (cooked--csi "u" code param))
      ;; Nothing negotiated, or a key level 1 leaves alone: meta has a classical
      ;; spelling, the rest do not.
@@ -293,14 +294,26 @@ guess and for the reason `cooked--kitty-negotiated-p\=' gives: `C-a\=' sent as
        (memq cooked--modify-other-keys '(1 2))
        cooked--modify-other-keys))
 
-(defun cooked--modify-other-p (level code mods)
-  "Whether modifyOtherKeys LEVEL spells CODE, held with MODS, as an escape.
+(defun cooked--modify-other-mods (level code mods)
+  "The modifiers modifyOtherKeys LEVEL spells CODE with, held with MODS, or nil.
+
+nil means the key is not re-spelled and goes as its classical bytes.  Otherwise
+the answer is the modifiers the parameter of `ESC [ 27 ; PARAM ; CODE ~\=' is
+made from, which are MODS less what xterm leaves out of it.  Super and Hyper
+are always left out, since xterm\='s `allowedCharModifiers\=' keeps only
+Shift, Control and Alt: \\`s-a\=' is a plain `a\=' at either level.
 
 CODE is the character the key types, shifted -- `A\=' for shift+a, which is the
 keysym xterm reads and the number it sends -- or the code point of a `literal\='
-key in `cooked--key-encodings\='.  The rules are `ModifyOtherKeys\=' and
-`allowedCharModifiers\=' in xterm\='s input.c (patch 411), checked against the
-us-pc105 table in xterm\='s modified-keys FAQ.
+key in `cooked--key-encodings\='.  The rules are `ModifyOtherKeys\=',
+`allowedCharModifiers\=' and `filterAltMeta\=' in xterm\='s input.c (patch
+411), checked against the us-pc105 table in xterm\='s modified-keys FAQ.
+
+Tab with Shift held is Shift+Tab, whichever name Emacs gave it, because that is
+the key X reports as `ISO_Left_Tab\=' and xterm sends as `ESC [ Z\=' at both
+levels.  Level 2 re-spells it only when another modifier is held beside Shift,
+so \\`C-S-<tab>\=' is `ESC [ 27 ; 6 ; 9 ~\=' while Shift+Tab alone stays
+`ESC [ Z\=', which is what a program that reads `kcbt\=' is waiting for.
 
 Level 2 re-spells any key held with Control or Meta.  Shift alone re-spells
 only the keys Control would otherwise turn into a byte -- the letters and
@@ -316,23 +329,39 @@ Level 1 leaves alone every chord that already means something.  Control
 re-spells a key only where `cooked--control-char\=' finds no byte for it, so
 `C-a\=' stays SOH while `C-;\=' becomes `ESC [ 27 ; 5 ; 59 ~\='.  Shift alone
 re-spells nothing, and neither does Meta: xterm\='s manual says Meta at this
-level follows metaSendsEscape, which is how cooked always spells it.  Return
-and Tab are the exception, and re-spelled under Shift or Control, while Escape
-and Backspace never are.  Where a chord is re-spelled Meta still counts in its
-parameter, so nothing held is lost; where it is not, Meta is the leading ESC
+level follows metaSendsEscape, which is how cooked always spells it.
+
+Return and Tab are re-spelled under Shift or Control, except that Meta takes
+Control and itself out of the chord first, as `filterAltMeta\=' does for the
+sake of Emacs\=' own `C-M-RET\='.  So \\`C-M-<return>\=' is `ESC CR\=' and
+\\`M-S-<return>\=' is `ESC [ 27 ; 2 ; 13 ~\='.  Escape is re-spelled only with
+Meta and Control or Shift held together, which is what `filterAltMeta\=' leaves
+of a chord on a key that is its own control byte; Backspace never is.
+
+Where any other chord is re-spelled, Meta still counts in its parameter, so
+\\`C-M-;\=' is `ESC [ 27 ; 7 ; 59 ~\='.  That is xterm with its default
+resources, where metaSendsEscape is off.  With it on xterm drops Meta from the
+parameter too, and the chord arrives as \\`C-;\=': cooked keeps the modifier
+rather than lose it.  Where a chord is not re-spelled, Meta is the leading ESC
 it always was."
-  (let ((ctrl (memq 'control mods))
-        (shift (memq 'shift mods))
-        (meta (memq 'meta mods)))
+  (let* ((mods (seq-difference mods '(super hyper)))
+         (ctrl (memq 'control mods))
+         (shift (memq 'shift mods))
+         (meta (memq 'meta mods)))
     (pcase level
-      (2 (if (memq code '(9 13 27 127))
-             (or ctrl shift meta)
-           (or ctrl meta
-               (and shift (or (<= #x40 code #x7f) (= code ?\s))))))
+      (2 (and (pcase code
+                ((guard (and (= code 9) shift)) (or ctrl meta))
+                ((or 9 13 27 127) (or ctrl shift meta))
+                (_ (or ctrl meta
+                       (and shift (or (<= #x40 code #x7f) (= code ?\s))))))
+              mods))
       (1 (pcase code
-           ((or 9 13) (or ctrl shift))
-           ((or 27 127) nil)
-           (_ (and ctrl (not (cooked--control-char code)))))))))
+           ((guard (and (= code 9) shift)) nil)
+           ((or 9 13) (cond (meta (and shift '(shift)))
+                            ((or ctrl shift) mods)))
+           (27 (and meta (or ctrl shift) mods))
+           (127 nil)
+           (_ (and ctrl (not (cooked--control-char code)) mods)))))))
 
 (defun cooked--encode-char (char mods)
   "The bytes for the text key CHAR held with MODS, when no protocol spells it.
@@ -352,7 +381,7 @@ BASIC and MODS are as `cooked--kitty-event\=' names the key, and PARAM the xterm
 modifier parameter derived from MODS.  A key in `cooked--key-encodings\=' goes
 the way it always has, with `cooked--encode-literal\=' asking LEVEL about the
 four keys the protocol re-spells; a text key is `ESC [ 27 ; PARAM ; CODE ~\='
-where `cooked--modify-other-p\=' says so, and its classical bytes where not.
+where `cooked--modify-other-mods\=' says so, and its classical bytes where not.
 
 Narrower than xterm where an Emacs event lacks the fact, as the kitty encoder
 is: shift+1 arrives as a bare `!\=', so Control+Shift+1 is sent as Control+`!\='
@@ -362,8 +391,8 @@ Return and Escape."
       (cooked--encode-entry entry param mods)
     (when (characterp basic)
       (let ((code (if (memq 'shift mods) (upcase basic) basic)))
-        (if (cooked--modify-other-p level code mods)
-            (cooked--csi "~" 27 param code)
+        (if-let* ((spelled (cooked--modify-other-mods level code mods)))
+            (cooked--csi "~" 27 (cooked--modifier-param spelled) code)
           (cooked--encode-char basic mods))))))
 
 ;;;; The kitty keyboard protocol, as negotiated
@@ -567,6 +596,10 @@ every capital into a lowercase letter."
          ;; `param' is computed, or the `literal' entry for `backtab' has a code
          ;; point that no modifier ever reaches.
          (mods (if (eq basic 'backtab) (cons 'shift mods) mods))
+         ;; And the other way round: where a frame names the key `S-tab\=', it is
+         ;; still the Shift+Tab X calls `ISO_Left_Tab\=', which every protocol
+         ;; spells as `backtab\=' rather than as a Tab with a modifier.
+         (basic (if (and (eq basic 'tab) (memq 'shift mods)) 'backtab basic))
          (param (cooked--modifier-param mods)))
     (pcase (and (or (cooked--kitty-negotiated-p) (cooked--modify-other-level))
                 (cooked--kitty-event event basic mods))

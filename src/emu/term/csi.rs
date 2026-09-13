@@ -822,6 +822,28 @@ impl State {
                         ModifyOtherKeys::from_param(params.arg(1, 0) as u16);
                 }
             }
+            // XTMODKEYS' other half, `CSI > 4 n`, which xterm reads as setting the
+            // resource to -1: modifyOtherKeys disabled, which is the same as no level.
+            // An omitted parameter names modifyFunctionKeys, which cooked has no switch
+            // for, so it and the other resources are ignored.
+            (Some(b'>'), 'n') => {
+                if params.value(0) == Some(4) {
+                    self.modes.modify_other_keys = None;
+                }
+            }
+            // XTQMODKEYS, `CSI ? 4 m`, answered `CSI > 4 ; LEVEL m` with the level the
+            // encoder honours, so a level 3 cooked read as none is reported as 0. The
+            // other resources have no level here to report, and get no answer, as
+            // xterm gives none for a resource it does not know.
+            (Some(b'?'), 'm') => {
+                if params.value(0) == Some(4) {
+                    let level = self
+                        .modes
+                        .modify_other_keys
+                        .map_or(0, ModifyOtherKeys::level);
+                    self.csi_reply(format_args!(">4;{level}m"));
+                }
+            }
             // Kitty keyboard protocol: push, pop, and set, each on the stack of the screen
             // being shown. See [`KittyStack`] for the cap and why a full push evicts.
             // A parameter out of range drops the whole sequence, as it does in ghostty.
