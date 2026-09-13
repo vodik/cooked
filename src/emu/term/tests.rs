@@ -3597,6 +3597,24 @@ fn xtsave_restores_mouse_tracking_as_one_choice() {
     );
 }
 
+/// xterm keeps one XTSAVE slot for the tracking modes and one for the coordinate
+/// encodings, because each group is one choice: what was saved under one number is
+/// restored under any other number in the same group.
+#[test]
+fn xtsave_slots_are_shared_within_each_mouse_group() {
+    let mut t = term(2, 8, b"\x1b[?1000s\x1b[?1003h\x1b[?1002r");
+    assert_eq!(
+        t.mouse().tracking,
+        MouseTracking::Off,
+        "saved under 1000, restored under 1002"
+    );
+
+    // Saved while X10 was in force, then SGR set: restoring under 1016 puts X10 back,
+    // which a flag saved for 1016 alone -- off before and off after -- never would.
+    t.feed(b"\x1b[?1016s\x1b[?1006h\x1b[?1016r");
+    assert_eq!(t.mouse().format, MouseFormat::X10);
+}
+
 /// A restore that changes nothing does nothing -- DECOM's `h`/`l` homes the cursor, and
 /// a restore is not a replay.
 #[test]

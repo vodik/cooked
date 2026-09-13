@@ -1,35 +1,5 @@
 //! `CSI` dispatch, and the mode machinery it drives.
 
-/// DECRQM's answer about a mode.
-///
-/// The protocol's numbers, named once, so that neither reporting site spells them as a
-/// bare `1`/`4`/`0` or as arithmetic on a bool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub(super) enum ModeReport {
-    /// The mode is not one we implement, and the child should stop asking.
-    Unknown = 0,
-    Set = 1,
-    Reset = 2,
-    /// Permanently on: the behaviour the mode asks for is the only one there is, so a
-    /// reset would be a lie. Mode 2027 and 1036, Meta sending ESC, answer this.
-    PermanentlySet = 3,
-    /// Deliberately not implemented -- this is how a child learns that without guessing.
-    PermanentlyReset = 4,
-}
-
-impl From<bool> for ModeReport {
-    fn from(on: bool) -> Self {
-        if on { Self::Set } else { Self::Reset }
-    }
-}
-
-impl std::fmt::Display for ModeReport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", *self as u8)
-    }
-}
-
 /// The modes that are exactly one flag on [`Modes`], stated once.
 ///
 /// Set/reset and the DECRQM query are generated from this list together, because keeping
@@ -41,21 +11,21 @@ impl std::fmt::Display for ModeReport {
 /// screens, the mouse group's event, 1049's save/switch/restore -- stay hand-written in
 /// [`State::dec_mode`]; there is nothing to share there but the number.
 macro_rules! dec_flags {
-    ($($number:literal => $field:ident),* $(,)?) => {
+    ($($mode:ident => $field:ident),* $(,)?) => {
         impl State {
             /// Set a one-flag mode, or report that this is not one.
-            fn set_flag_mode(&mut self, mode: u16, on: bool) -> bool {
+            fn set_flag_mode(&mut self, mode: DecMode, on: bool) -> bool {
                 match mode {
-                    $($number => self.modes.$field = on,)*
+                    $(DecMode::$mode => self.modes.$field = on,)*
                     _ => return false,
                 }
                 true
             }
 
             /// The DECRQM answer for a one-flag mode.
-            fn flag_mode_state(&self, mode: u16) -> Option<ModeReport> {
+            fn flag_mode_state(&self, mode: DecMode) -> Option<ModeReport> {
                 match mode {
-                    $($number => Some(self.modes.$field.into()),)*
+                    $(DecMode::$mode => Some(self.modes.$field.into()),)*
                     _ => None,
                 }
             }
@@ -64,17 +34,18 @@ macro_rules! dec_flags {
 }
 
 dec_flags! {
-    1 => app_cursor,
-    5 => reverse_screen,
-    25 => cursor_visible,
-    66 => app_keypad,
-    1004 => focus_events,
-    1007 => alt_scroll,
-    2004 => bracketed_paste,
-    2031 => color_scheme_updates,
-    2048 => size_reports,
+    AppCursor => app_cursor,
+    ReverseScreen => reverse_screen,
+    CursorVisible => cursor_visible,
+    AppKeypad => app_keypad,
+    FocusEvents => focus_events,
+    AltScroll => alt_scroll,
+    BracketedPaste => bracketed_paste,
+    ColorSchemeUpdates => color_scheme_updates,
+    SizeReports => size_reports,
 }
 
+use super::modes::{AnsiMode, DecMode, ModeReport};
 use super::*;
 use crate::emu::cell::Attrs;
 
@@ -150,93 +121,69 @@ impl PenParts {
     }
 }
 
-/// What XTSAVE kept for one private mode.
+/// What XTSAVE kept for one private mode, or for one group of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SavedMode {
     /// A mode that is on or off, restored through [`State::dec_mode`] like any `h`/`l`.
     Flag(bool),
     /// 1000, 1002 and 1003, which are one choice of what to report rather than three
-    /// flags, and so are saved whole under whichever number was named. Replaying them as
-    /// flags cannot work: with 1002 on, 1000 reads as reset, and `1000 l` would turn
-    /// reporting off. The coordinate format, 1006 and 1016, is a separate mode.
+    /// flags. Replaying them as flags cannot work: with 1002 on, 1000 reads as reset, and
+    /// `1000 l` would turn reporting off.
     Tracking(MouseTracking),
+    /// 1006 and 1016, which are one choice of coordinate encoding for the same reason.
+    Format(MouseFormat),
 }
 
 impl State {
-    pub(super) fn dec_mode(&mut self, mode: u16, on: bool) {
-        if self.set_flag_mode(mode, on) {
-            // The one flag whose setting is also a report. Subscribing is how the child
-            // learns the size it is starting from, so the answer goes out on every
-            // `2048 h`, set already or not -- a second subscriber in the same session,
-            // a multiplexer reattaching, is asking just as much as the first was.
-            if mode == 2048 && on {
-                let report = self.current_size_report();
-                self.events.push(Event::Reply(report));
-            }
-            return;
-        }
+    pub(super) fn dec_mode(&mut self, mode: DecMode, on: bool) {
         match mode {
-            6 => {
+            DecMode::Origin => {
                 self.modes.origin_mode = on;
                 self.screen_mut().goto(0, 0);
             }
-            7 => {
+            DecMode::Autowrap => {
                 for screen in self.screens.each_mut() {
                     screen.set_autowrap(on);
                 }
             }
-            // Cursor *blink*, deliberately ignored: that is `blink-cursor-mode', which is
-            // the user's setting and not the child's to drive. Visibility is mode 25.
-            12 => {}
-            1000 | 1002 | 1003 | 1006 | 1016 => {
-                let mouse = &mut self.modes.mouse;
-                match mode {
-                    // A set chooses the tracking mode and a reset of any of the three
-                    // turns tracking off, whichever was in force; see [`MouseTracking`].
-                    1000 | 1002 | 1003 => {
-                        mouse.tracking = match (on, mode) {
-                            (false, _) => MouseTracking::Off,
-                            (true, 1000) => MouseTracking::Click,
-                            (true, 1002) => MouseTracking::Drag,
-                            (true, _) => MouseTracking::Motion,
-                        };
-                    }
-                    _ => {
-                        let format = if mode == 1006 {
-                            MouseFormat::Sgr
-                        } else {
-                            MouseFormat::SgrPixels
-                        };
-                        // xterm's rule, and the reason this is one field: a set replaces
-                        // whichever coordinate mode was in force, and a reset is effective
-                        // only against its own. A child that sets 1016 over 1006 and then
-                        // resets 1006 on the way out of some subroutine has not asked for
-                        // X10 back, and would be handed it by a flag cleared blindly.
-                        if on {
-                            mouse.format = format;
-                        } else if mouse.format == format {
-                            mouse.format = MouseFormat::X10;
-                        }
-                    }
-                }
-                // Emitted inside the arm rather than after the match: out there it would
-                // have to re-test the same five numbers to know one of them was handled.
+            // A set chooses the tracking mode and a reset of any of the three turns
+            // tracking off, whichever was in force; see [`MouseTracking`].
+            DecMode::MouseClick | DecMode::MouseDrag | DecMode::MouseMotion => {
+                self.modes.mouse.tracking = match (on, mode) {
+                    (false, _) => MouseTracking::Off,
+                    (true, DecMode::MouseClick) => MouseTracking::Click,
+                    (true, DecMode::MouseDrag) => MouseTracking::Drag,
+                    (true, _) => MouseTracking::Motion,
+                };
                 self.events.push(Event::Mouse(self.modes.mouse));
             }
-            47 | 1047 => self.set_alt(on),
-            1048 => self.save_restore(on),
+            // xterm's rule, and the reason the format is one field: a set replaces
+            // whichever coordinate mode was in force, and a reset is effective only
+            // against its own. A child that sets 1016 over 1006 and then resets 1006 on
+            // the way out of some subroutine has not asked for X10 back.
+            DecMode::MouseSgr | DecMode::MouseSgrPixels => {
+                let format = if mode == DecMode::MouseSgr {
+                    MouseFormat::Sgr
+                } else {
+                    MouseFormat::SgrPixels
+                };
+                let mouse = &mut self.modes.mouse;
+                if on {
+                    mouse.format = format;
+                } else if mouse.format == format {
+                    mouse.format = MouseFormat::X10;
+                }
+                self.events.push(Event::Mouse(self.modes.mouse));
+            }
+            DecMode::AltScreenLegacy | DecMode::AltScreen => self.set_alt(on),
+            DecMode::SaveCursor => self.save_restore(on),
             // Save, switch, ... switch back, restore. The save and the restore have to
-            // bracket the switch rather than both precede it, because `save_restore`
-            // acts on whichever screen is showing: run before `set_alt(false)` it read
-            // the *alt* screen's saved cursor and left the primary's — the one
-            // `1049 h` actually saved — untouched.
-            //
-            // That was invisible for as long as nothing moved the primary's cursor while
-            // the alt screen was up, since a restore to where it already was is a no-op.
-            // `State::resize` moves it: a rewrap re-chunks the primary and places the
-            // cursor at the new width. So resizing the frame inside a full-screen program
-            // and then leaving it was already the case that lost the position.
-            1049 => {
+            // bracket the switch, because `save_restore` acts on whichever screen is
+            // showing: run before `set_alt(false)` it would read the alternate screen's
+            // saved cursor and leave the primary's -- the one `1049 h` saved -- untouched.
+            // A resize inside a full-screen program moves the primary's cursor, so that
+            // is the case that would lose the position.
+            DecMode::AltScreenSaveCursor => {
                 if on {
                     self.save_restore(true);
                     self.set_alt(true);
@@ -245,93 +192,134 @@ impl State {
                     self.save_restore(false);
                 }
             }
-            2026 => {
+            DecMode::SynchronizedOutput => {
                 self.modes.sync_until = on.then(|| std::time::Instant::now() + SYNC_TIMEOUT);
             }
-            _ => {}
+            // Declined or permanent, so a set or a reset changes nothing; see
+            // [`State::dec_mode_state`] for what each answers.
+            DecMode::Columns132
+            | DecMode::SmoothScroll
+            | DecMode::CursorBlink
+            | DecMode::ReverseWrap
+            | DecMode::BackarrowSendsBackspace
+            | DecMode::LeftRightMargins
+            | DecMode::MouseUtf8
+            | DecMode::MouseUrxvt
+            | DecMode::EightBitMeta
+            | DecMode::MetaSendsEscape
+            | DecMode::AltSendsEscape
+            | DecMode::ReverseWrapExtended
+            | DecMode::GraphemeClusters => {}
+            // The one flag whose setting is also a report. Subscribing is how the child
+            // learns the size it is starting from, so the answer goes out on every
+            // `2048 h`, set already or not: a multiplexer reattaching is asking just as
+            // much as the first subscriber was.
+            DecMode::SizeReports => {
+                self.set_flag_mode(mode, on);
+                if on {
+                    let report = self.current_size_report();
+                    self.events.push(Event::Reply(report));
+                }
+            }
+            DecMode::AppCursor
+            | DecMode::ReverseScreen
+            | DecMode::CursorVisible
+            | DecMode::AppKeypad
+            | DecMode::FocusEvents
+            | DecMode::AltScroll
+            | DecMode::BracketedPaste
+            | DecMode::ColorSchemeUpdates => {
+                self.set_flag_mode(mode, on);
+            }
         }
+    }
+
+    /// DECRQM's answer for a private mode, or [`ModeReport::Unknown`] for a number cooked
+    /// has no [`DecMode`] for.
+    pub(super) fn dec_mode_report(&self, number: u16) -> ModeReport {
+        DecMode::try_from(number).map_or(ModeReport::Unknown, |mode| self.dec_mode_state(mode))
     }
 
     /// DECRQM's answer for a private mode.
     ///
-    /// The one-flag modes come from the same table that sets them, so the two can no
-    /// longer disagree; only modes with state elsewhere are listed here.
-    pub(super) fn dec_mode_state(&self, mode: u16) -> ModeReport {
-        if let Some(report) = self.flag_mode_state(mode) {
-            return report;
-        }
+    /// The one-flag modes are read through the same table that sets them, so the two
+    /// cannot disagree about which field a number names.
+    pub(super) fn dec_mode_state(&self, mode: DecMode) -> ModeReport {
         let mouse = self.modes.mouse;
         match mode {
-            6 => self.modes.origin_mode.into(),
-            7 => self.screen().autowrap().into(),
-            1000 => (mouse.tracking == MouseTracking::Click).into(),
-            1002 => (mouse.tracking == MouseTracking::Drag).into(),
-            1003 => (mouse.tracking == MouseTracking::Motion).into(),
-            1006 => (mouse.format == MouseFormat::Sgr).into(),
-            1016 => mouse.pixels().into(),
-            2026 => self
+            DecMode::Origin => self.modes.origin_mode.into(),
+            DecMode::Autowrap => self.screen().autowrap().into(),
+            DecMode::MouseClick => (mouse.tracking == MouseTracking::Click).into(),
+            DecMode::MouseDrag => (mouse.tracking == MouseTracking::Drag).into(),
+            DecMode::MouseMotion => (mouse.tracking == MouseTracking::Motion).into(),
+            DecMode::MouseSgr => (mouse.format == MouseFormat::Sgr).into(),
+            DecMode::MouseSgrPixels => mouse.pixels().into(),
+            DecMode::SynchronizedOutput => self
                 .modes
                 .sync_until
                 .is_some_and(|t| std::time::Instant::now() < t)
                 .into(),
-            47 | 1047 | 1049 => self.shown.is_alternate().into(),
-            // Implemented, but stateless — it saves and restores rather than turning
-            // anything on — so "set" is the only honest answer that is not "unknown".
-            // Deliberately `Set` and not `PermanentlySet`: xterm answers 1 here, and a
-            // child that reads 3 concludes the mode cannot be reset.
-            1048 => ModeReport::Set,
-            // Meta sends ESC before the key, always, and nothing a child can send turns
-            // that off: it is how `cooked--encode-event' spells Meta on every key the
-            // negotiated protocols do not re-encode, which is exactly the reach xterm
-            // gives `metaSendsEscape'. So the honest answer is "on, for good" -- not 4,
-            // which would tell a child that M-x arrives as something other than ESC x.
-            1036 => ModeReport::PermanentlySet,
-            // Dropped from our terminfo, and this is where a child finds that out
-            // without having to guess: 12 is cursor blink (`blink-cursor-mode' is the
-            // user's), 69 left-right margins, 1034 eight-bit meta. 3 and 4 were never
-            // claimed, but `is2' and `rs2' reset them -- 132 columns and smooth scroll,
-            // neither of which a buffer has -- so a child reading the entry has seen
-            // their numbers and may well ask.
-            //
-            // The rest were never in the entry and are decided against all the same, and
-            // 4 rather than 0 is what saves a child a retry or a fallback probe. 45 and
-            // 1045 are reverse wraparound, which `bw' would claim and the entry leaves
-            // out because nothing here lets a backspace cross into the row above. 1005
-            // and 1015 are the UTF-8 and urxvt mouse encodings, both superseded by 1006
-            // and ambiguous where it is not. 1039 is Alt sending ESC, which matters only
-            // where Alt and Meta are different keys -- and there Emacs reports an `alt'
-            // modifier cooked does not spell at all; on the usual keyboard Alt *is* Meta
-            // and 1036 answers for it. 67 is DECBKM, backarrow sending BS, and `kbs=^?'
-            // fixes it at DEL.
-            //
-            // The list is `# declined-modes:' in cooked.ti, and the audit test holds the
-            // two in step.
-            3 | 4 | 12 | 45 | 67 | 69 | 1005 | 1015 | 1034 | 1039 | 1045 => {
-                ModeReport::PermanentlyReset
+            DecMode::AltScreenLegacy | DecMode::AltScreen | DecMode::AltScreenSaveCursor => {
+                self.shown.is_alternate().into()
             }
-            // Grapheme cluster segmentation, in contour's terminal-unicode-core sense.
+            // Implemented, but stateless -- it saves and restores rather than turning
+            // anything on -- so set is the only honest answer that is not unknown. Not
+            // `PermanentlySet`: xterm answers 1 here, and a child that reads 3 concludes
+            // the mode cannot be reset.
+            DecMode::SaveCursor => ModeReport::Set,
+            // Meta sends ESC before the key always: it is how `cooked--encode-event'
+            // spells Meta on every key the negotiated protocols do not re-encode. Not 4,
+            // which would tell a child that M-x arrives as something other than ESC x.
+            DecMode::MetaSendsEscape => ModeReport::PermanentlySet,
             // Not settable because there is nothing to turn off: the segmenter is how
-            // every character reaches the grid, and the per-code-point rule a reset
-            // would restore is the bug that put a ZWJ family on six cells. The one rule
-            // where this departs from the draft's wording — VS15 narrows — is argued in
-            // `emu::text`'s header. `dec_mode` ignores a set or reset of it, as it does
-            // any number it has no arm for.
-            2027 => ModeReport::PermanentlySet,
-            _ => ModeReport::Unknown,
+            // every character reaches the grid, and the per-code-point rule a reset would
+            // restore puts a ZWJ family on six cells. `emu::text`'s header argues the one
+            // rule where this departs from the draft, VS15 narrowing.
+            DecMode::GraphemeClusters => ModeReport::PermanentlySet,
+            // Declined, and answered 4 rather than 0 so that a child learns it without a
+            // retry or a fallback probe. The reason for each is on its variant. The list
+            // is `# declined-modes:' in cooked.ti, and the audit test holds the two in
+            // step.
+            DecMode::Columns132
+            | DecMode::SmoothScroll
+            | DecMode::CursorBlink
+            | DecMode::ReverseWrap
+            | DecMode::BackarrowSendsBackspace
+            | DecMode::LeftRightMargins
+            | DecMode::MouseUtf8
+            | DecMode::MouseUrxvt
+            | DecMode::EightBitMeta
+            | DecMode::AltSendsEscape
+            | DecMode::ReverseWrapExtended => ModeReport::PermanentlyReset,
+            DecMode::AppCursor
+            | DecMode::ReverseScreen
+            | DecMode::CursorVisible
+            | DecMode::AppKeypad
+            | DecMode::FocusEvents
+            | DecMode::AltScroll
+            | DecMode::BracketedPaste
+            | DecMode::ColorSchemeUpdates
+            | DecMode::SizeReports => self.flag_mode_state(mode).unwrap_or(ModeReport::Unknown),
         }
     }
 
-    /// ANSI (non-private) modes. Only two of these are real: everything else a child
-    /// sends here is a mode we neither implement nor advertise.
-    pub(super) fn ansi_mode(&mut self, mode: u16, on: bool) {
+    pub(super) fn ansi_mode(&mut self, mode: AnsiMode, on: bool) {
         match mode {
-            4 => {
+            AnsiMode::Insert => {
                 for screen in self.screens.each_mut() {
                     screen.set_insert_mode(on);
                 }
             }
-            20 => self.modes.newline_mode = on,
-            _ => {}
+            AnsiMode::Newline => self.modes.newline_mode = on,
+        }
+    }
+
+    /// DECRQM's answer for an ANSI mode.
+    fn ansi_mode_report(&self, number: u16) -> ModeReport {
+        match AnsiMode::try_from(number) {
+            Ok(AnsiMode::Insert) => self.screen().insert_mode().into(),
+            Ok(AnsiMode::Newline) => self.modes.newline_mode.into(),
+            Err(_) => ModeReport::Unknown,
         }
     }
 
@@ -387,20 +375,28 @@ impl State {
     /// Only a mode with a level to put back is saved: an unknown or declined mode has
     /// none, 1048 is itself a save rather than a setting, and 2026 is the opening of a
     /// frame, which restored later would hold redisplay for a frame nobody is drawing.
-    fn save_mode(&mut self, mode: u16) {
+    /// The mouse groups are saved whole, into the slot their group shares; see
+    /// [`DecMode::save_slot`].
+    fn save_mode(&mut self, mode: DecMode) {
         let value = match mode {
-            1000 | 1002 | 1003 => SavedMode::Tracking(self.modes.mouse.tracking),
-            1048 | 2026 => return,
+            DecMode::MouseClick | DecMode::MouseDrag | DecMode::MouseMotion => {
+                SavedMode::Tracking(self.modes.mouse.tracking)
+            }
+            DecMode::MouseSgr | DecMode::MouseSgrPixels => {
+                SavedMode::Format(self.modes.mouse.format)
+            }
+            DecMode::SaveCursor | DecMode::SynchronizedOutput => return,
             _ => match self.dec_mode_state(mode) {
                 ModeReport::Set => SavedMode::Flag(true),
                 ModeReport::Reset => SavedMode::Flag(false),
                 _ => return,
             },
         };
+        let slot = mode.save_slot();
         let slots = &mut self.modes.saved_modes;
-        match slots.iter_mut().find(|(saved, _)| *saved == mode) {
-            Some(slot) => slot.1 = value,
-            None => slots.push((mode, value)),
+        match slots.iter_mut().find(|(saved, _)| *saved == slot) {
+            Some(entry) => entry.1 = value,
+            None => slots.push((slot, value)),
         }
     }
 
@@ -411,12 +407,13 @@ impl State {
     /// was saved: a restore is a request for a state, not a replay of `h`/`l`, and
     /// replaying would home the cursor for DECOM or announce a mouse change that is not
     /// one.
-    fn restore_mode(&mut self, mode: u16) {
+    fn restore_mode(&mut self, mode: DecMode) {
+        let slot = mode.save_slot();
         let Some(&(_, value)) = self
             .modes
             .saved_modes
             .iter()
-            .find(|(saved, _)| *saved == mode)
+            .find(|(saved, _)| *saved == slot)
         else {
             return;
         };
@@ -429,6 +426,12 @@ impl State {
             SavedMode::Tracking(saved) => {
                 if self.modes.mouse.tracking != saved {
                     self.modes.mouse.tracking = saved;
+                    self.events.push(Event::Mouse(self.modes.mouse));
+                }
+            }
+            SavedMode::Format(saved) => {
+                if self.modes.mouse.format != saved {
+                    self.modes.mouse.format = saved;
                     self.events.push(Event::Mouse(self.modes.mouse));
                 }
             }
@@ -520,20 +523,25 @@ impl State {
             (Some(b'?'), 'h' | 'l') => {
                 let on = action == 'h';
                 for mode in params.iter().filter_map(|p| p.first().copied()) {
-                    self.dec_mode(mode, on);
+                    if let Ok(mode) = DecMode::try_from(mode) {
+                        self.dec_mode(mode, on);
+                    }
                 }
             }
             (None, 'h' | 'l') => {
                 let on = action == 'h';
                 for mode in params.iter().filter_map(|p| p.first().copied()) {
-                    self.ansi_mode(mode, on);
+                    if let Ok(mode) = AnsiMode::try_from(mode) {
+                        self.ansi_mode(mode, on);
+                    }
                 }
             }
             // XTSAVE and XTRESTORE. The `?` is the whole of what tells these from SCOSC
             // and DECSTBM, `CSI s` and `CSI r`, which arrive with no private byte and are
             // dispatched in their own families below.
             (Some(b'?'), 's' | 'r') => {
-                for mode in params.iter().filter_map(|p| p.first().copied()) {
+                let modes = params.iter().filter_map(|p| p.first().copied());
+                for mode in modes.filter_map(|mode| DecMode::try_from(mode).ok()) {
                     if action == 's' {
                         self.save_mode(mode);
                     } else {
@@ -706,18 +714,14 @@ impl State {
             // can therefore stop inferring our capabilities from TERM and just ask.
             (Some(b'?'), 'p') if intermediates.contains(&b'$') => {
                 let mode = params.arg(0, 0) as u16;
-                let status = self.dec_mode_state(mode);
+                let status = self.dec_mode_report(mode);
                 self.csi_reply(format_args!("?{mode};{status}$y"));
             }
             // The ANSI form has `$` as its only intermediate, so it arrives here as the
             // "private" byte rather than alongside one.
             (Some(b'$'), 'p') => {
                 let mode = params.arg(0, 0) as u16;
-                let status = match mode {
-                    4 => ModeReport::from(self.screen().insert_mode()),
-                    20 => ModeReport::from(self.modes.newline_mode),
-                    _ => ModeReport::Unknown,
-                };
+                let status = self.ansi_mode_report(mode);
                 self.csi_reply(format_args!("{mode};{status}$y"));
             }
             // XTWINOPS. The reports are answered and most of the operations refused

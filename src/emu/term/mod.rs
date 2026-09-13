@@ -23,6 +23,7 @@ use std::collections::{HashSet, VecDeque};
 mod csi;
 mod graphics;
 mod keys;
+mod modes;
 pub(crate) mod osc;
 mod perform;
 mod screens;
@@ -1119,7 +1120,7 @@ struct Modes {
     /// A slot per mode rather than a stack, which is what xterm and ghostty both keep, and
     /// which bounds this by the number of modes [`State::save_mode`] recognises no matter
     /// how often a child saves.
-    saved_modes: Vec<(u16, SavedMode)>,
+    saved_modes: Vec<(modes::DecMode, SavedMode)>,
 }
 
 impl Default for Modes {
