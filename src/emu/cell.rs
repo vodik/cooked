@@ -1983,6 +1983,71 @@ mod tests {
         );
     }
 
+    /// Check that ABSORBED is UNABSORBED with nothing changed but blank gaps taken into the
+    /// glyph runs either side of them, which is all [`Row::absorb_blank_runs`] may do.
+    ///
+    /// Stated without the function, so that composing it onto the reference, as
+    /// `runs_to_matches_the_reference` does, cannot hide a wrong merge: the same text and
+    /// columns, one decoration per character, each character's rendition, link and
+    /// decoration as it was, [`BoxGlyph::BLANK`] only on a character that
+    /// [`draws_nothing`], and never a blank at either end of a glyph run, which would be
+    /// padding baked into a bitmap rather than a gap between two glyphs.
+    fn assert_absorbed_only_blanks(unabsorbed: &[Run], absorbed: &[Run], context: &str) {
+        let text = |runs: &[Run]| runs.iter().map(|r| r.text.as_str()).collect::<String>();
+        let cols = |runs: &[Run]| runs.iter().map(|r| r.cols).sum::<usize>();
+        assert_eq!(text(absorbed), text(unabsorbed), "{context}: text");
+        assert_eq!(cols(absorbed), cols(unabsorbed), "{context}: columns");
+        for run in absorbed {
+            if let Some(deco) = &run.deco {
+                assert_eq!(
+                    deco.len(),
+                    run.text.chars().count(),
+                    "{context}: one decoration per character of {run:?}"
+                );
+            }
+            if let Some(Deco::Glyphs(glyphs)) = &run.deco {
+                assert!(
+                    glyphs.first() != Some(&BoxGlyph::BLANK)
+                        && glyphs.last() != Some(&BoxGlyph::BLANK),
+                    "{context}: a blank absorbed at the end of {run:?}"
+                );
+            }
+        }
+        let cells = |runs: &[Run]| -> Vec<(char, StyleId, Option<LinkId>, Option<DecoCell>)> {
+            runs.iter()
+                .flat_map(|run| {
+                    run.text.chars().enumerate().map(move |(i, ch)| {
+                        let deco = match &run.deco {
+                            Some(Deco::Glyphs(glyphs)) => {
+                                glyphs.get(i).copied().map(DecoCell::Glyph)
+                            }
+                            Some(Deco::Images(places)) => {
+                                places.get(i).copied().map(DecoCell::Image)
+                            }
+                            None => None,
+                        };
+                        (ch, run.style, run.link, deco)
+                    })
+                })
+                .collect()
+        };
+        for (i, (after, before)) in cells(absorbed)
+            .into_iter()
+            .zip(cells(unabsorbed))
+            .enumerate()
+        {
+            let blank = after.3 == Some(DecoCell::Glyph(BoxGlyph::BLANK));
+            assert!(
+                after == before || (blank && before.3.is_none() && draws_nothing(after.0)),
+                "{context}: character {i} was {before:?} and is {after:?}"
+            );
+            assert!(
+                after.1 == before.1 && after.2 == before.2,
+                "{context}: character {i}"
+            );
+        }
+    }
+
     #[test]
     fn runs_to_matches_the_reference() {
         // xorshift: a deterministic sequence, and small enough to read.
@@ -2007,10 +2072,11 @@ mod tests {
             Some(LinkId::from_index(0)),
             Some(LinkId::from_index(1)),
         ];
-        // Plain ASCII, a box glyph, a shade block, a wide character and a zero-width
-        // mark -- every branch `DecoCell::classify` and the width logic can take.
+        // Plain ASCII, both blanks a glyph run absorbs, a box glyph, a shade block, a wide
+        // character and a zero-width mark -- every branch `DecoCell::classify`, the
+        // absorption and the width logic can take.
         let chars = [
-            'a', 'b', ' ', '\u{2500}', '\u{2503}', '\u{2591}', '\u{6f22}',
+            'a', 'b', ' ', '\u{a0}', '\u{2500}', '\u{2503}', '\u{2591}', '\u{6f22}',
         ];
 
         // Both paths, deliberately. `runs_to` sends a row with attachments to
@@ -2020,6 +2086,7 @@ mod tests {
         // never executed once.
         let mut plain_rows = 0;
         let mut attached_rows = 0;
+        let mut absorbed_rows = 0;
         for case in 0..4_000 {
             let attachments = case % 2 == 0;
             let mut row = Row::new(COLS);
@@ -2073,13 +2140,31 @@ mod tests {
                 // called from inside the reference, so that this still compares two
                 // independent formulations of everything the builders decide. See
                 // `Row::absorb_blank_runs`.
-                let mut expected = row.runs_to_reference(end);
+                let unabsorbed = row.runs_to_reference(end);
+                let mut expected = unabsorbed.clone();
                 Row::absorb_blank_runs(&mut expected);
+                let runs = row.runs_to(end);
                 assert_eq!(
-                    row.runs_to(end),
-                    expected,
+                    runs, expected,
                     "case {case}, end {end}: runs disagree with the reference"
                 );
+                // A combining mark on a decorated cell adds a character with no decoration
+                // of its own, which misaligns every decoration after it in the run. That is
+                // the builders' doing rather than the absorption's, and the property below
+                // is stated for rows where each character has one.
+                let aligned = unabsorbed.iter().all(|run| {
+                    run.deco
+                        .as_ref()
+                        .is_none_or(|deco| deco.len() == run.text.chars().count())
+                });
+                if aligned {
+                    assert_absorbed_only_blanks(
+                        &unabsorbed,
+                        &runs,
+                        &format!("case {case}, end {end}"),
+                    );
+                    absorbed_rows += usize::from(runs.len() < unabsorbed.len());
+                }
             }
         }
 
@@ -2089,6 +2174,10 @@ mod tests {
         assert!(
             plain_rows > 1_000 && attached_rows > 1_000,
             "both run builders must be exercised: {plain_rows} plain, {attached_rows} attached"
+        );
+        assert!(
+            absorbed_rows > 100,
+            "the absorption must be exercised: {absorbed_rows} prefixes had a gap absorbed"
         );
     }
 

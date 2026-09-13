@@ -35,7 +35,7 @@
 //! decoration and the link id, and a stale face over correct characters is exactly the
 //! class of miss a text-only oracle waves through.
 
-use cooked::emu::{Delta, Direction, Edit, Run, Scrolled, Shift, StyleId, Term};
+use cooked::emu::{Delta, Direction, Edit, Levels, Run, Scrolled, Shift, StyleId, Term};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -120,10 +120,12 @@ impl Step {
 /// a `Deco`, and a decoration is a run boundary in its own right — a `Run` vector for a
 /// row of `+-|` and one for the same row of `┌─┐` differ in structure, not only in text.
 /// The wide characters and the combining marks are here for the other two ways a cell and
-/// a column stop being the same thing.
+/// a column stop being the same thing, and U+00A0 because it is the other blank a glyph run
+/// absorbs: `tree` indents with it.
 fn printable() -> impl Strategy<Value = char> {
     prop_oneof![
         6 => (0x20u32..0x7f).prop_map(|c| char::from_u32(c).unwrap()),
+        1 => Just('\u{a0}'),
         3 => (0x2500u32..0x25a0).prop_map(|c| char::from_u32(c).unwrap()),
         1 => (0x4e00u32..0x4e40).prop_map(|c| char::from_u32(c).unwrap()),
         1 => (0x0300u32..0x0310).prop_map(|c| char::from_u32(c).unwrap()),
@@ -162,6 +164,12 @@ fn sgr() -> impl Strategy<Value = Vec<u8>> {
         // shadow compares renditions through what each drain announced its ids to mean,
         // so a colour lost on the way shows up as a different rendition.
         (0u8..255).prop_map(|n| format!("\x1b[58;5;{n}m")),
+        // Overline on and off, the underline's styles, and the offs that clear them:
+        // attributes a run's rendition carries and nothing else on the row shows.
+        prop::sample::select(vec![
+            "53", "55", "4:0", "4:1", "4:2", "4:3", "4:4", "4:5", "21", "24"
+        ])
+        .prop_map(|n| format!("\x1b[{n}m")),
         Just("\x1b[0m".to_string()),
     ]
     .prop_map(String::into_bytes)
@@ -179,6 +187,7 @@ fn rewrite() -> impl Strategy<Value = Vec<u8>> {
         "hello",
         "\u{2502} \u{2500}\u{2500}",
         "\u{4e00}x",
+        "\u{2502}\u{a0}\u{a0} \u{2514}\u{2500}\u{2500}",
     ];
     prop_oneof![
         (1usize..9, prop::sample::select(lines.clone()))
@@ -249,6 +258,24 @@ fn control() -> impl Strategy<Value = Vec<u8>> {
         // style cannot express, so an empty one still has to survive the round trip.
         (0usize..4).prop_map(|n| format!("\x1b]8;;https://example.invalid/{n}\x07")),
         Just("\x1b]8;;\x07".to_string()),
+        // Character sets: DEC special graphics designated into G0, G1 and G2, the shifts
+        // that invoke them, and ASCII back. Under it `q` prints as a box glyph, so a byte
+        // the row already holds can change what the row draws.
+        prop::sample::select(vec![
+            "\x1b(0", "\x1b(B", "\x1b)0", "\x1b)B", "\x1b*0", "\x0e", "\x0f", "\x1bN"
+        ])
+        .prop_map(str::to_string),
+        // DECALN fills the screen with `E` and damages every row; DECSCNM inverts the whole
+        // screen, a level with no row to carry it; XTPUSHSGR and XTPOPSGR stack the pen.
+        prop::sample::select(vec![
+            "\x1b#8",
+            "\x1b[?5h",
+            "\x1b[?5l",
+            "\x1b[#{",
+            "\x1b[1;31#{",
+            "\x1b[#}"
+        ])
+        .prop_map(str::to_string),
     ]
     .prop_map(String::into_bytes)
 }
@@ -301,6 +328,35 @@ fn painted() -> impl Strategy<Value = Vec<u8>> {
     })
 }
 
+/// Text whose width the child declares, with `OSC 66 ; w=N`, rather than leaves to the
+/// width table: the one route by which a run's columns and its characters disagree
+/// without a wide character or a combining mark in it.
+fn sized() -> impl Strategy<Value = Vec<u8>> {
+    (1u8..4, prop::collection::vec(printable(), 1..3)).prop_map(|(width, chars)| {
+        let text: String = chars.into_iter().collect();
+        format!("\x1b]66;w={width};{text}\x07").into_bytes()
+    })
+}
+
+/// A picture laid into the grid at the cursor: a sixel, one cell without cell metrics, or
+/// a kitty transmission that names its own rectangle.
+///
+/// A placement is a decoration per cell, like a box glyph, but one that breaks a run on
+/// every change of picture, and a picture taller than one row scrolls as it is laid.
+fn image() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        (1u8..20).prop_map(|n| format!("\x1bP0;0;0q#0;2;100;0;0!{n}~\x1b\\")),
+        (1u8..4, 1u8..4, 0u8..3).prop_map(|(cols, rows, pixel)| {
+            // Two by two pixels of RGB, in base64, one of three colours so that two
+            // transmissions are sometimes the same picture and sometimes not.
+            let data =
+                ["AAAAAAAAAAAAAAAA", "////////////////", "AP8AAP8AAP8AAP8A"][usize::from(pixel)];
+            format!("\x1b_Ga=T,f=24,s=2,v=2,c={cols},r={rows};{data}\x1b\\")
+        }),
+    ]
+    .prop_map(String::into_bytes)
+}
+
 /// One write's worth of bytes.
 fn payload() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![
@@ -312,6 +368,8 @@ fn payload() -> impl Strategy<Value = Vec<u8>> {
         3 => rewrite(),
         3 => poke(),
         2 => box_run(),
+        1 => sized(),
+        1 => image(),
         1 => noise(),
     ]
 }
@@ -346,23 +404,66 @@ fn resize_step() -> impl Strategy<Value = Step> {
 /// wholesale by the switch, and the scrollback the resize evicts comes off the primary
 /// while the alt screen is the one on display. Four things that each rewrite the damage
 /// flags, in one sequence.
+///
+/// Through each of the three modes that switch screens: 1049 saves the cursor and clears
+/// the alt screen, 1047 clears it on the way out, and 47 does neither.
 fn alt_cycle() -> impl Strategy<Value = Vec<Step>> {
-    (write_step(), resize_step(), write_step()).prop_map(|(before, resize, after)| {
-        vec![
-            Step::Write {
-                bytes: b"\x1b[?1049h".to_vec(),
-                splits: vec![128],
-                drain: true,
-            },
-            before,
-            resize,
-            after,
-            Step::Write {
-                bytes: b"\x1b[?1049l".to_vec(),
-                splits: Vec::new(),
-                drain: true,
-            },
-        ]
+    (alt_mode(), write_step(), resize_step(), write_step()).prop_map(
+        |(mode, before, resize, after)| {
+            vec![
+                Step::Write {
+                    bytes: format!("\x1b[?{mode}h").into_bytes(),
+                    splits: vec![128],
+                    drain: true,
+                },
+                before,
+                resize,
+                after,
+                Step::Write {
+                    bytes: format!("\x1b[?{mode}l").into_bytes(),
+                    splits: Vec::new(),
+                    drain: true,
+                },
+            ]
+        },
+    )
+}
+
+fn alt_mode() -> impl Strategy<Value = u16> {
+    prop::sample::select(vec![47u16, 1047, 1049])
+}
+
+/// The alt screen left by a route other than resetting its mode.
+///
+/// RIS resets everything while the alt screen is up, which has to put the primary back on
+/// display. XTRESTORE of a mode saved while it was off does the same through the mode
+/// machinery instead of the mode's own reset, and one saved while it was on switches
+/// back to the alt screen from the primary.
+fn alt_exit() -> impl Strategy<Value = Vec<Step>> {
+    (alt_mode(), 0u8..3, write_step()).prop_map(|(mode, exit, write)| {
+        let bytes = |b: String| Step::Write {
+            bytes: b.into_bytes(),
+            splits: Vec::new(),
+            drain: true,
+        };
+        match exit {
+            0 => vec![
+                bytes(format!("\x1b[?{mode}h")),
+                write,
+                bytes("\x1bc".into()),
+            ],
+            1 => vec![
+                bytes(format!("\x1b[?{mode}s\x1b[?{mode}h")),
+                write,
+                bytes(format!("\x1b[?{mode}r")),
+            ],
+            _ => vec![
+                bytes(format!("\x1b[?{mode}h\x1b[?{mode}s\x1b[?{mode}l")),
+                write,
+                bytes(format!("\x1b[?{mode}r")),
+                bytes(format!("\x1b[?{mode}l")),
+            ],
+        }
     })
 }
 
@@ -405,7 +506,10 @@ fn recolour() -> impl Strategy<Value = Vec<Step>> {
             splits: Vec::new(),
             drain,
         };
-        vec![draw(b"\x1b[H", first, true), draw(b"\x1b[H\x1b[2K", second, false)]
+        vec![
+            draw(b"\x1b[H", first, true),
+            draw(b"\x1b[H\x1b[2K", second, false),
+        ]
     })
 }
 
@@ -414,6 +518,7 @@ fn script() -> impl Strategy<Value = Vec<Step>> {
         10 => write_step().prop_map(|s| vec![s]),
         2 => resize_step().prop_map(|s| vec![s]),
         1 => alt_cycle(),
+        1 => alt_exit(),
         1 => recolour(),
         1 => save_resize_restore(),
         1 => Just(vec![Step::ForgetHistory]),
@@ -439,18 +544,6 @@ fn size() -> impl Strategy<Value = (usize, usize)> {
 // ---------------------------------------------------------------------------
 // Running a script
 // ---------------------------------------------------------------------------
-
-/// One drain's worth of scrollback, kept with the flag that decides how it is rendered.
-///
-/// `alt` is here because `Update::scrolled_rows` in the crate root consults it for the
-/// batch's *last* row: a wrapped row at the end of a batch taken while the alt screen is
-/// up must not be joined onto what follows, because what follows is the alt grid's row 0
-/// rather than this row's continuation. Rendering scrollback without that flag would be
-/// rendering something the Lisp side never sees.
-struct Batch {
-    lines: Vec<Scrolled>,
-    alt: bool,
-}
 
 /// Every rendition any replay has seen, by its `Debug` spelling, numbered in the order
 /// first seen and shared by every case, so that two replays of the same bytes agree.
@@ -523,19 +616,30 @@ struct Replay {
     trimmed: Vec<bool>,
     /// Each shadow row's wrap flag as last sent, which Lisp marks the row's newline by.
     wrapped: Vec<bool>,
-    scrollback: Vec<Batch>,
+    /// Each drain that carried scrollback, reduced to the scrollback and the levels
+    /// [`Delta::scrolled_lines`] reads to decide where its lines end.
+    scrollback: Vec<Delta>,
     /// What each of `term` and `reference` has announced its rendition ids to mean.
     announced: [Announced; 2],
+    /// Whether a feed since the last drain said it changed something Emacs would draw.
+    ///
+    /// A write drains only when this is set, as the reader thread wakes Emacs only then,
+    /// so a change `Term::feed` fails to report is a change no drain shows: a row left
+    /// stale in the shadow, or a level left behind in `levels`.
+    woken: bool,
+    /// The levels and the cursor's character offset as the last drain stated them, which
+    /// is what Emacs is drawing from until the next.
+    levels: (Levels, usize),
 }
 
 impl Replay {
     /// A fresh terminal and a shadow that agrees with it.
     ///
-    /// The agreement is by construction rather than by a first drain: a new grid is blank
-    /// and undamaged, and a blank row's runs are empty, because trailing blanks are
-    /// trimmed out of `Row::runs`.
+    /// The rows agree by construction: a new grid is blank and undamaged, and a blank row's
+    /// runs are empty, because trailing blanks are trimmed out of `Row::runs`. The levels
+    /// are read by a first drain, as Emacs reads them when it starts the session.
     fn new(rows: usize, cols: usize) -> Self {
-        Self {
+        let mut replay = Self {
             term: Term::with_style_limit(rows, cols, STYLE_LIMIT),
             reference: Term::new(rows, cols),
             rows,
@@ -545,7 +649,11 @@ impl Replay {
             wrapped: vec![false; rows],
             scrollback: Vec::new(),
             announced: Default::default(),
-        }
+            woken: false,
+            levels: Default::default(),
+        };
+        replay.drain();
+        replay
     }
 
     /// Apply one delta to the shadow, exactly as `cooked--apply' does: rewrite the rows it
@@ -582,10 +690,12 @@ impl Replay {
                 self.wrapped[damaged.index] = damaged.wrapped;
             }
         }
+        self.levels = (delta.levels, delta.cursor_chars);
         if !delta.scrolled.is_empty() {
-            self.scrollback.push(Batch {
-                lines: delta.scrolled,
-                alt: delta.levels.alt,
+            self.scrollback.push(Delta {
+                scrolled: delta.scrolled,
+                levels: delta.levels,
+                ..Delta::default()
             });
         }
     }
@@ -746,19 +856,23 @@ impl Replay {
                 splits,
                 drain,
             } => {
-                for term in [&mut self.term, &mut self.reference] {
-                    if fragment {
-                        let mut at = 0;
-                        for cut in Step::cuts(bytes, splits) {
-                            term.feed(&bytes[at..cut]);
-                            at = cut;
-                        }
-                        term.feed(&bytes[at..]);
-                    } else {
-                        term.feed(bytes);
+                let feed = |term: &mut Term| {
+                    if !fragment {
+                        return term.feed(bytes);
                     }
-                }
-                if !drain {
+                    let mut at = 0;
+                    let mut changed = false;
+                    for cut in Step::cuts(bytes, splits) {
+                        changed |= term.feed(&bytes[at..cut]);
+                        at = cut;
+                    }
+                    changed | term.feed(&bytes[at..])
+                };
+                // Only `term`'s answer wakes the replay; the reference is a second opinion
+                // on the rows, not a second reader.
+                self.woken |= feed(&mut self.term);
+                feed(&mut self.reference);
+                if !(*drain && self.woken) {
                     return;
                 }
             }
@@ -780,7 +894,9 @@ impl Replay {
             }
             Step::Trim { row } => {
                 // The guard runs as a drain is rendered, so the drain comes first.
-                self.drain();
+                if self.woken {
+                    self.drain();
+                }
                 let row = usize::from(*row);
                 let Some(runs) = self.shadow.get_mut(row) else {
                     return;
@@ -799,6 +915,7 @@ impl Replay {
 
     /// Drain both terminals and absorb what they said.
     fn drain(&mut self) {
+        self.woken = false;
         let delta = self.announced[0].canonical(self.term.drain());
         self.reference.forget_sent(None);
         let reference = self.announced[1].canonical(self.reference.drain());
@@ -813,8 +930,11 @@ impl Replay {
     /// row instead of for the rows something claimed to have changed.
     fn full(&mut self) -> Delta {
         // Whatever the script left undrained is drained first, as it would be by the next
-        // wake, so the shadow is up to date before it is compared.
-        self.drain();
+        // wake, so the shadow is up to date before it is compared. A change no feed
+        // reported woke nothing, and stays out of the shadow.
+        if self.woken {
+            self.drain();
+        }
         self.term.touch_all();
         let full = self.term.drain();
         self.announced[0].canonical(full)
@@ -847,21 +967,17 @@ fn inside_glyph_run(runs: &[Run], at: usize) -> bool {
     false
 }
 
-/// The scrollback as one string, under one setting of `cooked-rejoin-wrapped-lines`.
-///
-/// A transcription of `Update::scrolled_rows`, which is where the Lisp side's copy of
-/// this rule lives — it cannot be called from here, because assembling the block needs an
-/// `Env` and there is no Emacs in this test. The duplication is the cost of testing the
-/// rule at all without one, and it is small enough to read against the original.
-fn render(scrollback: &[Batch], rejoin: bool) -> String {
+/// The scrollback as the text Emacs inserts, under one setting of
+/// `cooked-rejoin-wrapped-lines`, with the lines ended where [`Delta::scrolled_lines`]
+/// ends them for the module.
+fn render(scrollback: &[Delta], rejoin: bool) -> String {
     let mut out = String::new();
     for batch in scrollback {
-        let last = batch.lines.len() - 1;
-        for (i, line) in batch.lines.iter().enumerate() {
+        for (line, ends) in batch.scrolled_lines(rejoin) {
             for run in &line.runs {
                 out.push_str(&run.text);
             }
-            if !(rejoin && line.wrapped && !(i == last && batch.alt)) {
+            if ends {
                 out.push('\n');
             }
         }
@@ -958,6 +1074,13 @@ proptest! {
                 "replaying the deltas did not reproduce the grid — {where_}"
             )));
         }
+        // The levels too: the cursor, DECSCNM's reverse video, the alt screen and the key
+        // encoding are what Emacs draws and encodes from, and none of them is in a row.
+        prop_assert_eq!(
+            replay.levels,
+            (full.levels, full.cursor_chars),
+            "the last drain left Emacs with levels the terminal no longer has"
+        );
     }
 
     /// Property 2: where the writes were cut did not matter.
@@ -972,6 +1095,11 @@ proptest! {
             whole.step(step, false);
         }
         let (a, b) = (split.full(), whole.full());
+        prop_assert_eq!(
+            (a.levels, a.cursor_chars),
+            (b.levels, b.cursor_chars),
+            "the same bytes cut differently left different levels"
+        );
         let (a, b) = (dense(&a)?, dense(&b)?);
         if let Some(where_) = difference(&a, &b, &[]) {
             return Err(TestCaseError::fail(format!(
@@ -983,8 +1111,8 @@ proptest! {
         // would actually insert under each setting of `cooked-rejoin-wrapped-lines' —
         // which is a text-identity transformation of the wrap flags, and so exactly the
         // kind of thing a consistency property can check without an expected output.
-        let runs = |batches: &[Batch]| -> Vec<Scrolled> {
-            batches.iter().flat_map(|b| b.lines.clone()).collect()
+        let runs = |batches: &[Delta]| -> Vec<Scrolled> {
+            batches.iter().flat_map(|b| b.scrolled.clone()).collect()
         };
         prop_assert_eq!(runs(&split.scrollback), runs(&whole.scrollback));
         prop_assert_eq!(
@@ -993,4 +1121,3 @@ proptest! {
         );
     }
 }
-

@@ -383,6 +383,28 @@ pub struct Delta {
     pub marks: Vec<(MarkId, Anchor)>,
 }
 
+impl Delta {
+    /// This drain's scrollback, each row paired with whether Emacs ends a line after it.
+    ///
+    /// Without REJOIN, which is `cooked-rejoin-wrapped-lines', every row ends one. With
+    /// it, a row the terminal wrapped joins the row after it, so a long command line
+    /// yanked from history carries no newline the child never wrote. The exception is the
+    /// batch's last row while the alt screen is up: what follows it is the alt grid's own
+    /// row 0, and joining would weld frozen scrollback to a live row rewritten every
+    /// redraw.
+    ///
+    /// Here rather than where the scrollback is assembled for Emacs, which needs an `Env`,
+    /// so that a test with no Emacs can hold the rule to the same answer.
+    pub fn scrolled_lines(&self, rejoin: bool) -> impl Iterator<Item = (&Scrolled, bool)> {
+        let last = self.scrolled.len().saturating_sub(1);
+        let alt = self.levels.alt;
+        self.scrolled
+            .iter()
+            .enumerate()
+            .map(move |(i, line)| (line, !(rejoin && line.wrapped && !(i == last && alt))))
+    }
+}
+
 /// The state a drain restates in full every time, as of the end of that drain.
 ///
 /// These are the levels of the level/occurrence division [`Event`] describes: what Emacs

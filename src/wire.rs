@@ -634,19 +634,15 @@ impl Update {
         }
         let mut block = Block::default();
         let mut rows: Vec<RowSpan> = Vec::with_capacity(self.delta.scrolled.len());
-        let last = self.delta.scrolled.len() - 1;
 
-        for (i, line) in self.delta.scrolled.iter().enumerate() {
+        for (line, ends) in self.delta.scrolled_lines(rejoin) {
             let start = block.offset;
             block.push_runs(env, &line.runs)?;
             rows.push(RowSpan {
                 start,
                 chars: block.offset - start,
             });
-            // A wrapped row joins the line above -- except the batch's last row while the
-            // alt screen is up, where what follows is the alt grid's own row 0, and joining
-            // would weld frozen scrollback to a live row rewritten every redraw.
-            if !(rejoin && line.wrapped && !(i == last && self.delta.levels.alt)) {
+            if ends {
                 block.push_newline();
             }
         }
