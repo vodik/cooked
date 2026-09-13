@@ -287,7 +287,7 @@ drain.** The residual is the `vertical-motion` probe, which catches what Rust ca
 function of the row's text, the window's usable width and the font in force, all three
 of which sit still for minutes at a time, while a full-screen program rewrites the same
 248-character border 125 times a second and gets it re-measured every time. So
-`cooked--wrap-cache` holds, per buffer, a table of rows already seen to fit.
+`cooked--wrap-memo` holds, per buffer, a table of rows already seen to fit.
 
 Only the negative is stored, and that asymmetry is the safety argument. A wrong "this
 wraps" costs one `vertical-motion` and deletes nothing, because `cooked--trim-to-one-line`

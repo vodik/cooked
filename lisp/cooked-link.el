@@ -580,15 +580,15 @@ is there to avoid."
 
 ;;;; The goto-addr pass
 
-(defvar cooked--url-scheme-regexp nil
+(defvar cooked--url-scheme-regexp-memo nil
   "Cached (SCHEMES . REGEXP) for `thing-at-point-uri-schemes\='.")
 
 (defun cooked--url-scheme-regexp ()
   "The scheme alternation `thing-at-point\=' would have built, built once."
   (let ((schemes thing-at-point-uri-schemes))
-    (if (eq (car cooked--url-scheme-regexp) schemes)
-        (cdr cooked--url-scheme-regexp)
-      (cdr (setq cooked--url-scheme-regexp
+    (if (eq (car cooked--url-scheme-regexp-memo) schemes)
+        (cdr cooked--url-scheme-regexp-memo)
+      (cdr (setq cooked--url-scheme-regexp-memo
                  (cons schemes (regexp-opt schemes)))))))
 
 (defconst cooked-link--url-properties

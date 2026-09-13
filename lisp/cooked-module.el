@@ -187,7 +187,7 @@ DATABASE defaults to ours under `user-emacs-directory\='."
          (eq 0 (call-process "tic" nil nil nil "-x" "-o" database source))
          database)))
 
-(defvar cooked--terminfo-database 'unset
+(defvar cooked--terminfo-database-memo 'unset
   "Cached answer from `cooked--terminfo-database\=', or `unset\='.
 
 Once per session, because the answer involves a `tic\=' that would otherwise be
@@ -223,8 +223,8 @@ unpacked from a tarball and judged against its sidecar; `cooked/terminfo\=' is
 what `tic\=' wrote here and is judged against the source it was compiled from.
 Pointing both at one directory would mix the two and leave the sidecar
 answering for files it never described."
-  (when (eq cooked--terminfo-database 'unset)
-    (setq cooked--terminfo-database
+  (when (eq cooked--terminfo-database-memo 'unset)
+    (setq cooked--terminfo-database-memo
           (let ((shipped (expand-file-name "terminfo/db" (cooked--root)))
                 (downloaded (expand-file-name "terminfo" (cooked--module-directory)))
                 (mine (locate-user-emacs-file "cooked/terminfo")))
@@ -233,7 +233,7 @@ answering for files it never described."
              ((cooked--terminfo-usable-p downloaded cooked-term-name) downloaded)
              ((cooked--terminfo-usable-p mine cooked-term-name) mine)
              ((cooked--terminfo-install mine))))))
-  cooked--terminfo-database)
+  cooked--terminfo-database-memo)
 
 (defun cooked--terminfo ()
   "TERM to hand the child, or xterm-256color if we cannot describe ourselves."
@@ -831,7 +831,7 @@ because Emacs cannot unload a module and there is nothing else to say."
         (ignore-errors (delete-directory staging t))))
     ;; The database this session settled on was chosen before there was a
     ;; downloaded one to choose, and it is cached for the session.
-    (setq cooked--terminfo-database 'unset)
+    (setq cooked--terminfo-database-memo 'unset)
     (if (featurep 'cooked-core)
         (message "cooked: core %s installed -- restart Emacs to use it" release)
       (cooked--check-prebuilt (cooked--prebuilt-state directory))

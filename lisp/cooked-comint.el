@@ -83,7 +83,7 @@ typed.  Set this to nil to keep the guessing, or to keep the directory still."
   :type 'boolean
   :group 'cooked)
 
-(defvar-local cooked-comint--filter nil
+(defvar-local cooked-comint--core-filter nil
   "This buffer's parser handle, from `cooked--make-filter'.
 
 Buffer-local because the state it holds is the child's: a pen that persists
@@ -199,7 +199,7 @@ a newline: `cooked-comint--open' holds one unfinished line at most."
   (let* ((proc (get-buffer-process (current-buffer)))
          (mark (and proc (process-mark proc)))
          (intact (and mark (cooked-comint--intact-p mark)))
-         (result (cooked--filter-feed cooked-comint--filter string intact)))
+         (result (cooked--filter-feed cooked-comint--core-filter string intact)))
     (if (null result)
         ""
       (pcase-let* ((`(,retract ,text ,styles ,links ,directory) result)
@@ -259,7 +259,7 @@ about what is in it."
   (if cooked-comint-mode
       (progn
         (cooked--load-module)
-        (setq cooked-comint--filter (cooked--make-filter)
+        (setq cooked-comint--core-filter (cooked--make-filter)
               cooked-comint--open "")
         ;; comint's own pass over the chunk, which deletes to the start of the line
         ;; where a terminal overwrites.  There is nothing left for it to find in any
@@ -276,7 +276,7 @@ about what is in it."
         (add-hook 'comint-preoutput-filter-functions #'cooked-comint--filter nil t))
     (remove-hook 'comint-preoutput-filter-functions #'cooked-comint--filter t)
     (kill-local-variable 'comint-inhibit-carriage-motion)
-    (setq cooked-comint--filter nil
+    (setq cooked-comint--core-filter nil
           cooked-comint--open "")))
 
 (defun cooked-comint--turn-on ()

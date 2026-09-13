@@ -462,7 +462,7 @@ the everyday shape of this."
   ;; the ninety-scheme alternation on each call unless
   ;; `thing-at-point-beginning-of-url-regexp' is already set.  Binding it is the
   ;; whole of the fix, so what is pinned here is that no pass rebuilds it.
-  (setq cooked--url-scheme-regexp nil)
+  (setq cooked--url-scheme-regexp-memo nil)
   (let ((built 0))
     (cl-letf* ((original (symbol-function 'regexp-opt))
                ((symbol-function 'regexp-opt)

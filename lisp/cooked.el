@@ -1799,7 +1799,7 @@ being asked is a question about specific glyphs a specific font may or may not
 have.")
 
 (defcustom cooked-wrap-cache-limit 4096
-  "How many rows `cooked--wrap-cache\=' remembers before it starts over.
+  "How many rows `cooked--wrap-memo\=' remembers before it starts over.
 
 Not an eviction policy -- there is no ordering here to evict by -- but a bound.
 The memo is keyed by row text, and a buffer whose every row is different (a log
@@ -1819,7 +1819,7 @@ lower it to make a reset cheaper at the cost of more memo misses."
   :type 'natnum
   :group 'cooked)
 
-(defvar-local cooked--wrap-cache nil
+(defvar-local cooked--wrap-memo nil
   "This buffer's memo of which rows Emacs lays out on one screen line.
 
 (STAMP FIXED-PITCH . TABLE), rebuilt from scratch whenever STAMP moves.
@@ -1984,9 +1984,9 @@ because the stamp is the expensive part -- 44us to build, against the ~20us the
 whole guard is trying to get down to -- so a second cache with a second stamp
 would cost more than either table saves."
   (let ((stamp (cooked--layout-stamp window)))
-    (if (equal (car cooked--wrap-cache) stamp)
-        (cdr cooked--wrap-cache)
-      (cdr (setq cooked--wrap-cache
+    (if (equal (car cooked--wrap-memo) stamp)
+        (cdr cooked--wrap-memo)
+      (cdr (setq cooked--wrap-memo
                  (cons stamp
                        (list (cooked--ascii-fixed-pitch-p window)
                              (make-hash-table :test #'equal :size 64)
@@ -2054,7 +2054,7 @@ and laying out the same way every one of those times.  Measuring it is not free:
 guard cost per row, or 24.5ms per 45-row drain, which is more than a 60Hz frame
 spent to conclude there was nothing to do.
 
-Only the negative is stored; see `cooked--wrap-cache\=' for why that is also the
+Only the negative is stored; see `cooked--wrap-memo\=' for why that is also the
 safety argument.  The key is the row's text as it actually sits in the buffer
 rather than the text the drain said it wrote, because the buffer's copy is what
 `vertical-motion\=' is measuring."
@@ -2131,7 +2131,7 @@ font metrics, and a font can always surprise it."
 (defun cooked--glyph-metrics (beg end window metrics)
   "What the cluster in BEG..END actually measures, as (WIDTH ASCENT DESCENT PIXEL).
 
-Memoised in METRICS, `cooked--wrap-cache\='s third slot, on the cluster's own
+Memoised in METRICS, `cooked--wrap-memo\='s third slot, on the cluster's own
 text *and its face* -- so a border row of five hundred identical characters is
 one measurement and four hundred and ninety-nine hash lookups, while the same
 character in bold is measured again, which it must be: a bold face is a
