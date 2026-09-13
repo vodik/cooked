@@ -189,6 +189,18 @@ fn an_edit_counts_a_combining_mark_as_a_character_of_its_own() {
     );
 }
 
+/// Two of the same combining mark written back as one: every attachment on either side is
+/// also on the other, so only counting them tells the rows apart.
+#[test]
+fn a_repeated_combining_mark_written_back_once_is_an_edit() {
+    let mut t = settled(2, 40, "cafe\u{301}\u{301} x and some more".as_bytes());
+    t.feed("\x1b[1;4He\u{301}\x1b[2;1H".as_bytes());
+    assert_eq!(
+        edit_of(&mut t, 0),
+        Some(Some((3, Some(6), 21, "e\u{301}".to_string())))
+    );
+}
+
 #[test]
 fn a_change_inside_a_glyph_run_replaces_the_whole_run() {
     let row = "status: \u{2500}\u{2500}\u{2500}\u{2500} \u{2500}\u{2500}\u{2500}\u{2500} old";

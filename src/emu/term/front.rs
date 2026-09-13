@@ -224,14 +224,14 @@ impl Front {
         }
         let (old, new) = (self.cells(index), row.cells());
         let old_extras = &known.extras;
-        let new_extras: Vec<&(u16, Extra)> = drawn(row.extras()).collect();
+        let new_extras = || drawn(row.extras());
 
         // The first and last columns whose cell or attachments differ. Past both rows'
         // content every cell is a default blank in both, whose bytes are the same, so the
         // cells are only compared up to there -- which on a wide screen leaves most of the
         // row unread -- and each cell is compared as one 128-bit word.
         let old_len = content_len(old, old_extras.iter());
-        let new_len = content_len(new, new_extras.iter().copied());
+        let new_len = content_len(new, new_extras());
         let bound = old_len.max(new_len).min(cols);
         let word = |c: &Cell| {
             u128::from_ne_bytes(
@@ -245,20 +245,8 @@ impl Front {
             let last = (first..bound).rev().find(|&c| differs(c)).unwrap_or(first);
             (first, last + 1)
         });
-        if old_extras.len() != new_extras.len() || !old_extras.iter().eq(new_extras.iter().copied())
-        {
-            let column = |(at, _): &(u16, Extra)| usize::from(*at);
-            let differing = old_extras
-                .iter()
-                .filter(|entry| !new_extras.contains(entry))
-                .chain(
-                    new_extras
-                        .iter()
-                        .copied()
-                        .filter(|entry| !old_extras.contains(entry)),
-                )
-                .map(column);
-            for col in differing {
+        if !old_extras.iter().eq(new_extras()) {
+            for col in differing_columns(old_extras.iter(), new_extras()) {
                 span = Some(span.map_or((col, col + 1), |(lo, hi)| (lo.min(col), hi.max(col + 1))));
             }
         }
@@ -280,7 +268,7 @@ impl Front {
                 }));
             }
         }
-        let length = chars_before(new, new_extras.iter().copied(), new_len);
+        let length = chars_before(new, new_extras(), new_len);
         let Some((mut lo, mut hi)) = span else {
             // Nothing drawn differs, only the wrap flag: an empty replacement still has
             // Lisp mark the row's newline afresh.
@@ -456,6 +444,43 @@ fn is_glyph(cell: Cell) -> bool {
 }
 
 /// The attachments that change what Emacs draws: everything but semantic marks.
+/// The columns whose attachments differ between OLD and NEW, each in column order.
+///
+/// A merge over the two lists, one column at a time, rather than asking of every entry
+/// whether the other row holds it, which was quadratic in the attachments. A column's
+/// entries are compared in order, so the same attachments added in a different order read
+/// as a change. That can only widen an edit by the column, never hide one, and it counts
+/// what membership could not: `e` with two acute accents and `e` with one hold the same
+/// entries.
+fn differing_columns<'a>(
+    old: impl Iterator<Item = &'a (u16, Extra)>,
+    new: impl Iterator<Item = &'a (u16, Extra)>,
+) -> impl Iterator<Item = usize> {
+    let (mut old, mut new) = (old.peekable(), new.peekable());
+    std::iter::from_fn(move || {
+        loop {
+            let col = match (old.peek(), new.peek()) {
+                (None, None) => return None,
+                (Some((a, _)), None) => *a,
+                (None, Some((b, _))) => *b,
+                (Some((a, _)), Some((b, _))) => (*a).min(*b),
+            };
+            let at = |(c, _): &&(u16, Extra)| *c == col;
+            let mut same = true;
+            loop {
+                match (old.next_if(at), new.next_if(at)) {
+                    (None, None) => break,
+                    (Some(a), Some(b)) => same &= a == b,
+                    _ => same = false,
+                }
+            }
+            if !same {
+                return Some(usize::from(col));
+            }
+        }
+    })
+}
+
 fn drawn(extras: &[(u16, Extra)]) -> impl Iterator<Item = &(u16, Extra)> {
     extras
         .iter()
