@@ -38,9 +38,8 @@ pub(crate) fn validated_text(params: &[&[u8]], from: usize, max: usize) -> Optio
 impl State {
     /// OSC 133: a shell's semantic mark, anchored where it fell in the stream.
     pub(super) fn semantic(&mut self, params: &[&[u8]]) {
-        // Parsed before a mark is taken, because a mark that is ignored has to leave no
-        // trace: an id allocated for an event that is never pushed is a mark on the grid
-        // Emacs is never told about, which a later rewrap would carry around for nobody.
+        // Parsed before a mark is taken, so an ignored mark leaves no id on the grid that
+        // Emacs is never told about.
         let Some(mark) = Self::parse_mark(params) else {
             return;
         };
@@ -86,11 +85,10 @@ impl State {
     /// empty means `i`, which is the proposal's default and what cooked's own snippets
     /// rely on.
     ///
-    /// A right-hand prompt is neither of the other two. It starts no command, so it must
-    /// not move the prompt marker, and it continues nothing, so it must not be read as a
-    /// `PS2` either: no `B` follows a right prompt, and Emacs would wait at `prompt` for
-    /// good. A kind nobody here has heard of is dropped the same way, because dropping is
-    /// the one answer that changes no state.
+    /// A right-hand prompt is neither: it starts no command, so it must not move the prompt
+    /// marker, and it must not be read as a `PS2`, because no `B` follows it and Emacs
+    /// would wait at `prompt` for good. An unknown kind is dropped the same way, since
+    /// dropping changes no state.
     ///
     /// Options arrive in `params[2..]`, since `;` separates OSC parameters and `133;A;k=s`
     /// is three of them. Other emitters' options -- kitty's `click_events=`, Ghostty's
@@ -109,24 +107,18 @@ impl State {
 
     /// The command line a `C` mark carries, from `cmdline_url=`.
     ///
-    /// This is what the shell is about to run, said by the shell itself, and it is the
-    /// only account of it that survives the cases where Emacs has none: a prompt whose
-    /// line the shell kept, a program reading input of its own, the far end of an `ssh`.
-    /// Where Emacs does have one, this still wins — `cooked--submitted-input` is what
-    /// Emacs *sent*, assembled by hand across the lines of a multi-line construct, while
-    /// this is what the shell parsed.
+    /// This is what the shell is about to run, in its own words, and the only account that
+    /// survives where Emacs has none: a line the shell kept, or the far end of an `ssh`.
+    /// Where Emacs has one it still wins, since `cooked--submitted-input` is what Emacs
+    /// *sent* and this is what the shell parsed.
     ///
-    /// `cmdline_url=` and not kitty's `cmdline=`. The two carry the same thing and
-    /// kitty's is the older spelling, but it holds `printf %q` output — shell quoting,
-    /// which only that shell can undo, so `ls -la` arrives as `ls\ -la`. Guessing at an
-    /// unquoting would put the guess in the command record and there would be no way to
-    /// tell it from the truth. Percent-encoding has one reading, and it is what fish 4
-    /// already sends: a fish doing its own marking gets this for free.
+    /// `cmdline_url=` and not kitty's `cmdline=`, which holds `printf %q` output that only
+    /// that shell can unquote, so `ls -la` arrives as `ls\ -la`. Percent-encoding has one
+    /// reading, and fish 4 already sends it.
     ///
-    /// Capped at [`MAX_CMDLINE_LEN`] because this arm returns before `osc_dispatch`'s
-    /// generic limit, the same way [`State::hyperlink`] is. Control characters are
-    /// dropped, except the newline that a multi-line construct genuinely contains and
-    /// the tab that can be typed into one.
+    /// Capped at [`MAX_CMDLINE_LEN`] because this returns before `osc_dispatch`'s generic
+    /// limit. Control characters are dropped, except the newline a multi-line construct
+    /// contains and a tab.
     fn cmdline(params: &[&[u8]]) -> Option<String> {
         let raw = params
             .iter()
@@ -169,10 +161,8 @@ impl State {
 
     /// Name the mark at ANCHOR and leave it on the cell the anchor points at.
     ///
-    /// Nothing is attached while the alternate screen is up. That grid is a running
-    /// program's frame: its rows never become buffer text, they are dropped rather than
-    /// archived when the program leaves, and Emacs' marker for such a mark points into
-    /// the primary's text underneath. There is nothing there a rewrap could move.
+    /// Nothing is attached while the alternate screen is up: its rows never become buffer
+    /// text, so there is nothing a rewrap could move.
     pub(super) fn take_mark(&mut self, at: Anchor) -> MarkId {
         let id = MarkId(self.next_mark);
         self.next_mark = self.next_mark.wrapping_add(1);
@@ -186,12 +176,10 @@ impl State {
 
     /// Where every mark Emacs may be holding a stale marker for is now, or nothing.
     ///
-    /// Nothing on a drain where nothing moved, which is the overwhelming case and costs
-    /// one boolean test. Otherwise -- a resize, a redraw, or any drain that evicted a row
-    /// -- it is the marks that left the grid meanwhile, recorded as they went, plus every
-    /// mark still on it, read now. The grid walk is bounded by the screen's height and
-    /// skips a row with no attachments on a null check, so the cost is a scan of a few
-    /// dozen pointers on drains that were already rewriting rows.
+    /// Nothing on a drain where nothing moved, at the cost of one boolean test. Otherwise
+    /// -- a resize, a redraw, or an eviction -- it is the marks that left the grid,
+    /// recorded as they went, plus every mark still on it. The walk skips a row with no
+    /// attachments on a null check.
     pub(super) fn take_marks(&mut self) -> Vec<(MarkId, Anchor)> {
         if !self.marks_dirty {
             return Vec::new();
@@ -207,14 +195,9 @@ impl State {
 
     /// Every mark ROWS carry, numbered from absolute row BASE.
     ///
-    /// One caller: [`State::take_marks`], over the live primary grid, on a drain that
-    /// something moved. Rows that *left* the grid no longer come through here — they
-    /// carry their own marks out in [`Departed`](crate::emu::screen::Departed), recorded
-    /// as they went, and `take_marks` merges the two.
-    ///
-    /// Lazy throughout. This used to `collect` inside the `flat_map`, which cost a `Vec`
-    /// per row scanned whether or not the row carried a single mark — and while it was
-    /// also on the eviction path, that was a `Vec` per scrolled line.
+    /// Used by [`State::take_marks`] over the live primary grid. Rows that left the grid
+    /// carry their marks out in [`Departed`](crate::emu::screen::Departed) instead. Lazy,
+    /// so a row without marks allocates nothing.
     pub(super) fn marks_in<'a>(
         rows: impl Iterator<Item = &'a Row>,
         base: usize,
@@ -234,19 +217,14 @@ impl State {
 
     /// `OSC 8 ; PARAMS ; URI ST` — open a hyperlink, or close the one that is open.
     ///
-    /// An empty URI closes. That is the only thing that does, apart from a reset: see
-    /// [`State::link`] for why an SGR reset must not, which is the mistake this
-    /// implementation is one line away from at all times.
+    /// An empty URI closes, and apart from a reset nothing else does; see [`State::link`]
+    /// for why an SGR reset must not.
     ///
-    /// PARAMS is ignored wholesale. The only one anybody sends is `id=`, and
-    /// content-addressing already answers what it is for — see [`LinkStore::intern`].
+    /// PARAMS is ignored. The only one anybody sends is `id=`, and content-addressing
+    /// already answers what it is for; see [`LinkStore::intern`].
     ///
-    /// The URI is rejoined rather than taken as `params[2]`: `;` separates OSC
-    /// parameters, so a URI containing an unescaped one arrives pre-split. It is
-    /// refused outright if it carries a control character — the payload reaches
-    /// `browse-url` in Emacs, and a URI with a newline in it is not a destination
-    /// anybody meant — or if it is longer than [`MAX_URI_LEN`]. Length is checked here
-    /// because this arm returns before `osc_dispatch`'s generic payload limit.
+    /// The URI goes through [`validated_text`], so one containing a `;` is rejoined and
+    /// one carrying a control character or longer than [`MAX_URI_LEN`] is refused.
     pub(super) fn hyperlink(&mut self, params: &[&[u8]]) {
         let Some(uri) = validated_text(params, 2, MAX_URI_LEN) else {
             return;
@@ -264,54 +242,39 @@ impl State {
 
     /// `OSC 66 ; METADATA ; TEXT ST` — kitty's [text sizing protocol], width only.
     ///
-    /// The escape carries its own text, which is the first thing to know about it: the
-    /// payload is not printed afterwards, it *is* the payload, capped by the spec at
-    /// 4096 bytes. `METADATA` is a colon-separated list of `key=value` pairs, and only
-    /// one of the keys changes anything here.
+    /// The escape carries its own text: the payload is what gets printed, capped by the
+    /// spec at 4096 bytes. `METADATA` is a colon-separated list of `key=value` pairs.
     ///
-    /// **`w=N` is honoured; `s`, `n`, `d`, `v` and `h` are parsed and dropped.** That is
-    /// not a corner cut, it is a shape the spec names: "It is possible for a terminal to
-    /// implement only the width part of this spec and ignore the scale part... In such
-    /// cases `s` defaults to 1." Scale asks the terminal to render text at a multiple of
-    /// the base font size across a block `s` cells tall, and cooked draws nothing — the
-    /// grid it maintains is handed to Emacs, which lays it out in the buffer's own faces
-    /// at the frame's own character height. There is no font size here to multiply.
+    /// **`w=N` is honoured; `s`, `n`, `d`, `v` and `h` are parsed and dropped.** The spec
+    /// allows exactly that: "It is possible for a terminal to implement only the width part
+    /// of this spec and ignore the scale part... In such cases `s` defaults to 1." Scale
+    /// would mean rendering at a multiple of the font size, and Emacs lays text out at the
+    /// frame's own character height.
     ///
-    /// Width is the half that *is* ours, and the half the ecosystem actually needs: it
-    /// is the client saying how many cells a piece of text occupies, so that the two
-    /// ends stop disagreeing about what a width table says. That number reaches Emacs
-    /// intact — see [`Run::cols`](crate::emu::cell::Run::cols), which is carried rather
-    /// than re-derived precisely so that a *declared* width has somewhere to go.
+    /// Width is the part clients need: the client says how many cells a piece of text
+    /// occupies, and that number reaches Emacs intact through
+    /// [`Run::cols`](crate::emu::cell::Run::cols).
     ///
-    /// **Nothing is declined out loud, because there is nowhere to say it.** `src/emu/
-    /// kitty.rs` refuses graphics features with an `ENOTSUPPORTED` reply, and that works
-    /// because the graphics protocol has a response channel built into it. This one has
-    /// no reply of any kind. A client detects support by printing `w=2` text between two
-    /// `CPR` queries and checking that the cursor moved two cells — so the only thing
-    /// this implementation can say about itself, it says by getting the cursor
-    /// arithmetic right. A client probing scale gets a cursor that moved one cell for
-    /// `s=2`, reads that as "scale unsupported", and is correct.
+    /// **Nothing is declined out loud, because the protocol has no reply.** A client
+    /// detects support by printing `w=2` text between two `CPR` queries and checking that
+    /// the cursor moved two cells, so getting the cursor arithmetic right is the whole of
+    /// the answer; a client probing `s=2` sees one cell and correctly concludes that scale
+    /// is unsupported.
     ///
     /// [text sizing protocol]: https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
     pub(super) fn text_size(&mut self, params: &[&[u8]]) {
         let Some(width) = params.get(1).and_then(|meta| Self::text_size_width(meta)) else {
             return;
         };
-        // Rejoined for [`State::hyperlink`]'s reason and one more: `;` is an OSC
-        // separator, so text containing one arrives pre-split, and here the text is
-        // arbitrary content rather than a URI. The cap is the spec's own, and the
-        // parser's [`MAX_OSC_RAW`](crate::emu::parser::MAX_OSC_RAW) sits far above it —
-        // that one exists to stop a hostile stream sizing our heap, this one is the
-        // protocol saying how long a chunk may be, and a sender that exceeds it is
-        // sending something this cannot render as one block anyway.
+        // Rejoined, because text containing `;` arrives pre-split. The cap is the spec's
+        // own; see [`MAX_TEXT_SIZE_LEN`].
         let raw = rejoin(params, 2);
         if raw.len() > MAX_TEXT_SIZE_LEN {
             return;
         }
-        // Lossy, which is the spec's rule stated by the standard library: ill-formed
-        // UTF-8 becomes `U+FFFD` rather than dropping the escape. Controls are stripped
-        // — a `w=` block is one thing standing on a stated number of cells, and a
-        // newline or a backspace inside it is not part of that thing.
+        // Lossy, as the spec asks: ill-formed UTF-8 becomes `U+FFFD` rather than dropping
+        // the escape. Controls are stripped, since a newline cannot be part of a block
+        // standing on a stated number of cells.
         let text: String = String::from_utf8_lossy(&raw)
             .chars()
             .filter(|c| !c.is_control())
@@ -321,10 +284,8 @@ impl State {
         }
         let (pen, cols) = (self.pen, self.screen().width());
         // "If the multicell block is larger than the screen size in either dimension,
-        // the terminal must discard the character." A block wider than the screen can
-        // never be drawn whole, and drawing part of it would be a worse answer than not
-        // drawing it: the cursor would then move by something other than the width the
-        // client declared, which is exactly the disagreement this protocol exists to end.
+        // the terminal must discard the character." Drawing part of it would move the
+        // cursor by something other than the declared width.
         if width == 0 {
             // `w=0` is "split it up as you normally would", so it is the ordinary
             // printing path with the payload standing in for the stream — one cell per
@@ -360,12 +321,9 @@ impl State {
 
     /// The `w=` value, or `None` if the metadata is not something to act on.
     ///
-    /// Every key is range-checked and every unknown key is ignored, which is the same
-    /// division kitty's graphics parser makes: a protocol is extended by adding keys, so
-    /// an unfamiliar one is a newer sender rather than a broken one. A key that *is*
-    /// known but carries a value outside its range is a broken sender, and the whole
-    /// escape is dropped — the alternative is to guess at a width, and a guessed width
-    /// is precisely the failure this protocol was written to remove.
+    /// Unknown keys are ignored, since a protocol grows by adding keys and an unfamiliar one
+    /// means a newer sender. A known key with a value out of range means a broken sender,
+    /// and the whole escape is dropped rather than guessing at a width.
     fn text_size_width(meta: &[u8]) -> Option<u8> {
         let mut width = 0;
         for pair in meta.split(|b| *b == b':') {
@@ -420,9 +378,8 @@ impl State {
             self.semantic(params);
             return;
         }
-        // Before the generic numeric path, and returning rather than falling through:
-        // OSC 8 is grid state, so handing it to Lisp as an `Event::Osc` as well would
-        // invite a second, disagreeing implementation of it up there.
+        // Before the generic path, and returning: OSC 8 is grid state, and handing it to
+        // Lisp as well would invite a second implementation there.
         if code == "8" {
             self.hyperlink(params);
             return;
@@ -436,10 +393,9 @@ impl State {
         let Ok(code) = code.parse::<u16>() else {
             return;
         };
-        // A hostile stream should not get to size our heap for us, and nothing
-        // legitimate — title, working directory, hyperlink, clipboard — comes close.
-        // 1337 is the exception and needs its own bound, because what it carries is a
-        // whole base64 image; the parser has already capped it at `MAX_OSC_RAW`.
+        // A hostile stream should not get to size our heap, and nothing legitimate -- a
+        // title, a directory, a clipboard write -- comes close. 1337 carries a whole base64
+        // image, so it gets the parser's own cap, `MAX_OSC_RAW`.
         let limit = if code == 1337 {
             crate::emu::parser::MAX_OSC_RAW
         } else {
@@ -448,9 +404,8 @@ impl State {
         if params[1..].iter().map(|p| p.len()).sum::<usize>() > limit {
             return;
         }
-        // Only `File=` is ours. `OSC 1337` is iTerm2's whole private channel —
-        // `SetUserVar`, `CurrentDir`, `ShellIntegrationVersion` — and swallowing all of
-        // it would quietly close a door Lisp can already reach through `Event::Osc`.
+        // Only `File=` is ours. The rest of iTerm2's private channel, such as `SetUserVar`,
+        // goes on to Lisp as an `Event::Osc`.
         if code == 1337 && self.iterm_file(params) {
             return;
         }

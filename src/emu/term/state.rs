@@ -67,16 +67,12 @@ impl State {
     /// The guard is about which screen produced the rows, so callers that already know the
     /// rows came from the primary must use [`State::archive`] instead — see `resize`.
     ///
-    /// Growth is bounded by backpressure rather than by discarding: the reader stops
-    /// reading once [`Term::backlog`] is high, the pty's own buffer fills, and the
-    /// child blocks in `write` exactly as it would against a slow terminal. Dropping
-    /// would be lossy, and losing the middle of a build log is worse than waiting.
+    /// Growth is bounded by backpressure rather than by discarding: once [`Term::backlog`]
+    /// is high the reader stops reading and the child blocks in `write`, as against a slow
+    /// terminal. Losing the middle of a build log is worse than waiting.
     ///
-    /// The alt screen is exempt from that measure by design. It contributes no scrollback,
-    /// its grid is a fixed size, and `min_redisplay_interval` already bounds how often its
-    /// frames are drawn — so intermediate frames of a repaint are genuinely discardable in
-    /// a way log lines are not, and there is nothing to apply backpressure against.
-    ///
+    /// The alt screen contributes no scrollback and has a fixed-size grid, so there is
+    /// nothing there to apply backpressure against.
     pub(super) fn evicted(&mut self, rows: Evicted) {
         if self.shown.is_alternate() {
             return;
@@ -117,37 +113,22 @@ impl State {
     /// The single funnel for rows leaving the primary screen, which is why the absolute
     /// row counter is kept here rather than at each of its callers.
     pub(super) fn archive(&mut self, rows: Evicted) {
-        // An eviction moves live marks as surely as a rewrap does, if by less. The
-        // buffer's live text is *rebuilt* around what left -- the evicted row goes in
-        // above as scrollback while the rows below it move up a slot -- and the two
-        // renderings of that row differ by exactly the newline `cooked-rejoin-wrapped-
-        // lines' withholds from a continuation row. So every position below it slides by
-        // one per wrapped row that leaves, which is the drift a long-running command
-        // shows: its marker walks away from its prompt as its own output scrolls.
-        // The empty case first, because it is not the rare one: `Perform::print` hands the
-        // result of every single printed character to `evicted`, and only the character
-        // that scrolls the bottom margin brings a row with it. Everything below is a
-        // no-op for the rest -- but it is a no-op that still reads two fields, sets up an
-        // iterator and drops a `Vec`, once per byte of output.
-        //
-        // Worth ~10%: the full-screen repaint benchmark, which never evicts a single row,
-        // runs at 277ms with this return and 313ms without it, and `plain` at 203ms
-        // against 224ms. Hoisting the same test up into `evicted`, or adding it again at
-        // the `print` call site, both measured as no further gain -- so it belongs here,
-        // once, at the funnel every eviction path already goes through.
+        // The empty case first, because it is the common one: every printed character's
+        // result comes through here, and only the one that scrolls the bottom margin
+        // brings a row. Returning early is worth about 10% on a full-screen repaint.
         if rows.is_empty() {
             return;
         }
         let base = self.evicted_total;
+        // An eviction moves live marks too, if by less than a rewrap. The evicted row goes
+        // in above as scrollback and renders differently there by the newline
+        // `cooked-rejoin-wrapped-lines' withholds from a continuation row, so without a
+        // repair a long-running command's marker walks away from its prompt.
         self.marks_dirty = true;
         self.evicted_total += rows.len();
-        // A move, not a rebuild. `Screen` reduced these rows to runs as they left the
-        // grid -- see `Departed` -- so everything here is already the shape the backlog
-        // wants, and both halves of this loop hand it straight over.
-        //
-        // `extend` on an empty iterator neither allocates nor grows, which is what makes
-        // the mark half free: a row carrying no marks is the overwhelming case, and it
-        // used to cost a `Vec` per eviction here plus another per row inside `marks_in`.
+        // A move, not a rebuild: `Screen` reduced these rows to runs as they left (see
+        // `Departed`). `extend` on an empty iterator does not allocate, so a row carrying
+        // no marks, the usual case, costs nothing for them.
         for (index, row) in rows.into_iter().enumerate() {
             self.evicted_marks
                 .extend(row.marks.iter().map(|&(col, id)| {
@@ -193,18 +174,13 @@ impl State {
     /// [`State::prompt_start`] meaning what it says.
     ///
     /// Rows removed this way are discarded rather than archived, so `evicted_total` does
-    /// not move and screen row 0 keeps its absolute number — but every row *below* the
-    /// cut slides up, so an anchor pointing at one of them has to come down to meet it.
-    /// The rebase is the same arithmetic [`Screen::remove_rows`] applies to the cursor,
-    /// and for the same reason: both name a row by where it sits, and the rows moved.
+    /// not move, but every row *below* the cut slides up and an anchor pointing at one has
+    /// to come down with it -- the same arithmetic [`Screen::remove_rows`] applies to the
+    /// cursor.
     ///
-    /// Going through here rather than reaching for [`State::screen_mut`] is not a style
-    /// preference. `clear_to_prompt` rebased and `Term::remove_rows` did not, so
-    /// `cooked-delete-output` — which removes rows above the prompt — left the anchor
-    /// stale by exactly the count it dropped. A later `clear_to_prompt` then measured a
-    /// prompt row past the cursor, failed its own sanity filter, and silently fell back
-    /// to cutting at the cursor: right for a one-line prompt, and wrong for the
-    /// multi-line case the anchor exists to get right.
+    /// Every removal must go through here rather than [`State::screen_mut`]. A stale
+    /// anchor after `cooked-delete-output` would make a later `clear_to_prompt` fall back
+    /// to cutting at the cursor, which is wrong for a multi-line prompt.
     pub(super) fn remove_rows(&mut self, first: usize, count: usize) {
         self.screen_mut().remove_rows(first, count);
         // The alt grid holds a running program's frame, not a transcript; no anchor
@@ -244,10 +220,8 @@ impl State {
 
     pub(super) fn resize(&mut self, rows: usize, cols: usize) {
         // Before the rewrap, so the rows it pushes off the top are archived with the flag
-        // already up and their marks recorded on the way past. Every mark a resize could
-        // have moved is reported, not only the ones a rewrap re-laid: a height-only change
-        // evicts from the top too, and a mark re-anchored to where it already was costs
-        // Emacs one `set-marker'.
+        // up. Every mark is reported, not only those a rewrap re-laid: a height-only change
+        // evicts too, and re-anchoring a mark where it already was costs one `set-marker'.
         self.marks_dirty = true;
         let evicted = self.screens.primary.resize(rows, cols, Resize::Rewrap);
         // The alt screen contributes no scrollback -- it is a fixed-size scratch grid,
@@ -264,35 +238,23 @@ impl State {
 
     /// Drop the bytes of any image transmitted this drain that nothing is left showing.
     ///
-    /// The frame-rate governor, and the reason a 20fps animation costs Emacs 20 frames a
-    /// second rather than every frame the child managed to write. Transmitting is not
-    /// displaying: a child that draws over its own picture has produced a picture nobody
-    /// will ever see, and between two drains it may do that many times. `viu` sends
-    /// ~2MB a frame and moves the cursor back over it, so a drain that lands two frames
-    /// late holds three payloads of which exactly one is on the grid. The other two are
-    /// six megabytes on their way to a buffer that has no cell pointing at them.
+    /// The frame-rate governor. Transmitting is not displaying: `viu` sends about 2MB a
+    /// frame and draws each over the last, so a drain that lands two frames late holds
+    /// three payloads of which one is on the grid. Emacs' readiness for a drain therefore
+    /// decides how many frames cross, with no rate configured anywhere, and a child
+    /// outrunning the display loses only frames nobody could have seen.
     ///
-    /// Emacs' redisplay rate is therefore what decides how many frames cross, without
-    /// anyone configuring a rate or running a timer: drains happen when Emacs is ready
-    /// for one, and each carries the frame that is current at that moment. A child
-    /// outrunning the display loses the frames nobody could have seen, which is what
-    /// dropping frames means everywhere else.
-    ///
-    /// Three things count as showing a picture, and the third is the one that is easy to
-    /// miss:
+    /// Three things count as showing a picture, and the third is easy to miss:
     ///
     ///   - a cell of either grid, since a placement is per cell;
     ///   - a row scrolled off in *this* delta, whose runs Emacs is about to render;
     ///   - a client name bound by `i=`, because a later bare `a=p` can still ask for it,
     ///     and that transmission is the only chance those bytes have to cross.
     ///
-    /// Shedding tells the store, which is not optional: the invariant on
-    /// [`crate::emu::image::ImageStore`] is that an id is tracked iff Emacs
-    /// has its bytes, and these bytes are not going. Left tracked, the next transmission
-    /// of the same frame -- the next time round the loop, for an animation -- would be
-    /// answered "you already have this one" and never cross, and the placement would
-    /// name a picture Emacs had never been given: correct cells, correct cursor, nothing
-    /// drawn.
+    /// Shedding tells the store, because [`crate::emu::image::ImageStore`] tracks an id
+    /// exactly when Emacs has its bytes. Left tracked, the next transmission of the same
+    /// frame would be treated as already sent, and the placement would name a picture
+    /// Emacs was never given.
     pub(super) fn shed_unplaced_images(&mut self) {
         if self.pending_images.is_empty() {
             return;
@@ -336,19 +298,14 @@ impl State {
 
     pub(super) fn drain(&mut self) -> Delta {
         let damaged = self.screen_mut().drain_damage();
-        // Taken from the same screen and in the same breath as the damage, because the
-        // two are one answer: the damage indices are in the coordinates the shifts leave
-        // behind. Reading one without the other would hand Lisp rows to repaint at
-        // indices it had not yet moved its text to.
+        // Taken together with the damage, because the damage indices are in the
+        // coordinates the shifts leave behind.
         let shifts = self.screen_mut().drain_shifts();
         self.shed_unplaced_images();
         let images = std::mem::take(&mut self.pending_images);
         let links = std::mem::take(&mut self.pending_links);
-        // `Vec::from` rather than `drain(..).collect()`: this hands the deque's own ring
-        // buffer over as the Vec's, so there is no second allocation and nothing is
-        // copied element-wise. Draining to keep the deque's capacity across drains was
-        // tried and measured as noise in both directions -- and it is strictly more
-        // allocation, since the collect has to build a fresh Vec anyway.
+        // `Vec::from` rather than `drain(..).collect()`: it hands the deque's ring buffer
+        // over as the Vec's, with no second allocation and no element-wise copy.
         let scrolled = Vec::from(std::mem::take(&mut self.pending_scrollback));
         // Taken before the batch is handed over, so it names the first line *in* it.
         let scrolled_base = self.evicted_total - scrolled.len();

@@ -2,14 +2,12 @@
 
 /// The modes that are exactly one flag on [`Modes`], stated once.
 ///
-/// Set/reset and the DECRQM query are generated from this list together, because keeping
-/// them as two hand-written matches meant a mode could be settable and yet report itself
-/// unrecognised -- or, worse, report the opposite of its own state. `soft_reset` is the
-/// third member of that family and is handled by `Modes::default()`.
+/// Set/reset and the DECRQM query are generated from this list together, so a mode cannot
+/// be settable and yet report itself unrecognised, or report the opposite of its state.
+/// `soft_reset` covers them through `Modes::default()`.
 ///
-/// Modes with an effect beyond one flag -- DECOM's cursor move, DECAWM touching both
-/// screens, the mouse group's event, 1049's save/switch/restore -- stay hand-written in
-/// [`State::dec_mode`]; there is nothing to share there but the number.
+/// Modes with an effect beyond one flag -- DECOM's cursor move, the mouse group's event,
+/// 1049's save/switch/restore -- stay hand-written in [`State::dec_mode`].
 macro_rules! dec_flags {
     ($($mode:ident => $field:ident),* $(,)?) => {
         impl State {
@@ -61,9 +59,8 @@ pub(super) struct PushedPen {
     underline: Color,
     /// `None` for a bare push, which restores the whole pen.
     ///
-    /// An `Option` rather than a selection with every part ticked, so that the common
-    /// case is one assignment and stays exact when [`Attrs`] grows a bit: a selection
-    /// written out part by part would silently leave a new attribute behind on pop.
+    /// An `Option` rather than a selection with every part ticked, so a bare pop stays
+    /// exact when [`Attrs`] grows a bit.
     parts: Option<PenParts>,
 }
 
@@ -165,12 +162,10 @@ impl State {
             DecMode::AltScreenLegacy | DecMode::AltScreen => self.set_alt(on),
             DecMode::SaveCursor if on => self.save_cursor(),
             DecMode::SaveCursor => self.restore_cursor(),
-            // Save, switch, ... switch back, restore. The save and the restore have to
-            // bracket the switch, because `restore_cursor` acts on whichever screen is
-            // showing: run before `set_alt(false)` it would read the alternate screen's
-            // saved cursor and leave the primary's -- the one `1049 h` saved -- untouched.
-            // A resize inside a full-screen program moves the primary's cursor, so that
-            // is the case that would lose the position.
+            // Save, switch, ... switch back, restore. The save and restore bracket the
+            // switch because `restore_cursor` acts on the screen being shown, and the
+            // primary's cursor is the one `1049 h` saved -- which a resize inside a
+            // full-screen program will have moved.
             DecMode::AltScreenSaveCursor => {
                 if on {
                     self.save_cursor();
@@ -313,9 +308,8 @@ impl State {
 
     /// DECSTR, and the mode half of RIS.
     ///
-    /// Everything the child negotiated goes back to its power-on value. The screen and
-    /// the scrollback are deliberately not touched — that is the whole difference between
-    /// a soft reset and RIS, and it is why `rs2` can be sent without losing the session's
+    /// Everything the child negotiated goes back to its power-on value. The screen and the
+    /// scrollback are not touched, which is why `rs2` can be sent without losing the
     /// transcript.
     pub(super) fn soft_reset(&mut self) {
         self.pen = Style::default();
@@ -325,9 +319,7 @@ impl State {
         // [`State::link`].
         self.link = None;
         self.last_print = None;
-        // The whole of the negotiated state, in one statement, so that a new mode is
-        // reset by construction rather than by remembering to add an assignment; see
-        // [`Modes`].
+        // The whole negotiated state in one statement; see [`Modes`].
         let had_mouse = self.modes.mouse != Mouse::default();
         self.modes = Modes::default();
         for screen in self.screens.each_mut() {
@@ -388,11 +380,9 @@ impl State {
 
     /// XTRESTORE, `CSI ? Pm r`, for one mode.
     ///
-    /// The slot is kept rather than consumed, as xterm keeps it, so a second restore puts
-    /// back the same value. And nothing happens when the mode already stands where it
-    /// was saved: a restore is a request for a state, not a replay of `h`/`l`, and
-    /// replaying would home the cursor for DECOM or announce a mouse change that is not
-    /// one.
+    /// The slot is kept rather than consumed, as in xterm. Nothing happens when the mode
+    /// already stands where it was saved: a restore asks for a state rather than replaying
+    /// `h`/`l`, which would home the cursor for DECOM.
     fn restore_mode(&mut self, mode: DecMode) {
         let slot = mode.save_slot();
         let Some(&(_, value)) = self
@@ -479,19 +469,17 @@ impl State {
 
     /// `CSI Ps m`, decoded by the one decoder both performers share.
     ///
-    /// The arm itself is [`sgr::apply`](crate::emu::sgr::apply): the grid is not the only
-    /// thing in this crate that keeps a pen, and a second copy of this table is a
-    /// divergence waiting to be discovered by a user rather than by a test.
+    /// The arm is [`sgr::apply`](crate::emu::sgr::apply), shared with the comint filter,
+    /// which keeps a pen of its own.
     pub(super) fn sgr(&mut self, params: &Params) {
         crate::emu::sgr::apply(params, &mut self.pen, &mut self.underline);
     }
 
     /// Dispatch one `CSI` sequence.
     ///
-    /// Four families, tried in turn, each answering whether the sequence was one of its
-    /// own.  The order carries no meaning -- the patterns are disjoint -- but the
-    /// grouping does: `CSI` is a dispatch table forty-odd entries long, and the useful
-    /// question about any one entry is which of these four things it does.
+    /// Four families, tried in turn, each answering whether the sequence was its own. The
+    /// patterns are disjoint, so the order carries no meaning; the grouping just makes a
+    /// forty-entry table readable.
     pub(super) fn csi(&mut self, params: &Params, intermediates: &[u8], action: char) {
         let private = intermediates.first().copied();
         let _handled = self.csi_mode(private, action, params)
@@ -676,13 +664,10 @@ impl State {
             }
             // A child that probes and gets no answer may wait for one.
             //
-            // Masked to what is actually honoured, which is not what was pushed. The
-            // stack keeps whatever the child asked for -- a pop has to restore exactly
-            // what its matching push put there -- but the *reply* is a claim about this
-            // terminal, and echoing a flag back unmasked tells the child cooked
-            // implements something it does not. A child that asks for alternate keys or
-            // associated text, is told yes, and then encodes for them is a child cooked
-            // has actively misled; a child told no falls back to a spelling that works.
+            // Masked to what is honoured rather than what was pushed. The stack keeps what
+            // the child asked for, so a pop restores it exactly, but the reply is a claim
+            // about this terminal: a child told yes to a flag cooked does not implement
+            // would encode for it, while one told no falls back to a spelling that works.
             (Some(b'?'), 'u') => {
                 let flags = self.kitty_flags();
                 self.csi_reply(format_args!("?{flags}u"));
@@ -703,22 +688,18 @@ impl State {
                 let status = self.ansi_mode_report(mode);
                 self.csi_reply(format_args!("{mode};{status}$y"));
             }
-            // XTWINOPS. The reports are answered and most of the operations refused
-            // rather than merely unimplemented: `21t` answers with the window title *on
-            // the child's input stream*, which turns a title the child set itself into
-            // typed input at the next prompt, and `3t`/`4t`/`9t`/`10t`/`13t` move,
-            // iconify or maximise the frame, which is Emacs' business and not the
-            // child's. A resize (`8t`, and DECSLPP) is the one operation passed on, as a
-            // request Lisp is free to refuse -- see `Event::ResizeRequest`.
+            // XTWINOPS. The reports are answered and most operations refused: `21t` would
+            // put the window title *on the child's input stream*, where a title the child
+            // set becomes typed input at the next prompt, and `3t`/`4t`/`9t` move or
+            // iconify the frame, which is Emacs' business. A resize (`8t`, and DECSLPP) is
+            // passed on as a request Lisp may refuse; see `Event::ResizeRequest`.
             (None, 't') => match params.arg(0, 0) {
                 // Not iconified. Always true of a window that is receiving output, and
                 // the one state report with nothing to measure.
                 11 => self.csi_reply(format_args!("1t")),
-                // 14 is the text area in pixels, 16 one cell. Both were unanswerable
-                // until Emacs began reporting its cell size, and both are what an image
-                // producer asks before deciding whether to draw at all. Silent when
-                // nothing has been reported — a terminal frame has no cell size, and
-                // answering zero would be a claim rather than an absence.
+                // 14 is the text area in pixels, 16 one cell, which image producers ask
+                // before deciding whether to draw. Silent when Emacs has reported no cell
+                // size, as on a terminal frame, since zero would be a claim.
                 14 => {
                     if let Some(area) = self.text_area() {
                         let (ph, pw) = (area.h, area.w);
@@ -759,17 +740,13 @@ impl State {
                 }
                 _ => {}
             },
-            // XTSMGRAPHICS, `CSI ? Pi ; Pa ; Pv S`. What a sixel producer asks once it
-            // has seen the `4` in our primary DA: how many colour registers it may use,
-            // and how many pixels it has to draw into. Unanswered it is the same hang the
-            // secondary DA stub exists to prevent -- worse, in fact, because DA1 is what
-            // invited the question.
+            // XTSMGRAPHICS, `CSI ? Pi ; Pa ; Pv S`: what a sixel producer asks after
+            // seeing the `4` in our primary DA -- how many colour registers it may use and
+            // how many pixels it has. Unanswered, the producer hangs.
             //
-            // Every path here answers, including the ones that answer "no". The protocol
-            // carries its own status field -- 0 success, 1 "no such item", 2 "no such
-            // action", 3 failure -- so declining out loud costs one number and is what
-            // the kitty path already does with `ENOTSUPPORTED`. Silence is only right
-            // where the protocol has no way to say "not yet"; here it has one.
+            // Every path answers, including "no": the protocol has a status field -- 0
+            // success, 1 no such item, 2 no such action, 3 failure -- so declining costs
+            // one number.
             (Some(b'?'), 'S') => {
                 let (item, action) = (params.arg(0, 0), params.arg(1, 0));
                 match item {
@@ -780,33 +757,25 @@ impl State {
                     1 | 2 if self.graphics_hidden => {
                         self.csi_reply(format_args!("?{item};3S"));
                     }
-                    // Colour registers. Fixed at the palette the sixel decoder actually
-                    // allocates, so the answer cannot drift from what a stream may
-                    // address. Reading (1) and reading the maximum (4) are the same
-                    // number because there is only ever one, and so is resetting to the
-                    // default (2) -- the default is all there is. Setting (3) is refused:
-                    // a child cannot enlarge a compile-time array.
+                    // Colour registers, fixed at the palette the sixel decoder allocates.
+                    // Reading (1), resetting (2) and reading the maximum (4) give the same
+                    // number; setting (3) is refused, since a child cannot enlarge a
+                    // compile-time array.
                     1 => {
                         let registers = sixel::PALETTE_SIZE;
                         let status = if action == 3 { 3 } else { 0 };
                         self.csi_reply(format_args!("?1;{status};{registers}S"));
                     }
-                    // Sixel geometry, in pixels. The same product `14t` reports, from the
-                    // same cell metrics Emacs hands us, so the two reports cannot come to
-                    // disagree about how big the screen is.
+                    // Sixel geometry, in pixels: the same text area `14t` reports, so the
+                    // two cannot disagree.
                     //
-                    // The maximum (4) is the current size as well, deliberately. The
-                    // decoder's own bound is on a picture's *area* (`sixel::MAX_PIXELS`),
-                    // not on either axis, so there is no honest per-axis maximum to
-                    // report except the one the screen sets -- and a picture wider than
-                    // the screen has nowhere to be drawn whole regardless.
+                    // The maximum (4) is the current size too. The decoder bounds a
+                    // picture's *area* (`sixel::MAX_PIXELS`), not either axis, so the screen
+                    // is the only honest per-axis maximum.
                     //
-                    // Where `14t` falls silent on unreported metrics, this answers
-                    // failure (3). Both say "no size to report"; the difference is that
-                    // XTWINOPS has no way to spell that and this does, and a producer
-                    // waiting on an answer is owed one. Setting or resetting the geometry
-                    // is refused the same way: the window is Emacs' and not the child's,
-                    // which is why `3t`/`4t` are refused above and `8t` only asks.
+                    // Where `14t` falls silent on unreported metrics, this answers failure,
+                    // because this protocol can say so. Setting the geometry is refused the
+                    // same way: the window is Emacs'.
                     2 => match self.text_area().filter(|_| action == 1 || action == 4) {
                         // Width first here, where `14t` above reports height first. The
                         // two sequences genuinely disagree about the order.
@@ -821,13 +790,9 @@ impl State {
                     other => self.csi_reply(format_args!("?{other};1S")),
                 }
             }
-            // XTVERSION, `CSI > 0 q`. terminfo's `XR` names this, so a child that reads
-            // our entry is entitled to an answer -- and the answer names *cooked*. Every
-            // other terminal replies with the program it is, and the whole use of the
-            // query is telling them apart; answering `XTerm(...)` because that is what
-            // the sequence's name says would hand every feature-detecting client a
-            // capability list belonging to a different program.
-            //
+            // XTVERSION, `CSI > 0 q`, named by terminfo's `XR`. The answer names *cooked*,
+            // as every terminal names itself: the query exists to tell them apart, and
+            // answering `XTerm(...)` would hand clients another program's capabilities.
             // The version is the crate's own, so a release cannot ship a stale one.
             (Some(b'>'), 'q') if params.arg(0, 0) == 0 => {
                 self.dcs_reply(format_args!(">|cooked({})", env!("CARGO_PKG_VERSION")));
@@ -843,25 +808,16 @@ impl State {
             }
             // DECSTR. Unlike RIS this keeps the screen and the scrollback.
             (Some(b'!'), 'p') => self.soft_reset(),
-            // Primary DA. We answer for what we implement and nothing else: VT220 level
-            // (62) with sixel graphics (4) and ANSI colour (22). Not 1/132-column, not
-            // 6/selective erase, not 2/printer — see the printer capabilities dropped
-            // from terminfo. The 4 is load-bearing rather than decorative: it is how
-            // every sixel producer in circulation decides whether to emit one at all.
-            //
-            // Which is why it goes when Emacs has said a picture cannot be shown here
-            // (`graphics_hidden`). A producer that finds no `4` does not give up: chafa,
-            // timg and their kind draw with half blocks instead, and that renders on a
-            // terminal frame or with `cooked-inline-images` off, where a sixel would
-            // leave a blank rectangle.
+            // Primary DA, for what we implement and nothing else: VT220 level (62) with
+            // sixel graphics (4) and ANSI colour (22). The 4 is how sixel producers decide
+            // whether to emit one at all, so it goes when Emacs cannot show a picture
+            // (`graphics_hidden`), and chafa or timg draw with half blocks instead.
             (None, 'c') if self.graphics_hidden => self.csi_reply(format_args!("?62;22c")),
             (None, 'c') => self.csi_reply(format_args!("?62;4;22c")),
             // Secondary DA. Unanswered, a child that queries and waits hangs.
             (Some(b'>'), 'c') => self.csi_reply(format_args!(">0;0;0c")),
-            // Tertiary DA, the unit id, as `DCS ! | 00000000 ST`. Nothing in cooked has a
-            // serial number worth reporting, and zero is what xterm sends too; the reply
-            // exists for the same reason as DA2's, which is that a child asking the
-            // question waits for an answer.
+            // Tertiary DA, the unit id, as `DCS ! | 00000000 ST`: zero, as xterm sends,
+            // because a child asking waits for an answer.
             (Some(b'='), 'c') if params.arg(0, 0) == 0 => {
                 self.dcs_reply(format_args!("!|00000000"));
             }
@@ -872,11 +828,9 @@ impl State {
                 let Cursor { row, col, .. } = self.screen().cursor();
                 self.csi_reply(format_args!("{};{}R", row + 1, col + 1));
             }
-            // The colour scheme, `CSI ? 996 n`. Silent until Emacs has reported one: the
-            // protocol defines dark and light and nothing else, so there is no way to say
-            // "not yet" that a child could read. The `996` guard is what keeps every other
-            // private DSR -- `CSI ? 6 n`, `CSI ? 15 n` -- falling through to unimplemented
-            // rather than being swallowed here.
+            // The colour scheme, `CSI ? 996 n`. Silent until Emacs has reported one, since
+            // the protocol has no way to say "not yet". The `996` guard leaves other private
+            // DSRs such as `CSI ? 6 n` unimplemented rather than swallowed.
             (Some(b'?'), 'n') if params.arg(0, 0) == 996 => {
                 if let Some(scheme) = self.color_scheme {
                     self.events.push(Event::Reply(color_scheme_report(scheme)));
@@ -891,15 +845,13 @@ impl State {
     /// setting NAME names, as `DCS 1 $ r <sequence> ST`, or `DCS 0 $ r ST` for a name
     /// not answered.
     ///
-    /// Beside the CSI reports rather than with the DCS plumbing in graphics.rs because
-    /// every setting it can name is a CSI one, and the answer is read off the same state
-    /// those arms write. What is answered is what cooked implements and nothing more:
+    /// Here rather than with the DCS plumbing in graphics.rs because every setting it can
+    /// name is a CSI one. What is answered is what cooked implements and nothing more:
     ///
     /// - `m`, the pen, spelled by [`sgr::describe`](crate::emu::sgr::describe) so that it
-    ///   parses back through the one decoder to the same pen. This is the one a real
-    ///   client leans on: neovim sets `48:2::1:2:3`, asks, and turns on `termguicolors`
-    ///   if it gets the colour back -- the truecolour probe that works over ssh, where
-    ///   no terminfo entry is.
+    ///   parses back to the same pen. neovim sets `48:2::1:2:3`, asks, and turns on
+    ///   `termguicolors` if the colour comes back, which is the truecolour probe that
+    ///   works over ssh.
     /// - `r`, DECSTBM, the active screen's region, one-based and inclusive as it is set.
     /// - `SP q`, DECSCUSR, with the blink the child asked for; see `Modes::cursor_blink`.
     /// - `"p`, DECSCL, as `62;1` -- VT220 level, matching the `62` in the primary DA, with

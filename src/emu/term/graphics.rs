@@ -9,11 +9,9 @@ use crate::emu::kitty::CursorMove;
 
 /// Where the cursor is left once a picture has been laid into the grid.
 ///
-/// The three producers genuinely disagree about this, so it is the caller's to say
-/// rather than something [`State::lay_image`] can settle on its own — and getting it
-/// wrong is not a cosmetic matter, because a client that draws a frame, moves the cursor
-/// back up by the picture's height and draws the next one accumulates one row of drift
-/// per frame until the animation walks off the screen.
+/// The producers disagree about this, so the caller says. Getting it wrong is not
+/// cosmetic: a client that draws a frame, moves back up by the picture's height and draws
+/// the next accumulates a row of drift per frame until the animation walks off screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CursorAfterImage {
     /// Column 0 of the line below the picture, which is where xterm leaves a sixel and
@@ -59,22 +57,10 @@ impl State {
     /// the format states its own size, which clients rely on: the protocol does not ask
     /// a PNG's sender to repeat dimensions the file already carries.
     ///
-    /// **Takes the payload by value, and that is worth a paragraph.** This used to be a
-    /// `&[u8]` with a `bytes.to_vec()` on the way into `pending_images`, so every
-    /// *distinct* frame — which is every frame of an animation, ids being
-    /// content-addressed — paid a full copy of its own payload. At `viu`'s two megabytes
-    /// a frame and thirty frames a second that is sixty megabytes a second of memcpy,
-    /// spent to put bytes somewhere they already were.
-    ///
-    /// All three real producers already own a `Vec` at the call: the iTerm2 path has just
-    /// base64-decoded one, the sixel path has just had one back from `Bitmap::encode`, and
-    /// the kitty path destructures one out of `Outcome::Image`. So the copy bought nothing
-    /// but a signature. `State::place_image` is the one caller left holding a borrow, and
-    /// it copies there instead — it is reached only from `Term::place_image`, which
-    /// nothing but the tests calls.
-    ///
-    /// A recognised picture drops the payload here rather than copying it, which is the
-    /// same shape from the other side: the bytes are not wanted, because Emacs has them.
+    /// Takes the payload by value, because every producer already owns a `Vec` at the call
+    /// and every distinct frame of an animation would otherwise pay a full copy -- about
+    /// 60MB a second of memcpy for `viu`. Only `State::place_image`, used by tests, copies.
+    /// A recognised picture drops the payload, since Emacs already has the bytes.
     pub(super) fn intern_image(
         &mut self,
         format: ImageFormat,
@@ -97,32 +83,21 @@ impl State {
         // An explicit `c=`/`r=` overrides what the pixels imply: the child is saying how
         // much of the screen the picture should occupy, not how big its source is.
         //
-        // `c=`/`r=` are already clamped to `u16::MAX` in `kitty::Command::parse`, but
-        // that alone still lets a single tiny PNG transmission (the one format the
-        // payload-vs-geometry check in `kitty::finish` does not apply to, since a PNG
-        // carries no raw pixel count to check against) ask for up to 65535 rows.
-        // `lay_image` does one real `linefeed` — with its own scroll-eviction and
-        // scrollback-archival work — per row of `cells.1`, so an unclamped `r=` is a
-        // way to force tens of thousands of those from one small APC before the reader
-        // loop's own backlog backpressure ever gets a turn between reads. Capping here
-        // bounds that to the same order of magnitude as a screenful of images, which is
-        // already far more than any picture legitimately needs.
+        // `c=`/`r=` are clamped to `u16::MAX` in `kitty::Command::parse`, but a tiny PNG,
+        // which carries no raw pixel count for `kitty::finish` to check against, could
+        // still ask for 65535 rows. `lay_image` does a real `linefeed` per row, so that
+        // would force tens of thousands of scrolls from one small APC before backpressure
+        // gets a turn. [`MAX_IMAGE_CELL_SPAN`] bounds it.
         let asked = cells.map(|asked| {
             CellSize::new(
                 asked.cols.clamp(1, MAX_IMAGE_CELL_SPAN),
                 asked.rows.clamp(1, MAX_IMAGE_CELL_SPAN),
             )
         });
-        // Shedding also happens at drain time, which is where it decides what *crosses*.
-        // This is the other half, and it is about memory rather than about Emacs: a child
-        // can transmit far faster than Emacs drains, and every fresh frame parks a copy
-        // of its payload here until it does. Two megabytes a frame against a display loop
-        // that is already behind is how a gif turns into hundreds of megabytes of frames
-        // nobody will ever be shown. Shedding here keeps the queue at the couple of
-        // frames actually in play.
-        //
-        // Not before every transmission: below two there is nothing a scan could find,
-        // and the frame just placed is still the one on the grid.
+        // Shedding at drain time decides what crosses; shedding here bounds memory. A child
+        // can transmit far faster than Emacs drains, and at two megabytes a frame a gif
+        // would otherwise queue hundreds of megabytes nobody will see. Below two pending
+        // frames there is nothing a scan could find.
         if fresh && self.pending_images.len() >= 2 {
             self.shed_unplaced_images();
         }
@@ -148,13 +123,12 @@ impl State {
     /// payload is a *file*, with no field saying what kind, so the format and size come
     /// from sniffing the bytes. Only what Emacs decodes natively is accepted.
     ///
-    /// `inline=1` is required. Without it the sequence means "download this to the
-    /// user's machine", which is a file-writing capability a terminal emulator inside an
-    /// editor has no business growing, and which is refused here by doing nothing.
+    /// `inline=1` is required. Without it the sequence means "download this to the user's
+    /// machine", a file-writing capability that is refused by doing nothing.
     ///
-    /// Semicolons separate the keys, which is also what separates OSC parameters, so the
-    /// arguments arrive already split and are rejoined. That the payload's base64 alphabet
-    /// contains no semicolon is what makes this safe.
+    /// Semicolons separate the keys as well as OSC parameters, so the arguments arrive
+    /// split and are rejoined; base64 contains no semicolon, which makes that safe.
+    ///
     /// Returns whether this was an inline-image `File=`, handled or refused. `false`
     /// means it was some other `OSC 1337` and belongs to whoever else is listening.
     pub(super) fn iterm_file(&mut self, params: &[&[u8]]) -> bool {
@@ -166,10 +140,9 @@ impl State {
         let Some(args) = args.strip_prefix("File=") else {
             return false;
         };
-        // Emacs cannot show it. Refused here rather than laid as blanks, because unlike
-        // sixel and kitty this protocol has no probe for `graphics_hidden` to answer
-        // "no" to: `imgcat` just sends. Taking up the rows would leave a hole the size
-        // of a picture in the transcript and nothing to say why.
+        // Emacs cannot show it. Refused rather than laid as blanks, because this protocol
+        // has no probe to answer "no" to -- `imgcat` just sends -- and a picture-sized hole
+        // in the transcript would explain nothing.
         if self.graphics_hidden {
             return true;
         }
@@ -206,8 +179,7 @@ impl State {
         let Some((format, px)) = crate::emu::png::sniff(&bytes) else {
             return true;
         };
-        // An axis the child named settles both: the other falls back to one cell, as it
-        // did when the pair was a tuple with a zero in it.
+        // An axis the child named settles both: the other falls back to one cell.
         let cells = (cols.is_some() || rows.is_some())
             .then(|| CellSize::new(cols.unwrap_or(1), rows.unwrap_or(1)));
         let id = self.intern_image(format, bytes, px, cells);
@@ -223,13 +195,10 @@ impl State {
     /// image is a rectangle, and a row of it continuing on the next line would not be
     /// one.
     pub(super) fn lay_image(&mut self, id: ImageId, after: CursorAfterImage) {
-        // An id the store has forgotten draws nothing rather than a one-cell stub. No
-        // path reaches here with one today -- forgetting a picture retires the client's
-        // name for it in the same call, so a bare `a=p` is refused with `ENOENT:image`
-        // before it ever becomes a placement -- but the store is the only thing that
-        // knows the rectangle, and a guessed one is worse than none: it would put a
-        // picture-shaped hole of the wrong shape on the grid, under a cursor left in the
-        // wrong place.
+        // An id the store has forgotten draws nothing. No path reaches here with one --
+        // forgetting a picture retires the client's name for it too -- but only the store
+        // knows the rectangle, and a guessed one would leave a wrongly shaped hole under a
+        // misplaced cursor.
         let Some(cells) = self.images.cells(id, self.metrics) else {
             return;
         };
@@ -332,8 +301,8 @@ impl State {
 
     /// `ESC _ ... ST` — the kitty graphics protocol, and nothing else so far.
     ///
-    /// Reachable only because the parser is vendored: upstream vte consumes APC and
-    /// tells the performer nothing, which is why an image never arrived at all before.
+    /// Reachable only because the parser is vendored: upstream vte consumes APC and tells
+    /// the performer nothing.
     pub(super) fn apc(&mut self, bytes: &[u8]) {
         // A probe is how a kitty client decides whether to transmit at all, so this is
         // the kitty half of what DA1's missing `4` says to a sixel producer. Answered

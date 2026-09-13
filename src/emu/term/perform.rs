@@ -2,7 +2,7 @@
 //!
 //! A trait impl cannot be split across files, so the large arms are inherent methods
 //! next to the state they touch -- `State::csi` in csi.rs, `State::osc` in osc.rs, the
-//! image string handlers in image.rs -- and this forwards to them.
+//! image string handlers in graphics.rs -- and this forwards to them.
 
 use super::*;
 
@@ -54,10 +54,9 @@ impl Perform for State {
     ///
     /// Only printable ASCII goes fast: `0x20..=0x7e` is exactly the set that is one byte
     /// in the stream, one column on the grid, never zero-width and never a control. DEL
-    /// is deliberately outside it -- `ground_dispatch` does not treat `0x7f` as a control,
-    /// so it arrives here, and `unicode-width` gives it no width, which is the combining
-    /// path. Anything else -- a wide character, a combining mark, a box glyph, DEL --
-    /// falls through to `print` one character at a time and behaves exactly as it did.
+    /// arrives here too, since the parser does not treat `0x7f` as a control, but it has
+    /// no width, so it and anything else -- a wide character, a combining mark -- falls
+    /// through to `print` one character at a time.
     ///
     /// The pen cannot change inside a run, because changing it takes an escape sequence
     /// and that would have ended the run, so the conditions are tested once here rather
@@ -103,14 +102,11 @@ impl Perform for State {
                 // next has to find. Only the last one, because every character in the run
                 // is printable ASCII, and printable ASCII always starts a cluster.
                 //
-                // Always, bar one case this declines: `GB9b` joins a `Prepend` code point
-                // to whatever follows it, so `U+0600 ARABIC NUMBER SIGN` before an ASCII
-                // digit is one cluster and is segmented here as two. It costs nothing
-                // visible — every `Prepend` is zero width, so it rides the cell to its
-                // *left* rather than the one to its right and the column count is the
-                // same either way — and the alternative is a `Grapheme_Cluster_Break`
-                // lookup per character on the batched path, which is the path that exists
-                // to have no per-character lookups in it.
+                // One exception is accepted: `GB9b` joins a `Prepend` code point to what
+                // follows, so `U+0600 ARABIC NUMBER SIGN` before a digit is one cluster
+                // and is segmented here as two. Every `Prepend` is zero width, so the
+                // column count is the same, and avoiding it would cost a lookup per
+                // character on the path that exists to have none.
                 if let Some(last) = last {
                     let mut buf = [0u8; 4];
                     self.text
@@ -176,8 +172,8 @@ impl Perform for State {
                 self.screen_mut().reverse_index(pen);
             }
             (None, b'H') => self.screen_mut().set_tab(),
-            // DECKPAM/DECKPNM. `rs2` and `is2` both end in `ESC >`, so ignoring these
-            // meant a reset left the keypad wherever the last program put it.
+            // DECKPAM/DECKPNM. `rs2` and `is2` both end in `ESC >`, which is how a reset
+            // puts the keypad back.
             (None, b'=') => self.modes.app_keypad = true,
             (None, b'>') => self.modes.app_keypad = false,
             (None, b'7') => self.save_cursor(),
@@ -187,31 +183,20 @@ impl Perform for State {
                 // one and puts the tab stops back. The pen is default by the time the
                 // erase runs, so this is `bce` with nothing to carry.
                 //
-                // The alternate screen goes first, and through `set_alt` rather than by
-                // clearing the flag: that is the path `?1049l` and `?47l` take, and it is
-                // how Emacs hears of it, since `Levels::alt` is the level Lisp unpins the
-                // window on. Left up, `reset` run from a shell whose full-screen program
-                // died without its `rmcup` cleared the alt grid and left the user on it,
-                // with the transcript still hidden behind. Before `soft_reset`, too, so
-                // the erase and the home below act on the primary, and the kitty stack
-                // and saved cursor that reset empties are the ones the drain reads.
-                // No `restore_cursor`: the cursor `?1049h` saved is homed by RIS anyway.
+                // The alternate screen goes first, through `set_alt` as `?1049l` does, so
+                // `reset` after a full-screen program died without `rmcup` returns the
+                // user to the transcript. Before `soft_reset`, so the erase and home below
+                // act on the primary. No `restore_cursor`: RIS homes the cursor anyway.
                 self.set_alt(false);
                 self.soft_reset();
-                // Both screens own a stop table, and a child that cleared the stops on
-                // the alternate screen and then reset would otherwise find them still
-                // gone the next time it entered it. Not in `soft_reset`: DECSTR keeps
-                // the stops, as it does on xterm, and `rs1` is the half of `reset` that
-                // is meant to bring them back.
+                // Both screens own a stop table, so both are reset. Not in `soft_reset`:
+                // DECSTR keeps the stops, as on xterm.
                 for screen in self.screens.each_mut() {
                     screen.reset_tabs();
                 }
                 self.erase_display(Erase::All, Style::default());
                 self.screen_mut().goto(0, 0);
-                // Last, and after the erase, so that a Lisp handler reading the buffer
-                // from this event sees the reset already done rather than half done.
-                // See [`Event::Reset`] for why the event exists at all when everything
-                // above it is state Rust already put back by itself.
+                // Last, so a Lisp handler sees the reset already done; see [`Event::Reset`].
                 self.events.push(Event::Reset);
             }
             _ => {}
