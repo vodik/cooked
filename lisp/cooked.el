@@ -3217,39 +3217,6 @@ gets both, and floors, so a row that is only half visible is not a row we
 claim to have."
   (floor (window-body-height window t) (window-default-line-height window)))
 
-(defun cooked--layout-window ()
-  "The window this buffer's rows are laid out for, or nil if it has none.
-
-The narrowest window showing the buffer, on any frame: the one
-`cooked--window-size' hands the child, since a child sized to a larger window
-would wrap and clip everything shown in the smaller one.  That makes it the
-layout every rendered row is written for, and so the only window a row is
-worth measuring against.
-
-There is deliberately no `selected-window' fallback.  Everything that measures
-this buffer's text defaults to the selected window -- `vertical-motion' and
-`window-font-width' both do -- and the selected window is very often not one
-of ours: the minibuffer while a completion session previews this buffer in
-another window, or a neighbouring window while the frame is being resized.
-Measuring a row against a window that shows someone else's buffer at someone
-else's width is not a weaker measurement, it is a meaningless one, and
-`cooked--guard-row-width' acts on the answer by deleting text.
-
-The incumbent's width is carried rather than re-measured.  Asking it again per
-candidate made the walk measure the same window once for every window after it,
-and `window-max-chars-per-line' is not a cheap accessor: it selects the window
-to do its measuring in.
-
-Nothing is measured at all until there is a second window to compare against,
-which is the ordinary case and stays free."
-  (let (narrowest width)
-    (dolist (window (get-buffer-window-list (current-buffer) nil t) narrowest)
-      (cond ((null narrowest) (setq narrowest window))
-            (t (unless width (setq width (window-max-chars-per-line narrowest)))
-               (let ((chars (window-max-chars-per-line window)))
-                 (when (< chars width)
-                   (setq narrowest window width chars))))))))
-
 (defun cooked--set-tuning-option (symbol value)
   "Set SYMBOL to VALUE and hand the pair to every session already running.
 
@@ -3658,51 +3625,6 @@ and we need it to name ours."
                            (not (member name seen)))
                  collect (cons name (substring entry (1+ split)))
                  and do (push name seen)))))
-
-
-;;;; Giving up the region
-;;
-;; One function, and it is here rather than beside either of its callers because
-;; it has two: the drain clears a selection the child has overwritten
-;; (`cooked--capture-viewport', in cooked-render.el) and a mouse report clears
-;; one because the click belonged to the child (`cooked--send-mouse', in
-;; cooked-mouse.el).  Both files sit above this one and neither requires the
-;; other, so the shared answer belongs below both -- which is also the whole of
-;; why it did not travel with the pipeline it was extracted from.
-
-;; Read and called only behind a guard that evil is loaded and on, and named
-;; here so the byte-compiler reads them as the deliberate references they are;
-;; see `cooked--deactivate-mark' and, for the same arrangement, `cooked--discard-undo'.
-(declare-function evil-visual-state-p "ext:evil-states")
-(declare-function evil-exit-visual-state "ext:evil-states")
-
-(defun cooked--deactivate-mark ()
-  "Give up the region, taking evil's visual state with it.
-
-`deactivate-mark\=' on its own is only half of that under evil, and which half
-depends on where it was called from.  What keeps evil in step is
-`evil-visual-deactivate-hook\=', which decides from `this-command\=': from a
-command there is one to decide with -- a mouse report is sent under
-`cooked-mouse-event\=', which carries no `:keep-visual\=' property, so evil exits
-visual state and the two agree.  From a drain there is not.  A process filter
-runs between commands, `this-command\=' is whatever the user last ran or nothing
-at all, and the hook falls through both of its arms: the mark goes, evil stays
-in visual state, and the next \\`v\=' *leaves* visual state rather than entering
-it -- the failure `cooked-evil--command-range\=' documents at length, arrived at
-from the other side.
-
-So ask evil outright instead of through a hook whose answer depends on how we
-got here.  `evil-exit-visual-state\=' deactivates the mark itself on its way
-back to the state visual state was entered from, and does it the same way
-whether or not a command is running.
-
-Silent when there is no region: every caller is somewhere the region is
-incidental, so having none is the ordinary case rather than a failure."
-  (cond ((and (bound-and-true-p evil-local-mode)
-              (fboundp 'evil-visual-state-p)
-              (evil-visual-state-p))
-         (evil-exit-visual-state))
-        (mark-active (deactivate-mark))))
 
 
 ;;;; Entry points

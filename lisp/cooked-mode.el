@@ -1516,18 +1516,6 @@ keyboard to a prompt that is about to hand it straight back."
            (minibuffer-selected-window))
       (selected-window)))
 
-(defun cooked--defer (function)
-  "Call FUNCTION with no arguments, later, in the current buffer if it lives.
-
-The window hooks run during redisplay, and a drain is not a redisplay-safe
-thing to do from one: it inserts text, swaps the local map, recenters windows
-and runs `cooked-state-change-hook', which is arbitrary user code."
-  (let ((buffer (current-buffer)))
-    (run-at-time 0 nil
-                 (lambda ()
-                   (when (buffer-live-p buffer)
-                     (with-current-buffer buffer (funcall function)))))))
-
 (defun cooked--update-attention (&rest _)
   "Track, for every live session, whether the user is looking at it.
 
