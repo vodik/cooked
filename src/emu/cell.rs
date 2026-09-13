@@ -1,5 +1,6 @@
 //! Cells, styling, and the row representation the renderer consumes.
 
+use std::borrow::{Borrow, BorrowMut};
 use std::ops::{BitAnd, BitOr, BitOrAssign, Not};
 use unicode_width::UnicodeWidthChar;
 
@@ -666,32 +667,79 @@ impl Marks {
     }
 }
 
-/// A single line of the terminal, with per-column rarities held in a side table.
+/// What a row carries besides its cells: the rarities attached to single columns, and
+/// whether its line goes on below.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Row {
-    cells: Vec<Cell>,
+pub struct RowMeta {
     /// Marks, underline colours and anything else attached to a single column.
     ///
     /// All of it is rare -- an underline colour is essentially an editor drawing LSP
     /// diagnostics -- and none of it can go in [`Cell`]: a `Color` in [`Style`] would grow
     /// it from 16 bytes to 20, an 8-13% throughput loss across the grid.
     ///
-    /// Boxed, because the *inline* size of `Row` matters: rows are cloned on every scroll,
-    /// and an inline `Vec` cost 12% on the repaint benchmark. `Option<Box<Extras>>` is one
-    /// null-optimised pointer, 8 bytes.
+    /// Boxed, because a row's metadata is small and fixed-size that way, which keeps the
+    /// per-slot table in `Screen` dense: `Option<Box<Extras>>` is one null-optimised
+    /// pointer, 8 bytes.
     ///
     /// `None` whenever there is nothing attached, which is almost always, so
     /// [`Row::runs`] can specialise on a null check instead of asking per cell.
     extras: Option<Box<Extras>>,
-    pub wrapped: bool,
+    /// The row's logical line continues on the row below.
+    wrapped: bool,
+}
+
+/// A single line of the terminal: cells, and the [`RowMeta`] that goes with them.
+///
+/// Generic over where the two live, because the grid does not keep rows as objects. A
+/// `Screen` holds every cell of the screen in one contiguous buffer and every row's
+/// metadata in a table beside it, and lends a row out as a [`RowRef`] or [`RowMut`]
+/// borrowing a slice of each. [`Row`] is the owned form, for rows that are not on a grid:
+/// the ones a rewrap re-chunks, and the tests. Every method is written once, against the
+/// borrowed shapes, so all three behave identically by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RowOf<C, M> {
+    cells: C,
+    meta: M,
+}
+
+/// A row that owns its cells.
+pub(crate) type Row = RowOf<Vec<Cell>, RowMeta>;
+/// A row of a grid, read-only.
+pub(crate) type RowRef<'a> = RowOf<&'a [Cell], &'a RowMeta>;
+/// A row of a grid, for writing.
+pub(crate) type RowMut<'a> = RowOf<&'a mut [Cell], &'a mut RowMeta>;
+
+impl<'a> RowRef<'a> {
+    pub(crate) fn from_slices(cells: &'a [Cell], meta: &'a RowMeta) -> Self {
+        Self { cells, meta }
+    }
+
+    /// [`RowOf::marks`] for a borrowed grid row, living as long as the grid rather than
+    /// as long as this view of it, so that an iterator over rows can yield them.
+    pub fn into_marks(self) -> impl Iterator<Item = (usize, MarkId)> + 'a {
+        self.meta
+            .extras
+            .as_deref()
+            .map_or(&[][..], Extras::entries)
+            .iter()
+            .filter_map(|(at, extra)| match extra {
+                Extra::Mark(id) => Some((usize::from(*at), *id)),
+                _ => None,
+            })
+    }
+}
+
+impl<'a> RowMut<'a> {
+    pub(crate) fn from_slices(cells: &'a mut [Cell], meta: &'a mut RowMeta) -> Self {
+        Self { cells, meta }
+    }
 }
 
 impl Row {
     pub fn new(cols: usize) -> Self {
         Self {
             cells: vec![Cell::default(); cols],
-            extras: None,
-            wrapped: false,
+            meta: RowMeta::default(),
         }
     }
 
@@ -703,350 +751,11 @@ impl Row {
     pub fn from_parts(cells: Vec<Cell>, extras: Vec<(u16, Extra)>, wrapped: bool) -> Self {
         Self {
             cells,
-            extras: (!extras.is_empty()).then(|| Box::new(Extras { entries: extras })),
-            wrapped,
+            meta: RowMeta {
+                extras: (!extras.is_empty()).then(|| Box::new(Extras { entries: extras })),
+                wrapped,
+            },
         }
-    }
-
-    pub fn extras(&self) -> &[(u16, Extra)] {
-        self.extras.as_deref().map_or(&[], Extras::entries)
-    }
-
-    /// Attach EXTRA to COL, in addition to whatever is already there.
-    fn attach(&mut self, col: usize, extra: Extra) {
-        self.extras
-            .get_or_insert_with(Default::default)
-            .insert(col, extra);
-    }
-
-    /// Edit the side table, dropping it if the edit empties it.
-    ///
-    /// The one statement of the invariant `Row` rests on: an empty table is `None`, never
-    /// `Some` of an empty `Extras`. [`Row::runs`] specialises on the null check, so a table
-    /// left `Some` but empty would silently cost the fast path.
-    fn edit_extras(&mut self, f: impl FnOnce(&mut Extras)) {
-        if let Some(extras) = &mut self.extras {
-            f(extras);
-            if extras.entries.is_empty() {
-                self.extras = None;
-            }
-        }
-    }
-
-    /// Drop the attachments on the columns in RANGE, `marks` deciding the exception.
-    fn prune(&mut self, range: impl std::ops::RangeBounds<usize>, marks: Marks) {
-        self.edit_extras(|extras| extras.prune(range, marks));
-    }
-
-    /// [`Row::prune`] for exactly one column, out of line and marked cold.
-    ///
-    /// `Row::set` is the per-character write path and has to stay straight-line code.
-    /// Calling `prune` with a `RangeInclusive` cost about 4% of the full-screen repaint
-    /// benchmark, because the optimiser built the range before testing whether the row had
-    /// any attachments at all.
-    ///
-    /// A semantic mark is kept. `OSC 133;A' arrives *before* the shell prints its prompt,
-    /// so the mark lands on a cell about to be written, and retiring it there would lose it
-    /// at once.
-    #[cold]
-    #[inline(never)]
-    fn retire(&mut self, col: usize) {
-        self.edit_extras(|extras| {
-            extras
-                .entries
-                .retain(|(at, extra)| usize::from(*at) != col || matches!(extra, Extra::Mark(_)));
-        });
-    }
-
-    /// Set or clear the underline colour at `col`.
-    ///
-    /// `Color::Default` only removes, so a row that stops being underlined goes back to
-    /// having no table, which keeps [`Row::runs`] on its plain path.
-    pub fn set_underline(&mut self, col: usize, color: Color) {
-        self.edit_extras(|extras| extras.prune_kind(col, |e| matches!(e, Extra::Underline(_))));
-        if color != Color::Default && col < self.cells.len() {
-            self.attach(col, Extra::Underline(color));
-        }
-    }
-
-    /// Set or clear the hyperlink at `col`.
-    ///
-    /// `None` only removes, for the reason [`Row::set_underline`] gives.
-    pub fn set_link(&mut self, col: usize, link: Option<LinkId>) {
-        self.edit_extras(|extras| extras.prune_kind(col, |e| matches!(e, Extra::Link(_))));
-        if let Some(id) = link
-            && col < self.cells.len()
-        {
-            self.attach(col, Extra::Link(id));
-        }
-    }
-
-    /// Attach a semantic mark to `col`, without disturbing anything already there.
-    ///
-    /// Several marks on one cell is normal: `OSC 133;B' and `;C' land on the same cell when
-    /// the shell submits an empty line, and each names a different record in Emacs, so
-    /// none replaces another.
-    ///
-    /// Bounded per row at [`MARKS_PER_ROW`], oldest first, because nothing else bounds it:
-    /// a mark is never retired by what is drawn over it, so a child emitting `OSC 133'
-    /// without moving off the row would grow the table without limit and turn a linear
-    /// feed quadratic, as the `osc_dispatch' benchmark does.
-    pub fn mark(&mut self, col: usize, id: MarkId) {
-        if col >= self.cells.len() {
-            return;
-        }
-        // Guarded on the table's own length first, which is a load and a compare: there
-        // cannot be `MARKS_PER_ROW` marks in fewer than that many entries, so an ordinary
-        // row -- a prompt's four marks, an underline colour, a link -- never reaches the
-        // scan below at all. Without the guard the count is paid per mark, and the
-        // `osc_dispatch' benchmark is nothing but marks.
-        if let Some(extras) = &mut self.extras
-            && extras.entries.len() >= MARKS_PER_ROW
-            && Self::evict_oldest_mark(extras, col, id)
-        {
-            return;
-        }
-        self.attach(col, Extra::Mark(id));
-    }
-
-    /// Make room for one more mark on a row that is at [`MARKS_PER_ROW`], returning
-    /// whether the new mark has already been written in place.
-    ///
-    /// Out of line and cold: an ordinary row never reaches it, only a child emitting
-    /// `OSC 133' over and over without moving the cursor.
-    ///
-    /// The oldest goes, as the one whose record Emacs is least likely to still hold. Ids
-    /// are in stream order while entries are in column order, so this looks for the
-    /// smallest id. When that entry is on this very column -- the runaway case -- it is
-    /// overwritten in place, keeping the sort order.
-    #[cold]
-    #[inline(never)]
-    fn evict_oldest_mark(extras: &mut Extras, col: usize, id: MarkId) -> bool {
-        let (mut marks, mut oldest) = (0usize, None::<(MarkId, usize, u16)>);
-        for (index, (at, extra)) in extras.entries.iter().enumerate() {
-            if let Extra::Mark(m) = extra {
-                marks += 1;
-                if oldest.is_none_or(|(seen, _, _)| *m < seen) {
-                    oldest = Some((*m, index, *at));
-                }
-            }
-        }
-        if marks < MARKS_PER_ROW {
-            return false;
-        }
-        let Some((_, index, at)) = oldest else {
-            return false;
-        };
-        if usize::from(at) == col {
-            extras.entries[index].1 = Extra::Mark(id);
-            return true;
-        }
-        extras.entries.remove(index);
-        false
-    }
-
-    /// Every semantic mark on this row, in column order.
-    pub fn marks(&self) -> impl Iterator<Item = (usize, MarkId)> + '_ {
-        self.extras().iter().filter_map(|(at, extra)| match extra {
-            Extra::Mark(id) => Some((usize::from(*at), *id)),
-            _ => None,
-        })
-    }
-
-    pub fn cells(&self) -> &[Cell] {
-        &self.cells
-    }
-
-    pub fn len(&self) -> usize {
-        self.cells.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
-    }
-
-    pub fn get(&self, col: usize) -> Option<&Cell> {
-        self.cells.get(col)
-    }
-
-    /// Write CELL at COL, retiring everything the old occupant had attached to it.
-    ///
-    /// One `Option` check on the write path. An unconditional `Vec::retain` would cost
-    /// every write about 5% of the repaint benchmark; a null test on a pointer already in
-    /// cache does not.
-    ///
-    /// Returns whether the row now differs, which [`Screen::edit`](crate::emu::screen::Screen)
-    /// turns into damage. A TUI redrawing an unchanged frame should not make Emacs rewrite
-    /// every row of it.
-    ///
-    /// A row carrying attachments answers `true` unconditionally: the retirement is itself
-    /// a change, and asking the side table what this column had would cost the scan the
-    /// `Option` check avoids. Rows with attachments are rare; identical repaints are not.
-    pub fn set(&mut self, col: usize, cell: Cell) -> bool {
-        let attached = self.extras.is_some();
-        let Some(slot) = self.cells.get_mut(col) else {
-            return false;
-        };
-        let changed = attached || *slot != cell;
-        *slot = cell;
-        if attached {
-            self.retire(col);
-        }
-        changed
-    }
-
-    /// Place a run of characters from COL, each one column wide.
-    ///
-    /// [`Row::set`] in bulk, with the same effect as calling it per character. The
-    /// `extras` test is hoisted out of the loop, since it is a property of the row.
-    ///
-    /// Writes only as far as the row goes, so an over-long run is truncated rather than
-    /// panicking.
-    ///
-    /// Returns whether anything changed, on [`Row::set`]'s terms.
-    pub fn fill_run(&mut self, col: usize, text: &str, style: Style) -> bool {
-        let attached = self.extras.is_some();
-        let pen = Cell::blank(style);
-        let Some(slots) = self.cells.get_mut(col..) else {
-            return false;
-        };
-        // The comparison is a pass of its own rather than a test folded into the write
-        // loop: `any` stops at the first differing cell, usually the first, while the
-        // folded form cost 24% on the plain-text benchmark. An unchanged frame pays one
-        // pass and skips the stores.
-        let changed = attached
-            || slots
-                .iter()
-                .zip(text.chars())
-                .any(|(slot, ch)| *slot != pen.with_char(ch));
-        if !changed {
-            return false;
-        }
-        let mut placed = 0;
-        for (slot, ch) in slots.iter_mut().zip(text.chars()) {
-            *slot = pen.with_char(ch);
-            placed += 1;
-        }
-        if attached {
-            for at in col..col + placed {
-                self.retire(at);
-            }
-        }
-        true
-    }
-
-    /// Make COL one cell of an image, blanking whatever was there.
-    ///
-    /// The cell keeps a blank character in the pen's style, so the row still copies,
-    /// rewraps and yanks as text — a picture pasted out of the scrollback comes out as
-    /// the whitespace it occupied, which is the only honest plain-text rendering of it.
-    /// [`Extra::is_content`] is what stops that blank being trimmed away.
-    pub fn place(&mut self, col: usize, placement: Placement, style: Style) {
-        if col >= self.cells.len() {
-            return;
-        }
-        // `set` first, so it retires whatever the old occupant had attached before the
-        // placement goes on; the other order would prune the placement just made.
-        let _ = self.set(col, Cell::blank(style));
-        self.attach(col, Extra::Image(placement));
-    }
-
-    /// Attach a zero-width character (combining mark, variation selector) to `col`.
-    pub fn combine(&mut self, col: usize, mark: char) {
-        if let Some(extras) = &mut self.extras
-            && let Some((_, Extra::Marks(text))) = extras
-                .entries
-                .iter_mut()
-                .find(|(at, extra)| usize::from(*at) == col && matches!(extra, Extra::Marks(_)))
-        {
-            let mut s = String::from(&**text);
-            s.push(mark);
-            *text = s.into_boxed_str();
-            return;
-        }
-        self.attach(col, Extra::Marks(String::from(mark).into_boxed_str()));
-    }
-
-    /// Blank a span of columns, returning whether that changed anything; see [`Row::set`]
-    /// for what the answer is for.
-    pub fn fill(&mut self, range: impl IntoIterator<Item = usize>, style: Style) -> bool {
-        // Not `set` per column. `fill` is the erase path — a full-screen program clears
-        // rows every frame — and a per-cell side-table check in the loop stops this being
-        // a bulk write. The tables are pruned once, outside it.
-        let blank = Cell::blank(style);
-        let mut lo = usize::MAX;
-        let mut hi = 0;
-        let mut changed = self.extras.is_some();
-        for col in range {
-            if let Some(slot) = self.cells.get_mut(col) {
-                changed |= *slot != blank;
-                *slot = blank;
-                lo = lo.min(col);
-                hi = hi.max(col);
-            }
-        }
-        if lo > hi {
-            return false;
-        }
-        self.prune(lo..hi + 1, Marks::Keep);
-        changed
-    }
-
-    /// Whether the row holds any text, as opposed to only a background wash.
-    ///
-    /// Distinct from `is_blank` because of `bce`: a row a full-screen program painted and
-    /// cleared carries a background in every cell, but archiving it would push a screenful
-    /// of pure colour into the scrollback.
-    pub fn has_text(&self) -> bool {
-        self.extras().iter().any(|(_, e)| e.is_content())
-            || self.cells.iter().any(|c| c.ch != BLANK)
-    }
-
-    /// Whether the row holds nothing a resize would need to preserve.
-    ///
-    /// Stricter than [`Row::has_text`] on purpose: a resize must keep a background wash,
-    /// so a washed row is not blank even though it holds no text.
-    pub fn is_blank(&self) -> bool {
-        !self.extras().iter().any(|(_, e)| e.is_content())
-            && self
-                .cells
-                .iter()
-                .all(|c| c.ch == BLANK && c.is_default_style())
-    }
-
-    /// Blank the row and drop everything attached to it, semantic marks included.
-    ///
-    /// This is the row *ceasing to be what it was*: recycled at the bottom of a scroll,
-    /// backfilled behind a removed row, wiped by an erase of the display. A mark left on a
-    /// recycled row would duplicate one already archived with the row's text, and a drain
-    /// would report its id twice. [`Row::erase_all`] is the spelling for `CSI 2K`.
-    ///
-    /// Returns nothing, unlike the other writers: `Screen::scroll_up` clears every row it
-    /// recycles, and comparing first would scan the row before overwriting it, 22% of the
-    /// plain-text benchmark for an answer that path discards.
-    pub fn clear(&mut self, style: Style) {
-        Cell::fill(&mut self.cells, Cell::blank(style));
-        self.extras = None;
-        self.wrapped = false;
-    }
-
-    /// `CSI 2K`: blank every column, keeping semantic marks.
-    ///
-    /// The one whole-row erase that is not the row ending: a shell wipes its prompt line
-    /// with this and redraws it on every keystroke of a history search, so the marks stay,
-    /// as in [`Row::retire`].
-    ///
-    /// Returns whether that changed anything, so a prompt redrawn identically costs no
-    /// repaint. `wrapped` counts as content here, since it decides where a logical line
-    /// ends.
-    pub fn erase_all(&mut self, style: Style) -> bool {
-        let blank = Cell::blank(style);
-        let changed =
-            self.extras.is_some() || self.wrapped || self.cells.iter().any(|c| *c != blank);
-        Cell::fill(&mut self.cells, blank);
-        self.prune(0..self.cells.len(), Marks::Keep);
-        self.wrapped = false;
-        changed
     }
 
     /// The one place a mark is dropped by anything short of the row itself going: past
@@ -1058,33 +767,81 @@ impl Row {
         self.prune(cols.., Marks::Drop);
     }
 
-    pub fn insert_blank(&mut self, col: usize, count: usize, style: Style) {
-        let cols = self.cells.len();
-        if col >= cols {
-            return;
-        }
-        let n = count.min(cols - col);
-        // In place, because `Cell` is `Copy` and the row's length does not change: growing
-        // past `cols` and truncating would realloc once per character in insert mode.
-        self.cells.copy_within(col..cols - n, col + n);
-        Cell::fill(&mut self.cells[col..col + n], Cell::blank(style));
-        // The cells from `col` on moved right; their attachments move with them, and
-        // whatever was pushed off the end goes.
-        self.edit_extras(|extras| extras.shift(col, n as isize, cols));
+    /// A row from cells and the metadata that goes with them, for a grid handing its rows
+    /// out whole.
+    pub(crate) fn from_meta(cells: Vec<Cell>, meta: RowMeta) -> Self {
+        Self { cells, meta }
     }
 
-    pub fn delete(&mut self, col: usize, count: usize, style: Style) {
-        let cols = self.cells.len();
-        if col >= cols {
-            return;
-        }
-        let gone = (col + count).min(cols) - col;
-        self.cells.drain(col..(col + count).min(cols));
-        self.cells.resize(cols, Cell::blank(style));
-        // The deleted columns take their attachments with them; everything to their right
-        // closes the gap.
-        self.prune(col..col + gone, Marks::Keep);
-        self.edit_extras(|extras| extras.shift(col + gone, -(gone as isize), cols));
+    /// This row, borrowed as a grid row would be.
+    pub fn as_ref(&self) -> RowRef<'_> {
+        RowRef::from_slices(&self.cells, &self.meta)
+    }
+
+    /// The parts of this row, for storing it into a grid.
+    pub(crate) fn into_parts(self) -> (Vec<Cell>, RowMeta) {
+        (self.cells, self.meta)
+    }
+}
+
+impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
+    fn meta(&self) -> &RowMeta {
+        self.meta.borrow()
+    }
+
+    /// Whether this row's logical line continues on the row below.
+    pub fn wrapped(&self) -> bool {
+        self.meta().wrapped
+    }
+
+    pub fn extras(&self) -> &[(u16, Extra)] {
+        self.meta().extras.as_deref().map_or(&[], Extras::entries)
+    }
+
+    /// Every semantic mark on this row, in column order.
+    pub fn marks(&self) -> impl Iterator<Item = (usize, MarkId)> + '_ {
+        self.extras().iter().filter_map(|(at, extra)| match extra {
+            Extra::Mark(id) => Some((usize::from(*at), *id)),
+            _ => None,
+        })
+    }
+
+    pub fn cells(&self) -> &[Cell] {
+        self.cells.borrow()
+    }
+
+    pub fn len(&self) -> usize {
+        self.cells().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cells().is_empty()
+    }
+
+    pub fn get(&self, col: usize) -> Option<&Cell> {
+        self.cells().get(col)
+    }
+
+    /// Whether the row holds any text, as opposed to only a background wash.
+    ///
+    /// Distinct from `is_blank` because of `bce`: a row a full-screen program painted and
+    /// cleared carries a background in every cell, but archiving it would push a screenful
+    /// of pure colour into the scrollback.
+    pub fn has_text(&self) -> bool {
+        self.extras().iter().any(|(_, e)| e.is_content())
+            || self.cells().iter().any(|c| c.ch != BLANK)
+    }
+
+    /// Whether the row holds nothing a resize would need to preserve.
+    ///
+    /// Stricter than [`Row::has_text`] on purpose: a resize must keep a background wash,
+    /// so a washed row is not blank even though it holds no text.
+    pub fn is_blank(&self) -> bool {
+        !self.extras().iter().any(|(_, e)| e.is_content())
+            && self
+                .cells()
+                .iter()
+                .all(|c| c.ch == BLANK && c.is_default_style())
     }
 
     /// Columns up to the last one holding something, trailing default-styled blanks cut.
@@ -1099,13 +856,13 @@ impl Row {
     /// [`Row::line_runs`].
     pub fn content_len(&self) -> usize {
         let cells = self
-            .cells
+            .cells()
             .iter()
             .rposition(|c| c.ch != BLANK || !c.is_default_style())
             .map_or(0, |i| i + 1);
         // An attachment can be the last content on the row while its cell is a default
         // blank -- a combining mark on a space, or an image cell, which always is one.
-        if self.extras.is_none() {
+        if self.meta().extras.is_none() {
             return cells;
         }
         self.extras()
@@ -1132,7 +889,7 @@ impl Row {
     /// the two must agree for a resize to round-trip. It also keeps every departed row
     /// exactly `cols` wide, which [`Screen::carried`](super::screen::Screen) relies on.
     pub fn line_runs(&self) -> Vec<Run> {
-        if self.wrapped {
+        if self.meta().wrapped {
             self.runs_to(self.len())
         } else {
             self.runs()
@@ -1150,9 +907,9 @@ impl Row {
     /// builders stop: the test composes [`Row::absorb_blank_runs`] onto it.
     #[cfg(test)]
     pub(crate) fn runs_to_reference(&self, end: usize) -> Vec<Run> {
-        let entries: &[(u16, Extra)] = self.extras.as_deref().map_or(&[], |e| &e.entries);
+        let entries: &[(u16, Extra)] = self.meta().extras.as_deref().map_or(&[], |e| &e.entries);
         let mut runs: Vec<Run> = Vec::new();
-        for (col, cell) in self.cells[..end].iter().enumerate() {
+        for (col, cell) in self.cells()[..end].iter().enumerate() {
             if cell.is_continuation() {
                 // The column still belongs to the wide character before it, and so to
                 // that character's run: `cols` counts columns, not characters.
@@ -1210,7 +967,7 @@ impl Row {
     }
 
     fn runs_to(&self, end: usize) -> Vec<Run> {
-        let mut runs = match self.extras.as_deref() {
+        let mut runs = match self.meta().extras.as_deref() {
             Some(extras) => self.build_runs(end, &extras.entries),
             None => self.build_plain_runs(end),
         };
@@ -1288,7 +1045,7 @@ impl Row {
     /// mishandle.
     fn build_plain_runs(&self, end: usize) -> Vec<Run> {
         let mut runs = Vec::<Run>::with_capacity(4);
-        let cells = &self.cells[..end];
+        let cells = &self.cells()[..end];
         let mut col = 0;
         while col < end {
             let cell = &cells[col];
@@ -1375,7 +1132,7 @@ impl Row {
         // bigger allocation than the growth it saves.
         let mut runs = Vec::<Run>::with_capacity(4);
         let mut at = 0;
-        for (col, cell) in self.cells[..end].iter().enumerate() {
+        for (col, cell) in self.cells()[..end].iter().enumerate() {
             if cell.is_continuation() {
                 // A column of the wide character that opened it, hence of its run.
                 if let Some(run) = runs.last_mut() {
@@ -1459,6 +1216,346 @@ impl Row {
 
     pub fn to_text(&self) -> String {
         self.runs().into_iter().map(|r| r.text).collect()
+    }
+}
+
+impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
+    fn cells_mut(&mut self) -> &mut [Cell] {
+        self.cells.borrow_mut()
+    }
+
+    fn meta_mut(&mut self) -> &mut RowMeta {
+        self.meta.borrow_mut()
+    }
+
+    /// Set whether this row's line continues below, returning what it was.
+    pub fn set_wrapped(&mut self, wrapped: bool) -> bool {
+        std::mem::replace(&mut self.meta_mut().wrapped, wrapped)
+    }
+
+    /// Attach EXTRA to COL, in addition to whatever is already there.
+    fn attach(&mut self, col: usize, extra: Extra) {
+        self.meta_mut()
+            .extras
+            .get_or_insert_with(Default::default)
+            .insert(col, extra);
+    }
+
+    /// Edit the side table, dropping it if the edit empties it.
+    ///
+    /// The one statement of the invariant `Row` rests on: an empty table is `None`, never
+    /// `Some` of an empty `Extras`. [`Row::runs`] specialises on the null check, so a table
+    /// left `Some` but empty would silently cost the fast path.
+    fn edit_extras(&mut self, f: impl FnOnce(&mut Extras)) {
+        if let Some(extras) = &mut self.meta_mut().extras {
+            f(extras);
+            if extras.entries.is_empty() {
+                self.meta_mut().extras = None;
+            }
+        }
+    }
+
+    /// Drop the attachments on the columns in RANGE, `marks` deciding the exception.
+    fn prune(&mut self, range: impl std::ops::RangeBounds<usize>, marks: Marks) {
+        self.edit_extras(|extras| extras.prune(range, marks));
+    }
+
+    /// [`Row::prune`] for exactly one column, out of line and marked cold.
+    ///
+    /// `Row::set` is the per-character write path and has to stay straight-line code.
+    /// Calling `prune` with a `RangeInclusive` cost about 4% of the full-screen repaint
+    /// benchmark, because the optimiser built the range before testing whether the row had
+    /// any attachments at all.
+    ///
+    /// A semantic mark is kept. `OSC 133;A' arrives *before* the shell prints its prompt,
+    /// so the mark lands on a cell about to be written, and retiring it there would lose it
+    /// at once.
+    #[cold]
+    #[inline(never)]
+    fn retire(&mut self, col: usize) {
+        self.edit_extras(|extras| {
+            extras
+                .entries
+                .retain(|(at, extra)| usize::from(*at) != col || matches!(extra, Extra::Mark(_)));
+        });
+    }
+
+    /// Set or clear the underline colour at `col`.
+    ///
+    /// `Color::Default` only removes, so a row that stops being underlined goes back to
+    /// having no table, which keeps [`Row::runs`] on its plain path.
+    pub fn set_underline(&mut self, col: usize, color: Color) {
+        self.edit_extras(|extras| extras.prune_kind(col, |e| matches!(e, Extra::Underline(_))));
+        if color != Color::Default && col < self.cells().len() {
+            self.attach(col, Extra::Underline(color));
+        }
+    }
+
+    /// Set or clear the hyperlink at `col`.
+    ///
+    /// `None` only removes, for the reason [`Row::set_underline`] gives.
+    pub fn set_link(&mut self, col: usize, link: Option<LinkId>) {
+        self.edit_extras(|extras| extras.prune_kind(col, |e| matches!(e, Extra::Link(_))));
+        if let Some(id) = link
+            && col < self.cells().len()
+        {
+            self.attach(col, Extra::Link(id));
+        }
+    }
+
+    /// Attach a semantic mark to `col`, without disturbing anything already there.
+    ///
+    /// Several marks on one cell is normal: `OSC 133;B' and `;C' land on the same cell when
+    /// the shell submits an empty line, and each names a different record in Emacs, so
+    /// none replaces another.
+    ///
+    /// Bounded per row at [`MARKS_PER_ROW`], oldest first, because nothing else bounds it:
+    /// a mark is never retired by what is drawn over it, so a child emitting `OSC 133'
+    /// without moving off the row would grow the table without limit and turn a linear
+    /// feed quadratic, as the `osc_dispatch' benchmark does.
+    pub fn mark(&mut self, col: usize, id: MarkId) {
+        if col >= self.cells().len() {
+            return;
+        }
+        // Guarded on the table's own length first, which is a load and a compare: there
+        // cannot be `MARKS_PER_ROW` marks in fewer than that many entries, so an ordinary
+        // row -- a prompt's four marks, an underline colour, a link -- never reaches the
+        // scan below at all. Without the guard the count is paid per mark, and the
+        // `osc_dispatch' benchmark is nothing but marks.
+        if let Some(extras) = &mut self.meta_mut().extras
+            && extras.entries.len() >= MARKS_PER_ROW
+            && Self::evict_oldest_mark(extras, col, id)
+        {
+            return;
+        }
+        self.attach(col, Extra::Mark(id));
+    }
+
+    /// Make room for one more mark on a row that is at [`MARKS_PER_ROW`], returning
+    /// whether the new mark has already been written in place.
+    ///
+    /// Out of line and cold: an ordinary row never reaches it, only a child emitting
+    /// `OSC 133' over and over without moving the cursor.
+    ///
+    /// The oldest goes, as the one whose record Emacs is least likely to still hold. Ids
+    /// are in stream order while entries are in column order, so this looks for the
+    /// smallest id. When that entry is on this very column -- the runaway case -- it is
+    /// overwritten in place, keeping the sort order.
+    #[cold]
+    #[inline(never)]
+    fn evict_oldest_mark(extras: &mut Extras, col: usize, id: MarkId) -> bool {
+        let (mut marks, mut oldest) = (0usize, None::<(MarkId, usize, u16)>);
+        for (index, (at, extra)) in extras.entries.iter().enumerate() {
+            if let Extra::Mark(m) = extra {
+                marks += 1;
+                if oldest.is_none_or(|(seen, _, _)| *m < seen) {
+                    oldest = Some((*m, index, *at));
+                }
+            }
+        }
+        if marks < MARKS_PER_ROW {
+            return false;
+        }
+        let Some((_, index, at)) = oldest else {
+            return false;
+        };
+        if usize::from(at) == col {
+            extras.entries[index].1 = Extra::Mark(id);
+            return true;
+        }
+        extras.entries.remove(index);
+        false
+    }
+
+    /// Write CELL at COL, retiring everything the old occupant had attached to it.
+    ///
+    /// One `Option` check on the write path. An unconditional `Vec::retain` would cost
+    /// every write about 5% of the repaint benchmark; a null test on a pointer already in
+    /// cache does not.
+    ///
+    /// Returns whether the row now differs, which [`Screen::edit`](crate::emu::screen::Screen)
+    /// turns into damage. A TUI redrawing an unchanged frame should not make Emacs rewrite
+    /// every row of it.
+    ///
+    /// A row carrying attachments answers `true` unconditionally: the retirement is itself
+    /// a change, and asking the side table what this column had would cost the scan the
+    /// `Option` check avoids. Rows with attachments are rare; identical repaints are not.
+    pub fn set(&mut self, col: usize, cell: Cell) -> bool {
+        let attached = self.meta().extras.is_some();
+        let Some(slot) = self.cells_mut().get_mut(col) else {
+            return false;
+        };
+        let changed = attached || *slot != cell;
+        *slot = cell;
+        if attached {
+            self.retire(col);
+        }
+        changed
+    }
+
+    /// Place a run of characters from COL, each one column wide.
+    ///
+    /// [`Row::set`] in bulk, with the same effect as calling it per character. The
+    /// `extras` test is hoisted out of the loop, since it is a property of the row.
+    ///
+    /// Writes only as far as the row goes, so an over-long run is truncated rather than
+    /// panicking.
+    ///
+    /// Returns whether anything changed, on [`Row::set`]'s terms.
+    pub fn fill_run(&mut self, col: usize, text: &str, style: Style) -> bool {
+        let attached = self.meta().extras.is_some();
+        let pen = Cell::blank(style);
+        let Some(slots) = self.cells_mut().get_mut(col..) else {
+            return false;
+        };
+        // The comparison is a pass of its own rather than a test folded into the write
+        // loop: `any` stops at the first differing cell, usually the first, while the
+        // folded form cost 24% on the plain-text benchmark. An unchanged frame pays one
+        // pass and skips the stores.
+        let changed = attached
+            || slots
+                .iter()
+                .zip(text.chars())
+                .any(|(slot, ch)| *slot != pen.with_char(ch));
+        if !changed {
+            return false;
+        }
+        let mut placed = 0;
+        for (slot, ch) in slots.iter_mut().zip(text.chars()) {
+            *slot = pen.with_char(ch);
+            placed += 1;
+        }
+        if attached {
+            for at in col..col + placed {
+                self.retire(at);
+            }
+        }
+        true
+    }
+
+    /// Make COL one cell of an image, blanking whatever was there.
+    ///
+    /// The cell keeps a blank character in the pen's style, so the row still copies,
+    /// rewraps and yanks as text — a picture pasted out of the scrollback comes out as
+    /// the whitespace it occupied, which is the only honest plain-text rendering of it.
+    /// [`Extra::is_content`] is what stops that blank being trimmed away.
+    pub fn place(&mut self, col: usize, placement: Placement, style: Style) {
+        if col >= self.cells().len() {
+            return;
+        }
+        // `set` first, so it retires whatever the old occupant had attached before the
+        // placement goes on; the other order would prune the placement just made.
+        let _ = self.set(col, Cell::blank(style));
+        self.attach(col, Extra::Image(placement));
+    }
+
+    /// Attach a zero-width character (combining mark, variation selector) to `col`.
+    pub fn combine(&mut self, col: usize, mark: char) {
+        if let Some(extras) = &mut self.meta_mut().extras
+            && let Some((_, Extra::Marks(text))) = extras
+                .entries
+                .iter_mut()
+                .find(|(at, extra)| usize::from(*at) == col && matches!(extra, Extra::Marks(_)))
+        {
+            let mut s = String::from(&**text);
+            s.push(mark);
+            *text = s.into_boxed_str();
+            return;
+        }
+        self.attach(col, Extra::Marks(String::from(mark).into_boxed_str()));
+    }
+
+    /// Blank a span of columns, returning whether that changed anything; see [`Row::set`]
+    /// for what the answer is for.
+    pub fn fill(&mut self, range: impl IntoIterator<Item = usize>, style: Style) -> bool {
+        // Not `set` per column. `fill` is the erase path — a full-screen program clears
+        // rows every frame — and a per-cell side-table check in the loop stops this being
+        // a bulk write. The tables are pruned once, outside it.
+        let blank = Cell::blank(style);
+        let mut lo = usize::MAX;
+        let mut hi = 0;
+        let mut changed = self.meta().extras.is_some();
+        for col in range {
+            if let Some(slot) = self.cells_mut().get_mut(col) {
+                changed |= *slot != blank;
+                *slot = blank;
+                lo = lo.min(col);
+                hi = hi.max(col);
+            }
+        }
+        if lo > hi {
+            return false;
+        }
+        self.prune(lo..hi + 1, Marks::Keep);
+        changed
+    }
+
+    /// Blank the row and drop everything attached to it, semantic marks included.
+    ///
+    /// This is the row *ceasing to be what it was*: recycled at the bottom of a scroll,
+    /// backfilled behind a removed row, wiped by an erase of the display. A mark left on a
+    /// recycled row would duplicate one already archived with the row's text, and a drain
+    /// would report its id twice. [`Row::erase_all`] is the spelling for `CSI 2K`.
+    ///
+    /// Returns nothing, unlike the other writers: `Screen::scroll_up` clears every row it
+    /// recycles, and comparing first would scan the row before overwriting it, 22% of the
+    /// plain-text benchmark for an answer that path discards.
+    pub fn clear(&mut self, style: Style) {
+        Cell::fill(self.cells_mut(), Cell::blank(style));
+        self.meta_mut().extras = None;
+        self.meta_mut().wrapped = false;
+    }
+
+    /// `CSI 2K`: blank every column, keeping semantic marks.
+    ///
+    /// The one whole-row erase that is not the row ending: a shell wipes its prompt line
+    /// with this and redraws it on every keystroke of a history search, so the marks stay,
+    /// as in [`Row::retire`].
+    ///
+    /// Returns whether that changed anything, so a prompt redrawn identically costs no
+    /// repaint. `wrapped` counts as content here, since it decides where a logical line
+    /// ends.
+    pub fn erase_all(&mut self, style: Style) -> bool {
+        let blank = Cell::blank(style);
+        let changed = self.meta().extras.is_some()
+            || self.meta().wrapped
+            || self.cells().iter().any(|c| *c != blank);
+        Cell::fill(self.cells_mut(), blank);
+        self.prune(0..self.cells().len(), Marks::Keep);
+        self.meta_mut().wrapped = false;
+        changed
+    }
+
+    pub fn insert_blank(&mut self, col: usize, count: usize, style: Style) {
+        let cols = self.cells().len();
+        if col >= cols {
+            return;
+        }
+        let n = count.min(cols - col);
+        // In place, because `Cell` is `Copy` and the row's length does not change: growing
+        // past `cols` and truncating would realloc once per character in insert mode.
+        self.cells_mut().copy_within(col..cols - n, col + n);
+        Cell::fill(&mut self.cells_mut()[col..col + n], Cell::blank(style));
+        // The cells from `col` on moved right; their attachments move with them, and
+        // whatever was pushed off the end goes.
+        self.edit_extras(|extras| extras.shift(col, n as isize, cols));
+    }
+
+    pub fn delete(&mut self, col: usize, count: usize, style: Style) {
+        let cols = self.cells().len();
+        if col >= cols {
+            return;
+        }
+        let gone = (col + count).min(cols) - col;
+        // In place, as `insert_blank` is: the row's length does not change, so the cells
+        // right of the gap slide left over it and blanks fill in behind them.
+        let cells = self.cells_mut();
+        cells.copy_within(col + gone..cols, col);
+        Cell::fill(&mut cells[cols - gone..], Cell::blank(style));
+        // The deleted columns take their attachments with them; everything to their right
+        // closes the gap.
+        self.prune(col..col + gone, Marks::Keep);
+        self.edit_extras(|extras| extras.shift(col + gone, -(gone as isize), cols));
     }
 }
 
@@ -1801,7 +1898,7 @@ mod tests {
         for (col, ch) in "  \u{2500}\u{2500}  ".chars().enumerate() {
             row.set(col, Cell::new(ch, style));
         }
-        row.wrapped = true;
+        row.set_wrapped(true);
 
         let runs = row.line_runs();
         assert_eq!(
@@ -1863,9 +1960,9 @@ mod tests {
         // so returning to it matters as much as getting off it.
         let mut row = Row::new(4);
         row.set_underline(1, Color::Indexed(196));
-        assert!(row.extras.is_some());
+        assert!(row.meta.extras.is_some());
         row.set_underline(1, Color::Default);
-        assert!(row.extras.is_none());
+        assert!(row.meta.extras.is_none());
     }
 
     /// `build_runs` must agree with [`Row::runs_to_reference`] on every row shape.
@@ -1990,7 +2087,7 @@ mod tests {
                 col += width;
             }
 
-            if row.extras.is_some() {
+            if row.meta.extras.is_some() {
                 attached_rows += 1;
             } else {
                 plain_rows += 1;
@@ -2125,7 +2222,7 @@ mod tests {
         row.set(1, Cell::new('b', Style::default()));
 
         assert!(row.extras().is_empty());
-        assert!(row.extras.is_none());
+        assert!(row.meta.extras.is_none());
     }
 
     #[test]

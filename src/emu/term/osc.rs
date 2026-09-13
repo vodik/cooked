@@ -199,11 +199,11 @@ impl State {
     /// carry their marks out in [`Departed`](crate::emu::screen::Departed) instead. Lazy,
     /// so a row without marks allocates nothing.
     pub(super) fn marks_in<'a>(
-        rows: impl Iterator<Item = &'a Row>,
+        rows: impl Iterator<Item = RowRef<'a>>,
         base: usize,
     ) -> impl Iterator<Item = (MarkId, Anchor)> {
         rows.enumerate().flat_map(move |(index, row)| {
-            row.marks().map(move |(col, id)| {
+            row.into_marks().map(move |(col, id)| {
                 (
                     id,
                     Anchor {

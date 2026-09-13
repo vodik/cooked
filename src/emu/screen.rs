@@ -1,6 +1,8 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
-use super::cell::{CONTINUATION, Cell, Color, Extra, MarkId, Row, Run, Style};
+use super::cell::{
+    CONTINUATION, Cell, Color, Extra, MarkId, Row, RowMeta, RowMut, RowRef, Run, Style,
+};
 use super::image::{CellSize, ImageId, Placement};
 use super::link::LinkId;
 
@@ -138,10 +140,10 @@ impl Departed {
     /// `line_runs` rather than `runs`: these rows are becoming buffer text as part of a
     /// logical line, and a continuation row has to keep the blanks that are interior to
     /// it. See [`Row::line_runs`].
-    fn from_row(row: &Row) -> Self {
+    fn from_row(row: RowRef<'_>) -> Self {
         Self {
             runs: row.line_runs(),
-            wrapped: row.wrapped,
+            wrapped: row.wrapped(),
             marks: row.marks().collect(),
         }
     }
@@ -164,9 +166,8 @@ impl Evicted {
 
     /// Reduce rows leaving a grid, for the producers that already own them.
     ///
-    /// `scroll_up` does not use this; it reduces from the slice it is about to rotate.
-    fn from_rows(rows: &[Row]) -> Self {
-        Self(rows.iter().map(Departed::from_row).collect())
+    fn from_rows<'a>(rows: impl IntoIterator<Item = RowRef<'a>>) -> Self {
+        Self(rows.into_iter().map(Departed::from_row).collect())
     }
 
     /// These rows are not history. Says so out loud, so that a reader can tell this apart
@@ -197,7 +198,19 @@ impl IntoIterator for Evicted {
 
 #[derive(Debug, Clone)]
 pub struct Screen {
-    rows: Vec<Row>,
+    /// Every cell of the grid, `cols` to a slot, in one contiguous buffer.
+    ///
+    /// A slot is a row's storage and not its position: [`Screen::order`] says which slot
+    /// is shown at each screen row. Keeping the cells flat puts a whole screen in one
+    /// allocation that is read and compared sequentially, and keeping the order separate
+    /// is what lets a scroll stay cheap. Rotating `order` moves a row whatever the width,
+    /// where moving the cells of a 400-column scroll region would copy all of them on
+    /// every linefeed.
+    cells: Vec<Cell>,
+    /// What each slot's row carries besides its cells, indexed by slot like `cells`.
+    meta: Vec<RowMeta>,
+    /// The slot shown at each screen row, top to bottom. Its length is the grid's height.
+    order: Vec<u32>,
     cols: usize,
     /// Private so that every move goes through a method that keeps [`Cursor::wrap_pending`]
     /// honest: a pending wrap only means something on the last column, and a caller
@@ -261,7 +274,9 @@ impl Screen {
         let rows = rows.max(1);
         let cols = cols.max(1);
         Self {
-            rows: vec![Row::new(cols); rows],
+            cells: vec![Cell::default(); rows * cols],
+            meta: vec![RowMeta::default(); rows],
+            order: identity(rows),
             cols,
             cursor: Cursor::default(),
             region: Region::full(rows),
@@ -333,19 +348,66 @@ impl Screen {
     }
 
     pub fn height(&self) -> usize {
-        self.rows.len()
+        self.order.len()
     }
 
     pub fn width(&self) -> usize {
         self.cols
     }
 
-    pub fn row(&self, index: usize) -> Option<&Row> {
-        self.rows.get(index)
+    pub fn row(&self, index: usize) -> Option<RowRef<'_>> {
+        let slot = *self.order.get(index)? as usize;
+        let start = slot * self.cols;
+        Some(RowRef::from_slices(
+            &self.cells[start..start + self.cols],
+            &self.meta[slot],
+        ))
     }
 
-    pub fn rows(&self) -> impl Iterator<Item = &Row> {
-        self.rows.iter()
+    fn row_mut(&mut self, index: usize) -> Option<RowMut<'_>> {
+        let slot = *self.order.get(index)? as usize;
+        let start = slot * self.cols;
+        Some(RowMut::from_slices(
+            &mut self.cells[start..start + self.cols],
+            &mut self.meta[slot],
+        ))
+    }
+
+    pub fn rows(&self) -> impl Iterator<Item = RowRef<'_>> {
+        (0..self.height()).filter_map(|index| self.row(index))
+    }
+
+    /// Every row, top to bottom, as owned rows, leaving the grid empty -- for a resize,
+    /// which lays the rows out again and stores them back with [`Screen::store_rows`].
+    fn take_rows(&mut self) -> Vec<Row> {
+        let cols = self.cols;
+        let order = std::mem::take(&mut self.order);
+        let cells = std::mem::take(&mut self.cells);
+        let mut meta = std::mem::take(&mut self.meta);
+        order
+            .iter()
+            .map(|&slot| {
+                let slot = slot as usize;
+                Row::from_meta(
+                    cells[slot * cols..(slot + 1) * cols].to_vec(),
+                    std::mem::take(&mut meta[slot]),
+                )
+            })
+            .collect()
+    }
+
+    /// Store ROWS as the grid, each `cols` wide, in screen order.
+    fn store_rows(&mut self, rows: Vec<Row>, cols: usize) {
+        self.cols = cols;
+        self.order = identity(rows.len());
+        self.cells = Vec::with_capacity(rows.len() * cols);
+        self.meta = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (cells, meta) = row.into_parts();
+            debug_assert_eq!(cells.len(), cols, "a grid row is exactly the grid's width");
+            self.cells.extend_from_slice(&cells);
+            self.meta.push(meta);
+        }
     }
 
     /// Put an OSC 133 mark on the cell at (`row`, `col`), if the grid has one.
@@ -354,15 +416,15 @@ impl Screen {
     /// would send Emacs a row it already has in order to say something the row does not
     /// carry.
     pub fn mark(&mut self, row: usize, col: usize, id: MarkId) {
-        if let Some(row) = self.rows.get_mut(row) {
+        if let Some(mut row) = self.row_mut(row) {
             row.mark(col, id);
         }
     }
 
-    fn touch(&mut self, index: usize) -> Option<&mut Row> {
+    fn touch(&mut self, index: usize) -> Option<RowMut<'_>> {
         *self.dirty.get_mut(index)? = true;
         self.touches += 1;
-        self.rows.get_mut(index)
+        self.row_mut(index)
     }
 
     /// Hand row INDEX to EDIT, and damage it only if EDIT says it changed something.
@@ -384,11 +446,11 @@ impl Screen {
     /// Returns whether there was a row at INDEX at all, which is not the same question as
     /// whether anything changed — [`Screen::write_run`] has to tell the two apart to say
     /// how much it placed.
-    fn edit(&mut self, index: usize, edit: impl FnOnce(&mut Row) -> bool) -> bool {
-        let Some(row) = self.rows.get_mut(index) else {
+    fn edit(&mut self, index: usize, edit: impl FnOnce(&mut RowMut<'_>) -> bool) -> bool {
+        let Some(mut row) = self.row_mut(index) else {
             return false;
         };
-        if edit(row) {
+        if edit(&mut row) {
             self.damage(index);
         }
         true
@@ -539,7 +601,7 @@ impl Screen {
         } else {
             self.cursor.col.saturating_sub(before.max(1))
         };
-        if let Some(r) = self.touch(row) {
+        if let Some(mut r) = self.touch(row) {
             r.combine(lead, mark);
         }
         // Nothing to resize: the overwhelming case, since almost every mark that joins a
@@ -553,10 +615,9 @@ impl Screen {
         // The resized columns take the lead cell's own style, so a widened emoji does not
         // leave a differently-coloured half behind it.
         let style = self
-            .rows
-            .get(row)
-            .and_then(|r| r.get(lead))
-            .map_or_else(Style::default, |c| c.style());
+            .row(row)
+            .and_then(|r| r.get(lead).map(|c| c.style()))
+            .unwrap_or_default();
         let cell = if after > before {
             Cell::new(CONTINUATION, style)
         } else {
@@ -597,9 +658,7 @@ impl Screen {
                 // something Emacs renders from, so setting it is a change -- setting it
                 // twice is not, and a program parked at the last column reaches here
                 // again on every character it prints there.
-                self.edit(self.cursor.row, |r| {
-                    !std::mem::replace(&mut r.wrapped, true)
-                });
+                self.edit(self.cursor.row, |r| !r.set_wrapped(true));
                 self.cursor.col = 0;
                 evicted = self.linefeed(style);
             } else {
@@ -741,7 +800,7 @@ impl Screen {
         } else {
             self.cursor.col.saturating_sub(width)
         };
-        if let Some(r) = self.touch(row) {
+        if let Some(mut r) = self.touch(row) {
             r.set_underline(col, color);
         }
     }
@@ -758,7 +817,7 @@ impl Screen {
         } else {
             self.cursor.col.saturating_sub(width)
         };
-        if let Some(r) = self.touch(row) {
+        if let Some(mut r) = self.touch(row) {
             r.set_link(col, link);
         }
     }
@@ -824,7 +883,7 @@ impl Screen {
     ) -> u16 {
         let (row, start) = (self.cursor.row, self.cursor.col);
         let width = usize::from(cells.cols).min(self.cols.saturating_sub(start));
-        if let Some(r) = self.touch(row) {
+        if let Some(mut r) = self.touch(row) {
             for i in 0..width {
                 r.place(
                     start + i,
@@ -847,7 +906,7 @@ impl Screen {
         self.cursor.wrap_pending = false;
         match self.cursor.row {
             row if row == self.region.bottom => self.scroll_up(1, pen),
-            row if row + 1 < self.rows.len() => {
+            row if row + 1 < self.height() => {
                 self.cursor.row = row + 1;
                 Evicted::none()
             }
@@ -868,7 +927,7 @@ impl Screen {
     /// True when the scroll region is the whole screen, the only case in which rows
     /// leaving the top are history rather than discarded.
     fn archives(&self) -> bool {
-        self.history && self.region == Region::full(self.rows.len())
+        self.history && self.region == Region::full(self.height())
     }
 
     /// Shift the region up by `n`, returning rows that became scrollback.
@@ -882,18 +941,16 @@ impl Screen {
         // rotation below. `Screen::write` marks the row above `wrapped` before calling
         // `linefeed`, so the flag `line_runs` reads is already settled.
         let evicted = if self.archives() {
-            Evicted::from_rows(&self.rows[top..top + n])
+            Evicted::from_rows((top..top + n).filter_map(|index| self.row(index)))
         } else {
             Evicted::none()
         };
-        self.rows[top..=bottom].rotate_left(n);
+        self.order[top..=bottom].rotate_left(n);
         // The dirty flags rotate with their rows, so the damage reported is in post-shift
         // coordinates; otherwise a row written before the scroll would be repainted at the
         // index it used to have.
         self.dirty[top..=bottom].rotate_left(n);
-        for row in &mut self.rows[bottom + 1 - n..=bottom] {
-            row.clear(pen.erase());
-        }
+        self.clear_recycled(bottom + 1 - n..=bottom, pen);
         // The rows above the recycled ones hold the text they already held at another
         // index, which Emacs can move cheaply while keeping its markers and overlays; only
         // the blanks rotated in are new. The `else` is the region having turned over
@@ -923,7 +980,7 @@ impl Screen {
     /// The scroll region is left alone. The row count is unchanged, so its bounds stay
     /// valid, and resetting it would clear a child's `DECSTBM` as a side effect.
     pub fn remove_rows(&mut self, first: usize, count: usize) {
-        let height = self.rows.len();
+        let height = self.height();
         let first = first.min(height);
         let count = count.min(height - first);
         if count == 0 {
@@ -932,12 +989,10 @@ impl Screen {
         // No [`Shift`] and no rotation of the dirty flags, unlike the scrolls: every row
         // from `first` down is damaged unconditionally below, so there is nothing to keep
         // correct by moving. A shift logged earlier in the drain is still right to apply.
-        self.rows.drain(first..first + count);
-        let pen = Style::default();
-        self.rows.resize(height, Row::new(self.cols));
-        for row in &mut self.rows[height - count..] {
-            row.clear(pen.erase());
-        }
+        // The removed rows' slots go to the bottom and are blanked there, which is the
+        // same grid as removing them and appending blanks.
+        self.order[first..].rotate_left(count);
+        self.clear_recycled(height - count..=height - 1, Style::default());
         if first == 0 {
             self.carried = 0;
         }
@@ -959,12 +1014,10 @@ impl Screen {
         if n == 0 {
             return;
         }
-        self.rows[top..=bottom].rotate_right(n);
+        self.order[top..=bottom].rotate_right(n);
         // With the rows, for the reason spelled out in `scroll_up`.
         self.dirty[top..=bottom].rotate_right(n);
-        for row in &mut self.rows[top..top + n] {
-            row.clear(pen.erase());
-        }
+        self.clear_recycled(top..=top + n - 1, pen);
         if self.shift(top, bottom, n, Direction::Down) {
             self.touch_range(top..=top + n - 1);
         } else {
@@ -973,7 +1026,7 @@ impl Screen {
     }
 
     pub fn set_region(&mut self, top: usize, bottom: usize) {
-        let bottom = bottom.min(self.rows.len().saturating_sub(1));
+        let bottom = bottom.min(self.height().saturating_sub(1));
         if top < bottom {
             self.region = Region { top, bottom };
             self.goto(0, 0);
@@ -981,12 +1034,12 @@ impl Screen {
     }
 
     pub fn reset_region(&mut self) {
-        self.region = Region::full(self.rows.len());
+        self.region = Region::full(self.height());
     }
 
     /// Absolute positioning, clamped to the screen.
     pub fn goto(&mut self, row: usize, col: usize) {
-        self.cursor.row = row.min(self.rows.len().saturating_sub(1));
+        self.cursor.row = row.min(self.height().saturating_sub(1));
         self.cursor.col = col.min(self.cols.saturating_sub(1));
         self.cursor.wrap_pending = false;
     }
@@ -1024,7 +1077,7 @@ impl Screen {
     /// A partial erase archives nothing: the child is rewriting part of a screen it is
     /// still drawing on, not finishing with one.
     pub fn erase_display(&mut self, how: Erase, pen: Style) -> Evicted {
-        let (row, last) = (self.cursor.row, self.rows.len());
+        let (row, last) = (self.cursor.row, self.height());
         match how {
             Erase::ToEnd => {
                 self.erase_line(Erase::ToEnd, pen);
@@ -1040,8 +1093,8 @@ impl Screen {
                 // `has_text`, not `!is_blank`: with `bce` a screen the child painted and
                 // then cleared has a background on every cell, and archiving that would
                 // hand Emacs a screenful of pure colour with nothing written on it.
-                let history = if self.archives() && self.rows.iter().any(Row::has_text) {
-                    Evicted::from_rows(&self.rows[..=self.last_used_row()])
+                let history = if self.archives() && self.rows().any(|row| row.has_text()) {
+                    Evicted::from_rows(self.rows().take(self.last_used_row() + 1))
                 } else {
                     Evicted::none()
                 };
@@ -1059,8 +1112,19 @@ impl Screen {
     fn clear_rows(&mut self, range: std::ops::Range<usize>, pen: Style) {
         let style = pen.erase();
         for i in range {
-            if let Some(r) = self.touch(i) {
+            if let Some(mut r) = self.touch(i) {
                 r.clear(style);
+            }
+        }
+    }
+
+    /// Blank the rows in RANGE for reuse, without damaging them: a scroll that recycles
+    /// rows damages them itself, with the shift it reports.
+    fn clear_recycled(&mut self, range: std::ops::RangeInclusive<usize>, pen: Style) {
+        let style = pen.erase();
+        for index in range {
+            if let Some(mut row) = self.row_mut(index) {
+                row.clear(style);
             }
         }
     }
@@ -1073,14 +1137,14 @@ impl Screen {
 
     pub fn insert_chars(&mut self, n: usize, pen: Style) {
         let (row, col) = (self.cursor.row, self.cursor.col);
-        if let Some(r) = self.touch(row) {
+        if let Some(mut r) = self.touch(row) {
             r.insert_blank(col, n, pen.erase());
         }
     }
 
     pub fn delete_chars(&mut self, n: usize, pen: Style) {
         let (row, col) = (self.cursor.row, self.cursor.col);
-        if let Some(r) = self.touch(row) {
+        if let Some(mut r) = self.touch(row) {
             r.delete(col, n, pen.erase());
         }
     }
@@ -1187,7 +1251,7 @@ impl Screen {
     /// go down in the default rendition whatever the pen holds, as in xterm.
     pub fn align(&mut self) {
         let pattern = "E".repeat(self.cols);
-        for i in 0..self.rows.len() {
+        for i in 0..self.height() {
             self.edit(i, |row| row.fill_run(0, &pattern, Style::default()));
         }
         self.reset_region();
@@ -1204,9 +1268,9 @@ impl Screen {
     /// The last row worth archiving. Keyed on text, not on styling: a `bce` background
     /// wash below the last written line is not transcript.
     fn last_used_row(&self) -> usize {
-        self.rows
-            .iter()
-            .rposition(|row| row.has_text())
+        (0..self.height())
+            .rev()
+            .find(|&index| self.row(index).is_some_and(|row| row.has_text()))
             .unwrap_or(0)
     }
 
@@ -1249,29 +1313,32 @@ impl Screen {
             return self.reflow(rows, cols);
         }
 
+        // Laid out as owned rows and stored back: a resize is rare, and every row may
+        // change width, so there is nothing to gain from editing the flat buffer in place.
+        let keep = self.used();
+        let mut grid = self.take_rows();
         if cols != self.cols {
-            self.cols = cols;
             self.tabs = default_tabs(cols);
-            for row in &mut self.rows {
+            for row in &mut grid {
                 row.resize(cols, Style::default());
             }
         }
 
-        let shed: Vec<Row> = match rows.cmp(&self.rows.len()) {
+        let shed: Vec<Row> = match rows.cmp(&grid.len()) {
             std::cmp::Ordering::Less => {
-                let excess = self.rows.len() - rows;
-                let keep = self.used();
-                let spare = self.rows.len().saturating_sub(keep).min(excess);
-                self.rows.truncate(self.rows.len() - spare);
-                self.rows.drain(..excess - spare).collect()
+                let excess = grid.len() - rows;
+                let spare = grid.len().saturating_sub(keep).min(excess);
+                grid.truncate(grid.len() - spare);
+                grid.drain(..excess - spare).collect()
             }
             std::cmp::Ordering::Greater => {
-                self.rows.resize(rows, Row::new(cols));
+                grid.resize(rows, Row::new(cols));
                 Vec::new()
             }
             std::cmp::Ordering::Equal => Vec::new(),
         };
-        let evicted = Evicted::from_rows(&shed);
+        self.store_rows(grid, cols);
+        let evicted = Evicted::from_rows(shed.iter().map(Row::as_ref));
 
         self.carry(&evicted);
         self.cursor.row = self
@@ -1308,7 +1375,7 @@ impl Screen {
         let mut lines: Vec<Logical> = Vec::new();
         let (mut cursor_line, mut cursor_offset) = (0, 0);
         let mut continuing = false;
-        for (index, row) in self.rows[..keep].iter().enumerate() {
+        for (index, row) in self.rows().take(keep).enumerate() {
             if !continuing {
                 lines.push(Logical::default());
             }
@@ -1322,7 +1389,7 @@ impl Screen {
                 // exactly one past the last cell of the line so far.
                 cursor_offset = base + self.cursor.col + usize::from(self.cursor.wrap_pending);
             }
-            continuing = row.wrapped;
+            continuing = row.wrapped();
         }
 
         // The cursor is free to sit past the end of its line's text — on a blank row, or in
@@ -1341,7 +1408,9 @@ impl Screen {
         if head % cols != 0 && !lines.is_empty() {
             let split = (cols - head % cols).min(lines[0].cells.len());
             let ends_here = split == lines[0].cells.len();
-            history.push(Departed::from_row(&lines[0].take_front(split, !ends_here)));
+            history.push(Departed::from_row(
+                lines[0].take_front(split, !ends_here).as_ref(),
+            ));
             head += split;
             if cursor_line == 0 {
                 // Inside the fragment the cursor has left the grid; the nearest cell it
@@ -1382,12 +1451,11 @@ impl Screen {
         // Set from the re-aligned head first, so the eviction extends it rather than
         // measuring against the width the head was chunked at.
         self.carried = head / cols;
-        let evicted = Evicted::from_rows(&evicted);
+        let evicted = Evicted::from_rows(evicted.iter().map(Row::as_ref));
         self.carry(&evicted);
         history.extend(evicted);
 
-        self.rows = grid;
-        self.cols = cols;
+        self.store_rows(grid, cols);
         self.tabs = default_tabs(cols);
         self.cursor = Cursor {
             row: cursor
@@ -1407,16 +1475,21 @@ impl Screen {
 
     /// Text of the current line up to the cursor — the password prompt lives here.
     pub fn line_text(&self, row: usize) -> Option<String> {
-        self.rows.get(row).map(Row::to_text)
+        self.row(row).map(|row| row.to_text())
     }
 
     pub fn last_nonblank_text(&self) -> Option<String> {
         (0..=self.cursor.row)
             .rev()
-            .filter_map(|i| self.rows.get(i))
-            .map(Row::to_text)
+            .filter_map(|i| self.row(i))
+            .map(|row| row.to_text())
             .find(|t| !t.trim().is_empty())
     }
+}
+
+/// The order a freshly laid-out grid shows its slots in: slot N at row N.
+fn identity(rows: usize) -> Vec<u32> {
+    (0..rows as u32).collect()
 }
 
 fn default_tabs(cols: usize) -> Vec<bool> {
@@ -1461,9 +1534,9 @@ impl Logical {
     /// the line — the text continues on the next row — so trimming them the way a line's
     /// final row is trimmed would pull the continuation forward by however many columns
     /// the child happened to leave blank.
-    fn push_row(&mut self, row: &Row) -> usize {
+    fn push_row(&mut self, row: RowRef<'_>) -> usize {
         let base = self.cells.len();
-        let len = if row.wrapped {
+        let len = if row.wrapped() {
             row.len()
         } else {
             row.content_len()
@@ -1589,6 +1662,39 @@ mod tests {
         for ch in text.chars() {
             screen.write(ch, Style::default()).discard();
         }
+    }
+
+    /// A scroll moves rows by reordering slots, never by copying cells.
+    ///
+    /// The rows that survive a scroll inside a region keep their bytes exactly where they
+    /// were in the flat buffer; only the slot recycled at the bottom is rewritten. This is
+    /// the property that keeps a 400-column region scroll as cheap as a 40-column one.
+    #[test]
+    fn a_region_scroll_reorders_slots_and_moves_no_cells() {
+        let mut screen = Screen::new(6, 40);
+        for (row, text) in ["top", "one", "two", "three", "four", "bottom"]
+            .iter()
+            .enumerate()
+        {
+            screen.goto(row, 0);
+            write(&mut screen, text);
+        }
+        screen.set_region(1, 4);
+        let before = screen.cells.clone();
+        let recycled = screen.order[1] as usize;
+        screen.scroll_up(1, Style::default()).discard();
+
+        let texts: Vec<String> = screen.rows().map(|row| row.to_text()).collect();
+        assert_eq!(texts, ["top", "two", "three", "four", "", "bottom"]);
+        for slot in (0..6).filter(|&slot| slot != recycled) {
+            let span = slot * 40..(slot + 1) * 40;
+            assert_eq!(
+                Cell::bytes(&screen.cells[span.clone()]),
+                Cell::bytes(&before[span]),
+                "slot {slot} was rewritten"
+            );
+        }
+        assert_eq!(screen.order, [0, 2, 3, 4, 1, 5]);
     }
 
     #[test]
@@ -1936,8 +2042,8 @@ mod tests {
 
         assert_eq!(screen.row(0).unwrap().to_text(), "abcdefghij");
         assert_eq!(screen.row(1).unwrap().to_text(), "klmno");
-        assert!(screen.row(0).unwrap().wrapped);
-        assert!(!screen.row(1).unwrap().wrapped);
+        assert!(screen.row(0).unwrap().wrapped());
+        assert!(!screen.row(1).unwrap().wrapped());
     }
 
     #[test]

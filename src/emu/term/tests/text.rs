@@ -51,7 +51,8 @@ fn a_declared_width_overrides_what_a_width_table_would_say() {
 fn a_declared_width_lays_down_continuation_cells_like_any_wide_character() {
     let t = term(2, 20, b"\x1b]66;w=3;x\x07y");
     assert_eq!(t.screen().cursor().col, 4);
-    let cells = t.screen().row(0).unwrap().cells();
+    let grid_row = t.screen().row(0).unwrap();
+    let cells = grid_row.cells();
     assert_eq!(cells[0].ch, 'x');
     assert!(cells[1].is_continuation() && cells[2].is_continuation());
     assert_eq!(cells[3].ch, 'y');
@@ -143,7 +144,8 @@ fn a_zwj_emoji_family_stands_on_two_cells_and_not_on_six() {
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}|".as_bytes(),
     );
     assert_eq!(t.screen().cursor().col, 3);
-    let cells = t.screen().row(0).unwrap().cells();
+    let grid_row = t.screen().row(0).unwrap();
+    let cells = grid_row.cells();
     assert_eq!(cells[0].ch, '\u{1F468}');
     assert!(cells[1].is_continuation());
     assert_eq!(cells[2].ch, '|');
@@ -286,7 +288,8 @@ fn a_variation_selector_resizes_the_cell_it_lands_on() {
     assert_eq!(bare.screen().cursor().col, 2);
     let wide = term(2, 20, "\u{2714}\u{FE0F}|".as_bytes());
     assert_eq!(wide.screen().cursor().col, 3);
-    let cells = wide.screen().row(0).unwrap().cells();
+    let grid_row = wide.screen().row(0).unwrap();
+    let cells = grid_row.cells();
     assert!(cells[1].is_continuation());
     assert_eq!(cells[2].ch, '|');
 }

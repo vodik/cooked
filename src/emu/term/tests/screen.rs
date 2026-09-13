@@ -790,10 +790,15 @@ fn batched_and_per_character_printing_agree() {
             .map(|line| line.runs.iter().map(|r| r.text.as_str()).collect())
             .collect();
         let screen = (0..4)
-            .map(|i| t.screen().row(i).map(Row::to_text).unwrap_or_default())
+            .map(|i| {
+                t.screen()
+                    .row(i)
+                    .map(|row| row.to_text())
+                    .unwrap_or_default()
+            })
             .collect();
         let runs = (0..4)
-            .map(|i| t.screen().row(i).map(Row::runs).unwrap_or_default())
+            .map(|i| t.screen().row(i).map(|row| row.runs()).unwrap_or_default())
             .collect();
         let cursor = (t.screen().cursor().row, t.screen().cursor().col);
         (screen, runs, cursor, scrolled)

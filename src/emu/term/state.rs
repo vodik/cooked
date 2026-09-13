@@ -327,7 +327,7 @@ impl State {
                 .filter_map(|i| {
                     screen.row(i).map(|r| DamagedRow {
                         index: i,
-                        wrapped: r.wrapped,
+                        wrapped: r.wrapped(),
                         runs: r.runs(),
                     })
                 })
