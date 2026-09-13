@@ -63,10 +63,10 @@
 (declare-function cooked--redraw "ext:cooked-core")
 
 ;; Owned by cooked-mode.el, which requires this file.  One setting the drain is
-;; parameterised by, one the bell is handed to, and two notifications -- the mode the child is in and the
-;; exit it reported -- handed to the layer that owns what they mean.  Reads and
-;; notifications only, never a question asked upward, which is what keeps the
-;; list this short.
+;; parameterised by, one the bell is handed to, and two notifications -- the
+;; mode the child is in and the exit it reported -- handed to the layer that
+;; owns what they mean.  Reads and notifications only, never a question asked
+;; upward, which is what keeps the list this short.
 (defvar cooked-rejoin-wrapped-lines)
 (defvar cooked-bell-function)
 (declare-function cooked--set-mode "cooked-mode")
