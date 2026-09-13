@@ -755,11 +755,6 @@ switches that tidying off rather than trusting the protection.  See
   :type 'hook
   :group 'cooked)
 
-(defvar-local cooked--ownership 'unset
-  "Who owned the keyboard as of the last `cooked-state-change-hook' decision.
-`unset' until the first refresh, so a session starting against a child that
-already owns the keyboard still counts as a change and is announced.")
-
 (defvar cooked-input-mode-functions nil
   "Abnormal hook deciding the `cooked--input-mode' for a buffer.
 

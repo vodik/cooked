@@ -539,6 +539,11 @@ added: the answer is a property of not being at a prompt, so asking that
 directly cannot go stale when another state arrives."
   (not (cooked--input-state-p)))
 
+(defvar-local cooked--ownership 'unset
+  "Who owned the keyboard as of the last `cooked-state-change-hook' decision.
+`unset' until the first refresh, so a session starting against a child that
+already owns the keyboard still counts as a change and is announced.")
+
 (defcustom cooked-rejoin-wrapped-lines t
   "Whether a line the terminal wrapped becomes one buffer line again.
 
