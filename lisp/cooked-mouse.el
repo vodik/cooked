@@ -826,6 +826,16 @@ the other way: Emacs has them and CSS has no name that means them.")
   "How many shapes each screen's OSC 22 stack holds before dropping its bottom.
 Sixteen is the minimum kitty requires of a terminal.")
 
+(defconst cooked--pointer-name-regexp "\\`[a-z0-9_-]\\{1,32\\}\\'"
+  "What an OSC 22 name may look like to be kept on a stack.
+
+kitty\='s spec limits names to lowercase letters, digits, `_\=' and `-\=', and the
+longest in `cooked--pointer-shapes\=', `sb_v_double_arrow\=', is 17 of them, so
+32 is room to spare.  A name outside that is refused rather than kept, because
+`__current__\=' reads the top of the stack back to the child: a push of
+`rm -rf ~ x\=' followed by that query would otherwise put the command on the
+child\='s input.")
+
 (defvar-local cooked--pointer-stacks nil
   "OSC 22 shape stacks, an alist of `main\=' or `alt\=' to names, top first.
 
@@ -839,7 +849,9 @@ it took the screen.
 
 Names are kept whether or not `cooked--pointer-shapes\=' knows them, which is
 what keeps a push and its pop paired for a child that pushes a shape Emacs
-cannot draw.")
+cannot draw.  A name that fails `cooked--pointer-name-regexp\=' is kept as nil
+for the same reason: it holds its place for the pop, shows Emacs\=' own pointer,
+and a query of `__current__\=' answers 0 for it.")
 
 (defvar-local cooked--pointer-overlay nil
   "Overlay carrying the child\='s pointer over the screen, or nil if none is.")
@@ -860,7 +872,11 @@ A query is always answered, knob or not, with 1 or 0 per name -- or, for
          (op (and (> (length payload) 0)
                   (memq (aref payload 0) '(?= ?> ?< ??))
                   (aref payload 0)))
-         (names (split-string (if op (substring payload 1) payload) "," t))
+         (names (mapcar (lambda (name)
+                          (and (let ((case-fold-search nil))
+                                 (string-match-p cooked--pointer-name-regexp name))
+                               name))
+                        (split-string (if op (substring payload 1) payload) "," t)))
          (screen (cooked--pointer-screen))
          (stack (alist-get screen cooked--pointer-stacks)))
     (if (eq op ??)

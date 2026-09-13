@@ -1643,6 +1643,36 @@ does nothing and a query is told nothing is supported."
             (osc "?pointer,text")
             (should (equal (pop replies) '(22 . "0,0")))))))))
 
+;; The payloads below are read by `cooked--osc-pointer-shape' and nothing
+;; else, so no session is needed: with none, the overlay is simply never shown.
+(ert-deftest cooked-osc-22-refuses-a-name-outside-the-spec-and-never-reads-it-back ()
+  "A name outside [a-z0-9_-], or too long, is not kept, so `__current__' cannot
+return it; it still holds its place on the stack so the pop stays paired."
+  (with-temp-buffer
+    (let ((cooked--osc-bell-terminated t)
+          (cooked-allow-pointer-shape t)
+          (replies nil))
+      (cl-letf (((symbol-function 'cooked--reply-osc)
+                 (lambda (_session code payload _bell) (push (cons code payload) replies))))
+        (cl-flet ((osc (payload) (cooked--osc-pointer-shape (list payload))))
+          (osc "=wait")
+          (dolist (junk (list "rm -rf ~ x" "Pointer" "text\u00e9" (make-string 33 ?a)))
+            (osc (concat ">" junk))
+            (osc "?__current__")
+            (should (equal (pop replies) '(22 . "0")))
+            (should-not (member junk (alist-get 'main cooked--pointer-stacks)))
+            (osc "<")
+            (osc "?__current__")
+            (should (equal (pop replies) '(22 . "wait")))
+            (osc (concat "=" junk))
+            (osc "?__current__")
+            (should (equal (pop replies) '(22 . "0")))
+            (osc "=wait"))
+          ;; The longest the spec allows is still a name.
+          (osc (concat ">" (make-string 32 ?a)))
+          (osc "?__current__")
+          (should (equal (pop replies) (cons 22 (make-string 32 ?a)))))))))
+
 (defun cooked-tests--reverse-remap ()
   "The colors DECSCNM has remapped `default' to, as one plist, or nil.
 Only when both remaps are in force and nothing outranks them."
