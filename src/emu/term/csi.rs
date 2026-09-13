@@ -898,13 +898,21 @@ impl State {
             (None, 'n') if params.arg(0, 0) == 5 => {
                 self.csi_reply(format_args!("0n"));
             }
+            // CPR, and DECXCPR, its private form, which libvterm answers too. Both count
+            // rows from the top of the region under DECOM, as `CSI H` does, so a child can
+            // send back the position it was told. DECXCPR's page is left out, as xterm
+            // leaves it out below VT330 level, and DA1 says VT220.
             (None, 'n') if params.arg(0, 0) == 6 => {
-                let Cursor { row, col, .. } = self.screen().cursor();
-                self.csi_reply(format_args!("{};{}R", row + 1, col + 1));
+                let (row, col) = self.reported_cursor();
+                self.csi_reply(format_args!("{row};{col}R"));
+            }
+            (Some(b'?'), 'n') if params.arg(0, 0) == 6 => {
+                let (row, col) = self.reported_cursor();
+                self.csi_reply(format_args!("?{row};{col}R"));
             }
             // The colour scheme, `CSI ? 996 n`. Silent until Emacs has reported one, since
             // the protocol has no way to say "not yet". The `996` guard leaves other private
-            // DSRs such as `CSI ? 6 n` unimplemented rather than swallowed.
+            // DSRs such as `CSI ? 15 n` unimplemented rather than swallowed.
             (Some(b'?'), 'n') if params.arg(0, 0) == 996 => {
                 if let Some(scheme) = self.color_scheme {
                     self.push_reply(Event::Reply(color_scheme_report(scheme)));
@@ -913,6 +921,18 @@ impl State {
             _ => return false,
         }
         true
+    }
+
+    /// The cursor as a CPR reports it: one-based, and under DECOM from the top of the
+    /// scroll region.
+    fn reported_cursor(&self) -> (usize, usize) {
+        let Cursor { row, col, .. } = self.screen().cursor();
+        let top = if self.modes.origin_mode {
+            self.screen().region().top
+        } else {
+            0
+        };
+        (row.saturating_sub(top) + 1, col + 1)
     }
 
     /// DECRQSS, `DCS $ q Pt ST`: answer with the sequence that would recreate the

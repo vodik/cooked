@@ -292,6 +292,36 @@ fn cursor_position_report_is_answered() {
 }
 
 #[test]
+fn extended_cursor_position_report_is_answered() {
+    let mut t = term(4, 20, b"\x1b[3;5H\x1b[?6n");
+    assert!(
+        t.drain()
+            .events
+            .contains(&Event::Reply(b"\x1b[?3;5R".to_vec()))
+    );
+}
+
+#[test]
+fn cursor_position_reports_count_from_the_region_under_origin_mode() {
+    // DECOM puts `CSI 1;1H` at the top of the region, so row 1 is what the report says
+    // there: a child that sends back what it was told lands where it was.
+    let mut t = term(6, 20, b"\x1b[3;5r\x1b[?6h\x1b[2;4H\x1b[6n\x1b[?6n");
+    let replies: Vec<_> = t
+        .drain()
+        .events
+        .into_iter()
+        .filter(|event| matches!(event, Event::Reply(_)))
+        .collect();
+    assert_eq!(
+        replies,
+        vec![
+            Event::Reply(b"\x1b[2;4R".to_vec()),
+            Event::Reply(b"\x1b[?2;4R".to_vec()),
+        ]
+    );
+}
+
+#[test]
 fn status_report_is_answered() {
     let mut t = term(4, 20, b"\x1b[5n");
     assert!(
@@ -380,7 +410,7 @@ fn a_private_status_report_we_do_not_implement_is_not_answered() {
     // private DSR must stay unimplemented rather than be silently swallowed.
     let mut t = term(4, 20, b"");
     t.set_color_scheme(ColorScheme::Dark);
-    t.feed(b"\x1b[?15n\x1b[?6n");
+    t.feed(b"\x1b[?15n\x1b[?25n");
     assert!(
         t.drain()
             .events

@@ -196,6 +196,12 @@ mod tests {
                 "31415926535897932384".to_owned(),
                 true,
             ),
+            // DECXCPR echoes numbers only, the cursor's, and never a parameter.
+            (
+                "\x1b[?6;31415926535897932384n".to_owned(),
+                "31415926535897932384".to_owned(),
+                true,
+            ),
             (
                 format!("\x1b_Ga=q,i=1,{PAYLOAD};{PAYLOAD}\x1b\\"),
                 PAYLOAD.to_owned(),
