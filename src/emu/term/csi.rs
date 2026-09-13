@@ -65,6 +65,7 @@ macro_rules! dec_flags {
 
 dec_flags! {
     1 => app_cursor,
+    5 => reverse_screen,
     25 => cursor_visible,
     66 => app_keypad,
     1004 => focus_events,
@@ -280,11 +281,11 @@ impl State {
             // which would tell a child that M-x arrives as something other than ESC x.
             1036 => ModeReport::PermanentlySet,
             // Dropped from our terminfo, and this is where a child finds that out
-            // without having to guess: 5 is reverse screen (`flash'), 12 cursor blink
-            // (`blink-cursor-mode' is the user's), 69 left-right margins, 1034
-            // eight-bit meta. 3 and 4 were never claimed, but `is2' and `rs2' reset
-            // them -- 132 columns and smooth scroll, neither of which a buffer has -- so
-            // a child reading the entry has seen their numbers and may well ask.
+            // without having to guess: 12 is cursor blink (`blink-cursor-mode' is the
+            // user's), 69 left-right margins, 1034 eight-bit meta. 3 and 4 were never
+            // claimed, but `is2' and `rs2' reset them -- 132 columns and smooth scroll,
+            // neither of which a buffer has -- so a child reading the entry has seen
+            // their numbers and may well ask.
             //
             // The rest were never in the entry and are decided against all the same, and
             // 4 rather than 0 is what saves a child a retry or a fallback probe. 45 and
@@ -299,7 +300,7 @@ impl State {
             //
             // The list is `# declined-modes:' in cooked.ti, and the audit test holds the
             // two in step.
-            3 | 4 | 5 | 12 | 45 | 67 | 69 | 1005 | 1015 | 1034 | 1039 | 1045 => {
+            3 | 4 | 12 | 45 | 67 | 69 | 1005 | 1015 | 1034 | 1039 | 1045 => {
                 ModeReport::PermanentlyReset
             }
             // Grapheme cluster segmentation, in contour's terminal-unicode-core sense.

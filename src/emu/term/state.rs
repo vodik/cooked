@@ -326,7 +326,7 @@ impl State {
             self.on_alt,
             self.modes.app_cursor,
         );
-        let cursor_shape = self.modes.cursor_shape;
+        let (cursor_shape, reverse_screen) = (self.modes.cursor_shape, self.modes.reverse_screen);
         let keys = self.key_encoding();
         let kitty_flags = self.kitty_flags();
         let screen = self.screen();
@@ -354,6 +354,7 @@ impl State {
             cursor: screen.cursor,
             cursor_visible,
             cursor_shape,
+            reverse_screen,
             alt,
             app_cursor,
             keys,

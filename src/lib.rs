@@ -959,6 +959,7 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
         ":used"        => update.delta.used,
         ":head"        => update.delta.head,
         ":cursor"      => cursor,
+        ":reverse"     => update.delta.reverse_screen,
         ":marks"       => marks,
         ":alt"         => update.delta.alt,
         ":app-cursor"  => update.delta.app_cursor,

@@ -24,7 +24,6 @@
 #                     and 112 each undo one of those -- see `Cr'. A reset that
 #                     claimed to undo more than those three would be claiming a
 #                     palette we do not have.
-#   flash             visual bell via DECSCNM.
 #   mc0, mc4, mc5     printer control. There is no printer behind an Emacs
 #   mc5i              buffer, and mc5 is a child-driven exfiltration channel
 #                     with nothing to show for it.
@@ -52,7 +51,7 @@
 # src/emu/term/tests.rs fails if it, the DECRQM answers and the capabilities in
 # this file disagree.
 #
-# declined-modes: 3 4 5 12 45 67 69 1005 1015 1034 1039 1045
+# declined-modes: 3 4 12 45 67 69 1005 1015 1034 1039 1045
 #
 # Added, being things we implement that xterm-256color does not declare at all:
 #
@@ -112,6 +111,10 @@
 #   kxIN, kxOUT
 #   Cr, Cs            cursor colour via OSC 12/112, which Lisp handled all along
 #                     but nothing had ever checked against the entry
+#   flash             was removed, and is back with DECSCNM (mode 5) behind it:
+#                     the screen is drawn reversed by swapping the buffer's
+#                     default colours, and the value is xterm's, which is what
+#                     vim's `visualbell' sends
 
 # Kept, and now made true. Each of these described xterm rather than us, which is
 # the same failure as claiming a capability we do not have, told two other ways:
@@ -230,6 +233,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	el=\E[K,
 	el1=\E[1K,
 	fsl=^G,
+	flash=\E[?5h$<100/>\E[?5l,
 	home=\E[H,
 	hpa=\E[%i%p1%dG,
 	ht=^I,

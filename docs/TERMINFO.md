@@ -32,6 +32,7 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 | `Ss`, `Se` | `CSI Ps SP q` | cursor shape, now mapped onto `cursor-type` |
 | `fe`, `fd` | `CSI ?1004h/l` | focus reporting, now sending `CSI I`/`CSI O` |
 | `Cr`, `Cs` | OSC 12, OSC 112 | cursor colour, which Lisp had handled all along |
+| `flash` | `CSI ?5h`, `CSI ?5l` | removed while DECSCNM was missing; now reverse screen swaps the buffer\'s default colours, and vim\'s `visualbell` flashes |
 
 **Added, being things xterm-256color does not declare:**
 
@@ -58,7 +59,6 @@ cannot change its answer when the buffer moves.
 | Capability | Why |
 |---|---|
 | `ccc`, `initc` | palette redefinition via OSC 4. Emacs owns colour; a per-buffer 256-entry palette is the wrong seam. A query is still answered, from the colour each index is drawn in; a set is ignored |
-| `flash` | visual bell via DECSCNM |
 | `mc0`, `mc4`, `mc5`, `mc5i` | printer control. There is no printer behind an Emacs buffer, and `mc5` is a child-driven exfiltration channel with nothing to show for it |
 | `mgc`, `smglp`, `smglr`, `smgrp` | left/right margins. The grid, the reflow and the transcript model are all row-oriented — and `CSI s` is already save-cursor, so honouring these would corrupt it |
 | `meml`, `memu` | HP-era memory lock |
@@ -90,8 +90,8 @@ None of that rests on a reading of the file any more. The entry's header carries
 `# declined-modes:` line, and `terminfo_entry_matches_what_decrqm_says` in
 `src/emu/term/tests.rs` reads `cooked.ti` at compile time and fails if a mode a
 capability names answers 0, a declined mode answers anything but 4 or is set by a
-capability, or one of the queries `u7`, `u9`, `RV` and `XR` goes unanswered. Re-adding
-`flash` without DECSCNM is the change it exists to refuse.
+capability, or one of the queries `u7`, `u9`, `RV` and `XR` goes unanswered. `flash`
+came back only once DECSCNM answered 1 or 2, and removing mode 5 again would fail it.
 
 DECRQSS (`DCS $ q Pt ST`) does the same for settings rather than modes: it answers the pen
 (`m`, as the SGR that recreates it, direct colour included), the scroll region (`r`), the

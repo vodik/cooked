@@ -661,14 +661,18 @@ window edge from the terminal background right next to it."
           cooked--color-remaps)
     ;; Every cell face resolves against `default', so the memoized ones are stale the
     ;; moment the remap lands.
-    (cooked--flush-face-cache)))
+    (cooked--flush-face-cache)
+    ;; A reversed screen swapped the colours as they were, and the newest remap
+    ;; outranks it; see `cooked--apply-reverse-screen'.
+    (cooked--apply-reverse-screen)))
 
 (defun cooked--reset-default-color (kind)
   "Drop any OSC 10/11/12 remap of KIND, restoring the theme's own color."
   (when-let* ((cookies (alist-get kind cooked--color-remaps)))
     (mapc #'face-remap-remove-relative cookies)
     (setq cooked--color-remaps (assq-delete-all kind cooked--color-remaps))
-    (cooked--flush-face-cache)))
+    (cooked--flush-face-cache)
+    (cooked--apply-reverse-screen)))
 
 (defun cooked--osc-color-reset (_parts)
   "Undo an OSC 10/11/12 set, from OSC 110, 111 or 112.
@@ -723,6 +727,85 @@ second table that could disagree with it."
                                          (aref cooked-color-names n))))))
             (cooked--reply-osc cooked--session 4 (format "%d;%s" n payload)
                                cooked--osc-bell-terminated)))))))
+
+;;;; DECSCNM — the whole screen in reverse video
+;;
+;; Mode 5 arrives as a level on every drain, `:reverse', and is drawn here rather
+;; than in the cells: the emulator never touches a row for it, because the cells
+;; that change are exactly the ones in the default colours, and those are the
+;; buffer's `default' face.  Swapping that face's two colours reverses them all at
+;; once and leaves a cell with a colour of its own alone, which is what xterm does.
+;;
+;; This is screen state the child owns, like SGR 7 across the whole screen, and so
+;; it has no knob.  `flash' in our terminfo is a set, a 100ms pause and a reset,
+;; which is how vim's `visualbell' reaches it.
+;;
+;; The cursor is deliberately left alone, although xterm swaps it too.  The obvious
+;; worry is a cursor in the theme's foreground vanishing into the reversed
+;; background, and Emacs already prevents that: a cursor drawn in its face's own
+;; background colour is drawn in the foreground instead.  That was checked in a
+;; headless pgtk frame -- black text on white, a black cursor, `default' swapped --
+;; and box, bar, hbar and end-of-line cursors all came out white.  Nor could the
+;; swap be done here if it were wanted: the cursor's colour is the frame's
+;; `cursor-color' parameter, and the same frame showed a buffer-local remap of the
+;; `cursor' face having no effect at all.  Setting the frame parameter would repaint
+;; the cursor in every other buffer on the frame.
+
+(defvar-local cooked--reverse-screen nil
+  "Whether the child has asked for the screen in reverse video, DEC mode 5.")
+
+(defvar-local cooked--reverse-screen-remaps nil
+  "The face remapping cookies drawing `cooked--reverse-screen', or nil.")
+
+(defun cooked--screen-color (kind)
+  "The color this buffer draws for KIND, `foreground' or `background'.
+
+Unlike `cooked--default-color', an OSC 10 or 11 set counts: that remap is the
+color the child sees, so it is the one reverse video swaps.  Read back from the
+cookie `face-remap-add-relative' returned, whose tail is the attribute plist it
+was given."
+  (or (when-let* ((cookie (car (alist-get kind cooked--color-remaps))))
+        (plist-get (cdr cookie) (if (eq kind 'foreground) :foreground :background)))
+      (cooked--default-color kind)))
+
+(defun cooked--apply-reverse-screen ()
+  "Redraw the remap for `cooked--reverse-screen' against the colors of the moment.
+
+Removed and added again rather than left in place, for two reasons.  The colors
+it swaps are resolved when it is added, so a theme change or an OSC 10/11 set
+leaves it swapping the old ones.  And `face-remap-add-relative' gives the newest
+remap priority, so an OSC 11 set made while the screen is reversed would
+otherwise paint over the swap.  `fringe' follows the background for the reason
+`cooked--set-default-color' gives.
+
+One remap per attribute, and not one carrying both.  `face-remap-order' ranks a
+spec with fewer attributes above one with more, whatever order they were added
+in, so a two-attribute swap would lose to a one-attribute OSC 11 set however
+recently it was made.  Specs of one attribute each tie, and a tie goes to the
+newest."
+  (mapc #'face-remap-remove-relative cooked--reverse-screen-remaps)
+  (setq cooked--reverse-screen-remaps
+        (when cooked--reverse-screen
+          (let ((foreground (cooked--screen-color 'foreground))
+                (background (cooked--screen-color 'background)))
+            (list (face-remap-add-relative 'default :foreground background)
+                  (face-remap-add-relative 'default :background foreground)
+                  (face-remap-add-relative 'fringe :background foreground))))))
+
+(defun cooked--set-reverse-screen (on)
+  "Adopt DECSCNM state ON from the drain, remapping only when it changes."
+  (let ((on (and on t)))
+    (unless (eq on cooked--reverse-screen)
+      (setq cooked--reverse-screen on)
+      (cooked--apply-reverse-screen))))
+
+(defun cooked--refresh-reverse-screen ()
+  "Swap the new theme's colors, if the screen is reversed.
+On `cooked-theme-change-hook'."
+  (when cooked--reverse-screen
+    (cooked--apply-reverse-screen)))
+
+(add-hook 'cooked-theme-change-hook #'cooked--refresh-reverse-screen)
 
 ;;;; OSC 51 — the child asking Emacs to do something
 ;;

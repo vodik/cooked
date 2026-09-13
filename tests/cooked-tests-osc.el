@@ -1459,6 +1459,57 @@ does nothing and a query is told nothing is supported."
             (osc "?pointer,text")
             (should (equal (pop replies) '(22 . "0,0")))))))))
 
+(defun cooked-tests--reverse-remap ()
+  "The colors DECSCNM has remapped `default' to, as one plist, or nil.
+Only when both remaps are in force and nothing outranks them."
+  (let ((specs (alist-get 'default face-remapping-alist)))
+    (when (and cooked--reverse-screen-remaps
+               (equal (take 2 specs)
+                      (reverse (mapcar #'cdr (take 2 cooked--reverse-screen-remaps)))))
+      (append (nth 1 specs) (nth 0 specs)))))
+
+(ert-deftest cooked-reverse-screen-swaps-the-default-colors-and-undoes-it ()
+  "DECSCNM from a real child: set, reset, and set again then RIS.
+Each step waits on the child reading a line, so no two of them can land in one
+drain and cancel out before the buffer has seen the first."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "stty raw -echo; printf '\\033[?5h'; read -r _; printf '\\033[?5l'; read -r _; printf '\\033[?5h'; read -r _; printf '\\033c'; sleep 5")
+    (let ((foreground (cooked--default-color 'foreground))
+          (background (cooked--default-color 'background)))
+      (should (cooked-tests--settle #'cooked-tests--reverse-remap))
+      (should (equal (cooked-tests--reverse-remap)
+                     (list :foreground background :background foreground)))
+      (cooked--send-if-live "\n")
+      (should (cooked-tests--settle (lambda () (not cooked--reverse-screen))))
+      (should-not cooked--reverse-screen-remaps)
+      (should-not (alist-get 'default face-remapping-alist))
+      (cooked--send-if-live "\n")
+      (should (cooked-tests--settle #'cooked-tests--reverse-remap))
+      (cooked--send-if-live "\n")
+      (should (cooked-tests--settle (lambda () (not cooked--reverse-screen))))
+      (should-not (alist-get 'default face-remapping-alist)))))
+
+(ert-deftest cooked-reverse-screen-swaps-the-colors-the-child-set ()
+  "An OSC 11 background is the one reversed, before the reversal and after it."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((cooked-allow-color-set t)
+          (cooked--osc-bell-terminated t)
+          (foreground (cooked--default-color 'foreground)))
+      (let ((cooked--osc-code 11))
+        (cooked--osc-color '("#ff0000")))
+      (cooked--set-reverse-screen t)
+      (should (equal (cooked-tests--reverse-remap)
+                     (list :foreground "#ff0000" :background foreground)))
+      ;; Set while reversed: the swap follows it, and still outranks it.
+      (let ((cooked--osc-code 11))
+        (cooked--osc-color '("#00ff00")))
+      (should (equal (cooked-tests--reverse-remap)
+                     (list :foreground "#00ff00" :background foreground)))
+      (cooked--set-reverse-screen nil)
+      (should-not cooked--reverse-screen-remaps)
+      (should (equal (car (alist-get 'default face-remapping-alist))
+                     '(:background "#00ff00"))))))
+
 (ert-deftest cooked-color-scheme-follows-the-rendered-background ()
   "Read from the same background OSC 11 answers with, so a child that reacts to a
 scheme change by querying the background cannot be told two different things."

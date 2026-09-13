@@ -339,6 +339,12 @@ pub struct Delta {
     pub cursor: Cursor,
     pub cursor_visible: bool,
     pub cursor_shape: CursorShape,
+    /// DECSCNM (DEC mode 5): the child wants the whole screen in reverse video.
+    ///
+    /// A level, since what it changes is how every default-coloured cell is drawn.
+    /// Emacs renders it as a swap of the buffer's default foreground and background,
+    /// so nothing in [`Delta::rows`] changes with it and no row is damaged.
+    pub reverse_screen: bool,
     pub alt: bool,
     /// DECCKM: cursor keys must be sent as SS3 (`ESC O A`), not CSI (`ESC [ A`).
     /// ncurses turns this on via `smkx`, and terminfo's `kcuu1` assumes it.
@@ -420,6 +426,7 @@ struct Pending {
     cursor: Cursor,
     cursor_visible: bool,
     cursor_shape: CursorShape,
+    reverse_screen: bool,
     alt: bool,
     app_cursor: bool,
     keys: KeyEncoding,
@@ -438,6 +445,7 @@ impl Pending {
             cursor: state.screen().cursor,
             cursor_visible: state.modes.cursor_visible,
             cursor_shape: state.modes.cursor_shape,
+            reverse_screen: state.modes.reverse_screen,
             alt: state.on_alt,
             app_cursor: state.modes.app_cursor,
             keys: state.key_encoding(),
@@ -1041,6 +1049,18 @@ struct Modes {
     /// cooked quietly rewriting its request. Starts set, because `CSI 0 SP q` is the
     /// power-on style and DECSCUSR defines 0 as a blinking block.
     cursor_blink: bool,
+    /// DEC mode 5, DECSCNM: reverse video across the whole screen.
+    ///
+    /// Screen state the child owns, like SGR 7 over every cell, and so not a repeat of
+    /// the reasoning that ignores mode 12: blink is the user's preference, this is what
+    /// the screen looks like. `flash' in our terminfo is a set, a 100ms pause and a
+    /// reset, which is how vim's `visualbell' reaches it.
+    ///
+    /// Cleared by DECSTR along with everything else here, which the VT510 does not do.
+    /// Kept that way on purpose: `is2' and `rs2' both send DECSTR, and a screen left
+    /// reversed by a child killed mid-flash is exactly what `tput init' and `reset' are
+    /// typed to fix.
+    reverse_screen: bool,
     /// DEC mode 2004. No event: nothing reacts to this. It is read at the one moment it
     /// matters, by [`Term::bracketed_paste`] as a multi-line submission is being framed.
     bracketed_paste: bool,
@@ -1106,6 +1126,7 @@ impl Default for Modes {
             cursor_visible: true,
             cursor_shape: CursorShape::default(),
             cursor_blink: true,
+            reverse_screen: false,
             bracketed_paste: false,
             focus_events: false,
             alt_scroll: false,

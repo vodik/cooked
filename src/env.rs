@@ -251,6 +251,7 @@ symbols! {
     Used => ":used",
     Head => ":head",
     Cursor => ":cursor",
+    Reverse => ":reverse",
     Marks => ":marks",
     Alt => ":alt",
     AppCursor => ":app-cursor",

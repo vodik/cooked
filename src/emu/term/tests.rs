@@ -1271,8 +1271,9 @@ fn decrqm_answers_honestly_about_every_mode() {
         (&b"\x1b[?2048h"[..], 2048, 1),
         (&b"\x1b[?1004h"[..], 1004, 1),
         (&b"\x1b[?1049h"[..], 1049, 1),
+        (&b""[..], 5, 2),
+        (&b"\x1b[?5h"[..], 5, 1),
         // Deliberately not implemented — the drop list, machine readable.
-        (&b""[..], 5, 4),
         (&b""[..], 12, 4),
         (&b""[..], 69, 4),
         (&b""[..], 1034, 4),
@@ -1302,7 +1303,7 @@ fn decrqm_answers_honestly_about_every_mode() {
 /// itself unrecognised, or survive a soft reset that was supposed to clear it.
 #[test]
 fn every_flag_mode_sets_reports_and_soft_resets() {
-    for mode in [1u16, 25, 66, 1004, 1007, 2004, 2031, 2048] {
+    for mode in [1u16, 5, 25, 66, 1004, 1007, 2004, 2031, 2048] {
         let mut t = term(4, 8, b"");
 
         // Whatever it powers on as, DECRQM must not answer "never heard of it".
@@ -1551,6 +1552,37 @@ fn focus_reporting_is_off_until_asked_for() {
     assert!(t.focus_events());
     t.feed(b"\x1b[?1004l");
     assert!(!t.focus_events());
+}
+
+/// DECSCNM reaches Emacs as a level on every drain, not as an event: it is how the
+/// screen is drawn, so the drain after the set says `true' and the one after the reset
+/// says `false', with no row damaged in between.
+#[test]
+fn reverse_screen_rides_the_drain() {
+    let mut t = term(2, 8, b"ab");
+    assert!(!t.drain().reverse_screen);
+    assert!(t.feed(b"\x1b[?5h"), "setting it is an update of its own");
+    let delta = t.drain();
+    assert!(delta.reverse_screen);
+    assert!(delta.rows.is_empty(), "no cell changed");
+    assert!(t.feed(b"\x1b[?5l"), "and so is clearing it");
+    assert!(!t.drain().reverse_screen);
+}
+
+/// `flash' from our terminfo, and the reset `reset' sends: both have to leave the screen
+/// the right way round.
+#[test]
+fn a_reset_puts_the_screen_the_right_way_round() {
+    let mut t = term(2, 8, b"\x1b[?5h");
+    assert!(t.drain().reverse_screen);
+    t.feed(b"\x1bc");
+    assert!(!t.drain().reverse_screen);
+    t.feed(b"\x1b[?5$p");
+    assert!(
+        t.drain()
+            .events
+            .contains(&Event::Reply(b"\x1b[?5;2$y".to_vec()))
+    );
 }
 
 #[test]

@@ -413,6 +413,7 @@ those are.  The list is the same one, for that reason: OTHERS, as
         cooked--kitty-flags (or (plist-get update :kitty-flags) 0)
         cooked--exit (plist-get update :exit))
   (cooked--set-alt (plist-get update :alt))
+  (cooked--set-reverse-screen (plist-get update :reverse))
   (cooked--set-mode (plist-get update :mode)))
 
 (defun cooked--place-point (viewport)
