@@ -460,8 +460,8 @@ fn the_audit_ere_matcher_tells_old_patterns_from_new() {
 ///
 /// Three things are held together. A mode a capability names answers DECRQM with 1
 /// or 2 -- never 0, which would mean the entry claims what the core has never heard
-/// of. A mode on the `# declined-modes:` line answers 4, and no capability may set
-/// one: re-adding `flash` without DECSCNM is the case in point. And a query the
+/// of. A mode on the `# declined-modes:` line answers 4, a mode answering 4 is on the
+/// line, and no capability may set one: re-adding `flash` without DECSCNM is the case in point. And a query the
 /// entry declares gets a reply, since a query claimed and not answered is a child
 /// waiting out its timeout. For `RV` and `XR` that reply must also match the entry's
 /// own `rv` and `xr`, which is what the child compares it against.
@@ -499,6 +499,16 @@ fn terminfo_entry_matches_what_decrqm_says() {
             4,
             "declined mode ?{mode} is not answered 4"
         );
+    }
+    // And the other way: a mode answered 4 and missing from the line is one the entry's
+    // header has not been told about.
+    for mode in (0..=u16::MAX).filter(|&n| crate::emu::term::modes::DecMode::try_from(n).is_ok()) {
+        if decrqm(true, mode) == 4 {
+            assert!(
+                declined.contains(&mode),
+                "?{mode} is answered 4 and is not on the declined-modes line"
+            );
+        }
     }
 
     let capabilities = terminfo_capabilities();
