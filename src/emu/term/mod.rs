@@ -543,8 +543,14 @@ pub(crate) const SIXEL_BODY_LIMIT: usize = 8 << 20;
 /// Emacs reports modifiers only as part of another key.
 pub(crate) const KITTY_HONOURED: u8 = 0b11101;
 
-/// Depth of the kitty keyboard flag stack. Real clients push once around a full-screen
+/// Depth of each kitty keyboard flag stack. Real clients push once around a full-screen
 /// session; anything deeper is a child that never pops.
+///
+/// A push onto a full stack evicts the *oldest* entry rather than being dropped, as the
+/// spec requires. Dropping it was the worse failure: the child's next pop would then take
+/// away the entry *beneath* its push, so from then on every pop restored the wrong flags.
+/// Evicting keeps the pairing exact for the innermost sixteen, which are the ones a child
+/// that is still popping will ever reach.
 const KITTY_STACK_LIMIT: usize = 16;
 
 /// Depth of the XTPUSHSGR pen stack: xterm's own `MAX_SAVED_SGR`. A push past it is
@@ -1098,11 +1104,19 @@ struct Modes {
     app_keypad: bool,
     /// xterm's modifyOtherKeys level, 0-2. Only level 2 changes how we spell keys.
     modify_other_keys: u8,
-    /// Kitty keyboard flags, as pushed; see [`KITTY_HONOURED`] for which are read. The
-    /// protocol keeps a stack, and a real terminal keeps one per screen. A single
-    /// value is enough here — nothing we support cares about the alternate screen's
-    /// keyboard mode differing from the primary's.
-    kitty_keys: Vec<u8>,
+    /// Kitty keyboard flag stacks, as pushed, innermost last: the primary screen's first
+    /// and the alternate screen's second. See [`KITTY_HONOURED`] for which bits are read.
+    ///
+    /// Two because the spec says the screens "must maintain their own, independent,
+    /// keyboard mode stacks", and the reason is the failure one shared stack had. A
+    /// full-screen program pushes after it enters the alternate screen; if it dies
+    /// without popping, the shell it drops back to was left reporting keys in a protocol
+    /// it never asked for. With a stack per screen, `?1049l` is the whole of the cleanup.
+    ///
+    /// Nothing clears the alternate stack on the way back in, which is kitty's own
+    /// behaviour: a program that leaves the alternate screen to run a command and returns
+    /// finds its flags where it left them, as it would in kitty.
+    kitty_keys: [Vec<u8>; 2],
     /// LNM (ANSI mode 20): LF also returns the carriage.
     newline_mode: bool,
     /// XTPUSHSGR's stack, innermost last, at most [`SGR_STACK_LIMIT`] deep.
@@ -1140,7 +1154,7 @@ impl Default for Modes {
             app_cursor: false,
             app_keypad: false,
             modify_other_keys: 0,
-            kitty_keys: Vec::new(),
+            kitty_keys: [Vec::new(), Vec::new()],
             newline_mode: false,
             pen_stack: Vec::new(),
             saved_modes: Vec::new(),

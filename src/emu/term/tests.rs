@@ -3255,6 +3255,71 @@ fn kitty_keyboard_flags_stack() {
     );
 }
 
+/// The spec keeps a stack per screen, so a full-screen program that pushes on the
+/// alternate screen and dies without popping leaves nothing behind for the shell.
+#[test]
+fn each_screen_keeps_its_own_kitty_stack() {
+    let mut t = term(4, 20, b"\x1b[>1u\x1b[?1049h");
+    assert_eq!(
+        t.keys(),
+        KeyEncoding::Legacy,
+        "the alternate screen starts from its own, empty stack"
+    );
+
+    t.feed(b"\x1b[>8u");
+    assert_eq!(t.kitty_flags(), 8);
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(
+        t.kitty_flags(),
+        1,
+        "the push on the alternate screen is gone, the primary's is back"
+    );
+
+    t.feed(b"\x1b[<u");
+    assert_eq!(t.kitty_flags(), 0);
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(
+        t.kitty_flags(),
+        8,
+        "a pop on the primary screen does not reach the alternate one"
+    );
+
+    t.feed(b"\x1bc");
+    assert_eq!(t.kitty_flags(), 0, "RIS empties both stacks");
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.kitty_flags(), 0);
+}
+
+/// A push onto a full stack evicts the oldest entry instead of being dropped, so every
+/// pop still undoes its own push.
+#[test]
+fn a_push_onto_a_full_kitty_stack_evicts_the_oldest() {
+    let mut t = term(4, 20, b"");
+    for flags in 1..=17 {
+        t.feed(format!("\x1b[>{flags}u").as_bytes());
+    }
+    assert_eq!(t.state.kitty_stack().len(), 16);
+    assert_eq!(
+        t.state.kitty_stack().first(),
+        Some(&2),
+        "the first push was evicted"
+    );
+    assert_eq!(
+        t.state.kitty_stack().last(),
+        Some(&17),
+        "the 17th push is on top"
+    );
+
+    t.feed(b"\x1b[<15u");
+    assert_eq!(t.state.kitty_stack().as_slice(), &[2]);
+    t.feed(b"\x1b[<5u");
+    assert!(
+        t.state.kitty_stack().is_empty(),
+        "popping past the bottom empties it"
+    );
+    assert_eq!(t.kitty_flags(), 0);
+}
+
 #[test]
 fn a_kitty_query_is_answered_with_what_is_honoured() {
     // A child that probes and hears nothing back may sit there waiting -- but the

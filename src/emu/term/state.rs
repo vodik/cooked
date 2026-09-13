@@ -33,7 +33,16 @@ impl State {
 
     /// The top of the kitty flag stack, less what cooked does not honour.
     pub(super) fn kitty_flags(&self) -> u8 {
-        self.modes.kitty_keys.last().copied().unwrap_or(0) & KITTY_HONOURED
+        self.kitty_stack().last().copied().unwrap_or(0) & KITTY_HONOURED
+    }
+
+    /// The kitty flag stack of the screen being shown; see [`Modes::kitty_keys`].
+    pub(super) fn kitty_stack(&self) -> &Vec<u8> {
+        &self.modes.kitty_keys[usize::from(self.on_alt)]
+    }
+
+    pub(super) fn kitty_stack_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.modes.kitty_keys[usize::from(self.on_alt)]
     }
 
     pub(super) fn screen(&self) -> &Screen {

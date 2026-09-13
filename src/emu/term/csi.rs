@@ -677,32 +677,38 @@ impl State {
                         .unwrap_or(0) as u8;
                 }
             }
-            // Kitty keyboard protocol: push, pop, and set. The stack is capped because a
-            // child can push without ever popping, and only the top is ever read.
+            // Kitty keyboard protocol: push, pop, and set, each on the stack of the screen
+            // being shown. The stack is capped because a child can push without ever
+            // popping; a push onto a full one evicts the oldest entry, as the spec says,
+            // for the reason given at `KITTY_STACK_LIMIT`.
             (Some(b'>'), 'u') => {
-                if self.modes.kitty_keys.len() < KITTY_STACK_LIMIT {
-                    self.modes.kitty_keys.push(params.arg(0, 0) as u8);
+                let stack = self.kitty_stack_mut();
+                if stack.len() >= KITTY_STACK_LIMIT {
+                    stack.remove(0);
                 }
+                stack.push(params.arg(0, 0) as u8);
             }
             (Some(b'<'), 'u') => {
-                for _ in 0..params.arg(0, 1).max(1) {
-                    self.modes.kitty_keys.pop();
-                }
+                let stack = self.kitty_stack_mut();
+                let keep = stack.len().saturating_sub(params.arg(0, 1).max(1));
+                stack.truncate(keep);
             }
             // The second parameter says how: 1 (the default) replaces the top, 2 sets the
             // given bits and 3 clears them. Read as a plain replace, `CSI = 16 ; 2 u` --
             // "add associated text" -- would have dropped disambiguation on the way.
             (Some(b'='), 'u') => {
                 let flags = params.arg(0, 0) as u8;
-                let top = self.modes.kitty_keys.last().copied().unwrap_or(0);
-                let flags = match params.arg(1, 1) {
+                let mode = params.arg(1, 1);
+                let stack = self.kitty_stack_mut();
+                let top = stack.last().copied().unwrap_or(0);
+                let flags = match mode {
                     2 => top | flags,
                     3 => top & !flags,
                     _ => flags,
                 };
-                match self.modes.kitty_keys.last_mut() {
+                match stack.last_mut() {
                     Some(top) => *top = flags,
-                    None => self.modes.kitty_keys.push(flags),
+                    None => stack.push(flags),
                 }
             }
             // A child that probes and gets no answer may wait for one.
