@@ -141,13 +141,16 @@ numbered_modes! {
 impl DecMode {
     /// The mode whose XTSAVE slot this one shares.
     ///
-    /// xterm keeps one saved value for the tracking modes (`DP_X_MOUSE`) and one for the
-    /// coordinate encodings (`DP_X_EXT_MOUSE`), because each group is one choice: saving
-    /// under 1000 and restoring under 1003 puts back the same tracking. Every other mode
-    /// has a slot of its own.
+    /// xterm keeps one saved value for the tracking modes (`DP_X_MOUSE`), one for the
+    /// coordinate encodings (`DP_X_EXT_MOUSE`) and one for the three alternate screen
+    /// modes (`DP_X_ALTBUF`), because each group is one choice: saving under 1000 and
+    /// restoring under 1003 puts back the same tracking, and saving under 47 and
+    /// restoring under 1049 puts back the same screen. Every other mode has a slot of its
+    /// own.
     pub(super) fn save_slot(self) -> Self {
         match self {
             Self::MouseClick | Self::MouseDrag | Self::MouseMotion => Self::MouseClick,
+            Self::AltScreenLegacy | Self::AltScreen | Self::AltScreenSaveCursor => Self::AltScreen,
             Self::MouseSgr | Self::MouseSgrPixels => Self::MouseSgr,
             other => other,
         }

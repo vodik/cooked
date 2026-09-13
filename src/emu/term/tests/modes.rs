@@ -393,6 +393,26 @@ fn xtsave_slots_are_shared_within_each_mouse_group() {
     assert_eq!(t.mouse().format, MouseFormat::X10);
 }
 
+/// 47, 1047 and 1049 share one slot, as in xterm, and a restore only switches screens:
+/// saved under 47 and restored under 1049 goes back to the primary screen without the
+/// cursor restore a `1049 l` would do, and the primary's cursor is its own.
+#[test]
+fn xtsave_shares_one_slot_across_the_alternate_screen_modes() {
+    let mut t = term(4, 8, b"\x1b[2;2H\x1b7\x1b[3;3H\x1b[?47s\x1b[?47h");
+    assert!(t.drain().levels.alt);
+    t.feed(b"\x1b[?1049r");
+    assert!(!t.drain().levels.alt, "saved under 47, restored under 1049");
+    assert_eq!(
+        (t.screen().cursor().row, t.screen().cursor().col),
+        (2, 2),
+        "no DECRC of the save 47 never made"
+    );
+
+    // And the other way: saved on the alternate screen under 1049, restored under 47.
+    t.feed(b"\x1b[?1049h\x1b[?1049s\x1b[?1049l\x1b[?47r");
+    assert!(t.drain().levels.alt);
+}
+
 /// A restore that changes nothing does nothing -- DECOM's `h`/`l` homes the cursor, and
 /// a restore is not a replay.
 #[test]

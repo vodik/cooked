@@ -399,6 +399,11 @@ impl State {
             return;
         };
         match value {
+            // Which screen, and nothing else: xterm's restore of any of the three only
+            // switches, with no clear and no cursor restore, whichever number made the
+            // save. A 1049 replay would restore a cursor that 47 never saved. Nothing is
+            // lost by it, since each screen here keeps a cursor of its own.
+            SavedMode::Flag(on) if slot == DecMode::AltScreen => self.set_alt(on),
             SavedMode::Flag(on) => {
                 if self.dec_mode_state(mode) != ModeReport::from(on) {
                     self.dec_mode(mode, on);
