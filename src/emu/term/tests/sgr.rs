@@ -47,6 +47,15 @@ fn truecolor_arrives_in_both_spellings() {
 }
 
 #[test]
+fn truecolor_foreground_and_background_share_one_sequence() {
+    let t = term(2, 20, b"\x1b[38;2;255;255;255;48;2;1;2;3;1mx");
+    let style = run_style_at(&t, 0, 0);
+    assert_eq!(style.fg, Color::Rgb(255, 255, 255));
+    assert_eq!(style.bg, Color::Rgb(1, 2, 3));
+    assert!(style.attrs.contains(Attrs::BOLD));
+}
+
+#[test]
 fn indexed_256_color() {
     let t = term(2, 20, b"\x1b[38;5;200mx");
     assert_eq!(run_style_at(&t, 0, 0).fg, Color::Indexed(200));

@@ -137,9 +137,13 @@ fn extended(param: &[u16], iter: &mut ParamsIter<'_>) -> Option<Color> {
         // The colon form permits an empty color-space id: 38:2::R:G:B
         2 => {
             let (a, b, c) = (next()?, next()?, next()?);
-            match (param.len() >= 6, next()) {
-                (true, Some(d)) => Some(Color::Rgb(b as u8, c as u8, d as u8)),
-                _ => Some(Color::Rgb(a as u8, b as u8, c as u8)),
+            // A fourth value only exists in the colon form, where the colour-space id
+            // leads. Asking for one otherwise takes the next parameter, so
+            // `38;2;r;g;b;48;2;r;g;b` swallowed the `48` and read its colour as codes.
+            if param.len() >= 6 {
+                next().map(|d| Color::Rgb(b as u8, c as u8, d as u8))
+            } else {
+                Some(Color::Rgb(a as u8, b as u8, c as u8))
             }
         }
         _ => None,
