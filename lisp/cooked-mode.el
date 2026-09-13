@@ -230,23 +230,6 @@ it reaches live buffers; see `cooked-mode-syntax-table\='."
 
 (cooked--realize-syntax-table)
 
-(defcustom cooked-rejoin-wrapped-lines t
-  "Whether a line the terminal wrapped becomes one buffer line again.
-
-The emulator knows which scrolled-off rows were continuations rather than new
-lines, so history can be stored the way it was written.  Rejoining means yanking
-from the scrollback does not pick up newlines nobody typed, and widening the
-window re-wraps old output for free, because Emacs is doing the wrapping.
-
-Set to nil for the literal thing a terminal shows: one buffer line per screen
-row, hard-wrapped at whatever width was in force when it was printed.
-
-Turning it off also shrinks the scrollback, which is not obvious and is not
-small: `cooked-scrollback-lines\=' counts *buffer* lines, so hard-splitting
-multiplies the line count by the wrap factor and the same cap then retains far
-less text.  Measured at a factor of nine on 800-column output.  See there."
-  :type 'boolean :group 'cooked)
-
 (defun cooked-toggle-rejoin-wrapped-lines ()
   "Flip `cooked-rejoin-wrapped-lines\=', here and for buffers made after this.
 
@@ -282,9 +265,6 @@ from inside one of them."
   "Input set aside while browsing history.
 The one piece of history state that is cooked's: the ring, and the position in
 it, are `comint-input-ring' and `comint-input-ring-index'.")
-(defvar-local cooked--last-size nil
-  "The (ROWS . COLS) last reported to the emulator, or nil.")
-
 ;;;; Where point is while the child has the keyboard
 ;;
 ;; Two halves of one idea, and the reason they are here rather than in

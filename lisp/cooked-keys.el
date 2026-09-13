@@ -900,60 +900,6 @@ The bindings could have been closures over their own bytes, but a keymap full of
 anonymous functions describes itself badly: \\[describe-key] on an overridden key
 should name a command you can look up.")
 
-(defvar-local cooked--foreground-name nil
-  "Cached (PID . NAME) for the child's foreground process group.
-`process-attributes' is not free, and the pid is what says whether it is stale.")
-
-(defun cooked--foreground-program ()
-  "Name of the program in the child's foreground process group, or nil.
-
-Not the session's own command: that is usually a shell, and what the user is
-looking at is whatever the shell put in the foreground.  So a `claude' typed at
-a cooked shell answers `claude' here, which is the case an override has to be
-able to name."
-  (when-let* ((session (cooked--live-session))
-              (pid (cooked--foreground-pid session)))
-    (if (eq pid (car cooked--foreground-name))
-        (cdr cooked--foreground-name)
-      (cdr (setq cooked--foreground-name
-                 (cons pid (alist-get 'comm (process-attributes pid))))))))
-
-(defvar-local cooked--foreground-label nil
-  "Name of the program the child last had in the foreground, for the mode line.
-
-Maintained from `cooked--refresh-keymap\=' rather than read when the mode line
-asks, for the same reason `cooked--attention\=' is: `cooked--mode-line\=' runs
-from an `:eval\=' on every redisplay, and the answer costs a `tcgetpgrp\=' and,
-on a miss, a `process-attributes\=' -- which its own cache exists because it is
-not free.  Recomputing that per frame to render one word would be paying a
-syscall for a string that changes when the policy does.
-
-Every transition worth naming already passes through that refresh: termios
-flipping as a full-screen program takes the tty, and an OSC 133 `C\=' as a
-marked command starts.  What it misses is one quiet command following another
-at an unmarked shell, where nothing changes state -- so the label is a
-best-effort hint, and is allowed to be.")
-
-(defun cooked--update-foreground-label ()
-  "Refresh `cooked--foreground-label\=' for what the child is running now.
-
-Nil when the foreground process group is the session\='s own child -- the shell
-cooked spawned, sitting at its prompt.  Naming it there would put `zsh\=' in the
-mode line for the whole life of every session, which is a word that is always
-true and never news.
-
-Deliberately *not* keyed on who owns the line.  A canonical tty is not a shell
-prompt: `cat\=' and `sleep\=' hold one too, and cooked reads those as `edit\='
-because they genuinely are a line being edited.  Those are exactly the cases
-where the program\='s name is the only thing on screen saying what the line will
-be read by -- so the test is which process, not which policy."
-  (setq cooked--foreground-label
-        (and cooked--session
-             (let ((foreground (cooked--foreground-pid cooked--session)))
-               (and foreground
-                    (not (eql foreground (cooked--pid cooked--session)))
-                    (cooked--foreground-program))))))
-
 (defun cooked--override-applies-p (condition)
   "Whether CONDITION selects what the child is running now."
   (if (functionp condition)
