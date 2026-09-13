@@ -136,7 +136,7 @@ at all."
 
 ;;;; Putting styled text in the buffer
 
-(defun cooked--render-block (block &optional row)
+(defun cooked--render-block (block &optional row origin)
   "Insert BLOCK at point, with its styling and decoration applied.
 
 BLOCK is (TEXT STYLE-SPANS DECO-SPANS LINK-SPANS ROWS), the one shape rendered
@@ -195,6 +195,10 @@ absolute screen position, so phasing every row of a coalesced run against the
 first row\='s origin would draw a doubled column down each row below the first --
 the very seam the per-cell record exists to avoid.
 
+ORIGIN, when given, is where the row begins in the buffer, for a BLOCK that
+replaces only part of a row: its text starts partway along, and the dither phase
+is still measured from the row\='s own start.
+
 Returns the position the text was inserted at."
   (pcase-let ((`(,text ,styles ,decos ,links ,table) block))
     (let ((start (point)))
@@ -229,7 +233,8 @@ Returns the position the text was inserted at."
                 (setq rest (cdr rest)
                       seen (1+ seen)))
               (cooked--apply-deco (+ start from) deco
-                                  (and row (+ start (if rest (caar rest) 0)))
+                                  (and row (or origin
+                                               (+ start (if rest (caar rest) 0))))
                                   (and row (+ row seen))))))
         (when links
           (cooked--render-link-spans start links)))
@@ -868,14 +873,45 @@ would send the ordinary single-row case down the fallback for no reason."
     (cooked--goto-screen-row (+ first count -1) 'extend)
     (line-end-position)))
 
-(defun cooked--render-rows (rows &optional alt relocations)
-  "Rewrite damaged ROWS, an alist of (FIRST . BLOCK).
+(defun cooked--damage-in-order (rows edits)
+  "ROWS and EDITS as one list in ascending row index.
+
+ROWS is the drain\='s `:rows\=', entries of (INDEX . BLOCK), and EDITS its
+`:edits\=', entries of (INDEX CHAR-START CHAR-END LENGTH . BLOCK).  The two are
+told apart by what follows INDEX: a block begins with its text, a string, and an
+edit with a number.  Both arrive in ascending order and never name the same
+row, so this is a merge, and the order it keeps is what lets
+`cooked--render-rows\=' walk forward from the row it placed last.  A drain
+without edits, which is most of them, is returned as it came."
+  (if (null edits)
+      rows
+    (let (out)
+      (while (or rows edits)
+        (push (if (and rows (or (null edits) (< (caar rows) (caar edits))))
+                  (pop rows)
+                (pop edits))
+              out))
+      (nreverse out))))
+
+(defun cooked--render-rows (rows &optional alt relocations edits)
+  "Rewrite damaged ROWS, an alist of (FIRST . BLOCK), and apply EDITS.
 
 Each entry is a *run* of contiguous damaged rows: FIRST is the index of its
 first row, and BLOCK holds them all as one string with newlines between them
 and a row table saying where each begins -- see `cooked--render-block\='.  The
 core coalesces the run; a run of one row is the ordinary case and the same code
 path.
+
+EDITS are the drain\='s `:edits\=', rows of which only part changed, each
+\=(INDEX CHAR-START CHAR-END LENGTH . BLOCK): the characters CHAR-START to
+CHAR-END of the row, or to its end when CHAR-END is nil, are replaced with
+BLOCK\='s text, and anything past LENGTH characters is deleted -- spaces
+`cooked--pad-to-cursor\=' added for a cursor that has moved on, which rewriting
+the whole row would have taken away too.
+A spinner turning then costs one character rather than the row, and the markers
+and overlays on the rest of the row stay where they are.  Everything done to a
+row after it is written happens to an edited row too, measured over the whole
+row: the width guard, the wrap mark, the relocations and the notification.
 
 That is where the win is.  Emacs pays per edit rather than per character, so a
 24-row repaint that was 24 `delete-region\='s and 24 `insert\='s is one of each,
@@ -962,7 +998,7 @@ which has no such seam at all."
         ;; nothing for the question.
         (glyphs-drawn 'unset))
     (save-excursion
-      (pcase-dolist (`(,index . ,block) rows)
+      (pcase-dolist (`(,index . ,entry) (cooked--damage-in-order rows edits))
         ;; The short walk, or the whole one.  `bolp' is the same check
         ;; `cooked--goto-screen-row' makes and for the same reason: `forward-line'
         ;; counts a final line lacking a newline as a line moved, so it can
@@ -977,7 +1013,12 @@ which has no such seam at all."
                             (and (zerop (forward-line (- index last-row)))
                                  (bolp))))
           (cooked--goto-screen-row index 'extend))
-        (let* ((start (point))
+        (let* ((span (and (numberp (car entry)) entry))
+               (block (if span (nthcdr 3 entry) entry))
+               (row-start (point))
+               (start (if span
+                          (min (+ row-start (car span)) (line-end-position))
+                        row-start))
                ;; One entry per row of the run, and the only thing that says how
                ;; many rows this block covers.  A block that arrived without a
                ;; table is one row and no measurements -- nothing the core
@@ -985,7 +1026,11 @@ which has no such seam at all."
                ;; a nil width, which is a `wrong-type-argument' several layers
                ;; from anything that would explain it.
                (table (or (nth 4 block) '((0 nil nil))))
-               (end (cooked--goto-screen-run-end start index (length table))))
+               (end (cond ((null span)
+                           (cooked--goto-screen-run-end start index (length table)))
+                          ((nth 1 span)
+                           (min (+ row-start (nth 1 span)) (line-end-position)))
+                          (t (line-end-position)))))
           ;; The two edits the whole change is about: one deletion spanning the
           ;; run and one insertion of its text.  The trailing newline of the
           ;; run's last row is left where it is -- a damaged row is written into
@@ -997,13 +1042,17 @@ which has no such seam at all."
           (when relocations (cooked--note-relocations relocations start end))
           (delete-region start end)
           (goto-char start)
-          (cooked--render-block block index)
+          (cooked--render-block block index row-start)
+          (when span
+            (let ((keep (+ row-start (nth 2 span))))
+              (when (< keep (line-end-position))
+                (delete-region keep (line-end-position)))))
           ;; Now walk the rows just written.  Two things are per row and neither
           ;; can be done from the offsets in the table: the guard measures a row
           ;; against Emacs' own layout of it, and it can *shorten* the row it is
           ;; given, so every position after it has to be read from the buffer
           ;; rather than computed from where the text was put.
-          (let ((pos start)
+          (let ((pos row-start)
                 (i 0))
             (dolist (row table)
               (pcase-let ((`(,_ ,cells ,uniform ,wrapped ,hash) row))

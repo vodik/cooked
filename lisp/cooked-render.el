@@ -591,7 +591,8 @@ and the region shaped before anything measures it."
          (_ (cooked--apply-shifts (plist-get update :shifts)))
          (rendered (cooked--render-rows (plist-get update :rows)
                                         (plist-get update :alt)
-                                        (cooked-viewport-relocations viewport))))
+                                        (cooked-viewport-relocations viewport)
+                                        (plist-get update :edits))))
     (cooked--apply-levels update cursor)
     ;; Cleared before the events, so a drain that both scrolls and then clears
     ;; stays pinned.

@@ -288,6 +288,30 @@ why there is something here that reads it from there."
       "printf 'Building [   ]\\r'; printf 'Building [==>]\\r'; sleep 30"
     (should (string-match-p "Building \\[==>\\]" (or (cooked-tests-process--tail) "")))))
 
+(ert-deftest cooked-process-tail-follows-a-turning-spinner ()
+  "A cell rewritten in place reaches the tail, although only it is sent.
+
+The core sends the changed character alone, as an edit of the row it last sent,
+and the tail\='s copy of the row has to take the edit at the right offset."
+  (cooked-tests-process--while
+      "printf 'working | done'; sleep 0.3; printf '\\033[9G/'; sleep 30"
+    (should (cooked-tests--settle
+             (lambda () (equal (cooked-tests-process--tail) "working / done"))
+             5))))
+
+(ert-deftest cooked-process-tail-follows-the-rows-a-scroll-moved ()
+  "Rows a scroll moves are not sent again, so the tail moves its own copy.
+
+The rows keep their text as they rise, and the blank row the scroll opens at
+the bottom is not sent either; left unmoved, the tail would show every row one
+line out of date and the last one twice."
+  (let ((cooked-process-rows 3))
+    (cooked-tests-process--while
+        "printf 'a\\nb\\nc'; sleep 0.3; printf '\\nd'; sleep 30"
+      (should (cooked-tests--settle
+               (lambda () (equal (cooked-tests-process--tail) "b\nc\nd"))
+               5)))))
+
 (ert-deftest cooked-process-tail-is-not-buffer-text ()
   "The tail is an overlay, so nothing that parses the buffer can see it.
 

@@ -383,16 +383,33 @@ business and therefore the consumer's, which is the whole of what makes
 
 ;;;; The live tail
 
-(defun cooked-process--remember-rows (rows height)
-  "Fold ROWS, a drain\='s damaged rows, into `cooked-process--live\='.
+(defun cooked-process--remember-rows (rows height &optional shifts edits)
+  "Fold a drain\='s ROWS, SHIFTS and EDITS into `cooked-process--live\='.
 
 HEIGHT is the grid\='s row count, which decides the vector\='s length: a resize
 between drains means the remembered rows describe a screen that no longer
 exists, and the drain that carries the new height re-reports every row of the
-new one."
+new one.
+
+The vector is a copy of the screen kept the way a terminal buffer keeps one,
+because the core sends what changed on that understanding.  SHIFTS move rows
+that did not change, in order and before anything else, and the blank rows a
+shift opens are never sent.  EDITS replace part of a row, by character offsets
+into the text last kept for it.  A row is kept untrimmed for that reason, and
+trimmed only when it is shown."
   (unless (and cooked-process--live
                (eql (length cooked-process--live) height))
     (setq cooked-process--live (make-vector height "")))
+  (pcase-dolist (`(,top ,bottom ,count ,up) shifts)
+    (when (< bottom height)
+      (let ((rows (append (cl-subseq cooked-process--live top (1+ bottom)) nil))
+            (blank (make-list count "")))
+        (setq rows (if up
+                       (append (nthcdr count rows) blank)
+                     (append blank (butlast rows count))))
+        (cl-loop for text in rows
+                 for row from top
+                 do (aset cooked-process--live row text)))))
   (pcase-dolist (`(,first . ,block) rows)
     ;; One entry is a *run* of contiguous damaged rows, joined by newlines --
     ;; see `cooked--render-rows'.  The vector is per screen row, so the run is
@@ -402,14 +419,17 @@ new one."
     (let ((row first))
       (dolist (text (split-string (or (cooked-process--text block) "") "\n"))
         (when (< row height)
-          (aset cooked-process--live row
-                ;; Right-trimmed because a bar is padded out to the terminal's
-                ;; width with spaces, and an overlay is not a screen: nothing
-                ;; here has to reach the right margin, and the trailing run would
-                ;; only widen the window for a line whose visible text stops well
-                ;; short of it.
-                (string-trim-right text)))
-        (setq row (1+ row))))))
+          (aset cooked-process--live row text))
+        (setq row (1+ row)))))
+  (pcase-dolist (`(,row ,char-start ,char-end ,length . ,block) edits)
+    (when (< row height)
+      (let* ((old (aref cooked-process--live row))
+             (len (length old))
+             (new (concat (substring old 0 (min char-start len))
+                          (or (cooked-process--text block) "")
+                          (if char-end (substring old (min char-end len)) ""))))
+        (aset cooked-process--live row
+              (substring new 0 (min length (length new))))))))
 
 (defun cooked-process--tail-text ()
   "`cooked-process--live\=' as text, or nil when the grid says nothing.
@@ -417,7 +437,12 @@ new one."
 Trailing blank rows are dropped rather than shown.  The grid is a fixed eight
 rows and a child using one of them would otherwise be followed by seven blank
 lines, which is a worse answer than no tail at all."
-  (when-let* ((live cooked-process--live)
+  (when-let* ((live (and cooked-process--live
+                         ;; Right-trimmed because a bar is padded out to the
+                         ;; terminal's width with spaces, and an overlay is not a
+                         ;; screen: the trailing run would only widen the window for
+                         ;; a line whose visible text stops well short of it.
+                         (cl-map 'vector #'string-trim-right cooked-process--live)))
               (last (cl-position-if-not #'string-empty-p live :from-end t)))
     (mapconcat #'identity (cl-subseq live 0 (1+ last)) "\n")))
 
@@ -488,7 +513,9 @@ simply stopped filling."
               (when scrolled
                 (cooked-process--emit (cooked-process--text scrolled)))
               (cooked-process--remember-rows (plist-get update :rows)
-                                             (plist-get update :height))
+                                             (plist-get update :height)
+                                             (plist-get update :shifts)
+                                             (plist-get update :edits))
               (if exit
                   (cooked-process--finish host exit)
                 (cooked-process--refresh-tail host)))
