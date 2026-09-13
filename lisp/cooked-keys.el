@@ -65,7 +65,7 @@
 ;;;; Key encoding
 
 (defconst cooked--key-encodings
-  '((up          csi     "A")
+  `((up          csi     "A")
     (down        csi     "B")
     (right       csi     "C")
     (left        csi     "D")
@@ -97,7 +97,7 @@
     ;; explicit fallback is the classical, un-negotiated spelling; terminfo calls
     ;; it `kcbt\='.  It is the one entry whose fallback is not simply its code
     ;; point as a character.
-    (backtab     literal 9 "\e[Z")
+    (backtab     literal 9 ,(cooked--csi "Z"))
     ;; `begin\=' is here for the keypad's centre key rather than for itself: no
     ;; ordinary keyboard sends it, but `kbeg\=' is what terminfo calls that key
     ;; and this is the row `kp-begin\=' falls back to.
@@ -236,7 +236,7 @@ instead."
   (let ((seq (cooked--key-sequence entry))
         (level (cooked--modify-other-level)))
     (cond
-     ((= param 1) (if (memq 'meta mods) (concat "\e" seq) seq))
+     ((= param 1) (cooked--meta-prefixed mods seq))
      ;; A level the child set says which of these keys it covers; a guess from
      ;; `cooked-key-protocol-overrides\=' has no level and covers them all, as it
      ;; always has.
@@ -246,8 +246,7 @@ instead."
      ((eq cooked--keys 'kitty) (cooked--csi "u" code param))
      ;; Nothing negotiated, or a key level 1 leaves alone: meta has a classical
      ;; spelling, the rest do not.
-     ((memq 'meta mods) (concat "\e" seq))
-     (t seq))))
+     (t (cooked--meta-prefixed mods seq)))))
 
 (defun cooked--encode-entry (entry param mods)
   "Bytes for the `cooked--key-encodings\=' row ENTRY, held with MODS.
@@ -371,9 +370,7 @@ leading ESC."
   (let* ((char (if (memq 'shift mods) (upcase char) char))
          (char (or (and (memq 'control mods) (cooked--control-char char))
                    char)))
-    (if (memq 'meta mods)
-        (concat "\e" (string char))
-      (string char))))
+    (cooked--meta-prefixed mods (string char))))
 
 (defun cooked--encode-modify-other (basic mods param level)
   "Encode BASIC held with MODS for a child that negotiated modifyOtherKeys LEVEL.

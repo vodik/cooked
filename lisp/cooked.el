@@ -416,6 +416,15 @@ spelled as a CSI instead, which `cooked--encode-event\=' does for both of the
 cases above."
   (concat "\eO" final))
 
+(defun cooked--meta-prefixed (mods seq)
+  "SEQ as a key held with MODS sends it where no protocol spells the modifier.
+
+That is SEQ with an ESC in front when MODS holds `meta\=', and SEQ unchanged
+otherwise: `M-x\=' is `ESC x\=', which is xterm\='s `metaSendsEscape\=' and the
+only spelling of Meta a child that negotiated nothing can read.  Control and
+Shift are not this function\='s to apply, having already been folded into SEQ."
+  (if (memq 'meta mods) (concat "\e" seq) seq))
+
 (defun cooked--cursor-key (final)
   "Cursor key FINAL spelled the way the child last asked for it.
 

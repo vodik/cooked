@@ -225,11 +225,10 @@ absence."
                  (selected-frame))))
     (cond ((not pixels)
            (cooked--send-if-live
-            (format "\e[9;%d;%dt" (frame-text-lines frame) (frame-text-cols frame))))
+            (cooked--csi "t" 9 (frame-text-lines frame) (frame-text-cols frame))))
           ((display-graphic-p frame)
            (cooked--send-if-live
-            (format "\e[5;%d;%dt"
-                    (frame-text-height frame) (frame-text-width frame)))))))
+            (cooked--csi "t" 5 (frame-text-height frame) (frame-text-width frame)))))))
 
 (defun cooked--osc-cwd (parts)
   "Track the child's directory, from the OSC 7 payload PARTS."
