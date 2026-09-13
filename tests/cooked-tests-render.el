@@ -2424,7 +2424,10 @@ line of `tree\=' output begins `│ \=' and every one of them did it: measured, 
 display properties and 4 hidden spaces over three lines.
 
 So this asserts the *absence* of a decision, which is the only thing that can
-catch it -- the text was never wrong, only what was hung on it."
+catch it -- the text was never wrong, only what was hung on it.  It asks the
+predicate, and then the walk that consults it: the predicate alone stays true
+with the walk no longer asking it, and `│ \=' lines are the regression the walk
+produced."
   (let ((default '(15 5)))
     ;; Exactly its cell in all three dimensions: nothing to improve.
     (should (cooked--glyph-fits-p '(9 15 5 15) 9 default))
@@ -2436,7 +2439,20 @@ catch it -- the text was never wrong, only what was hung on it."
     (should-not (cooked--glyph-fits-p '(9 15 9 15) 9 default))
     ;; Under-filling is not fitting either -- that is the CJK case, which does
     ;; want the slot held at its budgeted width.
-    (should-not (cooked--glyph-fits-p '(15 15 5 15) 18 default))))
+    (should-not (cooked--glyph-fits-p '(15 15 5 15) 18 default)))
+  ;; The walk over `tree\=' output, every glyph measured exactly its cell.
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((inhibit-read-only t)
+          (cooked-glyph-scale-floor 0.5))
+      (insert "│ │ a\n")
+      (cooked-tests--with-glyph-font '(15 5 9)
+        (cl-letf (((symbol-function 'cooked--glyph-metrics)
+                   (lambda (&rest _) '(9 15 5 15))))
+          (cooked--scale-offenders (point-min) (line-end-position)
+                                   (selected-window)
+                                   (make-hash-table :test #'equal))))
+      (should-not (text-property-not-all (point-min) (point-max) 'display nil)))))
 
 (ert-deftest cooked-a-glyph-is-not-claimed-into-a-space-a-box-run-holds ()
   "A blank inside a box-drawing run is part of the run\='s image, not free.
