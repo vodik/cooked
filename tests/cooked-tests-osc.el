@@ -1227,13 +1227,95 @@ tracking where it sits; moving it would corrupt a redisplay cooked cannot see."
       (should (cooked-tests--settle
                (lambda () (equal (car kill-ring) "hello world")))))))
 
-(ert-deftest cooked-osc-52-never-answers-a-read ()
-  "Replying to a query would hand the clipboard to whatever asked."
-  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
-    (let ((kill-ring '("secret")))
-      (cooked--osc-clipboard '("c" "?"))
-      ;; Nothing added, and nothing written back to the child.
+(defmacro cooked-tests--osc-52-replies (query &rest body)
+  "Run BODY in a session that sends QUERY, with `replies' bound to a function.
+
+Calling `replies' with a predicate pumps until the child\='s input satisfies it,
+then pumps a little longer so that a second, unwanted reply has time to land,
+and returns everything the child received."
+  (declare (indent 1))
+  `(let ((out (make-temp-file "cooked-osc52")))
+     (unwind-protect
+         (cooked-tests--with-session (cooked-tests--reply-to ,query out)
+           (cl-flet ((replies (done)
+                       (should (cooked-tests--settle
+                                (lambda () (funcall done (cooked-tests--contents out)))))
+                       (cooked-tests--settle #'ignore 0.3)
+                       (cooked-tests--contents out)))
+             ,@body))
+       (delete-file out))))
+
+(ert-deftest cooked-osc-52-read-is-refused-out-loud-by-default ()
+  "A query blocks its sender -- neovim\='s paste provider waits on it -- so the
+refusal is an empty reply, sent once, and the kill ring is neither read nor
+touched."
+  (cooked-tests--with-kill "secret"
+    (cooked-tests--osc-52-replies "\\033]52;c;?\\007"
+      (should (equal (replies (lambda (s) (not (string-empty-p s))))
+                     "\033]52;c;\007"))
       (should (equal kill-ring '("secret"))))))
+
+(ert-deftest cooked-osc-52-read-echoes-the-terminator-and-the-target ()
+  (cooked-tests--osc-52-replies "\\033]52;p;?\\033\\\\"
+    (should (equal (replies (lambda (s) (string-suffix-p "\033\\" s)))
+                   "\033]52;p;\033\\"))))
+
+(ert-deftest cooked-osc-52-private-round-trips-through-a-cut-buffer ()
+  "Written to `0\=', read back from `0\=', and never near the kill ring --
+while the real clipboard, asked for in the same breath, stays empty."
+  (cooked-tests--with-kill "secret"
+    (let ((cooked-clipboard-read 'private))
+      (cooked-tests--osc-52-replies
+          "\\033]52;0;aGVsbG8=\\007\\033]52;0;?\\007\\033]52;c;?\\007"
+        (should (equal (replies (lambda (s) (string-search "52;c;" s)))
+                       "\033]52;0;aGVsbG8=\007\033]52;c;\007"))
+        (should (equal kill-ring '("secret")))))))
+
+(ert-deftest cooked-osc-52-default-reads-no-cut-buffer-either ()
+  (let ((cooked-clipboard-read nil))
+    (cooked-tests--osc-52-replies "\\033]52;0;aGVsbG8=\\007\\033]52;0;?\\007"
+      (should (equal (replies (lambda (s) (not (string-empty-p s))))
+                     "\033]52;0;\007")))))
+
+(ert-deftest cooked-osc-52-t-answers-from-the-kill-ring-and-primary ()
+  (cooked-tests--with-kill "héllo"
+    (cl-letf (((symbol-function 'gui-get-selection)
+               (lambda (type &rest _) (and (eq type 'PRIMARY) "primary"))))
+      (let ((cooked-clipboard-read t))
+        (cooked-tests--osc-52-replies "\\033]52;c;?\\007\\033]52;p;?\\007"
+          (should (equal (replies (lambda (s) (string-search "52;p;" s)))
+                         (concat "\033]52;c;"
+                                 (base64-encode-string
+                                  (encode-coding-string "héllo" 'utf-8) t)
+                                 "\007\033]52;p;cHJpbWFyeQ==\007"))))))))
+
+(ert-deftest cooked-osc-52-ask-answers-once-whichever-way-it-goes ()
+  "The prompt names the program and runs outside the filter; a no is still a
+reply, and a second query while the prompt is open is refused rather than
+queued behind it."
+  (dolist (yes '(t nil))
+    (cooked-tests--with-kill "secret"
+      (let ((cooked-clipboard-read 'ask)
+            (prompts nil))
+        (cl-letf (((symbol-function 'y-or-n-p)
+                   (lambda (prompt) (push prompt prompts) yes)))
+          (cooked-tests--osc-52-replies "\\033]52;c;?\\007\\033]52;c;?\\007"
+            (should (equal (replies (lambda (s) (>= (cl-count ?\a s) 2)))
+                           (concat "\033]52;c;\007"
+                                   "\033]52;c;" (if yes "c2VjcmV0" "") "\007")))
+            (should (= (length prompts) 1))
+            (should (string-match-p "clipboard" (car prompts)))
+            (should-not cooked--clipboard-prompting)))))))
+
+(ert-deftest cooked-osc-52-cut-buffer-writes-ignore-the-write-switch ()
+  "A cut buffer is the session\='s own, so refusing clipboard writes does not
+refuse it, and filling it does not touch the kill ring."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((cooked-clipboard-write nil)
+          (kill-ring nil))
+      (cooked--osc-clipboard '("3" "aGVsbG8="))
+      (should-not kill-ring)
+      (should (equal (aref cooked--cut-buffers 3) "hello")))))
 
 (ert-deftest cooked-osc-52-can-be-refused-entirely ()
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")

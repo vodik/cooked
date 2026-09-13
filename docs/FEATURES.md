@@ -187,9 +187,16 @@ so pointing it at a repo somebody else chose executes what that repo says to.
 
 Prefer a wrapper of your own over the bare command when the argument is a path.
 
-OSC 52 puts text on the kill ring, up to `cooked-clipboard-max-size`. Clipboard *reads*
-are never answered — replying to a query would hand your clipboard to whatever asked.
-Set `cooked-clipboard-write` to nil to refuse writes too.
+OSC 52 puts text on the kill ring, up to `cooked-clipboard-max-size`; the `p` target
+sets PRIMARY instead. Set `cooked-clipboard-write` to nil to refuse writes.
+
+Clipboard *reads* are always answered, because the program asking waits for the answer —
+neovim's OSC 52 paste provider hangs on a terminal that stays silent. What the answer
+holds is `cooked-clipboard-read`. The default, nil, answers every query with an empty
+payload, since replying with the clipboard would hand it to whatever asked. `private`
+answers only the cut buffers `0`–`7`, which OSC 52 writes fill per buffer and which never
+reach the kill ring. `ask` prompts, naming the program, before handing over the
+clipboard. `t` answers from the kill ring, or PRIMARY for `p`, without asking.
 
 A child asking to resize the terminal (`resize -s`, or `CSI 8 ; rows ; cols t`) is refused
 unless you set `cooked-resize-requests` to `window`. Then the window the child is laid out
