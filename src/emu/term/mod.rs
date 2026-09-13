@@ -333,6 +333,9 @@ pub struct Delta {
     pub app_cursor: bool,
     /// How to spell modified Return, Tab, Escape and Backspace for this child.
     pub keys: KeyEncoding,
+    /// The kitty flags in force, masked to [`KITTY_HONOURED`]: which parts of the kitty
+    /// encoding apply once `keys` says kitty at all.
+    pub kitty_flags: u8,
     pub events: Vec<Event>,
     /// Semantic marks whose position changed during this drain, as `(ID, ANCHOR)`.
     ///
@@ -408,6 +411,7 @@ struct Pending {
     alt: bool,
     app_cursor: bool,
     keys: KeyEncoding,
+    kitty_flags: u8,
 }
 
 impl Pending {
@@ -425,6 +429,7 @@ impl Pending {
             alt: state.on_alt,
             app_cursor: state.modes.app_cursor,
             keys: state.key_encoding(),
+            kitty_flags: state.kitty_flags(),
         }
     }
 }
@@ -498,21 +503,27 @@ pub(crate) const MAX_TEXT_SIZE_LEN: usize = 4096;
 /// result is bounded again, and more tightly, by [`sixel::MAX_PIXELS`].
 pub(crate) const SIXEL_BODY_LIMIT: usize = 8 << 20;
 
-/// Depth of the kitty keyboard flag stack. Real clients push once around a full-screen
-/// session; anything deeper is a child that never pops.
 /// The kitty keyboard flags cooked actually implements.
 ///
-/// Bit 1 alone — "disambiguate escape codes", which is the whole of what the encoder
-/// reads: the key-encoding choice tests `flags & 1` and nothing else looks at the value.
-/// Bits 2 (report event types), 4 (report alternate keys), 8 (report all keys as escape
-/// codes) and 16 (report associated text) are accepted onto the stack and change nothing
-/// about how a key is spelled, so claiming them in a `CSI ? u` reply would be a lie a
-/// child acts on.
+/// Bits 1 (disambiguate escape codes), 4 (report alternate keys), 8 (report all keys as
+/// escape codes) and 16 (report associated text). The encoder is Lisp's, which is where
+/// the key event is; this constant is what crosses to it as `:kitty-flags`, and what a
+/// `CSI ? u` reply is masked with, so the two cannot disagree about what was granted.
 ///
-/// Implementing bit 4 or 16 is worth doing and would widen this constant; until then this
-/// is the one place that has to be told.
-pub(crate) const KITTY_HONOURED: u8 = 1;
+/// Bit 2 (report event types) is the one left out, and for good: Emacs delivers no key
+/// release events and no way to tell a repeat from a press, so a child told yes would
+/// wait for releases that never come. The stack still keeps it -- a pop has to restore
+/// exactly what its matching push put there -- and nothing reads it.
+///
+/// Two parts of what is granted are narrower than kitty's own, both because Emacs does
+/// not have the fact to send. Bit 4's *base layout key* needs the physical key, which an
+/// Emacs event does not carry, so only the shifted key is sent; the protocol makes both
+/// alternates optional. And bit 8's report of a bare modifier press is never sent, since
+/// Emacs reports modifiers only as part of another key.
+pub(crate) const KITTY_HONOURED: u8 = 0b11101;
 
+/// Depth of the kitty keyboard flag stack. Real clients push once around a full-screen
+/// session; anything deeper is a child that never pops.
 const KITTY_STACK_LIMIT: usize = 16;
 
 /// Depth of the XTPUSHSGR pen stack: xterm's own `MAX_SAVED_SGR`. A push past it is
@@ -948,6 +959,11 @@ impl Term {
         self.state.key_encoding()
     }
 
+    /// The kitty keyboard flags in force, as far as cooked honours them.
+    pub fn kitty_flags(&self) -> u8 {
+        self.state.kitty_flags()
+    }
+
     /// Test-only: send every character down the per-character print path.
     ///
     /// The handle a test reaches for to make one `Term` print the slow way while another
@@ -1040,8 +1056,8 @@ struct Modes {
     app_keypad: bool,
     /// xterm's modifyOtherKeys level, 0-2. Only level 2 changes how we spell keys.
     modify_other_keys: u8,
-    /// Kitty keyboard flags. Bit 0 ("disambiguate escape codes") is the one that matters;
-    /// the protocol keeps a stack, and a real terminal keeps one per screen. A single
+    /// Kitty keyboard flags, as pushed; see [`KITTY_HONOURED`] for which are read. The
+    /// protocol keeps a stack, and a real terminal keeps one per screen. A single
     /// value is enough here — nothing we support cares about the alternate screen's
     /// keyboard mode differing from the primary's.
     kitty_keys: Vec<u8>,

@@ -280,6 +280,161 @@ and saying so means dispatching on that row from inside this one."
       (`(,_ literal ,code . ,_)
        (cooked--encode-literal entry code param mods)))))
 
+;;;; The kitty keyboard protocol, as negotiated
+
+(defconst cooked--kitty-keypad-codes
+  '((kp-0 . 57399) (kp-1 . 57400) (kp-2 . 57401) (kp-3 . 57402)
+    (kp-4 . 57403) (kp-5 . 57404) (kp-6 . 57405) (kp-7 . 57406)
+    (kp-8 . 57407) (kp-9 . 57408) (kp-decimal . 57409) (kp-divide . 57410)
+    (kp-multiply . 57411) (kp-subtract . 57412) (kp-add . 57413)
+    (kp-enter . 57414) (kp-separator . 57416) (kp-left . 57417)
+    (kp-right . 57418) (kp-up . 57419) (kp-down . 57420) (kp-prior . 57421)
+    (kp-next . 57422) (kp-home . 57423) (kp-end . 57424) (kp-insert . 57425)
+    (kp-delete . 57426) (kp-begin . 57427))
+  "The private-use code point kitty gives each keypad key.
+
+From the functional key table in kitty's keyboard protocol document.  The
+keypad is the one part of `cooked--key-encodings\=' the protocol spells
+differently from the legacy terminal: a keypad key is a key of its own there,
+not the main-keyboard key it stands in for, so that `kp-home\=' and `home\='
+can be told apart.")
+
+(defun cooked--kitty-flag-p (bit)
+  "Whether the child's kitty flags include BIT."
+  (/= 0 (logand cooked--kitty-flags bit)))
+
+(defun cooked--kitty-negotiated-p ()
+  "Whether the child asked for the kitty protocol itself, so all of it applies.
+
+Bit 1 or bit 8 -- the core's own test, in `State::key_encoding\=', and for the
+same reason: reporting every key as an escape code disambiguates them all by
+construction.  What it rules out is a `kitty\=' that nobody negotiated, which
+`cooked-key-protocol-overrides\=' binds for a program that reads the protocol
+without ever asking for it.  That guess re-spells only the `literal\=' keys, as
+it always has: a Claude Code sent Escape as `ESC [ 27 u\=' on the strength of a
+match against its process name would be the rubbish-in-the-input case the
+negotiation exists to prevent."
+  (and (eq cooked--keys 'kitty)
+       (cooked--kitty-flag-p #b1001)))
+
+(defun cooked--kitty-text-p (char)
+  "Whether CHAR may be reported as associated text: not a C0 or C1 control."
+  (and char (>= char #x20) (not (<= #x7f char #x9f))))
+
+(defun cooked--kitty-csi-u (code param &optional shifted text)
+  "The kitty sequence for key CODE held with modifier parameter PARAM.
+
+That is `ESC [ CODE : SHIFTED ; PARAM ; TEXT u\=', with each optional part left
+out when it has nothing to say: SHIFTED is the shifted key bit 4 reports, and
+TEXT the character bit 16 reports.  PARAM is omitted at 1, which is its default,
+unless TEXT follows it -- then its field is left empty rather than dropped, so
+that the text is not read as a modifier.  kitty's own example is shift+a,
+`ESC [ 97 ; 2 ; 65 u\=', and the same key with no modifier would be
+`ESC [ 97 ; ; 97 u\='.
+
+The base-layout key, which the protocol puts after SHIFTED, is never sent: it
+names the physical key on a US layout, and an Emacs event carries no physical
+key.  The protocol makes both alternates optional."
+  (let ((key (if shifted (format "%d:%d" code shifted) code)))
+    (cond (text (cooked--csi "u" key (if (> param 1) param "") text))
+          ((> param 1) (cooked--csi "u" key param))
+          (t (cooked--csi "u" key)))))
+
+(defun cooked--encode-kitty-char (char mods param)
+  "Encode the text key CHAR, held with MODS, for a child that negotiated kitty.
+
+CHAR is the unshifted key, as `event-basic-type\=' reports it, and PARAM the
+modifier parameter.  Plain text, shifted or not, goes as the text itself unless
+bit 8 asked for every key as an escape code; Control or Meta makes it an escape
+code under bit 1 alone, which is what disambiguation means for a text key.
+kitty's table for `i\=' is the whole of the rule: `i\=', `I\=', then
+`ESC [ 105 ; 3 u\=' for alt, `105 ; 5\=' for ctrl, `105 ; 4\=' for shift+alt,
+`105 ; 7\=' for ctrl+alt and `105 ; 6\=' for ctrl+shift.
+
+Associated text is reported only where the key still produces text, which
+Control and Meta both prevent.  The shifted key is reported only with Shift
+held and only where shifting changed something.  Both are narrower than kitty
+for a key whose shifted glyph is not its upper case: Emacs reports shift+1 as a
+bare `!\=' with no Shift, so it is sent as the key `!\=', and nothing here can
+recover that it was a `1\=' -- a fact about the keyboard layout that an Emacs
+event does not carry."
+  (let* ((ctrl (memq 'control mods))
+         (meta (memq 'meta mods))
+         (shift (memq 'shift mods))
+         (text (if shift (upcase char) char)))
+    (if (and (not ctrl) (not meta) (not (cooked--kitty-flag-p 8)))
+        (string text)
+      (cooked--kitty-csi-u
+       char param
+       (and (cooked--kitty-flag-p 4) shift (/= text char) text)
+       (and (cooked--kitty-flag-p 16) (not ctrl) (not meta)
+            (cooked--kitty-text-p text) text)))))
+
+(defun cooked--encode-kitty-entry (entry mods param)
+  "Encode the `cooked--key-encodings\=' row ENTRY for a negotiated kitty child.
+
+MODS and PARAM are as for `cooked--encode-entry\=', which this departs from in
+four places, each of them the protocol's rule that a key which produces no
+text is `CSI number ; modifier u\=' or `CSI 1 ; modifier FINAL\=':
+
+  Escape is always an escape code, `ESC [ 27 u\=' unmodified.  Return, Tab and
+  Backspace stay bare bytes unmodified, so that `reset\=' can still be typed
+  after a program dies with the mode on -- until bit 8, which takes that away
+  too.
+  F1-F4 and the cursor keys drop SS3, even under DECCKM and even unmodified.
+  F3 is `ESC [ 13 ~\=', since `ESC [ 1 ; MOD R\=' is a cursor position report.
+  The keypad is a set of keys of its own; see `cooked--kitty-keypad-codes\='."
+  (let ((modified (> param 1))
+        (all (cooked--kitty-flag-p 8)))
+    (pcase entry
+      (`(escape . ,_) (cooked--kitty-csi-u 27 param))
+      (`(,_ literal ,code . ,_)
+       (if (or modified all)
+           (cooked--kitty-csi-u code param)
+         (cooked--key-sequence entry)))
+      (`(f3 . ,_) (if modified (cooked--csi "~" 13 param) (cooked--csi "~" 13)))
+      (`(,_ ,(or 'csi 'ss3) ,final)
+       (if modified (cooked--csi final 1 param) (cooked--csi final)))
+      (`(,key keypad ,_ ,plain)
+       (let ((code (alist-get key cooked--kitty-keypad-codes))
+             (char (and (stringp plain) (aref plain 0))))
+         (if (and (cooked--kitty-text-p char) (not all)
+                  (not (memq 'control mods)) (not (memq 'meta mods)))
+             ;; A printable character on the cap types that character, shifted
+             ;; or not, as a main-keyboard text key would.
+             plain
+           (cooked--kitty-csi-u
+            code param nil
+            (and (cooked--kitty-flag-p 16) (cooked--kitty-text-p char)
+                 (not (memq 'control mods)) (not (memq 'meta mods))
+                 char)))))
+      (_ (cooked--encode-entry entry param mods)))))
+
+(defun cooked--kitty-event (event basic mods)
+  "BASIC and MODS for EVENT as the kitty protocol would name the key, or nil.
+
+A cons (BASIC . MODS), or nil for a key that has to go as the byte it arrived
+as.  Emacs names a control character by the letter it is typed with, so a TAB
+read from a terminal frame is `C-i\=' -- and the kitty protocol, told that,
+sends `ESC [ 105 ; 5 u\=' for every Tab.  A graphical frame reports the key as
+`tab\=' and this does not arise; a terminal frame cannot tell the two apart, and
+every terminal before kitty sent Tab for both, so the key is taken to be Tab.
+Return and Backspace are the same case, and NUL is Control plus the space bar
+rather than Control plus `@\='.
+
+ESC is the exception that is left alone.  On a terminal frame it is both the
+Escape key and the first half of every Meta chord, which arrive as two separate
+keys; sent as `ESC [ 27 u\=', a Meta chord would reach the child as an Escape
+followed by a letter.  The graphical frame, where Escape is a key of its own,
+reports it as `escape\=' and gets the protocol's spelling."
+  (pcase (and (integerp event) (logand event (1- (ash 1 22))))
+    (27 nil)
+    ((and code (or 9 13 127))
+     (cons (pcase code (9 'tab) (13 'return) (127 'backspace))
+           (remq 'control mods)))
+    (0 (cons ?\s mods))
+    (_ (cons basic mods))))
+
 (defun cooked--encode-event (event)
   "Bytes the child should receive for EVENT, or nil.
 
@@ -308,14 +463,28 @@ every capital into a lowercase letter."
          ;; point that no modifier ever reaches.
          (mods (if (eq basic 'backtab) (cons 'shift mods) mods))
          (param (cooked--modifier-param mods)))
-    (if-let* ((entry (assq basic cooked--key-encodings)))
-        (cooked--encode-entry entry param mods)
-      ;; Not in the table at all: a plain character, or nothing we can spell.
-      (when (characterp basic)
-        (let ((char (cond ((memq 'control mods) (logand (upcase basic) #x1f))
-                          ((memq 'shift mods) (upcase basic))
-                          (t basic))))
-          (if (memq 'meta mods) (concat "\e" (string char)) (string char)))))))
+    (pcase (and (cooked--kitty-negotiated-p)
+                (cooked--kitty-event event basic mods))
+      ;; The kitty protocol proper, when the child asked for it: every key it
+      ;; spells differently goes through here, and the rest is deferred back to
+      ;; `cooked--encode-entry' from inside.
+      (`(,basic . ,mods)
+       (let ((param (cooked--modifier-param mods)))
+         (if-let* ((entry (assq basic cooked--key-encodings)))
+             (cooked--encode-kitty-entry entry mods param)
+           (when (characterp basic)
+             (cooked--encode-kitty-char basic mods param)))))
+      (_
+       (if-let* ((entry (assq basic cooked--key-encodings)))
+           (cooked--encode-entry entry param mods)
+         ;; Not in the table at all: a plain character, or nothing we can spell.
+         (when (characterp basic)
+           (let ((char (cond ((memq 'control mods) (logand (upcase basic) #x1f))
+                             ((memq 'shift mods) (upcase basic))
+                             (t basic))))
+             (if (memq 'meta mods)
+                 (concat "\e" (string char))
+               (string char)))))))))
 
 (defun cooked-send-key ()
   "Send the key that invoked this command straight to the child.

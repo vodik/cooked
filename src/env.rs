@@ -255,6 +255,7 @@ symbols! {
     Alt => ":alt",
     AppCursor => ":app-cursor",
     Keys => ":keys",
+    KittyFlags => ":kitty-flags",
     Mode => ":mode",
     Images => ":images",
     Links => ":links",

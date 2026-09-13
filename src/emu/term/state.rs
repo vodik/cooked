@@ -19,15 +19,21 @@ impl State {
 
     /// Kitty wins when both are on: a child that pushed kitty flags is speaking the newer
     /// protocol deliberately, and libraries that enable both expect kitty to take effect.
+    ///
+    /// Bit 8 turns kitty on as surely as bit 1 does -- reporting every key as an escape
+    /// code disambiguates them all by construction -- while 4 and 16 alone do not: each
+    /// only adds a field to an escape code something else already chose to send.
     pub(super) fn key_encoding(&self) -> KeyEncoding {
-        match (
-            self.modes.kitty_keys.last().copied().unwrap_or(0),
-            self.modes.modify_other_keys,
-        ) {
-            (flags, _) if flags & 1 != 0 => KeyEncoding::Kitty,
+        match (self.kitty_flags(), self.modes.modify_other_keys) {
+            (flags, _) if flags & 0b1001 != 0 => KeyEncoding::Kitty,
             (_, 2) => KeyEncoding::ModifyOtherKeys,
             _ => KeyEncoding::Legacy,
         }
+    }
+
+    /// The top of the kitty flag stack, less what cooked does not honour.
+    pub(super) fn kitty_flags(&self) -> u8 {
+        self.modes.kitty_keys.last().copied().unwrap_or(0) & KITTY_HONOURED
     }
 
     pub(super) fn screen(&self) -> &Screen {
@@ -322,6 +328,7 @@ impl State {
         );
         let cursor_shape = self.modes.cursor_shape;
         let keys = self.key_encoding();
+        let kitty_flags = self.kitty_flags();
         let screen = self.screen();
         Delta {
             images,
@@ -350,6 +357,7 @@ impl State {
             alt,
             app_cursor,
             keys,
+            kitty_flags,
             events,
             marks,
         }

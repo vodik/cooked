@@ -2988,28 +2988,38 @@ fn kitty_keyboard_flags_stack() {
 fn a_kitty_query_is_answered_with_what_is_honoured() {
     // A child that probes and hears nothing back may sit there waiting -- but the
     // answer is a claim about this terminal, not an echo of the question.
-    //
-    // This asserted `?5u' for a pushed 5, which is bits 1 and 4: disambiguate escape
-    // codes, which cooked implements, and report alternate keys, which it does not.
-    // Bits 2, 4, 8 and 16 are stored and change nothing about how a key is spelled, so
-    // a child that asks for alternate keys, is told yes, and then encodes for them has
-    // been actively misled -- where a child told no falls back to a spelling that
-    // works. Answering less than was asked is the recoverable failure, and the old
-    // assertion pinned the other one.
-    let mut t = term(4, 20, b"\x1b[>5u\x1b[?u");
-    assert!(
-        t.drain()
+    let reply = |input: &[u8]| {
+        term(4, 20, input)
+            .drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?1u".to_vec()))
+            .into_iter()
+            .find_map(|e| match e {
+                Event::Reply(r) => Some(r),
+                _ => None,
+            })
+    };
+
+    // Bits 1, 4, 8 and 16 are honoured and come back as asked.
+    assert_eq!(reply(b"\x1b[>5u\x1b[?u"), Some(b"\x1b[?5u".to_vec()));
+    assert_eq!(reply(b"\x1b[>29u\x1b[?u"), Some(b"\x1b[?29u".to_vec()));
+
+    // Bit 2, report event types, is not: Emacs delivers no releases, and a child told
+    // it would get them waits for events that never come. Told no, it falls back to a
+    // spelling that works -- answering less than was asked is the recoverable failure.
+    assert_eq!(reply(b"\x1b[>3u\x1b[?u"), Some(b"\x1b[?1u".to_vec()));
+    assert_eq!(reply(b"\x1b[>31u\x1b[?u"), Some(b"\x1b[?29u".to_vec()));
+
+    // The reply is exactly the constant's mask, so widening one widens the other.
+    assert_eq!(
+        reply(b"\x1b[>255u\x1b[?u"),
+        Some(format!("\x1b[?{KITTY_HONOURED}u").into_bytes())
     );
 
     // The stack still carries what the child asked for: a pop has to restore exactly
     // what its matching push put there, which is the child's business and not ours.
-    let mut t = term(4, 20, b"\x1b[>5u\x1b[>1u\x1b[<1u\x1b[?u");
-    assert!(
-        t.drain()
-            .events
-            .contains(&Event::Reply(b"\x1b[?1u".to_vec()))
+    assert_eq!(
+        reply(b"\x1b[>7u\x1b[>1u\x1b[<1u\x1b[?u"),
+        Some(b"\x1b[?5u".to_vec())
     );
 }
 
@@ -3153,6 +3163,47 @@ fn reset_clears_the_pen_stack_and_saved_modes() {
     let mut t = term(2, 8, b"\x1b[?1006s\x1b[?1006h");
     t.feed(b"\x1bc\x1b[?1006h\x1b[?1006r");
     assert!(t.mouse().sgr());
+}
+
+#[test]
+fn kitty_flags_reach_the_drain() {
+    // The encoder is Lisp's, so the flags have to cross with the drain -- and a change
+    // of flags alone, with the encoding still kitty either side, is still a change.
+    let mut t = term(4, 20, b"\x1b[>1u");
+    assert_eq!(t.drain().kitty_flags, 1);
+    assert!(t.feed(b"\x1b[=29u"), "a flag change alone is an update");
+    let d = t.drain();
+    assert_eq!(d.keys, KeyEncoding::Kitty);
+    assert_eq!(d.kitty_flags, 29);
+    // Masked on the way out, as the query reply is.
+    t.feed(b"\x1b[=2;2u");
+    assert_eq!(t.kitty_flags(), 29);
+}
+
+#[test]
+fn kitty_report_all_keys_turns_kitty_on_by_itself() {
+    // Reporting every key as an escape code disambiguates by construction, so bit 8
+    // needs no bit 1 beside it.
+    assert_eq!(term(4, 20, b"\x1b[>8u").keys(), KeyEncoding::Kitty);
+    // Alternate keys and associated text only add fields to an escape code something
+    // else chose to send; alone, nothing is sent as one, and the spelling is legacy.
+    assert_eq!(term(4, 20, b"\x1b[>4u").keys(), KeyEncoding::Legacy);
+    assert_eq!(term(4, 20, b"\x1b[>16u").keys(), KeyEncoding::Legacy);
+    assert_eq!(term(4, 20, b"\x1b[>20u").kitty_flags(), 20);
+}
+
+#[test]
+fn kitty_set_honours_its_mode() {
+    // `CSI = FLAGS ; MODE u`: 1 replaces, 2 sets bits, 3 clears them.
+    let mut t = term(4, 20, b"\x1b[>1u");
+    t.feed(b"\x1b[=16;2u");
+    assert_eq!(t.kitty_flags(), 17, "mode 2 adds to what was there");
+    t.feed(b"\x1b[=1;3u");
+    assert_eq!(t.kitty_flags(), 16, "mode 3 takes away only what it names");
+    t.feed(b"\x1b[=4u");
+    assert_eq!(t.kitty_flags(), 4, "mode 1, the default, replaces");
+    t.feed(b"\x1b[=9;1u");
+    assert_eq!(t.kitty_flags(), 9);
 }
 
 #[test]

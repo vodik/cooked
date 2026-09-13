@@ -410,6 +410,7 @@ those are.  The list is the same one, for that reason: OTHERS, as
                                         :head (plist-get update :head))
         cooked--app-cursor (plist-get update :app-cursor)
         cooked--keys (plist-get update :keys)
+        cooked--kitty-flags (or (plist-get update :kitty-flags) 0)
         cooked--exit (plist-get update :exit))
   (cooked--set-alt (plist-get update :alt))
   (cooked--set-mode (plist-get update :mode)))

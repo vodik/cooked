@@ -2627,6 +2627,154 @@ protocol without negotiating (Claude Code) is no longer listening for that."
     (setq cooked--keys nil)
     (should (equal (cooked--override-bytes-for :kitty 'backtab) "\e[9;2u"))))
 
+(defmacro cooked-tests--with-kitty-flags (flags &rest body)
+  "Run BODY as if the child had pushed kitty FLAGS, which cooked honours."
+  (declare (indent 1))
+  `(let ((cooked--keys 'kitty)
+         (cooked--kitty-flags ,flags)
+         (cooked--app-cursor nil))
+     ,@body))
+
+(ert-deftest cooked-kitty-disambiguate-follows-kittys-text-key-table ()
+  "Bit 1 against the example table in kitty's keyboard protocol document.
+
+Before flags 4, 8 and 16 were honoured this bit covered only the `literal'
+keys, which left Control and Meta chords -- the ambiguity the bit is named for
+-- spelled exactly as a legacy terminal spells them.
+
+The table's key is `i', which is the one letter whose Control chords cannot be
+checked here: Emacs folds C-i into TAB before any keymap sees it, on either
+kind of frame, and a terminal frame's Tab key is the same byte.  Taking it as
+Tab is what every terminal before kitty did, so those columns are checked on
+`c' instead, where the table's rule is the same rule."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (cooked-tests--with-kitty-flags 1
+      (should (equal (cooked--encode-event ?i) "i"))
+      (should (equal (cooked--encode-event ?I) "I"))
+      (should (equal (cooked--encode-event ?\M-i) "\e[105;3u"))
+      (should (equal (cooked--encode-event ?\M-I) "\e[105;4u"))
+      (should (equal (cooked--encode-event ?\C-c) "\e[99;5u"))
+      (should (equal (cooked--encode-event ?\C-\M-c) "\e[99;7u"))
+      (should (equal (cooked--encode-event ?\C-\S-c) "\e[99;6u"))
+      (should (equal (cooked--encode-event ?\C-i) "\t"))
+      (should (equal (cooked--encode-event ?\C-\s) "\e[32;5u"))
+      ;; Escape is always an escape code; Return, Tab and Backspace stay bare
+      ;; unmodified, so `reset' can still be typed after a crash.
+      (should (equal (cooked--encode-event 'escape) "\e[27u"))
+      (should (equal (cooked--encode-event 'M-escape) "\e[27;3u"))
+      (should (equal (cooked--encode-event 'return) "\r"))
+      (should (equal (cooked--encode-event 'tab) "\t"))
+      (should (equal (cooked--encode-event 'backspace) "\177"))
+      (should (equal (cooked--encode-event 'S-return) "\e[13;2u"))
+      (should (equal (cooked--encode-event 'backtab) "\e[9;2u"))
+      ;; A terminal frame's TAB, CR and DEL are the keys, not C-i, C-m and C-?;
+      ;; its ESC is half of every Meta chord and goes as the byte.
+      (should (equal (cooked--encode-event 9) "\t"))
+      (should (equal (cooked--encode-event 13) "\r"))
+      (should (equal (cooked--encode-event 127) "\177"))
+      (should (equal (cooked--encode-event 27) "\e"))
+      ;; Non-text keys leave SS3 behind, DECCKM or not, and F3 is not a CPR.
+      (let ((cooked--app-cursor t))
+        (should (equal (cooked--encode-event 'up) "\e[A"))
+        (should (equal (cooked--encode-event 'f1) "\e[P")))
+      (should (equal (cooked--encode-event 'C-up) "\e[1;5A"))
+      (should (equal (cooked--encode-event 'f3) "\e[13~"))
+      (should (equal (cooked--encode-event 'S-f3) "\e[13;2~"))
+      (should (equal (cooked--encode-event 'f5) "\e[15~"))
+      (should (equal (cooked--encode-event 'C-next) "\e[6;5~"))
+      ;; The keypad is keys of its own: text where the cap has text, codes
+      ;; where it does not.
+      (should (equal (cooked--encode-event 'kp-1) "1"))
+      (should (equal (cooked--encode-event 'C-kp-1) "\e[57400;5u"))
+      (should (equal (cooked--encode-event 'kp-home) "\e[57423u"))
+      (should (equal (cooked--encode-event 'kp-enter) "\e[57414u")))))
+
+(ert-deftest cooked-kitty-alternate-keys-report-the-shifted-key ()
+  "Bit 4: the shifted key after a colon, and only with Shift held.
+
+kitty's document: ctrl+shift+a is `CSI 97 : 65 ; 6 u', never `CSI 65'.  The
+base-layout key is never sent -- an Emacs event has no physical key to name --
+which the protocol allows."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (cooked-tests--with-kitty-flags #b101
+      (should (equal (cooked--encode-event ?\C-\S-a) "\e[97:65;6u"))
+      (should (equal (cooked--encode-event ?\M-A) "\e[97:65;4u"))
+      ;; No Shift, no shifted key.
+      (should (equal (cooked--encode-event ?\C-a) "\e[97;5u"))
+      ;; Only on a key that was going to be an escape code anyway.
+      (should (equal (cooked--encode-event ?A) "A"))
+      ;; Not on a key that produces no text.
+      (should (equal (cooked--encode-event 'S-return) "\e[13;2u"))
+      (should (equal (cooked--encode-event 'S-up) "\e[1;2A")))
+    ;; Without the bit, the same chord has no alternate.
+    (cooked-tests--with-kitty-flags 1
+      (should (equal (cooked--encode-event ?\C-\S-a) "\e[97;6u")))))
+
+(ert-deftest cooked-kitty-report-all-keys-sends-text-as-escape-codes ()
+  "Bit 8: every key an escape code, Return, Tab and Backspace included.
+
+And bit 16 beside it, which is the only way the text survives: kitty's
+document gives shift+a as `CSI 97 ; 2 ; 65 u'."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (cooked-tests--with-kitty-flags #b1000
+      (should (equal (cooked--encode-event ?a) "\e[97u"))
+      (should (equal (cooked--encode-event ?A) "\e[97;2u"))
+      (should (equal (cooked--encode-event 'return) "\e[13u"))
+      (should (equal (cooked--encode-event 'tab) "\e[9u"))
+      (should (equal (cooked--encode-event 'backspace) "\e[127u"))
+      (should (equal (cooked--encode-event 9) "\e[9u"))
+      (should (equal (cooked--encode-event 'escape) "\e[27u"))
+      (should (equal (cooked--encode-event 'kp-1) "\e[57400u"))
+      (should (equal (cooked--encode-event 'up) "\e[A")))
+    (cooked-tests--with-kitty-flags #b11000
+      (should (equal (cooked--encode-event ?A) "\e[97;2;65u"))
+      (should (equal (cooked--encode-event ?a) "\e[97;;97u"))
+      (should (equal (cooked--encode-event ?é) "\e[233;;233u"))
+      (should (equal (cooked--encode-event 'kp-1) "\e[57400;;49u"))
+      ;; Control prevents text, and keys that produce none carry none: kitty's
+      ;; Enter with every flag on is `CSI 13 u'.
+      (should (equal (cooked--encode-event ?\C-a) "\e[97;5u"))
+      (should (equal (cooked--encode-event 'return) "\e[13u"))
+      (should (equal (cooked--encode-event 'kp-enter) "\e[57414u")))
+    ;; Everything at once.
+    (cooked-tests--with-kitty-flags #b11101
+      (should (equal (cooked--encode-event ?A) "\e[97:65;2;65u"))
+      (should (equal (cooked--encode-event ?\C-\S-a) "\e[97:65;6u")))))
+
+(ert-deftest cooked-kitty-associated-text-alone-changes-nothing ()
+  "Bit 16 is an enhancement to bit 8 and undefined without it.
+
+Under bit 1 alone, every key that produces text is sent as that text, and
+every escape code it does send is for a chord Control or Meta has already
+taken the text from -- so there is nowhere for the field to go."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (cooked-tests--with-kitty-flags #b10001
+      (should (equal (cooked--encode-event ?a) "a"))
+      (should (equal (cooked--encode-event ?A) "A"))
+      (should (equal (cooked--encode-event ?\M-a) "\e[97;3u")))))
+
+(ert-deftest cooked-kitty-guess-re-spells-only-the-literal-keys ()
+  "`cooked-key-protocol-overrides' binds `kitty' with no flags behind it.
+
+That is a guess about a program that never asked, and it must go on meaning
+what it meant before the protocol proper was implemented: Shift+Return and
+Shift+Tab re-spelled, Escape and every Control chord untouched."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (cooked-tests--with-kitty-flags 0
+      (should-not (cooked--kitty-negotiated-p))
+      (should (equal (cooked--encode-event 'S-return) "\e[13;2u"))
+      (should (equal (cooked--encode-event 'escape) "\e"))
+      (should (equal (cooked--encode-event ?\C-a) "\C-a"))
+      (should (equal (cooked--encode-event ?\M-x) "\ex")))))
+
+(ert-deftest cooked-kitty-flags-arrive-with-the-drain ()
+  "The flags a child pushes reach `cooked--kitty-flags', masked to what is
+honoured: bit 2 asks for release events Emacs never delivers."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\033[>31u'; sleep 5")
+    (should (cooked-tests--settle (lambda () (eq cooked--keys 'kitty))))
+    (should (= cooked--kitty-flags 29))))
+
 (ert-deftest cooked-key-override-actions-encode-to-their-bytes ()
   "Every `cooked-key-overrides' action form, and the reason each one exists:
 nobody should have to write `ESC [ 13;2 u' out by hand to bind Shift+Return."

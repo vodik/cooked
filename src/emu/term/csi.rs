@@ -688,8 +688,17 @@ impl State {
                     self.modes.kitty_keys.pop();
                 }
             }
+            // The second parameter says how: 1 (the default) replaces the top, 2 sets the
+            // given bits and 3 clears them. Read as a plain replace, `CSI = 16 ; 2 u` --
+            // "add associated text" -- would have dropped disambiguation on the way.
             (Some(b'='), 'u') => {
                 let flags = params.arg(0, 0) as u8;
+                let top = self.modes.kitty_keys.last().copied().unwrap_or(0);
+                let flags = match params.arg(1, 1) {
+                    2 => top | flags,
+                    3 => top & !flags,
+                    _ => flags,
+                };
                 match self.modes.kitty_keys.last_mut() {
                     Some(top) => *top = flags,
                     None => self.modes.kitty_keys.push(flags),
@@ -705,7 +714,7 @@ impl State {
             // associated text, is told yes, and then encodes for them is a child cooked
             // has actively misled; a child told no falls back to a spelling that works.
             (Some(b'?'), 'u') => {
-                let flags = self.modes.kitty_keys.last().copied().unwrap_or(0) & KITTY_HONOURED;
+                let flags = self.kitty_flags();
                 self.csi_reply(format_args!("?{flags}u"));
             }
             // DECRQM. The machine-readable half of the terminfo audit: a mode we

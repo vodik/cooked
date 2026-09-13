@@ -271,6 +271,15 @@ the `editing\=' binding in `cooked--apply\='."
 
 One of `legacy', `modify-other' or `kitty', as negotiated by the child itself —
 see `cooked--key-encodings' for why this cannot simply be assumed.")
+(defvar-local cooked--kitty-flags 0
+  "The kitty keyboard flags the child pushed, masked to what cooked honours.
+
+A bit field, as the protocol defines it: 1 disambiguates escape codes, 4 adds
+the shifted key, 8 sends every key as an escape code and 16 adds the text a key
+produces.  Read only while `cooked--keys' is `kitty', and not enough on its own
+even then: with neither 1 nor 8 set, kitty was assumed rather than negotiated --
+see `cooked-key-protocol-overrides' -- and only the `literal' keys are
+re-spelled.  See `cooked--kitty-negotiated-p'.")
 (defvar-local cooked-title nil
   "Title the child last set, via OSC 0 or 2, or nil if it never set one.
 
@@ -383,7 +392,9 @@ between \"M\" and \"m\" for a press and a release.
 PARAMS are numbers, so `(cooked--csi \"~\" 5 2)\=' is `ESC [ 5 ; 2 ~\=', the
 modified spelling of `prior\='.  None of them at all is the unparameterised
 sequence `ESC [ FINAL\=', which is what an unmodified cursor key and the DEC 1004
-focus notifications are.
+focus notifications are.  A string is taken as the parameter verbatim, which is
+for the kitty keyboard protocol: its fields carry colon-separated sub-fields and
+may be empty, `ESC [ 97 : 65 ; ; 65 u\=', and neither is a number.
 
 See `cooked--csi-private\=' for the two sequences that carry a private-parameter
 prefix, and `cooked--cursor-key\=' for the one choice between CSI and SS3 that
@@ -407,7 +418,9 @@ A second function rather than an optional argument in front of FINAL, because
 the prefix is the rare case: reading a nil through every ordinary call site
 would bury the two things a reader wants from one of these, which are the
 parameters and the final byte."
-  (concat "\e[" prefix (mapconcat #'number-to-string params ";") final))
+  (concat "\e[" prefix
+          (mapconcat (lambda (p) (if (stringp p) p (number-to-string p))) params ";")
+          final))
 
 (defun cooked--ss3 (final)
   "The single-shift-three sequence `ESC O FINAL\='.

@@ -14,6 +14,17 @@ protocol, and sends the extended form **only** to a child that asked for it — 
 `ESC [ 27;2;13 ~` to a program that did not is not a Shift+Return, it is six characters
 of rubbish in its input.
 
+A child that pushes kitty flags gets the protocol proper, not just those four keys. Bit 1
+spells Escape and every Control or Meta chord as `CSI code ; mods u`; bit 4 adds the
+shifted key; bit 8 sends every key as an escape code, plain text included; bit 16 puts the
+text back as a third field. `CSI ? u` answers exactly those, and so declines bit 2 —
+Emacs delivers no key releases to report. Three things are narrower than kitty because an
+Emacs event does not carry the fact: the base-layout key of bit 4 is never sent, a bare
+modifier press is never reported under bit 8, and a shifted symbol such as `!` is reported
+as the key `!` rather than as Shift+`1`. On a terminal frame Tab, Return and Backspace are
+indistinguishable from C-i, C-m and C-?, and are taken to be the keys; ESC there is also
+half of every Meta chord, so it goes as the plain byte.
+
 Some programs never ask. Claude Code enables the kitty protocol from a list of terminal
 *names* it recognises in the environment — `iTerm.app`, `kitty`, `WezTerm`, `ghostty`,
 `tmux`, `windows-terminal`, `WarpTerminal` — and never sends the `CSI ? u` query cooked

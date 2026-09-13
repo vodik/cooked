@@ -147,7 +147,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 
         /// Collect everything that changed in SESSION since the last call.
         /// Returns a plist with :scrolled, :rows, :height, :used, :head, :cursor, :alt,
-        /// :app-cursor, :keys, :mode, :images, :events and :exit.
+        /// :app-cursor, :keys, :kitty-flags, :mode, :images, :events and :exit.
         ///
         /// :scrolled and :rows are the same shape, so one renderer handles both: a block is
         /// (TEXT STYLE-SPANS DECO-SPANS), where the spans carry character offsets into TEXT and
@@ -952,22 +952,23 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
         .collect::<Result<Vec<_>>>()?;
 
     plist!(env, {
-        ":scrolled"   => scrolled,
-        ":shifts"     => shifts,
-        ":rows"       => rows,
-        ":height"     => update.delta.height,
-        ":used"       => update.delta.used,
-        ":head"       => update.delta.head,
-        ":cursor"     => cursor,
-        ":marks"      => marks,
-        ":alt"        => update.delta.alt,
-        ":app-cursor" => update.delta.app_cursor,
-        ":keys"       => update.delta.keys,
-        ":mode"       => update.mode,
-        ":images"     => images_to_lisp(env, &update.delta.images)?,
-        ":links"      => links_to_lisp(env, &update.delta.links)?,
-        ":events"     => events,
-        ":exit"       => update.exit.map(i64::from),
+        ":scrolled"    => scrolled,
+        ":shifts"      => shifts,
+        ":rows"        => rows,
+        ":height"      => update.delta.height,
+        ":used"        => update.delta.used,
+        ":head"        => update.delta.head,
+        ":cursor"      => cursor,
+        ":marks"       => marks,
+        ":alt"         => update.delta.alt,
+        ":app-cursor"  => update.delta.app_cursor,
+        ":keys"        => update.delta.keys,
+        ":kitty-flags" => u32::from(update.delta.kitty_flags),
+        ":mode"        => update.mode,
+        ":images"      => images_to_lisp(env, &update.delta.images)?,
+        ":links"       => links_to_lisp(env, &update.delta.links)?,
+        ":events"      => events,
+        ":exit"        => update.exit.map(i64::from),
     })
 }
 
