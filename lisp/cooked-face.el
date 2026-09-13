@@ -291,14 +291,16 @@ which a full-screen repaint takes a few dozen times and then never again.
 Memoized per buffer in `cooked--face-cache\=', the same table and the same
 lifetime as before, so `cooked--flush-face-cache\=' still reaches every resolved
 colour with one `clrhash\=' when the theme changes."
-  (let* ((fg (+ i (eval-when-compile cooked--style-fg)))
-         (bg (+ i (eval-when-compile cooked--style-bg)))
-         (ul (+ i (eval-when-compile cooked--style-underline)))
-         (attrs (cooked--u16 packed (+ i (eval-when-compile cooked--style-attrs))))
-         (key (or (cooked--face-key (cooked--color-code packed fg)
-                                    (cooked--color-code packed bg)
-                                    (cooked--color-code packed ul)
-                                    attrs)
+  ;; The field offsets are added at each use rather than bound once: a hit reads
+  ;; each of them exactly once, and three extra bindings per span measured as a
+  ;; 2% slower styled frame.  The miss below recomputes them, which it can afford.
+  (let* ((attrs (cooked--u16 packed (+ i (eval-when-compile cooked--style-attrs))))
+         (key (or (cooked--face-key
+                   (cooked--color-code packed (+ i (eval-when-compile cooked--style-fg)))
+                   (cooked--color-code packed (+ i (eval-when-compile cooked--style-bg)))
+                   (cooked--color-code packed
+                                       (+ i (eval-when-compile cooked--style-underline)))
+                   attrs)
                   ;; An rgb colour somewhere in the rendition, so there is no fixnum
                   ;; to be had.  The key becomes the record's own rendition bytes,
                   ;; FG through the end of ATTRS, which is the one thing that always
@@ -315,16 +317,18 @@ colour with one `clrhash\=' when the theme changes."
                   ;; table with no chance of colliding -- which is what keeps
                   ;; `cooked--flush-face-cache' a single `clrhash' over everything
                   ;; holding a resolved colour.
-                  (substring packed fg (+ i cooked--style-record)))))
+                  (substring packed (+ i (eval-when-compile cooked--style-fg))
+                             (+ i cooked--style-record)))))
     (cooked--cached cooked--face-cache key
       ;; Decoded on the miss only, which a full-screen repaint takes a few dozen
       ;; times and then never again.  The old fallback decoded before it had even
       ;; looked, and then handed the specs to `cooked--face' to build a second key
       ;; out of.
-      (cooked--face-build (cooked--color-spec packed fg)
-                          (cooked--color-spec packed bg)
-                          attrs
-                          (cooked--color-spec packed ul)))))
+      (cooked--face-build
+       (cooked--color-spec packed (+ i (eval-when-compile cooked--style-fg)))
+       (cooked--color-spec packed (+ i (eval-when-compile cooked--style-bg)))
+       attrs
+       (cooked--color-spec packed (+ i (eval-when-compile cooked--style-underline)))))))
 
 (defmacro cooked--do-style-spans (spec &rest body)
   "Run BODY for each styled span in the packed style records STYLES.
