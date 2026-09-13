@@ -64,7 +64,7 @@ Made with `comint-mode-syntax-table\=' as its *parent* rather than as a copy, an
 that is what makes re-realizing possible at all: a character this file has not
 spoken about is `nil\=' here and inherits, so undoing a previous realization is
 setting those characters back to `nil\=' rather than trying to remember what
-class they used to have.")
+class they had before.")
 
 (defvar cooked--syntax-overridden nil
   "Characters `cooked--realize-syntax-table\=' has given a class of their own.
@@ -266,14 +266,11 @@ the input line passes through here first -- a typed character, a paste, a yank
 from a package that has never heard of cooked -- in one place rather than by
 each one remembering to ask.
 
-It was briefly two mechanisms: a `self-insert-command\\=' remap for the typed
-character, and this hook for the rest.  One is enough, and the remap was the
-half worth losing.  A remap *replaces* `this-command\\=' rather than layering
-over it, so it silently took every ordinary keystroke out of
-`cooked-snap-commands\\=' and broke the snap until the replacement was named
-there too.  That trap is re-armed by any later remap and cannot be designed
-away while one exists, and the substitution below does the same job without
-it.
+There is deliberately no `self-insert-command\\=' remap beside it.  A remap
+*replaces* `this-command\\=' rather than layering over it, so it would take every
+ordinary keystroke out of `cooked-snap-commands\\=' and break the snap until the
+replacement was named there too.  The substitution below does the same job
+without that trap.
 
 Keyed on `cooked-snap-commands\\=', which is not an approximation of \"commands
 that insert\" but the very list the tree already maintains for that -- a new
@@ -370,13 +367,12 @@ The answer for anyone not driving this from somewhere else."
 
 The same claim `cooked-evil-visual-state-render\=' makes, for everyone who is
 not running evil: a selection says something about a region of text, and text
-being rewritten underneath it turns the claim into a lie.  Until this existed
-cooked froze for evil's visual state and for nothing else, so a plain
-\\[set-mark-command] -- or a `consult-line\=', or a mouse drag -- was clobbered
+being rewritten underneath it turns the claim into a lie.  Without it a plain
+\\[set-mark-command] -- or a `consult-line\=', or a mouse drag -- is clobbered
 by the next drain.
 
-nil is the old behaviour and is a reasonable choice for anyone who selects in a
-terminal only to copy something that has already finished printing.
+nil is a reasonable choice for anyone who selects in a terminal only to copy
+something that has already finished printing.
 
 The freeze cannot strand a buffer: it lifts when the selection goes away, and a
 drain that invalidates the region deactivates the mark anyway -- see
@@ -626,10 +622,10 @@ corrupt a redisplay cooked cannot see, let alone repair."
 
 comint's \\[cooked-clear-scrollback] read literally, and the seam between the emulator's grid
 and Emacs\=' scrollback is not the user's business: whether what is above the
-prompt has scrolled off the grid yet or is still on it, it goes.  Scrollback
-alone was the old behaviour and looked inert at exactly the moment it is reached
-for -- a few commands into a session nothing has scrolled off at all, and every
-line on screen is a row the emulator still holds.
+prompt has scrolled off the grid yet or is still on it, it goes.  Clearing
+scrollback alone would look inert at exactly the moment it is reached for -- a
+few commands into a session nothing has scrolled off at all, and every line on
+screen is a row the emulator still holds.
 
 Each side is asked for its own half.  `cooked--clear-to-prompt\=' removes the
 rows, because rows have one owner and only the emulator knows which of them are
@@ -1555,8 +1551,8 @@ to the child verbatim."
   ;; `cooked--update-buffer-name', which every OSC 7 already ends with.
   (setq-local list-buffers-directory default-directory)
   ;; The ring `comint-mode' just built is the history; it is at the default 500,
-  ;; which is what cooked kept anyway.  Repeats are dropped, as a shell's own
-  ;; history does by default and as cooked's private list used to.
+  ;; which is enough.  Repeats are dropped, as a shell's own history does by
+  ;; default.
   (setq-local comint-input-ignoredups t)
   ;; The OSC 133 records know where each command line began; comint would otherwise
   ;; scan backwards for a prompt regexp cooked deliberately never sets.
@@ -1654,10 +1650,9 @@ to the child verbatim."
 (define-key cooked-mode-map (kbd "C-c TAB") #'cooked-toggle-fold)
 (define-key cooked-mode-map (kbd "C-c C-l") #'cooked-refresh)
 ;; Reads the way \\`M->' does for the end of a buffer, and for the same reason:
-;; the newest command is the one end of the transcript that keeps moving.  It had
-;; no key at all until now -- only the mode line's exit status was a click away
-;; from it, which is a control a keyboard cannot reach and a terminal frame does
-;; not draw.
+;; the newest command is the one end of the transcript that keeps moving.  The mode
+;; line's exit status is a click away from it too, but a keyboard cannot reach that
+;; and a terminal frame does not draw it.
 (define-key cooked-mode-map (kbd "C-c C->") #'cooked-goto-last-command)
 ;; goto-addr's own advertised key, and the entry point that does not need point to
 ;; be inside a highlighted span -- see `cooked-follow-link-at-point'.  Here rather
