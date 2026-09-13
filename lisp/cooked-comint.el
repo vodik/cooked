@@ -65,7 +65,6 @@
 ;;; Code:
 
 (require 'comint)
-(require 'url-util)
 (require 'cooked-util)
 (require 'cooked-face)
 (require 'cooked-module)
@@ -178,20 +177,18 @@ explains it from the terminal's side: a `cat' of a hostile file can put any
 URL here, and `file-directory-p' on a TRAMP name is itself the connection.
 `cooked--local-name' is the second guard, for a path that names a remote file
 without saying so in the authority."
-  (when (and cooked-comint-track-directory
-             (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url))
-    (let ((host (url-unhex-string (match-string 1 url)))
-          (path (url-unhex-string (match-string 2 url))))
-      ;; An empty authority means "this machine", which is what a shell that has
-      ;; not bothered to name itself sends.  A named host that is not this one is
-      ;; reporting honestly about a directory that is not ours to resolve: the same
-      ;; path here would name a different file, or -- worse and more often -- a
-      ;; local file of the same name on a tree kept roughly in step with it.
-      (when (member host (list "" "localhost" (system-name)))
-        (when-let* ((name (cooked--local-name path))
-                    (dir (file-name-as-directory name))
-                    ((file-directory-p dir)))
-          (setq default-directory dir))))))
+  (pcase-let ((`(,host . ,path) (and cooked-comint-track-directory
+                                     (cooked--parse-file-url url))))
+    ;; A named host that is not this one is reporting honestly about a directory
+    ;; that is not ours to resolve: the same path here would name a different
+    ;; file, or -- worse and more often -- a local file of the same name on a
+    ;; tree kept roughly in step with it.  Which names are this one is the same
+    ;; question the terminal asks, answered by the same function.
+    (when (and path (cooked--local-host-p host))
+      (when-let* ((name (cooked--local-name path))
+                  (dir (file-name-as-directory name))
+                  ((file-directory-p dir)))
+        (setq default-directory dir)))))
 
 (defun cooked-comint--emit (string)
   "Resolve STRING through this filter, returning what comint should insert.

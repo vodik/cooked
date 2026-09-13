@@ -1398,9 +1398,9 @@ Ends by offering the buffer a rename, foreign host or not: `cooked--host\='
 changed either way, and a `cooked-buffer-name\=' with %h or %p in it wants to
 know about both kinds of move, not just the ones that touch
 `default-directory\='."
-  (when (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url)
-    (setq cooked--host (url-unhex-string (match-string 1 url)))
-    (let ((path (url-unhex-string (match-string 2 url))))
+  (pcase-let ((`(,host . ,path) (cooked--parse-file-url url)))
+    (when path
+      (setq cooked--host host)
       (if (cooked--foreign-host-p)
           (when-let* (((eq cooked-remote-directory 'tramp))
                       ;; Already a directory name: see the end of
@@ -1411,8 +1411,8 @@ know about both kinds of move, not just the ones that touch
         (when-let* ((name (cooked--local-name path))
                     (dir (file-name-as-directory name)))
           (when (file-directory-p dir)
-            (setq default-directory dir)))))
-    (cooked--update-buffer-name)))
+            (setq default-directory dir))))
+      (cooked--update-buffer-name))))
 
 (provide 'cooked-osc)
 ;;; cooked-osc.el ends here

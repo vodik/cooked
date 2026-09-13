@@ -223,6 +223,22 @@ the last thing in the buffer."
       (cooked-tests-comint--say "\e]7;file://elsewhere.example/tmp/\a$ ")
       (should (equal default-directory was)))))
 
+(ert-deftest cooked-comint-agrees-with-the-terminal-about-which-host-is-this-one ()
+  ;; zsh reports `HOST', which is usually the short name, where `system-name' is
+  ;; fully qualified.  The terminal has always read the two as one machine; the
+  ;; comint filter compared them exactly and so tracked nothing.  A different
+  ;; machine on the same domain is still a different machine.
+  (cooked-tests-comint--with
+    (cl-letf (((symbol-function 'system-name) (lambda () "box.example.org")))
+      (let ((dir (file-name-as-directory (temporary-file-directory)))
+            (was default-directory))
+        (cooked-tests-comint--say "\e]7;file://other.example.org/\a$ ")
+        (should (equal default-directory was))
+        (cooked-tests-comint--say (format "\e]7;file://box%s\a$ " dir))
+        (should (equal default-directory dir))
+        (should-not (cooked--local-host-p "boxer"))
+        (should (cooked--local-host-p "BOX.example.org"))))))
+
 (ert-deftest cooked-comint-leaves-the-directory-alone-when-asked-to ()
   (cooked-tests-comint--with
     (let ((cooked-comint-track-directory nil)

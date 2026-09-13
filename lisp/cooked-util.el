@@ -15,6 +15,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'url-util)
 
 (defgroup cooked nil
   "A terminal emulator that yields to Emacs when the child wants a line."
@@ -366,6 +367,55 @@ prebuilt artifact instead."
   (let ((dir (file-name-as-directory cooked--source-directory)))
     (or (locate-dominating-file dir "Cargo.toml")
         (file-name-directory (directory-file-name dir)))))
+
+(defun cooked--same-host-p (a b)
+  "Whether host names A and B name the same machine, as far as anyone can tell.
+
+Nil if either is nil, so an absent name never matches a present one.
+
+Deliberately generous about spelling and about nothing else.  `HOST\=' from zsh
+is usually short where `system-name\=' and a TRAMP prefix are fully qualified,
+and the two spellings of one machine must not read as a move; but anything
+beyond a shared first label is treated as a different machine, because both
+callers would rather ask again than guess.  The generosity is one-sided in a
+useful way -- it can only ever say `same\=' about two names sharing their first
+label, never about two that do not."
+  (and a b
+       (let ((a (downcase a))
+             (b (downcase b)))
+         (or (equal a b)
+             ;; Either side may carry the domain the other omits.
+             (equal a (car (split-string b "\\.")))
+             (equal (car (split-string a "\\.")) b)))))
+
+(defun cooked--local-host-p (host)
+  "Whether HOST, the authority of an OSC 7 URL, names this machine.
+
+An empty authority does, being what a shell that has not bothered to name
+itself sends, and so does `localhost\='.  Otherwise the comparison with
+`system-name\=' is `cooked--same-host-p\=': generous about spelling, since
+`HOST\=' from zsh is usually short where `system-name\=' is fully qualified,
+and ungenerous about everything else.  Anything not recognisably here is
+elsewhere, because the cost of a false negative is a local file opened in
+place of a remote one."
+  (and host
+       (or (member (downcase host) '("" "localhost" "localhost.localdomain"))
+           (cooked--same-host-p host (system-name)))
+       t))
+
+(defun cooked--parse-file-url (url)
+  "The (HOST . PATH) an OSC 7 `file://\=' URL names, both percent-decoded, or nil.
+
+HOST is the empty string when the authority is empty.  The path is
+percent-encoded on the wire because that is what a URL is: a directory called
+`100%20cake\=' arrives as `100%2520cake\=', and decoding it once gives the name
+back.  Nothing here looks at the file system; deciding what the path means is
+the caller\='s, and has to come after `cooked--local-host-p\=' and
+`cooked--local-name\='."
+  (when (and (stringp url)
+             (string-match "\\`file://\\([^/]*\\)\\(/.*\\)\\'" url))
+    (cons (url-unhex-string (match-string 1 url))
+          (url-unhex-string (match-string 2 url)))))
 
 (defun cooked--decode-base64 (data)
   "The bytes base64 DATA encodes, as a unibyte string, or nil if it is not base64.
