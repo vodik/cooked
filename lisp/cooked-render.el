@@ -708,13 +708,11 @@ two chances to disagree."
      (cooked--discard-scrollback (cooked--screen-start-position)))
     (`(display-cleared) (setq cooked--pin-screen-top t))
     ;; `ESC c'.  Everything RIS resets inside the emulator the emulator resets
-    ;; itself; this event exists for the state Emacs holds on its behalf: the
-    ;; OSC 9;4 progress indicator, the OSC 22 pointer stacks and the bell's
-    ;; mark.  A `reset' that blanked the screen and left the mode line still
-    ;; claiming a build was 60% through would be stuck in the one way the user
-    ;; has no second thing to type their way out of.
-    (`(reset) (cooked--reset-progress) (cooked--reset-pointer-shapes)
-     (cooked--reset-bell))
+    ;; itself; this event exists for the state Emacs holds on its behalf.  A
+    ;; `reset' that blanked the screen and left the mode line still claiming a
+    ;; build was 60% through would be stuck in the one way the user has no
+    ;; second thing to type their way out of.  See `cooked--reset-terminal'.
+    (`(reset) (cooked--reset-terminal))
     ;; Decoded into a record at the boundary, like the cursor and the grid; see
     ;; `cooked-mouse-state'.  cooked-mouse.el owns it because it is the only
     ;; reader, and re-gates its own keymap on the way through.
@@ -727,6 +725,27 @@ two chances to disagree."
      (cooked--end-of-command)
      (cooked--handle-semantic event batch-start))
     (_ nil)))
+
+(defun cooked--reset-terminal ()
+  "Put back everything Emacs holds for the child, on RIS.
+
+RIS is a power-on reset, and every piece of it a child can change lives here
+rather than in the emulator: the OSC 9;4 progress indicator, the OSC 22 pointer
+stacks, the bell\='s mark, the OSC 10 and 11 colour remaps, the OSC 12 cursor
+colour and the title with its XTWINOPS stack.  `reset\=' is what a user types at
+a terminal a program left purple with a stale title, and it has to fix all of
+it, as ghostty's `fullReset\=' clears the title and eat's reset does.
+
+The OSC 3008 contexts are not here, on purpose: see
+`cooked-osc-context--stack\='."
+  (cooked--reset-progress)
+  (cooked--reset-pointer-shapes)
+  (cooked--reset-bell)
+  (dolist (kind cooked--osc-settable-colors)
+    (cooked--reset-default-color kind))
+  (setq cooked--title-stack nil)
+  (when cooked-title
+    (cooked--set-title nil)))
 
 (defun cooked--end-of-command (&optional exited)
   "Drop what a command left in Emacs, at OSC 133 C or D, or on exit when EXITED.

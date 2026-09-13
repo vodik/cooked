@@ -355,6 +355,32 @@ after the reset is raised afresh is the Rust test
     (should-not cooked-bell-pending)
     (should-not (string-search "bell" (cooked--mode-line)))))
 
+(ert-deftest cooked-a-reset-from-a-real-child-puts-back-what-emacs-holds ()
+  "`reset' is what a user types at a terminal a program left purple under a
+stale title.  RIS takes off the OSC 10 and 11 remaps and the OSC 12 cursor
+colour, and forgets the title and the titles pushed under it."
+  (let ((go (make-temp-name (expand-file-name "cooked-reset-go" temporary-file-directory)))
+        (cooked-allow-color-set t))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "printf '\\033]10;#00ff00\\007\\033]11;#800080\\007\\033]12;#ff0000\\007'; \
+printf '\\033]2;shell\\007\\033[22;0;0t\\033]2;vim\\007'; \
+while [ ! -e %s ]; do sleep 0.05; done; printf '\\033c'; sleep 5" go))
+          (should (cooked-tests--settle
+                   (lambda () (and (equal cooked-title "vim")
+                                   (alist-get 'foreground cooked--color-remaps)
+                                   (alist-get 'background cooked--color-remaps)
+                                   cooked--cursor-color))))
+          (should cooked--title-stack)
+          (write-region "" nil go)
+          (should (cooked-tests--settle (lambda () (null cooked-title))))
+          (should-not cooked--title-stack)
+          (should-not cooked--color-remaps)
+          (should-not (alist-get 'default face-remapping-alist))
+          (should-not cooked--cursor-color))
+      (ignore-errors (delete-file go)))))
+
 (ert-deftest cooked-title-stack-restores-on-pop ()
   "XTWINOPS 22/23, which `smcup'/`rmcup' send around the alternate screen."
   (cooked-tests--with-session
