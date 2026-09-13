@@ -124,8 +124,8 @@ impl State {
     ///
     /// This is what the shell is about to run, in its own words, and the only account that
     /// survives where Emacs has none: a line the shell kept, or the far end of an `ssh`.
-    /// Where Emacs has one it still wins, since `cooked--submitted-input` is what Emacs
-    /// *sent* and this is what the shell parsed.
+    /// Where Emacs has one it still wins, since `cooked-line-submitted-input` is what
+    /// Emacs *sent* and this is what the shell parsed.
     ///
     /// `cmdline_url=` and not kitty's `cmdline=`, which holds `printf %q` output that only
     /// that shell can unquote, so `ls -la` arrives as `ls\ -la`. Percent-encoding has one

@@ -224,7 +224,7 @@ macro_rules! symbols {
             /// one list above.
             const NAMES: &'static [&'static str] = &[$($name),*];
         }
-        // Most variants are never written as `Sym::Something`. They are here to give
+        // Most variants are never named by a `Sym::` path in code. They are here to give
         // their string a slot in `NAMES`, which `sym_index` searches by spelling on
         // behalf of `plist!` -- one table, reached two ways, rather than two tables whose
         // indices could disagree.
