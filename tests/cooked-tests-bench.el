@@ -326,5 +326,22 @@ since re-basing them onto the assembled text is the one thing
           (pcase-dolist (`(,from ,_deco) decos)
             (should (< from limit))))))))
 
+(ert-deftest cooked-bench-allocation-prints-a-row-per-fixture ()
+  "`cooked-bench-allocation\=' runs last in `cooked-bench\=', after every timed case,
+so a crash there costs the whole run its only machine-independent rows.  It
+once called `cooked-bench--update\=' positionally after that helper had become
+keyword-only, and nothing but a full benchmark run would have said so; the
+byte-compiler does not check keyword arguments.  Running it here is four
+frames and four sessions, cheap enough to pin."
+  (let (rows)
+    (cl-letf (((symbol-function 'message)
+               (lambda (format &rest args)
+                 (push (apply #'format-message format args) rows))))
+      (cooked-bench-allocation))
+    (should (= (length rows) 4))
+    (dolist (row rows)
+      (should (string-match-p "\\`  alloc, .* conses +[0-9]+ .* intervals +[0-9]+\\'"
+                              row)))))
+
 (provide 'cooked-tests-bench)
 ;;; cooked-tests-bench.el ends here

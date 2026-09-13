@@ -1329,7 +1329,7 @@ allocates differently print different ones, which is the property a timing does
 not have."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-tests--settle-briefly)
-    (let ((update (cooked-bench--update rows t)))
+    (let ((update (cooked-bench--update rows :alt t)))
       ;; Three warm frames: the first builds the face cache, the glyph caches
       ;; and the wrap memo, and a fixture charged for those is reporting a
       ;; session's start-up once per frame.  Three rather than one because the
