@@ -471,11 +471,6 @@ fn join(first: Option<Vec<u8>>, second: Option<Vec<u8>>) -> Option<Vec<u8>> {
     }
 }
 
-/// The answer owed to the child, honouring `q=`.
-///
-/// `q=1` suppresses success and leaves errors, `q=2` suppresses both. A command with no
-/// id gets no response either: the protocol keys the answer to `i=`, and one without it
-/// is unaddressable.
 /// The refusal owed to PAYLOAD if it is an `a=q` probe, when Emacs cannot show pictures.
 ///
 /// `None` for anything that is not a probe -- including a probe the child asked to hear
@@ -495,6 +490,11 @@ pub(crate) fn refuse_probe(payload: &[u8]) -> Option<Vec<u8>> {
     response(&cmd, Some("ENOTSUPPORTED:display"))
 }
 
+/// The answer owed to the child, honouring `q=`.
+///
+/// `q=1` suppresses success and leaves errors, `q=2` suppresses both. A command with no
+/// id gets no response either: the protocol keys the answer to `i=`, and one without it
+/// is unaddressable.
 fn response(cmd: &Command, error: Option<&str>) -> Option<Vec<u8>> {
     match (cmd.quiet, error) {
         (q, _) if q >= 2 => return None,

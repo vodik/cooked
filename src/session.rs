@@ -653,14 +653,8 @@ impl Interrupt {
     }
 }
 
-/// A live child, its emulator, and the reader thread coupling them to Emacs.
-///
-/// The owned resources sit behind mutexes rather than in plain `Option`s because
-/// [`Session::shutdown`] runs through the `&Session` that Emacs' user-pointer hands
-/// back — there is never a `&mut` to be had.
-/// The tuning knobs [`Session::spawn`] takes, so they arrive named rather than as the
-/// last two of seven positional parameters -- and so their defaults live in the [`Default`]
-/// impl below, next to the fields they belong to, rather than at the call site.
+/// The tuning knobs [`Session::spawn`] takes, named rather than positional, with their
+/// defaults in the [`Default`] impl beside the fields they belong to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Options {
     /// See [`NotifyState::min_interval`].
@@ -708,6 +702,11 @@ impl Default for Options {
     }
 }
 
+/// A live child, its emulator, and the reader thread coupling them to Emacs.
+///
+/// The owned resources sit behind mutexes rather than in plain `Option`s because
+/// [`Session::shutdown`] runs through the `&Session` that Emacs' user-pointer hands
+/// back, so there is never a `&mut` to be had.
 pub(crate) struct Session {
     shared: Arc<Shared>,
     reader: Mutex<Option<JoinHandle<()>>>,

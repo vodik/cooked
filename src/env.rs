@@ -519,8 +519,7 @@ impl<'e> Env<'e> {
         unsafe { p.cast::<T>().as_ref() }.ok_or(Error)
     }
 
-    /// Writable file descriptor for a `make-pipe-process`; safe to use off-thread.
-    /// The write end of a pipe process' channel, owned.
+    /// The write end of a `make-pipe-process` channel, owned and safe to use off-thread.
     ///
     /// Emacs hands over a descriptor that is ours to close, so this returns the type that
     /// says so. The `unsafe` sits three lines from the FFI call that establishes the

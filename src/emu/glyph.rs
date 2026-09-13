@@ -236,8 +236,6 @@ fn direction_from_bits(bits: u16) -> Direction {
     }
 }
 
-/// Structured shape for a box-drawing or block-element codepoint, or `None` for
-/// anything the emulator renders as plain glyph-shaped text.
 /// The first and last codepoints the arms of [`classify_glyph`] can name.
 ///
 /// The union of those arms is contiguous, so two compares stand in for all six range
