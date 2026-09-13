@@ -1303,17 +1303,19 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
 ;; Emacs.  A global stickiness default is not worth a saving that measures as
 ;; nothing.
 ;;
-;; The one place the shape is different is box drawing, whose 5,815 string
-;; characters and 48 strings per frame are almost entirely
-;; `cooked--row-wraps-p' building its memo key: one
-;; `buffer-substring-no-properties' per row, on every frame, including the frames
-;; that hit.  That is the same shape the style path already fixed -- a cache key
-;; allocated to ask a question whose answer is cached -- but the key has to be
-;; the row's exact text, since only the negative is memoized and a collision is a
-;; row that should have been trimmed and was not.  No allocation-free exact key
-;; was found.  It is confined to rows the guard cannot finish at step 1, which is
-;; box drawing and CJK and nothing else: the plain and URL frames allocate 31
-;; string characters between them.
+;; Box drawing used to be the exception, and now allocates what a plain frame
+;; does in strings: 703 conses, 55 vector cells, 31 string characters and 3
+;; strings.  Nothing about box drawing needed more.  The core tells the guard a
+;; row whose only multi-byte characters are box glyphs apart from one the font
+;; draws, and a glyph drawn as cooked's own one-cell bitmap cannot be wider than
+;; its cell, so such a row is not measured at all.  Rows that are measured -- CJK,
+;; emoji, or the `tree' fixture's unabsorbed padding -- key the wrap memo on a
+;; layout hash the core sends rather than on a copy of the row, and the metrics
+;; memo on the character rather than on a fresh string, so a 24x80 `tree' frame
+;; allocates 31 string characters and 3 strings as well; its remaining conses
+;; are the measuring itself.  A hash is a safe key because only the negative is
+;; memoized: a collision can leave a row soft-wrapped until it is rewritten, and
+;; can never delete a character -- see `cooked--wrap-memo'.
 
 (defun cooked-bench--allocation (label rows)
   "Print what one steady-state `cooked--apply' of ROWS allocates, under LABEL.
