@@ -1125,6 +1125,111 @@ is the walk, and the walk reads nothing but the `cooked-deco\=' property."
                            (lambda () (cooked--rescale-deco)))
     (message "  %-40s   %s" "" "the gate `cooked--sync-size' relies on")))
 
+;;;; Allocation per frame, which is a count and not a time
+;;
+;; Every other case in this file is a clock, and a clock cannot answer the
+;; question the residual p99 spikes raise.  Collection is what those spikes are
+;; -- `cooked-bench--record' prints the count beside every row precisely so they
+;; can be read that way -- and the only thing that removes a collection is not
+;; allocating.  So this section counts allocation directly: `memory-use-counts'
+;; is exact, identical on a busy machine and a quiet one, and comparable across
+;; machines and across years, which is everything a timing is not.
+;;
+;; It is reported per *steady-state* frame.  The first frame of a fixture builds
+;; the face cache, the glyph caches and the wrap memo, and charging a frame for
+;; those would be charging a session's whole warm-up to every frame of it; three
+;; frames are run and thrown away before the one that counts.
+;;
+;; What the counts said when this was written, and the reason the allocation
+;; task closed rather than shipping something.  A styled 24x80 frame conses
+;; 1,750 cells, and every one of them is accounted for:
+;;
+;;   53     the plain frame's floor -- the whole of the rest of a render
+;;   384    two per style span, 192 spans
+;;   1,300  six per interval, 215 intervals
+;;   ~13    the other eleven phases of `cooked--apply' put together
+;;
+;; The middle two are one thing wearing two hats: *Emacs conses a fresh property
+;; plist per property per interval*, in `add_text_properties', and there is no
+;; Lisp API that hands it a shared one.  `set-text-properties' with a constant
+;; plist was measured and conses identically -- 401 cells over 192 spans either
+;; way -- because it copies.  So 96% of a styled frame's consing is the interval
+;; machinery and not cooked's code, and the two levers over it are the number of
+;; properties and the number of intervals.  The intervals are the colours the
+;; child asked for.  The properties are `cooked--read-only-props', and one of its
+;; three can be moved: putting `(read-only . t)' in a buffer-local
+;; `text-property-default-nonsticky' instead of writing `rear-nonsticky' per
+;; interval is behaviourally identical -- checked with `get-pos-property' at both
+;; edges -- and takes the styled frame from 1,750 conses to 1,320.
+;;
+;; It was measured and not taken, which is the finding rather than a gap.  Three
+;; runs a side of the styled per-frame case: p50 0.139-0.144 ms against
+;; 0.138-0.141, ranges fully overlapping, and collections over ~3,000 frames 18,
+;; 19, 23 against 17, 18, 18.  A quarter of the consing removed moves neither.
+;; The arithmetic says why: 430 cells is 7 KB, `gc-cons-threshold' is 800 KB, and
+;; a frame at 28 KB reaches it every thirtieth frame either way.  Removing a
+;; collection means removing *all* the consing, and the majority of it belongs to
+;; Emacs.  A global stickiness default is not worth a saving that measures as
+;; nothing.
+;;
+;; The one place the shape is different is box drawing, whose 5,815 string
+;; characters and 48 strings per frame are almost entirely
+;; `cooked--row-wraps-p' building its memo key: one
+;; `buffer-substring-no-properties' per row, on every frame, including the frames
+;; that hit.  That is the same shape the style path already fixed -- a cache key
+;; allocated to ask a question whose answer is cached -- but the key has to be
+;; the row's exact text, since only the negative is memoized and a collision is a
+;; row that should have been trimmed and was not.  No allocation-free exact key
+;; was found.  It is confined to rows the guard cannot finish at step 1, which is
+;; box drawing and CJK and nothing else: the plain and URL frames allocate 31
+;; string characters between them.
+
+(defun cooked-bench--allocation (label rows)
+  "Print what one steady-state `cooked--apply' of ROWS allocates, under LABEL.
+
+The fields are `memory-use-counts'\='s, whose order is easy to transpose and
+worth naming: (CONSES FLOATS VECTOR-CELLS SYMBOLS STRING-CHARS INTERVALS
+STRINGS).  Reading STRING-CHARS as STRINGS is a factor of a hundred on the box
+row and was made once already while these numbers were being taken.
+
+Not routed through `cooked-bench--measure', which is the whole point: there is
+no distribution here to summarise and no machine to be quiet.  Two runs of this
+on the same commit print the same numbers, and two runs across a commit that
+allocates differently print different ones, which is the property a timing does
+not have."
+  (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
+    (cooked-tests--settle-briefly)
+    (let ((update (cooked-bench--update rows t)))
+      ;; Three warm frames: the first builds the face cache, the glyph caches
+      ;; and the wrap memo, and a fixture charged for those is reporting a
+      ;; session's start-up once per frame.  Three rather than one because the
+      ;; box path settles a frame later than the others.
+      (dotimes (_ 3) (cooked--apply update))
+      (garbage-collect)
+      (let ((before (memory-use-counts)))
+        (cooked--apply update)
+        (let ((after (memory-use-counts)))
+          (message "  %-40s conses %6d  vec-cells %5d  str-chars %6d  strings %4d  intervals %4d"
+                   label
+                   (- (nth 0 after) (nth 0 before))
+                   (- (nth 2 after) (nth 2 before))
+                   (- (nth 4 after) (nth 4 before))
+                   (- (nth 6 after) (nth 6 before))
+                   (- (nth 5 after) (nth 5 before))))))))
+
+(defun cooked-bench-allocation ()
+  "What each fixture allocates per frame, exactly.
+
+Read the plain row as the floor and the others as what their content costs over
+it.  See this section\='s commentary for where a styled frame\='s 1,750 conses
+go and why the obvious quarter of them was measured and left alone."
+  (cooked-bench--allocation "alloc, 24x80 plain" (cooked-bench--plain-rows 24 80))
+  (cooked-bench--allocation "alloc, 24x80 styled (8 runs/row)"
+                            (cooked-bench--styled-rows 24 80))
+  (cooked-bench--allocation "alloc, 24x80 box drawing" (cooked-bench--box-rows 24 80))
+  (cooked-bench--allocation "alloc, 24x80 with a URL per row"
+                            (cooked-bench--url-rows 24 80)))
+
 (defun cooked-bench--report ()
   "Print the run footer.
 
@@ -1163,6 +1268,11 @@ a result."
   (cooked-bench-deferred)
   (message "")
   (cooked-bench-rescale)
+  (message "")
+  ;; Last, and after the load line has long scrolled off: these are the only
+  ;; rows in the file that do not depend on the machine at all, so they are the
+  ;; ones worth quoting when the machine is in doubt.
+  (cooked-bench-allocation)
   (cooked-bench--report))
 
 (provide 'cooked-bench)
