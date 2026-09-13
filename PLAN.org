@@ -1752,10 +1752,10 @@ State of the other eleven, by whether the code has anything:
 | password regex fallback           | *DONE*, 780e8f8                           |
 | =cooked-password-functions= chain | *DONE*, 780e8f8                           |
 | minibuffer resize exception       | *DONE*, 2157a1a's sibling                 |
-| kitty flags beyond bit 1          | partial — tracked, never change encoding  |
+| kitty flags beyond bit 1          | *DONE*, d633794 — stopped claiming them   |
 | =around-font-scale= advice        | *DONE*, 2157a1a                           |
 | medium gating defcustom           | partial — one reference in kitty.rs       |
-| bash < 4.4 DEBUG-trap fallback    | partial — DEBUG referenced in the snippet |
+| bash < 4.4 DEBUG-trap fallback    | *DECLINED*, c13973e — decays and says so  |
 | nushell arm                       | partial — four files mention nu           |
 | picker annotations                | =cooked--title= used in five files        |
 
@@ -1768,6 +1768,30 @@ fast swipe, so a notch would be accumulated, rounded, and a click would go
 missing. And the floor of one press is the event's own *line count*, not a
 constant: macOS reports a notch as one line and fewer pixels than a row when
 =line-spacing= is set, so the row arithmetic yields zero and the notch vanishes.
+
+**** Done: the kitty flags (d633794), and bash < 4.4 declined (c13973e)
+
+*=CSI ? u= was echoing the pushed flags back verbatim*, so a child that set bit 4
+or 16 was told cooked implements them. It does not — the flags are read in
+exactly one place, =flags & 1=, and bits 2/4/8/16 are stored and change nothing
+about how a key is spelled. A child that asks for associated text, is told yes,
+and encodes for it has been *actively misled*; one told no falls back to a
+spelling that works. Only the reply is masked; the stack keeps what the child
+pushed, because a pop must restore what its push put there.
+
+The existing test *pinned the bug* — it asserted =?5u= for a pushed 5, which is
+bit 1 plus the alternate-keys bit cooked ignores.
+
+*bash < 4.4 is declined rather than fixed*, on the file's own argument: the
+fallback would be a DEBUG trap, which fires before every simple command and
+whose installation silently replaces bash-preexec. Buying a mark by stopping
+somebody's =preexec_functions= is a bad trade.
+
+What was *not* acceptable was the silence — the feature was requested, nothing
+was installed, nothing said so. It now *decays and says which half it lost*: =A=
+and =B= live in PS1, which every bash has, so prompt navigation, the input
+region and the command anchors are intact; only the =C= mark and the per-command
+title go.
 
 **** Done: the two password items (780e8f8)
 
@@ -1786,25 +1810,6 @@ comparison and never reaches the regexp.
 
 Worth recording as a test-writing trap: the first version used
 =user@host password: =, which =comint-password-prompt-regexp= does *not* match
-because it anchors the prompt. The test was testing itself.
-
-**** Done: the two password items (780e8f8)
-
-The chain is asked *before* the single slot, so no existing
-=cooked-password-function= changes meaning — it keeps working as the answer of
-last resort rather than becoming one voice among several. Through
-=cooked--run-seam-until-success=, so a broken auth-source backend gives no
-answer and the next source is asked rather than taking the prompt down.
-
-The regex arm's gate is the whole of why a regex is safe here: matched against
-*local* output it would fire on any program displaying a file that mentions a
-password. Asked of the cursor's row, and asked *per drain* rather than on a
-state change — a remote child changes the far tty and the local one never moves,
-so there is no transition to hang it off. A local session pays one string
-comparison and never reaches the regexp.
-
-A test-writing trap worth recording: the first version used
-=user@host password: =, which =comint-password-prompt-regexp= does *not* match,
 because it anchors the prompt. The test was testing itself.
 
 **** Done: the font-scale advice (2157a1a) and the minibuffer exception
