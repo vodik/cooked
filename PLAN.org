@@ -1724,13 +1724,14 @@ on the text. The regression test asserts the *absence* of a decision.
 
 *** Still open
 
-- *No bench case*, and the reported slowness is unexplained. Same gap the image
-  and scroll work hit. =tree= in a large directory is the fixture this wants —
-  it is what found the bug, it is a shape the suite has nothing like (box
-  drawing on every row, non-uniform, coloured, thousands of rows), and the user
-  reported it *slow* as well as wrong. Whether the slowness survives 788bff3 is
-  not yet known: the walk still visits every cluster of every non-uniform row
-  even when it decides to do nothing.
+- *Bench case landed and the slowness is explained*, but not by this. =tree= in
+  a large directory is now a fixture — =cooked-bench-tree= and
+  =scripts/bench-tree.el= — and it did find a real 10× (d2bb50d, see the =tree=
+  task above). The cause was a per-decoration-record window measurement, not
+  the glyph walk: with the walk disabled entirely the timings are flat against
+  baseline both before and after that fix, and it never appears in the profile.
+  The walk visiting every cluster of every non-uniform row is real and still
+  costs something, but it is not what the user felt.
 - *Turning scaling back on* is the open question. The guard makes the
   box-drawing case correct, but being wrong twice about what this touches is
   reason enough to let it be asked for. Try =(setq cooked-glyph-scale-floor
@@ -2026,32 +2027,124 @@ did not: publish =SHA256SUMS= and verify against digests compiled into the
 mtime-vs-source to version-vs-sidecar — a downloaded install has no
 =terminfo/cooked.ti= to compare against.
 
-** WIP [#A] Why =tree= in a large directory is slow
+** DONE [#A] Why =tree= in a large directory is slow
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   none — reported from real use, never reproduced
-:BRANCH:   cooked/tree-slowness
+:BRANCH:   cooked/tree-slowness (merged, d2bb50d)
 :AGENT:    yes
 :END:
-Reported alongside the glyph-scaling regression and *not* explained by fixing it:
-=tree= in a large directory is "extremely slow". The regression it arrived with
-is fixed (788bff3); this is the half that was never reproduced.
+Reproduced and attributed. =tree -C /usr/include= in a 100×32 pgtk frame under
+headless gamescope took *3.10 s*, of which 3.00 s was inside
+=cooked--drain-and-apply= — cooked's Lisp, not redisplay and not the
+compositor. The same session on a tty frame took 0.33 s, and that 9× gap
+between graphical and terminal is what named the cause.
 
-Why it is worth more than anything else left in the plan: it is a real user
-report on a real workload, the suite has *nothing shaped like it* — box drawing
-on every row, non-uniform, coloured, thousands of rows, arriving as fast as the
-kernel will carry it — and every measurement in this file was taken on fixtures
-chosen by the people who wrote them.
+*The cause was a stale docstring describing an invariant the code did not
+hold.* =cooked--cell-size= has always claimed the cell size is "measured once
+per render pass and passed down, rather than asked per character".
+=cooked--apply-deco= asked =cooked--layout-window= and =cooked--deco-cell-size=
+— which walks the window list a second time — afresh *per decoration record*.
+On pgtk =window-font-width= is 20.8 µs and =window-default-line-height= 8.9 µs,
+against =frame-char-width='s 0.085 µs.
 
-The obvious suspect is that a =tree= row is non-uniform, so it defeats step 1 of
-=cooked--guard-row-width= and reaches the per-cluster walk in
-=cooked--scale-offenders= on *every row of every drain*, where a plain ASCII row
-would have been refused at the gate. The cache makes each cluster cheap after
-the first, but the walk itself is per cell per row per drain. Suspect, not
-finding: nobody has measured it.
+A border row is one decoration record and hides this completely, which is
+exactly why every box-drawing fixture in the suite was blind to it. A =tree=
+row is the opposite shape: =│= separated by NBSP, so a record per nesting
+level. One =tree -C /usr/include= is 86,107 records and 172,224 window walks —
+86,107 × 29.7 µs = 2.56 s of the 3.10 s.
 
-Done when: the slowness is either reproduced and attributed, or shown not to
-exist on this machine and the report reconciled with that.
+Fixed by =cooked--deco-pass=, a lazily-filled box bound by =cooked--apply= for
+the render pass — the same scoping argument the file already makes twice, in
+=cooked--render-rows= for the layout window and =cooked--wrap-cache= for the
+layout stamp.
+
+| measurement                             | before  | after  |
+|-----------------------------------------+---------+--------|
+| =tree -C /usr/include=, 100×32 pgtk     | 3105 ms | 311 ms |
+| =cooked--layout-window= calls / session | 172,224 |     17 |
+| same under =--batch=, tty frame         |  330 ms | 210 ms |
+
+Both arms byte-compiled, three sessions each, medians, load average 1.6–2.3,
+graphical pair re-run and agreed to 3%.
+
+*The standing suspect was measured and refuted.* A =tree= row is non-uniform
+and does reach =cooked--scale-offenders='s per-cluster walk on every row, but
+=cooked-glyph-scale-floor= nil is flat against baseline in every run both
+before and after the fix (2824 vs 3105 pre-fix, 284 vs 311 post-fix — noise,
+and sometimes the wrong sign), and the walk never appears in the profile. The
+per-cluster walk is not the cost.
+
+*Left behind:* =cooked-bench-tree= in =tests/cooked-bench.el= — 108 decoration
+records per frame against the border fixture's 24, the shape the suite lacked;
+=scripts/bench-tree.el=, which drives a real =tree= through the *wake pipe* via
+=sit-for= rather than a drain loop of its own (an =accept-process-output= loop
+hands the module the whole flood at once, four huge deltas come out, and the
+run finishes in a third of a second while a real session is still drawing —
+that correction is load-bearing and documented in the file); and
+=cooked-a-render-pass-measures-the-window-once-not-once-per-record=, which
+states the invariant as a *ratio* — two rows differing only in record count
+must cost the same number of window lookups — so it cannot go stale against an
+unrelated call. It fails 5 vs 21 without the fix.
+
+*Two harness traps worth keeping.* =cooked--fontify-region= declines outright
+once =cooked--session= is nil, so a child that exits before you measure gives
+you zero scans and a clean bill of health. And =cooked-file-link-scan-limit= is
+per *jit-lock chunk*, not per drain — observed chunks are 2–25 lines, so the
+400-line cap never engages in normal use, while a piped reproduction makes
+chunks huge and measures the defence instead of the bug.
+
+** TODO [#B] The file-link scan doubles its syscalls on every name that misses
+:PROPERTIES:
+:EFFORT:   3h
+:REPORT:   none — found while attributing the =tree= slowness
+:BRANCH:
+:END:
+Split out of the =tree= investigation, where it was measured and found *real
+but secondary*. =cooked-file-link-scan= runs from =cooked--fontify-region=, so
+it fires at redisplay over settled scrollback, not on the flood path — during
+the flood it runs 2–6 times on 1-line chunks and costs nothing. It shows up
+when you scroll back.
+
+Scrolling back 1500 lines of =tree= output: 1319 ms with links on against
+1089 ms off, so *230 ms / 21% is the scan* — 120 scans, 1435 candidates, 2870
+=ffap-file-exists-string= calls. The doubling is =cooked-file-link--exists=
+retrying against the project root on a miss, so every non-resolving name pays
+two syscalls plus a =project-current=; =tree= output is thousands of
+non-resolving names. Outside a project it is 1559 calls and 7%.
+
+Worth fixing, but note the size: 21% of a scroll gesture is not "extremely
+slow", and it never explained output *arriving* slowly. Likely shape: a
+negative cache spanning the scan, or declining the project-root retry for a
+candidate with no directory separator in it.
+
+** TODO [#C] The blue underlined space after =│= in =tree= output
+:PROPERTIES:
+:EFFORT:   1h
+:REPORT:   none — reported from real use
+:GATE:     Three facts from the user, below
+:BRANCH:
+:END:
+Reported alongside the =tree= slowness: the space after the white =│= appears
+to carry a blue underline. *Not reproduced*, and the file-link path — the
+obvious suspect, since =cooked-link= inherits =link= and =link= is blue and
+underlined — looks exonerated. Running =cooked-file-link-scan= over real =tree=
+rows propertizes exactly the filenames and nothing adjacent; the candidate
+regexp cannot match a space or NBSP, neither being in its character class.
+Dumping every property run over live =tree -C -L 1= output found one face
+only: =(:foreground "blue2" :weight bold)= on directory names, which is =tree
+-C='s own SGR out of =LS_COLORS= — bold blue, *no underline*.
+
+So the leading hypothesis is now that this is the child's own colour and not a
+cooked decoration at all. Three facts settle it, and all three need the user's
+live session: whether =cooked-file-link= is actually loaded there, their
+=LS_COLORS=, and =describe-text-properties= on the offending character.
+
+*Also refuted:* the pstree/systemctl discriminator. Both print box drawing and
+both pay the per-record cost fixed above; =pstree= is ~100 rows and
+=systemctl status= ~20 against =tree /usr/include='s 30,326. At 30 µs a record
+volume explains the contrast on its own, with no need for filenames to be
+involved.
 
 ** TODO [#C] =TERMINFO=b64:…= for the remote spawn only
 :PROPERTIES:
