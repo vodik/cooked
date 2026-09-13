@@ -728,19 +728,48 @@ two chances to disagree."
      (cooked--handle-semantic event batch-start))
     (_ nil)))
 
-(defun cooked--end-of-command ()
-  "Drop the state the last command left behind, at OSC 133 C or D or on exit.
+(defun cooked--end-of-command (&optional exited)
+  "Drop what a command left in Emacs, at OSC 133 C or D, or on exit when EXITED.
 
 The shell saying a command has finished, or that the next one is starting, is
-the one signal that whatever ran before it is gone, however it went.  The
-progress indicator is what needs it: `cargo build\=' interrupted at the
-keyboard never sends the report that removes its bar, so without this `[42%]\='
-stays in the mode line through every command after it.  Both marks, rather
-than D alone, because a shell that drops its D still sends the next C.
+the one signal that whatever ran before it is gone, however it went.  Both
+marks, rather than D alone, because a shell that drops its D still sends the
+next C.  What the emulator holds for the shell -- the mouse, focus and size
+reports, the key encoding -- the core puts back itself at D, and explains there
+why D and not the prompt's A; a mouse that goes off reaches Emacs as an ordinary
+`mouse\=' event.  This is the Emacs half, for state that is about a command:
 
-This is the place for any other state a child sets and cannot be trusted to
-unset, so that the marks and exit reach all of it through one call."
-  (cooked--reset-progress))
+- the OSC 9;4 progress indicator: `cargo build\=' interrupted at the keyboard
+  never sends the report that removes its bar, so without this `[42%]\=' stays
+  in the mode line through every command after it;
+- the OSC 22 pointer stacks, which no shell sets, so a pointer left as a
+  `text\=' bar by a crashed editor is not the shell\='s.
+
+Some state waits for EXITED, because a shell sets it too.  The OSC 12 cursor
+colour is one: base16-shell sets it from `.bashrc\=', before the first prompt,
+and clearing it at every mark would undo the theme the user chose.  The mouse
+state is another kind of wait: the core keeps it right while a child lives, but
+nothing reports it once the child is dead, so a kept buffer went on holding
+`track-mouse\=' on.  The OSC 3008 contexts belong to `cooked-exit-hook\=': a
+`run0 bash\=' prompts inside its `elevate\=' context, so no mark may end one."
+  (cooked--reset-progress)
+  ;; Guarded, since this runs twice per command and almost nothing sets a shape.
+  (when cooked--pointer-stacks (cooked--reset-pointer-shapes))
+  (when exited
+    (cooked--set-cursor-color nil)
+    (cooked--set-mouse-state nil nil nil nil nil)
+    (cooked--run-seam 'cooked-exit-hook)))
+
+(defcustom cooked-exit-hook nil
+  "Hook run in a session buffer once its child has exited.
+
+For a layer keeping state about the child that nothing else will clear: once
+the child is gone that state is wrong rather than stale, and a buffer can be
+kept and shown long after.  Run from inside the drain that saw the exit, each
+function contained, so one that signals is reported once and the rest still
+run."
+  :type 'hook
+  :group 'cooked)
 
 ;;;; The alternate screen, and the link passes redisplay runs
 
@@ -1037,8 +1066,8 @@ and a session that exits and is then killed goes through both."
   ;; A child that dies mid-`getpass' -- interrupted from the buffer, killed from
   ;; outside -- leaves a password prompt with nothing behind it.
   (cooked--cancel-secret)
-  ;; Nor is there any command left for a progress report to describe.
-  (cooked--end-of-command)
+  ;; Nor is there any command left for what it set to describe.
+  (cooked--end-of-command t)
   (cooked--stop-session)
   ;; After the session is gone, so the mode is recomputed as nil: a child that
   ;; exited while the buffer was suspended -- evil in normal state, or a

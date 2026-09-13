@@ -3015,6 +3015,157 @@ while [ ! -e %1$s.3 ]; do sleep 0.05; done; exit 3"
       (dolist (n '("1" "2" "3"))
         (ignore-errors (delete-file (concat go "." n)))))))
 
+;;;; What a dead command leaves behind
+
+(defun cooked-tests--dying-command (go set &optional probe)
+  "ARGV for a shell whose command sets SET and is killed before it can unset it.
+
+The shell marks its prompt and hands over at C.  SET is printf text, run in a
+`sh -c' that `kill -9's itself, which is as dead as a command gets.  The shell
+then runs PROBE on `before', waits for the file GO, sends D and its next
+prompt, runs PROBE on `after', and sleeps.  PROBE is a function from a label
+to shell text, or nil."
+  (list "/bin/sh" "-c"
+        (format "printf '\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007'; \
+sh -c \"printf '%s'; kill -9 \\$\\$\"; %s \
+while [ ! -e %s ]; do sleep 0.05; done; \
+printf '\\033]133;D;137\\007\\033]133;A\\007next$ \\033]133;B\\007'; %s sleep 5"
+                set (if probe (funcall probe "before") "") go
+                (if probe (funcall probe "after") ""))))
+
+(defun cooked-tests--mode-probe (mode)
+  "A probe for `cooked-tests--dying-command' printing DECRQM's answer for MODE.
+
+It prints its label, a colon and everything the terminal sent up to the reply's
+final `y', with ESC spelled E, so the answer for 2048 while it is set ends
+`E[?2048;1$y' -- after the size report its `h' sent.  The tty is left raw."
+  (lambda (label)
+    (format "stty raw -echo; printf '\\033[?%d$p'; r=; \
+while c=$(dd bs=1 count=1 2>/dev/null); [ \"$c\" != y ]; do r=\"$r$c\"; done; \
+printf '%s:%%sy\\r\\n' \"$r\" | tr '\\033' E;"
+            mode label)))
+
+(defmacro cooked-tests--after-dying-command (set probe before after)
+  "Run a `cooked-tests--dying-command' with SET and PROBE in a session.
+
+BEFORE must come to hold while what the command left stands, and AFTER once the
+shell has sent D and its next prompt."
+  (declare (indent 2))
+  (let ((go (make-symbol "go")))
+    `(let ((,go (make-temp-name
+                 (expand-file-name "cooked-handover-go" temporary-file-directory))))
+       (unwind-protect
+           (cooked-tests--with-session
+               (cooked-tests--dying-command ,go ,set ,probe)
+             (should (cooked-tests--settle (lambda () ,before)))
+             (write-region "" nil ,go)
+             ;; Short of the exit, which ends some of the same state for its own reasons.
+             (should (cooked-tests--settle (lambda () (and (not cooked--exit) ,after)))))
+         (ignore-errors (delete-file ,go))))))
+
+(defun cooked-tests--text-has (regexp)
+  "Whether the buffer text matches REGEXP."
+  (string-match-p regexp (cooked-tests--text)))
+
+(ert-deftest cooked-command-end-ends-size-reports ()
+  "A command killed with mode 2048 on would have every resize type
+`ESC [ 48 ; ...' into the prompt after it."
+  (cooked-tests--after-dying-command "\\033[?2048h"
+      (cooked-tests--mode-probe 2048)
+    (cooked-tests--text-has "before:.*E\\[\\?2048;1\\$y")
+    (cooked-tests--text-has "after:E\\[\\?2048;2\\$y")))
+
+(ert-deftest cooked-command-end-ends-mouse-tracking ()
+  "Left on, a hovering pointer is input for the next program that takes the
+keyboard."
+  (cooked-tests--after-dying-command "\\033[?1003h\\033[?1006h" nil
+    (cooked-mouse-state-motion cooked--mouse-state)
+    (and (cooked-tests--text-has "next\\$")
+         (not (cooked-mouse-state-enabled cooked--mouse-state))
+         (not (cooked-mouse-state-sgr cooked--mouse-state)))))
+
+(ert-deftest cooked-command-end-ends-focus-reports ()
+  "Left on, every change of window types `ESC [ I' into bash."
+  (cooked-tests--after-dying-command "\\033[?1004h" nil
+    (cooked--focus-events-p cooked--session)
+    (and (cooked-tests--text-has "next\\$")
+         (not (cooked--focus-events-p cooked--session)))))
+
+(ert-deftest cooked-command-end-pops-the-primary-kitty-flags ()
+  "A primary-screen program that pushed kitty flags and crashed left bash
+reading `CSI 114 ; 5 u' for C-r."
+  (cooked-tests--after-dying-command "\\033[>1u" nil
+    (eq cooked--keys 'kitty)
+    (and (cooked-tests--text-has "next\\$")
+         (eq cooked--keys 'legacy))))
+
+(ert-deftest cooked-command-end-empties-the-alternate-kitty-stack ()
+  "A program that left the alternate screen without popping handed its flags to
+the next full-screen program that pushes none of its own."
+  (cooked-tests--after-dying-command "\\033[?1049h\\033[>1u\\033[?1049l"
+      (lambda (label)
+        (format "stty raw -echo; printf '\\033[?1049h\\033[?u'; \
+r=$(dd bs=1 count=5 2>/dev/null); printf '\\033[?1049l'; \
+printf '%s:%%s\\r\\n' \"$r\" | tr '\\033' E;"
+                label))
+    (cooked-tests--text-has "before:E\\[\\?1u")
+    (cooked-tests--text-has "after:E\\[\\?0u")))
+
+(ert-deftest cooked-command-end-empties-the-pointer-stacks ()
+  "A pointer a crashed editor left as a text bar is not the shell's."
+  (cooked-tests--after-dying-command "\\033]22;>text\\007" nil
+    (alist-get 'main cooked--pointer-stacks)
+    (and (cooked-tests--text-has "next\\$")
+         (null cooked--pointer-stacks))))
+
+(ert-deftest cooked-command-end-leaves-bracketed-paste-to-the-shell ()
+  "bash, zsh and fish all set bracketed paste before the prompt that carries
+their A, so the handover must not take it back: at D it is still as the command
+left it, and the shell clears it before the next command itself."
+  (cooked-tests--after-dying-command "\\033[?2004h" nil
+    (cooked--bracketed-paste-p cooked--session)
+    (and (cooked-tests--text-has "next\\$")
+         (cooked--bracketed-paste-p cooked--session))))
+
+(defmacro cooked-tests--until-exit (script before &rest after)
+  "Run SCRIPT, a shell that waits for the file named by $GO and then exits.
+
+BEFORE must come to hold first; AFTER is the body run once the child is gone."
+  (declare (indent 2))
+  (let ((go (make-symbol "go")))
+    `(let ((,go (make-temp-name
+                 (expand-file-name "cooked-exit-go" temporary-file-directory))))
+       (unwind-protect
+           (cooked-tests--with-session
+               (list "/bin/sh" "-c"
+                     (concat ,script
+                             (format "; while [ ! -e %s ]; do sleep 0.05; done; exit 0"
+                                     ,go)))
+             (should (cooked-tests--settle (lambda () ,before)))
+             (write-region "" nil ,go)
+             (should (cooked-tests--settle (lambda () cooked--exit)))
+             ,@after)
+         (ignore-errors (delete-file ,go))))))
+
+(ert-deftest cooked-exit-ends-hover-tracking ()
+  "Nothing reports the mouse off once the child is dead, so a buffer kept after
+exit went on holding `track-mouse' on, a command-loop turn per glyph crossed."
+  (let ((cooked-mouse-hover-motion t))
+    (cooked-tests--until-exit
+        "printf '\\033[?1049h\\033[?1003h\\033[?1006h'; stty raw -echo"
+        (local-variable-p 'track-mouse)
+      (should-not (cooked-mouse-state-enabled cooked--mouse-state))
+      (should-not (local-variable-p 'track-mouse)))))
+
+(ert-deftest cooked-exit-takes-off-the-cursor-colour-and-marks-do-not ()
+  "base16-shell sets OSC 12 from `.bashrc', so a prompt mark keeps it; the frame
+wearing it after the child exited was the other way round."
+  (let ((cooked-allow-color-set t))
+    (cooked-tests--until-exit
+        "printf '\\033]12;#ff0000\\007\\033]133;C\\007\\033]133;D;0\\007\\033]133;A\\007$ '"
+        (and cooked--cursor-color (cooked-tests--text-has "\\$"))
+      (should-not cooked--cursor-color))))
+
 (ert-deftest cooked-osc-9-notifies-from-a-real-child ()
   "The TERM.org check, end to end: a message notifies and `9;9;PATH' does not."
   (let* ((cooked-allow-notifications t)

@@ -218,5 +218,25 @@ RIS in the middle must not clear the stack -- the spec's safety rule -- and the
     (should (cooked-tests--settle (lambda () (null cooked-osc-context--stack))))
     (should (equal (cooked-tests--context-shown) ""))))
 
+(ert-deftest cooked-osc-context-outlives-marks-and-not-the-child ()
+  "A `run0 bash' prompts inside its `elevate', so its OSC 133 marks leave the
+stack alone.  The child exiting ends every context, so a session started in the
+same buffer afterwards does not begin as root."
+  (let ((go (make-temp-name (expand-file-name "cooked-context-go" temporary-file-directory))))
+    (unwind-protect
+        (cooked-tests--with-session
+            `("/bin/sh" "-c"
+              ,(concat "printf '\\033]3008;start=44444444444444444444444444444444"
+                       cooked-tests--context-common ";type=elevate\\033\\\\';"
+                       " printf '\\033]133;C\\007\\033]133;D;0\\007\\033]133;A\\007$ ';"
+                       (format " while [ ! -e %s ]; do sleep 0.05; done; exit 0" go)))
+          (should (cooked-tests--settle
+                   (lambda () (and (equal (cooked-tests--context-shown) " root")
+                                   (string-match-p "\\$" (cooked-tests--text))))))
+          (write-region "" nil go)
+          (should (cooked-tests--settle (lambda () cooked--exit)))
+          (should-not cooked-osc-context--stack))
+      (ignore-errors (delete-file go)))))
+
 (provide 'cooked-tests-osc-context)
 ;;; cooked-tests-osc-context.el ends here

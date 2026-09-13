@@ -142,7 +142,12 @@ file recognises.
 Deliberately left alone by RIS.  The spec says a terminal reset must not touch
 the stack, so that a program running inside a context cannot hide it from the
 user by resetting the terminal -- and `reset' is the first thing anyone types
-in a terminal that looks wrong.")
+in a terminal that looks wrong.
+
+Left alone by the shell's OSC 133 marks too, which end every other piece of
+state a command leaves behind: a shell that `run0' started prompts inside its
+`elevate' context, and a mark from it is no evidence that the context is over.
+Only the child's exit ends them all; see `cooked-osc-context--forget'.")
 
 (defun cooked-osc-context--parse-head (head)
   "The (VERB . ID) that HEAD, the first field of an OSC 3008 payload, carries.
@@ -204,6 +209,14 @@ before and after."
     (unless (eq shown (cooked-osc-context--current))
       (force-mode-line-update))))
 
+(defun cooked-osc-context--forget ()
+  "Drop every open context, on `cooked-exit-hook\='.
+
+Nothing is open once the child has exited, and the mode line already says so by
+showing nothing.  The stack has to say so too, or a second session started in
+the same buffer would begin inside the first one\='s `elevate\='."
+  (setq cooked-osc-context--stack nil))
+
 (defun cooked-osc-context--current ()
   "The type of the context to name in the mode line, or nil.
 
@@ -254,6 +267,7 @@ keeps a second run of the hook from adding it twice."
 
 (setf (alist-get 3008 cooked-osc-handlers) #'cooked-osc-context--handle)
 (add-hook 'cooked-mode-hook #'cooked-osc-context--setup)
+(add-hook 'cooked-exit-hook #'cooked-osc-context--forget)
 ;; Sessions already running when this was loaded: their contexts from before
 ;; the load are lost, but anything opened from here on is shown.
 (dolist (buffer (buffer-list))

@@ -1204,7 +1204,9 @@ value the buffer is left with is the default one, so that is what it syncs to."
           (cooked--sync-pointer-shape (list newval)))))))
 
 (defun cooked--reset-pointer-shapes ()
-  "Empty both OSC 22 stacks, on RIS, as the protocol requires."
+  "Empty both OSC 22 stacks, on RIS as the protocol requires, and after a command.
+
+See `cooked--end-of-command\=' for why a command\='s end is reason enough."
   (setq cooked--pointer-stacks nil)
   (cooked--sync-pointer-shape))
 
