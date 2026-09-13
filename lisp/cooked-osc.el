@@ -249,7 +249,12 @@ absence."
 Queries are always answered; this is about OSC 10/11/12 requests that *set* a
 color.  Anything that can write to the terminal can send one — a `cat' of a
 hostile file, output from a compromised host — so it is off by default, for the
-same reason the OSC 51 command channel is a separate file you have to require."
+same reason the OSC 51 command channel is a separate file you have to require.
+
+The cursor color is the one that is not this buffer's alone.  Emacs has one per
+frame, so an OSC 12 set is worn by the frame while this buffer is in its
+selected window, the hollow cursors of the frame's other windows included, and
+taken off again when it is not."
   :type 'boolean
   :group 'cooked)
 
@@ -519,7 +524,11 @@ something is stuck."
   (cooked--set-progress nil nil))
 
 (defvar-local cooked--color-remaps nil
-  "Alist of color kind to face remapping cookie, so OSC 110/111/112 can undo a set.")
+  "Alist of color kind to face remapping cookie, so OSC 110/111 can undo a set.")
+
+(defvar-local cooked--cursor-color nil
+  "The cursor color an OSC 12 set asked for, or nil.
+Not a face remap like the other two; see `cooked--sync-cursor-color'.")
 
 (defconst cooked--osc-color-sources
   '((10 . foreground) (11 . background) (12 . cursor)
@@ -552,7 +561,10 @@ exists to fix."
                                   (frame-parameter nil 'foreground-color)))
                  ('background (or (face-background 'default nil t)
                                   (frame-parameter nil 'background-color)))
-                 ('cursor (or (frame-parameter nil 'cursor-color)
+                 ;; The frame's own colour, not what it wears for some other
+                 ;; buffer that set one.
+                 ('cursor (or cooked--cursor-color
+                              (cooked--frame-cursor-color (selected-frame))
                               (face-foreground 'default nil t)))
                  ;; Inheriting through `default', because a theme whose `region'
                  ;; sets only a background draws selected text in the default
@@ -645,7 +657,8 @@ the code."
 (defun cooked--set-default-color (kind spec)
   "Remap this buffer's default KIND to SPEC, if it parses.
 Buffer-local rather than frame-wide: a child gets to repaint its own terminal,
-not every window in the Emacs running it.
+not every window in the Emacs running it.  The cursor is the exception, because
+Emacs has no buffer-local cursor colour to give it; see `cooked--cursor-color'.
 
 A `background\=' set also remaps `fringe\=', not just `default\=': the fringe is
 its own face, styled by the Emacs theme rather than by anything a shell can
@@ -653,27 +666,34 @@ see, so without this a child that paints its own background leaves the fringe
 sitting in whatever shade the Emacs theme picked -- visibly split down the
 window edge from the terminal background right next to it."
   (when-let* ((color (cooked--parse-osc-color spec)))
-    (cooked--reset-default-color kind)
-    (push (cons kind (pcase kind
-                       ('foreground (list (face-remap-add-relative 'default :foreground color)))
-                       ('background (list (face-remap-add-relative 'default :background color)
-                                          (face-remap-add-relative 'fringe :background color)))
-                       ('cursor (list (face-remap-add-relative 'cursor :background color)))))
-          cooked--color-remaps)
-    ;; Every cell face resolves against `default', so the memoized ones are stale the
-    ;; moment the remap lands.
-    (cooked--flush-face-cache)
-    ;; A reversed screen swapped the colours as they were, and the newest remap
-    ;; outranks it; see `cooked--apply-reverse-screen'.
-    (cooked--apply-reverse-screen)))
+    (if (eq kind 'cursor)
+        (cooked--set-cursor-color color)
+      (cooked--reset-default-color kind)
+      (cooked--remap-default-color kind color))))
+
+(defun cooked--remap-default-color (kind color)
+  "Remap this buffer's `default' KIND, `foreground' or `background', to COLOR."
+  (push (cons kind (pcase kind
+                     ('foreground (list (face-remap-add-relative 'default :foreground color)))
+                     ('background (list (face-remap-add-relative 'default :background color)
+                                        (face-remap-add-relative 'fringe :background color)))))
+        cooked--color-remaps)
+  ;; Every cell face resolves against `default', so the memoized ones are stale the
+  ;; moment the remap lands.
+  (cooked--flush-face-cache)
+  ;; A reversed screen swapped the colours as they were, and the newest remap
+  ;; outranks it; see `cooked--apply-reverse-screen'.
+  (cooked--apply-reverse-screen))
 
 (defun cooked--reset-default-color (kind)
   "Drop any OSC 10/11/12 remap of KIND, restoring the theme's own color."
-  (when-let* ((cookies (alist-get kind cooked--color-remaps)))
-    (mapc #'face-remap-remove-relative cookies)
-    (setq cooked--color-remaps (assq-delete-all kind cooked--color-remaps))
-    (cooked--flush-face-cache)
-    (cooked--apply-reverse-screen)))
+  (if (eq kind 'cursor)
+      (cooked--set-cursor-color nil)
+    (when-let* ((cookies (alist-get kind cooked--color-remaps)))
+      (mapc #'face-remap-remove-relative cookies)
+      (setq cooked--color-remaps (assq-delete-all kind cooked--color-remaps))
+      (cooked--flush-face-cache)
+      (cooked--apply-reverse-screen))))
 
 (defun cooked--osc-color-reset (_parts)
   "Undo an OSC 10/11/12 set, from OSC 110, 111 or 112.
@@ -686,6 +706,73 @@ palette is the wrong seam -- so the only colours a child can have changed are
 the three defaults above, and each of those already has its own undo."
   (when-let* ((kind (alist-get (- cooked--osc-code 100) cooked--osc-color-sources)))
     (cooked--reset-default-color kind)))
+
+;;;; OSC 12 — the cursor, worn by the frame
+;;
+;; The other two defaults are face remaps, and OSC 12 used to be one too: a
+;; buffer-local remap of the `cursor' face.  It never reached the screen.  Emacs
+;; draws every cursor in its frame's `cursor-color' parameter, which the `cursor'
+;; face feeds only through the frame-wide face, so a remap changed what the
+;; buffer's faces said and not a single pixel.  That was checked in a headless
+;; pgtk frame, a red OSC 12 over a blue frame cursor, and no red pixel appeared
+;; in either the box or the hollow cursor.
+;;
+;; So the frame wears the colour while a cooked buffer that set one is in its
+;; selected window, and takes its own back the moment that stops.  Neither vterm
+;; nor eat does even that much; both ignore OSC 12 sets.  Two things follow from
+;; there being one colour per frame.  While
+;; the cooked window is selected, the hollow cursors other windows on the frame
+;; draw are in its colour too; those are the cursors of windows you are not
+;; typing in, and the alternative of declining OSC 12 outright costs the cursor
+;; you are.  And the colour given back is whatever the frame had when the child's
+;; went on, unless something else -- a theme, `set-cursor-color' -- has changed
+;; it since, in which case that newer colour is the one given back.
+
+(defun cooked--set-cursor-color (color)
+  "Make COLOR, or nil for none, this buffer\='s OSC 12 cursor color.
+Applied at once to every frame whose selected window shows this buffer."
+  (setq cooked--cursor-color color)
+  (cooked--sync-cursor-color-everywhere))
+
+(defun cooked--frame-cursor-color (frame)
+  "FRAME\='s own cursor color, beneath any OSC 12 color it is wearing.
+
+The frame parameter `cooked--cursor-color\=' records what is worn, as a cons of
+the color put on and the color it replaced.  When the frame\='s `cursor-color\='
+no longer matches the first, something other than `cooked--sync-cursor-color\='
+changed it, and that newer color is the frame\='s own."
+  (let ((current (frame-parameter frame 'cursor-color))
+        (worn (frame-parameter frame 'cooked--cursor-color)))
+    (if (and worn (equal (car worn) current)) (cdr worn) current)))
+
+(defun cooked--sync-cursor-color (frame)
+  "Put on or take off FRAME\='s OSC 12 cursor color, for its selected window.
+What is taken off is replaced by `cooked--frame-cursor-color\='.
+
+From `window-selection-change-functions\=' and
+`window-buffer-change-functions\=', whose global values run once per frame."
+  (when (frame-live-p frame)
+    (let* ((color (buffer-local-value 'cooked--cursor-color
+                                      (window-buffer (frame-selected-window frame))))
+           (current (frame-parameter frame 'cursor-color))
+           (own (cooked--frame-cursor-color frame)))
+      (cond (color
+             (unless (equal color current)
+               (set-frame-parameter frame 'cursor-color color))
+             (set-frame-parameter frame 'cooked--cursor-color
+                                  (cons (frame-parameter frame 'cursor-color) own)))
+            ((frame-parameter frame 'cooked--cursor-color)
+             (set-frame-parameter frame 'cooked--cursor-color nil)
+             (unless (equal own current)
+               (set-frame-parameter frame 'cursor-color own)))))))
+
+(defun cooked--sync-cursor-color-everywhere (&rest _)
+  "Run `cooked--sync-cursor-color\=' on every frame.
+On `cooked-theme-change-hook\=' too, since a theme that sets the `cursor\=' face
+repaints the frame\='s cursor without any window changing."
+  (mapc #'cooked--sync-cursor-color (frame-list)))
+
+(add-hook 'cooked-theme-change-hook #'cooked--sync-cursor-color-everywhere)
 
 ;;;; OSC 4 — the palette, answered and never changed
 ;;

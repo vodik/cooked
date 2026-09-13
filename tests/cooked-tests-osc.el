@@ -1476,6 +1476,50 @@ shifting the pairs after it, and a set stays silent even with sets allowed."
         (cooked--osc-color-reset nil))
       (should-not cooked--color-remaps))))
 
+(ert-deftest cooked-osc-12-is-worn-by-the-frame-while-the-buffer-is-selected ()
+  "The cursor is drawn in the frame\='s `cursor-color\=', so a remap of the `cursor\='
+face never reached the screen.  The frame wears the child\='s colour while the
+buffer is in its selected window, gives its own back when it is not, and gives
+back a colour something else set in the meantime rather than the stale one."
+  (let* ((frame (selected-frame))
+         (window (selected-window))
+         (before (window-buffer window))
+         (own (frame-parameter frame 'cursor-color))
+         (other (generate-new-buffer " other")))
+    (unwind-protect
+        (cooked-tests--with-session
+            '("/bin/sh" "-c" "sleep 0.3; printf '\033]12;#ff0000\007'; sleep 5")
+          (set-window-buffer window (current-buffer))
+          (let ((cooked-allow-color-set t))
+            (should (cooked-tests--settle (lambda () cooked--cursor-color))))
+          (should (equal (frame-parameter frame 'cursor-color) "#ff0000"))
+          (should-not (alist-get 'cursor face-remapping-alist))
+          ;; A query answers with the colour set, and a query from a buffer that
+          ;; set none answers with the frame's own, not the one it is wearing.
+          (should (equal (cooked--default-color 'cursor) "#ff0000"))
+          (with-current-buffer other
+            (should (equal (cooked--default-color 'cursor) own)))
+          (set-window-buffer window other)
+          (cooked--sync-cursor-color frame)
+          (should (equal (frame-parameter frame 'cursor-color) own))
+          (should-not (frame-parameter frame 'cooked--cursor-color))
+          (set-window-buffer window (current-buffer))
+          (cooked--sync-cursor-color frame)
+          (should (equal (frame-parameter frame 'cursor-color) "#ff0000"))
+          ;; What a theme does underneath: the frame's own colour changes while
+          ;; the child's is worn, and that is the colour given back.
+          (set-frame-parameter frame 'cursor-color "#00ff00")
+          (cooked--sync-cursor-color frame)
+          (should (equal (frame-parameter frame 'cursor-color) "#ff0000"))
+          (let ((cooked--osc-code 112))
+            (cooked--osc-color-reset nil))
+          (should-not cooked--cursor-color)
+          (should (equal (frame-parameter frame 'cursor-color) "#00ff00")))
+      (set-window-buffer window before)
+      (kill-buffer other)
+      (set-frame-parameter frame 'cooked--cursor-color nil)
+      (set-frame-parameter frame 'cursor-color own))))
+
 (ert-deftest cooked-osc-22-query-says-which-shapes-can-be-shown ()
   "One answer per name, in order: 1 for a shape Emacs has a pointer for, 0 for
 one it has not, and the top of the stack -- empty, so 0 -- for `__current__'."

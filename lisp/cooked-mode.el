@@ -1598,6 +1598,11 @@ back to.  See `cooked-bell-pending'."
   ;; something else.
   (add-hook 'window-selection-change-functions #'cooked--update-attention)
   (add-hook 'window-buffer-change-functions #'cooked--update-attention)
+  ;; The same two halves decide which buffer's OSC 12 colour a frame's cursor
+  ;; wears, and the global values are the ones that still run when the window
+  ;; being left shows a buffer that is no longer cooked, or no longer live.
+  (add-hook 'window-selection-change-functions #'cooked--sync-cursor-color)
+  (add-hook 'window-buffer-change-functions #'cooked--sync-cursor-color)
   ;; Whether a picture can be shown is a question about every frame the buffer
   ;; is on, so it is asked by walking sessions too; see `cooked--sync-graphics'.
   (add-hook 'window-buffer-change-functions #'cooked--sync-graphics-everywhere)
