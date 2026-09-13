@@ -196,34 +196,21 @@ Returns the position the text was inserted at."
   (pcase-let ((`(,text ,styles ,decos ,links ,table) block))
     (let ((start (point)))
       (insert text)
-      ;; The `insert' is outside the binding below and the three property phases
-      ;; are inside it, and the line between them is the whole of the care this
-      ;; needs.  Emacs runs `after-change-functions' for a text property change
-      ;; exactly as it does for an insertion, and jit-lock puts
-      ;; `jit-lock-after-change' there -- so a row of box drawing paid the hook
-      ;; once per decorated run and once per style span to be told what the
-      ;; `insert' had already told it, that this row is unfontified.  Measured
-      ;; at +21% on plain rows and +55% on box drawing; see
-      ;; `cooked--sync-fontification', which is the other half of the same
-      ;; finding and drops the hook entirely for a buffer with no scan to run.
+      ;; The `insert' is outside the binding below and the property phases are
+      ;; inside it.  Emacs runs `after-change-functions' for a text property
+      ;; change exactly as for an insertion, and jit-lock is on that hook, so a
+      ;; row of box drawing would pay it once per decorated run and once per
+      ;; style span to be told what the `insert' already said -- a cost of
+      ;; about a fifth on plain rows and half on box drawing.  See
+      ;; `cooked--sync-fontification', which drops the hook entirely for a
+      ;; buffer with no scan to run.
       ;;
-      ;; The `insert' stays outside because that call, and the `delete-region'
-      ;; in `cooked--render-rows' above it, are the row rewrite itself: they are
-      ;; what that function offers jit-lock in place of scanning anything, and a
-      ;; change hook a user has added is entitled to see an edit whatever we
-      ;; think of the one hook we are here about.
-      ;;
-      ;; One correction to the belief this was made on, since it is the sort of
-      ;; thing that gets restated as a hazard: inhibiting across the rewrite as
-      ;; well does *not* in fact stop links being found, and it was worth
-      ;; checking rather than assuming.  `insert' inherits no properties, so a
-      ;; rewritten row carries no `fontified' property by construction and reads
-      ;; as unfontified whether or not `jit-lock-after-change' ever ran on it.
-      ;; The notification is belt-and-braces, not the only thread the scan hangs
-      ;; from -- see `cooked-rewriting-a-row-still-gets-it-scanned', which says
-      ;; the same thing from the other side.  The line is drawn here anyway,
-      ;; because the saving is entirely in the loops and there is nothing to buy
-      ;; by moving it.
+      ;; The `insert' stays outside because it, and the `delete-region' in
+      ;; `cooked--render-rows', are the row rewrite itself, and a change hook a
+      ;; user has added is entitled to see an edit.  Links are found either
+      ;; way: `insert' inherits no properties, so a rewritten row reads as
+      ;; unfontified whether or not `jit-lock-after-change' ran on it.  See
+      ;; `cooked-rewriting-a-row-still-gets-it-scanned'.
       (let ((inhibit-modification-hooks t))
         (cooked--do-style-spans (from to face styles)
           (put-text-property (+ start from) (+ start to) 'face face))
@@ -254,10 +241,9 @@ Returns the position the text was inserted at."
 ;; same way for two edits.  What that buys is not mainly the edits: it is that a row
 ;; whose text was moved rather than rewritten keeps its markers, its overlays and its
 ;; fontification, where a rewritten one loses all three.  A prompt marker, a command
-;; decoration, a linkified URL and a live `next-error' position all used to be destroyed
-;; by every single line of output; now they survive until the row they sit on is
-;; genuinely recycled or scrolls off the top into scrollback, where they are pinned
-;; anyway.
+;; decoration, a linkified URL and a live `next-error' position would otherwise be
+;; destroyed by every line of output; moved, they survive until the row they sit on is
+;; genuinely recycled or scrolls off the top into scrollback.
 ;;
 ;; The emulator reports the moves as `:shifts', and the row indices in `:rows' are in
 ;; the coordinates the moves leave behind -- so these run first, before
@@ -421,8 +407,6 @@ that one glyph kind, exactly as a live row rendered without a known origin does.
         ;; is inserted with `cooked-rejoin-wrapped-lines' having joined a
         ;; continuation row onto the line above it, so a URL the live screen
         ;; broke across two rows is one string by the time anything scans it.
-        ;; That was true when the scan happened here and stays true, the joining
-        ;; being a property of the text rather than of when it is read.
         (set-marker cooked--screen-start (point))
         ;; After the marker moves, so it names the seam these marks are now above.
         (cooked--prune-marks)
@@ -517,18 +501,11 @@ full-screen program is read, inside a peek -- and there is somewhere to scroll
 to, the wheel goes back to Emacs, and a scroll the user asked for is theirs to
 keep.
 
-One hook, where there were two.  The second was `pre-redisplay-functions\=', and
-what it cost was out of proportion to the two cases it caught.  A pin calls
-`set-window-start\=', which clears the window\='s end-valid flag and so denies
-redisplay its incremental path; doing that *from inside* redisplay makes
-redisplay start over for the move the pin itself just made.  And it ran once per
-window per redisplay rather than once per event that could have moved one --
-which is why a selected window, whose point tracks the child\='s cursor and whose
-start therefore really does drift, cost measurably more to draw than the same
-window unselected.  Measured, scrolling one full-screen program: 202MB allocated
-under `redisplay_internal\=' against 28.7MB with this hook gone, and the gap
-between a selected and an unselected window closing with it.  See docs/DESIGN.md
-for the two cases this dropped and how they are answered instead."
+Not also on `pre-redisplay-functions\='.  A pin calls `set-window-start\=',
+which clears the window\='s end-valid flag and denies redisplay its incremental
+path; doing that from inside redisplay makes redisplay start over for the move
+the pin itself just made, once per window per redisplay.  See docs/DESIGN.md
+for the two cases that hook caught and how they are answered instead."
   (cooked--protect-hook
     (when (cooked--screen-restricted-p)
       (when-let* ((top (cooked--screen-start-position)))
@@ -573,10 +550,9 @@ copy of the live screen, and a blankness test leaves the screen showing twice."
           ;; Extend to the *last* row and trim from its end, rather than
           ;; walking one row past the last and trimming from its start.  A row
           ;; is made to exist by inserting the newline that ends the row above
-          ;; it, so asking for row ROWS left the region ROWS newline-terminated
-          ;; lines and then an empty one at `point-max' — a real buffer line
-          ;; below the bottom of the screen, which point can be moved onto and
-          ;; which scrolls the whole picture up by one when it is.  Trimming to
+          ;; it, so asking for row ROWS would leave an empty line at `point-max'
+          ;; below the screen, which point can be moved onto and which scrolls
+          ;; the whole picture up by one when it is.  Trimming to
           ;; `line-end-position' of the last row leaves that row unterminated,
           ;; exactly as the primary's last row already is, and is stable across
           ;; drains: the next one lands `bolp' on it and deletes nothing.
@@ -643,10 +619,9 @@ returns them -- but they are not the whole of what a drain inserts:
 one, and `cooked--fit-screen\=' and `cooked--goto-screen-row\=' add the newlines
 that make a row exist.  A sweep that misses one of those leaves a hole in the
 transcript the user can type into, which is not a failure any test would show.
-Measured, the sweep over a 50x200 screen that is already protected costs one to
-thirteen microseconds depending on how many face runs it is walking -- it is the
-*cold* part, the text the drain actually wrote, that costs, and that has to be
-paid wherever it is paid from."
+Sweeping text that is already protected costs microseconds; what costs is the
+text the drain actually wrote, and that has to be paid wherever it is paid
+from."
   (when-let* ((screen (cooked--screen-start-position)))
     (let ((tick (buffer-chars-modified-tick))
           (beg (min screen limit)))
@@ -724,7 +699,7 @@ costs its own contribution and neither the rest of the hook nor the drain.")
 ;;   `cooked--scroll-transcript' is not going to move.  While the view is
 ;;   following it points every one of them at the cursor and there is nothing to
 ;;   preserve; while it is held -- `still', `frozen', a peek -- it touches none
-;;   of them, and the row rewrite underneath was taking their point with it.
+;;   of them, so without this the row rewrite underneath would take their point with it.
 ;;
 ;; The transform is ghostel's `adjustRegion' (saved_markers.zig:27) with one
 ;; departure.  ghostel replaces one row per edit, so clamping a position inside
@@ -746,10 +721,9 @@ costs its own contribution and neither the rest of the hook nor the drain.")
 ;; and re-deriving them all in arithmetic would be a second implementation of the
 ;; drain with its own way of being wrong.  The single edit markers are wrong for
 ;; is the row rewrite, because a delete-and-reinsert is not a replacement as far
-;; as that adjustment is concerned -- and the two failures are not even the same
-;; failure, which is the evidence that nothing was carrying either.  A mark
-;; collapses to the run's *start*; a `window-point' is pushed to its *end*.  So
-;; that one edit is corrected where it happens, and nothing else is touched.
+;; as that adjustment is concerned: a mark collapses to the run's *start* and a
+;; `window-point' is pushed to its *end*.  So that one edit is corrected where it
+;; happens, and nothing else is touched.
 
 (cl-defstruct (cooked-relocation (:constructor cooked--relocation-make) (:copier nil))
   "A position `cooked--render-rows' has to carry across a run it rewrites.
@@ -849,8 +823,8 @@ a mode whose whole point is that the buffer keeps the grid\='s line structure.
 
 Written only when it differs from what is already there, which on the ordinary
 row is never.  A property change runs `after-change-functions\=' exactly as an
-insertion does, and jit-lock is on that hook -- see `cooked--render-block\=' for
-the same finding measured.  A row inside a run has a freshly inserted newline
+insertion does, and jit-lock is on that hook -- see `cooked--render-block\='.
+A row inside a run has a freshly inserted newline
 that carries nothing, so the common case reads a property and writes none;
 only a row that has just started or stopped wrapping pays anything.
 
@@ -911,9 +885,8 @@ and overlay anchored in text nothing asked to have rewritten.  See
 
 ROWS is expected in ascending index order, which is how the drain reports
 damage.  Order is not required for correctness -- a run out of sequence is
-found by the same walk from `cooked--screen-start' that every row used to
-take -- but it is what keeps a full-height repaint from being quadratic; see
-the walk below.
+found by walking from `cooked--screen-start' -- but it is what keeps a
+full-height repaint from being quadratic; see the walk below.
 
 ALT says whether these rows belong to the alternate screen, and is passed in
 rather than read from `cooked--alt' because that variable still holds the
@@ -1026,8 +999,7 @@ which has no such seam at all."
                 ;; The row table's own two measurements: how many cells the row
                 ;; occupies on the grid, and whether every character of it takes
                 ;; one byte and stands on one cell.  Both are by-products of the
-                ;; core building the row, and both are answers the guard used to
-                ;; work out for itself, per row per drain -- see
+                ;; core building the row, so the guard need not measure them; see
                 ;; `cooked--guard-row-width'.
                 (when (and layout cells)
                   (cooked--guard-row-width pos cells layout uniform cache))
