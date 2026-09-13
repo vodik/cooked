@@ -1584,11 +1584,47 @@ What to look for, in order of how much it matters:
    would. Worth trying with your own prompt.
 4. *Bold CJK beside regular CJK* should now measure separately.
 
+*** It shipped broken, and how
+
+Reported from real use: htop out of line where it had rendered perfectly, btop a
+mess, =tree= with an extra line of coloured corruption between every =│=, and
+scrollback in a large directory very slow. Off by default now (feff41b) and the
+cause fixed (788bff3), but *both* diagnoses on the way are worth keeping.
+
+*The first guess was wrong.* Box-drawing glyphs coming from fallback fonts with
+roomier metrics, firing the scaler — plausible, and false. Measured, every one
+of =─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼ █ ▊ ▎ ░ ▒ ▓ ⣿ ❯= comes from the *default* font at
+exactly 9x15/5. They were never scaled at all.
+
+*The damage came from the path added to avoid scaling.* A box character has
+exactly cell-shaped proportions — 9 over 20 against a cell of 9 over 20 — so
+=cooked--glyph-claims-next-cell-p= compared two equal aspects, answered yes on
+the =>==, claimed the cell after it and hid the space living there. Every line
+of =tree= output begins =│ = and every one did it: 8 display properties and 4
+hidden spaces over three lines.
+
+The missing piece is ghostel's *first act* in =adjustGlyph=, which returns
+before doing anything when the glyph's width is exactly its slot and its ascent
+and descent are exactly the default's. It reads like an optimisation and is not:
+it is what keeps the claim path away from glyphs that need neither.
+
+*And the buffer text was correct throughout*, which is why nothing in the suite
+caught it — a text oracle cannot see a bug that lives entirely in what is hung
+on the text. The regression test asserts the *absence* of a decision.
+
 *** Still open
 
-- *No bench case.* Same gap the image and scroll work hit: the guard's cost with
-  scaling on is unmeasured, and the interesting number is a row of *distinct*
-  offenders, where the cache cannot help.
+- *No bench case*, and the reported slowness is unexplained. Same gap the image
+  and scroll work hit. =tree= in a large directory is the fixture this wants —
+  it is what found the bug, it is a shape the suite has nothing like (box
+  drawing on every row, non-uniform, coloured, thousands of rows), and the user
+  reported it *slow* as well as wrong. Whether the slowness survives 788bff3 is
+  not yet known: the walk still visits every cluster of every non-uniform row
+  even when it decides to do nothing.
+- *Turning scaling back on* is the open question. The guard makes the
+  box-drawing case correct, but being wrong twice about what this touches is
+  reason enough to let it be asked for. Try =(setq cooked-glyph-scale-floor
+  0.5)= against htop, btop and tree before considering a default.
 - *Only the first cluster of a run is measured*, which is right for a border row
   and wrong for a row of mixed CJK — each distinct cluster still costs a shaping
   call the first time it is seen under a given font.
