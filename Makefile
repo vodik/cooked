@@ -104,8 +104,8 @@ test: rust-test lisp-test lint
 # size for a gate -- a suite whose runtime nobody can predict is a suite people learn to
 # skip. `PROPTEST_CASES' in the environment overrides it, and is how a suspicion gets
 # chased: `PROPTEST_CASES=100000 make rust-test' is a few minutes and a much wider net.
-# Anything it finds shrinks and lands in `tests/delta_replay.regressions', which is
-# committed and replayed ahead of the random cases on every subsequent run.
+# Anything it finds is shrunk and printed, and belongs in the file as a named test with
+# that input written out, which a change to the generators cannot turn into another case.
 rust-test:
 	cargo test
 

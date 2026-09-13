@@ -1041,86 +1041,395 @@ fn dense(delta: &Delta) -> Result<Vec<Vec<Run>>, TestCaseError> {
     Ok(delta.rows.iter().map(|r| r.runs.clone()).collect())
 }
 
+/// Property 1: the deltas said everything the grid would have said.
+fn replays_the_whole_grid(rows: usize, cols: usize, steps: &[Step]) -> Result<(), TestCaseError> {
+    let mut replay = Replay::new(rows, cols);
+    for step in steps {
+        replay.step(step, true);
+    }
+    let full = replay.full();
+    let grid = dense(&full)?;
+    if let Some(where_) = difference(&replay.shadow, &grid, &replay.trimmed) {
+        return Err(TestCaseError::fail(format!(
+            "replaying the deltas did not reproduce the grid — {where_}"
+        )));
+    }
+    // The levels too: the cursor, DECSCNM's reverse video and its toggle count, the alt
+    // screen and the key encoding are what Emacs draws and encodes from, and none of
+    // them is in a row.
+    prop_assert_eq!(
+        replay.levels,
+        (full.levels, full.cursor_chars),
+        "the last drain left Emacs with levels the terminal no longer has"
+    );
+    Ok(())
+}
+
+/// Property 2: where the writes were cut did not matter.
+fn fragmenting_changes_nothing(
+    rows: usize,
+    cols: usize,
+    steps: &[Step],
+    rejoin: bool,
+) -> Result<(), TestCaseError> {
+    let mut split = Replay::new(rows, cols);
+    let mut whole = Replay::new(rows, cols);
+    for step in steps {
+        split.step(step, true);
+        whole.step(step, false);
+    }
+    let (a, b) = (split.full(), whole.full());
+    prop_assert_eq!(
+        (a.levels, a.cursor_chars),
+        (b.levels, b.cursor_chars),
+        "the same bytes cut differently left different levels"
+    );
+    let (a, b) = (dense(&a)?, dense(&b)?);
+    if let Some(where_) = difference(&a, &b, &[]) {
+        return Err(TestCaseError::fail(format!(
+            "the same bytes cut differently produced different grids — {where_}"
+        )));
+    }
+    // The scrollback is compared as runs first, so a divergence in styles or in the
+    // wrap provenance is caught with its own message, and then as the text Emacs
+    // would actually insert under each setting of `cooked-rejoin-wrapped-lines' —
+    // which is a text-identity transformation of the wrap flags, and so exactly the
+    // kind of thing a consistency property can check without an expected output.
+    let runs = |batches: &[Delta]| -> Vec<Scrolled> {
+        batches.iter().flat_map(|b| b.scrolled.clone()).collect()
+    };
+    prop_assert_eq!(runs(&split.scrollback), runs(&whole.scrollback));
+    prop_assert_eq!(
+        render(&split.scrollback, rejoin),
+        render(&whole.scrollback, rejoin)
+    );
+    Ok(())
+}
+
 proptest! {
     // 1024 rather than proptest's default 256: a case is a few dozen cells and a few
-    // hundred bytes, so the pair of properties still runs in under a second and
+    // hundred bytes, so the pair of properties still runs in about a second and
     // quadrupling the cases is the cheapest coverage on offer. `PROPTEST_CASES=100000`
     // in the environment is the long soak, for when something is suspected but not
     // reproducing.
     //
-    // The persistence file has to be named outright: proptest's default looks for the
-    // `lib.rs` or `main.rs` of the crate it belongs to and an integration test has
-    // neither, so the failing case would be printed and then lost. Named, it is written
-    // beside this file and *committed* -- §9's shrunk corpus, replayed ahead of the
-    // random cases on every run, which is what stops a fixed bug from coming back
-    // quietly.
+    // Nothing is persisted. proptest would store the RNG seed of a failure, and a seed
+    // names a case only for the strategies that produced it: adding a motif to
+    // `payload()` or changing a weight quietly turns it into some other random case. A
+    // failure is written out instead, as a named test under "Regressions" below, from
+    // the minimal input proptest prints.
     #![proptest_config(ProptestConfig {
         cases: 1024,
-        failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::Direct(
-            "tests/delta_replay.regressions",
-        ))),
+        failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
-    /// Property 1: the deltas said everything the grid would have said.
     #[test]
     fn deltas_replay_the_whole_grid(((rows, cols), steps) in (size(), script())) {
-        let mut replay = Replay::new(rows, cols);
-        for step in &steps {
-            replay.step(step, true);
-        }
-        let full = replay.full();
-        let grid = dense(&full)?;
-        if let Some(where_) = difference(&replay.shadow, &grid, &replay.trimmed) {
-            return Err(TestCaseError::fail(format!(
-                "replaying the deltas did not reproduce the grid — {where_}"
-            )));
-        }
-        // The levels too: the cursor, DECSCNM's reverse video and its toggle count, the alt
-        // screen and the key encoding are what Emacs draws and encodes from, and none of
-        // them is in a row.
-        prop_assert_eq!(
-            replay.levels,
-            (full.levels, full.cursor_chars),
-            "the last drain left Emacs with levels the terminal no longer has"
-        );
+        replays_the_whole_grid(rows, cols, &steps)?;
     }
 
-    /// Property 2: where the writes were cut did not matter.
     #[test]
     fn fragmenting_the_writes_changes_nothing(
         ((rows, cols), steps, rejoin) in (size(), script(), any::<bool>())
     ) {
-        let mut split = Replay::new(rows, cols);
-        let mut whole = Replay::new(rows, cols);
-        for step in &steps {
-            split.step(step, true);
-            whole.step(step, false);
-        }
-        let (a, b) = (split.full(), whole.full());
-        prop_assert_eq!(
-            (a.levels, a.cursor_chars),
-            (b.levels, b.cursor_chars),
-            "the same bytes cut differently left different levels"
-        );
-        let (a, b) = (dense(&a)?, dense(&b)?);
-        if let Some(where_) = difference(&a, &b, &[]) {
-            return Err(TestCaseError::fail(format!(
-                "the same bytes cut differently produced different grids — {where_}"
-            )));
-        }
-        // The scrollback is compared as runs first, so a divergence in styles or in the
-        // wrap provenance is caught with its own message, and then as the text Emacs
-        // would actually insert under each setting of `cooked-rejoin-wrapped-lines' —
-        // which is a text-identity transformation of the wrap flags, and so exactly the
-        // kind of thing a consistency property can check without an expected output.
-        let runs = |batches: &[Delta]| -> Vec<Scrolled> {
-            batches.iter().flat_map(|b| b.scrolled.clone()).collect()
-        };
-        prop_assert_eq!(runs(&split.scrollback), runs(&whole.scrollback));
-        prop_assert_eq!(
-            render(&split.scrollback, rejoin),
-            render(&whole.scrollback, rejoin)
-        );
+        fragmenting_changes_nothing(rows, cols, &steps, rejoin)?;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Regressions
+// ---------------------------------------------------------------------------
+//
+// Cases the properties have failed on, each shrunk by proptest and written out, run through
+// the property that found it. Most came from deliberately broken builds while the checks
+// were being written -- a copy of Emacs' screen that was not shifted, a trim that was not
+// forgotten, a glyph run cut by an edit -- and the rest from real bugs. The first two
+// predate `Step::Write::drain`, when every write drained.
+
+/// A write of TEXT, cut at SPLITS (fractions of its length in 256ths), and drained after if
+/// DRAIN.
+fn write(text: &str, splits: &[u8], drain: bool) -> Step {
+    Step::Write {
+        bytes: text.as_bytes().to_vec(),
+        splits: splits.to_vec(),
+        drain,
+    }
+}
+
+#[test]
+fn a_split_c1_control_between_a_cursor_save_and_restore() {
+    let steps = [
+        write("\x1b[s", &[100], true),
+        Step::Resize { rows: 0, cols: 0 },
+        write("\u{80}", &[128], true),
+        write("\x1b[u", &[], true),
+    ];
+    fragmenting_changes_nothing(1, 1, &steps, false).unwrap();
+}
+
+#[test]
+fn combining_marks_among_box_glyphs_on_a_one_cell_grid() {
+    let steps = [write(
+        "    \u{2500} \u{2500}\u{300} \u{300}        \u{2500}",
+        &[114],
+        true,
+    )];
+    fragmenting_changes_nothing(1, 1, &steps, false).unwrap();
+}
+
+#[test]
+fn a_row_trimmed_before_it_was_drained() {
+    let steps = [
+        write("\x1b[H\x1b[0mabcdefgh", &[], false),
+        Step::Trim { row: 0 },
+    ];
+    replays_the_whole_grid(1, 1, &steps).unwrap();
+}
+
+#[test]
+fn a_trimmed_row_erased_and_written_back() {
+    let steps = [
+        write("", &[], false),
+        write("\x1b[H\x1b[0mabcdefgh", &[], false),
+        Step::Trim { row: 0 },
+        write("\x1b[1;1H\x1b[2Kabcdefgh", &[], false),
+    ];
+    fragmenting_changes_nothing(1, 5, &steps, false).unwrap();
+}
+
+#[test]
+fn a_trimmed_row_redrawn_by_a_screen_clear() {
+    let steps = [
+        write("\x1b[H\x1b[2Jabcdefgh\r\nabcdefgh", &[], false),
+        Step::Trim { row: 0 },
+        write("\x1b[H\x1b[2Jabcdefgh\r\nabcdefgh", &[], false),
+    ];
+    replays_the_whole_grid(1, 1, &steps).unwrap();
+}
+
+#[test]
+fn a_box_row_under_a_row_with_a_background() {
+    let steps = [
+        write("\x1b[H\x1b[48;2;0;0;0mAA BB", &[], true),
+        write("\x1b[2;1H\x1b[2K\u{2502} \u{2500}\u{2500}", &[], false),
+    ];
+    replays_the_whole_grid(4, 1, &steps).unwrap();
+}
+
+#[test]
+fn a_row_rewritten_after_the_alt_screen_resized_back() {
+    let steps = [
+        Step::Resize { rows: 2, cols: 0 },
+        write("\x1b[?1049h", &[128], true),
+        write("", &[], false),
+        Step::Resize { rows: 3, cols: 0 },
+        write("", &[], false),
+        write("\x1b[?1049l", &[], true),
+        write("\x1b[H\x1b[0mabcdefgh", &[], true),
+        write("\x1b[2;1H\x1b[2Kabcdefgh", &[], false),
+    ];
+    fragmenting_changes_nothing(3, 1, &steps, false).unwrap();
+}
+
+#[test]
+fn a_row_written_below_the_grid_between_two_screen_clears() {
+    let steps = [
+        Step::Resize { rows: 4, cols: 0 },
+        write("\x1b[H\x1b[2Jabcdefgh\r\nhello", &[], false),
+        write("\x1b[6;1H\x1b[2K\u{2502} \u{2500}\u{2500}", &[], true),
+        write("\x1b[H\x1b[2Jabcdefgh\r\nhello", &[], false),
+    ];
+    replays_the_whole_grid(3, 1, &steps).unwrap();
+}
+
+#[test]
+fn text_redrawn_with_an_underline_colour_after_a_screen_clear() {
+    let steps = [
+        write("\x1b[H\x1b[2Jabcdefgh\r\nabcdefgh", &[], true),
+        write("\x1b[H\x1b[58;5;0mabcdefgh", &[], false),
+    ];
+    fragmenting_changes_nothing(1, 1, &steps, false).unwrap();
+}
+
+#[test]
+fn a_character_redrawn_with_an_underline_colour() {
+    let steps = [
+        write("\x1b[H\x1b[0mx", &[], true),
+        write("\x1b[H\x1b[58;5;0mx", &[], false),
+    ];
+    replays_the_whole_grid(1, 1, &steps).unwrap();
+}
+
+#[test]
+fn an_erase_below_after_a_nul() {
+    let steps = [write(" \0!", &[], true), write("\x1b[0J", &[], false)];
+    replays_the_whole_grid(1, 2, &steps).unwrap();
+}
+
+#[test]
+fn history_forgotten_before_a_shrink_and_a_screen_clear() {
+    let steps = [
+        write("\x1b[1;1H\x1b[2Khello", &[], false),
+        write("    \u{4e00}          !", &[], false),
+        Step::ForgetHistory,
+        Step::Resize { rows: 1, cols: 0 },
+        write("\x1b[H\x1b[2Jabcdefgh\r\nhello", &[], false),
+    ];
+    fragmenting_changes_nothing(4, 5, &steps, false).unwrap();
+}
+
+#[test]
+fn a_restore_after_narrowing_and_a_write() {
+    let steps = [
+        write("    \u{2500}\u{2500}", &[], false),
+        write("\x1b[s", &[100], true),
+        Step::Resize { rows: 0, cols: -5 },
+        write(" ", &[], true),
+        write("\x1b[u", &[], true),
+        write("  ", &[], false),
+    ];
+    replays_the_whole_grid(8, 11, &steps).unwrap();
+}
+
+#[test]
+fn a_combining_mark_on_a_box_glyph_under_a_background_pen() {
+    let steps = [
+        Step::Resize { rows: 1, cols: -1 },
+        write("\x1b[48;2;0;0;0m", &[], false),
+        write("     ", &[], true),
+        write("       \u{2500}\u{300}", &[], false),
+    ];
+    fragmenting_changes_nothing(1, 3, &steps, false).unwrap();
+}
+
+#[test]
+fn a_box_run_after_the_scroll_region_is_reset() {
+    let steps = [
+        write("\x1b[H\x1b[0m....", &[], false),
+        write(" \u{4e00}!", &[], true),
+        write("\x1b[r", &[], false),
+        write(
+            "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+            &[],
+            false,
+        ),
+    ];
+    replays_the_whole_grid(2, 4, &steps).unwrap();
+}
+
+#[test]
+fn a_restore_after_wide_characters_rewrap() {
+    let steps = [
+        write("   \u{4e00}           \u{4e00}\u{4e00}\u{4e00}", &[], false),
+        Step::Resize { rows: 0, cols: 3 },
+        write("\x1b[H\x1b[0mx", &[], false),
+        write("\x1b[s", &[100], true),
+        Step::Resize { rows: 0, cols: 0 },
+        write(
+            "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+            &[],
+            false,
+        ),
+        write("\x1b[u", &[], true),
+    ];
+    fragmenting_changes_nothing(6, 2, &steps, false).unwrap();
+}
+
+#[test]
+fn two_save_resize_restore_cycles_over_wide_characters() {
+    let steps = [
+        write("\x1b[s", &[100], true),
+        Step::Resize { rows: 0, cols: 3 },
+        write("             ", &[], false),
+        write("\x1b[u", &[], true),
+        write("\x1b[s", &[100], true),
+        Step::Resize { rows: 2, cols: 6 },
+        write(" \u{4e00}\u{4e00}\u{2500}", &[], false),
+        write("\x1b[u", &[], true),
+        write("\u{2500}\u{2500}\u{2500}\u{2500}", &[], false),
+    ];
+    replays_the_whole_grid(1, 1, &steps).unwrap();
+}
+
+#[test]
+fn wide_characters_and_a_mark_with_autowrap_off() {
+    let steps = [
+        write("         ", &[], false),
+        write("\x1b[?7l", &[], false),
+        write(" \u{4e00}\u{4e00}\u{300}", &[], true),
+        write(" ", &[], false),
+    ];
+    replays_the_whole_grid(2, 7, &steps).unwrap();
+}
+
+#[test]
+fn two_alt_screen_cycles_with_autowrap_off() {
+    let steps = [
+        write("\x1b[?7l", &[], false),
+        write("\x1b[?1049h", &[128], true),
+        write("", &[], false),
+        Step::Resize { rows: 0, cols: 3 },
+        write("", &[], false),
+        write("\x1b[?1049l", &[], true),
+        write("\x1b[?1049h", &[128], true),
+        write("\u{2500}\u{2500}", &[], false),
+        Step::Resize { rows: 0, cols: -2 },
+        write("\x1b[0J", &[], true),
+        write("\x1b[?1049l", &[], true),
+    ];
+    replays_the_whole_grid(1, 1, &steps).unwrap();
+}
+
+#[test]
+fn a_scroll_region_set_after_a_restore_on_a_box_row() {
+    let steps = [
+        Step::Resize { rows: 0, cols: 0 },
+        write("\x1b[s", &[100], true),
+        Step::Resize { rows: 1, cols: 0 },
+        write("  \u{2500}", &[], false),
+        write("\x1b[u", &[], true),
+        write("\u{2500}", &[], false),
+        write("\x1b[1;2r", &[], false),
+    ];
+    fragmenting_changes_nothing(1, 5, &steps, false).unwrap();
+}
+
+#[test]
+fn a_lone_combining_mark_after_a_resize() {
+    let steps = [
+        Step::Resize { rows: 0, cols: 3 },
+        write("\u{300}", &[], false),
+    ];
+    fragmenting_changes_nothing(1, 1, &steps, false).unwrap();
+}
+
+#[test]
+fn a_repaint_over_a_wide_character_carrying_a_mark() {
+    let steps = [
+        write("h\u{4e00}\u{300}  !", &[], true),
+        write("\x1b[H\x1b[0mhello", &[], false),
+    ];
+    replays_the_whole_grid(5, 9, &steps).unwrap();
+}
+
+/// A pen with a background taken as it fills the rendition table: the collection for its
+/// erase rendition freed its text rendition's id, and the text was written under an id no
+/// drain announced.
+#[test]
+fn a_pen_whose_erase_rendition_fills_the_table() {
+    let steps = [
+        write("\x1b[1m", &[], false),
+        write(" ", &[], false),
+        write("\x1b[H\x1b[2mabcdefgh", &[], false),
+        write("\x1b[48;2;0;0;0m", &[], false),
+        write("\x1b[1;1H\x1b[2Kabcdefgh", &[], false),
+        write("\x1b[?1049h", &[128], true),
+        write("\x1b[H\x1b[40mabcdefgh", &[], false),
+        Step::Resize { rows: 0, cols: 0 },
+        write("", &[], false),
+        write("\x1b[?1049l", &[], true),
+        write("\x1b[H\x1b[41mabcdefgh", &[], false),
+    ];
+    replays_the_whole_grid(1, 1, &steps).unwrap();
 }
