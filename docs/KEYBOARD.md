@@ -25,6 +25,24 @@ as the key `!` rather than as Shift+`1`. On a terminal frame Tab, Return and Bac
 indistinguishable from C-i, C-m and C-?, and are taken to be the keys; ESC there is also
 half of every Meta chord, so it goes as the plain byte.
 
+modifyOtherKeys is honoured at both of xterm's levels, with xterm's rules for which keys
+each covers (`ModifyOtherKeys` in its `input.c`). Level 2 spells every key held with
+Control or Meta as `CSI 27 ; mods ; char ~`, so `C-;` is `ESC [ 27;5;59 ~` rather than a
+bare ESC; Shift alone does the same for letters and the space bar, and a shifted `A` goes
+out as `ESC [ 27;2;65 ~`, while `!` stays `!`. Level 1, which is what `emacs -nw` asks for,
+keeps every chord that already has a byte: `C-a` is still SOH and only a chord like `C-;`
+or `C-1`, which has none, is spelled out. Return and Tab are spelled out under Shift or
+Control, Escape and Backspace never are, and Meta is the leading ESC it always was unless
+the rest of the chord is being spelled out anyway. The same two narrowings as kitty
+apply: Control+Shift+1 is reported as Control+`!`, and C-i, C-m and C-[ are Tab, Return
+and Escape.
+
+Which byte Control makes follows X11's table, not a five-bit mask, whether or not
+anything was negotiated: `C-2` is NUL, `C-/` is US, and `C-;`, which has no control form,
+sends `;` just as xterm does, where it used to send an ESC. On a graphical frame those
+chords, and Control+Shift on a letter, are forwarded to the child like any other key;
+before, they fell through to Emacs, and Control+Shift lost its shift on the way.
+
 Some programs never ask. Claude Code enables the kitty protocol from a list of terminal
 *names* it recognises in the environment — `iTerm.app`, `kitty`, `WezTerm`, `ghostty`,
 `tmux`, `windows-terminal`, `WarpTerminal` — and never sends the `CSI ? u` query cooked

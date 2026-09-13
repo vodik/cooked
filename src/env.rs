@@ -257,6 +257,7 @@ symbols! {
     AppCursor => ":app-cursor",
     Keys => ":keys",
     KittyFlags => ":kitty-flags",
+    ModifyOtherKeysLevel => ":modify-other-keys",
     Mode => ":mode",
     Images => ":images",
     Links => ":links",

@@ -233,12 +233,19 @@ when the child has negotiated nothing, since that is what every terminal has
 always sent and what every program still understands -- a bare byte for most
 keys here, but `backtab' falls back to its own classical, three-byte spelling
 instead."
-  (let ((seq (cooked--key-sequence entry)))
+  (let ((seq (cooked--key-sequence entry))
+        (level (cooked--modify-other-level)))
     (cond
      ((= param 1) (if (memq 'meta mods) (concat "\e" seq) seq))
-     ((eq cooked--keys 'modify-other) (cooked--csi "~" 27 param code))
+     ;; A level the child set says which of these keys it covers; a guess from
+     ;; `cooked-key-protocol-overrides\=' has no level and covers them all, as it
+     ;; always has.
+     ((and (eq cooked--keys 'modify-other)
+           (or (not level) (cooked--modify-other-p level code mods)))
+      (cooked--csi "~" 27 param code))
      ((eq cooked--keys 'kitty) (cooked--csi "u" code param))
-     ;; Nothing negotiated: meta has a classical spelling, the rest do not.
+     ;; Nothing negotiated, or a key level 1 leaves alone: meta has a classical
+     ;; spelling, the rest do not.
      ((memq 'meta mods) (concat "\e" seq))
      (t seq))))
 
@@ -279,6 +286,115 @@ and saying so means dispatching on that row from inside this one."
         (t (cooked--encode-literal entry (aref plain 0) param mods))))
       (`(,_ literal ,code . ,_)
        (cooked--encode-literal entry code param mods)))))
+
+;;;; xterm's modifyOtherKeys, as negotiated
+
+(defun cooked--control-char (char)
+  "The byte Control turns CHAR into, or nil where Control makes no byte.
+
+This is X11's table, from `XkbToControl\=' in libX11, and xterm's too, since
+xterm takes the byte from `XLookupString\=': `@\=' through `~\=' and the space
+bar are masked to their low five bits, `2\=' is NUL, `3\=' through `7\=' are ESC
+through US, `8\=' and `?\=' are DEL, and `/\=' is US.  Every other character has
+no control form, and Control on it sends the character itself.
+
+The obvious rule, masking any character to five bits, is wrong on both sides of
+that line.  It sent `C-;\=' as a bare ESC, which a child reads as the start of
+an escape sequence, and `C-/\=' as SI rather than the US every shell binds to
+undo.  modifyOtherKeys needs the real table for a second reason: level 1 is
+defined by it, re-spelling exactly the chords that have no byte here."
+  (cond ((or (<= ?@ char ?~) (= char ?\s)) (logand char #x1f))
+        ((= char ?2) 0)
+        ((<= ?3 char ?7) (+ 27 (- char ?3)))
+        ((memq char '(?8 ??)) 127)
+        ((= char ?/) 31)))
+
+(defun cooked--modify-other-level ()
+  "The modifyOtherKeys level the child negotiated, or nil if it negotiated none.
+
+nil while `cooked--keys\=' is `modify-other\=' means that value was assumed by
+`cooked-key-protocol-overrides\=' or `cooked-key-overrides\=' rather than asked
+for, and then only the `literal\=' keys are re-spelled, exactly as for a kitty
+guess and for the reason `cooked--kitty-negotiated-p\=' gives: `C-a\=' sent as
+`ESC [ 27 ; 5 ; 97 ~\=' to a program that never asked is not a Control-a."
+  (and (eq cooked--keys 'modify-other)
+       (memq cooked--modify-other-keys '(1 2))
+       cooked--modify-other-keys))
+
+(defun cooked--modify-other-p (level code mods)
+  "Whether modifyOtherKeys LEVEL spells CODE, held with MODS, as an escape.
+
+CODE is the character the key types, shifted -- `A\=' for shift+a, which is the
+keysym xterm reads and the number it sends -- or the code point of a `literal\='
+key in `cooked--key-encodings\='.  The rules are `ModifyOtherKeys\=' and
+`allowedCharModifiers\=' in xterm\='s input.c (patch 411), checked against the
+us-pc105 table in xterm\='s modified-keys FAQ.
+
+Level 2 re-spells any key held with Control or Meta.  Shift alone re-spells
+only the keys Control would otherwise turn into a byte -- the letters and
+`@[\\]^_\=' with their shifted partners -- and the space bar, since shift+1
+already types a `!\=' nobody could mistake.  So shift+a is
+`ESC [ 27 ; 2 ; 65 ~\=' and `!\=' stays `!\='.  Return, Tab, Escape and
+Backspace are re-spelled under any modifier.  xterm leaves Control+Backspace
+alone, since Control there flips Backspace between BS and DEL, a switch cooked
+does not have; spelling it out loses nothing a child that asked for this can
+misread.
+
+Level 1 leaves alone every chord that already means something.  Control
+re-spells a key only where `cooked--control-char\=' finds no byte for it, so
+`C-a\=' stays SOH while `C-;\=' becomes `ESC [ 27 ; 5 ; 59 ~\='.  Shift alone
+re-spells nothing, and neither does Meta: xterm\='s manual says Meta at this
+level follows metaSendsEscape, which is how cooked always spells it.  Return
+and Tab are the exception, and re-spelled under Shift or Control, while Escape
+and Backspace never are.  Where a chord is re-spelled Meta still counts in its
+parameter, so nothing held is lost; where it is not, Meta is the leading ESC
+it always was."
+  (let ((ctrl (memq 'control mods))
+        (shift (memq 'shift mods))
+        (meta (memq 'meta mods)))
+    (pcase level
+      (2 (if (memq code '(9 13 27 127))
+             (or ctrl shift meta)
+           (or ctrl meta
+               (and shift (or (<= #x40 code #x7f) (= code ?\s))))))
+      (1 (pcase code
+           ((or 9 13) (or ctrl shift))
+           ((or 27 127) nil)
+           (_ (and ctrl (not (cooked--control-char code)))))))))
+
+(defun cooked--encode-char (char mods)
+  "The bytes for the text key CHAR held with MODS, when no protocol spells it.
+
+CHAR is the unshifted key, as `event-basic-type\=' reports it.  Shift becomes a
+capital, Control the byte `cooked--control-char\=' names or nothing, and Meta a
+leading ESC."
+  (let* ((char (if (memq 'shift mods) (upcase char) char))
+         (char (or (and (memq 'control mods) (cooked--control-char char))
+                   char)))
+    (if (memq 'meta mods)
+        (concat "\e" (string char))
+      (string char))))
+
+(defun cooked--encode-modify-other (basic mods param level)
+  "Encode BASIC held with MODS for a child that negotiated modifyOtherKeys LEVEL.
+
+BASIC and MODS are as `cooked--kitty-event\=' names the key, and PARAM the xterm
+modifier parameter derived from MODS.  A key in `cooked--key-encodings\=' goes
+the way it always has, with `cooked--encode-literal\=' asking LEVEL about the
+four keys the protocol re-spells; a text key is `ESC [ 27 ; PARAM ; CODE ~\='
+where `cooked--modify-other-p\=' says so, and its classical bytes where not.
+
+Narrower than xterm where an Emacs event lacks the fact, as the kitty encoder
+is: shift+1 arrives as a bare `!\=', so Control+Shift+1 is sent as Control+`!\='
+with parameter 5 rather than xterm\='s 6, and C-i, C-m and C-[ merge into Tab,
+Return and Escape."
+  (if-let* ((entry (assq basic cooked--key-encodings)))
+      (cooked--encode-entry entry param mods)
+    (when (characterp basic)
+      (let ((code (if (memq 'shift mods) (upcase basic) basic)))
+        (if (cooked--modify-other-p level code mods)
+            (cooked--csi "~" 27 param code)
+          (cooked--encode-char basic mods))))))
 
 ;;;; The kitty keyboard protocol, as negotiated
 
@@ -413,6 +529,9 @@ text is `CSI number ; modifier u\=' or `CSI 1 ; modifier FINAL\=':
 (defun cooked--kitty-event (event basic mods)
   "BASIC and MODS for EVENT as the kitty protocol would name the key, or nil.
 
+modifyOtherKeys names keys the same way and asks this too; the kitty protocol
+is where the question first came up.
+
 A cons (BASIC . MODS), or nil for a key that has to go as the byte it arrived
 as.  Emacs names a control character by the letter it is typed with, so a TAB
 read from a terminal frame is `C-i\=' -- and the kitty protocol, told that,
@@ -463,28 +582,25 @@ every capital into a lowercase letter."
          ;; point that no modifier ever reaches.
          (mods (if (eq basic 'backtab) (cons 'shift mods) mods))
          (param (cooked--modifier-param mods)))
-    (pcase (and (cooked--kitty-negotiated-p)
+    (pcase (and (or (cooked--kitty-negotiated-p) (cooked--modify-other-level))
                 (cooked--kitty-event event basic mods))
-      ;; The kitty protocol proper, when the child asked for it: every key it
-      ;; spells differently goes through here, and the rest is deferred back to
+      ;; A protocol proper, when the child asked for one: every key it spells
+      ;; differently goes through here, and the rest is deferred back to
       ;; `cooked--encode-entry' from inside.
       (`(,basic . ,mods)
        (let ((param (cooked--modifier-param mods)))
-         (if-let* ((entry (assq basic cooked--key-encodings)))
-             (cooked--encode-kitty-entry entry mods param)
-           (when (characterp basic)
-             (cooked--encode-kitty-char basic mods param)))))
+         (if-let* ((level (cooked--modify-other-level)))
+             (cooked--encode-modify-other basic mods param level)
+           (if-let* ((entry (assq basic cooked--key-encodings)))
+               (cooked--encode-kitty-entry entry mods param)
+             (when (characterp basic)
+               (cooked--encode-kitty-char basic mods param))))))
       (_
        (if-let* ((entry (assq basic cooked--key-encodings)))
            (cooked--encode-entry entry param mods)
          ;; Not in the table at all: a plain character, or nothing we can spell.
          (when (characterp basic)
-           (let ((char (cond ((memq 'control mods) (logand (upcase basic) #x1f))
-                             ((memq 'shift mods) (upcase basic))
-                             (t basic))))
-             (if (memq 'meta mods)
-                 (concat "\e" (string char))
-               (string char)))))))))
+           (cooked--encode-char basic mods)))))))
 
 (defun cooked-send-key ()
   "Send the key that invoked this command straight to the child.
@@ -1006,6 +1122,41 @@ even if accepted -- see `cooked-raw-exceptions' for why."
       (error "cooked: %S does not name a single unmodified control character" key))
     (aref keys 0)))
 
+(defun cooked--control-chord-events (exceptions)
+  "The Control chords on printable keys that no character code in 0-127 names.
+
+On a graphical frame `C-;\=' and `C-S-a\=' are events of their own, outside
+the range `cooked--build-passthrough-map\=' binds a code at a time.  Left
+unbound, `C-;\=' reached whatever Emacs binds globally, and `C-S-a\=' was
+shift-translated to `C-a\=' with the shift gone before `cooked-send-key\=' could
+look -- so neither could be spelled by a protocol that has a spelling for it,
+which is what modifyOtherKeys and the kitty protocol both exist to provide.
+With no protocol they send what xterm sends: the key itself where Control
+makes no byte, and the control byte where it does.  A terminal frame never
+produces these events, so nothing changes there.
+
+Those that stand in for an entry of EXCEPTIONS are left out, as is the one
+standing in for `cooked--escape-key\=': `C-S-g\=' is `C-g\=' with a shift Emacs
+would otherwise translate away, and forwarding it would take the key back from
+the binding the exception was made to keep."
+  (let (events)
+    ;; Not the capitals: Emacs spells Control on one as `C-S-' and the
+    ;; lowercase letter, which is the shifted chord the letters below add.
+    (dolist (char (append (number-sequence ?\s ?@) (number-sequence ?\[ ?~)))
+      (let ((ctrl (event-apply-modifier char 'control 26 "C-")))
+        (when (>= ctrl 128)
+          (push ctrl events))
+        ;; The shift bit by hand: `event-apply-modifier' shifts a control
+        ;; character by upcasing it, which makes `C-a' into `C'.  Not `C-S-i'
+        ;; or `C-S-m' either, which are `S-TAB' and `S-RET' as events and are
+        ;; the literal keys' to answer for.
+        (when (and (<= ?a char ?z)
+                   (not (memq char '(?i ?m)))
+                   (not (memq ctrl exceptions))
+                   (not (eq ctrl cooked--escape-key)))
+          (push (logior ctrl (ash 1 25)) events))))
+    (nreverse events)))
+
 (defun cooked--build-passthrough-map (exceptions &optional reserve-meta)
   "A keymap that forwards to the child, except EXCEPTIONS and `C-c'.
 EXCEPTIONS is a list of character codes, as from `cooked--exception-code';
@@ -1034,6 +1185,8 @@ where Meta chords arrive as two forwarded bytes, and is why
                   (and reserve-meta (eq code meta-prefix-char))
                   (memq code exceptions))
         (define-key map (vector code) #'cooked-send-key)))
+    (dolist (event (cooked--control-chord-events exceptions))
+      (define-key map (vector event) #'cooked-send-key))
     ;; Bind the modified variants explicitly, not for completeness but for
     ;; correctness: when `S-return' has no binding Emacs shift-translates it to
     ;; `return' and runs *that* binding, with `last-command-event' already flattened.
@@ -1084,7 +1237,8 @@ along with them would take a key from the child on the strength of a binding
 Emacs does not have."
   (let ((overlay (make-sparse-keymap))
         (esc (make-sparse-keymap)))
-    (dolist (code (number-sequence 0 127))
+    (dolist (code (append (number-sequence 0 127)
+                          (cooked--control-chord-events nil)))
       (unless (memq code '(?O ?\[))
         (define-key esc (vector code) #'cooked-send-meta-key)))
     (define-key overlay (vector meta-prefix-char) esc)

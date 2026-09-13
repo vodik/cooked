@@ -3286,11 +3286,21 @@ fn modify_other_keys_is_negotiated() {
 
     t.feed(b"\x1b[>4;2m");
     assert_eq!(t.keys(), KeyEncoding::ModifyOtherKeys);
-    assert_eq!(t.drain().keys, KeyEncoding::ModifyOtherKeys);
+    let delta = t.drain();
+    assert_eq!(delta.keys, KeyEncoding::ModifyOtherKeys);
+    assert_eq!(delta.modify_other_keys, 2);
 
-    // Level 1 does not cover Return and friends, so it is not enough for us.
-    t.feed(b"\x1b[>4;1m");
+    // Level 1 is the protocol too, with fewer keys; the level says which, and a change
+    // in the level alone is something to tell Lisp.
+    assert!(t.feed(b"\x1b[>4;1m"), "a level change alone is an update");
+    assert_eq!(t.keys(), KeyEncoding::ModifyOtherKeys);
+    assert_eq!(t.modify_other_keys(), 1);
+    assert_eq!(t.drain().modify_other_keys, 1);
+
+    // Level 3 also sends unmodified keys, which cooked does not, so it is not claimed.
+    t.feed(b"\x1b[>4;3m");
     assert_eq!(t.keys(), KeyEncoding::Legacy);
+    assert_eq!(t.modify_other_keys(), 0);
 
     t.feed(b"\x1b[>4;2m\x1b[>4m");
     assert_eq!(
@@ -3298,6 +3308,20 @@ fn modify_other_keys_is_negotiated() {
         KeyEncoding::Legacy,
         "a bare reset turns it back off"
     );
+    assert_eq!(t.modify_other_keys(), 0);
+}
+
+#[test]
+fn kitty_wins_over_modify_other_keys_but_the_level_survives_it() {
+    let mut t = term(4, 20, b"\x1b[>4;1m\x1b[>1u");
+    assert_eq!(t.keys(), KeyEncoding::Kitty);
+    t.feed(b"\x1b[<u");
+    assert_eq!(
+        t.keys(),
+        KeyEncoding::ModifyOtherKeys,
+        "popping kitty uncovers level 1"
+    );
+    assert_eq!(t.modify_other_keys(), 1);
 }
 
 #[test]

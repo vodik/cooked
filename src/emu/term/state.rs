@@ -24,10 +24,27 @@ impl State {
     /// code disambiguates them all by construction -- while 4 and 16 alone do not: each
     /// only adds a field to an escape code something else already chose to send.
     pub(super) fn key_encoding(&self) -> KeyEncoding {
-        match (self.kitty_flags(), self.modes.modify_other_keys) {
+        match (self.kitty_flags(), self.modify_other_keys()) {
             (flags, _) if flags & 0b1001 != 0 => KeyEncoding::Kitty,
-            (_, 2) => KeyEncoding::ModifyOtherKeys,
+            (_, 1 | 2) => KeyEncoding::ModifyOtherKeys,
             _ => KeyEncoding::Legacy,
+        }
+    }
+
+    /// The modifyOtherKeys level Lisp should encode for: 1, 2, or 0 for anything else.
+    ///
+    /// Both levels are honoured, and they differ in which keys they cover, not in how a
+    /// covered key is spelled -- the rules are xterm's and live with the encoder, in
+    /// `cooked--modify-other-p`. Level 1 is the one `emacs -nw` asks for, from
+    /// `xterm--init-modify-other-keys`, so it is not a curiosity.
+    ///
+    /// Level 3 reads as 0. It sends unmodified keys as escapes too, which nothing here
+    /// does, and a child given its modified keys in level 2's spelling would still be
+    /// waiting for every plain one; legacy at least types.
+    pub(super) fn modify_other_keys(&self) -> u8 {
+        match self.modes.modify_other_keys {
+            level @ (1 | 2) => level,
+            _ => 0,
         }
     }
 
@@ -338,6 +355,7 @@ impl State {
         let (cursor_shape, reverse_screen) = (self.modes.cursor_shape, self.modes.reverse_screen);
         let keys = self.key_encoding();
         let kitty_flags = self.kitty_flags();
+        let modify_other_keys = self.modify_other_keys();
         let screen = self.screen();
         Delta {
             images,
@@ -368,6 +386,7 @@ impl State {
             app_cursor,
             keys,
             kitty_flags,
+            modify_other_keys,
             events,
             marks,
         }

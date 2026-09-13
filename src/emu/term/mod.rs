@@ -219,7 +219,9 @@ pub enum KeyEncoding {
     /// Nothing negotiated: a modified Return is just CR, as it has always been.
     #[default]
     Legacy,
-    /// xterm's `modifyOtherKeys` (`CSI > 4 ; 2 m`): `CSI 27 ; MOD ; CHAR ~`.
+    /// xterm's `modifyOtherKeys` (`CSI > 4 ; 1 m` or `CSI > 4 ; 2 m`): `CSI 27 ; MOD ;
+    /// CHAR ~`. Which keys take that spelling depends on the level, which crosses beside
+    /// this as [`Delta::modify_other_keys`].
     ModifyOtherKeys,
     /// The kitty keyboard protocol (`CSI > FLAGS u`): `CSI CHAR ; MOD u`.
     Kitty,
@@ -355,6 +357,9 @@ pub struct Delta {
     /// The kitty flags in force, masked to [`KITTY_HONOURED`]: which parts of the kitty
     /// encoding apply once `keys` says kitty at all.
     pub kitty_flags: u8,
+    /// The modifyOtherKeys level in force, 1 or 2, or 0: which of xterm's two rule sets
+    /// applies once `keys` says modifyOtherKeys at all.
+    pub modify_other_keys: u8,
     pub events: Vec<Event>,
     /// Semantic marks whose position changed during this drain, as `(ID, ANCHOR)`.
     ///
@@ -432,6 +437,7 @@ struct Pending {
     app_cursor: bool,
     keys: KeyEncoding,
     kitty_flags: u8,
+    modify_other_keys: u8,
 }
 
 impl Pending {
@@ -451,6 +457,7 @@ impl Pending {
             app_cursor: state.modes.app_cursor,
             keys: state.key_encoding(),
             kitty_flags: state.kitty_flags(),
+            modify_other_keys: state.modify_other_keys(),
         }
     }
 }
@@ -991,6 +998,11 @@ impl Term {
         self.state.kitty_flags()
     }
 
+    /// The modifyOtherKeys level in force, as far as cooked honours it: 0, 1 or 2.
+    pub fn modify_other_keys(&self) -> u8 {
+        self.state.modify_other_keys()
+    }
+
     /// Test-only: send every character down the per-character print path.
     ///
     /// The handle a test reaches for to make one `Term` print the slow way while another
@@ -1102,7 +1114,8 @@ struct Modes {
     charsets: Charsets,
     app_cursor: bool,
     app_keypad: bool,
-    /// xterm's modifyOtherKeys level, 0-2. Only level 2 changes how we spell keys.
+    /// xterm's modifyOtherKeys level, as set. 1 and 2 are honoured; 3, which sends even
+    /// unmodified keys as escapes, is not, and reads as 0. See [`State::modify_other_keys`].
     modify_other_keys: u8,
     /// Kitty keyboard flag stacks, as pushed, innermost last: the primary screen's first
     /// and the alternate screen's second. See [`KITTY_HONOURED`] for which bits are read.

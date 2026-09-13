@@ -267,10 +267,12 @@ the `editing\=' binding in `cooked--apply\='."
 (defvar-local cooked--app-cursor nil
   "DECCKM: send cursor keys as SS3, which is what `smkx' asks for.")
 (defvar-local cooked--keys 'legacy
-  "How to spell modified Return, Tab, Escape and Backspace for this child.
+  "How to spell modified keys for this child.
 
 One of `legacy', `modify-other' or `kitty', as negotiated by the child itself —
-see `cooked--key-encodings' for why this cannot simply be assumed.")
+see `cooked--key-encodings' for why this cannot simply be assumed.  Which keys a
+protocol covers is a second question, answered by `cooked--kitty-flags' and
+`cooked--modify-other-keys'.")
 (defvar-local cooked--kitty-flags 0
   "The kitty keyboard flags the child pushed, masked to what cooked honours.
 
@@ -280,6 +282,13 @@ produces.  Read only while `cooked--keys' is `kitty', and not enough on its own
 even then: with neither 1 nor 8 set, kitty was assumed rather than negotiated --
 see `cooked-key-protocol-overrides' -- and only the `literal' keys are
 re-spelled.  See `cooked--kitty-negotiated-p'.")
+(defvar-local cooked--modify-other-keys 0
+  "The modifyOtherKeys level the child set with `CSI > 4 ; LEVEL m', or 0.
+
+1 or 2; the core reports anything else as 0.  Read only while `cooked--keys'
+is `modify-other', and the difference between 0 and a level there is the
+difference between a guess and a negotiation -- see
+`cooked--modify-other-level'.")
 (defvar-local cooked-title nil
   "Title the child last set, via OSC 0 or 2, or nil if it never set one.
 
