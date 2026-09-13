@@ -142,11 +142,29 @@ be flatly zero however far behind it got.
 ## What is not implemented, and why
 
 **Kitty transmission by file** (`t=f`, `t=t`, `t=s`) is declined with
-`ENOTSUPPORTED:medium`. Deliberately: reading a path a child names is a decision about
-trust, not a decode, and it deserves a real decision rather than a default. If you take
-it up, the options are temp files only — `t=t`, where the protocol says the terminal
-deletes the file after reading — under the system temp dir; or all three behind a
-defcustom defaulting to off.
+`ENOTSUPPORTED:medium`, and the decision has now been made rather than deferred: it
+stays declined.
+
+Two reasons, and the second is the one an earlier draft of this paragraph got wrong.
+
+`src/emu/` performs **no file I/O of any kind** — the only `std::fs` in the crate is in
+`session.rs`, on the pty side. The emulator is a pure byte-stream-to-grid transform, and
+that is worth more than this feature. Adding a file read to it means the component that
+parses hostile input also touches the filesystem, and every future question about the
+parser has to be asked twice.
+
+And `t=t` is not the safe subset it looks like. The protocol says the terminal **deletes
+the file after reading it**, so implementing `t=t` faithfully is a delete-an-arbitrary-path
+primitive driven by bytes — and those bytes need not come from a program the user ran.
+Any `cat` of a hostile file emits whatever escape sequences it likes. That is the same
+shape as the OSC 7 TRAMP-method injection and the mode-line `%` injection found in this
+tree: *payload reaching an interpreter*. Here the interpreter is `unlink`.
+
+If it is ever taken up: `t=f` and `t=s` only, never `t=t`; a path confined to the system
+temp directory and refused otherwise; a size cap; a refusal for anything that is not a
+regular file, so a FIFO cannot block the parser; and a defcustom defaulting to off. The
+deletion clause should simply not be honoured, and the child told the transmission
+succeeded — a terminal that declines to delete your files is not a bug worth fixing.
 
 **Kitty extensions not attempted:** unicode placeholders (`U=`), animation, z-index,
 source rectangles (`x=`/`y=`/`w=`/`h=`), cell offsets (`X=`/`Y=`).
