@@ -377,9 +377,13 @@ still pass if the core stopped coalescing altogether."
       ;; land in a *later* drain than the text it rewrites, since the marker
       ;; goes in between, and echo would otherwise have the line discipline
       ;; print the escape sequence as `^[[1;1H\=' on the cursor\='s row instead of
-      ;; the child ever executing it.
+      ;; the child ever executing it.  `-icanon\=' with it, because echo off in
+      ;; canonical mode is `getpass\=' as far as `cooked-secret.el\=' can tell: the
+      ;; `read\=' then had a password prompt scheduled behind it, which in batch
+      ;; reads stdin and hung the suite whenever stdin was open and silent.  The
+      ;; shell\='s `read\=' still waits for the newline either way.
       '("/bin/sh" "-c"
-        "stty -echo; printf 'aaa\\nbbb\\nccc\\n'; read x; printf '\\033[1;1HXXX\\033[3;1HZZZ'; sleep 5")
+        "stty -echo -icanon; printf 'aaa\\nbbb\\nccc\\n'; read x; printf '\\033[1;1HXXX\\033[3;1HZZZ'; sleep 5")
     (should (cooked-tests--settle
              (lambda () (string-match-p "ccc" (cooked-tests--text)))))
     (let* ((middle (save-excursion

@@ -885,18 +885,23 @@ because cooked's input mark is the process mark comint asks for."
     (should (eq (key-binding (kbd "C-c C-a")) #'cooked-beginning-of-line))))
 
 (ert-deftest cooked-secret-mode-is-detected-and-prompts ()
-  (cooked-tests--with-session
-      '("/bin/sh" "-c"
-        "printf 'Password: '; stty -echo; read p; stty echo; \
-         if [ \"$p\" = hunter2 ]; then printf '\\nACCEPTED\\n'; else printf '\\nDENIED\\n'; fi; sleep 5")
-    (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
-    (let ((cooked-password-function (lambda (_prompt) "hunter2")))
-      (cooked--prompt-secret (current-buffer)))
-    (should (cooked-tests--settle
-             (lambda () (string-match-p "ACCEPTED" (cooked-tests--text)))))
-    ;; The child received it, but it was never echoed into the buffer.
-    (should-not (string-match-p "hunter2" (buffer-substring-no-properties
-                                           (point-min) (point-max))))))
+  ;; The prompt entering secret mode schedules is not what this is about, and
+  ;; a wait that pumps past its debounce would raise it: in batch, a
+  ;; `read-passwd' on stdin.  Pushed out past the end of the test instead; the
+  ;; session's cleanup cancels it.
+  (let ((cooked-secret-debounce 60))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c"
+          "printf 'Password: '; stty -echo; read p; stty echo; \
+           if [ \"$p\" = hunter2 ]; then printf '\\nACCEPTED\\n'; else printf '\\nDENIED\\n'; fi; sleep 5")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+      (let ((cooked-password-function (lambda (_prompt) "hunter2")))
+        (cooked--prompt-secret (current-buffer)))
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "ACCEPTED" (cooked-tests--text)))))
+      ;; The child received it, but it was never echoed into the buffer.
+      (should-not (string-match-p "hunter2" (buffer-substring-no-properties
+                                             (point-min) (point-max)))))))
 
 (ert-deftest cooked-a-source-supplied-secret-is-not-cleared-in-place ()
   "The string `cooked-password-function\=' hands over must come back unharmed.
@@ -910,7 +915,11 @@ failure the user gets to debug somewhere else entirely.
 So the cache here is a real one: the same string object is handed out and then
 looked at again afterwards.  Before the split, this test read seven NULs."
   (let* ((cache (list (cons "sudo" (copy-sequence "hunter2"))))
-         (cooked-password-function (lambda (_prompt) (cdr (assoc "sudo" cache)))))
+         (cooked-password-function (lambda (_prompt) (cdr (assoc "sudo" cache))))
+         ;; Only the direct call below may answer.  The prompt secret mode
+         ;; schedules would answer too if a wait pumped past its debounce, and
+         ;; could take the child out of secret mode before the wait saw it.
+         (cooked-secret-debounce 60))
     (cooked-tests--with-session
         '("/bin/sh" "-c"
           "printf 'Password: '; stty -echo; read p; stty echo; \
@@ -1001,21 +1010,24 @@ epoch and dismisses the read on screen -- correct when the child has stopped
 asking, and destructive when the user is halfway through answering.  So the
 resume path has to decline while a read is in flight, and this pins the guard
 rather than the timer it protects."
-  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'Password: '; stty -echo; sleep 5")
-    (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
-    (cooked--cancel-secret)
-    ;; Stand in for a live read: `cooked--secret-read' holds the minibuffer for as
-    ;; long as `cooked--read-passwd' is inside it.
-    (let ((epoch cooked--secret-epoch))
-      (setq cooked--secret-read (current-buffer))
-      (unwind-protect
-          (progn
-            (cooked--resume-secret)
-            (should-not cooked--secret-timer)
-            ;; The epoch is the tell: a resume that went through would have moved
-            ;; it, and the read in flight would then refuse to send its answer.
-            (should (= epoch cooked--secret-epoch)))
-        (setq cooked--secret-read nil)))))
+  ;; Debounce pushed past the end of the test, for the reason
+  ;; `cooked-secret-mode-is-detected-and-prompts' gives.
+  (let ((cooked-secret-debounce 60))
+    (cooked-tests--with-session '("/bin/sh" "-c" "printf 'Password: '; stty -echo; sleep 5")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+      (cooked--cancel-secret)
+      ;; Stand in for a live read: `cooked--secret-read' holds the minibuffer for as
+      ;; long as `cooked--read-passwd' is inside it.
+      (let ((epoch cooked--secret-epoch))
+        (setq cooked--secret-read (current-buffer))
+        (unwind-protect
+            (progn
+              (cooked--resume-secret)
+              (should-not cooked--secret-timer)
+              ;; The epoch is the tell: a resume that went through would have moved
+              ;; it, and the read in flight would then refuse to send its answer.
+              (should (= epoch cooked--secret-epoch)))
+          (setq cooked--secret-read nil))))))
 
 (ert-deftest cooked-a-stale-cooked-mode-cannot-leak-a-typed-secret ()
   "Typing must never insert under a `cooked--mode\=' the child has moved on from.
@@ -1184,9 +1196,12 @@ into it; it does not replace the sample, and this is the test that says so."
       (should asked))))
 
 (ert-deftest cooked-secret-prompt-text-is-recovered ()
-  (cooked-tests--with-session '("/bin/sh" "-c" "printf 'Enter passphrase: '; stty -echo; sleep 5")
-    (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
-    (should (equal (cooked--prompt-text cooked--session) "Enter passphrase:"))))
+  ;; Debounce pushed past the end of the test, for the reason
+  ;; `cooked-secret-mode-is-detected-and-prompts' gives.
+  (let ((cooked-secret-debounce 60))
+    (cooked-tests--with-session '("/bin/sh" "-c" "printf 'Enter passphrase: '; stty -echo; sleep 5")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'secret))))
+      (should (equal (cooked--prompt-text cooked--session) "Enter passphrase:")))))
 
 (ert-deftest cooked-wheel-notches-are-reported-as-presses ()
   "Emacs calls a notch a click; encoding that as a release loses the scroll.

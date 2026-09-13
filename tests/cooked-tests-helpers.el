@@ -76,6 +76,52 @@ Returns the packages that could not be found."
 (require 'cooked)
 (require 'cooked-mode)
 
+;;;; Nothing reads the terminal
+
+;; A batch Emacs has no minibuffer.  `read-from-minibuffer' reads a line from
+;; stdin instead, and so does everything built on it -- `read-passwd',
+;; `y-or-n-p', `completing-read'.  What that does to a test depends entirely on
+;; how the suite was started: under `</dev/null' the read gets end of file and
+;; signals, from a timer that prints the error and carries on, so the test
+;; passes; under a pipe that has data waiting the read consumes a line and, for a
+;; password prompt, sends it to the child; under a pipe or socket that is open
+;; and silent it blocks, and the suite stops for as long as nobody looks.  That
+;; last one cost twenty minutes before anyone noticed, stopped at a render test
+;; with nothing on screen to say why.
+;;
+;; Two kinds of test had been reading.  Any child that turns echo off in
+;; canonical mode is `getpass' to `cooked-secret.el', which schedules a password
+;; prompt 30ms later; a render test did that by accident, and several secret
+;; tests did it on purpose without answering, so whichever of them pumped past
+;; the debounce raised a real `read-passwd'.  And a comint test printed
+;; Password: into a comint buffer, where comint's own
+;; `comint-watch-for-password-prompt' queued a `read-passwd' that only stopped
+;; short of the terminal because the buffer was dead when it fired -- that was
+;; the `Selecting deleted buffer' timer error in every run.
+;;
+;; So any such read is refused outright while the suite runs in batch, with the
+;; prompt in the message.  From inside a test that fails the test; from a timer
+;; it prints an error naming the prompt, which is loud where a hang is silent.
+;; A read that has real input to consume -- a keyboard macro, or
+;; `unread-command-events' -- is left alone, since that is how a test legitimately
+;; answers one.  `read-string' and `yes-or-no-p' are guarded by name as well as
+;; `read-from-minibuffer', because they reach it from C, where no advice sees
+;; the call.
+
+(defun cooked-tests--refuse-terminal-read (name function prompt &rest args)
+  "Call FUNCTION with PROMPT and ARGS, unless the answer would come from stdin.
+NAME is what FUNCTION is called, for the error."
+  (if (and noninteractive
+           (not executing-kbd-macro)
+           (null unread-command-events))
+      (error "cooked-tests: %s would read stdin for %S" name prompt)
+    (apply function prompt args)))
+
+(dolist (function '(read-from-minibuffer read-string yes-or-no-p))
+  (advice-add function :around
+              (apply-partially #'cooked-tests--refuse-terminal-read function)
+              '((name . cooked-tests--refuse-terminal-read))))
+
 ;;;; Waiting, and how long for
 
 ;; Every wait in this suite is a deadline on a real child through a real pty, so

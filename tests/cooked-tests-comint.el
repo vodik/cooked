@@ -31,6 +31,14 @@
      (unwind-protect
          (with-current-buffer buffer
            (comint-mode)
+           ;; A test that says Password: would otherwise have comint queue a
+           ;; `read-passwd' of its own, from a timer that outlives the buffer;
+           ;; see the guard in `cooked-tests-helpers.el'.  The list is
+           ;; comint's global one, so it is copied without the watcher rather
+           ;; than removed from, which would change it for every buffer.
+           (setq-local comint-output-filter-functions
+                       (remq #'comint-watch-for-password-prompt
+                             comint-output-filter-functions))
            (setq cooked-tests-comint--proc
                  (make-pipe-process :name "cooked-comint-test" :buffer buffer
                                     :noquery t :filter #'ignore))
