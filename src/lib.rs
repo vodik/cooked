@@ -1523,6 +1523,17 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
         Event::Reset => list!(env, [sym!(env, "reset")?]),
         // (title-stack PUSH-P)
         Event::TitleStack(push) => list!(env, [sym!(env, "title-stack")?, *push]),
+        // (resize-request ROWS COLS), nil for a dimension to leave alone.
+        Event::ResizeRequest(rows, cols) => list!(
+            env,
+            [
+                sym!(env, "resize-request")?,
+                rows.map(i64::from),
+                cols.map(i64::from),
+            ]
+        ),
+        // (frame-size PIXELS-P)
+        Event::FrameSize(pixels) => list!(env, [sym!(env, "frame-size")?, *pixels]),
     }
 }
 

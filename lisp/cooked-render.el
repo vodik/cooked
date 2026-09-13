@@ -689,6 +689,8 @@ two chances to disagree."
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
     (`(reply . ,bytes) (cooked--send-if-live bytes))
     (`(title-stack ,push) (cooked--handle-title-stack push))
+    (`(resize-request ,rows ,cols) (cooked--handle-resize-request rows cols))
+    (`(frame-size ,pixels) (cooked--handle-frame-size pixels))
     ;; `CSI 3 J', the tail of what `clear' sends.  Honoured unconditionally: it is
     ;; only reachable by something already holding the terminal, every other terminal
     ;; honours it, and it is precisely what the user typed `clear' to get.  The

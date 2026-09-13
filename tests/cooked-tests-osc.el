@@ -225,6 +225,154 @@ comes back to."
     (dotimes (_ 20) (cooked--handle-title-stack nil))
     (should cooked-title)))
 
+(defmacro cooked-tests--with-resize-request (script &rest body)
+  "Run BODY in a session running SCRIPT, shown in the top of two windows.
+
+The split is what gives a request somewhere to go: a window alone in its frame
+cannot move without the frame, which a request never touches.  WINDOW is bound
+to the session's window, and `cooked--last-size' is settled first so a resize
+counted afterwards is one the request caused.
+
+SCRIPT should wait for a line before it sends anything, and the test sends one
+once it is ready: a request drained before the buffer is in a window has no
+layout window to move."
+  (declare (indent 1))
+  `(save-window-excursion
+     (delete-other-windows)
+     (let ((below (split-window-below)))
+       (cooked-tests--with-session (list "/bin/sh" "-c" ,script)
+         (should (cooked-tests--settle (lambda () cooked--session)))
+         (set-window-buffer below (get-buffer-create "*cooked-test-neighbour*"))
+         (set-window-buffer (selected-window) (current-buffer))
+         (let ((window (selected-window)))
+           (ignore window)
+           (cooked--sync-size)
+           ,@body)))))
+
+(ert-deftest cooked-a-resize-request-resizes-the-window-once ()
+  "`resize -s ROWS 0' under `window': the window moves, the child is told once.
+
+And told the size the window really took, which is what `stty size' prints.
+The request is sent and then the child waits for a line, so the size it reads
+is the one it has after Emacs has noticed the window change -- simulated here
+by running `window-size-change-functions'\\=' handler by hand, since batch has
+no redisplay to run it.
+
+Once, twice over: noticing the change a second time, as the configuration hook
+and the size hook both do in a live frame, resizes nothing more, and a second
+identical request finds the window already where it asked and moves nothing."
+  (let ((cooked-resize-requests 'window)
+        (moves 0) (resizes 0))
+    (cooked-tests--with-resize-request
+        "read _; printf '\\033[8;14;0t'; read _; stty size; printf '\\033[8;14;0t'; sleep 5"
+      (cl-letf* ((real-resize (symbol-function 'cooked--resize))
+                 ((symbol-function 'cooked--resize)
+                  (lambda (&rest args) (cl-incf resizes) (apply real-resize args)))
+                 (real-move (symbol-function 'window-resize))
+                 ((symbol-function 'window-resize)
+                  (lambda (&rest args) (cl-incf moves) (apply real-move args))))
+        (cooked--send-if-live "\r")
+        (should (cooked-tests--settle (lambda () (> moves 0))))
+        (should (= moves 1))
+        (should (= (cooked--window-rows window) 14))
+        (should (= resizes 0))
+        (cooked--frame-size-changed (selected-frame))
+        (cooked--frame-size-changed (selected-frame))
+        (should (= resizes 1))
+        (should (equal cooked--last-size
+                       (cons 14 (window-max-chars-per-line window))))
+        (cooked--send-if-live "\r")
+        (should (cooked-tests--settle
+                 (lambda ()
+                   (string-match-p
+                    (format "^14 %d$" (window-max-chars-per-line window))
+                    (cooked-tests--text)))))
+        ;; The second request, already satisfied.
+        (cooked-tests--pump 0.3)
+        (cooked-tests--settle (lambda () nil) 0.3)
+        (cooked--frame-size-changed (selected-frame))
+        (should (= moves 1))
+        (should (= resizes 1))))))
+
+(ert-deftest cooked-a-resize-request-is-refused-by-default ()
+  "Nothing moves, and nothing answers: the child's `18t' tells it the truth."
+  (should-not (default-value 'cooked-resize-requests))
+  (let ((out (make-temp-file "cooked-resize-refused")))
+    (unwind-protect
+        (cooked-tests--with-resize-request
+            (format "stty raw -echo; dd bs=1 count=1 >/dev/null 2>&1; printf '\\033[8;14;40t\\033[30t\\033[18t'; cat > %s" out)
+          (cooked--send-if-live "\r")
+          (let ((before (window-body-height window t))
+                (width (window-max-chars-per-line window)))
+            (should (cooked-tests--settle
+                     (lambda () (string-match-p "t\\'" (cooked-tests--contents out)))))
+            (should (= (window-body-height window t) before))
+            (should (= (window-max-chars-per-line window) width))
+            ;; The `18t' is the whole of what came back.
+            (should (equal (cooked-tests--contents out)
+                           (format "\e[8;%d;%dt" (car cooked--last-size) width)))))
+      (delete-file out))))
+
+(ert-deftest cooked-a-resize-request-never-moves-the-frame ()
+  "A buffer filling its frame has nowhere to grow, and the request is clamped to nothing."
+  (let ((cooked-resize-requests 'window))
+    (save-window-excursion
+      (delete-other-windows)
+      (with-temp-buffer
+        (cooked-mode)
+        (set-window-buffer (selected-window) (current-buffer))
+        (let ((frame (list (frame-width) (frame-height)))
+              (window (list (window-body-height nil t) (window-max-chars-per-line))))
+          (cooked--handle-resize-request 200 300)
+          (cooked--handle-resize-request 3 10)
+          (should (equal (list (frame-width) (frame-height)) frame))
+          (should (equal (list (window-body-height nil t) (window-max-chars-per-line))
+                         window)))))))
+
+(ert-deftest cooked-a-resize-request-moves-only-the-layout-window ()
+  "The narrowest window is the child's, and it may not grow past the next one.
+
+Grown past it, the other window becomes the layout window and hands the child
+its own width instead -- and a child that asked again would grow that one next."
+  (let ((cooked-resize-requests 'window))
+    (save-window-excursion
+      (delete-other-windows)
+      (with-temp-buffer
+        (cooked-mode)
+        (let* ((left (selected-window))
+               (middle (split-window-right 20))
+               (right (split-window-right 35 middle)))
+          (set-window-buffer left (current-buffer))
+          (set-window-buffer middle (get-buffer-create "*cooked-test-neighbour*"))
+          (set-window-buffer right (current-buffer))
+          ;; 20, 35 and the 25 left over: LEFT is narrowest, and MIDDLE is wide
+          ;; enough to give LEFT all it can take without RIGHT having to shrink.
+          (should (eq (cooked--layout-window) left))
+          (let ((right-width (window-max-chars-per-line right))
+                (right-rows (window-body-height right)))
+            (cooked--handle-resize-request nil 15)
+            (should (= (window-max-chars-per-line left) 15))
+            (cooked--handle-resize-request nil 200)
+            (should (= (window-max-chars-per-line left) right-width))
+            (should (= (window-max-chars-per-line right) right-width))
+            (should (= (window-body-height right) right-rows))))))))
+
+(ert-deftest cooked-frame-size-reports-answer-from-the-frame ()
+  "`19t' in cells on any frame; `15t' only where there are pixels, like `14t'."
+  (let ((out (make-temp-file "cooked-19t")))
+    (unwind-protect
+        (cooked-tests--with-session (cooked-tests--reply-to "\\033[19t\\033[15t\\033[11t" out)
+          (should (cooked-tests--settle
+                   (lambda () (string-suffix-p "\e[1t" (cooked-tests--contents out)))))
+          (should (equal (cooked-tests--contents out)
+                         (concat
+                          (format "\e[9;%d;%dt" (frame-text-lines) (frame-text-cols))
+                          (if (display-graphic-p)
+                              (format "\e[5;%d;%dt" (frame-text-height) (frame-text-width))
+                            "")
+                          "\e[1t"))))
+      (delete-file out))))
+
 (ert-deftest cooked-osc-handler-errors-do-not-break-redisplay ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033]2;boom\\007'; printf 'after\\n'; sleep 5")
     ;; `cooked-debug' back off against the fixture's binding: this is a test of

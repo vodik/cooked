@@ -191,6 +191,12 @@ OSC 52 puts text on the kill ring, up to `cooked-clipboard-max-size`. Clipboard 
 are never answered — replying to a query would hand your clipboard to whatever asked.
 Set `cooked-clipboard-write` to nil to refuse writes too.
 
+A child asking to resize the terminal (`resize -s`, or `CSI 8 ; rows ; cols t`) is refused
+unless you set `cooked-resize-requests` to `window`. Then the window the child is laid out
+for grows or shrinks toward the request as far as its neighbours allow, and the child is
+told the size it actually got the same way it is told about any resize. The frame never
+moves, so a buffer that fills its frame stays as it is.
+
 
 ## What the prompt marks are read to mean
 

@@ -1516,15 +1516,65 @@ fn xtwinops_pushes_and_pops_the_title() {
 
 #[test]
 fn xtwinops_refuses_to_report_the_title_or_move_the_window() {
-    // `21t` would put the child's own title back on its input stream. `3t`/`4t`/`8t`
-    // are Emacs' geometry. All four answer with silence, not with a reply.
-    let mut t = term(2, 10, b"\x1b[21t\x1b[3;0;0t\x1b[4;0;0t\x1b[8;9;9t");
-    assert!(
-        t.drain()
-            .events
-            .iter()
-            .all(|e| !matches!(e, Event::Reply(_))),
-        "no window operation may answer the child"
+    // `21t` would put the child's own title back on its input stream. `3t`/`4t` are
+    // Emacs' geometry, and so are iconify (`2t`), raise (`5t`), maximise (`9t`) and
+    // full-screen (`10t`). All answer with silence, and none of them asks Lisp either.
+    let mut t = term(
+        2,
+        10,
+        b"\x1b[21t\x1b[3;0;0t\x1b[4;0;0t\x1b[2t\x1b[5t\x1b[9;1t\x1b[10;1t\x1b[13t",
+    );
+    let events = t.drain().events;
+    assert!(events.is_empty(), "{events:?}");
+}
+
+#[test]
+fn xtwinops_passes_a_resize_on_as_a_request_and_never_answers_it() {
+    // `resize -s 30 100`. Honouring it is Lisp's to decide, and the child learns the
+    // outcome from its own `18t`, so the grid neither resizes nor replies.
+    let mut t = term(2, 10, b"\x1b[8;30;100t");
+    let events = t.drain().events;
+    assert_eq!(events, vec![Event::ResizeRequest(Some(30), Some(100))]);
+    assert_eq!((t.screen().height(), t.screen().width()), (2, 10));
+}
+
+#[test]
+fn xtwinops_resize_leaves_a_zero_dimension_alone() {
+    let mut t = term(2, 10, b"\x1b[8;0;100t\x1b[8;30t\x1b[8;;0t\x1b[8t");
+    assert_eq!(
+        t.drain().events,
+        vec![
+            Event::ResizeRequest(None, Some(100)),
+            Event::ResizeRequest(Some(30), None),
+        ],
+        "a request that leaves both dimensions alone is no request"
+    );
+}
+
+#[test]
+fn decslpp_asks_for_rows_alone() {
+    // 24 is the smallest DECSLPP; below it the number is some other XTWINOPS.
+    let mut t = term(2, 10, b"\x1b[24t\x1b[48t");
+    assert_eq!(
+        t.drain().events,
+        vec![
+            Event::ResizeRequest(Some(24), None),
+            Event::ResizeRequest(Some(48), None),
+        ]
+    );
+}
+
+#[test]
+fn xtwinops_reports_not_iconified_and_asks_lisp_for_the_frame() {
+    let mut t = term(2, 10, b"\x1b[11t\x1b[19t\x1b[15t");
+    assert_eq!(
+        t.drain().events,
+        vec![
+            Event::Reply(b"\x1b[1t".to_vec()),
+            Event::FrameSize(false),
+            Event::FrameSize(true),
+        ],
+        "the order is the order asked, since a reply from Lisp rides the same list"
     );
 }
 

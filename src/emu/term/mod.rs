@@ -175,6 +175,23 @@ pub enum Event {
     /// XTWINOPS 22/23: push or pop the window title. `smcup`/`rmcup` end in these, so a
     /// full-screen program that sets a title expects it restored when it leaves.
     TitleStack(bool),
+    /// XTWINOPS `8t` or DECSLPP (`CSI Ps t`, Ps of 24 or more): the child asks for a
+    /// size, as (rows, columns), with `None` for a dimension it asked to leave alone.
+    ///
+    /// Only asked, never done here. The grid follows the window and not the other way
+    /// round, so the one honest way to honour this is to move an Emacs window and let
+    /// the ordinary resize path tell the child -- and whether any window moves at the
+    /// child's say-so is `cooked-resize-requests`, which refuses by default. No reply
+    /// either way: xterm with `allowWindowOps` off sends none, and the child's `18t`
+    /// read-back is what tells it the answer.
+    ResizeRequest(Option<u16>, Option<u16>),
+    /// XTWINOPS `19t` (`false`) or `15t` (`true`): the size of the *screen*, which in
+    /// Emacs is the frame, in cells or in pixels.
+    ///
+    /// An event rather than a reply because the grid does not know the frame. It knows
+    /// the one window it is laid out for, and that is `18t` and `14t`; the frame
+    /// around it is Emacs' to measure.
+    FrameSize(bool),
 }
 
 /// How the child wants keys that have no classical encoding — modified Return, Tab,

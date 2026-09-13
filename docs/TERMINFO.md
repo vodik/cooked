@@ -70,11 +70,15 @@ capability, or one of the queries `u7`, `u9`, `RV` and `XR` goes unanswered. Re-
 
 Some requests are refused rather than merely unimplemented. `CSI 21t` reports the window
 title *on the child\'s input stream*, which turns a title the child set itself into typed
-input at your next prompt; `CSI 3t`, `4t` and `8t` move and resize the window, which is
-Emacs\' business. The read-only `CSI 18t` is answered.
-So is DEC mode 2048: a program that sets it is sent `CSI 48 ; rows ; cols ; height px ;
-width px t` at once and again after every resize, which is how a multiplexer on the far
-side of ssh, where SIGWINCH does not reach, learns the size.
+input at your next prompt; `CSI 3t`, `4t`, `9t`, `10t` and `13t` move the frame, size it
+in pixels, maximise it or report where it is, which is Emacs\' business. A resize
+(`CSI 8t`, and DECSLPP\'s `CSI Ps t` with Ps of 24 or more) is refused too unless
+`cooked-resize-requests` says otherwise, and even then it moves a window and never the
+frame. The read-only reports are answered: `11t`, `14t`, `16t` and `18t` from the grid,
+`15t` and `19t` from the frame. So is DEC mode 2048: a program that sets it is sent
+`CSI 48 ; rows ; cols ; height px ; width px t` at once and again after every resize,
+which is how a multiplexer on the far side of ssh, where SIGWINCH does not reach, learns
+the size.
 
 The entry installs itself into `~/.terminfo` on first use — no root needed — and falls
 back to `xterm-256color` when `tic` is unavailable. Set `cooked-term-name` to nil to always

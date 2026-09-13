@@ -708,12 +708,17 @@ impl State {
                 };
                 self.csi_reply(format_args!("{mode};{status}$y"));
             }
-            // XTWINOPS, read-only. The reporting and geometry operations are refused
+            // XTWINOPS. The reports are answered and most of the operations refused
             // rather than merely unimplemented: `21t` answers with the window title *on
             // the child's input stream*, which turns a title the child set itself into
-            // typed input at the next prompt, and `3t`/`4t`/`8t` move and resize the
-            // window, which is Emacs' business and not the child's.
+            // typed input at the next prompt, and `3t`/`4t`/`9t`/`10t`/`13t` move,
+            // iconify or maximise the frame, which is Emacs' business and not the
+            // child's. A resize (`8t`, and DECSLPP) is the one operation passed on, as a
+            // request Lisp is free to refuse -- see `Event::ResizeRequest`.
             (None, 't') => match params.arg(0, 0) {
+                // Not iconified. Always true of a window that is receiving output, and
+                // the one state report with nothing to measure.
+                11 => self.csi_reply(format_args!("1t")),
                 // 14 is the text area in pixels, 16 one cell. Both were unanswerable
                 // until Emacs began reporting its cell size, and both are what an image
                 // producer asks before deciding whether to draw at all. Silent when
@@ -735,8 +740,28 @@ impl State {
                     let (h, w) = (self.screen().height(), self.screen().width());
                     self.csi_reply(format_args!("8;{h};{w}t"));
                 }
+                // The frame, which only Emacs can measure. Lisp answers, and answers
+                // `15t` only where there are pixels, by the same rule as `14t` above.
+                15 => self.events.push(Event::FrameSize(true)),
+                19 => self.events.push(Event::FrameSize(false)),
                 22 => self.events.push(Event::TitleStack(true)),
                 23 => self.events.push(Event::TitleStack(false)),
+                // A 0 or omitted argument means "leave this dimension", which `arg`'s
+                // fallback of 0 folds together with an absent one. A request to leave
+                // both is no request.
+                8 => {
+                    let dim = |i| u16::try_from(params.arg(i, 0)).ok().filter(|&n| n != 0);
+                    let (rows, cols) = (dim(1), dim(2));
+                    if rows.is_some() || cols.is_some() {
+                        self.events.push(Event::ResizeRequest(rows, cols));
+                    }
+                }
+                // DECSLPP: set lines per page. The row count alone, from the VT340, which
+                // xterm reads any `CSI Ps t` of 24 or more as.
+                lines @ 24.. => {
+                    let rows = u16::try_from(lines).unwrap_or(u16::MAX);
+                    self.events.push(Event::ResizeRequest(Some(rows), None));
+                }
                 _ => {}
             },
             // XTSMGRAPHICS, `CSI ? Pi ; Pa ; Pv S`. What a sixel producer asks once it
@@ -779,7 +804,7 @@ impl State {
                     // XTWINOPS has no way to spell that and this does, and a producer
                     // waiting on an answer is owed one. Setting or resetting the geometry
                     // is refused the same way: the window is Emacs' and not the child's,
-                    // which is why `3t`/`4t`/`8t` are refused above.
+                    // which is why `3t`/`4t` are refused above and `8t` only asks.
                     2 if self.metrics.is_reported() && (action == 1 || action == 4) => {
                         let (h, w) = (self.screen().height(), self.screen().width());
                         let (pw, ph) = (
