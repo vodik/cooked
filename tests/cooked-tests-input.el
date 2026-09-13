@@ -2896,10 +2896,10 @@ different key; `cl-block' is what makes a hit terminal instead."
     ;; table carries -- the shape a key reaches the end of the search in.
     (should-not (cooked--encode-event '(mouse-1 (nil 1 (0 . 0) 0))))
     (should-not (cooked--encode-event 'wheel-up))
-    (should-not (cooked--encode-event 'f20))
+    (should-not (cooked--encode-event 'f30))
     ;; Including with modifiers, which is the case that would otherwise have
     ;; found a code point in a `literal' `cooked--key-encodings' entry on the way past.
-    (should-not (cooked--encode-event 'C-f20))))
+    (should-not (cooked--encode-event 'C-f30))))
 
 (ert-deftest cooked-modified-arrows-use-xterm-parameters ()
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -3261,6 +3261,50 @@ take cooked's own prefix back through a shift."
   (should-not (eq (lookup-key cooked-alt-map (kbd "C-S-c")) #'cooked-send-key))
   (should (eq (lookup-key (cooked--build-meta-overlay cooked-alt-map) (kbd "C-M-;"))
               #'cooked-send-meta-key)))
+
+(ert-deftest cooked-super-hyper-and-kittys-own-keys-reach-a-kitty-child ()
+  "Through the command loop, the keys kitty spells and nothing else did reach it.
+
+`cooked--modifier-param' summed Shift, Meta and Control, so \\`s-a' and \\`H-a'
+went out as a plain `a', and no map bound them anyway.  \\`C-M-S-<up>' was not
+among the modified spellings the maps bind, so Emacs shift-translated it to
+\\`C-M-<up>' and the Shift was gone before `cooked-send-key' ran.  F13 and Pause
+encoded to nothing.  While nothing is negotiated the Super chord and Pause stay
+Emacs', since no other protocol can spell them."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h\\033[>1u'; stty raw -echo; cat -v")
+    (should (cooked-tests--settle (lambda () (cooked--kitty-negotiated-p))))
+    (cooked-tests--display-buffer)
+    (let ((cooked--app-cursor nil))
+      (dolist (key '("s-A" "S-s-a" "H-a" "C-M-S-<up>" "s-<up>" "<f13>" "<pause>" "C-é"))
+        (ert-info ((format "%s under kitty" key))
+          (should (eq (key-binding (kbd key)) #'cooked-send-key))))
+      (execute-kbd-macro
+       (vconcat (kbd "s-A") (kbd "C-M-S-<up>") (kbd "H-a") (kbd "<f13>") (kbd "<pause>")))
+      (should (cooked-tests--settle
+               (lambda ()
+                 (string-search "^[[97;10u^[[1;8A^[[97;17u^[[57376u^[[57362u"
+                                (cooked-tests--text))))))
+    ;; Evil insert state keeps Super for Emacs, as it keeps Meta.
+    (should-not (eq (lookup-key cooked-semi-map (kbd "s-A")) #'cooked-send-key))
+    ;; With no flags, Super and Pause fall through to Emacs again while the keys a
+    ;; legacy spelling exists for still forward.  Read per key, so no map is rebuilt.
+    (let ((cooked--kitty-flags 0))
+      (dolist (key '("s-A" "<pause>"))
+        (should-not (eq (key-binding (kbd key)) #'cooked-send-key)))
+      (dolist (key '("C-M-S-<up>" "<f13>" "<menu>"))
+        (should (eq (key-binding (kbd key)) #'cooked-send-key))))))
+
+(ert-deftest cooked-meta-chords-beyond-ascii-forward-on-a-graphical-frame ()
+  "A graphical frame\='s \\`M-é' is one event, and the overlay\='s ESC map bound
+only 0-127, so it reached Emacs.  The ESC map is now a full keymap."
+  (let ((map (cooked--build-meta-overlay cooked-alt-map)))
+    (dolist (key '("M-é" "M-中" "M-x"))
+      (should (eq (lookup-key map (kbd key)) #'cooked-send-meta-key)))
+    (dolist (key '("M-O" "M-["))
+      (should-not (lookup-key map (kbd key)))))
+  (let ((map (cooked--build-meta-overlay cooked-raw-map (list (aref (kbd "M-é") 0)))))
+    (should-not (lookup-key map (kbd "M-é")))))
 
 (ert-deftest cooked-key-override-actions-encode-to-their-bytes ()
   "Every `cooked-key-overrides' action form, and the reason each one exists:

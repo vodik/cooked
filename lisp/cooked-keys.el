@@ -104,7 +104,24 @@
     (kp-down     keypad  "r" down)
     (kp-next     keypad  "s" next)
     (kp-insert   keypad  "p" insert)
-    (kp-delete   keypad  "n" deletechar))
+    (kp-delete   keypad  "n" deletechar)
+    ;; F13-F24 as terminfo/cooked.ti names them: `kf13\=' is Shift+F1's
+    ;; `ESC [ 1 ; 2 P\=', up to `kf24\=', Shift+F12's `ESC [ 24 ; 2 ~\='.
+    (f13         shifted f1)
+    (f14         shifted f2)
+    (f15         shifted f3)
+    (f16         shifted f4)
+    (f17         shifted f5)
+    (f18         shifted f6)
+    (f19         shifted f7)
+    (f20         shifted f8)
+    (f21         shifted f9)
+    (f22         shifted f10)
+    (f23         shifted f11)
+    (f24         shifted f12)
+    (menu        tilde   29)
+    (pause       none)
+    (print       none))
   "Every non-character key cooked speaks for, as (SYMBOL KIND PAYLOAD [FALLBACK]).
 
 One table rather than parallel ones per spelling, because the unmodified
@@ -132,11 +149,25 @@ KIND says both how the key is spelled and what a modifier does to it:
               keys with a character on the cap, or the symbol of the row this
               key stands in for when NumLock is off.  See
               `cooked--app-keypad-p\=' for which of the two is sent.
+  `shifted\='  PAYLOAD is the row this key is spelled as with Shift held, so
+              `f13\=' is sent as `S-f1\=' and `C-f13\=' as `C-S-f1\='.  That is
+              how the entry declares `kf13\=' through `kf24\=', after xterm\='s
+              PC keyboard, where F13 is what Shift+F1 is called.  xterm sends
+              a key that really is F13 as `ESC [ 25 ~\=', but no capability in
+              terminfo/cooked.ti names that, so a program reading the entry
+              would take it for an unknown key.
+  `none\='     There is no spelling outside the kitty protocol, which gives the
+              key a code point of its own in `cooked--kitty-functional-codes\='.
+              Pause and Print Screen send nothing in xterm and have no
+              capability in terminfo, and inventing a sequence for them would
+              put bytes in a program\='s input that it never agreed to read.
 
 `cooked--key-sequence\=' derives the unmodified spelling, so the two can no
 longer disagree.  The symbols are also exactly the set
 `cooked--build-passthrough-map\=' binds explicitly, in every modified spelling,
-for each of the maps it builds -- which is the table\='s other consumer.")
+for each of the maps it builds -- which is the table\='s other consumer.  A
+`none\=' key is bound only while the kitty protocol is negotiated; see
+`cooked--kitty-only\='.")
 
 (defconst cooked--key-event-aliases
   '((delete . deletechar))
@@ -173,11 +204,20 @@ key from drifting apart."
     (`(,_ literal ,code) (string code))))
 
 (defun cooked--modifier-param (mods)
-  "Return xterm's modifier parameter for MODS: 1 plus a bit per held modifier."
+  "Return the modifier parameter for MODS: 1 plus a bit per held modifier.
+
+Shift is 1, Meta 2 and Control 4, as in xterm, where the key Emacs calls Meta
+is the one xterm calls Alt.  Super is 8 and Hyper 16, as in kitty\='s keyboard
+protocol, so \\`s-<up>\=' is `ESC [ 1 ; 9 A\='.  xterm\='s own 8 is a Meta key
+distinct from Alt, which a PC keyboard does not have, and kitty sends Super in
+that place in its legacy spellings too.  Emacs\=' Alt modifier has no bit in
+either protocol and is not spelled, which is also why mode 1039 is declined."
   (+ 1
      (if (memq 'shift mods) 1 0)
      (if (memq 'meta mods) 2 0)
-     (if (memq 'control mods) 4 0)))
+     (if (memq 'control mods) 4 0)
+     (if (memq 'super mods) 8 0)
+     (if (memq 'hyper mods) 16 0)))
 
 (defun cooked--app-keypad-p ()
   "Whether the keypad should send the SS3 spelling `smkx\=' asked for.
@@ -258,7 +298,12 @@ and saying so means dispatching on that row from inside this one."
         ;; from the code point of `+\=' exactly as `C-+\=' would be.
         (t (cooked--encode-literal entry (aref plain 0) param mods))))
       (`(,_ literal ,code . ,_)
-       (cooked--encode-literal entry code param mods)))))
+       (cooked--encode-literal entry code param mods))
+      (`(,_ shifted ,key)
+       (let ((mods (cons 'shift mods)))
+         (cooked--encode-entry (assq key cooked--key-encodings)
+                               (cooked--modifier-param mods) mods)))
+      (`(,_ none) nil))))
 
 ;;;; xterm's modifyOtherKeys, as negotiated
 
@@ -414,6 +459,18 @@ differently from the legacy terminal: a keypad key is a key of its own there,
 not the main-keyboard key it stands in for, so that `kp-home\=' and `home\='
 can be told apart.")
 
+(defconst cooked--kitty-functional-codes
+  '((f13 . 57376) (f14 . 57377) (f15 . 57378) (f16 . 57379) (f17 . 57380)
+    (f18 . 57381) (f19 . 57382) (f20 . 57383) (f21 . 57384) (f22 . 57385)
+    (f23 . 57386) (f24 . 57387) (print . 57361) (pause . 57362) (menu . 57363))
+  "The private-use code point kitty gives the keys that have no legacy spelling.
+
+From the same table as `cooked--kitty-keypad-codes\='.  `menu\=' has a legacy
+spelling, `ESC [ 29 ~\=', but the protocol names it `ESC [ 57363 u\=' all the
+same, and F13-F24, which terminfo spells as shifted F1-F12, are keys of their
+own here, as the keypad is.  Scroll Lock and the lock keys have codes too, and
+are missing because Emacs reports none of them as a key.")
+
 (defconst cooked--kitty-disambiguate 1
   "Kitty keyboard flag 1: spell ambiguous keys, Escape and chords, as escape codes.")
 
@@ -451,6 +508,14 @@ rubbish-in-the-input case the negotiation exists to prevent."
   (and (eq cooked--keys 'kitty)
        (cooked--kitty-flag-p cooked--kitty-negotiated)))
 
+(defun cooked--kitty-textless-p (mods)
+  "Whether MODS hold a modifier that stops a key producing text.
+
+That is every modifier but Shift: Control and Meta, and Super and Hyper, whose
+chords are shortcuts rather than characters.  kitty spells \\`s-a\=' as
+`ESC [ 97 ; 9 u\=' under bit 1, as it does \\`M-a\='."
+  (seq-some (lambda (modifier) (memq modifier mods)) '(control meta super hyper)))
+
 (defun cooked--kitty-text-p (char)
   "Whether CHAR may be reported as associated text: not a C0 or C1 control."
   (and char (>= char #x20) (not (<= #x7f char #x9f))))
@@ -486,30 +551,32 @@ kitty's table for `i\=' is the whole of the rule: `i\=', `I\=', then
 `105 ; 7\=' for ctrl+alt and `105 ; 6\=' for ctrl+shift.
 
 Associated text is reported only where the key still produces text, which
-Control and Meta both prevent.  The shifted key is reported only with Shift
-held and only where shifting changed something.  Both are narrower than kitty
-for a key whose shifted glyph is not its upper case: Emacs reports shift+1 as a
-bare `!\=' with no Shift, so it is sent as the key `!\=', and nothing here can
-recover that it was a `1\=' -- a fact about the keyboard layout that an Emacs
-event does not carry."
-  (let* ((ctrl (memq 'control mods))
-         (meta (memq 'meta mods))
+any modifier but Shift prevents; see `cooked--kitty-textless-p\='.  The shifted
+key is reported only with Shift held and only where shifting changed something.
+Both are narrower than kitty for a key whose shifted glyph is not its upper
+case: Emacs reports shift+1 as a bare `!\=' with no Shift, so it is sent as the
+key `!\=', and nothing here can recover that it was a `1\=' -- a fact about the
+keyboard layout that an Emacs event does not carry."
+  (let* ((textless (cooked--kitty-textless-p mods))
          (shift (memq 'shift mods))
          (text (if shift (upcase char) char)))
-    (if (and (not ctrl) (not meta) (not (cooked--kitty-flag-p cooked--kitty-all-keys)))
+    (if (and (not textless) (not (cooked--kitty-flag-p cooked--kitty-all-keys)))
         (string text)
       (cooked--kitty-csi-u
        char param
        (and (cooked--kitty-flag-p cooked--kitty-alternate-keys) shift (/= text char) text)
-       (and (cooked--kitty-flag-p cooked--kitty-associated-text) (not ctrl) (not meta)
+       (and (cooked--kitty-flag-p cooked--kitty-associated-text) (not textless)
             (cooked--kitty-text-p text) text)))))
 
 (defun cooked--encode-kitty-entry (entry mods param)
   "Encode the `cooked--key-encodings\=' row ENTRY for a negotiated kitty child.
 
 MODS and PARAM are as for `cooked--encode-entry\=', which this departs from in
-four places, each of them the protocol's rule that a key which produces no
+five places, each of them the protocol's rule that a key which produces no
 text is `CSI number ; modifier u\=' or `CSI 1 ; modifier FINAL\=':
+
+  A key in `cooked--kitty-functional-codes\=' is that code point, so F13 is
+  `ESC [ 57376 u\=' rather than the Shift+F1 terminfo calls it.
 
   Escape is always an escape code, `ESC [ 27 u\=' unmodified.  Return, Tab and
   Backspace stay bare bytes unmodified, so that `reset\=' can still be typed
@@ -521,6 +588,10 @@ text is `CSI number ; modifier u\=' or `CSI 1 ; modifier FINAL\=':
   (let ((modified (> param 1))
         (all (cooked--kitty-flag-p cooked--kitty-all-keys)))
     (pcase entry
+      ((and `(,key . ,_)
+            (let code (alist-get key cooked--kitty-functional-codes))
+            (guard code))
+       (cooked--kitty-csi-u code param))
       (`(escape . ,_) (cooked--kitty-csi-u 27 param))
       (`(,_ literal ,code . ,_)
        (if (or modified all)
@@ -533,14 +604,14 @@ text is `CSI number ; modifier u\=' or `CSI 1 ; modifier FINAL\=':
        (let ((code (alist-get key cooked--kitty-keypad-codes))
              (char (and (stringp plain) (aref plain 0))))
          (if (and (cooked--kitty-text-p char) (not all)
-                  (not (memq 'control mods)) (not (memq 'meta mods)))
+                  (not (cooked--kitty-textless-p mods)))
              ;; A printable character on the cap types that character, shifted
              ;; or not, as a main-keyboard text key would.
              plain
            (cooked--kitty-csi-u
             code param nil
             (and (cooked--kitty-flag-p cooked--kitty-associated-text) (cooked--kitty-text-p char)
-                 (not (memq 'control mods)) (not (memq 'meta mods))
+                 (not (cooked--kitty-textless-p mods))
                  char)))))
       (_ (cooked--encode-entry entry param mods)))))
 

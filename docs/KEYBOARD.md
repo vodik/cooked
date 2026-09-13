@@ -23,7 +23,17 @@ Emacs event does not carry the fact: the base-layout key of bit 4 is never sent,
 modifier press is never reported under bit 8, and a shifted symbol such as `!` is reported
 as the key `!` rather than as Shift+`1`. On a terminal frame Tab, Return and Backspace are
 indistinguishable from C-i, C-m and C-?, and are taken to be the keys; ESC there is also
-half of every Meta chord, so it goes as the plain byte.
+half of every Meta chord, so it goes as the plain byte. On a graphical frame Ctrl+[ is that
+same ESC, which is the prefix Meta chords are read under, so it waits for the next key
+rather than going out as `CSI 91;5u`. Under bit 8 the text an input method commits arrives
+as key events, `中` as `CSI 20013u`, since Emacs cannot tell a commit from a key press. And
+the flags reach the encoder with the drain that carries them, so a key typed between a
+child's `CSI > 1 u` and that drain is still spelled the legacy way.
+
+Super and Hyper are kitty's bits 8 and 16, and F13 to F24, Menu, Pause and Print Screen
+are its code points. A Super or Hyper chord, Pause and Print Screen have no spelling
+outside the kitty protocol, so they are forwarded only while a child has negotiated it;
+otherwise they stay Emacs', and `s-v` is still a paste.
 
 modifyOtherKeys is honoured at both of xterm's levels, with xterm's rules for which keys
 each covers (`ModifyOtherKeys` in its `input.c`). Level 2 spells every key held with
