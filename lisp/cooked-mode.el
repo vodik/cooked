@@ -1004,6 +1004,7 @@ back to.  See `cooked-bell-pending'."
   (add-hook 'window-buffer-change-functions #'cooked--sync-graphics-everywhere)
   (add-hook 'after-delete-frame-functions #'cooked--sync-graphics-everywhere)
   (add-variable-watcher 'cooked-inline-images #'cooked--sync-graphics-on-toggle)
+  (add-variable-watcher 'cooked-allow-pointer-shape #'cooked--sync-pointer-shape-on-toggle)
   ;; Frame focus is not a per-buffer event, so this one walks live sessions.
   ;;
   ;; `after-focus-change-function' holds a *single function*, defaulting to `ignore',

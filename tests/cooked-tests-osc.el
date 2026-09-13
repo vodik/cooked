@@ -1845,17 +1845,81 @@ back a colour something else set in the meantime rather than the stale one."
       (set-frame-parameter frame 'cooked--cursor-color nil)
       (set-frame-parameter frame 'cursor-color own))))
 
-(ert-deftest cooked-osc-22-query-says-which-shapes-can-be-shown ()
-  "One answer per name, in order: 1 for a shape Emacs has a pointer for, 0 for
-one it has not, and the top of the stack -- empty, so 0 -- for `__current__'."
+(defun cooked-tests--osc-22-query-reply (graphic)
+  "What a real child is told for five OSC 22 names.
+GRAPHIC non-nil stands in for a graphical frame; nil leaves the batch frame,
+which is a text terminal's."
   (let ((out (make-temp-file "cooked-osc22")))
     (unwind-protect
-        (cooked-tests--with-session
-            (cooked-tests--reply-to "\\033]22;?pointer,crosshair,ew-resize,__current__\\033\\\\" out)
-          (should (cooked-tests--settle
-                   (lambda () (string-suffix-p "\033\\" (cooked-tests--contents out)))))
-          (should (equal (cooked-tests--contents out) "\033]22;1,0,1,0\033\\")))
+        (cl-letf (((symbol-function 'cooked--pointer-displayable-p)
+                   (if graphic
+                       (lambda () t)
+                     (symbol-function 'cooked--pointer-displayable-p))))
+          (unless graphic (should-not (display-graphic-p)))
+          (cooked-tests--with-session
+              (cooked-tests--reply-to
+               "\\033]22;?pointer,crosshair,ew-resize,__current__,__default__\\033\\\\" out)
+            (should (cooked-tests--settle
+                     (lambda () (string-suffix-p "\033\\" (cooked-tests--contents out)))))
+            (cooked-tests--contents out)))
       (delete-file out))))
+
+(ert-deftest cooked-osc-22-query-says-which-shapes-can-be-shown ()
+  "One answer per name, in order: 1 for a shape Emacs has a pointer for, 0 for
+one it has not, the top of the stack -- empty, so 0 -- for `__current__', and
+Emacs' own text pointer for `__default__'."
+  (should (equal (cooked-tests--osc-22-query-reply t)
+                 "\033]22;1,0,1,0,text\033\\")))
+
+(ert-deftest cooked-osc-22-query-supports-nothing-where-no-pointer-is-seen ()
+  "On a text terminal, and with the knob off, a real child is told no shape is
+supported, since a set would change nothing it could see."
+  (should (equal (cooked-tests--osc-22-query-reply nil)
+                 "\033]22;0,0,0,0,text\033\\"))
+  (let ((cooked-allow-pointer-shape nil))
+    (should (equal (cooked-tests--osc-22-query-reply t)
+                   "\033]22;0,0,0,0,text\033\\"))))
+
+(ert-deftest cooked-osc-22-empty-set-resets-and-a-full-stack-drops-its-bottom ()
+  "kitty's `ESC ] 22 ; ST' resets the top of the stack to the default pointer
+and leaves what is under it for the pop; a 17th push drops the oldest shape;
+and turning the knob off takes a shape on show away at once."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; printf '\\033[?1000h'; exec sleep 30")
+    (should (cooked-tests--settle (lambda () cooked--mouse-grab)))
+    (cl-flet ((shown () (and cooked--pointer-overlay
+                             (overlay-get cooked--pointer-overlay 'pointer)))
+              (stack () (alist-get 'main cooked--pointer-stacks))
+              (osc (payload) (cooked--osc-pointer-shape (list payload))))
+      ;; Nothing to reset on an empty stack.
+      (osc "")
+      (should-not cooked--pointer-stacks)
+      (dolist (reset '("" "="))
+        (osc ">text,pointer")
+        (should (eq (shown) 'hand))
+        (osc reset)
+        (should-not (shown))
+        (should (equal (stack) '(nil "text")))
+        (osc "<")
+        (should (eq (shown) 'text))
+        (osc "<")
+        (should-not (stack)))
+      ;; Sixteen fit; the seventeenth drops the first.
+      (osc ">wait")
+      (dotimes (_ 15) (osc ">text"))
+      (should (= (length (stack)) 16))
+      (should (equal (car (last (stack))) "wait"))
+      (osc ">pointer")
+      (should (= (length (stack)) 16))
+      (should-not (member "wait" (stack)))
+      (should (eq (shown) 'hand))
+      ;; The knob off removes the overlay without waiting for a drain.
+      (setq-local cooked-allow-pointer-shape nil)
+      (should-not cooked--pointer-overlay)
+      (kill-local-variable 'cooked-allow-pointer-shape)
+      (should (eq (shown) 'hand))
+      (let ((cooked-allow-pointer-shape nil))
+        (should-not cooked--pointer-overlay))
+      (should (eq (shown) 'hand)))))
 
 (ert-deftest cooked-osc-22-shape-covers-the-grid-only-while-reporting ()
   "The pointer changes over the screen and not the scrollback above it, stays off

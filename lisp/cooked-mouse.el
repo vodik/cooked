@@ -801,7 +801,7 @@ narrower: the pointer changes over this terminal\='s own grid and only while
 the child is being sent mouse reports, so a hostile stream can do no more than
 draw a hand over text it already controls.  When off, sets are ignored and a
 query is told that no shape is supported, which is the truth about what a set
-would then do."
+would then do.  Turning it off removes a shape already on show at once."
   :type 'boolean
   :group 'cooked)
 
@@ -867,7 +867,15 @@ The payload is an operation character and a comma-separated list of names:
 `=\=' or nothing sets the top of the stack to the first name, `>\=' pushes each
 name in turn, `<\=' pops one and ignores the names, and `?\=' asks about each.
 A query is always answered, knob or not, with 1 or 0 per name -- or, for
-`__current__\=', the name on top of the stack, and 0 when it is empty."
+`__current__\=', the name on top of the stack, and 0 when it is empty.
+
+A set with no name at all, `ESC ] 22 ; ST\=', is kitty\='s reset to the default
+pointer.  It replaces the top of the stack with nil, as kitty does, so a
+program that pushed a shape and reset it can still pop it without taking the
+shape underneath with it.  On an empty stack there is nothing to reset.
+
+A push onto a full stack drops the bottom entry, which is kitty\='s rule: the
+oldest shape is the one least likely to be popped back to."
   (let* ((payload (string-join parts ";"))
          (op (and (> (length payload) 0)
                   (memq (aref payload 0) '(?= ?> ?< ??))
@@ -890,8 +898,8 @@ A query is always answered, knob or not, with 1 or 0 per name -- or, for
                      (?< (cdr stack))
                      (?> (seq-take (append (reverse names) stack)
                                    cooked--pointer-stack-limit))
-                     ;; The first name only; a set carrying none has nothing to act on.
-                     (_ (if names (cons (car names) (cdr stack)) stack)))))
+                     ;; The first name only, or nil, the default pointer, for none.
+                     (_ (if (or names stack) (cons (car names) (cdr stack)) stack)))))
           ;; A program with hover reporting re-sends its shape on every motion,
           ;; and nearly all of those name the shape already on top.
           (unless (equal new stack)
@@ -903,16 +911,36 @@ A query is always answered, knob or not, with 1 or 0 per name -- or, for
 
 `__default__\=' and `__grabbed__\=' ask what the pointer is when no child shape is
 in force, with and without mouse reporting.  cooked changes nothing for either,
-so both are Emacs\=' own pointer over buffer text."
+so both are Emacs\=' own pointer over buffer text.
+
+A shape is supported only where it can be seen: on a text terminal there is no
+pointer to change, so a buffer shown only on tty frames answers 0 for every
+name, as it does with `cooked-allow-pointer-shape\=' off."
   (pcase name
     ("__current__" (or current "0"))
     ((or "__default__" "__grabbed__") "text")
-    (_ (if (and cooked-allow-pointer-shape (assoc name cooked--pointer-shapes))
+    (_ (if (and cooked-allow-pointer-shape
+                (assoc name cooked--pointer-shapes)
+                (cooked--pointer-displayable-p))
            "1"
          "0"))))
 
-(defun cooked--sync-pointer-shape ()
+(defun cooked--pointer-displayable-p ()
+  "Whether a frame this buffer is on can show a mouse pointer at all.
+
+The frames of the windows showing it, or the selected frame when there are none,
+since that is where a buffer not yet displayed is about to appear.  Any one
+graphical frame is enough: that is where the pointer would be seen."
+  (seq-some #'display-graphic-p
+            (or (mapcar #'window-frame (get-buffer-window-list nil nil t))
+                (list (selected-frame)))))
+
+(defun cooked--sync-pointer-shape (&optional allow)
   "Show the child\='s pointer shape over the screen if it may be, or remove it.
+
+ALLOW, when given, is `(VALUE)\=' and stands in for
+`cooked-allow-pointer-shape\=', for the variable watcher, which runs before the
+new value is in place.
 
 Shown while the child is being sent mouse reports: the reporting gate is
 `cooked--mouse-grab\=', and `enabled\=' is asked as well because that gate also
@@ -931,12 +959,18 @@ redisplay the shortcuts it takes for a buffer whose text and overlays are as it
 last drew them -- on every drain, which is the path those shortcuts are for.
 `overlay-put\=' of the value already there costs nothing, so it is not guarded.
 
+An overlay property outranks a text property, so over a command line the
+child\='s shape replaces the `pointer hand\=' that
+`cooked-command-decorations\=' puts on its text.  That is right for as long as
+it lasts: the shape is shown only while the child is sent the clicks, and a
+click there is the child\='s, not a decoration\='s.
+
 Past the end of a row\='s text there is no buffer position for any property to
 sit on, and Emacs shows `void-text-area-pointer\=' there.  That variable is read
 in whatever buffer is current when the pointer moves, not the one under it, so
 setting it here would repaint the void of every window while this one was
 selected; the blank tail of a short row keeps Emacs\=' own pointer instead."
-  (let ((pointer (and cooked-allow-pointer-shape
+  (let ((pointer (and (if allow (car allow) cooked-allow-pointer-shape)
                       cooked--session
                       cooked--mouse-grab
                       (cooked-mouse-state-enabled cooked--mouse-state)
@@ -958,6 +992,26 @@ selected; the blank tail of a short row keeps Emacs\=' own pointer instead."
       (when cooked--pointer-overlay
         (delete-overlay cooked--pointer-overlay)
         (setq cooked--pointer-overlay nil)))))
+
+(defun cooked--sync-pointer-shape-on-toggle (symbol newval operation where)
+  "Follow SYMBOL, the pointer shape knob, to NEWVAL, as a variable watcher.
+
+WHERE is the buffer a buffer-local OPERATION applies to, and nil for the default
+value, which reaches every buffer that has not made the variable local.  Without
+this a shape on show when the knob went off stayed until the next drain.
+
+`kill-local-variable\=' arrives as `makunbound\=' with NEWVAL nil, while the
+value the buffer is left with is the default one, so that is what it syncs to."
+  (unless (eq operation 'defvaralias)
+    (if where
+        (when (buffer-live-p where)
+          (with-current-buffer where
+            (when (derived-mode-p 'cooked-mode)
+              (cooked--sync-pointer-shape
+               (list (if (eq operation 'makunbound) (default-value symbol) newval))))))
+      (cooked--dolist-buffers
+        (unless (local-variable-p 'cooked-allow-pointer-shape)
+          (cooked--sync-pointer-shape (list newval)))))))
 
 (defun cooked--reset-pointer-shapes ()
   "Empty both OSC 22 stacks, on RIS, as the protocol requires."
