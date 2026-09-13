@@ -498,7 +498,10 @@ fn response(cmd: &Command, error: Option<&str>) -> Option<Vec<u8>> {
         return None;
     }
     let body = error.unwrap_or("OK");
-    super::term::apc_reply(&format!("i={};{}", cmd.id, body))
+    super::term::reply::frame(
+        super::term::reply::Framing::KittyGraphics,
+        format_args!("i={};{}", cmd.id, body),
+    )
 }
 
 /// Standard base64, rejecting anything that is not — but lifting out what the *terminal*

@@ -481,6 +481,10 @@ impl State {
             .iter()
             .map(|p| String::from_utf8_lossy(p).into_owned())
             .collect();
-        self.events.push(Event::Osc(code, parts, bell_terminated));
+        self.events.push(Event::Osc(
+            code,
+            parts,
+            Terminator::from_bell(bell_terminated),
+        ));
     }
 }

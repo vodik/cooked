@@ -17,6 +17,8 @@ use super::text::{self, Segmenter, Step};
 use csi::{PushedPen, SavedMode};
 use keys::KittyStack;
 pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};
+use reply::{Framing, color_scheme_report, size_report};
+pub(crate) use reply::{Terminator, osc_reply};
 use screens::{PerScreen, ScreenId};
 use std::collections::{HashSet, VecDeque};
 
@@ -26,6 +28,7 @@ mod keys;
 mod modes;
 pub(crate) mod osc;
 mod perform;
+pub(crate) mod reply;
 mod screens;
 mod state;
 #[cfg(test)]
@@ -126,7 +129,7 @@ pub enum Event {
     /// it, and Emacs answers asynchronously: by the time a handler runs we may have
     /// parsed several more sequences, so "the terminator of the last OSC" would
     /// answer the wrong query. See [`osc_reply`].
-    Osc(u16, Vec<String>, bool),
+    Osc(u16, Vec<String>, Terminator),
     /// OSC 133;A — a shell prompt begins.
     ///
     /// The [`MarkId`] is how Emacs is told, later, that the mark has moved: it holds a
@@ -158,6 +161,9 @@ pub enum Event {
     Mouse(Mouse),
     /// Bytes the terminal owes the child (device attributes, cursor reports).
     Reply(Vec<u8>),
+    /// The mode 2048 report, which is a [`Event::Reply`] in every respect but one: a resize
+    /// supersedes it. See [`Term::set_size`], which drops an undrained one by this variant.
+    SizeReport(Vec<u8>),
     /// `CSI 3 J` — the child asked to erase saved lines, xterm's `clear -x`.
     ///
     /// Unlike `CSI 2 J`, real xterm's `3 J` touches only the scrollback, leaving the
@@ -193,7 +199,7 @@ pub enum Event {
     Reset,
     /// XTWINOPS 22/23: push or pop the window title. `smcup`/`rmcup` end in these, so a
     /// full-screen program that sets a title expects it restored when it leaves.
-    TitleStack(bool),
+    TitleStack(StackOp),
     /// XTWINOPS `8t` or DECSLPP (`CSI Ps t`, Ps of 24 or more): the child asks for a
     /// size, as (rows, columns), with `None` for a dimension it asked to leave alone.
     ///
@@ -204,13 +210,27 @@ pub enum Event {
     /// either way: xterm with `allowWindowOps` off sends none, and the child's `18t`
     /// read-back is what tells it the answer.
     ResizeRequest(Option<u16>, Option<u16>),
-    /// XTWINOPS `19t` (`false`) or `15t` (`true`): the size of the *screen*, which in
-    /// Emacs is the frame, in cells or in pixels.
+    /// XTWINOPS `19t` (cells) or `15t` (pixels): the size of the *screen*, which in Emacs
+    /// is the frame.
     ///
     /// An event rather than a reply because the grid does not know the frame. It knows
     /// the one window it is laid out for, and that is `18t` and `14t`; the frame
     /// around it is Emacs' to measure.
-    FrameSize(bool),
+    FrameSize(Unit),
+}
+
+/// A push or a pop, for [`Event::TitleStack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackOp {
+    Push,
+    Pop,
+}
+
+/// What a size is counted in, for [`Event::FrameSize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+    Cells,
+    Pixels,
 }
 
 /// What the child asked to hear from the mouse, and how the reports are to be spelled.
@@ -566,63 +586,6 @@ fn plain_cells(value: &str) -> Option<u16> {
     Some(u16::try_from(value.parse::<u32>().ok()?).unwrap_or(u16::MAX))
 }
 
-/// Frame `ESC ] CODE ; PAYLOAD` with the terminator the query used.
-///
-/// Queries whose answer only Emacs knows — the default colours, which resolve against
-/// the buffer's faces rather than any palette we hold — are answered from Lisp, but the
-/// framing belongs here so that no Lisp frames a payload the *child* supplied.
-///
-/// That is narrower than "Lisp never splices control bytes", which is how this used to
-/// read and is not the rule the tree keeps: `cooked--encode-event' spells out
-/// `ESC [ 27 ; MOD ; CHAR ~', `cooked--mouse-report' spells out an SGR report, and
-/// `cooked--alt-scroll-keys' spells out cursor keys — all correctly, because every field
-/// in them is an Emacs-side integer or symbol and none can carry an `ESC` the child
-/// chose. What cannot be done in Lisp is framing a string that came *from* the child,
-/// which is this function's whole case and the reason for the refusal below.
-///
-/// `bell` picks BEL over ST because xterm echoes the terminator it was asked with, and a
-/// client scanning its input for BEL hangs on an ST-terminated reply.
-///
-/// Returns `None` for a payload carrying C0 controls or DEL, which would end the sequence
-/// early or inject one of their own. Payloads are attacker-reachable — a colour name can
-/// arrive from the child in a set request and come straight back out in the echo — so
-/// centralising the framing buys nothing unless it also refuses to frame a lie.
-pub(crate) fn osc_reply(code: u16, payload: &str, bell: bool) -> Option<Vec<u8>> {
-    if !reply_safe(payload) {
-        return None;
-    }
-    let terminator = if bell { "\x07" } else { "\x1b\\" };
-    Some(format!("\x1b]{code};{payload}{terminator}").into_bytes())
-}
-
-/// Whether PAYLOAD may be framed into a reply at all.
-///
-/// The one statement of the rule, for every framing there is: [`osc_reply`],
-/// [`apc_reply`], and [`State::csi_reply`] with its DCS sibling. A C0 control or DEL
-/// inside a reply either ends the sequence early or starts one of its own, so a payload
-/// carrying either is not a reply that can be sent -- it is a reply plus whatever the
-/// rest of it turns into on the child's input stream.
-///
-/// Kept as one predicate rather than repeated per framing because it is the security
-/// half of centralising the framing, and a check written out four times is a check that
-/// can come to differ four ways. The framings themselves stay separate: an introducer is
-/// not a rule, and spelling `ESC [` in the function that means CSI is what makes each one
-/// readable.
-pub(crate) fn reply_safe(payload: &str) -> bool {
-    !payload.chars().any(|c| c.is_control() || c == '\u{7f}')
-}
-
-/// Frame `ESC _ G BODY ESC \` -- the kitty graphics protocol's answer to a command.
-///
-/// Beside its OSC, CSI and DCS siblings for the reason they are beside each other: four
-/// introducers, one rule about what may go between them. The kitty path builds the body
-/// from its own vocabulary of error codes, so [`reply_safe`] has never fired here either;
-/// see [`State::csi_reply`] for why that is the argument for the check rather than
-/// against it.
-pub(crate) fn apc_reply(body: &str) -> Option<Vec<u8>> {
-    reply_safe(body).then(|| format!("\x1b_G{body}\x1b\\").into_bytes())
-}
-
 /// What `CSI ? 996 n` answers, and what mode 2031 pushes.
 ///
 /// The discriminants are the protocol's own numbers, so that no reporting site spells a
@@ -643,33 +606,6 @@ impl std::fmt::Display for ColorScheme {
     }
 }
 
-/// The DSR a child gets for the colour scheme, whether it asked or subscribed.
-///
-/// One function because the pull and the push are the same report, and a child cannot
-/// tell a solicited answer from an unsolicited one -- framed at two sites, the two could
-/// come to differ.
-pub(crate) fn color_scheme_report(scheme: ColorScheme) -> Vec<u8> {
-    format!("\x1b[?997;{scheme}n").into_bytes()
-}
-
-/// The mode 2048 report: `CSI 48 ; rows ; cols ; height px ; width px t`.
-///
-/// One function for the same reason [`color_scheme_report`] is one: the report a child
-/// gets for subscribing and the one it gets for a resize must be the same bytes, and two
-/// sites framing them are two that can drift. Height before width in both units, which
-/// is `14t`'s order and not XTSMGRAPHICS'.
-///
-/// The pixel fields are 0 when Emacs has not reported a cell size. That is where this
-/// parts company with `14t`, which falls silent instead: silence there is no answer to a
-/// question, but here it would withhold the row and column count too, which are known.
-/// Zero is also what `ws_xpixel`/`ws_ypixel` already say on the tty in the same case, so
-/// the report and the `TIOCSWINSZ` it travels beside agree about the pixels as well.
-pub(crate) fn size_report(rows: usize, cols: usize, metrics: Option<CellMetrics>) -> Vec<u8> {
-    let area = metrics.map_or_else(PixelSize::default, |m| m.text_area(rows, cols));
-    let (hpx, wpx) = (area.h, area.w);
-    format!("\x1b[48;{rows};{cols};{hpx};{wpx}t").into_bytes()
-}
-
 impl State {
     /// The shown screen's text area in pixels, or `None` before Emacs reports a cell size.
     pub(super) fn text_area(&self) -> Option<PixelSize> {
@@ -682,51 +618,20 @@ impl State {
         size_report(self.screen().height(), self.screen().width(), self.metrics)
     }
 
-    /// Queue `ESC [ BODY` for the child: the CSI reply, framed in one place.
-    ///
-    /// What [`osc_reply`] is to OSC, and it earns its keep the same two ways. The
-    /// introducer is spelled once, so ten reports cannot come to disagree about how a
-    /// reply begins -- [`color_scheme_report`] already exists because two sites framing
-    /// one report is two things that can drift. And there is a single point at which to
-    /// ask whether the bytes about to be sent are ones we chose.
-    ///
-    /// Every body written today is our own arithmetic -- a mode number, a cursor
-    /// position, a pixel count -- so [`reply_safe`] has never refused one and should not.
-    /// That is the case for the check rather than against it: a report is exactly the
-    /// shape of thing that later grows a field echoing something the child sent, and on
-    /// that day the check is already in the path instead of being remembered.
-    ///
-    /// A refused reply is dropped whole rather than trimmed. The child is waiting for one
-    /// answer, and the tail of a broken sequence does not stop being bytes -- it arrives
-    /// at the next prompt as typed input, which is the failure `21t` is refused over.
+    /// Queue a CSI reply, `ESC [ BODY`; see [`reply::frame`] for what is refused.
     pub(crate) fn csi_reply(&mut self, body: std::fmt::Arguments<'_>) {
-        self.framed_reply("\x1b[", body, "");
+        self.reply(Framing::Csi, body);
     }
 
-    /// Queue `ESC P BODY ESC \` -- a DCS reply.
-    ///
-    /// XTVERSION's answer, DA3's, DECRQSS's and XTGETTCAP's. Its own method rather than
-    /// a string pasted at each call site, because the terminator is the part a second
-    /// site would get wrong: a DCS that is never closed leaves the parser eating
-    /// everything the child prints next.
+    /// Queue a DCS reply, `ESC P BODY ESC \`.
     pub(crate) fn dcs_reply(&mut self, body: std::fmt::Arguments<'_>) {
-        self.framed_reply("\x1bP", body, "\x1b\\");
+        self.reply(Framing::Dcs, body);
     }
 
-    /// The framing both of the above are: introducer, body, terminator, with
-    /// [`reply_safe`] asked about the body alone.
-    fn framed_reply(&mut self, introducer: &str, body: std::fmt::Arguments<'_>, end: &str) {
-        use std::fmt::Write as _;
-        let mut reply = String::from(introducer);
-        let start = reply.len();
-        // Cannot fail: `String`'s `write_fmt` is infallible, and the only errors a
-        // `Display` impl could raise are its own -- none of these have one.
-        let _ = reply.write_fmt(body);
-        if !reply_safe(&reply[start..]) {
-            return;
+    fn reply(&mut self, framing: Framing, body: std::fmt::Arguments<'_>) {
+        if let Some(bytes) = reply::frame(framing, body) {
+            self.events.push(Event::Reply(bytes));
         }
-        reply.push_str(end);
-        self.events.push(Event::Reply(reply.into_bytes()));
     }
 }
 
@@ -830,7 +735,7 @@ impl Term {
         }
         self.state
             .events
-            .retain(|e| !matches!(e, Event::Reply(bytes) if bytes.starts_with(b"\x1b[48;")));
+            .retain(|e| !matches!(e, Event::SizeReport(_)));
         Some(report)
     }
 

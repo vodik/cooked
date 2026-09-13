@@ -422,9 +422,7 @@ fn size_reports(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::Reply(bytes) if bytes.starts_with(b"\x1b[48;") => {
-                Some(String::from_utf8(bytes.clone()).unwrap())
-            }
+            Event::SizeReport(bytes) => Some(String::from_utf8(bytes.clone()).unwrap()),
             _ => None,
         })
         .collect()
@@ -1911,8 +1909,8 @@ fn xtsmgraphics_declines_out_loud_rather_than_leaving_a_producer_waiting() {
 fn xtwinops_pushes_and_pops_the_title() {
     let mut t = term(2, 10, b"\x1b[22;0;0t\x1b[23;0;0t");
     let events = t.drain().events;
-    assert!(events.contains(&Event::TitleStack(true)));
-    assert!(events.contains(&Event::TitleStack(false)));
+    assert!(events.contains(&Event::TitleStack(StackOp::Push)));
+    assert!(events.contains(&Event::TitleStack(StackOp::Pop)));
 }
 
 #[test]
@@ -1972,8 +1970,8 @@ fn xtwinops_reports_not_iconified_and_asks_lisp_for_the_frame() {
         t.drain().events,
         vec![
             Event::Reply(b"\x1b[1t".to_vec()),
-            Event::FrameSize(false),
-            Event::FrameSize(true),
+            Event::FrameSize(Unit::Cells),
+            Event::FrameSize(Unit::Pixels),
         ],
         "the order is the order asked, since a reply from Lisp rides the same list"
     );
@@ -2485,8 +2483,8 @@ fn unhandled_osc_is_passed_through_verbatim() {
     assert_eq!(
         t.drain().events,
         vec![
-            Event::Osc(0, vec!["hi".into()], true),
-            Event::Osc(7, vec!["file://h/tmp".into()], true),
+            Event::Osc(0, vec!["hi".into()], Terminator::Bel),
+            Event::Osc(7, vec!["file://h/tmp".into()], Terminator::Bel),
         ]
     );
 }
@@ -2500,7 +2498,7 @@ fn osc_payloads_keep_their_internal_separators() {
         vec![Event::Osc(
             51,
             vec!["E\"find-file\" \"/tmp/a".into(), "b\"".into()],
-            false
+            Terminator::St
         )]
     );
 }
@@ -2510,7 +2508,11 @@ fn osc_52_clipboard_is_passed_through() {
     let mut t = term(4, 20, b"\x1b]52;c;aGVsbG8=\x07");
     assert_eq!(
         t.drain().events,
-        vec![Event::Osc(52, vec!["c".into(), "aGVsbG8=".into()], true)]
+        vec![Event::Osc(
+            52,
+            vec!["c".into(), "aGVsbG8=".into()],
+            Terminator::Bel
+        )]
     );
 }
 
@@ -2852,31 +2854,10 @@ fn osc_terminator_travels_with_the_event() {
     assert_eq!(
         t.drain().events,
         vec![
-            Event::Osc(11, vec!["?".into()], true),
-            Event::Osc(11, vec!["?".into()], false),
+            Event::Osc(11, vec!["?".into()], Terminator::Bel),
+            Event::Osc(11, vec!["?".into()], Terminator::St),
         ]
     );
-}
-
-#[test]
-fn osc_reply_echoes_the_terminator_it_was_asked_with() {
-    assert_eq!(
-        osc_reply(11, "rgb:0000/0000/0000", true).unwrap(),
-        b"\x1b]11;rgb:0000/0000/0000\x07"
-    );
-    assert_eq!(
-        osc_reply(11, "rgb:ffff/ffff/ffff", false).unwrap(),
-        b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"
-    );
-}
-
-/// A colour name can arrive from the child in a set request and come straight back
-/// out in the echo, so the payload is not ours to trust.
-#[test]
-fn osc_reply_refuses_a_payload_that_could_close_the_sequence() {
-    assert_eq!(osc_reply(11, "red\x07\x1b]0;pwned", true), None);
-    assert_eq!(osc_reply(11, "red\x1b\\", false), None);
-    assert_eq!(osc_reply(11, "red\x7f", true), None);
 }
 
 #[test]

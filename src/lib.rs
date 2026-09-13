@@ -632,8 +632,8 @@ fn send(env: Env, args: &[Value]) -> Result<Value> {
 fn reply_osc(env: Env, args: &[Value]) -> Result<Value> {
     let code = env.from_lisp::<u16>(args[1])?;
     let payload = env.from_lisp::<String>(args[2])?;
-    let bell = !env.is_nil(args[3]);
-    let Some(bytes) = emu::osc_reply(code, &payload, bell) else {
+    let terminator = emu::Terminator::from_bell(!env.is_nil(args[3]));
+    let Some(bytes) = emu::osc_reply(code, &payload, terminator) else {
         return Err(env.signal(
             "error",
             "cooked: refusing to frame an OSC reply containing control characters",
@@ -1488,11 +1488,11 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
         Event::Bell => list!(env, [sym!(env, "bell")?]),
         // (osc CODE BELL-P PART...) — Lisp decides what the code means. BELL-P is
         // opaque to the handler: it hands it back to `cooked--reply-osc' if it answers.
-        Event::Osc(code, parts, bell) => {
+        Event::Osc(code, parts, terminator) => {
             let mut items = vec![
                 sym!(env, "osc")?,
                 env.into_lisp(*code)?,
-                env.into_lisp(*bell)?,
+                env.into_lisp(*terminator == emu::Terminator::Bel)?,
             ];
             for part in parts {
                 items.push(env.into_lisp(part.as_str())?);
@@ -1540,12 +1540,14 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
                 m.pixels(),
             ]
         ),
-        Event::Reply(bytes) => env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?),
+        Event::Reply(bytes) | Event::SizeReport(bytes) => {
+            env.cons(sym!(env, "reply")?, env.into_lisp(bytes.as_slice())?)
+        }
         Event::EraseScrollback => list!(env, [sym!(env, "erase-scrollback")?]),
         Event::DisplayCleared => list!(env, [sym!(env, "display-cleared")?]),
         Event::Reset => list!(env, [sym!(env, "reset")?]),
         // (title-stack PUSH-P)
-        Event::TitleStack(push) => list!(env, [sym!(env, "title-stack")?, *push]),
+        Event::TitleStack(op) => list!(env, [sym!(env, "title-stack")?, *op == emu::StackOp::Push]),
         // (resize-request ROWS COLS), nil for a dimension to leave alone.
         Event::ResizeRequest(rows, cols) => list!(
             env,
@@ -1556,7 +1558,9 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
             ]
         ),
         // (frame-size PIXELS-P)
-        Event::FrameSize(pixels) => list!(env, [sym!(env, "frame-size")?, *pixels]),
+        Event::FrameSize(unit) => {
+            list!(env, [sym!(env, "frame-size")?, *unit == emu::Unit::Pixels])
+        }
     }
 }
 
