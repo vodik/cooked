@@ -53,6 +53,10 @@ would be noise around the one that failed."
     (should (cooked--running-anchor))
     (should (string-prefix-p "  running: make -j8" (cooked-tests--annotation)))
     (should-not (string-search "exit" (cooked-tests--annotation)))
+    ;; With a start time it says how long, in the command search's spelling.
+    (setq cooked--command-started-at (- (float-time) 65))
+    (should (string-match-p "\\`  running 1m [0-9]+s: make -j8" (cooked-tests--annotation)))
+    (setq cooked--command-started-at nil)
     ;; And back to failed once the anchor is gone, with no record having moved.
     (setq cooked--command-prompt nil cooked--command-start nil cooked--command-input nil)
     (should (string-prefix-p "  exit 2" (cooked-tests--annotation)))))
@@ -279,6 +283,67 @@ outside one, and whichever group a narrow key has chosen."
       (consult-cooked '(4))
       (consult-cooked-other-window '(4)))
     (should (equal called '((cooked-other-window (4)) (cooked (4)))))))
+
+(ert-deftest cooked-consult-command-narrows-and-previews-across-buffers ()
+  "The consult frontend over `cooked-command-search': its narrow keys keep
+exactly the status they name, and its preview shows a finished command at its
+prompt and a running one at its live tail, each in its own buffer.
+
+No minibuffer, for the reason the commentary gives: the predicate and the state
+function are what `consult--read' would have been handed, and they are asked
+directly."
+  :tags '(consult)
+  (skip-unless (require 'consult nil t))
+  (require 'cooked-consult)
+  (require 'cooked-command-search)
+  (cooked-tests--with-consult-buffers
+      ((one "*cooked: one*" temporary-file-directory)
+       (two "*cooked: two*" temporary-file-directory))
+    (with-current-buffer one
+      (cooked-tests--make-command "$ " "make test" "boom\n" 2)
+      (cooked-tests--make-command "$ " "ls" "a\n" 0))
+    (with-current-buffer two
+      (cooked-tests--make-command "$ " "cargo build" "error\n" 101)
+      (goto-char (point-max))
+      (let ((prompt (point-marker)))
+        (insert "$ python -m http.server\nServing HTTP\n")
+        (setq cooked--command-prompt prompt
+              cooked--command-start (copy-marker (pos-bol 0))
+              cooked--command-input "python -m http.server"
+              cooked--command-started-at (float-time))))
+    (let* ((candidates (cooked-command-search--candidates))
+           (kept (lambda (key)
+                   (let ((consult--narrow key))
+                     (sort (mapcar #'substring-no-properties
+                                   (seq-filter #'cooked-consult--command-matches-narrow-p
+                                               candidates))
+                           #'string<)))))
+      (should (equal (funcall kept ?f) '("cargo build" "make test")))
+      (should (equal (funcall kept ?s) '("ls")))
+      (should (equal (funcall kept ?r) '("python -m http.server")))
+      (let ((original (get-buffer-create "*cooked-test-original*"))
+            ;; The object, as `consult--read' hands the state function whatever
+            ;; `:lookup' returned rather than the string.
+            (named (lambda (name)
+                     (get-text-property
+                      0 'cooked-command-search
+                      (seq-find (lambda (c) (string-prefix-p name c)) candidates)))))
+        (unwind-protect
+            (save-window-excursion
+              (switch-to-buffer original)
+              (let ((state (cooked-consult--command-preview)))
+                (funcall state 'setup nil)
+                (funcall state 'preview (funcall named "make test"))
+                (should (eq (window-buffer) one))
+                (with-current-buffer one
+                  (should (looking-at-p "\\$ make test")))
+                (funcall state 'preview (funcall named "python"))
+                (should (eq (window-buffer) two))
+                (should (= (window-point) (with-current-buffer two (point-max))))
+                ;; Putting the window back is `consult--read's, not the state
+                ;; function's: consult restores the window configuration itself.
+                (funcall state 'preview nil)))
+          (kill-buffer original))))))
 
 (provide 'cooked-tests-consult)
 ;;; cooked-tests-consult.el ends here

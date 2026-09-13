@@ -100,6 +100,15 @@ command is the whole cost.
 The running command's only: a finished record carries no duration, since
 nothing has asked for one yet.")
 
+(defun cooked--command-duration (started)
+  "How long ago STARTED was, a `float-time', spelled for an annotation.
+
+Largest unit first with the empty ones in front dropped, so a minute-old
+server reads `1m 4s' and a day-old one `1d 2h 0m 9s'.  One spelling for
+every list that shows a running command, so the picker and the command
+search cannot come to disagree about what four minutes looks like."
+  (format-seconds "%dd %hh %mm %z%ss" (- (float-time) started)))
+
 (defvar-local cooked--commands nil
   "Finished `cooked-command' records, newest first.")
 

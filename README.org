@@ -227,6 +227,7 @@ already loaded and running is a switch in name only — these are separate files
   (require 'cooked-next-error)
   (require 'cooked-command-decorations)
   (require 'cooked-project)
+  (require 'cooked-command-search)
   (require 'cooked-consult)             ; wants consult
   (require 'cooked-process)
   (cooked-process-mode 1))
@@ -282,6 +283,17 @@ you can see how a scrollback full of commands went without reading any of it.
 Scopes a session to the current project root: =cooked-project= reuses one terminal per
 project the way ~project-shell~ does, rather than one per invocation.
 
+** cooked-command-search
+
+=M-x cooked-command-search= offers every command every cooked buffer has run, grouped by
+buffer, each with its exit status and how much it printed — and the command still
+running in each buffer, first, with how long it has been going. Picking a finished one
+jumps to its prompt; picking a running one jumps to its live output, so a server left
+running somewhere is two keystrokes away. =C-u= narrows to the failed, the succeeded or
+the running. =M-x cooked-command-search-act= picks one and then copies its line, copies
+its output, reruns it, or interrupts the running one. This is the transcript, not the
+shell's history file: it answers where you ran something and what it printed.
+
 ** cooked-consult
 
 =M-x consult-cooked= picks a terminal, this project's first, previewing each as you move
@@ -290,6 +302,9 @@ failure, the title, the directory and the input mode. A name that matches nothin
 a session with that name; =C-u= makes it plain =cooked=. It also puts terminals into
 =consult-buffer= behind the =t= narrow key. The annotations do not need consult —
 ~cooked-buffer-completion-table~ carries them to any =completing-read=.
+
+=M-x consult-cooked-command= is [[*cooked-command-search][cooked-command-search]] with
+preview, and with =f=, =s= and =r= narrowing to the failed, the succeeded and the running.
 
 ** Shell integration
 

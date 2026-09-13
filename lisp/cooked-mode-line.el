@@ -300,10 +300,14 @@ stale."
    ((cooked--running-anchor)
     (let ((input (and cooked--command-input
                       (string-trim (replace-regexp-in-string
-                                    "[ \t\n]+" " " cooked--command-input)))))
+                                    "[ \t\n]+" " " cooked--command-input))))
+          (running (if cooked--command-started-at
+                       (concat "running " (cooked--command-duration
+                                           cooked--command-started-at))
+                     "running")))
       (if (and input (not (string-empty-p input)))
-          (concat "running: " (truncate-string-to-width input 32 nil nil t))
-        "running")))
+          (concat running ": " (truncate-string-to-width input 32 nil nil t))
+        running)))
    ((when-let* ((code (cooked-last-exit-code)))
       (and (not (eql code 0))
            (propertize (format "exit %s" code) 'face 'cooked-failure))))

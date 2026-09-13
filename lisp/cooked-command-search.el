@@ -191,9 +191,7 @@ shows are paid for."
               (let ((started (cooked-command-search--running-started candidate)))
                 (concat
                  (if started
-                     (format "running %s"
-                             (format-seconds "%dd %hh %mm %z%ss"
-                                             (- (float-time) started)))
+                     (format "running %s" (cooked--command-duration started))
                    "running")
                  (when-let* ((start cooked--command-start)
                              ((marker-position start)))

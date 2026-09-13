@@ -24,6 +24,12 @@
 ;;   (setq consult-buffer-sources
 ;;         (delq 'cooked-consult-source-hidden consult-buffer-sources))
 ;;
+;; `consult-cooked-command' is `cooked-command-search' through consult: every
+;; buffer's commands, the running ones first, previewed as the selection moves,
+;; with `f', `s' and `r' narrowing to the failed, the succeeded and the running.
+;; It loads cooked-command-search when it runs, so the terminal picker alone
+;; never does.
+;;
 ;; The annotations are not this file's.  They are completion metadata defined
 ;; beside the mode line -- see `cooked-buffer-annotation' -- and reach vertico,
 ;; the default completion UI and anything else through
@@ -215,6 +221,101 @@ NEW means what it does there, and makes this `cooked-other-window'."
   (if new
       (cooked-other-window new)
     (cooked-consult--pick #'switch-to-buffer-other-window)))
+
+;;;; Commands
+
+;; cooked-command-search is its own opt-in layer, and asking for this picker is
+;; opting in: it is `require'd when the command runs rather than when this file
+;; loads, so a user of the terminal picker alone never loads it.
+(declare-function consult--read "ext:consult" (table &rest options))
+(declare-function consult--jump-preview "ext:consult" ())
+(defvar consult--narrow)
+(declare-function cooked-command-search--candidates "cooked-command-search" (&optional filter))
+(declare-function cooked-command-search--table "cooked-command-search" (candidates))
+(declare-function cooked-command-search--lookup "cooked-command-search" (string candidates))
+(declare-function cooked-command-search--buffer "cooked-command-search" (candidate))
+(declare-function cooked-command-search--status "cooked-command-search" (candidate))
+(declare-function cooked-command-search--running-p "cooked-command-search" (candidate))
+(declare-function cooked-command-search--finished-command "cooked-command-search" (candidate))
+(declare-function cooked-command-search-do "cooked-command-search" (candidate action))
+
+(defconst cooked-consult--command-narrow
+  '((?f failed "Failed") (?s succeeded "Succeeded") (?r running "Running"))
+  "The narrow keys of `consult-cooked-command', as (KEY STATUS LABEL).
+STATUS is what `cooked-command-search--status' answers for the candidates the
+key keeps.")
+
+(defun cooked-consult--command-matches-narrow-p (string)
+  "Whether the candidate STRING belongs under the narrow key in force.
+
+Reads the candidate off the string's `cooked-command-search' property, which
+consult keeps where plain completion would not.  Called only while a key is in
+force, so an unknown key keeps nothing rather than everything."
+  (eq (nth 1 (assq consult--narrow cooked-consult--command-narrow))
+      (cooked-command-search--status
+       (get-text-property 0 'cooked-command-search string))))
+
+(defun cooked-consult--command-preview ()
+  "A consult state function previewing a command candidate in its own buffer.
+
+`consult--jump-preview' wants a marker and the candidates carry none, so one is
+made for the candidate under the selection and released when the next one is.
+The candidate arrives as the object `:lookup' found, not as its string.  A
+running command previews at its live tail, where the jump would land; a
+finished one at its prompt."
+  (let ((jump (consult--jump-preview))
+        (marker nil))
+    (lambda (action candidate)
+      (when marker
+        (set-marker marker nil)
+        (setq marker nil))
+      (when-let* (((eq action 'preview))
+                  (candidate candidate)
+                  (buffer (cooked-command-search--buffer candidate))
+                  ((buffer-live-p buffer)))
+        (setq marker
+              (with-current-buffer buffer
+                (copy-marker
+                 (if (cooked-command-search--running-p candidate)
+                     (point-max)
+                   (let ((command (cooked-command-search--finished-command candidate)))
+                     (or (cooked--command-prompt-position command)
+                         (cooked--command-start-position command))))))))
+      (funcall jump action marker))))
+
+;;;###autoload
+(defun consult-cooked-command ()
+  "Jump to a command run in any cooked buffer, previewing each on the way.
+
+`cooked-command-search' through consult: the same candidates, running commands
+first, grouped by buffer and annotated alike, with \\`f', \\`s' and \\`r'
+narrowing to the failed, the succeeded and the running.  A finished command is
+jumped to at its prompt, a running one at its live tail."
+  (interactive)
+  (require 'consult)
+  (require 'cooked-command-search)
+  (let* ((candidates (or (cooked-command-search--candidates)
+                         (user-error "cooked: no commands in any buffer")))
+         (metadata (completion-metadata
+                    "" (cooked-command-search--table candidates) nil)))
+    ;; Nil when nothing matched under the narrowing in force.
+    (when-let* ((candidate
+                 (consult--read
+                  candidates
+                  :prompt "Command: "
+                  :category 'cooked-command
+                  :sort nil
+                  :require-match t
+                  :group (completion-metadata-get metadata 'group-function)
+                  :annotate (completion-metadata-get metadata 'annotation-function)
+                  :lookup (lambda (selected candidates &rest _)
+                            (cooked-command-search--lookup selected candidates))
+                  :narrow (list :predicate #'cooked-consult--command-matches-narrow-p
+                                :keys (mapcar (lambda (entry)
+                                                (cons (car entry) (nth 2 entry)))
+                                              cooked-consult--command-narrow))
+                  :state (cooked-consult--command-preview))))
+      (cooked-command-search-do candidate 'jump))))
 
 (provide 'cooked-consult)
 ;;; cooked-consult.el ends here

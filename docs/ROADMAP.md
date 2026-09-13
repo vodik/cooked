@@ -202,7 +202,6 @@ there already — the module boundary is a session handle and a wakeup pipe.
 - **Sixel / kitty graphics** rendered as Emacs images.
 - **Prompt inference without shell integration**, for remote hosts where the snippet is
   not installed — heuristics over termios transitions and cursor movement.
-- **`consult-cooked-history`** across every session.
 - **Auto-answer** sudo and ssh prompts from auth-source, keyed on the host parsed from the
   prompt text. The hook (`cooked-password-function`) already exists.
 
