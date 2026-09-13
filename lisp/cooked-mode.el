@@ -1957,7 +1957,8 @@ state rather than merely checking that it parses."
      :help "Open the URL or file name at point"]
     "--"
     ("Options"
-     ["Detect Links" (setq cooked-detect-links (not cooked-detect-links))
+     ["Detect Links" (customize-set-variable 'cooked-detect-links
+                                            (not cooked-detect-links))
       :style toggle :selected cooked-detect-links
       :help "Highlight things that look like URLs as output is rendered"]
      ["Detect Links on the Alt Screen"

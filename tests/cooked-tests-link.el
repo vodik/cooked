@@ -623,6 +623,33 @@ the everyday shape of this."
                                      'cooked-link-url)))))
 
 
+(ert-deftest cooked-switching-link-detection-applies-to-text-already-shown ()
+  "Customizing `cooked-detect-links\=' changes the links already on screen.
+
+The guess runs once per stretch of text, from jit-lock, so a URL found before
+the switch stayed clickable after it was turned off, and one shown while it was
+off never became a link once it was turned back on.  The `OSC 8\=' span beside
+it is what the child said, and survives both."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'go to https://example.com/ or \\033]8;;https://osc.example/\\033\\\\here\\033]8;;\\033\\\\\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "or here" (cooked-tests--text)))))
+    (let ((url (cooked-tests--link-at "https://"))
+          (osc (cooked-tests--link-at "here")))
+      (jit-lock-fontify-now (point-min) (point-max))
+      (should (get-text-property url 'cooked-link-url))
+      (unwind-protect
+          (progn
+            (customize-set-variable 'cooked-detect-links nil)
+            (should-not (get-text-property url 'cooked-link-url))
+            (should (equal (cooked-link-uri osc) "https://osc.example/"))
+            (customize-set-variable 'cooked-detect-links t)
+            (jit-lock-fontify-now (point-min) (point-max))
+            (should (get-text-property url 'cooked-link-url))
+            (should (equal (cooked-link-uri osc) "https://osc.example/")))
+        (customize-set-variable 'cooked-detect-links t)))))
+
 (ert-deftest cooked-the-url-scheme-regexp-is-built-once ()
   ;; `bounds-of-thing-at-point' is asked about every match, and thingatpt rebuilds
   ;; the ninety-scheme alternation on each call unless

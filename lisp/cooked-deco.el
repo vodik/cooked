@@ -83,8 +83,11 @@ the buffer -- see `cooked--session-cell-size\='.")
 
 Separate from `cooked--box-glyph-cache' because it memoizes a `font-info' call
 rather than a bitmap, and that call is far too costly to repeat per character
-on a full-screen repaint.  Keyed by height alone: the answer depends only on
-the font's ascent relative to the line box.")
+on a full-screen repaint.  Keyed by height, which a zoom or a `line-spacing'
+change moves, but the answer also depends on the font's ascent: a font swapped
+for one with the same line height and a lower baseline would keep the old
+placement.  So this is emptied with `cooked--deco-image-cache' whenever the
+layout stamp moves; see `cooked--flush-deco-cache'.")
 
 (defvar-local cooked--box-glyph-height-cache nil
   "Line-box height -> the height a box-drawing bitmap is drawn at, per buffer.
@@ -523,8 +526,9 @@ the case on a terminal frame, which has no font to ask.
 
 The font is `cooked--default-font\=''s, which follows a zoom, and a zoom moves
 the line box with it, so HEIGHT is a new key for a zoomed font.  A font swapped
-for one of the same line height and a different ascent is the case the key
-does not see.
+for one of the same line height and a different ascent is not a new key, and
+is handled by emptying the cache instead: the swap moves the layout stamp, and
+`cooked--flush-deco-cache\=' runs on `cooked--redraw-hook\='.
 
 The percentage is the one Emacs turns back into exactly the font\='s ascent,
 which `cooked--image-ascent-percent\=' explains."
@@ -1769,14 +1773,25 @@ written to still answer for."
 (add-variable-watcher 'text-scale-mode-amount #'cooked--rescale-deco-on-zoom)
 
 (defun cooked--flush-deco-cache ()
-  "Drop decoration specs measured against the outgoing theme.
-On `cooked-theme-change-hook\=', which runs with the buffer current.  Not the
-colours, which a spec no longer holds, but the `:ascent\=' a theme moves whenever
-it changes the default face\='s font -- see `cooked--deco-image-cache\='."
+  "Drop decoration specs placed for a font that has gone.
+
+Not the colours, which a spec no longer holds, but the `:ascent\=' measured
+from the default face\='s font -- see `cooked--deco-image-cache\=' -- and the
+measurements behind it in `cooked--box-ascent-cache\=' and
+`cooked--box-glyph-height-cache\='.  All are keyed by cell size, which a font of
+the same size and a different baseline does not move.
+On `cooked-theme-change-hook\=', since a theme can change the default font, and
+on `cooked--redraw-hook\=', which runs when the layout stamp moves, as it does
+for a font set any other way.  Both run with the buffer current."
   (when (hash-table-p cooked--deco-image-cache)
-    (clrhash cooked--deco-image-cache)))
+    (clrhash cooked--deco-image-cache))
+  (when (hash-table-p cooked--box-ascent-cache)
+    (clrhash cooked--box-ascent-cache))
+  (when (hash-table-p cooked--box-glyph-height-cache)
+    (clrhash cooked--box-glyph-height-cache)))
 
 (add-hook 'cooked-theme-change-hook #'cooked--flush-deco-cache)
+(add-hook 'cooked--redraw-hook #'cooked--flush-deco-cache)
 
 (provide 'cooked-deco)
 ;;; cooked-deco.el ends here

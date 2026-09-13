@@ -101,6 +101,33 @@ sanctioned escape and must keep working whatever the child has grabbed.")
   "Links in terminal output."
   :group 'cooked)
 
+(declare-function cooked--sync-fontification "cooked-render")
+
+(defun cooked-link--set-detect-links (symbol value)
+  "Set SYMBOL to VALUE and make every session\='s text agree with it.
+
+The guess runs from jit-lock, once per stretch of text, so switching it on left
+every URL already fontified without a link, and switching it off left every one
+already found clickable.  Off, each buffer loses the detected links\='
+properties at once, and an `OSC 8\=' span keeps its own.  On, the buffer has to
+be scanned again, and `cooked--sync-fontification\=' does that as it follows
+the switch with the jit-lock registration: `jit-lock-register\=' marks the
+whole buffer unfontified, so redisplay scans what it shows, as it does for new
+output.  On the alternate screen nothing is registered, and the primary
+screen\='s rows are rewritten on the way back, which marks them the same way.
+
+A cooked buffer exists only once cooked-render.el has loaded, so the walk can
+call into it.  At load, when `custom-declare-variable\=' calls this to set the
+default, there is no buffer to walk and nothing but the `set-default\=' happens."
+  (set-default symbol value)
+  (cooked--dolist-buffers
+    (unless value
+      (save-restriction
+        (widen)
+        (with-silent-modifications
+          (cooked-link--unfontify-urls (point-min) (point-max)))))
+    (cooked--sync-fontification)))
+
 (defcustom cooked-detect-links t
   "Whether to scan rendered output for things that look like URLs.
 
@@ -108,8 +135,13 @@ The guess, not the `OSC 8' sequences — those are what the child actually said,
 and are always honoured.  Turning this off leaves a real hyperlink clickable
 and stops `cooked--fontify-links' scanning at all; with no scan layer loaded
 either, `cooked--sync-fontification' then drops the jit-lock registration, so
-nothing about the guess is paid for."
+nothing about the guess is paid for.
+
+Setting it through `customize\=' or `setopt\=' applies to the text already in
+every session, scrollback included; see `cooked-link--set-detect-links\='.
+A plain `setq\=' reaches only output rendered afterwards."
   :type 'boolean
+  :set #'cooked-link--set-detect-links
   :group 'cooked-link)
 
 (defcustom cooked-detect-links-on-alt-screen nil

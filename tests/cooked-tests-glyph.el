@@ -892,6 +892,29 @@ row\='s."
                 (should (cooked--bitmap-ref bitmap (/ cell 2) 0))
                 (should (cooked--bitmap-ref bitmap (/ cell 2) (1- line)))))))))))
 
+(ert-deftest cooked-a-font-with-another-baseline-moves-a-drawn-border ()
+  "A border drawn in one font is placed on the next font's baseline.
+
+The `:ascent\=' was memoized by line height alone, and the spec holding it by
+pattern and cell size, so swapping the default font for one of the same height
+with a lower baseline kept every border at the old placement, rows drawn
+afterwards included.  The swap moves the layout stamp, which now empties both
+caches as it has every row sent again."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220'; sleep 5")
+    ;; In no window, so the cell is this one rather than the batch frame's; the
+    ;; layout stamp is still read off the selected window and this buffer.
+    (cooked-tests--cell 10 20)
+    (let ((placed (lambda ()
+                    (plist-get (cdr (cooked-tests--glyph-image (point-min))) :ascent))))
+      (cooked-tests--with-glyph-font '(15 5 10)
+        (cooked--wrap-cache (selected-window))
+        (should (cooked-tests--settle (lambda () (eql (funcall placed) 75)))))
+      (cooked-tests--with-glyph-font '(12 8 10)
+        (face-remap-add-relative 'default :slant 'italic)
+        (cooked--wrap-cache (selected-window))
+        (should (cooked-tests--settle (lambda () (eql (funcall placed) 60))))))))
+
 (ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐

@@ -456,6 +456,16 @@ refuses a PAYLOAD holding control characters that could close it early.  Pass
 will not recognise an ST-terminated answer."
   (cooked--queue-reply session (cooked--osc-reply code payload bell)))
 
+(defvar cooked--redraw-hook nil
+  "Run in a cooked buffer whose every row is about to be rendered again.
+
+That is, from `cooked--forget-sent-rows\=' with REDRAW, whose callers all mean
+that the same cells are about to be drawn differently.  A cache holding
+something measured under the old drawing adds itself here to be emptied first,
+since this file sits below the files that own those caches: the box-drawing
+spec cache in cooked-deco.el holds an `:ascent\=' measured from a font the
+layout stamp has just said is gone.")
+
 (defun cooked--forget-sent-rows (&optional redraw)
   "Make the core send every live row again the next time it is damaged.
 
@@ -479,8 +489,10 @@ the options that change rendering all mean the same thing by it.  On
 `cooked--set-rendering-option\='."
   (when (user-ptrp cooked--session)
     (if redraw
-        ;; Damaging every row forgets the copy too; see `Term::touch_all'.
-        (cooked--redraw cooked--session)
+        (progn
+          (run-hooks 'cooked--redraw-hook)
+          ;; Damaging every row forgets the copy too; see `Term::touch_all'.
+          (cooked--redraw cooked--session))
       (cooked--row-unsent cooked--session nil))))
 
 (declare-function cooked--drain-and-apply "cooked-render")
@@ -500,6 +512,15 @@ an idle prompt would not show it until the next keystroke.  At load, when
 `custom-declare-variable\=' calls this to set the default, there is no cooked
 buffer to walk and nothing but the `set-default\=' happens."
   (set-default symbol value)
+  (cooked--redraw-every-screen))
+
+(defun cooked--redraw-every-screen ()
+  "Render every live screen again now, in every cooked buffer.
+
+For a change to how the same cells are drawn that has to show at once: see
+`cooked--set-rendering-option\=' and `cooked--refresh-ansi-colors\='.  Each
+buffer\='s rows are damaged and drained, rather than left for the child to
+repaint, which it may never do."
   (cooked--dolist-buffers
     (when (user-ptrp cooked--session)
       (cooked--forget-sent-rows 'redraw)

@@ -36,8 +36,15 @@
    "gray50" "red" "green" "yellow" "blue" "magenta" "cyan" "white"]
   "Fallback palette for the sixteen ANSI colors.
 Consulted only where the corresponding `ansi-color-' face gives no foreground,
-so a theme that styles those faces wins."
+so a theme that styles those faces wins.
+
+Setting it through `customize\=' or `setopt\=' redraws the screens already
+running in the new colours; see `cooked--refresh-ansi-colors\='."
   :type '(vector (repeat :inline t string))
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (fboundp 'cooked--refresh-ansi-colors)
+           (cooked--refresh-ansi-colors)))
   :group 'cooked)
 
 (defconst cooked--ansi-faces
@@ -101,13 +108,79 @@ into it for a cache to clear.  Adding to this hook is how it says so instead.")
 Nothing colorless needs flushing: `cooked--box-glyph-cache\=' holds shape bitmaps
 that are colorized live at display time, so a theme change leaves them true.
 What does need it is anything holding a color already resolved against the old
-theme, which is what `cooked-theme-change-hook\=' is for."
+theme, which is what `cooked-theme-change-hook\=' is for.
+
+It also records the ANSI colours the caches will now be resolved against, so
+that `cooked--refresh-ansi-colors\=' after a theme finds nothing more to do."
+  (cooked--ansi-faces-changed-p)
   (cooked--dolist-buffers
     (when (hash-table-p cooked--face-cache)
       (clrhash cooked--face-cache))
     (when cooked--style-faces
       (fillarray cooked--style-faces nil))
     (run-hooks 'cooked-theme-change-hook)))
+
+(defvar cooked--ansi-face-stamp nil
+  "The ANSI colours the face caches were last resolved against, or nil.
+
+A vector of what `cooked--color\=' answers for indices 0 to 15, in index order,
+with `cooked-color-names\=' itself last.  Global, like the faces it describes.")
+
+(defun cooked--ansi-faces-changed-p ()
+  "Record the ANSI colours now in force, and say whether they have moved.
+
+Sixteen `face-foreground\=' calls compared in place, which allocates nothing
+unless something moved.  A theme sets every face whether or not its colour
+changes, and a face can be set to the colour it already had, so the moment of
+the set is not enough to know.  The first call answers t, since nothing says
+what the caches were resolved against, and the cost of that is one redraw."
+  (let* ((stamp (or cooked--ansi-face-stamp
+                    (setq cooked--ansi-face-stamp (make-vector 17 nil))))
+         (moved nil)
+         (i 0))
+    (while (< i 16)
+      (let ((color (cooked--color i)))
+        (unless (equal color (aref stamp i))
+          (aset stamp i color)
+          (setq moved t)))
+      (setq i (1+ i)))
+    (unless (eq cooked-color-names (aref stamp 16))
+      (aset stamp 16 cooked-color-names)
+      (setq moved t))
+    moved))
+
+(defun cooked--refresh-ansi-colors ()
+  "Redraw every screen in the ANSI colours now in force, if they have moved.
+
+The face caches are flushed as a theme change flushes them, and every row is
+damaged and drained as well, because nothing else would send one: a child that
+repaints the same cells damages nothing, and an idle prompt repaints nothing.
+Rows already in the scrollback keep the colour they were drawn in, as they do
+after a theme change."
+  (when (cooked--ansi-faces-changed-p)
+    (cooked--flush-face-cache)
+    (cooked--redraw-every-screen)))
+
+(defvar cooked--ansi-refresh-timer nil
+  "The pending `cooked--refresh-ansi-colors\=' call, or nil.")
+
+(defun cooked--notice-face-change (face &rest _)
+  "Refresh the screens soon if FACE is one of `cooked--ansi-faces\='.
+
+After `set-face-attribute\=', which is where `set-face-foreground\=',
+`customize-face\=' and a theme all end up.  Only a theme runs a hook, so a face
+edited any other way stayed resolved in `cooked--face-cache\=' and drawn on the
+screen until the child sent different cells.  Deferred to one idle call, so a
+theme setting all sixteen faces costs one comparison, and that one finds the
+stamp already current, because `cooked--flush-face-cache\=' records it."
+  (when (and (not cooked--ansi-refresh-timer)
+             (cl-position face cooked--ansi-faces :test #'eq))
+    (setq cooked--ansi-refresh-timer
+          (run-at-time 0 nil (lambda ()
+                               (setq cooked--ansi-refresh-timer nil)
+                               (cooked--refresh-ansi-colors))))))
+
+(advice-add 'set-face-attribute :after #'cooked--notice-face-change)
 
 ;; `enable-theme-functions' arrived in Emacs 29, and `add-hook' on an unbound variable
 ;; quietly defines it rather than failing — so on 28 this looked fine and did nothing.

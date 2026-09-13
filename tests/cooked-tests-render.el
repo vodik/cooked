@@ -3738,6 +3738,34 @@ repainting the same cells afterwards gets them in the new colours."
         (cooked--flush-face-cache))
       (should (member (cons session nil) unsent)))))
 
+(ert-deftest cooked-an-ansi-face-edited-outside-a-theme-redraws-the-screen ()
+  "A repaint after `set-face-attribute' on an ANSI face draws the new colour.
+
+No hook runs for a face edited outside a theme, so the face cache kept the red
+it resolved first, and nothing sent the row again: the child writes the same
+cells over themselves, which damages nothing and does not even wake a drain.
+`set-face-attribute\=' on an ANSI face now schedules a comparison of the ANSI
+colours, and a move flushes the faces and redraws every screen."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "while :; do printf '\\r\\033[31mred\\033[0m'; sleep 0.05; done")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "red" (cooked-tests--text)))))
+    (let ((old (face-attribute 'ansi-color-red :foreground))
+          (face (lambda () (plist-get (get-text-property (point-min) 'face)
+                                      :foreground))))
+      (should (equal (funcall face) (cooked--color 1)))
+      (unwind-protect
+          (progn
+            ;; The colours the screen was drawn in, as a session running for a
+            ;; while has them recorded.
+            (cooked--ansi-faces-changed-p)
+            (set-face-attribute 'ansi-color-red nil :foreground "#123456")
+            (should (cooked-tests--settle
+                     (lambda () (equal (funcall face) "#123456")))))
+        (set-face-attribute 'ansi-color-red nil :foreground old)
+        (cooked--refresh-ansi-colors)))))
+
 (ert-deftest cooked-a-zoom-makes-the-core-send-every-row-again ()
   "Rows rendered under one layout are sent again once the layout moves.
 
