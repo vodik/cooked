@@ -8,11 +8,9 @@ use super::*;
 
 impl Perform for State {
     fn print(&mut self, c: char) {
-        let c = if self.modes.dec_graphics {
-            dec_graphic(c)
-        } else {
-            c
-        };
+        // The designated set, and any single shift, before anything else sees the
+        // character: the segmenter has to measure what is drawn, not what was sent.
+        let c = self.modes.charsets.print(c);
         let pen = self.pen;
         let underline = self.underline;
         let link = self.link;
@@ -71,11 +69,15 @@ impl Perform for State {
     /// and that would have ended the run, so the conditions are tested once here rather
     /// than per character.
     fn print_str(&mut self, text: &str) {
-        // `mark_underline` and `mark_link` attach to each cell written, and DEC graphics
-        // substitutes the character; each is per-character work the run form does not do,
-        // so their presence disqualifies the whole run rather than being reimplemented.
-        let batched =
-            !self.modes.dec_graphics && self.underline == Color::Default && self.link.is_none();
+        // `mark_underline` and `mark_link` attach to each cell written, and a designated
+        // set or a single shift substitutes the character; each is per-character work the
+        // run form does not do, so their presence disqualifies the whole run rather than
+        // being reimplemented. A single shift spends itself on the run's first character,
+        // after which the rest of the run is plain again but goes the slow way anyway --
+        // an `ESC N` is rare enough that re-deciding mid-run is not worth a second test.
+        let batched = self.modes.charsets.is_plain()
+            && self.underline == Color::Default
+            && self.link.is_none();
         // Compiled out of a release build entirely; see `State::force_per_character_print`.
         #[cfg(test)]
         let batched = batched && !self.force_per_character_print;
@@ -144,8 +146,10 @@ impl Perform for State {
                 }
             }
             0x0D => self.screen_mut().carriage_return(),
-            0x0E => self.modes.dec_graphics = true,
-            0x0F => self.modes.dec_graphics = false,
+            // SO and SI: locking shifts of G1 and G0 into GL. Which set that draws is
+            // whatever was designated there; see [`Charsets`].
+            0x0E => self.modes.charsets.lock(1),
+            0x0F => self.modes.charsets.lock(0),
             _ => {}
         }
     }
@@ -156,8 +160,30 @@ impl Perform for State {
         // that wrote it. See [`crate::emu::text`].
         self.text.reset();
         match (intermediates.first().copied(), byte) {
-            (Some(b'('), b'0') => self.modes.dec_graphics = true,
-            (Some(b'('), _) => self.modes.dec_graphics = false,
+            // SCS into G0-G3. Matched on the first intermediate alone, so a two-byte
+            // designator such as `ESC ( % 5` (DEC Supplemental) still lands in its slot --
+            // as ASCII, which is `Charset::designated`'s answer for a set it lacks.
+            (Some(slot @ (b'(' | b')' | b'*' | b'+')), _) => {
+                self.modes
+                    .charsets
+                    .designate(usize::from(slot - b'('), byte);
+            }
+            // LS2 and LS3, and SS2 and SS3: G2 or G3 into GL until told otherwise, or for
+            // the next character alone.
+            (None, b'n') => self.modes.charsets.lock(2),
+            (None, b'o') => self.modes.charsets.lock(3),
+            (None, b'N') => self.modes.charsets.single_shift(2),
+            (None, b'O') => self.modes.charsets.single_shift(3),
+            // DECALN. Erased first, exactly as `CSI 2J` erases, so a primary screen's
+            // contents reach history before the pattern covers them; see `Screen::align`.
+            (Some(b'#'), b'8') => {
+                let evicted = self
+                    .screen_mut()
+                    .erase_display(Erase::All, Style::default());
+                self.evicted(evicted);
+                self.cleared_display();
+                self.screen_mut().align();
+            }
             (None, b'D') => self.linefeed(),
             (None, b'E') => {
                 self.screen_mut().carriage_return();

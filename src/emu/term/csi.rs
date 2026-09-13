@@ -307,12 +307,20 @@ impl State {
             screen.set_insert_mode(false);
             screen.saved = None;
         }
+        self.saved_charsets = [None; 2];
         if had_mouse {
             self.events.push(Event::Mouse(self.modes.mouse));
         }
     }
 
     pub(super) fn save_restore(&mut self, save: bool) {
+        let charsets = self.modes.charsets;
+        let saved = &mut self.saved_charsets[usize::from(self.on_alt)];
+        if save {
+            *saved = Some(charsets);
+        } else if let Some(charsets) = saved.take() {
+            self.modes.charsets = charsets;
+        }
         let screen = self.screen_mut();
         if save {
             screen.saved = Some(screen.cursor);
@@ -525,6 +533,9 @@ impl State {
                 self.screen_mut().goto(params.coord(0), col);
             }
             (None, 'g') => self.screen_mut().clear_tabs(params.arg(0, 0) == 3),
+            // DECST8C. `CSI ? 5 W` and no other parameter: the unprefixed `CSI Ps W` is CTC,
+            // whose 5 clears every stop rather than resetting them, and is not implemented.
+            (Some(b'?'), 'W') if params.arg(0, 0) == 5 => self.screen_mut().reset_tabs(),
             (None, 'Z') => self.screen_mut().back_tab(params.arg(0, 1)),
             (None, 'I') => self.screen_mut().tab(params.arg(0, 1)),
             (None, 's') => self.save_restore(true),

@@ -1246,6 +1246,28 @@ impl Screen {
         }
     }
 
+    /// DECST8C: back to a stop every eighth column, the table a screen powers on with.
+    pub fn reset_tabs(&mut self) {
+        self.tabs = default_tabs(self.cols);
+    }
+
+    /// DECALN: the margins reset, the cursor home and every cell an `E`.
+    ///
+    /// The alignment pattern vttest draws its frames against. The caller erases the
+    /// display first, through the same path `CSI 2J` takes, so that what was on a primary
+    /// screen goes to history rather than being painted over: the pattern replaces a
+    /// screen just as a clear does, and only one of those should decide what happens to
+    /// the transcript. That leaves this writing onto blank rows, and the cells go down in
+    /// the default rendition whatever the pen holds, which is what xterm does.
+    pub fn align(&mut self) {
+        let pattern = "E".repeat(self.cols);
+        for i in 0..self.rows.len() {
+            self.edit(i, |row| row.fill_run(0, &pattern, Style::default()));
+        }
+        self.reset_region();
+        self.goto(0, 0);
+    }
+
     pub fn backspace(&mut self) {
         self.cursor.col = self.cursor.col.saturating_sub(1);
         self.cursor.wrap_pending = false;

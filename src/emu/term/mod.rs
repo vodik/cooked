@@ -977,7 +977,9 @@ struct Modes {
     sync_until: Option<std::time::Instant>,
     mouse: Mouse,
     origin_mode: bool,
-    dec_graphics: bool,
+    /// SCS designations and the shifts; see [`Charsets`]. A soft reset puts ASCII back in
+    /// every slot and G0 in GL, which is what DECSTR is documented to do.
+    charsets: Charsets,
     app_cursor: bool,
     app_keypad: bool,
     /// xterm's modifyOtherKeys level, 0-2. Only level 2 changes how we spell keys.
@@ -1018,7 +1020,7 @@ impl Default for Modes {
             sync_until: None,
             mouse: Mouse::default(),
             origin_mode: false,
-            dec_graphics: false,
+            charsets: Charsets::default(),
             app_cursor: false,
             app_keypad: false,
             modify_other_keys: 0,
@@ -1069,8 +1071,8 @@ struct State {
     /// outlive the grid position it was taken from.
     evicted_total: usize,
     events: Vec<Event>,
-    /// The last graphic character printed, for REP. Held after `dec_graphic` translation,
-    /// so repeating a box-drawing character repeats what was actually drawn.
+    /// The last graphic character printed, for REP. Held after the designated set has
+    /// translated it, so repeating a box-drawing character repeats what was drawn.
     ///
     /// Zero-width characters never land here. REP is defined for the last *graphic*
     /// character, and repeating a combining mark would fold it onto the cell to the left
@@ -1148,6 +1150,111 @@ struct State {
     evicted_marks: Vec<(MarkId, Anchor)>,
     /// Everything DECSTR and RIS put back; see [`Modes`].
     modes: Modes,
+    /// What DECSC saved of [`Modes::charsets`], for the primary screen and the alternate.
+    ///
+    /// Beside the cursor [`Screen::saved`] holds and with the same lifetime, but here
+    /// rather than there, because the charsets are the stream's and not a grid's; the
+    /// grid only decides which save a DECRC reads. VT100 DECSC is defined to save the
+    /// designations and the shift along with the position, and a child that draws a box
+    /// inside a save/restore pair relies on getting its text set back.
+    saved_charsets: [Option<Charsets>; 2],
+}
+
+/// A 94-character set that can be designated into one of G0-G3.
+///
+/// Only the sets anything still emits. Everything else a child can name -- the national
+/// replacement sets, DEC Supplemental, the 96-character Latin sets -- designates ASCII,
+/// which is xterm's answer for a set it was built without and the right one here: the
+/// stream is UTF-8, so a child that wants a pound sign or an umlaut has a far better way
+/// to ask for it, and ASCII is the only reading that cannot turn text into boxes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum Charset {
+    #[default]
+    Ascii,
+    /// DEC Special Graphics, `0`. Also answers for `2`, the VT100's alternate ROM with
+    /// graphics, which xterm draws the same way and vttest still asks for.
+    DecGraphics,
+    /// United Kingdom, `A`: ASCII with `#` as a pound sign, and nothing else different.
+    Uk,
+}
+
+impl Charset {
+    /// The set an SCS final byte names; see the type for why the unknown ones are ASCII.
+    fn designated(final_byte: u8) -> Self {
+        match final_byte {
+            b'0' | b'2' => Self::DecGraphics,
+            b'A' => Self::Uk,
+            _ => Self::Ascii,
+        }
+    }
+
+    fn map(self, c: char) -> char {
+        match self {
+            Self::Ascii => c,
+            Self::DecGraphics => dec_graphic(c),
+            Self::Uk if c == '#' => '£',
+            Self::Uk => c,
+        }
+    }
+}
+
+/// The four designation slots and the shifts between them, as SCS, SO/SI and the
+/// ISO 2022 shifts leave them.
+///
+/// This replaced a single `dec_graphics` flag that `ESC ( 0` and SO both set, and
+/// `ESC ( B` and SI both cleared. That was right for the common case, which is ncurses'
+/// `smacs` designating graphics into G0, and wrong the moment the two mechanisms met: SI
+/// after `ESC ( 0` drew letters although G0 still held graphics, and SO drew boxes
+/// whatever G1 held -- including ASCII, which is what G1 powers on with in xterm. A
+/// locking shift chooses a *slot*, and what the slot holds is a separate question, so
+/// the two are kept separately.
+///
+/// GL only. There is no GR to invoke anything into: the stream is UTF-8, so the bytes a
+/// GR set would decode are continuation bytes of something else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct Charsets {
+    slots: [Charset; 4],
+    /// Which slot is locked into GL: SI makes it 0, SO 1, `ESC n` 2 and `ESC o` 3.
+    gl: usize,
+    /// A slot invoked for the next printed character alone, by SS2 (`ESC N`) or SS3
+    /// (`ESC O`).
+    single: Option<usize>,
+}
+
+impl Charsets {
+    pub(super) fn designate(&mut self, slot: usize, final_byte: u8) {
+        if let Some(set) = self.slots.get_mut(slot) {
+            *set = Charset::designated(final_byte);
+        }
+    }
+
+    pub(super) fn lock(&mut self, slot: usize) {
+        self.gl = slot.min(3);
+    }
+
+    pub(super) fn single_shift(&mut self, slot: usize) {
+        self.single = Some(slot.min(3));
+    }
+
+    /// Whether printing is the identity, which is what lets [`Perform::print_str`] take
+    /// its batched path: the set in GL is ASCII and no single shift is waiting.
+    pub(super) fn is_plain(&self) -> bool {
+        self.single.is_none() && self.slots[self.gl] == Charset::Ascii
+    }
+
+    /// The character C draws as, consuming a pending single shift.
+    ///
+    /// Only GL's code points are translated. Anything outside `0x20..=0x7e` arrived as
+    /// UTF-8 and means itself, and a single shift is still spent on it -- the shift
+    /// applies to the next character, not to the next one it would have changed.
+    pub(super) fn print(&mut self, c: char) -> char {
+        let slot = self.single.take().unwrap_or(self.gl);
+        if (' '..='~').contains(&c) {
+            self.slots[slot].map(c)
+        } else {
+            c
+        }
+    }
 }
 
 /// DEC Special Graphics, for the box-drawing characters TUIs still emit.

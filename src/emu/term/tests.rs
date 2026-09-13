@@ -2540,6 +2540,138 @@ fn dec_graphics_draws_boxes() {
     assert_eq!(text(&t, 0), "┌─┐");
 }
 
+/// vttest's VT100 character-set screen, as a table: each set it names, designated into
+/// G0 and invoked by SI, then into G1 and invoked by SO, drawing the same row of GL.
+///
+/// vttest is not installed here, so this stands in for its screen. The row it prints is
+/// the one that tells the sets apart -- `#` is where UK differs, `` ` `` through `~` is
+/// where graphics differ -- and each set has to come out the same from either slot, which
+/// is exactly what a single graphics flag could not manage.
+#[test]
+fn every_designated_set_draws_the_same_from_g0_and_g1() {
+    let probe = "#`jklmnqx~";
+    let cases = [
+        (b'B', "#`jklmnqx~"),
+        (b'1', "#`jklmnqx~"),
+        (b'A', "£`jklmnqx~"),
+        (b'0', "#◆┘┐┌└┼─│·"),
+        (b'2', "#◆┘┐┌└┼─│·"),
+    ];
+    for (set, drawn) in cases {
+        for (slot, shift) in [(b'(', b'\x0f'), (b')', b'\x0e')] {
+            let mut input = vec![0x1b, slot, set, shift];
+            input.extend_from_slice(probe.as_bytes());
+            let t = term(2, 20, &input);
+            assert_eq!(
+                text(&t, 0),
+                drawn,
+                "ESC {} {} then {}",
+                slot as char,
+                set as char,
+                if shift == 0x0e { "SO" } else { "SI" }
+            );
+        }
+    }
+}
+
+#[test]
+fn shifts_choose_a_slot_and_designations_fill_one() {
+    // Graphics in G1, ASCII in G0: SO and SI flip between them.
+    let t = term(2, 10, b"\x1b)0q\x0eq\x0fq");
+    assert_eq!(text(&t, 0), "q─q");
+    // G1 powers on ASCII, so a bare SO draws letters, not boxes.
+    let t = term(2, 10, b"\x0eq");
+    assert_eq!(text(&t, 0), "q");
+    // SI does not undo a G0 designation: the old flag cleared it here.
+    let t = term(2, 10, b"\x1b(0\x0e\x0fq");
+    assert_eq!(text(&t, 0), "─");
+    // Redesignating the slot that is not in GL changes nothing on screen.
+    let t = term(2, 10, b"\x1b(0\x1b)Bq");
+    assert_eq!(text(&t, 0), "─");
+}
+
+#[test]
+fn g2_and_g3_lock_and_single_shift() {
+    // LS2 and LS3 lock; SI puts G0 back.
+    let t = term(2, 10, b"\x1b*0\x1b+A\x1bnq\x1bo#\x0fq");
+    assert_eq!(text(&t, 0), "─£q");
+    // SS2 is spent on the next character only, whatever that character is.
+    let t = term(2, 10, b"\x1b*0\x1bNqq");
+    assert_eq!(text(&t, 0), "─q");
+    let t = term(2, 10, "\x1b*0\x1bN\u{e9}q".as_bytes());
+    assert_eq!(text(&t, 0), "\u{e9}q");
+}
+
+#[test]
+fn charsets_are_reset_by_decstr_and_restored_by_decrc() {
+    let t = term(2, 10, b"\x1b)0\x0e\x1b[!pq");
+    assert_eq!(text(&t, 0), "q", "DECSTR puts G0 back in GL, holding ASCII");
+    // DECSC saves the designation and the shift with the position.
+    let t = term(2, 10, b"\x1b(0\x1b7\x1b(B\x1b)A\x0e\x1b8q");
+    assert_eq!(text(&t, 0), "─");
+    // And per screen: the primary's save is not the alternate screen's.
+    let t = term(2, 10, b"\x1b(0\x1b[?1049h\x1b(B\x1b7\x1b[?1049lq");
+    assert_eq!(text(&t, 0), "─", "1049 restores the primary's graphics set");
+}
+
+/// vttest's first screen draws its border onto DECALN's pattern, inside margins it has
+/// set; the pattern has to fill every cell, reset those margins, home the cursor and
+/// leave the pen out of it.
+#[test]
+fn decaln_fills_the_screen_with_e() {
+    let mut t = term(4, 6, b"hi\r\nthere\x1b[3;4H\x1b[31;44m\x1b#8");
+    for row in 0..4 {
+        assert_eq!(text(&t, row), "EEEEEE");
+        assert!(
+            t.screen()
+                .row(row)
+                .unwrap()
+                .cells()
+                .iter()
+                .all(|c| c.style == Style::default()),
+            "row {row} is in the default rendition"
+        );
+    }
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (0, 0));
+    let delta = t.drain();
+    let scrolled: Vec<_> = delta.scrolled.iter().map(runs_text).collect();
+    assert_eq!(
+        scrolled.iter().map(|s| s.trim_end()).collect::<Vec<_>>(),
+        ["hi", "there"],
+        "the screen went to history, as a clear would send it"
+    );
+    // vttest's frame, drawn over it: the pattern stays wherever the frame is not.
+    t.feed(b"\x1b[2;2H*\x1b[3;5H+");
+    assert_eq!(text(&t, 1), "E*EEEE");
+    assert_eq!(text(&t, 2), "EEEE+E");
+
+    // Margins go back to the whole screen. The erase still happens under the margins the
+    // child set, exactly as `CSI 2J` would, so a partitioned screen archives nothing.
+    let mut t = term(4, 6, b"hi\x1b[2;3r\x1b#8");
+    assert_eq!((t.screen().region.top, t.screen().region.bottom), (0, 3));
+    assert!(t.drain().scrolled.is_empty());
+}
+
+#[test]
+fn decst8c_puts_the_stops_back_every_eight_columns() {
+    let mut t = term(2, 30, b"\x1b[3g\x1b[?5W\tx");
+    assert_eq!(text(&t, 0), "        x");
+    t.feed(b"\r\x1b[3g\x1b[4G\x1bH\r\x1b[?5W\t\ty");
+    assert_eq!(
+        text(&t, 0),
+        "        x       y",
+        "the stop set at column 4 is gone"
+    );
+    // `CSI 5 W` without the `?` is CTC, which is not this.
+    let t = term(2, 30, b"\x1b[3g\x1b[5W\tx");
+    assert_eq!(
+        t.screen().cursor.col,
+        29,
+        "no stops: the tab ran to the margin"
+    );
+    assert_eq!(text(&t, 0).trim_start(), "x");
+}
+
 #[test]
 fn scroll_region_then_linefeed_stays_off_scrollback() {
     let mut t = term(4, 8, b"a\r\nb\r\nc\r\nd");
@@ -3073,7 +3205,7 @@ fn backlog_counts_pending_events_as_well_as_scrollback() {
 /// The cases land on the seams: the last column, where `write_run` stops one short so the
 /// deferred wrap is decided in one place; wide characters and combining marks, which it
 /// declines; DEL, which is not a C0 control and so reaches `print_str` while having no
-/// width; insert mode and DEC graphics, which disable it; and a scroll, so eviction is
+/// width; insert mode and a designated set or single shift, which disable it; and a scroll, so eviction is
 /// compared too.
 #[test]
 fn batched_and_per_character_printing_agree() {
@@ -3093,6 +3225,8 @@ fn batched_and_per_character_printing_agree() {
         ("styled runs", b"a\x1b[31mred\x1b[0mb"),
         ("insert mode", b"abcdef\x1b[4D\x1b[4hXY"),
         ("dec graphics", b"\x1b(0qqq\x1b(Babc"),
+        ("graphics shifted out of G1", b"a\x1b)0\x0eqqq\x0fqqq"),
+        ("single shift spent on a run", b"\x1b*0\x1bNqqq"),
         (
             "hyperlink attaches per cell",
             b"a\x1b]8;;http://x\x07bcd\x1b]8;;\x07e",
