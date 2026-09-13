@@ -232,7 +232,8 @@ NEW means what it does there, and makes this `cooked-other-window'."
 (defvar consult--narrow)
 (declare-function cooked-command-search--candidates "cooked-command-search" (&optional filter))
 (declare-function cooked-command-search--table "cooked-command-search" (candidates))
-(declare-function cooked-command-search--lookup "cooked-command-search" (string candidates))
+(declare-function cooked-command-search--index "cooked-command-search" (candidates))
+(declare-function cooked-command-search--lookup "cooked-command-search" (string index))
 (declare-function cooked-command-search--buffer "cooked-command-search" (candidate))
 (declare-function cooked-command-search--status "cooked-command-search" (candidate))
 (declare-function cooked-command-search--running-p "cooked-command-search" (candidate))
@@ -296,6 +297,7 @@ jumped to at its prompt, a running one at its live tail."
   (require 'cooked-command-search)
   (let* ((candidates (or (cooked-command-search--candidates)
                          (user-error "cooked: no commands in any buffer")))
+         (index (cooked-command-search--index candidates))
          (metadata (completion-metadata
                     "" (cooked-command-search--table candidates) nil)))
     ;; Nil when nothing matched under the narrowing in force.
@@ -308,8 +310,8 @@ jumped to at its prompt, a running one at its live tail."
                   :require-match t
                   :group (completion-metadata-get metadata 'group-function)
                   :annotate (completion-metadata-get metadata 'annotation-function)
-                  :lookup (lambda (selected candidates &rest _)
-                            (cooked-command-search--lookup selected candidates))
+                  :lookup (lambda (selected &rest _)
+                            (cooked-command-search--lookup selected index))
                   :narrow (list :predicate #'cooked-consult--command-matches-narrow-p
                                 :keys (mapcar (lambda (entry)
                                                 (cons (car entry) (nth 2 entry)))

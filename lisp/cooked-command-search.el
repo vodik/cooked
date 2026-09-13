@@ -162,10 +162,25 @@ worth keeping current between two uses."
                 candidates))))
     (nreverse candidates)))
 
-(defun cooked-command-search--lookup (string candidates)
-  "The candidate object named by STRING among CANDIDATES, or nil."
-  (when-let* ((found (car (member string candidates))))
-    (get-text-property 0 'cooked-command-search found)))
+(defun cooked-command-search--index (candidates)
+  "A table from each of CANDIDATES' names to its candidate object.
+
+Built once per invocation, because the lookup runs once per candidate a UI
+shows, for its group and again for its annotation.  Walking the list each
+time made a refresh over 5000 commands some 25 million string comparisons;
+hashed, it is 5000 probes.  Names are unique by construction, so nothing is
+shadowed, and `equal' ignores text properties, so a string handed back
+without them still finds its entry."
+  (let ((index (make-hash-table :test #'equal :size (length candidates))))
+    (dolist (candidate candidates index)
+      (puthash candidate
+               (get-text-property 0 'cooked-command-search candidate)
+               index))))
+
+(defun cooked-command-search--lookup (string index)
+  "The candidate object named by STRING in INDEX, or nil.
+INDEX is what `cooked-command-search--index' built."
+  (gethash string index))
 
 ;;;; Describing one
 
@@ -214,16 +229,17 @@ gives: left to itself `completing-read' sorts alphabetically, and
 running-first, newest-first is the order that makes the list worth
 reading.  The category is what embark and marginalia key on, should
 anyone want to give these actions of their own."
-  (let ((describe (lambda (string)
-                    (when-let* ((candidate (cooked-command-search--lookup string candidates))
-                                (text (cooked-command-search--describe candidate)))
-                      (concat "  " text))))
-        (group (lambda (string transform)
-                 (if transform
-                     string
-                   (when-let* ((candidate (cooked-command-search--lookup string candidates))
-                               (buffer (cooked-command-search--buffer candidate)))
-                     (if (buffer-live-p buffer) (buffer-name buffer) "(killed)"))))))
+  (let* ((index (cooked-command-search--index candidates))
+         (describe (lambda (string)
+                     (when-let* ((candidate (cooked-command-search--lookup string index))
+                                 (text (cooked-command-search--describe candidate)))
+                       (concat "  " text))))
+         (group (lambda (string transform)
+                  (if transform
+                      string
+                    (when-let* ((candidate (cooked-command-search--lookup string index))
+                                (buffer (cooked-command-search--buffer candidate)))
+                      (if (buffer-live-p buffer) (buffer-name buffer) "(killed)"))))))
     (lambda (string predicate action)
       (if (eq action 'metadata)
           `(metadata (category . cooked-command)
@@ -370,7 +386,7 @@ keys, and the consult source uses them."
     (let ((choice (completing-read
                    (if filter (format "Command (%s): " filter) "Command: ")
                    (cooked-command-search--table candidates) nil t)))
-      (or (cooked-command-search--lookup choice candidates)
+      (or (cooked-command-search--lookup choice (cooked-command-search--index candidates))
           (user-error "cooked: no such command")))))
 
 ;;;###autoload

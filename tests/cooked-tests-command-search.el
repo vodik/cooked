@@ -141,7 +141,8 @@ refused for it by name rather than handed a half-built record reading exit 0."
             cooked--command-started-at (- (float-time) 125))
       (insert "Serving HTTP on 0.0.0.0 port 8000\n"))
     (let* ((candidates (cooked-command-search--candidates 'running))
-           (candidate (cooked-command-search--lookup "python -m http.server" candidates))
+           (candidate (cooked-command-search--lookup
+                       "python -m http.server" (cooked-command-search--index candidates)))
            (annotate (completion-metadata-get
                       (completion-metadata "" (cooked-command-search--table candidates) nil)
                       'annotation-function)))
@@ -235,6 +236,58 @@ prompt, and interrupting it is refused as what it now is, a finished command."
       (should-error (cooked-command-search-do candidate 'interrupt) :type 'user-error)
       (cooked-command-search-do candidate 'jump)
       (should (= (point) (cooked--command-prompt-position (car cooked--commands)))))))
+
+(ert-deftest cooked-command-search-finds-the-oldest-of-5000-commands ()
+  "5000 records, and the pick at the far end of the list is still the one found.
+
+The oldest is the last candidate, so a lookup that went wrong on a large list
+would show here first."
+  (cooked-tests--with-cooked-buffers (many)
+    (with-current-buffer many
+      (dotimes (i 5000)
+        (cooked-tests--make-command "$ " (format "make target-%d" i) "ok\n" (% i 3))))
+    (should (= 5000 (length (cooked-command-search--candidates))))
+    (should (= 1667 (length (cooked-command-search--candidates 'succeeded))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (should (string-search
+                          "exit 0" (funcall (completion-metadata-get
+                                             (completion-metadata "" table nil)
+                                             'annotation-function)
+                                            "make target-0")))
+                 "make target-0")))
+      (cooked-command-search))
+    (should (eq (current-buffer) many))
+    (should (looking-at-p "\\$ make target-0$"))))
+
+(ert-deftest cooked-command-search-groups-20000-candidates-without-walking-the-list ()
+  "A completion refresh asks for every candidate's group, so lookup must be cheap.
+
+vertico groups by calling the group function on each candidate, and each call
+looks the candidate up by name.  With that lookup a `member' over the list, the
+refresh was quadratic: 80ms over 5000 commands and 1.2s over 20000 on an idle
+machine.  Through the index it is 4ms and 17ms.  20000 rather than 5000 because
+that is where the two are far enough apart for a wall-clock bound to tell them
+apart on a loaded machine: the bound is some fifteen times the indexed cost and
+a quarter of the walked one.  The candidates are built directly rather than from
+records, since 20000 records take half a minute to insert and the lookup never
+reads past the candidate object."
+  (cooked-tests--with-cooked-buffers (many)
+    (let* ((candidates
+            (cl-loop for i below 20000
+                     collect (propertize (format "make target-%d" i)
+                                         'cooked-command-search
+                                         (cooked-command-search--finished-make
+                                          :buffer many))))
+           (group (completion-metadata-get
+                   (completion-metadata "" (cooked-command-search--table candidates) nil)
+                   'group-function))
+           (names (mapcar #'substring-no-properties candidates))
+           (start (float-time))
+           (groups (mapcar (lambda (name) (funcall group name nil)) names))
+           (elapsed (- (float-time) start)))
+      (should (seq-every-p (lambda (g) (equal g (buffer-name many))) groups))
+      (should (< elapsed 0.3)))))
 
 (provide 'cooked-tests-command-search)
 ;;; cooked-tests-command-search.el ends here
