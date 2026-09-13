@@ -107,7 +107,7 @@ sizes -- at most a few hundred entries, ever, for the life of the buffer.
 `cooked--box-glyph-cache\=' is the tier that varies with content
 and needs a bound instead.")
 
-(defcustom cooked-box-glyph-run-cache-limit 512
+(defcustom cooked-box-glyph-run-cache-limit 1024
   "How many run patterns `cooked--box-glyph-cache' and
 `cooked--deco-image-cache' remember, per buffer, before each starts over.
 
@@ -118,19 +118,28 @@ value on every drain.  Unlike the shape itself, a pattern has no bound of its
 own.  Left unwatched, either cache would grow for as long as such a program
 kept redrawing, which is most of a session running one.
 
-What would thrash a pattern key is content with high entropy *per row*, and two
-things keep the real cases cheap.  Low-entropy drawing repeats itself: a border
-is one long identical run and thirty thousand `tree\=' rows share a handful of
-indents, so the table holds a few entries however long the session runs.  And
-the high-entropy case -- btop\='s shade plots, a fresh mix of densities across
-the row every frame -- never reaches these tables at all, because a shade is
-painted as a background rather than drawn as a bitmap; see
-`cooked--apply-shade\='.  What is left is a progress bar, which mints one key
-per width.
+The default is set from the largest listings measured, through the core and
+`cooked--glyph-run-segments\=' as a session cuts them.  A `tree\=' indent is
+one pattern per combination of depth, continuing levels and last entries, so
+the count grows with how deep and how uneven a tree is rather than with its
+length: `tree -C /usr/include\=' draws 62 distinct patterns over 30,000 rows,
+`/usr/lib\=' 505 over 181,000, and the first 400,000 rows of a source
+directory of forty repositories 611.  Under the old limit of 512 that last
+listing cleared both tables once on arrival and again on every
+`cooked--rescale-deco\=' of the transcript, which walks every pattern in it.
+1024 holds each of them with room for the borders and progress bars of the
+programs run beside it.
+
+A btop shade plot, a fresh mix of densities across the row every frame, never
+reaches these tables at all, because a shade is painted as a background rather
+than drawn as a bitmap; see `cooked--apply-shade\='.  What mints keys without
+end is a progress bar or a resizing border, one per width.
 
 Raising this trades memory for fewer of the clears below buying back a shape
 `cooked--box-glyph-cell-cache\=' already has for free; lowering it does the
-opposite.  See `cooked--cached-bounded\='."
+opposite.  An entry is a bitmap as wide as its run, a kilobyte for a
+forty-cell indent at a 10x20 cell, so the default costs a few megabytes at
+most.  See `cooked--cached-bounded\='."
   :type 'natnum
   :group 'cooked)
 
@@ -480,9 +489,16 @@ The key is the packed string itself rather than a list of decoded records, and
 that is not incidental: `sxhash-equal\=' walks only the first few elements of a
 list, so an eleven-record `tree\=' indent keyed as a list would collide with
 every other indent of the same depth and turn the lookup into a linear scan of
-`equal\=' comparisons.  A string is hashed whole.  It is also canonical -- a
-count is never zero and no two adjacent records share a shape -- so two runs
-that draw the same thing key the same."
+`equal\=' comparisons.  A string fares better but is not hashed whole either:
+past 64 bytes, sixteen records, Emacs samples it.  So deep indents do share
+hashes, and measured they share few: the 611 patterns of 400,000 `tree\=' rows
+land on 548 hashes, at most five on one, which costs a lookup no more than five
+`equal\=' comparisons of strings a hundred bytes long.  Hashing the whole string
+in Lisp through `define-hash-table-test\=' would cost every lookup more than
+those collisions cost the few that meet one.
+
+The string is also canonical -- a count is never zero and no two adjacent
+records share a shape -- so two runs that draw the same thing key the same."
   (cooked--cached-bounded cooked--box-glyph-cache cooked-box-glyph-run-cache-limit
       (list pattern (car size) (cdr size))
     (cooked--pack-box-glyph-run

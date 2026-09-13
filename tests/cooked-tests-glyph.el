@@ -398,6 +398,34 @@ one interval, and without the cut after it the cursor's segment is four cells."
                                 :data-width)
                      (* 3 10))))))
 
+(ert-deftest cooked-a-hidden-cursor-still-cuts-its-glyph-run ()
+  "A cursor the child hid with DECTCEM is still cut out of its glyph run.
+
+Skipping the cut for a hidden cursor would save one `display\=' interval, and it
+would be wrong, because a hidden cursor is not always an undrawn one.  At a
+prompt, in canonical mode with no OSC 133 to say a command is running,
+`cooked--sync-cursor-type\=' gives point a visible cursor of its own, and point
+is on the child\='s cell: `cat\=' run after a program that left the cursor hidden
+is that case.  The core cannot see that decision, which also turns on the input
+mode, so the cut stays wherever the cursor is."
+  (cooked-tests--with-session
+      ;; `│ │ ├──' with the cursor hidden, then CUP to the second blank, and a
+      ;; child reading in canonical mode.
+      '("/bin/sh" "-c"
+        "printf '\\033[?25l\\342\\224\\202 \\342\\224\\202 \\342\\224\\234\\342\\224\\200\\342\\224\\200\\033[1;4H'; exec cat")
+    (cooked-tests--cell 10 20)
+    (should (cooked-tests--settle
+             (lambda () (and (get-text-property (point-min) 'display)
+                             cooked--cursor
+                             (not (cooked-cursor-visible cooked--cursor))))))
+    (cooked--sync-cursor-type)
+    (let ((beg (point-min)))
+      ;; The premise: point is on the hidden cursor's cell, and draws there.
+      (should (= (point) (+ beg 3)))
+      (should (cooked--input-state-p))
+      (should (eq cursor-type t))
+      (should (= (cooked-tests--display-intervals beg (+ beg 7)) 3)))))
+
 (ert-deftest cooked-the-cursor-in-an-empty-field-is-one-cell-wide ()
   "The cursor inside a drawn input field is cut out of the field's middle row.
 

@@ -2396,7 +2396,9 @@ it now has.
 =sxhash-equal= walks only the first few elements of a list, so an eleven-record
 =tree= indent keyed as a list would collide with every other indent of the same
 depth and turn each lookup into a linear scan of =equal= comparisons. A string
-is hashed whole, and the wire encoding is already canonical — a count is never
+fares better, though it is not hashed whole: past 64 bytes Emacs samples it, and
+the 611 patterns of 400,000 =tree= rows share 548 hashes, at most five on one
+(re-measured 2026-09-13). The wire encoding is already canonical — a count is never
 zero and no two adjacent records share a shape — so two runs that draw the same
 thing key the same.
 
@@ -2442,10 +2444,27 @@ materialise, and the reason is structural rather than lucky: a shade never
 reaches these tables as a pattern at all, because it is split to one cell per
 record for the dither reason above, so a shade plot mints the same handful of
 one-record keys it always did. Low-entropy drawing repeats itself — a border is
-one long identical run, and 30,326 =tree= rows share a handful of indents. What
-is left is the progress bar, which minted a key per width before this and mints
-a key per width now; =cooked-box-glyph-run-cache-limit= is the same bound it
-always was, and the run length is bounded by the row width regardless.
+one long identical run, and 30,326 =tree -C /usr/include= rows share 62
+patterns. That is the shallow case, though: a pattern is a combination of depth,
+continuing levels and last entries, so deeper trees mint more. Re-measured
+through the core and =cooked--glyph-run-segments= on 2026-09-13, =/usr/lib= has
+505 patterns over 181,000 rows and the first 400,000 rows of =~/src= have 611,
+past the old limit of 512, which cleared both tables once on arrival and once
+per rescale of the transcript. =cooked-box-glyph-run-cache-limit= is now 1024.
+The progress bar still mints a key per width, and the run length is bounded by
+the row width regardless.
+
+*The trade against font glyphs.* An image over a run is one glyph to Emacs, so
+point and the region cannot fall inside it. Moving point through scrollback
+across an indent (=l=, =C-f=) shows the cursor held at the image's start for
+N-1 steps, and a region starting mid-indent highlights all of the image or none
+of it. ghostel draws box drawing as font glyphs and pays neither, at the price
+of gaps in borders under =line-spacing=. cooked keeps the image: the live
+cursor is cut out of its run (=cooked--glyph-run-segments=), so only a point
+the user moves off the child's cursor meets this, and cutting at point too
+would re-render a row per motion. Whether an image is worth it at all when the
+font's glyph fits and =line-spacing= is nil is still unmeasured, and waits on
+the Wave 6 instruments.
 
 *** Measured: the invariant
 

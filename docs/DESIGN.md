@@ -1266,7 +1266,10 @@ repeated is the border case; `├──` is two records over three cells and a `
 five over eleven, and one image per *record* would have cost an interval per nesting
 level. So `cooked--box-glyph-image` is memoized on the packed record string itself — the
 string, not a decoded list, because `sxhash-equal` walks only the first few elements of a
-list and eleven-record indents would all collide into one bucket.
+list and eleven-record indents would all collide into one bucket. A string past 64 bytes is
+sampled rather than hashed whole, so deep indents still share some hashes: 611 patterns over
+400,000 `tree` rows land on 548, at most five on one, which is a few `equal` comparisons.
+The table is bounded by `cooked-box-glyph-run-cache-limit`, 1024, set from those counts.
 
 **A blank can be part of a run.** A run breaks on any undecorated cell and a space
 classifies to nothing, so `│   │   ├── ` was three decorated runs: 2.90 `display`
