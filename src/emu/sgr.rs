@@ -19,6 +19,67 @@
 use super::cell::{Attrs, Color, Style};
 use super::parser::{Params, ParamsIter};
 
+/// An attribute that is one bit of [`Attrs`], with the SGR codes that set and clear it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Flag {
+    pub(crate) set: u16,
+    pub(crate) reset: u16,
+    pub(crate) attr: Attrs,
+}
+
+/// Every one-bit attribute, in the order DECRQSS spells them.
+///
+/// The one table of which number means which bit, read by [`apply`] to set and clear,
+/// by [`describe`] to answer, and by XTPUSHSGR to name the parts of a selective push.
+/// Bold and faint share their reset, 22, as ECMA-48 has it. Overline is last because it
+/// is the one XTPUSHSGR's numbering does not include; see [`PUSHABLE`].
+pub(crate) const FLAGS: [Flag; 8] = [
+    Flag {
+        set: 1,
+        reset: 22,
+        attr: Attrs::BOLD,
+    },
+    Flag {
+        set: 2,
+        reset: 22,
+        attr: Attrs::FAINT,
+    },
+    Flag {
+        set: 3,
+        reset: 23,
+        attr: Attrs::ITALIC,
+    },
+    Flag {
+        set: 5,
+        reset: 25,
+        attr: Attrs::BLINK,
+    },
+    Flag {
+        set: 7,
+        reset: 27,
+        attr: Attrs::REVERSE,
+    },
+    Flag {
+        set: 8,
+        reset: 28,
+        attr: Attrs::CONCEAL,
+    },
+    Flag {
+        set: 9,
+        reset: 29,
+        attr: Attrs::STRIKE,
+    },
+    Flag {
+        set: 53,
+        reset: 55,
+        attr: Attrs::OVERLINE,
+    },
+];
+
+/// The flags a selective XTPUSHSGR can name, which are xterm's and stop short of
+/// overline.
+pub(crate) const PUSHABLE: &[Flag] = FLAGS.split_at(7).0;
+
 /// Apply one `CSI Ps m` to PEN and UNDERLINE.
 ///
 /// UNDERLINE is `SGR 58`'s colour, which is separate from PEN for the reason the module
@@ -38,43 +99,40 @@ pub(crate) fn apply(params: &Params, pen: &mut Style, underline: &mut Color) {
                 *pen = Style::default();
                 *underline = Color::Default;
             }
-            1 => pen.attrs |= Attrs::BOLD,
-            2 => pen.attrs |= Attrs::FAINT,
-            3 => pen.attrs |= Attrs::ITALIC,
             // `SGR 4` is single; `4:0`-`4:5` name a style. Only the first
             // subparameter is read, which is all the protocol defines.
             4 => match param.get(1) {
                 None => pen.attrs.set_underline_style(1),
                 Some(&style) => pen.attrs.set_underline_style(style.min(5) as u8),
             },
-            5 | 6 => pen.attrs |= Attrs::BLINK,
-            7 => pen.attrs |= Attrs::REVERSE,
-            8 => pen.attrs |= Attrs::CONCEAL,
-            9 => pen.attrs |= Attrs::STRIKE,
-            21 | 22 => pen.attrs.remove(Attrs::BOLD | Attrs::FAINT),
-            23 => pen.attrs.remove(Attrs::ITALIC),
+            // Rapid blink is kept as blink, and 21 as the bold-and-faint reset, since the
+            // pen has no separate bit for either.
+            6 => pen.attrs |= Attrs::BLINK,
+            21 => pen.attrs.remove(Attrs::BOLD | Attrs::FAINT),
             24 => pen.attrs.set_underline_style(0),
-            25 => pen.attrs.remove(Attrs::BLINK),
-            27 => pen.attrs.remove(Attrs::REVERSE),
-            28 => pen.attrs.remove(Attrs::CONCEAL),
-            29 => pen.attrs.remove(Attrs::STRIKE),
             30..=37 => pen.fg = Color::Indexed((code - 30) as u8),
             38 => pen.fg = extended(param, &mut iter).unwrap_or(pen.fg),
             39 => pen.fg = Color::Default,
             40..=47 => pen.bg = Color::Indexed((code - 40) as u8),
             48 => pen.bg = extended(param, &mut iter).unwrap_or(pen.bg),
             49 => pen.bg = Color::Default,
-            // `SGR 53`/`55`. 54 would be ECMA-48's "not framed or encircled", which
-            // clears 51 and 52; neither is kept, so 54 has nothing to clear.
-            53 => pen.attrs |= Attrs::OVERLINE,
-            55 => pen.attrs.remove(Attrs::OVERLINE),
             // `SGR 58`/`59`: the underline's own colour, parsed by the same
             // `extended` as 38 and 48, so `58:2::r:g:b` and `58:5:n` come free.
             58 => *underline = extended(param, &mut iter).unwrap_or(*underline),
             59 => *underline = Color::Default,
             90..=97 => pen.fg = Color::Indexed((code - 90 + 8) as u8),
             100..=107 => pen.bg = Color::Indexed((code - 100 + 8) as u8),
-            _ => {}
+            // The one-bit attributes. 54, ECMA-48's "not framed or encircled", clears 51
+            // and 52, neither of which is kept, so it has nothing to clear.
+            _ => {
+                for flag in &FLAGS {
+                    if flag.set == code {
+                        pen.attrs |= flag.attr;
+                    } else if flag.reset == code {
+                        pen.attrs.remove(flag.attr);
+                    }
+                }
+            }
         }
     }
 }
@@ -132,26 +190,19 @@ pub(crate) fn describe(pen: Style, underline: Color) -> String {
         let _ = write!(out, ";{param}");
     };
     let attrs = pen.attrs;
-    for (flag, code) in [(Attrs::BOLD, 1), (Attrs::FAINT, 2), (Attrs::ITALIC, 3)] {
-        if attrs.contains(flag) {
-            push(format_args!("{code}"));
-        }
+    // In code order, with the underline, which is a style rather than a bit, in its place
+    // between italic and blink.
+    let (before, after) = FLAGS.split_at(3);
+    for flag in before.iter().filter(|flag| attrs.contains(flag.attr)) {
+        push(format_args!("{}", flag.set));
     }
     match attrs.underline_style() {
         0 => {}
         1 => push(format_args!("4")),
         style => push(format_args!("4:{style}")),
     }
-    for (flag, code) in [
-        (Attrs::BLINK, 5),
-        (Attrs::REVERSE, 7),
-        (Attrs::CONCEAL, 8),
-        (Attrs::STRIKE, 9),
-        (Attrs::OVERLINE, 53),
-    ] {
-        if attrs.contains(flag) {
-            push(format_args!("{code}"));
-        }
+    for flag in after.iter().filter(|flag| attrs.contains(flag.attr)) {
+        push(format_args!("{}", flag.set));
     }
     // The base is the parameter that introduces the extended form, 38, 48 or 58; the
     // short forms sit at fixed offsets from it only for the first two, which is why

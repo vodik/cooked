@@ -48,6 +48,7 @@ dec_flags! {
 use super::modes::{AnsiMode, DecMode, ModeReport};
 use super::*;
 use crate::emu::cell::Attrs;
+use crate::emu::sgr::PUSHABLE;
 
 /// One XTPUSHSGR: the pen as it stood, and which parts of it the matching pop puts back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +70,7 @@ pub(super) struct PushedPen {
 /// The attributes a selective `CSI Pm # {` names, in xterm's numbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct PenParts {
-    /// The on/off attributes among [`PEN_FLAGS`].
+    /// The on/off attributes among [`sgr::PUSHABLE`](crate::emu::sgr::PUSHABLE).
     flags: Attrs,
     /// 4 and 21 alike. xterm keeps double underline as an attribute of its own; here it
     /// is one of the underline's styles, so either number restores the style, and with
@@ -78,17 +79,6 @@ struct PenParts {
     fg: bool,
     bg: bool,
 }
-
-/// The attributes that are a single bit, which a selective pop copies bit by bit.
-const PEN_FLAGS: [Attrs; 7] = [
-    Attrs::BOLD,
-    Attrs::FAINT,
-    Attrs::ITALIC,
-    Attrs::BLINK,
-    Attrs::REVERSE,
-    Attrs::CONCEAL,
-    Attrs::STRIKE,
-];
 
 impl PenParts {
     /// The selection a push's parameters name, or `None` when they name none at all.
@@ -104,17 +94,14 @@ impl PenParts {
         let mut parts = Self::default();
         for code in codes {
             match code {
-                1 => parts.flags |= Attrs::BOLD,
-                2 => parts.flags |= Attrs::FAINT,
-                3 => parts.flags |= Attrs::ITALIC,
                 4 | 21 => parts.underline = true,
-                5 => parts.flags |= Attrs::BLINK,
-                7 => parts.flags |= Attrs::REVERSE,
-                8 => parts.flags |= Attrs::CONCEAL,
-                9 => parts.flags |= Attrs::STRIKE,
                 30 => parts.fg = true,
                 31 => parts.bg = true,
-                _ => {}
+                _ => {
+                    if let Some(flag) = PUSHABLE.iter().find(|flag| flag.set == code) {
+                        parts.flags |= flag.attr;
+                    }
+                }
             }
         }
         Some(parts)
@@ -466,10 +453,10 @@ impl State {
             (self.pen, self.underline) = (pen, underline);
             return;
         };
-        for flag in PEN_FLAGS
-            .into_iter()
-            .filter(|&flag| parts.flags.contains(flag))
-        {
+        for flag in PUSHABLE.iter().map(|flag| flag.attr) {
+            if !parts.flags.contains(flag) {
+                continue;
+            }
             if pen.attrs.contains(flag) {
                 self.pen.attrs |= flag;
             } else {

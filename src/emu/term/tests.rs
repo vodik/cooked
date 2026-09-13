@@ -4779,6 +4779,28 @@ fn decrqss_round_trip(rows: usize, cols: usize, set: &[u8], name: &str) -> Strin
     body.to_owned()
 }
 
+/// Every one-bit attribute sets exactly its own bit, clears it again, and is answered with
+/// the code that set it: the three readers of `sgr::FLAGS` agree about every entry.
+#[test]
+fn each_sgr_flag_sets_clears_and_describes_its_own_bit() {
+    for flag in crate::emu::sgr::FLAGS {
+        let mut t = term(1, 4, format!("\x1b[{}m", flag.set).as_bytes());
+        assert_eq!(t.state.pen.attrs, flag.attr, "SGR {}", flag.set);
+        assert_eq!(
+            decrqss(&mut t, "m"),
+            format!("\x1bP1$r0;{}m\x1b\\", flag.set)
+        );
+        t.feed(format!("\x1b[{}m", flag.reset).as_bytes());
+        assert_eq!(
+            t.state.pen.attrs,
+            Attrs::default(),
+            "SGR {} after {}",
+            flag.reset,
+            flag.set
+        );
+    }
+}
+
 #[test]
 fn decrqss_answers_the_pen_as_the_sgr_that_recreates_it() {
     for (set, want) in [
