@@ -47,14 +47,16 @@
 ;; property names survives.  `cooked--sync-fontification' has why this moved off the
 ;; render path and what registering jit-lock costs when there is nothing to scan.
 ;;
-;; The one accepted gap, stated plainly because it is visible: a URL that the child
-;; wrapped across a column boundary is not matched while it is on screen.  Each live
-;; row is its own hard-newlined buffer line and `goto-address-url-regexp' stops at a
-;; newline, so the two halves are two lines.  It becomes matchable once the row is
-;; evicted, because `cooked-rejoin-wrapped-lines' joins a wrapped row onto the line
-;; above it in the scrollback, and the scrollback pass then sees one string.  Anything
-;; better means detecting links against the *grid* rather than the buffer, which is a
-;; different design and a much larger one.
+;; A URL the child wrapped across a column boundary used to be the one accepted gap:
+;; each live row is its own hard-newlined buffer line, `goto-address-url-regexp' stops
+;; at a newline, and so the two halves were two lines.  It closed without detecting
+;; against the grid, which was the expensive answer this file had assumed was the only
+;; one.  The emulator already knew -- `Row::wrapped' -- and was telling Emacs only on
+;; the way out to scrollback, where `cooked-rejoin-wrapped-lines' joins the logical
+;; line and the gap closed on its own.  That one bit now rides the drain's row table
+;; too, `cooked--mark-row-wrap' puts it on the newline, and the scan matches against
+;; the rejoined *string* when there is one to build.  See "Soft wrap" below, which is
+;; ghostel's arrangement taken whole.
 ;;
 ;; File names are not detected here.  Deciding that `src/lib.rs' is a file rather than
 ;; a word means asking the filesystem, and asking it per candidate per redraw is a
@@ -214,6 +216,13 @@ which differ only in what they do *before* deciding to open anything."
   (if-let* ((uri (cooked-link-uri)))
       (browse-url uri)
     (or (cooked--run-seam-until-success 'cooked-link-follow-functions)
+        ;; The detected URL as the scan recorded it, before goto-addr is asked to
+        ;; read it out of the text again.  For an ordinary match the two agree; for
+        ;; one the child wrapped across a row they cannot, because the text at
+        ;; point is half of it and `goto-address-at-point' would open that half.
+        (when-let* ((url (get-text-property (point) 'cooked-link-url)))
+          (browse-url url)
+          t)
         (goto-address-at-point))))
 
 (defun cooked-follow-link (&optional event)
@@ -396,6 +405,179 @@ claim a click the image had a better claim to."
           (unless (get-text-property beg 'face)
             (put-text-property beg end 'face 'cooked-link)))))))
 
+;;;; Soft wrap: putting a logical line back together to match against
+;;
+;; A screen row is one buffer line, so a URL the terminal ran out of columns for
+;; is two buffer lines with a newline in the middle -- and a regexp that would
+;; have matched it whole matches only as far as the break.  That was cooked's one
+;; documented detection gap (REPORT.org §6's matrix), and the half of it that was
+;; missing was never the matching: it was that the buffer had no way to tell a
+;; line the child ended from a line the grid ran out of room for.  The emulator
+;; has always known -- `Row::wrapped' -- and used it only on the way out to
+;; scrollback, where `cooked-rejoin-wrapped-lines' rejoins the logical line and
+;; the gap closes on its own.  It now rides the drain's row table as well, and
+;; `cooked--mark-row-wrap' puts it on the newline as `cooked-wrap'.
+;;
+;; ghostel's approach, and cooked takes it whole because the alternative does not
+;; exist here: cooked cannot hand the joined text to `goto-address-fontify-region'
+;; and be done, since it stopped calling that function at all -- the scan is its
+;; own (see `cooked--fontify-links'), and what it scans is a *string* with the
+;; wrap newlines taken out, mapped back to buffer positions afterwards.
+;;
+;; Four pieces, all of them ghostel's shape: the joined region with its
+;; offset-to-position chunk map (`ghostel--wrap-joined-region', links.el:334), the
+;; binary search back (:369), the per-row fragments a match is marked in (:384),
+;; and the shared id that makes those fragments one link (:417).  The fifth is the
+;; row cap below.
+;;
+;; The whole of it is paid only when there is something to join.  A region with no
+;; `cooked-wrap' in it -- every region on a screen of ordinary short lines -- costs
+;; one `text-property-not-all' to find that out, and then takes the path it always
+;; took.
+
+(defconst cooked-link--join-rows 50
+  "How many soft-wrapped rows are joined into one candidate for detection.
+
+Output like a minified JSON blob is one logical line megabytes long, and joining
+all of it would build a string of that size on every scan and then hand the
+regexp engine a single token to chew through.  ghostel's number, for ghostel's
+reason (`ghostel--soft-wrap-row-limit'): fifty rows is longer than any URL and
+far shorter than a runaway line.
+
+Counted per logical line rather than per region, so a screen of ordinary output
+never approaches it.  Not a defcustom: the cap is a bound on the worst case
+rather than a preference, and a URL long enough to need more than fifty rows of
+a terminal is not a URL anyone typed.")
+
+(defun cooked-link--wrap-at (pos end)
+  "Position of the first soft-wrap newline in POS..END, or nil.
+
+The `eq' test is not redundant with the property search.  `cooked-wrap' is put
+on a newline and nothing else, but a yank carries text properties with the text,
+so a region can hold a copy of one sitting on an ordinary character -- and
+joining there would delete a character rather than a line break."
+  (when-let* ((at (text-property-not-all pos end 'cooked-wrap nil))
+              ((eq (char-after at) ?\n)))
+    at))
+
+(defun cooked-link--join-wrapped (beg end)
+  "Return (STRING . CHUNKS) for BEG..END with its soft-wrap newlines removed.
+
+STRING is the region as the child wrote it, so a value split across rows is one
+token again.  CHUNKS maps it back: a vector of (OFFSET . POSITION) pairs, one
+per piece, ascending -- see `cooked-link--wrap-position'.
+
+Nil when nothing in the region is soft-wrapped, and that is the contract rather
+than an optimisation.  The caller takes its old path on nil, so the ordinary
+scan is unchanged and the only thing a screen of short lines pays for this
+feature is the property search that answers nil.
+
+`cooked-link--join-rows' bounds the run of rows joined into one line.  The count
+is per logical line: a hard newline inside a piece ends the line it was counting
+and the row after it starts a new one from zero."
+  (let ((chunks nil)
+        (parts nil)
+        (joined nil)
+        (offset 0)
+        (rows 0)
+        (pos beg))
+    (while (< pos end)
+      (let* ((wrap (cooked-link--wrap-at pos end))
+             (join (and wrap (< rows cooked-link--join-rows)))
+             ;; Three pieces: up to the wrap when joining, through it when the cap
+             ;; says stop -- so the newline stays in the string and no match can
+             ;; span it -- and the rest of the region when there is no wrap left.
+             (piece (buffer-substring-no-properties
+                     pos (cond (join wrap) (wrap (1+ wrap)) (t end)))))
+        (when join (setq joined t))
+        (push (cons offset pos) chunks)
+        (push piece parts)
+        (setq rows (cond ((not join) 0)
+                         ((string-search "\n" piece) 1)
+                         (t (1+ rows)))
+              offset (+ offset (length piece))
+              pos (if wrap (1+ wrap) end))))
+    (when joined
+      (cons (string-join (nreverse parts)) (vconcat (nreverse chunks))))))
+
+(defun cooked-link--wrap-position (offset chunks)
+  "The buffer position for string OFFSET, given CHUNKS.
+
+Binary search rather than a walk, which is what keeps a region of many rows
+cheap to map: the scan asks this twice per match, and a linear map would make a
+screenful of matches quadratic in the rows joined.
+
+An OFFSET landing exactly on a chunk boundary answers with the *later* chunk,
+which is the right answer for a match beginning there and one character past the
+newline for a match ending there.  Nothing downstream is hurt by the second
+case: `cooked-link--wrap-fragments' stops at the wrap it has already passed, so
+the fragment list is the same either way."
+  (unless (zerop (length chunks))
+    (let ((low 0)
+          (high (1- (length chunks))))
+      (while (< low high)
+        (let ((mid (/ (+ low high 1) 2)))
+          (if (<= (car (aref chunks mid)) offset)
+              (setq low mid)
+            (setq high (1- mid)))))
+      (let ((chunk (aref chunks low)))
+        (+ (cdr chunk) (- offset (car chunk)))))))
+
+(defun cooked-link--wrap-fragments (beg end)
+  "The buffer ranges covering BEG..END, split at the soft wraps inside it.
+
+Each element is a (START . STOP) cons, and the wrap newlines are left out: a
+link property covering a row break would put `mouse-face' on the gap between two
+rows and hand the keymap a click on nothing."
+  (let ((fragments nil)
+        (pos beg))
+    (while (< pos end)
+      (let ((wrap (cooked-link--wrap-at pos end)))
+        (if wrap
+            (progn
+              (when (< pos wrap) (push (cons pos wrap) fragments))
+              (setq pos (1+ wrap)))
+          (push (cons pos end) fragments)
+          (setq pos end))))
+    (nreverse fragments)))
+
+(defun cooked-link-logical-line-bounds (beg end)
+  "BEG..END widened to whole soft-wrapped logical lines, as (FROM . TO).
+
+`cooked--fontify-region' rounds jit-lock's chunk out to whole *buffer* lines so
+a candidate straddling a chunk boundary is matched by one half or the other.
+That is not enough once a logical line can be several buffer lines: a boundary
+between two soft-wrapped rows would split the very candidate this whole section
+exists to put back together.
+
+Bounded by `cooked-link--join-rows' in each direction, for the reason that
+constant gives -- and because without a bound a screenful of one logical line
+would make every chunk cover the screen, which is the cost jit-lock's chunking
+is there to avoid."
+  (let ((from beg)
+        (to end))
+    (save-excursion
+      (let ((rows 0))
+        (goto-char from)
+        (while (and (< rows cooked-link--join-rows)
+                    (> (point) (point-min))
+                    (eq (char-before) ?\n)
+                    (get-text-property (1- (point)) 'cooked-wrap))
+          (forward-line -1)
+          (setq from (point)
+                rows (1+ rows))))
+      (let ((rows 0))
+        (goto-char to)
+        (while (and (< rows cooked-link--join-rows)
+                    (< (point) (point-max))
+                    (eq (char-after) ?\n)
+                    (get-text-property (point) 'cooked-wrap))
+          (forward-line 1)
+          (end-of-line)
+          (setq to (point)
+                rows (1+ rows)))))
+    (cons from to)))
+
 ;;;; The goto-addr pass
 
 (defvar cooked--url-scheme-regexp nil
@@ -410,7 +592,7 @@ claim a click the image had a better claim to."
                  (cons schemes (regexp-opt schemes)))))))
 
 (defconst cooked-link--url-properties
-  '(cooked-link-url face mouse-face follow-link help-echo keymap)
+  '(cooked-link-url cooked-link-fragment face mouse-face follow-link help-echo keymap)
   "The properties the detected-URL pass owns, and the only ones it removes.
 
 Named once so unfontifying cannot drift from fontifying and leave a stray
@@ -440,6 +622,131 @@ explicit hyperlink -- and cooked-file-link.el's spans -- untouched."
                              'help-echo help-echo
                              'mouse-face mouse-face
                              'face (and goto-address-fontify-p face))))
+
+(defun cooked-link--fontify-wrapped-match (beg end url face mouse-face help-echo)
+  "Make BEG..END a detected link to URL, one fragment per row it spans.
+
+The soft-wrap counterpart of `cooked-link--fontify-url-match\=', and the two
+differ in exactly two things: the newlines between the rows are left unmarked,
+and every fragment carries the same `cooked-link-fragment\=' id so that what is
+drawn as three highlighted pieces is still one link to everything that asks.
+`cooked-link--detected-bounds\=' is what asks.
+
+A fresh cons per match, compared with `eq\=': two occurrences of the same URL on
+the same row are two links, and comparing the URL string instead would have said
+they were one."
+  (unless (cooked-link--claimed-p beg 'goto-addr)
+    (let ((id (cons 'cooked-link-detected url)))
+      (pcase-dolist (`(,from . ,to) (cooked-link--wrap-fragments beg end))
+        (cooked-link--propertize from to
+                                 'cooked-link-url url
+                                 'cooked-link-fragment id
+                                 'help-echo help-echo
+                                 'mouse-face mouse-face
+                                 'face (and goto-address-fontify-p face))))))
+
+(defun cooked-link--scan (beg end match)
+  "Run goto-addr's two patterns over BEG..END, calling MATCH for each hit.
+
+MATCH is called as (BEG END URL FACE MOUSE-FACE HELP-ECHO), which is
+`cooked-link--fontify-url-match\='s own signature -- so the ordinary scan passes
+that function straight in and the soft-wrap scan passes a closure that maps the
+positions back into the buffer the text came from first.
+
+Split out for that second caller and for nothing else.  What the two share is
+everything that makes the scan a faithful reproduction of
+`goto-address-fontify-region\=' -- both regexps, `bounds-of-thing-at-point\=' for
+the URL bounds and the raw match for mail, the two faces and the two help
+strings -- and it is a reproduction precisely because goto-addr offers no hook
+to filter its matches with.  Having a second copy of it for the wrapped case
+would be a second thing to keep faithful."
+  (save-excursion
+    (goto-char beg)
+    (while (re-search-forward goto-address-url-regexp end t)
+      ;; goto-addr takes the bounds from thingatpt rather than from its own
+      ;; match, and the difference is real: the regexp swallows trailing
+      ;; punctuation that `bounds-of-thing-at-point' trims.
+      (when-let* ((bounds (save-excursion
+                            (goto-char (match-beginning 0))
+                            (bounds-of-thing-at-point 'url))))
+        (funcall match (car bounds) (cdr bounds)
+                 (buffer-substring-no-properties (car bounds) (cdr bounds))
+                 goto-address-url-face goto-address-url-mouse-face
+                 "mouse-2, C-c RET: follow URL"))))
+  (save-excursion
+    (goto-char beg)
+    (while (re-search-forward goto-address-mail-regexp end t)
+      (funcall match (match-beginning 0) (match-end 0)
+               (concat "mailto:" (match-string-no-properties 0))
+               goto-address-mail-face goto-address-mail-mouse-face
+               "mouse-2, C-c RET: mail this address"))))
+
+(defun cooked-link--scan-joined (joined)
+  "Scan JOINED, a rejoined region's text, and mark what it finds in the buffer.
+
+JOINED is `cooked-link--join-wrapped\='s (STRING . CHUNKS).  The string is put in
+a temporary buffer rather than matched with `string-match\=', because the scan
+asks `bounds-of-thing-at-point\=' where each URL really ends and thingatpt reads
+a buffer.  Matching the string directly would mean either giving that up or
+reimplementing it, and giving it up is what puts the trailing bracket of
+\"(https://example.com/x)\" inside the link.
+
+The source buffer's syntax table goes with the text.  thingatpt's idea of a word
+constituent is the current table's, so a scratch buffer left in
+`fundamental-mode\=' could disagree with the real one about where a URL ends --
+about which the honest thing to say is that it does not today, and that a
+one-line guarantee is cheaper than knowing whether it ever will."
+  (let ((chunks (cdr joined))
+        (source (current-buffer))
+        (table (syntax-table)))
+    (with-temp-buffer
+      (set-syntax-table table)
+      (insert (car joined))
+      (cooked-link--scan
+       (point-min) (point-max)
+       (lambda (mbeg mend url face mouse-face help-echo)
+         ;; Buffer positions are one-based and the chunk map is in string
+         ;; offsets, which is the whole of the conversion.
+         (let ((from (cooked-link--wrap-position (1- mbeg) chunks))
+               (to (cooked-link--wrap-position (1- mend) chunks)))
+           (with-current-buffer source
+             (cooked-link--fontify-wrapped-match
+              from to url face mouse-face help-echo))))))))
+
+(defun cooked-link--detected-bounds (&optional pos)
+  "Bounds of the detected-URL span covering POS, or nil.
+
+The run of `cooked-link-url\=', extended across any soft wrap the match was
+broken over: the fragments of one match share a `cooked-link-fragment\=' id, so
+the extension is exact rather than a guess from the text being adjacent.  An
+unwrapped match carries no id and the run is the whole answer, which is why the
+common case walks nothing.
+
+Returns the outer bounds, newlines included.  What the *properties* deliberately
+skip is a different question from what the link *is*: `thing-at-point\=' and
+embark want the extent of the thing, and the thing spans the break."
+  (let ((pos (or pos (point))))
+    (when (get-text-property pos 'cooked-link-url)
+      (let ((from (or (previous-single-property-change
+                       (1+ pos) 'cooked-link-url)
+                      (point-min)))
+            (to (or (next-single-property-change pos 'cooked-link-url)
+                    (point-max)))
+            (id (get-text-property pos 'cooked-link-fragment)))
+        (when id
+          (while (and (> from (point-min))
+                      (eq (char-before from) ?\n)
+                      (eq (get-text-property (- from 2) 'cooked-link-fragment) id))
+            (setq from (or (previous-single-property-change
+                            (1- from) 'cooked-link-url)
+                           (point-min))))
+          (while (and (< to (point-max))
+                      (eq (char-after to) ?\n)
+                      (eq (get-text-property (1+ to) 'cooked-link-fragment) id))
+            (setq to (or (next-single-property-change
+                          (1+ to) 'cooked-link-url)
+                         (point-max)))))
+        (cons from to)))))
 
 (defun cooked--fontify-links (beg end)
   "Scan BEG..END for things that look like URLs, and highlight what it finds.
@@ -474,7 +781,15 @@ about the match changes; ffap binds the same variable for the same purpose.
 An explicit `OSC 8' span still wins, but now by being *asked* rather than by
 having its overlays deleted afterwards: `cooked-link--claimed-p' is consulted
 per match with `goto-addr' as the asking source, so the precedence is the one
-`cooked-link-claim-functions' states and nothing is created only to be undone."
+`cooked-link-claim-functions' states and nothing is created only to be undone.
+
+A soft-wrapped region takes a second path, and only then.  When something in
+BEG..END carries `cooked-wrap' the scan runs over the rejoined *string* instead
+of over the buffer -- see `cooked-link--scan-joined', and the commentary above
+`cooked-link--join-rows' for why -- and every match is marked one row at a time.
+When nothing does, which is every region of ordinary short lines, the cost of
+having asked is one `text-property-not-all' and the path is the one it always
+was."
   (when cooked-detect-links
     ;; Guarded like `cooked--apply-deco': this runs over text that is already
     ;; correct without it, and `goto-address-url-regexp' is a variable the user
@@ -492,28 +807,9 @@ per match with `goto-addr' as the asking source, so the precedence is the one
                (or thing-at-point-beginning-of-url-regexp
                    (cooked--url-scheme-regexp))))
           (cooked-link--unfontify-urls beg end)
-          (save-excursion
-            (goto-char beg)
-            (while (re-search-forward goto-address-url-regexp end t)
-              ;; goto-addr takes the bounds from thingatpt rather than from its
-              ;; own match, and the difference is real: the regexp swallows
-              ;; trailing punctuation that `bounds-of-thing-at-point' trims.
-              (when-let* ((bounds (save-excursion
-                                    (goto-char (match-beginning 0))
-                                    (bounds-of-thing-at-point 'url))))
-                (cooked-link--fontify-url-match
-                 (car bounds) (cdr bounds)
-                 (buffer-substring-no-properties (car bounds) (cdr bounds))
-                 goto-address-url-face goto-address-url-mouse-face
-                 "mouse-2, C-c RET: follow URL"))))
-          (save-excursion
-            (goto-char beg)
-            (while (re-search-forward goto-address-mail-regexp end t)
-              (cooked-link--fontify-url-match
-               (match-beginning 0) (match-end 0)
-               (concat "mailto:" (match-string-no-properties 0))
-               goto-address-mail-face goto-address-mail-mouse-face
-               "mouse-2, C-c RET: mail this address")))))))))
+          (if-let* ((joined (cooked-link--join-wrapped beg end)))
+              (cooked-link--scan-joined joined)
+            (cooked-link--scan beg end #'cooked-link--fontify-url-match))))))))
 
 ;;;; thing-at-point, which is how everything else finds a link
 
@@ -571,12 +867,27 @@ text, and it reads more schemes than goto-addr does.  What it cannot know is
 that these particular characters carry a destination that is not written in
 them -- an `OSC 8\=' span\='s text is frequently a label, so the URL is nowhere
 on screen.  Answering only that case adds the knowledge without displacing
-anything."
-  (cooked-link-uri))
+anything.
+
+One other case has the same shape and so is answered here too: a detected URL
+the child wrapped across a row.  thingatpt would read it out of the text like
+any other, and the text has a row break in the middle of it -- so what it would
+answer is the first fragment.  The scan knows the whole URL and has already
+written it down; see `cooked-link--fontify-wrapped-match'.  An *unwrapped*
+detected URL is still left to thingatpt, which reads it correctly and reads more
+schemes than goto-addr does."
+  (or (cooked-link-uri)
+      (and (get-text-property (point) 'cooked-link-fragment)
+           (get-text-property (point) 'cooked-link-url))))
 
 (defun cooked-link--url-bounds-at-point ()
-  "Bounds of the `OSC 8\=' span at point, for the bounds provider alist."
-  (and (cooked-link-uri) (cooked-link--osc-8-bounds)))
+  "Bounds of the link at point, for the bounds provider alist.
+
+The two cases `cooked-link--url-at-point' answers, in the same order and for the
+same reasons."
+  (cond ((cooked-link-uri) (cooked-link--osc-8-bounds))
+        ((get-text-property (point) 'cooked-link-fragment)
+         (cooked-link--detected-bounds))))
 
 (add-to-list 'cooked-thing-at-point-providers
              (cons 'url #'cooked-link--url-at-point))

@@ -265,7 +265,8 @@ pub struct Delta {
     ///
     /// Empty on every drain that did not scroll, which is most of them.
     pub shifts: Vec<Shift>,
-    pub rows: Vec<(usize, Vec<Run>)>,
+    /// Rows to rewrite, in ascending index order; see [`DamagedRow`].
+    pub rows: Vec<DamagedRow>,
     /// The grid's shape as of this drain, so the buffer never has to hold a second opinion
     /// of it: how tall it is, how many rows of it are occupied ([`Screen::used`]), and how
     /// many characters of row 0's logical line are already in Emacs ([`Screen::head`]).
@@ -304,6 +305,28 @@ pub struct Delta {
     /// rewrite. `anchor_to_lisp` already spells both, so the two cases cost nothing to
     /// tell apart here.
     pub marks: Vec<(MarkId, Anchor)>,
+}
+
+/// One damaged row as a drain reports it: where it is, whether its logical line
+/// continues onto the row below, and the styled runs to rewrite it from.
+///
+/// A struct rather than the `(usize, Vec<Run>)` pair it grew out of, because `wrapped`
+/// is a third thing that is not either of the other two and a bare triple would have
+/// [`update_to_lisp`](crate::update_to_lisp) reading `.1` and `.2` a screaming distance
+/// from anything saying what they are.
+///
+/// `wrapped` is [`Row::wrapped`](crate::emu::cell::Row::wrapped), which until now left
+/// the emulator only through eviction: the archiver reads it to rejoin a logical line as
+/// it becomes buffer text. On the live grid the same fact was known and never told, so
+/// Emacs saw a screenful of independent lines and had no way to know that two of them
+/// were one. That is the whole of cooked's documented link-detection gap -- a URL broken
+/// across a row boundary matched only as far as the break -- and one bool per damaged
+/// row closes it.
+#[derive(Clone, Debug)]
+pub struct DamagedRow {
+    pub index: usize,
+    pub wrapped: bool,
+    pub runs: Vec<Run>,
 }
 
 /// A reading of everything [`Delta`] carries, cheap enough to take on every read.

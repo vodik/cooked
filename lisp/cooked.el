@@ -439,17 +439,22 @@ run of characters, and every span carries offsets in characters into it; spans
 appear only where there is something to say, so a plain unstyled row carries no
 list at all.
 
-ROWS is the block\='s row table: one (START WIDTH UNIFORM) per *screen row* the
-block covers, in order.  A block is a run of contiguous damaged rows joined by
-newlines -- see `cooked--render-rows\=' -- so START is where that row\='s text
-begins in TEXT, WIDTH how many grid cells it occupies, and UNIFORM whether
-every character of it takes one byte and stands on one cell.  The last two are
-by-products of the core building the row, for `cooked--guard-row-width\=' to use
-once this text is in the buffer, and are read by `cooked--render-rows\=' rather
-than here; START is read here, and only for a decoration, which is the one
-thing that has to know which row of the run it landed on.  Scrollback carries
-no table at all: its lines are ordinary buffer text that is allowed to wrap, so
-there is nothing to guard and no screen row to phase against.
+ROWS is the block\='s row table: one (START WIDTH UNIFORM WRAPPED) per *screen
+row* the block covers, in order.  A block is a run of contiguous damaged rows
+joined by newlines -- see `cooked--render-rows\=' -- so START is where that
+row\='s text begins in TEXT, WIDTH how many grid cells it occupies, UNIFORM
+whether every character of it takes one byte and stands on one cell, and
+WRAPPED whether the row below continues this row\='s logical line.  All three
+measurements are by-products of the core building the row; the first two are
+`cooked--guard-row-width\='s and the third is
+`cooked--mark-row-wrap\='s, and all three are read by `cooked--render-rows\='
+rather than here.  START is read here, and only for a decoration, which is the
+one thing that has to know which row of the run it landed on.  Scrollback
+carries no table at all: its lines are ordinary buffer text that is allowed to
+wrap, so there is nothing to guard, no screen row to phase against, and -- with
+`cooked-rejoin-wrapped-lines\=' on, which is the default -- no soft wrap left to
+mark, the continuation having been joined onto the line above as it was
+written.
 
 STYLE-SPANS is not a list but a unibyte string of fixed-width records, one per
 run that has a rendition to name -- see `Block::push_style\=' in src/lib.rs for
@@ -2686,6 +2691,43 @@ the user was pointing is the end of what the row now holds."
       (cooked--relocation-set
        relocation (min (+ start (cooked-relocation-column relocation)) end)))))
 
+(defun cooked--mark-row-wrap (eol wrapped)
+  "Record on the newline at EOL whether the row it ends was soft-wrapped.
+
+The `cooked-wrap\=' property, and this is the only place it is written: WRAPPED
+non-nil means the emulator\='s `Row::wrapped\=' was set, so the row below carries
+the rest of a logical line the child never broke.  The buffer has no other way
+to know that.  A screen row is one buffer line, so a line the child ended and a
+line the terminal ran out of columns for are the same two characters of text --
+and everything that reads the buffer as language rather than as a grid then gets
+the wrong answer.  cooked\='s one documented link-detection gap is exactly this:
+a URL split across a row boundary matched only as far as the break.  See
+`cooked-link--join-wrapped\=', which is the reader.
+
+Only the live screen.  Scrollback needs nothing under
+`cooked-rejoin-wrapped-lines\=', which is the default: the continuation was
+joined onto the line above as it was written, so there is no wrap newline left
+to mark.  With rejoining off the rows do stay separate up there and no flag
+follows them, which is the one place this does not reach -- an accepted cost of
+a mode whose whole point is that the buffer keeps the grid\='s line structure.
+
+Written only when it differs from what is already there, which on the ordinary
+row is never.  A property change runs `after-change-functions\=' exactly as an
+insertion does, and jit-lock is on that hook -- see `cooked--render-block\=' for
+the same finding measured.  A row inside a run has a freshly inserted newline
+that carries nothing, so the common case reads a property and writes none;
+only a row that has just started or stopped wrapping pays anything.
+
+Nothing to mark at `point-max\=': the last screen row is left unterminated -- see
+`cooked--fit-screen\=' -- so a wrap on it has no newline to sit on yet.  The row
+below it does not exist, which is the sense in which the flag is not yet true."
+  (when (< eol (point-max))
+    (let ((marked (get-text-property eol 'cooked-wrap)))
+      (cond ((and wrapped (not marked))
+             (put-text-property eol (1+ eol) 'cooked-wrap t))
+            ((and marked (not wrapped))
+             (remove-text-properties eol (1+ eol) '(cooked-wrap nil)))))))
+
 (defun cooked--goto-screen-run-end (start first count)
   "End of the last of COUNT screen rows, the first of them row FIRST at START.
 
@@ -2843,7 +2885,7 @@ which has no such seam at all."
           (let ((pos start)
                 (i 0))
             (dolist (row table)
-              (pcase-let ((`(,_ ,cells ,uniform) row))
+              (pcase-let ((`(,_ ,cells ,uniform ,wrapped) row))
                 (goto-char pos)
                 ;; The row table's own two measurements: how many cells the row
                 ;; occupies on the grid, and whether every character of it takes
@@ -2853,7 +2895,10 @@ which has no such seam at all."
                 ;; `cooked--guard-row-width'.
                 (when (and layout cells)
                   (cooked--guard-row-width pos cells layout uniform cache))
-                (goto-char pos))
+                (goto-char pos)
+                ;; After the guard, which is the one thing in this loop that can
+                ;; shorten a row -- and so move the newline this is about.
+                (cooked--mark-row-wrap (line-end-position) wrapped))
               ;; Nothing scans the row here.  Rewriting the text is what tells
               ;; jit-lock the row is no longer fontified, so redisplay asks
               ;; `cooked--fontify-region' for it -- and only if this frame is one
@@ -2995,6 +3040,13 @@ a reproduction of `goto-address-fontify-region\=' with the filtering added and
 the rounding left out -- see `cooked--fontify-links\=' -- and the scan hook
 never rounded.
 
+Whole *logical* lines, which is a wider round than it used to be and has to be:
+a soft-wrapped line is several buffer lines, so rounding to buffer lines alone
+would let a chunk boundary fall between two rows of one line and split the very
+candidate the joining exists to put back together.  See
+`cooked-link-logical-line-bounds\=', which is bounded so this cannot round out to
+a screenful.
+
 Nothing at all on the alternate screen, which is what
 `cooked-detect-links-on-alt-screen\=' asks for and is safe to answer by simply
 returning: that grid is rewritten row by row on the way back to the primary
@@ -3002,8 +3054,11 @@ screen, and rewriting text is what marks it unfontified again, so nothing is
 stranded by having been skipped here."
   (when (and cooked--session (not cooked--alt))
     (let* ((inhibit-read-only t)
-           (from (save-excursion (goto-char beg) (line-beginning-position)))
-           (to (save-excursion (goto-char end) (line-end-position)))
+           (lines (cooked-link-logical-line-bounds
+                   (save-excursion (goto-char beg) (line-beginning-position))
+                   (save-excursion (goto-char end) (line-end-position))))
+           (from (car lines))
+           (to (cdr lines))
            (held (cooked--link-hold-bounds)))
       ;; The one row worth declining, and why declining it is not a corner case.
       ;; A spinner or a progress bar rewrites the cursor's row tens to a hundred

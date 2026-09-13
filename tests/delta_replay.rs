@@ -375,9 +375,9 @@ impl Replay {
         for shift in delta.shifts {
             Self::shift(&mut self.shadow, shift);
         }
-        for (index, runs) in delta.rows {
-            if let Some(row) = self.shadow.get_mut(index) {
-                *row = runs;
+        for damaged in delta.rows {
+            if let Some(row) = self.shadow.get_mut(damaged.index) {
+                *row = damaged.runs;
             }
         }
         if !delta.scrolled.is_empty() {
@@ -542,14 +542,14 @@ fn difference(shadow: &[Vec<Run>], full: &[Vec<Run>]) -> Option<String> {
 /// lets damaged rows be coalesced into spans at all — so it is worth asserting where a
 /// property test can see it.
 fn dense(delta: &Delta) -> Result<Vec<Vec<Run>>, TestCaseError> {
-    let indices: Vec<usize> = delta.rows.iter().map(|(i, _)| *i).collect();
+    let indices: Vec<usize> = delta.rows.iter().map(|r| r.index).collect();
     let expected: Vec<usize> = (0..delta.height).collect();
     prop_assert_eq!(
         indices,
         expected,
         "a drain after touch_all must report every row once, ascending"
     );
-    Ok(delta.rows.iter().map(|(_, runs)| runs.clone()).collect())
+    Ok(delta.rows.iter().map(|r| r.runs.clone()).collect())
 }
 
 proptest! {

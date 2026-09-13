@@ -769,5 +769,215 @@ bought again every redraw."
         (pcase-dolist (`(,_beg . ,end) seen)
           (should (<= end screen)))))))
 
+;;;; Soft wrap
+;;
+;; A narrow session, because that is the only way to make the terminal do the
+;; wrapping: the child writes one line and the grid breaks it, which is exactly
+;; the case the buffer could not tell from a line the child ended.  Twenty
+;; columns is narrow enough for a URL to need three rows of it and wide enough
+;; that the rows are still readable in a failure message.
+;;
+;; A trailing newline after the URL matters and is not decoration.  The URL scan
+;; declines the cursor's own row -- see
+;; `cooked-the-url-guess-declines-the-cursors-own-row' -- so a URL whose last row
+;; the cursor is still sitting on is held back, and the test would be asserting
+;; the hold rather than the join.
+
+(defmacro cooked-tests--with-wrapped-line (text &rest body)
+  "Run BODY with TEXT printed into a 6x20 session, followed by a newline."
+  (declare (indent 1))
+  `(let ((buffer (generate-new-buffer "*cooked-wrap*")))
+     (unwind-protect
+         (with-current-buffer buffer
+           (cooked-mode)
+           (setq cooked--rows 6 cooked--cols 20 cooked--last-size '(6 . 20))
+           (cooked--start (list "/bin/sh" "-c"
+                                (format "printf '%%s\\n' '%s'; sleep 5" ,text)))
+           (cooked--refresh-keymap)
+           (should (cooked-tests--settle
+                    (lambda () (string-match-p "end" (cooked-tests--text)))))
+           (cooked-tests--fontify)
+           ,@body)
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer))))
+
+(defun cooked-tests--url-runs ()
+  "Every run of `cooked-link-url\\=' in the buffer, as (BEG END URL)."
+  (let ((runs nil)
+        (pos (point-min)))
+    (while (< pos (point-max))
+      (let ((next (or (next-single-property-change pos 'cooked-link-url)
+                      (point-max))))
+        (when-let* ((url (get-text-property pos 'cooked-link-url)))
+          (push (list pos next url) runs))
+        (setq pos next)))
+    (nreverse runs)))
+
+(defconst cooked-tests--wrapping-url
+  "see https://example.com/a/very/long/path end"
+  "A URL that needs three rows of a twenty-column terminal.")
+
+(ert-deftest cooked-a-url-the-terminal-wrapped-is-matched-whole ()
+  "cooked's one documented detection gap, closed.
+
+Each live row is its own buffer line, so until the emulator started reporting
+`Row::wrapped' for damaged rows this matched only as far as the first column
+boundary -- `https://example' and nothing else.  The whole URL is now one match,
+and the assertion is on the URL *recorded*, which is the thing a click opens."
+  (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
+    (let ((runs (cooked-tests--url-runs)))
+      (should runs)
+      (dolist (run runs)
+        (should (equal (nth 2 run) "https://example.com/a/very/long/path")))
+      ;; More than one run, and that is the shape rather than an accident: the
+      ;; wrap newlines are left unmarked, so one link is as many property runs as
+      ;; it has rows.
+      (should (> (length runs) 1)))))
+
+(ert-deftest cooked-a-wrapped-links-row-breaks-carry-no-link-property ()
+  "The newline between two rows of one link is not part of the link.
+
+A `mouse-face' there would highlight the gap at the end of the row, and a
+`keymap' would claim a click on nothing.  ghostel's `ghostel--wrap-fragments'
+makes the same exclusion for the same reason."
+  (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
+    (let ((runs (cooked-tests--url-runs)))
+      (should (> (length runs) 1))
+      ;; Between each pair of runs, exactly the wrap newline and nothing else.
+      (cl-loop for (this next) on runs
+               while next
+               do (should (= (nth 1 this) (1- (car next))))
+               do (should (eq (char-after (nth 1 this)) ?\n))
+               do (should (get-text-property (nth 1 this) 'cooked-wrap))
+               do (should-not (get-text-property (nth 1 this) 'mouse-face))
+               do (should-not (get-text-property (nth 1 this) 'keymap))))))
+
+(ert-deftest cooked-the-fragments-of-a-wrapped-link-are-one-thing ()
+  "What is drawn as three pieces answers as one link.
+
+The shared `cooked-link-fragment' id is what makes that exact -- adjacency in
+the text would not, since two links can sit on consecutive rows -- and it is
+what `thing-at-point' and embark need in order to act on the whole URL rather
+than on the row point happens to be in."
+  (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
+    (let* ((runs (cooked-tests--url-runs))
+           (ids (mapcar (lambda (run)
+                          (get-text-property (car run) 'cooked-link-fragment))
+                        runs))
+           (whole (cons (car (car runs)) (nth 1 (car (last runs))))))
+      (should (car ids))
+      (should (apply #'eq (car ids) (cdr ids)))
+      ;; The bounds span every fragment and the breaks between them, which is the
+      ;; extent of the thing even though the properties skip the breaks -- and
+      ;; the same answer whichever fragment is asked.
+      (goto-char (car (car runs)))
+      (should (equal (cooked-link--detected-bounds) whole))
+      (goto-char (car (car (last runs))))
+      (should (equal (cooked-link--detected-bounds) whole)))))
+
+(ert-deftest cooked-thing-at-point-answers-a-wrapped-url-whole ()
+  "thingatpt reads a URL out of the text, and the text has a row break in it.
+
+So this is the second case `cooked-link--url-at-point' answers, on the same
+argument as the first: what thingatpt cannot know.  An unwrapped detected URL is
+still left to it."
+  (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
+    (goto-char (car (car (cooked-tests--url-runs))))
+    (cooked--install-thing-at-point-providers)
+    (should (equal (thing-at-point 'url)
+                   "https://example.com/a/very/long/path"))))
+
+(ert-deftest cooked-following-a-wrapped-link-opens-the-whole-url ()
+  "`goto-address-at-point' would open the fragment point is in, reading the URL
+out of the text being all it can do.  The scan already wrote the whole one down."
+  (cooked-tests--with-wrapped-line cooked-tests--wrapping-url
+    (let ((opened nil))
+      (cl-letf (((symbol-function 'browse-url)
+                 (lambda (url &rest _) (setq opened url))))
+        ;; The second row, so a fragment rather than the start of the match.
+        (goto-char (car (nth 1 (cooked-tests--url-runs))))
+        (cooked--open-link-at-point))
+      (should (equal opened "https://example.com/a/very/long/path")))))
+
+(ert-deftest cooked-a-line-the-child-ended-is-never-joined ()
+  "The half that must not change, and the reason the flag had to come from the
+emulator rather than be guessed from the geometry.  Two lines the child ended
+are two things whatever they look like, and gluing them would invent a URL
+nobody printed -- a real hazard rather than a tidy one, since the invented
+destination names a host neither line did."
+  (cooked-tests--with-wrapped-line "see https://a.example\n/evil/path end"
+    (let ((runs (cooked-tests--url-runs)))
+      (should runs)
+      (dolist (run runs)
+        (should-not (string-search "evil" (nth 2 run)))))))
+
+(ert-deftest cooked-an-unwrapped-region-takes-the-path-it-always-took ()
+  "The cost of the feature on a screen with nothing wrapped is one property
+search, and the way that is guaranteed is that the join declines: with no
+`cooked-wrap' in the region `cooked-link--join-wrapped' answers nil and the scan
+runs over the buffer exactly as before."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf 'go to https://example.com/ now\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "example.com" (cooked-tests--text)))))
+    (should-not (cooked-link--join-wrapped (point-min) (point-max)))
+    (cooked-tests--fontify)
+    (let ((at (cooked-tests--link-at "https://example.com/")))
+      (should (equal (get-text-property at 'cooked-link-url)
+                     "https://example.com/"))
+      ;; No id, because there was nothing to hold together.
+      (should-not (get-text-property at 'cooked-link-fragment)))))
+
+;; The join's own pieces, over a buffer written by hand.  A terminal cannot
+;; produce a fifty-row logical line at any width a test would want to run at, and
+;; the binary search is worth pinning at a size where a linear walk would have
+;; passed by accident.
+
+(defun cooked-tests--wrapped-buffer (rows text)
+  "Insert ROWS lines of TEXT, joined by soft-wrap newlines, and mark them."
+  (dotimes (row rows)
+    (when (> row 0)
+      (insert "\n")
+      (put-text-property (1- (point)) (point) 'cooked-wrap t))
+    (insert text)))
+
+(ert-deftest cooked-joining-stops-at-the-row-cap ()
+  "A minified blob is one logical line megabytes long, and joining all of it
+would build that string on every scan and hand the regexp engine a single token
+to chew through.  The cap is ghostel's fifty, counted per logical line."
+  (with-temp-buffer
+    (cooked-tests--wrapped-buffer (* 2 cooked-link--join-rows) "0123456789")
+    (let ((joined (cooked-link--join-wrapped (point-min) (point-max))))
+      (should joined)
+      ;; Every newline but the ones the cap refused is gone: one refusal per
+      ;; fifty rows joined, and the last stretch stops short of the cap.
+      (should (= (cl-count ?\n (car joined))
+                 (/ (1- (* 2 cooked-link--join-rows))
+                    cooked-link--join-rows))))))
+
+(ert-deftest cooked-the-offset-map-finds-the-row-an-offset-landed-in ()
+  "The binary search, over enough rows that a walk would be the wrong shape.
+Asserted against the buffer's own arithmetic for every row, which is the only
+oracle worth having for a map."
+  (with-temp-buffer
+    (cooked-tests--wrapped-buffer 40 "0123456789")
+    (let* ((joined (cooked-link--join-wrapped (point-min) (point-max)))
+           (chunks (cdr joined)))
+      (should (= (length (car joined)) 400))
+      (dotimes (row 40)
+        ;; Ten characters per row in the string; eleven in the buffer, the
+        ;; eleventh being the wrap newline the join took out.
+        (should (= (cooked-link--wrap-position (* row 10) chunks)
+                   (+ (point-min) (* row 11))))))))
+
+(ert-deftest cooked-a-wrap-flag-on-something-other-than-a-newline-is-ignored ()
+  "A yank carries text properties with the text, so a buffer can hold a copy of
+a `cooked-wrap' sitting on an ordinary character.  Joining there would delete a
+character rather than a line break."
+  (with-temp-buffer
+    (insert "abcdef")
+    (put-text-property 3 4 'cooked-wrap t)
+    (should-not (cooked-link--join-wrapped (point-min) (point-max)))))
+
 (provide 'cooked-tests-link)
 ;;; cooked-tests-link.el ends here

@@ -27,8 +27,8 @@ pub(crate) mod pty;
 pub(crate) mod session;
 
 use emu::{
-    Anchor, CellMetrics, Color, ColorScheme, CursorShape, Deco, Event, ImageData, ImageFormat,
-    ImageId, KeyEncoding, LinkId, MarkId, Run, Style,
+    Anchor, CellMetrics, Color, ColorScheme, CursorShape, DamagedRow, Deco, Event, ImageData,
+    ImageFormat, ImageId, KeyEncoding, LinkId, MarkId, Run, Style,
 };
 use env::{Env, Result, Runtime, Value, lisp_enum, list, plist, sym};
 use nix::sys::signal::Signal;
@@ -862,8 +862,8 @@ fn filter_feed(env: Env, args: &[Value]) -> Result<Value> {
 /// every marker and overlay anchored inside it. Coalescing runs of *genuinely damaged*
 /// rows cannot do that: an undamaged row between two damaged ones is never inside a
 /// block, so nothing anchored to it is touched.
-fn contiguous_runs(rows: &[(usize, Vec<Run>)]) -> impl Iterator<Item = &[(usize, Vec<Run>)]> {
-    rows.chunk_by(|(this, _), (next, _)| *next == this + 1)
+fn contiguous_runs(rows: &[DamagedRow]) -> impl Iterator<Item = &[DamagedRow]> {
+    rows.chunk_by(|this, next| next.index == this.index + 1)
 }
 
 /// `(:scrolled ROWS :rows ((FIRST . BLOCK)...) :height N :used N :head N
@@ -886,14 +886,14 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
     let rows = contiguous_runs(&update.delta.rows)
         .map(|run| {
             let mut block = Block::default();
-            for (i, (_, runs)) in run.iter().enumerate() {
+            for (i, row) in run.iter().enumerate() {
                 if i > 0 {
                     block.push_newline();
                 }
-                block.push_runs(env, runs)?;
-                block.end_row();
+                block.push_runs(env, &row.runs)?;
+                block.end_row(row.wrapped);
             }
-            env.cons(env.into_lisp(run[0].0)?, block.into_lisp(&env)?)
+            env.cons(env.into_lisp(run[0].index)?, block.into_lisp(&env)?)
         })
         .collect::<Result<Vec<_>>>()?;
     // `(TOP BOTTOM COUNT UP)` per move, in the order they happened; see [`Shift`]. A list
@@ -1085,6 +1085,15 @@ struct BlockRow {
     start: usize,
     cols: usize,
     uniform: bool,
+    /// [`Row::wrapped`](crate::emu::cell::Row::wrapped): the row below continues this
+    /// row's logical line, so the newline between them is a soft wrap the child never
+    /// wrote.
+    ///
+    /// The only field here that is not the width guard's. It rides the same table
+    /// because it is the same kind of fact -- something the core knows about a rendered
+    /// row that Emacs cannot see for itself -- and a second per-row list to carry one
+    /// bool would cost a cons per row per drain to say less clearly.
+    wrapped: bool,
 }
 
 /// Bytes in one packed style span. See [`Block::push_style`] for the field layout.
@@ -1235,11 +1244,12 @@ impl Block {
     /// distinction the table encodes — a live row is a fixed-width slot on the grid
     /// whose layout Emacs can get wrong, while a scrollback line is ordinary buffer text
     /// that is allowed to wrap.
-    fn end_row(&mut self) {
+    fn end_row(&mut self, wrapped: bool) {
         self.rows.push(BlockRow {
             start: self.row_start,
             cols: self.cols,
             uniform: !self.nonuniform,
+            wrapped,
         });
         self.cols = 0;
         self.nonuniform = false;
@@ -1250,7 +1260,7 @@ impl Block {
         let rows = self
             .rows
             .iter()
-            .map(|row| list!(*env, [row.start, row.cols, row.uniform]))
+            .map(|row| list!(*env, [row.start, row.cols, row.uniform, row.wrapped]))
             .collect::<Result<Vec<_>>>()?;
         list!(
             *env,
@@ -1602,9 +1612,16 @@ mod tests {
 
     /// The indices of each run, which is all the grouping decision amounts to.
     fn runs_of(indices: &[usize]) -> Vec<Vec<usize>> {
-        let rows: Vec<(usize, Vec<Run>)> = indices.iter().map(|i| (*i, Vec::new())).collect();
+        let rows: Vec<DamagedRow> = indices
+            .iter()
+            .map(|i| DamagedRow {
+                index: *i,
+                wrapped: false,
+                runs: Vec::new(),
+            })
+            .collect();
         contiguous_runs(&rows)
-            .map(|run| run.iter().map(|(i, _)| *i).collect())
+            .map(|run| run.iter().map(|r| r.index).collect())
             .collect()
     }
 
@@ -1656,24 +1673,31 @@ mod tests {
         };
         let mut block = Block::default();
         block.push_run(&row("ab", 2), 2);
-        block.end_row();
+        block.end_row(false);
         block.push_newline();
         // Two characters of three bytes each standing on two cells apiece: neither
         // one-byte nor one-cell, so this row is the nonuniform one.
         block.push_run(&row("世界", 4), 2);
-        block.end_row();
+        // And the wrapped one: its logical line goes on below it. Per row like the other
+        // two, and asserted alongside them, because a flag that leaked between rows would
+        // have Emacs join a line the child ended.
+        block.end_row(true);
         block.push_newline();
         block.push_run(&row("cd", 2), 2);
-        block.end_row();
+        block.end_row(false);
 
-        let table: Vec<(usize, usize, bool)> = block
+        let table: Vec<(usize, usize, bool, bool)> = block
             .rows
             .iter()
-            .map(|r| (r.start, r.cols, r.uniform))
+            .map(|r| (r.start, r.cols, r.uniform, r.wrapped))
             .collect();
         assert_eq!(
             table,
-            vec![(0, 2, true), (3, 4, false), (6, 2, true)],
+            vec![
+                (0, 2, true, false),
+                (3, 4, false, true),
+                (6, 2, true, false)
+            ],
             "text {:?}",
             block.text
         );

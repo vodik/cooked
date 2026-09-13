@@ -47,7 +47,7 @@ fn cursor_addressing_is_one_based() {
 fn sgr_sets_colors_and_attributes() {
     let mut t = term(2, 20, b"\x1b[1;31mred\x1b[0m.");
     let delta = t.drain();
-    let runs = &delta.rows.iter().find(|(i, _)| *i == 0).unwrap().1;
+    let runs = &delta.rows.iter().find(|r| r.index == 0).unwrap().runs;
     assert_eq!(runs[0].text, "red");
     assert_eq!(runs[0].style.fg, Color::Indexed(1));
     assert!(runs[0].style.attrs.contains(Attrs::BOLD));
@@ -2416,7 +2416,7 @@ fn damage_covers_only_touched_rows() {
     t.feed(b"\x1b[1;1Hz");
     let rows = t.drain().rows;
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, 0);
+    assert_eq!(rows[0].index, 0);
 }
 
 #[test]
@@ -2434,11 +2434,12 @@ fn resize_preserves_the_tail() {
 fn box_drawing_bytes_produce_glyphs_in_the_drained_delta() {
     let mut t = term(2, 10, "\u{250C}\u{2500}\u{2500}\u{2510}".as_bytes());
     let delta = t.drain();
-    let (_, runs) = delta
+    let runs = &delta
         .rows
         .iter()
-        .find(|(i, _)| *i == 0)
-        .expect("row 0 is damaged");
+        .find(|r| r.index == 0)
+        .expect("row 0 is damaged")
+        .runs;
     assert_eq!(runs.len(), 1);
     let glyphs = runs[0].deco.as_ref().expect("box-glyph run").glyphs();
     assert_eq!(glyphs.len(), 4, "one descriptor per character");
@@ -2449,11 +2450,12 @@ fn box_drawing_bytes_produce_glyphs_in_the_drained_delta() {
 fn diagonal_and_stub_bytes_also_produce_glyphs() {
     let mut t = term(2, 10, "\u{2571}\u{2572}\u{2573}\u{2574}".as_bytes());
     let delta = t.drain();
-    let (_, runs) = delta
+    let runs = &delta
         .rows
         .iter()
-        .find(|(i, _)| *i == 0)
-        .expect("row 0 is damaged");
+        .find(|r| r.index == 0)
+        .expect("row 0 is damaged")
+        .runs;
     assert_eq!(runs.len(), 1);
     let glyphs = runs[0].deco.as_ref().expect("box-glyph run").glyphs();
     assert_eq!(glyphs.len(), 4);
@@ -2471,11 +2473,12 @@ fn diagonal_and_stub_bytes_also_produce_glyphs() {
 fn a_run_of_identical_glyphs_packs_into_a_single_run_length_record() {
     let mut t = term(2, 10, "\u{2500}\u{2500}\u{2500}\u{2500}".as_bytes());
     let delta = t.drain();
-    let (_, runs) = delta
+    let runs = &delta
         .rows
         .iter()
-        .find(|(i, _)| *i == 0)
-        .expect("row 0 is damaged");
+        .find(|r| r.index == 0)
+        .expect("row 0 is damaged")
+        .runs;
     let packed = runs[0].deco.as_ref().expect("box-glyph run").packed();
     assert_eq!(
         packed.len(),
@@ -2493,11 +2496,12 @@ fn a_run_of_identical_glyphs_packs_into_a_single_run_length_record() {
 fn a_run_of_differing_glyphs_packs_one_record_per_distinct_shape() {
     let mut t = term(2, 10, "\u{250C}\u{2500}\u{2500}\u{2510}".as_bytes());
     let delta = t.drain();
-    let (_, runs) = delta
+    let runs = &delta
         .rows
         .iter()
-        .find(|(i, _)| *i == 0)
-        .expect("row 0 is damaged");
+        .find(|r| r.index == 0)
+        .expect("row 0 is damaged")
+        .runs;
     let deco = runs[0].deco.as_ref().expect("box-glyph run");
     let packed = deco.packed();
     assert_eq!(packed.len(), 12, "three records: {packed:?}");
@@ -2527,11 +2531,12 @@ fn a_run_of_differing_glyphs_packs_one_record_per_distinct_shape() {
 fn a_run_of_shades_collapses_like_any_other_repeat_and_is_not_flagged() {
     let mut t = term(2, 10, "\u{2592}\u{2592}\u{2592}".as_bytes());
     let delta = t.drain();
-    let (_, runs) = delta
+    let runs = &delta
         .rows
         .iter()
-        .find(|(i, _)| *i == 0)
-        .expect("row 0 is damaged");
+        .find(|r| r.index == 0)
+        .expect("row 0 is damaged")
+        .runs;
     let deco = runs[0].deco.as_ref().expect("box-glyph run");
     let packed = deco.packed();
     // ▒ U+2592, medium shade: block kind, direction `Shade', density 2 -- 0x8015, the

@@ -169,6 +169,6 @@ fn a_write_that_rides_a_scroll_is_reported_at_the_index_it_ended_at() {
     let mut term = painted();
     term.feed(b"\x1b[6;1Hmarker\x1b[24;1H\n");
     let delta = term.drain();
-    let rows: Vec<usize> = delta.rows.iter().map(|(i, _)| *i).collect();
+    let rows: Vec<usize> = delta.rows.iter().map(|r| r.index).collect();
     assert_eq!(rows, vec![4, 23]);
 }

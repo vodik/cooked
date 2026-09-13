@@ -139,7 +139,7 @@ fn feed_and_drain() {
             for piece in data.chunks(chunk) {
                 term.feed(piece);
                 let delta = term.drain();
-                runs += delta.rows.iter().map(|(_, r)| r.len()).sum::<usize>();
+                runs += delta.rows.iter().map(|r| r.runs.len()).sum::<usize>();
                 runs += delta.scrolled.len();
             }
         });

@@ -1573,7 +1573,7 @@ mod tests {
             .delta
             .rows
             .iter()
-            .flat_map(|(_, runs)| runs.iter().map(|r| r.text.clone()))
+            .flat_map(|row| row.runs.iter().map(|r| r.text.clone()))
             .collect()
     }
 

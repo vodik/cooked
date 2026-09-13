@@ -331,7 +331,13 @@ impl State {
             shifts,
             rows: damaged
                 .into_iter()
-                .filter_map(|i| screen.row(i).map(|r| (i, r.runs())))
+                .filter_map(|i| {
+                    screen.row(i).map(|r| DamagedRow {
+                        index: i,
+                        wrapped: r.wrapped,
+                        runs: r.runs(),
+                    })
+                })
                 .collect(),
             height: screen.height(),
             used: screen.used(),
