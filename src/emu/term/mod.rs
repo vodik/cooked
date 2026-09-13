@@ -811,6 +811,10 @@ impl Term {
     }
 
     /// Remove `count` grid rows starting at `first`; see [`Screen::remove_rows`].
+    ///
+    /// One of the two edits the grid accepts from Emacs, with [`Term::clear_to_prompt`].
+    /// Emacs asks rather than deleting buffer text itself because the rows have one owner,
+    /// and the drain that follows repaints what moved like any other.
     pub fn remove_rows(&mut self, first: usize, count: usize) {
         self.state.remove_rows(first, count);
     }

@@ -67,30 +67,33 @@ macro_rules! defuns {
     };
 }
 
-/// Register Lisp functions that are one [`Session`] method on the handle in `args[0]`.
+/// Register Lisp functions whose whole body is one call on the session in `args[0]`.
 ///
-/// Ten defuns share one body -- take the handle, call the method, convert what comes
-/// back -- so they are written as the table they are. `=> alive` names the method, which
-/// is the only thing such a body ever says.
-///
-/// The result goes through [`env::IntoLisp`], so a method returning `()` yields `nil`
-/// without a special case. The optional `as CONV` arm is for a return type that needs a
-/// step before that, which is only `pid`.
+/// Each entry names the call as a function of the session: `Session::alive` for a
+/// session method, or `|s| s.term().touch_all()` for a question put straight to the
+/// locked emulator. The result goes through [`env::IntoLisp`], so a call returning `()`
+/// yields `nil` without a special case.
 ///
 /// A defun whose body is not exactly this shape does not belong here: `foreground_pid`
 /// has its own `Err` handling and `job_control` builds a plist, so both stay written out
 /// in full.
 macro_rules! accessors {
     ($env:expr, {
-        $( $(#[doc = $doc:literal])+ $name:literal => $method:ident; )*
+        $( $(#[doc = $doc:literal])+ $name:literal => $call:expr; )*
     }) => {
         [ $( $env.defun($name, 1..=1, &docstring(&[$($doc),+]), {
             fn accessor(env: Env, args: &[Value]) -> Result<Value> {
-                env.into_lisp(handle(env, args[0])?.$method())
+                env.into_lisp(on_session(handle(env, args[0])?, $call))
             }
             accessor
         }) ),* ]
     };
+}
+
+/// Apply CALL to SESSION. A function rather than `(CALL)(SESSION)` in the macro, so that
+/// a closure's parameter takes its type from this bound instead of needing an annotation.
+fn on_session<R>(session: &Session, call: impl FnOnce(&Session) -> R) -> R {
+    call(session)
 }
 
 /// Emacs calls this once when the module is loaded.
@@ -353,13 +356,13 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// how much of its top row's line already left for Emacs, so that a rewrap resumes
         /// that line where the buffer actually wraps it.  Once the text is gone the top row
         /// begins a line again, and saying so is what keeps the two ends agreeing.
-        "cooked--forget-history" => forget_history;
+        "cooked--forget-history" => |s| s.term().forget_history();
 
         /// Mark SESSION's whole screen damaged, so the next drain re-sends it.
         /// For recovering from a redisplay that failed part-way: an ordinary drain only reports
         /// what changed since the last one, so it cannot repair a buffer that is missing rows of
         /// a drain that signalled halfway through applying them.
-        "cooked--redraw" => redraw;
+        "cooked--redraw" => |s| s.term().touch_all();
 
         /// Remove the rows above SESSION's current prompt, returning how many went.
         ///
@@ -370,7 +373,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         ///
         /// Returns 0 and does nothing on the alternate screen: that grid belongs to a
         /// running program, not to a transcript.
-        "cooked--clear-to-prompt" => clear_to_prompt;
+        "cooked--clear-to-prompt" => |s| s.term().clear_to_prompt();
 
         /// Tell SESSION that Emacs has finished drawing the last drain.
         ///
@@ -387,17 +390,17 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// rather than fatal -- the reader thread's own tick wakes Emacs instead, at
         /// roughly 100ms -- which is what makes the callers that never do (the benchmark,
         /// the tests that drain by hand) merely leisurely.
-        "cooked--ready" => ready;
+        "cooked--ready" => Session::ready;
 
         /// Text of the last non-blank line written by SESSION's child.
         /// Used as the minibuffer prompt when SESSION enters `secret' mode.
-        "cooked--prompt-text" => trailing_text;
+        "cooked--prompt-text" => |s| s.term().trailing_text();
 
         /// Process id of SESSION's child.
-        "cooked--pid" => pid;
+        "cooked--pid" => Session::pid;
 
         /// Whether SESSION's child is still running.
-        "cooked--live-p" => alive;
+        "cooked--live-p" => Session::alive;
 
         /// Re-read SESSION's termios now and return the mode it reports.
         ///
@@ -410,23 +413,23 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// prompt -- leaves nothing on the pty to wake anyone, so the cached mode goes on
         /// saying `cooked' while a password read is in progress.  Asking here, once per
         /// character, is what keeps that window from ever being a window.
-        "cooked--sample-mode" => sample_mode;
+        "cooked--sample-mode" => Session::sample_mode;
 
         /// Whether SESSION requested bracketed paste.
-        "cooked--bracketed-paste-p" => bracketed_paste;
+        "cooked--bracketed-paste-p" => |s| s.term().bracketed_paste();
 
         /// Whether SESSION asked to be told when the window gains or loses focus.
-        "cooked--focus-events-p" => focus_events;
+        "cooked--focus-events-p" => |s| s.term().focus_events();
 
         /// Whether a wheel notch on SESSION should be sent as cursor keys.
-        "cooked--alt-scroll-p" => alt_scroll;
+        "cooked--alt-scroll-p" => |s| s.term().alt_scroll();
 
         /// Tear SESSION's child down now and reap it.
         /// Returns t if this call ended the session, nil if it had already ended. Safe to call
         /// repeatedly. The child is sent SIGHUP, given a moment, then SIGKILL, so a process that
         /// ignores SIGHUP cannot outlive its buffer. Afterwards the handle is inert and garbage
         /// collecting it costs nothing.
-        "cooked--kill" => shutdown;
+        "cooked--kill" => Session::shutdown;
     });
 
     match registered
@@ -604,7 +607,7 @@ fn resize(env: Env, args: &[Value]) -> Result<Value> {
 fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
     let first = env.from_lisp::<i64>(args[1])?.max(0) as usize;
     let count = env.from_lisp::<i64>(args[2])?.max(0) as usize;
-    handle(env, args[0])?.remove_rows(first, count);
+    handle(env, args[0])?.term().remove_rows(first, count);
     Ok(env.nil())
 }
 
@@ -614,7 +617,7 @@ fn image_forget(env: Env, args: &[Value]) -> Result<Value> {
     // an id the module gave it, and a number that could never have been one is the same
     // no-op as an id already retired.
     if let Ok(id) = u32::try_from(env.from_lisp::<i64>(args[1])?) {
-        handle(env, args[0])?.forget_image(ImageId(id));
+        handle(env, args[0])?.term().forget_image(ImageId(id));
     }
     Ok(env.nil())
 }
@@ -630,13 +633,14 @@ fn set_color_scheme(env: Env, args: &[Value]) -> Result<Value> {
     } else {
         return Err(env.signal_wrong_type("cooked-color-scheme-p", args[1]));
     };
-    let owed = handle(env, args[0])?.set_color_scheme(scheme);
+    let owed = handle(env, args[0])?.term().set_color_scheme(scheme);
     env.into_lisp(owed.as_deref())
 }
 
 fn set_graphics_shown(env: Env, args: &[Value]) -> Result<Value> {
     // Nil-or-not, as `set_attended` reads its flag.
-    handle(env, args[0])?.set_graphics_shown(env.from_lisp(args[1])?);
+    let shown = env.from_lisp(args[1])?;
+    handle(env, args[0])?.term().set_graphics_shown(shown);
     Ok(env.nil())
 }
 

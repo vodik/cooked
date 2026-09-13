@@ -4,7 +4,7 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{ColorScheme, Delta, ImageId, Term};
+use crate::emu::{Delta, Term};
 use crate::error::Result;
 use crate::pty::{AtomicMode, JobControl, Mode, Pid, Pty, Winsize};
 use nix::errno::Errno;
@@ -798,6 +798,17 @@ impl Session {
         true
     }
 
+    /// The emulator, locked, for a caller that only needs to ask it something or tell it
+    /// something.
+    ///
+    /// The methods on `Session` itself are the ones with policy of their own -- a resize
+    /// that also sets the tty, a send that counts as interaction -- so a plain question
+    /// about the grid goes straight to [`Term`] rather than through a one-line forwarder
+    /// here.
+    pub(crate) fn term(&self) -> MutexGuard<'_, Term> {
+        self.shared.term.held()
+    }
+
     /// Collect everything that changed, acknowledging the wakeup that asked for it.
     ///
     /// Acknowledging is not re-arming: the next wake byte waits on [`Session::ready`],
@@ -839,13 +850,6 @@ impl Session {
     pub(crate) fn send(&self, bytes: &[u8]) -> Result<()> {
         self.shared.interacted();
         self.shared.pty.write(bytes)
-    }
-
-    /// Forget that any of the top row's line is already in Emacs.
-    ///
-    /// Emacs holds the scrollback, so only Emacs knows when it has thrown it away.
-    pub(crate) fn forget_history(&self) {
-        self.shared.term.held().forget_history();
     }
 
     /// Resize the emulator and the pty, and keep asking until the child agrees.
@@ -903,39 +907,6 @@ impl Session {
             let _ = self.shared.pty.write(&report);
         }
         result
-    }
-
-    /// Emacs has dropped an image's bytes; see [`Term::forget_image`].
-    pub(crate) fn forget_image(&self, id: ImageId) {
-        self.shared.term.held().forget_image(id);
-    }
-
-    /// Mark the whole screen damaged, so the next drain re-sends it.
-    ///
-    /// Emacs asks for this when its own idea of the screen region can no longer be
-    /// trusted — a redisplay that signalled part-way through leaves the buffer holding
-    /// some rows of a drain and not others, and no amount of further deltas repairs
-    /// that, because a delta only describes what changed since.
-    pub(crate) fn redraw(&self) {
-        self.shared.term.held().touch_all();
-    }
-
-    /// Remove `count` grid rows starting at `first`, and repaint what moved.
-    ///
-    /// The one edit the grid accepts from Emacs. It goes through the emulator rather than
-    /// Emacs deleting the buffer text itself for the same reason input does: the rows have
-    /// one owner, and the drain that follows is the ordinary one.
-    pub(crate) fn remove_rows(&self, first: usize, count: usize) {
-        self.shared.term.held().remove_rows(first, count);
-    }
-
-    /// Drop the grid rows above the prompt; see [`Term::clear_to_prompt`].
-    ///
-    /// The other edit the grid accepts from Emacs, and the same bargain as
-    /// [`Session::remove_rows`]: Emacs asks, the emulator moves the rows, and the drain
-    /// that follows is the ordinary one.
-    pub(crate) fn clear_to_prompt(&self) -> usize {
-        self.shared.term.held().clear_to_prompt()
     }
 
     /// The reader thread's last sample. Lisp reads this off the drain's `:mode' instead,
@@ -1073,34 +1044,6 @@ impl Session {
 
     pub(crate) fn alive(&self) -> bool {
         self.shared.exited.held().is_none()
-    }
-
-    /// The last non-blank line — the prompt text for a [`Mode::Secret`] read.
-    pub(crate) fn trailing_text(&self) -> Option<String> {
-        self.shared.term.held().trailing_text()
-    }
-
-    pub(crate) fn bracketed_paste(&self) -> bool {
-        self.shared.term.held().bracketed_paste()
-    }
-
-    pub(crate) fn focus_events(&self) -> bool {
-        self.shared.term.held().focus_events()
-    }
-
-    pub(crate) fn alt_scroll(&self) -> bool {
-        self.shared.term.held().alt_scroll()
-    }
-
-    /// Record whether Emacs can show this session's pictures; see
-    /// `Term::set_graphics_shown`.
-    pub(crate) fn set_graphics_shown(&self, shown: bool) {
-        self.shared.term.held().set_graphics_shown(shown);
-    }
-
-    /// Record Emacs' colour scheme, returning what a mode 2031 subscriber is owed.
-    pub(crate) fn set_color_scheme(&self, scheme: ColorScheme) -> Option<Vec<u8>> {
-        self.shared.term.held().set_color_scheme(scheme)
     }
 }
 
