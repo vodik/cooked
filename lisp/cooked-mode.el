@@ -1517,6 +1517,17 @@ to the child verbatim."
               ;; whitespace that will not break a line; a grid has no lines to
               ;; break and no writer to warn.
               nobreak-char-display nil
+              ;; SGR 53 is a line along the top of the cell, not a taller cell.
+              ;; Emacs adds `overline-margin\=' pixels to the ascent of any glyph
+              ;; with an overline, 2 by default, so every overlined row came out
+              ;; that much taller than `window-default-line-height\=', which
+              ;; `cooked--window-rows\=' counts in.  A screen with a few such
+              ;; rows then no longer fits the rows the child was told, and the
+              ;; bottom one is clipped.  At 0 the line is drawn over the top
+              ;; pixel row of the cell instead, as a terminal draws it.  Local
+              ;; here, since redisplay reads the value with the window\='s
+              ;; buffer current, so prose elsewhere keeps its margin.
+              overline-margin 0
               ;; A grid, not prose.  Cell (ROW . COL) is the COLth character of
               ;; the ROWth line and nothing may make it otherwise: `cooked--mouse-cell'
               ;; turns a click's column back into a cell, the ghost cursor is

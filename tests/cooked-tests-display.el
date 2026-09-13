@@ -182,6 +182,18 @@ vterm and eat all leave it at the default."
       (should (local-variable-p 'nobreak-char-display))
       (should-not nobreak-char-display))))
 
+(ert-deftest cooked-mode-draws-an-overline-inside-the-row ()
+  "An overlined row is exactly as tall as any other.
+Emacs grows a row with an overline by `overline-margin\=' pixels, and the rows
+told to the child are counted in the default line height, so the margin has to
+be 0 in the buffer.  Set globally first, as the user\='s own value would be."
+  (let ((overline-margin 5))
+    (with-temp-buffer
+      (cooked-mode)
+      (should (local-variable-p 'overline-margin))
+      (should (= overline-margin 0)))
+    (should (= overline-margin 5))))
+
 (ert-deftest cooked-mode-tears-sessions-down-when-emacs-exits ()
   "Killing the buffer reaps the child; exiting Emacs kills no buffers, so
 without this hook `Session::shutdown''s SIGHUP-then-SIGKILL escalation never
