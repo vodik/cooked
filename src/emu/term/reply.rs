@@ -10,6 +10,13 @@
 //! A refused body is dropped whole rather than trimmed. The child is waiting for one
 //! answer, and the tail of a broken sequence does not stop being bytes -- it arrives at
 //! the next prompt as typed input.
+//!
+//! Refusing controls is not enough on its own, because printable text echoed back is
+//! typed input too: `DCS 0 + r rm -rf ~ ST` reaches the shell's line editor as the
+//! command. So a reply carries nothing the child sent except as hex or base64, and
+//! numbers only once they have been parsed. Nothing here can tell a child's bytes from
+//! our own, so that rule is held by a test, `no_query_echoes_the_text_it_was_sent`,
+//! which sends every query form a printable payload and looks for it in the answer.
 
 use super::ColorScheme;
 use crate::emu::image::{CellMetrics, PixelSize};
@@ -146,6 +153,105 @@ mod tests {
         ] {
             for body in ["red\x07\x1b]0;pwned", "red\x1b\\", "red\x7f", "red\u{9c}"] {
                 assert_eq!(frame(framing, format_args!("{body}")), None, "{framing:?}");
+            }
+        }
+    }
+
+    /// Printable text a child could smuggle into a query, and would like typed back at
+    /// the shell. Spaces and a tilde, so it cannot be mistaken for hex, base64 or a
+    /// number any reply legitimately carries.
+    const PAYLOAD: &str = "rm -rf ~ x";
+
+    /// Every query form the core sees, each carrying printable text where a reply might
+    /// echo it, paired with that text, and whether the core itself answers it. The OSCs
+    /// are answered in Lisp and are here so that moving one into the core cannot skip
+    /// this check; `cooked-no-osc-query-echoes-the-text-it-was-sent` sends the same
+    /// payloads through the real Lisp answers.
+    fn queries() -> Vec<(String, String, bool)> {
+        let long = "A".repeat(5000);
+        let mut queries = vec![
+            (format!("\x1bP+q{PAYLOAD}\x1b\\"), PAYLOAD.to_owned(), true),
+            (
+                format!("\x1bP+q5463;{PAYLOAD}\x1b\\"),
+                PAYLOAD.to_owned(),
+                true,
+            ),
+            (
+                format!("\x1bP+q7A7A;{PAYLOAD}\x1b\\"),
+                PAYLOAD.to_owned(),
+                true,
+            ),
+            (format!("\x1bP+q{long}\x1b\\"), long.clone(), true),
+            (format!("\x1bP$q{PAYLOAD}\x1b\\"), PAYLOAD.to_owned(), true),
+            (format!("\x1bP$qm{PAYLOAD}\x1b\\"), PAYLOAD.to_owned(), true),
+            // The mode number is the one thing DECRQM echoes, and it is parsed: twenty
+            // digits cannot come back as twenty digits.
+            (
+                "\x1b[?31415926535897932384$p".to_owned(),
+                "31415926535897932384".to_owned(),
+                true,
+            ),
+            (
+                "\x1b[31415926535897932384$p".to_owned(),
+                "31415926535897932384".to_owned(),
+                true,
+            ),
+            (
+                format!("\x1b_Ga=q,i=1,{PAYLOAD};{PAYLOAD}\x1b\\"),
+                PAYLOAD.to_owned(),
+                true,
+            ),
+        ];
+        let oscs = [
+            format!("4;1;?{PAYLOAD}"),
+            format!("4;{PAYLOAD};?"),
+            format!("22;?{PAYLOAD}"),
+            format!("22;>{PAYLOAD}"),
+            format!("52;c;?{PAYLOAD}"),
+            format!("52;{PAYLOAD};?"),
+        ]
+        .into_iter()
+        .chain(
+            [10, 11, 12, 17, 19]
+                .into_iter()
+                .flat_map(|code| [format!("{code};?{PAYLOAD}"), format!("{code};{PAYLOAD};?")]),
+        );
+        for body in oscs {
+            for terminator in ["\x07", "\x1b\\"] {
+                queries.push((
+                    format!("\x1b]{body}{terminator}"),
+                    PAYLOAD.to_owned(),
+                    false,
+                ));
+            }
+        }
+        queries
+    }
+
+    #[test]
+    fn no_query_echoes_the_text_it_was_sent() {
+        for (query, payload, answered) in queries() {
+            let mut t = super::super::Term::new(4, 20);
+            t.feed(query.as_bytes());
+            let replies: Vec<Vec<u8>> = t
+                .drain()
+                .events
+                .into_iter()
+                .filter_map(|event| match event {
+                    super::super::Event::Reply(bytes) => Some(bytes),
+                    _ => None,
+                })
+                .collect();
+            // A form the core stopped answering would pass the check below vacuously.
+            assert_eq!(!replies.is_empty(), answered, "{query:?}: {replies:?}");
+            for reply in &replies {
+                assert!(
+                    !reply
+                        .windows(payload.len())
+                        .any(|w| w == payload.as_bytes()),
+                    "{query:?} echoed its payload: {:?}",
+                    String::from_utf8_lossy(reply)
+                );
             }
         }
     }

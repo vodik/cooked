@@ -1673,6 +1673,48 @@ return it; it still holds its place on the stack so the pop stays paired."
           (osc "?__current__")
           (should (equal (pop replies) (cons 22 (make-string 32 ?a)))))))))
 
+(ert-deftest cooked-no-osc-query-echoes-the-text-it-was-sent ()
+  "The Lisp half of `no_query_echoes_the_text_it_was_sent' in reply.rs.
+
+Every OSC query Lisp answers is sent printable text wherever a reply might
+carry it -- after the `?', in place of an index or target, and stored first by
+a set or push that a later query reads back -- with every knob that widens an
+answer turned on.  The child's input must never contain that text.  A DSR is
+sent last, so its answer marks the point by which everything has come back."
+  (let* ((payload "rm -rf ~ x")
+         (bodies
+          (append
+           (list (concat "4;1;?" payload) (concat "4;" payload ";?")
+                 (concat "22;?" payload) (concat "22;>" payload) "22;?__current__"
+                 (concat "52;c;?" payload) (concat "52;" payload ";?")
+                 ;; Base64 for the payload, which a read must return re-encoded.
+                 "52;0;cm0gLXJmIH4geA==" "52;0;?")
+           (mapcan (lambda (code)
+                     (list (format "%d;?%s" code payload)
+                           (format "%d;%s;?" code payload)
+                           (format "%d;%s" code payload)
+                           (format "%d;?" code)))
+                   '(10 11 12 17 19))))
+         (query (concat (mapconcat (lambda (body) (concat "\\033]" body "\\007"))
+                                   bodies "")
+                        "\\033[5n"))
+         (out (make-temp-file "cooked-osc-echo")))
+    (let ((cooked-allow-color-set t)
+          (cooked-allow-pointer-shape t)
+          (cooked-clipboard-read 'private))
+      (cooked-tests--with-kill "secret"
+        (unwind-protect
+            (cooked-tests--with-session (cooked-tests--reply-to query out)
+              (should (cooked-tests--settle
+                       (lambda () (string-suffix-p "\033[0n" (cooked-tests--contents out)))))
+              (let ((received (cooked-tests--contents out)))
+                ;; The queries were answered, so the check below is not vacuous.
+                (should (string-search "\033]22;0\007" received))
+                (should (string-search "\033]52;0;cm0gLXJmIH4geA==\007" received))
+                (should (string-match-p "\033]11;rgb:" received))
+                (should-not (string-search payload received))))
+          (delete-file out))))))
+
 (defun cooked-tests--reverse-remap ()
   "The colors DECSCNM has remapped `default' to, as one plist, or nil.
 Only when both remaps are in force and nothing outranks them."
