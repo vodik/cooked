@@ -1307,6 +1307,40 @@ queued behind it."
             (should (string-match-p "clipboard" (car prompts)))
             (should-not cooked--clipboard-prompting)))))))
 
+(ert-deftest cooked-osc-52-read-over-the-size-bound-is-answered-empty ()
+  "`cooked-clipboard-max-size\=' bounds replies as it bounds writes.  A kill that
+would encode past it gets the empty reply, once, so the child is not left
+waiting, and a message says why the paste came back blank.  Both settings that
+can hand over the kill ring are checked, since `ask\=' builds its reply in a
+deferred prompt rather than in the filter."
+  (dolist (setting '(t ask))
+    (cooked-tests--with-kill "0123456789"
+      (let ((cooked-clipboard-read setting)
+            ;; Ten bytes encode to sixteen characters.
+            (cooked-clipboard-max-size 15)
+            (refusals nil))
+        (cl-letf* ((real-message (symbol-function 'message))
+                   ((symbol-function 'message)
+                    (lambda (fmt &rest args)
+                      (when (and fmt (string-search "cooked-clipboard-max-size" fmt))
+                        (push (apply #'format fmt args) refusals))
+                      (apply real-message fmt args)))
+                   ((symbol-function 'y-or-n-p) (lambda (_) t)))
+          (cooked-tests--osc-52-replies "\\033]52;c;?\\007"
+            (should (equal (replies (lambda (s) (not (string-empty-p s))))
+                           "\033]52;c;\007"))
+            (should (equal refusals
+                           '("cooked: answered a clipboard read with nothing, as its 16 characters exceed `cooked-clipboard-max-size'")))
+            (should (equal kill-ring '("0123456789")))))))))
+
+(ert-deftest cooked-osc-52-read-at-the-size-bound-is-answered ()
+  (cooked-tests--with-kill "0123456789"
+    (let ((cooked-clipboard-read t)
+          (cooked-clipboard-max-size 16))
+      (cooked-tests--osc-52-replies "\\033]52;c;?\\007"
+        (should (equal (replies (lambda (s) (not (string-empty-p s))))
+                       "\033]52;c;MDEyMzQ1Njc4OQ==\007"))))))
+
 (ert-deftest cooked-osc-52-cut-buffer-writes-ignore-the-write-switch ()
   "A cut buffer is the session\='s own, so refusing clipboard writes does not
 refuse it, and filling it does not touch the kill ring."

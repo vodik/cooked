@@ -981,9 +981,12 @@ SECONDARY, with no prompt."
   :group 'cooked)
 
 (defcustom cooked-clipboard-max-size 100000
-  "Largest OSC 52 payload accepted onto the kill ring, in base64 characters.
+  "Largest OSC 52 payload, in base64 characters, in either direction.
 Anything writing to the terminal can push to the clipboard, so this bounds how
-much of the kill ring a runaway or hostile stream can take over."
+much of the kill ring a runaway or hostile stream can take over.  It bounds
+replies to `cooked-clipboard-read\=' too: a selection that would encode to more
+is answered with an empty payload and a message, so the child still hears back
+and is not handed megabytes it would have to swallow before its next read."
   :type 'natnum
   :group 'cooked)
 
@@ -1031,13 +1034,24 @@ client that asked about `p\=' matches its answer on that letter."
                        cooked--osc-bell-terminated)))
 
 (defun cooked--osc-52-encode (text)
-  "TEXT as the base64 an OSC 52 reply carries, or the empty string for nil."
+  "TEXT as the base64 an OSC 52 reply carries, or the empty string for nil.
+
+A payload longer than `cooked-clipboard-max-size\=' is replaced by the empty
+string too, with a message.  The bound is measured on the base64, as it is for
+writes, so one number caps both directions.  Replying with nothing rather than
+not replying is the point: the child is still waiting, and a truncated payload
+would decode to text the user never copied."
   (if (stringp text)
-      (base64-encode-string
-       (if (multibyte-string-p text)
-           (encode-coding-string (substring-no-properties text) 'utf-8)
-         text)
-       t)
+      (let ((payload (base64-encode-string
+                      (if (multibyte-string-p text)
+                          (encode-coding-string (substring-no-properties text) 'utf-8)
+                        text)
+                      t)))
+        (if (<= (length payload) cooked-clipboard-max-size)
+            payload
+          (message "cooked: answered a clipboard read with nothing, as its %d characters exceed `cooked-clipboard-max-size'"
+                   (length payload))
+          ""))
     ""))
 
 (defun cooked--osc-52-query (targets)

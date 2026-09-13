@@ -196,7 +196,8 @@ holds is `cooked-clipboard-read`. The default, nil, answers every query with an 
 payload, since replying with the clipboard would hand it to whatever asked. `private`
 answers only the cut buffers `0`–`7`, which OSC 52 writes fill per buffer and which never
 reach the kill ring. `ask` prompts, naming the program, before handing over the
-clipboard. `t` answers from the kill ring, or PRIMARY for `p`, without asking.
+clipboard. `t` answers from the kill ring, or PRIMARY for `p`, without asking. A reply
+larger than `cooked-clipboard-max-size` goes out empty, with a message saying so.
 
 A child asking to resize the terminal (`resize -s`, or `CSI 8 ; rows ; cols t`) is refused
 unless you set `cooked-resize-requests` to `window`. Then the window the child is laid out
