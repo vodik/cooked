@@ -25,8 +25,15 @@
 (require 'cooked-module)
 
 (defun cooked-tests--sidecar (directory &rest plist)
-  "Write PLIST as DIRECTORY's version sidecar, creating DIRECTORY."
+  "Write PLIST as DIRECTORY's version sidecar, creating DIRECTORY.
+
+`:platform' defaults to this machine's `cooked--platform-tag', as `make dist'
+run here would write it, so a test about some other key is not refused as a
+foreign core.  Pass `:platform' explicitly, nil included, to write something
+else."
   (make-directory directory t)
+  (unless (plist-member plist :platform)
+    (setq plist (append plist (list :platform (cooked--platform-tag)))))
   (write-region (concat (prin1-to-string plist) "\n") nil
                 (cooked--sidecar-file directory) nil 'silent))
 
@@ -44,9 +51,7 @@ defaults to a sidecar this Lisp accepts."
                 (expand-file-name "terminfo/c/cooked-256color" directory)
                 nil 'silent)
   (apply #'cooked-tests--sidecar directory
-         (or plist (list :core "1.0.0"
-                         :terminfo cooked--terminfo-digest
-                         :platform "x86_64-linux"))))
+         (or plist (list :core "1.0.0" :terminfo cooked--terminfo-digest))))
 
 (defmacro cooked-tests--with-temp-directory (var &rest body)
   "Run BODY with VAR bound to a fresh directory, removed afterwards."
@@ -265,6 +270,32 @@ leaves this same Emacs able to load the replacement the moment
         (should-not mapped)
         ;; And a sidecar that will not parse, which is the same answer.
         (write-region "(:core" nil (cooked--sidecar-file dir) nil 'silent)
+        (should-error (cooked--load-module))
+        (should-not mapped)))))
+
+(ert-deftest cooked-a-core-built-for-another-platform-is-refused ()
+  "A sidecar naming another platform is `foreign', and nothing is mapped.
+
+The case is a module directory synced between machines: ~/.emacs.d shared by an
+x86_64 Linux box and an aarch64 Mac, where the core the one downloaded sits in
+the other's directory with a sidecar that vouches for its version.  Mapped, it
+fails at `dlopen' with an error about an ELF header, and the session cannot load
+the right one afterwards without a restart.  A sidecar with no platform at all is
+refused the same way, because it vouches for nothing about the one question
+that matters here."
+  (cooked-tests--with-temp-directory dir
+    (cooked-tests--fake-artifact dir)
+    (should (eq 'usable (cooked--prebuilt-state dir)))
+    (cooked-tests--sidecar dir :core "1.0.0" :platform "sparc64-plan9")
+    (should (eq 'foreign (cooked--prebuilt-state dir)))
+    (cooked-tests--sidecar dir :core "1.0.0" :platform nil)
+    (should (eq 'foreign (cooked--prebuilt-state dir)))
+    ;; Refused as foreign rather than stale when it is both: rebuilding on
+    ;; this machine is what fixes it, and a newer foreign core would not.
+    (cooked-tests--sidecar dir :core "0.0.1" :platform "sparc64-plan9")
+    (should (eq 'foreign (cooked--prebuilt-state dir)))
+    (cooked-tests--with-no-checkout mapped
+      (let ((cooked-module-directory dir))
         (should-error (cooked--load-module))
         (should-not mapped)))))
 

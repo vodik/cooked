@@ -347,12 +347,17 @@ is for.")
                 by hand.  Refused rather than probed: the whole reason the
                 sidecar is written last is so that this state is reachable, and
                 treating it as good enough would throw that away.
+  `foreign\='     the sidecar names a platform other than this one's
+                `cooked--platform-tag\=', as when ~/.emacs.d is synced between an
+                x86_64 laptop and an aarch64 one.  Mapping that core would fail
+                at `dlopen\=' with an error about an ELF class or a missing
+                symbol, which is a long way from the truth.
   `stale\='       the sidecar names a core older than
                 `cooked--minimum-core-version\='.
   `usable\='      map it.
 
-A symbol rather than a boolean because the three refusals want different things
-said to the user -- download it, download it again, finish the download -- and
+A symbol rather than a boolean because the refusals want different things said
+to the user -- download it, download it again, finish the download -- and
 by the time `cooked--load-module\=' has decided not to map anything, the
 directory it decided that about is the only evidence left."
   (let* ((directory (or directory (cooked--module-directory)))
@@ -361,6 +366,7 @@ directory it decided that about is the only evidence left."
     (cond
      ((not (file-exists-p (cooked--prebuilt-core directory))) 'absent)
      ((not (stringp version)) 'incomplete)
+     ((not (equal (plist-get sidecar :platform) (cooked--platform-tag))) 'foreign)
      ((version< version cooked--minimum-core-version) 'stale)
      (t 'usable))))
 
@@ -377,6 +383,9 @@ refusing leaves this same Emacs able to load the fresh one the moment
     ('stale
      (error "%s %s" "cooked: the downloaded native core is older than this Lisp"
             "needs -- run M-x cooked-download-module"))
+    ('foreign
+     (error "%s %s" "cooked: the downloaded native core was built for another platform"
+            "-- run M-x cooked-download-module on this machine"))
     ('incomplete
      (error "%s %s" "cooked: the downloaded native core has no readable version"
             "sidecar -- run M-x cooked-download-module"))
@@ -567,12 +576,15 @@ Publishing one is: `make dist\=' on each platform, upload the tarballs and the
 SHA256SUMS from `make dist-checksums\=', then paste what `make dist-digests\='
 printed into the two constants here.
 
-Deliberately not `cooked-version\='.  The digests below can only be computed
-after the artifacts they pin have been built, so this trails the tree by a
-release and is bumped in the commit that lands the digest table.  A constant
-required to equal the current version would be one nobody could ever set
-correctly, and the version it could not be set to is the one an install would
-then refuse to download.")
+Set by hand rather than read from `cooked-version\=', because the digests can
+only be computed after the artifacts they pin have been built, and it is set in
+the commit that lands the digest table.  That commit is the one the release is
+tagged on, so at tag v1.2.0 this says \"1.2.0\" and the Lisp downloads the core
+of its own release.  The artifacts are built from the commit before, which
+differs only in these two constants, so the core they carry is the one the
+tagged tree would build.  Tagging first and pinning afterwards would leave every
+tagged package one release behind its own core, guarded only by a hand-bumped
+`cooked--minimum-core-version\='.  The Makefile, above `dist\=', has the order.")
 
 (defconst cooked--prebuilt-digests nil
   "SHA-256 of each artifact of `cooked--prebuilt-release\=', by asset name.

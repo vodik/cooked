@@ -260,6 +260,31 @@ terminfo:
 # Written into dist/stage and tarred by name rather than by `.', so the archive
 # holds exactly the three members `cooked--check-unpacked' will accept and the
 # staging directory cannot leak into it.
+#
+# The `terminfo' prerequisite recompiles terminfo/db with this machine's `tic',
+# over the database committed in the tree.  The bytes can differ between ncurses
+# versions without anything being wrong, and the sidecar's digest is of
+# terminfo/cooked.ti rather than of the compiled files, so nothing notices; the
+# release order below discards the rewrite rather than committing it.
+#
+# A release, in this order:
+#
+#   1. Bump `version' in Cargo.toml and the Version header in lisp/cooked.el,
+#      and commit.  This commit is the one the artifacts are built from.
+#   2. On each platform, from that commit: `make dist'.
+#   3. Collect every tarball into one dist/ and run `make dist-checksums'.
+#   4. Run `make dist-digests', paste its table into `cooked--prebuilt-digests',
+#      set `cooked--prebuilt-release' to the new version, run
+#      `git checkout terminfo/db' to drop step 2's recompile, and commit.
+#   5. Tag that commit v$(VERSION), push the tag, and upload the tarballs and
+#      SHA256SUMS to its release.
+#
+# The tag goes on step 4's commit, not step 1's.  Step 4 changes two constants in
+# lisp/cooked-module.el and nothing a tarball holds, so the cores built at step 2
+# are what the tagged tree builds, and the tagged Lisp pins its own release.
+# Tagged at step 1, every tagged package would download the release before it,
+# and only a hand-bumped `cooked--minimum-core-version' would stand between the
+# Lisp and a core missing the defuns it calls.
 dist: module terminfo
 	@rm -rf dist/stage && mkdir -p dist/stage
 	cp $(MODULE) dist/stage/libcooked$(MODULE_SUFFIX)
@@ -278,16 +303,17 @@ dist: module terminfo
 dist-checksums:
 	@cd dist && $(SHA256) *.tar.gz > SHA256SUMS && cat SHA256SUMS
 	@echo
-	@echo "Upload SHA256SUMS beside the tarballs, then run 'make dist-digests'."
+	@echo "Run 'make dist-digests' and commit its table, then tag that commit and"
+	@echo "upload SHA256SUMS beside the tarballs."
 
 # The same digests as an alist to paste into `cooked--prebuilt-digests', which is
 # where they actually do any work.  SHA256SUMS on the release page proves nothing
 # on its own -- whoever can replace a tarball can replace the file that lists its
 # digest -- so the copy that gets checked is the one that travels with the Lisp.
 #
-# This is why `cooked--prebuilt-release' trails the tree by a release: the digests
-# cannot exist until the artifacts do, so tag, build, paste, and the constants
-# land in the commit after the tag they name.
+# The digests cannot exist until the artifacts do, so they land in a commit after
+# the one the artifacts were built from, and the release is tagged on that later
+# commit; see the order above `dist'.
 dist-digests:
 	@echo '(defconst cooked--prebuilt-digests'
 	@echo "  '("
