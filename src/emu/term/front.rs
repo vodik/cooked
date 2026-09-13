@@ -134,14 +134,18 @@ impl Front {
         let Some(known) = self.rows.get(index) else {
             return false;
         };
+        // The cursor question last: it walks the row looking for a glyph run around the
+        // cursor, and a row whose cells changed has already answered no. A line just
+        // scrolled into a region holds blanks in the copy, so asking it first walked
+        // every blank column of every such row.
         known.known
             && known.wrapped == row.wrapped()
-            && (known.cursor == cursor
-                || self.cursor_run(index, row, known.cursor).is_none()
-                    && self.cursor_run(index, row, cursor).is_none())
             && row.len() == self.cols
             && Cell::bytes(row.cells()) == Cell::bytes(self.cells(index))
             && known.extras.iter().eq(drawn(row.extras()))
+            && (known.cursor == cursor
+                || self.cursor_run(index, row, known.cursor).is_none()
+                    && self.cursor_run(index, row, cursor).is_none())
     }
 
     /// The part of ROW that differs from what Emacs shows at INDEX, as a replacement Emacs
