@@ -411,8 +411,16 @@ impl State {
                 }
             }
             // A child that probes and gets no answer may wait for one.
+            //
+            // Masked to what is actually honoured, which is not what was pushed. The
+            // stack keeps whatever the child asked for -- a pop has to restore exactly
+            // what its matching push put there -- but the *reply* is a claim about this
+            // terminal, and echoing a flag back unmasked tells the child cooked
+            // implements something it does not. A child that asks for alternate keys or
+            // associated text, is told yes, and then encodes for them is a child cooked
+            // has actively misled; a child told no falls back to a spelling that works.
             (Some(b'?'), 'u') => {
-                let flags = self.modes.kitty_keys.last().copied().unwrap_or(0);
+                let flags = self.modes.kitty_keys.last().copied().unwrap_or(0) & KITTY_HONOURED;
                 self.csi_reply(format_args!("?{flags}u"));
             }
             // DECRQM. The machine-readable half of the terminfo audit: a mode we

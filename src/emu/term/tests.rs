@@ -2374,13 +2374,31 @@ fn kitty_keyboard_flags_stack() {
 }
 
 #[test]
-fn a_kitty_query_is_answered() {
-    // A child that probes and hears nothing back may sit there waiting.
+fn a_kitty_query_is_answered_with_what_is_honoured() {
+    // A child that probes and hears nothing back may sit there waiting -- but the
+    // answer is a claim about this terminal, not an echo of the question.
+    //
+    // This asserted `?5u' for a pushed 5, which is bits 1 and 4: disambiguate escape
+    // codes, which cooked implements, and report alternate keys, which it does not.
+    // Bits 2, 4, 8 and 16 are stored and change nothing about how a key is spelled, so
+    // a child that asks for alternate keys, is told yes, and then encodes for them has
+    // been actively misled -- where a child told no falls back to a spelling that
+    // works. Answering less than was asked is the recoverable failure, and the old
+    // assertion pinned the other one.
     let mut t = term(4, 20, b"\x1b[>5u\x1b[?u");
     assert!(
         t.drain()
             .events
-            .contains(&Event::Reply(b"\x1b[?5u".to_vec()))
+            .contains(&Event::Reply(b"\x1b[?1u".to_vec()))
+    );
+
+    // The stack still carries what the child asked for: a pop has to restore exactly
+    // what its matching push put there, which is the child's business and not ours.
+    let mut t = term(4, 20, b"\x1b[>5u\x1b[>1u\x1b[<1u\x1b[?u");
+    assert!(
+        t.drain()
+            .events
+            .contains(&Event::Reply(b"\x1b[?1u".to_vec()))
     );
 }
 

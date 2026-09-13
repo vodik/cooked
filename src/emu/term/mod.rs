@@ -452,6 +452,19 @@ pub(crate) const SIXEL_BODY_LIMIT: usize = 8 << 20;
 
 /// Depth of the kitty keyboard flag stack. Real clients push once around a full-screen
 /// session; anything deeper is a child that never pops.
+/// The kitty keyboard flags cooked actually implements.
+///
+/// Bit 1 alone — "disambiguate escape codes", which is the whole of what the encoder
+/// reads: the key-encoding choice tests `flags & 1` and nothing else looks at the value.
+/// Bits 2 (report event types), 4 (report alternate keys), 8 (report all keys as escape
+/// codes) and 16 (report associated text) are accepted onto the stack and change nothing
+/// about how a key is spelled, so claiming them in a `CSI ? u` reply would be a lie a
+/// child acts on.
+///
+/// Implementing bit 4 or 16 is worth doing and would widen this constant; until then this
+/// is the one place that has to be told.
+pub(crate) const KITTY_HONOURED: u8 = 1;
+
 const KITTY_STACK_LIMIT: usize = 16;
 
 /// Ceiling on the `c=`/`r=` cell span an image placement is honoured for.
