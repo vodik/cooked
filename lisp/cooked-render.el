@@ -177,7 +177,7 @@ again is safe."
             ;; Also in the cleanup, though `cooked--apply' ends with it: the drain
             ;; has assertions in it (`cooked--check-seam', `cooked--guard-row-width')
             ;; and a signal out of one leaves the screen half-rewritten with the
-            ;; input line moved and the anchor still naming where it used to be.
+            ;; input line moved and the anchor still naming its old position.
             ;; Idempotent on the ordinary path, the anchor already matching by then
             ;; -- and inside the `with-current-buffer' for the same reason as the
             ;; flags: it is this buffer's anchor it exists to check.
@@ -428,8 +428,8 @@ The ghost keeps the way back visible; `cooked--snap-to-cursor' takes it."
 (defun cooked--scroll-windows (viewport)
   "Scroll every window on this buffer to what VIEWPORT and the new grid want.
 
-Explicit rather than left to redisplay, and the honest reason is narrower than
-it used to be stated here.  `scroll-conservatively' *is* a guarantee for the
+Explicit rather than left to redisplay, for a narrow reason.
+`scroll-conservatively' *is* a guarantee for the
 selected window whatever moved its point: `redisplay_window' compares the
 window's start against its point and has no idea whether a command or a process
 filter did the moving.  What redisplay will not do is move a *non-selected*
@@ -481,26 +481,23 @@ thing that can grow the buffer\='s true end.  `cooked--on-exit\=' does too,
 appending the \"[exited N]\=\" line from outside `cooked--scroll-windows\='
 entirely, and it needs exactly this rather than a second copy of it.
 
-Computed and NOFORCE, rather than the `recenter\=' this used to be.
-`recenter\=' sets a forced start that redisplay then overrules through
-`make-cursor-line-fully-visible\=', so the window landed where neither of them
-had chosen; and it counts every screen line as the default font\='s height, so a
-row taller than that -- an image slice, a Nerd Font prompt separator -- had to
-be paid back afterwards in whole lines of scroll.  A NOFORCE start is a
-suggestion redisplay may settle against instead, and the pixels are
-`make-cursor-line-fully-visible\='s business, which is where they were always
-handled correctly.  No `with-selected-window\=' either: nothing here needs the
-window selected, and `select-window\=' is advised -- by `evil\=', to refresh its
-cursor -- so a pair of them per window per drain was arbitrary code running in
-the middle of a render.
+Computed and NOFORCE, rather than `recenter\='.  `recenter\=' sets a forced
+start that redisplay then overrules through `make-cursor-line-fully-visible\=',
+so the window lands where neither chose; and it counts every screen line as the
+default font\='s height, so a row taller than that -- an image slice, a Nerd
+Font prompt separator -- is paid back in whole lines of scroll.  A NOFORCE start
+is a suggestion redisplay may settle against, and the pixels stay
+`make-cursor-line-fully-visible\='s business.  No `with-selected-window\=' either:
+`select-window\=' is advised -- by `evil\=', to refresh its cursor -- and nothing
+here needs the window selected.
 
 Monotone, which is what stops this jittering.  The follow direction is taken
 whenever the tail has grown, and the equality is the common case: a steady
 stream whose tail is the same length leaves TOP exactly where it already is and
 this writes nothing at all, at a drain rate whose floor is
-`cooked-min-redisplay-interval\='.  The shrink direction is the one thing the
-two-way pin was buying -- `comint-scroll-show-maximum-output\='s actual
-semantics, no blank space below the last line -- and is taken only when the
+`cooked-min-redisplay-interval\='.  The shrink direction gives
+`comint-scroll-show-maximum-output\='s semantics, no blank space below the last
+line, and is taken only when the
 *last* redisplay had the buffer\='s end on screen, so it fires when the grid
 really has fewer used rows than before rather than every time
 `vertical-motion\='s whole-line count disagrees with what redisplay laid out in
@@ -759,8 +756,8 @@ worth knowing: jit-lock hangs `jit-lock-after-change\=' on
 `after-change-functions\=', and that fires for every text property applied as
 well as for every insertion.  A row of box drawing sets a `display\=' property
 per cell, so a frame of it pays the hook some hundreds of times to be told
-something it could have been told once.  Measured at +21% on plain rows, +55%
-on box drawing, with `cooked--fontify-region\=' never once being called.
+something it could have been told once -- a fifth again on plain rows and half
+again on box drawing, with `cooked--fontify-region\=' never called.
 
 So the registration follows the work rather than the mode.  Two things can make
 it worthless, and both are ordinary.  The alternate screen is one: that grid is
@@ -875,12 +872,10 @@ answers by adding text properties to it.  The render path had this for free from
 Rounded out to whole lines.  jit-lock hands over chunks of
 `jit-lock-chunk-size\=' characters and a chunk boundary falls wherever it falls,
 so a candidate straddling one would be matched by neither half.  Rounded here
-rather than in either pass, because neither does it for itself: the URL scan is
-a reproduction of `goto-address-fontify-region\=' with the filtering added and
-the rounding left out -- see `cooked--fontify-links\=' -- and the scan hook
-never rounded.
+rather than in either pass, because neither does it for itself -- see
+`cooked--fontify-links\='.
 
-Whole *logical* lines, which is a wider round than it used to be and has to be:
+Whole *logical* lines, because
 a soft-wrapped line is several buffer lines, so rounding to buffer lines alone
 would let a chunk boundary fall between two rows of one line and split the very
 candidate the joining exists to put back together.  See
