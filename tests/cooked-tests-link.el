@@ -454,27 +454,27 @@ position itself, and a source is not blocked by one it outranks."
     (insert "abcdefghij")
     (let* ((claimed nil)
            (cooked-link-claim-functions
-            (list (cons 'osc-8 (lambda (pos) (memq pos claimed)))
-                  (cons 'goto-addr (lambda (pos) (memq (1+ pos) claimed)))
-                  (cons 'guessed (lambda (pos) (memq (+ 2 pos) claimed))))))
+            (list (cons 'osc-8 (lambda (pos _end) (memq pos claimed)))
+                  (cons 'goto-addr (lambda (pos _end) (memq (1+ pos) claimed)))
+                  (cons 'guessed (lambda (pos _end) (memq (+ 2 pos) claimed))))))
       ;; Nothing registered a claim yet.
-      (should-not (cooked-link--claimed-p 1))
+      (should-not (cooked-link--claimed-p 1 2))
       ;; The top source claims, and is named -- the return value is the symbol,
       ;; so a caller can say *which* source outranked it rather than only that
       ;; one did.
       (setq claimed '(1))
-      (should (eq (cooked-link--claimed-p 1) 'osc-8))
+      (should (eq (cooked-link--claimed-p 1 2) 'osc-8))
       ;; The guessing layer asks as itself and is still blocked, because OSC 8
       ;; outranks it.
-      (should (eq (cooked-link--claimed-p 1 'guessed) 'osc-8))
+      (should (eq (cooked-link--claimed-p 1 2 'guessed) 'osc-8))
       ;; ... and OSC 8 asking as itself is *not* told it claimed its own span.
-      (should-not (cooked-link--claimed-p 1 'osc-8))
+      (should-not (cooked-link--claimed-p 1 2 'osc-8))
       ;; A claim held only by the lowest source does not block the ones above
       ;; it: the walk stops at the asking source's own entry.
       (setq claimed '(3))
-      (should (eq (cooked-link--claimed-p 1) 'guessed))
-      (should-not (cooked-link--claimed-p 1 'goto-addr))
-      (should-not (cooked-link--claimed-p 1 'osc-8)))))
+      (should (eq (cooked-link--claimed-p 1 2) 'guessed))
+      (should-not (cooked-link--claimed-p 1 2 'goto-addr))
+      (should-not (cooked-link--claimed-p 1 2 'osc-8)))))
 
 (ert-deftest cooked-the-file-link-layer-registers-itself-below-the-others ()
   "cooked-file-link.el appends its own rank rather than the base layer naming it."
@@ -1149,6 +1149,76 @@ runs over the buffer exactly as before."
                      "https://example.com/"))
       ;; No id, because there was nothing to hold together.
       (should-not (get-text-property at 'cooked-link-fragment)))))
+
+;; Edges of the join and of the precedence between the passes.
+
+(ert-deftest cooked-an-osc-8-span-inside-a-url-keeps-its-own-properties ()
+  "The guess asks whether any of its match is claimed, not just the first character.
+
+A child can open an `OSC 8\=' span halfway through text that also reads as a
+URL.  Asked only about the start, the guess found nothing there and laid its
+`help-echo\=' over the span\='s tail, so hovering the explicit link showed goto-addr\='s
+string instead of where the link goes."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf 'https://example.com/\\033]8;;https://elsewhere.example/\\033\\\\tail\\033]8;;\\033\\\\\\n'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "example.com/tail" (cooked-tests--text)))))
+    (cooked-tests--fontify)
+    (let ((tail (cooked-tests--link-at "tail")))
+      (should (equal (cooked-link-uri tail) "https://elsewhere.example/"))
+      (should (eq (get-text-property tail 'help-echo) #'cooked--link-help-echo))
+      (should-not (text-property-not-all (cooked-tests--link-at "https://")
+                                         (1+ (cooked-tests--link-at "tail"))
+                                         'cooked-link-url nil)))))
+
+(ert-deftest cooked-detected-bounds-just-after-a-leading-newline ()
+  "Two characters back from a fragment is position 0 when a blank row starts the buffer.
+
+`cooked-link--detected-bounds\=' looks past the newline before a fragment for
+the row above, and at position 2 that look signalled `args-out-of-range\='."
+  (with-temp-buffer
+    (insert "\nhttps://example.com/")
+    (add-text-properties 2 (point-max)
+                         (list 'cooked-link-url "https://example.com/"
+                               'cooked-link-fragment (cons 'cooked-link-detected nil)))
+    (should (equal (cooked-link--detected-bounds 2) (cons 2 (point-max))))))
+
+(ert-deftest cooked-only-a-url-that-crosses-a-wrap-is-marked-as-fragments ()
+  "A URL in a wrapped region that fits on its row is an ordinary link.
+
+The joined scan used to mark every match with a `cooked-link-fragment\=' id, so
+the url provider answered an unwrapped URL from the property, which is the case
+`cooked-link--url-at-point\=' says it leaves to thingatpt."
+  (cooked-tests--with-wrapped-line "https://a.io/ https://example.com/a/long/path end"
+    (let ((short (cooked-tests--link-at "https://a.io/"))
+          ;; Found by column, since the row break is inside `https:'.
+          (long (+ (cooked-tests--link-at "https://a.io/") 14)))
+      (should (equal (get-text-property short 'cooked-link-url) "https://a.io/"))
+      (should-not (get-text-property short 'cooked-link-fragment))
+      (should (equal (get-text-property long 'cooked-link-url)
+                     "https://example.com/a/long/path"))
+      (should (get-text-property long 'cooked-link-fragment)))))
+
+(ert-deftest cooked-thing-at-point-answers-a-wrapped-file-name-whole ()
+  "A path the terminal wrapped is one file name, from whichever row you ask.
+
+ffap reads to the end of the buffer line, which on the live screen is a row, so
+point on the second row of `src/some/deeply/nested/file.txt\=' used to be
+answered `nested/file.txt\=', and `find-file\=' offered that."
+  (cooked-tests--with-file-links
+    (cooked-tests--with-wrapped-line "see src/some/deeply/nested/file.txt end"
+      (cooked--install-thing-at-point-providers)
+      (let ((beg (cooked-tests--link-at "src/"))
+            (end (+ (cooked-tests--link-at ".txt") 4)))
+        ;; The row break really is inside the name.
+        (should (< beg (cooked-tests--link-at "nested") end))
+        (should (cooked-link--wrap-at beg end))
+        (dolist (at (list (1+ beg) (cooked-tests--link-at "file")))
+          (goto-char at)
+          (should (equal (thing-at-point 'filename)
+                         "src/some/deeply/nested/file.txt"))
+          (should (equal (bounds-of-thing-at-point 'filename) (cons beg end))))))))
 
 ;; The join's own pieces, over a buffer written by hand.  A terminal cannot
 ;; produce a fifty-row logical line at any width a test would want to run at, and

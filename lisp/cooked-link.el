@@ -184,7 +184,17 @@ Strong and buffer-local, like `cooked--image-data\=': the native core sends a
 URI exactly once per distinct destination however many cells or drains name it,
 so this holds the only copy Emacs has.  Bounded on the other side of the
 boundary rather than here -- see `LinkStore\=' in src/emu/link.rs -- because
-that is where the ids are minted.")
+that is where the ids are minted.
+
+Which means this table is not bounded, and is never pruned: it holds every
+distinct destination the session has named.  Dropping the entries whose text
+has left the buffer is not safe from this side.  The core sends a URI only the
+first time it interns it, so if `ls --hyperlink\=' named a file an hour ago and
+names it again now, the second listing arrives as a bare id, and an entry
+pruned in between would leave that link with nowhere to go.  Pruning needs the
+core told which ids Lisp has let go of, so it can send them again.  Until then
+the cost is one string per destination: tens of kilobytes for every thousand
+distinct files a hyperlinked `ls\=' has named.")
 
 (defun cooked--install-links (links)
   "Record LINKS, a drain's `:links\=', before anything referring to them renders.
@@ -313,25 +323,28 @@ whether cooked's own `C-c' map is reachable at all already decides it."
 
 ;;;; The OSC 8 pass
 
-(defun cooked-link--osc-8-claim-p (pos)
-  "Whether an `OSC 8\=' span covers POS."
-  (get-text-property pos 'cooked-link-id))
+(defun cooked-link--osc-8-claim-p (beg end)
+  "Whether an `OSC 8\=' span covers any of BEG..END."
+  (text-property-not-all beg end 'cooked-link-id nil))
 
-(defun cooked-link--goto-addr-claim-p (pos)
-  "Whether the detected-URL pass has claimed POS.
+(defun cooked-link--goto-addr-claim-p (beg end)
+  "Whether the detected-URL pass has claimed any of BEG..END.
 
 A text property since the pass stopped making overlays -- see
 `cooked--fontify-links\='."
-  (get-text-property pos 'cooked-link-url))
+  (text-property-not-all beg end 'cooked-link-url nil))
 
 (defvar cooked-link-claim-functions
   (list (cons 'osc-8 #'cooked-link--osc-8-claim-p)
         (cons 'goto-addr #'cooked-link--goto-addr-claim-p))
   "Sources that can claim a span as a link, in order of precedence.
 
-An alist of (SYMBOL . PREDICATE); PREDICATE is called with a buffer position
-and answers whether that source has claimed it.  Earlier entries outrank later
-ones, and `cooked-link--claimed-p\=' is the arbiter.
+An alist of (SYMBOL . PREDICATE); PREDICATE is called with the two ends of a
+buffer range and answers whether that source has claimed any of it.  Any, not
+the start: a child can open an `OSC 8\=' span halfway through text that also
+reads as a URL, and a guess that asked only about its first character would
+put its own `keymap\=' and `help-echo\=' over the span\='s tail.  Earlier
+entries outrank later ones, and `cooked-link--claimed-p\=' is the arbiter.
 
 The list is *data the layers contribute to* rather than an ordering written
 into this file.  A guessed file name is `cooked-file-link.el\='s output, so a
@@ -344,12 +357,12 @@ outright first, then what goto-addr read out of the text.  A layer that
 *guesses* -- from a shape, from the filesystem -- appends itself, because
 guessing is the only kind that can be wrong about what the text even is.")
 
-(defun cooked-link--claimed-p (pos &optional source)
-  "Which source, if any, has already made the text at POS a link.
+(defun cooked-link--claimed-p (beg end &optional source)
+  "Which source, if any, has already made some of BEG..END a link.
 
 Returns the claiming source\='s symbol, or nil.  With SOURCE, answers only for
 sources ranked *above* it: a source asks before claiming, and must not be told
-that it has claimed the position itself -- nor be blocked by something it
+that it has claimed the text itself -- nor be blocked by something it
 outranks.  The walk therefore stops at SOURCE\='s own entry.
 
 Deliberately *not* the question `cooked--fontify-links\=' asks when it drops a
@@ -359,7 +372,7 @@ delete overlays sitting over file names too."
   (catch 'claimed
     (pcase-dolist (`(,symbol . ,predicate) cooked-link-claim-functions)
       (when (eq symbol source) (throw 'claimed nil))
-      (when (funcall predicate pos) (throw 'claimed symbol)))
+      (when (funcall predicate beg end) (throw 'claimed symbol)))
     nil))
 
 (defun cooked-link--propertize (beg end &rest extra)
@@ -639,7 +652,7 @@ explicit hyperlink -- and cooked-file-link.el's spans -- untouched."
 
 (defun cooked-link--fontify-url-match (beg end url face mouse-face help-echo)
   "Make BEG..END a detected link to URL, unless something outranks it."
-  (unless (cooked-link--claimed-p beg 'goto-addr)
+  (unless (cooked-link--claimed-p beg end 'goto-addr)
     (cooked-link--propertize beg end
                              'cooked-link-url url
                              'help-echo help-echo
@@ -658,7 +671,7 @@ drawn as three highlighted pieces is still one link to everything that asks.
 A fresh cons per match, compared with `eq\=': two occurrences of the same URL on
 the same row are two links, and comparing the URL string instead would have said
 they were one."
-  (unless (cooked-link--claimed-p beg 'goto-addr)
+  (unless (cooked-link--claimed-p beg end 'goto-addr)
     (let ((id (cons 'cooked-link-detected url)))
       (pcase-dolist (`(,from . ,to) (cooked-link--wrap-fragments beg end))
         (cooked-link--propertize from to
@@ -718,7 +731,14 @@ The source buffer's syntax table goes with the text.  thingatpt's idea of a word
 constituent is the current table's, so a scratch buffer left in
 `fundamental-mode\=' could disagree with the real one about where a URL ends --
 about which the honest thing to say is that it does not today, and that a
-one-line guarantee is cheaper than knowing whether it ever will."
+one-line guarantee is cheaper than knowing whether it ever will.
+
+The scratch buffer is made and killed per call, which is every chunk that holds
+a wrap -- all of them, under a long wrapped log line.  That was measured and
+kept: making, filling and killing one for a 1500-character chunk costs about
+10 microseconds against 4 for erasing a buffer kept for reuse, which is small
+beside the regexp scan of the same chunk and not worth a buffer that lives for
+the session."
   (let ((chunks (cdr joined))
         (source (current-buffer))
         (table (syntax-table)))
@@ -733,8 +753,14 @@ one-line guarantee is cheaper than knowing whether it ever will."
          (let ((from (cooked-link--wrap-position (1- mbeg) chunks))
                (to (cooked-link--wrap-position (1- mend) chunks)))
            (with-current-buffer source
-             (cooked-link--fontify-wrapped-match
-              from to url face mouse-face help-echo))))))))
+             ;; A match that shares the region with a wrap but does not cross
+             ;; one is an ordinary link, and marked as one: a fragment id on it
+             ;; would have the url provider answer from the property what
+             ;; thingatpt reads correctly, and reads more schemes for.
+             (funcall (if (cooked-link--wrap-at from to)
+                          #'cooked-link--fontify-wrapped-match
+                        #'cooked-link--fontify-url-match)
+                      from to url face mouse-face help-echo))))))))
 
 (defun cooked-link--detected-bounds (&optional pos)
   "Bounds of the detected-URL span covering POS, or nil.
@@ -757,7 +783,10 @@ embark want the extent of the thing, and the thing spans the break."
                     (point-max)))
             (id (get-text-property pos 'cooked-link-fragment)))
         (when id
-          (while (and (> from (point-min))
+          ;; Two characters back, past the newline, so the row above has to
+          ;; have one: a newline at `point-min' is an empty row with nothing on
+          ;; it to continue, and asking at position 0 signals.
+          (while (and (> from (1+ (point-min)))
                       (eq (char-before from) ?\n)
                       (eq (get-text-property (- from 2) 'cooked-link-fragment) id))
             (setq from (or (previous-single-property-change

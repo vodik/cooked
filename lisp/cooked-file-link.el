@@ -198,13 +198,59 @@ local one."
                        (default-directory root))
              (when (ffap-file-exists-string name t) (expand-file-name name))))))
 
+(defun cooked-file-link--string-at-point ()
+  "`ffap-string-at-point\=' in its `file\=' mode, read across soft wraps.
+
+ffap stops at the end of the buffer line, and on the live screen a buffer line
+is a row: a path the terminal ran out of columns for would be answered as the
+half point is in, and `find-file\=' would be offered that half.  So when the
+logical line under point is wrapped, ffap is asked about the line as the child
+wrote it, joined by `cooked-link--join-wrapped\=' and put in a scratch buffer,
+and `ffap-string-at-point-region\=' is mapped back to this buffer\='s
+positions.  With nothing wrapped, or a region active -- where ffap takes the
+region as it stands -- this is ffap\='s own call and costs one property search.
+
+Wrapped rows in scrollback carry no flag when `cooked-rejoin-wrapped-lines\=' is
+nil, and a path wrapped there is still answered a row at a time."
+  (let* ((line (cooked-link-logical-line-bounds (line-beginning-position)
+                                                (line-end-position)))
+         (joined (and (not (use-region-p))
+                      (cooked-link--join-wrapped (car line) (cdr line)))))
+    (if (not joined)
+        (ffap-string-at-point 'file)
+      (let* ((chunks (cdr joined))
+             (pos (point))
+             ;; The row point is in: the last piece starting at or before it.
+             (chunk (seq-reduce (lambda (found chunk)
+                                  (if (<= (cdr chunk) pos) chunk found))
+                                chunks (aref chunks 0)))
+             (table (syntax-table))
+             string beg end)
+        (with-temp-buffer
+          (set-syntax-table table)
+          (insert (car joined))
+          (goto-char (+ 1 (car chunk) (- pos (cdr chunk))))
+          (setq string (ffap-string-at-point 'file)
+                beg (1- (car ffap-string-at-point-region))
+                end (1- (cadr ffap-string-at-point-region))))
+        ;; The end is mapped from the last character rather than from the
+        ;; offset after it, which on a row boundary would name the character
+        ;; after the wrap newline -- see `cooked-link--wrap-position'.
+        (setq ffap-string-at-point-region
+              (if (< beg end)
+                  (list (cooked-link--wrap-position beg chunks)
+                        (1+ (cooked-link--wrap-position (1- end) chunks)))
+                (let ((pos (cooked-link--wrap-position beg chunks)))
+                  (list pos pos))))
+        string))))
+
 (defun cooked-file-link--at-point ()
   "The file under point as (FILE LINE COL), or nil.
 
 `ffap-string-at-point' with the `file' mode only.  Nothing here consults
 `ffap-alist', `ffap-url-at-point' or `ffap-machine-p' -- see this file's
 Commentary for why that last one in particular."
-  (when-let* ((string (ffap-string-at-point 'file)))
+  (when-let* ((string (cooked-file-link--string-at-point)))
     (pcase-let ((`(,name ,line ,col) (cooked-file-link--split string)))
       (when-let* ((file (cooked-file-link--exists name)))
         (pcase-let ((`(,rule-line ,rule-col) (cooked-file-link--position name)))
@@ -258,14 +304,14 @@ a rule that matched some other part of the line from contributing numbers."
           (move-to-column col)))
       t)))
 
-(defun cooked-file-link--claim-p (pos)
-  "Whether this layer has claimed POS as a file name.
+(defun cooked-file-link--claim-p (beg end)
+  "Whether this layer has claimed any of BEG..END as a file name.
 
 The entry `cooked-link-claim-functions\=' carries for the guessing tier.  The
 property is the one `cooked-file-link-scan\=' puts down, so the answer is about
 spans this layer actually made rather than about text it merely could have
 matched."
-  (get-text-property pos 'cooked-file-link))
+  (text-property-not-all beg end 'cooked-file-link nil))
 
 (defun cooked-file-link-scan (beg end)
   "Highlight existing file names between BEG and END.
@@ -299,7 +345,7 @@ guessed."
               ;; about this layer's own rank rather than one written into the
               ;; base layer -- see `cooked-link-claim-functions'.
               (unless (or (string-match-p cooked-file-link--number-regexp name)
-                          (cooked-link--claimed-p from 'guessed))
+                          (cooked-link--claimed-p from to 'guessed))
                 (let ((file (with-memoization (gethash name known)
                               (or (cooked-file-link--exists name) 'none))))
                   (unless (eq file 'none)
@@ -338,7 +384,7 @@ guessed."
 `filename\=' rather than `existing-filename\=': the caller asked what the text
 *is*, not whether it resolves, so the split is done and the name returned
 without a `stat\='.  `cooked-file-link--exists\=' is the other provider\='s job."
-  (when-let* ((string (ffap-string-at-point 'file)))
+  (when-let* ((string (cooked-file-link--string-at-point)))
     (car (cooked-file-link--split string))))
 
 (defun cooked-file-link--existing-filename-at-point ()
@@ -358,7 +404,7 @@ makes the answer useful is that it is absolute."
 produced the string rather than from a second, possibly disagreeing, one.  The
 trailing `:LINE:COL\=' is included: it is part of the thing the user pointed at,
 and a caller wanting only the name has the `filename\=' provider for that."
-  (when (ffap-string-at-point 'file)
+  (when (cooked-file-link--string-at-point)
     (let ((region ffap-string-at-point-region))
       (when (and (car region) (cadr region))
         (cons (car region) (cadr region))))))
