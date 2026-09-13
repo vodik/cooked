@@ -147,8 +147,8 @@ older three-element shape."
                ;; own.
                cooked--line-record nil)
          ;; Output begins here, so this is where the input ended.  `comint-delete-output',
-         ;; `comint-show-output' and `comint-write-output' all measure from it; it sat at
-         ;; `point-min' until now, which is why deleting output flushed the whole buffer.
+         ;; `comint-show-output' and `comint-write-output' all measure from it, and left
+         ;; at `point-min' it would make deleting output flush the whole buffer.
          (set-marker comint-last-input-end start)
          (set-marker comint-last-output-start start)
          (run-hook-with-args 'cooked-command-started-functions

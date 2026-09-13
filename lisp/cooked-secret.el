@@ -135,8 +135,7 @@ minibuffer of whatever frame is selected, which for a buffer nobody is in means
 a masked prompt appearing under the cursor in an unrelated buffer -- and then
 the next thing typed there, whatever it was meant for, is sent to this child
 followed by a newline.  A password prompt that arrives late is a small thing; a
-password prompt that quietly redirects the keys you are already typing is not,
-and the second is what this used to do.
+password prompt that quietly redirects the keys you are already typing is not.
 
 So the read is held instead, and `cooked--resume-secret\=' raises it when
 attention comes back.  Nothing else is deferred with it: `cooked--mode\=' is

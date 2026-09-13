@@ -451,7 +451,7 @@ the line -- see `cooked-send-string', which shares the reasoning."
 
 Spelled as a builder rather than a literal for the same reason
 `cooked--build-passthrough-map\=' is: `cooked-delegate-keys\=' can change at any
-time, and rebuilding is the only way to put a key back that used to be
+time, and rebuilding is the only way to put back a key that was
 delegated.  Unbinding it instead would leave `TAB\=' bound to nothing rather
 than to `completion-at-point\='."
   (let ((map (make-sparse-keymap)))

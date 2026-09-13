@@ -15,9 +15,9 @@
 
 ;;;; The bell
 ;;
-;; BEL used to be a bare `ding': unconditional, unthrottled, and the same whether
-;; or not anyone could see the buffer.  `cat' on a binary rang it dozens of times
-;; in a row, and a build that rings to say it has finished did so while you were
+;; A bare `ding' would be unconditional, unthrottled, and the same whether or
+;; not anyone could see the buffer: `cat' on a binary rings it dozens of times
+;; in a row, and a build that rings to say it has finished does so while you are
 ;; reading another buffer, where a ding says nothing about which session wants
 ;; you.  tmux's `monitor-bell' is the behaviour worth having: ring when the
 ;; session is on screen, and otherwise leave a mark on it that stays until you

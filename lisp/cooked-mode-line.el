@@ -169,9 +169,9 @@ feels broken next to every other one in the frame."
   "The state word: who owns the keyboard, and how well that is known.
 
 `cooked--policy\=' tells five situations apart and this says all five, because
-the three it used to spell `raw\=' are not one state told badly -- they are a
+`prompt\=', `command\=' and `raw\=' are not one state told badly -- they are a
 marked prompt the shell is editing itself, a marked command the shell announced,
-and a genuine unknown.  Spelling them alike is what made a session read as
+and a genuine unknown.  Spelling them alike would make a session read as
 unreliable the moment it went remote: `prompt\=' is where a bare shell at the far
 end of an `ssh\=' sits, and it is doing exactly what it should.
 

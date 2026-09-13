@@ -193,10 +193,10 @@ character costs that character a column.  `evaporate t\=' so
 `cooked--discard-scrollback\=' cleans the overlay up for free when the text it
 anchors to goes.
 
-The \"already right\" test names FACE as well as the span, which the span alone
-used to carry: the running marker is repainted in its finished colour by this
-same path and at this same position, so a test that asked only where the
-overlay sat would leave every command grey forever after it exited.
+The \"already right\" test names FACE as well as the span: the running marker
+is repainted in its finished colour by this same path and at this same
+position, so a test that asked only where the overlay sat would leave every
+command grey forever after it exited.
 
 HELP is the tooltip, read once per repaint rather than per hover, since it is a
 property of a virtual string and not a function.  KEYMAP nil makes a marker

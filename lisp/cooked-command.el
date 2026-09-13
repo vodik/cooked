@@ -341,8 +341,8 @@ are typing expects.
 
 Refuses rather than returns nil for an empty region: a command that printed
 nothing has a start and an end that coincide, and there is nothing to fold or
-delete there.  Signalling here rather than at each call site is the point; the
-two commands used to carry a copy of this each."
+delete there.  Signalling here means the two commands need not each carry a
+copy of the check."
   (let* ((command (or (cooked--command-at (point)) (car cooked--commands)))
          (beg (and command (cooked--command-start-position command)))
          (end (and command (cooked--command-end-position command))))

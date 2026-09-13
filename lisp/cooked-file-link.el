@@ -165,12 +165,10 @@ local one."
   (and (not (string-empty-p name))
        (not (cooked--foreign-host-p))
        (not (file-remote-p default-directory))
-       ;; Expanded, and that is a fix rather than a tidy-up.  `ffap-file-exists-string'
-       ;; returns the name it was *given*, not where it found it -- so the project-root
-       ;; branch below used to hand back a bare `src/lib.rs' that the caller then
-       ;; resolved against the child's `default-directory', which is the one directory
-       ;; it is already known not to be in.  Expanding here makes the answer say which
-       ;; of the two searches succeeded, which is the whole point of having two.
+       ;; Expanded, because `ffap-file-exists-string' returns the name it was *given*,
+       ;; not where it found it.  Unexpanded, the project-root branch below would hand
+       ;; back a bare `src/lib.rs' for the caller to resolve against the child's
+       ;; `default-directory', the one directory it is known not to be in.
        (or (when (ffap-file-exists-string name) (expand-file-name name))
            (when-let* ((project (project-current nil))
                        (root (project-root project))
