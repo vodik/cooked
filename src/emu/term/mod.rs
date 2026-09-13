@@ -1047,6 +1047,12 @@ impl Term {
         self.state.force_per_character_print = true;
     }
 
+    /// Test-only: how many sequences no arm recognised; see [`State::unrecognised`].
+    #[cfg(test)]
+    pub(crate) fn unrecognised(&self) -> usize {
+        self.state.unrecognised
+    }
+
     /// How much undrained work is queued, in the one currency backpressure understands.
     ///
     /// Rows and events count themselves. Pictures are counted by weight instead, at
@@ -1299,6 +1305,16 @@ struct State {
     /// `#[cfg(test)]`, so the field and its test do not exist in a release build.
     #[cfg(test)]
     force_per_character_print: bool,
+    /// Test-only: how many control sequences, escapes and C0 controls arrived that no
+    /// arm recognised.
+    ///
+    /// Everything the core does not recognise it drops without a trace, which is right
+    /// for a child and leaves a test nothing to ask. The terminfo audit feeds this every
+    /// capability in the entry, so a capability whose sequence nothing handles -- `rep`
+    /// with its `CSI b` arm deleted -- is a count rather than a silence. See
+    /// `terminfo_sequences_are_all_recognised`.
+    #[cfg(test)]
+    unrecognised: usize,
     /// The renditions the grids' cells name by id; see [`crate::emu::style`].
     styles: StyleStore,
     /// Where the shell last said its prompt begins (OSC 133;A), in [`Anchor`] coordinates.

@@ -132,6 +132,9 @@ impl Perform for State {
             // whatever was designated there; see [`Charsets`].
             0x0E => self.modes.charsets.lock(1),
             0x0F => self.modes.charsets.lock(0),
+            #[cfg(test)]
+            _ => self.unrecognised += 1,
+            #[cfg(not(test))]
             _ => {}
         }
     }
@@ -213,6 +216,12 @@ impl Perform for State {
                 self.events.push(Event::Reset);
                 self.bell_queued = false;
             }
+            // ST. The parser has already dispatched the OSC, DCS or APC it ends, and hands
+            // on the backslash after the ESC as an escape of its own.
+            (None, b'\\') => {}
+            #[cfg(test)]
+            _ => self.unrecognised += 1,
+            #[cfg(not(test))]
             _ => {}
         }
     }

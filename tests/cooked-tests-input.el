@@ -3306,6 +3306,85 @@ only 0-127, so it reached Emacs.  The ESC map is now a full keymap."
   (let ((map (cooked--build-meta-overlay cooked-raw-map (list (aref (kbd "M-é") 0)))))
     (should-not (lookup-key map (kbd "M-é")))))
 
+(defun cooked-tests--terminfo-keys ()
+  "Every key capability of terminfo/cooked.ti, as (NAME . BYTES)."
+  (with-temp-buffer
+    (insert-file-contents (cooked--terminfo-source))
+    (let (keys)
+      (while (re-search-forward "^\t\\(k[A-Za-z0-9]+\\)=\\(.*\\),$" nil t)
+        (let ((value (match-string 2)) (bytes nil) (at 0))
+          (while (< at (length value))
+            (pcase (aref value at)
+              (?\\ (setq at (1+ at))
+                   (push (pcase (aref value at) (?E 27) (c c)) bytes))
+              (?^ (setq at (1+ at))
+                  (push (if (eq (aref value at) ??) 127 (logand (aref value at) 31))
+                        bytes))
+              (c (push c bytes)))
+            (setq at (1+ at)))
+          (push (cons (match-string 1) (concat (nreverse bytes))) keys)))
+      (nreverse keys))))
+
+(defconst cooked-tests--terminfo-key-events
+  (append
+   '(("kbs" . backspace) ("kcbt" . backtab) ("kcub1" . left) ("kcud1" . down)
+     ("kcuf1" . right) ("kcuu1" . up) ("kdch1" . deletechar) ("kend" . end)
+     ("khome" . home) ("kich1" . insert) ("knp" . next) ("kpp" . prior)
+     ("kind" . S-down) ("kri" . S-up) ("kent" . kp-enter) ("kbeg" . kp-begin)
+     ("ka1" . kp-home) ("ka2" . kp-up) ("ka3" . kp-prior) ("kb1" . kp-left)
+     ("kb2" . kp-5) ("kb3" . kp-right) ("kc1" . kp-end) ("kc2" . kp-down)
+     ("kc3" . kp-next) ("kp5" . kp-begin) ("kpADD" . kp-add) ("kpSUB" . kp-subtract)
+     ("kpMUL" . kp-multiply) ("kpDIV" . kp-divide) ("kpDOT" . kp-decimal)
+     ("kpCMA" . kp-separator) ("kpZRO" . kp-0))
+   ;; F1-F12, then the same twelve shifted, with Control, with Control and
+   ;; Shift, with Meta, and three with Meta and Shift, as xterm numbers them.
+   (cl-loop for n from 1 to 63
+            collect (cons (format "kf%d" n)
+                          (intern (format "%s%s"
+                                          (nth (/ (1- n) 12) '("" "S-" "C-" "C-S-" "M-" "M-S-"))
+                                          (format "f%d" (1+ (% (1- n) 12))))))
+            into fkeys
+            finally return (cons '("kf13" . f13) (assoc-delete-all "kf13" fkeys)))
+   (cl-loop for (cap . key) in '(("DC" . deletechar) ("END" . end) ("HOM" . home)
+                                 ("IC" . insert) ("LFT" . left) ("NXT" . next)
+                                 ("PRV" . prior) ("RIT" . right) ("UP" . up)
+                                 ("DN" . down))
+            append (cl-loop for (suffix . mods) in '(("" . "S-") ("3" . "M-") ("4" . "M-S-")
+                                                     ("5" . "C-") ("6" . "C-S-") ("7" . "C-M-"))
+                            collect (cons (concat "k" cap suffix)
+                                          (intern (concat mods (symbol-name key))))))
+   '(("kmous") ("kxIN") ("kxOUT")))
+  "The event each key capability in terminfo/cooked.ti is the spelling of.
+
+nil for the three that describe reports cooked sends of its own accord, a
+mouse report and the two focus reports, rather than a key.  `kf13' is `f13'
+itself, where the other shifted function keys are named by their chord, so
+that the `shifted' row the table spells it with is checked as well.")
+
+(ert-deftest cooked-terminfo-keys-are-what-cooked-sends ()
+  "Every key the entry declares is what cooked sends for that key.
+
+The terminfo audit checked modes and queries, and nothing checked the ~160 key
+capabilities: `kf5' could lose its row in `cooked--key-encodings' and every
+test pass, while ncurses waited on a sequence that never arrived.  Under `smkx'
+each capability is the key\='s spelling exactly.  Under `rmkx' the keypad and
+cursor keys go back to their other spelling and every other key is unchanged.
+A capability with no entry in `cooked-tests--terminfo-key-events' fails, so a
+new one is checked from the day it is added."
+  (let ((source (cooked--terminfo-source))
+        (cooked--keys 'legacy))
+    (skip-unless (file-exists-p source))
+    (pcase-dolist (`(,name . ,bytes) (cooked-tests--terminfo-keys))
+      (ert-info ((format "`%s' is %S" name bytes))
+        (let ((entry (assoc name cooked-tests--terminfo-key-events)))
+          (should entry)
+          (when-let* ((event (cdr entry)))
+            (let ((cooked--app-cursor t))
+              (should (equal (cooked--encode-event event) bytes)))
+            (unless (string-prefix-p "\eO" bytes)
+              (let ((cooked--app-cursor nil))
+                (should (equal (cooked--encode-event event) bytes))))))))))
+
 (ert-deftest cooked-key-override-actions-encode-to-their-bytes ()
   "Every `cooked-key-overrides' action form, and the reason each one exists:
 nobody should have to write `ESC [ 13;2 u' out by hand to bind Shift+Return."

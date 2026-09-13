@@ -637,6 +637,10 @@ impl State {
             || self.csi_cursor(private, action, params)
             || self.csi_edit(private, action, params)
             || self.csi_report(private, action, params, intermediates);
+        #[cfg(test)]
+        {
+            self.unrecognised += usize::from(!_handled);
+        }
     }
 
     /// DEC private and ANSI mode set/reset (`CSI ? Ps h/l`, `CSI Ps h/l`), and the save

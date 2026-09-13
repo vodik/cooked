@@ -20,17 +20,192 @@ fn terminfo_capabilities() -> Vec<(&'static str, &'static str)> {
 /// A terminfo string with no `%` parameters, decoded to the bytes it sends.
 fn terminfo_decode(value: &str) -> Vec<u8> {
     assert!(!value.contains('%'), "{value:?} is parametrised");
+    terminfo_unescape(value)
+}
+
+/// A terminfo string's escapes decoded, with any `%` left for [`terminfo_expand`].
+///
+/// All of terminfo(5)'s escapes: `\E`, `^X`, the named ones, and octal, which the
+/// entry uses for BEL in `dsl`, `Cr` and `Cs`. Read as `\0` and two literal digits,
+/// `\007` used to decode to the text "007". Padding, `$<100/>` in `flash`, is a delay
+/// for the terminal's benefit and sends nothing, so it is dropped.
+fn terminfo_unescape(value: &str) -> Vec<u8> {
+    let bytes = value.as_bytes();
     let mut out = Vec::new();
-    let mut chars = value.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => match chars.next() {
-                Some('E' | 'e') => out.push(0x1b),
-                Some(escaped) => out.push(escaped as u8),
-                None => panic!("{value:?} ends in a backslash"),
+    let mut at = 0;
+    while let Some(&b) = bytes.get(at) {
+        at += 1;
+        match b {
+            b'\\' => {
+                let escaped = *bytes.get(at).expect("ends in a backslash");
+                at += 1;
+                out.push(match escaped {
+                    b'E' | b'e' => 0x1b,
+                    b'n' | b'l' => b'\n',
+                    b'r' => b'\r',
+                    b't' => b'\t',
+                    b'b' => 0x08,
+                    b'f' => 0x0c,
+                    b's' => b' ',
+                    b'0'..=b'7' => {
+                        let digits = bytes[at - 1..]
+                            .iter()
+                            .take(3)
+                            .take_while(|d| d.is_ascii_digit())
+                            .count();
+                        at += digits - 1;
+                        let code = std::str::from_utf8(&bytes[at - digits..at]).unwrap();
+                        // `\0` alone is terminfo's way of writing a NUL it can store.
+                        u8::from_str_radix(code, 8).map_or(0x80, |n| if n == 0 { 0x80 } else { n })
+                    }
+                    other => other,
+                });
+            }
+            b'^' => {
+                out.push(bytes.get(at).expect("^ ends the string") & 0x1f);
+                at += 1;
+            }
+            b'$' if bytes.get(at) == Some(&b'<') => {
+                at += bytes[at..]
+                    .iter()
+                    .position(|&c| c == b'>')
+                    .expect("unclosed padding")
+                    + 1;
+            }
+            _ => out.push(b),
+        }
+    }
+    out
+}
+
+/// A `%p` argument to a parametrised capability: a number or a string.
+#[derive(Clone, Copy)]
+enum Arg {
+    N(i64),
+    S(&'static str),
+}
+
+/// A parametrised capability expanded with ARGS, as ncurses' `tparm` would.
+///
+/// terminfo(5)'s whole stack language but `%P`/`%g` variables and the `%x`/`%o`
+/// formats, none of which the entry uses, and each of which panics rather than
+/// being read as something else.
+fn terminfo_expand(value: &str, args: &[Arg]) -> Vec<u8> {
+    let code = terminfo_unescape(value);
+    let mut params: Vec<Arg> = args.to_vec();
+    params.resize(9, Arg::N(0));
+    let mut stack: Vec<Arg> = Vec::new();
+    let mut out = Vec::new();
+    let int = |arg: Option<Arg>| match arg {
+        Some(Arg::N(n)) => n,
+        Some(Arg::S(s)) => panic!("{value:?} uses the string {s:?} as a number"),
+        None => panic!("{value:?} pops an empty stack"),
+    };
+    // Skip from just after a `%t` or `%e` to past the `%e` or `%;` that answers it at
+    // this depth, stopping at an `%e` only when STOP_AT_ELSE.
+    let skip = |at: &mut usize, stop_at_else: bool| {
+        let mut depth = 0;
+        while *at + 1 < code.len() {
+            if code[*at] == b'%' {
+                match code[*at + 1] {
+                    b'?' => depth += 1,
+                    b';' if depth == 0 => return *at += 2,
+                    b';' => depth -= 1,
+                    b'e' if depth == 0 && stop_at_else => return *at += 2,
+                    _ => {}
+                }
+                *at += 2;
+            } else {
+                *at += 1;
+            }
+        }
+        panic!("{value:?} has an unclosed conditional");
+    };
+    let mut at = 0;
+    while at < code.len() {
+        if code[at] != b'%' {
+            out.push(code[at]);
+            at += 1;
+            continue;
+        }
+        let op = code[at + 1];
+        at += 2;
+        match op {
+            b'%' => out.push(b'%'),
+            b'c' => out.push(int(stack.pop()) as u8),
+            b'd' => out.extend(int(stack.pop()).to_string().bytes()),
+            b's' => match stack.pop() {
+                Some(Arg::S(s)) => out.extend(s.bytes()),
+                _ => panic!("{value:?} prints a non-string with %s"),
             },
-            '^' => out.push(chars.next().expect("^ ends the string") as u8 & 0x1f),
-            _ => out.push(c as u8),
+            b'l' => match stack.pop() {
+                Some(Arg::S(s)) => stack.push(Arg::N(s.len() as i64)),
+                _ => panic!("{value:?} takes the length of a non-string"),
+            },
+            b'p' => {
+                stack.push(params[usize::from(code[at] - b'1')]);
+                at += 1;
+            }
+            b'i' => {
+                for param in &mut params[..2] {
+                    if let Arg::N(n) = param {
+                        *n += 1;
+                    }
+                }
+            }
+            b'{' => {
+                let end = at + code[at..].iter().position(|&c| c == b'}').unwrap();
+                stack.push(Arg::N(
+                    std::str::from_utf8(&code[at..end])
+                        .unwrap()
+                        .parse()
+                        .unwrap(),
+                ));
+                at = end + 1;
+            }
+            b'\'' => {
+                stack.push(Arg::N(i64::from(code[at])));
+                at += 2;
+            }
+            b'+' | b'-' | b'*' | b'/' | b'm' | b'&' | b'|' | b'^' | b'=' | b'<' | b'>' | b'A'
+            | b'O' => {
+                let (b, a) = (int(stack.pop()), int(stack.pop()));
+                stack.push(Arg::N(match op {
+                    b'+' => a + b,
+                    b'-' => a - b,
+                    b'*' => a * b,
+                    b'/' => a / b,
+                    b'm' => a % b,
+                    b'&' => a & b,
+                    b'|' => a | b,
+                    b'^' => a ^ b,
+                    b'=' => i64::from(a == b),
+                    b'<' => i64::from(a < b),
+                    b'>' => i64::from(a > b),
+                    b'A' => i64::from(a != 0 && b != 0),
+                    _ => i64::from(a != 0 || b != 0),
+                }));
+            }
+            b'!' => {
+                let a = int(stack.pop());
+                stack.push(Arg::N(i64::from(a == 0)));
+            }
+            b'~' => {
+                let a = int(stack.pop());
+                stack.push(Arg::N(!a));
+            }
+            b'?' | b';' => {}
+            b't' => {
+                if int(stack.pop()) == 0 {
+                    skip(&mut at, true);
+                }
+            }
+            // Reached only by running the true branch to its end.
+            b'e' => skip(&mut at, false),
+            other => panic!(
+                "{value:?} uses %{}, which the audit does not expand",
+                other as char
+            ),
         }
     }
     out
@@ -65,6 +240,49 @@ fn terminfo_modes(value: &str) -> Vec<(bool, u16, bool)> {
         }
     }
     modes
+}
+
+/// Whether REPLY is what the ncurses response pattern PATTERN describes.
+///
+/// `u6` and `u8` are written in `tparm`'s own language rather than as an ERE: `%d` is
+/// a number, `%[...]` a run of the characters in the brackets, and `%i` says the
+/// numbers are one-based, which a match does not need to know.
+fn terminfo_response_matches(pattern: &str, reply: &[u8]) -> bool {
+    let pattern = terminfo_unescape(pattern);
+    let (mut p, mut r) = (0, 0);
+    while p < pattern.len() {
+        if pattern[p] != b'%' {
+            if reply.get(r) != Some(&pattern[p]) {
+                return false;
+            }
+            (p, r) = (p + 1, r + 1);
+            continue;
+        }
+        let run = |r: usize, accept: &dyn Fn(u8) -> bool| {
+            r + reply[r..].iter().take_while(|&&b| accept(b)).count()
+        };
+        match pattern[p + 1] {
+            b'i' => p += 2,
+            b'd' => {
+                let end = run(r, &|b| b.is_ascii_digit());
+                if end == r {
+                    return false;
+                }
+                (p, r) = (p + 2, end);
+            }
+            b'[' => {
+                let close = p + pattern[p..].iter().position(|&b| b == b']').unwrap();
+                let set = &pattern[p + 2..close];
+                let end = run(r, &|b| set.contains(&b));
+                if end == r {
+                    return false;
+                }
+                (p, r) = (close + 1, end);
+            }
+            other => panic!("`%{}' in a response pattern", other as char),
+        }
+    }
+    r == reply.len()
 }
 
 /// One element of a POSIX extended regular expression, as `terminfo_ere` parses it.
@@ -299,24 +517,12 @@ fn terminfo_entry_matches_what_decrqm_says() {
         }
     }
 
-    for query in ["u7", "u9", "RV", "XR"] {
-        let (_, value) = capabilities
-            .iter()
-            .find(|(name, _)| *name == query)
-            .unwrap_or_else(|| panic!("cooked.ti no longer declares `{query}'"));
-        let mut t = term(4, 8, &terminfo_decode(value));
-        assert!(
-            t.drain()
-                .events
-                .iter()
-                .any(|event| matches!(event, Event::Reply(_))),
-            "`{query}' ({value}) gets no reply"
-        );
-    }
-
-    // `tset` and tmux do not stop at a reply arriving: they match it against the
-    // entry's own pattern, so a reply that drifts from `rv` or `xr` is as good as none.
-    for (query, pattern) in [("RV", "rv"), ("XR", "xr")] {
+    // A query the entry declares gets a reply, and the reply is the one the entry says
+    // to expect: `tset` and tmux match it against `rv` and `xr`, so a reply that drifts
+    // from the pattern is as good as none. Which capabilities are queries is not a list
+    // kept here: `terminfo_sequences_are_all_recognised` fails for any capability that
+    // is answered and has no pattern in `TERMINFO_QUERIES`.
+    for &(query, pattern) in TERMINFO_QUERIES {
         let value = |name: &str| {
             capabilities
                 .iter()
@@ -326,14 +532,187 @@ fn terminfo_entry_matches_what_decrqm_says() {
         };
         let mut t = term(4, 8, &terminfo_decode(value(query)));
         let replies = reply_strings(&mut t);
-        let ere = terminfo_ere(value(pattern));
         assert!(
-            replies
-                .iter()
-                .any(|reply| ere_matches_whole(&ere, reply.as_bytes())),
+            !replies.is_empty(),
+            "`{query}' ({}) gets no reply",
+            value(query)
+        );
+        let matches = |reply: &String| match pattern {
+            "rv" | "xr" => ere_matches_whole(&terminfo_ere(value(pattern)), reply.as_bytes()),
+            _ => terminfo_response_matches(value(pattern), reply.as_bytes()),
+        };
+        assert!(
+            replies.iter().any(matches),
             "`{query}' is answered {:?}, which `{pattern}' ({}) does not match",
             replies,
             value(pattern)
+        );
+    }
+}
+
+/// Every capability that asks the terminal something, with the capability that says
+/// what the answer looks like.
+const TERMINFO_QUERIES: &[(&str, &str)] = &[("u7", "u6"), ("u9", "u8"), ("RV", "rv"), ("XR", "xr")];
+
+/// The arguments the audit expands each parametrised capability with, one list per
+/// expansion.
+///
+/// Chosen so that every branch of a conditional is taken by some expansion: `setaf`
+/// at 1, 9 and 100 goes through its `3x`, `9x` and `38;5` arms. A parametrised
+/// capability that is not listed here fails the audit, which is how a new one gets
+/// arguments rather than going unchecked.
+fn terminfo_arguments(name: &str) -> &'static [&'static [Arg]] {
+    use Arg::{N, S};
+    match name {
+        "cub" | "cud" | "cuf" | "cuu" | "dch" | "dl" | "ech" | "hpa" | "ich" | "il" | "indn"
+        | "rin" | "vpa" => &[&[N(2)]],
+        "csr" | "cup" => &[&[N(1), N(3)]],
+        // `%c`, so the character to repeat is given as its code.
+        "rep" => &[&[N(b'x' as i64), N(3)]],
+        "setaf" | "setab" => &[&[N(1)], &[N(9)], &[N(100)], &[N(0x12_34_56)]],
+        "sgr" => &[
+            &[],
+            &[N(1), N(1), N(1), N(1), N(1), N(1), N(1), N(0), N(1)],
+            &[N(0), N(0), N(0), N(0), N(0), N(0), N(1)],
+        ],
+        "setrgbf" | "setrgbb" => &[&[N(1), N(2), N(3)]],
+        "Smulx" => &[&[N(3)]],
+        "Setulc" => &[&[N(0x12_34_56)]],
+        "Setulc1" => &[&[N(5)]],
+        "Ss" => &[&[N(4)]],
+        "XM" | "Sync" => &[&[N(1)], &[N(0)]],
+        "Cs" => &[&[S("red")]],
+        // The write, and the read form: `?` asks for the clipboard back.
+        "Ms" => &[&[S("c"), S("aGk=")], &[S("c"), S("?")]],
+        "Hls" => &[&[S("7"), S("https://example.com/")], &[S(""), S("")]],
+        _ => panic!("`{name}' is parametrised and the audit has no arguments for it"),
+    }
+}
+
+/// The style the first cell of row 0 is drawn in after INPUT and an `x`.
+fn style_after(input: &[u8]) -> Style {
+    let mut t = term(2, 8, input);
+    t.feed(b"x");
+    run_style_at(&t, 0, 0)
+}
+
+/// Every sequence the entry says cooked understands is one cooked recognises.
+///
+/// The DECRQM audit above sees modes and a handful of queries. This feeds every other
+/// string capability, parametrised ones expanded by [`terminfo_expand`], and asks the
+/// core's count of sequences no arm recognised: `rep` with the `CSI b` arm deleted,
+/// `indn` without `CSI S`, `E3` without `CSI 3 J`, all used to pass.
+///
+/// Recognised is not the same as acted on, for two families. An SGR the decoder
+/// ignores is still a recognised `CSI m`, so each one must change the pen, either from
+/// the default or from a pen with everything on, which is how a reset shows. And an
+/// OSC is recognised by being handed to Lisp, so each one must at least arrive there.
+///
+/// Keys are what cooked sends rather than what it reads, and so are `PS` and `PE`, the
+/// bracketed-paste markers; those are `cooked-terminfo-keys-are-what-cooked-sends`.
+/// `rv`, `xr`, `u6`, `u8` and `xm` describe replies, and `acsc` is a table rather
+/// than a sequence; see `terminfo_alternate_charset_draws_every_pair`.
+#[test]
+fn terminfo_sequences_are_all_recognised() {
+    let replies_expected: Vec<&str> = TERMINFO_QUERIES.iter().map(|&(query, _)| query).collect();
+    let full = b"\x1b[1;2;3;4;5;7;8;9;53;38;5;1;48;5;2;58;5;3m";
+    let capabilities = terminfo_capabilities();
+    let fsl = capabilities
+        .iter()
+        .find(|(name, _)| *name == "fsl")
+        .expect("no `fsl'")
+        .1;
+    for &(name, value) in &capabilities {
+        let not_a_sequence = value.is_empty()
+            || name.starts_with('k')
+            || ["PS", "PE", "rv", "xr", "u6", "u8", "xm", "acsc"].contains(&name);
+        if not_a_sequence {
+            continue;
+        }
+        let expansions: Vec<Vec<u8>> = if value.contains('%') {
+            terminfo_arguments(name)
+                .iter()
+                .map(|args| terminfo_expand(value, args))
+                .collect()
+        } else {
+            vec![terminfo_decode(value)]
+        };
+        for mut bytes in expansions {
+            // `tsl' and `TS' open the status line and the title is written after them,
+            // and `Swd' opens OSC 7 for a directory, so they are fed as a program uses
+            // them: closed by `fsl'.
+            if ["tsl", "TS", "Swd"].contains(&name) {
+                bytes.extend(if name == "Swd" {
+                    &b"file://host/tmp"[..]
+                } else {
+                    b"title"
+                });
+                bytes.extend(terminfo_decode(fsl));
+            }
+            let shown = String::from_utf8_lossy(&bytes).escape_debug().to_string();
+            let mut t = term(4, 20, b"");
+            t.feed(&bytes);
+            assert_eq!(
+                t.unrecognised(),
+                0,
+                "`{name}' sends {shown}, which nothing recognises"
+            );
+
+            let events = t.drain().events;
+            if events.iter().any(|event| matches!(event, Event::Reply(_))) {
+                assert!(
+                    replies_expected.contains(&name),
+                    "`{name}' ({shown}) is answered, and TERMINFO_QUERIES has no pattern for it"
+                );
+            }
+            if bytes.starts_with(b"\x1b]") {
+                assert!(
+                    events.iter().any(|event| matches!(event, Event::Osc(..)))
+                        || bytes.starts_with(b"\x1b]8;"),
+                    "`{name}' sends {shown}, and nothing reaches Lisp"
+                );
+            }
+
+            let sgr = bytes.starts_with(b"\x1b[")
+                && bytes.ends_with(b"m")
+                && !matches!(bytes.get(2), Some(b'>' | b'?'));
+            if sgr {
+                let changed_from_default = style_after(&bytes) != style_after(b"");
+                let changed_from_full =
+                    style_after(&[&full[..], &bytes].concat()) != style_after(full);
+                assert!(
+                    changed_from_default || changed_from_full,
+                    "`{name}' sends {shown}, which changes nothing about the pen"
+                );
+            }
+        }
+    }
+}
+
+/// `acsc` pairs each VT100 line-drawing character with the one `smacs` makes of it, and
+/// cooked draws every pair it lists: under `smacs` none of them is printed as itself.
+#[test]
+fn terminfo_alternate_charset_draws_every_pair() {
+    let capabilities = terminfo_capabilities();
+    let value = |name: &str| {
+        capabilities
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("cooked.ti does not declare `{name}'"))
+            .1
+    };
+    let keys: Vec<u8> = terminfo_decode(value("acsc"))
+        .into_iter()
+        .step_by(2)
+        .collect();
+    let mut input = terminfo_decode(value("smacs"));
+    input.extend(&keys);
+    let t = term(1, keys.len() + 1, &input);
+    for (key, drawn) in keys.iter().zip(text(&t, 0).chars()) {
+        assert_ne!(
+            drawn, *key as char,
+            "`acsc' lists `{}', and `smacs' prints it as itself",
+            *key as char
         );
     }
 }
