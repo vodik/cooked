@@ -11,6 +11,7 @@ impl Levels {
             cursor_visible: modes.cursor_visible,
             cursor_shape: modes.cursor_shape,
             reverse_screen: modes.reverse_screen,
+            reverse_screen_toggles: state.reverse_screen_toggles,
             alt: state.shown.is_alternate(),
             app_cursor: modes.app_cursor,
             keys: state.key_encoding(),

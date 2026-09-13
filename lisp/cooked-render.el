@@ -392,7 +392,8 @@ CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
         cooked--modify-other-keys (or (plist-get update :modify-other-keys) 0)
         cooked--exit (plist-get update :exit))
   (cooked--set-alt (plist-get update :alt))
-  (cooked--set-reverse-screen (plist-get update :reverse))
+  (cooked--set-reverse-screen (plist-get update :reverse)
+                              (plist-get update :reverse-toggles))
   (cooked--set-mode (plist-get update :mode)))
 
 (defun cooked--set-mode (mode)

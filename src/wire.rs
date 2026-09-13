@@ -262,6 +262,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
         ":head"        => update.delta.head,
         ":cursor"      => cursor,
         ":reverse"     => levels.reverse_screen,
+        ":reverse-toggles" => levels.reverse_screen_toggles,
         ":marks"       => marks,
         ":alt"         => levels.alt,
         ":app-cursor"  => levels.app_cursor,

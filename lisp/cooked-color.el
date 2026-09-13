@@ -370,7 +370,22 @@ second table that could disagree with it."
 ;; the cursor in every other buffer on the frame.
 
 (defvar-local cooked--reverse-screen nil
-  "Whether the child has asked for the screen in reverse video, DEC mode 5.")
+  "Whether the screen is drawn in reverse video, DEC mode 5.
+The child\='s own setting, `cooked--reverse-screen-level\=', except while a flash
+is held; see `cooked--set-reverse-screen\='.")
+
+(defvar-local cooked--reverse-screen-level nil
+  "Whether the child wants the screen in reverse video, as of the last drain.")
+
+(defvar-local cooked--reverse-screen-toggles 0
+  "The drain\='s count of DECSCNM changes, as of the last drain.")
+
+(defvar-local cooked--flash-timer nil
+  "The timer ending a flash `cooked--set-reverse-screen\=' is holding, or nil.")
+
+(defconst cooked--flash-seconds 0.1
+  "How long a flash that arrived inside one drain is shown for.
+The pause `flash\=' in our terminfo makes between its set and its reset.")
 
 (defvar-local cooked--reverse-screen-remaps nil
   "The face remapping cookies drawing `cooked--reverse-screen', or nil.")
@@ -423,14 +438,48 @@ showing in the colors of the moment it was drawn.  See `cooked--face-build\='."
         (cooked--remap-concealed background foreground)
       (cooked--remap-concealed foreground background))))
 
-(defun cooked--set-reverse-screen (on)
-  "Adopt DECSCNM state ON from the drain, remapping only when it changes."
-  (let ((on (and on t)))
-    (unless (eq on cooked--reverse-screen)
-      (setq cooked--reverse-screen on)
-      (cooked--apply-reverse-screen)
-      ;; A shade in the default colours was blended from them as they were.
-      (cooked--reblend-shades))))
+(defun cooked--set-reverse-screen (on &optional toggles)
+  "Adopt DECSCNM state ON from the drain, remapping only when it changes.
+
+TOGGLES is the drain\='s count of changes to the mode.  A count that moved while
+the level ended the drain where it began is a flash whose set and reset both
+landed between two drains -- which a drain held by a synchronised frame, or by
+load, makes likely, since `flash\=' pauses only 100ms.  Adopting the level alone
+would draw nothing at all, so the reversal is drawn instead and held for
+`cooked--flash-seconds\=' before the level is.  For example, `vim\=''s
+`visualbell\=' sends ESC [ ? 5 h, pauses, then ESC [ ? 5 l, and a drain that
+reads both in one go still flashes the screen once."
+  (let ((on (and on t))
+        (was cooked--reverse-screen-level))
+    (setq cooked--reverse-screen-level on)
+    (when (and toggles (/= toggles cooked--reverse-screen-toggles))
+      (setq cooked--reverse-screen-toggles toggles)
+      (when (eq on was)
+        (when cooked--flash-timer
+          (cancel-timer cooked--flash-timer))
+        (cooked--draw-reverse-screen (not on))
+        (setq cooked--flash-timer
+              (run-at-time cooked--flash-seconds nil
+                           #'cooked--end-flash (current-buffer)))))
+    ;; A held flash is left alone by the drains that arrive while it shows; its end
+    ;; draws whatever level the last of them left.
+    (unless cooked--flash-timer
+      (cooked--draw-reverse-screen on))))
+
+(defun cooked--end-flash (buffer)
+  "End the flash held in BUFFER, drawing the screen the way the child has it now."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq cooked--flash-timer nil)
+      (cooked--draw-reverse-screen cooked--reverse-screen-level))))
+
+(defun cooked--draw-reverse-screen (on)
+  "Draw the screen in reverse video if ON, remapping only when that changes."
+  (unless (eq on cooked--reverse-screen)
+    (setq cooked--reverse-screen on)
+    (cooked--apply-reverse-screen)
+    ;; A shade in the default colours was blended from them as they were.
+    (cooked--reblend-shades)))
 
 (defun cooked--refresh-reverse-screen ()
   "Swap the new theme's colors, if the screen is reversed.

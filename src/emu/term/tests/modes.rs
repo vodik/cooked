@@ -136,6 +136,26 @@ fn reverse_screen_rides_the_drain() {
     assert!(!t.drain().levels.reverse_screen);
 }
 
+/// A `flash` whose set and reset land in one read still reaches the drain: the level is
+/// back where it was, but the count says it moved twice. A set that changes nothing is
+/// not counted.
+#[test]
+fn a_flash_inside_one_drain_is_counted() {
+    let mut t = term(2, 8, b"ab");
+    assert_eq!(t.drain().levels.reverse_screen_toggles, 0);
+    assert!(t.feed(b"\x1b[?5h\x1b[?5l"), "the flash is an update");
+    let levels = t.drain().levels;
+    assert!(!levels.reverse_screen);
+    assert_eq!(levels.reverse_screen_toggles, 2);
+    t.feed(b"\x1b[?5l\x1b[?5h\x1b[?5h\x1bc");
+    let levels = t.drain().levels;
+    assert!(!levels.reverse_screen);
+    assert_eq!(
+        levels.reverse_screen_toggles, 3,
+        "the repeat and RIS are not toggles"
+    );
+}
+
 /// `flash' from our terminfo, and the reset `reset' sends: both have to leave the screen
 /// the right way round.
 #[test]

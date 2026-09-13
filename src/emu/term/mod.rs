@@ -404,6 +404,15 @@ pub struct Levels {
     /// Emacs renders it as a swap of the buffer's default foreground and background, so
     /// nothing in [`Delta::rows`] changes with it and no row is damaged.
     pub reverse_screen: bool,
+    /// How many times DECSCNM has changed since the session began, wrapping.
+    ///
+    /// The level alone loses a `flash`: a set and a reset that land between two drains
+    /// leave it where it was, so nothing wakes and Emacs never draws the reversal. That
+    /// is not rare, because a drain waits out 2026's synchronised frames and load, and
+    /// `flash` holds the reversal for only 100ms. A count that moved while the level did
+    /// not is how Emacs tells there was one. It counts `h` and `l`, but not the resets,
+    /// which are the child starting over rather than signalling.
+    pub reverse_screen_toggles: u32,
     pub alt: bool,
     /// DECCKM: cursor keys must be sent as SS3 (`ESC O A`), not CSI (`ESC [ A`).
     /// ncurses turns this on via `smkx`, and terminfo's `kcuu1` assumes it.
@@ -1157,6 +1166,9 @@ struct State {
     evicted_marks: Vec<(MarkId, Anchor)>,
     /// Everything DECSTR and RIS put back; see [`Modes`].
     modes: Modes,
+    /// [`Levels::reverse_screen_toggles`]. Beside [`Modes`] rather than in it, so that a
+    /// reset, which puts every mode back, does not also make a count go backwards.
+    reverse_screen_toggles: u32,
     /// What DECSC saved of [`Modes::charsets`], for the primary screen and the alternate.
     ///
     /// VT100 DECSC saves the designations and the shift along with the cursor, and a child

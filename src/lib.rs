@@ -144,8 +144,9 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
 
         /// Collect everything that changed in SESSION since the last call.
         /// Returns a plist with :scrolled, :shifts, :rows, :edits, :height, :used, :head,
-        /// :cursor, :reverse, :marks, :alt, :app-cursor, :keys, :kitty-flags,
-        /// :modify-other-keys, :mode, :images, :links, :styles, :events and :exit.
+        /// :cursor, :reverse, :reverse-toggles, :marks, :alt, :app-cursor, :keys,
+        /// :kitty-flags, :modify-other-keys, :mode, :images, :links, :styles, :events and
+        /// :exit.
         ///
         /// :scrolled and :rows are the same shape, so one renderer handles both: a block is
         /// (TEXT STYLES DECOS ROWS), where the spans carry character offsets into TEXT and

@@ -208,8 +208,13 @@ impl State {
                     self.events.push(Event::SizeReport(report));
                 }
             }
+            DecMode::ReverseScreen => {
+                if self.modes.reverse_screen != on {
+                    self.reverse_screen_toggles = self.reverse_screen_toggles.wrapping_add(1);
+                }
+                self.set_flag_mode(mode, on);
+            }
             DecMode::AppCursor
-            | DecMode::ReverseScreen
             | DecMode::CursorVisible
             | DecMode::AppKeypad
             | DecMode::FocusEvents

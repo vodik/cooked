@@ -157,8 +157,10 @@ Only when DIRECTORY is non-nil: nil keeps its own meaning of leaving the child
 wherever Emacs is, and is not a request to be second-guessed."
   (cooked--load-module)
   (cooked--reset-images)
-  ;; A new core numbers its renditions from scratch.
+  ;; A new core numbers its renditions from scratch, and counts DECSCNM changes
+  ;; from zero.
   (cooked--reset-styles)
+  (setq cooked--reverse-screen-toggles 0)
   ;; A layer that failed against the last child's output is worth hearing about
   ;; again for this one; see `cooked--seams-reported'.
   (setq cooked--seams-reported nil)

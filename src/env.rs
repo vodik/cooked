@@ -253,6 +253,7 @@ symbols! {
     Head => ":head",
     Cursor => ":cursor",
     Reverse => ":reverse",
+    ReverseToggles => ":reverse-toggles",
     Marks => ":marks",
     Alt => ":alt",
     AppCursor => ":app-cursor",

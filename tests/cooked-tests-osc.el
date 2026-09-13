@@ -2142,6 +2142,50 @@ drain and cancel out before the buffer has seen the first."
       (should (cooked-tests--settle (lambda () (not cooked--reverse-screen))))
       (should-not (alist-get 'default face-remapping-alist)))))
 
+(ert-deftest cooked-a-flash-inside-one-drain-still-flashes ()
+  "`flash\=' written in one go reverses the screen once and puts it back.
+
+The set and the reset reach the core in one read, so the drain after them reports
+the level where it began; only the toggle count says anything happened.  Every
+change actually drawn is recorded, and the screen must have gone reversed and
+then come back, with the reversal held until the timer ends it."
+  (let ((drawn nil))
+    (cl-flet ((record (on)
+                (unless (eq on cooked--reverse-screen)
+                  (push on drawn))))
+      (advice-add 'cooked--draw-reverse-screen :before #'record)
+      (unwind-protect
+          (cooked-tests--with-session
+              '("/bin/sh" "-c" "printf '\\033[?5h\\033[?5l'; sleep 5")
+            (should (cooked-tests--settle (lambda () (equal drawn '(nil t)))))
+            (should (= cooked--reverse-screen-toggles 2))
+            (should-not cooked--reverse-screen-level)
+            (should-not cooked--reverse-screen)
+            ;; And a drain that moves nothing does not flash again.
+            (cooked--set-reverse-screen nil 2)
+            (should-not cooked--flash-timer)
+            (should (equal drawn '(nil t))))
+        (advice-remove 'cooked--draw-reverse-screen #'record)))))
+
+(ert-deftest cooked-a-held-flash-outlasts-the-drains-during-it ()
+  "Drains arriving while a flash shows leave it showing, and its end draws the
+level the last of them reported, which a reset in the meantime may have moved."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (cooked--set-reverse-screen nil 2)
+    (should cooked--reverse-screen)
+    (should cooked--flash-timer)
+    (cooked--set-reverse-screen nil 2)
+    (should cooked--reverse-screen)
+    (cooked--set-reverse-screen t 2)
+    (should cooked--reverse-screen)
+    (cooked--set-reverse-screen nil 2)
+    (should (cooked-tests--settle (lambda () (not cooked--flash-timer))))
+    (should-not cooked--reverse-screen)
+    ;; A set that simply changes the level is drawn at once, with no flash.
+    (cooked--set-reverse-screen t 3)
+    (should cooked--reverse-screen)
+    (should-not cooked--flash-timer)))
+
 (ert-deftest cooked-reverse-screen-swaps-the-colors-the-child-set ()
   "An OSC 11 background is the one reversed, before the reversal and after it."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
