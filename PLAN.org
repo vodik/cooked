@@ -1634,9 +1634,9 @@ State of the other eleven, by whether the code has anything:
 | pixel-delta wheel accumulation    | *DONE*, cfe4e85                           |
 | password regex fallback           | absent — nothing in cooked-secret.el      |
 | =cooked-password-functions= chain | absent — the variable does not exist      |
-| minibuffer resize exception       | absent                                    |
+| minibuffer resize exception       | *DONE*, 2157a1a's sibling                 |
 | kitty flags beyond bit 1          | partial — tracked, never change encoding  |
-| =around-font-scale= advice        | partial — hooks exist, no advice          |
+| =around-font-scale= advice        | *DONE*, 2157a1a                           |
 | medium gating defcustom           | partial — one reference in kitty.rs       |
 | bash < 4.4 DEBUG-trap fallback    | partial — DEBUG referenced in the snippet |
 | nushell arm                       | partial — four files mention nu           |
@@ -1651,6 +1651,26 @@ fast swipe, so a notch would be accumulated, rounded, and a click would go
 missing. And the floor of one press is the event's own *line count*, not a
 constant: macOS reports a notch as one line and fewer pixels than a row when
 =line-spacing= is set, so the row arithmetic yields zero and the notch vanishes.
+
+**** Done: the font-scale advice (2157a1a) and the minibuffer exception
+
+=buffer-face-set=, =variable-pitch-mode= and =buffer-face-toggle= all rescale
+through =buffer-face-mode=, which runs *no hook*, and nothing else observes it
+either — the window's pixel dimensions do not change, so neither
+=window-configuration-change-hook= nor =window-size-change-functions= fires. The
+sharp end: =cooked--ascii-fixed-pitch-p= exists precisely to detect a
+non-fixed-pitch face, and cooked could detect one without ever being told to
+look.
+
+=:after= advice where ghostel uses =:around=, and that is a property of cooked
+rather than a shortcut — ghostel snapshots anchored windows because its
+anchoring is *latched*, where =cooked--pin-transcript-bottom= computes the view
+from the buffer on every drain. Nothing to save and put back. The caches need no
+telling either, =cooked--layout-stamp= naming the font.
+
+The minibuffer exception is deferred only where the *width* is unchanged, and
+never on the alternate screen: a full-screen program has laid itself out against
+a row count and would draw into rows that are gone.
 
 **** Done: lone-ESC filter (65b7916)
 
