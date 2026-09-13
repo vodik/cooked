@@ -123,6 +123,7 @@ pub enum Mark {
 /// restate the field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// At least one BEL since the last drain; see [`State::bell_queued`].
     Bell,
     /// Any OSC the terminal does not act on itself, handed over verbatim as
     /// (code, remaining parts, ended with BEL).
@@ -167,9 +168,9 @@ pub enum Event {
     /// `ESC c` -- RIS, a full reset of the terminal.
     ///
     /// RIS resets the emulator itself; this event is for state kept in Lisp, such as OSC
-    /// 9;4 progress and the OSC 22 pointer stacks. A reset that cleared the screen but left
-    /// a progress indicator on the mode line would be the stuck state `reset` is typed to
-    /// cure.
+    /// 9;4 progress, the OSC 22 pointer stacks and the bell's mark. A reset that cleared the
+    /// screen but left a progress indicator on the mode line would be the stuck state
+    /// `reset` is typed to cure.
     ///
     /// Not raised by DECSTR (`CSI ! p`), which every `rs2` and `is2` sends: a soft reset is
     /// a program tidying its modes, and a build running underneath has not stopped
@@ -1088,6 +1089,14 @@ struct State {
     /// outlive the grid position it was taken from.
     evicted_total: usize,
     events: Vec<Event>,
+    /// Whether `events` already holds an [`Event::Bell`] this drain.
+    ///
+    /// A BEL is an occurrence with no payload, so a second one before Emacs has seen the
+    /// first says nothing new, and Lisp rate-limits the noise anyway. Without this, `cat`
+    /// of a binary queues about four thousand bells per MiB, each one a round trip through
+    /// the seam and a window lookup. A flag rather than a search of `events`, which a
+    /// burst of bells among a burst of replies would make quadratic.
+    bell_queued: bool,
     /// The last graphic character printed, for REP. Held after the designated set has
     /// translated it, so repeating a box-drawing character repeats what was drawn.
     ///

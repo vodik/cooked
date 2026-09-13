@@ -112,7 +112,12 @@ impl Perform for State {
     fn execute(&mut self, byte: u8) {
         self.end_cluster();
         match byte {
-            0x07 => self.events.push(Event::Bell),
+            0x07 => {
+                if !self.bell_queued {
+                    self.bell_queued = true;
+                    self.events.push(Event::Bell);
+                }
+            }
             0x08 => self.screen_mut().backspace(),
             0x09 => self.screen_mut().tab(1),
             0x0A..=0x0C => {
@@ -189,7 +194,10 @@ impl Perform for State {
                 self.erase_display(Erase::All, Pen::default());
                 self.screen_mut().goto(0, 0);
                 // Last, so a Lisp handler sees the reset already done; see [`Event::Reset`].
+                // A bell queued before it is answered before the reset, and Lisp clears
+                // its mark there, so a BEL after the reset has to be queued afresh.
                 self.events.push(Event::Reset);
+                self.bell_queued = false;
             }
             _ => {}
         }

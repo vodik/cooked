@@ -203,6 +203,46 @@ comes back to."
     (cooked--update-attention)
     (should-not cooked-bell-pending)))
 
+(ert-deftest cooked-a-bell-rings-under-a-keyboard-macro ()
+  "A bell arriving while a keyboard macro runs rings and leaves the macro alone.
+
+Batch Emacs never takes the branch of `ding' that ends a macro, since it is
+`noninteractive', so the stub does what the C does outside batch: with no
+argument and `executing-kbd-macro' set, `ding' signals `user-error'.  The bell
+goes through the real event and seam, which would otherwise swallow the signal
+and report a failure where a ring should have been."
+  (let ((rings 0)
+        (failures nil)
+        (cooked--bell-last nil))
+    (cl-letf (((symbol-function 'ding)
+               (lambda (&optional arg)
+                 (if (and (null arg) executing-kbd-macro)
+                     (user-error "Keyboard macro terminated by a command ringing the bell")
+                   (cl-incf rings))))
+              ((symbol-function 'cooked--seam-failed)
+               (lambda (&rest args) (push args failures))))
+      (with-temp-buffer
+        (cooked-mode)
+        (set-window-buffer (selected-window) (current-buffer))
+        (let ((executing-kbd-macro [?x]))
+          (cooked--handle-event '(bell) (point-min)))
+        (should-not failures)
+        (should (= rings 1))))))
+
+(ert-deftest cooked-a-reset-clears-the-bell-mark ()
+  "RIS takes a bell\='s mark with it, as it takes the progress indicator.
+
+Pinned at the seam, like `cooked-progress-is-cleared-by-a-reset'; that a BEL
+after the reset is raised afresh is the Rust test
+`a_burst_of_bells_is_one_event_per_drain'."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq cooked-bell-pending t)
+    (should (string-search "bell" (cooked--mode-line)))
+    (cooked--handle-event '(reset) (point-min))
+    (should-not cooked-bell-pending)
+    (should-not (string-search "bell" (cooked--mode-line)))))
+
 (ert-deftest cooked-title-stack-restores-on-pop ()
   "XTWINOPS 22/23, which `smcup'/`rmcup' send around the alternate screen."
   (cooked-tests--with-session

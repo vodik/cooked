@@ -246,6 +246,25 @@ fn a_reset_says_so_where_a_soft_reset_does_not() {
     assert!(t.drain().events.contains(&Event::Reset));
 }
 
+/// `cat` of a binary sends thousands of BELs, and each one queued is a trip through Lisp
+/// that the bell's own rate limit then throws away. One per drain says all of it.
+#[test]
+fn a_burst_of_bells_is_one_event_per_drain() {
+    let bells = |events: &[Event]| events.iter().filter(|e| **e == Event::Bell).count();
+    let mut t = term(3, 8, b"");
+    t.feed(&b"\x07a\x07\x1b]0;x\x07\x07".repeat(1000));
+    assert_eq!(bells(&t.drain().events), 1);
+    assert_eq!(bells(&t.drain().events), 0, "nothing rings twice");
+    t.feed(b"\x07");
+    assert_eq!(bells(&t.drain().events), 1, "the next drain rings again");
+    // Lisp clears the bell's mark on RIS, so a BEL after one is news again.
+    t.feed(b"\x07\x1bc\x07");
+    let events = t.drain().events;
+    let reset = events.iter().position(|e| *e == Event::Reset).unwrap();
+    assert_eq!(bells(&events[..reset]), 1);
+    assert_eq!(bells(&events[reset..]), 1);
+}
+
 /// `reset` from a shell whose full-screen program died without its `rmcup`: RIS has to
 /// bring the user back to the primary screen, and say so on the drain's `alt` level,
 /// which is the only way Lisp hears of any alt switch.

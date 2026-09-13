@@ -694,11 +694,12 @@ two chances to disagree."
     (`(display-cleared) (setq cooked--pin-screen-top t))
     ;; `ESC c'.  Everything RIS resets inside the emulator the emulator resets
     ;; itself; this event exists for the state Emacs holds on its behalf: the
-    ;; OSC 9;4 progress indicator and the OSC 22 pointer stacks.  A
-    ;; `reset' that blanked the screen and left the mode line still claiming a
-    ;; build was 60% through would be stuck in the one way the user has no
-    ;; second thing to type their way out of.
-    (`(reset) (cooked--reset-progress) (cooked--reset-pointer-shapes))
+    ;; OSC 9;4 progress indicator, the OSC 22 pointer stacks and the bell's
+    ;; mark.  A `reset' that blanked the screen and left the mode line still
+    ;; claiming a build was 60% through would be stuck in the one way the user
+    ;; has no second thing to type their way out of.
+    (`(reset) (cooked--reset-progress) (cooked--reset-pointer-shapes)
+     (cooked--reset-bell))
     ;; Decoded into a record at the boundary, like the cursor and the grid; see
     ;; `cooked-mouse-state'.  cooked-mouse.el owns it because it is the only
     ;; reader, and re-gates its own keymap on the way through.

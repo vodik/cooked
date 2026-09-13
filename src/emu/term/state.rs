@@ -383,6 +383,7 @@ impl State {
         // scrolls in between moves every mark still on the grid with its row.
         let marks = self.take_marks();
         let mut events = std::mem::take(&mut self.events);
+        self.bell_queued = false;
         for event in &mut events {
             if let Event::Mark(_, at, id) = event {
                 *at = self.anchor_in_characters(*at, *id, &marks);
