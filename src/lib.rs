@@ -8,15 +8,10 @@
 // type in it is private by design.  Documentation that explains a public entry
 // point therefore has to point *inwards* -- `cooked--drain' cannot be explained
 // without naming `Screen::drain_damage' and `Event' -- and rustdoc warns about
-// every one of those links, nineteen of them, on a build with no defects in it
-// at all.  That is not a lint finding, it is the lint describing the shape of
-// the crate, and the cost of leaving it on is that the one warning class that
-// *is* a defect -- `broken_intra_doc_links', a link naming something that no
-// longer exists -- arrives in the middle of the nineteen and is not read.  So
-// the shape warning is silenced and the defect warning is kept, and `make doc'
-// turns what is left into an error.  Read the docs with
-// `cargo doc --document-private-items'; without it this crate documents about
-// four items and none of the links resolve.
+// every such link on a build with no defects in it.  Left on, those warnings
+// would bury the one class that is a defect, `broken_intra_doc_links', so the
+// shape warning is silenced and the defect warning kept.  Read the docs with
+// `cargo doc --document-private-items'; without it none of the links resolve.
 #![allow(rustdoc::private_intra_doc_links)]
 
 pub mod emu;
@@ -382,8 +377,8 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// instead of buying a redisplay per write.  That is the whole of cooked's
         /// backpressure, and it is deliberately released here rather than at
         /// `cooked--drain' -- taking a delta is cheap, rendering it is not, and re-arming
-        /// before the render made `cooked-min-redisplay-interval' a floor that had always
-        /// elapsed by the time it was consulted.
+        /// before the render would make `cooked-min-redisplay-interval' a floor that had
+        /// always elapsed by the time it was consulted.
         ///
         /// Call it once per drain, from the cleanup of an `unwind-protect' rather than the
         /// body: a render that signals must still re-arm.  Failing to call it is slow
@@ -487,11 +482,9 @@ fn pairs(env: Env, alist: Value) -> Result<Vec<(String, String)>> {
 
 /// Turn a core error into a Lisp signal, at the point `?` would carry it.
 ///
-/// An extension trait rather than a free function because there is no `impl From` to be
-/// had -- the conversion needs an `Env`, which the error does not carry -- and six call
-/// sites spelling `.or_signal(env)?` is what that shortfall looked like.
-/// `Display` on [`crate::error::Error`] does the message, so this no longer has to know
-/// anything about what went wrong.
+/// An extension trait because there is no `impl From` to be had: the conversion needs an
+/// `Env`, which the error does not carry. `Display` on [`crate::error::Error`] writes the
+/// message.
 trait OrSignal<T> {
     fn or_signal(self, env: Env) -> Result<T>;
 }
@@ -521,11 +514,8 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
     };
     let wake = env.open_channel(args[4])?;
     let cwd = env.opt::<String>(args, 5)?;
-    // The interval through the constructor rather than as a field of a struct literal,
-    // because the frame ceiling is derived from it and update syntax would compute that
-    // from the default and then overwrite the interval it came from; see
-    // `Options::with_min_redisplay_interval`. `backlog_limit` is nobody's derivation and
-    // stays an ordinary field.
+    // The interval through the constructor, because the frame ceiling derives from it;
+    // see `Options::with_min_redisplay_interval`.
     let defaults = match env.opt::<i64>(args, 6)? {
         Some(ms) => session::Options::with_min_redisplay_interval(
             std::time::Duration::from_millis(ms.max(0) as u64),
@@ -612,9 +602,7 @@ fn remove_rows(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 fn image_forget(env: Env, args: &[Value]) -> Result<Value> {
-    // An id outside the module's own range is one it certainly does not hold, so it is
-    // nothing to forget rather than something to signal about: the caller is handing back
-    // an id the module gave it, and a number that could never have been one is the same
+    // An id outside the module's own range is one it cannot hold, so it is the same
     // no-op as an id already retired.
     if let Ok(id) = u32::try_from(env.from_lisp::<i64>(args[1])?) {
         handle(env, args[0])?.term().forget_image(ImageId(id));
@@ -623,9 +611,8 @@ fn image_forget(env: Env, args: &[Value]) -> Result<Value> {
 }
 
 fn set_color_scheme(env: Env, args: &[Value]) -> Result<Value> {
-    // Two symbols compared by identity rather than a `FromLisp` for a two-value enum:
-    // the protocol has exactly these two answers, and anything else is the caller
-    // passing the wrong thing rather than a scheme we have no name for.
+    // Two symbols compared by identity: the protocol has exactly these two answers, and
+    // anything else is the caller passing the wrong thing.
     let scheme = if env.eq(args[1], sym!(env, "dark")?) {
         ColorScheme::Dark
     } else if env.eq(args[1], sym!(env, "light")?) {
@@ -652,18 +639,14 @@ fn signal(env: Env, args: &[Value]) -> Result<Value> {
 
 /// The signal named by a Lisp `sigtstp'-style symbol, or given as a raw number.
 ///
-/// Names exist because the numbers are not portable and Lisp cannot see which platform
-/// it is on. `SIGTSTP` is 20 on Linux and 18 on the BSDs, where 20 is `SIGCHLD` and 18
-/// is what Linux calls `SIGCONT` -- so a number written down in Lisp is right on one
-/// platform and quietly wrong on the other. It was: `cooked-suspend' sent 20, which on
-/// macOS is a `SIGCHLD' the child ignores, and `cooked-continue' sent 18, which there
-/// stops the job it is supposed to restart. This is the side that links libc, so this is
-/// the side that should be turning a name into a number.
+/// Names exist because the numbers are not portable: `SIGTSTP` is 20 on Linux and 18 on
+/// the BSDs, where 20 is `SIGCHLD` and 18 is what Linux calls `SIGCONT`. A number written
+/// in Lisp would suspend on one platform and do something else on the other, and this is
+/// the side that links libc.
 ///
-/// Numbers still work, and are still validated here rather than inside `Pty::signal`:
-/// that is the one caller whose number is untrusted, and one that is not a signal is the
-/// caller passing the wrong thing, so it gets the Lisp condition for that rather than
-/// being flattened into a `cooked-error' string.
+/// Numbers still work, validated here rather than in `Pty::signal`, so a number that is
+/// not a signal gets the Lisp condition for a wrong argument rather than a
+/// `cooked-error' string.
 fn to_signal(env: Env, value: Value) -> Result<Signal> {
     // Asked before `from_lisp`, not after: a failed conversion leaves a non-local exit
     // pending on the Emacs side, and everything after it is a no-op until Lisp unwinds.
