@@ -52,9 +52,8 @@ fills and the child blocks in `write\='.  One paces, the other pauses; calling
 the pair pacing would advertise a second pace mechanism that deliberately does
 not exist.
 
-Neither used to reach a session already running, which meant the obvious way to
-tune the one knob with a taste question behind it was to kill the terminal you
-were tuning it for.
+Both reach a session already running, so tuning the interval does not mean
+killing the terminal you are tuning it for.
 
 Both are sent whichever one changed, because the core takes them together: they
 are tuned as a pair, a longer interval leaving more to accumulate between drains

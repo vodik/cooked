@@ -107,16 +107,10 @@
     (kp-delete   keypad  "n" deletechar))
   "Every non-character key cooked speaks for, as (SYMBOL KIND PAYLOAD [FALLBACK]).
 
-One table rather than the five parallel ones this replaced, and the reason is
-worth stating because the five looked like a reasonable decomposition.  Four of
-them named how a key is spelled *modified* -- CSI final, SS3 final, tilde
-number, code point -- and the fifth, cooked--special-keys, listed the
-unmodified spelling for all twenty-seven.  But that fifth table was derivable
-from the other four in every single entry, so it was a denormalization
-maintained by hand; and because `cooked--encode-event\=' consulted it last, after
-the four tables that between them covered all twenty-seven keys, its clause
-there could never fire at all.  A table nothing can reach is not a fallback, it
-is a place for a mistake to live.
+One table rather than parallel ones per spelling, because the unmodified
+spelling of every key is derivable from its modified one: a separate table of
+unmodified spellings would be a denormalization maintained by hand, and one
+consulted after the others could never be reached at all.
 
 KIND says both how the key is spelled and what a modifier does to it:
 
@@ -147,9 +141,9 @@ for each of the maps it builds -- which is the table\='s other consumer.")
 (defun cooked--key-sequence (entry)
   "The unmodified, un-negotiated escape sequence ENTRY names.
 
-ENTRY is a `cooked--key-encodings\=' row.  This is what used to be written out a
-second time in cooked--special-keys; deriving it is what keeps the two
-spellings of one key from drifting apart."
+ENTRY is a `cooked--key-encodings\=' row.  Deriving the unmodified spelling
+rather than writing it out a second time is what keeps the two spellings of one
+key from drifting apart."
   (pcase entry
     (`(,_ csi ,final) (cooked--csi final))
     (`(,_ ss3 ,final) (cooked--ss3 final))
@@ -543,12 +537,8 @@ every capital into a lowercase letter."
   ;; `event-basic-type' only reads.  Ask the other way round and the first press of
   ;; every modified key decodes as nil.
   ;;
-  ;; One lookup and one dispatch on the entry's KIND.  This used to be five
-  ;; tables tried in order under a `cl-block', which needed a paragraph of
-  ;; comment to explain why the ordering was safe -- the rule being that the
-  ;; first table holding a key is the one that answers for it, which nothing
-  ;; stated and only the tables' contents made true.  With one entry per key
-  ;; there is no ordering left to get wrong: a key is in the table or it is not,
+  ;; One lookup and one dispatch on the entry's KIND.  With one entry per key
+  ;; there is no ordering to get wrong: a key is in the table or it is not,
   ;; and if it is not it falls through to the plain-character case below.
   (let* ((mods (event-modifiers event))
          (basic (event-basic-type event))

@@ -150,8 +150,7 @@ uses.  Weight is bold and faint, slant is italic, `:underline\=' is a whole
 sub-protocol of its own, `:strike-through\=' is SGR 9, `:overline\=' is SGR 53,
 and reverse and conceal both spend the two colours — so any of those would make
 blinking text indistinguishable from text carrying the attribute it collided
-with, which is the bug this face exists to fix rather than move.  It used to be
-the overline, until SGR 53 arrived and claimed it.
+with, which is the bug this face exists to fix rather than move.
 
 The box is drawn inward, which is what the negative widths say: it takes its
 pixels from the cells it surrounds rather than adding a column either side, so
@@ -264,11 +263,10 @@ no colour is rgb -- and that is the overwhelmingly common case, since the
 palette is what shells and TUIs emit.  Nil when any code is nil, and the caller
 falls back to a consed list.
 
-The key exists because building one used to cost more than answering with it.
-`cooked--face\=' consed a fresh four-element list per span and looked it up in an
-`equal\=' table; 192 lookups on a styled frame measured 0.220 ms that way against
-0.049 ms for a fixnum.  Almost none of that is the hash: it is the allocation
-and the element-by-element `equal\=' walk, neither of which a fixnum has.
+The key exists because a consed list per span, looked up in an `equal\=' table,
+costs several times what a fixnum does.  Almost none of that is the hash: it is
+the allocation and the element-by-element `equal\=' walk, neither of which a
+fixnum has.
 
 The layout packs into 43 bits -- ATTRS is 16, each code is 9 -- which a 64-bit
 Emacs holds in a fixnum with 18 to spare.  On a 32-bit build the shifts spill
@@ -307,17 +305,12 @@ colour with one `clrhash\=' when the theme changes."
                   ;; identifies it exactly: one short unibyte string, compared by
                   ;; `equal' as a memcmp rather than walked.
                   ;;
-                  ;; It was a consed list of decoded specs, and that made truecolor
-                  ;; the slowest thing in the renderer: a `(list r g b)' per colour
-                  ;; field, then a four-element key holding them, then an `equal'
-                  ;; hash descending into the nesting -- 14.6us against 2.6us for a
-                  ;; palette span, where before the packed format the lists at least
-                  ;; arrived ready-made from Rust.  `flood, 20k styled lines' has one
-                  ;; truecolor span per line and went from 117ms to 225ms on it.
-                  ;; Optimising the palette case is no excuse for pessimising the
-                  ;; other one; `ls --color' is not the only thing that emits colour,
-                  ;; and a build log full of `38;2' is exactly the flood this path is
-                  ;; for.
+                  ;; A consed key of decoded specs would make truecolor the
+                  ;; slowest thing in the renderer: a `(list r g b)' per colour
+                  ;; field, a key holding them, and an `equal' hash descending
+                  ;; into the nesting.  `ls --color' is not the only thing that
+                  ;; emits colour, and a build log full of `38;2' is exactly the
+                  ;; flood this path is for.
                   ;; Never `equal' to a fixnum, so the two kinds of key share one
                   ;; table with no chance of colliding -- which is what keeps
                   ;; `cooked--flush-face-cache' a single `clrhash' over everything

@@ -133,8 +133,8 @@ one child\\='s output is worth hearing about again for the next one.")
 
 The call site for anything running from inside a drain that the buffer is
 already correct without -- an optional layer\\='s contribution, or one of cooked\\='s
-own cosmetic passes.  Three policies, and the five open-coded `condition-case\\='s
-this replaced each got a different pair of them wrong.
+own cosmetic passes.  Three policies, which an open-coded `condition-case\\='
+easily gets a different pair of wrong.
 
 *Re-signals under `cooked-debug\\='*, like `cooked--protect-hook\\=' and
 `cooked--dolist-buffers\\='.  A developer who asked to see failures must not have
@@ -171,10 +171,8 @@ A dynamic binding rather than something the wrapper closes over, and the reason
 is worth a sentence because the closure is the obvious spelling.
 `run-hook-wrapped\\=' hands the wrapper its arguments, so the only thing left to
 capture is the seam\\='s own name -- and capturing it costs a closure per call, on
-a path that runs once per damaged row per drain.  Measured byte-compiled at
-1.14us per call against 0.50us with the wrapper hoisted to top level.  The CPU
-time is immaterial either way; one closure per row per frame is garbage this
-tree does not otherwise make.
+a path that runs once per damaged row per drain.  The CPU time is immaterial;
+one closure per row per frame is garbage this tree does not otherwise make.
 
 Bound around the whole walk rather than per entry, and with `let\\=' rather than
 `setq\\=', so a seam whose entry runs another seam -- a row listener that
