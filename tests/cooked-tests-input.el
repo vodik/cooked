@@ -3793,5 +3793,54 @@ terminal for the rest of the session."
       (cooked--track-selection)
       (should-not (eq cooked--input-mode 'frozen)))))
 
+(ert-deftest cooked-a-wheel-notch-is-one-press-and-a-trackpad-is-not ()
+  "A trackpad tick is pixels; a notch is a notch.  Ported from ghostel.
+
+With `mwheel-coalesce-scroll-events\=' nil -- which
+`pixel-scroll-precision-mode\=' and ultra-scroll both set -- every tick arrives
+as its own event carrying a pixel delta, and one report per event floods a child
+that asked for mouse tracking with dozens of notches per row of travel."
+  (with-temp-buffer
+    (let ((cooked--scroll-pending 0.0)
+          (mwheel-coalesce-scroll-events t))
+      ;; Coalescing on: Emacs has already done the work, one event is one notch.
+      (should (= (cooked--wheel-presses
+                  '(wheel-down (nil 0 (0 . 0) 0 nil 0 nil nil (0 . 40)) 1 1 (0 . 40)))
+                 1)))
+    (let ((cooked--scroll-pending 0.0)
+          (mwheel-coalesce-scroll-events nil)
+          (line 20))
+      (cl-letf (((symbol-function 'default-line-height) (lambda () line))
+                ;; No `device-class', so the mouse guard does not fire and the
+                ;; pixel path is taken -- which is what is under test.
+                ((symbol-function 'device-class) nil))
+        (fmakunbound 'device-class)
+        ;; A sub-row tick reports nothing and is carried.
+        (should (= (cooked--wheel-presses
+                    '(wheel-down (nil 0 (0 . 0) 0 nil 0 nil nil (0 . 8)) 0 0 (0 . 8)))
+                   0))
+        (should (> cooked--scroll-pending 0))
+        ;; Enough further travel to cross a row reports exactly once.
+        (should (= (cooked--wheel-presses
+                    '(wheel-down (nil 0 (0 . 0) 0 nil 0 nil nil (0 . 14)) 0 0 (0 . 14)))
+                   1))
+        ;; And the remainder is carried rather than lost or double-counted.
+        (should (< cooked--scroll-pending line))))))
+
+(ert-deftest cooked-a-notch-narrower-than-a-row-still-reports ()
+  "macOS reports a notch as one line and fewer pixels than a row when
+`line-spacing\=' is set, so the row arithmetic yields zero and the notch would
+vanish.  The floor is the event\='s own line count, not a constant -- which is
+what keeps a sub-row *trackpad* tick at zero while this reports once."
+  (with-temp-buffer
+    (let ((cooked--scroll-pending 0.0)
+          (mwheel-coalesce-scroll-events nil))
+      (cl-letf (((symbol-function 'default-line-height) (lambda () 20)))
+        (fmakunbound 'device-class)
+        ;; LINES 1, but only 12 pixels of a 20-pixel row.
+        (should (= (cooked--wheel-presses
+                    '(wheel-down (nil 0 (0 . 0) 0 nil 0 nil nil (0 . 12)) 1 1 (0 . 12)))
+                   1))))))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

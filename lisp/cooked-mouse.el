@@ -330,6 +330,57 @@ not share.  One answer for both beats two that agree by accident."
   (setq cooked--mouse-last-cell (cons row col))
   (cooked--send-to-child (cooked--mouse-report button row col pressed)))
 
+(defvar mwheel-coalesce-scroll-events)
+(defvar last-event-device)
+(declare-function device-class "frame" (frame name))
+
+(defvar-local cooked--scroll-pending 0.0
+  "Wheel travel in pixels not yet forwarded to the child as a whole row.")
+
+(defun cooked--wheel-presses (event)
+  "How many notches EVENT is worth to the child.  Ported from ghostel.
+
+One, normally.  A wheel notch is a notch and the child is told once.
+
+The case this exists for is `mwheel-coalesce-scroll-events\=' nil, which
+`pixel-scroll-precision-mode\=' and ultra-scroll both set: every trackpad tick
+then arrives as its own event carrying a *pixel* delta, and forwarding one
+report per event floods a child that asked for mouse tracking with dozens of
+notches per row of travel.  Pixels are accumulated instead and one press is sent
+per row actually crossed, with the remainder carried -- so a slow drag scrolls
+smoothly in Emacs and one line at a time in the child, which is the only thing
+the child can express.
+
+The two guards are the non-obvious part and both are ghostel\='s.
+
+*A real mouse is excluded by device class*, not by the delta.  X11 and pgtk
+report a wheel notch as several rows of pixels with no line count, which
+arithmetic alone cannot tell from a fast trackpad swipe -- so a notch would be
+accumulated, rounded, and a click would go missing.  `device-class\=' is how
+the question gets asked instead.
+
+*And the floor of one press is `nth 3\=', not a constant.* macOS reports a
+notch as one line and *fewer pixels than a row* when `line-spacing\=' is set,
+so the row arithmetic yields zero and the notch would vanish.  Taking the larger
+of the two means a sub-row trackpad tick still accumulates -- its line count is
+0 -- while a notch that undershoots a row still reports once."
+  (let ((delta (cdr-safe (nth 4 event)))
+        (lines (nth 3 event)))
+    (if (or (null delta)
+            (not (boundp 'mwheel-coalesce-scroll-events))
+            mwheel-coalesce-scroll-events
+            (and (fboundp 'device-class)
+                 (eq (device-class last-event-frame last-event-device) 'mouse)))
+        1
+      (let* ((row (let ((window (posn-window (event-start event))))
+                    (if (windowp window)
+                        (with-selected-window window (default-line-height))
+                      (default-line-height))))
+             (pending (+ cooked--scroll-pending delta))
+             (rows (truncate pending row)))
+        (setq cooked--scroll-pending (- pending (* rows row)))
+        (max (abs rows) (min 1 (or lines 0)))))))
+
 (defun cooked--report-button (button row col pressed)
   "Report BUTTON at ROW/COL as PRESSED or released, remembering that it is held."
   (cond ((memq button cooked--mouse-wheel-numbers)) ; a notch cannot be held
@@ -487,7 +538,11 @@ into by the time it comes up."
            ((null cell)
             (cooked--mouse-fallback event))
            (t
-            (cooked--report-button button (car cell) (cdr cell) pressed)
+            ;; A wheel notch may be worth more than one report, or none at all,
+            ;; when the pointing device speaks in pixels; everything else is
+            ;; worth exactly one.  See `cooked--wheel-presses'.
+            (dotimes (_ (if wheel (cooked--wheel-presses event) 1))
+              (cooked--report-button button (car cell) (cdr cell) pressed))
             ;; Take the whole gesture or none of it: having reported a press to a
             ;; child that asked where the pointer goes, the motion is ours to
             ;; deliver, and the only way to be given it is to sit in `track-mouse'
