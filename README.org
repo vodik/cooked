@@ -90,13 +90,16 @@ mature and fast.
 ** Ghostel
 
 Ghostel embeds libghostty — the same engine behind the Ghostty app — and it's the fastest
-of the four on raw throughput. Like eat and vterm, its terminal is a rectangle of
-characters with no idea where a command starts or ends; what it calls "comint support" is
-a minor mode that drops libghostty's colour handling into somebody else's =shell-mode=
-buffer, not a comint-derived terminal — and it passes carriage returns and backspaces
-through for comint to *delete* with, where [[*Any comint buffer][cooked-comint]]
-resolves them against the line they addressed. If a native rendering engine is what you're after
-and you don't need cooked's structure, ghostel is newer and worth a look.
+of the four on raw throughput. It reads OSC 133 prompt marks and exit statuses, spots
+a password prompt from the pty's termios, and offers a line mode for editing input in
+Emacs — but those are modes you switch between, where cooked derives who owns the
+keyboard continuously, and a prompt is a line number rather than a command record with
+its output attached. What it calls "comint support" is a minor mode that drops
+libghostty's colour handling into somebody else's =shell-mode= buffer, not a
+comint-derived terminal — and it passes carriage returns and backspaces through for
+comint to *delete* with, where [[*Any comint buffer][cooked-comint]] resolves them
+against the line they addressed. If a native rendering engine is what you're after and
+you don't need cooked's structure, ghostel is newer and worth a look.
 
 ** cooked
 

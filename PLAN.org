@@ -1963,12 +1963,17 @@ the terminal, and a translation reaching it would be a bug nobody would connect
 to this setting. Verified against a real tty under foot — wrapped once, still
 once after two more calls.
 
-** TODO [#B] =cooked-consult.el= — a terminal picker
+** REVIEW [#B] =cooked-consult.el= — a terminal picker
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   none — ghostel's =extensions/consult-ghostel/consult-ghostel.el=
 :GATE:     "picker annotations" in Remaining smaller items (=cooked--title= public)
-:BRANCH:
+:BRANCH:   58a17c5
+:AGENT:    yes
+:END:
+:LOGBOOK:
+- State "REVIEW"     from "WIP"        [2026-09-12 Sat 22:55]
+- State "WIP"        from "TODO"       [2026-09-12 Sat 22:40]
 :END:
 =consult-buffer= already reaches cooked buffers; this is a picker for terminals
 only, and the value over ghostel's is what cooked can annotate with. ghostel
@@ -1996,12 +2001,45 @@ Done when: the picker previews, narrows and creates-on-miss; annotations show
 under plain =completing-read= with consult unloaded; a test covers the
 annotation for a running, a failed and an idle session.
 
-** TODO [#B] Search the session's commands, across every buffer
+*** Landed: 58a17c5, on =cooked/consult-picker=
+
+=consult-cooked= picks from this project's terminals and then the rest (=p= and
+=o= narrow to either), previews each, and a name that matches nothing starts a
+session called that. =C-u= is plain =cooked=, and =consult-cooked-other-window=
+is the pair. Hidden sources put terminals into =consult-buffer= and
+=consult-project-buffer= behind =t=. The gate went in with it: =cooked--title=
+is now =cooked-title=, with no obsolete alias because the tree never makes one.
+
+*The annotations are not in =cooked-consult.el=.* They are completion metadata
+in =cooked-mode-line.el= (=cooked-buffer-annotation=,
+=cooked-buffer-completion-table=): the mode line's own facts read from outside
+the buffer, next to the faces that already colour an exit status. A test runs
+them in a fresh Emacs with only =lisp/= on the load path, because a suite that
+has already loaded consult cannot check that they work without it. Running is
+read from =cooked--running-anchor= and =cooked--command-input=; a zero status
+reads =idle=; a dead session shows only =exited N=.
+
+Two departures worth knowing. The category is =cooked-buffer=, not =buffer=:
+under =buffer= marginalia's own annotator wins, and a marginalia user would see
+mode and size instead of what the session is doing. The cost is that embark
+needs =(cooked-buffer . embark-buffer-map)= to treat these as buffers. And
+consult is not required when the file loads, as cooked-evil does with evil,
+because =make compile= runs under =-Q=.
+
+Not covered by a test: the real minibuffer. Batch Emacs reads it from stdin, so
+the tests call the sources directly for items, preview, which source a miss goes
+to, and =:new=.
+
+** WIP [#B] Search the session's commands, across every buffer
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   none
 :GATE:     =cooked-consult.el= — a terminal picker (the file it lands in)
-:BRANCH:
+:BRANCH:   cooked/command-search
+:AGENT:    yes
+:END:
+:LOGBOOK:
+- State "WIP"        from "TODO"       [2026-09-12 Sat 22:40]
 :END:
 Not shell history. =cooked-history= reads the shell's history file and *types*
 the pick; this searches the *transcript* and *jumps*. History says what you
