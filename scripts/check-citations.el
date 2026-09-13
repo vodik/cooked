@@ -264,11 +264,15 @@ directory would turn every one of those into a finding."
          (or (fboundp sym) (boundp sym) (facep sym)
              (ert-test-boundp sym)
              (cl-find-class sym)
-             ;; A symbol carrying properties is a real thing the prose can point
-             ;; at even when it is neither bound nor callable: an autoload
-             ;; cookie's target, a `define-error' condition, a struct's slot
-             ;; metadata.
-             (symbol-plist sym)
+             ;; Two things are real without being bound or callable, and each
+             ;; says so with a property of its own: a `define-error' condition,
+             ;; like `cooked-error', and a `define-fringe-bitmap' bitmap, like
+             ;; `cooked-command-bar'.  Not any property at all, because a
+             ;; symbol picks one up from much that is not a definition --
+             ;; `function-history' is left behind by a function that was
+             ;; defined and then removed, which is a rename's old name.
+             (get sym 'error-conditions)
+             (get sym 'fringe)
              ;; A feature, cited by its bare name.  Prose here says "the
              ;; autoloads in `cooked-project'" as often as it says
              ;; `cooked-project.el', and both mean the file.
@@ -341,12 +345,16 @@ directory would turn every one of those into a finding."
 
 ;;; The Rust half.
 
-;; Rust prose cites two shapes that can be checked without a compiler: a path
-;; with a slash in it, which the filesystem settles, and `Type::method', which
-;; is settled the same way the Lisp half settles a symbol -- against the set of
-;; names the sources actually use.  Only doc comments are read, `///' and
-;; `//!', because that is where the citations are and because rustdoc's own
-;; intra-doc links cover nothing else.
+;; Rust prose cites three shapes that can be checked without a compiler: a path
+;; with a slash in it, which the filesystem settles; `Type::method', which is
+;; settled the same way the Lisp half settles a symbol, against the set of names
+;; the sources actually use; and a Lisp name, `cooked--drain', which is settled
+;; by the Lisp half's own oracle.  Every whole-line comment is read, plain `//'
+;; as well as `///' and `//!', and in the integration tests under tests/ as
+;; well as src/: a plain comment explains as much as a doc comment does, and
+;; rustdoc checks neither a plain comment nor a test crate.  A comment trailing
+;; code on the same line is not read, since telling it from a `//' inside a
+;; string would take a Rust lexer.
 
 (defconst cooked-citations--rust-backtick-re "`\\([^`\n]+\\)`"
   "Regexp for a backticked span inside a Rust doc comment.")
@@ -355,11 +363,16 @@ directory would turn every one of those into a finding."
   "\\`[A-Za-z_][A-Za-z0-9_]*\\(::[A-Za-z_][A-Za-z0-9_]*\\)+\\'"
   "Regexp for a `module::item' or `Type::method' citation.")
 
-(defun cooked-citations--rust-doc-line-p ()
-  "Return non-nil if point is on a `///' or `//!' doc comment line."
+(defun cooked-citations--rust-files ()
+  "Return the Rust sources: the crate under src/ and the test crates under tests/."
+  (append (cooked-citations--files "src" ".rs")
+          (cooked-citations--files "tests" ".rs")))
+
+(defun cooked-citations--rust-comment-line-p ()
+  "Return non-nil if point is on a line that is wholly a `//' comment."
   (save-excursion
     (beginning-of-line)
-    (looking-at-p "[ \t]*//[/!]")))
+    (looking-at-p "[ \t]*//")))
 
 (defun cooked-citations--rust-names ()
   "Return (ITEMS . IDENTS) for the Rust sources.
@@ -373,7 +386,7 @@ namespaces, its macro-generated associated constants, or its trait methods."
     ;; The crate names itself in its own docs, and it is declared in Cargo.toml
     ;; rather than in any source file.
     (puthash "cooked" t items)
-    (dolist (file (cooked-citations--files "src" ".rs"))
+    (dolist (file (cooked-citations--rust-files))
       (with-temp-buffer
         (insert-file-contents file)
         (goto-char (point-min))
@@ -388,11 +401,11 @@ namespaces, its macro-generated associated constants, or its trait methods."
           ;; path in an impl belongs to somebody else's crate, and admitting
           ;; `std' here would make every `std::...' citation in the tree look
           ;; like something this checker is entitled to have an opinion about.
-          (unless (or (looking-at-p "::") (cooked-citations--rust-doc-line-p))
+          (unless (or (looking-at-p "::") (cooked-citations--rust-comment-line-p))
             (puthash (match-string 1) t items)))
         (goto-char (point-min))
         (while (re-search-forward "[A-Za-z_][A-Za-z0-9_]*" nil t)
-          (unless (cooked-citations--rust-doc-line-p)
+          (unless (cooked-citations--rust-comment-line-p)
             (puthash (match-string 0) t idents)))))
     (cons items idents)))
 
@@ -409,21 +422,56 @@ namespaces, its macro-generated associated constants, or its trait methods."
                ;; fails this because the basename goes with it.
                (not (cl-some (lambda (real)
                                (string-suffix-p (concat "/" path) real))
-                             (cooked-citations--files "src" ".rs")))
+                             (cooked-citations--rust-files)))
                (not (cooked-citations--known-path-p base)))
       (cooked-citations--report file line "cites path `%s', which does not exist" path))))
 
+(defun cooked-citations--terminfo-names ()
+  "Return the entry names terminfo/cooked.ti declares, such as cooked-direct.
+Rust prose cites them the way it cites a Lisp name, and they are not symbols."
+  (let ((file (expand-file-name "terminfo/cooked.ti" cooked-citations--root))
+        (names '()))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (while (re-search-forward "^\\([a-z][^|,\n]*\\)|" nil t)
+          (push (match-string 1) names))))
+    names))
+
+(defun cooked-citations--check-rust-lisp (file line span terminfo)
+  "Report each Lisp name in SPAN, at FILE and LINE, that does not exist.
+TERMINFO is the entry names `cooked-citations--terminfo-names' found."
+  (dolist (tok (cooked-citations--tokens-in span))
+    (unless (cond
+             ((string-match-p cooked-citations--path-re tok)
+              (cooked-citations--known-path-p tok))
+             ((member tok terminfo) t)
+             ((string-suffix-p "*" tok)
+              (cooked-citations--known-prefix-p (string-remove-suffix "*" tok)))
+             ((string-match-p "\\." tok) t)
+             (t (or (gethash tok cooked-citations--in-code)
+                    (cooked-citations--known-symbol-p tok))))
+      (cooked-citations--report file line "cites `%s', which does not exist" tok))))
+
 (defun cooked-citations--check-rust ()
-  "Report stale `Type::method' and path citations in Rust doc comments."
-  (pcase-let ((`(,items . ,idents) (cooked-citations--rust-names)))
-    (dolist (file (cooked-citations--files "src" ".rs"))
+  "Report stale `Type::method', path and Lisp citations in Rust comments."
+  (pcase-let ((`(,items . ,idents) (cooked-citations--rust-names))
+              (terminfo (cooked-citations--terminfo-names)))
+    (dolist (file (cooked-citations--rust-files))
       (with-temp-buffer
         (insert-file-contents file)
         (goto-char (point-min))
-        (while (re-search-forward "^[ \t]*//[/!]\\(.*\\)$" nil t)
+        (while (re-search-forward "^[ \t]*//[/!]?\\(.*\\)$" nil t)
           (let ((doc (match-string 1))
                 (line (line-number-at-pos (match-beginning 0)))
                 (start 0))
+            ;; A Lisp name is quoted either way in Rust prose: `foo' by the
+            ;; Lisp convention, `foo` by the Rust one.
+            (let ((lisp-start 0))
+              (while (string-match "`\\([^`'\n]+\\)['`]" doc lisp-start)
+                (setq lisp-start (match-end 0))
+                (cooked-citations--check-rust-lisp
+                 file line (match-string 1 doc) terminfo)))
             (while (string-match cooked-citations--rust-backtick-re doc start)
               (setq start (match-end 0))
               (let ((span (match-string 1 doc)))
