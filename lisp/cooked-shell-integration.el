@@ -222,6 +222,39 @@ all; restart it, or source the file yourself."
               "fi\n"
               "unset COOKED_USER_ZDOTDIR_SET\n"))))
 
+(defun cooked--fish-quote (string)
+  "STRING as a fish single-quoted word.
+
+Inside single quotes fish treats only a backslash and a quote specially, so
+those two are escaped and nothing else is: it\='s here becomes \='it\\\='s here\='."
+  (concat "'" (replace-regexp-in-string "[\\\\']" "\\\\\\&" string t) "'"))
+
+(defun cooked--fish-restore-data-dirs (scratch injected original)
+  "Fish code that undoes the XDG_DATA_DIRS injection for SCRATCH.
+
+INJECTED is the value cooked gave the variable, and ORIGINAL the value it had
+before, or nil when it was unset.  When the variable still holds INJECTED it is
+put back to ORIGINAL exactly, or erased.  When something that ran earlier in
+fish\='s startup has changed it since, only the SCRATCH entry is taken out, so
+that change survives: a value of /tmp/cooked-x:/opt/share becomes /opt/share.
+
+Only `test\=', `set\=', `string\=' and `contains\=' are used, so the code runs on
+the fish 3.x releases cooked.fish still supports."
+  (concat
+   "if test \"$XDG_DATA_DIRS\" = " (cooked--fish-quote injected) "\n"
+   (if original
+       (concat "    set -gx XDG_DATA_DIRS " (cooked--fish-quote original) "\n")
+     "    set -eg XDG_DATA_DIRS\n")
+   "else\n"
+   "    set -l __cooked_dirs (string split : -- \"$XDG_DATA_DIRS\")\n"
+   "    set -l __cooked_index (contains -i -- " (cooked--fish-quote scratch)
+   " $__cooked_dirs)\n"
+   "    if test -n \"$__cooked_index\"\n"
+   "        set -e __cooked_dirs[$__cooked_index]\n"
+   "        set -gx XDG_DATA_DIRS (string join : -- $__cooked_dirs)\n"
+   "    end\n"
+   "end\n"))
+
 (defun cooked--shell-invocation (shell)
   "Return (ARGV EXTRA-ENV SCRATCH) that starts SHELL with integration loaded.
 
@@ -285,15 +318,23 @@ arrives."
        ;; default is spelled out when unset -- POSIX says an empty value means the
        ;; default, but fish reads the variable rather than the specification, so
        ;; leaving it empty would hide every vendor completion on the system.
+       ;;
+       ;; The generated file puts the variable back before anything else, since
+       ;; the scratch directory is only for this fish to find.  Left in place,
+       ;; every program this fish starts would inherit it, a variable that was
+       ;; unset would stay exported as the spelled-out default, and a nested
+       ;; fish would source the snippet a second time.
        (let* ((scratch (cooked--scratch-directory))
               (conf (expand-file-name "fish/vendor_conf.d" scratch))
-              (existing (or (getenv "XDG_DATA_DIRS") "/usr/local/share:/usr/share")))
+              (original (getenv "XDG_DATA_DIRS"))
+              (injected (concat scratch ":" (or original "/usr/local/share:/usr/share"))))
          (make-directory conf t)
          (with-temp-file (expand-file-name "cooked.fish" conf)
-           (insert "source " (shell-quote-argument
+           (insert (cooked--fish-restore-data-dirs scratch injected original)
+                   "source " (shell-quote-argument
                               (expand-file-name "cooked.fish" dir)) "\n"))
          (list (list shell "-i")
-               `(,@env ("XDG_DATA_DIRS" . ,(concat scratch ":" existing)))
+               `(,@env ("XDG_DATA_DIRS" . ,injected))
                scratch)))
       (_ (list (list shell) env nil)))))
 

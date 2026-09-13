@@ -1508,6 +1508,57 @@ fish honours its own documented path is fish\='s business, and
                                        "-c" "echo $COOKED_VENDOR_RAN")))))))
       (delete-directory dir t))))
 
+(defun cooked-tests--fish-injected-env (original &optional command)
+  "What `env' prints inside a fish cooked injected, with XDG_DATA_DIRS at ORIGINAL.
+
+ORIGINAL nil means the variable is unset in Emacs.  The fish is started with
+the invocation's own program and environment, run non-interactively with
+COMMAND, `env' by default, since fish sources vendor_conf.d either way.
+XDG_CONFIG_HOME points at an empty directory so the user's config.fish stays
+out of it."
+  (let* ((config (make-temp-file "cooked-tests-fish-config" t))
+         (process-environment
+          (cons (concat "XDG_CONFIG_HOME=" config)
+                (cl-remove-if (lambda (entry) (string-prefix-p "XDG_DATA_DIRS=" entry))
+                              process-environment)))
+         (process-environment (if original
+                                  (cons (concat "XDG_DATA_DIRS=" original)
+                                        process-environment)
+                                process-environment)))
+    (pcase-let ((`(,argv ,env ,scratch)
+                 (cooked--shell-invocation (executable-find "fish"))))
+      (unwind-protect
+          (let ((process-environment
+                 (append (mapcar (lambda (pair) (concat (car pair) "=" (cdr pair))) env)
+                         process-environment)))
+            (with-output-to-string
+              (with-current-buffer standard-output
+                (call-process (car argv) nil t nil "-c" (or command "env")))))
+        (delete-directory config t)
+        (when scratch (delete-directory scratch t))))))
+
+(ert-deftest cooked-fish-puts-xdg-data-dirs-back-for-its-children ()
+  "`env' inside an injected fish shows XDG_DATA_DIRS exactly as it was.
+
+cooked prepends a scratch directory so fish finds its vendor_conf.d file, and
+nothing took it out again.  Every child of that fish inherited the directory, an
+unset variable became an exported /usr/local/share:/usr/share, and a nested fish
+sourced the snippet a second time.  Run against a real fish, for a variable
+with a value (including a quote, which the generated file has to survive) and
+for one that was unset."
+  :tags '(fish)
+  (skip-unless (executable-find "fish"))
+  (let ((original "/opt/it's here:/usr/share"))
+    (let ((lines (split-string (cooked-tests--fish-injected-env original) "\n")))
+      (should (equal (seq-filter (lambda (line) (string-prefix-p "XDG_DATA_DIRS=" line))
+                                 lines)
+                     (list (concat "XDG_DATA_DIRS=" original))))))
+  (should-not (string-search "XDG_DATA_DIRS=" (cooked-tests--fish-injected-env nil)))
+  ;; A nested fish inherits the restored value, so it finds no cooked vendor file.
+  (should (equal (cooked-tests--fish-injected-env
+                  "/usr/share" "fish -c 'echo \"[$XDG_DATA_DIRS]\"'")
+                 "[/usr/share]\n")))
+
 ;;; tmux
 
 (defun cooked-tests--script-output (command input &rest env)
