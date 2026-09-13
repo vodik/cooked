@@ -77,6 +77,16 @@ fn underline_styles_arrive_from_the_subparameter() {
 }
 
 #[test]
+fn sgr_21_is_double_underline_and_leaves_bold_alone() {
+    let style = run_style_at(&term(2, 8, b"\x1b[1;21mx"), 0, 0);
+    assert!(style.attrs.contains(Attrs::BOLD));
+    assert_eq!(style.attrs.underline_style(), 2);
+    // And 24 takes it off again, as it does every other underline.
+    let off = run_style_at(&term(2, 8, b"\x1b[21;24mx"), 0, 0);
+    assert_eq!(off.attrs.underline_style(), 0);
+}
+
+#[test]
 fn underline_is_removed_by_both_spellings() {
     for input in [&b"\x1b[4:3m\x1b[4:0mx"[..], &b"\x1b[4:3m\x1b[24mx"[..]] {
         let style = run_style_at(&term(2, 8, input), 0, 0);

@@ -93,10 +93,12 @@ pub(crate) fn apply(params: &Params, pen: &mut Style) {
                 None => pen.attrs.set_underline_style(1),
                 Some(&style) => pen.attrs.set_underline_style(style.min(5) as u8),
             },
-            // Rapid blink is kept as blink, and 21 as the bold-and-faint reset, since the
-            // pen has no separate bit for either.
+            // Rapid blink is kept as blink, since the pen has no separate bit for it.
             6 => pen.attrs |= Attrs::BLINK,
-            21 => pen.attrs.remove(Attrs::BOLD | Attrs::FAINT),
+            // Double underline, as ECMA-48, xterm and ghostty have it, and as
+            // XTPUSHSGR's numbering already read it. Linux's console once took 21
+            // for a bold reset, which is what 22 is for.
+            21 => pen.attrs.set_underline_style(2),
             24 => pen.attrs.set_underline_style(0),
             30..=37 => pen.fg = Color::Indexed((code - 30) as u8),
             38 => pen.fg = extended(param, &mut iter).unwrap_or(pen.fg),
@@ -172,7 +174,7 @@ fn extended(param: &[u16], iter: &mut ParamsIter<'_>) -> Option<Color> {
 ///   `termguicolors`.
 ///
 /// Lossy exactly where [`apply`] is: `SGR 6` (rapid blink) reads back as `5`, and `21`
-/// as nothing, because the pen does not keep the difference. The answer describes the
+/// as `4:2`, because the pen does not keep the difference. The answer describes the
 /// pen, not the bytes that built it.
 pub(crate) fn describe(pen: Style) -> String {
     let mut out = String::from("0");
