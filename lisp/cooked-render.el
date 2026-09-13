@@ -698,7 +698,11 @@ two chances to disagree."
     (`(osc ,code ,bell . ,parts) (cooked--handle-osc code bell parts))
     (`(reply . ,bytes) (cooked--reply-if-live bytes))
     (`(title-stack ,push) (cooked--handle-title-stack push))
-    (`(resize-request ,rows ,cols) (cooked--handle-resize-request rows cols))
+    ;; Guarded, because it moves windows the drain does not own: a layout that
+    ;; refuses the resize must not cost this drain the replies queued after it.
+    (`(resize-request ,rows ,cols)
+     (cooked--protect-seam 'cooked-resize-requests
+       (cooked--handle-resize-request rows cols)))
     (`(frame-size ,pixels) (cooked--handle-frame-size pixels))
     ;; `CSI 3 J', the tail of what `clear' sends.  Honoured unconditionally: it is
     ;; only reachable by something already holding the terminal, every other terminal

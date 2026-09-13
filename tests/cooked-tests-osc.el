@@ -537,6 +537,64 @@ its own width instead -- and a child that asked again would grow that one next."
             (should (= (window-max-chars-per-line right) right-width))
             (should (= (window-body-height right) right-rows))))))))
 
+(ert-deftest cooked-a-resize-request-on-a-character-frame-stays-within-its-clamp ()
+  "Where windows move by whole characters, a request never steps past the room.
+
+With `window-resize-pixelwise' nil, `window-resize' rounds a pixel delta to the
+nearest `frame-char-size'.  A batch frame's character is one pixel, so nothing
+ever rounds there, and `frame-char-size' is made to say three: the frame then
+behaves as a graphical frame whose rows are three pixels tall.  Each split
+leaves the window different room to grow, and a room of 14, 11 or 8 pixels is
+the case that used to signal, rounding up to 15, 12 or 9.  Every split must
+resize without an error, by a whole number of characters no larger than the
+room."
+  (let ((window-resize-pixelwise nil)
+        (window-min-height 1)
+        (window-safe-min-height 1)
+        (residues nil))
+    (save-window-excursion
+      (dolist (split '(5 6 7 8 9 10 11 12 13 14 15))
+        (delete-other-windows)
+        (split-window-below split)
+        (cl-letf (((symbol-function 'frame-char-size) (lambda (&rest _) 3)))
+          (let* ((window (selected-window))
+                 (before (window-pixel-height window))
+                 (room (window-resizable window 99 nil nil t)))
+            (push (% room 3) residues)
+            (cooked--resize-window-by window nil 99)
+            (let ((grown (- (window-pixel-height window) before)))
+              (should (zerop (% grown 3)))
+              (should (<= 0 (- room grown) 2)))))))
+    ;; The rounding-up case was actually reached, so the loop tested something.
+    (should (memq 2 residues))))
+
+(ert-deftest cooked-a-failed-resize-request-keeps-the-rest-of-its-drain ()
+  "A resize that signals is reported, and the events after it still run.
+
+The request moves windows the drain does not own, so a layout that refuses it
+is not the drain's failure: the reply queued behind it in the same drain, here
+a bell, must still be handled."
+  (let* ((cooked-resize-requests 'window)
+         (cooked-debug nil)
+         (rings 0)
+         (cooked-bell-function (lambda () (cl-incf rings)))
+         (failures nil))
+    (save-window-excursion
+      (delete-other-windows)
+      (split-window-below)
+      (with-temp-buffer
+        (cooked-mode)
+        (set-window-buffer (selected-window) (current-buffer))
+        (cl-letf (((symbol-function 'window-resize)
+                   (lambda (window &rest _)
+                     (error "Cannot resize window %s" window)))
+                  ((symbol-function 'cooked--seam-failed)
+                   (lambda (key _err) (push key failures))))
+          (dolist (event '((resize-request 5 nil) (bell)))
+            (cooked--handle-event event (point-min))))
+        (should (equal failures '(cooked-resize-requests)))
+        (should (= rings 1))))))
+
 (ert-deftest cooked-frame-size-reports-answer-from-the-frame ()
   "`19t' in cells on any frame; `15t' only where there are pixels, like `14t'."
   (let ((out (make-temp-file "cooked-19t")))

@@ -59,7 +59,16 @@ nil      Refuse.  Nothing moves and nothing is sent back, which is what
 
 Refused by default because anything that can write to the terminal can send
 one, and the windows it would move are yours: a program you ran over ssh does
-not get to rearrange the layout you were working in."
+not get to rearrange the layout you were working in.
+
+Three things `window' does not do.  A 0 for ROWS or COLS leaves that dimension
+alone, as a missing one does, where xterm reads 0 as the size of the display:
+`CSI 8 ; 0 ; 100 t' changes only the columns.  Only the window the child is laid
+out for moves, so with the buffer also shown in a shorter window the child keeps
+that window's rows, and `resize -s 50 80' can leave it with fewer than 50.  And
+a child that asks for its size again on every SIGWINCH, as some do, puts the
+window back each time you drag it to another size: it cannot loop, but it does
+undo the drag."
   :type '(choice (const :tag "Refuse" nil)
                  (const :tag "Resize the layout window" window))
   :group 'cooked)
@@ -109,8 +118,22 @@ request."
 Pixelwise, because the child counts rows in `window-default-line-height' and
 columns in the default face's width, and either can differ from the frame's
 canonical character size under `text-scale-mode'.  A partial row or column the
-clamp leaves behind is floored away by `cooked--window-size' like any other."
-  (let ((delta (window-resizable window pixels horizontal nil t)))
+clamp leaves behind is floored away by `cooked--window-size' like any other.
+
+Unless `window-resize-pixelwise' is set, `window-resize' moves a window only by
+whole multiples of `frame-char-size', and it rounds a pixel delta to the nearest
+one on its own.  Rounding after the clamp could step past it: with 17-pixel
+characters and room for 26 more pixels, a delta of 26 rounds to 34, and
+`window-resize' signals \"Cannot resize window\" rather than doing what it
+can.  So the request is rounded here, the way `window-resize' would round it,
+before `window-resizable' clamps it, and a clamp that lands between two
+multiples is truncated toward zero, to one `window-resize' can make exactly."
+  (let* ((unit (if window-resize-pixelwise
+                   1
+                 (frame-char-size window horizontal)))
+         (wanted (* (round pixels unit) unit))
+         (room (window-resizable window wanted horizontal nil t))
+         (delta (* (truncate room unit) unit)))
     (unless (zerop delta)
       (window-resize window delta horizontal nil t))))
 
