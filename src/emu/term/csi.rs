@@ -11,9 +11,8 @@ pub(super) enum ModeReport {
     Unknown = 0,
     Set = 1,
     Reset = 2,
-    /// Implemented but stateless, or permanently on. Nothing answers this today; it is
-    /// here because DECRQM defines five values and a partial enum invites a bare `3`.
-    #[allow(dead_code)]
+    /// Permanently on: the behaviour the mode asks for is the only one there is, so a
+    /// reset would be a lie. Mode 2027 is the one answer that uses it.
     PermanentlySet = 3,
     /// Deliberately not implemented -- this is how a child learns that without guessing.
     PermanentlyReset = 4,
@@ -265,6 +264,14 @@ impl State {
             // list is `# declined-modes:' in cooked.ti, and the audit test holds the
             // two in step.
             3 | 4 | 5 | 12 | 69 | 1034 => ModeReport::PermanentlyReset,
+            // Grapheme cluster segmentation, in contour's terminal-unicode-core sense.
+            // Not settable because there is nothing to turn off: the segmenter is how
+            // every character reaches the grid, and the per-code-point rule a reset
+            // would restore is the bug that put a ZWJ family on six cells. The one rule
+            // where this departs from the draft's wording — VS15 narrows — is argued in
+            // `emu::text`'s header. `dec_mode` ignores a set or reset of it, as it does
+            // any number it has no arm for.
+            2027 => ModeReport::PermanentlySet,
             _ => ModeReport::Unknown,
         }
     }

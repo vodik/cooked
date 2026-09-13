@@ -36,7 +36,8 @@
 //! model, which the crate already carried and the grid already applied. Reimplementing
 //! it would mean vendoring `EastAsianWidth.txt` and `emoji-sequences.txt` and keeping
 //! them current, to disagree with the shipped tables in one place. So this defers, and
-//! states the one disagreement outright: a **lone regional indicator**. `unicode-width`
+//! states the two disagreements outright. The second, a cap of two columns on any one
+//! cluster, is written up on [`cluster_cells`]. The first is a **lone regional indicator**. `unicode-width`
 //! gives `U+1F1E6..=U+1F1FF` one column each, since their East Asian Width is Neutral;
 //! the spec gives them two. A *pair* of them is one cluster either way and comes out at
 //! two columns under both readings, so the correction only shows on an unpaired one —
@@ -48,7 +49,23 @@
 //! retroactive — the cell was already written when the selector arrives. `Screen::join`
 //! is what carries that back onto the grid.
 //!
+//! ## Mode 2027
+//!
+//! Contour's [terminal-unicode-core] draft defines DEC private mode 2027 as a promise
+//! that the terminal segments by grapheme cluster, which is what this module does
+//! unconditionally, so `CSI ? 2027 $ p` answers 3, permanently set, and a set or reset
+//! of it changes nothing. There is one place this module and that draft part company,
+//! and it is on purpose: the draft says `U+FE0E` changes presentation and *not* width,
+//! so `⌚︎` stays two columns. Kitty's spec narrows it to one, `unicode-width` does, and
+//! ghostty — whose mode 2027 names the same draft — does too; contour is alone in the
+//! literal reading. A child measuring with Rust's `unicode-width` gets the narrow
+//! answer, and so does one written against kitty or ghostty; that column is the one
+//! this has to match. The
+//! corpus that pins every rule the mode is about, and this divergence with it, is
+//! `mode_2027_corpus` in `term/tests.rs`.
+//!
 //! [text sizing protocol]: https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
+//! [terminal-unicode-core]: https://github.com/contour-terminal/terminal-unicode-core
 
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -92,10 +109,21 @@ pub(crate) fn char_cells(c: char) -> usize {
 /// The regional-indicator override applies to a cluster that *starts* with one, which
 /// covers both a lone indicator and a well-formed flag pair — the pair already measures
 /// two, so stating it this way costs nothing and keeps the two functions agreeing.
+///
+/// The result is capped at two, which is the second correction to `unicode-width`. Its
+/// string form sums what it does not recognise as a sequence, so a cluster UAX#29 glues
+/// together out of parts no emoji table lists comes out wider than any one cell can be:
+/// `a` followed by an emoji modifier is a single cluster, since a modifier is `Extend`,
+/// and it measured three, as did a wide ideograph followed by a spacing mark. No reading
+/// of either spec gives a cell three columns. Contour's terminal-unicode-core puts a
+/// whole cluster in one cell, and a cell is narrow or wide; ghostty, which implements
+/// that spec's mode 2027, lands this exact case on two. Two rather than one because the
+/// part that widened it is still drawn — a skin-tone swatch next to the `a` — and
+/// a column short would put it on top of whatever follows.
 pub(crate) fn cluster_cells(cluster: &str) -> usize {
     match cluster.chars().next() {
         Some(c) if REGIONAL.contains(&c) => 2,
-        Some(_) => cluster.width(),
+        Some(_) => cluster.width().min(2),
         None => 0,
     }
 }

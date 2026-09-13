@@ -1158,6 +1158,10 @@ fn decrqm_answers_honestly_about_every_mode() {
         (&b""[..], 9999, 0),
         // Implemented, and must not answer "never heard of it".
         (&b""[..], 1048, 1),
+        // Grapheme clustering is always on, and neither a reset nor a set moves it.
+        (&b""[..], 2027, 3),
+        (&b"\x1b[?2027l"[..], 2027, 3),
+        (&b"\x1b[?2027h\x1b[!p"[..], 2027, 3),
     ] {
         let mut t = term(4, 8, setup);
         t.feed(format!("\x1b[?{mode}$p").as_bytes());
@@ -3752,6 +3756,128 @@ fn a_zwj_emoji_family_stands_on_two_cells_and_not_on_six() {
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}|",
         "every code point still reaches Emacs; only the columns collapsed"
     );
+}
+
+/// The rules DEC mode 2027 is a promise about, measured where a child measures them: by
+/// where the cursor ends up.
+///
+/// DECRQM answers 3 for 2027 on the strength of this table, so a row that stops passing
+/// is a reason to revisit that answer and not only a width bug. Each case is fed twice,
+/// whole and one byte per `feed`, since a cluster that only holds together within a
+/// single read is not segmentation. The sources are contour's terminal-unicode-core
+/// draft, which defines the mode, kitty's text sizing spec, which `emu::text` follows,
+/// and ghostty's `unicode/grapheme.zig`, the other implementation of 2027 to hand. Where
+/// they split, the comment says which one this sides with.
+#[test]
+fn mode_2027_corpus() {
+    let corpus: &[(&str, usize, &str)] = &[
+        // Emoji are two cells, and a ZWJ sequence is one image on two cells.
+        ("\u{1F600}", 2, "emoji presentation by default"),
+        (
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            2,
+            "ZWJ family",
+        ),
+        (
+            "\u{1F3F4}\u{200D}\u{2620}\u{FE0F}",
+            2,
+            "ZWJ sequence ending in VS16",
+        ),
+        (
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+            2,
+            "tag sequence flag",
+        ),
+        // VS16 promotes a text-presentation base to two, and does nothing to a base with
+        // no emoji variant.
+        ("\u{2764}\u{FE0F}", 2, "VS16 promotes"),
+        ("#\u{FE0F}\u{20E3}", 2, "keycap sequence"),
+        ("x\u{FE0F}", 1, "VS16 on a base with no emoji variant"),
+        // VS15. A text-default base stays one under every reading. An emoji-default one
+        // is the divergence: the draft keeps it at two, kitty, ghostty and
+        // `unicode-width` narrow it to one, and this narrows; see `emu::text`.
+        ("\u{2714}\u{FE0E}", 1, "VS15 on a text-default base"),
+        (
+            "\u{231A}\u{FE0E}",
+            1,
+            "VS15 on an emoji-default base narrows",
+        ),
+        (
+            "\u{1F600}\u{FE0E}",
+            2,
+            "VS15 on a base with no text variant is ignored",
+        ),
+        (
+            "\u{231A}\u{FE0E}\u{FE0F}",
+            1,
+            "a second selector has no base to act on",
+        ),
+        // Emoji modifiers ride their base. A modifier after something that is not a
+        // modifier base still joins its cluster, since it is `Extend`; ghostty gives that
+        // cluster two cells, and so does this.
+        ("\u{1F44B}\u{1F3FF}", 2, "modifier sequence"),
+        (
+            "\u{261D}\u{1F3FF}",
+            2,
+            "modifier widens a text-default base",
+        ),
+        ("\u{1F3FF}", 2, "a lone modifier is a swatch"),
+        (
+            "a\u{1F3FF}",
+            2,
+            "a modifier on a non-base is one cluster, never three cells",
+        ),
+        // Regional indicators pair from the left, two cells a flag and two for an
+        // unpaired one.
+        ("\u{1F1E6}", 2, "lone regional indicator"),
+        ("\u{1F1E6}\u{1F1FA}", 2, "flag"),
+        ("\u{1F1E6}\u{1F1FA}\u{1F1E8}", 4, "flag and half a flag"),
+        ("\u{1F1E6}\u{1F1FA}\u{1F1E8}\u{1F1E6}", 4, "two flags"),
+        // Hangul jamo compose into one syllable block, two cells however it is spelled.
+        (
+            "\u{1100}\u{1161}\u{11A8}",
+            2,
+            "leading, vowel and trailing jamo",
+        ),
+        (
+            "\u{AC00}\u{11A8}",
+            2,
+            "precomposed LV syllable and a trailing jamo",
+        ),
+        ("\u{A960}\u{1161}", 2, "Jamo Extended-A leading consonant"),
+        ("\u{1100}\u{D7B0}", 2, "Jamo Extended-B vowel"),
+        ("\u{3131}", 2, "compatibility jamo stands alone"),
+        // The cap from the other direction: a wide base and a spacing mark.
+        ("\u{65E5}\u{0903}", 2, "wide base and a spacing mark"),
+    ];
+    for &(cluster, cells, what) in corpus {
+        let input = format!("{cluster}|");
+        let whole = term(2, 20, input.as_bytes());
+        let mut bytewise = Term::new(2, 20);
+        for byte in input.as_bytes() {
+            bytewise.feed(std::slice::from_ref(byte));
+        }
+        for (how, t) in [("whole", &whole), ("a byte at a time", &bytewise)] {
+            assert_eq!(
+                t.screen().cursor.col,
+                cells + 1,
+                "{what}: {cluster:?} fed {how}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mode_2027_cannot_be_reset() {
+    // The per-code-point rule is not kept anywhere to fall back on, so a child that
+    // turns the mode off, or soft-resets, gets clustering all the same — which is what
+    // answering 3 promised it.
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}|";
+    for setup in [&b"\x1b[?2027l"[..], b"\x1b[!p", b"\x1bc"] {
+        let mut t = term(2, 20, setup);
+        t.feed(family.as_bytes());
+        assert_eq!(t.screen().cursor.col, 3, "after {setup:?}");
+    }
 }
 
 #[test]

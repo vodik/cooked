@@ -54,8 +54,9 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 | `cvvis` | cursor *blink* is `blink-cursor-mode`, yours to set and not the child\'s. `cnorm` covers visibility |
 
 A child does not have to take our word for any of it. DECRQM (`CSI ? Ps $ p`) answers 1 or
-2 for a mode we implement, 4 — "permanently reset" — for every one in that last table, and
-0 for one we have never heard of. That includes 2031, the colour-scheme subscription,
+2 for a mode we implement, 4 — "permanently reset" — for every one in that last table, 3 —
+"permanently set" — for 2027, grapheme clustering, which is always on, and 0 for one we
+have never heard of. That includes 2031, the colour-scheme subscription,
 which is the mode a child is most likely to probe before deciding whether to bother
 asking. DECCOLM (3) and DECSCLM (4) answer 4 as well: `is2` and `rs2` reset them, and
 nothing here sets them.
