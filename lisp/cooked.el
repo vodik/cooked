@@ -2089,32 +2089,37 @@ of it -- and the loop then eats the newline above START and the row below."
     trimmed))
 
 (defcustom cooked-glyph-scale-floor 0.5
-  "How far a glyph may be shrunk to make it fit its cell, or nil not to.
+  "How far a glyph may be shrunk to make it fit its cell, or nil not to shrink.
 
-A *clamp*, not a threshold: a glyph needing more than this is shrunk to exactly
-this and left slightly over its cell, rather than being refused.  A slightly
-wide character beats an illegible one, and beats a row trimmed to fit.
+The grid budgets a character a whole number of cells, and a font is free to
+disagree.  Iosevka draws its arrows and geometric shapes at *twice* its cell
+width, so a row of btop carrying one is a cell too wide and every column after
+it is out of line.  Without this cooked answers by deleting characters off the
+end of the row and drawing a truncation arrow -- it notices the problem and
+destroys the overflow.  With it, the offending glyph is scaled down instead and
+the row keeps its text.
 
-A glyph needing more than this is left alone and the row is trimmed instead.
-Scaling is a repair, and a repair that renders a character at half size has
-stopped repairing and started hiding: below some ratio an unreadable glyph in
-the right place is worse than a truncation arrow saying plainly that something
-did not fit.
+*A clamp, not a threshold.*  A glyph needing a smaller scale than this is shrunk
+to exactly this and left slightly over its cell, rather than being refused.  The
+distinction decides whether the feature works at all on the fonts that need it:
+an exactly-double-width arrow wants 0.5, which quantizes just under 0.5, and a
+floor read as a threshold throws away the one glyph the mechanism exists for.
+Read as a clamp it says what it means -- never shrink more than this -- and
+where that leaves a glyph a little over, a slightly wide character beats an
+illegible one.
 
-*nil by default, and that is a retreat rather than a design.* Scaling shipped
-on and immediately misrendered htop and btop: their box-drawing and block
-characters come from fallback fonts whose ascent or descent differs from the
-default face\=', so the scaler fired on *every* glyph in a border and shrank a
-whole TUI out of alignment.  A repair whose failure mode is worse than the
-problem has to be asked for, not assumed, until it can tell a genuinely
-overflowing glyph from a fallback font with roomier metrics.
+Below the clamp is where scaling stops being a repair and starts being a hiding
+place, which is why there is a floor at all: a character rendered at a third of
+its size, in the right place, is worse than a truncation arrow saying plainly
+that something did not fit.
 
-Set it to a number -- 0.5 was the shipped default -- to turn scaling on.  Below
-that ratio a glyph is left alone and the row is trimmed instead: a repair that
-renders a character at half size has stopped repairing and started hiding, and
-an unreadable glyph in the right place is worse than a truncation arrow saying
-plainly that something did not fit."
-  :type '(choice (const :tag "Never scale, only trim" nil) number)
+*nil restores the old behaviour outright* -- no measuring, no scaling, and the
+trim as the only answer.  Worth reaching for if a font of yours renders worse
+with this on than without; the scaling only ever touches a glyph whose measured
+size disagrees with the cells the grid gave it, but that judgement rests on
+font metrics, and a font can always surprise it."
+  :type '(choice (const :tag "Never scale, only trim (the old behaviour)" nil)
+                 (number :tag "Smallest scale a glyph may be shrunk to"))
   :group 'cooked)
 
 (defun cooked--glyph-metrics (beg end window metrics)
