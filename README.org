@@ -101,6 +101,53 @@ comint to *delete* with, where [[*Any comint buffer][cooked-comint]] resolves th
 against the line they addressed. If a native rendering engine is what you're after and
 you don't need cooked's structure, ghostel is newer and worth a look.
 
+** Why not just use ghostel?
+
+It's a fair question, and it comes up. The short answer is that there's room for both,
+and which one suits you depends on what you want from a terminal inside Emacs.
+
+cooked started from one idea: a terminal buffer that /is/ a comint buffer, rather than a
+rectangle that borrows a few of comint's parts. Most of the rest still hangs off that.
+The prompt is Emacs text. A command is a record with its output attached. And =M-x
+shell= gets the same VT handling through [[*Any comint buffer][cooked-comint]].
+
+Since then the design has moved past that, toward a narrower goal: being as
+well-behaved a citizen inside Emacs as a terminal can be. The native core doesn't just
+emulate a terminal and hand Emacs a grid. It keeps track of what the buffer is already
+showing, and speaks in the buffer's terms:
+
+- A program that repaints the screen with what's already there changes nothing in the
+  buffer. A spinner or a clock edits the few characters that changed, not the whole row.
+- Text that didn't change isn't touched. Markers, overlays, the region, and anything
+  another package attached to that text stay where they are, through repaints and as rows
+  scroll up into history.
+- A terminal no window shows does no rendering work. It still answers its program and
+  still records its commands.
+- Colours become faces once per rendition rather than once per frame. Prompt marks are
+  anchors the core moves for you when a resize rewraps the screen.
+
+Ghostel makes a different trade, and a reasonable one. libghostty is built for Ghostty's
+GPU renderer, where redrawing a row costs next to nothing. It is a faster and more
+complete emulator than cooked's core, and it wins on raw throughput. cooked accepts being
+slower there, because fast enough is the bar. In exchange it gets a core shaped around
+what is expensive in Emacs specifically: inserting text, applying properties, and
+disturbing the positions everything else in Emacs holds.
+
+Whether that adds up to a better experience is a design argument, not a benchmark
+result. Pieces of it can be measured, such as how many rows reach the buffer per frame
+and whether a marker survives a scroll. The whole can't.
+
+Ghostel is the better pick if you:
+
+- use Emacs on Windows (patches welcome, but how well cooked's pty and pacing model
+  carries over to ConPTY is an open question);
+- use nushell, or an older fish than cooked's shell integration supports;
+- want the shell running on a process Emacs itself spawned rather than a pty the terminal
+  allocates.
+
+If you're a developer on Linux or macOS and the integration above is what you're after,
+cooked is the one to try.
+
 ** cooked
 
 cooked is fast, like vterm, but also knows what eat and vterm structurally can't, because
