@@ -1981,6 +1981,20 @@ this drain inserted, not to some row still on the grid."
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
 
+(ert-deftest cooked-a-mark-after-a-wide-character-lands-on-its-character ()
+  "An anchor on the live screen counts characters, not columns.
+
+`日本 ' is five columns and three characters, so a mark after it taken as a
+column landed two characters into the text that followed."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        "printf '\\346\\227\\245\\346\\234\\254 \\033]133;C\\007marked\\033]133;D;0\\007'; sleep 5")
+    (should (cooked-tests--settle (lambda () (= (length cooked--commands) 1))))
+    (let ((start (cooked--command-start-position (car cooked--commands))))
+      (should (equal (buffer-substring-no-properties
+                      start (min (point-max) (+ start 6)))
+                     "marked")))))
+
 (ert-deftest cooked-refresh-rebuilds-a-corrupted-screen ()
   "Resync throws the screen region away and has the emulator re-send it."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\nbeta\\n'; sleep 5")

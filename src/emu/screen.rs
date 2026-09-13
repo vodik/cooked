@@ -127,7 +127,10 @@ pub struct Evicted(Vec<Departed>);
 pub struct Departed {
     pub runs: Vec<Run>,
     pub wrapped: bool,
-    /// Semantic marks still attached, as `(column, id)`.
+    /// Semantic marks still attached, as `(offset, id)`, the offset counting the
+    /// characters of the row's text before the mark rather than its columns: this is the
+    /// last moment the cells are there to count, and a scrolled row is addressed in Emacs
+    /// by character. See [`chars_before`](super::cell::chars_before).
     ///
     /// Empty for essentially every row, and an empty `Vec` does not allocate, so the
     /// ordinary line pays nothing to carry this.
@@ -142,7 +145,10 @@ impl Departed {
         Self {
             runs: row.line_runs(),
             wrapped: row.wrapped(),
-            marks: row.marks().collect(),
+            marks: row
+                .marks()
+                .map(|(col, id)| (row.chars_before(col), id))
+                .collect(),
         }
     }
 

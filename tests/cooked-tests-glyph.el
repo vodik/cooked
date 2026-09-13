@@ -395,6 +395,22 @@ and the assertion on the boundary fails."
                                 :data-width)
                      (* 4 10))))))
 
+(ert-deftest cooked-the-cursor-is-found-by-character-after-a-wide-one ()
+  "On `日本X' with the cursor on `本', point is on `本'.
+
+The cursor arrives as a grid column, and `本' is columns 2 and 3 but the second
+character of the row.  Adding the column to the row's start put point on `X', so
+every CJK or emoji program drew its cursor one cell right per wide character
+before it.  The core counts the characters for Lisp, by the rule its own row
+edits are measured by."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\346\\227\\245\\346\\234\\254X\\033[1;3H'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (equal (cooked--cursor-cell) '(0 . 2)))))
+    (let ((beg (point-min)))
+      (should (equal (buffer-substring-no-properties beg (+ beg 3)) "日本X"))
+      (should (= (cooked--cursor-position) (1+ beg))))))
+
 (defconst cooked-tests--white-on-black "\\033[38;2;255;255;255m\\033[48;2;0;0;0m"
   "SGR for white on black in truecolor, so a blend has colours a test can name.
 The palette resolves through the theme\='s `ansi-color\=' faces, which a batch

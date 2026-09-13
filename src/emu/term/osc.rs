@@ -193,7 +193,8 @@ impl State {
         marks
     }
 
-    /// Every mark ROWS carry, numbered from absolute row BASE.
+    /// Every mark ROWS carry, numbered from absolute row BASE, each at the characters of
+    /// its row's text before it; see [`Delta::marks`].
     ///
     /// Used by [`State::take_marks`] over the live primary grid. Rows that left the grid
     /// carry their marks out in [`Departed`](crate::emu::screen::Departed) instead. Lazy,
@@ -208,7 +209,7 @@ impl State {
                     id,
                     Anchor {
                         row: base + index,
-                        col,
+                        col: row.chars_before(col),
                     },
                 )
             })

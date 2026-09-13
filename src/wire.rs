@@ -154,7 +154,7 @@ fn contiguous_runs(rows: &[DamagedRow]) -> impl Iterator<Item = &[DamagedRow]> {
 }
 
 /// `(:scrolled ROWS :rows ((FIRST . BLOCK)...) :height N :used N :head N
-/// :cursor (ROW COL VISIBLE) :marks ((ID . ANCHOR)...) ...)`
+/// :cursor (ROW COL VISIBLE SHAPE CHARS) :marks ((ID . ANCHOR)...) ...)`
 pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
     // The scrollback is assembled first because the events are resolved against it: a
     // mark on a row that scrolled away during this very drain is spelled as an offset
@@ -229,6 +229,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
             levels.cursor.col,
             levels.cursor_visible,
             levels.cursor_shape,
+            update.delta.cursor_chars,
         ]
     )?;
     let events = update
@@ -655,8 +656,10 @@ impl Update {
     /// Spell an [`Anchor`] in whichever coordinate system Emacs can address it in.
     ///
     /// `(scrolled . OFFSET)` — a character offset into this drain's scrollback text, for
-    /// a row that scrolled away while this drain was accumulating. `(screen ROW . COL)`
-    /// — a cell on the live grid, for one that did not. Resolved here rather than in
+    /// a row that scrolled away while this drain was accumulating. `(screen ROW . CHARS)`
+    /// — a row on the live grid and the characters of its text before the anchor, for one
+    /// that did not. The drain has already turned the anchor's column into characters;
+    /// see [`Delta::marks`](crate::emu::Delta::marks). Resolved here rather than in
     /// Lisp because the arithmetic is over Rust's absolute row numbering, which is not
     /// something the Lisp side should have to hold a copy of.
     ///
@@ -672,7 +675,7 @@ impl Update {
             );
         }
         match at.row.checked_sub(base).and_then(|i| rows.get(i)) {
-            // Trailing blanks are trimmed out of the runs, so a column past the end of
+            // Trailing blanks are trimmed out of the runs, so an offset past the end of
             // what the row actually kept is clamped rather than run off the line.
             Some(row) => env.cons(
                 sym!(env, "scrolled")?,

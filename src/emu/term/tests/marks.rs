@@ -458,3 +458,41 @@ fn clearing_to_the_prompt_leaves_the_alt_screen_alone() {
     assert_eq!(t.clear_to_prompt(), 0);
     assert_eq!(text(&t, 1), "bbb");
 }
+
+/// Emacs turns an anchor into a buffer position by counting characters along the row,
+/// so the drain counts them for it: a prompt of `日本 ` ends at column 5, and the mark
+/// after it is 3 characters in. Counted as columns it lands two characters past the
+/// end of the prompt.
+#[test]
+fn a_mark_after_a_wide_character_is_anchored_by_characters() {
+    let mut t = term(4, 20, "\u{65e5}\u{672c} \x1b]133;B\x07".as_bytes());
+    let events = t.drain().events;
+    assert_eq!(
+        events,
+        vec![Event::Mark(
+            Mark::PromptEnd,
+            Anchor { row: 0, col: 3 },
+            MarkId::from_index(0)
+        )]
+    );
+}
+
+/// The same count for a mark whose row scrolls away in the drain it was made in. The
+/// row's cells are gone by the time the drain is taken, so the count is the one made
+/// as the row departed, and the event and the relocation agree on it.
+#[test]
+fn a_mark_scrolled_away_after_a_wide_character_is_anchored_by_characters() {
+    let mut t = term(
+        2,
+        20,
+        "\u{65e5}\u{672c} \x1b]133;B\x07\r\n\r\n\r\n".as_bytes(),
+    );
+    let delta = t.drain();
+    let anchor = Anchor { row: 0, col: 3 };
+    assert!(anchor.row < delta.scrolled_base + delta.scrolled.len());
+    assert_eq!(
+        delta.events,
+        vec![Event::Mark(Mark::PromptEnd, anchor, MarkId::from_index(0))]
+    );
+    assert_eq!(delta.marks, vec![(MarkId::from_index(0), anchor)]);
+}

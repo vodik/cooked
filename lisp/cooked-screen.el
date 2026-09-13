@@ -67,10 +67,13 @@ because row 0 owns the remainder of the shared one."
 (defun cooked--cursor-position ()
   "Buffer position of the emulator cursor.
 A pure query: it never extends the buffer, so it is safe to call before
-`inhibit-read-only' is in effect."
+`inhibit-read-only' is in effect.
+
+Counted in characters along the row, which the core has already done: on
+`日本X' with the cursor on `本', the column would land on `X'."
   (save-excursion
     (cooked--goto-screen-row (cooked-cursor-row cooked--cursor))
-    (min (+ (point) (cooked-cursor-col cooked--cursor)) (line-end-position))))
+    (min (+ (point) (cooked-cursor-chars cooked--cursor)) (line-end-position))))
 
 (defun cooked--anchor-position (anchor batch-start)
   "Buffer position ANCHOR names, or the cursor if it names nothing we can place.
@@ -83,7 +86,10 @@ in src/wire.rs:
                        inserted, for a row that scrolled away while the
                        drain accumulated.  BATCH-START, from
                        `cooked--render-scrolled', is where that text begins.
-  (screen ROW . COL)   a cell on the live grid, for a row still on it.
+  (screen ROW . CHARS) a place on the live grid, for a row still on it: the
+                       row, and characters of its text before the anchor,
+                       which the core counted from the cells so that a
+                       wide character before it does not push it along.
 
 Both are resolvable only after the scrollback and the damaged rows have been
 rendered, which is where `cooked--apply' dispatches events.
@@ -96,10 +102,10 @@ one drain would all land on the same position."
      (if batch-start
          (min (+ batch-start offset) (point-max))
        (cooked--cursor-position)))
-    (`(screen ,row . ,col)
+    (`(screen ,row . ,chars)
      (save-excursion
        (cooked--goto-screen-row row)
-       (min (+ (point) col) (line-end-position))))
+       (min (+ (point) chars) (line-end-position))))
     (_ (cooked--cursor-position))))
 
 (defun cooked--screen-cell (&optional pos)
@@ -336,7 +342,7 @@ damaged anyway."
       (cooked--apply-shift top bottom count up))))
 
 (defun cooked--pad-to-cursor ()
-  "Extend the cursor's row so it can hold the cursor column.
+  "Extend the cursor's row so it can hold the cursor's character.
 
 Rendered rows have trailing blanks trimmed, which loses the space at the
 end of a prompt like \"$ \".  The input region would then begin one column
@@ -344,7 +350,8 @@ early, and the shell's echo of the submitted line would disagree with
 what was displayed."
   (save-excursion
     (cooked--goto-screen-row (cooked-cursor-row cooked--cursor) 'extend)
-    (let ((short (- (cooked-cursor-col cooked--cursor) (- (line-end-position) (point)))))
+    (let ((short (- (cooked-cursor-chars cooked--cursor)
+                    (- (line-end-position) (point)))))
       (when (> short 0)
         (goto-char (line-end-position))
         (insert (make-string short ?\s))))))

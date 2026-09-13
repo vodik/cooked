@@ -378,12 +378,21 @@ impl State {
         let scrolled = Vec::from(std::mem::take(&mut self.pending_scrollback));
         // Taken before the batch is handed over, so it names the first line *in* it.
         let scrolled_base = self.evicted_total - scrolled.len();
-        let events = std::mem::take(&mut self.events);
         // Read here, off the grid as it stands, rather than when the resize re-laid it:
         // the child is signalled on a resize and answers by redrawing, and anything it
         // scrolls in between moves every mark still on the grid with its row.
         let marks = self.take_marks();
+        let mut events = std::mem::take(&mut self.events);
+        for event in &mut events {
+            if let Event::Mark(_, at, id) = event {
+                *at = self.anchor_in_characters(*at, *id, &marks);
+            }
+        }
         let levels = Levels::of(self);
+        let cursor_chars = self
+            .screen()
+            .row(levels.cursor.row)
+            .map_or(levels.cursor.col, |row| row.chars_before(levels.cursor.col));
         let rows = self.damaged_rows(damaged, &shifts, levels.cursor);
         // Last, after everything that could have named a new id: the rows, edits and
         // scrollback above were all built from cells written before this drain began.
@@ -405,8 +414,33 @@ impl State {
             // scrollback, and its row 0 begins a buffer line of its own.
             head: if levels.alt { 0 } else { screen.head() },
             levels,
+            cursor_chars,
             events,
             marks,
+        }
+    }
+
+    /// AT, a mark's anchor as it was taken, with its column turned into characters of the
+    /// row's text; see [`Delta::marks`].
+    ///
+    /// A row still on the grid is measured as it stands. A row that has scrolled away is
+    /// no longer anywhere to measure, but the mark ID left on its cell was measured as the
+    /// row departed, and MARKS, this drain's relocations, carry that measurement. A mark
+    /// with neither -- its cell overwritten before the row went -- keeps its column,
+    /// which is still right on a row with no wide character before it.
+    fn anchor_in_characters(&self, at: Anchor, id: MarkId, marks: &[(MarkId, Anchor)]) -> Anchor {
+        match at.row.checked_sub(self.evicted_total) {
+            Some(index) => Anchor {
+                col: self
+                    .screen()
+                    .row(index)
+                    .map_or(at.col, |row| row.chars_before(at.col)),
+                ..at
+            },
+            None => marks
+                .iter()
+                .find(|(mark, _)| *mark == id)
+                .map_or(at, |(_, moved)| *moved),
         }
     }
 

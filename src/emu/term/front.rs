@@ -15,7 +15,7 @@
 //! so itself when it edits a live row -- the width guard deleting characters off a row
 //! that wrapped is the case that exists. A row that is not known is always sent.
 
-use super::super::cell::{BLANK, Cell, Extra, RowRef, draws_nothing};
+use super::super::cell::{BLANK, Cell, Extra, RowRef, chars_before, draws_nothing};
 use super::super::glyph;
 use super::super::screen::{Direction, Shift};
 
@@ -246,7 +246,7 @@ impl Front {
                 }));
             }
         }
-        let length = chars(new, new_extras.iter().copied(), new_len);
+        let length = chars_before(new, new_extras.iter().copied(), new_len);
         let Some((mut lo, mut hi)) = span else {
             // Nothing drawn differs, only the wrap flag: an empty replacement still has
             // Lisp mark the row's newline afresh.
@@ -291,7 +291,7 @@ impl Front {
         let (char_end, end) = if hi >= old_len {
             (None, new_len.max(lo))
         } else {
-            (Some(chars(old, old_extras.iter(), hi)), hi)
+            (Some(chars_before(old, old_extras.iter(), hi)), hi)
         };
         if (end - lo) * 2 > cols {
             return None;
@@ -299,7 +299,7 @@ impl Front {
         Some(Span {
             start: lo,
             end,
-            char_start: chars(old, old_extras.iter(), lo),
+            char_start: chars_before(old, old_extras.iter(), lo),
             char_end,
             length,
         })
@@ -371,25 +371,6 @@ fn content_len<'a>(cells: &[Cell], extras: impl Iterator<Item = &'a (u16, Extra)
         .filter(|(_, extra)| extra.is_content())
         .map(|(at, _)| usize::from(*at) + 1)
         .fold(text, usize::max)
-}
-
-/// Characters Emacs holds for the first COLS columns of a row: one per cell that is not
-/// the second half of a wide character, and one more per combining mark riding a cell.
-fn chars<'a>(cells: &[Cell], extras: impl Iterator<Item = &'a (u16, Extra)>, cols: usize) -> usize {
-    let base = cells[..cols]
-        .iter()
-        .filter(|c| !c.is_continuation())
-        .count();
-    // A mark on a continuation cell is not rendered -- the runs skip that cell whole --
-    // so it is not counted either.
-    let marks: usize = extras
-        .filter(|(at, _)| usize::from(*at) < cols && !cells[usize::from(*at)].is_continuation())
-        .map(|(_, extra)| match extra {
-            Extra::Marks(text) => text.chars().count(),
-            _ => 0,
-        })
-        .sum();
-    base + marks
 }
 
 /// The first and last columns of a run of box glyphs that a boundary before column AT

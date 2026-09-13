@@ -267,7 +267,12 @@ produce — the same defect `indent-bars' documents for box characters."
         (window-default-line-height window)))
 
 (defvar cooked--deco-cursor nil
-  "The child\='s cursor as a (ROW . COL) screen cell, for the render pass.
+  "The child\='s cursor as (ROW . CHARS), for the render pass.
+
+CHARS counts the characters of the row\='s text before the cursor, as
+`cooked-cursor-chars\=' does, so that it compares with a character offset from
+the row\='s start: on `日本──\=' with the cursor on the first `─\=', column 4,
+it is 2.
 
 Bound by `cooked--apply\=' in cooked-render.el for exactly as long as the two
 render passes run, and nil everywhere else -- including in a rescale, which
@@ -1403,9 +1408,11 @@ other one\='s slices were cut."
 (defun cooked--glyph-run-segments (packed column cursor)
   "PACKED cut into the parts that are each drawn as one thing, left to right.
 
-PACKED is a whole decoration run\='s (BITS COUNT) records; COLUMN is the screen
-column its first cell stands on, or nil off the screen; CURSOR is the screen
-column the child\='s cursor is on in this row, or nil.  The answer is a list of
+PACKED is a whole decoration run\='s (BITS COUNT) records; COLUMN is how many
+characters into its row the run\='s first cell is, or nil off the screen;
+CURSOR is the same count for the child\='s cursor when it is on this row, or
+nil.  Both are characters rather than grid columns, so that a wide character
+earlier on the row moves them together.  The answer is a list of
 \(KIND . PATTERN), KIND being `glyph\=' or `shade\=' and PATTERN in the form
 `cooked--glyph-pattern-records\=' reads, whose cells add up to PACKED\='s.
 

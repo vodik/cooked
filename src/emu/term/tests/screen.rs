@@ -844,3 +844,19 @@ fn a_read_that_changes_nothing_reports_nothing() {
     assert!(delta.events.is_empty() && delta.images.is_empty());
     assert!(delta.scrolled.is_empty() && delta.marks.is_empty());
 }
+
+/// Emacs finds the cursor by counting characters along its row, which is not its column
+/// once a wide character or a combining mark comes before it.
+#[test]
+fn the_drain_counts_the_cursor_in_characters_of_its_row() {
+    // On `本`, which is the second character and columns 2 and 3.
+    let mut t = term(2, 20, "\u{65e5}\u{672c}X\x1b[1;3H".as_bytes());
+    let delta = t.drain();
+    assert_eq!((delta.levels.cursor.col, delta.cursor_chars), (2, 1));
+    // On its second column the cursor is still on `本`.
+    t.feed(b"\x1b[1;4H");
+    assert_eq!(t.drain().cursor_chars, 1);
+    // Past a combining mark, which is a character of its own in the buffer.
+    let mut t = term(2, 20, "e\u{301}x\x1b[1;2H".as_bytes());
+    assert_eq!(t.drain().cursor_chars, 2);
+}

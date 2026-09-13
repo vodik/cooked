@@ -191,6 +191,41 @@ pub(crate) fn draws_nothing(ch: char) -> bool {
     ch == BLANK || ch == NO_BREAK_SPACE
 }
 
+/// Characters Emacs holds for a row of CELLS and EXTRAS before the character at column
+/// COLS: one per cell that is not the second half of a wide character, and one more per
+/// combining mark riding a cell.
+///
+/// The one conversion from a grid column to a character offset into the row's text, so
+/// that everything the core tells Emacs by offset agrees on it: the ends of a partial row
+/// edit, the cursor, and an anchor. On `日本X` the cursor on either column of `本` is 1
+/// character in; counting columns instead puts it on `X`. A column that is the second
+/// half of a wide character counts from the character it belongs to, and COLS past the
+/// row counts the cells there are.
+pub(crate) fn chars_before<'a>(
+    cells: &[Cell],
+    extras: impl Iterator<Item = &'a (u16, Extra)>,
+    cols: usize,
+) -> usize {
+    let mut cols = cols.min(cells.len());
+    while cols < cells.len() && cols > 0 && cells[cols].is_continuation() {
+        cols -= 1;
+    }
+    let base = cells[..cols]
+        .iter()
+        .filter(|c| !c.is_continuation())
+        .count();
+    // A mark on a continuation cell is not rendered -- the runs skip that cell whole --
+    // so it is not counted either.
+    let marks: usize = extras
+        .filter(|(at, _)| usize::from(*at) < cols && !cells[usize::from(*at)].is_continuation())
+        .map(|(_, extra)| match extra {
+            Extra::Marks(text) => text.chars().count(),
+            _ => 0,
+        })
+        .sum();
+    base + marks
+}
+
 impl Default for Cell {
     fn default() -> Self {
         Self::blank(StyleId::DEFAULT)
@@ -846,6 +881,12 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             .rev()
             .find(|(_, e)| e.is_content())
             .map_or(cells, |(at, _)| cells.max(usize::from(*at) + 1))
+    }
+
+    /// Characters of this row's text before the character at column COL; see
+    /// [`chars_before`].
+    pub fn chars_before(&self, col: usize) -> usize {
+        chars_before(self.cells(), self.extras().iter(), col)
     }
 
     /// Style-grouped runs with trailing default-styled blanks trimmed.

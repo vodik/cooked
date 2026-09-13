@@ -356,8 +356,21 @@ pub struct Delta {
     pub head: usize,
     /// Everything else a drain restates in full every time; see [`Levels`].
     pub levels: Levels,
+    /// The cursor's column as characters of its row's text, which is how Emacs finds it:
+    /// on `日本X` with the cursor on `X`, column 4, it is 2. See
+    /// [`chars_before`](super::cell::chars_before).
+    ///
+    /// Beside [`Levels`] rather than in it, because the levels are read on every parse to
+    /// decide whether there is anything to draw, and this has to walk the row. It cannot
+    /// change unless the cursor or its row did, which the levels and the damage see.
+    pub cursor_chars: usize,
     pub events: Vec<Event>,
     /// Semantic marks whose position changed during this drain, as `(ID, ANCHOR)`.
+    ///
+    /// The anchor's column here, and in every [`Event::Mark`] a drain carries, counts the
+    /// characters of the row's text before the mark rather than grid columns, because a
+    /// buffer position is what Emacs makes of it: a prompt of `日本 ` ends at column 5 and
+    /// 3 characters in.
     ///
     /// Empty on most drains. A resize fills it, because a rewrap re-lays every logical
     /// line at the new width and the old buffer positions stop holding; so does a redraw,

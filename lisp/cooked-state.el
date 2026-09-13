@@ -20,7 +20,7 @@
 
 ;;;; What the two ends exchange
 ;;
-;; The native core reports its cursor as a four-element list and its geometry as
+;; The native core reports its cursor as a five-element list and its geometry as
 ;; three keys of the drain's plist, both of which are the cheapest thing to build
 ;; across the module boundary.  Neither is a good thing to *read*: `(nth 3
 ;; cooked--cursor)' says nothing about what it holds, and a positional decode
@@ -32,6 +32,11 @@
   "The child's cursor: where it is, and what it should look like."
   (row 0 :documentation "Screen row, zero-based.")
   (col 0 :documentation "Screen column, zero-based.")
+  (chars 0 :documentation "\
+Characters of its row\='s text before it, which is where it is in the buffer.
+Not COL once a wide character or a combining mark comes before it: on `日本X\='
+with the cursor on `本\=' COL is 2 and this is 1.  The core counts it, by the
+rule its row edits are measured by.")
   (visible t :documentation "Whether the child has asked for it to be shown.")
   (shape 'block :documentation "`block', `underline' or `bar', from DECSCUSR."))
 
@@ -39,9 +44,9 @@
   "The child's cursor as of the last drain, a `cooked-cursor'.")
 
 (defun cooked--cursor-decode (spec)
-  "Decode SPEC, the (ROW COL VISIBLE SHAPE) list the native core reports."
-  (pcase-let ((`(,row ,col ,visible ,shape) spec))
-    (cooked--cursor-make :row (or row 0) :col (or col 0)
+  "Decode SPEC, the (ROW COL VISIBLE SHAPE CHARS) list the native core reports."
+  (pcase-let ((`(,row ,col ,visible ,shape ,chars) spec))
+    (cooked--cursor-make :row (or row 0) :col (or col 0) :chars (or chars col 0)
                          :visible visible :shape (or shape 'block))))
 
 (defun cooked--cursor-cell ()
