@@ -1058,4 +1058,161 @@ mod tests {
             "ab\n"
         );
     }
+
+    /// The filter's own oracle: where a read happens to end must not change what is shown.
+    ///
+    /// comint hands the filter whatever one `read' returned, so a progress bar's `\r`, an
+    /// `SGR` or an `OSC 8` can be cut anywhere, and the parser, the pen, the segmenter and
+    /// the retraction all have to carry across the cut. The grid has `delta_replay.rs` for
+    /// the same question; this filter is not the grid, and a bug in its reconciliation
+    /// would pass every property that one has. So the same script is fed whole to one
+    /// filter and in pieces to another, and the two consumers must end up displaying the
+    /// same characters under the same renditions and the same link destinations.
+    mod chunking {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// What a consumer displays: each character, with the rendition and the `OSC 8`
+        /// destination it was inserted under.
+        ///
+        /// Resolved rather than kept as ids, because the two filters under comparison
+        /// number their renditions independently: one that saw a style first in a
+        /// different feed may well have given it a different id.
+        type Shown = Vec<(char, Style, Option<String>)>;
+
+        /// A comint buffer, reduced to what `cooked-comint--emit' does with an emission.
+        struct Consumer {
+            filter: Filter,
+            shown: Shown,
+            /// `cooked-comint--open': the text of the open line as last handed over,
+            /// which is what decides whether the next feed may retract.
+            open: String,
+        }
+
+        impl Consumer {
+            fn new() -> Self {
+                Self {
+                    filter: Filter::new(),
+                    shown: Vec::new(),
+                    open: String::new(),
+                }
+            }
+
+            /// Whether the buffer still ends in the open line, as
+            /// `cooked-comint--intact-p' asks it: by text alone.
+            fn intact(&self) -> bool {
+                let open: Vec<char> = self.open.chars().collect();
+                self.shown.len() >= open.len()
+                    && self.shown[self.shown.len() - open.len()..]
+                        .iter()
+                        .map(|(c, ..)| *c)
+                        .eq(open.iter().copied())
+            }
+
+            /// One chunk, applied the way `cooked-comint--emit' applies one.
+            fn feed(&mut self, chunk: &str) {
+                let intact = self.intact();
+                self.filter.feed(chunk.as_bytes(), intact);
+                let emission = self.filter.emission();
+                assert!(
+                    intact || emission.retract == 0,
+                    "an unsynced feed retracted"
+                );
+                self.shown.truncate(self.shown.len() - emission.retract);
+                let mut text = String::new();
+                for run in &emission.runs {
+                    let style = self.filter.style(run.style);
+                    let link = run
+                        .link
+                        .and_then(|id| self.filter.uri(id))
+                        .map(str::to_string);
+                    self.shown
+                        .extend(run.text.chars().map(|c| (c, style, link.clone())));
+                    text.push_str(&run.text);
+                }
+                let tail = text.rsplit('\n').next().unwrap_or_default();
+                if text.contains('\n') {
+                    self.open = tail.to_string();
+                } else {
+                    let keep = self.open.chars().count() - emission.retract;
+                    self.open = self.open.chars().take(keep).collect::<String>() + tail;
+                }
+            }
+
+            /// SCRIPT cut at CUTS, each a fraction of its length in 256ths, and moved to
+            /// the nearest character boundary at or before it: comint decodes the output
+            /// before a preoutput filter sees it, so a cut inside a character is not one
+            /// the filter can meet.
+            fn feed_cut(&mut self, script: &str, cuts: &[u8]) {
+                let mut offsets: Vec<usize> = cuts
+                    .iter()
+                    .map(|&cut| {
+                        let mut at = usize::from(cut) * script.len() / 256;
+                        while !script.is_char_boundary(at) {
+                            at -= 1;
+                        }
+                        at
+                    })
+                    .collect();
+                offsets.sort_unstable();
+                let mut from = 0;
+                for at in offsets.into_iter().chain([script.len()]) {
+                    self.feed(&script[from..at]);
+                    from = at;
+                }
+            }
+        }
+
+        /// The pieces a script is made of: everything the line buffer resolves, each in a
+        /// shape that has something to disturb, and the ones that make characters and
+        /// columns disagree.
+        fn token() -> impl Strategy<Value = String> {
+            prop_oneof![
+                4 => prop::sample::select(vec!["abc", "Downloading", " 42%", "$ ", "x"])
+                    .prop_map(str::to_string),
+                3 => prop::sample::select(vec!["\r", "\x08", "\t", "\n", "\r\n"])
+                    .prop_map(str::to_string),
+                2 => prop::sample::select(vec!["\x1b[K", "\x1b[1K", "\x1b[2K"])
+                    .prop_map(str::to_string),
+                3 => (1usize..12, prop::sample::select(vec!['G', 'X', 'P', '@', 'C', 'D']))
+                    .prop_map(|(n, verb)| format!("\x1b[{n}{verb}")),
+                2 => prop::sample::select(vec!["\x1b[31m", "\x1b[1;42m", "\x1b[0m"])
+                    .prop_map(str::to_string),
+                // A wide character, and a combining mark both with a base and without.
+                2 => prop::sample::select(vec!["\u{6f22}", "e\u{301}", "\u{301}"])
+                    .prop_map(str::to_string),
+                1 => (0usize..3)
+                    .prop_map(|n| format!("\x1b]8;;https://example.invalid/{n}\x1b\\")),
+                1 => Just("\x1b]8;;\x1b\\".to_string()),
+            ]
+        }
+
+        fn script() -> impl Strategy<Value = String> {
+            prop::collection::vec(token(), 0..24).prop_map(|tokens| tokens.concat())
+        }
+
+        fn cuts() -> impl Strategy<Value = Vec<u8>> {
+            prop::collection::vec(any::<u8>(), 0..8)
+        }
+
+        proptest! {
+            // No persistence file. A unit test's would be written under `src/', and a
+            // failure this finds belongs in the named tests above, with its input spelled
+            // out, rather than in a seed that silently changes meaning with the generator.
+            #![proptest_config(ProptestConfig {
+                cases: 1024,
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
+
+            #[test]
+            fn cutting_the_output_into_reads_changes_nothing(script in script(), cuts in cuts()) {
+                let mut whole = Consumer::new();
+                whole.feed(&script);
+                let mut pieces = Consumer::new();
+                pieces.feed_cut(&script, &cuts);
+                prop_assert_eq!(pieces.shown, whole.shown);
+            }
+        }
+    }
 }
