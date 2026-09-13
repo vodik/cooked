@@ -84,6 +84,24 @@ impl State {
         self.archive(rows);
     }
 
+    /// Run OP on the screen being shown, and send the rows it pushed off the top wherever
+    /// that screen's departing rows go.
+    pub(super) fn evicting(&mut self, op: impl FnOnce(&mut Screen) -> Evicted) {
+        let evicted = op(self.screen_mut());
+        self.evicted(evicted);
+    }
+
+    /// ED on the shown screen, with what erasing it all means beyond the cells: the rows
+    /// go to history and Emacs is told the display was cleared. DECALN and RIS both erase
+    /// this way before drawing, so a pattern or a reset never paints over a transcript
+    /// that `CSI 2 J` would have kept.
+    pub(super) fn erase_display(&mut self, how: Erase, style: Style) {
+        self.evicting(|screen| screen.erase_display(how, style));
+        if how == Erase::All {
+            self.cleared_display();
+        }
+    }
+
     /// The child cleared the whole display; see [`Event::DisplayCleared`].
     ///
     /// Silent on the alternate screen, which archives nothing and is pinned to the top of
@@ -221,8 +239,7 @@ impl State {
 
     pub(super) fn linefeed(&mut self) {
         let pen = self.pen;
-        let evicted = self.screen_mut().linefeed(pen);
-        self.evicted(evicted);
+        self.evicting(|screen| screen.linefeed(pen));
     }
 
     pub(super) fn resize(&mut self, rows: usize, cols: usize) {

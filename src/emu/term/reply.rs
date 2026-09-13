@@ -58,7 +58,7 @@ pub(crate) enum Framing {
 /// `char::is_control` covers C0, DEL and C1 alike, which is exactly the set that can end
 /// a sequence or begin another.
 pub(crate) fn is_safe(text: &str) -> bool {
-    !text.chars().any(char::is_control)
+    !crate::emu::text::has_control(text)
 }
 
 /// The reply BODY makes under FRAMING, or `None` if BODY is not safe to send.

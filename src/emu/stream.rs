@@ -67,6 +67,7 @@ use super::cell::{BLANK, CONTINUATION, Cell, Color, Run, Style};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
 use super::sgr;
+use super::term::osc::validated_text;
 use super::text::{Segmenter, Step};
 
 /// Columns one logical line may reach before it is retired to keep it bounded.
@@ -517,25 +518,13 @@ impl Stream {
 
     /// `OSC 8 ; params ; uri` -- open or close a hyperlink.
     ///
-    /// The same shape as the grid's `State::hyperlink`, including
-    /// the refusal of a URI carrying control characters, which is what stops a
-    /// destination from smuggling an escape sequence into whatever displays it.
+    /// Validated by the same [`validated_text`] as the grid's `State::hyperlink`, so a
+    /// destination cannot smuggle an escape sequence into whatever displays it.
     fn hyperlink(&mut self, params: &[&[u8]]) {
-        let uri = super::term::osc::rejoin(params.get(2..).unwrap_or(&[]));
-        if uri.is_empty() {
-            self.link = None;
-            return;
-        }
-        if uri.len() > MAX_URI_LEN {
-            return;
-        }
-        let Ok(uri) = std::str::from_utf8(&uri) else {
+        let Some(uri) = validated_text(params, 2, MAX_URI_LEN) else {
             return;
         };
-        if uri.chars().any(|c| c.is_control() || c == '\u{7f}') {
-            return;
-        }
-        self.link = Some(self.links.intern(uri).0);
+        self.link = (!uri.is_empty()).then(|| self.links.intern(&uri).0);
     }
 
     /// `OSC 7 ; file://host/path` -- the child's working directory.
@@ -544,27 +533,10 @@ impl Stream {
     /// is a question about hosts, TRAMP and percent-encoding that Lisp already answers
     /// once, in `cooked-osc.el', and answering it a second time here in Rust is how the
     /// two answers come to differ. The cap is [`MAX_URI_LEN`] for the reason the
-    /// hyperlink has one -- the payload is a child's to choose the length of.
+    /// hyperlink has one: the payload is a child's to choose the length of.
     fn set_directory(&mut self, params: &[&[u8]]) {
-        let url = super::term::osc::rejoin(params.get(1..).unwrap_or(&[]));
-        if url.is_empty() || url.len() > MAX_URI_LEN {
-            return;
-        }
-        let Ok(url) = std::str::from_utf8(&url) else {
-            return;
-        };
-        if url.chars().any(|c| c.is_control() || c == '\u{7f}') {
-            return;
-        }
-        self.out.directory = Some(url.to_owned());
-    }
-
-    /// The first parameter, defaulting to one, which is what nearly every `CSI` means by
-    /// an omitted or zero argument.
-    fn count(params: &Params) -> usize {
-        match params.iter().next().and_then(|p| p.first().copied()) {
-            None | Some(0) => 1,
-            Some(n) => n as usize,
+        if let Some(url) = validated_text(params, 1, MAX_URI_LEN).filter(|url| !url.is_empty()) {
+            self.out.directory = Some(url);
         }
     }
 }
@@ -659,7 +631,8 @@ impl Perform for Stream {
         if !intermediates.is_empty() {
             return;
         }
-        let n = Self::count(params);
+        // Omitted or zero means one, as it does for nearly every `CSI` with a count.
+        let n = params.arg(0, 1);
         match action {
             'm' => sgr::apply(params, &mut self.pen, &mut self.underline),
             // CUF and CUB. Within the line, and never past its start.
@@ -671,7 +644,7 @@ impl Perform for Stream {
             // because there is no right margin here: a comint buffer's line ends where
             // the text does, and blanks out to a width this filter does not have would
             // be trailing whitespace the child never asked for.
-            'K' => match params.iter().next().and_then(|p| p.first().copied()) {
+            'K' => match params.value(0) {
                 Some(1) => {
                     let to = (self.col + 1).min(self.line.len());
                     self.erase(0, to);

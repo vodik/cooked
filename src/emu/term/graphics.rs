@@ -158,7 +158,7 @@ impl State {
     /// Returns whether this was an inline-image `File=`, handled or refused. `false`
     /// means it was some other `OSC 1337` and belongs to whoever else is listening.
     pub(super) fn iterm_file(&mut self, params: &[&[u8]]) -> bool {
-        let joined = rejoin(params.get(1..).unwrap_or(&[]));
+        let joined = rejoin(params, 1);
         // The colon separates the arguments from the payload, and only the first one
         // does: base64 has no colon in it.
         let colon = joined.iter().position(|&b| b == b':');
@@ -247,8 +247,7 @@ impl State {
             if last && after != CursorAfterImage::NextLine {
                 break;
             }
-            let evicted = self.screen_mut().linefeed(pen);
-            self.evicted(evicted);
+            self.evicting(|screen| screen.linefeed(pen));
         }
         match after {
             CursorAfterImage::NextLine => self.screen_mut().carriage_return(),
@@ -263,8 +262,7 @@ impl State {
                     // on this line. A real linefeed rather than a clamp, because this is
                     // the case that has to scroll when the picture ends on the bottom
                     // row.
-                    let evicted = self.screen_mut().linefeed(pen);
-                    self.evicted(evicted);
+                    self.evicting(|screen| screen.linefeed(pen));
                     self.screen_mut().carriage_return();
                 }
             }

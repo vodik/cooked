@@ -6,14 +6,24 @@
 
 use super::*;
 
+impl State {
+    /// End the grapheme cluster under the cursor.
+    ///
+    /// Every dispatch that is not a print calls this first. The cell to the cursor's left
+    /// is only this side's to extend while this side is the one that wrote it: an `e`,
+    /// then a cursor move, then a combining acute must not join the `e`. See
+    /// [`crate::emu::text`].
+    fn end_cluster(&mut self) {
+        self.text.reset();
+    }
+}
+
 impl Perform for State {
     fn print(&mut self, c: char) {
         // The designated set, and any single shift, before anything else sees the
         // character: the segmenter has to measure what is drawn, not what was sent.
         let c = self.modes.charsets.print(c);
         let pen = self.pen;
-        let underline = self.underline;
-        let link = self.link;
         // The segmenter, not a width table. A code point that continues the cluster on
         // the cell to the left costs no column of its own however wide it looks alone,
         // which is the whole of what makes a ZWJ emoji family two cells rather than six.
@@ -25,31 +35,15 @@ impl Perform for State {
                 // to be told, since that number is how it finds the cell next time.
                 let settled = self.screen_mut().join(c, before, after);
                 self.text.settle(settled);
-                // Zero, so the two attachment writers below leave the cell alone: a
-                // combining mark neither owns an underline colour nor opens a link, and
-                // moving either onto the cell it rides would take it off the character
-                // that actually carries it.
+                // Zero, so `attach` leaves the cell alone: a combining mark neither owns
+                // an underline colour nor opens a link, and moving either onto the cell
+                // it rides would take it off the character that actually carries it.
                 (0, Evicted::none())
             }
         };
-        let screen = self.screen_mut();
-        // After the write, so it lands on the cell the write actually chose — which a
-        // wrap or DECAWM may have moved. Only when there is a colour to record: retiring
-        // the *previous* occupant's colour is `Row::set`'s job, so nothing here needs a
-        // screen-wide "has anything ever been underlined" latch to guard the call. Such a
-        // latch cannot be cleared correctly anyway — one `SGR 58` anywhere in a session
-        // would make every subsequent character pay for this call forever.
-        // Zero-width characters fold onto the cell to their left and never own one, so
-        // they must not move an underline colour either.
-        if width > 0 && underline != Color::Default {
-            screen.mark_underline(underline, width);
-        }
-        // The same shape, and only when there is a link open: a cell written outside one
-        // has nothing attached, because `Row::set` has already retired whatever the
-        // previous occupant carried.
-        if width > 0 && link.is_some() {
-            screen.mark_link(link, width);
-        }
+        // After the write, so it lands on the cell the write actually chose, which a wrap
+        // or DECAWM may have moved.
+        self.attach(width);
         self.evicted(evicted);
         if width > 0 {
             self.last_print = Some(c);
@@ -130,10 +124,7 @@ impl Perform for State {
     }
 
     fn execute(&mut self, byte: u8) {
-        // Anything that is not a print ends the cluster under the cursor: the cell to
-        // the cursor's left is only this side's to extend while this side is the one
-        // that wrote it. See [`crate::emu::text`].
-        self.text.reset();
+        self.end_cluster();
         match byte {
             0x07 => self.events.push(Event::Bell),
             0x08 => self.screen_mut().backspace(),
@@ -155,10 +146,7 @@ impl Perform for State {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
-        // Anything that is not a print ends the cluster under the cursor: the cell to
-        // the cursor's left is only this side's to extend while this side is the one
-        // that wrote it. See [`crate::emu::text`].
-        self.text.reset();
+        self.end_cluster();
         match (intermediates.first().copied(), byte) {
             // SCS into G0-G3. Matched on the first intermediate alone, so a two-byte
             // designator such as `ESC ( % 5` (DEC Supplemental) still lands in its slot --
@@ -177,11 +165,7 @@ impl Perform for State {
             // DECALN. Erased first, exactly as `CSI 2J` erases, so a primary screen's
             // contents reach history before the pattern covers them; see `Screen::align`.
             (Some(b'#'), b'8') => {
-                let evicted = self
-                    .screen_mut()
-                    .erase_display(Erase::All, Style::default());
-                self.evicted(evicted);
-                self.cleared_display();
+                self.erase_display(Erase::All, Style::default());
                 self.screen_mut().align();
             }
             (None, b'D') => self.linefeed(),
@@ -224,11 +208,7 @@ impl Perform for State {
                 for screen in self.screens.each_mut() {
                     screen.reset_tabs();
                 }
-                let evicted = self
-                    .screen_mut()
-                    .erase_display(Erase::All, Style::default());
-                self.evicted(evicted);
-                self.cleared_display();
+                self.erase_display(Erase::All, Style::default());
                 self.screen_mut().goto(0, 0);
                 // Last, and after the erase, so that a Lisp handler reading the buffer
                 // from this event sees the reset already done rather than half done.
@@ -241,18 +221,12 @@ impl Perform for State {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
-        // Anything that is not a print ends the cluster under the cursor: the cell to
-        // the cursor's left is only this side's to extend while this side is the one
-        // that wrote it. See [`crate::emu::text`].
-        self.text.reset();
+        self.end_cluster();
         self.csi(params, intermediates, action);
     }
 
     fn hook(&mut self, _params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        // Anything that is not a print ends the cluster under the cursor: the cell to
-        // the cursor's left is only this side's to extend while this side is the one
-        // that wrote it. See [`crate::emu::text`].
-        self.text.reset();
+        self.end_cluster();
         self.dcs_hook(intermediates, ignore, action);
     }
 
@@ -265,18 +239,12 @@ impl Perform for State {
     }
 
     fn apc_dispatch(&mut self, bytes: &[u8]) {
-        // Anything that is not a print ends the cluster under the cursor: the cell to
-        // the cursor's left is only this side's to extend while this side is the one
-        // that wrote it. See [`crate::emu::text`].
-        self.text.reset();
+        self.end_cluster();
         self.apc(bytes);
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        // Anything that is not a print ends the cluster under the cursor: the cell to
-        // the cursor's left is only this side's to extend while this side is the one
-        // that wrote it. See [`crate::emu::text`].
-        self.text.reset();
+        self.end_cluster();
         self.osc(params, bell_terminated);
     }
 }

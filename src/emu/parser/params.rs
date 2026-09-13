@@ -49,15 +49,26 @@ impl Params {
         ParamsIter::new(self)
     }
 
+    /// The value of each parameter, without its subparameters: `4:3;58` yields 4 and 58.
+    ///
+    /// For the sequences whose parameters are a list of numbers each meaning itself, such
+    /// as the modes in `CSI ? 1049 ; 2004 h`, where 0 is a value rather than a default.
+    pub fn values(&self) -> impl Iterator<Item = u16> + '_ {
+        self.iter().filter_map(|p| p.first().copied())
+    }
+
+    /// Parameter `index` as written, `None` when absent. A written `0` stays 0; see
+    /// [`Params::arg`] for the reading that treats it as a default.
+    pub fn value(&self, index: usize) -> Option<u16> {
+        self.iter().nth(index).and_then(|p| p.first().copied())
+    }
+
     /// Parameter `index`, defaulting to `fallback` when absent, empty or zero.
     ///
     /// The CSI convention in one place: a parameter that is omitted or written `0` means
-    /// "use the default", so a caller never has to test for either. This was a free
-    /// function in `term`, called at 37 sites with the `&Params` it belongs on.
+    /// "use the default", so a caller never has to test for either.
     pub fn arg(&self, index: usize, fallback: usize) -> usize {
-        self.iter()
-            .nth(index)
-            .and_then(|p| p.first().copied())
+        self.value(index)
             .filter(|v| *v != 0)
             .map_or(fallback, usize::from)
     }

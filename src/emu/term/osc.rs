@@ -3,20 +3,36 @@
 
 use super::*;
 
-/// Undoes the parser's `;`-splitting of a payload that legitimately contains
-/// semicolons of its own -- a URI, or iTerm2's `File=` argument string. Shared
-/// because three OSC producers -- [`State::hyperlink`], [`State::iterm_file`] and the
-/// grid-less [`Filter`](crate::emu::stream::Filter) -- all need it and would otherwise
-/// drift apart one length cap or edge case at a time.
-pub(crate) fn rejoin(parts: &[&[u8]]) -> Vec<u8> {
+/// PARAMS from index FROM on, joined back with the `;` the parser split them at.
+///
+/// A URI, a path, or iTerm2's `File=` argument string can contain semicolons of its own,
+/// and the parser cannot tell those from the ones separating OSC parameters.
+pub(crate) fn rejoin(params: &[&[u8]], from: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    for (at, part) in parts.iter().enumerate() {
+    for (at, part) in params.get(from..).unwrap_or_default().iter().enumerate() {
         if at != 0 {
             out.push(b';');
         }
         out.extend_from_slice(part);
     }
     out
+}
+
+/// The text PARAMS carry from index FROM on, if it is UTF-8 of at most MAX bytes with no
+/// control character in it.
+///
+/// For a payload Emacs will act on rather than display: a hyperlink's destination reaches
+/// `browse-url`, and a working directory becomes `default-directory`. A newline or an
+/// `ESC` inside either is not something anybody meant, so the payload is refused whole
+/// rather than trimmed. The length is checked here because the grid's OSC 8 and the
+/// comint filter's OSC 7 both return before any generic payload limit applies.
+pub(crate) fn validated_text(params: &[&[u8]], from: usize, max: usize) -> Option<String> {
+    let bytes = rejoin(params, from);
+    if bytes.len() > max {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    (!text::has_control(&text)).then_some(text)
 }
 
 impl State {
@@ -233,23 +249,16 @@ impl State {
     /// anybody meant — or if it is longer than [`MAX_URI_LEN`]. Length is checked here
     /// because this arm returns before `osc_dispatch`'s generic payload limit.
     pub(super) fn hyperlink(&mut self, params: &[&[u8]]) {
-        let uri = rejoin(params.get(2..).unwrap_or(&[]));
+        let Some(uri) = validated_text(params, 2, MAX_URI_LEN) else {
+            return;
+        };
         if uri.is_empty() {
             self.link = None;
             return;
         }
-        if uri.len() > MAX_URI_LEN {
-            return;
-        }
-        let Ok(uri) = std::str::from_utf8(&uri) else {
-            return;
-        };
-        if uri.chars().any(|c| c.is_control() || c == '\u{7f}') {
-            return;
-        }
-        let (id, fresh) = self.links.intern(uri);
+        let (id, fresh) = self.links.intern(&uri);
         if fresh {
-            self.pending_links.push((id, uri.to_owned()));
+            self.pending_links.push((id, uri));
         }
         self.link = Some(id);
     }
@@ -296,7 +305,7 @@ impl State {
         // that one exists to stop a hostile stream sizing our heap, this one is the
         // protocol saying how long a chunk may be, and a sender that exceeds it is
         // sending something this cannot render as one block anyway.
-        let raw = rejoin(params.get(2..).unwrap_or(&[]));
+        let raw = rejoin(params, 2);
         if raw.len() > MAX_TEXT_SIZE_LEN {
             return;
         }
@@ -326,8 +335,7 @@ impl State {
                 if cells > cols {
                     continue;
                 }
-                let evicted = self.screen_mut().write_cluster(cluster, cells, pen);
-                self.evicted(evicted);
+                self.evicting(|screen| screen.write_cluster(cluster, cells, pen));
                 self.attach(cells);
                 last = Some((cluster.to_owned(), cells));
             }
@@ -343,8 +351,7 @@ impl State {
         if width > cols {
             return;
         }
-        let evicted = self.screen_mut().write_cluster(&text, width, pen);
-        self.evicted(evicted);
+        self.evicting(|screen| screen.write_cluster(&text, width, pen));
         self.attach(width);
         // Seeded with the *declared* width, not the measured one: that is where the cell
         // begins as far as the grid is concerned, so it is what [`Screen::join`] needs to
@@ -386,13 +393,16 @@ impl State {
         Some(width)
     }
 
-    /// Hang the pen's underline colour and open hyperlink on a block WIDTH cells wide.
+    /// Hang the pen's underline colour and open hyperlink on the WIDTH cells just written.
     ///
-    /// What [`crate::emu::parser::Perform::print`] does after every
-    /// character it places, said once for a block: the two attachment writers locate
-    /// their cell by backing up over the width just written, so they need the block's
-    /// width rather than any character's.
-    fn attach(&mut self, width: usize) {
+    /// Both writers locate their cell by backing up over the width just written, so a
+    /// block from `OSC 66` passes its whole width and a character its own. Nothing is
+    /// attached at width 0, since a zero-width character rides the cell to its left and
+    /// owns neither. Each writer runs only when there is something to record: retiring
+    /// the previous occupant's colour or link is `Row::set`'s job, so no screen-wide latch
+    /// is needed, and one `SGR 58` early in a session does not tax every later character.
+    #[inline]
+    pub(super) fn attach(&mut self, width: usize) {
         let (underline, link) = (self.underline, self.link);
         let screen = self.screen_mut();
         if width > 0 && underline != Color::Default {

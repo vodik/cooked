@@ -97,7 +97,7 @@ impl PenParts {
     /// A list of numbers none of which xterm defines is still a selection -- of nothing
     /// -- rather than a bare push, because the child did ask for something specific.
     fn from_params(params: &Params) -> Option<Self> {
-        let codes: Vec<u16> = params.iter().filter_map(|p| p.first().copied()).collect();
+        let codes: Vec<u16> = params.values().collect();
         if codes.iter().all(|&code| code == 0) {
             return None;
         }
@@ -521,26 +521,21 @@ impl State {
         match (private, action) {
             (Some(b'?'), 'h' | 'l') => {
                 let on = action == 'h';
-                for mode in params.iter().filter_map(|p| p.first().copied()) {
-                    if let Ok(mode) = DecMode::try_from(mode) {
-                        self.dec_mode(mode, on);
-                    }
+                for mode in params.values().filter_map(|n| DecMode::try_from(n).ok()) {
+                    self.dec_mode(mode, on);
                 }
             }
             (None, 'h' | 'l') => {
                 let on = action == 'h';
-                for mode in params.iter().filter_map(|p| p.first().copied()) {
-                    if let Ok(mode) = AnsiMode::try_from(mode) {
-                        self.ansi_mode(mode, on);
-                    }
+                for mode in params.values().filter_map(|n| AnsiMode::try_from(n).ok()) {
+                    self.ansi_mode(mode, on);
                 }
             }
             // XTSAVE and XTRESTORE. The `?` is the whole of what tells these from SCOSC
             // and DECSTBM, `CSI s` and `CSI r`, which arrive with no private byte and are
             // dispatched in their own families below.
             (Some(b'?'), 's' | 'r') => {
-                let modes = params.iter().filter_map(|p| p.first().copied());
-                for mode in modes.filter_map(|mode| DecMode::try_from(mode).ok()) {
+                for mode in params.values().filter_map(|n| DecMode::try_from(n).ok()) {
                     if action == 's' {
                         self.save_mode(mode);
                     } else {
@@ -615,11 +610,7 @@ impl State {
             (None, 'J') => {
                 let param = params.arg(0, 0) as u16;
                 if let Some(how) = Erase::from_param(param) {
-                    let evicted = self.screen_mut().erase_display(how, pen);
-                    self.evicted(evicted);
-                    if matches!(how, Erase::All) {
-                        self.cleared_display();
-                    }
+                    self.erase_display(how, pen);
                 }
                 if param == 3 {
                     self.events.push(Event::EraseScrollback);
@@ -635,8 +626,7 @@ impl State {
             (None, 'P') => self.screen_mut().delete_chars(params.arg(0, 1), pen),
             (None, 'S') => {
                 let n = params.arg(0, 1);
-                let evicted = self.screen_mut().scroll_up(n, pen);
-                self.evicted(evicted);
+                self.evicting(|screen| screen.scroll_up(n, pen));
             }
             (None, 'T') => self.screen_mut().scroll_down(params.arg(0, 1), pen),
             (None, 'X') => self.screen_mut().erase_chars(params.arg(0, 1), pen),
@@ -658,8 +648,7 @@ impl State {
                     let cap = self.screen().width() * self.screen().height();
                     let pen = self.pen;
                     for _ in 0..params.arg(0, 1).min(cap) {
-                        let evicted = self.screen_mut().write(ch, pen);
-                        self.evicted(evicted);
+                        self.evicting(|screen| screen.write(ch, pen));
                     }
                 }
             }

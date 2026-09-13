@@ -85,6 +85,14 @@ const REGIONAL: std::ops::RangeInclusive<char> = '\u{1F1E6}'..='\u{1F1FF}';
 /// perfectly good answer.
 const MAX_CLUSTER: usize = 512;
 
+/// Whether TEXT holds a control character: C0, DEL or C1.
+///
+/// The one test for text that is about to be framed into a reply or handed to Emacs to
+/// act on, where any of the three can end a sequence early or start one of its own.
+pub(crate) fn has_control(text: &str) -> bool {
+    text.chars().any(char::is_control)
+}
+
 /// Columns one code point stands on, in isolation.
 ///
 /// "In isolation" is the caveat that matters: this is only the right answer for the
