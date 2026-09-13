@@ -2138,6 +2138,19 @@ to the child verbatim."
               ;; buffer-locally rather than worked around: a terminal grid has
               ;; no use for a default text property of any kind.
               default-text-properties nil
+              ;; U+00A0 is a character the child asked for, not a typo in
+              ;; prose.  With `nobreak-char-display' at its default, redisplay
+              ;; paints every no-break space in the `nobreak-space' face --
+              ;; `escape-glyph' plus an underline, so blue and underlined -- and
+              ;; it does so at *display* time, carrying no text property, which
+              ;; is why the artifact this fixes survived a property dump and an
+              ;; A/B against both link passes.  A TUI that pads with U+00A0
+              ;; (Claude Code's prompt, `tree''s indent) then draws a row of
+              ;; blue underlined gaps that no program asked for and nothing in
+              ;; the buffer records.  Emacs highlights it to warn a writer about
+              ;; whitespace that will not break a line; a grid has no lines to
+              ;; break and no writer to warn.
+              nobreak-char-display nil
               ;; A grid, not prose.  Cell (ROW . COL) is the COLth character of
               ;; the ROWth line and nothing may make it otherwise: `cooked--mouse-cell'
               ;; turns a click's column back into a cell, the ghost cursor is

@@ -160,6 +160,28 @@ it rather than merely inheriting a nil nobody had touched."
       (should (local-variable-p 'default-text-properties))
       (should-not default-text-properties))))
 
+(ert-deftest cooked-mode-does-not-let-redisplay-mark-up-the-childs-spaces ()
+  "U+00A0 is a cell the child asked for, not suspect whitespace in prose.
+
+At `nobreak-char-display\='s default, redisplay paints every no-break space in
+the `nobreak-space\=' face -- `escape-glyph\=' plus an underline -- at display
+time, carrying no text property.  A TUI that pads with U+00A0 then draws a row
+of blue underlined gaps that no program asked for, and because the markup is
+not a property, neither `describe-text-properties\=' nor an A/B against the
+link passes can find it.  That is how the reported artifact stayed
+unattributed: every tool that looks at the buffer says the character is clean.
+
+Set globally here to prove the mode clears it rather than inheriting a nil
+nobody had touched.  Emacs highlights U+00A0 to warn a writer about whitespace
+that will not break a line; a grid has no lines to break and no writer to warn,
+and cooked is the only one of the three comparators that says so -- ghostel,
+vterm and eat all leave it at the default."
+  (let ((nobreak-char-display t))
+    (with-temp-buffer
+      (cooked-mode)
+      (should (local-variable-p 'nobreak-char-display))
+      (should-not nobreak-char-display))))
+
 (ert-deftest cooked-mode-tears-sessions-down-when-emacs-exits ()
   "Killing the buffer reaps the child; exiting Emacs kills no buffers, so
 without this hook `Session::shutdown''s SIGHUP-then-SIGKILL escalation never
