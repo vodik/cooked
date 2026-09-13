@@ -926,6 +926,24 @@ keyboard to a prompt that is about to hand it straight back."
 
 (defun cooked--update-attention (&rest _)
   "Track, for every live session, whether the user is looking at it.
+From `window-selection-change-functions'; see `cooked--update-buffer-attention'."
+  (cooked--dolist-buffers
+    (cooked--update-buffer-attention)))
+
+(defun cooked--window-buffers-changed (&rest _)
+  "Update attention and graphics in every session, in one walk of the sessions.
+
+From `window-buffer-change-functions', whose global value runs once per frame
+that changed.  Both questions are about which windows show a buffer, so one
+walk answers both rather than each walking the sessions for itself."
+  (cooked--dolist-buffers
+    ;; Protected apart, so a failure in one still lets the other run.
+    (cooked--protect-hook (cooked--update-buffer-attention))
+    (when cooked--session
+      (cooked--sync-graphics))))
+
+(defun cooked--update-buffer-attention ()
+  "Track whether the user is looking at the current buffer's session.
 
 A freeze is only worth anything while someone is reading the picture it holds
 still, so it lifts for as long as the buffer is not the selected window's --
@@ -942,46 +960,45 @@ A pending bell is cleared here too, and ahead of the session test: a build
 that rang to say it was done and then took its shell with it has left a mark
 that still wants seeing, and a dead session is still a buffer the user comes
 back to.  See `cooked-bell-pending'."
-  (cooked--dolist-buffers
-    (when (and cooked-bell-pending
-               (eq (current-buffer) (window-buffer (cooked--user-window))))
-      (setq cooked-bell-pending nil)
-      (force-mode-line-update))
-    (when cooked--session
-      (let ((state (cond ((eq (current-buffer) (window-buffer (cooked--user-window)))
-                          'here)
-                         ;; Displayed elsewhere, or displayed nowhere having
-                         ;; been somewhere a moment ago -- both are the user
-                         ;; being elsewhere.  A buffer that has never been on
-                         ;; screen stays nil and keeps its freeze.
-                         ((or cooked--attention (get-buffer-window nil t))
-                          'away))))
-        (unless (or (null state) (eq state cooked--attention))
-          (setq cooked--attention state)
-          ;; The native core polls the child's termios on a tick, and the tick is
-          ;; only ever for somebody watching -- so it stretches while nobody is.
-          ;; Told before anything below acts on the new state, because coming back
-          ;; is the one direction that needs the eager tick restored *first*.
-          (cooked--set-attended cooked--session (eq state 'here))
-          ;; Coming back is where Emacs hands the buffer a point it recorded
-          ;; before every drain since, and a cooked position does not keep that
-          ;; long.  See `cooked--restore-point'.
-          (when (eq state 'here)
-            (cooked--restore-point (cooked--user-window))
-            ;; The mode is as stale as the tick that was running while the buffer
-            ;; sat off screen, so it is read again here rather than inherited: a
-            ;; child that went into a secret read silently would otherwise not be
-            ;; noticed for up to a second after the user is already looking at it.
-            ;; This is also what raises the prompt in the ordinary case, by way of
-            ;; `cooked--set-mode'; `cooked--resume-secret' is for the other one,
-            ;; where the mode was already `secret' before the buffer was left and
-            ;; so nothing changes for `cooked--set-mode' to notice.
-            (cooked--resample-mode)
-            (cooked--resume-secret))
-          (when (and (eq state 'away) (eq cooked--input-mode 'frozen))
-            (cooked--defer
-             (lambda ()
-               (when cooked--session (cooked--drain-and-apply))))))))))
+  (when (and cooked-bell-pending
+             (eq (current-buffer) (window-buffer (cooked--user-window))))
+    (setq cooked-bell-pending nil)
+    (force-mode-line-update))
+  (when cooked--session
+    (let ((state (cond ((eq (current-buffer) (window-buffer (cooked--user-window)))
+                        'here)
+                       ;; Displayed elsewhere, or displayed nowhere having
+                       ;; been somewhere a moment ago -- both are the user
+                       ;; being elsewhere.  A buffer that has never been on
+                       ;; screen stays nil and keeps its freeze.
+                       ((or cooked--attention (get-buffer-window nil t))
+                        'away))))
+      (unless (or (null state) (eq state cooked--attention))
+        (setq cooked--attention state)
+        ;; The native core polls the child's termios on a tick, and the tick is
+        ;; only ever for somebody watching -- so it stretches while nobody is.
+        ;; Told before anything below acts on the new state, because coming back
+        ;; is the one direction that needs the eager tick restored *first*.
+        (cooked--set-attended cooked--session (eq state 'here))
+        ;; Coming back is where Emacs hands the buffer a point it recorded
+        ;; before every drain since, and a cooked position does not keep that
+        ;; long.  See `cooked--restore-point'.
+        (when (eq state 'here)
+          (cooked--restore-point (cooked--user-window))
+          ;; The mode is as stale as the tick that was running while the buffer
+          ;; sat off screen, so it is read again here rather than inherited: a
+          ;; child that went into a secret read silently would otherwise not be
+          ;; noticed for up to a second after the user is already looking at it.
+          ;; This is also what raises the prompt in the ordinary case, by way of
+          ;; `cooked--set-mode'; `cooked--resume-secret' is for the other one,
+          ;; where the mode was already `secret' before the buffer was left and
+          ;; so nothing changes for `cooked--set-mode' to notice.
+          (cooked--resample-mode)
+          (cooked--resume-secret))
+        (when (and (eq state 'away) (eq cooked--input-mode 'frozen))
+          (cooked--defer
+           (lambda ()
+             (when cooked--session (cooked--drain-and-apply)))))))))
 
 (defun cooked--install-global-hooks ()
   "Install the hooks that cannot be buffer-local."
@@ -993,7 +1010,9 @@ back to.  See `cooked-bell-pending'."
   ;; selection moving to another window, and the window they are in showing
   ;; something else.
   (add-hook 'window-selection-change-functions #'cooked--update-attention)
-  (add-hook 'window-buffer-change-functions #'cooked--update-attention)
+  ;; One function for both halves on the buffer side, since graphics below asks
+  ;; about the same windows: see `cooked--window-buffers-changed'.
+  (add-hook 'window-buffer-change-functions #'cooked--window-buffers-changed)
   ;; The same two halves decide which buffer's OSC 12 colour a frame's cursor
   ;; wears, and the global values are the ones that still run when the window
   ;; being left shows a buffer that is no longer cooked, or no longer live.
@@ -1001,7 +1020,7 @@ back to.  See `cooked-bell-pending'."
   (add-hook 'window-buffer-change-functions #'cooked--sync-cursor-color)
   ;; Whether a picture can be shown is a question about every frame the buffer
   ;; is on, so it is asked by walking sessions too; see `cooked--sync-graphics'.
-  (add-hook 'window-buffer-change-functions #'cooked--sync-graphics-everywhere)
+  ;; On a window change `cooked--window-buffers-changed' asks it.
   (add-hook 'after-delete-frame-functions #'cooked--sync-graphics-everywhere)
   (add-variable-watcher 'cooked-inline-images #'cooked--sync-graphics-on-toggle)
   (add-variable-watcher 'cooked-allow-pointer-shape #'cooked--sync-pointer-shape-on-toggle)
@@ -1592,6 +1611,7 @@ to the child verbatim."
               (when (windowp window) (cooked--tty-esc-init (window-frame window))))
             nil t)
   (cooked--install-thing-at-point-providers)
+  (cooked--register-buffer)
   (cooked--install-global-hooks)
   ;; Negative depth so it runs ahead of the snap: the guard can substitute
   ;; `this-command', and the snap reads `this-command' to decide whether to move

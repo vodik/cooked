@@ -3417,6 +3417,50 @@ core; that the hook fires on a real frame change is Emacs' own promise."
                                     (cooked-tests--graphics-replies out)))))
       (delete-file out))))
 
+(ert-deftest cooked-window-hooks-walk-the-sessions-once ()
+  "A window change walks the cooked buffers once per frame, rather than once for
+attention and again for graphics, and walks no buffer that is not cooked.  A
+theme change syncs the cursor color of the frames showing a cooked buffer, once
+each, rather than every frame once per cooked buffer."
+  (let* ((sessions (list (generate-new-buffer "*cooked-a*") (generate-new-buffer "*cooked-b*")))
+         (others (cl-loop repeat 20 collect (generate-new-buffer " *cooked-other*")))
+         (left (generate-new-buffer "*cooked-left*"))
+         (window-buffer (window-buffer (selected-window)))
+         (walks 0) (attended nil) (synced 0))
+    (unwind-protect
+        (progn
+          (dolist (buffer (cons left sessions))
+            (with-current-buffer buffer (cooked-mode)))
+          ;; A buffer that left the mode, and one that was killed, are not walked.
+          (with-current-buffer left (fundamental-mode))
+          (let ((dead (generate-new-buffer "*cooked-dead*")))
+            (with-current-buffer dead (cooked-mode))
+            (kill-buffer dead))
+          (should (equal (seq-filter (lambda (buffer) (memq buffer sessions)) (buffer-list))
+                         (seq-filter (lambda (buffer)
+                                       (string-prefix-p "*cooked-" (buffer-name buffer)))
+                                     (cooked--buffers))))
+          (cl-letf* ((real-buffers (symbol-function 'cooked--buffers))
+                     ((symbol-function 'cooked--buffers)
+                      (lambda () (cl-incf walks) (funcall real-buffers)))
+                     ((symbol-function 'cooked--update-buffer-attention)
+                      (lambda () (push (current-buffer) attended)))
+                     ((symbol-function 'cooked--sync-cursor-color)
+                      (lambda (_frame) (cl-incf synced))))
+            (run-hook-with-args 'window-buffer-change-functions (selected-frame))
+            (should (= walks 1))
+            (should-not (seq-difference sessions attended))
+            (should-not (seq-intersection (cons left others) attended))
+            ;; Nothing shows a cooked buffer: nothing to sync on a theme change.
+            (setq synced 0)
+            (cooked--flush-face-cache)
+            (should (= synced 0))
+            (set-window-buffer (selected-window) (car sessions))
+            (cooked--flush-face-cache)
+            (should (= synced 1))))
+      (set-window-buffer (selected-window) window-buffer)
+      (mapc #'kill-buffer (append sessions others (list left))))))
+
 ;;;; Containment
 ;;
 ;; Every one of these binds `cooked-debug' back to nil against the fixture's own

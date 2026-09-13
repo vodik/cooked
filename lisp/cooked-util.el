@@ -71,20 +71,55 @@ user-pointer's finalizer against its own; Emacs itself cannot tell one
 module's user-pointer from another's."
   (and (user-ptrp object) (ignore-errors (integerp (cooked--pid object)))))
 
+(defvar cooked--buffers nil
+  "Every buffer that has entered `cooked-mode', including some since killed.
+
+Pushed onto by `cooked--register-buffer' and pruned by `cooked--buffers', which
+is the only reader.  Pruned there rather than from `kill-buffer-hook', because a
+buffer can also leave the mode by changing its major mode, and asking on the way
+in catches both.")
+
+(defun cooked--register-buffer ()
+  "Record the current buffer as a cooked buffer, from `cooked-mode'."
+  (unless (memq (current-buffer) cooked--buffers)
+    (push (current-buffer) cooked--buffers)))
+
+(defun cooked--buffers ()
+  "The live cooked buffers, most recently selected first.
+
+In `buffer-list' order, since the pickers built on this list offer the session
+used last first.  Taking the order from `buffer-list' costs a `memq' per
+buffer, where testing each buffer's major mode meant making it current, which
+swaps in every one of its local variables."
+  (setq cooked--buffers
+        (cl-remove-if-not
+         (lambda (buffer)
+           (and (buffer-live-p buffer)
+                (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
+                                         'cooked-mode)))
+         cooked--buffers))
+  (if (cdr cooked--buffers)
+      (cl-remove-if-not (lambda (buffer) (memq buffer cooked--buffers)) (buffer-list))
+    cooked--buffers))
+
 (defmacro cooked--dolist-buffers (&rest body)
   "Run BODY once in each live cooked buffer, with that buffer current.
 
 Several things have to reach every session at once — a theme change invalidating
 the face caches, a frame focus change, the list of sessions to switch to — and
 each of them was walking `buffer-list' and testing the major mode itself.  BODY
-that needs the buffer as a value can say `current-buffer'.
+that needs the buffer as a value can say `current-buffer'.  The buffers are
+those `cooked--buffers' returns, so a hook that walks them costs nothing for the
+buffers that are not cooked ones.
 
 BODY runs inside its own `condition-case', unless `cooked-debug': this is called
 from global hooks (`window-selection-change-functions' and the like) that walk
 every cooked buffer in one pass, so one buffer whose BODY signals must not abort
 the pass and leave every buffer after it in that same `buffer-list' untouched."
   (declare (indent 0) (debug body))
-  `(dolist (buffer (buffer-list))
+  `(dolist (buffer (cooked--buffers))
+     ;; Asked again per buffer: BODY run in an earlier one can kill a later one,
+     ;; or change its major mode.
      (when (buffer-live-p buffer)
        (with-current-buffer buffer
          (when (derived-mode-p 'cooked-mode)

@@ -286,12 +286,23 @@ From `window-selection-change-functions\=' and
                (set-frame-parameter frame 'cursor-color own)))))))
 
 (defun cooked--sync-cursor-color-everywhere (&rest _)
-  "Run `cooked--sync-cursor-color\=' on every frame.
-On `cooked-theme-change-hook\=' too, since a theme that sets the `cursor\=' face
-repaints the frame\='s cursor without any window changing."
+  "Run `cooked--sync-cursor-color\=' on every frame."
   (mapc #'cooked--sync-cursor-color (frame-list)))
 
-(add-hook 'cooked-theme-change-hook #'cooked--sync-cursor-color-everywhere)
+(defun cooked--sync-cursor-color-here ()
+  "Sync the cursor color of each frame whose selected window shows this buffer.
+
+On `cooked-theme-change-hook\=', since a theme that sets the `cursor\=' face
+repaints the frame\='s cursor without any window changing.  That hook runs once
+in every cooked buffer, so syncing every frame from it did the whole job once
+per buffer.  A frame wears a color only while its selected window shows the
+buffer that set it, so the frames showing this buffer are all this run has to
+look at, and the runs in the other buffers cover the rest."
+  (dolist (window (get-buffer-window-list nil nil t))
+    (when (eq window (frame-selected-window (window-frame window)))
+      (cooked--sync-cursor-color (window-frame window)))))
+
+(add-hook 'cooked-theme-change-hook #'cooked--sync-cursor-color-here)
 
 ;;;; OSC 4 — the palette, answered and never changed
 ;;
