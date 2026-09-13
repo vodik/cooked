@@ -288,7 +288,33 @@ __cooked_prompt() {
   # then printed all the same -- except that a subshell cannot see a redirected stdout
   # back to the terminal, so it writes to /dev/tty and expands to nothing.  Both spell
   # the same thing; the first forks less.
-  if __cooked_want marks || __cooked_want title; then
+  # PS0 arrived in bash 4.4, and macOS still ships 3.2 as /bin/bash -- so on a Mac
+  # using the system bash rather than a Homebrew one, everything below expands to
+  # nothing and the `C' mark never fires.
+  #
+  # Deliberately not worked around.  The fallback would be a DEBUG trap, and the
+  # comment above `__cooked_preexec' is the whole argument against one: it fires before
+  # every simple command so it needs a latch to find the user's, and `trap ... DEBUG'
+  # silently replaces whatever was installed before it -- which, since cooked registers
+  # at the first prompt, is usually bash-preexec. Trading a missing mark for somebody's
+  # `preexec_functions' quietly ceasing to run is a bad trade, and a 2007 bash is a
+  # `brew install bash' away from not being the problem.
+  #
+  # What is *not* acceptable is failing silently, which is what happened before this:
+  # the marks feature was requested, nothing was installed, and nothing said so.  One
+  # line on stderr at setup, once.
+  if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+    # Everything above this point still works: the `A' and `B' marks live in PS1,
+    # which every bash has, so prompt navigation, the input region and the command
+    # records' anchors are all intact.  What is lost is the `C' mark and the
+    # per-command title, and nothing else -- which is why this is a warning about one
+    # feature rather than a refusal to set up.
+    if [[ -z ${__cooked_ps0_warned-} ]] && { __cooked_want marks || __cooked_want title; }; then
+      __cooked_ps0_warned=1
+      printf 'cooked: bash %s has no PS0, so command-start marks and per-command titles are off (needs 4.4+)\n' \
+        "${BASH_VERSION%%(*}" >&2
+    fi
+  elif __cooked_want marks || __cooked_want title; then
     local hook
     if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 3) )); then
       hook='${ __cooked_preexec; }'
