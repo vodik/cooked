@@ -2558,6 +2558,134 @@ outright, with no scrollback and no command records of Emacs\=' own to re-apply.
 Empty by default, and run through `cooked--run-seam\=', so an entry that signals
 costs its own contribution and neither the rest of the hook nor the drain.")
 
+;; Carrying a position across a row the render rewrites.
+;;
+;; The mechanical floor under `cooked--capture-viewport''s intents, and only that:
+;; `editing', `wandered' and `follow' each re-derive a position from something
+;; that outlives the text -- an offset into the pending input, a screen cell, a
+;; question put to the mode -- and they answer things arithmetic structurally
+;; cannot.  Two positions have nothing of the sort to be re-derived from, and
+;; until this existed neither had any rescue at all:
+;;
+;; - The *mark*.  A mark names text rather than a cell, so there is no cell to
+;;   look it up by afterwards.  `cooked--deactivate-mark' drops an active
+;;   selection whose characters the child has just rewritten, which is the right
+;;   policy and is a different subject -- it decides what happens to the
+;;   *highlight*.  The mark is somewhere either way, and it is that somewhere the
+;;   next \\[exchange-point-and-mark] or \\[pop-to-mark-command] goes to.  Note
+;;   which case this leaves: `cooked-selection-render' freezes the render while a
+;;   selection is up, so the live selection is in no danger; what reaches a drain
+;;   is the mark of a selection *already dismissed*, carried in by the catch-up
+;;   drain the freeze lifting releases.  By then `mark-active' is nil and nothing
+;;   above here is looking at the mark at all.
+;;
+;; - The `window-point' of another window in the live screen that
+;;   `cooked--scroll-transcript' is not going to move.  While the view is
+;;   following it points every one of them at the cursor and there is nothing to
+;;   preserve; while it is held -- `still', `frozen', a peek -- it touches none
+;;   of them, and the row rewrite underneath was taking their point with it.
+;;
+;; The transform is ghostel's `adjustRegion' (saved_markers.zig:27) with one
+;; departure.  ghostel replaces one row per edit, so clamping a position inside
+;; the replaced region to that region's new end is exact-replace semantics and
+;; is the right answer.  cooked coalesces contiguous damaged rows into one Block,
+;; so a full-height repaint replaces the whole screen in a single edit -- and the
+;; clamp would collapse a mark on row 1 onto the last column of row 23.  The
+;; run's row table already says where each of its rows begins, so a position
+;; keeps its *row and column* instead, clamped to that row's new end.  That
+;; degenerates to exactly ghostel's answer for a run of one row, and is strictly
+;; better for every longer one.
+;;
+;; Tracked through the render by the marker each of these already is, rather than
+;; by the integer ghostel captures at the top of `redraw', and that is the design
+;; rather than a shortcut.  A drain does much more than rewrite rows: it inserts
+;; this batch's scrollback above the screen, moves rows for a scroll, extends and
+;; trims the region, lifts and reinstates the pending input, and evicts from the
+;; top.  Emacs' own marker adjustment is already right for every one of those,
+;; and re-deriving them all in arithmetic would be a second implementation of the
+;; drain with its own way of being wrong.  The single edit markers are wrong for
+;; is the row rewrite, because a delete-and-reinsert is not a replacement as far
+;; as that adjustment is concerned -- and the two failures are not even the same
+;; failure, which is the evidence that nothing was carrying either.  A mark
+;; collapses to the run's *start*; a `window-point' is pushed to its *end*.  So
+;; that one edit is corrected where it happens, and nothing else is touched.
+
+(cl-defstruct (cooked-relocation (:constructor cooked--relocation-make) (:copier nil))
+  "A position `cooked--render-rows' has to carry across a run it rewrites.
+
+Made by `cooked--capture-relocations', which is where the decision about *which*
+positions need one lives; everything here is mechanism."
+  (window nil :documentation "\
+The window whose `window-point\=' this stands for, or nil for the mark.
+
+Two cases and no function slot, deliberately: a closure per window per drain is
+allocation on a path whose floor is `cooked-min-redisplay-interval\=', and it
+would spell a choice between two branches written down right here.")
+  (row nil :documentation "\
+Which row of the run being rewritten this position was on, or nil.
+
+Live only between `cooked--note-relocations' and `cooked--place-relocations',
+which is the whole of one run's rewrite: outside it there is no run for a row
+index to be an index into.")
+  (column nil :documentation "\
+The position's column within that row, in characters."))
+
+(defun cooked--relocation-position (relocation)
+  "Where RELOCATION currently points, or nil if there is nothing to carry.
+
+Read afresh at every run rather than remembered, because the runs before this
+one have already moved it: a row that came back shorter shifts every row below
+it, and the marker underneath has been keeping up the whole time."
+  (if-let* ((window (cooked-relocation-window relocation)))
+      (and (window-live-p window) (window-point window))
+    (mark t)))
+
+(defun cooked--relocation-set (relocation position)
+  "Put RELOCATION at POSITION."
+  (if-let* ((window (cooked-relocation-window relocation)))
+      (when (window-live-p window) (set-window-point window position))
+    (set-marker (mark-marker) position)))
+
+(defun cooked--note-relocations (relocations start end)
+  "Record where each of RELOCATIONS sits inside the run START..END.
+
+Before the deletion, because afterwards there is nothing left to read: the run's
+newlines are the only thing that says which row a position was on, and its
+column is an offset into text that is about to stop existing.
+
+The row is cleared for everything first.  A relocation outside this run must not
+still be carrying the row it was on in a *previous* one -- the runs of a drain
+are rewritten one after another, and a stale index would place a position into
+a row that has nothing to do with it."
+  (dolist (relocation relocations)
+    (setf (cooked-relocation-row relocation) nil)
+    (when-let* ((position (cooked--relocation-position relocation))
+                ((<= start position end)))
+      (save-excursion
+        (goto-char position)
+        (let ((bol (line-beginning-position)))
+          (setf (cooked-relocation-column relocation) (- position bol)
+                ;; Screen row 0 does not always begin a buffer line -- it
+                ;; continues the wrapped row handed to scrollback before it -- so
+                ;; START can sit mid-line and a position on that row has its BOL
+                ;; above START.  `count-lines' counts the newlines between two
+                ;; places whatever either of them is in the middle of, which is
+                ;; the row index for exactly that reason.
+                (cooked-relocation-row relocation)
+                (if (<= bol start) 0 (count-lines start bol))))))))
+
+(defun cooked--place-relocations (relocations row start end)
+  "Put back each of RELOCATIONS that belonged to ROW, now written at START..END.
+
+Clamped to END, which is where the departure from `adjustRegion' stops: a row
+that came back shorter has no column 12 any more, and the nearest thing to where
+the user was pointing is the end of what the row now holds."
+  (dolist (relocation relocations)
+    (when (eql (cooked-relocation-row relocation) row)
+      (setf (cooked-relocation-row relocation) nil)
+      (cooked--relocation-set
+       relocation (min (+ start (cooked-relocation-column relocation)) end)))))
+
 (defun cooked--goto-screen-run-end (start first count)
   "End of the last of COUNT screen rows, the first of them row FIRST at START.
 
@@ -2585,7 +2713,7 @@ would send the ordinary single-row case down the fallback for no reason."
     (cooked--goto-screen-row (+ first count -1) 'extend)
     (line-end-position)))
 
-(defun cooked--render-rows (rows &optional alt)
+(defun cooked--render-rows (rows &optional alt relocations)
   "Rewrite damaged ROWS, an alist of (FIRST . BLOCK).
 
 Each entry is a *run* of contiguous damaged rows: FIRST is the index of its
@@ -2613,6 +2741,14 @@ ALT says whether these rows belong to the alternate screen, and is passed in
 rather than read from `cooked--alt' because that variable still holds the
 *previous* drain's answer at this point in `cooked--apply' -- which would leave
 the frame that restores the primary screen, and every link on it, unscanned.
+
+RELOCATIONS are the positions to carry across the runs this rewrites, from
+`cooked--capture-relocations', and are the one thing here that is not about
+putting text in the buffer.  They are handled from inside this loop rather than
+corrected afterwards, because the offset a position had within its old row
+is readable only in the moment between finding the run and deleting it.  Nil for
+the ordinary drain, in which case the two calls below cost one test per run and
+one per row.
 
 Returns the (BEG . END) bounds of each live row it rewrote, in the order it
 wrote them, for `cooked--notify-rows-rendered' to announce once the drain has
@@ -2692,6 +2828,10 @@ which has no such seam at all."
           ;; run's last row is left where it is -- a damaged row is written into
           ;; a line that already exists, and the block carries newlines only
           ;; *between* its rows for exactly that reason.
+          ;;
+          ;; Between finding the run and deleting it is the only moment a carried
+          ;; position can still be read against the rows it was written for.
+          (when relocations (cooked--note-relocations relocations start end))
           (delete-region start end)
           (goto-char start)
           (cooked--render-block block index)
@@ -2728,6 +2868,10 @@ which has no such seam at all."
               ;; it belongs; `cooked--notify-rows-rendered' is the other half of
               ;; that.
               (let ((eol (line-end-position)))
+                ;; After the guard for the same reason the bounds are: a carried
+                ;; position is clamped to the row's end, and the guard is what
+                ;; decides where that is.
+                (when relocations (cooked--place-relocations relocations i pos eol))
                 (when (and cooked-row-rendered-functions (not alt))
                   (push (cons pos eol) rendered))
                 ;; The next run walks from the last row of this one, which is

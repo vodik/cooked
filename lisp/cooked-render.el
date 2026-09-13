@@ -342,21 +342,63 @@ it up by, only a claim about text that is about to stop being that text -- so
 the question is asked while it still has an answer.  See
 `cooked-clear-selection-on-output'.")
   (others nil :documentation "\
-The other windows on this buffer that were following the child's cursor."))
+The other windows on this buffer that were following the child's cursor.")
+  (relocations nil :documentation "\
+The positions the render has to carry mechanically, having no intent above them.
+
+The odd field out, and knowingly: everything else here is read once and answered
+once, while these are handed to `cooked--render-rows' and corrected *during* the
+render.  They are captured with the rest because the question they answer -- who
+is going to be moved by something else, and so needs no carrying -- is only
+answerable before the render, exactly like `others' above.  See
+`cooked--capture-relocations'."))
+
+(defun cooked--capture-relocations (others)
+  "The positions this drain would otherwise drag, as `cooked-relocation's.
+
+The policy half of the floor cooked.el implements; see the commentary above
+`cooked-relocation' for what the transform is and why the mark and a held
+window's point are the two things with nothing else speaking for them.
+
+The mark whenever there is one in the live screen, active or not.  Not gated on
+`cooked-clear-selection-on-output', which decides something else: whether an
+active selection's *highlight* survives output that rewrote the text under it.
+The mark is a position either way -- it is where \\[exchange-point-and-mark] and
+\\[pop-to-mark-command] go -- and dropping the highlight is not a reason to move
+it.  A mark in the scrollback needs nothing, that text never being rewritten.
+
+The other windows only while the view is held.  While it is following,
+`cooked--scroll-transcript' points every one of them at the cursor, so carrying
+them across the render would be work whose result is overwritten a few lines
+later -- and worse than pointless if the two ever disagreed about which windows
+those are.  The list is the same one, for that reason: OTHERS, as
+`cooked--following-windows' just answered it."
+  (let ((start (cooked--screen-start-position))
+        (relocations nil))
+    (when start
+      (when-let* ((mark (mark t))
+                  ((>= mark start)))
+        (push (cooked--relocation-make) relocations))
+      (unless (cooked--follow-p)
+        (dolist (window others)
+          (push (cooked--relocation-make :window window) relocations))))
+    relocations))
 
 (defun cooked--capture-viewport ()
   "Snapshot the view, before the render invalidates every part of it."
-  (cooked--viewport-make
-   :editing (when-let* ((region (cooked--input-region))
-                        ((<= (car region) (point) (cdr region))))
-              (- (point) (car region)))
-   :follow (and (cooked--follow-p)
-                (>= (point) (cooked--screen-start-position)))
-   :wandered (and cooked--wandered (cooked--screen-cell))
-   :stale-mark (and cooked-clear-selection-on-output
-                    mark-active (mark)
-                    (>= (mark) (cooked--screen-start-position)))
-   :others (cooked--following-windows)))
+  (let ((others (cooked--following-windows)))
+    (cooked--viewport-make
+     :editing (when-let* ((region (cooked--input-region))
+                          ((<= (car region) (point) (cdr region))))
+                (- (point) (car region)))
+     :follow (and (cooked--follow-p)
+                  (>= (point) (cooked--screen-start-position)))
+     :wandered (and cooked--wandered (cooked--screen-cell))
+     :stale-mark (and cooked-clear-selection-on-output
+                      mark-active (mark)
+                      (>= (mark) (cooked--screen-start-position)))
+     :others others
+     :relocations (cooked--capture-relocations others))))
 
 (defun cooked--apply-levels (update)
   "Adopt UPDATE's levels: the state as of this drain, for redisplay to read."
@@ -544,7 +586,8 @@ and the region shaped before anything measures it."
          ;; `cooked--apply-shifts'.
          (_ (cooked--apply-shifts (plist-get update :shifts)))
          (rendered (cooked--render-rows (plist-get update :rows)
-                                        (plist-get update :alt))))
+                                        (plist-get update :alt)
+                                        (cooked-viewport-relocations viewport))))
     (cooked--apply-levels update)
     ;; Cleared before the events, so a drain that both scrolls and then clears
     ;; stays pinned.

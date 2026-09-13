@@ -509,6 +509,180 @@ redraw put it, which is what cooked did before there was an option."
                (lambda () (string-match-p "bravo" (cooked-tests--text)))))
       (should mark-active))))
 
+;; The mechanical floor: `cooked--capture-relocations' and the pair
+;; `cooked--render-rows' calls around each run it rewrites.  Every one of these
+;; failed before that existed, and each fails in its own way -- the mark lands on
+;; the rewritten row's *start*, a window's point on its *end* -- which is worth
+;; knowing only as evidence that neither was being carried by anything and both
+;; were being left to Emacs' own marker adjustment.
+;;
+;; A raw child echoing what it is sent is the shape all of them need: rewriting a
+;; row in place, over and over, without scrolling, is what a spinner or a
+;; progress bar does and is the only way to damage a row whose position something
+;; is already pointing into.
+
+(defun cooked-tests--paint-rows (rows text)
+  "Write TEXT plus the row number into each of the first ROWS screen rows.
+
+One `cooked--send\\=', so the whole thing is one drain and the damaged rows are
+contiguous -- which is what makes the core coalesce them into a single Block,
+and so the whole screen into a single `delete-region\\='/`insert\\=' pair.
+
+Addressed with `CUP\\=' rather than written as lines, and that is not tidiness.
+A newline\\='s meaning depends on the line discipline, and the discipline is
+still translating for as long as it takes the `stty\\=' to run -- so a `\\r\\n\\='
+sent early comes back as two line feeds and every row after the first is one
+lower than the test believes.  A cursor-position sequence means the same thing
+either way."
+  (cooked--send cooked--session
+                (mapconcat (lambda (row) (format "\033[%d;1H%s%d" (1+ row) text row))
+                           (number-sequence 0 (1- rows))))
+  (should (cooked-tests--settle
+           (lambda ()
+             (string-match-p (format "%s%d" text (1- rows)) (cooked-tests--text))))))
+
+(defmacro cooked-tests--with-rewritable-rows (rows &rest body)
+  "Run BODY over a raw child, ROWS rows of `aaaN\\=' already on the screen.
+
+The child echoes what it receives with no interpretation of its own, so BODY can
+address the grid directly and the emulator sees the result exactly as it would a
+full-screen program\\='s."
+  (declare (indent 1))
+  `(cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; cat")
+     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+     (cooked-tests--paint-rows ,rows "aaa")
+     ,@body))
+
+(ert-deftest cooked-a-dismissed-selection-leaves-its-mark-where-it-was ()
+  "The case `cooked-selection-render' leaves behind rather than the one it
+answers.  The freeze holds the render for as long as the selection is up, so the
+mark is in no danger there; the drain that has been waiting arrives the moment
+the selection is dismissed, and by then `mark-active' is nil, so
+`cooked--deactivate-mark' has nothing to say and the mark is just a position in
+a row about to be deleted.
+
+What the user is owed is the next \\[exchange-point-and-mark]: the mark is still
+the place they marked, and the child overwriting the characters there does not
+move the place."
+  (cooked-tests--with-rewritable-rows 3
+    (goto-char (cooked--screen-start-position))
+    (cooked--goto-screen-cell '(1 . 2))
+    (set-mark (point))
+    (activate-mark)
+    (setq cooked--input-mode 'frozen)
+    ;; Nothing drains while the selection is up, which is the freeze working.
+    (cooked--send cooked--session "\033[2;1Hzzz1")
+    (cooked-tests--pump 0.2)
+    (should-not (string-match-p "zzz1" (cooked-tests--text)))
+    ;; The user dismisses it.  The catch-up drain runs against a mark nothing is
+    ;; protecting any more.
+    (deactivate-mark)
+    (setq cooked--input-mode nil)
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "zzz1" (cooked-tests--text)))))
+    (should (equal (cooked--screen-cell (mark t)) '(1 . 2)))))
+
+(ert-deftest cooked-a-mark-kept-through-output-keeps-its-cell ()
+  "`cooked-clear-selection-on-output' nil is a decision to keep the mark, and
+keeping it somewhere else is not keeping it.  Before the floor existed the mark
+collapsed to column 0 of the row it was in, so the option delivered a region the
+user never drew -- visibly, since this one stays highlighted."
+  (let ((cooked-clear-selection-on-output nil))
+    (cooked-tests--with-rewritable-rows 3
+      ;; On the row about to be rewritten, which is the only row where there is
+      ;; anything to keep.
+      (cooked--goto-screen-cell '(0 . 2))
+      (set-mark (point))
+      (activate-mark)
+      (cooked-tests--paint-rows 1 "zzz")
+      (should mark-active)
+      (should (equal (cooked--screen-cell (mark t)) '(0 . 2))))))
+
+(ert-deftest cooked-a-mark-survives-a-coalesced-run-on-its-own-row ()
+  "Where cooked's floor departs from ghostel's `adjustRegion', and why it has to.
+
+ghostel replaces one row per edit, so clamping a position inside the replaced
+region to that region's new end is exact-replace semantics and costs nothing.
+cooked coalesces contiguous damaged rows into one Block, so the region here is
+the whole screen in a single edit -- and the clamp would put a mark on row 1 at
+the last column of the last row of the run.  The run's row table is what makes
+the better answer cheap: the position keeps its row as well as its column."
+  (let ((cooked-clear-selection-on-output nil))
+    (cooked-tests--with-rewritable-rows 3
+      (cooked--goto-screen-cell '(1 . 2))
+      (set-mark (point))
+      (cooked-tests--paint-rows 3 "zzz")
+      ;; One run, not three: the point of coalescing, and the thing that makes
+      ;; the clamp wrong.
+      (should (equal (cooked--screen-cell (mark t)) '(1 . 2))))))
+
+(ert-deftest cooked-a-mark-past-a-shortened-row-lands-on-its-new-end ()
+  "The half the clamp is still right for.  A row that came back shorter has no
+column 12 any more, and the nearest thing to where the user was pointing is the
+end of what the row now holds."
+  (let ((cooked-clear-selection-on-output nil))
+    (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; cat")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+      (cooked--send cooked--session "\033[1;1Habcdefghijklmnop")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "abcdefghijklmnop" (cooked-tests--text)))))
+      (cooked--goto-screen-cell '(0 . 12))
+      (set-mark (point))
+      (should (equal (cooked--screen-cell (mark t)) '(0 . 12)))
+      ;; `EL' after the four characters, so the row is genuinely shorter rather
+      ;; than overwritten with blanks.
+      (cooked--send cooked--session "\033[1;1Hwxyz\033[K")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "wxyz" (cooked-tests--text)))))
+      (should (equal (cooked--screen-cell (mark t)) '(0 . 4))))))
+
+(ert-deftest cooked-a-held-second-window-keeps-its-point-on-the-screen ()
+  "`cooked--scroll-transcript' points the other windows at the cursor only while
+the view is following.  While it is held -- `still', `frozen', a peek -- it
+touches none of them, and until the floor existed nothing else did either: the
+row rewrite dragged the window's point to the end of whatever was written over
+it, which is a second view of the terminal scrolling itself while the user is
+reading it."
+  (cooked-tests--with-rewritable-rows 3
+    (let ((buffer (current-buffer))
+          (main (selected-window)))
+      (delete-other-windows)
+      (set-window-buffer main buffer)
+      (let ((other (split-window main nil 'below)))
+        (unwind-protect
+            (progn
+              (set-window-buffer other buffer)
+              (set-window-point other (save-excursion
+                                        (cooked--goto-screen-cell '(1 . 2))
+                                        (point)))
+              (setq cooked--input-mode 'still)
+              (should-not (cooked--follow-p))
+              (cooked-tests--paint-rows 3 "zzz")
+              (should (equal (cooked--screen-cell (window-point other)) '(1 . 2))))
+          (delete-window other))))))
+
+(ert-deftest cooked-a-following-second-window-is-still-taken-to-the-cursor ()
+  "The other half, and the reason the floor is captured conditionally: a window
+that is following wants the cursor, not the cell it was last pointed at.  The
+floor must not quietly turn `cooked-second-window-follows-new-output' into its
+opposite."
+  (cooked-tests--with-rewritable-rows 3
+    (let ((buffer (current-buffer))
+          (main (selected-window)))
+      (delete-other-windows)
+      (set-window-buffer main buffer)
+      (let ((other (split-window main nil 'below)))
+        (unwind-protect
+            (progn
+              (set-window-buffer other buffer)
+              (set-window-point other (save-excursion
+                                        (cooked--goto-screen-cell '(1 . 2))
+                                        (point)))
+              (should (cooked--follow-p))
+              (cooked-tests--paint-rows 3 "zzz")
+              (should (= (window-point other) (point))))
+          (delete-window other))))))
+
 (ert-deftest cooked-alt-screen-keeps-exactly-the-emulator-height ()
   "Trimming is disabled on the alt screen, so nothing else removes stale rows
 when the window shrinks — which looked like resize doing nothing."
