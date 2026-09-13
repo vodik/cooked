@@ -22,10 +22,11 @@
 ;;
 ;; The one design decision worth stating: the history command runs through
 ;; `process-file', not `call-process'.  That is what makes a *remote* session query
-;; the *remote* host's history for free -- `process-file' dispatches on
-;; `default-directory', which `cooked--set-directory' keeps on a TRAMP path once the
-;; child has reported one.  There is no remote branch in this file because there does
-;; not need to be one.
+;; the *remote* host's history -- `process-file' dispatches on `default-directory',
+;; which `cooked--set-directory' keeps on a TRAMP path once the child has reported
+;; one.  The only remote branch is the shell that runs the command line, because
+;; the local `shell-file-name' is an absolute path on this machine; see
+;; `cooked-history--run'.
 
 ;;; Code:
 
@@ -44,7 +45,7 @@
   "How to ask each shell for its history, newest first.
 
 An alist of (SHELL . COMMAND).  COMMAND is either a shell command line, run
-through `process-file\=' with the user\='s `shell-file-name\=', or a *function*
+by `cooked-history--run\=', or a *function*
 called with no arguments in the session\='s buffer, which returns the list of
 entries itself.  The function form is the seam atuin, histdb and any other
 history database plug into, and it is why this is not a plain list of strings.
@@ -100,6 +101,50 @@ wrapper could reasonably emit NULs from anything."
   (let ((entries (split-string output (if (string-search "\0" output) "\0" "\n") t)))
     (mapcar #'string-trim entries)))
 
+(defun cooked-history--run (command)
+  "Run the shell command line COMMAND and return what it wrote to stdout.
+
+Through `process-file\=', so a session whose `default-directory\=' is a TRAMP
+path asks the far host.  The command line is run by `shell-file-name\=' here,
+and by /bin/sh on a remote host.  `shell-file-name\=' is an absolute path on
+this machine, such as /opt/homebrew/bin/fish, and TRAMP runs it by that path
+rather than looking the name up, so a Linux server would answer
+\"sh: /opt/homebrew/bin/fish: not found\".  Every host has /bin/sh.
+
+Stderr goes to a file of its own rather than into the output.  An interactive
+shell with no controlling terminal, which is what a GUI Emacs starts, prints
+\"bash: no job control in this shell\" before the history, and that line would
+be offered as the newest entry.  A non-zero exit status signals a `user-error\='
+with the first line of stderr, so a missing shell or an empty zsh history is
+reported rather than offered as a command."
+  (let ((stderr (make-temp-file "cooked-history")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((status (process-file (if (file-remote-p default-directory)
+                                          "/bin/sh"
+                                        shell-file-name)
+                                      nil (list t stderr) nil
+                                      shell-command-switch command)))
+            (unless (eql status 0)
+              (user-error "cooked: history command failed (%s): %s" status
+                          (with-temp-buffer
+                            (insert-file-contents stderr)
+                            (buffer-substring-no-properties
+                             (point-min) (line-end-position)))))
+            (buffer-string)))
+      (delete-file stderr))))
+
+(defun cooked-history--refuse-while-busy ()
+  "Signal a `user-error\=' unless the shell is at its prompt.
+
+While a command owns the keyboard, as `vim\=' does, an entry would be pasted
+into that program rather than put on the shell\='s line.  `cooked--policy\='
+says `command\=' or `alt\=' then, and those are the states refused.  `raw\=' is
+allowed, because without shell integration it is also what a shell at its own
+prompt looks like."
+  (when (memq (cooked--policy) '(command alt))
+    (user-error "cooked: a command is running; history is for the prompt")))
+
 (defun cooked-history--entries ()
   "This session\='s history, newest first, without duplicates."
   (let* ((shell (cooked-history--shell))
@@ -109,17 +154,10 @@ wrapper could reasonably emit NULs from anything."
                   (or shell "an unknown shell")))
     (let* ((raw (if (functionp command)
                     (funcall command)
-                  ;; `process-file', so a session whose `default-directory' is a
-                  ;; TRAMP path asks the far host.  The shell is the *local*
-                  ;; `shell-file-name' by name only -- TRAMP resolves it there.
-                  (with-output-to-string
-                    (with-current-buffer standard-output
-                      (process-file shell-file-name nil t nil
-                                    shell-command-switch command)))))
+                  (cooked-history--run command)))
            (entries (if (listp raw) raw (cooked-history--split raw)))
-           ;; `delete-dups' rather than a hash walk: the list is already capped
-           ;; and this preserves the newest-first order, which is the whole
-           ;; reason the shells are asked for a reversed history.
+           ;; `delete-dups' preserves the newest-first order, which is the
+           ;; whole reason the shells are asked for a reversed history.
            (entries (delete-dups (seq-remove #'string-empty-p entries))))
       (if (and cooked-history-limit (> (length entries) cooked-history-limit))
           (seq-take entries cooked-history-limit)
@@ -130,6 +168,7 @@ wrapper could reasonably emit NULs from anything."
   "Pick a command out of the shell's history and put it at the prompt."
   (interactive)
   (unless cooked--session (user-error "cooked: no session in this buffer"))
+  (cooked-history--refuse-while-busy)
   (let* ((entries (cooked-history--entries))
          (choice (completing-read
                   "History: "
@@ -144,6 +183,9 @@ wrapper could reasonably emit NULs from anything."
                                    (cycle-sort-function . identity))
                       (complete-with-action action entries string predicate)))
                   nil nil nil nil nil t)))
+    ;; Asked again, because a command may have started while the minibuffer
+    ;; was open.
+    (cooked-history--refuse-while-busy)
     (cooked-history--insert choice)))
 
 (defun cooked-history--insert (text)

@@ -2,11 +2,15 @@
 
 ;;; Commentary:
 
-;; `cooked-history.el' is an optional layer.  Nothing here shells out to a real shell:
-;; what is under test is the splitting, the ordering and where the chosen entry lands,
-;; and a test that depended on the machine's own history would assert whatever happened
-;; to be in it.  The function form of `cooked-history-commands' is the seam that makes
-;; that possible, and it is the same seam atuin plugs into.
+;; `cooked-history.el' is an optional layer.  Most of what is under test is the
+;; splitting, the ordering and where the chosen entry lands, and a test that depended on
+;; the machine's own history would assert whatever happened to be in it.  The function
+;; form of `cooked-history-commands' is the seam that makes that possible, and it is the
+;; same seam atuin plugs into.
+;;
+;; The string form is tested through a real shell with command lines that stand in for
+;; a history command, since what can go wrong there is stderr, the exit status and which
+;; shell runs the line, none of which the seam goes near.
 
 ;;; Code:
 
@@ -93,6 +97,75 @@ away from the entry you did not.  So: no newline, on either path."
           (should (string-suffix-p "echo edited"
                                    (buffer-substring-no-properties
                                     (point-min) (point-max)))))))))
+
+(defmacro cooked-tests--with-history-command (command &rest body)
+  "Run BODY with `cooked-history--entries\=' running the command line COMMAND."
+  (declare (indent 1))
+  `(let ((cooked-history-shell 'test)
+         (cooked-history-commands (list (cons 'test ,command)))
+         (shell-file-name "/bin/sh")
+         (shell-command-switch "-c"))
+     ,@body))
+
+(ert-deftest cooked-history-does-not-offer-stderr-as-an-entry ()
+  "What a shell writes to stderr is not history, even when it exits 0.
+
+An interactive bash with no controlling terminal prints \"cannot set terminal
+process group\" and \"no job control in this shell\" before the history, and
+with stderr merged into the output those became the two newest candidates."
+  (cooked-tests--with-history-command
+      "echo 'bash: no job control in this shell' >&2; printf 'newest\\nolder\\n'"
+    (should (equal (cooked-history--entries) '("newest" "older")))))
+
+(ert-deftest cooked-history-reports-a-failed-command ()
+  "A non-zero exit is a `user-error' naming stderr's first line, not a candidate.
+
+zsh on an empty history prints \"zsh:fc:1: no such event: 1\" and exits 1, and
+a missing shell prints \"not found\" and exits 127.  Both used to be offered as
+the one entry in the history."
+  (cooked-tests--with-history-command
+      "echo 'zsh:fc:1: no such event: 1' >&2; echo second >&2; exit 1"
+    (let ((err (should-error (cooked-history--entries) :type 'user-error)))
+      (should (string-search "no such event" (cadr err)))
+      (should-not (string-search "second" (cadr err))))))
+
+(ert-deftest cooked-history-runs-the-remote-command-with-bin-sh ()
+  "Over TRAMP the command line is run by /bin/sh, not by the local shell's path.
+
+`shell-file-name' is an absolute path on this machine, and TRAMP runs a program
+by that path on the far host.  Here it names a shell that exists nowhere, which
+is what /opt/homebrew/bin/fish is to a Linux server."
+  (cooked-tests--with-mock-tramp remote
+    (cooked-tests--with-history-command "printf 'remote\\n'"
+      (let ((default-directory remote)
+            (shell-file-name "/nonexistent/bin/fish"))
+        (should (equal (cooked-history--entries) '("remote")))))))
+
+(ert-deftest cooked-history-is-refused-while-a-command-owns-the-keyboard ()
+  "An entry would be pasted into vim, so the history is not even asked for.
+
+The refusal comes before the shell is run, so a slow rc file is not waited on
+for nothing, and again after the pick, since a command can start while the
+minibuffer is open."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (should (cooked-tests--settle (lambda () cooked--session)))
+    (let* ((asked nil)
+           (cooked-history-shell 'test)
+           (cooked-history-commands
+            (list (cons 'test (lambda () (setq asked t) '("ls"))))))
+      (dolist (policy '(command alt))
+        (cl-letf (((symbol-function 'cooked--policy) (lambda () policy)))
+          (should-error (cooked-history) :type 'user-error)
+          (should-not asked)))
+      (let ((policy 'cooked) (inserted nil))
+        (cl-letf (((symbol-function 'cooked--policy) (lambda () policy))
+                  ((symbol-function 'completing-read)
+                   (lambda (&rest _) (setq policy 'alt) "ls"))
+                  ((symbol-function 'cooked-history--insert)
+                   (lambda (text) (setq inserted text))))
+          (should-error (cooked-history) :type 'user-error)
+          (should asked)
+          (should-not inserted))))))
 
 (provide 'cooked-tests-history)
 ;;; cooked-tests-history.el ends here
