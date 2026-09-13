@@ -62,9 +62,16 @@ pub struct Shift {
     /// bought for nothing. See [`Screen::drain_shifts`], which is where such an entry is
     /// dropped, and [`Screen::shift`] for why it is kept in the log until then.
     pub count: usize,
-    /// Towards `top` (`IND`, `SU`, `DL`, and the ordinary line feed) rather than towards
-    /// `bottom` (`RI`, `SD`, `IL`).
-    pub up: bool,
+    pub direction: Direction,
+}
+
+/// Which way a [`Shift`] moved its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Towards the region's top: `IND`, `SU`, `DL`, and the ordinary line feed.
+    Up,
+    /// Towards the region's bottom: `RI`, `SD`, `IL`.
+    Down,
 }
 
 /// What a width change does to the rows already on the grid.
@@ -510,10 +517,10 @@ impl Screen {
     /// in the log, and hand Emacs a pair of buffer edits per drain for rows it is about to
     /// rewrite anyway. Saturated and kept, the log holds one entry for the whole flood and
     /// every subsequent scroll answers false in two comparisons.
-    fn shift(&mut self, top: usize, bottom: usize, n: usize, up: bool) -> bool {
+    fn shift(&mut self, top: usize, bottom: usize, n: usize, direction: Direction) -> bool {
         let height = bottom + 1 - top;
         if let Some(last) = self.shifts.last_mut() {
-            if last.top == top && last.bottom == bottom && last.up == up {
+            if last.top == top && last.bottom == bottom && last.direction == direction {
                 last.count = (last.count + n).min(height);
                 return last.count < height;
             }
@@ -522,7 +529,7 @@ impl Screen {
             top,
             bottom,
             count: n.min(height),
-            up,
+            direction,
         });
         n < height
     }
@@ -994,7 +1001,7 @@ impl Screen {
         // blanks rotated in at the bottom are genuinely new. The `else` is the region
         // having turned over completely, where there is nothing left to move; see
         // [`Screen::shift`].
-        if self.shift(top, bottom, n, true) {
+        if self.shift(top, bottom, n, Direction::Up) {
             self.touch_range(bottom + 1 - n..=bottom);
         } else {
             self.touch_range(top..=bottom);
@@ -1072,7 +1079,7 @@ impl Screen {
         for row in &mut self.rows[top..top + n] {
             row.clear(pen.erase());
         }
-        if self.shift(top, bottom, n, false) {
+        if self.shift(top, bottom, n, Direction::Down) {
             self.touch_range(top..=top + n - 1);
         } else {
             self.touch_range(top..=bottom);
@@ -1279,12 +1286,16 @@ impl Screen {
         }
     }
 
-    pub fn clear_tabs(&mut self, all: bool) {
-        if all {
-            self.tabs.fill(false);
-        } else if let Some(stop) = self.tabs.get_mut(self.cursor.col) {
+    /// TBC 0: clear the stop at the cursor's column.
+    pub fn clear_tab(&mut self) {
+        if let Some(stop) = self.tabs.get_mut(self.cursor.col) {
             *stop = false;
         }
+    }
+
+    /// TBC 3: clear every stop.
+    pub fn clear_all_tabs(&mut self) {
+        self.tabs.fill(false);
     }
 
     /// DECST8C: back to a stop every eighth column, the table a screen powers on with.

@@ -5,6 +5,7 @@
 
 use super::osc::rejoin;
 use super::*;
+use crate::emu::kitty::CursorMove;
 
 /// Where the cursor is left once a picture has been laid into the grid.
 ///
@@ -24,6 +25,19 @@ pub(super) enum CursorAfterImage {
     /// the case kitty's clients guard against: viuer emits the newline itself *unless*
     /// the image reached the boundary, because otherwise it would get a blank line.
     PastRightEdge,
+    /// Where it was before the picture was laid: kitty's `C=1`. A picture tall enough to
+    /// scroll still moves the text the cursor sat in, and the cursor stays on the same
+    /// screen row, which is what a terminal that never scrolled would show.
+    Unmoved,
+}
+
+impl From<CursorMove> for CursorAfterImage {
+    fn from(cursor: CursorMove) -> Self {
+        match cursor {
+            CursorMove::Advance => Self::PastRightEdge,
+            CursorMove::Stay => Self::Unmoved,
+        }
+    }
 }
 
 impl State {
@@ -220,7 +234,8 @@ impl State {
             return;
         };
         let pen = self.pen.erase();
-        let start_col = self.screen().cursor().col;
+        let entry = self.screen().cursor();
+        let start_col = entry.col;
         for cell_row in 0..cells.rows {
             let row = self.screen().cursor().row;
             self.screen_mut().goto(row, start_col);
@@ -229,7 +244,7 @@ impl State {
             // running it there is what puts the cursor on the line below the picture,
             // and skipping it is what leaves it on the picture's last row.
             let last = cell_row + 1 == cells.rows;
-            if last && after == CursorAfterImage::PastRightEdge {
+            if last && after != CursorAfterImage::NextLine {
                 break;
             }
             let evicted = self.screen_mut().linefeed(pen);
@@ -237,6 +252,7 @@ impl State {
         }
         match after {
             CursorAfterImage::NextLine => self.screen_mut().carriage_return(),
+            CursorAfterImage::Unmoved => self.screen_mut().put_cursor(entry),
             CursorAfterImage::PastRightEdge => {
                 let end = start_col + usize::from(cells.cols);
                 if end < self.screen().width() {
@@ -344,32 +360,17 @@ impl State {
                 cells,
                 client_id,
                 display,
-                freeze_cursor,
             } => {
                 let id = self.intern_image(format, bytes, px, cells.asked());
                 // The child's id space is not ours — ours is content-addressed — so the
                 // mapping is what makes a later `a=p` find this picture again.
                 self.kitty.bind(client_id, id);
-                if display {
-                    self.kitty_place(id, freeze_cursor);
+                if let Some(cursor) = display {
+                    self.lay_image(id, cursor.into());
                 }
             }
-            Outcome::Place { id, freeze_cursor } => self.kitty_place(id, freeze_cursor),
+            Outcome::Place { id, cursor } => self.lay_image(id, cursor.into()),
             Outcome::Incomplete | Outcome::Nothing => {}
-        }
-    }
-
-    /// Draw a picture for the kitty protocol, honouring `C=`.
-    ///
-    /// `C=1` is "do not move the cursor", so the whole of it is putting back what was
-    /// there. The one thing that cannot be put back is the *text* the cursor sat in when
-    /// a picture tall enough to scroll pushed it up: the row restored is the same screen
-    /// row, which is what a terminal that never scrolls at all would have left anyway.
-    fn kitty_place(&mut self, id: ImageId, freeze_cursor: bool) {
-        let entry = self.screen().cursor();
-        self.lay_image(id, CursorAfterImage::PastRightEdge);
-        if freeze_cursor {
-            self.screen_mut().put_cursor(entry);
         }
     }
 }

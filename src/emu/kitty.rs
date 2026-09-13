@@ -77,10 +77,8 @@ pub(crate) struct Command {
     pub cells: CellSize,
     /// `q=1` suppresses success, `q=2` suppresses everything.
     pub quiet: u8,
-    /// `C=1` — display the picture without moving the cursor. Spelled as the exception
-    /// rather than as "should the cursor move", so the derived default is the protocol's
-    /// default: absent `C=` moves it.
-    pub freeze_cursor: bool,
+    /// `C=`: whether displaying the picture moves the cursor.
+    pub cursor: CursorMove,
     /// A capability named in the control data that this terminal does not implement.
     pub unsupported: Option<&'static str>,
     /// The action the control data *named*, as distinct from the one that applies.
@@ -157,9 +155,9 @@ impl Command {
                 "c" => cmd.cells.cols = u16::try_from(num()).unwrap_or(u16::MAX),
                 "r" => cmd.cells.rows = u16::try_from(num()).unwrap_or(u16::MAX),
                 "q" => cmd.quiet = u8::try_from(num()).unwrap_or(u8::MAX),
-                // Only `C=1` freezes it. The protocol defines no other value, and
+                // Only `C=1` holds it. The protocol defines no other value, and
                 // reading "anything but zero" would make a future one mean this.
-                "C" => cmd.freeze_cursor = value == "1",
+                "C" if value == "1" => cmd.cursor = CursorMove::Stay,
                 _ => {}
             }
         }
@@ -167,23 +165,33 @@ impl Command {
     }
 }
 
+/// What displaying a picture does to the cursor, as `C=` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CursorMove {
+    /// The protocol's default: the cursor ends just past the picture's right edge.
+    #[default]
+    Advance,
+    /// `C=1`: the cursor is left where it was.
+    Stay,
+}
+
 /// What the terminal should do once a command's payload is complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// Nothing yet — more chunks are coming.
     Incomplete,
-    /// Hand these bytes to the image store; display them if `display`.
+    /// Hand these bytes to the image store, and display them if `display` says how.
     Image {
         format: ImageFormat,
         bytes: Vec<u8>,
         px: PixelSize,
         cells: CellSize,
         client_id: u32,
-        display: bool,
-        freeze_cursor: bool,
+        /// `None` for `a=t`, which transmits without displaying.
+        display: Option<CursorMove>,
     },
     /// Place an image already transmitted under this id.
-    Place { id: ImageId, freeze_cursor: bool },
+    Place { id: ImageId, cursor: CursorMove },
     /// Nothing to do, but the child may be owed an answer.
     Nothing,
 }
@@ -335,7 +343,7 @@ impl Kitty {
                 Some(id) => (
                     Outcome::Place {
                         id,
-                        freeze_cursor: cmd.freeze_cursor,
+                        cursor: cmd.cursor,
                     },
                     response(&cmd, None),
                 ),
@@ -433,8 +441,7 @@ impl Kitty {
                 px: cmd.px,
                 cells: cmd.cells,
                 client_id: cmd.id,
-                display: cmd.action == Action::Display,
-                freeze_cursor: cmd.freeze_cursor,
+                display: (cmd.action == Action::Display).then_some(cmd.cursor),
             },
             response(&cmd, None),
         )
@@ -718,8 +725,7 @@ mod tests {
                 px: PixelSize::new(0, 0),
                 cells: CellSize::new(0, 0),
                 client_id: 3,
-                display: true,
-                freeze_cursor: false,
+                display: Some(CursorMove::Advance),
             }
         );
         assert_eq!(reply.unwrap(), b"\x1b_Gi=3;OK\x1b\\");
@@ -892,16 +898,16 @@ mod tests {
             k.feed(b"Ga=p,i=9").0,
             Outcome::Place {
                 id: ImageId(42),
-                freeze_cursor: false,
+                cursor: CursorMove::Advance,
             }
         );
     }
 
     #[test]
     fn c_says_whether_the_cursor_moves() {
-        assert!(!Command::parse("a=T,i=1").freeze_cursor);
-        assert!(Command::parse("a=T,i=1,C=1").freeze_cursor);
-        assert!(!Command::parse("a=T,i=1,C=0").freeze_cursor);
+        assert_eq!(Command::parse("a=T,i=1").cursor, CursorMove::Advance);
+        assert_eq!(Command::parse("a=T,i=1,C=1").cursor, CursorMove::Stay);
+        assert_eq!(Command::parse("a=T,i=1,C=0").cursor, CursorMove::Advance);
     }
 
     #[test]

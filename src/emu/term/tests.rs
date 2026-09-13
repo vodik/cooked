@@ -1085,6 +1085,21 @@ fn kitty_c_leaves_the_cursor_exactly_where_it_was() {
     assert_eq!(placements(&t, 2).len(), 3);
 }
 
+/// With the cursor staying put, a picture that ends at the right edge of the bottom row
+/// has no reason to scroll: the line feed that would take the cursor past the edge is
+/// never needed.
+#[test]
+fn kitty_c_at_the_bottom_right_scrolls_nothing() {
+    let mut t = with_metrics(3, 6);
+    t.feed(b"top[3;4H");
+    t.drain();
+    let entry = t.screen().cursor();
+    kitty_image(&mut t, "a=T,f=100,c=3,r=1,i=1,C=1");
+    assert_eq!(t.screen().cursor(), entry);
+    assert!(t.drain().scrolled.is_empty(), "nothing left the screen");
+    assert_eq!(text(&t, 0), "top");
+}
+
 #[test]
 fn image_cells_reach_lisp_as_one_run_of_their_own() {
     let mut t = with_metrics(10, 20);
@@ -3095,7 +3110,7 @@ fn removing_alt_screen_rows_does_not_move_the_primarys_prompt_mark() {
 
 #[test]
 fn leaving_the_alt_screen_restores_the_cursor_the_primary_saved() {
-    // `save_restore' acts on whichever screen is showing, so the restore has to run
+    // `restore_cursor' acts on whichever screen is showing, so the restore has to run
     // after the switch back. Run before it, it reads the alt screen's saved cursor
     // and leaves the primary's -- the one `1049h' saved -- untouched.
     // The saved position has to be one something later moves, or a restore that never
@@ -3264,6 +3279,16 @@ fn decst8c_puts_the_stops_back_every_eight_columns() {
         "no stops: the tab ran to the margin"
     );
     assert_eq!(text(&t, 0).trim_start(), "x");
+}
+
+/// TBC defines 0, the stop under the cursor, and 3, every stop. xterm ignores any other
+/// parameter rather than reading it as 0.
+#[test]
+fn tbc_clears_one_stop_or_all_and_nothing_for_other_parameters() {
+    let t = term(2, 30, b"\x1b[9G\x1b[g\r\tx");
+    assert_eq!(text(&t, 0), "                x", "the stop at 8 is gone");
+    let t = term(2, 30, b"\x1b[9G\x1b[2g\r\tx");
+    assert_eq!(text(&t, 0), "        x", "2 is not a TBC parameter");
 }
 
 #[test]

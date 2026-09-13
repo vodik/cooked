@@ -21,7 +21,7 @@
 //! live: a flood must arrive as one move rather than a thousand, and past the height of
 //! the region as none at all.
 
-use cooked::emu::{Shift, Term};
+use cooked::emu::{Direction, Shift, Term};
 
 const ROWS: usize = 24;
 const COLS: usize = 80;
@@ -107,17 +107,16 @@ fn shifts(script: &[u8]) -> Vec<Shift> {
     term.drain().shifts
 }
 
-/// One expected move. `UP` and `DOWN` name the direction rather than the bare boolean,
-/// which in a list of four numbers is the one field a reader cannot check at a glance.
-const UP: bool = true;
-const DOWN: bool = false;
+const UP: Direction = Direction::Up;
+const DOWN: Direction = Direction::Down;
 
-fn shift(top: usize, bottom: usize, count: usize, up: bool) -> Shift {
+/// One expected move.
+fn shift(top: usize, bottom: usize, count: usize, direction: Direction) -> Shift {
     Shift {
         top,
         bottom,
         count,
-        up,
+        direction,
     }
 }
 

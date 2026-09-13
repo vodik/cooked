@@ -176,20 +176,21 @@ impl State {
                 self.events.push(Event::Mouse(self.modes.mouse));
             }
             DecMode::AltScreenLegacy | DecMode::AltScreen => self.set_alt(on),
-            DecMode::SaveCursor => self.save_restore(on),
+            DecMode::SaveCursor if on => self.save_cursor(),
+            DecMode::SaveCursor => self.restore_cursor(),
             // Save, switch, ... switch back, restore. The save and the restore have to
-            // bracket the switch, because `save_restore` acts on whichever screen is
+            // bracket the switch, because `restore_cursor` acts on whichever screen is
             // showing: run before `set_alt(false)` it would read the alternate screen's
             // saved cursor and leave the primary's -- the one `1049 h` saved -- untouched.
             // A resize inside a full-screen program moves the primary's cursor, so that
             // is the case that would lose the position.
             DecMode::AltScreenSaveCursor => {
                 if on {
-                    self.save_restore(true);
+                    self.save_cursor();
                     self.set_alt(true);
                 } else {
                     self.set_alt(false);
-                    self.save_restore(false);
+                    self.restore_cursor();
                 }
             }
             DecMode::SynchronizedOutput => {
@@ -354,20 +355,18 @@ impl State {
         }
     }
 
-    pub(super) fn save_restore(&mut self, save: bool) {
-        let charsets = self.modes.charsets;
-        let saved = &mut self.saved_charsets[self.shown];
-        if save {
-            *saved = Some(charsets);
-        } else if let Some(charsets) = saved.take() {
+    /// DECSC: the cursor and the character sets, for the screen being shown.
+    pub(super) fn save_cursor(&mut self) {
+        self.saved_charsets[self.shown] = Some(self.modes.charsets);
+        self.screen_mut().save_cursor();
+    }
+
+    /// DECRC: put back what [`State::save_cursor`] kept on this screen, if anything.
+    pub(super) fn restore_cursor(&mut self) {
+        if let Some(charsets) = self.saved_charsets[self.shown].take() {
             self.modes.charsets = charsets;
         }
-        let screen = self.screen_mut();
-        if save {
-            screen.save_cursor();
-        } else {
-            screen.restore_cursor();
-        }
+        self.screen_mut().restore_cursor();
     }
 
     /// XTSAVE, `CSI ? Pm s`, for one mode.
@@ -588,14 +587,18 @@ impl State {
                 let col = self.screen().cursor().col;
                 self.screen_mut().goto(params.coord(0), col);
             }
-            (None, 'g') => self.screen_mut().clear_tabs(params.arg(0, 0) == 3),
+            (None, 'g') => match params.arg(0, 0) {
+                0 => self.screen_mut().clear_tab(),
+                3 => self.screen_mut().clear_all_tabs(),
+                _ => {}
+            },
             // DECST8C. `CSI ? 5 W` and no other parameter: the unprefixed `CSI Ps W` is CTC,
             // whose 5 clears every stop rather than resetting them, and is not implemented.
             (Some(b'?'), 'W') if params.arg(0, 0) == 5 => self.screen_mut().reset_tabs(),
             (None, 'Z') => self.screen_mut().back_tab(params.arg(0, 1)),
             (None, 'I') => self.screen_mut().tab(params.arg(0, 1)),
-            (None, 's') => self.save_restore(true),
-            (None, 'u') => self.save_restore(false),
+            (None, 's') => self.save_cursor(),
+            (None, 'u') => self.restore_cursor(),
             _ => return false,
         }
         true

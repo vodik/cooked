@@ -198,8 +198,8 @@ impl Perform for State {
             // meant a reset left the keypad wherever the last program put it.
             (None, b'=') => self.modes.app_keypad = true,
             (None, b'>') => self.modes.app_keypad = false,
-            (None, b'7') => self.save_restore(true),
-            (None, b'8') => self.save_restore(false),
+            (None, b'7') => self.save_cursor(),
+            (None, b'8') => self.restore_cursor(),
             (None, b'c') => {
                 // RIS is a soft reset that also clears the screen, leaves the alternate
                 // one and puts the tab stops back. The pen is default by the time the
@@ -213,7 +213,7 @@ impl Perform for State {
                 // with the transcript still hidden behind. Before `soft_reset`, too, so
                 // the erase and the home below act on the primary, and the kitty stack
                 // and saved cursor that reset empties are the ones the drain reads.
-                // No `save_restore`: the cursor `?1049h` saved is homed by RIS anyway.
+                // No `restore_cursor`: the cursor `?1049h` saved is homed by RIS anyway.
                 self.set_alt(false);
                 self.soft_reset();
                 // Both screens own a stop table, and a child that cleared the stops on

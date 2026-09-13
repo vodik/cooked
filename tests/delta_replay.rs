@@ -35,7 +35,7 @@
 //! decoration and the link id, and a stale face over correct characters is exactly the
 //! class of miss a text-only oracle waves through.
 
-use cooked::emu::{Delta, Run, Scrolled, Shift, Term};
+use cooked::emu::{Delta, Direction, Run, Scrolled, Shift, Term};
 use proptest::prelude::*;
 
 /// The upper bound on a generated grid, in both directions.
@@ -415,12 +415,15 @@ impl Replay {
             shift.bottom + 1 - shift.top
         );
         let span = &mut shadow[shift.top..=shift.bottom];
-        let recycled = if shift.up {
-            span.rotate_left(shift.count);
-            span.len() - shift.count..span.len()
-        } else {
-            span.rotate_right(shift.count);
-            0..shift.count
+        let recycled = match shift.direction {
+            Direction::Up => {
+                span.rotate_left(shift.count);
+                span.len() - shift.count..span.len()
+            }
+            Direction::Down => {
+                span.rotate_right(shift.count);
+                0..shift.count
+            }
         };
         for row in &mut span[recycled] {
             *row = Vec::new();

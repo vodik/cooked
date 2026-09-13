@@ -923,7 +923,12 @@ fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
         .delta
         .shifts
         .iter()
-        .map(|s| list!(env, [s.top, s.bottom, s.count, s.up]))
+        .map(|s| {
+            list!(
+                env,
+                [s.top, s.bottom, s.count, s.direction == emu::Direction::Up]
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let levels = &update.delta.levels;
     let cursor = list!(
