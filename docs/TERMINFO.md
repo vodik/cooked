@@ -50,7 +50,7 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 | `mc0`, `mc4`, `mc5`, `mc5i` | printer control. There is no printer behind an Emacs buffer, and `mc5` is a child-driven exfiltration channel with nothing to show for it |
 | `mgc`, `smglp`, `smglr`, `smgrp` | left/right margins. The grid, the reflow and the transcript model are all row-oriented — and `CSI s` is already save-cursor, so honouring these would corrupt it |
 | `meml`, `memu` | HP-era memory lock |
-| `smm`, `rmm`, `km` | meta-sends-escape. How Meta is spelled is negotiated through modifyOtherKeys or the kitty protocol, which is the mechanism that should own it |
+| `smm`, `rmm`, `km` | meta sets the eighth bit (mode 1034). How Meta is spelled is negotiated through modifyOtherKeys or the kitty protocol, which is the mechanism that should own it |
 | `cvvis` | cursor *blink* is `blink-cursor-mode`, yours to set and not the child\'s. `cnorm` covers visibility |
 
 A child does not have to take our word for any of it. DECRQM (`CSI ? Ps $ p`) answers 1 or
@@ -59,7 +59,13 @@ A child does not have to take our word for any of it. DECRQM (`CSI ? Ps $ p`) an
 have never heard of. That includes 2031, the colour-scheme subscription,
 which is the mode a child is most likely to probe before deciding whether to bother
 asking. DECCOLM (3) and DECSCLM (4) answer 4 as well: `is2` and `rs2` reset them, and
-nothing here sets them.
+nothing here sets them. So do modes no capability names but cooked has decided against,
+since 4 saves a child the retry that 0 invites: reverse wraparound (45, 1045), the UTF-8
+and urxvt mouse encodings (1005, 1015, superseded by 1006), DECBKM (67, fixed by
+`kbs=^?`) and Alt-sends-escape (1039). Meta-sends-escape (1036) answers 3, "permanently
+set", because Meta is spelled as a leading ESC whatever the child asks.
+
+`CSI = c`, tertiary DA, answers `DCS ! | 00000000 ST`: a unit id of zero, as xterm's.
 
 None of that rests on a reading of the file any more. The entry's header carries a
 `# declined-modes:` line, and `terminfo_entry_matches_what_decrqm_says` in

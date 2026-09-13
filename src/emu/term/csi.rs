@@ -12,7 +12,7 @@ pub(super) enum ModeReport {
     Set = 1,
     Reset = 2,
     /// Permanently on: the behaviour the mode asks for is the only one there is, so a
-    /// reset would be a lie. Mode 2027 is the one answer that uses it.
+    /// reset would be a lie. Mode 2027 and 1036, Meta sending ESC, answer this.
     PermanentlySet = 3,
     /// Deliberately not implemented -- this is how a child learns that without guessing.
     PermanentlyReset = 4,
@@ -273,15 +273,35 @@ impl State {
             // Deliberately `Set` and not `PermanentlySet`: xterm answers 1 here, and a
             // child that reads 3 concludes the mode cannot be reset.
             1048 => ModeReport::Set,
+            // Meta sends ESC before the key, always, and nothing a child can send turns
+            // that off: it is how `cooked--encode-event' spells Meta on every key the
+            // negotiated protocols do not re-encode, which is exactly the reach xterm
+            // gives `metaSendsEscape'. So the honest answer is "on, for good" -- not 4,
+            // which would tell a child that M-x arrives as something other than ESC x.
+            1036 => ModeReport::PermanentlySet,
             // Dropped from our terminfo, and this is where a child finds that out
             // without having to guess: 5 is reverse screen (`flash'), 12 cursor blink
             // (`blink-cursor-mode' is the user's), 69 left-right margins, 1034
-            // meta-sends-escape. 3 and 4 were never claimed, but `is2' and `rs2' reset
+            // eight-bit meta. 3 and 4 were never claimed, but `is2' and `rs2' reset
             // them -- 132 columns and smooth scroll, neither of which a buffer has -- so
-            // a child reading the entry has seen their numbers and may well ask. The
-            // list is `# declined-modes:' in cooked.ti, and the audit test holds the
+            // a child reading the entry has seen their numbers and may well ask.
+            //
+            // The rest were never in the entry and are decided against all the same, and
+            // 4 rather than 0 is what saves a child a retry or a fallback probe. 45 and
+            // 1045 are reverse wraparound, which `bw' would claim and the entry leaves
+            // out because nothing here lets a backspace cross into the row above. 1005
+            // and 1015 are the UTF-8 and urxvt mouse encodings, both superseded by 1006
+            // and ambiguous where it is not. 1039 is Alt sending ESC, which matters only
+            // where Alt and Meta are different keys -- and there Emacs reports an `alt'
+            // modifier cooked does not spell at all; on the usual keyboard Alt *is* Meta
+            // and 1036 answers for it. 67 is DECBKM, backarrow sending BS, and `kbs=^?'
+            // fixes it at DEL.
+            //
+            // The list is `# declined-modes:' in cooked.ti, and the audit test holds the
             // two in step.
-            3 | 4 | 5 | 12 | 69 | 1034 => ModeReport::PermanentlyReset,
+            3 | 4 | 5 | 12 | 45 | 67 | 69 | 1005 | 1015 | 1034 | 1039 | 1045 => {
+                ModeReport::PermanentlyReset
+            }
             // Grapheme cluster segmentation, in contour's terminal-unicode-core sense.
             // Not settable because there is nothing to turn off: the segmenter is how
             // every character reaches the grid, and the per-code-point rule a reset
@@ -850,6 +870,13 @@ impl State {
             (None, 'c') => self.csi_reply(format_args!("?62;4;22c")),
             // Secondary DA. Unanswered, a child that queries and waits hangs.
             (Some(b'>'), 'c') => self.csi_reply(format_args!(">0;0;0c")),
+            // Tertiary DA, the unit id, as `DCS ! | 00000000 ST`. Nothing in cooked has a
+            // serial number worth reporting, and zero is what xterm sends too; the reply
+            // exists for the same reason as DA2's, which is that a child asking the
+            // question waits for an answer.
+            (Some(b'='), 'c') if params.arg(0, 0) == 0 => {
+                self.dcs_reply(format_args!("!|00000000"));
+            }
             (None, 'n') if params.arg(0, 0) == 5 => {
                 self.csi_reply(format_args!("0n"));
             }

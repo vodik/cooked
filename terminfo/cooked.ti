@@ -33,21 +33,26 @@
 #                     `CSI s' is already save-cursor, so honouring these would
 #                     corrupt the very thing they share a sequence with.
 #   meml, memu        HP-era memory lock.
-#   smm, rmm, km      meta-sends-escape (mode 1034). How Meta is spelled is
-#                     negotiated through modifyOtherKeys or the kitty keyboard
-#                     protocol, which is the mechanism that should own it.
+#   smm, rmm, km      meta sets the eighth bit (mode 1034). How Meta is spelled
+#                     is a leading ESC, or whatever modifyOtherKeys or the kitty
+#                     keyboard protocol negotiates, which is what should own it.
 #   cvvis             was \E[?12;25h. Cursor *blink* is `blink-cursor-mode', the
 #                     user's setting and not the child's; cnorm covers
 #                     visibility on its own.
 #
 # A child does not have to take our word for any of that: DECRQM answers 4,
-# "permanently reset", for every mode named above. Two more answer 4 without a
-# capability of their own: DECCOLM (3) and DECSCLM (4), which `is2' and `rs2'
-# reset and nothing here ever sets. The line below is that list for a machine,
-# and `terminfo_entry_matches_what_decrqm_says' in src/emu/term/tests.rs fails if
-# it, the DECRQM answers and the capabilities in this file disagree.
+# "permanently reset", for every mode named above. More answer 4 without a
+# capability of their own. DECCOLM (3) and DECSCLM (4) are reset by `is2' and
+# `rs2' and set by nothing here. Reverse wraparound (45, 1045) is what `bw' would
+# claim. The UTF-8 and urxvt mouse encodings (1005, 1015) are superseded by 1006.
+# DECBKM (67) is fixed by `kbs=^?', and Alt-sends-escape (1039) by Emacs'
+# own `alt' modifier, which cooked does not spell. Meta-sends-escape (1036) is
+# the opposite case, always on, and answers 3. The line below is the declined
+# list for a machine, and `terminfo_entry_matches_what_decrqm_says' in
+# src/emu/term/tests.rs fails if it, the DECRQM answers and the capabilities in
+# this file disagree.
 #
-# declined-modes: 3 4 5 12 69 1034
+# declined-modes: 3 4 5 12 45 67 69 1005 1015 1034 1039 1045
 #
 # Added, being things we implement that xterm-256color does not declare at all:
 #

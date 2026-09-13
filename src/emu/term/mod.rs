@@ -680,10 +680,10 @@ impl State {
 
     /// Queue `ESC P BODY ESC \` -- a DCS reply.
     ///
-    /// XTVERSION's answer and nothing else so far. Its own method rather than a string
-    /// pasted at the one call site, because the terminator is the part a second site
-    /// would get wrong: a DCS that is never closed leaves the parser eating everything
-    /// the child prints next.
+    /// XTVERSION's answer and DA3's. Its own method rather than a string pasted at
+    /// each call site, because the terminator is the part a second site would get
+    /// wrong: a DCS that is never closed leaves the parser eating everything the
+    /// child prints next.
     pub(crate) fn dcs_reply(&mut self, body: std::fmt::Arguments<'_>) {
         self.framed_reply("\x1bP", body, "\x1b\\");
     }

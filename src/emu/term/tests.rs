@@ -1700,6 +1700,32 @@ fn device_attributes_name_only_what_we_implement() {
     assert!(events.contains(&Event::Reply(b"\x1b[>0;0;0c".to_vec())));
 }
 
+#[test]
+fn tertiary_device_attributes_answer_a_zero_unit_id() {
+    let mut t = term(2, 10, b"\x1b[=c\x1b[=0c\x1b[=1c");
+    let replies: Vec<_> = t
+        .drain()
+        .events
+        .into_iter()
+        .filter(|event| matches!(event, Event::Reply(_)))
+        .collect();
+    // `=1c` is not DA3, and answering it would put a reply where no child waits.
+    assert_eq!(
+        replies,
+        vec![Event::Reply(b"\x1bP!|00000000\x1b\\".to_vec()); 2]
+    );
+}
+
+#[test]
+fn meta_sending_escape_is_permanently_set() {
+    // Both before and after a child tries to turn it off: Lisp spells Meta as ESC
+    // whatever the core is told, so the answer must not follow the request.
+    let mut t = term(2, 10, b"\x1b[?1036$p\x1b[?1036l\x1b[?1036$p");
+    let replies = t.drain().events;
+    let set = Event::Reply(b"\x1b[?1036;3$y".to_vec());
+    assert_eq!(replies.iter().filter(|event| **event == set).count(), 2);
+}
+
 /// The style of the last cell of a row, which is where an erase-to-end lands.
 fn last_style(t: &Term, row: usize) -> Style {
     let r = t.screen().row(row).unwrap();
