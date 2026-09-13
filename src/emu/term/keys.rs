@@ -200,8 +200,22 @@ pub enum KeyEncoding {
     /// xterm's `modifyOtherKeys`: `CSI 27 ; MOD ; CHAR ~`, over the keys the level covers.
     ModifyOtherKeys(ModifyOtherKeys),
     /// The kitty keyboard protocol: `CSI CHAR ; MOD u`, with the honoured flags in force.
-    /// Never constructed with flags for which [`KittyFlags::enables_encoding`] is false.
-    Kitty(KittyFlags),
+    Kitty(KittyEncoding),
+}
+
+/// The flags of a kitty encoding that is actually in force.
+///
+/// A type of its own so that a [`KeyEncoding::Kitty`] cannot carry flags that would not
+/// have switched kitty on -- bit 4 alone, say, which only adds a field to an escape code
+/// something else chose to send. [`KeyEncoding::kitty`] is the one way to make one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KittyEncoding(KittyFlags);
+
+impl KittyEncoding {
+    /// The honoured flags this encoding applies.
+    pub fn flags(self) -> KittyFlags {
+        self.0
+    }
 }
 
 impl KeyEncoding {
@@ -210,20 +224,24 @@ impl KeyEncoding {
     /// Kitty wins when both are on: a child that pushed kitty flags is speaking the newer
     /// protocol deliberately, and libraries that enable both expect kitty to take effect.
     pub(super) fn negotiate(kitty: KittyFlags, modify_other: Option<ModifyOtherKeys>) -> Self {
-        let kitty = kitty.honoured();
-        if kitty.enables_encoding() {
-            Self::Kitty(kitty)
-        } else if let Some(level) = modify_other {
-            Self::ModifyOtherKeys(level)
-        } else {
-            Self::Legacy
-        }
+        Self::kitty(kitty)
+            .or(modify_other.map(Self::ModifyOtherKeys))
+            .unwrap_or(Self::Legacy)
+    }
+
+    /// The kitty encoding FLAGS select once the unhonoured bits are dropped, or `None` if
+    /// what is left does not switch kitty on; see [`KittyFlags::enables_encoding`].
+    pub fn kitty(flags: KittyFlags) -> Option<Self> {
+        let flags = flags.honoured();
+        flags
+            .enables_encoding()
+            .then_some(Self::Kitty(KittyEncoding(flags)))
     }
 
     /// The kitty flags the encoder applies: empty unless the encoding is kitty.
     pub fn kitty_flags(self) -> KittyFlags {
         match self {
-            Self::Kitty(flags) => flags,
+            Self::Kitty(kitty) => kitty.flags(),
             _ => KittyFlags::NONE,
         }
     }
@@ -272,6 +290,9 @@ mod tests {
     fn kitty_wins_over_modify_other_keys() {
         let encoding =
             KeyEncoding::negotiate(KittyFlags::DISAMBIGUATE, Some(ModifyOtherKeys::Level2));
-        assert_eq!(encoding, KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE));
+        assert_eq!(
+            encoding,
+            KeyEncoding::kitty(KittyFlags::DISAMBIGUATE).unwrap()
+        );
     }
 }

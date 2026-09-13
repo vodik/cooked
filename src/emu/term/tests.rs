@@ -3368,7 +3368,10 @@ fn modify_other_keys_is_negotiated() {
 #[test]
 fn kitty_wins_over_modify_other_keys_but_the_level_survives_it() {
     let mut t = term(4, 20, b"\x1b[>4;1m\x1b[>1u");
-    assert_eq!(t.keys(), KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE));
+    assert_eq!(
+        t.keys(),
+        KeyEncoding::kitty(KittyFlags::DISAMBIGUATE).unwrap()
+    );
     t.feed(b"\x1b[<u");
     assert_eq!(
         t.keys(),
@@ -3380,7 +3383,10 @@ fn kitty_wins_over_modify_other_keys_but_the_level_survives_it() {
 #[test]
 fn kitty_keyboard_flags_stack() {
     let mut t = term(4, 20, b"\x1b[>1u");
-    assert_eq!(t.keys(), KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE));
+    assert_eq!(
+        t.keys(),
+        KeyEncoding::kitty(KittyFlags::DISAMBIGUATE).unwrap()
+    );
 
     t.feed(b"\x1b[>0u");
     assert_eq!(
@@ -3392,7 +3398,7 @@ fn kitty_keyboard_flags_stack() {
     t.feed(b"\x1b[<u");
     assert_eq!(
         t.keys(),
-        KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE),
+        KeyEncoding::kitty(KittyFlags::DISAMBIGUATE).unwrap(),
         "popping restores what was underneath"
     );
 
@@ -3684,7 +3690,7 @@ fn kitty_flags_reach_the_drain() {
     let d = t.drain();
     assert_eq!(
         d.levels.keys,
-        KeyEncoding::Kitty(KittyFlags::from_bits_retain(29))
+        KeyEncoding::kitty(KittyFlags::from_bits_retain(29)).unwrap()
     );
     // Masked on the way out, as the query reply is.
     t.feed(b"\x1b[=2;2u");
@@ -3697,7 +3703,7 @@ fn kitty_report_all_keys_turns_kitty_on_by_itself() {
     // needs no bit 1 beside it.
     assert_eq!(
         term(4, 20, b"\x1b[>8u").keys(),
-        KeyEncoding::Kitty(KittyFlags::REPORT_ALL_KEYS)
+        KeyEncoding::kitty(KittyFlags::REPORT_ALL_KEYS).unwrap()
     );
     // Alternate keys and associated text only add fields to an escape code something
     // else chose to send; alone, nothing is sent as one, and the spelling is legacy.
@@ -3727,7 +3733,10 @@ fn kitty_set_honours_its_mode() {
 #[test]
 fn reset_clears_negotiated_keyboard_modes() {
     let mut t = term(4, 20, b"\x1b[>4;2m\x1b[>1u");
-    assert_eq!(t.keys(), KeyEncoding::Kitty(KittyFlags::DISAMBIGUATE));
+    assert_eq!(
+        t.keys(),
+        KeyEncoding::kitty(KittyFlags::DISAMBIGUATE).unwrap()
+    );
     t.feed(b"\x1bc");
     assert_eq!(t.keys(), KeyEncoding::Legacy);
 }
