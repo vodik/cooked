@@ -3,7 +3,7 @@
 ;;; Commentary:
 
 ;; The sequences cooked answers in Lisp rather than in Rust: titles, colours,
-;; notifications and the bell, the clipboard, and the OSC 51 command channel -- which is also
+;; notifications and the bell, the clipboard, SetUserVar, and the OSC 51 command channel -- which is also
 ;; where the opt-in defaults are asserted, since every one of these is something
 ;; a hostile stream can send.
 
@@ -11,6 +11,7 @@
 
 (require 'cooked-tests-helpers)
 (require 'cooked-osc-eval)
+(require 'cooked-user-var)
 
 (ert-deftest cooked-osc-133-drives-the-input-state ()
   (cooked-tests--with-session
@@ -1661,6 +1662,78 @@ including one that renders nothing and puts the state somewhere else entirely."
                      '("/bin/sh" "-c" "printf '\\033]9;9;/tmp\\007\\033]9;done\\007'; sleep 5")
                    (should (cooked-tests--settle (lambda () seen)))))))
     (should (equal seen '(("" . "done"))))))
+
+;;;; OSC 1337 SetUserVar
+
+(ert-deftest cooked-user-var-set-reaches-the-hook ()
+  "The WezTerm snippet's shape, through a real pty: stored, then announced."
+  (let* ((seen nil)
+         (cooked-user-var-functions
+          (list (lambda (name value) (push (cons name value) seen)))))
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "printf '\\033]1337;SetUserVar=prog=%s\\007' \"$(printf 'vim ü' | base64)\"; sleep 5")
+      (should (cooked-tests--settle (lambda () seen)))
+      (should (equal seen '(("prog" . "vim ü"))))
+      (should (equal (cooked-user-var "prog") "vim ü")))))
+
+(ert-deftest cooked-user-var-over-the-bound-is-refused-out-loud ()
+  "A silent drop would look like a snippet that never worked."
+  (with-temp-buffer
+    (cooked-mode)
+    (let* ((ran nil)
+           (said nil)
+           (cooked-user-var-max-size 16)
+           (cooked-user-var-functions (list (lambda (&rest _) (setq ran t)))))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (cooked-user-var--osc (list (concat "SetUserVar=big=" (base64-encode-string (make-string 64 ?x))))))
+      (should-not ran)
+      (should-not cooked-user-vars)
+      (should (= (length said) 1))
+      (should (string-match-p "refused.*big.*cooked-user-var-max-size" (car said))))))
+
+(ert-deftest cooked-user-var-limit-refuses-new-names-but-not-updates ()
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-user-var-limit 2)
+          (said nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (cooked-user-var--osc '("SetUserVar=a=MQ=="))
+        (cooked-user-var--osc '("SetUserVar=b=Mg=="))
+        (cooked-user-var--osc '("SetUserVar=c=Mw=="))
+        (cooked-user-var--osc '("SetUserVar=a=NA==")))
+      (should (equal (cooked-user-var "a") "4"))
+      (should (equal (cooked-user-var "b") "2"))
+      (should-not (cooked-user-var "c"))
+      (should (equal (length said) 1))
+      (should (string-match-p "cooked-user-var-limit" (car said))))))
+
+(ert-deftest cooked-user-var-ignores-what-is-not-a-well-formed-set ()
+  "Other 1337 keys are not ours, and bad base64 is the child's bug."
+  (with-temp-buffer
+    (cooked-mode)
+    (let* ((ran nil)
+           (cooked-user-var-functions (list (lambda (&rest _) (setq ran t)))))
+      (cooked-user-var--osc '("CurrentDir=/tmp"))
+      (cooked-user-var--osc '("SetUserVar==YmFy"))
+      (cooked-user-var--osc '("SetUserVar=novalue"))
+      (cooked-user-var--osc '("SetUserVar=bad=not*base64"))
+      (should-not ran)
+      (should-not cooked-user-vars)
+      ;; Unpadded base64 is cosmetic, not malformed; an empty value is a value.
+      (cooked-user-var--osc '("SetUserVar=bare=YmE"))
+      (cooked-user-var--osc '("SetUserVar=empty="))
+      (should (equal (cooked-user-var "bare") "ba"))
+      (should (equal (assoc "empty" cooked-user-vars) '("empty" . ""))))))
+
+(ert-deftest cooked-user-var-yields-to-a-1337-handler-of-your-own ()
+  "Loading the layer must not silently displace a handler already configured."
+  (let ((cooked-osc-handlers (cons (cons 1337 #'ignore)
+                                   (assq-delete-all 1337 (copy-alist cooked-osc-handlers)))))
+    (load (locate-library "cooked-user-var.el") nil t t)
+    (should (eq (alist-get 1337 cooked-osc-handlers) #'ignore))
+    (should (rassq 'cooked-user-var--osc cooked-osc-handlers))))
 
 (provide 'cooked-tests-osc)
 ;;; cooked-tests-osc.el ends here

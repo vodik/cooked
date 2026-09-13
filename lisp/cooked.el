@@ -33,8 +33,9 @@
 ;; it are separate because you should choose them, and choosing one is `require'ing
 ;; its file rather than setting a variable: `cooked-evil', `cooked-osc-eval',
 ;; `cooked-shell-completion', `cooked-project', `cooked-file-link',
-;; `cooked-next-error', `cooked-command-decorations' and `cooked-dnd'.  The snippet
-;; above names only the four most people want; the other four load the same way.
+;; `cooked-next-error', `cooked-command-decorations', `cooked-dnd' and
+;; `cooked-user-var'.  The snippet above names only the four most people want; the
+;; other five load the same way.
 
 ;; The buffer is the scrollback.  Rows that scroll off the emulator's screen are
 ;; handed over once and become ordinary buffer text; the lines after

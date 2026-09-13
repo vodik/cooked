@@ -247,6 +247,13 @@ closed set of verbs cooked implements itself and checks the arguments to, not an
 name lookup; arbitrary named commands need a second, explicit entry in
 ~cooked-eval-commands~. See [[file:docs/FEATURES.md][docs/FEATURES.md]].
 
+** cooked-user-var
+
+Keeps what the shell says with iTerm2's =OSC 1337 SetUserVar= — the foreground program,
+the host, anything a WezTerm snippet sends — in a buffer-local ~cooked-user-vars~, and
+runs ~cooked-user-var-functions~ with each name and value. Data only: nothing the child
+sends is run, and oversized or excess variables are refused with a message.
+
 ** cooked-shell-completion
 
 Answers =TAB= from zsh's or bash's own completion system, over a side channel, instead
