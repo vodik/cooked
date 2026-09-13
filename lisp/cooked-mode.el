@@ -32,6 +32,7 @@
 (require 'cooked-scrollback)
 (require 'cooked-keys)
 (require 'cooked-input)
+(require 'cooked-keymaps)
 (require 'cooked-completion)
 (require 'cooked-mouse)
 (require 'cooked-shell-integration)
@@ -187,18 +188,6 @@ from inside one of them."
   :type 'string :group 'cooked)
 
 (defvar cooked-mode-map)                ; `define-derived-mode' below makes it
-
-(defun cooked--peek-resume-and-send ()
-  "End peek and forward the key that invoked this command to the child.
-
-Bound in `cooked-peek-map' wherever a key would otherwise self-insert or
-submit a line: typing while peeking can only mean one thing, so there is no
-reason to make resuming forwarding a separate step from it.  `cooked-send-key'
-already snaps point to the child's cursor before sending, which is also
-exactly where the ghost cursor was pointing the whole time peek was frozen."
-  (interactive)
-  (cooked--resume-forwarding)
-  (cooked-send-key))
 
 ;;;; State transitions
 
