@@ -17,6 +17,7 @@ use super::text::{self, Segmenter, Step};
 use csi::{PushedPen, SavedMode};
 use keys::KittyStack;
 pub(crate) use keys::{KeyEncoding, KittyFlags, ModifyOtherKeys};
+use screens::{PerScreen, ScreenId};
 use std::collections::{HashSet, VecDeque};
 
 mod csi;
@@ -24,6 +25,7 @@ mod graphics;
 mod keys;
 pub(crate) mod osc;
 mod perform;
+mod screens;
 mod state;
 #[cfg(test)]
 mod tests;
@@ -859,7 +861,7 @@ impl Term {
 
     /// Emacs has discarded the scrollback, so the top row continues nothing.
     pub fn forget_history(&mut self) {
-        self.state.primary.forget_carry();
+        self.state.screens.primary.forget_carry();
     }
 
     /// Mark every row of the current screen damaged, so the next drain re-sends all of
@@ -926,7 +928,9 @@ impl Term {
     /// scroll, the alternate screen is up, and it did not ask for the mouse itself —
     /// a program that wants mouse reports gets mouse reports, as in xterm.
     pub fn alt_scroll(&self) -> bool {
-        self.state.modes.alt_scroll && self.state.on_alt && !self.state.modes.mouse.enabled()
+        self.state.modes.alt_scroll
+            && self.state.shown.is_alternate()
+            && !self.state.modes.mouse.enabled()
     }
 
     pub fn app_cursor(&self) -> bool {
@@ -1057,8 +1061,7 @@ struct Modes {
     app_keypad: bool,
     /// xterm's modifyOtherKeys level, or `None` for a level cooked does not honour.
     modify_other_keys: Option<ModifyOtherKeys>,
-    /// Kitty keyboard flag stacks, as pushed, innermost last: the primary screen's first
-    /// and the alternate screen's second. See [`KittyFlags::HONOURED`] for which bits are read.
+    /// Kitty keyboard flag stacks, one per screen. See [`KittyFlags::HONOURED`] for which bits are read.
     ///
     /// Two because the spec says the screens "must maintain their own, independent,
     /// keyboard mode stacks", and the reason is the failure one shared stack had. A
@@ -1069,7 +1072,7 @@ struct Modes {
     /// Nothing clears the alternate stack on the way back in, which is kitty's own
     /// behaviour: a program that leaves the alternate screen to run a command and returns
     /// finds its flags where it left them, as it would in kitty.
-    kitty_keys: [KittyStack; 2],
+    kitty_keys: PerScreen<KittyStack>,
     /// LNM (ANSI mode 20): LF also returns the carriage.
     newline_mode: bool,
     /// XTPUSHSGR's stack, innermost last, at most [`SGR_STACK_LIMIT`] deep.
@@ -1138,9 +1141,11 @@ const DECRQSS_BODY_LIMIT: usize = 3;
 
 #[derive(Default)]
 struct State {
-    primary: Screen,
-    alt: Screen,
-    on_alt: bool,
+    /// The two grids. Which rows may leave one for the transcript is a question of which
+    /// grid they left, so the primary is reached by name wherever that matters.
+    screens: PerScreen<Screen>,
+    /// The grid being written to and shown.
+    shown: ScreenId,
     pen: Style,
     pending_scrollback: VecDeque<Scrolled>,
     images: ImageStore,
@@ -1281,7 +1286,7 @@ struct State {
     /// grid only decides which save a DECRC reads. VT100 DECSC is defined to save the
     /// designations and the shift along with the position, and a child that draws a box
     /// inside a save/restore pair relies on getting its text set back.
-    saved_charsets: [Option<Charsets>; 2],
+    saved_charsets: PerScreen<Option<Charsets>>,
 }
 
 /// A 94-character set that can be designated into one of G0-G3.

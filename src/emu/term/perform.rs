@@ -221,8 +221,9 @@ impl Perform for State {
                 // gone the next time it entered it. Not in `soft_reset`: DECSTR keeps
                 // the stops, as it does on xterm, and `rs1` is the half of `reset` that
                 // is meant to bring them back.
-                self.primary.reset_tabs();
-                self.alt.reset_tabs();
+                for screen in self.screens.each_mut() {
+                    screen.reset_tabs();
+                }
                 let evicted = self
                     .screen_mut()
                     .erase_display(Erase::All, Style::default());

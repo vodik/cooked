@@ -246,9 +246,9 @@ pub struct Screen {
     ///
     /// False for the alternate grid, which is a running program's scratch frame and
     /// contributes no transcript. [`State::evicted`](super::term) already refuses to
-    /// archive while `on_alt`, and this does not replace that: `evicted` is the funnel
-    /// that owns the policy, and this only stops the *work* being done for rows nobody
-    /// will read. Deleting either is wrong.
+    /// archive while the alternate screen is shown, and this does not replace that:
+    /// `evicted` is the funnel that owns the policy, and this only stops the *work* being
+    /// done for rows nobody will read. Deleting either is wrong.
     ///
     /// It cannot be folded into [`Screen::archives`]'s region test. That test asks whether
     /// the scroll covers the whole grid, which is true of the alt screen as often as the

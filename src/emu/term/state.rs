@@ -11,7 +11,7 @@ impl Levels {
             cursor_visible: modes.cursor_visible,
             cursor_shape: modes.cursor_shape,
             reverse_screen: modes.reverse_screen,
-            alt: state.on_alt,
+            alt: state.shown.is_alternate(),
             app_cursor: modes.app_cursor,
             keys: state.key_encoding(),
         }
@@ -24,11 +24,13 @@ impl State {
         // and `Modes` owns the one exception (a visible cursor). Spelled `..default()` so
         // a new field is initialised by construction rather than by remembering to.
         Self {
-            primary: Screen::new(rows, cols),
-            // `scratch`, not `new`: the alt grid archives nothing, and saying so at
-            // construction is what stops `scroll_up` building a departure record per line
-            // for a transcript that does not exist. See `Screen::history`.
-            alt: Screen::scratch(rows, cols),
+            screens: PerScreen {
+                primary: Screen::new(rows, cols),
+                // `scratch`, not `new`: the alt grid archives nothing, and saying so at
+                // construction stops `scroll_up` building a departure record per line for
+                // a transcript that does not exist. See `Screen::history`.
+                alternate: Screen::scratch(rows, cols),
+            },
             ..Self::default()
         }
     }
@@ -45,27 +47,19 @@ impl State {
 
     /// The kitty flag stack of the screen being shown; see [`Modes::kitty_keys`].
     pub(super) fn kitty_stack(&self) -> &KittyStack {
-        &self.modes.kitty_keys[usize::from(self.on_alt)]
+        &self.modes.kitty_keys[self.shown]
     }
 
     pub(super) fn kitty_stack_mut(&mut self) -> &mut KittyStack {
-        &mut self.modes.kitty_keys[usize::from(self.on_alt)]
+        &mut self.modes.kitty_keys[self.shown]
     }
 
     pub(super) fn screen(&self) -> &Screen {
-        if self.on_alt {
-            &self.alt
-        } else {
-            &self.primary
-        }
+        &self.screens[self.shown]
     }
 
     pub(super) fn screen_mut(&mut self) -> &mut Screen {
-        if self.on_alt {
-            &mut self.alt
-        } else {
-            &mut self.primary
-        }
+        &mut self.screens[self.shown]
     }
 
     /// Rows leaving the *current* screen: buffer text on the primary, discarded on the alt.
@@ -84,7 +78,7 @@ impl State {
     /// a way log lines are not, and there is nothing to apply backpressure against.
     ///
     pub(super) fn evicted(&mut self, rows: Evicted) {
-        if self.on_alt {
+        if self.shown.is_alternate() {
             return;
         }
         self.archive(rows);
@@ -95,7 +89,7 @@ impl State {
     /// Silent on the alternate screen, which archives nothing and is pinned to the top of
     /// the window already: there is no transcript there to scroll out of view.
     pub(super) fn cleared_display(&mut self) {
-        if !self.on_alt {
+        if !self.shown.is_alternate() {
             self.events.push(Event::DisplayCleared);
         }
     }
@@ -161,10 +155,10 @@ impl State {
     /// repair. The scrollback Emacs deletes alongside is the primary's, and is untouched
     /// by whatever is on screen.
     pub(super) fn clear_to_prompt(&mut self) -> usize {
-        if self.on_alt {
+        if self.shown.is_alternate() {
             return 0;
         }
-        let cursor = self.primary.cursor.row;
+        let cursor = self.screens.primary.cursor.row;
         let keep = self
             .prompt_start
             .and_then(|at| at.row.checked_sub(self.evicted_total))
@@ -197,7 +191,7 @@ impl State {
         self.screen_mut().remove_rows(first, count);
         // The alt grid holds a running program's frame, not a transcript; no anchor
         // points into it, and the primary's rows have not moved.
-        if self.on_alt {
+        if self.shown.is_alternate() {
             return;
         }
         if let Some(at) = &mut self.prompt_start {
@@ -238,10 +232,13 @@ impl State {
         // evicts from the top too, and a mark re-anchored to where it already was costs
         // Emacs one `set-marker'.
         self.marks_dirty = true;
-        let evicted = self.primary.resize(rows, cols, Resize::Rewrap);
+        let evicted = self.screens.primary.resize(rows, cols, Resize::Rewrap);
         // The alt screen contributes no scrollback -- it is a fixed-size scratch grid,
         // never transcript -- so its rewrap has nothing to hand anyone.
-        self.alt.resize(rows, cols, Resize::Clamp).discard();
+        self.screens
+            .alternate
+            .resize(rows, cols, Resize::Clamp)
+            .discard();
         // These rows came off the primary whichever screen is showing, so they are history
         // even mid-alt. Routing them through `evicted` would drop the top of the transcript
         // whenever the frame was resized with a full-screen program open.
@@ -284,7 +281,7 @@ impl State {
             return;
         }
         let mut live: HashSet<ImageId> = self.kitty.bound_images().collect();
-        for screen in [&self.primary, &self.alt] {
+        for screen in self.screens.each() {
             for row in screen.rows() {
                 for (_, extra) in row.extras() {
                     if let Extra::Image(place) = extra {
@@ -367,19 +364,25 @@ impl State {
     }
 
     pub(super) fn set_alt(&mut self, on: bool) {
-        if self.on_alt == on {
+        let shown = if on {
+            ScreenId::Alternate
+        } else {
+            ScreenId::Primary
+        };
+        if self.shown == shown {
             return;
         }
-        self.on_alt = on;
+        self.shown = shown;
         if on {
             // Dropped rather than archived: this is the previous full-screen program's
             // leftover frame, which was never history to begin with.
             // `Style::default()`, not the pen: a freshly entered alt screen is not the
             // outgoing program's background wash.
-            self.alt
+            let alternate = &mut self.screens.alternate;
+            alternate
                 .erase_display(Erase::All, Style::default())
                 .discard();
-            self.alt.goto(0, 0);
+            alternate.goto(0, 0);
         }
         // No event to match: `Levels::alt` is the level, and Lisp acts on that. See the
         // note on `Event` about not sending the same state two ways.

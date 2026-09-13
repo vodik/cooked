@@ -191,10 +191,10 @@ impl State {
     pub(super) fn take_mark(&mut self, at: Anchor) -> MarkId {
         let id = MarkId(self.next_mark);
         self.next_mark = self.next_mark.wrapping_add(1);
-        if !self.on_alt
+        if !self.shown.is_alternate()
             && let Some(row) = at.row.checked_sub(self.evicted_total)
         {
-            self.primary.mark(row, at.col, id);
+            self.screens.primary.mark(row, at.col, id);
         }
         id
     }
@@ -213,7 +213,10 @@ impl State {
         }
         self.marks_dirty = false;
         let mut marks = std::mem::take(&mut self.evicted_marks);
-        marks.extend(Self::marks_in(self.primary.rows(), self.evicted_total));
+        marks.extend(Self::marks_in(
+            self.screens.primary.rows(),
+            self.evicted_total,
+        ));
         marks
     }
 

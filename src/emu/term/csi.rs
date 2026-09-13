@@ -183,8 +183,9 @@ impl State {
                 self.screen_mut().goto(0, 0);
             }
             7 => {
-                self.primary.set_autowrap(on);
-                self.alt.set_autowrap(on);
+                for screen in self.screens.each_mut() {
+                    screen.set_autowrap(on);
+                }
             }
             // Cursor *blink*, deliberately ignored: that is `blink-cursor-mode', which is
             // the user's setting and not the child's to drive. Visibility is mode 25.
@@ -268,7 +269,7 @@ impl State {
                 .sync_until
                 .is_some_and(|t| std::time::Instant::now() < t)
                 .into(),
-            47 | 1047 | 1049 => self.on_alt.into(),
+            47 | 1047 | 1049 => self.shown.is_alternate().into(),
             // Implemented, but stateless — it saves and restores rather than turning
             // anything on — so "set" is the only honest answer that is not "unknown".
             // Deliberately `Set` and not `PermanentlySet`: xterm answers 1 here, and a
@@ -320,8 +321,9 @@ impl State {
     pub(super) fn ansi_mode(&mut self, mode: u16, on: bool) {
         match mode {
             4 => {
-                self.primary.set_insert_mode(on);
-                self.alt.set_insert_mode(on);
+                for screen in self.screens.each_mut() {
+                    screen.set_insert_mode(on);
+                }
             }
             20 => self.modes.newline_mode = on,
             _ => {}
@@ -347,13 +349,13 @@ impl State {
         // [`Modes`].
         let had_mouse = self.modes.mouse != Mouse::default();
         self.modes = Modes::default();
-        for screen in [&mut self.primary, &mut self.alt] {
+        for screen in self.screens.each_mut() {
             screen.reset_region();
             screen.set_autowrap(true);
             screen.set_insert_mode(false);
             screen.saved = None;
         }
-        self.saved_charsets = [None; 2];
+        self.saved_charsets = PerScreen::default();
         if had_mouse {
             self.events.push(Event::Mouse(self.modes.mouse));
         }
@@ -361,7 +363,7 @@ impl State {
 
     pub(super) fn save_restore(&mut self, save: bool) {
         let charsets = self.modes.charsets;
-        let saved = &mut self.saved_charsets[usize::from(self.on_alt)];
+        let saved = &mut self.saved_charsets[self.shown];
         if save {
             *saved = Some(charsets);
         } else if let Some(charsets) = saved.take() {
