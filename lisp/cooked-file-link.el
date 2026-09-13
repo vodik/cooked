@@ -112,7 +112,19 @@ A regexp, not an answer: everything it matches is still handed to the
 filesystem.  Its whole job is to keep `file-exists-p' off the ninety-odd
 percent of terminal output that contains no path-shaped token at all, which is
 what makes scanning a batch of scrollback affordable.  Something has to have
-either a slash in it or an extension on it to qualify.")
+either a slash in it or an extension on it to qualify.
+
+A number with a point in it has an extension by that rule, so `1.5\=' and
+`192.168.0.1\=' match too.  `cooked-file-link-scan\=' drops those itself, by
+`cooked-file-link--number-regexp\=', because an Emacs regexp has no lookahead
+to say \"but not only digits\" with.")
+
+(defconst cooked-file-link--number-regexp "\\`[0-9.]+\\'"
+  "A candidate that is only digits and points: a version, a ratio, an address.
+
+Nothing a program prints as `3.14\=' or `10.0.0.1\=' is meant as a file, and
+each would otherwise cost a `file-exists-p\=' per scan.  Following one under
+point still asks, since there you pointed at it.")
 
 (defun cooked-file-link--split (string)
   "Split STRING into its file name and any trailing :LINE:COL, as (NAME LINE COL).
@@ -142,9 +154,16 @@ the project root, which is what makes the paths in a `make' or `cargo' log at
 the top of a tree resolve from anywhere inside it -- the project.el integration
 the report asked for, and it is one `let' rather than a mechanism.
 
-`ffap-file-exists-string' rather than `file-exists-p' so that ffap's own
-`ffap-alist'-free notion of a readable name applies, including its handling of
-a remote `default-directory'.
+Each place costs one `file-exists-p\=', and a miss is most of what a scan
+does, so the count is the thing to keep down.  `ffap-file-exists-string\=' is
+called with NOMODIFY: without it a miss also tries `NAME.gz\=' and `NAME.Z\=',
+which made six calls of two, and it returns the compressed name while this
+returned `NAME\=' -- so a directory holding only `foo.gz\=' linked a `foo\='
+that opened an empty buffer.  And the root is not asked when it would be the
+same question again: at the project root itself, which is where `tree\=' and
+most builds run, or for an absolute NAME, which `default-directory\=' does not
+touch.  The root is compared as a string, since asking the filesystem whether
+two directories are one would cost the stat being saved.
 
 Nothing resolves once the child has said it is on another host.  A build log
 from a remote tree is full of names that exist here too, at the same paths, in
@@ -169,11 +188,15 @@ local one."
        ;; not where it found it.  Unexpanded, the project-root branch below would hand
        ;; back a bare `src/lib.rs' for the caller to resolve against the child's
        ;; `default-directory', the one directory it is known not to be in.
-       (or (when (ffap-file-exists-string name) (expand-file-name name))
-           (when-let* ((project (project-current nil))
-                       (root (project-root project))
+       (or (when (ffap-file-exists-string name t) (expand-file-name name))
+           (when-let* (((not (file-name-absolute-p name)))
+                       (project (project-current nil))
+                       (root (file-name-as-directory
+                              (expand-file-name (project-root project))))
+                       ((not (string= root (file-name-as-directory
+                                            (expand-file-name default-directory)))))
                        (default-directory root))
-             (when (ffap-file-exists-string name) (expand-file-name name))))))
+             (when (ffap-file-exists-string name t) (expand-file-name name))))))
 
 (defun cooked-file-link--at-point ()
   "The file under point as (FILE LINE COL), or nil.
@@ -275,7 +298,8 @@ guessed."
               ;; `guessed' rather than anonymously is what makes that a fact
               ;; about this layer's own rank rather than one written into the
               ;; base layer -- see `cooked-link-claim-functions'.
-              (unless (cooked-link--claimed-p from 'guessed)
+              (unless (or (string-match-p cooked-file-link--number-regexp name)
+                          (cooked-link--claimed-p from 'guessed))
                 (let ((file (with-memoization (gethash name known)
                               (or (cooked-file-link--exists name) 'none))))
                   (unless (eq file 'none)

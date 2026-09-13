@@ -724,6 +724,62 @@ land in a real file, and be the wrong file."
         (search-forward "lisp/cooked-link.el")
         (should-not (get-text-property (match-beginning 0) 'cooked-file-link))))))
 
+(ert-deftest cooked-a-compressed-file-does-not-make-its-plain-name-a-link ()
+  "Only `notes.txt.gz\=' exists, so `notes.txt\=' is not a file.
+
+`ffap-file-exists-string\=' tries the compression suffixes on a miss and
+returns the name it found, and `cooked-file-link--exists\=' threw that away and
+answered with the name it was asked about, so the link opened an empty buffer."
+  (should (rassq 'jka-compr-handler file-name-handler-alist))
+  (cooked-tests--with-file-links
+    (let ((dir (make-temp-file "cooked-gz" t)))
+      (unwind-protect
+          (with-temp-buffer
+            (setq-local default-directory (file-name-as-directory dir))
+            (write-region "" nil (expand-file-name "notes.txt.gz" dir))
+            (should-not (cooked-file-link--exists "notes.txt"))
+            (insert "see notes.txt\n")
+            (cooked--run-seam 'cooked-link-scan-functions (point-min) (point-max))
+            (should-not (get-text-property (cooked-tests--link-at "notes.txt")
+                                           'cooked-file-link)))
+        (delete-directory dir t)))))
+
+(ert-deftest cooked-a-missed-file-name-is-asked-for-once-per-place ()
+  "A miss is most of what a scan does, so it costs one `file-exists-p\=' a place.
+
+Six it used to be at the project root: the name, then `.gz\=' and `.Z\=', all
+twice, the second time against a root that was the directory already asked.
+A relative name in a subdirectory still gets its two places, an absolute one
+only the one, and a number with a point in it is not a candidate at all."
+  (cooked-tests--with-file-links
+    (let* ((root (file-name-as-directory (make-temp-file "cooked-miss" t)))
+           (sub (file-name-as-directory (expand-file-name "sub" root)))
+           (calls 0)
+           (count (lambda (&rest _) (cl-incf calls))))
+      (make-directory sub)
+      (make-directory (expand-file-name ".git" root))
+      (advice-add 'file-exists-p :before count)
+      (unwind-protect
+          (with-temp-buffer
+            (cl-flet ((asks (name)
+                        (setq calls 0)
+                        (should-not (cooked-file-link--exists name))
+                        calls))
+              (setq-local default-directory root)
+              ;; Warm `project-current's cache, which asks for .git itself.
+              (cooked-file-link--exists "warm.el")
+              (should (= (asks "missing.el") 1))
+              (setq-local default-directory sub)
+              (cooked-file-link--exists "warm.el")
+              (should (= (asks "missing.el") 2))
+              (should (= (asks "/nowhere/missing.el") 1))
+              (insert "version 1.5 on 192.168.0.1\n")
+              (setq calls 0)
+              (cooked--run-seam 'cooked-link-scan-functions (point-min) (point-max))
+              (should (= calls 0))))
+        (advice-remove 'file-exists-p count)
+        (delete-directory root t)))))
+
 (ert-deftest cooked-file-link-scan-highlights-only-what-exists ()
   (cooked-tests--with-file-links
     (let ((root (file-name-directory
