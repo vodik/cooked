@@ -151,6 +151,19 @@ lisp-test: module
 # release gate must not tolerate, and `test' exists to be the thing that always
 # actually runs.  This is the inner-loop target.
 #
+# Each also depends on what every file shares, because each Emacs loads all of
+# it: the runner, `cooked-tests-helpers.el', `cooked-bench.el' whose fixtures
+# `cooked-tests-bench.el' asserts on, and the shell integration and terminfo
+# source the live tests hand to real children.  Without them, editing
+# `cooked-tests--settle' left every stamp green over tests that had never run
+# against it.
+#
+# The module is reached through `module' rather than named as a bare file.  A
+# prerequisite with no rule is only ever compared, never rebuilt, so a Rust edit
+# followed by `make lisp-test-parallel' kept the old core and the old stamps;
+# now cargo runs first, and because `module' leaves the artifact's mtime alone
+# when the bytes are the same, a build that changed nothing reruns nothing.
+#
 # Each Emacs loads the whole suite and selects, rather than loading one file;
 # `cooked-tests-run-file' explains why.
 # `cooked-tests*.el' and not `cooked-tests-*.el': the runner file itself holds a
@@ -161,9 +174,14 @@ lisp-test: module
 TEST_FILES := $(wildcard tests/cooked-tests*.el)
 TEST_STAMPS := $(patsubst tests/%.el,target/test-stamps/%.stamp,$(TEST_FILES))
 
+TEST_SHARED := tests/cooked-tests.el tests/cooked-tests-helpers.el tests/cooked-bench.el \
+               $(wildcard shell-integration/*) terminfo/cooked.ti
+
 lisp-test-parallel: $(TEST_STAMPS)
 
-target/test-stamps/%.stamp: tests/%.el $(wildcard lisp/*.el) $(MODULE)
+$(MODULE): module ;
+
+target/test-stamps/%.stamp: tests/%.el $(TEST_SHARED) $(wildcard lisp/*.el) $(MODULE)
 	@mkdir -p $(@D)
 	@$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el \
 	  --eval '(cooked-tests-run-file "$<")'
