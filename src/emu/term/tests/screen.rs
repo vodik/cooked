@@ -476,6 +476,12 @@ fn decaln_fills_the_screen_with_e() {
         (0, 3)
     );
     assert!(t.drain().scrolled.is_empty());
+
+    // DECOM goes off and the pen back to plain, so the next cell drawn is at the screen's
+    // own row 3 and in the default rendition.
+    let t = term(4, 6, b"\x1b[2;3r\x1b[?6h\x1b[31m\x1b#8\x1b[3;1Hx");
+    assert_eq!(text(&t, 2), "xEEEEE");
+    assert_eq!(cell_style(&t, 2, 0), Style::default());
 }
 
 #[test]

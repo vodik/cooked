@@ -155,8 +155,13 @@ impl Perform for State {
             (None, b'O') => self.modes.charsets.single_shift(3),
             // DECALN. Erased first, exactly as `CSI 2J` erases, so a primary screen's
             // contents reach history before the pattern covers them; see `Screen::align`.
+            // xterm also turns DECOM off and puts the rendition back, so the home the
+            // pattern leaves the cursor at is the screen's corner and not the region's,
+            // and a test drawn next is drawn in plain text.
             (Some(b'#'), b'8') => {
                 self.erase_display(Erase::All, Pen::default());
+                self.modes.origin_mode = false;
+                self.pen.set_style(Style::default());
                 self.screen_mut().align();
             }
             (None, b'D') => self.linefeed(),
