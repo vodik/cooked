@@ -502,13 +502,41 @@ the case on a terminal frame, which has no font to ask.
 The font is `cooked--default-font\=''s, which follows a zoom, and a zoom moves
 the line box with it, so HEIGHT is a new key for a zoomed font.  A font swapped
 for one of the same line height and a different ascent is the case the key
-does not see."
+does not see.
+
+The percentage is the one Emacs turns back into exactly the font\='s ascent,
+which `cooked--image-ascent-percent\=' explains."
   (cooked--cached cooked--box-ascent-cache height
     (let ((base (when-let* ((font (cooked--default-font window)))
                   (aref (query-font font) 4))))
       (if (and (natnump base) (> height 0) (<= base height))
-          (round (* 100 base) height)
+          (cooked--image-ascent-percent base height)
         'center))))
+
+(defun cooked--image-ascent-percent (ascent height)
+  "The `:ascent\=' percentage that puts ASCENT of HEIGHT pixels above the baseline.
+
+Emacs does not round the percentage back into pixels, it truncates: an image
+HEIGHT tall with `:ascent\=' P gets an ascent of HEIGHT * (P / 100.0) cut down
+to an integer.  The nearest percentage is therefore often a pixel short.  A
+17-pixel bitmap in a font of ascent 13 and descent 4 rounds to 76, which is
+12.92 pixels and so 12.  The image then hangs 5 pixels below the baseline where
+the font hangs 4, and a row holding one is 18 pixels tall in a 17-pixel line
+box.  A screen of box drawing, which is what htop and btop draw, then no longer
+fits the rows the child was told, and every vertical border has a gap in it.
+
+So this takes the smallest percentage whose truncation lands on ASCENT, worked
+in the same floating point Emacs uses, since 100 * (29 / 100.0) comes out a
+hair under 29.  Such a percentage almost always exists up to 100 pixels,
+because consecutive percentages move the ascent by less than a pixel.  Where
+none does, as for an ascent of 29 in 100 pixels, the least percentage that
+reaches ASCENT in exact arithmetic is a pixel off, and nothing does better."
+  (let ((least (ceiling (* 100 ascent) height)))
+    (or (cl-loop for percent from least to 100
+                 for pixels = (truncate (* height (/ percent 100.0)))
+                 until (> pixels ascent)
+                 when (= pixels ascent) return percent)
+        (min least 100))))
 
 (defun cooked--box-glyph-image (pattern window size)
   "Image spec for the run PATTERN draws at cell SIZE.

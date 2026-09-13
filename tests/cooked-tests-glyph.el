@@ -816,6 +816,44 @@ a pgtk frame reports, which batch Emacs does not have."
     (cooked-tests--with-glyph-font '(15 5 9)
       (should (equal (cooked--box-glyph-ascent (selected-window) 20) 75)))))
 
+(ert-deftest cooked-a-box-glyph-row-is-exactly-one-line-box ()
+  "A row of box drawing is the default line height, and its borders meet.
+
+Emacs truncates an image\='s `:ascent\=' percentage back into pixels, so the
+nearest percentage was often a pixel short: a 17-pixel bitmap in a font of
+ascent 13 and descent 4 got 76, an ascent of 12 and a descent of 5, and every
+such row came out 18 pixels tall.  htop and btop are mostly such rows, so the
+screen ran a row or two past its window, and the stroke of a vertical line
+stopped a pixel short of the one below it.
+
+The line box is worked out as redisplay works it out: the taller of the
+font\='s and the image\='s ascent, over the taller of their descents, the image
+ascent being the truncation Emacs makes.  The fonts are the ones a pgtk frame
+reported for Adwaita Mono at heights 100, 130, 160, 200 and 220, and three more
+with other ratios."
+  (dolist (font '((13 4 8) (17 5 10) (21 6 12) (27 8 16) (29 9 17)
+                  (15 5 9) (11 3 7) (40 13 23)))
+    (with-temp-buffer
+      (cooked-tests--with-glyph-font font
+        (pcase-let* ((`(,ascent ,descent ,cell) font)
+                     (line (+ ascent descent))
+                     (pattern (cooked--glyph-pattern
+                               (cooked-tests--line-bits 1 1 0 0) 1))
+                     (image (cooked--box-glyph-image
+                             pattern (selected-window) (cons cell line)))
+                     (percent (plist-get (cdr image) :ascent))
+                     (image-ascent (truncate (* line (/ percent 100.0))))
+                     (bitmap (cooked-tests--glyph-grid
+                              (cooked-tests--line-bits 1 1 0 0) cell line)))
+          (ert-info ((format "font %S, :ascent %S" font percent))
+            (should (= image-ascent ascent))
+            (should (= (+ (max ascent image-ascent)
+                          (max descent (- line image-ascent)))
+                       line))
+            (should (= (plist-get (cdr image) :data-height) line))
+            (should (cooked--bitmap-ref bitmap (/ cell 2) 0))
+            (should (cooked--bitmap-ref bitmap (/ cell 2) (1- line)))))))))
+
 (ert-deftest cooked-box-drawing-images-opt-out-of-auto-scaling ()
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'") ; ┌─┐
