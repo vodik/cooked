@@ -66,16 +66,18 @@ and the rest keep working."
 ;; forward everything are worn through `cooked--forwarding-map', which answers
 ;; with a child of the map that binds the Meta space as well.
 
-(defun cooked--exception-code (key)
-  "The character code KEY names, signalling an error if it does not name one.
+(defun cooked--exception-event (key)
+  "The one event KEY names, signalling an error if it names more or fewer.
 
-Only a single, unmodified control character in the 0-127 range is meaningful
-here: passthrough is a raw-byte forwarding loop over exactly that range, not a
-general keymap, so a modified chord such as `M-x' would silently do nothing
-even if accepted -- see `cooked-raw-exceptions' for why."
+Any key a passthrough map binds on its own can be kept back: a control
+character such as `C-g', a Control chord no character names such as `C-;', a
+function key such as `<f5>', or a Meta chord such as `M-x'.  Each is left
+unbound wherever the maps would otherwise bind it, which for a Meta chord on a
+graphical frame is `cooked--build-meta-overlay'.  A sequence such as `C-x C-f'
+is refused, since the maps forward one event at a time and never see a second."
   (let ((keys (kbd key)))
-    (unless (and (stringp keys) (= (length keys) 1) (< (aref keys 0) 128))
-      (error "cooked: %S does not name a single unmodified control character" key))
+    (unless (= (length keys) 1)
+      (error "cooked: %S does not name a single key" key))
     (aref keys 0)))
 
 (defun cooked--control-chord-events (exceptions)
@@ -91,16 +93,16 @@ With no protocol they send what xterm sends: the key itself where Control
 makes no byte, and the control byte where it does.  A terminal frame never
 produces these events, so nothing changes there.
 
-Those that stand in for an entry of EXCEPTIONS are left out, as is the one
-standing in for `cooked--escape-key\=': `C-S-g\=' is `C-g\=' with a shift Emacs
-would otherwise translate away, and forwarding it would take the key back from
-the binding the exception was made to keep."
+The events in EXCEPTIONS are left out, and so are those that stand in for one,
+as is the one standing in for `cooked--escape-key\=': `C-S-g\=' is `C-g\=' with a
+shift Emacs would otherwise translate away, and forwarding it would take the key
+back from the binding the exception was made to keep."
   (let (events)
     ;; Not the capitals: Emacs spells Control on one as `C-S-' and the
     ;; lowercase letter, which is the shifted chord the letters below add.
     (dolist (char (append (number-sequence ?\s ?@) (number-sequence ?\[ ?~)))
       (let ((ctrl (event-apply-modifier char 'control 26 "C-")))
-        (when (>= ctrl 128)
+        (when (and (>= ctrl 128) (not (memq ctrl exceptions)))
           (push ctrl events))
         ;; The shift bit by hand: `event-apply-modifier' shifts a control
         ;; character by upcasing it, which makes `C-a' into `C'.  Not `C-S-i'
@@ -113,21 +115,26 @@ the binding the exception was made to keep."
           (push (logior ctrl (ash 1 25)) events))))
     (nreverse events)))
 
-(defun cooked--build-passthrough-map (exceptions &optional reserve-meta)
+(defun cooked--build-passthrough-map (exceptions &optional reserve-chords)
   "A keymap that forwards to the child, except EXCEPTIONS and `C-c'.
-EXCEPTIONS is a list of character codes, as from `cooked--exception-code';
-each is simply left unbound here, so it falls through to whatever
+EXCEPTIONS is a list of events, as from `cooked--exception-event'; each is
+simply left unbound here, so it falls through to whatever
 `cooked-mode-map'/`comint-mode-map'/`global-map' -- or `evil', if it has
 installed a higher-priority keymap of its own -- would otherwise do with it.
 
-With RESERVE-META, ESC and every Meta-modified key are left unbound too.  That
-is one exception expressed as a rule rather than a list, and it has to be:
-`kbd' spells Meta as a modifier bit on a GUI frame and as a leading ESC on a
-terminal, so no list of character codes can name `M-x' in both -- while leaving
-ESC itself unbound makes Emacs' own `meta-prefix-char' handling the thing that
-answers, in whichever spelling the frame produces.  The cost is the one thing
-ESC is otherwise good for here: a forwarded ESC has no latency, and a prefix
-key waits.  See `cooked-semi-map', which is where that trade is worth making.
+With RESERVE-CHORDS, ESC, every Meta-modified key and every Control chord no
+character code names are left unbound too.  Those are the chords Emacs
+packages live on -- `M-x', a leader on `M-SPC', embark on `C-;', a mark on
+`C-SPC' -- and holding them back is one exception expressed as a rule rather
+than a list.  For Meta it has to be: `kbd' spells Meta as a modifier bit on a
+GUI frame and as a leading ESC on a terminal, so no list of character codes can
+name `M-x' in both -- while leaving ESC itself unbound makes Emacs' own
+`meta-prefix-char' handling the thing that answers, in whichever spelling the
+frame produces.  The cost is the one thing ESC is otherwise good for here: a
+forwarded ESC has no latency, and a prefix key waits.  See `cooked-semi-map',
+which is where that trade is worth making.  The Control chords cost nothing on a
+terminal frame, which never produces them: there `C-SPC' is NUL and still
+forwards.
 
 Without it the Meta space is not bound here either, for the same reason read
 the other way: ESC being a key of its own is what stops it being the prefix
@@ -138,20 +145,22 @@ where Meta chords arrive as two forwarded bytes, and is why
     (define-key map [remap self-insert-command] #'cooked-send-key)
     (dolist (code (number-sequence 0 127))
       (unless (or (eq code cooked--escape-key)
-                  (and reserve-meta (eq code meta-prefix-char))
+                  (and reserve-chords (eq code meta-prefix-char))
                   (memq code exceptions))
         (define-key map (vector code) #'cooked-send-key)))
-    (dolist (event (cooked--control-chord-events exceptions))
-      (define-key map (vector event) #'cooked-send-key))
+    (unless reserve-chords
+      (dolist (event (cooked--control-chord-events exceptions))
+        (define-key map (vector event) #'cooked-send-key)))
     ;; Bind the modified variants explicitly, not for completeness but for
     ;; correctness: when `S-return' has no binding Emacs shift-translates it to
     ;; `return' and runs *that* binding, with `last-command-event' already flattened.
     ;; By the time `cooked-send-key' looks, the shift is gone and unrecoverable.
     (dolist (entry cooked--key-encodings)
       (dolist (prefix '("" "S-" "C-" "M-" "C-S-" "M-S-" "C-M-"))
-        (unless (and reserve-meta (string-search "M-" prefix))
-          (define-key map (vector (intern (concat prefix (symbol-name (car entry)))))
-                      #'cooked-send-key))))
+        (let ((event (intern (concat prefix (symbol-name (car entry))))))
+          (unless (or (and reserve-chords (string-search "M-" prefix))
+                      (memq event exceptions))
+            (define-key map (vector event) #'cooked-send-key)))))
     ;; Everything else cooked binds under `C-c' -- its own commands, and the
     ;; ones that write to the child out of band -- lives on `cooked-mode-map'
     ;; instead of here, so it survives peeking too; see the `set-keymap-parent'
@@ -168,8 +177,8 @@ customization because `cooked--replace-keymap\=' rebuilds a map\='s bindings
 without replacing the map itself -- so a cached overlay\='s parent stays the
 map the user just changed.")
 
-(defun cooked--build-meta-overlay (map)
-  "A child of MAP that forwards the Meta space as well.
+(defun cooked--build-meta-overlay (map &optional exceptions)
+  "A child of MAP that forwards the Meta space as well, but for EXCEPTIONS.
 
 MAP itself cannot carry that space.  `define-key\=' and `lookup-key\=' both
 translate a Meta character into ESC plus the character, so `M-t\=' is stored and
@@ -187,15 +196,18 @@ actually sends, which only decays to a bare ESC byte when nothing binds it.
 also leave them out: they begin the escape sequences every other key arrives
 as, and a binding here would swallow one that had not been decoded yet.
 
-The whole Meta space forwards, MAP\='s exceptions included.  Those name
-unmodified control characters -- `C-g\=', `C-u\=' -- and reserving `M-C-g\='
-along with them would take a key from the child on the strength of a binding
-Emacs does not have."
+EXCEPTIONS are MAP\='s, as events, and only a Meta chord among them is kept
+back here: an exception of `M-x\=' leaves `ESC x\=' unbound, so the chord
+falls through to Emacs.  The rest of the Meta space forwards whatever MAP keeps.
+An exception of `C-g\=' names an unmodified control character, and reserving
+`C-M-g\=' along with it would take a key from the child on the strength of a
+binding Emacs does not have."
   (let ((overlay (make-sparse-keymap))
         (esc (make-sparse-keymap)))
     (dolist (code (append (number-sequence 0 127)
                           (cooked--control-chord-events nil)))
-      (unless (memq code '(?O ?\[))
+      (unless (or (memq code '(?O ?\[))
+                  (memq (event-apply-modifier code 'meta 27 "M-") exceptions))
         (define-key esc (vector code) #'cooked-send-meta-key)))
     (define-key overlay (vector meta-prefix-char) esc)
     (define-key overlay [escape] #'cooked-send-key)
@@ -223,6 +235,18 @@ about, and cleared by `cooked--state-keymap\=' before it chooses -- so the
 record cannot drift from what was actually installed by anyone adding a state
 that forwards or by anyone taking one away.")
 
+(defvar cooked-raw-map)                 ; Both below, the map built from the option.
+(defvar cooked-raw-exceptions)
+
+(defun cooked--meta-exceptions (map)
+  "The exceptions, as events, that MAP\='s Meta overlay has to leave out.
+
+Only `cooked-raw-map\=' has any.  `cooked-alt-map\=' and `cooked-command-map\='
+keep nothing back by design, and `cooked-semi-map\=' is never worn through an
+overlay, since it holds the whole Meta space back itself."
+  (and (eq map cooked-raw-map)
+       (mapcar #'cooked--exception-event cooked-raw-exceptions)))
+
 (defun cooked--forwarding-map (map)
   "MAP as it should be worn on the selected frame.
 
@@ -243,7 +267,8 @@ buffer has just been selected in and asks for a refresh only when they differ."
     (if (eq type 'text)
         map
       (or (cdr (assq map cooked--meta-overlays))
-          (let ((overlay (cooked--build-meta-overlay map)))
+          (let ((overlay (cooked--build-meta-overlay
+                          map (cooked--meta-exceptions map))))
             (push (cons map overlay) cooked--meta-overlays)
             overlay)))))
 
@@ -263,21 +288,27 @@ silently drop it; save and restore it around the replacement."
     (setcdr map (cdr fresh))
     (set-keymap-parent map parent)))
 
-(defun cooked--passthrough-setter (map &optional reserve-meta)
+(defun cooked--passthrough-setter (map &optional reserve-chords)
   "A `defcustom\=' `:set\=' rebuilding MAP as a passthrough map for its value.
 
-The value is a list of key strings naming the control characters to keep for
-Emacs; RESERVE-META means what it does in `cooked--build-passthrough-map\='.
-MAP is named rather than passed, and checked for at call time, because the maps
-are defined below the options that configure them -- the option has to exist
-first for the `defvar\=' to read it."
+The value is a list of key strings naming the keys to keep for Emacs;
+RESERVE-CHORDS means what it does in `cooked--build-passthrough-map\='.  MAP is
+named rather than passed, and checked for at call time, because the maps are
+defined below the options that configure them -- the option has to exist first
+for the `defvar\=' to read it.
+
+A Meta overlay already built for MAP is rebuilt in place too, since a Meta chord
+among the exceptions is left out there rather than in MAP."
   (lambda (symbol value)
     (set-default symbol value)
     (when (and (boundp map) (keymapp (symbol-value map)))
-      (cooked--replace-keymap
-       (symbol-value map)
-       (cooked--build-passthrough-map (mapcar #'cooked--exception-code value)
-                                      reserve-meta)))))
+      (let ((events (mapcar #'cooked--exception-event value))
+            (keymap (symbol-value map)))
+        (cooked--replace-keymap
+         keymap (cooked--build-passthrough-map events reserve-chords))
+        (when-let* ((overlay (cdr (assq keymap cooked--meta-overlays))))
+          (cooked--replace-keymap
+           overlay (cooked--build-meta-overlay keymap events)))))))
 
 (defcustom cooked-raw-exceptions '("C-g" "C-x" "C-h" "C-u" "C-l")
   "Keys kept for Emacs during a raw read outside the alternate screen.
@@ -300,19 +331,18 @@ their own point of view, just sitting at an ordinary prompt, so losing the
 universal quit key outright is a worse trade than reserving a handful of
 control characters most raw programs do not need for themselves.
 
-Each entry names a single control character via `kbd', e.g. \"C-g\".  \\`C-y\=' is
-deliberately not offered here even though it would otherwise be a plausible
-candidate: it is both vim's scroll-up-a-line and readline's own yank, real
-bindings a user relying on the child is actively using.  `M-x'/`M-o'/`M-y'
-are not offerable at all, for a different reason -- they are Meta-modified
-letters, which this list has no way to reach in the first place: a bare ESC
-byte is forwarded the instant it is pressed, for the sake of a real
-terminal's Escape key having no latency, so on a terminal frame `ESC' and the
-letter that follows are two independently-forwarded bytes before Emacs' own
-Meta-prefix logic ever runs.  A graphical frame reaches the same place by a
-different route, `cooked--build-meta-overlay' binding the Meta space the one
-way a keymap can.  `C-c M-x' remains the one escape hatch guaranteed to work
-regardless of frame type.
+Each entry names a single key via `kbd', e.g. \"C-g\", or \"C-;\" for a Control
+chord a graphical frame would otherwise forward.  \\`C-y\=' is deliberately not
+offered here even though it would otherwise be a plausible candidate: it is both
+vim's scroll-up-a-line and readline's own yank, real bindings a user relying on
+the child is actively using.  A Meta chord such as \"M-x\" is accepted, and is
+kept on a graphical frame, where `cooked--build-meta-overlay' is what binds the
+Meta space and leaves it out.  On a terminal frame it cannot be: a bare ESC byte
+is forwarded the instant it is pressed, for the sake of a real terminal's Escape
+key having no latency, so `ESC' and the letter that follows are two
+independently-forwarded bytes before Emacs' own Meta-prefix logic ever runs.
+`C-c M-x' remains the one escape hatch guaranteed to work regardless of frame
+type.
 
 `cooked-send-literal-key' (\\`C-c C-q') sends any one key through to the child
 regardless of this list, for a raw program that wants one of these keys back."
@@ -321,7 +351,7 @@ regardless of this list, for a raw program that wants one of these keys back."
   :group 'cooked)
 
 (defvar cooked-raw-map
-  (cooked--build-passthrough-map (mapcar #'cooked--exception-code cooked-raw-exceptions))
+  (cooked--build-passthrough-map (mapcar #'cooked--exception-event cooked-raw-exceptions))
   "Keymap while the child is doing a raw, non-alt-screen read.")
 
 (defvar cooked-command-map
@@ -347,12 +377,14 @@ to `evil-emacs-state') is the way to reach Emacs here, rather than a static
 list that would collide with whatever the program wants those keys for.")
 
 (defcustom cooked-semi-exceptions '("C-g" "C-x" "C-h" "C-u" "C-l")
-  "Control characters `cooked-semi-map' keeps for Emacs.
+  "Keys `cooked-semi-map' keeps for Emacs, besides the chords it always keeps.
 
 The same idea as `cooked-raw-exceptions', asked in a different place: that
 list hedges a state cooked is unsure about, this one describes a state the
-user has chosen.  ESC and the whole Meta space are held back as well, and are
-not listed here -- see `cooked-semi-map'.
+user has chosen.  ESC, the whole Meta space and the Control chords no character
+names -- `C-;', `C-SPC' on a graphical frame -- are held back as well, and are
+not listed here -- see `cooked-semi-map'.  Entries are `kbd' strings naming one
+key each, as for `cooked-raw-exceptions'.
 
 `cooked-send-literal-key' (\\`C-c C-q') sends any one of these through to the
 child anyway, for the program that wants it back."
@@ -362,7 +394,7 @@ child anyway, for the program that wants it back."
 
 (defvar cooked-semi-map
   (cooked--build-passthrough-map
-   (mapcar #'cooked--exception-code cooked-semi-exceptions) t)
+   (mapcar #'cooked--exception-event cooked-semi-exceptions) t)
   "Keymap for forwarding that stops short of taking Emacs away.
 
 The other passthrough maps answer \"the child needs every key\" and reserve `C-c'
@@ -372,15 +404,17 @@ state you can leave: if ESC forwards, the way out is gone, and if every Meta
 chord forwards, so is `M-x' and so is the non-normal leader most `evil'
 configurations put on `M-SPC'.
 
-So this map holds back three things: `cooked-semi-exceptions', ESC, and --
-because ESC unbound is what makes Emacs treat it as `meta-prefix-char' again
--- the entire Meta space, without naming a key of it.  Everything else still
-goes to the child, `C-a'/`C-e'/`C-k'/`C-r' included, which is the half that
-matters: those are readline's and vim's, and a rule of \"Emacs wins wherever
-Emacs has a binding\" would have taken all of them, `global-map' binding
-almost every control character.  That is the same conclusion `vterm' and
-`eat' reached -- `vterm-keymap-exceptions' and `eat-semi-char-non-bound-keys'
-are both explicit lists over an otherwise total map, for this reason.
+So this map holds back four things: `cooked-semi-exceptions'; ESC; the entire
+Meta space, because ESC unbound is what makes Emacs treat it as
+`meta-prefix-char' again; and the Control chords a graphical frame has with no
+character behind them, which is where embark, avy and a mark on `C-SPC' live.
+Everything else still goes to the child, `C-a'/`C-e'/`C-k'/`C-r' included,
+which is the half that matters: those are readline's and vim's, and a rule of
+\"Emacs wins wherever Emacs has a binding\" would have taken all of them,
+`global-map' binding almost every control character.  That is the same
+conclusion `vterm' and `eat' reached -- `vterm-keymap-exceptions' and
+`eat-semi-char-non-bound-keys' are both explicit lists over an otherwise total
+map, for this reason.
 
 The cost is ESC's latency: unbound here, it waits to see whether a Meta chord
 follows.  That is why the full maps keep forwarding it instead, and why this

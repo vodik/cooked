@@ -4691,6 +4691,41 @@ every layer invited onto that hook inherits it."
       (should (cooked-tests--settle (lambda () (not (eq seen 'never)))))
       (should (equal seen '(t t))))))
 
+(ert-deftest cooked-semi-map-leaves-emacs-its-control-chords ()
+  "Evil insert state keeps `C-;' and `C-SPC' for Emacs; the raw map forwards them.
+
+On a graphical frame those are events no character code names, and binding them
+in every passthrough map took them from embark, avy and the mark in the one map
+that exists to keep Emacs reachable.  The raw map still forwards them, so a
+protocol can spell them, and an exception of \"C-;\" takes one back: before, the
+exception lists accepted nothing outside 0-127."
+  (dolist (key '("C-;" "C-SPC" "C-S-a"))
+    (should-not (eq (lookup-key cooked-semi-map (kbd key)) #'cooked-send-key))
+    (should (eq (lookup-key cooked-raw-map (kbd key)) #'cooked-send-key)))
+  (should-error (cooked--exception-event "C-x C-f"))
+  (let ((saved cooked-raw-exceptions)
+        (global (current-global-map))
+        (map (make-composed-keymap nil (current-global-map))))
+    (define-key map (kbd "C-;") #'ignore)
+    (unwind-protect
+        (progn
+          (use-global-map map)
+          (customize-set-variable 'cooked-raw-exceptions
+                                  (append saved '("C-;" "M-o")))
+          (should-not (lookup-key cooked-raw-map (kbd "C-;")))
+          ;; A Meta chord is kept where a graphical frame binds it, and the
+          ;; Meta chords around it still forward.
+          (let ((overlay (cooked--build-meta-overlay
+                          cooked-raw-map (cooked--meta-exceptions cooked-raw-map))))
+            (should-not (eq (lookup-key overlay (kbd "M-o")) #'cooked-send-meta-key))
+            (should (eq (lookup-key overlay (kbd "M-p")) #'cooked-send-meta-key)))
+          (cooked-tests--with-echoing-child ""
+            (should (eq (cooked--policy) 'raw))
+            (should (eq (key-binding (kbd "C-;")) #'ignore))))
+      (customize-set-variable 'cooked-raw-exceptions saved)
+      (use-global-map global)))
+  (should (eq (lookup-key cooked-raw-map (kbd "C-;")) #'cooked-send-key)))
+
 (ert-deftest cooked-mode-is-special-enough-to-be-left-alone ()
   "What excuses cooked from every globalized whitespace tidier at once.
 
