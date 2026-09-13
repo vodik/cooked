@@ -2112,6 +2112,24 @@ key at all -- and one that some other binding wants still does."
         (define-key overriding-terminal-local-map [mouse-movement] #'forward-char)
         (should (equal (vconcat (read-key-sequence nil)) (vector movement)))))))
 
+(ert-deftest cooked-hover-repeats-do-not-count-lines ()
+  "Emacs sends a movement per pixel over an image, so a pointer crossing a
+decorated panel arrives many times in one cell.  The cell is a `count-lines\='
+away, and a repeat of the glyph just measured does not pay it again."
+  (cooked-tests--with-hover
+    (let ((movement (list 'mouse-movement (cooked-tests--posn from)))
+          (counted 0))
+      (cl-letf* ((count (symbol-function 'count-lines))
+                 ((symbol-function 'count-lines)
+                  (lambda (&rest args)
+                    (setq counted (1+ counted))
+                    (apply count args))))
+        (should (cooked--hover-report (event-start movement)))
+        (should (> counted 0))
+        (setq counted 0)
+        (should (cooked--hover-report (event-start movement)))
+        (should (= counted 0))))))
+
 (ert-deftest cooked-literal-key-skips-the-pointer-moving ()
   "`read-key\=' returns a movement like any key, so with hover on the pointer
 drifting while \\`C-c C-q' waited was the key sent, and the real one was lost."

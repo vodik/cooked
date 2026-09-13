@@ -682,6 +682,29 @@ was skipped."
                                      (cooked--mouse-offset posn))))))
       (push event unread-command-events))))
 
+(defvar-local cooked--hover-glyph nil
+  "The glyph hover last measured and the cell it was, as (KEY . CELL).
+
+KEY is what the cell was derived from: the buffer\='s modification tick, the
+screen\='s start, the grid\='s width, and the position and cell offset
+`cooked--mouse-glyph\=' answered.  While all of those hold, the cell does too,
+and `cooked--hover-cell\=' hands it back without counting the lines above it.")
+
+(defun cooked--hover-cell (glyph)
+  "The screen cell of GLYPH, a `cooked--mouse-glyph\=' answer, remembered.
+
+Emacs sends a movement per pixel over an image and per column past a row\='s
+end, so a pointer crossing a decorated panel arrives dozens of times in one
+cell.  `cooked--report-motion\=' drops every repeat, but only after being handed
+a cell, and a cell is a `count-lines\=' from the top of the screen.  Asking
+whether the glyph is the one just measured is a comparison of five integers."
+  (let ((key (list (buffer-chars-modified-tick) (cooked--screen-start-position)
+                   cooked--cols (car glyph) (cadr glyph))))
+    (if (equal key (car cooked--hover-glyph))
+        (cdr cooked--hover-glyph)
+      (cdr (setq cooked--hover-glyph
+                 (cons key (cooked--mouse-cell nil glyph)))))))
+
 (defun cooked--hover-report (posn)
   "Report POSN as hover to the child under it, and say whether it takes hover.
 
@@ -695,13 +718,14 @@ never opted into.
 
 A pointer over no text -- past the last row, over the fringe -- reports nothing
 rather than a cell it is not in.  Repeats of the last cell are dropped by
-`cooked--report-motion\='."
+`cooked--report-motion\=', and repeats of the last glyph before that, by
+`cooked--hover-cell\='."
   (when-let* ((target (cooked--mouse-buffer (posn-window posn))))
     (with-current-buffer target
       (when (and cooked-mouse-hover-motion cooked--mouse-grab
                  (cooked-mouse-state-motion cooked--mouse-state))
         (when-let* ((glyph (cooked--mouse-glyph posn))
-                    (cell (cooked--mouse-cell posn glyph)))
+                    (cell (cooked--hover-cell glyph)))
           (cooked--report-motion (car cell) (cdr cell)
                                  (cooked--mouse-offset posn glyph) t))
         t))))
