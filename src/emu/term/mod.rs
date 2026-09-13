@@ -643,6 +643,20 @@ impl Term {
         }
     }
 
+    /// A terminal whose rendition table looks for ids to free once LIMIT renditions are
+    /// live, rather than at the four thousand an ordinary one holds.
+    ///
+    /// For a property test to reach id reuse at all: on an 8x12 grid a script would need
+    /// thousands of distinct pens before a collection ran, and with a limit of 4 one runs
+    /// every few `SGR`s, so an id a collection wrongly freed is soon handed to another
+    /// rendition while something still names it.
+    #[doc(hidden)]
+    pub fn with_style_limit(rows: usize, cols: usize, limit: usize) -> Self {
+        let mut term = Self::new(rows, cols);
+        term.state.styles = StyleStore::with_limit(limit);
+        term
+    }
+
     /// Parse BYTES, reporting whether they changed anything Emacs would draw.
     ///
     /// The answer lets the reader thread avoid waking Emacs for bytes that change nothing,

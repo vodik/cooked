@@ -233,15 +233,24 @@ impl State {
         }
         let (style, link) = (self.pen.style(), self.pen.link());
         let erase = style.erase();
+        let text = self.style_id(style);
         let pen = Pen {
-            style: self.style_id(style),
+            style: text,
             link,
             // Most pens have no background, and erase to the default rendition, which
             // needs no lookup at all.
             erase: if erase == Style::default() {
                 StyleId::DEFAULT
             } else {
-                self.style_id(erase)
+                // Given an id without a collection, even on a full table. Nothing holds
+                // TEXT until the pen is remembered, so a collection here would free it and
+                // hand the slot to the erase: `SGR 1;41` on a full table wrote its text
+                // under an id that meant the erase rendition. One id past the limit is
+                // collected for by the next rendition instead.
+                match self.styles.lookup(erase) {
+                    Some(id) => id,
+                    None => self.styles.insert(erase),
+                }
             },
         };
         self.pen.remember(pen);

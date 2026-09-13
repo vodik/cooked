@@ -95,6 +95,19 @@ impl Default for StyleStore {
 }
 
 impl StyleStore {
+    /// A store that looks for ids to free once LIMIT renditions are live, rather than at
+    /// [`STYLE_TABLE_CAPACITY`].
+    ///
+    /// For a test that wants collections to happen every few writes instead of once in
+    /// four thousand renditions: a limit of 4 puts an id's reuse within reach of a script
+    /// a few steps long. The limit still grows as [`StyleStore::collect`] describes.
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
+    }
+
     /// The id STYLE already has, if it has one.
     pub(crate) fn lookup(&mut self, style: Style) -> Option<StyleId> {
         let key = StyleKey::of(style);

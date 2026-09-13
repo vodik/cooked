@@ -395,6 +395,32 @@ fn a_rendition_per_character_stays_bounded_and_every_run_keeps_its_colour() {
     );
 }
 
+/// A pen with a background needs two ids, one for its text and one for the blank an erase
+/// leaves, and a collection taken for the second must not free the first.
+///
+/// With a limit of 8 and seven renditions live, `SGR 1;41` gives the bold text a slot of
+/// its own, which fills the table, and then collects for the erase rendition. Nothing held
+/// the text's id yet, so the collection freed it, the text was written under an id no drain
+/// announced, and the next rendition to be given one would have recoloured it.
+#[test]
+fn a_pen_taken_as_the_table_fills_keeps_its_text_rendition() {
+    let mut t = Term::with_style_limit(1, 20, 8);
+    t.feed(b"\x1b[31mx\x1b[32mx\x1b[33mx\x1b[34mx\x1b[35mx\x1b[36mx\x1b[0m");
+    t.drain();
+    t.feed(b"\x1b[H\x1b[2K\x1b[1;41my");
+    let delta = t.drain();
+    let run = &delta.rows[0].runs[0];
+    assert_eq!(run.text, "y");
+    let announced = delta
+        .styles
+        .iter()
+        .find(|(id, _)| *id == run.style)
+        .map(|(_, style)| *style);
+    let style = announced.unwrap_or_else(|| panic!("{:?} was never announced", run.style));
+    assert_eq!(style.bg, Color::Indexed(1));
+    assert!(style.attrs.contains(Attrs::BOLD), "{style:?}");
+}
+
 #[test]
 fn an_underline_colour_and_a_link_reach_the_scrollback_with_their_characters() {
     let mut t = term(
