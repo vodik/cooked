@@ -2210,6 +2210,27 @@ level the last of them reported, which a reset in the meantime may have moved."
     (should cooked--reverse-screen)
     (should-not cooked--flash-timer)))
 
+(ert-deftest cooked-reverse-screen-on-a-tty-swaps-the-terminals-own-colours ()
+  "A text terminal that keeps its colours to itself is reversed by name.
+The remap is to `unspecified-bg\=' on `unspecified-fg\=', which Emacs draws in
+standout, rather than to the black and white `cooked--default-color\=' guesses.
+An OSC 11 background is still swapped as the colour it is.  The tty is
+simulated: batch Emacs crashes redisplaying a real tty frame with no colours."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (cl-letf (((symbol-function 'tty-type) (lambda (&rest _) "xterm-direct"))
+              ((symbol-function 'face-attribute)
+               (lambda (_face attribute &rest _)
+                 (if (eq attribute :foreground) "unspecified-fg" "unspecified-bg"))))
+      (let ((cooked-allow-color-set t)
+            (cooked--osc-bell-terminated t))
+        (cooked--set-reverse-screen t)
+        (should (equal (cooked-tests--reverse-remap)
+                       '(:foreground "unspecified-bg" :background "unspecified-fg")))
+        (let ((cooked--osc-code 11))
+          (cooked--osc-color '("#ff0000")))
+        (should (equal (cooked-tests--reverse-remap)
+                       '(:foreground "#ff0000" :background "unspecified-fg")))))))
+
 (ert-deftest cooked-reverse-screen-swaps-the-colors-the-child-set ()
   "An OSC 11 background is the one reversed, before the reversal and after it."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")

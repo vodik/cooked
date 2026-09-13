@@ -415,6 +415,27 @@ Every other kind is `cooked--default-color\=''s."
        (cooked--screen-color (if cooked--reverse-screen-level other kind))))
     (_ (cooked--default-color kind))))
 
+(defun cooked--reversible-color (kind)
+  "The color `cooked--apply-reverse-screen\=' swaps in for KIND.
+
+`cooked--screen-color\=', except on a text terminal that has not said what its
+default colors are.  There `cooked--default-color\=' can only guess black or
+white, but the names `unspecified-fg\=' and `unspecified-bg\=' stand for the
+terminal\='s own pair, and Emacs draws a face whose foreground is the default
+background in standout.  So the swap comes out as the terminal\='s real colors
+reversed: for example, light grey on black becomes black on light grey rather
+than black on white.  Checked by running `emacs -nw\=' under `script\=' against
+xterm-direct, where every cell of the remapped buffer went out under SGR 7."
+  (let ((name (if (eq kind 'foreground) "unspecified-fg" "unspecified-bg")))
+    (if (and (tty-type)
+             (not (alist-get kind cooked--color-remaps))
+             (equal (face-attribute 'default
+                                    (if (eq kind 'foreground) :foreground :background)
+                                    nil t)
+                    name))
+        name
+      (cooked--screen-color kind))))
+
 (defun cooked--apply-reverse-screen ()
   "Redraw the remap for `cooked--reverse-screen' against the colors of the moment.
 
@@ -433,8 +454,8 @@ newest."
   (mapc #'face-remap-remove-relative cooked--reverse-screen-remaps)
   (setq cooked--reverse-screen-remaps
         (when cooked--reverse-screen
-          (let ((foreground (cooked--screen-color 'foreground))
-                (background (cooked--screen-color 'background)))
+          (let ((foreground (cooked--reversible-color 'foreground))
+                (background (cooked--reversible-color 'background)))
             (list (face-remap-add-relative 'default :foreground background)
                   (face-remap-add-relative 'default :background foreground)
                   (face-remap-add-relative 'fringe :background foreground)))))
