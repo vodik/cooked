@@ -591,11 +591,12 @@ links. Fixed rather than filtered: a crate-root allow for the private-item
 class, and docs built with =--document-private-items= — without which rustdoc
 documents about four items and checks almost no links at all.
 
-** NEXT [#B] The evil blank-row bug, and what else evil edits
+** WIP [#B] The evil blank-row bug, and what else evil edits
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   none — found by the first bench fixture containing a blank row
-:BRANCH:   73b2a6d for the fix; the sweep is what remains
+:BRANCH:   cooked/whitespace-sweep
+:AGENT:    yes
 :END:
 *Fixed* (73b2a6d): entering evil insert state arms =evil-maybe-remove-spaces= on
 =post-command-hook= and leaving calls it, and it deletes the whitespace from a
@@ -1867,11 +1868,12 @@ and =font-lock-face= unconditionally, per =cooked-process.el:350=.
 Factor the =set_attribute= arm out of =term/csi.rs= so grid and stream share SGR
 decoding — the same instinct as ghostel's =style_face.zig=, on the Rust side.
 
-** TODO [#C] Prebuilt module download
+** WIP [#C] Prebuilt module download
 :PROPERTIES:
 :EFFORT:   2d
 :REPORT:   §3 "Prebuilt module download"; "The artifact has to carry terminfo"
-:BRANCH:
+:BRANCH:   cooked/prebuilt-module
+:AGENT:    yes
 :END:
 Port the sidecar read *before* =module-load= (so a stale =.so= is refused),
 atomic install-by-rename, never prompting at load time. Then do what ghostel
