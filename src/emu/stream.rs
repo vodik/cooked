@@ -75,6 +75,9 @@ use super::text::{self, Segmenter, Step, Width};
 /// another. 64k columns is far past any line a person will read and far short of
 /// anything that costs a modern machine a thought, and hitting it retires the line as if
 /// a newline had arrived, which is the failure mode that loses nothing.
+///
+/// Printing is not the only way to lengthen a line, so the cursor motions and the
+/// editing operators meet the cap too; see [`Stream::confine`].
 const MAX_LINE_COLUMNS: usize = 1 << 16;
 
 /// Where a tab stop falls. Fixed at eight rather than a table of them, because `CSI H`
@@ -280,6 +283,23 @@ impl Stream {
         if self.line.len() < columns {
             self.line.resize(columns, Column::default());
         }
+    }
+
+    /// Hold the line and the cursor to [`MAX_LINE_COLUMNS`], as a right margin would.
+    ///
+    /// Printing retires a line at the cap, but a line also grows without printing:
+    /// `CSI 65535 C` moves the cursor that far and `CSI 1 X` then pads out to it, and
+    /// `CSI 65535 @` opens a gap of that many blanks. Four of either is 36 bytes of
+    /// output for a quarter of a million 48-byte columns, doubled by the copy in
+    /// [`Stream::emitted`], and a crafted file `cat` in `M-x shell` repeats that until
+    /// Emacs is killed. So everything that is not a print ends here, and whatever it
+    /// pushed past the cap falls off the end, as text pushed past a terminal's right
+    /// margin does. One sequence can still reach twice the cap before this runs, since
+    /// its count is at most 65535; what can no longer happen is the next one building
+    /// on it.
+    fn confine(&mut self) {
+        self.line.truncate(MAX_LINE_COLUMNS);
+        self.col = self.col.min(MAX_LINE_COLUMNS);
     }
 
     /// Blank COUNT columns from AT with the pen's background, the `bce` rule.
@@ -629,6 +649,7 @@ impl Perform for Stream {
             // has already declined to serve.
             _ => {}
         }
+        self.confine();
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
@@ -687,6 +708,7 @@ impl Perform for Stream {
             // would be a grid with holes in it.
             _ => {}
         }
+        self.confine();
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
@@ -1072,7 +1094,27 @@ mod tests {
     }
 
     #[test]
-    fn a_line_that_never_ends_is_retired_before_it_can_grow_without_bound() {
+    fn no_cursor_motion_or_edit_grows_a_line_past_the_cap() {
+        // A gap opened four times over, the cursor sent far out by `CUF` and by tab stops
+        // with one blank written there: none of them prints, so none of them meets the
+        // retirement that printing does.
+        let hostile = [
+            "\x1b[65535@".repeat(4),
+            "\x1b[65535C".repeat(4) + "\x1b[1X",
+            "\x1b[65535G".to_string() + &"\t".repeat(1000) + "\x1b[1X",
+        ];
+        for bytes in hostile {
+            let mut filter = Filter::new();
+            filter.feed(bytes.as_bytes(), true);
+            assert!(filter.stream.line.len() <= MAX_LINE_COLUMNS);
+            assert!(filter.stream.emitted.len() <= MAX_LINE_COLUMNS);
+            let text: usize = filter.emission().runs.iter().map(|r| r.text.len()).sum();
+            assert!(text <= MAX_LINE_COLUMNS);
+        }
+    }
+
+    #[test]
+    fn a_printed_line_that_never_ends_is_retired_before_it_can_grow_without_bound() {
         let mut filter = Filter::new();
         let chunk = "x".repeat(MAX_LINE_COLUMNS + 16);
         filter.feed(chunk.as_bytes(), true);
