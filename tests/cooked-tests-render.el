@@ -2085,6 +2085,33 @@ screen, which is worse than the repaint the deferral exists to avoid."
         (cooked--sync-size)
         (should (> resizes 0))))))
 
+(ert-deftest cooked-a-glyph-that-already-fits-is-left-entirely-alone ()
+  "The guard whose absence misrendered htop, btop and tree.
+
+Dropping it looks harmless: a glyph that fits needs no *scaling*, and
+`cooked--glyph-scale\=' answers nil for it either way.  What it also needs is no
+*claim*, and that is what went wrong.  A box-drawing character has exactly
+cell-shaped proportions -- 9 pixels over an ascent and descent of 20, against a
+cell of 9 over 20 -- so the claim test compared two equal aspects, answered yes
+on the `>=\=', took the cell after it and hid the space living there.  Every
+line of `tree\=' output begins `│ \=' and every one of them did it: measured, 8
+display properties and 4 hidden spaces over three lines.
+
+So this asserts the *absence* of a decision, which is the only thing that can
+catch it -- the text was never wrong, only what was hung on it."
+  (let ((default '(15 5)))
+    ;; Exactly its cell in all three dimensions: nothing to improve.
+    (should (cooked--glyph-fits-p '(9 15 5 15) 9 default))
+    ;; A wide glyph exactly filling two cells.
+    (should (cooked--glyph-fits-p '(18 15 5 15) 18 default))
+    ;; Any one dimension off and it is not this function's business any more.
+    (should-not (cooked--glyph-fits-p '(10 15 5 15) 9 default))
+    (should-not (cooked--glyph-fits-p '(9 18 5 15) 9 default))
+    (should-not (cooked--glyph-fits-p '(9 15 9 15) 9 default))
+    ;; Under-filling is not fitting either -- that is the CJK case, which does
+    ;; want the slot held at its budgeted width.
+    (should-not (cooked--glyph-fits-p '(15 15 5 15) 18 default))))
+
 (provide 'cooked-tests-render)
 ;;; cooked-tests-render.el ends here
 

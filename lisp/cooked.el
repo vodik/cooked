@@ -2160,6 +2160,30 @@ compose rule, and which therefore answers 0 for both without complaining."
            (list (aref glyph 4) (aref info 4) (aref info 5) (aref info 2)))
          metrics))))
 
+(defun cooked--glyph-fits-p (measured slot default)
+  "Whether MEASURED already sits inside SLOT pixels and DEFAULT\='s metrics.
+
+ghostel\='s first act in `adjustGlyph\=' and the guard whose absence broke htop,
+btop and tree: it returns before doing anything at all when the glyph\='s width
+is exactly its slot and its ascent and descent are exactly the default face\='s.
+
+Dropping it looks harmless, because a glyph that fits needs no *scaling* --
+`cooked--glyph-scale\=' answers nil for it either way.  What it also needs is no
+*claim*, and that is what went wrong.  A box-drawing character has precisely
+cell-shaped proportions -- 9 pixels over an ascent and descent of 20, against a
+cell of 9 over 20 -- so `cooked--glyph-claims-next-cell-p\=' compares two equal
+aspects, answers yes on the `>=\=', takes the cell after it and hides the space
+living there.  In `tree\=' output every line begins `│ \=' and every one of them
+did it.
+
+So the question this asks is not \"can it be improved\" but \"is anything wrong
+with it\", and nothing else runs until the answer is no."
+  (pcase-let ((`(,width ,ascent ,descent ,_) measured)
+              (`(,default-ascent ,default-descent) default))
+    (and (eql width slot)
+         (eql ascent default-ascent)
+         (eql descent default-descent))))
+
 (defun cooked--glyph-scale (measured slot default)
   "The scale that fits MEASURED into SLOT pixels, or nil if it already fits.
 
@@ -2299,12 +2323,17 @@ the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
                ;; whatever is still over.  A glyph given two cells is scaled
                ;; less, or not at all, and the leftover gap is what scaling
                ;; costs -- so the cheapest gap is the one never opened.
-               (claim (and measured default
+               ;; Nothing at all for a glyph that already fits, which is the
+               ;; overwhelming majority and every character of a TUI's borders.
+               (fits (and measured default
+                          (cooked--glyph-fits-p
+                           measured (* (frame-char-width) cells) default)))
+               (claim (and measured default (not fits)
                            (= cells 1)
                            (cooked--glyph-claims-next-cell-p
                             measured from to end default (frame-char-width))))
                (cells (if claim 2 cells))
-               (scale (and measured default
+               (scale (and measured default (not fits)
                            (cooked--glyph-scale
                             measured (* (frame-char-width) cells) default))))
           (when (or claim (and scale (>= scale cooked-glyph-scale-floor)))
