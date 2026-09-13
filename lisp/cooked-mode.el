@@ -801,15 +801,6 @@ against the state it will actually run in."
         (when-let* ((equivalent (alist-get this-command cooked--child-equivalents)))
           (setq this-command equivalent))))))
 
-(defun cooked--set-mode (mode)
-  "Adopt MODE, switching keymaps and handling secret prompts on a change."
-  (unless (eq mode cooked--mode)
-    (setq cooked--mode mode)
-    (cooked--refresh-keymap)
-    (if (eq mode 'secret)
-        (cooked--schedule-secret)
-      (cooked--cancel-secret))))
-
 (defcustom cooked-state-change-hook nil
   "Hook run in the session's buffer after who owns the keyboard changes.
 
@@ -1531,91 +1522,6 @@ assumption on startup is that it has focus, and telling it so again is noise.")
   (cooked--dolist-buffers
     (when cooked--session
       (cooked--report-focus))))
-
-;;;; What happens when the child exits
-
-(defcustom cooked-kill-buffer-on-exit nil
-  "Whether the session buffer is killed when the child exits.
-
-nil keeps the buffer, exit status and all, which is the point of running the
-terminal inside Emacs: the transcript outlives the command.  t kills it,
-`on-success' kills it only for a zero status — the shell-in-a-window habit,
-where a failure is the one case you still want to read.  A function is called
-with the exit code and kills the buffer when it returns non-nil.
-
-The buffer is killed from a timer rather than mid-redraw, so `kill-buffer-hook'
-and anything watching the buffer list see an ordinary kill."
-  :type '(choice (const :tag "Keep the buffer" nil)
-                 (const :tag "Always kill it" t)
-                 (const :tag "Kill it only on a zero exit status" on-success)
-                 (function :tag "Function of the exit code"))
-  :group 'cooked)
-
-(defun cooked--kill-buffer-on-exit-p (code)
-  "Whether `cooked-kill-buffer-on-exit' wants the buffer killed for CODE."
-  (pcase cooked-kill-buffer-on-exit
-    ('nil nil)
-    ('on-success (eql code 0))
-    ((and (pred functionp) f) (funcall f code))
-    (_ t)))
-
-(defun cooked--stop-session ()
-  "Kill the child and close the wake pipe, leaving the buffer sessionless.
-
-Kill before closing the pipe.  The other order leaves the reader thread writing
-into a closed pipe -- harmless, since it blocks SIGPIPE -- but this order costs
-nothing.
-
-The child is killed rather than left to the garbage collector: clearing
-`cooked--session\=' only drops the last reference, and nothing guarantees a
-collection ever runs, so the child would keep going long after whatever reason
-there was to stop it.
-
-Idempotent, and both callers rely on that -- `cooked--on-exit\=' runs when the
-child reports its own exit and `cooked--cleanup\=' when the buffer is killed,
-and a session that exits and is then killed goes through both."
-  (when cooked--session (ignore-errors (cooked--kill cooked--session)))
-  (when cooked--wake (delete-process cooked--wake))
-  (setq cooked--session nil cooked--wake nil))
-
-(defun cooked--on-exit (code)
-  "Report that the child exited with CODE and stop the session."
-  ;; A child can die while still on the alt screen — killed from outside, or
-  ;; crashed mid-redraw — and nothing later would widen the buffer for it.
-  (setq cooked--alt nil)
-  (cooked--release-alt-pin)
-  ;; `cooked--scroll-windows' already ran for this drain and pinned whatever was
-  ;; then the buffer's true end to the bottom of every window that was following
-  ;; it -- this call is what appends past that end, from entirely outside that
-  ;; machinery, and stranding the line it adds is the same bug
-  ;; `cooked--pin-transcript-bottom' exists to prevent. Captured before the
-  ;; insert, and compared with the same slack-of-one `cooked--scroll-transcript'
-  ;; uses: a window whose point was already at the old end was following, and
-  ;; is owed the new one; a window scrolled up into history is left alone.
-  (let ((old-end (point-max)))
-    (cooked--with-child-edit
-      (save-excursion
-        (goto-char (point-max))
-        (insert (format "\n[exited %s]\n" code))))
-    (cooked--dolist-windows w (get-buffer-window-list nil nil t)
-      (when (>= (window-point w) (1- old-end))
-        (cooked--pin-transcript-bottom (list w)))))
-  ;; A child that dies mid-`getpass' -- interrupted from the buffer, killed from
-  ;; outside -- leaves a password prompt with nothing behind it.
-  (cooked--cancel-secret)
-  (cooked--stop-session)
-  ;; After the session is gone, so the mode is recomputed as nil: a child that
-  ;; exited while the buffer was suspended -- evil in normal state, or a
-  ;; deliberate peek -- would otherwise leave it read-only under `cooked-peek-map'
-  ;; with nothing left to thaw it.
-  (cooked--refresh-keymap)
-  ;; Deferred: this runs from inside the drain, which keeps working with the
-  ;; buffer and its locals after we return.  Killing here would pull them out
-  ;; from under it, and would run `kill-buffer-hook' — arbitrary user code —
-  ;; halfway through a redraw.
-  (when (cooked--kill-buffer-on-exit-p code)
-    (let ((buffer (current-buffer)))
-      (run-at-time 0 nil (lambda () (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 ;;;; Where the rest of Emacs goes looking for structure
 ;;
