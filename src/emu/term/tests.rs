@@ -2,7 +2,7 @@
 
 use super::*;
 // Not in the parent's imports: the SGR arm that used to set these bits moved to
-// `emu::sgr`, so nothing outside these tests names the type any more.
+// `emu::sgr`, and the one other name for it here is csi.rs's own import.
 use crate::emu::cell::Attrs;
 
 /// An RGBA buffer encoded the way the emulator would encode it.
@@ -2640,6 +2640,148 @@ fn a_kitty_query_is_answered_with_what_is_honoured() {
             .events
             .contains(&Event::Reply(b"\x1b[?1u".to_vec()))
     );
+}
+
+/// The style and underline colour of the run on row 0 whose text is TEXT.
+fn run_style(t: &Term, text: &str) -> (Style, Color) {
+    let runs = t.screen().row(0).unwrap().runs();
+    let run = runs.iter().find(|r| r.text == text).unwrap();
+    (run.style, run.underline)
+}
+
+/// A pop must put back every part of the pen, the side-table underline colour included,
+/// and not merely the parts a later SGR happened to touch.
+#[test]
+fn xtpushsgr_push_change_pop_restores_the_pen_exactly() {
+    let t = term(
+        2,
+        20,
+        b"\x1b[1;3;4:3;38;2;1;2;3;48;5;200;58;5;9ma\
+          \x1b[#{\x1b[0;7;32mb\x1b[#}c",
+    );
+    assert_eq!(run_style(&t, "a"), run_style(&t, "c"));
+    let (b, b_underline) = run_style(&t, "b");
+    assert_eq!(b.fg, Color::Indexed(2));
+    assert_eq!(b_underline, Color::Default);
+
+    // xterm's older spelling of the same pair.
+    let t = term(2, 20, b"\x1b[31ma\x1b[#p\x1b[32mb\x1b[#qc");
+    assert_eq!(run_style(&t, "a"), run_style(&t, "c"));
+}
+
+/// `CSI Pm # {` restores only what it names; the rest of the pen stays as changed.
+#[test]
+fn xtpushsgr_with_parameters_restores_only_what_it_names() {
+    let t = term(
+        2,
+        20,
+        b"\x1b[1;4;31;44ma\x1b[30;4#{\x1b[0;7;32;45mb\x1b[#}c",
+    );
+    let (c, _) = run_style(&t, "c");
+    assert_eq!(c.fg, Color::Indexed(1), "30 names the foreground");
+    assert!(c.attrs.contains(Attrs::UNDERLINE), "4 names the underline");
+    assert_eq!(c.bg, Color::Indexed(5), "the background was not named");
+    assert!(!c.attrs.contains(Attrs::BOLD), "bold was not named");
+    assert!(c.attrs.contains(Attrs::REVERSE), "reverse was not named");
+}
+
+/// Ten deep, as xterm is: the eleventh push is dropped, and a pop with nothing pushed
+/// leaves the pen alone.
+#[test]
+fn xtpushsgr_stack_is_bounded_and_pop_on_empty_is_harmless() {
+    let mut input = Vec::new();
+    for i in 1..=11 {
+        input.extend(format!("\x1b[38;5;{i}m\x1b[#{{").into_bytes());
+    }
+    input.extend(b"\x1b[38;5;99m\x1b[#}a");
+    let t = term(2, 20, &input);
+    assert_eq!(run_style(&t, "a").0.fg, Color::Indexed(10));
+
+    let t = term(2, 20, b"\x1b[31m\x1b[#}a");
+    assert_eq!(run_style(&t, "a").0.fg, Color::Indexed(1));
+}
+
+#[test]
+fn xtsave_restores_a_private_mode() {
+    let mut t = term(2, 8, b"\x1b[?1006h\x1b[?1006s\x1b[?1006l");
+    assert!(!t.mouse().sgr);
+    t.feed(b"\x1b[?1006r\x1b[?1006$p");
+    assert!(t.mouse().sgr);
+    assert!(
+        t.drain()
+            .events
+            .contains(&Event::Reply(b"\x1b[?1006;1$y".to_vec()))
+    );
+
+    // And the other direction: saved off, turned on, restored off.
+    let mut t = term(2, 8, b"\x1b[?2004s\x1b[?2004h\x1b[?2004r");
+    assert!(!t.bracketed_paste());
+    // The slot outlives a restore, as xterm's does.
+    t.feed(b"\x1b[?2004h\x1b[?2004r");
+    assert!(!t.bracketed_paste());
+}
+
+/// The case XTSAVE exists for: turn mouse reporting on, and put back exactly what was
+/// there -- which, with the tracking modes overlapping, flag-by-flag replay gets wrong.
+#[test]
+fn xtsave_restores_mouse_tracking_as_one_choice() {
+    let mut t = term(2, 8, b"\x1b[?1002h");
+    t.drain();
+    t.feed(b"\x1b[?1000;1002;1003;1006s\x1b[?1003;1006h\x1b[?1000;1002;1003;1006r");
+    let mouse = t.mouse();
+    assert!(mouse.click && mouse.drag && !mouse.motion && !mouse.sgr);
+    assert!(
+        t.drain().events.contains(&Event::Mouse(mouse)),
+        "Lisp is told the restored tracking"
+    );
+
+    let mut t = term(
+        2,
+        8,
+        b"\x1b[?1000;1002;1003s\x1b[?1003h\x1b[?1000;1002;1003r",
+    );
+    assert!(!t.mouse().enabled());
+    t.drain();
+    // A restore to the state already standing announces nothing.
+    t.feed(b"\x1b[?1000;1002;1003r");
+    assert!(
+        !t.drain()
+            .events
+            .iter()
+            .any(|e| matches!(e, Event::Mouse(_)))
+    );
+}
+
+/// A restore that changes nothing does nothing -- DECOM's `h`/`l` homes the cursor, and
+/// a restore is not a replay.
+#[test]
+fn xtrestore_of_an_unchanged_mode_does_not_move_the_cursor() {
+    let t = term(4, 8, b"\x1b[?6s\x1b[3;3H\x1b[?6r");
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (2, 2));
+}
+
+/// `CSI ? s` and `CSI ? r` are not SCOSC and DECSTBM, which have no private byte.
+#[test]
+fn xtsave_is_not_save_cursor_and_xtrestore_is_not_decstbm() {
+    let t = term(4, 8, b"\x1b[2;3H\x1b[?25s\x1b[4;4H\x1b[u");
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (3, 3));
+
+    let t = term(4, 8, b"\x1b[2;3r\x1b[3;3H\x1b[?25r");
+    assert_eq!((t.screen().cursor.row, t.screen().cursor.col), (2, 2));
+    assert_eq!((t.screen().region.top, t.screen().region.bottom), (1, 2));
+}
+
+/// Both stacks are negotiated state, and RIS is the child starting over.
+#[test]
+fn reset_clears_the_pen_stack_and_saved_modes() {
+    let mut t = term(2, 8, b"\x1b[31m\x1b[#{\x1b[?1006h\x1b[?1006s\x1bc");
+    t.feed(b"\x1b[32m\x1b[#}a\x1b[?1006r");
+    assert_eq!(run_style(&t, "a").0.fg, Color::Indexed(2));
+    assert!(!t.mouse().sgr, "no slot survives to restore");
+
+    let mut t = term(2, 8, b"\x1b[?1006s\x1b[?1006h");
+    t.feed(b"\x1bc\x1b[?1006h\x1b[?1006r");
+    assert!(t.mouse().sgr);
 }
 
 #[test]

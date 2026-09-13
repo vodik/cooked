@@ -76,6 +76,93 @@ dec_flags! {
 }
 
 use super::*;
+use crate::emu::cell::Attrs;
+
+/// One XTPUSHSGR: the pen as it stood, and which parts of it the matching pop puts back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PushedPen {
+    pen: Style,
+    /// `SGR 58`'s colour, pushed with the pen for the reason [`sgr::apply`] gives for
+    /// never holding one of the two back.
+    ///
+    /// [`sgr::apply`]: crate::emu::sgr::apply
+    underline: Color,
+    /// `None` for a bare push, which restores the whole pen.
+    ///
+    /// An `Option` rather than a selection with every part ticked, so that the common
+    /// case is one assignment and stays exact when [`Attrs`] grows a bit: a selection
+    /// written out part by part would silently leave a new attribute behind on pop.
+    parts: Option<PenParts>,
+}
+
+/// The attributes a selective `CSI Pm # {` names, in xterm's numbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PenParts {
+    /// The on/off attributes among [`PEN_FLAGS`].
+    flags: Attrs,
+    /// 4 and 21 alike. xterm keeps double underline as an attribute of its own; here it
+    /// is one of the underline's styles, so either number restores the style, and with
+    /// it the underline's colour, which has no number of its own in the selection.
+    underline: bool,
+    fg: bool,
+    bg: bool,
+}
+
+/// The attributes that are a single bit, which a selective pop copies bit by bit.
+const PEN_FLAGS: [Attrs; 7] = [
+    Attrs::BOLD,
+    Attrs::FAINT,
+    Attrs::ITALIC,
+    Attrs::BLINK,
+    Attrs::REVERSE,
+    Attrs::CONCEAL,
+    Attrs::STRIKE,
+];
+
+impl PenParts {
+    /// The selection a push's parameters name, or `None` when they name none at all.
+    ///
+    /// `CSI # {` arrives with no parameters or a single default 0, and both mean "all".
+    /// A list of numbers none of which xterm defines is still a selection -- of nothing
+    /// -- rather than a bare push, because the child did ask for something specific.
+    fn from_params(params: &Params) -> Option<Self> {
+        let codes: Vec<u16> = params.iter().filter_map(|p| p.first().copied()).collect();
+        if codes.iter().all(|&code| code == 0) {
+            return None;
+        }
+        let mut parts = Self::default();
+        for code in codes {
+            match code {
+                1 => parts.flags |= Attrs::BOLD,
+                2 => parts.flags |= Attrs::FAINT,
+                3 => parts.flags |= Attrs::ITALIC,
+                4 | 21 => parts.underline = true,
+                5 => parts.flags |= Attrs::BLINK,
+                7 => parts.flags |= Attrs::REVERSE,
+                8 => parts.flags |= Attrs::CONCEAL,
+                9 => parts.flags |= Attrs::STRIKE,
+                30 => parts.fg = true,
+                31 => parts.bg = true,
+                _ => {}
+            }
+        }
+        Some(parts)
+    }
+}
+
+/// What XTSAVE kept for one private mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SavedMode {
+    /// A mode that is on or off, restored through [`State::dec_mode`] like any `h`/`l`.
+    Flag(bool),
+    /// 1000, 1002 and 1003, which are not three flags but one choice of what to report.
+    ///
+    /// Saved whole, as xterm saves its single mouse-mode value for any of the three
+    /// numbers. Restoring them as flags cannot work: with 1002 on, 1000 reads as reset,
+    /// and replaying `1000 l` would clear the click reporting 1002 depends on. The
+    /// encoding bit, 1006, is a separate mode and is left out of this.
+    Tracking(Mouse),
+}
 
 impl State {
     pub(super) fn dec_mode(&mut self, mode: u16, on: bool) {
@@ -234,6 +321,117 @@ impl State {
         }
     }
 
+    /// XTSAVE, `CSI ? Pm s`, for one mode.
+    ///
+    /// Only a mode with a level to put back is saved: an unknown or declined mode has
+    /// none, 1048 is itself a save rather than a setting, and 2026 is the opening of a
+    /// frame, which restored later would hold redisplay for a frame nobody is drawing.
+    fn save_mode(&mut self, mode: u16) {
+        let value = match mode {
+            1000 | 1002 | 1003 => SavedMode::Tracking(self.modes.mouse),
+            1048 | 2026 => return,
+            _ => match self.dec_mode_state(mode) {
+                ModeReport::Set => SavedMode::Flag(true),
+                ModeReport::Reset => SavedMode::Flag(false),
+                _ => return,
+            },
+        };
+        let slots = &mut self.modes.saved_modes;
+        match slots.iter_mut().find(|(saved, _)| *saved == mode) {
+            Some(slot) => slot.1 = value,
+            None => slots.push((mode, value)),
+        }
+    }
+
+    /// XTRESTORE, `CSI ? Pm r`, for one mode.
+    ///
+    /// The slot is kept rather than consumed, as xterm keeps it, so a second restore puts
+    /// back the same value. And nothing happens when the mode already stands where it
+    /// was saved: a restore is a request for a state, not a replay of `h`/`l`, and
+    /// replaying would home the cursor for DECOM or announce a mouse change that is not
+    /// one.
+    fn restore_mode(&mut self, mode: u16) {
+        let Some(&(_, value)) = self
+            .modes
+            .saved_modes
+            .iter()
+            .find(|(saved, _)| *saved == mode)
+        else {
+            return;
+        };
+        match value {
+            SavedMode::Flag(on) => {
+                if self.dec_mode_state(mode) != ModeReport::from(on) {
+                    self.dec_mode(mode, on);
+                }
+            }
+            SavedMode::Tracking(saved) => {
+                let now = self.modes.mouse;
+                let restored = Mouse {
+                    sgr: now.sgr,
+                    ..saved
+                };
+                if restored != now {
+                    self.modes.mouse = restored;
+                    self.events.push(Event::Mouse(restored));
+                }
+            }
+        }
+    }
+
+    /// XTPUSHSGR, `CSI Pm # {`: keep the pen, or the parts of it PARAMS names.
+    ///
+    /// The pen and not the cursor, which is the whole difference from DECSC: a program
+    /// can colour a span and put back exactly the rendition it found, without knowing
+    /// what that was and without moving.
+    fn push_pen(&mut self, params: &Params) {
+        if self.modes.pen_stack.len() < SGR_STACK_LIMIT {
+            self.modes.pen_stack.push(PushedPen {
+                pen: self.pen,
+                underline: self.underline,
+                parts: PenParts::from_params(params),
+            });
+        }
+    }
+
+    /// XTPOPSGR, `CSI # }`. A pop with nothing pushed changes nothing.
+    fn pop_pen(&mut self) {
+        let Some(PushedPen {
+            pen,
+            underline,
+            parts,
+        }) = self.modes.pen_stack.pop()
+        else {
+            return;
+        };
+        let Some(parts) = parts else {
+            (self.pen, self.underline) = (pen, underline);
+            return;
+        };
+        for flag in PEN_FLAGS
+            .into_iter()
+            .filter(|&flag| parts.flags.contains(flag))
+        {
+            if pen.attrs.contains(flag) {
+                self.pen.attrs |= flag;
+            } else {
+                self.pen.attrs.remove(flag);
+            }
+        }
+        if parts.underline {
+            self.pen
+                .attrs
+                .set_underline_style(pen.attrs.underline_style());
+            self.underline = underline;
+        }
+        if parts.fg {
+            self.pen.fg = pen.fg;
+        }
+        if parts.bg {
+            self.pen.bg = pen.bg;
+        }
+    }
+
     /// `CSI Ps m`, decoded by the one decoder both performers share.
     ///
     /// The arm itself is [`sgr::apply`](crate::emu::sgr::apply): the grid is not the only
@@ -257,7 +455,8 @@ impl State {
             || self.csi_report(private, action, params, intermediates);
     }
 
-    /// DEC private and ANSI mode set/reset (`CSI ? Ps h/l`, `CSI Ps h/l`).
+    /// DEC private and ANSI mode set/reset (`CSI ? Ps h/l`, `CSI Ps h/l`), and the save
+    /// and restore of private modes (`CSI ? Pm s/r`).
     ///
     /// Returns whether the sequence belonged to this family.
     fn csi_mode(&mut self, private: Option<u8>, action: char, params: &Params) -> bool {
@@ -272,6 +471,18 @@ impl State {
                 let on = action == 'h';
                 for mode in params.iter().filter_map(|p| p.first().copied()) {
                     self.ansi_mode(mode, on);
+                }
+            }
+            // XTSAVE and XTRESTORE. The `?` is the whole of what tells these from SCOSC
+            // and DECSTBM, `CSI s` and `CSI r`, which arrive with no private byte and are
+            // dispatched in their own families below.
+            (Some(b'?'), 's' | 'r') => {
+                for mode in params.iter().filter_map(|p| p.first().copied()) {
+                    if action == 's' {
+                        self.save_mode(mode);
+                    } else {
+                        self.restore_mode(mode);
+                    }
                 }
             }
             _ => return false,
@@ -361,6 +572,10 @@ impl State {
             (None, 'X') => self.screen_mut().erase_chars(params.arg(0, 1), pen),
             (None, '@') => self.screen_mut().insert_chars(params.arg(0, 1), pen),
             (None, 'm') => self.sgr(params),
+            // XTPUSHSGR and XTPOPSGR, in both of xterm's spellings: `{`/`}` and the
+            // older `p`/`q`.
+            (Some(b'#'), '{' | 'p') => self.push_pen(params),
+            (Some(b'#'), '}' | 'q') => self.pop_pen(),
             (None, 'r') => {
                 let bottom = params.arg(1, self.screen().height());
                 self.screen_mut()

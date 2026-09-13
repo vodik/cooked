@@ -14,6 +14,7 @@ use super::png::png_dimensions;
 use super::screen::{Cursor, Erase, Evicted, Resize, Screen, Shift};
 use super::sixel;
 use super::text::{self, Segmenter, Step};
+use csi::{PushedPen, SavedMode};
 use std::collections::{HashSet, VecDeque};
 
 mod csi;
@@ -466,6 +467,10 @@ pub(crate) const SIXEL_BODY_LIMIT: usize = 8 << 20;
 pub(crate) const KITTY_HONOURED: u8 = 1;
 
 const KITTY_STACK_LIMIT: usize = 16;
+
+/// Depth of the XTPUSHSGR pen stack: xterm's own `MAX_SAVED_SGR`. A push past it is
+/// dropped, as xterm drops it, so a child written against xterm sees the same pops here.
+const SGR_STACK_LIMIT: usize = 10;
 
 /// Ceiling on the `c=`/`r=` cell span an image placement is honoured for.
 ///
@@ -984,6 +989,19 @@ struct Modes {
     kitty_keys: Vec<u8>,
     /// LNM (ANSI mode 20): LF also returns the carriage.
     newline_mode: bool,
+    /// XTPUSHSGR's stack, innermost last, at most [`SGR_STACK_LIMIT`] deep.
+    ///
+    /// Here rather than beside [`State::pen`], because what a reset has to do with it is
+    /// what it does with everything else on this struct. A child that sends DECSTR or RIS
+    /// has said "start over", and a pop after that must not hand it back a pen from
+    /// before it said so.
+    pen_stack: Vec<PushedPen>,
+    /// XTSAVE's slots: one saved value per private mode, overwritten by a second save.
+    ///
+    /// A slot per mode rather than a stack, which is what xterm and ghostty both keep, and
+    /// which bounds this by the number of modes [`State::save_mode`] recognises no matter
+    /// how often a child saves.
+    saved_modes: Vec<(u16, SavedMode)>,
 }
 
 impl Default for Modes {
@@ -1006,6 +1024,8 @@ impl Default for Modes {
             modify_other_keys: 0,
             kitty_keys: Vec::new(),
             newline_mode: false,
+            pen_stack: Vec::new(),
+            saved_modes: Vec::new(),
         }
     }
 }
