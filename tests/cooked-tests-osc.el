@@ -1405,6 +1405,66 @@ deferred prompt rather than in the filter."
         (should (equal (replies (lambda (s) (not (string-empty-p s))))
                        "\033]52;c;MDEyMzQ1Njc4OQ==\007"))))))
 
+(ert-deftest cooked-osc-52-read-is-measured-before-it-is-encoded ()
+  "An oversized selection is refused on its byte count, without being encoded.
+
+The count is exact for UTF-8 text, so `héllo\=' at six bytes needs its full
+eight characters of base64 and is refused at seven.  A query loop against the
+same oversized kill says so once rather than once per query."
+  (with-temp-buffer
+    (let ((encodes 0)
+          (said nil))
+      (cl-letf* ((real-encode (symbol-function 'base64-encode-string))
+                 ((symbol-function 'base64-encode-string)
+                  (lambda (&rest args) (cl-incf encodes) (apply real-encode args)))
+                 ((symbol-function 'message)
+                  (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (let ((cooked-clipboard-max-size 7))
+          (dotimes (_ 3)
+            (should (equal (cooked--osc-52-encode "héllo") ""))))
+        (should (= encodes 0))
+        (should (= (length said) 1))
+        (should (string-search "its 8 characters" (car said)))
+        (let ((cooked-clipboard-max-size 8))
+          (should (equal (cooked--osc-52-encode "héllo") "aMOpbGxv")))))))
+
+(ert-deftest cooked-osc-52-write-is-bounded-by-what-can-be-read-back ()
+  "An unpadded write is measured padded, since that is what a query answers with.
+
+`aMOpbGxvID8+fiDDvA\=' is eighteen characters, and the cut buffer it fills reads
+back as twenty.  Accepting it under a bound of eighteen would store text that
+every later query is refused."
+  (with-temp-buffer
+    (let ((cooked-clipboard-read 'private)
+          (cooked-clipboard-max-size 18)
+          (inhibit-message t))
+      (cooked--osc-52-write '(?0) "aMOpbGxvID8+fiDDvA")
+      (should-not cooked--cut-buffers)
+      (setq cooked-clipboard-max-size 20)
+      (cooked--osc-52-write '(?0) "aMOpbGxvID8+fiDDvA")
+      (should (equal (cooked--osc-52-encode (aref cooked--cut-buffers 0))
+                     "aMOpbGxvID8+fiDDvA==")))))
+
+(ert-deftest cooked-osc-52-bound-cannot-exceed-the-cores ()
+  "Raising `cooked-clipboard-max-size\=' past the core\='s OSC limit raises nothing.
+
+A write the core would have dropped unseen is refused in Lisp with a message
+instead, and a reply the core\='s limit could not have carried is refused too."
+  (with-temp-buffer
+    (let ((cooked-clipboard-max-size (ash 1 22))
+          (cooked-clipboard-write t)
+          (kill-ring nil)
+          (said nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) said))))
+        (cooked--osc-52-write '(?c) (make-string (+ cooked--osc-52-core-limit 4) ?A))
+        (should-not kill-ring)
+        (should (string-search "refused" (car said)))
+        (should (equal (cooked--osc-52-encode
+                        (make-string (* 3 (1+ (/ cooked--osc-52-core-limit 4))) ?a))
+                       ""))
+        (should (string-search "answered a clipboard read with nothing" (car said)))))))
+
 (ert-deftest cooked-osc-52-cut-buffer-writes-ignore-the-write-switch ()
   "A cut buffer is the session\='s own, so refusing clipboard writes does not
 refuse it, and filling it does not touch the kill ring."

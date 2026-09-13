@@ -638,9 +638,33 @@ Anything writing to the terminal can push to the clipboard, so this bounds how
 much of the kill ring a runaway or hostile stream can take over.  It bounds
 replies to `cooked-clipboard-read\=' too: a selection that would encode to more
 is answered with an empty payload and a message, so the child still hears back
-and is not handed megabytes it would have to swallow before its next read."
+and is not handed megabytes it would have to swallow before its next read.
+
+A value above `cooked--osc-52-core-limit\=' counts as that limit.  The native
+core drops any OSC longer than a mebibyte before Lisp sees it, so a write past
+it could only vanish without the message a refusal promises."
   :type 'natnum
   :group 'cooked)
+
+(defconst cooked--osc-52-core-limit (- (ash 1 20) 12)
+  "The longest OSC 52 payload the native core is sure to hand to Lisp.
+
+The core refuses any OSC whose fields after the code add up to more than its
+`OSC_PAYLOAD_LIMIT\=', one mebibyte.  For OSC 52 those fields are the targets
+and the data, and the targets name at most the twelve selections
+`cpqs01234567\=', so twelve less than a mebibyte is always delivered.  It is a
+multiple of four, which a padded base64 payload always is.")
+
+(defvar-local cooked--clipboard-refused nil
+  "The size of the reply last refused for `cooked-clipboard-max-size\=', or nil.
+
+Kept so that a program asking again and again for the same oversized selection
+gets one message rather than one per query: a paste provider polling the
+clipboard would otherwise take the echo area over.")
+
+(defun cooked--osc-52-max-size ()
+  "The effective OSC 52 bound: `cooked-clipboard-max-size\=', capped at the core\='s."
+  (min cooked-clipboard-max-size cooked--osc-52-core-limit))
 
 (defvar-local cooked--cut-buffers nil
   "The eight OSC 52 cut buffers, as a vector of byte strings, or nil if unused.
@@ -692,18 +716,30 @@ A payload longer than `cooked-clipboard-max-size\=' is replaced by the empty
 string too, with a message.  The bound is measured on the base64, as it is for
 writes, so one number caps both directions.  Replying with nothing rather than
 not replying is the point: the child is still waiting, and a truncated payload
-would decode to text the user never copied."
+would decode to text the user never copied.
+
+The length is worked out before anything is encoded, from `string-bytes\=',
+since padded base64 of N bytes is always 4 * ceiling(N / 3) characters.  A
+ten-megabyte kill is refused without first building the thirty megabytes of
+UTF-8 and base64 it would take to measure.  For text Emacs holds as UTF-8 the
+count is exact; a raw byte in a multibyte string is two bytes inside Emacs and
+one on the wire, so text with raw bytes in it can be refused a little early."
   (if (stringp text)
-      (let ((payload (base64-encode-string
-                      (if (multibyte-string-p text)
-                          (encode-coding-string (substring-no-properties text) 'utf-8)
-                        text)
-                      t)))
-        (if (<= (length payload) cooked-clipboard-max-size)
-            payload
-          (message "cooked: answered a clipboard read with nothing, as its %d characters exceed `cooked-clipboard-max-size'"
-                   (length payload))
-          ""))
+      (let ((size (* 4 (ceiling (string-bytes text) 3))))
+        (cond
+         ((<= size (cooked--osc-52-max-size))
+          (setq cooked--clipboard-refused nil)
+          (base64-encode-string
+           (if (multibyte-string-p text)
+               (encode-coding-string (substring-no-properties text) 'utf-8)
+             text)
+           t))
+         (t
+          (unless (eql size cooked--clipboard-refused)
+            (setq cooked--clipboard-refused size)
+            (message "cooked: answered a clipboard read with nothing, as its %d characters exceed `cooked-clipboard-max-size'"
+                     size))
+          "")))
     ""))
 
 (defun cooked--osc-52-query (targets)
@@ -758,7 +794,9 @@ A cut buffer is written under every setting, since it is this buffer\='s own and
 putting it on the kill ring would be wrong under any of them.  The shared
 selections need `cooked-clipboard-write\=', and the kill ring is written once
 however many of `c\=' and `s\=' were named."
-  (if (> (length data) cooked-clipboard-max-size)
+  ;; Measured as the padded length, which is what a read-back re-encodes to, so
+  ;; an unpadded write that fits is one whose contents can also be read back.
+  (if (> (* 4 (ceiling (length data) 4)) (cooked--osc-52-max-size))
       ;; Refuse out loud: a silent drop looks like the copy simply failed.
       (message "cooked: refused a %d-character clipboard write (see `cooked-clipboard-max-size')"
                (length data))

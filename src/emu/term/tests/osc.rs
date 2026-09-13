@@ -193,6 +193,21 @@ fn osc_52_clipboard_is_passed_through() {
     );
 }
 
+/// `cooked--osc-52-core-limit` in Lisp caps `cooked-clipboard-max-size` at the longest
+/// write this passes through whatever targets it names, so a larger one is refused with a
+/// message there rather than dropped unseen here. The two numbers have to agree.
+#[test]
+fn osc_52_at_the_lisp_bound_reaches_lisp_with_every_target() {
+    let bound = OSC_PAYLOAD_LIMIT - 12;
+    let osc = |len| {
+        let mut t = Term::new(4, 20);
+        t.feed(format!("\x1b]52;cpqs01234567;{}\x07", "A".repeat(len)).as_bytes());
+        t.drain().events.len()
+    };
+    assert_eq!(osc(bound), 1);
+    assert_eq!(osc(bound + 4), 0);
+}
+
 /// The terminator has to survive the trip to Lisp: a client that queried with BEL
 /// will not recognise an ST-terminated answer, and vice versa.
 #[test]
