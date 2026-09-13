@@ -76,6 +76,11 @@
 
 (defvar evil-state)
 (defvar evil-previous-state)
+;; The four switches `cooked-evil--no-unbidden-edit' turns off; see there.
+(defvar evil-maybe-remove-spaces)
+(defvar evil-want-abbrev-expand-on-insert-exit)
+(defvar evil-insert-count)
+(defvar evil-insert-vcount)
 (declare-function evil-insert-state "ext:evil-states")
 (declare-function evil-emacs-state "ext:evil-states")
 
@@ -141,30 +146,99 @@ Non-nil is the point of the integration: typing reaches the child, while ESC,
 policy's own map does, making insert state indistinguishable from emacs state."
   :type 'boolean :group 'cooked)
 
-(defun cooked-evil--keep-spaces-p (&rest _)
-  "Whether evil may strip the whitespace-only line point is on.  Never here.
+;;;; Edits evil makes on its own initiative
 
-`:before-while\=' advice on `evil-maybe-remove-spaces\='.
+;; A cooked buffer's text *is the terminal grid*.  A line holding only spaces is
+;; a screen row whose cells the child wrote, not slack, and there is no line in
+;; one of these buffers Emacs is entitled to tidy -- scrollback rows are the
+;; child's text just as much as the live screen's are.
+;;
+;; Ordinary edits are refused by the `read-only' property `cooked--protect' puts
+;; on all of it, and refused loudly: the command signals, the user sees why.
+;; What gets past that is the class below.  `cooked--refresh-keymap' runs
+;; `cooked-state-change-hook' -- and so `cooked-evil-sync', and so evil's whole
+;; state-transition machinery -- from inside the drain, where `cooked--apply'
+;; has bound `inhibit-read-only' to t and `buffer-undo-list' to t so that the
+;; emulator can rewrite rows the user may not.  Third-party code invited into
+;; that window inherits both, so an edit it makes there is neither refused nor
+;; recorded.  Measured, not assumed: a hook on `cooked-state-change-hook' in a
+;; live session sees `inhibit-read-only' t every time.
+;;
+;; So the defence has to be "do not start the edit", and it cannot be "signal".
+;; A signal thrown from inside a state-transition hook leaves evil half
+;; transitioned, believing in a state the user cannot see out of -- the failure
+;; `cooked-evil-visual-case' documents at length, and a worse outcome than the
+;; silent deletion it would be replacing.
 
-Entering evil insert state hangs that function on `post-command-hook\=' and arms
-it, and leaving insert state calls it directly; what it does is delete the
-indentation from a line holding nothing else, which in an ordinary buffer is a
-kindness -- you opened a line, typed nothing, and evil tidies up after you.
+(defconst cooked-evil--unbidden-editors
+  '(evil-maybe-remove-spaces evil-maybe-expand-abbrev evil-cleanup-insert-state)
+  "The evil functions that edit a buffer without a command having asked them to.
 
-In a cooked buffer the line *is a screen row* and its spaces are cells the child
-put there.  Blanking them is data loss: the grid says twenty columns and the
-buffer then says none, the two disagree about a row neither can re-derive, and
-nothing in the drain put it there to notice.  A frame of any picture is mostly
-blank rows, so this is not a corner -- it is every image, and every TUI with
-empty space in it.
+The whole list, from a sweep of every hook and advice evil installs; everything
+else it hangs on `post-command-hook\=', `pre-command-hook\=',
+`after-change-functions\=' or a state hook either moves point, keeps a
+record, or sets a variable.
 
-Refused wholesale rather than for the alt screen or the live region alone.
-Scrollback rows are the child's text just as much, and there is no line in one
-of these buffers Emacs is entitled to tidy."
-  (not (derived-mode-p 'cooked-mode)))
+`evil-maybe-remove-spaces\=' deletes the whitespace from a line holding nothing
+else.  Entering insert state hangs it on `post-command-hook\=' and arms it, and
+leaving insert state calls it directly.  In an ordinary buffer that is a
+kindness -- you opened a line, typed nothing, and evil tidies up after you --
+and here it is data loss: the grid says twenty columns and the buffer then says
+none, about a row neither can re-derive.  Not a corner, either.  A frame of any
+picture is mostly blank rows, which is how this was found: the first bench
+fixture to contain one lost it, and only with evil loaded.
 
-(unless (advice-member-p #'cooked-evil--keep-spaces-p 'evil-maybe-remove-spaces)
-  (advice-add 'evil-maybe-remove-spaces :before-while #'cooked-evil--keep-spaces-p))
+`evil-maybe-expand-abbrev\=' runs `expand-abbrev\=' on
+`evil-insert-state-exit-hook\=' whenever `abbrev-mode\=' is on, so a word the
+*child* printed that happens to match an abbrev is rewritten to its expansion.
+Reproduced: a row reading `teh\=' comes back as `the\='.
+
+`evil-cleanup-insert-state\=' replays the insertion when a count is pending --
+\\`3i\=', or a visual-block \\`I\=' -- and the vcount branch reaches every line
+of the block with `move-to-column ... t\=', which pads short rows with spaces.
+Reproduced: a two-column row grows two spaces it was never sent.")
+
+(defconst cooked-evil--unbidden-switches
+  '(evil-maybe-remove-spaces
+    evil-want-abbrev-expand-on-insert-exit
+    evil-insert-count
+    evil-insert-vcount)
+  "Every switch that arms one of `cooked-evil--unbidden-editors\='.
+
+Bound together rather than one list per function, because it costs a `progv\='
+of four symbols instead of a table to look one up in, and a function that is
+not armed by a switch does not read it.")
+
+(defun cooked-evil--no-unbidden-edit (fn &rest args)
+  "Call FN with ARGS, with evil\='s own tidying switched off in a cooked buffer.
+
+`:around\=' advice on each of `cooked-evil--unbidden-editors\='.
+
+One advice for the three, and it does not override evil so much as tell evil
+that its own switches are off here: `cooked-evil--unbidden-switches\=' are the
+variables each of those functions consults before it edits, and with them nil
+each takes the branch it already has for having nothing to do.  That is why
+this is `:around\=' rather than three `:before-while\=' predicates refusing
+three functions outright -- `evil-cleanup-insert-state\=' also ends the fine
+grained undo step, which is bookkeeping about the *user\='s* pending input at a
+prompt and worth keeping, and amputating the function would lose it.
+
+Refused wholesale rather than for the alt screen or the live region alone; see
+the Commentary above for why every row counts and why refusing by signalling
+would be worse than the loss it prevents.
+
+One deliberate reach outside this buffer.  `evil-maybe-remove-spaces\=' hangs
+itself on the *global* `post-command-hook\=', so taking its \"nothing to
+remove\" branch here removes it globally -- which is the same cleanup evil does
+after any command that did not open a line, and reaching this buffer at all
+took a command that would have done it anyway."
+  (if (not (derived-mode-p 'cooked-mode))
+      (apply fn args)
+    (cl-progv cooked-evil--unbidden-switches nil (apply fn args))))
+
+(dolist (editor cooked-evil--unbidden-editors)
+  (unless (advice-member-p #'cooked-evil--no-unbidden-edit editor)
+    (advice-add editor :around #'cooked-evil--no-unbidden-edit)))
 
 (defun cooked-evil-sync ()
   "Match evil's state to who owns the keyboard.

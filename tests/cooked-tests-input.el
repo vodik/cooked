@@ -3969,6 +3969,112 @@ keeps its meaning as the answer of last resort."
                  (lambda (_p) "survived")))
           (cooked-password-function nil))
       (should (equal (cooked--password-from-sources "Password:") "survived")))))
+(ert-deftest cooked-evil-does-not-expand-an-abbrev-in-the-childs-text ()
+  "`evil-maybe-expand-abbrev\=' rewrites a word the child printed.
+
+It hangs on `evil-insert-state-exit-hook\=' whenever `abbrev-mode\=' is on, and
+`expand-abbrev\=' asks about the word before point without any notion of whose
+word it is.  Point over a rendered row is over the child\='s text, so a row
+reading `teh\=' comes back reading `the\=' -- a row the emulator\='s grid still
+believes says the other thing.
+
+Run under `inhibit-read-only\=', which is not a contrivance but the condition
+that makes this class silent: `cooked--refresh-keymap\=' runs
+`cooked-state-change-hook\=' -- and so `cooked-evil-sync\=', and so every evil
+state transition cooked itself forces -- from inside the drain, where
+`cooked--apply\=' has bound it.  Without the binding the `read-only\=' property
+answers for this, and the answer is a signal; with it, nothing answers."
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (with-temp-buffer
+    (delay-mode-hooks (cooked-mode))
+    (abbrev-mode 1)
+    (define-abbrev local-abbrev-table "teh" "the")
+    (evil-local-mode 1)
+    (evil-insert-state)
+    (insert "top\nteh\nbot\n")
+    (add-text-properties (point-min) (point-max) cooked--read-only-props)
+    (goto-char 8)
+    (let ((inhibit-read-only t) (buffer-undo-list t))
+      (evil-normal-state))
+    (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                   "top\nteh\nbot\n"))))
+
+(ert-deftest cooked-evil-does-not-pad-the-childs-rows-out-to-a-column ()
+  "`evil-cleanup-insert-state\=' pads short rows with spaces the child never sent.
+
+A visual-block \\`I\=' or \\`A\=' leaves `evil-insert-vcount\=' set, and the branch that
+reads it walks every line of the block calling `move-to-column ... t\=' -- the
+FORCE argument, which inserts spaces when the line is shorter than the column.
+On the way out of insert state that turns a two-column row into a four-column
+one, and the emulator, which was told nothing, keeps computing every later
+delta against the row it still thinks is there.
+
+Refused by switching `evil-insert-vcount\=' off for the call rather than by
+refusing the call, so the fine-grained undo step it also ends -- bookkeeping
+about the user\='s own pending input -- still happens.  Under `inhibit-read-only\='
+for the reason `cooked-evil-does-not-expand-an-abbrev-in-the-childs-text\='
+gives."
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (with-temp-buffer
+    (delay-mode-hooks (cooked-mode))
+    (insert "abcdef\nab\nabcdef\n")
+    (add-text-properties (point-min) (point-max) cooked--read-only-props)
+    (goto-char (point-min))
+    (evil-local-mode 1)
+    (setq evil-insert-count nil
+          evil-insert-lines nil
+          evil-insert-skip-empty-lines nil
+          evil-insert-vcount (list 1 4 3)
+          evil-insert-repeat-info '(nil))
+    (let ((inhibit-read-only t) (buffer-undo-list t))
+      (evil-cleanup-insert-state))
+    (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                   "abcdef\nab\nabcdef\n"))))
+
+(ert-deftest cooked-state-change-hook-runs-inside-the-childs-edit ()
+  "The premise the whole whitespace sweep rests on, pinned so it cannot drift.
+
+`cooked--apply\=' binds `inhibit-read-only\=' and `buffer-undo-list\=' so the
+emulator can rewrite rows the user may not, and `cooked--refresh-keymap\=' runs
+`cooked-state-change-hook\=' from inside that -- an OSC 133 `prompt-end\=' or the
+alternate screen going up reaches the hook without ever leaving the drain.
+Whatever the hook calls therefore edits with the protection off and the history
+disabled, which is why an edit made there is neither refused nor recorded, and
+why `cooked-evil--no-unbidden-edit\=' has to stop evil before it starts rather
+than let the `read-only\=' property answer.
+
+If this ever stops being true the sweep can be reconsidered; while it is true,
+every layer invited onto that hook inherits it."
+  (cooked-tests--with-session
+      (list "/bin/sh" "-c" "stty raw -echo; printf '\\033[?1049h'; sleep 5")
+    (let ((seen 'never))
+      (add-hook 'cooked-state-change-hook
+                (lambda () (setq seen (list inhibit-read-only (eq buffer-undo-list t))))
+                nil t)
+      (should (cooked-tests--settle (lambda () (not (eq seen 'never)))))
+      (should (equal seen '(t t))))))
+
+(ert-deftest cooked-mode-is-special-enough-to-be-left-alone ()
+  "What excuses cooked from every globalized whitespace tidier at once.
+
+`ws-butler-global-mode\=', which is the one actually installed here, turns
+`ws-butler-mode\=' on in every buffer except those whose major mode has a
+`mode-class\=' of `special\=' -- and `ws-butler-mode\=' would otherwise put a
+`ws-butler-chg\=' property on every row the child writes, on every drain, and
+trim the lot on the first save.  The same `mode-class\=' convention is what
+`define-globalized-minor-mode\=' users check generally.
+
+cooked does not declare it: `define-derived-mode\=' inherits it from
+`comint-mode\='.  That makes it exactly the kind of thing a refactor away from
+comint would drop without noticing, which is the whole reason to assert it
+here rather than to trust it."
+  (with-temp-buffer
+    (delay-mode-hooks (cooked-mode))
+    (should (eq (get 'cooked-mode 'mode-class) 'special))))
 
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

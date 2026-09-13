@@ -938,7 +938,20 @@ which change whose keyboard it is.  `cooked-evil-sync' answers this hook by
 putting evil into `cooked-evil-child-state', so running it for those was how a
 program that touched its termios settings -- which a full-screen program does
 routinely -- dragged the user out of normal state a keystroke after they pressed
-`C-z', leaving \`V' forwarded to the child instead of starting a selection."
+`C-z', leaving \`V' forwarded to the child instead of starting a selection.
+
+*A handler here usually runs inside the drain*, and the drain has bound
+`inhibit-read-only' and `buffer-undo-list' so that the emulator can rewrite rows
+the user may not -- an OSC 133 `prompt-end' or the alternate screen going up
+reaches `cooked--refresh-keymap' without ever leaving `cooked--apply'.  A
+handler that edits the buffer there is therefore neither refused by the
+`read-only' property nor recorded in the history, which makes a wrong edit
+silent and unrecoverable rather than a visible error.  Do not edit buffer text
+from this hook, and be careful what you call that might: it is how evil's own
+insert-state tidying came to blank a screen row, and why `cooked-evil' now
+switches that tidying off rather than trusting the protection.  See
+`cooked-evil--no-unbidden-edit' and
+`cooked-state-change-hook-runs-inside-the-childs-edit', which pins the premise."
   :type 'hook
   :group 'cooked)
 
