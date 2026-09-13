@@ -37,6 +37,7 @@
 (require 'cooked)
 (require 'cooked-util)
 (require 'cooked-mouse)
+(require 'cooked-peek)
 ;; For `cooked-link-delegate-function', the slot this file fills at the bottom.
 (require 'cooked-link)
 
@@ -48,7 +49,7 @@
 ;; into, never maintains, which is the one shape a back-edge here is allowed to
 ;; have.
 (declare-function cooked--snap-to-cursor "cooked-mode")
-(declare-function cooked--resume-forwarding "cooked-mode")
+(declare-function cooked--resume-forwarding "cooked-peek")
 (declare-function cooked--refresh-keymap "cooked-mode")
 (declare-function cooked--peek-resume-and-send "cooked-mode")
 (declare-function cooked-send-input "cooked-mode")

@@ -33,7 +33,7 @@
 ;; And `cooked-bell-pending' by cooked-mode.el, which sets it from the bell and
 ;; clears it when the buffer is looked at; both readers below only report it.
 (defvar cooked-bell-pending)
-(declare-function cooked-toggle-peek "cooked-mode")
+(declare-function cooked-toggle-peek "cooked-peek")
 (declare-function cooked--buffer-name-shows-title-p "cooked-osc")
 
 (defface cooked-failure '((t :inherit error))
