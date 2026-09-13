@@ -2560,6 +2560,53 @@ including one that renders nothing and puts the state somewhere else entirely."
     (should (cooked-tests--settle (lambda () (equal cooked--progress '(set . 37)))))
     (should (string-match-p (regexp-quote "[37%%]") (cooked--mode-line)))))
 
+(ert-deftest cooked-progress-repeated-report-does-not-repaint ()
+  "A report identical to the one on show asks the mode line for nothing.
+Tools resend the same percentage many times a second while a step runs."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((repaints 0))
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&rest _) (cl-incf repaints))))
+        (cooked--osc-progress '("4" "1" "42"))
+        (should (= repaints 1))
+        (dotimes (_ 10) (cooked--osc-progress '("4" "1" "42")))
+        (should (= repaints 1))
+        ;; A bare `1' carries the 42 forward, so it is the same report too.
+        (cooked--osc-progress '("4" "1"))
+        (should (= repaints 1))
+        (cooked--osc-progress '("4" "1" "43"))
+        (should (= repaints 2))
+        (cooked--osc-progress '("4" "0"))
+        (cooked--osc-progress '("4" "0"))
+        (should (= repaints 3))))))
+
+(ert-deftest cooked-progress-is-cleared-when-the-command-is-over ()
+  "A build that never sends the report removing its bar loses it at the shell's
+next OSC 133 C, at its D, and when the child exits."
+  (let ((go (make-temp-name (expand-file-name "cooked-progress-go" temporary-file-directory))))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "printf '\\033]9;4;1;42\\007'; \
+while [ ! -e %1$s.1 ]; do sleep 0.05; done; printf '\\033]133;C\\007\\033]9;4;1;17\\007'; \
+while [ ! -e %1$s.2 ]; do sleep 0.05; done; printf '\\033]133;D;130\\007\\033]9;4;2;60\\007'; \
+while [ ! -e %1$s.3 ]; do sleep 0.05; done; exit 3"
+                          go))
+          (should (cooked-tests--settle (lambda () (equal cooked--progress '(set . 42)))))
+          ;; C clears what came before it, and the new command's report stands.
+          (write-region "" nil (concat go ".1"))
+          (should (cooked-tests--settle (lambda () (equal cooked--progress '(set . 17)))))
+          ;; D clears it; a report after D, from nothing the shell ran, stands.
+          (write-region "" nil (concat go ".2"))
+          (should (cooked-tests--settle (lambda () (equal cooked--progress '(error . 60)))))
+          ;; And exit clears that.
+          (write-region "" nil (concat go ".3"))
+          (should (cooked-tests--settle (lambda () cooked--exit)))
+          (should-not cooked--progress))
+      (dolist (n '("1" "2" "3"))
+        (ignore-errors (delete-file (concat go "." n)))))))
+
 (ert-deftest cooked-osc-9-notifies-from-a-real-child ()
   "The TERM.org check, end to end: a message notifies and `9;9;PATH' does not."
   (let* ((cooked-allow-notifications t)

@@ -706,10 +706,26 @@ two chances to disagree."
     (`(mouse ,enabled ,sgr ,drag ,motion ,pixels)
      (cooked--set-mouse-state enabled sgr drag motion pixels))
     ((or `(prompt-start ,_ . ,_) `(prompt-continuation ,_ . ,_)
-         `(prompt-end ,_ . ,_)
-         `(command-start ,_ ,_ . ,_) `(command-end ,_ ,_ . ,_))
+         `(prompt-end ,_ . ,_))
+     (cooked--handle-semantic event batch-start))
+    ((or `(command-start ,_ ,_ . ,_) `(command-end ,_ ,_ . ,_))
+     (cooked--end-of-command)
      (cooked--handle-semantic event batch-start))
     (_ nil)))
+
+(defun cooked--end-of-command ()
+  "Drop the state the last command left behind, at OSC 133 C or D or on exit.
+
+The shell saying a command has finished, or that the next one is starting, is
+the one signal that whatever ran before it is gone, however it went.  The
+progress indicator is what needs it: `cargo build\=' interrupted at the
+keyboard never sends the report that removes its bar, so without this `[42%]\='
+stays in the mode line through every command after it.  Both marks, rather
+than D alone, because a shell that drops its D still sends the next C.
+
+This is the place for any other state a child sets and cannot be trusted to
+unset, so that the marks and exit reach all of it through one call."
+  (cooked--reset-progress))
 
 ;;;; The alternate screen, and the link passes redisplay runs
 
@@ -999,6 +1015,8 @@ and a session that exits and is then killed goes through both."
   ;; A child that dies mid-`getpass' -- interrupted from the buffer, killed from
   ;; outside -- leaves a password prompt with nothing behind it.
   (cooked--cancel-secret)
+  ;; Nor is there any command left for a progress report to describe.
+  (cooked--end-of-command)
   (cooked--stop-session)
   ;; After the session is gone, so the mode is recomputed as nil: a child that
   ;; exited while the buffer was suspended -- evil in normal state, or a

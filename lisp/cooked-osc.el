@@ -520,12 +520,18 @@ which of the two the child meant."
 The mode line is asked to repaint here rather than left to notice on its own: a
 child that reports 100% and then goes quiet produces no further output, so
 nothing else would ever wake redisplay and the last number the user saw would be
-whatever happened to be on screen when something else last changed."
-  (setq cooked--progress (and state (cons state percent)))
-  (force-mode-line-update))
+whatever happened to be on screen when something else last changed.
+
+A report that changes nothing asks for nothing.  cargo and npm resend the same
+percentage many times a second while a slow step runs, and each repaint would
+re-evaluate every mode line showing this buffer to draw the text already there."
+  (let ((progress (and state (cons state percent))))
+    (unless (equal progress cooked--progress)
+      (setq cooked--progress progress)
+      (force-mode-line-update))))
 
 (defun cooked--reset-progress ()
-  "Drop any progress indicator, on RIS.
+  "Drop any progress indicator, on RIS and when a command is over.
 
 Called from the `reset\=' event rather than from anything in this file, because
 RIS is `ESC c\=' and not an OSC at all.  It has to be reachable from Lisp: the
@@ -533,7 +539,12 @@ indicator is the one piece of a session's visible state that lives entirely in
 Emacs, so a reset that Rust handled by itself would clear the screen and leave
 the mode line still claiming a build was 60% through -- and there would be no
 second thing for the user to type, `reset\=' being the thing you type when
-something is stuck."
+something is stuck.
+
+Also called from `cooked--end-of-command\=', for the report nobody finished: a
+build interrupted at the keyboard, or an agent that crashed, never sends the
+`0\=' that removes its bar, and the shell prompting again is the proof it is
+gone."
   (cooked--set-progress nil nil))
 
 ;;;; OSC 51 — the child asking Emacs to do something
