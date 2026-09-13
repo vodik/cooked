@@ -28,7 +28,7 @@ pub(crate) mod session;
 
 use emu::{
     Anchor, CellMetrics, Color, ColorScheme, CursorShape, DamagedRow, Deco, Event, ImageData,
-    ImageFormat, ImageId, KeyEncoding, LinkId, MarkId, Run, Style,
+    ImageFormat, ImageId, KeyEncoding, LinkId, Mark, MarkId, Run, Style,
 };
 use env::{Env, Result, Runtime, Value, lisp_enum, list, plist, sym};
 use nix::sys::signal::Signal;
@@ -1504,11 +1504,13 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
             }
             env.into_lisp(items)
         }
-        Event::PromptStart(at, id) => mark(sym!(env, "prompt-start")?, *at, *id),
-        Event::PromptContinuation(at, id) => mark(sym!(env, "prompt-continuation")?, *at, *id),
-        Event::PromptEnd(at, id) => mark(sym!(env, "prompt-end")?, *at, *id),
+        Event::Mark(Mark::PromptStart, at, id) => mark(sym!(env, "prompt-start")?, *at, *id),
+        Event::Mark(Mark::PromptContinuation, at, id) => {
+            mark(sym!(env, "prompt-continuation")?, *at, *id)
+        }
+        Event::Mark(Mark::PromptEnd, at, id) => mark(sym!(env, "prompt-end")?, *at, *id),
         // (command-start CMDLINE ANCHOR ID), CMDLINE nil when the shell did not say.
-        Event::CommandStart(cmdline, at, id) => list!(
+        Event::Mark(Mark::CommandStart(cmdline), at, id) => list!(
             env,
             [
                 sym!(env, "command-start")?,
@@ -1517,7 +1519,7 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
                 *id,
             ]
         ),
-        Event::CommandEnd(code, at, id) => list!(
+        Event::Mark(Mark::CommandEnd(code), at, id) => list!(
             env,
             [
                 sym!(env, "command-end")?,

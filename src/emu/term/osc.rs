@@ -20,104 +20,74 @@ pub(crate) fn rejoin(parts: &[&[u8]]) -> Vec<u8> {
 }
 
 impl State {
+    /// OSC 133: a shell's semantic mark, anchored where it fell in the stream.
     pub(super) fn semantic(&mut self, params: &[&[u8]]) {
-        // Matched whole, not on the first byte. `params.get(1).and_then(|p| p.first())`
-        // read `Dfoo` as a `D`, which is a parser agreeing with a sender that means
-        // something else -- and the kinds are single letters, so exactness is free.
-        let Some(kind) = params.get(1).copied() else {
+        // Parsed before a mark is taken, because a mark that is ignored has to leave no
+        // trace: an id allocated for an event that is never pushed is a mark on the grid
+        // Emacs is never told about, which a later rewrap would carry around for nobody.
+        let Some(mark) = Self::parse_mark(params) else {
             return;
         };
-        // `A` only. The proposal also spells this mark `P`, and Ghostty sends that one
-        // to avoid `A`'s implied fresh line -- but cooked implements no fresh-line
-        // behaviour, so the two would be the same mark to it, and nothing on this wire
-        // sends `P` anyway: cooked's own snippets emit `A`, fish 4 emits `A`, and
-        // kitty's and Ghostty's integrations gate themselves on environment variables
-        // cooked never sets and that no `ssh` carries. One spelling end to end.
-        let prompt = kind == b"A";
-        if !prompt && !matches!(kind, b"B" | b"C" | b"D") {
-            return;
-        }
-        // Decided before a mark is taken, because "ignore this" has to leave *no* trace:
-        // an id allocated for an event that is never pushed is a mark on the grid Emacs
-        // is never told about, which a later rewrap would then carry around for nobody.
-        let kind_of_prompt = prompt.then(|| Self::prompt_kind(params));
-        if kind_of_prompt == Some(PromptKind::Other) {
-            return;
-        }
-        // Read before the mark is taken, so that a `C` carrying a command line that is
-        // too long or not text is still a `C`: the mark is the part Emacs cannot do
-        // without, and the command line is a courtesy on top of it.
-        let cmdline = (kind == b"C").then(|| Self::cmdline(params)).flatten();
-        // Anchored here, where the mark actually is in the stream. See [`Anchor`].
         let at = self.anchor();
-        // And left on the cell, so that a rewrap can be told where it went. Allocated
-        // before the match rather than per arm: every kind that gets an event gets an id,
-        // and an arm that forgot to take one would be a mark Emacs could never be told
-        // about again.
+        // Left on the cell as well, so that a rewrap can be told where it went.
         let id = self.take_mark(at);
-        self.events.push(match kind {
-            b"A" => {
-                if kind_of_prompt == Some(PromptKind::Continuation) {
-                    // Deliberately *not* moving `prompt_start`. A continuation prompt is
-                    // the same command still being typed, so the prompt it began at is
-                    // the one `clear_to_prompt` must keep and the one Emacs files the
-                    // command record under -- taking the last continuation line instead
-                    // would start the record halfway through the construct.
-                    Event::PromptContinuation(at, id)
-                } else {
-                    self.prompt_start = Some(at);
-                    Event::PromptStart(at, id)
-                }
-            }
-            b"B" => Event::PromptEnd(at, id),
-            b"C" => Event::CommandStart(cmdline, at, id),
-            b"D" => Event::CommandEnd(
+        // Only an initial prompt moves `prompt_start`. A continuation prompt is the same
+        // command still being typed, so the prompt it began at is the one
+        // `clear_to_prompt` must keep and the one Emacs files the command record under.
+        if mark == Mark::PromptStart {
+            self.prompt_start = Some(at);
+        }
+        self.events.push(Event::Mark(mark, at, id));
+    }
+
+    /// The mark PARAMS spell, or `None` for one cooked does not act on.
+    ///
+    /// The kind is matched whole rather than on its first byte, so `Dfoo` is not read as
+    /// `D`. `A` is the only spelling of a prompt start: the proposal also allows `P`, but
+    /// cooked implements no fresh-line behaviour to tell the two apart, and none of the
+    /// integrations that reach it send `P`.
+    fn parse_mark(params: &[&[u8]]) -> Option<Mark> {
+        match params.get(1).copied()? {
+            b"A" => Self::prompt_kind(params),
+            b"B" => Some(Mark::PromptEnd),
+            // A command line that is too long or not text still leaves a `C`: the mark is
+            // the part Emacs cannot do without, and the command line is a courtesy.
+            b"C" => Some(Mark::CommandStart(Self::cmdline(params))),
+            b"D" => Some(Mark::CommandEnd(
                 params
                     .get(2)
                     .and_then(|p| std::str::from_utf8(p).ok())
                     .and_then(|s| s.parse().ok()),
-                at,
-                id,
-            ),
-            _ => return,
-        });
+            )),
+            _ => None,
+        }
     }
 
-    /// What kind of prompt an `A` mark is announcing.
+    /// Which prompt an `A` mark announces, or `None` for one that is neither.
     ///
-    /// `k=` names it: `i` initial, `s` secondary — zsh's and bash's `PS2` — `c`
-    /// continuation, `r` the prompt drawn on the *right* of the input line. Absent, or
-    /// present but empty, means `i`: the proposal gives the kind that default, and an
-    /// emitter writing `k=` with nothing after it is not announcing a new kind. cooked's
-    /// own snippets rely on that default and send a bare `A` for an initial prompt.
+    /// `k=` names it: `i` initial, `s` secondary (zsh's and bash's `PS2`), `c`
+    /// continuation, and `r` the prompt drawn on the right of the input line. Absent or
+    /// empty means `i`, which is the proposal's default and what cooked's own snippets
+    /// rely on.
     ///
-    /// Three answers rather than the boolean this used to be, because `r` belongs to
-    /// neither. A right-hand prompt is decoration beside an input area cooked already
-    /// owns: it starts no command, so it must not move the prompt marker, and it
-    /// continues nothing, so it must not be read as a `PS2` either. Read as a
-    /// continuation it was a session-ending bug -- no `B` follows a right prompt, so
-    /// Emacs went to `prompt` and never came back, and the input line was gone for good.
+    /// A right-hand prompt is neither of the other two. It starts no command, so it must
+    /// not move the prompt marker, and it continues nothing, so it must not be read as a
+    /// `PS2` either: no `B` follows a right prompt, and Emacs would wait at `prompt` for
+    /// good. A kind nobody here has heard of is dropped the same way, because dropping is
+    /// the one answer that changes no state.
     ///
-    /// A kind nobody here has heard of joins `r` rather than joining `s`. The safe
-    /// answer for an unknown mark is to change no state at all, and both of the other
-    /// two answers change state.
-    ///
-    /// Options are read from `params[2..]`, which is where they arrive: `;` separates
-    /// OSC parameters, so `133;A;k=s` is three of them. Every other option any emitter
-    /// sends -- kitty's `click_events=`, Ghostty's `redraw=` and `cl=`, ble.sh's
-    /// `aid=` -- is not a `k=` and so leaves the answer at `Initial`.
-    fn prompt_kind(params: &[&[u8]]) -> PromptKind {
-        let Some(kind) = params
+    /// Options arrive in `params[2..]`, since `;` separates OSC parameters and `133;A;k=s`
+    /// is three of them. Other emitters' options -- kitty's `click_events=`, Ghostty's
+    /// `redraw=` -- are not `k=` and leave the prompt initial.
+    fn prompt_kind(params: &[&[u8]]) -> Option<Mark> {
+        let kind = params
             .iter()
             .skip(2)
-            .find_map(|opt| opt.strip_prefix(b"k=".as_slice()))
-        else {
-            return PromptKind::Initial;
-        };
+            .find_map(|opt| opt.strip_prefix(b"k=".as_slice()));
         match kind {
-            b"" | b"i" => PromptKind::Initial,
-            b"s" | b"c" => PromptKind::Continuation,
-            _ => PromptKind::Other,
+            None | Some(b"" | b"i") => Some(Mark::PromptStart),
+            Some(b"s" | b"c") => Some(Mark::PromptContinuation),
+            Some(_) => None,
         }
     }
 

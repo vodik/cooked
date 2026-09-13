@@ -2344,10 +2344,10 @@ fn osc_133_becomes_semantic_events() {
             // column 0, then after "$ ", then after "ls", then after "out".
             // The ids are the order the marks were parsed in, which is what pairs
             // each one back up with the marker Emacs makes for it.
-            Event::PromptStart(at(0, 0), MarkId(0)),
-            Event::PromptEnd(at(0, 2), MarkId(1)),
-            Event::CommandStart(None, at(0, 4), MarkId(2)),
-            Event::CommandEnd(Some(3), at(0, 7), MarkId(3)),
+            Event::Mark(Mark::PromptStart, at(0, 0), MarkId(0)),
+            Event::Mark(Mark::PromptEnd, at(0, 2), MarkId(1)),
+            Event::Mark(Mark::CommandStart(None), at(0, 4), MarkId(2)),
+            Event::Mark(Mark::CommandEnd(Some(3)), at(0, 7), MarkId(3)),
         ]
     );
 }
@@ -2363,9 +2363,9 @@ fn osc_133_marks_a_continuation_prompt() {
     assert_eq!(
         events,
         vec![
-            Event::PromptStart(at(0, 0), MarkId(0)),
-            Event::PromptContinuation(at(0, 2), MarkId(1)),
-            Event::PromptEnd(at(0, 2), MarkId(2)),
+            Event::Mark(Mark::PromptStart, at(0, 0), MarkId(0)),
+            Event::Mark(Mark::PromptContinuation, at(0, 2), MarkId(1)),
+            Event::Mark(Mark::PromptEnd, at(0, 2), MarkId(2)),
         ]
     );
 }
@@ -2383,7 +2383,11 @@ fn osc_133_ignores_the_other_spelling_of_the_prompt_mark() {
     let mut t = term(4, 20, b"\x1b]133;P;k=s\x07\x1b]133;P\x07\x1b]133;A\x07");
     assert_eq!(
         t.drain().events,
-        vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))]
+        vec![Event::Mark(
+            Mark::PromptStart,
+            Anchor { row: 0, col: 0 },
+            MarkId(0)
+        )]
     );
 }
 
@@ -2401,7 +2405,11 @@ fn osc_133_drops_a_prompt_kind_that_is_neither_initial_nor_a_continuation() {
         t.feed(format!("\x1b]133;A;k={}\x07", String::from_utf8_lossy(kind)).as_bytes());
         assert_eq!(
             t.drain().events,
-            vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))],
+            vec![Event::Mark(
+                Mark::PromptStart,
+                Anchor { row: 0, col: 0 },
+                MarkId(0)
+            )],
             "k={} should have been dropped whole",
             String::from_utf8_lossy(kind)
         );
@@ -2416,8 +2424,8 @@ fn osc_133_reads_both_spellings_of_a_continuation() {
     assert_eq!(
         t.drain().events,
         vec![
-            Event::PromptContinuation(at(0, 0), MarkId(0)),
-            Event::PromptContinuation(at(0, 0), MarkId(1)),
+            Event::Mark(Mark::PromptContinuation, at(0, 0), MarkId(0)),
+            Event::Mark(Mark::PromptContinuation, at(0, 0), MarkId(1)),
         ]
     );
 }
@@ -2429,7 +2437,11 @@ fn osc_133_treats_an_empty_prompt_kind_as_initial() {
     let mut t = term(4, 20, b"\x1b]133;A;k=\x07");
     assert_eq!(
         t.drain().events,
-        vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))]
+        vec![Event::Mark(
+            Mark::PromptStart,
+            Anchor { row: 0, col: 0 },
+            MarkId(0)
+        )]
     );
 }
 
@@ -2447,7 +2459,11 @@ fn osc_133_ignores_the_options_that_are_not_a_prompt_kind() {
         t.feed(&[b"\x1b]133;A;", opts, b"\x07"].concat());
         assert_eq!(
             t.drain().events,
-            vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))],
+            vec![Event::Mark(
+                Mark::PromptStart,
+                Anchor { row: 0, col: 0 },
+                MarkId(0)
+            )],
             "{} should have been an initial prompt",
             String::from_utf8_lossy(opts)
         );
@@ -2484,8 +2500,8 @@ fn osc_133_d_without_a_status() {
     let mut t = term(4, 20, b"\x1b]133;D\x07");
     assert_eq!(
         t.drain().events,
-        vec![Event::CommandEnd(
-            None,
+        vec![Event::Mark(
+            Mark::CommandEnd(None),
             Anchor { row: 0, col: 0 },
             MarkId(0)
         )]
@@ -2536,7 +2552,11 @@ fn osc_133_stays_typed() {
     let mut t = term(4, 20, b"\x1b]133;A\x07");
     assert_eq!(
         t.drain().events,
-        vec![Event::PromptStart(Anchor { row: 0, col: 0 }, MarkId(0))]
+        vec![Event::Mark(
+            Mark::PromptStart,
+            Anchor { row: 0, col: 0 },
+            MarkId(0)
+        )]
     );
 }
 
@@ -2554,7 +2574,7 @@ fn marks_in_one_drain_keep_their_own_positions() {
         .events
         .into_iter()
         .filter_map(|e| match e {
-            Event::CommandStart(_, at, _) => Some(at),
+            Event::Mark(Mark::CommandStart(_), at, _) => Some(at),
             _ => None,
         })
         .collect();
@@ -2659,7 +2679,7 @@ fn an_anchor_survives_the_row_scrolling_off() {
     let mut t = term(3, 20, b"\x1b]133;C\x07start\r\n");
     t.feed(b"a\r\nb\r\nc\r\nd\r\n");
     let delta = t.drain();
-    let Some(Event::CommandStart(_, at, _)) = delta.events.first() else {
+    let Some(Event::Mark(Mark::CommandStart(_), at, _)) = delta.events.first() else {
         panic!("no command-start: {:?}", delta.events);
     };
     assert_eq!(at.row, 0, "the mark fell on the first row written");

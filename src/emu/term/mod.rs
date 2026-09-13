@@ -89,16 +89,24 @@ pub struct Anchor {
     pub col: usize,
 }
 
-/// Which of the prompts a `133;A` mark is announcing. See [`State::prompt_kind`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PromptKind {
-    /// The prompt a command is typed at: `PS1`, and the default when `k=` is absent.
-    Initial,
-    /// `PS2` — the same command, still being typed.
-    Continuation,
-    /// A right-hand prompt, or a kind this version has never heard of. Neither starts a
-    /// command nor continues one, so the mark is dropped and no state moves.
-    Other,
+/// An OSC 133 mark: where a shell says its prompt, its input and its command's output
+/// begin and end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mark {
+    /// `133;A`: the prompt a command is typed at, `PS1`.
+    PromptStart,
+    /// `133;A;k=s`: a continuation prompt, `PS2`, for the second and later lines of a
+    /// multi-line construct. It opens no command and moves no prompt marker; it says that
+    /// the line about to be read continues the one already submitted.
+    PromptContinuation,
+    /// `133;B`: user input begins, which is where Emacs takes the line.
+    PromptEnd,
+    /// `133;C`: the command is running and owns the output region, with the command line
+    /// the shell said it was about to run, from `cmdline_url=`. See [`State::cmdline`]
+    /// for why that spelling and not kitty's `cmdline=`.
+    CommandStart(Option<String>),
+    /// `133;D`: the command finished, with its exit status when reported.
+    CommandEnd(Option<i32>),
 }
 
 /// Something the Lisp side must react to, beyond redrawing cells.
@@ -130,32 +138,12 @@ pub enum Event {
     /// parsed several more sequences, so "the terminator of the last OSC" would
     /// answer the wrong query. See [`osc_reply`].
     Osc(u16, Vec<String>, Terminator),
-    /// OSC 133;A — a shell prompt begins.
+    /// An OSC 133 mark, and where it landed.
     ///
-    /// The [`MarkId`] is how Emacs is told, later, that the mark has moved: it holds a
+    /// The [`MarkId`] is how Emacs is told later that the mark has moved: Emacs holds a
     /// buffer marker taken from the [`Anchor`], the anchor stops being true the moment a
-    /// resize rewraps the grid, and the id is what pairs the two ends up again. See
-    /// [`Delta::marks`].
-    PromptStart(Anchor, MarkId),
-    /// OSC 133;A;k=s — a *continuation* prompt begins: `PS2`, the second
-    /// and later lines of a multi-line construct.
-    ///
-    /// Its own event rather than a flag on [`Event::PromptStart`] because the two differ
-    /// in what they mean to Emacs rather than in degree: this one opens no command and
-    /// moves no prompt marker, it only says that the line about to be read continues the
-    /// one already submitted. See [`State::prompt_kind`], which is where `k=` is read
-    /// and a continuation told apart from an initial or a right-hand prompt.
-    PromptContinuation(Anchor, MarkId),
-    /// OSC 133;B — user input begins; this is where comint takes over.
-    PromptEnd(Anchor, MarkId),
-    /// OSC 133;C — the command is running and owns the output region.
-    ///
-    /// The [`String`] is the command line the shell said it was about to run, from the
-    /// mark's `cmdline_url=`, and is absent when the shell did not say. See
-    /// [`State::cmdline`] for why that spelling and not kitty's `cmdline=`.
-    CommandStart(Option<String>, Anchor, MarkId),
-    /// OSC 133;D — the command finished, with its exit status when reported.
-    CommandEnd(Option<i32>, Anchor, MarkId),
+    /// resize rewraps the grid, and the id pairs the two up again. See [`Delta::marks`].
+    Mark(Mark, Anchor, MarkId),
     /// The child changed its mind about mouse reporting. An occurrence rather than a
     /// field because nothing in redisplay depends on it: its one consumer swaps a keymap.
     Mouse(Mouse),

@@ -2491,14 +2491,14 @@ mod tests {
             u.delta
                 .events
                 .iter()
-                .any(|e| matches!(e, Event::PromptStart(..)))
+                .any(|e| matches!(e, Event::Mark(crate::emu::Mark::PromptStart, ..)))
         });
         assert!(
             update
                 .delta
                 .events
                 .iter()
-                .any(|e| matches!(e, Event::PromptEnd(..)))
+                .any(|e| matches!(e, Event::Mark(crate::emu::Mark::PromptEnd, ..)))
         );
     }
 
