@@ -236,6 +236,7 @@ and moves you between them itself:
   - =C-c C-z=: suspend (=C-z=, as a real terminal sends it).
   - =C-c C-v=: peek — freeze the display to read back over a program without stalling it.
   - =C-c C-p= / =C-c C-n=: jump to the previous/next command.
+  - =C-c M-p= / =C-c M-n=: jump to the previous/next link; eldoc says where it goes.
   - =C-c M-o=: clear the scrollback.
   - =C-c TAB=: fold a command's output to one line.
   - =C-c C-q=: send the next key exactly as typed, even =C-c= itself.

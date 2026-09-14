@@ -364,7 +364,16 @@ guessed."
                      'help-echo "mouse-2, C-c RET: visit this file"
                      'face 'cooked-link)))))))))))
 
+(defun cooked-file-link--destination (pos)
+  "The file the file name at POS resolved to, abbreviated, or nil.
+
+The entry `cooked-link-destination-functions' carries for this layer.  A file
+under your home directory reads as ~/src/lib.rs."
+  (when-let* ((file (get-text-property pos 'cooked-file-link)))
+    (abbreviate-file-name file)))
+
 (add-hook 'cooked-link-follow-functions #'cooked-file-link-follow)
+(add-hook 'cooked-link-destination-functions #'cooked-file-link--destination t)
 (add-hook 'cooked-link-scan-functions #'cooked-file-link-scan)
 
 ;; Registered at the *end*, which is this layer's rank and not an accident of load

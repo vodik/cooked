@@ -1736,6 +1736,10 @@ to the child verbatim."
               (when (windowp window) (cooked--tty-esc-init (window-frame window))))
             nil t)
   (cooked--install-thing-at-point-providers)
+  ;; Where the link at point goes, in the echo area.  In the mode body, which
+  ;; runs before `global-eldoc-mode' decides whether this buffer has anything
+  ;; for eldoc to show, so that mode turns eldoc on here by itself.
+  (add-hook 'eldoc-documentation-functions #'cooked-link--eldoc nil t)
   (cooked--register-buffer)
   (cooked--install-global-hooks)
   ;; Negative depth so it runs ahead of the snap: the guard can substitute
@@ -1840,6 +1844,12 @@ to the child verbatim."
 ;; interrupt character, and a `C-c' prefix in a property at point would make Emacs
 ;; wait for a second key before letting SIGINT through.
 (define-key cooked-mode-map (kbd "C-c RET") #'cooked-follow-link-at-point)
+;; Next and previous as `C-c C-n' and `C-c C-p' are for commands, comint's
+;; prompts, so links take the Meta pair under the same prefix, which comint
+;; leaves free.  `cooked-link-repeat-map' makes a plain `n' and `p' enough after
+;; the first.
+(define-key cooked-mode-map (kbd "C-c M-n") #'cooked-next-link)
+(define-key cooked-mode-map (kbd "C-c M-p") #'cooked-previous-link)
 
 ;; comint-shaped, cooked-implemented.  These keep comint's own positions, because
 ;; the concept behind each is one a terminal genuinely has -- it is only comint's

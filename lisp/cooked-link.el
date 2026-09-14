@@ -67,6 +67,7 @@
 (require 'goto-addr)
 (require 'browse-url)
 (require 'thingatpt)
+(require 'eldoc)
 ;; The seam helpers below -- `cooked--protect-seam' and
 ;; `cooked--run-seam-until-success' -- live here.  The first is a *macro*, so
 ;; without this the file compiles a call to a function that does not exist and
@@ -1040,6 +1041,217 @@ same reasons."
              (cons 'url #'cooked-link--url-at-point))
 (add-to-list 'cooked-bounds-of-thing-at-point-providers
              (cons 'url #'cooked-link--url-bounds-at-point))
+
+;;;; Moving between links, and saying where one goes
+;;
+;; ghostel's `ghostel-next-hyperlink' and `ghostel--eldoc-link', taken for the
+;; reason REPORT.org gives: nothing reached a link from the keyboard unless point
+;; was already on it.  Named as org and shr name theirs, `cooked-next-link', since
+;; everything else here says link.
+;;
+;; A link, to both, is any text carrying `cooked-link-map', which
+;; `cooked-link--propertize' puts on every kind: an `OSC 8' span, a detected URL,
+;; and a file name when cooked-file-link.el is loaded.  That keeps this section from
+;; naming a layer above it, as `cooked-link-claim-functions' does for precedence.
+
+(defvar cooked-link-destination-functions
+  (list #'cooked-link-uri #'cooked-link--detected-url)
+  "Functions naming where the link at a position goes, tried in order.
+
+Each is called with a buffer position and returns the destination as a string,
+or nil when the link there is not its kind.  The first answer wins.  This
+file contributes the two kinds it makes, an `OSC 8' span's URI and a
+detected URL; cooked-file-link.el adds the file a file name resolved to.
+
+`cooked-link--eldoc' is what asks, so on an `OSC 8' span whose text reads
+https://example.com/ and whose destination is https://elsewhere.example/, the
+echo area says the second.")
+
+(defun cooked-link--detected-url (pos)
+  "The URL the scan detected at POS, or nil.
+A mail address reads as its mailto: URL, which is what following it opens."
+  (get-text-property pos 'cooked-link-url))
+
+(defun cooked-link-destination (&optional pos)
+  "Where the link at POS goes, as a string, or nil if POS is on no link.
+See `cooked-link-destination-functions'."
+  (let ((pos (or pos (point))))
+    (and (cooked-link--at-p pos)
+         (run-hook-with-args-until-success 'cooked-link-destination-functions
+                                           pos))))
+
+(defun cooked-link--eldoc (callback &rest _)
+  "Report the destination of the link at point through eldoc's CALLBACK.
+
+An entry on `eldoc-documentation-functions', installed by `cooked-mode'.
+It says where following the link would go, which the text need not: an `OSC 8'
+span's text is often a label, and a file name is shown resolved, so
+src/lib.rs in a project reads as the file it opens.  An `OSC 8' span's
+`help-echo' shows its destination on hover, and this is the keyboard's way to
+the same answer, for every kind of link."
+  (when-let* ((destination (cooked-link-destination)))
+    (funcall callback destination :thing "Link" :face 'cooked-link)
+    t))
+
+(defun cooked-link--at-p (pos)
+  "Whether the text at POS is part of a link of any kind."
+  (and (< pos (point-max))
+       (eq (get-text-property pos 'keymap) cooked-link-map)))
+
+(defconst cooked-link--run-properties
+  '(keymap cooked-link-id cooked-link-url cooked-link-fragment)
+  "The properties a change in which ends one link's run of text.
+
+Two links can touch.  Two `OSC 8' spans printed back to back carry the same
+keymap and differ only in their id, so the keymap alone would read them as
+one link and step over the second.")
+
+(defun cooked-link--run-bounds (pos)
+  "Bounds of the run of one link's text around POS, within its row."
+  (let ((beg (point-min))
+        (end (point-max)))
+    (dolist (property cooked-link--run-properties)
+      (setq beg (max beg (or (previous-single-property-change
+                              (1+ pos) property nil (point-min))
+                             (point-min)))
+            end (min end (or (next-single-property-change
+                              pos property nil (point-max))
+                             (point-max)))))
+    (cons beg end)))
+
+(defun cooked-link--continues-p (pos)
+  "Whether the link run starting at POS carries on the one before its row break.
+
+True when POS begins a row and the last character of the row above belongs
+to the same link: the same `OSC 8' id, or the same fragment id the scan
+gives the pieces of a URL the terminal wrapped.  Destinations are not
+compared, so the same URL printed on two consecutive rows is two links."
+  (and (> pos (1+ (point-min)))
+       (eq (char-before pos) ?\n)
+       (cooked-link--at-p (- pos 2))
+       (let ((id (get-text-property pos 'cooked-link-id))
+             (fragment (get-text-property pos 'cooked-link-fragment)))
+         (or (and id (eql id (get-text-property (- pos 2) 'cooked-link-id)))
+             (and fragment
+                  (eq fragment
+                      (get-text-property (- pos 2) 'cooked-link-fragment)))))))
+
+(defun cooked-link-bounds (&optional pos)
+  "Bounds of the whole link at POS, across the rows it was wrapped over, or nil.
+
+A cons (BEG . END).  A URL the terminal wrapped over three rows is three runs
+of text with row breaks between them, and this answers from the start of the
+first to the end of the last."
+  (let ((pos (or pos (point))))
+    (when (cooked-link--at-p pos)
+      (pcase-let ((`(,beg . ,end) (cooked-link--run-bounds pos)))
+        (while (cooked-link--continues-p beg)
+          (setq beg (car (cooked-link--run-bounds (- beg 2)))))
+        (while (and (< (1+ end) (point-max))
+                    (cooked-link--continues-p (1+ end)))
+          (setq end (cdr (cooked-link--run-bounds (1+ end)))))
+        (cons beg end)))))
+
+(defconst cooked-link--search-chunk 4096
+  "How many characters a link search makes sure are scanned at a time.
+
+Detected URLs exist only in text redisplay has fontified, so a search that
+looked only at properties would miss every URL below the window.  The search
+fontifies the text it is about to look at, this much at a time, and stops at
+the first link: the next link a screen away costs a screen of scanning, not
+the scrollback.")
+
+(defun cooked-link--fontify (beg end)
+  "Have BEG..END scanned for links now, if jit-lock would scan it later."
+  (when (bound-and-true-p jit-lock-mode)
+    (jit-lock-fontify-now beg end)))
+
+(defun cooked-link--next-start (from limit)
+  "Start of the first link that begins in FROM..LIMIT, or nil."
+  (let ((pos from)
+        (found nil))
+    (while (and (not found) (< pos limit))
+      (let ((stop (min limit (+ pos cooked-link--search-chunk))))
+        (cooked-link--fontify pos stop)
+        (while (and (not found) (< pos stop))
+          (if (not (cooked-link--at-p pos))
+              (setq pos (next-single-property-change pos 'keymap nil stop))
+            (let ((bounds (cooked-link-bounds pos)))
+              (if (= (car bounds) pos)
+                  (setq found pos)
+                (setq pos (cdr bounds))))))))
+    found))
+
+(defun cooked-link--previous-start (from limit)
+  "Start of the last link that has text in LIMIT..FROM, or nil."
+  (let ((pos from)
+        (found nil))
+    (while (and (not found) (> pos limit))
+      (let ((stop (max limit (- pos cooked-link--search-chunk))))
+        (cooked-link--fontify stop pos)
+        (while (and (not found) (> pos stop))
+          (if (cooked-link--at-p (1- pos))
+              (setq found (car (cooked-link-bounds (1- pos))))
+            (setq pos (previous-single-property-change pos 'keymap nil stop))))))
+    found))
+
+(defun cooked-link--goto (direction)
+  "Move point to the start of the next link in DIRECTION, `next' or `previous'.
+
+The link point is on is skipped whole, wrapped rows and all, and the search
+wraps around the buffer when it runs out of links in DIRECTION."
+  ;; Point's own row first, so that a URL point is inside is known as one before
+  ;; the search decides where to start from.
+  (cooked-link--fontify (line-beginning-position) (line-end-position))
+  (let* ((here (cooked-link-bounds))
+         (next (eq direction 'next))
+         (from (cond ((not here) (point)) (next (cdr here)) (t (car here))))
+         (target (if next
+                     (cooked-link--next-start from (point-max))
+                   (cooked-link--previous-start from (point-min)))))
+    (unless target
+      (setq target (if next
+                       (cooked-link--next-start (point-min) from)
+                     (cooked-link--previous-start (point-max) from)))
+      (when target (message "Wrapped")))
+    (unless target
+      (user-error "No links in this buffer"))
+    (goto-char target)))
+
+(defun cooked-next-link (&optional n)
+  "Move to the start of the Nth next link, wrapping around the buffer.
+
+A link is anything \\<cooked-link-map>\\[cooked-follow-link] on it opens: an
+`OSC 8' hyperlink, a URL or mail address in the text, or a file name when
+cooked-file-link.el is loaded.  A URL the terminal wrapped over several rows is
+one link, visited once.  Text below the window is scanned for URLs as the
+search reaches it, so every link in the scrollback is found.  With N negative,
+move back instead, as `cooked-previous-link' does.
+
+With `repeat-mode' on, \\`n' and \\`p' keep moving; see
+`cooked-link-repeat-map'."
+  (interactive "p")
+  (let ((n (or n 1)))
+    (dotimes (_ (abs n))
+      (cooked-link--goto (if (< n 0) 'previous 'next)))))
+
+(defun cooked-previous-link (&optional n)
+  "Move to the start of the Nth previous link, wrapping around the buffer.
+See `cooked-next-link'."
+  (interactive "p")
+  (cooked-next-link (- (or n 1))))
+
+(defvar-keymap cooked-link-repeat-map
+  :doc "Keys that keep moving between links after `cooked-next-link'.
+Active when `repeat-mode' is on, so \\`n' and \\`p' step on from one
+link to the next without the prefix."
+  :repeat t
+  "n"   #'cooked-next-link
+  "p"   #'cooked-previous-link
+  "M-n" #'cooked-next-link
+  "M-p" #'cooked-previous-link)
+
+(eldoc-add-command #'cooked-next-link #'cooked-previous-link)
 
 (provide 'cooked-link)
 

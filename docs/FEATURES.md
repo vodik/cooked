@@ -566,6 +566,13 @@ it is highlighted, and `S-mouse-2`/`S-RET` follow one even while the child has g
 mouse or the keyboard — because a plain click or `RET` in that state still belongs to the
 child, exactly as it does everywhere else, with Shift as the escape.
 
+`C-c M-n` and `C-c M-p` move to the next and previous link of any kind, wrapping around
+the buffer, and with `repeat-mode` on a plain `n` and `p` keep going. A URL wrapped over
+several rows is one stop. The search scans the scrollback for URLs as it reaches it, so
+a link nobody has scrolled back to yet is still found. With point on a link, eldoc shows
+where it goes: the `OSC 8` destination behind a label, the URL, or the file a file name
+resolved to.
+
 File names are a separate, optional feature, because deciding that `src/lib.rs` is a file
 rather than a word means asking the filesystem, and doing that per candidate per redraw is
 a syscall on the render hot path. Load it on purpose:

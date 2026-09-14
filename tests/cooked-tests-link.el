@@ -1571,5 +1571,130 @@ A pattern of the user's own is searched for plainly."
       (should (cooked-link--next-mail (point-max)))
       (should (equal (match-string 0) "one")))))
 
+;;;; Moving between links from the keyboard
+
+(defconst cooked-tests--links-to-visit
+  (concat "\e]8;;https://a.example/\e\\aa\e]8;;https://b.example/\e\\bb"
+          "\e]8;;\e\\ https://one.example/\r\n"
+          "see https://example.com/a/very/long/path x@y.example\r\n"
+          "done")
+  "Four kinds of link at twenty columns, for the navigation tests.
+
+Two `OSC 8' spans printed back to back, which share a keymap and differ only
+in their id; a URL the terminal wraps; a longer one wrapped over three rows;
+and a mail address.")
+
+(defconst cooked-tests--link-destinations
+  '("https://a.example/" "https://b.example/" "https://one.example/"
+    "https://example.com/a/very/long/path" "mailto:x@y.example")
+  "Where the links in `cooked-tests--links-to-visit' go, in buffer order.")
+
+(defun cooked-tests--visit-links (command count)
+  "Run COMMAND COUNT times from where point is, collecting each stop.
+Each stop is (DESTINATION . AT-START), AT-START saying whether point landed on
+the first character of the whole link."
+  (let ((stops nil))
+    (dotimes (_ count)
+      (let ((inhibit-message t))
+        (funcall command))
+      (push (cons (cooked-link-destination)
+                  (= (point) (car (cooked-link-bounds))))
+            stops))
+    (nreverse stops)))
+
+(ert-deftest cooked-next-link-visits-each-link-once-and-wraps-around ()
+  "Every link is a stop, a wrapped one once, and the walk comes back round.
+
+Nothing fontifies the buffer first: batch mode never redisplays, so until the
+search scans the text it reaches, no URL in it is a link yet.  That is the
+state of any scrollback nobody has scrolled back through."
+  (cooked-tests--with-narrow-cat
+    (cooked-tests--type-and-settle
+     cooked-tests--links-to-visit
+     (lambda () (string-search "done" (cooked-tests--text))))
+    (goto-char (point-min))
+    (let ((stops (cooked-tests--visit-links #'cooked-next-link 6)))
+      (should (equal (mapcar #'car stops)
+                     (append cooked-tests--link-destinations
+                             (list (car cooked-tests--link-destinations)))))
+      (should (seq-every-p #'cdr stops)))))
+
+(ert-deftest cooked-previous-link-lands-on-the-start-of-a-wrapped-link ()
+  "Moving back reaches a wrapped URL at its first row, not at its last piece.
+
+ghostel walks back over the pieces that share an id for the same reason: the
+search meets the last row of the link first."
+  (cooked-tests--with-narrow-cat
+    (cooked-tests--type-and-settle
+     cooked-tests--links-to-visit
+     (lambda () (string-search "done" (cooked-tests--text))))
+    (goto-char (point-max))
+    (let ((stops (cooked-tests--visit-links #'cooked-previous-link 6)))
+      (should (equal (mapcar #'car stops)
+                     (append (reverse cooked-tests--link-destinations)
+                             (last cooked-tests--link-destinations))))
+      (should (seq-every-p #'cdr stops)))
+    ;; A prefix argument counts links, and a negative one turns round.
+    (goto-char (point-min))
+    (cooked-next-link 3)
+    (should (equal (cooked-link-destination) "https://one.example/"))
+    (cooked-next-link -2)
+    (should (equal (cooked-link-destination) "https://a.example/"))))
+
+(ert-deftest cooked-next-link-says-so-when-there-is-nothing-to-visit ()
+  (with-temp-buffer
+    (insert "no links here\n")
+    (goto-char (point-min))
+    (should-error (cooked-next-link) :type 'user-error)
+    (should (= (point) (point-min)))))
+
+(ert-deftest cooked-eldoc-names-where-the-link-at-point-goes ()
+  "The echo area shows the destination, which the text of a link need not say.
+
+An `OSC 8' span labelled aa goes to https://a.example/, and the URL a mail
+address opens is its mailto: form.  Off a link, eldoc is told nothing."
+  (cooked-tests--with-narrow-cat
+    (should (memq #'cooked-link--eldoc eldoc-documentation-functions))
+    (cooked-tests--type-and-settle
+     cooked-tests--links-to-visit
+     (lambda () (string-search "done" (cooked-tests--text))))
+    (cooked-tests--fontify)
+    (let ((eldoc (lambda ()
+                   (let ((said nil))
+                     (cooked-link--eldoc
+                      (lambda (doc &rest plist) (setq said (cons doc plist))))
+                     said))))
+      (goto-char (cooked-tests--link-at "aa"))
+      (should (equal (funcall eldoc)
+                     '("https://a.example/" :thing "Link" :face cooked-link)))
+      (goto-char (cooked-tests--link-at "x@y"))
+      (should (equal (car (funcall eldoc)) "mailto:x@y.example"))
+      (goto-char (cooked-tests--link-at "done"))
+      (should-not (funcall eldoc)))))
+
+(ert-deftest cooked-eldoc-names-the-file-a-file-link-resolved-to ()
+  (cooked-tests--with-file-links
+    (let ((default-directory (file-name-directory
+                              (directory-file-name
+                               (file-name-directory (locate-library "cooked-link")))))
+          (cooked-link-destination-functions
+           (append cooked-link-destination-functions
+                   (list #'cooked-file-link--destination))))
+      (with-temp-buffer
+        (setq-local default-directory default-directory)
+        (insert "see lisp/cooked-link.el:12:3 here\n")
+        (cooked-file-link-scan (point-min) (point-max))
+        (goto-char (cooked-tests--link-at "lisp/"))
+        (should (equal (cooked-link-destination)
+                       (abbreviate-file-name
+                        (expand-file-name "lisp/cooked-link.el"))))))))
+
+(ert-deftest cooked-link-navigation-is-bound-under-the-prefix ()
+  "Both commands are on `cooked-mode-map', and repeat without the prefix."
+  (should (eq (keymap-lookup cooked-mode-map "C-c M-n") #'cooked-next-link))
+  (should (eq (keymap-lookup cooked-mode-map "C-c M-p") #'cooked-previous-link))
+  (should (eq (get 'cooked-next-link 'repeat-map) 'cooked-link-repeat-map))
+  (should (eq (keymap-lookup cooked-link-repeat-map "p") #'cooked-previous-link)))
+
 (provide 'cooked-tests-link)
 ;;; cooked-tests-link.el ends here
