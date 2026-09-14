@@ -397,10 +397,10 @@ sources ranked *above* it: a source asks before claiming, and must not be told
 that it has claimed the text itself -- nor be blocked by something it
 outranks.  The walk therefore stops at SOURCE\='s own entry.
 
-Deliberately *not* the question `cooked--fontify-links\=' asks when it drops a
-goto-addr overlay: that one is specifically about an `OSC 8\=' span having
-claimed the same characters, and widening it to \"claimed\" would have it
-delete overlays sitting over file names too."
+For example, the URL pass asks with SOURCE `goto-addr\=' before it marks a
+match, in `cooked-link--fontify-url-match\=', and is told only about an
+`OSC 8\=' span over the same characters.  A guessed file name there ranks
+below it and cannot keep a URL from being marked."
   (catch 'claimed
     (pcase-dolist (`(,symbol . ,predicate) cooked-link-claim-functions)
       (when (eq symbol source) (throw 'claimed nil))

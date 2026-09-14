@@ -300,7 +300,18 @@ Not for customizing, since the buffer remaps it: `cooked--remap-concealed\='
 gives it a `:foreground\=' of the background this buffer draws, whatever OSC 11
 and DECSCNM have made that.  A face plist cannot say \='the colour of the default
 background\=' any other way, and naming the colour itself would freeze it at the
-moment the plist was built."
+moment the plist was built.
+
+On a text terminal whose colours Emacs does not know, the background is
+`unspecified-bg\=', and concealed text shows anyway.  Emacs draws a foreground
+of `unspecified-bg\=' by turning on reverse video, since that is the only way a
+terminal paints text in its own background colour, so a concealed password
+comes out as a reversed block with the letters legible in it.  No face hides
+text there, because every channel a face has is a colour or an attribute the
+terminal draws visibly.  Hiding it would take a `display\=' of blanks over the
+cells, which the renderer does not put on concealed text.  A frame whose
+default colours are named, by a theme or its `background-color\=' parameter,
+conceals as intended."
   :group 'cooked)
 
 (defface cooked--concealed-reversed '((t))
