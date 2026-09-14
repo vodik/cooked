@@ -1596,6 +1596,13 @@ to the child verbatim."
   ;; would answer for a cooked buffer: see the `comint-completion-at-point'
   ;; removal below.
   (visual-line-mode -1)
+  ;; A bracket in a terminal is a character the child drew, not code to be
+  ;; balanced.  The global `show-paren-mode' is on by default and its predicate
+  ;; only exempts `special-mode', which comint is not, so with point on a `)' in
+  ;; scrollback it would highlight a partner that may be three commands up.
+  ;; Nothing on the live screen does that, and scrollback should behave as the
+  ;; screen did.  The local switch outlives a later toggle of the global mode.
+  (show-paren-local-mode -1)
   (setq-local scroll-conservatively 101
               ;; Both margins to zero, as eat and vterm also set them.  A
               ;; terminal's viewport is the whole window: the child decides what
@@ -1694,6 +1701,15 @@ to the child verbatim."
               ;; and not for Lisp to set, and the character-level shaping it
               ;; would also disable is not what is in the way here.
               bidi-paragraph-direction 'left-to-right
+              ;; The bracket-pair pass of the bidi algorithm scans each
+              ;; redisplayed line for matching brackets to decide how neutral
+              ;; characters around them are ordered.  With the paragraph
+              ;; direction fixed above there is almost nothing left for it to
+              ;; decide, and TUI output is dense with brackets, so the scan is
+              ;; cost for no result.
+              ;; Emacs documents this variable as the one to set for exactly
+              ;; that trade.
+              bidi-inhibit-bpa t
               truncate-lines (not cooked-rejoin-wrapped-lines)
               mode-line-process '(:eval (cooked--mode-line))
               ;; Read once here and never toggled afterwards -- see
