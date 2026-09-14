@@ -155,8 +155,15 @@ window stops being the selected one, so this cannot strand a buffer."
   "Whether insert state forwards through `cooked-semi-map'.
 
 Non-nil is the point of the integration: typing reaches the child, while ESC,
-`M-x' and a non-normal leader still reach Emacs.  nil forwards everything the
-policy's own map does, making insert state indistinguishable from emacs state."
+`M-x' and a non-normal leader still reach Emacs, and the forwarding sits above
+evil's insert state maps so `C-r' and `C-w' reach the child too.
+
+nil wears the policy's own map, the one emacs state wears, but only as the local
+map, and evil's insert state maps outrank every local map.  So a key evil binds
+in insert state runs evil's command: `C-r' pastes a register, `C-w' deletes a
+word of the read-only screen and ESC enters normal state.  Every other key
+reaches the child.  For insert state that forwards every key, ESC included, set
+`cooked-evil-child-state' to `emacs' instead, which is what that state is for."
   :type 'boolean :group 'cooked)
 
 ;;;; Edits evil makes on its own initiative
@@ -658,28 +665,112 @@ unchanged.  See `cooked-evil-insert-line' for the other half of the pair."
 (declare-function evil-get-minor-mode-keymap "ext:evil-core")
 (defvar evil-toggle-key)
 
-(defun cooked-evil--forward-above (state)
-  "Make the child\='s forwarding outrank evil\='s own keymaps in STATE.
+(defvar cooked-evil--kept-toggle-key nil
+  "The `evil-toggle-key\=' the forwarding leaves to evil, as a key vector.
+See `cooked-evil--keep-toggle-key\='.")
+
+(defun cooked-evil--forwarding-maps ()
+  "Evil\='s minor-mode keymaps for `cooked--semi-map-worn\=', one per state.
+Replace state as well as insert, since `cooked-evil--input-mode\=' wears the
+semi map in both."
+  (mapcar (lambda (state) (evil-get-minor-mode-keymap state 'cooked--semi-map-worn))
+          '(insert replace)))
+
+(defun cooked-evil--keep-toggle-key (key)
+  "Leave KEY, a `kbd\=' string, to evil in the forwarding, and give back the last.
+
+`evil-toggle-key\=' is the way out of insert state into emacs state, as ESC is
+the way into normal state, and forwarding it would send \\`C-z\=' to the child
+as a suspend.  So each forwarding map binds it to nil, which shadows the
+forwarding beneath and lets evil\='s insert state map answer.
+
+A variable watcher calls this again whenever the toggle key is set, which is
+also when evil\='s own `:set\=' moves evil\='s bindings.  Without it a toggle key
+chosen after cooked-evil loaded went to the child, and \\`C-z\=' stayed kept
+back from a child that wanted it."
+  (let ((keys (kbd key)))
+    (dolist (map (cooked-evil--forwarding-maps))
+      (when cooked-evil--kept-toggle-key
+        (define-key map cooked-evil--kept-toggle-key nil t))
+      (define-key map keys nil))
+    (setq cooked-evil--kept-toggle-key keys)))
+
+(defun cooked-evil--toggle-key-changed (_symbol value operation where)
+  "Follow a new `evil-toggle-key\=', VALUE, in the forwarding.
+A variable watcher.  OPERATION and WHERE are checked so that only a global
+`set\=' moves the global keymaps, not a `let\=' or a buffer-local value."
+  (when (and (eq operation 'set) (null where) (stringp value))
+    (cooked-evil--keep-toggle-key value)))
+
+(defun cooked-evil--forward-above ()
+  "Make the child\='s forwarding outrank evil\='s own keymaps in insert state.
 
 `cooked--semi-forwarding-map\=' becomes the parent of evil\='s minor-mode keymap
-for `cooked--semi-map-worn\=' in STATE, so it answers ahead of the state maps
-while that variable is non-nil; see the Commentary for why a local map could
-not.  The parent is the forwarding alone, without `cooked-mode-map\=' and
+for `cooked--semi-map-worn\=', so it answers ahead of the state maps while that
+variable is non-nil; see the Commentary for why a local map could not.  The
+parent is the forwarding alone, without `cooked-mode-map\=' and
 `comint-mode-map\=' beneath it, which would put comint\='s own bindings above
-evil\='s too.
-
-`evil-toggle-key\=' is left to evil.  It is the way out of insert state into
-emacs state, as ESC is the way into normal state, and forwarding it would send
-\\`C-z\=' to the child as a suspend."
-  (let ((map (evil-get-minor-mode-keymap state 'cooked--semi-map-worn)))
-    (set-keymap-parent map cooked--semi-forwarding-map)
-    (define-key map (kbd evil-toggle-key) nil)))
+evil\='s too.  `evil-toggle-key\=' is left to evil; see
+`cooked-evil--keep-toggle-key\='."
+  (dolist (map (cooked-evil--forwarding-maps))
+    (set-keymap-parent map cooked--semi-forwarding-map))
+  (cooked-evil--keep-toggle-key evil-toggle-key)
+  (add-variable-watcher 'evil-toggle-key #'cooked-evil--toggle-key-changed))
 
 (with-eval-after-load 'evil
-  ;; Replace state as well, since `cooked-evil--input-mode' wears the semi map
-  ;; there too.
-  (cooked-evil--forward-above 'insert)
-  (cooked-evil--forward-above 'replace))
+  (cooked-evil--forward-above))
+
+(defconst cooked-evil--prompt-keys '("S-<return>" "S-RET")
+  "Keys cooked\='s prompt binding wins in insert state, besides the delegated ones.
+
+Shift+Return composes a multi-line command at a prompt, see `cooked-newline\=',
+and `evil-collection-comint\=' binds both spellings to `newline\=' on an
+auxiliary keymap that outranks `cooked-input-map\='.")
+
+(defun cooked-evil--prompt-binding (key)
+  "A binding for KEY that answers with `cooked-input-map\=''s, at a prompt only.
+
+A `menu-item\=' whose `:filter\=' looks KEY up in `cooked-input-map\=' while that
+map is the one worn, and answers nil everywhere else, which lets the lookup
+carry on into evil\='s own maps.  Looked up when the key is pressed rather than
+copied, so a later change to `cooked-delegate-keys\=' is followed: a key taken
+out of it is evil\='s again."
+  (let ((keys (kbd key)))
+    `(menu-item
+      "" nil
+      :filter ,(lambda (_)
+                 (and (eq (current-local-map) cooked-input-map)
+                      (let ((binding (lookup-key cooked-input-map keys)))
+                        (and (not (numberp binding)) binding)))))))
+
+(defun cooked-evil--bind-prompt-keys (keys)
+  "Let `cooked-input-map\=' answer KEYS, a list of `kbd\=' strings, in insert state.
+
+At a prompt a readline user expects \\`C-r\=' to search the shell\='s history,
+which is what `cooked-delegate-keys\=' makes it do, and Shift+Return to add a
+line.  Evil\='s insert state map binds \\`C-r\=' to `evil-paste-from-register\='
+and `evil-collection-comint\=' binds Shift+Return to `newline\=', and both
+outrank the local map, so neither of cooked\='s bindings was reached.  The
+bindings go on an auxiliary keymap tied to `cooked-mode-map\=', for the reason
+Enter\='s does below, and each defers to evil wherever Emacs does not own the
+line; see `cooked-evil--prompt-binding\='."
+  (dolist (key keys)
+    (evil-define-key* 'insert cooked-mode-map (kbd key)
+                      (cooked-evil--prompt-binding key))))
+
+(defun cooked-evil--delegate-keys-changed (_symbol value operation where)
+  "Give each key newly in `cooked-delegate-keys\=', VALUE, the prompt binding.
+A variable watcher; OPERATION and WHERE are checked as in
+`cooked-evil--toggle-key-changed\='.  A key that is no longer delegated needs
+nothing, since its binding already defers to evil."
+  (when (and (eq operation 'set) (null where))
+    (cooked-evil--bind-prompt-keys value)))
+
+(with-eval-after-load 'evil
+  (cooked-evil--bind-prompt-keys (append cooked-evil--prompt-keys
+                                         cooked-delegate-keys))
+  (add-variable-watcher 'cooked-delegate-keys
+                        #'cooked-evil--delegate-keys-changed))
 
 (defconst cooked-evil--submit
   `(menu-item

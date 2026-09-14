@@ -5313,6 +5313,84 @@ Emacs, and at a prompt it is not there at all."
       (should (eq (key-binding (kbd "C-w")) #'evil-delete-backward-word))
       (should (eq (key-binding (kbd "RET")) #'cooked-send-input)))))
 
+(ert-deftest cooked-evil-insert-state-at-a-prompt-keeps-cookeds-keys ()
+  "At a prompt insert-state `S-<return>' adds a line and `C-r' goes to the shell.
+
+A readline user expects Shift+Return to compose a second line and \\`C-r' to
+search the shell's history, which is what `cooked-input-map' binds them to.
+evil-collection's `newline' and evil's `evil-paste-from-register' outranked it,
+since both sit on keymaps above every local map.  A key taken out of
+`cooked-delegate-keys' is evil's again, and one added later is cooked's, and
+while the child owns the keyboard none of this applies."
+  :tags '(evil evil-collection)
+  (skip-unless (require 'evil nil t))
+  (skip-unless (require 'evil-collection nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--with-evil-collection (comint)
+    (cooked-tests--with-session '("/bin/cat")
+      (should (cooked-tests--settle (lambda () (eq cooked--mode 'cooked))))
+      (evil-insert-state)
+      (should (eq (key-binding (kbd "S-<return>")) #'cooked-newline))
+      (should (eq (key-binding (kbd "S-RET")) #'cooked-newline))
+      (should (eq (key-binding (kbd "C-r")) #'cooked-delegate-this-key))
+      (should (eq (key-binding (kbd "RET")) #'cooked-send-input))
+      (should (eq (key-binding (kbd "C-w")) #'evil-delete-backward-word))
+      (let ((original cooked-delegate-keys))
+        (unwind-protect
+            (progn
+              (customize-set-variable 'cooked-delegate-keys '("C-t"))
+              (should (eq (key-binding (kbd "C-r")) #'evil-paste-from-register))
+              (should (eq (key-binding (kbd "C-t")) #'cooked-delegate-this-key)))
+          (customize-set-variable 'cooked-delegate-keys original)))
+      (should (eq (key-binding (kbd "C-r")) #'cooked-delegate-this-key))
+      ;; Normal state keeps evil's own `C-r', which is redo.
+      (evil-normal-state)
+      (should (eq (key-binding (kbd "C-r")) #'evil-redo)))))
+
+(ert-deftest cooked-evil-hybrid-insert-off-leaves-evils-insert-keys ()
+  "With `cooked-evil-hybrid-insert' nil, evil's insert-state keys stay evil's.
+
+The docstring said insert state then behaved like emacs state, and it did not:
+the policy's map is worn as the local map, below evil's insert state map.  What
+it now says is what this pins: a key evil binds in insert state runs evil's
+command, and every other key reaches the child."
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (let ((cooked-evil-hybrid-insert nil))
+    (cooked-tests--with-echoing-child ""
+      (evil-insert-state)
+      (cooked--refresh-keymap t)
+      (should-not cooked--semi-map-worn)
+      (should (eq (key-binding (kbd "C-r")) #'evil-paste-from-register))
+      (should (eq (key-binding (kbd "<escape>")) #'evil-normal-state))
+      (should (eq (key-binding (kbd "a")) #'cooked-send-key))
+      (should (eq (key-binding (kbd "C-f")) #'cooked-send-key)))))
+
+(ert-deftest cooked-evil-follows-a-new-toggle-key ()
+  "The key evil leaves insert state with is kept from the child after it changes.
+
+The forwarding above evil's insert state unbound `evil-toggle-key' once, when
+cooked-evil loaded, so a toggle key set afterwards went to the child and \\`C-z'
+stayed kept back from it."
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (let ((original evil-toggle-key))
+    (unwind-protect
+        (cooked-tests--with-echoing-child ""
+          (evil-insert-state)
+          (should cooked--semi-map-worn)
+          (should (eq (key-binding (kbd "C-z")) #'evil-emacs-state))
+          (should (eq (key-binding (kbd "C-]")) #'cooked-send-key))
+          (customize-set-variable 'evil-toggle-key "C-]")
+          (should (eq (key-binding (kbd "C-]")) #'evil-emacs-state))
+          (should (eq (key-binding (kbd "C-z")) #'cooked-send-key)))
+      (customize-set-variable 'evil-toggle-key original))))
+
 (ert-deftest cooked-semi-map-leaves-emacs-its-control-chords ()
   "Evil insert state keeps `C-;' and `C-SPC' for Emacs; the raw map forwards them.
 

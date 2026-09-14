@@ -625,6 +625,9 @@ than to `completion-at-point\='."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'cooked-send-input)
     (define-key map (kbd "<S-return>") #'cooked-newline)
+    ;; The spelling `evil-collection' binds beside `<S-return>', so the two
+    ;; answer the same at a prompt; see `cooked-evil--prompt-keys'.
+    (define-key map (kbd "S-RET") #'cooked-newline)
     (define-key map (kbd "C-d") #'cooked-delete-char-or-eof)
     (define-key map (kbd "TAB") #'completion-at-point)
     (define-key map (kbd "M-p") #'cooked-previous-input)
