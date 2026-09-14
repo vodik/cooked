@@ -245,6 +245,43 @@ it unchanged."
     (insert "typed")
     (should (equal (cooked--pending-input) "typed"))))
 
+(ert-deftest cooked-an-echoed-keystroke-protects-only-what-it-wrote ()
+  "An echo on the third row must not re-protect the two rows above it.
+
+`add-text-properties' over the whole screen walks every interval and, once one
+of them lacks the properties, treats the whole range as modified, so the sweep
+cost whatever the screen held rather than what the drain wrote.  The rows above
+the cursor are already read-only, so what `cooked--protect' hands it has to
+start on the cursor's row.  The screen still ends up read-only throughout."
+  (cooked-tests--with-echoing-child "printf 'one\\ntwo\\n'; "
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "two" (cooked-tests--text)))))
+    (let* ((row (save-excursion (goto-char (cooked--cursor-position))
+                                (line-beginning-position)))
+           (inside nil)
+           (ranges nil)
+           (record (lambda (beg end &rest _)
+                     (when inside (push (cons beg end) ranges))))
+           (protect (lambda (orig &rest args)
+                      (setq inside t)
+                      (unwind-protect (apply orig args)
+                        (setq inside nil)))))
+      (should (> row (cooked--screen-start-position)))
+      (advice-add 'add-text-properties :before record)
+      (advice-add 'cooked--protect :around protect)
+      (unwind-protect
+          (progn
+            (cooked--send-to-child "x")
+            (should (cooked-tests--settle
+                     (lambda () (string-match-p "x" (cooked-tests--text))))))
+        (advice-remove 'cooked--protect protect)
+        (advice-remove 'add-text-properties record))
+      (should ranges)
+      (dolist (range ranges)
+        (should (>= (car range) row)))
+      (should-not (text-property-not-all (cooked--screen-start-position)
+                                         (point-max) 'read-only t)))))
+
 (ert-deftest cooked-screen-is-trimmed-to-a-transcript ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'one\\ntwo\\n'; sleep 5")
     (should (cooked-tests--settle

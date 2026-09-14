@@ -732,6 +732,21 @@ src/emu/cell.rs."
 TICK is `buffer-chars-modified-tick\=' as of that call.  See there for what it
 buys.")
 
+(defun cooked--protect-holes (beg end)
+  "Protect every run between BEG and END that is not already read-only.
+
+A run is found by its `read-only\=' property alone.  That is sound because
+nothing removes the stickiness `cooked--read-only-props\=' carries:
+`cooked--protect\=' lifts `read-only\=' and leaves the rest.  On a screen whose
+only unprotected text is a row the drain rewrote, for example a shell prompt
+with one character echoed, this makes one call to `add-text-properties\=', over
+that row."
+  (let ((pos beg))
+    (while (setq pos (text-property-not-all pos end 'read-only t))
+      (let ((hole (next-single-property-change pos 'read-only nil end)))
+        (add-text-properties pos hole cooked--read-only-props)
+        (setq pos hole)))))
+
 (defun cooked--protect (limit)
   "Make the screen read-only up to LIMIT, leaving anything after it editable.
 
@@ -747,16 +762,25 @@ says a drain changed no characters, and it says it about every writer rather
 than about the ones this file knows of: an insertion anywhere, by any layer,
 moves it.
 
-The full sweep is kept for the case where it did change, rather than narrowed to
-the rows the render rewrote.  Those bounds do exist -- `cooked--render-rows\='
+When characters did change, every hole in the screen is filled rather than the
+rows the render rewrote.  Those bounds do exist -- `cooked--render-rows\='
 returns them -- but they are not the whole of what a drain inserts:
 `cooked--pad-to-cursor\=' extends the cursor\='s row, which need not be the last
-one, and `cooked--fit-screen\=' and `cooked--goto-screen-row\=' add the newlines
-that make a row exist.  A sweep that misses one of those leaves a hole in the
-transcript the user can type into, which is not a failure any test would show.
-Sweeping text that is already protected costs microseconds; what costs is the
-text the drain actually wrote, and that has to be paid wherever it is paid
-from.
+one, `cooked--fit-screen\=', `cooked--goto-screen-row\=' and a shift add the
+newlines that make a row exist, and a promotion opens blank rows at the foot of
+its region.  A sweep that misses one of those leaves a hole in the transcript
+the user can type into, which only the render oracle would show.  So the
+holes are found by asking the text, with `text-property-not-all\=', and that
+answer covers every writer, including ones this file does not know of.
+
+What the sweep must not do is hand the whole screen to `add-text-properties\='.
+That walks the same intervals, but once one of them lacks the properties it
+treats the entire range it was given as modified and adds to every interval in
+turn, so the sweep cost what the screen held rather than what the drain wrote.
+On a styled 24x80 screen with one row rewritten that was 12 us of a 70 us apply,
+against 5.5 us for finding the one hole and filling it (interleaved in one
+compiled Emacs, load 4.9 over 16 CPUs).  Both cons the same 56 cells: a cons is
+per interval that gains the properties, and those are the same intervals.
 
 The sweep runs with change hooks inhibited, for the reason
 `cooked--render-block\=' gives for its property phases.  `add-text-properties\='
@@ -779,7 +803,7 @@ of them for URLs again.  Making text read-only changes nothing any hook reads."
              (add-text-properties (max beg was) limit cooked--read-only-props)
            (remove-text-properties limit (min was (point-max)) '(read-only nil))))
         (_
-         (add-text-properties beg limit cooked--read-only-props)
+         (cooked--protect-holes beg limit)
          (when (< limit (point-max))
            (remove-text-properties limit (point-max) '(read-only nil)))))
       ;; Read again: the two calls above do not change `buffer-chars-modified-tick\='
