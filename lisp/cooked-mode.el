@@ -1822,6 +1822,12 @@ to the child verbatim."
 ;; keys but never this event, so every state reaches it.
 (define-key cooked-mode-map [xterm-paste] #'cooked-xterm-paste)
 
+;; The primary selection is the other paste that does not come from the kill
+;; ring, and `mouse-yank-primary' inserts it into the buffer whoever owns the
+;; keyboard.  Remapped rather than bound, since `mouse-2' is `cooked-paste' here
+;; and the command is reached only from a key a user has put it on.
+(define-key cooked-mode-map [remap mouse-yank-primary] #'cooked-mouse-yank-primary)
+
 ;; Whatever key a user has bound to comint's commands reaches ours, so
 ;; `evil-collection-comint' (which binds `repl-submit' to `comint-send-input')
 ;; works without knowing cooked exists.

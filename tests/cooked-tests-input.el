@@ -767,6 +767,39 @@ at the end of its line and the one that did not is a space."
              (lambda () (string-match-p "^a b\\^\\[$" (cooked-tests--text)))))
     (should-not (string-search "a^[b" (cooked-tests--text)))))
 
+(ert-deftest cooked-primary-selection-and-text-drops-are-pastes ()
+  "The primary selection and a dropped text reach the child as a bracketed paste.
+
+`mouse-yank-primary' and `dnd-insert-text', which every port's text drop ends
+in, both inserted straight into the buffer, so while a program owned the
+keyboard the text sat in the transcript and the program never saw it.  At a
+prompt each joins the pending line, marked as pasted so its control bytes are
+stripped on submission."
+  (cooked-tests--with-echoing-child "printf '\\033[?2004h'; "
+    (should (cooked--bracketed-paste-p cooked--session))
+    (set-window-buffer (selected-window) (current-buffer))
+    (should (eq (key-binding [remap mouse-yank-primary]) #'cooked-mouse-yank-primary))
+    (cl-letf (((symbol-function 'gui-get-primary-selection) (lambda () "a\eprimary")))
+      (call-interactively #'cooked-mouse-yank-primary))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-search "^[[200~a primary^[[201~" (cooked-tests--text)))))
+    (should (eq (dnd-insert-text (selected-window) 'copy "a\edropped") 'copy))
+    (should (cooked-tests--settle
+             (lambda ()
+               (string-search "^[[200~a dropped^[[201~" (cooked-tests--text))))))
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat")
+    (should (cooked-tests--settle
+             (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
+    (set-window-buffer (selected-window) (current-buffer))
+    (cl-letf (((symbol-function 'gui-get-primary-selection) (lambda () "primary ")))
+      (call-interactively #'cooked-mouse-yank-primary))
+    (dnd-insert-text (selected-window) 'copy "dropped")
+    (should (equal (cooked--pending-input) "primary dropped"))
+    ;; Every character of it is marked.
+    (should-not (text-property-not-all (cooked--input-start-position)
+                                       cooked--input-end 'cooked-pasted t))))
+
 (ert-deftest cooked-terminal-frame-paste-goes-to-the-child-bracketed ()
   "An `xterm-paste' event reaches the child, not the buffer, in every state.
 

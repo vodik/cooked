@@ -214,7 +214,8 @@ narrow words over the text the previous command typed."
 (defvar cooked-snap-commands
   '(self-insert-command
     cooked-newline newline newline-and-indent
-    yank yank-pop cooked-paste cooked-xterm-paste cooked-evil-paste
+    yank yank-pop cooked-paste cooked-xterm-paste cooked-mouse-yank-primary
+    cooked-evil-paste
     evil-paste-before evil-paste-after evil-paste-from-register)
   "Commands that should act on the input region even if point drifted out of it.
 See `cooked--snap-to-input'.

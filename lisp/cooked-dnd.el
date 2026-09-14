@@ -69,30 +69,6 @@ the images accumulated."
                  directory)
   :group 'cooked-dnd)
 
-(defun cooked-dnd--deliver (text)
-  "Put TEXT on the line, wherever the line is being edited.
-
-At an input prompt Emacs owns the line, so TEXT is inserted into the pending
-input, where it can still be edited and where `cooked-send-input\=' will find
-it, marked as pasted by `cooked--mark-pasted\=' so its control bytes are
-stripped when the line is submitted.  Sending it to the child instead would type
-it underneath the line Emacs is showing, and the two would be submitted
-together.  Otherwise the child owns the line and TEXT goes through
-`cooked--send-paste\=', as a paste would.
-
-Signals a `user-error\=' when the child has exited, since there is no line to
-put anything on."
-  (unless (cooked--live-session)
-    (user-error "No live session"))
-  (if (cooked--input-state-p)
-      (progn
-        (unless (cooked--input-region)
-          (cooked--restore-pending-input nil))
-        (when-let* ((region (cooked--input-region)))
-          (goto-char (max (car region) (min (point) (cdr region)))))
-        (insert (cooked--mark-pasted text)))
-    (cooked--send-paste text)))
-
 (defun cooked-dnd--quote (file)
   "FILE\='s name as the shell running in this buffer should see it, quoted.
 
@@ -100,22 +76,33 @@ put anything on."
 `default-directory\=' is remote the child is running on the far host, so the
 name it needs is the path there: /ssh:host:/tmp/x.png means nothing to a shell
 on host, while /tmp/x.png is exactly right.  A local name is used as it stands.
-Dropping a *local* file on a remote session still types a path that only exists
-here; nothing short of copying the file could fix that."
+
+A file on a different host from the shell\='s is refused with a `user-error\='
+rather than typed.  Dropping ~/notes.txt on a session whose `default-directory\='
+is /ssh:host:/srv/ would type /home/me/notes.txt to a shell on host, where it
+names nothing or, worse, a different file.  Copying the file there through TRAMP
+would make the name true, but it is a transfer of unbounded size started by a
+drag, and it waits on the open question of how cooked runs anything on a remote
+host."
+  (let ((host (file-remote-p default-directory 'host)))
+    (unless (equal (file-remote-p file 'host) host)
+      (user-error "cooked: %s is not on %s, where the shell runs; copy it there"
+                  file (or host "this machine"))))
   (shell-quote-argument (or (file-remote-p file 'localname) file)))
 
 (defun cooked-dnd--insert (files)
   "Type the names of FILES, a list, shell-quoted and separated by spaces.
 
-Through `cooked-dnd--deliver\=', and so through `cooked--send-paste\=' when the
-child owns the line, because a file name is attacker-controlled far more often
-than a paste is.  A name can contain ESC as easily as a space, and
+Through `cooked--deliver-paste\=', and so through `cooked--send-paste\=' when
+the child owns the line, because a file name is attacker-controlled far more
+often than a paste is.  A name can contain ESC as easily as a space, and
 `shell-quote-argument\=' protects the shell from it but not the terminal; the
-paste path\='s control-byte strip does that.
+paste path\='s control-byte strip does that, and at a prompt the name is marked
+as pasted so the same strip applies when the line is submitted.
 
 A trailing space, because the common case is a name being added to a command
 that is still being typed."
-  (cooked-dnd--deliver
+  (cooked--deliver-paste
    (concat (mapconcat #'cooked-dnd--quote files " ") " ")))
 
 (defun cooked-dnd-handle-url (url action)
@@ -179,7 +166,7 @@ is current.  An event that is only a drag moving across the frame does nothing."
       (with-current-buffer (if (windowp window) (window-buffer window) (current-buffer))
         (pcase-exhaustive payload
           (`(files . ,files) (cooked-dnd--insert files))
-          (`(text . ,text) (cooked-dnd--deliver text)))))))
+          (`(text . ,text) (cooked--deliver-paste text)))))))
 
 (defun cooked-dnd-yank-media (type data)
   "Write DATA, an image of mime TYPE, to a file and type its name.

@@ -67,6 +67,24 @@ somebody about."
       (let ((cooked-shell (car case)))
         (should (eq (cooked-history--shell) (cdr case)))))))
 
+(ert-deftest cooked-history-asks-a-remote-host-for-its-shell ()
+  "A remote session guesses its shell from the far host, not from `cooked-shell'.
+
+A zsh user who ssh'd to a host whose shell is fish was asked for zsh's history
+there.  The far host's `SHELL' is asked instead, over the same TRAMP connection
+the history command uses.  The mock connection is a local shell, so the
+variable is handed to it through `process-environment', which TRAMP passes on
+as it would to a real host."
+  (cooked-tests--with-mock-tramp remote
+    (let ((cooked-history-shell nil)
+          (cooked-shell "/bin/zsh")
+          (shell-file-name "/bin/sh")
+          (shell-command-switch "-c"))
+      (should (eq (cooked-history--shell) 'zsh))
+      (let ((default-directory remote)
+            (process-environment (cons "SHELL=/usr/bin/fish" process-environment)))
+        (should (eq (cooked-history--shell) 'fish))))))
+
 (ert-deftest cooked-history-inserts-at-the-prompt-without-running-it ()
   "The chosen entry has to stop where it can still be edited.
 

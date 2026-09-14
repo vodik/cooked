@@ -73,18 +73,38 @@ it needs is the path *there*: `/ssh:host:/tmp/x.png\=' means nothing to a shell
 on host, while `/tmp/x.png\=' is exactly right.  Nothing here opens a
 connection -- `file-remote-p\=' is pure string surgery on the name."
   (with-temp-buffer
-    (should (equal (cooked-tests--capturing-paste
-                     (cooked-dnd--insert (list "/ssh:host:/tmp/x.png")))
-                   '("/tmp/x.png ")))
-    ;; A multi-hop name resolves to the same localname, so the feature does not
-    ;; quietly stop working on the hop that needed it most.
-    (should (equal (cooked-tests--capturing-paste
-                     (cooked-dnd--insert (list "/ssh:jump|ssh:host:/tmp/x.png")))
-                   '("/tmp/x.png ")))
+    (let ((default-directory "/ssh:host:/srv/"))
+      (should (equal (cooked-tests--capturing-paste
+                       (cooked-dnd--insert (list "/ssh:host:/tmp/x.png")))
+                     '("/tmp/x.png ")))
+      ;; A multi-hop name resolves to the same localname, so the feature does
+      ;; not quietly stop working on the hop that needed it most.
+      (should (equal (cooked-tests--capturing-paste
+                       (cooked-dnd--insert (list "/ssh:jump|ssh:host:/tmp/x.png")))
+                     '("/tmp/x.png "))))
     ;; And a local name is used as it stands.
     (should (equal (cooked-tests--capturing-paste
                      (cooked-dnd--insert (list "/tmp/x.png")))
                    '("/tmp/x.png ")))))
+
+(ert-deftest cooked-dnd-refuses-a-file-from-another-host ()
+  "A local file dropped on a remote session is refused, not typed.
+
+The shell runs on the host `default-directory' names, so /tmp/notes.txt typed
+there names a file that is not the one dropped, if it names anything.  The same
+goes for a file on one host dropped on a session on another, and on a local
+session.  Nothing is typed before the refusal, so a drop of two files where one
+is refused types neither."
+  (dolist (case '(("/ssh:host:/srv/" "/tmp/notes.txt")
+                  ("/ssh:host:/srv/" "/ssh:other:/tmp/notes.txt")
+                  ("/tmp/" "/ssh:host:/tmp/notes.txt")))
+    (with-temp-buffer
+      (let ((default-directory (car case)))
+        (ert-info ((format "%s dropped on %s" (cadr case) (car case)))
+          (should-not
+           (cooked-tests--capturing-paste
+             (should-error (cooked-dnd--insert (list "/ssh:host:/tmp/ok" (cadr case)))
+                           :type 'user-error))))))))
 
 (ert-deftest cooked-dnd-writes-yanked-media-and-types-its-name ()
   "Clipboard bytes become a file, because a name is the only thing that crosses.

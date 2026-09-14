@@ -20,6 +20,7 @@
 (require 'cooked-util)
 (require 'cooked-state)
 (require 'cooked-cursor)
+(require 'cooked-pending)
 (require 'cooked-peek)
 
 (cooked--declare-core)
@@ -942,6 +943,68 @@ would."
         (kill-new text))
       (unless (string-empty-p text)
         (cooked--send-paste text)))))
+
+(defun cooked--deliver-paste (text)
+  "Put TEXT on the line as a paste, wherever the line is being edited.
+
+At an input prompt Emacs owns the line, so TEXT is inserted into the pending
+input, marked as pasted by `cooked--mark-pasted\=', where it can still be edited
+and where `cooked-send-input\=' will find it.  Point is kept inside the region
+first, since a drop or a click can leave it on the read-only prompt.  Sending
+TEXT to the child instead would type it underneath the line Emacs is showing,
+and the two would be submitted together.  Otherwise the child owns the line and
+TEXT goes through `cooked--send-paste\=', bracketed if the child asked.
+
+This is the way in for text that does not come from the kill ring: a drop, the
+primary selection, and a history entry.  Signals a `user-error\=' when the
+child has exited, since there is no line to put anything on."
+  (unless (cooked--live-session)
+    (user-error "No live session"))
+  (if (cooked--input-state-p)
+      (progn
+        (unless (cooked--input-region)
+          (cooked--restore-pending-input nil))
+        (when-let* ((region (cooked--input-region)))
+          (goto-char (max (car region) (min (point) (cdr region)))))
+        (insert (cooked--mark-pasted text)))
+    (cooked--send-paste text)))
+
+(defun cooked-mouse-yank-primary ()
+  "Paste the primary selection, as a middle-click does in other terminals.
+
+Bound in place of `mouse-yank-primary\=' wherever a user has put that, since
+its own insertion goes into the buffer at the click whoever owns the keyboard.
+While vim runs the text then sat in the cooked buffer, where the next repaint
+overwrote it, and vim never saw it.  Through `cooked--deliver-paste\=' instead,
+so at a prompt it joins the pending line at point and otherwise it reaches the
+child as a paste.  \\[cooked-paste], on `mouse-2\=' by default, is the kill
+ring\='s counterpart."
+  (interactive)
+  (cooked--resume-forwarding)
+  (let ((text (gui-get-primary-selection)))
+    (unless (string-empty-p text)
+      (cooked--deliver-paste text))))
+
+(defun cooked--dnd-insert-text (insert window action text)
+  "Deliver a text drop on a live cooked buffer as a paste.
+
+Around advice for `dnd-insert-text\=', which every port\='s drop handler ends
+in for text, and for a URL that no `dnd-protocol-alist\=' entry claimed.
+INSERT is the original function, called with WINDOW, ACTION and TEXT for a drop
+on any other buffer.  It inserts TEXT at point in WINDOW\='s buffer with plain
+`insert\=', so while a program owned the keyboard a drop landed in the
+transcript rather than reaching the program.  Here it goes through
+`cooked--deliver-paste\=', and ACTION is returned as `dnd-insert-text\='
+returns it."
+  (let ((buffer (and (windowp window) (window-buffer window))))
+    (if (and buffer (with-current-buffer buffer (cooked--live-session)))
+        (with-current-buffer buffer
+          (cooked--deliver-paste text)
+          action)
+      (funcall insert window action text))))
+
+(with-eval-after-load 'dnd
+  (advice-add 'dnd-insert-text :around #'cooked--dnd-insert-text))
 
 ;;;; Per-program key overrides
 

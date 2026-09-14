@@ -69,7 +69,14 @@ nil guesses from `cooked-shell\=', which is what `M-x cooked\=' starts.  The
 guess is wrong for a session started with an explicit command -- cooked keeps no
 per-buffer record of what it launched, and inventing one for this would be a
 change to the core on behalf of an optional layer.  Set this buffer-locally in
-such a session, or set it globally if you always use one shell."
+such a session, or set it globally if you always use one shell.
+
+A remote session, one whose `default-directory\=' is a TRAMP path because the
+far shell reported its directory, guesses from the far host\='s `SHELL\='
+instead, since the local `cooked-shell\=' says nothing about what ssh started
+there.  That is the login shell, so it is wrong for someone who ran `fish\=' by
+hand after logging in to a host whose login shell is bash; the history command
+then fails and says so, and setting this is the way out."
   :type '(choice (const :tag "Guess from `cooked-shell'" nil) symbol)
   :group 'cooked-history)
 
@@ -84,12 +91,15 @@ oldest."
   :group 'cooked-history)
 
 (defun cooked-history--shell ()
-  "The shell symbol to look up in `cooked-history-commands\='."
+  "The shell symbol to look up in `cooked-history-commands\='.
+See `cooked-history-shell\=' for how it is guessed, here and on a remote host."
   (or cooked-history-shell
       (let ((name (file-name-nondirectory
-                   ;; `cooked-shell' may carry arguments the way
-                   ;; `explicit-shell-file-name' is allowed to.
-                   (car (split-string-and-unquote (or cooked-shell ""))))))
+                   (if (file-remote-p default-directory)
+                       (string-trim (cooked-history--run "printf %s \"$SHELL\""))
+                     ;; `cooked-shell' may carry arguments the way
+                     ;; `explicit-shell-file-name' is allowed to.
+                     (car (split-string-and-unquote (or cooked-shell "")))))))
         (and (not (string-empty-p name)) (intern name)))))
 
 (defun cooked-history--split (output)
