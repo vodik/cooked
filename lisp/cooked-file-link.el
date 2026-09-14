@@ -276,28 +276,42 @@ The line is the logical one, joined across soft wraps by
 `cooked-link--join-wrapped\=', as `cooked-file-link--string-at-point\=' reads
 it.  On a twenty-column screen `lisp/cooked-link.el:12:3: error\=' breaks
 after the first colon, and the row alone matches no rule, so the file name
-taken from an active region there used to open at no line at all."
+taken from an active region there used to open at no line at all.
+
+Each rule is matched against the whole line first, and then from each place
+NAME begins in it.  The rules are written for compiler output, where the file
+starts the line, and `gnu\=' reads leading words into its FILE group: on
+`see lisp/cooked-link.el:12:3: here\=' it takes the file to be
+`see lisp/cooked-link.el\=', which is not NAME, so a location quoted after
+other words got no line number.  The whole line still goes first for a rule
+whose own words come before the file, as `gcc-include\=' has
+`In file included from\='."
   (let* ((bounds (cooked-link-logical-line-bounds (line-beginning-position)
                                                   (line-end-position)))
          (line (or (car (cooked-link--join-wrapped (car bounds) (cdr bounds)))
                    (buffer-substring-no-properties
                     (line-beginning-position) (line-end-position))))
-         (found (list nil nil)))
+         (text line)
+         (from 0))
     (catch 'done
-      (dolist (key cooked-file-link-error-rules (list nil nil))
-        (when-let* ((rule (cdr (assq key compilation-error-regexp-alist-alist)))
-                    (regexp (car rule))
-                    (file (cooked-file-link--group (nth 1 rule)))
-                    ((string-match regexp line))
-                    ((equal (match-string file line) name)))
-          (setq found
-                (list (when-let* ((group (cooked-file-link--group (nth 2 rule)))
-                                  (text (match-string group line)))
-                        (string-to-number text))
-                      (when-let* ((group (cooked-file-link--group (nth 3 rule)))
-                                  (text (match-string group line)))
-                        (string-to-number text))))
-          (throw 'done found))))))
+      (while text
+        (dolist (key cooked-file-link-error-rules)
+          (when-let* ((rule (cdr (assq key compilation-error-regexp-alist-alist)))
+                      (regexp (car rule))
+                      (file (cooked-file-link--group (nth 1 rule)))
+                      ((string-match regexp text))
+                      ((equal (match-string file text) name)))
+            (throw 'done
+                   (list (when-let* ((group (cooked-file-link--group (nth 2 rule)))
+                                     (number (match-string group text)))
+                           (string-to-number number))
+                         (when-let* ((group (cooked-file-link--group (nth 3 rule)))
+                                     (number (match-string group text)))
+                           (string-to-number number))))))
+        (let ((at (string-search name line from)))
+          (setq text (and at (substring line at))
+                from (and at (1+ at)))))
+      (list nil nil))))
 
 ;;;; The two seams
 

@@ -1436,6 +1436,30 @@ the row matched nothing and the file opened at no line."
             (should (equal (cdr (cooked-file-link--at-point)) '(12 3)))
           (deactivate-mark))))))
 
+(ert-deftest cooked-a-compile-location-inside-a-line-keeps-its-line-number ()
+  "A location quoted after other words is read from where its name begins.
+
+`gnu' is written for a line that starts with the file, and its FILE group takes
+any leading words along: on `see lisp/cooked-link.el:12:3: here' it reads the
+file as `see lisp/cooked-link.el', which is not the name being followed, so the
+file opened at no line.  A second mention of the name further along is still
+found, and a line that starts with the file, or with the words `gcc-include'
+expects before it, reads as it always did."
+  (cooked-tests--with-file-links
+    (with-temp-buffer
+      (pcase-dolist (`(,text ,expected)
+                     '(("see lisp/cooked-link.el:12:3: here" (12 3))
+                       ("lisp/cooked-link.el is at lisp/cooked-link.el:7:2: here" (7 2))
+                       ("lisp/cooked-link.el:12:3: error" (12 3))
+                       ("make: lisp/cooked-link.el:4: error" (4 nil))
+                       ("In file included from lisp/cooked-link.el:5:1," (5 1))
+                       ("see lisp/cooked-link.el for more" (nil nil))))
+        (erase-buffer)
+        (insert text)
+        (ert-info (text)
+          (should (equal (cooked-file-link--position "lisp/cooked-link.el")
+                         expected)))))))
+
 ;; The join's own pieces, over a buffer written by hand.  A terminal cannot
 ;; produce a fifty-row logical line at any width a test would want to run at, and
 ;; the binary search is worth pinning at a size where a linear walk would have
