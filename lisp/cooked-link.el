@@ -184,12 +184,15 @@ those defaults untouched, which is what keeps an `OSC 8\=' destination, a
 detected URL and goto-addr\='s own match opening the same things the same way.")
 
 (defvar cooked-link-scan-functions nil
-  "Abnormal hook run over each batch of output that has settled into scrollback.
+  "Abnormal hook run over scrollback that is about to be shown.
 
-Each entry is called with two arguments, the start and end of the newly-appended
-region, and its value is ignored.  Run once per batch and never from the
-live-row path, which is what makes it affordable for something that has to touch
-the filesystem to answer.  Empty by default; see
+Each entry is called with two arguments, the start and end of the region, and
+its value is ignored.  The region is the settled part of one jit-lock chunk,
+rounded out to whole logical lines by `cooked--fontify-region', so scrolling
+back through a long build log runs the hook a screenful at a time and never
+over rows nobody displays.  It never sees a live row, which is what makes it
+affordable for something that has to touch the filesystem to answer: scrollback
+is not rewritten, so one scan of it stands.  Empty by default; see
 `cooked-link-follow-functions'.
 
 Run through `cooked--run-seam', so one entry signalling costs its own

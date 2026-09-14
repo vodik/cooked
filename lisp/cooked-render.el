@@ -351,11 +351,12 @@ when it is shown, however much scrollback went in above it meanwhile."
 
 A region is a claim about particular text, and the child rewriting that text
 makes the claim into a lie -- an invisible one, because the highlight stays.
-`cooked--render-rows\=' deletes and reinserts each damaged row whole, so a mark
-inside one collapses to that row\='s start and the region visibly warps under
-live output; the drain re-pins point (see `cooked--apply\='), and nothing ever
-did the same for the mark.  Every xterm-family terminal drops a selection whose
-cells are overwritten, for the reason this does.
+The mark itself is carried to its character across the rewrite (see
+`cooked--capture-relocations\='), but a character is all it keeps: select
+`alpha\=' on a live row, let the child redraw that row as `bravo\=', and the
+highlight now covers `bravo\=', which is not what was selected.  Every
+xterm-family terminal drops a selection whose cells are overwritten, for the
+reason this does.
 
 Only a mark in the live screen.  The scrollback is text the child has finished
 with and can no longer reach, so a region up there still means what it did when
@@ -1011,8 +1012,9 @@ See docs/DESIGN.md."
 Registration is not free and the cost is not at redisplay, which is the part
 worth knowing: jit-lock hangs `jit-lock-after-change\=' on
 `after-change-functions\=', and that fires for every text property applied as
-well as for every insertion.  A row of box drawing sets a `display\=' property
-per cell, so a frame of it pays the hook some hundreds of times to be told
+well as for every insertion.  Every styled run of a row is a `face\=' property,
+and every run of box drawing a `display\=' and a `cooked-deco\=' on top, so a
+frame of a full-screen program pays the hook once for each of them to be told
 something it could have been told once -- a fifth again on plain rows and half
 again on box drawing, with `cooked--fontify-region\=' never called.
 

@@ -561,10 +561,10 @@ drain, after which point was stranded at column 0 of whatever line it was on."
 
 (ert-deftest cooked-output-drops-a-selection-it-rewrites ()
   "A region is a claim about particular text, and the child rewriting that text
-makes the claim false without making it look false: `cooked--render-rows'
-deletes a damaged row whole, so the mark collapses to that row's start and the
-highlight spreads or shrinks on its own.  Every xterm-family terminal drops such
-a selection instead, and `cooked-clear-selection-on-output' is that."
+makes the claim false without making it look false: the mark stays on its
+character, but the characters around it are no longer the ones that were
+selected, and the highlight goes on covering them.  Every xterm-family terminal
+drops such a selection instead, and `cooked-clear-selection-on-output' is that."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'alpha\\n'; exec cat")
     (should (cooked-tests--settle
              (lambda () (string-match-p "alpha" (cooked-tests--text)))))

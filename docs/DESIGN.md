@@ -1330,14 +1330,15 @@ Four things fall out of that, and each is a place where the obvious next step is
   theme changes.
 
 - **Images stay one record per character.** The same compression is available on the wire
-  and was declined: every cell of a picture displays its own slice, named by that cell's
-  row and column within it, so Lisp must cons a record and set a property per cell
-  whatever arrives. Sharing one record across three image cells gives all three
-  `(slice 0 0 ...)` where the second needs `(slice 12 0 ...)`, and a rewrap that split
-  such a run would leave both halves claiming the same start column. Compressing a wire
-  that has to be decompressed again immediately moves nothing off the side that is slow.
-  What `cooked--apply-image-deco` hoists instead is the *spec*, which genuinely is one
-  thing per placement — and that needed no protocol change at all.
+  and was declined: each cell of a picture is named by its own row and column within it,
+  and that per-cell addressing is what survives an overwrite, a scroll and a rewrap.
+  Sharing one record across three image cells gives all three `(slice 0 0 ...)` where the
+  second needs `(slice 12 0 ...)`, and a rewrap that split such a run would leave both
+  halves claiming the same start column. The run is rebuilt on the Lisp side instead:
+  `cooked--apply-image-deco` coalesces consecutive cells of one picture row into a single
+  `display` slice, a comparison per cell that is far cheaper than the property it saves.
+  The *spec* is hoisted too, being genuinely one thing per placement, and neither needed a
+  protocol change.
 
 - **The cursor's cell breaks a run, and the shade rule is why that is cheap.** Emacs draws
   a block cursor on a `display` span at the span's start and as wide as the span, and

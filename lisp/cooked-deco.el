@@ -7,11 +7,12 @@
 ;; *derived* from the character, an image placement is *stored* against the cell, and
 ;; both cross from Rust as `(KIND . PACKED)\=' and end as a `display\=' property here.
 ;;
-;; The rasterizer is cooked-glyph.el, which knows nothing about terminals.  What is
-;; here is everything buffer-shaped: caching a bitmap against the window\='s cell size,
-;; slicing an image one cell at a time, and rebuilding all of it when the font moves
-;; under it.  Colour is nobody\='s job here -- a glyph is drawn in the colours of the
-;; face it lands on, which is what keeps it in step with the text beside it.
+;; The rasterizer is cooked-glyph.el, which knows nothing about terminals.
+;; What is here is everything buffer-shaped: caching a bitmap against the
+;; window\='s cell size, cutting an image into one slice per run of cells, and
+;; rebuilding all of it when the font moves under it.  Colour is nobody\='s job
+;; here -- a glyph is drawn in the colours of the face it lands on, which is
+;; what keeps it in step with the text beside it.
 ;;
 ;; Image lifetime is Emacs\='.  `cooked--image-data\=' is the only copy of the bytes, so it
 ;; is strong; `cooked--image-specs\=' is rebuildable, so it is weak on the value, and the
@@ -33,10 +34,10 @@
   "Whether to display images the child transmits.
 
 Images arrive through a terminal graphics protocol, are held for as long as the
-buffer text showing them lives, and are rendered as one `display\=' slice per
-cell they cover.  Setting this to nil leaves those cells as the blanks they
-already are on the grid, so the layout is unchanged and only the picture is
-missing.
+buffer text showing them lives, and are rendered as `display\=' slices of one
+image, a slice for each run of cells on a row.  Setting this to nil leaves
+those cells as the blanks they already are on the grid, so the layout is
+unchanged and only the picture is missing.
 
 Distinct from `cooked-box-drawing-images\=', which is about substituting a
 generated bitmap for a character the font could draw itself."
@@ -656,7 +657,7 @@ now hiding a box glyph as it always did the text beside it."
                    :ascent (cooked--box-glyph-ascent window height)))))
 
 (defun cooked--apply-deco (start deco &optional origin row)
-  "Hang DECO's per-character `display' properties on the text at START.
+  "Hang DECO's `display' properties on the text at START, one per run.
 
 DECO is `(KIND . PACKED)\=', what the `Deco\=' conversion in src/wire.rs hands
 over: KIND names what the run\='s characters display instead of themselves, and
@@ -1168,8 +1169,6 @@ rectangle is part of the memoization key too -- a reshape does not move the
 cell, so keying on SIZE alone would answer a resized placement with the spec
 built for the old one.
 
-Shared across every cell of one placement, deliberately: they all display a
-slice of one spec, so Emacs decodes the picture once rather than once per cell.
 `:scale 1\=' for the same reason it is on a box glyph:
 `image-scaling-factor\=' is `auto\=' and would resample what has already been
 scaled to fit."
@@ -1627,16 +1626,16 @@ Reuses the `cooked-deco' property `cooked--apply-deco' stashed, so this never
 needs the native core — the classified shape and its colors already survive in
 the buffer.
 
-This is the only thing that rewrites a decoration already in the scrollback, and
-that makes it the whole repair mechanism rather than a zoom convenience.  A
-picture is displayed as one `slice' per cell, so both the slice geometry and the
-spec they cut from are functions of the cell size; rows written at one size and
-rows written at another stay mismatched forever unless something walks the
-buffer.  Hence the callers: `cooked--sync-size', which is the one place that
-notices the cell actually moving, and `cooked--rescale-deco-on-zoom' for the
-zoom that moves it without a window event.  Called only when the size really
-changed, because this is a whole-buffer walk under `widen' and a long transcript
-is not free.
+This is the only thing that rewrites a decoration already in the scrollback,
+and that makes it the whole repair mechanism rather than a zoom convenience.  A
+picture is displayed as `slice's of one spec, a slice per run of cells, so both
+the slice geometry and the spec they cut from are functions of the cell size;
+rows written at one size and rows written at another stay mismatched forever
+unless something walks the buffer.  Hence the callers: `cooked--sync-size',
+which is the one place that notices the cell actually moving, and
+`cooked--rescale-deco-on-zoom' for the zoom that moves it without a window
+event.  Called only when the size really changed, because this is a
+whole-buffer walk under `widen' and a long transcript is not free.
 
 Does nothing at all when there is no cell size to be had — see
 `cooked--deco-cell-size'.  Stripping the decorations back to plain characters

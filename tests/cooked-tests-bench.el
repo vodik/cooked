@@ -98,7 +98,7 @@ for the whole suite for exactly this reason and states it in its docstring;
 survive a cosmetic failure rather than stop for it.  So it is bound here, around
 the one call under test."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
+    (cooked-bench--settle-briefly)
     (let ((cooked-debug t))
       (cooked--apply (cooked-bench--update (cooked-bench--box-rows 1 40))))
     (let ((decorated 0)
@@ -137,7 +137,7 @@ them are not, which is the check a byte-level assertion cannot make."
                (cl-count-if (lambda (line) (string-match-p "[─-╿]" line))
                             lines)))
     (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-      (cooked-tests--settle-briefly)
+      (cooked-bench--settle-briefly)
       (let ((cooked-debug t))
         (cooked--apply (cooked-bench--update rows :alt t)))
       (save-restriction
@@ -203,7 +203,7 @@ coalescing means and says it about whichever rows survived.
 binds it: `cooked--apply-deco\=' runs inside `cooked--protect-seam\=', which outside
 the flag swallows a malformed record and lets the row come back plausible."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
+    (cooked-bench--settle-briefly)
     (let ((cooked-debug t)
           (rows (cooked-bench--image-rows 4 40)))
       (cooked--install-images (cooked-bench--image-resources 4 40))
@@ -245,7 +245,7 @@ obeys by deleting the twenty-three the shift had just carefully preserved.  Both
 are asserted here as a screen that still has twenty-four rows after a frame, the
 last of which is the one the fixture wrote."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
+    (cooked-bench--settle-briefly)
     (let ((update (cooked-bench--update (cooked-bench--scrolled-row 23 40)
                                         :alt t :height 24
                                         :shifts '((0 23 1 t)))))
@@ -385,7 +385,7 @@ the font\='s glyph for a character the font never draws was nine tenths of what
 a box-drawing frame allocated.  With the bitmaps turned off the font draws the
 characters after all, and the same row has to be measured again."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
+    (cooked-bench--settle-briefly)
     (let ((update (cooked-bench--update (cooked-bench--box-rows 4 40) :alt t))
           (walks 0))
       (cl-letf* ((real (symbol-function 'cooked--scale-offenders))

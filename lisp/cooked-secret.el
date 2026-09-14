@@ -46,7 +46,7 @@ returns the password or nil to let the next one try.  The chain is the point:
 auth-source for the hosts it knows, `pass\=' for the rest, and `read-passwd\='
 at the tail is what cooked does anyway when every entry declines.
 
-A single =cooked-password-function= cannot compose -- a second source means
+A single `cooked-password-function\=' cannot compose -- a second source means
 writing a dispatcher, and every user who wants two writes the same one.  This is
 the seam idiom the rest of cooked uses, and it is asked *before*
 `cooked-password-function\=' so an existing configuration keeps working as the
@@ -353,11 +353,11 @@ are cleared: it is sent as two writes rather than one `concat', which a
 child reading canonically cannot distinguish, and the native core zeroes
 its byte buffer after writing.
 
-Only cooked's own copies, though.  A string handed over by
-`cooked-password-function' belongs to whoever supplied it -- an
-auth-source backend may return the plaintext its cache is holding -- so
-zeroing that one would corrupt the cache rather than the secret.  The
-copy written to the child is made here for exactly that reason.
+Only cooked's own copies, though.  A string handed over by an entry on
+`cooked-password-functions', or by `cooked-password-function', belongs to
+whoever supplied it -- an auth-source backend may return the plaintext its
+cache is holding -- so zeroing that one would corrupt the cache rather than the
+secret.  The copy written to the child is made here for exactly that reason.
 
 That is the honest limit of it.  `read-passwd' builds the string in
 Emacs' own heap, the garbage collector relocates and compacts small
@@ -414,7 +414,7 @@ screen for a new one."
                             (clear-string wire)))
                       ;; What `read-passwd' returns was allocated for this call
                       ;; and nobody else has a reference, so it is ours to zero.
-                      ;; What `cooked-password-function' returns is not: an
+                      ;; What a password source returns is not: an
                       ;; auth-source backend caches plaintext by design and may
                       ;; hand out the very string sitting in that cache, so
                       ;; zeroing it corrupts the cache in place and the next

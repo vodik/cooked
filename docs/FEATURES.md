@@ -608,8 +608,8 @@ shape `cooked-osc-eval` and `cooked-shell-completion` already use. It validates 
 against the child's own working directory and then the project root, resolves a trailing
 `:LINE:COL` (and reads `compilation-error-regexp-alist`'s `gnu`/`gcc-include` entries for
 the same numbers where a compiler wrote them beside the name), and does that lazily: on
-demand when you follow a name, and once per batch of output that has settled into the
-scrollback. Never on a live row.
+demand when you follow a name, and over scrollback as it is about to be shown, so a long
+log nobody scrolls back through is never checked. Never on a live row.
 
 
 ## From Lisp

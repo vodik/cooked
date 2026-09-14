@@ -1160,7 +1160,7 @@ state a scroll actually arrives in.  The priming is conditional rather than
 unconditional so that the cases recorded before it existed are still being run
 exactly as they were."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
+    (cooked-bench--settle-briefly)
     (when images (cooked--install-images images))
     (when prime
       (cooked--apply (cooked-bench--update prime :alt t :height height)))
@@ -1172,7 +1172,7 @@ exactly as they were."
                              (or frames 200))
       (message "  %-40s   %d rows/frame" "" (cooked-bench--row-count rows)))))
 
-(defun cooked-tests--settle-briefly ()
+(defun cooked-bench--settle-briefly ()
   "Let the child start and the first drain land."
   (dotimes (_ 5) (accept-process-output nil 0.02))
   (when cooked--session
@@ -1272,7 +1272,7 @@ the two rows is the picture and nothing else."
     ;; the loop above leaves whatever the last frame wrote, and a count taken
     ;; there would be reporting the state a benchmark happened to stop in.
     (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-      (cooked-tests--settle-briefly)
+      (cooked-bench--settle-briefly)
       (cooked--install-images (cooked-bench--image-resources 24 80))
       (cooked--apply (cooked-bench--update rows :alt t))
       (message "  %-40s   %d display intervals, %d cooked-deco" ""
@@ -1441,7 +1441,7 @@ out as a difference in how often the tail fires rather than in cost.  The
 per-unit figure printed beside the group is the per-frame number the earlier
 shape reported."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
+    (cooked-bench--settle-briefly)
     ;; The primary screen, because the alternate one is never scanned for URLs,
     ;; and what is under test is when the scan is paid rather than which screen
     ;; pays it.  See `cooked--fontify-region'.
@@ -1505,7 +1505,7 @@ The transcript is grown by copying rendered text, properties and all, rather
 than by driving forty thousand cells through the module: what is under test here
 is the walk, and the walk reads nothing but the `cooked-deco\=' property."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
+    (cooked-bench--settle-briefly)
     (cooked--apply (cooked-bench--update (cooked-bench--box-rows 24 80)))
     (let ((inhibit-read-only t)
           (buffer-undo-list t)
@@ -1737,7 +1737,7 @@ on the same commit print the same numbers, and two runs across a commit that
 allocates differently print different ones, which is the property a timing does
 not have."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
-    (cooked-tests--settle-briefly)
+    (cooked-bench--settle-briefly)
     (when prime
       (cooked--apply (cooked-bench--update prime :alt t :height height)))
     (let* ((update (cooked-bench--update rows :alt (not fontify) :height height

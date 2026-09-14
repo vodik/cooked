@@ -61,11 +61,12 @@ is asked."
   :group 'cooked-link)
 
 (defcustom cooked-file-link-scan-limit 400
-  "Longest batch of scrollback, in lines, that is scanned for file names.
+  "Longest region of scrollback, in lines, that is scanned for file names.
 
-A batch is one drain's worth of evicted rows, so this is normally one or two.
-The cap is for the flood: `cat' of a large file arrives as tens of thousands of
-lines at once, and nobody is reading those for links.  A prefilter means a line
+A region is one jit-lock chunk of about `jit-lock-chunk-size' characters,
+rounded out to whole logical lines, so this is normally a few dozen lines.  The
+cap is for a chunk of very short lines: a column of 1500 single digits is 1500
+lines, and nobody is reading those for links.  A prefilter means a line
 with no path-shaped token in it costs no syscall at all, so this is the second
 bound rather than the one that usually matters."
   :type 'natnum
@@ -111,8 +112,8 @@ two, as `gnu' spells a range) are skipped: those forms are instructions to
 A regexp, not an answer: everything it matches is still handed to the
 filesystem.  Its whole job is to keep `file-exists-p' off the ninety-odd
 percent of terminal output that contains no path-shaped token at all, which is
-what makes scanning a batch of scrollback affordable.  Something has to have
-either a slash in it or an extension on it to qualify.
+what makes scanning a screenful of scrollback affordable.  Something has to
+have either a slash in it or an extension on it to qualify.
 
 A number with a point in it has an extension by that rule, so `1.5\=' and
 `192.168.0.1\=' match too.  `cooked-file-link-scan\=' drops those itself, by
@@ -174,13 +175,13 @@ than cooked knows, and everything it says is true.
 Nothing resolves against a remote `default-directory\=' either, and that is a
 second condition rather than a restatement of the first.  It is the cost guard
 where the host check is the correctness one: every candidate on this path is a
-`file-exists-p\=' in disguise, and against a TRAMP name each one is a round trip
-to another machine.  Scrollback settles in batches of hundreds of lines, so what
-that buys is a stall per batch for the rest of the session.  The two conditions
-also do not imply each other in either direction -- \\[cooked] from a buffer
-visiting a remote file starts with a remote `default-directory\=' and no OSC 7 at
-all, and `cooked-remote-directory\=' set to nil leaves a foreign host with a
-local one."
+`file-exists-p\=' in disguise, and against a TRAMP name each one is a round
+trip to another machine.  Scrolling back scans a screenful of candidates at a
+time, so what that buys is a stall per screenful for the rest of the session.
+The two conditions also do not imply each other in either direction --
+\\[cooked] from a buffer visiting a remote file starts with a remote
+`default-directory\=' and no OSC 7 at all, and `cooked-remote-directory\=' set
+to nil leaves a foreign host with a local one."
   (and (not (string-empty-p name))
        (not (cooked--foreign-host-p))
        (not (file-remote-p default-directory))
@@ -341,17 +342,17 @@ matched."
 
 An entry on `cooked-link-scan-functions\='.
 
-Runs once per batch of settled scrollback and never on a live row, which is the
-whole reason it may touch the filesystem at all.  Answers are memoised for the
-batch, so a build log naming one file forty times costs one `stat'.
+Runs over settled scrollback as redisplay reaches it, and never on a live row,
+which is the whole reason it may touch the filesystem at all.  Answers are
+memoised for the region, so a build log naming one file forty times in one
+screenful costs one `stat'.
 
-Text properties rather than overlays, unlike the goto-addr pass: this text is
-frozen -- `cooked--render-scrolled' has just marked it read-only and nothing
-rewrites it -- so there is no lifetime for an `evaporate' to manage, and a
-property costs less than an overlay per match on a batch that can be thousands
-of lines long.  A match that already carries an `OSC 8' link, or that goto-addr
-has claimed as a URL, is left alone: what the child said outranks what this
-guessed."
+Text properties rather than overlays, as the URL pass also uses: this text is
+frozen -- `cooked--render-scrolled' marked it read-only when it scrolled off,
+and nothing rewrites it -- so there is no lifetime for an `evaporate' to
+manage, and a property costs less than an overlay per match.  A match that
+already carries an `OSC 8' link, or that goto-addr has claimed as a URL, is
+left alone: what the child said outranks what this guessed."
   (when (and cooked-file-link-highlight
              (<= (count-lines beg end) cooked-file-link-scan-limit))
     (let ((known (make-hash-table :test #'equal)))

@@ -608,7 +608,9 @@ cell, and measuring the base alone would answer about something nobody draws.
 Nothing is measured on a row that got here uniform and fixed-pitch -- the caller
 has already refused those, which is the whole cost control.  What reaches here
 is a row the grid thinks may be mismeasured, and on such a row each *distinct*
-cluster costs one shaping call for the life of the font.  Nothing is measured
+cluster costs one shaping call, one that cannot be measured included, until the
+font changes or `cooked-wrap-cache-limit' measurements empty the memo -- see
+`cooked--glyph-metrics'.  Nothing is measured
 on a terminal frame either, where `cooked--default-metrics\=' has no answer.
 
 A character carrying `cooked-deco\=' is passed over whole.  It is drawn as
