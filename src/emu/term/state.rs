@@ -564,8 +564,9 @@ impl State {
     /// leave behind. Then a damaged row that matches the copy is left out, which is a
     /// repaint that wrote the same thing back.
     ///
-    /// A changed row with no changed neighbour whose change is small is sent as an
-    /// [`Edit`] of the part that changed; see [`front::Front::edit`].
+    /// A changed row whose change is small is sent as an [`Edit`] of the part that changed,
+    /// on the alternate screen only when it has no changed neighbour; see
+    /// [`front::Front::edit`].
     ///
     /// On the primary screen, the rows below `used` are forgotten afterwards. Emacs trims
     /// its screen region to that many lines, so whatever it held for them is gone, and a
@@ -621,6 +622,7 @@ impl State {
         // Row 0 of the primary screen continues the scrollback above it when the head is
         // not empty, so its text in the buffer begins mid-line.
         let seam = !self.shown.is_alternate() && screen.head() > 0;
+        let alternate = self.shown.is_alternate();
         let front = &mut self.front;
         let at = |index: usize| (cursor.row == index).then_some(cursor.col as u16);
         let changed: Vec<usize> = damaged
@@ -641,15 +643,26 @@ impl State {
             .enumerate()
             .filter_map(|(i, &index)| {
                 let row = screen.row(index)?;
-                // Only a row with no changed neighbour is offered as an edit. Contiguous
-                // rows coalesce into one block that Emacs rewrites with a single deletion
-                // and insertion, and measured per frame that is several times cheaper than
-                // an edit per row: 24 plain rows as a block took 0.025ms against 0.10ms as
-                // 24 small edits. An isolated row -- the spinner, the clock, the bar --
-                // has no block to join, and there the edit is the cheaper of the two.
+                // On the primary screen every changed row is offered as an edit, and on
+                // the alternate screen only a row with no changed neighbour.
+                //
+                // Contiguous rows sent whole coalesce into one block that Emacs rewrites
+                // with a single deletion and insertion, and that destroys every marker,
+                // overlay and property on the rows' unchanged cells: a prompt's semantic
+                // marks, a bookmark, an overlay a mode put on a line of output. On the
+                // primary screen those are the transcript's, so the rows that changed a
+                // little are edited in place and keep them. The price is Emacs' per-edit
+                // cost. Measured in instructions per frame for 24 80-column rows each
+                // changing one cell, 24 edits cost 1.7M against 0.38M for one block of
+                // plain rows, and 1.9M against 2.8M for rows of eight styled spans, whose
+                // properties the block writes again. The alternate screen is a full-screen
+                // program's picture, repainted at its frame rate and carrying none of those
+                // marks, so it keeps the block. An isolated row -- the spinner, the clock,
+                // the bar -- has no block to join, and there the edit is the cheaper of the
+                // two on either screen.
                 let isolated = (i == 0 || changed[i - 1] + 1 != index)
                     && changed.get(i + 1).is_none_or(|&next| next != index + 1);
-                let edit = isolated
+                let edit = (isolated || !alternate)
                     .then(|| front.edit(index, row, at(index), seam && index == 0))
                     .flatten()
                     .map(|span| Edit {

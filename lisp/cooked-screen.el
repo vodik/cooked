@@ -1287,7 +1287,11 @@ BLOCK\='s text, and anything past LENGTH characters is deleted -- spaces
 `cooked--pad-to-cursor\=' added for a cursor that has moved on, which rewriting
 the whole row would have taken away too.
 A spinner turning then costs one character rather than the row, and the markers
-and overlays on the rest of the row stay where they are.  Everything done to a
+and overlays on the rest of the row stay where they are.  On the primary screen
+a row with changed neighbours arrives as an edit too, so a few adjacent rows
+each changing a little keep theirs, where a block would have taken them all;
+on the alternate screen such rows still come as one block, for its cost.
+Everything done to a
 row after it is written happens to an edited row too, measured over the whole
 row: the width guard, the wrap mark, the relocations and the notification.
 

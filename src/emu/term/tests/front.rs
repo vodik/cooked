@@ -139,6 +139,41 @@ fn edit_of(t: &mut Term, index: usize) -> Option<Option<(usize, Option<usize>, u
 }
 
 #[test]
+fn neighbouring_rows_changing_a_little_are_edits_on_the_primary_screen() {
+    // Sent whole they would coalesce into one block, which Emacs deletes and inserts again,
+    // taking every marker on the rows' unchanged cells with it.
+    let mut t = settled(3, 20, b"1 abcdefghij\r\n2 klmnopqrst");
+    t.feed(b"\x1b[1;1H3\x1b[2;1H4\x1b[3;1H");
+    let edits: Vec<_> = t
+        .drain()
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.index,
+                row.edit.as_ref().map(|e| (e.char_start, e.char_end)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        edits,
+        vec![(0, Some((0, Some(1)))), (1, Some((0, Some(1))))]
+    );
+}
+
+#[test]
+fn neighbouring_rows_changing_a_little_are_a_block_on_the_alternate_screen() {
+    let mut t = settled(3, 20, b"\x1b[?1049h1 abcdefghij\r\n2 klmnopqrst");
+    t.feed(b"\x1b[1;1H3\x1b[2;1H4\x1b[3;1H");
+    let delta = t.drain();
+    assert_eq!(
+        delta.rows.iter().map(|r| r.index).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(delta.rows.iter().all(|row| row.edit.is_none()));
+}
+
+#[test]
 fn a_turning_spinner_is_sent_as_its_one_character() {
     let mut t = settled(2, 40, b"working | on the build");
     t.feed(b"\x1b[1;9H/\x1b[2;1H");

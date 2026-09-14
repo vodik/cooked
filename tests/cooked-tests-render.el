@@ -1387,6 +1387,27 @@ departing-row half of the `adjustRegion' floor."
       (should (get-text-property marker 'cooked-scrollback))
       (should (equal (cooked-tests--text) "abcdefghij\ntwo\nthree\nfour")))))
 
+(ert-deftest cooked-neighbouring-rows-that-change-a-little-keep-what-is-on-them ()
+  "Two adjacent rows each changing one cell keep the markers elsewhere on them.
+
+Changed rows next to each other used to be sent as one block, deleted and
+inserted whole, so a marker at column 5 of the lower row collapsed to the
+start of the upper one and an overlay on it to nothing.  On the primary screen
+each is now an edit of the cell that changed, as a lone row already was."
+  (cooked-tests--with-fed-screen 4 20
+    (cooked-tests--fed "1 abcdefghij\r\n2 klmnopqrst\r\n")
+    (let* ((start (cooked--screen-start-position))
+           (upper (copy-marker (+ start 5)))
+           (lower (save-excursion (goto-char start) (forward-line 1)
+                                  (copy-marker (+ (point) 5))))
+           (overlay (make-overlay lower (+ lower 3))))
+      (cooked-tests--fed "\e[1;1H3\e[2;1H4")
+      (should (equal (cooked-tests--text) "3 abcdefghij\n4 klmnopqrst"))
+      (should (equal (cooked-tests--at upper 3) "def"))
+      (should (equal (cooked-tests--at lower 3) "nop"))
+      (should (equal (cooked-tests--at (overlay-start overlay) 3) "nop"))
+      (should (= (overlay-end overlay) (+ (overlay-start overlay) 3))))))
+
 (defun cooked-tests--fed-resize (rows cols)
   "Resize this buffer's emulator to ROWS by COLS, then drain and apply."
   (setq cooked--rows rows cooked--cols cols cooked--last-size (cons rows cols))
