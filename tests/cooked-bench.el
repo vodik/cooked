@@ -1673,12 +1673,21 @@ makes the row evidence: a scan that found nothing, or never ran, prints 0."
 ;; memoized: a collision can leave a row soft-wrapped until it is rewritten, and
 ;; can never delete a character -- see `cooked--wrap-memo'.
 
-(cl-defun cooked-bench--allocation (label rows &optional height &key edits prime)
+(cl-defun cooked-bench--allocation (label rows &optional height &key edits prime fontify)
   "Print what one steady-state `cooked--apply' of ROWS allocates, under LABEL.
 
 HEIGHT is the screen's, for a fixture whose rows do not fill it; see
 `cooked-bench--update'.  EDITS are the update's `:edits', and PRIME rows applied
 once beforehand, so that an edit has a screen to edit.
+
+FONTIFY non-nil counts the fontification redisplay would run over the screen
+after each apply, on the primary screen rather than the alternate one.  The URL
+scan runs from jit-lock and batch never redisplays, so without it a row of URLs
+allocates exactly what a plain row does: 2,492 conses both, interpreted, when
+the URL row was last taken without it.  Return the number of `cooked-link-url'
+runs the screen holds afterwards, which is the proof that a scan ran: 23 for
+`cooked-bench--url-rows' of 24, whose cursor row the scan declines, and 0 for
+every fixture without FONTIFY.
 
 The fields are `memory-use-counts'\='s, whose order is easy to transpose and
 worth naming: (CONSES FLOATS VECTOR-CELLS SYMBOLS STRING-CHARS INTERVALS
@@ -1694,15 +1703,22 @@ not have."
     (cooked-tests--settle-briefly)
     (when prime
       (cooked--apply (cooked-bench--update prime :alt t :height height)))
-    (let ((update (cooked-bench--update rows :alt t :height height :edits edits)))
+    (let* ((update (cooked-bench--update rows :alt (not fontify) :height height
+                                         :edits edits))
+           (frame (lambda ()
+                    (cooked--apply update)
+                    (when fontify
+                      (cooked-bench--fontify-as-redisplay
+                       (or (cooked--screen-start-position) (point-min))
+                       (point-max))))))
       ;; Three warm frames: the first builds the face cache, the glyph caches
       ;; and the wrap memo, and a fixture charged for those is reporting a
       ;; session's start-up once per frame.  Three rather than one because the
       ;; box path settles a frame later than the others.
-      (dotimes (_ 3) (cooked--apply update))
+      (dotimes (_ 3) (funcall frame))
       (garbage-collect)
       (let ((before (memory-use-counts)))
-        (cooked--apply update)
+        (funcall frame)
         (let ((after (memory-use-counts)))
           (message "  %-40s conses %6d  vec-cells %5d  str-chars %6d  strings %4d  intervals %4d"
                    label
@@ -1710,7 +1726,8 @@ not have."
                    (- (nth 2 after) (nth 2 before))
                    (- (nth 4 after) (nth 4 before))
                    (- (nth 6 after) (nth 6 before))
-                   (- (nth 5 after) (nth 5 before))))))))
+                   (- (nth 5 after) (nth 5 before)))))
+      (cooked-bench--count-property-runs 'cooked-link-url (point-min) (point-max)))))
 
 (defun cooked-bench-allocation ()
   "What each fixture allocates per frame, exactly.
@@ -1732,8 +1749,8 @@ go and why the obvious quarter of them was measured and left alone."
                             :edits (list (cooked-bench--edit 0 8 9 80 "x")))
   (cooked-bench--allocation "alloc, 24x80 every cell linked and underlined"
                             (cooked-bench--linked-rows 24 80))
-  (cooked-bench--allocation "alloc, 24x80 with a URL per row"
-                            (cooked-bench--url-rows 24 80)))
+  (cooked-bench--allocation "alloc, 24x80 with a URL per row, scanned"
+                            (cooked-bench--url-rows 24 80) nil :fontify t))
 
 (defun cooked-bench--report ()
   "Print the run footer.

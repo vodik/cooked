@@ -344,16 +344,37 @@ so a crash there costs the whole run its only machine-independent rows.  It
 once called `cooked-bench--update\=' positionally after that helper had become
 keyword-only, and nothing but a full benchmark run would have said so; the
 byte-compiler does not check keyword arguments.  Running it here is eight
-frames and eight sessions, cheap enough to pin."
+frames and eight sessions, cheap enough to pin.
+
+Only the messages that name a fixture are rows.  A session can say other
+things as it starts.  In a fresh worktree, where the checkout can leave
+terminfo/cooked.ti newer than the compiled database beside it until `make
+terminfo' runs, the sessions say `cooked: could not install terminfo', and
+counting those made seventeen rows where there were eight."
   (let (rows)
     (cl-letf (((symbol-function 'message)
                (lambda (format &rest args)
-                 (push (apply #'format-message format args) rows))))
+                 (let ((text (apply #'format-message format args)))
+                   (when (string-prefix-p "  alloc, " text)
+                     (push text rows))))))
       (cooked-bench-allocation))
     (should (= (length rows) 8))
     (dolist (row rows)
       (should (string-match-p "\\`  alloc, .* conses +[0-9]+ .* intervals +[0-9]+\\'"
                               row)))))
+
+(ert-deftest cooked-bench-allocation-of-a-url-row-counts-the-scan ()
+  "The URL row of `cooked-bench-allocation\=' scans the URLs it is named for.
+
+The scan runs from jit-lock and batch never redisplays, so a row of URLs
+applied and left alone allocates exactly what a plain row does, and the row
+under this name once reported the plain figure to the cons.  It must leave a
+link behind on 23 of its 24 rows: the cursor sits on the first, and
+`cooked--fontify-region' holds the cursor's row back from the scan."
+  (cl-letf (((symbol-function 'message) #'ignore))
+    (should (= 23 (cooked-bench--allocation
+                   "alloc, URL probe" (cooked-bench--url-rows 24 80) nil
+                   :fontify t)))))
 
 (ert-deftest cooked-a-box-row-drawn-as-bitmaps-is-not-measured ()
   "A row the core calls `glyph\=' skips the guard while its glyphs are bitmaps.
