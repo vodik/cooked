@@ -74,9 +74,11 @@ the images accumulated."
 
 At an input prompt Emacs owns the line, so TEXT is inserted into the pending
 input, where it can still be edited and where `cooked-send-input\=' will find
-it.  Sending it to the child instead would type it underneath the line Emacs is
-showing, and the two would be submitted together.  Otherwise the child owns the
-line and TEXT goes through `cooked--send-paste\=', as a paste would.
+it, marked as pasted by `cooked--mark-pasted\=' so its control bytes are
+stripped when the line is submitted.  Sending it to the child instead would type
+it underneath the line Emacs is showing, and the two would be submitted
+together.  Otherwise the child owns the line and TEXT goes through
+`cooked--send-paste\=', as a paste would.
 
 Signals a `user-error\=' when the child has exited, since there is no line to
 put anything on."
@@ -88,7 +90,7 @@ put anything on."
           (cooked--restore-pending-input nil))
         (when-let* ((region (cooked--input-region)))
           (goto-char (max (car region) (min (point) (cdr region)))))
-        (insert text))
+        (insert (cooked--mark-pasted text)))
     (cooked--send-paste text)))
 
 (defun cooked-dnd--quote (file)

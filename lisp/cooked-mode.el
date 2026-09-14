@@ -1671,6 +1671,13 @@ to the child verbatim."
   ;; snapped against the command it replaced.
   (add-hook 'pre-command-hook #'cooked--guard-insertion -50 t)
   (add-hook 'pre-command-hook #'cooked--snap-to-input nil t)
+  ;; A yank marks what it inserts, so its control bytes can be stripped on
+  ;; submission while typed ones are not; see `cooked--mark-pasted'.  The mark
+  ;; is not inherited, or a character typed with `quoted-insert' right after a
+  ;; yank would count as pasted.
+  (add-hook 'yank-transform-functions #'cooked--mark-pasted nil t)
+  (setq-local text-property-default-nonsticky
+              (cons '(cooked-pasted . t) text-property-default-nonsticky))
   (add-hook 'post-command-hook #'cooked--track-wandering nil t)
   ;; From the same hook and for the same reason: the user's own commands produce
   ;; no output, so a drain is never what discovers that one of them scrolled the

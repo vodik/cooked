@@ -741,6 +741,32 @@ kill it before it printed anything."
     (should-not (string-search "^[" (cooked-tests--text)))
     (should-not (string-search "^C" (cooked-tests--text)))))
 
+(ert-deftest cooked-a-typed-escape-at-a-prompt-reaches-the-shell ()
+  "Only pasted text is stripped: a yanked ESC goes as a space, a typed one as ESC.
+
+The whole submitted line used to be stripped, so an ESC entered with
+\\[quoted-insert] became a space as well, where xterm, kitty, foot and ghostty
+filter what was pasted and never what was typed.  A yank now marks what it
+inserts.  The mark has to survive a drain, which lifts the line out and puts it
+back, and must not spread to the character typed straight after the yank.  The
+child is `cat -v' on a canonical tty, so the ESC that got through is spelled ^[
+at the end of its line and the one that did not is a space."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; cat -v")
+    (should (cooked-tests--settle
+             (lambda () (and (cooked--input-state-p) (cooked--input-start-position)))))
+    (cooked--refresh-keymap)
+    (cooked-tests--with-kill "a\eb" (cooked-paste))
+    (cooked--drain-and-apply)
+    (goto-char cooked--input-end)
+    (let ((unread-command-events (list ?\e)))
+      (call-interactively #'quoted-insert))
+    (should (equal (cooked--pending-input) "a\eb\e"))
+    (cooked-send-input)
+    (should (equal (ring-ref comint-input-ring 0) "a b\e"))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "^a b\\^\\[$" (cooked-tests--text)))))
+    (should-not (string-search "a^[b" (cooked-tests--text)))))
+
 (ert-deftest cooked-terminal-frame-paste-goes-to-the-child-bracketed ()
   "An `xterm-paste' event reaches the child, not the buffer, in every state.
 
@@ -1511,17 +1537,18 @@ cost one byte each."
 (ert-deftest cooked-delegation-strips-control-bytes-from-the-line ()
   "The line handed to the shell is typing, so an ESC yanked into it is a space.
 
-The key that follows is sent as it is, since sending a key is the point."
+An ESC the user typed into the line is sent as it is, as a terminal would send
+it, and so is the key that follows, since sending a key is the point."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
     (goto-char cooked--input-end)
-    (insert "echo \e[Ahi")
+    (insert "echo " (cooked--mark-pasted "\e[A") "hi\e")
     (let (sent)
       (cl-letf (((symbol-function 'cooked--send-to-child)
                  (lambda (bytes) (setq sent bytes))))
         (cooked-delegate-key "\C-r"))
-      (should (equal sent "echo  [Ahi\C-r")))))
+      (should (equal sent "echo  [Ahi\e\C-r")))))
 
 (ert-deftest cooked-delegation-lasts-exactly-one-line ()
   "Delegation is a one-way door for the rest of the line and no further.

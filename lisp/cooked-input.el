@@ -38,7 +38,13 @@ mode `ICRNL' turns it into the newline the child expects, and in raw mode it is
 what a shell's line editor is bound to.  Sending LF works for readline but not
 for ZLE."
   (interactive)
-  (let ((text (or (cooked--pending-input) "")))
+  ;; Stripped here rather than left to `cooked--send-input-string', so the
+  ;; history records the line the shell was sent: recalling it later gives back
+  ;; the spaces a pasted ESC became, not an ESC that would now count as typed.
+  (let ((text (cooked--strip-pasted-controls
+               (if-let* ((region (cooked--input-region)))
+                   (cooked--input-substring (car region) (cdr region))
+                 ""))))
     ;; The text is left in the buffer rather than deleted, and that is the whole
     ;; of the fix for a flicker on Enter: deleting it emptied the line here and
     ;; now, while the echo that puts it back is a round trip through the child
@@ -63,14 +69,15 @@ the same way it owns the first -- so the record for
 line submitted last rather than the command that ran.  See
 `cooked-line-prompt-continued'.
 
-TEXT goes through `cooked--strip-paste-controls' first, for the same reason a
-paste does.  The input region holds whatever was yanked into it, so a kill of
-\"ls ESC [ A\" would otherwise reach the shell as keystrokes on RET, and an
-interrupt character in it would kill the line it was part of.  Every path that
-puts text at a prompt ends here, so this one strip covers `yank', a terminal
-frame's paste, and a history entry or a dropped file name inserted into the
-line."
-  (setq text (cooked--strip-paste-controls text))
+TEXT goes through `cooked--strip-pasted-controls' first, which strips control
+bytes from the parts of it that were pasted, for the same reason a paste to the
+child is stripped.  The input region holds whatever was yanked into it, so a
+kill of \"ls ESC [ A\" would otherwise reach the shell as keystrokes on RET,
+and an interrupt character in it would kill the line it was part of.  What the
+user typed is sent as typed, so an ESC entered with \\[quoted-insert] still
+reaches the shell as ESC.  A plain string, such as `comint-input-sender' hands
+over, has no pasted parts and is sent unchanged."
+  (setq text (cooked--strip-pasted-controls text))
   (let ((record (cooked--line)))
     (setf (cooked-line-submitted-input record)
           (let ((line (and (not (string-blank-p text)) text))
@@ -169,7 +176,12 @@ Positive DELTA moves towards older entries, as \\[cooked-previous-input] does."
   ;; past the newest entry, so browsing history never costs you the line you were
   ;; writing.  comint has no equivalent; it simply loses it.
   (when (null comint-input-ring-index)
-    (setq cooked--history-stash (or (cooked--pending-input) "")))
+    ;; With the paste mark, so a yanked ESC put aside and handed back is still
+    ;; stripped when the line is submitted.
+    (setq cooked--history-stash
+          (if-let* ((region (cooked--input-region)))
+              (cooked--input-substring (car region) (cdr region))
+            "")))
   (let ((next (max -1 (min (+ (or comint-input-ring-index -1) delta)
                            (1- (ring-length comint-input-ring))))))
     (setq comint-input-ring-index (and (>= next 0) next))

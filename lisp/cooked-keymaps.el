@@ -677,15 +677,16 @@ cost one byte each.
 
 Then KEY, once the shell\='s cursor is back where the user\='s was.
 
-The line is stripped of control bytes on the way, as a submitted one is by
-`cooked--send-input-string\=', because it reaches the line editor as typing:
-an ESC yanked into it would be read as the start of a key sequence.  KEY is
-not stripped, since sending a control key is what it is for."
+The pasted parts of the line are stripped of control bytes on the way, as a
+submitted line\='s are by `cooked--send-input-string\=', because the line reaches
+the line editor as typing: an ESC yanked into it would be read as the start of a
+key sequence.  What was typed goes as typed, and KEY is not stripped, since
+sending a control key is what it is for."
   (unless (cooked--input-state-p)
     (user-error "The child already owns the line"))
   (pcase-let* ((`(,start . ,end) (cooked--input-region))
-               (text (cooked--strip-paste-controls
-                      (buffer-substring-no-properties start end)))
+               (text (cooked--strip-pasted-controls
+                      (cooked--input-substring start end)))
                (after (- end (max start (min (point) end)))))
     (cooked--clear-input-region)
     (setf (cooked-line-delegated (cooked--line)) t)

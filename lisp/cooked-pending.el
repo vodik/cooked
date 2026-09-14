@@ -143,6 +143,42 @@ was never built."
   (when-let* ((region (cooked--input-region)))
     (buffer-substring-no-properties (car region) (cdr region))))
 
+(defun cooked--mark-pasted (text)
+  "TEXT with every character marked as having arrived by paste.
+
+The mark is the `cooked-pasted\=' text property, and what reads it is
+`cooked--strip-pasted-controls\=', which strips control bytes from marked text
+only.  That is where a terminal draws the line: xterm\='s
+`disallowedPasteControls\=' filters what was pasted and never what was typed, so
+an ESC yanked into the line goes to the shell as a space while one typed with
+\\[quoted-insert] goes as ESC.
+
+Buffer-locally on `yank-transform-functions\=', which sees every string
+`insert-for-yank\=' inserts: `yank\=', `yank-pop\=', evil\='s paste commands, the
+`xterm-paste\=' a terminal frame delivers, and `mouse-yank-primary\='.  A drop
+and a history entry are marked where they are inserted.  Two insertions go
+unmarked: an evil block paste, whose handler inserts its own copy of the lines,
+and any yank under a `yank-excluded-properties\=' of t, which removes every
+property from the text, this one included."
+  (propertize text 'cooked-pasted t))
+
+(defun cooked--input-substring (start end)
+  "The text between START and END, keeping only the paste mark.
+
+The drain lifts the pending input out and puts it back on every redraw, and
+submitting or delegating the line reads it once more.  Each of those has to keep
+`cooked-pasted\=' or a yanked ESC is typing again by the time it is sent, and
+none should keep anything else: a face or a link property left over from the
+row the line sits on is the screen\='s, not the line\='s."
+  (let ((text (buffer-substring-no-properties start end))
+        (from start))
+    (while (< from end)
+      (let ((to (next-single-property-change from 'cooked-pasted nil end)))
+        (when (get-text-property from 'cooked-pasted)
+          (put-text-property (- from start) (- to start) 'cooked-pasted t text))
+        (setq from to)))
+    text))
+
 (defvar cooked-snap-commands
   '(self-insert-command
     cooked-newline newline newline-and-indent
@@ -193,9 +229,10 @@ submitted while the child is sent an empty line."
               ((> (point) (cdr region)) (goto-char (cdr region))))))))
 
 (defun cooked--take-pending-input ()
-  "Remove the pending input from the buffer and return it."
+  "Remove the pending input from the buffer and return it.
+The paste mark comes with it; see `cooked--input-substring\='."
   (when-let* ((region (cooked--input-region))
-              (text (buffer-substring-no-properties (car region) (cdr region))))
+              (text (cooked--input-substring (car region) (cdr region))))
     (delete-region (car region) (cdr region))
     text))
 

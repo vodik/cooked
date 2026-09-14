@@ -830,6 +830,30 @@ count survives, so a paste that was tampered with looks wrong rather than
 looking like something shorter that was pasted on purpose."
   (replace-regexp-in-string cooked--paste-strip-regexp " " text t t))
 
+(defun cooked--strip-pasted-controls (text)
+  "TEXT with control bytes stripped from the parts that were pasted.
+
+A pasted part is one carrying the `cooked-pasted\=' property that
+`cooked--mark-pasted\=' puts on a yank, a drop or a history entry, and it goes
+through `cooked--strip-paste-controls\='.  Everything else is what the user typed
+and is left alone, as xterm, kitty, foot and ghostty leave it: a line holding a
+yanked \"a ESC [ A\" followed by an ESC typed with \\[quoted-insert] goes to the
+shell as \"a  [A\" and then the ESC.
+
+The result carries no properties, since it is on its way to the child."
+  (let ((pieces nil)
+        (from 0)
+        (end (length text)))
+    (while (< from end)
+      (let* ((to (next-single-property-change from 'cooked-pasted text end))
+             (piece (substring-no-properties text from to)))
+        (push (if (get-text-property from 'cooked-pasted text)
+                  (cooked--strip-paste-controls piece)
+                piece)
+              pieces)
+        (setq from to)))
+    (apply #'concat (nreverse pieces))))
+
 (defun cooked--send-paste (text)
   "Hand TEXT to the child as a paste.
 
@@ -899,11 +923,13 @@ turns `yank\=' into `cooked-paste\=' never sees it.  Pasting into a running vim
 therefore put the text into the cooked buffer instead of into vim.
 
 At an input prompt this does what `xterm-paste\=' does, since the line is
-being edited in the buffer; `cooked--send-input-string\=' strips the control
-bytes when it is submitted.  While the child owns the keyboard TEXT goes to it
-through `cooked--send-paste\=', bracketed if the child asked, with the same
-control-byte strip as `cooked-paste\='.  TEXT is put on the kill ring first
-when `xterm-store-paste-on-kill-ring\=' says so, as `xterm-paste\=' would."
+being edited in the buffer.  Its `yank\=' marks the text as pasted, see
+`cooked--mark-pasted\=', and `cooked--send-input-string\=' strips the control
+bytes from it when the line is submitted.  While the child owns the keyboard
+TEXT goes to it through `cooked--send-paste\=', bracketed if the child asked,
+with the same control-byte strip as `cooked-paste\='.  TEXT is put on the kill
+ring first when `xterm-store-paste-on-kill-ring\=' says so, as `xterm-paste\='
+would."
   (interactive "e")
   (if (cooked--input-state-p)
       (xterm-paste event)

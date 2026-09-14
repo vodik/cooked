@@ -193,9 +193,10 @@ prompt looks like."
 
 Two paths, because a cooked buffer is two different things depending on who
 owns the keyboard.  In an input state the buffer *is* editable and the prompt
-is Emacs\=' -- so this inserts, and \\[cooked-send-input] runs it, exactly as
-though it had been typed.  Otherwise the child owns the line editor and the
-only way in is the wire, so it goes through the paste path.
+is Emacs\=' -- so this inserts, and \\[cooked-send-input] runs it.  The entry is
+marked as pasted, see `cooked--mark-pasted\=', so its control bytes are stripped
+on the way out as they would be on the other path.  Otherwise the child owns the
+line editor and the only way in is the wire, so it goes through the paste path.
 
 Never a newline either way.  Offering a list of past commands and running the
 chosen one on the spot is a one-way door over somebody\='s shell history, and
@@ -204,7 +205,7 @@ the entry you meant is one line away from the entry you did not."
       (progn
         (when-let* ((start (cooked--input-start-position)))
           (goto-char (max (point) start)))
-        (insert text))
+        (insert (cooked--mark-pasted text)))
     ;; Through the paste path rather than `cooked--send-to-child': a history
     ;; file is not necessarily one you wrote -- a shared account, a restored
     ;; dotfiles repo, a container image -- so it gets the control-byte strip

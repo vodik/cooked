@@ -247,7 +247,9 @@ RET then submitted both."
                  (lambda (text) (push text pasted))))
         (cooked-dnd--insert (list "/tmp/two words.png")))
       (should-not pasted))
-    (should (equal (cooked--pending-input) "/tmp/two\\ words.png "))))
+    (should (equal (cooked--pending-input) "/tmp/two\\ words.png "))
+    ;; Marked as pasted, so a control byte in a name is stripped on RET.
+    (should (get-text-property (cooked--input-start-position) 'cooked-pasted))))
 
 (ert-deftest cooked-dnd-opens-the-file-once-the-child-has-exited ()
   "With no child to type to, a drop visits the file as it would elsewhere."

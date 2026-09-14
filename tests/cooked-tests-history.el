@@ -96,7 +96,10 @@ away from the entry you did not.  So: no newline, on either path."
           (should-not sent)
           (should (string-suffix-p "echo edited"
                                    (buffer-substring-no-properties
-                                    (point-min) (point-max)))))))))
+                                    (point-min) (point-max))))
+          ;; Marked as pasted, since a history file is not necessarily one you
+          ;; wrote, so its control bytes are stripped when the line is sent.
+          (should (get-text-property (1- (point-max)) 'cooked-pasted)))))))
 
 (defmacro cooked-tests--with-history-command (command &rest body)
   "Run BODY with `cooked-history--entries\=' running the command line COMMAND."
