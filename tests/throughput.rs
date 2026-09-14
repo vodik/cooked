@@ -132,7 +132,7 @@ fn feed_and_drain() {
         timed(label, data.len(), || {
             for piece in data.chunks(chunk) {
                 term.feed(piece);
-                let delta = term.drain();
+                let delta = term.drain_promoting();
                 runs += delta.rows.iter().map(|r| r.runs.len()).sum::<usize>();
                 runs += delta.scrolled.len();
             }
@@ -247,7 +247,7 @@ fn scroll_region() {
         timed(label, body.len(), || {
             for piece in body.chunks(READ_CHUNK) {
                 term.feed(piece);
-                let delta = term.drain();
+                let delta = term.drain_promoting();
                 scrolled += delta.scrolled.len() + delta.shifts.len();
             }
         });
@@ -292,6 +292,64 @@ fn region_scroll_small_drains() {
         }
     });
     println!("{:>44}({shifts} shifts over {frames} drains)", "");
+}
+
+/// A few lines fed at the bottom of the whole screen between drains, the way `tail -f` or
+/// a build prints, drained by PROMOTE or not.
+///
+/// Every row that leaves is one Emacs showed, so a promoting drain hands none of them over
+/// as text: what the pair measures is what deciding that costs the core, against the runs
+/// a drain that sends them builds anyway. Two tests rather than two cases of one, so each
+/// can be counted on its own under `perf stat`.
+fn full_screen_small_drains(label: &str, promote: bool) {
+    let (rows, cols, frames, per_frame) = (50, 200, 20_000, 3);
+    let mut data = format!("\x1b[{rows};1H").into_bytes();
+    let setup = data.len();
+    let mut line = 0usize;
+    let mut frames_at = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        for _ in 0..per_frame {
+            data.extend_from_slice(
+                format!("\r\n{line:06} {}", "text ".repeat(cols / 6)).as_bytes(),
+            );
+            line += 1;
+        }
+        frames_at.push(data.len());
+    }
+    let mut term = Term::new(rows, cols);
+    term.feed(&data[..setup]);
+    term.drain();
+    let (mut scrolled, mut promoted) = (0usize, 0usize);
+    timed(label, data.len() - setup, || {
+        let mut at = setup;
+        for &end in &frames_at {
+            term.feed(&data[at..end]);
+            let delta = if promote {
+                term.drain_promoting()
+            } else {
+                term.drain()
+            };
+            scrolled += delta.scrolled.len();
+            promoted += delta.promoted.map_or(0, |shift| shift.count);
+            at = end;
+        }
+    });
+    println!(
+        "{:>44}({promoted} of {scrolled} scrolled rows promoted)",
+        ""
+    );
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn full_screen_small_drains_sent() {
+    full_screen_small_drains("full screen, 3 lines a drain, sent", false);
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn full_screen_small_drains_promoted() {
+    full_screen_small_drains("full screen, 3 lines a drain, promoted", true);
 }
 
 /// What hyperlinks cost, which is a question about `LinkStore` rather than the parser.
