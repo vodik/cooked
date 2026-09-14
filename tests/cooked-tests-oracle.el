@@ -682,14 +682,19 @@ mid-line while the drain's `:head' said 0 for the alternate screen.  A wrapped
 row that scrolled away in the switching drain was given a newline, and the
 primary's carry still counted it once the primary came back.  The line now
 ends at the seam and stays ended, so the primary's row 0 begins a line when
-it returns.  A switch there and back inside one drain shows Emacs nothing, and
-the line stays whole."
+it returns, whether a drain showed the alternate screen or not, and whether
+that drain was whole or left the screen out."
   (cooked-tests--oracle-check
    '((nil :rows 5 :cols 6 :rejoin t :chunks ((" 42%xy┌─" "\e[1S") ("\e[?47h")))
      (nil :rows 5 :cols 6 :rejoin t
           :chunks ((" 42%xy┌─" "\e[1S") ("\e[?47h") ("x") ("\e[?47l") ("y" "\e[1S")))
      (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h") ("\e[?47l")))
-     (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h" "\e[?47l"))))))
+     (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h" "\e[?47l")))))
+  ;; Hidden drains show the alternate screen too, and end the line as whole ones do.
+  (cooked-tests--oracle-check
+   '((nil :rows 3 :cols 5 :rejoin t
+          :chunks (("https://e.x/a") ("$ ls") ("\e8") ("\e[?47h") ("\e[?1049l"))))
+   #'cooked-tests--oracle-hide))
 
 ;; Detected links are checked against the text they cover after every drain;
 ;; see the Commentary.

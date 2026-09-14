@@ -707,7 +707,7 @@ and the region shaped before anything measures it."
                         (or promoted inserted)))
          ;; After the scrollback, which is what the line ends after, and before
          ;; anything is measured from `cooked--screen-start'.
-         (_ (when (plist-get update :alt) (cooked--end-seam-line)))
+         (_ (cooked--end-seam-line (plist-get update :head)))
          ;; Between the two render passes, and it has to be exactly here.  After the
          ;; scrollback, because the rows a scroll pushed off the top are inserted above
          ;; `cooked--screen-start' or promoted past it, and the shift's first row is

@@ -459,14 +459,6 @@ impl State {
         // scrollback above were all built from cells written before this drain began.
         let styles = self.styles.take_unsent();
         let fonts = self.styles.font_bits().to_vec();
-        // A drain that shows the alternate screen ends the primary's line in the buffer:
-        // the alt grid's row 0 begins a line of its own, so the last row of this batch is
-        // given a newline (see `Delta::scrolled_lines`) and a screen that began mid-line is
-        // broken there (`cooked--end-seam-line`). Neither is taken back when the primary
-        // returns, so its row 0 begins a line too, and the carry saying otherwise goes.
-        if levels.alt {
-            self.screens.primary.forget_carry();
-        }
         let screen = self.screen();
         Delta {
             images,
@@ -699,6 +691,12 @@ impl State {
         }
         self.shown = shown;
         if on {
+            // The alt grid's row 0 begins a buffer line of its own, so the primary's line
+            // ends at the seam, and stays ended when the primary comes back: its row 0
+            // begins a line too, whatever the carry said. Here, at the switch, rather than
+            // at the drain that shows it, so the answer is the same however the drains
+            // fall; a drain whose head is 0 has Lisp end the line (`cooked--end-seam-line`).
+            self.screens.primary.forget_carry();
             // Dropped rather than archived: this is the previous full-screen program's
             // leftover frame, which was never history to begin with.
             // The default pen, not the child's: a freshly entered alt screen is not the

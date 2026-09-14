@@ -517,27 +517,30 @@ core counts a promoted row\='s characters into those offsets."
           (cooked--prune-marks)
           start)))))
 
-(defun cooked--end-seam-line ()
-  "End the buffer line the live screen begins in, if it begins mid-line.
+(defun cooked--end-seam-line (head)
+  "End the buffer line the live screen begins in, when HEAD says it begins one.
 
-For a drain that shows the alternate screen, whose row 0 begins a buffer line
-of its own: the drain reports a `:head\=' of 0 for it.  A screen that began
-mid-line on the primary, continuing a wrapped line whose head scrolled away in
-an earlier drain, would have the alternate screen's row 0 appended to that
-head.  So the line ends here, with a newline that belongs to the scrollback
-above it.
+HEAD is the drain\='s `:head\=', how many characters of screen row 0\='s line
+the buffer already holds; a 0 there while `cooked--screen-start\=' is mid-line
+means the line ended in the core, and it ends here with a newline that belongs
+to the scrollback above it.
 
-It is not taken back when the primary screen returns.  The core forgets the
-primary's carry on the same drain, so the primary's row 0 begins a line too:
-a line wrapped across the top of the screen when a full-screen program started
-stays split there.  Undoing the break instead would mean tracking it through
-every drain the alternate screen is up for, including a resize, which evicts
-rows from the primary and inserts them at this very seam.
+The alternate screen is what does that.  Its row 0 begins a buffer line of its
+own, so the core forgets the primary\='s carry when the child switches to it,
+and a screen that began mid-line, continuing a wrapped line whose head
+scrolled away earlier, is broken at the seam.  It is not taken back when the
+primary screen returns: a line wrapped across the top of the screen when a
+full-screen program started stays split there.  Undoing the break would mean
+tracking it through every drain the alternate screen is up for, including a
+resize, which evicts rows from the primary and inserts them at this very seam.
+A switch there and back between two drains ends the line all the same, so the
+buffer does not depend on where the drains fell.
 
 Widens first, for the reason `cooked--render-scrolled\=' does."
   (save-restriction
     (widen)
-    (when-let* ((start (cooked--screen-start-position)))
+    (when-let* (((eql head 0))
+                (start (cooked--screen-start-position)))
       (unless (or (= start (point-min)) (eq (char-before start) ?\n))
         (save-excursion
           (goto-char start)

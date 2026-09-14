@@ -177,13 +177,13 @@ fn alt_screen_output_never_reaches_scrollback() {
 }
 
 #[test]
-fn showing_the_alternate_screen_ends_the_line_the_primary_began_in() {
+fn switching_to_the_alternate_screen_ends_the_line_the_primary_began_in() {
     // Two rows of `=` wrap onto a third and scroll the first away, so row 0 continues a
     // line whose head is in Emacs.
     let mut t = term(2, 4, b"==========");
     assert_eq!(t.drain().head, 4, "precondition: row 0 continues a line");
 
-    // Shown to Emacs, the alternate screen begins a buffer line, and the break stays.
+    // The alternate screen begins a buffer line, and the break stays.
     t.feed(b"\x1b[?1049h");
     assert_eq!(t.drain().head, 0);
     t.feed(b"\x1b[?1049l");
@@ -193,11 +193,20 @@ fn showing_the_alternate_screen_ends_the_line_the_primary_began_in() {
         "the primary's row 0 begins a line when it returns"
     );
 
-    // A switch there and back that no drain saw shows Emacs nothing, so nothing ends.
+    // A drain that leaves the screen out still shows the alternate screen.
+    let mut t = term(2, 4, b"==========");
+    assert_eq!(t.drain().head, 4);
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(t.drain_hidden().head, 0);
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.drain().head, 0);
+
+    // So does a switch there and back that no drain saw, so the buffer does not depend
+    // on where the drains fell.
     let mut t = term(2, 4, b"==========");
     assert_eq!(t.drain().head, 4);
     t.feed(b"\x1b[?1049h\x1b[?1049l");
-    assert_eq!(t.drain().head, 4);
+    assert_eq!(t.drain().head, 0);
 }
 
 #[test]
