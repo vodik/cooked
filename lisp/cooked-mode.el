@@ -801,6 +801,36 @@ where it exists, being newer than the Emacs cooked still supports."
                                    'global-text-scale-adjust)))
     (advice-add 'global-text-scale-adjust :after #'cooked--font-scale-resync)))
 
+(defvar-local cooked--sized-line-height nil
+  "The (LINE-SPACING . FACE-REMAPPING-ALIST) `cooked--sync-size\=' last ran under.
+
+Both change how tall a row is, and so how many rows a window holds, without
+changing any window\='s size, and nothing runs a hook for either.
+`cooked--sync-size-for-line-height\=' compares them before each redisplay.  The
+remapping is held as a copy, because `face-remap-add-relative\=' edits an entry
+it already has in place.")
+
+(defun cooked--sync-size-for-line-height (_window)
+  "Resize the child if this buffer\='s rows have changed height since it was sized.
+
+On `pre-redisplay-functions\=', buffer-locally, so it runs only when a window on
+this buffer is about to be drawn.  A window 437 pixels tall holds 23 rows of a
+19-pixel font, and 20 once `line-spacing\=' is 2; without this the child went on
+drawing 23 until the window next changed size.  A remapped default face is
+the other case, as `face-remap-add-relative\=' makes one with a new `:height\=':
+`text-scale-mode-hook\=' and the advice on `buffer-face-mode\=' catch the usual
+ways of making one, and this catches the rest.
+
+Deferred, as the window hooks defer, since the resize may drain.  The values are
+recorded at once, so the redisplays before the timer runs schedule nothing
+more."
+  (when (and cooked--session
+             (not (and (eql line-spacing (car cooked--sized-line-height))
+                       (equal face-remapping-alist (cdr cooked--sized-line-height)))))
+    (setq cooked--sized-line-height
+          (cons line-spacing (copy-tree face-remapping-alist)))
+    (cooked--defer #'cooked--sync-size)))
+
 (defun cooked--sync-size (&optional _frame)
   "Match the emulator and child to the window size.
 
@@ -830,6 +860,8 @@ reported\" rather than as a claim about zero.
 This is also the one place that notices the cell moving at all, which makes it
 the trigger for `cooked--rescale-deco\='."
   (when cooked--session
+    (setq cooked--sized-line-height
+          (cons line-spacing (copy-tree face-remapping-alist)))
     (pcase-let* ((`(,rows . ,cols) (cooked--window-size))
                  (cell (cooked--session-cell-size))
                  (moved (not (equal cooked--last-cell cell)))
@@ -1793,6 +1825,7 @@ to the child verbatim."
   (cooked--advise-font-scale)
   (add-hook 'window-selection-change-functions #'cooked--window-selection-changed nil t)
   (add-hook 'pre-redisplay-functions #'cooked--sync-before-redisplay nil t)
+  (add-hook 'pre-redisplay-functions #'cooked--sync-size-for-line-height nil t)
   (add-hook 'context-menu-functions #'cooked--context-menu nil t)
   ;; An input method composes by editing the buffer, and the screen it would
   ;; edit while the child owns the keyboard is read-only; see cooked-ime.el.

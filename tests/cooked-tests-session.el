@@ -973,6 +973,43 @@ stay silent -- `text-scale-mode-hook' is the one that has to pick it up."
                      (window-max-chars-per-line (get-buffer-window (current-buffer))))))
       (text-scale-set 0))))
 
+(ert-deftest cooked-a-line-spacing-change-resizes-the-child ()
+  "Rows that grow taller hold fewer of them, and the child is told so.
+
+`line-spacing' changes how many rows a window holds without changing the
+window, so no window hook runs, and the child went on drawing rows for the old
+count until something else resized it.  A default face remapped to a new
+height by `face-remap-add-relative' is the same, and runs no hook either.
+
+Batch has no line spacing or face height to measure, so the line height is made
+to include a pixel of each, as a graphical frame's would, and the redisplay
+that would draw the buffer runs its hooks by hand."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "old=; while :; do s=$(stty size); [ \"$s\" = \"$old\" ] || echo \"$s\"; old=$s; sleep 0.05; done")
+    (set-window-buffer (selected-window) (current-buffer))
+    (cooked--sync-size)
+    (cl-letf* ((real (symbol-function 'window-default-line-height))
+               ((symbol-function 'window-default-line-height)
+                (lambda (&optional window)
+                  (with-current-buffer (window-buffer window)
+                    (+ (funcall real window)
+                       (or line-spacing 0)
+                       (if (assq 'default face-remapping-alist) 1 0))))))
+      (dolist (change (list (lambda () (setq-local line-spacing 1))
+                            (lambda () (face-remap-add-relative 'default :height 2.0))))
+        (let ((rows (car cooked--last-size)))
+          (funcall change)
+          (run-hook-with-args 'pre-redisplay-functions (selected-window))
+          (should (< (cooked--window-rows (selected-window)) rows))
+          (should (cooked-tests--settle
+                   (lambda ()
+                     (string-match-p
+                      (format "^%d %d$" (cooked--window-rows (selected-window))
+                              (cdr cooked--last-size))
+                      (cooked-tests--text)))))
+          (should (equal (car cooked--last-size)
+                         (cooked--window-rows (selected-window)))))))))
+
 (ert-deftest cooked-terminfo-is-installed-and-used ()
   "The child should see a TERM that describes what we actually implement.
 
