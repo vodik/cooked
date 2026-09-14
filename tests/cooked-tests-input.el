@@ -1992,6 +1992,29 @@ back in the cell the pointer was in."
                                            (+ 1 (* 20 (car cell)) 7))
                                    (cooked-tests--text)))))))))
 
+(ert-deftest cooked-screen-cell-counts-a-drawn-run-by-its-cells ()
+  "A cell after a decoration drawn wider than its cells is still its own column.
+
+`current-column' counts a `display' image as its pixels over the frame's
+character width, so once `text-scale-mode' made the cell wider than the frame's
+character, the column after a run of box drawing came out too far right, and a
+click there was reported to the child in the wrong cell.  A `space' of five
+columns over the three cells of `│ │' stands in for the zoomed image, which
+batch cannot draw."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h│ │x中y'; stty raw; exec sleep 30")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "│ │x中y" (cooked-tests--text)))))
+    (let* ((run (save-excursion (goto-char (cooked--screen-start-position))
+                                (search-forward "│ │") (match-beginning 0)))
+           (x (+ run 3)))
+      (let ((inhibit-read-only t))
+        (put-text-property run x 'display '(space :width 5)))
+      (should (equal (cooked--screen-cell x) '(0 . 3)))
+      ;; A wide character counts both of its cells.
+      (should (equal (cooked--screen-cell (+ x 2)) '(0 . 6)))
+      (should (equal (cooked--mouse-cell nil (list x 0)) '(0 . 3))))))
+
 (ert-deftest cooked-mouse-is-left-to-emacs-when-unrequested ()
   "A child that never asked for mouse reports must not steal the click."
   (cooked-tests--with-session '("/bin/cat")

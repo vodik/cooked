@@ -123,16 +123,22 @@ The inverse of `cooked--goto-screen-row', including its treatment of row 0:
 when `cooked--screen-start' sits mid-line, the head before it belongs to
 scrollback, so the column is measured from the marker rather than from the
 line's beginning, which would count characters that are not on the screen
-at all."
+at all.
+
+The column is the `string-width\=' of the row's text before POS, without its
+properties, which is the cells the grid gave that text.  Not `current-column\=':
+that counts a decoration image as its pixel width over the frame\='s character
+width, so after `text-scale-mode\=' has made a cell 12 pixels wide on a frame
+whose characters are 9, a cell after a ten-cell run of box drawing read as
+column 13.  See `cooked--mouse-glyph\=', which measures the same way."
   (let ((pos (or pos (point)))
         (start (cooked--screen-start-position)))
     (when (and start (>= pos start))
       (save-excursion
         (goto-char pos)
-        (if (< (line-beginning-position) start)
-            (cons 0 (- pos start))
-          (cons (count-lines start (line-beginning-position))
-                (current-column)))))))
+        (let ((bol (line-beginning-position)))
+          (cons (if (< bol start) 0 (count-lines start bol))
+                (string-width (buffer-substring-no-properties (max bol start) pos))))))))
 
 (defun cooked--goto-screen-cell (cell)
   "Move point to CELL, a (ROW . COL) pair, clamped to what the row holds."
