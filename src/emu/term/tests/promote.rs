@@ -191,6 +191,17 @@ fn the_alternate_screen_promotes_nothing() {
 }
 
 #[test]
+fn nothing_is_promoted_across_a_switch_of_screens() {
+    // Before the switch and after it, in a drain that ends on the primary screen.
+    let mut t = settled(3, 10, b"one\r\ntwo\r\nthree");
+    t.feed(b"\r\nfour\x1b[?1049h\x1b[?1049l");
+    assert_eq!(t.drain_promoting().promoted, None);
+    let mut t = settled(3, 10, b"one\r\ntwo\r\nthree");
+    t.feed(b"\x1b[?1049h\x1b[?1049l\r\nfour");
+    assert_eq!(t.drain_promoting().promoted, None);
+}
+
+#[test]
 fn a_hidden_drain_promotes_nothing_and_leaves_its_rows_to_the_scroll() {
     // A buffer no window shows takes the scrollback as text and leaves the scroll in the
     // log, so the rows Emacs shows at the top are still the ones just sent again when the

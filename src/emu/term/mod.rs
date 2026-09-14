@@ -449,20 +449,17 @@ impl Delta {
     ///
     /// Without REJOIN, which is `cooked-rejoin-wrapped-lines', every row ends one. With
     /// it, a row the terminal wrapped joins the row after it, so a long command line
-    /// yanked from history carries no newline the child never wrote. The exception is the
-    /// batch's last row while the alt screen is up: what follows it is the alt grid's own
-    /// row 0, and joining would weld frozen scrollback to a live row rewritten every
-    /// redraw.
+    /// yanked from history carries no newline the child never wrote. That holds while
+    /// the alternate screen is up too, for rows a resize takes off the primary: the row
+    /// after the batch's last is the primary's row 0 and not the alternate screen's, and
+    /// Lisp keeps the two apart with a newline of its own; see `cooked--place-seam`.
     ///
     /// Here rather than where the scrollback is assembled for Emacs, which needs an `Env`,
     /// so that a test with no Emacs can hold the rule to the same answer.
     pub fn scrolled_lines(&self, rejoin: bool) -> impl Iterator<Item = (&Scrolled, bool)> {
-        let last = self.scrolled.len().saturating_sub(1);
-        let alt = self.levels.alt;
         self.scrolled
             .iter()
-            .enumerate()
-            .map(move |(i, line)| (line, !(rejoin && line.wrapped && !(i == last && alt))))
+            .map(move |line| (line, !(rejoin && line.wrapped)))
     }
 }
 

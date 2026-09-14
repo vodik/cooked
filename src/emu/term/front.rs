@@ -111,6 +111,17 @@ impl Front {
         }
     }
 
+    /// Promote no row that leaves before the next drain, and none of those that left since
+    /// the last.
+    ///
+    /// For a switch of screens: the rows that left the primary before it are not at the
+    /// top of what the next drain draws, and a row that leaves after it would be matched
+    /// against rows the other grid may have drawn.
+    pub(super) fn stop_promoting(&mut self) {
+        self.promoted = 0;
+        self.promoting = false;
+    }
+
     /// Note that ROW has just left the top of the screen for scrollback, and whether Emacs
     /// can keep the text it holds for it rather than be sent the row again.
     ///

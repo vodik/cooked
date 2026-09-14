@@ -413,9 +413,12 @@ marker is anchored to the prompt it was launched from -- a row now outside the
 narrowing, and so outside the range that sweep looks in.
 
 Nothing puts any of them back explicitly, and nothing needs to: restoring the
-primary marks every row damaged, and `cooked-command-decorations--rearm\='
-repaints from that -- which is the whole reason the decoration is re-applied
-per render rather than persisted."
+primary rewrites every row the program\='s last frame left different, and
+`cooked-command-decorations--rearm\=' repaints every marker once any row is
+rendered -- which is the whole reason the decoration is re-applied per render
+rather than persisted.  Only a frame identical to the primary in every row
+leaves them down, which a full-screen program over a command\='s output does
+not draw."
   (when-let* ((screen (and cooked--alt (cooked--screen-start-position))))
     (cooked-command-decorations--drop-running)
     (dolist (overlay (overlays-in screen (point-max)))

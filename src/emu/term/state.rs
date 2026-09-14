@@ -712,12 +712,6 @@ impl State {
         }
         self.shown = shown;
         if on {
-            // The alt grid's row 0 begins a buffer line of its own, so the primary's line
-            // ends at the seam, and stays ended when the primary comes back: its row 0
-            // begins a line too, whatever the carry said. Here, at the switch, rather than
-            // at the drain that shows it, so the answer is the same however the drains
-            // fall; a drain whose head is 0 has Lisp end the line (`cooked--end-seam-line`).
-            self.screens.primary.forget_carry();
             // Dropped rather than archived: this is the previous full-screen program's
             // leftover frame, which was never history to begin with.
             // The default pen, not the child's: a freshly entered alt screen is not the
@@ -730,19 +724,21 @@ impl State {
         }
         // No event to match: `Levels::alt` is the level, and Lisp acts on that. See the
         // note on `Event` about not sending the same state two ways.
-        self.screen_mut().touch_all();
-        self.forget_sent(None);
-        // Both screens are drawn over the same buffer region, so a switch either way
-        // replaces the text of every live row, and the markers Emacs holds on those rows
-        // collapse to the region's start. The report on the way back is the one that
-        // matters: without it, the four prompts run before `less` all came back naming
-        // the first line. It is not withheld on the way in, because the rule stays "every
-        // rewrite of the whole screen reports every mark", as for `Term::touch_all`.
         //
-        // The markers are still wrong while the alternate screen is up, since its own
-        // redraws collapse them again: sticky scroll or command search reading them in
-        // that window sees one position for every prompt on screen until the program
-        // exits. Keeping the primary's rows in the buffer would close that.
-        self.marks_dirty = true;
+        // Every row is compared, and only against the copy of what Emacs holds, which is
+        // the same buffer text whichever grid drew it. So a switch sends the rows that
+        // differ between the two grids and nothing else: a blank row or a status line
+        // both screens hold costs nothing, and the markers on it stay where they are.
+        // The seam needs nothing here either. The primary keeps its head, and the drain
+        // reports it again once the primary is shown; see `cooked--place-seam`.
+        self.screen_mut().touch_all();
+        self.front.stop_promoting();
+        // The primary's marks are reported on the way back, against its rows. Not on the
+        // way in: an anchor names a row of the primary grid, and resolved against the
+        // alternate screen's text it would move a marker that a row both screens hold had
+        // kept in place.
+        if !on {
+            self.marks_dirty = true;
+        }
     }
 }

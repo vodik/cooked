@@ -754,9 +754,9 @@ and the region shaped before anything measures it."
                             (inserted (when-let* ((scrolled (plist-get update :scrolled)))
                                         (cooked--render-scrolled scrolled))))
                         (or promoted inserted)))
-         ;; After the scrollback, which is what the line ends after, and before
-         ;; anything is measured from `cooked--screen-start'.
-         (_ (cooked--end-seam-line (plist-get update :head)))
+         ;; After the scrollback, which is what the line ends or continues after,
+         ;; and before anything is measured from `cooked--screen-start'.
+         (_ (cooked--place-seam (plist-get update :head) (plist-get update :alt)))
          ;; Between the two render passes, and it has to be exactly here.  After the
          ;; scrollback, because the rows a scroll pushed off the top are inserted above
          ;; `cooked--screen-start' or promoted past it, and the shift's first row is
@@ -979,8 +979,9 @@ down while a full-screen program has the viewport.  `cooked-command-decorations'
 is the case it exists for: its markers ride overlays on the live rows, and those
 buffer positions are where the alt screen's own rows get rendered, so a marker
 left up sits in the fringe beside a running program's frame claiming to be about
-a command.  Coming back needs no hook -- restoring the primary marks every row
-damaged, and a layer that re-applies per render is repainted by that."
+a command.  Coming back needs no hook -- restoring the primary rewrites every
+row that differs from the program's last frame, and a layer that re-applies
+per render is repainted by that."
   :type 'hook
   :group 'cooked)
 

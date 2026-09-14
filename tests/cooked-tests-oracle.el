@@ -773,26 +773,106 @@ it."
    (lambda () 'hidden)))
 
 (ert-deftest cooked-render-oracle-the-alternate-screen-and-a-rejoined-seam ()
-  "Showing the alternate screen ends the line the primary screen began in.
+  "The alternate screen agrees with the core about a seam rejoined around it.
 
 Switching after a wrapped row had scrolled away left `cooked--screen-start'
-mid-line while the drain's `:head' said 0 for the alternate screen.  A wrapped
-row that scrolled away in the switching drain was given a newline, and the
-primary's carry still counted it once the primary came back.  The line now
-ends at the seam and stays ended, so the primary's row 0 begins a line when
-it returns, whether a drain showed the alternate screen or not, and whether
-that drain was whole or left the screen out."
+mid-line while the drain's `:head' said 0 for the alternate screen, and a
+wrapped row that scrolled away in the switching drain was given a newline
+while the primary's carry still counted it.  A newline is now held at the seam
+while the alternate screen is shown and deleted once the primary is back,
+whether a drain showed the alternate screen or not, and whether that drain was
+whole or left the screen out."
   (cooked-tests--oracle-check
    '((nil :rows 5 :cols 6 :rejoin t :chunks ((" 42%xy┌─" "\e[1S") ("\e[?47h")))
      (nil :rows 5 :cols 6 :rejoin t
           :chunks ((" 42%xy┌─" "\e[1S") ("\e[?47h") ("x") ("\e[?47l") ("y" "\e[1S")))
      (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h") ("\e[?47l")))
      (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h" "\e[?47l")))))
-  ;; Hidden drains show the alternate screen too, and end the line as whole ones do.
+  ;; Hidden drains show the alternate screen too, and rejoin the line as whole ones do.
   (cooked-tests--oracle-check
    '((nil :rows 3 :cols 5 :rejoin t
           :chunks (("https://e.x/a") ("$ ls") ("\e8") ("\e[?47h") ("\e[?1049l"))))
    #'cooked-tests--oracle-hide))
+
+(defun cooked-tests--oracle-run (rows cols chunks &optional treatment)
+  "A buffer with a ROWS by COLS session fed CHUNKS, drained after each.
+
+TREATMENT is as for `cooked-tests--oracle-compare\='s SUBJECT, and the buffer
+is caught up with `cooked--sync\=' at the end.  The seam is checked on every
+whole drain.  The caller kills the buffer."
+  (let ((buffer (cooked-tests--oracle-buffer rows cols))
+        (cooked-debug t))
+    (dolist (chunk chunks)
+      (cooked-tests--oracle-feed buffer chunk)
+      (cooked-tests--oracle-drain buffer t (or treatment #'ignore)))
+    (with-current-buffer buffer
+      (let ((cooked-rejoin-wrapped-lines t))
+        (cooked--sync)))
+    buffer))
+
+(defmacro cooked-tests--with-oracle-run (spec &rest body)
+  "Run BODY in the buffer `cooked-tests--oracle-run\=' makes from SPEC, then kill it."
+  (declare (indent 1))
+  (let ((buffer (make-symbol "buffer")))
+    `(let ((,buffer (cooked-tests--oracle-run ,@spec)))
+       (unwind-protect
+           (with-current-buffer ,buffer ,@body)
+         (with-current-buffer ,buffer (cooked--cleanup))
+         (kill-buffer ,buffer)))))
+
+(ert-deftest cooked-render-oracle-a-line-wrapped-across-the-top-is-whole-after-the-alternate-screen ()
+  "A line wrapped across the top of the screen is one buffer line after `less\='.
+
+Ten `=\=' at 4 columns on a 2-row screen leave the first 4 in scrollback and
+the rest on row 0 and row 1, and row 0 continues the scrollback\='s last line.
+Showing the alternate screen and leaving it again leaves no newline between
+them: across two drains, with the switch there
+and back inside one drain, with drains that leave the screen out, and with a
+resize under the alternate screen that takes more of the line off the
+primary.  It used to stay split at the seam for good."
+  (dolist (run `((("\e[?1049h" "x") ("\e[?1049l"))
+                 (("\e[?1049h" "x" "\e[?1049l"))
+                 (("\e[?1049h" "x") ("y") ("\e[?1049l") ("z"))
+                 (("\e[?1049h" "x") ((resize 1 4)) ("\e[?1049l"))
+                 (("\e[?1049h" "x") ((resize 2 3)) ("\e[?1049l"))
+                 (("\e[?1049h" "x" (resize 3 6)) ("\e[?1049l"))
+                 hidden
+                 (("\e[?1049h" "x") ((resize 1 4)) ("\e[?1049l") ("z"))))
+    (pcase-let* ((`(,chunks ,treatment)
+                  (if (eq run 'hidden)
+                      (list '(("\e[?1049h" "x") ("y") ("\e[?1049l")) #'cooked-tests--oracle-hide)
+                    (list run nil))))
+      (cooked-tests--with-oracle-run (2 4 (cons '("==========") chunks) treatment)
+        (let ((start (cooked--screen-start-position)))
+          (should (> (cooked-grid-head cooked--grid) 0))
+          (should-not (save-restriction
+                        (widen)
+                        (string-search "\n" (buffer-substring-no-properties
+                                              (point-min) start)))))
+        (should-not (text-property-any (point-min) (point-max) 'cooked-seam t))))))
+
+(ert-deftest cooked-render-oracle-rows-both-screens-hold-keep-their-markers ()
+  "A row the alternate screen draws as the primary had it is not rewritten.
+
+The copy of what Emacs holds is the same buffer text whichever grid drew it, so
+switching to a screen that shares the first and last of three rows sends only
+the middle one, and so does switching back.  A marker on a shared row stays on
+its character through the round trip, and through a switch there and back
+inside one drain."
+  (dolist (chunks '((("\e[?1049h\e[1;1Hone\e[3;1Hbar") ("\e[?1049l"))
+                    (("\e[?1049h\e[1;1Hone\e[3;1Hbar\e[?1049l"))))
+    (cooked-tests--with-oracle-run (3 10 '(("one\r\ntwo\r\nbar")))
+      (let* ((start (cooked--screen-start-position))
+             (first (copy-marker (+ start 1)))
+             (last (copy-marker (+ start 9))))
+        (dolist (chunk chunks)
+          (cooked-tests--oracle-feed (current-buffer) chunk)
+          (cooked--drain-and-apply))
+        (should (equal (string-trim-right
+                        (buffer-substring-no-properties start (point-max)))
+                       "one\ntwo\nbar"))
+        (should (= first (+ start 1)))
+        (should (= last (+ start 9)))))))
 
 ;; Detected links are checked against the text they cover after every drain;
 ;; see the Commentary.

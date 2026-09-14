@@ -177,36 +177,73 @@ fn alt_screen_output_never_reaches_scrollback() {
 }
 
 #[test]
-fn switching_to_the_alternate_screen_ends_the_line_the_primary_began_in() {
+fn the_primary_keeps_its_head_through_the_alternate_screen() {
     // Two rows of `=` wrap onto a third and scroll the first away, so row 0 continues a
     // line whose head is in Emacs.
     let mut t = term(2, 4, b"==========");
     assert_eq!(t.drain().head, 4, "precondition: row 0 continues a line");
 
-    // The alternate screen begins a buffer line, and the break stays.
+    // The alternate screen's row 0 begins a buffer line, and the primary's continues the
+    // same line again once it is back.
     t.feed(b"\x1b[?1049h");
     assert_eq!(t.drain().head, 0);
     t.feed(b"\x1b[?1049l");
-    assert_eq!(
-        t.drain().head,
-        0,
-        "the primary's row 0 begins a line when it returns"
-    );
+    assert_eq!(t.drain().head, 4, "the primary's row 0 continues its line");
 
-    // A drain that leaves the screen out still shows the alternate screen.
+    // The same through a drain that leaves the screen out, and through a switch there
+    // and back that no drain saw.
     let mut t = term(2, 4, b"==========");
-    assert_eq!(t.drain().head, 4);
+    t.drain();
     t.feed(b"\x1b[?1049h");
     assert_eq!(t.drain_hidden().head, 0);
     t.feed(b"\x1b[?1049l");
-    assert_eq!(t.drain().head, 0);
-
-    // So does a switch there and back that no drain saw, so the buffer does not depend
-    // on where the drains fell.
-    let mut t = term(2, 4, b"==========");
     assert_eq!(t.drain().head, 4);
     t.feed(b"\x1b[?1049h\x1b[?1049l");
-    assert_eq!(t.drain().head, 0);
+    assert_eq!(t.drain().head, 4);
+}
+
+#[test]
+fn a_resize_under_the_alternate_screen_carries_the_primarys_head_on() {
+    // Shrunk to one row, the primary hands its wrapped row 0 to scrollback, which
+    // joins it to the head above, and row 0 continues the longer line.
+    let mut t = term(2, 4, b"==========");
+    t.drain();
+    t.feed(b"\x1b[?1049h");
+    t.drain();
+    t.resize(1, 4);
+    let delta = t.drain();
+    assert_eq!(delta.head, 0, "the alternate screen begins its own line");
+    assert_eq!(
+        delta
+            .scrolled_lines(true)
+            .map(|(_, ends)| ends)
+            .collect::<Vec<_>>(),
+        [false],
+        "the row joins the primary's row 0 and not the alternate screen's"
+    );
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(t.drain().head, 8);
+}
+
+#[test]
+fn a_switch_of_screens_sends_only_the_rows_they_do_not_share() {
+    let sent = |t: &mut Term| {
+        t.drain_promoting()
+            .rows
+            .iter()
+            .map(|row| row.index)
+            .collect::<Vec<_>>()
+    };
+    let mut t = term(3, 10, b"one\r\ntwo\r\nbar");
+    sent(&mut t);
+    // The alternate screen draws the first and last rows the primary holds.
+    t.feed(b"\x1b[?1049h\x1b[1;1Hone\x1b[3;1Hbar");
+    assert_eq!(sent(&mut t), [1]);
+    t.feed(b"\x1b[?1049l");
+    assert_eq!(sent(&mut t), [1]);
+    // A switch there and back inside one drain changes no row at all.
+    t.feed(b"\x1b[?1049h\x1b[1;1Hone\x1b[?1049l");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
 }
 
 #[test]

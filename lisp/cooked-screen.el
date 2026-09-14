@@ -458,8 +458,9 @@ split a glyph run at."
   (save-restriction
     (widen)
     (save-excursion
-      (goto-char cooked--screen-start)
-      (let ((start (cooked--render-block block)))
+      (let* ((seam (cooked--held-seam (marker-position cooked--screen-start)))
+             (start (progn (goto-char (or seam cooked--screen-start))
+                           (cooked--render-block block))))
         ;; Scrollback never changes again, so it is protected once, here, rather
         ;; than re-swept on every redisplay.  The read-only half is
         ;; `cooked--read-only-props', shared with `cooked--protect' so the two
@@ -476,8 +477,10 @@ split a glyph run at."
         ;; is inserted with `cooked-rejoin-wrapped-lines' having joined a
         ;; continuation row onto the line above it, so a URL the live screen
         ;; broke across two rows is one string by the time anything scans it.
-        (set-marker cooked--screen-start (point))
-        (cooked--forget-owed-wrap-above (point))
+        ;; Above a held seam the marker has moved already, past the newline that
+        ;; stays below this batch.
+        (unless seam (set-marker cooked--screen-start (point)))
+        (cooked--forget-owed-wrap-above (marker-position cooked--screen-start))
         ;; After the marker moves, so it names the seam these marks are now above.
         (cooked--prune-marks)
         start))))
@@ -545,35 +548,60 @@ core counts a promoted row\='s characters into those offsets."
           (cooked--prune-marks)
           start)))))
 
-(defun cooked--end-seam-line (head)
-  "End the buffer line the live screen begins in, when HEAD says it begins one.
+(defun cooked--held-seam (start)
+  "Where the newline `cooked--place-seam\=' holds before START is, or nil.
+
+START is where the live screen begins.  Scrollback arriving while that newline
+is held goes above it, since it continues the primary screen\='s line rather
+than the alternate screen\='s row 0."
+  (and (> start (point-min))
+       (get-text-property (1- start) 'cooked-seam)
+       (1- start)))
+
+(defun cooked--place-seam (head alt)
+  "Join or break the buffer line the live screen begins in, as this drain says.
 
 HEAD is the drain\='s `:head\=', how many characters of screen row 0\='s line
-the buffer already holds; a 0 there while `cooked--screen-start\=' is mid-line
-means the line ended in the core, and it ends here with a newline that belongs
-to the scrollback above it.
+the buffer already holds, and ALT whether the drain shows the alternate screen.
+The seam is decided afresh on every whole drain rather than written once, so a
+switch of screens leaves nothing behind in the transcript.
 
-The alternate screen is what does that.  Its row 0 begins a buffer line of its
-own, so the core forgets the primary\='s carry when the child switches to it,
-and a screen that began mid-line, continuing a wrapped line whose head
-scrolled away earlier, is broken at the seam.  It is not taken back when the
-primary screen returns: a line wrapped across the top of the screen when a
-full-screen program started stays split there.  Undoing the break would mean
-tracking it through every drain the alternate screen is up for, including a
-resize, which evicts rows from the primary and inserts them at this very seam.
-A switch there and back between two drains ends the line all the same, so the
-buffer does not depend on where the drains fell.
+The alternate screen\='s row 0 begins a buffer line, but the primary keeps its
+head in the core, so the transcript above can end mid-line: a wrapped line
+whose head scrolled away before `less\=' started.  While the alternate screen
+is shown, a newline marked `cooked-seam\=' is held between the two, and rows a
+resize takes off the primary meanwhile go in above it, continuing the line
+they belong to.  Once the primary is back with a HEAD above 0 the newline is
+deleted, and row 0 continues the line again.  Ten `=\=' at 4 columns on a
+2-row screen leave 4 in scrollback and 4 on row 0 of the same buffer line, and
+after `1049h\=' and `1049l\=' they are one line still, however many drains
+came between.
+
+A HEAD of 0 on the primary screen while the buffer is mid-line is the core
+saying the line ended without Emacs holding its newline, so the newline stays:
+one is written for good, or the held one is kept for good.
 
 Widens first, for the reason `cooked--render-scrolled\=' does."
   (save-restriction
     (widen)
-    (when-let* (((eql head 0))
-                (start (cooked--screen-start-position)))
-      (unless (or (= start (point-min)) (eq (char-before start) ?\n))
-        (save-excursion
-          (goto-char start)
-          (insert (apply #'propertize "\n" 'cooked-scrollback t cooked--read-only-props))
-          (set-marker cooked--screen-start (point)))))))
+    (when-let* ((start (cooked--screen-start-position)))
+      (let* ((held (cooked--held-seam start))
+             (line (or held start))
+             (mid-line (not (or (= line (point-min)) (eq (char-before line) ?\n)))))
+        (cond
+         ((and held (or (not mid-line) (not (or alt (eql head 0)))))
+          (delete-region held start))
+         ((and held (not alt))
+          (remove-list-of-text-properties held start '(cooked-seam)))
+         ((and mid-line (not held) (or alt (eql head 0)))
+          (save-excursion
+            (goto-char start)
+            (insert (apply #'propertize "\n" 'cooked-scrollback t
+                           (if alt
+                               `(cooked-seam t ,@cooked--read-only-props)
+                             cooked--read-only-props)))
+            (set-marker cooked--screen-start (point))
+            (cooked--forget-owed-wrap-above (point)))))))))
 
 (defun cooked--prune-marks ()
   "Forget the marks that have scrolled into permanent scrollback.
@@ -751,10 +779,16 @@ in `cooked--apply' precisely so this can watch it.
 Called under `cooked-debug' only.  It is a whole-line measurement on every
 drain, and the invariant it guards is maintained in the native core rather than
 here, so there is nothing for it to repair — see `Row::line_runs' in
-src/emu/cell.rs."
+src/emu/cell.rs.
+
+Widens to measure: the drain that leaves the alternate screen still has the
+buffer narrowed to the screen when this runs, and the head it rejoined is above
+that."
   (when-let* ((start (cooked--screen-start-position)))
-    (let* ((head (save-excursion (goto-char start)
-                                 (- start (line-beginning-position))))
+    (let* ((head (save-excursion (save-restriction
+                                   (widen)
+                                   (goto-char start)
+                                   (- start (line-beginning-position)))))
            (want (cooked-grid-head cooked--grid)))
       (unless (= head want)
         (error "cooked: seam desync: buffer holds %d characters of row 0's line, emulator says %d"
