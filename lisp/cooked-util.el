@@ -666,6 +666,24 @@ file is the floor for."
       (progn (message "cooked: refused `%s' (a remote file name)" name) nil)
     name))
 
+(defun cooked--same-file-p (a b)
+  "Whether file names A and B name the same file, as its inode and device say.
+
+Not `file-equal-p\=', which compares every attribute but the name, the times
+included.  A directory\='s modification time moves whenever a file is made or
+removed in it, so asking about a busy directory such as /tmp or a project
+being built raced whatever was writing there: when a file was created in /tmp
+between its two `stat\=' calls, `file-equal-p\=' said /tmp/ was not /tmp/.
+
+Both names are resolved first, since `file-attributes\=' describes a symbolic
+link rather than what it points at.  Nil if either does not exist."
+  (when-let* ((one (file-attributes (file-truename a)))
+              (other (file-attributes (file-truename b))))
+    (and (equal (file-attribute-inode-number one)
+                (file-attribute-inode-number other))
+         (equal (file-attribute-device-number one)
+                (file-attribute-device-number other)))))
+
 ;;;; Windows, and waiting until redisplay is over
 
 (defun cooked--layout-window ()

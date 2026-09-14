@@ -1403,10 +1403,12 @@ See `cooked--outline-search' for why the transcript is flat."
 
 Where the shell is *now*, which OSC 7 keeps in `default-directory': a session
 that has since `cd'd out is not this one, and one that has `cd'd in is, which
-is the same rule `cooked-project' reuses a session by."
+is the same rule `cooked-project' reuses a session by.  The two directories are
+compared by `cooked--same-file-p', which a project being built beside the shell
+cannot make disagree."
   (seq-find (lambda (buffer)
               (with-current-buffer buffer
-                (ignore-errors (file-equal-p default-directory directory))))
+                (ignore-errors (cooked--same-file-p default-directory directory))))
             (cooked--live-buffers)))
 
 (defun cooked--bookmark-record ()

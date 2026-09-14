@@ -523,6 +523,31 @@ papered over by starting a shell somewhere else."
                        (handler . cooked-bookmark-jump)))
                     :type 'user-error))))
 
+(ert-deftest cooked-a-session-is-found-in-a-directory-being-written-to ()
+  "A directory something is writing files into is still the same directory.
+
+`file-equal-p' compares modification times, and a directory's moves with every
+file made in it, so a bookmark or a project command asking about a tree under a
+running build missed the shell already standing there whenever a file landed
+between its two looks, and the consult test asking about /tmp failed under the
+load of other programs using /tmp.  Here the directory's time moves after every
+look, which is that race made to happen each time."
+  (let ((directory (file-name-as-directory (make-temp-file "cooked-busy" t)))
+        (looks 0))
+    (unwind-protect
+        (cooked-tests--with-session (list "/bin/sh")
+          (should (cooked-tests--settle (lambda () (cooked--live-p cooked--session))))
+          (setq default-directory directory)
+          (cl-letf* ((real (symbol-function 'file-attributes))
+                     ((symbol-function 'file-attributes)
+                      (lambda (file &rest args)
+                        (prog1 (apply real file args)
+                          (set-file-times directory
+                                          (time-add 1000000000 (cl-incf looks)))))))
+            (should (eq (cooked--session-in-directory directory) (current-buffer)))
+            (should (> looks 1))))
+      (delete-directory directory t))))
+
 (ert-deftest cooked-a-terminal-is-left-out-of-the-desktop-file ()
   "The reasoned decline, kept honest by a test.
 

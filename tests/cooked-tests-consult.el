@@ -258,14 +258,14 @@ outside one, and whichever group a narrow key has chosen."
             (with-current-buffer buffer
               (should (derived-mode-p 'cooked-mode))
               (should cooked--session)
-              (should (file-equal-p default-directory root))))
+              (should (cooked--same-file-p default-directory root))))
           (let ((buffer (let ((default-directory temporary-file-directory))
                           (funcall (plist-get cooked-consult-source-other :new) ""))))
             (push buffer made)
             ;; Blank is the default name, not a buffer called "".
             (should (string-prefix-p "*cooked" (buffer-name buffer)))
             (with-current-buffer buffer
-              (should (file-equal-p default-directory temporary-file-directory)))))
+              (should (cooked--same-file-p default-directory temporary-file-directory)))))
       (dolist (buffer made)
         (with-current-buffer buffer (cooked--cleanup))
         (kill-buffer buffer))
