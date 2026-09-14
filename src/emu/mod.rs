@@ -130,8 +130,8 @@ pub(crate) mod term;
 pub(crate) mod terminfo;
 pub(crate) mod text;
 
-pub(crate) use cell::{Color, Deco, MarkId, Style};
-pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ImageId, ShownFormats};
+pub(crate) use cell::{Color, MarkId, Style};
+pub(crate) use image::{CellMetrics, ImageData, ImageFormat, ShownFormats};
 pub(crate) use link::LinkId;
 pub(crate) use term::{
     Anchor, ColorScheme, CursorShape, Event, KeyEncoding, Mark, StackOp, Terminator, Unit,
@@ -139,10 +139,12 @@ pub(crate) use term::{
 };
 
 // What the integration tests are allowed to see, and no more. `tests/throughput.rs` needs
-// `Term` and the high-water mark; `tests/delta_replay.rs` needs the other three, because
-// its whole subject is what a drain reports — it accumulates `Delta::rows` into a shadow
-// grid and compares `Run`s, styles included, against the grid's own full reading of
-// itself.
+// `Term` and the high-water mark; `tests/delta_replay.rs` needs the rest, because its
+// whole subject is what a drain reports — it accumulates `Delta::rows` into a shadow grid
+// and compares `Run`s, styles and pictures included, against the grid's own full reading
+// of itself. `Deco` and `ImageId` are there so it can rename a picture by its bytes: two
+// terminals fed the same script can name one picture by different ids, as they can a
+// rendition.
 //
 // Widened here rather than by making the modules public: an integration test is an
 // external crate and cannot reach `pub(crate)`, so a self-oracle over the drain protocol
@@ -150,7 +152,8 @@ pub(crate) use term::{
 // protocol's own types become nameable from outside. The second is the smaller
 // concession — these are already the wire format the Lisp side is written against, so
 // nothing here is more exposed than `cooked--apply' already assumes.
-pub use cell::Run;
+pub use cell::{Deco, Run};
+pub use image::ImageId;
 pub use screen::{Direction, Shift};
 pub use style::StyleId;
 pub use term::{BACKLOG_HIGH_WATER, DamagedRow, Delta, Edit, Levels, Scrolled, Term};

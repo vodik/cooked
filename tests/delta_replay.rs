@@ -35,7 +35,9 @@
 //! decoration and the link id, and a stale face over correct characters is exactly the
 //! class of miss a text-only oracle waves through.
 
-use cooked::emu::{Delta, Direction, Edit, Levels, Run, Scrolled, Shift, StyleId, Term};
+use cooked::emu::{
+    Deco, Delta, Direction, Edit, ImageId, Levels, Run, Scrolled, Shift, StyleId, Term,
+};
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -565,15 +567,35 @@ fn size() -> impl Strategy<Value = (usize, usize)> {
 static RENDITIONS: LazyLock<Mutex<HashMap<String, u32>>> =
     LazyLock::new(|| Mutex::new(HashMap::from([(String::from("default"), 0)])));
 
-/// One terminal's ids, as its drains have announced them in `Delta::styles`.
+/// Every picture any replay has seen, by its format, size and bytes, numbered in the
+/// order first seen and shared by every case, as [`RENDITIONS`] is for renditions.
+///
+/// Two terminals fed the same bytes can name one picture by different ids too, because
+/// an id lasts only while the terminal believes Emacs holds the bytes. A hidden `term`
+/// that drains while a picture is on its grid sends the bytes and keeps the id; the
+/// reference, not drained while hidden, still holds them pending when an erase takes the
+/// picture off, sheds them, and mints a new id when the same picture is sent again.
+static PICTURES: LazyLock<Mutex<HashMap<String, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One terminal's ids, as its drains have announced them in `Delta::styles` and
+/// `Delta::images`.
 #[derive(Default)]
-struct Announced(HashMap<StyleId, String>);
+struct Announced {
+    styles: HashMap<StyleId, String>,
+    images: HashMap<ImageId, String>,
+}
 
 impl Announced {
-    /// Learn DELTA's announcements, then renumber every run in it; see [`RENDITIONS`].
+    /// Learn DELTA's announcements, then renumber every run in it; see [`RENDITIONS`] and
+    /// [`PICTURES`].
     fn canonical(&mut self, mut delta: Delta) -> Delta {
         for (id, style) in &delta.styles {
-            self.0.insert(*id, format!("{style:?}"));
+            self.styles.insert(*id, format!("{style:?}"));
+        }
+        for image in &delta.images {
+            let picture = format!("{:?} {:?} {:?}", image.format, image.px, image.bytes);
+            self.images.insert(image.id, picture);
         }
         let rows = delta.rows.iter_mut().flat_map(|row| {
             std::iter::once(&mut row.runs).chain(row.edit.as_mut().map(|edit| &mut edit.runs))
@@ -582,6 +604,11 @@ impl Announced {
         for runs in rows.chain(scrolled) {
             for run in runs {
                 run.style = self.renumber(run.style);
+                if let Some(Deco::Images(places)) = &mut run.deco {
+                    for place in places {
+                        place.id = self.rename(place.id);
+                    }
+                }
             }
         }
         delta
@@ -591,13 +618,25 @@ impl Announced {
         let key = if id == StyleId::DEFAULT {
             "default"
         } else {
-            self.0
+            self.styles
                 .get(&id)
                 .unwrap_or_else(|| panic!("a run names {id:?}, which no drain announced"))
         };
         let mut renditions = RENDITIONS.lock().unwrap();
         let next = renditions.len() as u32;
         StyleId::from_raw(*renditions.entry(key.to_owned()).or_insert(next))
+    }
+
+    /// The id every replay gives the picture this terminal calls ID, which also checks
+    /// that a drain sent its bytes before any placement named it.
+    fn rename(&self, id: ImageId) -> ImageId {
+        let key = self
+            .images
+            .get(&id)
+            .unwrap_or_else(|| panic!("a placement names {id:?}, whose bytes no drain sent"));
+        let mut pictures = PICTURES.lock().unwrap();
+        let next = pictures.len() as u32;
+        ImageId::from_index(*pictures.entry(key.clone()).or_insert(next))
     }
 }
 
@@ -628,7 +667,8 @@ struct Replay {
     /// Each drain that carried scrollback, reduced to the scrollback and the levels
     /// [`Delta::scrolled_lines`] reads to decide where its lines end.
     scrollback: Vec<Delta>,
-    /// What each of `term` and `reference` has announced its rendition ids to mean.
+    /// What each of `term` and `reference` has announced its rendition and picture ids to
+    /// mean.
     announced: [Announced; 2],
     /// Whether a feed since the last drain said it changed something Emacs would draw.
     ///
@@ -1615,4 +1655,26 @@ fn two_scroll_regions_taking_turns_while_hidden() {
     steps.push(Step::Show);
     replays_the_whole_grid(8, 5, &steps).unwrap();
     hiding_changes_nothing(8, 5, &steps).unwrap();
+}
+
+/// A picture sent while hidden, erased, and sent again: the hidden drain sent the bytes
+/// while the picture was on the grid, so `term` names it again by the same id, while the
+/// reference, not drained while hidden, shed the bytes at the erase and minted another.
+/// Both rows draw the same picture, and are compared as such.
+#[test]
+fn a_picture_sent_again_after_a_hidden_drain_sent_its_bytes() {
+    let picture = "\x1b_Ga=T,f=24,s=2,v=2,c=1,r=1;AAAAAAAAAAAAAAAA\x1b\\";
+    let steps = [
+        Step::Hide,
+        write(picture, &[], false),
+        Step::Resize { rows: 0, cols: 2 },
+        write("\x1b[1J", &[], false),
+        Step::Show,
+        write("\x1b[?47h", &[], false),
+        write(picture, &[], true),
+        write("\x1bc", &[], true),
+    ];
+    fragmenting_changes_nothing(1, 4, &steps, false).unwrap();
+    replays_the_whole_grid(1, 4, &steps).unwrap();
+    hiding_changes_nothing(1, 4, &steps).unwrap();
 }
