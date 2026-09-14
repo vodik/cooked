@@ -157,17 +157,17 @@ policy is `alt`), so the input line stays tmux's and nothing can eat a keystroke
 Directory tracking works, but prompt marks are dropped: the alternate screen scrolls
 without scrollback, so a mark there would name a line of output as soon as the pane
 scrolled. For marks that follow the transcript into scrollback, and an input line Emacs
-edits, keep tmux off the alternate screen and remove the status line:
+edits, keep tmux off the alternate screen:
 
 ```tmux
 set -ga terminal-overrides ',cooked*:smcup@:rmcup@'
-set -g status off
 ```
 
-The status line has to go because tmux scrolls the pane inside a margin that stops
-short of it, and cooked archives only rows that scroll off the top of the whole screen.
-Once they are gone, the rest of the pane is lost. Copy mode and switching windows repaint
-the screen in place, too.
+A status line at the bottom can stay. tmux scrolls the pane inside a margin that stops
+short of it, and cooked archives the rows that leave a margin starting at the top row,
+as vte does. With `status-position top` the margin starts one row down, and what
+scrolls off it is lost, so turn the status line off or keep it at the bottom. Copy mode
+and switching windows repaint the screen in place, too.
 
 **A mark lands wherever tmux's own cursor is.** tmux writes a passed-through sequence at
 the cursor of the terminal it draws on, without first moving to the pane's cursor. So

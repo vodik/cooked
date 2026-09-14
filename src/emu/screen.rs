@@ -923,8 +923,9 @@ impl Screen {
         }
     }
 
-    /// True when the scroll region is the whole screen, the only case in which rows
-    /// leaving the top are history rather than discarded.
+    /// True when the scroll region is the whole screen, which is when a clear or a rewrap
+    /// may hand the whole screen to history. A scroll asks less; see
+    /// [`Screen::scroll_up`].
     fn archives(&self) -> bool {
         self.history && self.region == Region::full(self.height())
     }
@@ -936,10 +937,15 @@ impl Screen {
         if n == 0 {
             return Evicted::none();
         }
+        // Rows leaving a region that starts at the top of the screen are history, whatever
+        // the region leaves fixed below it, as in vte. That is tmux under `smcup@` with a
+        // status line on the bottom row: its pane is rows 1 to 23, and `self.archives()`
+        // would have discarded every line the pane scrolled.
+        //
         // Reduced here, from the rows still in place, so no row is cloned across the
         // rotation below. `Screen::write` marks the row above `wrapped` before calling
         // `linefeed`, so the flag `line_runs` reads is already settled.
-        let evicted = if self.archives() {
+        let evicted = if self.history && top == 0 {
             Evicted::from_rows((top..top + n).filter_map(|index| self.row(index)))
         } else {
             Evicted::none()

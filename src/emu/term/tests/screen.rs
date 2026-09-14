@@ -571,6 +571,25 @@ fn scroll_region_then_linefeed_stays_off_scrollback() {
     assert!(t.drain().scrolled.is_empty());
 }
 
+/// A margin that starts at row 0 archives what leaves its top, as vte does. It is what
+/// tmux sets for its pane above a status line on the bottom row, with `smcup@` keeping it
+/// on the primary screen, and without it the pane's output never reached scrollback.
+#[test]
+fn a_scroll_region_from_the_top_row_archives_what_leaves_it() {
+    let mut t = term(4, 8, b"\x1b[1;3r\x1b[4;1Hstatus\x1b[1;1Ha\r\nb\r\nc");
+    t.drain();
+    t.feed(b"\r\nd\r\ne");
+    let delta = t.drain();
+    let scrolled: Vec<String> = delta.scrolled.iter().map(runs_text).collect();
+    assert_eq!(
+        scrolled,
+        ["a", "b"],
+        "the rows the region scrolled off its top"
+    );
+    assert_eq!([text(&t, 0), text(&t, 1), text(&t, 2)], ["c", "d", "e"]);
+    assert_eq!(text(&t, 3), "status", "the row below the region stays put");
+}
+
 #[test]
 fn trailing_text_finds_a_password_prompt() {
     let t = term(4, 30, b"Warming up\r\nPassword: ");
