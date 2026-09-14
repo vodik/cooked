@@ -934,6 +934,19 @@ costs its own contribution and neither the rest of the hook nor the drain.")
 ;; flood scrolled through between drains, a row after a resize or a screen switch.
 ;; Every other row is promoted, and a position on it stays on its character; see
 ;; `cooked--promote-rows'.
+;;
+;; A drain that rewraps the screen is the other exception, and (row, column) is
+;; the wrong thing to carry across it: at the new width the same cell holds some
+;; other character.  What a rewrap keeps is each logical line's characters, so a
+;; position is carried as the logical line it is on and how far into that line
+;; it is, counted from the start of the buffer line the screen begins on; see
+;; `cooked--logical-place'.  ghostel pins the position in its VT library across
+;; `term.resize' instead.  The core could do the same for a position Lisp hands
+;; it, as it does for a semantic mark, but a position Lisp hands it is in the
+;; buffer's rows, and the grid may already have moved on from those by the time
+;; the resize lands -- output drained in the same drain -- while the buffer's
+;; logical lines are exactly what the rewrap preserves, with nothing new on the
+;; wire.
 
 (cl-defstruct (cooked-relocation (:constructor cooked--relocation-make) (:copier nil))
   "A position `cooked--render-rows' has to carry across a run it rewrites.
@@ -953,7 +966,13 @@ Live only between `cooked--note-relocations' and `cooked--place-relocations',
 which is the whole of one run's rewrite: outside it there is no run for a row
 index to be an index into.")
   (column nil :documentation "\
-The position's column within that row, in characters."))
+The position's column within that row, in characters.")
+  (place nil :documentation "\
+Where the position was as (LINES . CHARS), for a drain that rewraps the screen.
+
+Set by `cooked--capture-relocations' in place of the row and column, which a
+rewrap makes meaningless, and put back by `cooked--place-reflowed' once the
+rows are rewritten.  See `cooked--logical-place'."))
 
 (defun cooked--relocation-position (relocation)
   "Where RELOCATION currently points, or nil if there is nothing to carry.
@@ -984,7 +1003,8 @@ are rewritten one after another, and a stale index would place a position into
 a row that has nothing to do with it."
   (dolist (relocation relocations)
     (setf (cooked-relocation-row relocation) nil)
-    (when-let* ((position (cooked--relocation-position relocation))
+    (when-let* (((not (cooked-relocation-place relocation)))
+                (position (cooked--relocation-position relocation))
                 ((<= start position end)))
       (save-excursion
         (goto-char position)
@@ -1010,6 +1030,113 @@ the user was pointing is the end of what the row now holds."
       (setf (cooked-relocation-row relocation) nil)
       (cooked--relocation-set
        relocation (min (+ start (cooked-relocation-column relocation)) end)))))
+
+(defun cooked--logical-base ()
+  "Where the logical line the screen begins in starts, the origin of a place.
+
+The start of the buffer line holding `cooked--screen-start\=', which is above it
+when row 0 continues a line whose head is already history.  Nothing a drain
+does moves text before this: scrollback goes in at the marker, which is at or
+after it, and the rows below are what gets rewritten."
+  (save-excursion
+    (goto-char (cooked--screen-start-position))
+    (line-beginning-position)))
+
+(defun cooked--wrap-blanks (newline cols)
+  "Blank cells the row ending at NEWLINE had before it wrapped, at COLS wide.
+
+Nonzero only for a newline marked `blank\=': the row was written without the
+blanks the child left at its end, and a rewrap puts those cells back inside
+the line.  On a five-column screen `ab\=' wrapped with three blanks after it,
+and at ten columns the line reads `ab   cd\=', so a position on `c\=' is five
+characters into it rather than two."
+  (if (eq (get-text-property newline 'cooked-wrap) 'blank)
+      (let ((start (max (save-excursion (goto-char newline)
+                                        (line-beginning-position))
+                        (cooked--screen-start-position))))
+        (max 0 (- cols (string-width
+                        (buffer-substring-no-properties start newline)))))
+    0))
+
+(defun cooked--logical-place (position base cols)
+  "POSITION as (LINES . CHARS), for carrying it across a rewrap of the screen.
+
+LINES is how many newlines that end a line lie between BASE, from
+`cooked--logical-base\=', and POSITION, and CHARS is how far into its logical
+line POSITION is.  A newline marked `cooked-wrap\=' is a row boundary rather
+than a line end, and counts nothing; the blanks before a `blank\=' one count,
+measured at COLS, the width the rows were laid out at.  The rewrap chunks each
+logical line afresh and leaves its characters as they were, so the pair names
+the same character before and after: `hello world\=' wrapped at five columns,
+with the mark on `w\=' at row 1 column 1, is (0 . 6), and at twenty columns
+that is row 0 column 6."
+  (save-excursion
+    (goto-char base)
+    (let ((lines 0)
+          (chars 0)
+          (row base))
+      (while (search-forward "\n" position t)
+        (let ((newline (1- (point))))
+          (if (get-text-property newline 'cooked-wrap)
+              (setq chars (+ chars (- newline row)
+                             (cooked--wrap-blanks newline cols)))
+            (setq lines (1+ lines)
+                  chars 0))
+          (setq row (point))))
+      (cons lines (+ chars (- position row))))))
+
+(defun cooked--logical-position (place base cols)
+  "The buffer position PLACE, from `cooked--logical-place\=', now names.
+
+BASE is the same origin, which the drain in between has not moved, and COLS
+the width the rows are now laid out at.  A place past the end of its line, as
+blanks the rewrap trimmed from the end or a line that has since got shorter,
+lands at the end of the line."
+  (save-excursion
+    (goto-char base)
+    (let ((lines (car place))
+          (chars (cdr place))
+          (found nil))
+      (while (and (> lines 0) (search-forward "\n" nil t))
+        (unless (get-text-property (1- (point)) 'cooked-wrap)
+          (setq lines (1- lines))))
+      (if (> lines 0)
+          (point-max)
+        (while (not found)
+          (let* ((newline (save-excursion
+                            (and (search-forward "\n" nil t) (1- (point)))))
+                 (end (or newline (point-max))))
+            (cond ((<= chars (- end (point)))
+                   (setq found (+ (point) chars)))
+                  ((not (and newline (get-text-property newline 'cooked-wrap)))
+                   (setq found end))
+                  (t
+                   (setq chars (- chars (- end (point))))
+                   (let ((blanks (cooked--wrap-blanks newline cols)))
+                     (if (<= chars blanks)
+                         (setq found end)
+                       (setq chars (- chars blanks))
+                       (goto-char (1+ newline))))))))
+        found))))
+
+(defun cooked--place-reflowed (relocations reflow cols)
+  "Put back RELOCATIONS and a wandered point after a drain rewrapped the screen.
+
+REFLOW is the viewport\='s `reflow\=', (BASE . POINT): the origin every place
+was counted from, and point\='s own place when it had wandered off the cursor.
+COLS is the width the rows are laid out at now.  Point is handed back as the
+cell it now sits on, which is what `cooked--place-point\=' restores a wandered
+point from.  Returns that cell, or nil, having moved point itself when the
+rewrap pushed its character up into history."
+  (pcase-let ((`(,base . ,point) reflow))
+    (dolist (relocation relocations)
+      (when-let* ((place (cooked-relocation-place relocation)))
+        (cooked--relocation-set
+         relocation (cooked--logical-position place base cols))))
+    (when point
+      (let ((position (cooked--logical-position point base cols)))
+        (or (cooked--screen-cell position)
+            (progn (goto-char position) nil))))))
 
 (defun cooked--mark-row-wrap (eol wrapped &optional width)
   "Record on the newline at EOL whether the row it ends was soft-wrapped.

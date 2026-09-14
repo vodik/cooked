@@ -250,6 +250,7 @@ symbols! {
     Rows => ":rows",
     Edits => ":edits",
     Height => ":height",
+    Width => ":width",
     Used => ":used",
     Head => ":head",
     Cursor => ":cursor",

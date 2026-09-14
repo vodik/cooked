@@ -61,6 +61,9 @@ a different thing and can differ for as long as it takes a resize to land.  This
 is what the grid actually is, so the buffer is shaped by the emulator rather
 than by a second opinion of it."
   (height 24 :documentation "Rows the grid has.")
+  (width nil :documentation "\
+Columns the grid has, or nil before the first drain.  A drain reporting another
+width has rewrapped the rows; see `cooked--apply'.")
   (used 1 :documentation "Rows of it that are occupied — see `cooked--fit-screen'.")
   (head 0 :documentation "\
 Characters of screen row 0's logical line that are already in the buffer, above

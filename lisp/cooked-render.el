@@ -442,9 +442,15 @@ once, while these are handed to `cooked--render-rows' and corrected *during* the
 render.  They are captured with the rest because the question they answer -- who
 is going to be moved by something else, and so needs no carrying -- is only
 answerable before the render, exactly like `others' above.  See
-`cooked--capture-relocations'."))
+`cooked--capture-relocations'.")
+  (reflow nil :documentation "\
+For a drain that rewraps the screen, (BASE . POINT), and nil for any other.
 
-(defun cooked--capture-relocations (others)
+BASE is where the places in RELOCATIONS are counted from, and POINT is
+point\='s own place when it had wandered, standing in for `wandered\=', whose
+cell the rewrap gives to another character.  See `cooked--logical-place'."))
+
+(defun cooked--capture-relocations (others &optional reflow)
   "The positions this drain would otherwise drag, as `cooked-relocation's.
 
 The policy half of the floor cooked-screen.el implements; see the commentary
@@ -463,7 +469,12 @@ The other windows only while the view is held.  While it is following,
 them across the render would be work whose result is overwritten a few lines
 later -- and worse than pointless if the two ever disagreed about which windows
 those are.  The list is the same one, for that reason: OTHERS, as
-`cooked--following-windows' just answered it."
+`cooked--following-windows' just answered it.
+
+REFLOW, for a drain that rewraps the screen, is (BASE . COLS): each position is
+then captured as its place in the logical lines counted from BASE at COLS wide,
+since the row and column it had name another character once the rows are laid
+out again.  See `cooked--logical-place'."
   (let ((start (cooked--screen-start-position))
         (relocations nil))
     (when start
@@ -473,23 +484,38 @@ those are.  The list is the same one, for that reason: OTHERS, as
       (unless (cooked--follow-p)
         (dolist (window others)
           (push (cooked--relocation-make :window window) relocations))))
+    (when reflow
+      (dolist (relocation relocations)
+        (when-let* ((position (cooked--relocation-position relocation)))
+          (setf (cooked-relocation-place relocation)
+                (cooked--logical-place position (car reflow) (cdr reflow))))))
     relocations))
 
-(defun cooked--capture-viewport ()
-  "Snapshot the view, before the render invalidates every part of it."
-  (let ((others (cooked--following-windows)))
+(defun cooked--capture-viewport (&optional cols)
+  "Snapshot the view, before the render invalidates every part of it.
+
+COLS, for a drain that rewraps the screen, is the width its rows are laid out
+at now, before the drain; see the `reflow' field."
+  (let* ((others (cooked--following-windows))
+         (base (and cols (cooked--screen-start-position)
+                    (cooked--logical-base)))
+         (reflow (and base (cons base cols)))
+         (wandered (and cooked--wandered (cooked--screen-cell))))
     (cooked--viewport-make
      :editing (when-let* ((region (cooked--input-region))
                           ((<= (car region) (point) (cdr region))))
                 (- (point) (car region)))
      :follow (and (cooked--follow-p)
                   (>= (point) (cooked--screen-start-position)))
-     :wandered (and cooked--wandered (cooked--screen-cell))
+     :wandered (and (not reflow) wandered)
      :stale-mark (and cooked-clear-selection-on-output
                       mark-active (mark)
                       (>= (mark) (cooked--screen-start-position)))
      :others others
-     :relocations (cooked--capture-relocations others))))
+     :relocations (cooked--capture-relocations others reflow)
+     :reflow (and reflow
+                  (cons base (and wandered
+                                  (cooked--logical-place (point) base cols)))))))
 
 (defun cooked--apply-levels (update cursor)
   "Adopt UPDATE's levels: the state as of this drain, for redisplay to read.
@@ -497,6 +523,7 @@ CURSOR is UPDATE's cursor, already decoded by `cooked--apply'."
   (setq cooked--cursor cursor
         ;; Before `cooked--fit-screen', which is shaped by it.
         cooked--grid (cooked--grid-make :height (plist-get update :height)
+                                        :width (plist-get update :width)
                                         :used (plist-get update :used)
                                         :head (plist-get update :head))
         cooked--app-cursor (plist-get update :app-cursor)
@@ -692,7 +719,20 @@ and the region shaped before anything measures it."
          ;; broken at the cursor this drain puts on it.  See `cooked--deco-cursor'.
          (cooked--deco-cursor
           (cons (cooked-cursor-row cursor) (cooked-cursor-chars cursor)))
-         (viewport (cooked--capture-viewport))
+         ;; A drain reporting another width has rewrapped the primary screen's
+         ;; rows, which moves every character on them to another cell; the width
+         ;; the buffer's rows are laid out at is the last drain's.  Not with
+         ;; `cooked-rejoin-wrapped-lines' off, where the rows that scroll into
+         ;; history keep newlines nothing marks, so the logical lines a
+         ;; position is counted in cannot be read back; nor on the alternate
+         ;; screen, which is clipped rather than rewrapped.
+         (viewport (cooked--capture-viewport
+                    (let ((was (cooked-grid-width cooked--grid))
+                          (now (plist-get update :width)))
+                      (and was now (/= was now)
+                           cooked-rejoin-wrapped-lines
+                           (not cooked--alt) (not (plist-get update :alt))
+                           was))))
          (pending (cooked--take-pending-input))
          ;; Where this drain's scrollback landed, for resolving a `scrolled'
          ;; anchor against.  nil when the drain evicted nothing.  The rows the
@@ -719,7 +759,14 @@ and the region shaped before anything measures it."
          (rendered (cooked--render-rows (plist-get update :rows)
                                         (plist-get update :alt)
                                         (cooked-viewport-relocations viewport)
-                                        (plist-get update :edits))))
+                                        (plist-get update :edits)))
+         ;; Right after the rows, before anything else inserts or deletes: a
+         ;; place is counted in the lines as the render leaves them.
+         (_ (when-let* ((reflow (cooked-viewport-reflow viewport)))
+              (setf (cooked-viewport-wandered viewport)
+                    (cooked--place-reflowed
+                     (cooked-viewport-relocations viewport)
+                     reflow (plist-get update :width))))))
     (cooked--apply-levels update cursor)
     ;; Cleared before the events, so a drain that both scrolls and then clears
     ;; stays pinned.

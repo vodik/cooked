@@ -154,7 +154,7 @@ fn contiguous_runs(rows: &[DamagedRow]) -> impl Iterator<Item = &[DamagedRow]> {
 }
 
 /// `(:scrolled ROWS :promoted (BOTTOM (CHARS . ENDS)...) :rows ((FIRST . BLOCK)...)
-/// :height N :used N :head N :cursor (ROW COL VISIBLE SHAPE CHARS)
+/// :height N :width N :used N :head N :cursor (ROW COL VISIBLE SHAPE CHARS)
 /// :marks ((ID . ANCHOR)...) ...)`
 pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
     // The scrollback is assembled first because the events are resolved against it: a
@@ -260,6 +260,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
         ":rows"        => rows,
         ":edits"       => edits,
         ":height"      => update.delta.height,
+        ":width"       => update.delta.width,
         ":used"        => update.delta.used,
         ":head"        => update.delta.head,
         ":cursor"      => cursor,

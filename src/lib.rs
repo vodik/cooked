@@ -146,8 +146,8 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         "cooked--spawn" 5..=9 => spawn;
 
         /// Collect everything that changed in SESSION since the last call.
-        /// Returns a plist with :scrolled, :promoted, :shifts, :rows, :edits, :height, :used,
-        /// :head, :cursor, :reverse, :reverse-toggles, :marks, :alt, :app-cursor, :keys,
+        /// Returns a plist with :scrolled, :promoted, :shifts, :rows, :edits, :height, :width,
+        /// :used, :head, :cursor, :reverse, :reverse-toggles, :marks, :alt, :app-cursor, :keys,
         /// :kitty-flags, :modify-other-keys, :mode, :images, :links, :styles, :events, :exit
         /// and :withheld.
         ///
@@ -176,9 +176,9 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// describes the whole row, and anything past LENGTH characters goes.  Its indices
         /// are post-shift too, and no row is in both lists.
         ///
-        /// :height, :used and :head describe the grid's shape, so the buffer is shaped by what
-        /// the emulator has rather than by a second opinion of it: the grid's row count, how many
-        /// of those rows are occupied, and how many characters of screen row 0's logical line are
+        /// :height, :width, :used and :head describe the grid's shape, so the buffer is shaped by
+        /// what the emulator has rather than by a second opinion of it: the grid's row and column
+        /// counts, how many of those rows are occupied, and how many characters of screen row 0's logical line are
         /// already in the buffer above the screen.  The last is the seam, 0 unless the last row
         /// handed to scrollback was a wrapped one that row 0 continues.
         ///

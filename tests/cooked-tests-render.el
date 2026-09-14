@@ -1387,6 +1387,46 @@ departing-row half of the `adjustRegion' floor."
       (should (get-text-property marker 'cooked-scrollback))
       (should (equal (cooked-tests--text) "abcdefghij\ntwo\nthree\nfour")))))
 
+(defun cooked-tests--fed-resize (rows cols)
+  "Resize this buffer's emulator to ROWS by COLS, then drain and apply."
+  (setq cooked--rows rows cooked--cols cols cooked--last-size (cons rows cols))
+  (cooked--resize cooked--session rows cols)
+  (cooked--drain-and-apply))
+
+(ert-deftest cooked-a-rewrap-keeps-the-mark-on-its-character ()
+  "Narrowing or widening the screen leaves the mark on the character it was on.
+
+A rewrap lays every logical line out again, so the row and column the mark was
+carried by named some other character afterwards: on `KLMNOPQRST\=', the second
+row of a wrapped line at ten columns, `M\=' is row 2 column 2, and at twenty
+columns that cell holds the next line.  A row the child left blanks at the end
+of before it wrapped counts them, so `c\=' after eight of them is found again
+whichever width the blanks end up inside, and narrowing far enough to push the
+line into history carries the mark up there with it.  A point that wandered off
+the cursor is kept on its character the same way."
+  (let ((cooked-rejoin-wrapped-lines t))
+    (cooked-tests--with-fed-screen 5 10
+      (cooked-tests--fed "one\r\nabcdefghijKLMNOPQRST\r\nab        cd")
+      (let ((start (cooked--screen-start-position)))
+        (set-mark (save-excursion
+                    (goto-char start) (search-forward "M") (1- (point))))
+        ;; Point walked off the cursor onto `O', which is kept as a cell.
+        (goto-char (+ (mark t) 2))
+        (setq cooked--wandered t))
+      (cooked-tests--fed-resize 5 20)
+      (should (equal (cooked-tests--at (mark t) 3) "MNO"))
+      (should (equal (cooked-tests--at (point) 1) "O"))
+      (cooked-tests--fed-resize 5 4)
+      (should (equal (cooked-tests--at (mark t) 3) "MNO"))
+      (should (equal (cooked-tests--at (point) 1) "O"))
+      (set-mark (save-excursion (goto-char (point-max)) (search-backward "cd")))
+      (cooked-tests--fed-resize 5 7)
+      (should (equal (cooked-tests--at (mark t) 2) "cd"))
+      (cooked-tests--fed-resize 5 30)
+      (should (equal (cooked-tests--at (mark t) 2) "cd"))
+      (should (equal (cooked-tests--text)
+                     "one\nabcdefghijKLMNOPQRST\nab        cd")))))
+
 (ert-deftest cooked-a-row-scrolled-above-a-status-line-keeps-what-was-on-it ()
   "A region from the top row scrolls into history as the whole screen does.
 

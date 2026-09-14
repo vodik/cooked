@@ -471,6 +471,7 @@ impl State {
             shifts,
             rows,
             height: screen.height(),
+            width: screen.width(),
             used: screen.used(),
             // The seam is a property of the primary: the alt screen contributes no
             // scrollback, and its row 0 begins a buffer line of its own.
@@ -518,6 +519,7 @@ impl State {
             styles,
             fonts,
             height: screen.height(),
+            width: screen.width(),
             used: screen.used(),
             head: if levels.alt { 0 } else { screen.head() },
             scrolled,

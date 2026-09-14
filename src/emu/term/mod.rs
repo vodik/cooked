@@ -401,12 +401,15 @@ pub struct Delta {
     /// Rows to rewrite, in ascending index order; see [`DamagedRow`].
     pub rows: Vec<DamagedRow>,
     /// The grid's shape as of this drain, so the buffer never has to hold a second opinion
-    /// of it: how tall it is, how many rows of it are occupied ([`Screen::used`]), and how
-    /// many characters of row 0's logical line are already in Emacs ([`Screen::head`]).
+    /// of it: how tall and wide it is, how many rows of it are occupied ([`Screen::used`]),
+    /// and how many characters of row 0's logical line are already in Emacs
+    /// ([`Screen::head`]). A width that differs from the last drain's says the rows were
+    /// rewrapped, which Lisp needs to know before it rewrites them.
     ///
     /// The last is the seam, and the only one of the three Emacs cannot see for itself —
     /// the marker sitting mid-line is the *consequence* of the head, not a measure of it.
     pub height: usize,
+    pub width: usize,
     pub used: usize,
     pub head: usize,
     /// Everything else a drain restates in full every time; see [`Levels`].
