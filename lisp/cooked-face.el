@@ -47,6 +47,26 @@ running in the new colours; see `cooked--refresh-ansi-colors\='."
            (cooked--refresh-ansi-colors)))
   :group 'cooked)
 
+(defcustom cooked-bold-is-bright nil
+  "Whether bold text in one of the first eight colours is drawn in its bright twin.
+
+Colours 0 to 7 become 8 to 15 when the text is also bold, as xterm does with
+its `boldColors' resource: `ESC [ 1 ; 34 m' draws in `ansi-color-bright-blue'
+rather than `ansi-color-blue'.  Programs written for terminals that did this
+use bold to reach the bright colours, and in a theme whose normal blue is dark
+their bold text is otherwise hard to read.  The text stays bold, and a colour
+given any other way, from the 256-colour cube or as RGB, is left as it is.
+
+Off by default, since a program that asks for bold blue gets bold blue.
+Setting it through `customize\=' or `setopt\=' redraws the screens already
+running; see `cooked--set-bold-is-bright\='."
+  :type 'boolean
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (fboundp 'cooked--set-bold-is-bright)
+           (cooked--set-bold-is-bright)))
+  :group 'cooked)
+
 (defconst cooked--ansi-faces
   [ansi-color-black ansi-color-red ansi-color-green ansi-color-yellow
    ansi-color-blue ansi-color-magenta ansi-color-cyan ansi-color-white
@@ -214,6 +234,13 @@ them share one redraw."
       (add-hook 'disable-theme-functions #'cooked--theme-changed))
   (advice-add 'enable-theme :after #'cooked--theme-changed)
   (advice-add 'disable-theme :after #'cooked--theme-changed))
+
+(defun cooked--set-bold-is-bright ()
+  "Draw every screen again under the new `cooked-bold-is-bright'.
+The resolved faces are flushed first, since each was built under the old value
+and is cached by its rendition alone."
+  (cooked--flush-face-cache)
+  (cooked--redraw-every-screen))
 
 (defun cooked--underline-styles-for (major)
   "The `:underline' styles Emacs MAJOR can draw, indexed by SGR 4:x.
@@ -527,7 +554,12 @@ by its pixels in a headless pgtk frame, and a cell with colours of its own
 still comes out with the two exchanged."
   (let* ((reverse (cooked--attr-p attrs cooked--attr-reverse))
          (conceal (cooked--attr-p attrs cooked--attr-conceal))
-         (fg* (cooked--color fg))
+         (fg* (cooked--color
+               (if (and cooked-bold-is-bright
+                        (integerp fg) (< fg 8)
+                        (cooked--attr-p attrs cooked--attr-bold))
+                   (+ fg 8)
+                 fg)))
          (bg* (cooked--color bg))
          (face nil))
     ;; Concealed text is drawn in the colour it sits on.  Which property that is

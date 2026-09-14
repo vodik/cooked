@@ -474,6 +474,8 @@ that is not dashed or a diagonal that misses the corner its neighbour has to mee
   theme that styles those wins; `cooked-color-names` is only a fallback. One `face`
   property carries a run: comint leaves `font-lock-defaults` at `(nil t)`, under which the
   first fontification strips a bare `face`, so `cooked-mode` clears it.
+  `cooked-bold-is-bright` draws bold text in colours 0–7 in their bright twins, as
+  xterm's `boldColors` does; it is off by default.
 - **Evil.** Evil's states decide how much of the keyboard the child gets, and cooked
   moves the state itself when a full-screen program takes over. `[[`/`]]` walk prompts,
   `vic`/`vac` select a command's output or the whole record, normal state keeps the view

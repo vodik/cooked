@@ -190,6 +190,46 @@ which strips a bare `face' property and with it every colour."
     (should (equal resolved (or (face-foreground 'ansi-color-red nil t)
                                 (aref cooked-color-names 1))))))
 
+(ert-deftest cooked-bold-is-bright-draws-bold-in-the-bright-colour ()
+  "With `cooked-bold-is-bright', bold in colours 0 to 7 draws in 8 to 15.
+
+Read off a real tty frame.  B is bold red, N is plain red, and C is bold in
+colour 1 given through the 256-colour spelling, which is still index 1 and
+brightens with it, as xterm's `boldColors' does.  X is bold in an RGB red,
+which no palette index names and so stays as it is.  Off, B draws in red; set,
+the screen already drawn is redrawn and B draws in bright red, with N beside
+it unchanged."
+  (cooked-tests--with-tty-frame
+    (cooked-tests--with-session
+        '("/bin/sh" "-c"
+          "printf '\\033[1;31mB\\033[0;31mN\\033[m\\033[1;38;5;1mC\\033[m\\033[1;38;2;200;0;0mX\\033[m\\n'; sleep 5")
+      (should (cooked-tests--settle
+               (lambda () (string-search "BNCX" (cooked-tests--text)))))
+      (let ((buffer (current-buffer))
+            (saved cooked-bold-is-bright))
+        (cl-flet ((drawn (index)
+                    (apply #'format "#%02x%02x%02x"
+                           (mapcar (lambda (v) (ash v -8))
+                                   (color-values (cooked--color index)))))
+                  (foreground (char)
+                    (car (cooked-tests--realized-colors buffer char))))
+          (should-not (equal (drawn 1) (drawn 9)))
+          (unwind-protect
+              (progn
+                (customize-set-variable 'cooked-bold-is-bright nil)
+                (should (equal (foreground ?B) (drawn 1)))
+                (should (equal (foreground ?C) (drawn 1)))
+                (customize-set-variable 'cooked-bold-is-bright t)
+                (should (equal (foreground ?B) (drawn 9)))
+                (should (equal (foreground ?C) (drawn 9)))
+                (should (equal (foreground ?N) (drawn 1)))
+                (should (equal (foreground ?X) "#c80000")))
+            (customize-set-variable 'cooked-bold-is-bright saved)))))))
+
+(ert-deftest cooked-bold-is-bright-is-off-by-default ()
+  "A program asking for bold blue gets bold blue unless the user says otherwise."
+  (should-not (eval (car (get 'cooked-bold-is-bright 'standard-value)))))
+
 (ert-deftest cooked-scrollback-and-screen-are-read-only ()
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'banner\\n'; exec cat")
     (should (cooked-tests--settle
