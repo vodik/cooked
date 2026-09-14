@@ -84,6 +84,7 @@ starts on this machine."
             (should (seq-some (lambda (m) (string-match-p "method .mock" m)) messages))
             (with-current-buffer buffer
               (should cooked--session)
+              (should-not cooked--spawn-connection)
               (should-not cooked--host)))
         (when buffer
           (with-current-buffer buffer (cooked--cleanup))
@@ -208,7 +209,9 @@ Two logins, in order, each with the method's arguments; the far shell in the
 directory, with a quote and a space in its name surviving three layers of
 quoting; TERM as cooked set it, readable through TERMINFO=b64: because the far
 host has no entry of its own; and the variables ssh does not forward exported.
-The OSC 7 the spawn sends reports the far host by its own name, far-host-1."
+`default-directory' stays the TRAMP name, and the OSC 7 the spawn sends reports
+the far host by its own name, far-host-1, which is kept as that connection's
+name rather than turned into a prefix of its own."
   :tags '(infocmp)
   (skip-unless (and (executable-find "infocmp") (equal (cooked--terminfo) cooked-term-name)))
   (cooked-tests--with-fake-ssh (log far)
@@ -227,7 +230,10 @@ The OSC 7 the spawn sends reports the far host by its own name, far-host-1."
             (should (equal (funcall log)
                            '(("-t" "-e" "none" "jump.invalid")
                              ("-t" "-l" "me" "-p" "2222" "-e" "none" "box.invalid"))))
-            (should (equal cooked--host "far-host-1")))
+            (should (equal cooked--host "far-host-1"))
+            (should (equal cooked--spawn-connection
+                           '("/ssh:jump.invalid|ssh:me@box.invalid#2222:" . "far-host-1")))
+            (should (equal default-directory name)))
         (cooked-tests--kill-session buffer)))))
 
 (ert-deftest cooked-remote-create-runs-an-argv-on-the-far-host ()

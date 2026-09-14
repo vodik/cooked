@@ -122,9 +122,10 @@ xterm-256color, which every host already describes."
   "The shell command that moves the far shell to LOCALNAME, or nil for home.
 
 An absolute LOCALNAME is also reported back as OSC 7 once the `cd\\=' has
-worked, with the host as the far machine names itself, so the buffer learns
-where its shell is before a shell has sourced anything, and even when its rc
-sources nothing.  A name under ~, which TRAMP allows as in
+worked, with the host as the far machine names itself.  That report is what
+teaches `cooked--remote-prefix\\=' which host the connection reaches, before a
+shell has sourced anything, and even when its rc sources nothing; see
+`cooked--spawn-connection\\='.  A name under ~, which TRAMP allows as in
 /ssh:box:~/src/, is left to the shell to expand and is not reported, since
 only the far end knows what it expands to."
   (cond

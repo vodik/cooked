@@ -1048,6 +1048,21 @@ asking `file-remote-p\=' for the prefix, which would leave the hop out."
   (when-let* ((local (file-remote-p name 'localname)))
     (substring name 0 (- (length name) (length local)))))
 
+(defvar-local cooked--spawn-connection nil
+  "The TRAMP prefix this session was started over, and the host it reported.
+
+A cons (PREFIX . HOST), or nil for a session started on this machine.
+`cooked--start-session\=' sets it with HOST nil when it starts a shell over
+ssh, and `cooked--set-directory\=' fills HOST in from the first report naming
+another machine.  The shell started over /ssh:prod: that reports ip-10-0-0-1
+leaves (\"/ssh:prod:\" . \"ip-10-0-0-1\"), which is what lets
+`cooked--remote-prefix\=' treat the alias and the reported name as one host.
+
+The first report is trusted to come from the far end of that connection because
+the spawn sends it itself, from `cooked--remote-cd\=', before the far shell
+starts.  Only an absolute directory is reported there, so a session started in
+a directory under ~ waits for its shell\='s own first report instead.")
+
 (defun cooked--remote-prefix (host)
   "The TRAMP prefix, `/METHOD:HOST:\=' or longer, that names HOST, or nil.
 
@@ -1059,19 +1074,28 @@ only if that name passes `cooked--host-name-regexp\='.  A HOST that is neither
 the connection in use nor the announced host gets nil, so no caller can make
 Emacs dial a machine by passing a name through here.
 
-Whether the prefix names HOST is decided by name, and a name is all either side
-has.  So an ssh-config alias reads as a move: a buffer at `/ssh:prod:\=' whose
-shell reports `ip-10-0-0-1\=', `prod\=' being that machine\='s alias, looks the
-same as one whose shell has gone on from prod to a second machine by that name,
-and both get a prefix built for `ip-10-0-0-1\='.  The second is the case worth
-getting right, since keeping `/ssh:prod:\=' there would open a file of the same
-name on the wrong machine.  The cost falls on the first: where the reported name
-does not resolve from here, the next \\[find-file] fails to connect.  A built
-prefix names no user either, so TRAMP\='s default for the host applies, which is
-usually your local user and not the one the alias logs in as.  A `Host
-ip-10-0-0-1\=' entry in ~/.ssh/config, with the alias\='s HostName and User,
-makes the built name work."
-  (or (and (cooked--same-host-p (file-remote-p default-directory 'host) host)
+Whether the prefix in `default-directory\=' names HOST is decided by name, and
+a name is all either side has.  So an ssh-config alias reads as a move: a buffer
+at `/ssh:prod:\=' whose shell reports `ip-10-0-0-1\=', `prod\=' being that
+machine\='s alias, looks the same as one whose shell has gone on from prod to a
+second machine of that name.  The second is the case worth getting right, since
+keeping `/ssh:prod:\=' there would open a file of the same name on the wrong
+machine.  So both get a prefix built for `ip-10-0-0-1\=', which may not resolve
+from here and names no user.
+
+A session started over the connection is the exception, because it knows which
+host its own connection reaches: the first host that session reported is
+the one at the end of the ssh it ran.  `cooked--spawn-connection\=' keeps that
+pair, and a HOST matching it gets the prefix the session was started with, hops
+and user included, wherever `default-directory\=' has been since.  So
+\\[cooked] at `/ssh:prod:/srv/\=' keeps `/ssh:prod:\=' when its shell says
+`ip-10-0-0-1\=', and again after an `ssh\=' onward and back.  For a buffer
+that got its prefix any other way, a `Host ip-10-0-0-1\=' entry in
+~/.ssh/config, with the alias\='s HostName and User, makes the built name
+work."
+  (or (and (cooked--same-host-p host (cdr cooked--spawn-connection))
+           (car cooked--spawn-connection))
+      (and (cooked--same-host-p (file-remote-p default-directory 'host) host)
            (cooked--tramp-prefix default-directory))
       (and (cooked--same-host-p host cooked--host)
            (string-match-p cooked--host-name-regexp cooked--host)
@@ -1207,6 +1231,10 @@ back."
                (unless (equal cooked--directory-report (cons url default-directory))
                  (cooked--parse-file-url url))))
     (when path
+      (when (and cooked--spawn-connection
+                 (null (cdr cooked--spawn-connection))
+                 (not (cooked--local-host-p host)))
+        (setq cooked--spawn-connection (cons (car cooked--spawn-connection) host)))
       (setq cooked--host host)
       (if (cooked--foreign-host-p)
           (when-let* (((eq cooked-remote-directory 'tramp))

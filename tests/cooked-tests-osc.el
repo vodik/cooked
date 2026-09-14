@@ -956,6 +956,28 @@ the other side."
       (cooked--osc-cwd '("file://second.example/srv"))
       (should (equal default-directory "/ssh:second.example:/srv/")))))
 
+(ert-deftest cooked-osc-7-keeps-the-alias-a-session-was-started-over ()
+  "A session started over `/ssh:prod:' keeps that prefix for the name prod reports.
+
+prod is an ssh-config alias and the far shell names itself ip-10-0-0-1, which
+may not resolve from here.  The first report after the start names the host
+that connection reaches, so later reports of that host keep `/ssh:prod:' --
+across an `ssh' onward, which still gets a prefix of its own, and back."
+  (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
+    (let ((default-directory "/ssh:prod:/tmp/")
+          (cooked-tramp-default-method "ssh"))
+      (setq cooked--spawn-connection (list "/ssh:prod:")
+            cooked--host "prod")
+      (cooked--osc-cwd '("file://ip-10-0-0-1/srv/app"))
+      (should (equal default-directory "/ssh:prod:/srv/app/"))
+      (should (equal cooked--spawn-connection '("/ssh:prod:" . "ip-10-0-0-1")))
+      (cooked--osc-cwd '("file://second.example/srv"))
+      (should (equal default-directory "/ssh:second.example:/srv/"))
+      ;; The second host's report did not replace the one the connection made.
+      (should (equal (cdr cooked--spawn-connection) "ip-10-0-0-1"))
+      (cooked--osc-cwd '("file://ip-10-0-0-1.ec2.internal/var"))
+      (should (equal default-directory "/ssh:prod:/var/")))))
+
 (ert-deftest cooked-osc-7-remote-mapping-can-be-turned-off ()
   "`cooked-remote-directory\=' nil is what cooked did before the mapping existed:
 stop at `cooked--host\=', leaving `default-directory\=' where it was.  Still the

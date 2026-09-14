@@ -2275,7 +2275,8 @@ run on the far host as given.  The pty itself starts in the local home
 directory, since a TRAMP name is nowhere a local process can be, while
 `default-directory' keeps the TRAMP name, so \[find-file] at the first prompt
 already opens files on that host.  `cooked--host' is set to the host before
-anything is reported, so the buffer treats the shell as remote from the start.
+anything is reported, so the buffer treats the shell as remote from the start,
+and `cooked--spawn-connection' records the prefix.
 
 A method that cannot be started over ssh is refused with a message, and the
 child starts locally in the home directory, as it did before remote starts
@@ -2287,7 +2288,8 @@ existed."
              (remote (and remote-p
                           (cooked--remote-invocation default-directory command))))
         (when remote
-          (setq cooked--host (file-remote-p default-directory 'host)))
+          (setq cooked--host (file-remote-p default-directory 'host)
+                cooked--spawn-connection (list (cooked--tramp-prefix default-directory))))
         (pcase-let ((`(,argv ,env ,scratch)
                      (cond (remote)
                            ((consp command) (list command nil nil))
