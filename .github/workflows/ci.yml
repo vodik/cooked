@@ -48,14 +48,31 @@ jobs:
       # that loads the suite passes to Emacs. Without them the evil, evil-collection
       # and consult tests skip. goto-chg is evil's one hard dependency, annalist is
       # evil-collection's, and compat is consult's.
+      #
+      # Each is pinned to a commit, so that a push to one of their default branches
+      # cannot turn this suite red on a change nobody made here. They are the
+      # commits the suite last passed against locally, 2026-09-13; compat's is the
+      # upstream commit whose Lisp matches the ELPA mirror's. To bump one, run the
+      # suite with EVIL_LOAD_PATH pointing at the new checkout, then replace its
+      # hash below with `git rev-parse HEAD' there. A tag works too, since the
+      # fetch takes any ref the remote advertises.
       - name: Install evil, evil-collection and consult
         run: |
           deps="$RUNNER_TEMP/elisp"
           mkdir -p "$deps"
-          for repo in emacs-evil/evil emacs-evil/goto-chg emacs-evil/evil-collection \
-                      noctuid/annalist.el minad/consult emacs-compat/compat; do
-            git clone --depth 1 "https://github.com/$repo.git" "$deps/$(basename "$repo" .el)"
-          done
+          while read -r repo ref; do
+            dir="$deps/$(basename "$repo" .el)"
+            git init -q "$dir"
+            git -C "$dir" fetch -q --depth 1 "https://github.com/$repo.git" "$ref"
+            git -C "$dir" checkout -q FETCH_HEAD
+          done <<'PINS'
+          emacs-evil/evil 6a3e1ddd04ac504a016590940d0af2a3361b9efd
+          emacs-evil/goto-chg 72f556524b88e9d30dc7fc5b0dc32078c166fda7
+          emacs-evil/evil-collection 1513aae3652101caf3227bcf7349e2e6fded3210
+          noctuid/annalist.el f83019d61b82a64e621d8dfd63a527a578ff0a11
+          minad/consult f10cf28d3df1e43a8069f5a507c82654834c8b09
+          emacs-compat/compat f0787bca0f7eae45e51fa752b46e38f49e09137e
+          PINS
           load_path=""
           for dir in "$deps"/*; do load_path="$load_path -L $dir"; done
           echo "EVIL_LOAD_PATH=$load_path" >> "$GITHUB_ENV"
