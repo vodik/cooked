@@ -80,6 +80,7 @@ mod keyboard;
 mod marks;
 mod modes;
 mod osc;
+mod promote;
 mod replies;
 mod reports;
 mod screen;

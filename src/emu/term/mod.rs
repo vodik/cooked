@@ -370,6 +370,26 @@ pub struct Delta {
     /// Absolute index of `scrolled`'s first line, so an [`Anchor`] can be told apart
     /// into "in this batch of scrollback" and "still on the grid".
     pub scrolled_base: usize,
+    /// The rows of `scrolled`'s first lines that Emacs already holds, as the top rows of
+    /// its screen, exactly as scrollback would get them but for trailing spaces and the
+    /// newline a rejoined row gives up: `count` of them, off the top of the region from
+    /// row 0 to `bottom`.
+    ///
+    /// Emacs keeps those rows where they are and moves the start of its screen past them,
+    /// rather than inserting the same text again above the screen and deleting the rows it
+    /// had. A marker or an overlay on a row at column 5 then stays on its character as
+    /// the row becomes history, and a `tail -f` line costs one insertion at the bottom.
+    ///
+    /// The promotion is its share of the scroll that took those rows off the top, the
+    /// scroll of the same region by `count` rows without the deletion, so Emacs opens as
+    /// many blank rows at the bottom of the region, and the first of `shifts` is that
+    /// scroll less those rows. Only from [`Term::drain_promoting`], and never while the
+    /// alternate screen is shown. Rows go as text instead when the copy of what Emacs holds
+    /// does not know them: rows a flood scrolled through between drains, a row the width
+    /// guard trimmed, and anything after a resize or a switch of screens. So do rows taken
+    /// off the grid by anything but that one scroll, a screen clear, or a scroll after
+    /// rows lower down have moved.
+    pub promoted: Option<Shift>,
     /// Rows that *moved* during this drain, in the order they moved; see [`Shift`].
     ///
     /// Read together with [`Delta::rows`]: a shift says which buffer text to move where,
@@ -806,10 +826,22 @@ impl Term {
         self.state.events.len() != events || self.backlog() >= limit / 2
     }
 
+    /// Everything that changed since the last drain, every scrolled row as text.
     pub fn drain(&mut self) -> Delta {
+        self.drain_with(false)
+    }
+
+    /// Everything that changed since the last drain, for a consumer that keeps the screen
+    /// as text of its own and can promote the rows of it that scroll away; see
+    /// [`Delta::promoted`].
+    pub fn drain_promoting(&mut self) -> Delta {
+        self.drain_with(true)
+    }
+
+    fn drain_with(&mut self, promote: bool) -> Delta {
         let route = &mut self.state.replies;
         route.handling |= std::mem::take(&mut route.undrained);
-        self.state.drain()
+        self.state.drain(promote)
     }
 
     /// Drain for a buffer no window shows: everything but the screen.

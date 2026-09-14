@@ -719,22 +719,42 @@ impl Session {
         self.shared.term.held()
     }
 
+    /// [`Session::drain_with`] for a consumer that promotes nothing, which is what the
+    /// tests here read.
+    #[cfg(test)]
+    pub(crate) fn drain(&self) -> Update {
+        self.drain_with(false)
+    }
+
     /// Collect everything that changed, acknowledging the wakeup that asked for it.
+    ///
+    /// PROMOTE says the consumer keeps a screen of its own, as a cooked buffer does, and
+    /// can promote the scrolled rows it already holds; see [`Delta::promoted`]. The
+    /// compile pump reads the scrollback as text and does not.
     ///
     /// Acknowledging is not re-arming: the next wake byte waits on [`Session::ready`],
     /// which Emacs calls once it has drawn what this returned. See
     /// [`Notifier::acknowledge`] for why the window covers the render rather than the
     /// collection.
-    pub(crate) fn drain(&self) -> Update {
+    ///
+    /// [`Delta::promoted`]: crate::emu::Delta::promoted
+    pub(crate) fn drain_with(&self, promote: bool) -> Update {
         self.shared.notifier.acknowledge();
+        let mut term = self.shared.term.held();
+        let delta = if promote {
+            term.drain_promoting()
+        } else {
+            term.drain()
+        };
+        drop(term);
         Update {
-            delta: self.shared.term.held().drain(),
+            delta,
             mode: self.shared.mode.load(),
             exit: *self.shared.exited.held(),
         }
     }
 
-    /// [`Session::drain`] for a buffer no window shows; see [`Term::drain_hidden`].
+    /// [`Session::drain_with`] for a buffer no window shows; see [`Term::drain_hidden`].
     ///
     /// Whole once the child has exited. The screen it left is what the buffer keeps, and
     /// Lisp appends its exit line below that screen, which has to be there first.
@@ -2012,7 +2032,7 @@ mod tests {
         drop(session);
     }
 
-    /// The backpressure window ends at [`Session::ready`] and not at [`Session::drain`]:
+    /// The backpressure window ends at [`Session::ready`] and not at [`Session::drain_with`]:
     /// a drain that took a delta buys no second wake byte until Emacs says it has drawn
     /// the first.
     ///

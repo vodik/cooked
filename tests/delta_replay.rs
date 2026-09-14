@@ -691,6 +691,12 @@ impl Replay {
         // coordinates the moves leave behind. This is the half of the change the oracle
         // is actually watching — if `Screen::scroll_up' narrows its damage by one row too
         // many, the shadow keeps the row the grid recycled and property 1 fails.
+        self.check_promoted(&delta);
+        if let Some(shift) = promotion(&delta) {
+            Self::shift(&mut self.shadow, shift);
+            Self::shift(&mut self.trimmed, shift);
+            Self::shift(&mut self.wrapped, shift);
+        }
         for shift in delta.shifts {
             Self::shift(&mut self.shadow, shift);
             Self::shift(&mut self.trimmed, shift);
@@ -726,15 +732,27 @@ impl Replay {
     /// from the shadow here, and this is where it is caught rather than in the whole-grid
     /// comparison at the end, which a later write over the same row could hide.
     fn check_skipped(&self, delta: &Delta, reference: &Delta) {
-        assert_eq!(
-            delta.shifts, reference.shifts,
-            "the two drains moved different rows"
-        );
+        // A promotion and the scroll it is left with move the rows the scroll alone did.
+        // Rows the reference sends whole are exempt, since after a scroll that turned the
+        // screen over the reference moves nothing and rewrites everything.
+        let resent: Vec<usize> = reference.rows.iter().map(|r| r.index).collect();
+        let ours = moved(delta.height, promotion(delta).iter().chain(&delta.shifts));
+        let theirs = moved(delta.height, reference.shifts.iter());
+        for (index, (a, b)) in ours.iter().zip(&theirs).enumerate() {
+            assert!(
+                a == b || resent.contains(&index),
+                "the two drains moved different rows to row {index}: \
+                 promoted {:?} with {:?}, against {:?}",
+                delta.promoted,
+                delta.shifts,
+                reference.shifts
+            );
+        }
         let mut shadow = self.shadow.clone();
         let mut wrapped = self.wrapped.clone();
         shadow.resize(delta.height, Vec::new());
         wrapped.resize(delta.height, false);
-        for shift in &delta.shifts {
+        for shift in promotion(delta).iter().chain(&delta.shifts) {
             Self::shift(&mut shadow, *shift);
             Self::shift(&mut wrapped, *shift);
         }
@@ -763,6 +781,38 @@ impl Replay {
                 Some(&row.wrapped),
                 "row {} was left out of the drain with a different wrap flag",
                 row.index
+            );
+        }
+    }
+
+    /// Check that every row DELTA promotes is what Emacs holds at the top of its screen,
+    /// as `cooked--promote-rows' keeps it: the shadow's row, padded with plain spaces to
+    /// the characters the scrolled row has, and wrapped as the scrolled row is.
+    fn check_promoted(&self, delta: &Delta) {
+        let space = drawn(&[Run {
+            text: " ".into(),
+            cols: 1,
+            style: StyleId::DEFAULT,
+            deco: None,
+            link: None,
+        }]);
+        let promoted = delta.promoted.map_or(0, |shift| shift.count);
+        for (index, line) in delta.scrolled.iter().take(promoted).enumerate() {
+            let held = drawn(&self.shadow[index]);
+            let kept = drawn(&line.runs);
+            assert!(
+                !self.trimmed[index],
+                "row {index} was promoted, but Lisp trimmed it"
+            );
+            assert_eq!(
+                self.wrapped[index], line.wrapped,
+                "row {index} was promoted with a different wrap flag"
+            );
+            assert!(
+                kept.starts_with(&held) && kept[held.len()..].iter().all(|c| *c == space[0]),
+                "row {index} was promoted, but Emacs holds {:?} where scrollback gets {:?}",
+                self.shadow[index],
+                line.runs
             );
         }
     }
@@ -950,7 +1000,7 @@ impl Replay {
             let delta = self.announced[0].canonical(self.term.drain_hidden());
             if delta.withheld {
                 assert!(
-                    delta.rows.is_empty() && delta.shifts.is_empty(),
+                    delta.rows.is_empty() && delta.shifts.is_empty() && delta.promoted.is_none(),
                     "a hidden drain carried the screen"
                 );
                 self.withheld = true;
@@ -965,7 +1015,7 @@ impl Replay {
             }
             delta
         } else {
-            self.announced[0].canonical(self.term.drain())
+            self.announced[0].canonical(self.term.drain_promoting())
         };
         self.withheld = false;
         self.reference.forget_sent(None);
@@ -991,6 +1041,23 @@ impl Replay {
         let full = self.term.drain();
         self.announced[0].canonical(full)
     }
+}
+
+/// The move a promotion makes of Emacs' screen: the promoted rows leave the top and as
+/// many blank rows open at the bottom of their region, the scroll that took them off
+/// without its deletion.
+fn promotion(delta: &Delta) -> Option<Shift> {
+    delta.promoted
+}
+
+/// Which row each row of a HEIGHT-row screen holds once SHIFTS are made, by the index it
+/// held before them, or `None` for a blank row a shift opened.
+fn moved<'a>(height: usize, shifts: impl Iterator<Item = &'a Shift>) -> Vec<Option<usize>> {
+    let mut rows: Vec<Option<usize>> = (0..height).map(Some).collect();
+    for shift in shifts {
+        Replay::shift(&mut rows, *shift);
+    }
+    rows
 }
 
 /// RUNS as what Emacs draws for each character: the character, its rendition and link,

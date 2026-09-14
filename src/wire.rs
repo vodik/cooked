@@ -153,13 +153,14 @@ fn contiguous_runs(rows: &[DamagedRow]) -> impl Iterator<Item = &[DamagedRow]> {
     .filter(|run| run[0].edit.is_none())
 }
 
-/// `(:scrolled ROWS :rows ((FIRST . BLOCK)...) :height N :used N :head N
-/// :cursor (ROW COL VISIBLE SHAPE CHARS) :marks ((ID . ANCHOR)...) ...)`
+/// `(:scrolled ROWS :promoted (BOTTOM (CHARS . ENDS)...) :rows ((FIRST . BLOCK)...)
+/// :height N :used N :head N :cursor (ROW COL VISIBLE SHAPE CHARS)
+/// :marks ((ID . ANCHOR)...) ...)`
 pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<Value> {
     // The scrollback is assembled first because the events are resolved against it: a
     // mark on a row that scrolled away during this very drain is spelled as an offset
     // into the text about to be inserted, which only exists once that text is built.
-    let (scrolled, spans) = update.scrolled_rows(env, rejoin)?;
+    let (promoted, scrolled, spans) = update.scrolled_rows(env, rejoin)?;
     // `(FIRST . BLOCK)`, the same [`Block`] scrollback arrives in, so one renderer in
     // Lisp handles both. FIRST is the index of the block's *first* row; its table says
     // how many follow it and where each begins.
@@ -254,6 +255,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
 
     plist!(env, {
         ":scrolled"    => scrolled,
+        ":promoted"    => promoted,
         ":shifts"      => shifts,
         ":rows"        => rows,
         ":edits"       => edits,
@@ -625,22 +627,39 @@ struct RowSpan {
 }
 
 impl Update {
-    /// This drain's scrollback as one [`Block`], plus where each row landed in it.
+    /// This drain's scrollback: the rows Emacs promotes as `(CHARS . ENDS)` each, the rest
+    /// as one [`Block`], and where each row landed in the text the two make together.
     ///
     /// Assembled here rather than handed over row by row, for the reason [`Block`]
     /// gives: a flood is tens of thousands of rows, and Emacs pays for every `insert`.
-    fn scrolled_rows(&self, env: Env, rejoin: bool) -> Result<(Value, Vec<RowSpan>)> {
+    ///
+    /// A promoted row is counted into the offsets as though its text were in the block,
+    /// because once Emacs has promoted it the text is there, just above the block: a mark
+    /// at column 5 of a promoted row is `(scrolled . 5)` from where the promoted rows
+    /// begin, as it would be from where resent rows began.
+    fn scrolled_rows(&self, env: Env, rejoin: bool) -> Result<(Value, Value, Vec<RowSpan>)> {
         if self.delta.scrolled.is_empty() {
-            return Ok((env.nil(), Vec::new()));
+            return Ok((env.nil(), env.nil(), Vec::new()));
         }
         let mut block = Block::default();
+        let promotion = self.delta.promoted.map_or(0, |shift| shift.count);
+        let mut promoted = Vec::with_capacity(promotion);
         let mut rows: Vec<RowSpan> = Vec::with_capacity(self.delta.scrolled.len());
+        // Characters, newlines included, of the promoted rows before the block's text.
+        let mut kept = 0;
 
-        for (line, ends) in self.delta.scrolled_lines(rejoin) {
+        for (i, (line, ends)) in self.delta.scrolled_lines(rejoin).enumerate() {
+            if i < promotion {
+                let chars = line.runs.iter().map(|run| run.text.chars().count()).sum();
+                rows.push(RowSpan { start: kept, chars });
+                kept += chars + usize::from(ends);
+                promoted.push(env.cons(env.into_lisp(chars)?, env.into_lisp(ends)?)?);
+                continue;
+            }
             let start = block.offset;
             block.push_runs(env, &line.runs)?;
             rows.push(RowSpan {
-                start,
+                start: kept + start,
                 chars: block.offset - start,
             });
             if ends {
@@ -648,7 +667,17 @@ impl Update {
             }
         }
 
-        Ok((block.into_lisp(&env)?, rows))
+        let text = if promotion < self.delta.scrolled.len() {
+            block.into_lisp(&env)?
+        } else {
+            env.nil()
+        };
+        // `(BOTTOM . ROWS)`, BOTTOM being the last row of the region the rows left.
+        let promoted = match self.delta.promoted {
+            Some(shift) => env.cons(env.into_lisp(shift.bottom)?, env.list(&promoted)?)?,
+            None => env.nil(),
+        };
+        Ok((promoted, text, rows))
     }
 
     /// Spell an [`Anchor`] in whichever coordinate system Emacs can address it in.

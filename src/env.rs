@@ -245,6 +245,7 @@ symbols! {
     // second. `sym_index` makes leaving one out a compile error rather than a silent
     // fallback, so this list cannot quietly fall behind the call sites.
     Scrolled => ":scrolled",
+    Promoted => ":promoted",
     Shifts => ":shifts",
     Rows => ":rows",
     Edits => ":edits",

@@ -127,6 +127,18 @@ impl State {
         // repair a long-running command's marker walks away from its prompt.
         self.marks_dirty = true;
         self.evicted_total += rows.len();
+        // Whether Emacs can keep its own text for each row is decided now, while the
+        // moves that took it off the grid are still in the log to be read. Once one row
+        // could not be kept, no later row can, and the rest of a flood costs a test.
+        if self.front.promoting() {
+            let limit = self.screens.primary.scrolled_off();
+            for row in rows.iter() {
+                self.front.promote(row, limit);
+            }
+            if !self.front.promoting() {
+                self.screens.primary.witness(0);
+            }
+        }
         // A move, not a rebuild: `Screen` reduced these rows to runs as they left (see
         // `Departed`). `extend` on an empty iterator does not allocate, so a row carrying
         // no marks, the usual case, costs nothing for them.
@@ -375,11 +387,49 @@ impl State {
         self.kitty.forget(id);
     }
 
-    pub(super) fn drain(&mut self) -> Delta {
+    /// Everything that changed since the last drain; see [`Delta`].
+    ///
+    /// With PROMOTE, the rows that left the top of the screen as Emacs already holds them
+    /// are promoted rather than sent: see [`Delta::promoted`]. Without it every scrolled
+    /// row is text, for a consumer that reads the scrollback rather than keeping a screen.
+    pub(super) fn drain(&mut self, promote: bool) -> Delta {
         let damaged = self.screen_mut().drain_damage();
+        let promoted = self.front.take_promoted();
+        // The scroll the promoted rows left by, read before the log is taken, which drops a
+        // scroll that turned its region over.
+        let scroll = self.screen().shifts().first().copied();
+        let promoted = scroll
+            .filter(|_| promote && promoted > 0 && !self.shown.is_alternate())
+            .map(|scroll| Shift {
+                count: promoted,
+                ..scroll
+            });
+        // The rows that leave before the next drain are compared against the copy as this
+        // drain leaves it, a screenful at most, and only for a consumer that promotes.
+        let witness = if promote {
+            self.screens.primary.height()
+        } else {
+            0
+        };
+        self.screens.primary.witness(witness);
         // Taken together with the damage, because the damage indices are in the
         // coordinates the shifts leave behind.
-        let shifts = self.screen_mut().drain_shifts();
+        let mut shifts = self.screen_mut().drain_shifts();
+        // A promotion is its share of the scroll that took its rows off the top: Lisp keeps
+        // the rows and opens as many blank ones at the bottom of the region, which is that
+        // scroll by those rows without the deletion. So the scroll is left with the rest of
+        // its rows. One that turned its region over is already gone from the log, every row
+        // it covers being damaged, and has nothing left to move.
+        if let (Some(promotion), Some(scroll)) = (promoted, scroll)
+            && scroll.count < scroll.bottom + 1 - scroll.top
+        {
+            let first = &mut shifts[0];
+            debug_assert!(*first == scroll && first.count >= promotion.count);
+            first.count -= promotion.count;
+            if first.count == 0 {
+                shifts.remove(0);
+            }
+        }
         self.shed_unplaced_images();
         let images = std::mem::take(&mut self.pending_images);
         let links = std::mem::take(&mut self.pending_links);
@@ -404,7 +454,7 @@ impl State {
             .screen()
             .row(levels.cursor.row)
             .map_or(levels.cursor.col, |row| row.chars_before(levels.cursor.col));
-        let rows = self.damaged_rows(damaged, &shifts, levels.cursor);
+        let rows = self.damaged_rows(damaged, promoted, &shifts, levels.cursor);
         // Last, after everything that could have named a new id: the rows, edits and
         // scrollback above were all built from cells written before this drain began.
         let styles = self.styles.take_unsent();
@@ -417,6 +467,7 @@ impl State {
             fonts,
             scrolled,
             scrolled_base,
+            promoted,
             shifts,
             rows,
             height: screen.height(),
@@ -438,6 +489,14 @@ impl State {
         self.shed_unplaced_images();
         let scrolled = Vec::from(std::mem::take(&mut self.pending_scrollback));
         let scrolled_base = self.evicted_total - scrolled.len();
+        // Every row that scrolled away goes as text, and the scroll that took it off stays
+        // in the log for the next whole drain, which deletes the row Emacs still shows for
+        // it. So none of these rows is promoted, and no row after them can be: Emacs' top
+        // rows are the ones just sent again, until that drain has moved them.
+        if !scrolled.is_empty() {
+            self.front.unpromote(0);
+            self.screens.primary.witness(0);
+        }
         // Only the marks that left the grid, whose rows are in `scrolled`. `marks_dirty`
         // stays up, so the next whole drain still reports the ones on the grid, against
         // rows it has sent by then.
@@ -498,9 +557,10 @@ impl State {
 
     /// The damaged rows Emacs does not already have, recording them as sent.
     ///
-    /// SHIFTS are applied to the copy first, as Emacs applies them to its text, because the
-    /// damage indices are in the coordinates they leave behind. Then a damaged row that
-    /// matches the copy is left out, which is a repaint that wrote the same thing back.
+    /// PROMOTED rows leave the top of the copy first, and then SHIFTS are applied to it, as
+    /// Emacs does both to its text, because the damage indices are in the coordinates they
+    /// leave behind. Then a damaged row that matches the copy is left out, which is a
+    /// repaint that wrote the same thing back.
     ///
     /// A changed row with no changed neighbour whose change is small is sent as an
     /// [`Edit`] of the part that changed; see [`front::Front::edit`].
@@ -513,12 +573,16 @@ impl State {
     fn damaged_rows(
         &mut self,
         mut damaged: Vec<usize>,
+        promoted: Option<Shift>,
         shifts: &[Shift],
         cursor: Cursor,
     ) -> Vec<DamagedRow> {
         let (height, width) = (self.screen().height(), self.screen().width());
         if !self.front.fits(height, width) {
             self.front.reset(height, width);
+        }
+        if let Some(promotion) = promoted {
+            self.front.shift(promotion);
         }
         for shift in shifts {
             self.front.shift(*shift);

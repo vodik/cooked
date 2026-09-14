@@ -146,10 +146,21 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         "cooked--spawn" 5..=9 => spawn;
 
         /// Collect everything that changed in SESSION since the last call.
-        /// Returns a plist with :scrolled, :shifts, :rows, :edits, :height, :used, :head,
-        /// :cursor, :reverse, :reverse-toggles, :marks, :alt, :app-cursor, :keys,
+        /// Returns a plist with :scrolled, :promoted, :shifts, :rows, :edits, :height, :used,
+        /// :head, :cursor, :reverse, :reverse-toggles, :marks, :alt, :app-cursor, :keys,
         /// :kitty-flags, :modify-other-keys, :mode, :images, :links, :styles, :events, :exit
         /// and :withheld.
+        ///
+        /// With PROMOTE non-nil and HIDDEN nil, the rows scrolled off the top that the buffer already holds
+        /// as its top screen rows come as :promoted rather than in :scrolled: (BOTTOM . ROWS),
+        /// ROWS having one (CHARS . ENDS) per row, oldest first, saying how many characters
+        /// the row keeps and whether a newline ends it.  Those rows are the first of the
+        /// batch, and :scrolled holds the rest.  The buffer keeps its text for them, trimmed
+        /// or padded to CHARS and joined to the next row unless ENDS, moves the start of the
+        /// screen past them, and opens as many blank rows at the bottom of the region they
+        /// scrolled in, whose last row is BOTTOM; the first of :shifts is already that scroll
+        /// less those rows.  An anchor into this drain's scrollback counts the promoted rows'
+        /// characters first.
         ///
         /// :scrolled and :rows are the same shape, so one renderer handles both: a block is
         /// (TEXT STYLES DECOS ROWS), where the spans carry character offsets into TEXT and
@@ -187,7 +198,7 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// away, while the damage waits in SESSION for the next drain without HIDDEN.
         /// :withheld is then t.  It is nil, and the drain whole, when an event needs the
         /// screen's text (an OSC 133 mark, CSI 2 J or CSI 3 J) or the child has exited.
-        "cooked--drain" 1..=3 => drain;
+        "cooked--drain" 1..=4 => drain;
 
         /// Write STRING to the pty of SESSION.
         /// Waits up to three seconds for a child that is not reading, then signals, having
@@ -611,11 +622,12 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
 fn drain(env: Env, args: &[Value]) -> Result<Value> {
     let rejoin = args.get(1).is_none_or(|v| !env.is_nil(*v));
     let hidden = args.get(2).is_some_and(|v| !env.is_nil(*v));
+    let promote = args.get(3).is_some_and(|v| !env.is_nil(*v));
     let session = handle(env, args[0])?;
     let update = if hidden {
         session.drain_hidden()
     } else {
-        session.drain()
+        session.drain_with(promote)
     };
     update_to_lisp(env, &update, rejoin)
 }

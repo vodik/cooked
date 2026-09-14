@@ -135,6 +135,14 @@ pub struct Departed {
     /// Empty for essentially every row, and an empty `Vec` does not allocate, so the
     /// ordinary line pays nothing to carry this.
     pub marks: Vec<(usize, MarkId)>,
+    /// The row itself, cells and attachments, for the few rows that leave while
+    /// [`Screen::witness`] asks for them.
+    ///
+    /// The copy of what Emacs holds compares these with its own cells to decide whether
+    /// Emacs can keep its text for the row; see `Front::promote`. Comparing cells is a
+    /// `memcmp`, where rebuilding the copy's runs to compare with `runs` cost more than
+    /// the row's own reduction did.
+    pub row: Option<Box<Row>>,
 }
 
 impl Departed {
@@ -154,6 +162,7 @@ impl Departed {
                 .marks()
                 .map(|(col, id)| (row.chars_before(col), id))
                 .collect(),
+            row: None,
         }
     }
 
@@ -259,6 +268,12 @@ pub struct Screen {
     /// combining mark a character on none, so `日本` handed over as a row of four columns
     /// is two characters in the buffer, and `e\u{301}` on one column is two.
     carried_chars: usize,
+    /// How many more rows leaving the top keep a copy of themselves in [`Departed::row`].
+    ///
+    /// Set at a drain to as many rows as Emacs holds, and cleared once a row that leaves
+    /// is not one of them, so a flood copies a screenful per drain rather than a row per
+    /// line.
+    witness: usize,
     /// DECAWM, on by default as every terminal starts. See [`Screen::set_autowrap`].
     autowrap: bool,
     /// IRM. See [`Screen::set_insert_mode`].
@@ -303,6 +318,7 @@ impl Screen {
             tabs: default_tabs(cols),
             carried: 0,
             carried_chars: 0,
+            witness: 0,
             autowrap: true,
             insert_mode: false,
             history: true,
@@ -319,6 +335,11 @@ impl Screen {
             history: false,
             ..Self::new(rows, cols)
         }
+    }
+
+    /// Keep a copy of the next COUNT rows to leave the top; see [`Departed::row`].
+    pub fn witness(&mut self, count: usize) {
+        self.witness = count;
     }
 
     /// Drop the carry: nothing of the top row's line is in Emacs any more.
@@ -508,6 +529,27 @@ impl Screen {
         // a resize, since a shift naming a `bottom` the grid no longer has cannot be
         // applied.
         self.shifts.clear();
+    }
+
+    /// Row moves since the last drain, as logged, including a move that has turned its
+    /// region over and which [`Screen::drain_shifts`] will drop.
+    pub fn shifts(&self) -> &[Shift] {
+        &self.shifts
+    }
+
+    /// How many rows the moves since the last drain have taken off the top of the screen,
+    /// or `None` when a move other than one scroll of a region from the top row is among
+    /// them.
+    ///
+    /// Only then are the rows handed to scrollback the rows the screen held at its top, in
+    /// order, with nothing else moved, so a row leaving can be matched against what Emacs
+    /// holds; see `Front::promote`. Saturates at the region's height, as the log does.
+    pub fn scrolled_off(&self) -> Option<usize> {
+        match self.shifts.as_slice() {
+            [] => Some(0),
+            [shift] if shift.top == 0 && shift.direction == Direction::Up => Some(shift.count),
+            _ => None,
+        }
     }
 
     /// Row moves since the last drain, taken with the damage they go with.
@@ -961,7 +1003,20 @@ impl Screen {
         // rotation below. `Screen::write` marks the row above `wrapped` before calling
         // `linefeed`, so the flag `line_runs` reads is already settled.
         let evicted = if self.history && top == 0 {
-            Evicted::from_rows((top..top + n).filter_map(|index| self.row(index)))
+            let witnessed = std::mem::take(&mut self.witness);
+            self.witness = witnessed.saturating_sub(n);
+            let mut evicted =
+                Evicted::from_rows((top..top + n).filter_map(|index| self.row(index)));
+            for (index, departed) in evicted.0.iter_mut().take(witnessed).enumerate() {
+                departed.row = self.row(top + index).map(|row| {
+                    Box::new(Row::from_parts(
+                        row.cells().to_vec(),
+                        row.extras().to_vec(),
+                        row.wrapped(),
+                    ))
+                });
+            }
+            evicted
         } else {
             Evicted::none()
         };
