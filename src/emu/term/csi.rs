@@ -113,10 +113,18 @@ pub(super) enum SavedMode {
     Format(MouseFormat),
 }
 
-/// The modes that make the terminal send the child something it did not type, as they
-/// stood when the shell handed the terminal to a command. See [`State::take_back`].
+/// The modes a command can leave behind for the shell's prompt, as they stood when the
+/// shell handed the terminal to it. See [`State::take_back`].
+///
+/// Two kinds. Most make the terminal send the child something it did not type. The cursor
+/// and DECSCNM change only how the prompt is drawn, and are here because no shell sets
+/// them at its prompt, so one a command left is left for good.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Handover {
+    cursor_visible: bool,
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
+    reverse_screen: bool,
     mouse: Mouse,
     focus_events: bool,
     color_scheme_updates: bool,
@@ -131,6 +139,10 @@ pub(super) struct Handover {
 impl Handover {
     fn capture(modes: &Modes) -> Self {
         Self {
+            cursor_visible: modes.cursor_visible,
+            cursor_shape: modes.cursor_shape,
+            cursor_blink: modes.cursor_blink,
+            reverse_screen: modes.reverse_screen,
             mouse: modes.mouse,
             focus_events: modes.focus_events,
             color_scheme_updates: modes.color_scheme_updates,
@@ -144,6 +156,10 @@ impl Handover {
     }
 
     fn restore(self, modes: &mut Modes) {
+        modes.cursor_visible = self.cursor_visible;
+        modes.cursor_shape = self.cursor_shape;
+        modes.cursor_blink = self.cursor_blink;
+        modes.reverse_screen = self.reverse_screen;
         modes.mouse = self.mouse;
         modes.focus_events = self.focus_events;
         modes.color_scheme_updates = self.color_scheme_updates;
@@ -423,7 +439,7 @@ impl State {
         }
     }
 
-    /// OSC 133 `C`: note the input modes the shell is handing to the command.
+    /// OSC 133 `C`: note the modes the shell is handing to the command; see [`Handover`].
     ///
     /// Only on the primary screen. A `C` on the alternate screen comes from a shell inside
     /// a multiplexer such as tmux, which passes its panes' marks through while it holds
@@ -435,8 +451,8 @@ impl State {
         }
     }
 
-    /// OSC 133 `D`: the command is over, so the input modes go back to what the shell
-    /// handed over at its `C`, and the alternate screen's kitty stack is emptied.
+    /// OSC 133 `D`: the command is over, so the modes in [`Handover`] go back to what the
+    /// shell handed over at its `C`, and the alternate screen's kitty stack is emptied.
     ///
     /// A command that dies with a mode set leaves the shell reading reports it never
     /// asked for. With 2048 on, every resize types `ESC [ 48 ; 24 ; 80 ; ... t` at the
@@ -460,6 +476,14 @@ impl State {
     /// nothing back. Neither does a program that runs a command without marks, so
     /// `vim`'s `:!make` keeps vim's own modes across the round trip.
     ///
+    /// The cursor's visibility and shape and DECSCNM are restored too, although no report
+    /// hangs on them. A spinner killed with its cursor hidden, or an editor that died with
+    /// its bar cursor or mid-flash, otherwise leaves the prompt drawn that way for the rest
+    /// of the session: bash 5.3, zsh 5.9 and fish 4.9, watched on a pty, set none of the
+    /// three at a prompt, so nothing else would ever put them back. A shell or a prompt
+    /// theme that does set a shape, as a vi-mode binding does on entering the line editor,
+    /// sets it after `D` and keeps it.
+    ///
     /// Bracketed paste is not among the modes, though it is the one most often left on.
     /// Every line editor that uses it sets it at each prompt and clears it before each
     /// command, so a stale one never outlives the next prompt, and a prompt theme that
@@ -475,10 +499,15 @@ impl State {
         }
         self.modes.kitty_keys.alternate = KittyStack::default();
         if let Some(handover) = self.handover.take() {
-            let mouse = self.modes.mouse;
+            let (mouse, reverse_screen) = (self.modes.mouse, self.modes.reverse_screen);
             handover.restore(&mut self.modes);
             if self.modes.mouse != mouse {
                 self.events.push(Event::Mouse(self.modes.mouse));
+            }
+            // Counted as a DECSCNM would be, so a command that reversed the screen and died
+            // inside one drain still shows as a flash rather than as nothing.
+            if self.modes.reverse_screen != reverse_screen {
+                self.reverse_screen_toggles = self.reverse_screen_toggles.wrapping_add(1);
             }
         }
     }

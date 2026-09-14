@@ -605,6 +605,30 @@ fn the_shell_gets_back_its_own_modes_and_a_bare_d_moves_none() {
     );
 }
 
+/// A command that hid the cursor, changed its shape and reversed the screen, and died,
+/// leaves the prompt drawn as the shell had it at `C`: the cursor visible, in the bar the
+/// shell had set for itself, blinking as it asked, on a screen the right way round.
+#[test]
+fn a_dead_command_leaves_the_prompt_the_cursor_and_screen_it_handed_over() {
+    let mut t = term(4, 40, b"\x1b[5 q\x1b]133;C\x07");
+    t.drain();
+    t.feed(b"\x1b[?25l\x1b[2 q\x1b[?5h");
+    let levels = t.drain().levels;
+    assert!(!levels.cursor_visible && levels.reverse_screen);
+    assert_eq!(levels.cursor_shape, CursorShape::Block);
+
+    t.feed(b"\x1b]133;D;130\x07");
+    let levels = t.drain().levels;
+    assert!(levels.cursor_visible, "DECTCEM");
+    assert_eq!(levels.cursor_shape, CursorShape::Bar, "DECSCUSR");
+    assert!(t.state.modes.cursor_blink, "5 q is the blinking bar");
+    assert!(!levels.reverse_screen, "DECSCNM");
+    assert_eq!(
+        levels.reverse_screen_toggles, 2,
+        "the restore counts as a change of DECSCNM"
+    );
+}
+
 /// bash, zsh and fish each set bracketed paste before the prompt that carries `A`, so
 /// neither mark may touch it. The sequence is bash 5.3's, as recorded on a pty.
 #[test]
