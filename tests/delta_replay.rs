@@ -1315,8 +1315,14 @@ proptest! {
     // `payload()` or changing a weight quietly turns it into some other random case. A
     // failure is written out instead, as a named test under "Regressions" below, from
     // the minimal input proptest prints.
+    //
+    // Read from the environment here because an explicit `cases` overrides proptest's
+    // own reading of `PROPTEST_CASES`, which silently made the soak run 1024 cases too.
     #![proptest_config(ProptestConfig {
-        cases: 1024,
+        cases: std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|cases| cases.parse().ok())
+            .unwrap_or(1024),
         failure_persistence: None,
         ..ProptestConfig::default()
     })]
