@@ -577,11 +577,10 @@ so the scan would be paid over and over for text about to be overwritten, and th
 usually where the child wants the mouse for itself. A program that wants a link on its
 own screen can say so with `OSC 8`, which works on both screens.
 
-One visible gap, and it is accepted rather than hidden: a URL the child *wrapped* across
-a column boundary is not matched while it is on screen, because every live row is its own
-buffer line and the regexp stops at a newline. It becomes matchable the moment the row
-scrolls off, since `cooked-rejoin-wrapped-lines` joins a continuation row onto the line
-above it in the transcript.
+A URL the child *wrapped* across a column boundary is matched whole, on screen as well as
+in the scrollback. Every live row is its own buffer line, so the scan joins the rows the
+emulator marked as wrapped before matching, up to fifty of them, which is longer than any
+URL and far shorter than a minified JSON blob. A click on either half opens the whole URL.
 
 `mouse-2` and `RET` follow a link, `C-c RET` follows whatever is at point whether or not
 it is highlighted, and `S-mouse-2`/`S-RET` follow one even while the child has grabbed the
