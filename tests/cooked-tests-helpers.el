@@ -345,7 +345,7 @@ row first is not testing what it says it is."
     (while (and (< (float-time) deadline) (not (funcall predicate)))
       (accept-process-output nil 0.05)
       (when cooked--session
-        (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))))
+        (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t))))
     (funcall predicate)))
 
 (defun cooked-tests--pump (seconds)
@@ -718,7 +718,7 @@ scaled by `cooked-tests-timeout\=', like every other wait in the suite."
                     ;; With the flag, exactly as `cooked--drain-and-apply' asks;
                     ;; see `cooked-tests--settle'.
                     (cooked--apply
-                     (cooked--drain cooked--session cooked-rejoin-wrapped-lines)))))))
+                     (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t)))))))
           (not (buffer-live-p buffer)))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer (cooked--cleanup))

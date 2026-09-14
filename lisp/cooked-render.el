@@ -150,7 +150,7 @@ again is safe."
           (progn
             (setq cooked--draining t
                   cooked--drain-pending nil)
-            (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines hidden)))
+            (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines hidden t)))
               (if (plist-get update :withheld)
                   (cooked--apply-withheld update)
                 (cooked--apply update)))
@@ -158,7 +158,7 @@ again is safe."
             ;; and a freeze that has lifted does not lift again.
             (while (and cooked--drain-pending cooked--session)
               (setq cooked--drain-pending nil)
-              (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines)))
+              (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t)))
             (setq applied t))
         (when (buffer-live-p buffer)
           (with-current-buffer buffer
@@ -672,13 +672,20 @@ and the region shaped before anything measures it."
          (viewport (cooked--capture-viewport))
          (pending (cooked--take-pending-input))
          ;; Where this drain's scrollback landed, for resolving a `scrolled'
-         ;; anchor against.  nil when the drain evicted nothing.
-         (batch-start (when-let* ((scrolled (plist-get update :scrolled)))
-                        (cooked--render-scrolled scrolled)))
+         ;; anchor against.  nil when the drain evicted nothing.  The rows the
+         ;; buffer already holds are promoted first, since they are the batch's
+         ;; first rows and the top of the screen, and the rest is inserted after
+         ;; them.
+         (batch-start (let ((promoted (when-let* ((promoted (plist-get update :promoted)))
+                                        (cooked--promote-rows
+                                         promoted (plist-get update :height))))
+                            (inserted (when-let* ((scrolled (plist-get update :scrolled)))
+                                        (cooked--render-scrolled scrolled))))
+                        (or promoted inserted)))
          ;; Between the two render passes, and it has to be exactly here.  After the
          ;; scrollback, because the rows a scroll pushed off the top are inserted above
-         ;; `cooked--screen-start' and the shift's first row is measured from the marker
-         ;; once that insertion has moved it.  Before the damaged rows, because their
+         ;; `cooked--screen-start' or promoted past it, and the shift's first row is
+         ;; measured from the marker once that has moved it.  Before the damaged rows, because their
          ;; indices are in post-shift coordinates -- the emulator's dirty flags travel
          ;; with their rows through every move precisely so that they can be.  See
          ;; `cooked--apply-shifts'.

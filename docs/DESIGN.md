@@ -81,8 +81,9 @@ on the drain that evicts the first wrapped row.
 
 ### The transcript is read-only in two halves
 
-Scrollback is protected once, where it is inserted (`cooked--render-scrolled`), because
-it never changes again. The live screen is protected on every drain
+Scrollback is protected once, where it enters the transcript, because it never changes
+again: `cooked--render-scrolled` for rows sent as text, and `cooked--promote-rows` for the
+top screen rows the buffer already held, which become history where they stand. The live screen is protected on every drain
 (`cooked--protect`), because the boundary between it and the input region moves.
 `cooked--read-only-props` is the one property list both write, and sharing it is worth
 more than tidiness: the two regions are adjacent halves of one read-only transcript, so

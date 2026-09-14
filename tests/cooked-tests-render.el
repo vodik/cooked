@@ -1253,6 +1253,105 @@ it, so a whole-region repaint destroys every overlay in the viewport."
                                                      (overlay-end overlay))
                      "l3")))))
 
+;;;; Promoting the row that scrolls into history
+
+(defmacro cooked-tests--with-fed-screen (rows cols &rest body)
+  "Run BODY in a ROWS by COLS cooked buffer whose child writes nothing.
+
+What the emulator sees arrives through `cooked-tests--fed', so each drain holds
+exactly what the test fed before it."
+  (declare (indent 2))
+  `(let ((buffer (generate-new-buffer "*cooked-promote*")))
+     (unwind-protect
+         (with-current-buffer buffer
+           (cooked-mode)
+           (cooked--start '("sleep" "600"))
+           (setq cooked--rows ,rows cooked--cols ,cols
+                 cooked--last-size (cons ,rows ,cols))
+           (cooked--resize cooked--session ,rows ,cols)
+           (cooked--refresh-keymap)
+           (cooked--drain-and-apply)
+           ,@body)
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer))))
+
+(defun cooked-tests--fed (bytes)
+  "Feed BYTES to this buffer's emulator, then drain and apply as a wake does."
+  (cooked--feed cooked--session bytes)
+  (cooked--drain-and-apply))
+
+(defun cooked-tests--at (position length)
+  "The LENGTH characters at POSITION, without properties."
+  (buffer-substring-no-properties position (+ position length)))
+
+(ert-deftest cooked-a-row-scrolled-into-history-keeps-what-was-on-it ()
+  "A line fed at the bottom leaves the top row\'s text where it is.
+
+The row used to be sent again as scrollback and the original deleted, so a
+marker at column 5 collapsed to the start of the copy, an overlay over it
+collapsed to nothing, and a property Lisp had added was gone.  All three are on
+the same characters once the row is history, and so is the mark, which is the
+departing-row half of the `adjustRegion' floor."
+  (cooked-tests--with-fed-screen 3 20
+    (cooked-tests--fed "abcdefghij\r\ntwo\r\nthree")
+    (let* ((row (cooked--screen-start-position))
+           (marker (copy-marker (+ row 5)))
+           (overlay (make-overlay (+ row 5) (+ row 8))))
+      (set-mark (+ row 5))
+      (let ((inhibit-read-only t))
+        (put-text-property (+ row 5) (+ row 8) 'cooked-test-note t))
+      (cooked-tests--fed "\r\nfour")
+      (should (< marker (cooked--screen-start-position)))
+      (should (equal (cooked-tests--at marker 3) "fgh"))
+      (should (equal (cooked-tests--at (overlay-start overlay) 3) "fgh"))
+      (should (= (overlay-end overlay) (+ (overlay-start overlay) 3)))
+      (should (equal (cooked-tests--at (mark t) 3) "fgh"))
+      (should (get-text-property marker 'cooked-test-note))
+      (should (get-text-property marker 'cooked-scrollback))
+      (should (equal (cooked-tests--text) "abcdefghij\ntwo\nthree\nfour")))))
+
+(ert-deftest cooked-a-row-scrolled-above-a-status-line-keeps-what-was-on-it ()
+  "A region from the top row scrolls into history as the whole screen does.
+
+A status line on the bottom row, as tmux or a pinned progress bar draws one,
+confines the scroll to the rows above it.  The row leaving the top is still
+the buffer\'s own text, and the status line stays below the region."
+  (cooked-tests--with-fed-screen 3 20
+    (cooked-tests--fed "\e[1;2rabcdefghij\r\ntwo\e[3;1Hstatus\e[2;4H")
+    (let ((marker (copy-marker (+ (cooked--screen-start-position) 5))))
+      (cooked-tests--fed "\r\nthree")
+      (should (< marker (cooked--screen-start-position)))
+      (should (equal (cooked-tests--at marker 3) "fgh"))
+      (should (equal (cooked-tests--text) "abcdefghij\ntwo\nthree\nstatus")))))
+
+(ert-deftest cooked-rows-emacs-does-not-hold-scroll-into-history-as-text ()
+  "Only a row the buffer holds as the core last sent it is promoted.
+
+A row the width guard trimmed, the rows a flood scrolled through between
+drains, and a scroll after a region scroll all arrive as text."
+  (cl-flet ((drained (bytes)
+              (cooked--feed cooked--session bytes)
+              (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines nil t)))
+                (cooked--apply update)
+                update)))
+    (cooked-tests--with-fed-screen 3 20
+      (should (equal (plist-get (drained "one\r\ntwo\r\nthree\r\nfour") :promoted) nil))
+      (should (equal (plist-get (drained "\r\nfive") :promoted) '(2 (3 . t))))
+      ;; The guard trimmed the top row.
+      (cooked--row-unsent cooked--session 0)
+      (let ((update (drained "\r\nsix")))
+        (should-not (plist-get update :promoted))
+        (should (plist-get update :scrolled)))
+      ;; A flood: three rows the buffer showed, then rows it never did.
+      (let ((update (drained "\r\n1\r\n2\r\n3\r\n4\r\n5")))
+        (should (= (length (cdr (plist-get update :promoted))) 3))
+        (should (plist-get update :scrolled)))
+      ;; A region scroll first.
+      (should-not (plist-get (drained "\e[2;3r\e[3;1H\n\e[r\e[3;1H\n") :promoted))
+      ;; The region scroll discarded `4\=', which is what a region does.
+      (should (equal (cooked-tests--text)
+                     "one\ntwo\nthree\nfour\nfive\nsix\n1\n2\n3\n5")))))
+
 (ert-deftest cooked-a-scroll-leaves-the-buffer-saying-what-the-grid-says ()
   "Correctness, for the three shapes of move the emulator can report.
 

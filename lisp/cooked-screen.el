@@ -433,6 +433,68 @@ split a glyph run at."
         (cooked--prune-marks)
         start))))
 
+(defun cooked--promote-rows (promoted height)
+  "Keep the top screen rows as history, returning where they begin.
+
+PROMOTED is the drain\='s `:promoted\=', (BOTTOM . ROWS): one (CHARS . ENDS) per
+row, from screen row 0 down, for the rows that scrolled off the top of the
+region ending at row BOTTOM while the buffer already held them.  Their text
+stays where it is and `cooked--screen-start\=' moves past it.  Sent as text
+instead, `cooked--render-scrolled\=' would insert the same rows again above the
+screen and `cooked--apply-shift\=' would delete the originals.  So a marker, an
+overlay or a text property on one of them is still on its character once the
+row is history: a bookmark at column 5 of the line `tail -f\=' pushes off the
+top stays at column 5.
+
+The buffer\='s row and what scrollback gets differ in three ways, and each is
+mended by a small edit that leaves the rest of the row alone:
+- CHARS is how long the row is as scrollback.  A row carrying spaces
+  `cooked--pad-to-cursor\=' added is longer, and loses them; a wrapped row keeps
+  its trailing blanks up there, which the live row trimmed, and gets them back.
+- ENDS nil means the row joins the next one, as `cooked-rejoin-wrapped-lines\='
+  joins a wrapped row, so its newline is deleted.  If the next row is still on
+  the screen, the screen then starts mid-line, at the seam `:head\=' counts.
+- A newline that stays loses its `cooked-wrap\=' mark, which only the live
+  screen carries.
+
+A promotion is its share of the scroll that took the rows off the top, and
+`:shifts\=' holds the rest of that scroll.  So it opens the blank rows at the
+bottom of the region that `cooked--apply-shift\=' would have opened for it,
+which keeps a status line below the region where it is, and leaves the newlines
+ending the rows where that scroll would have: the newline a wrapped row\='s mark
+goes on is one of them.  None open when the region is the whole screen, HEIGHT
+rows tall, and every row of it went, since there is nothing below to hold apart.
+
+The return value is what `cooked--render-scrolled\=' returns: where this
+drain\='s scrollback begins, which a `scrolled\=' anchor is an offset from.  The
+core counts a promoted row\='s characters into those offsets."
+  (pcase-let ((`(,bottom . ,rows) promoted))
+    (save-restriction
+      (widen)
+      (save-excursion
+        (let ((start (marker-position cooked--screen-start))
+              (count (length rows)))
+          (goto-char start)
+          (pcase-dolist (`(,chars . ,ends) rows)
+            (let ((end (+ (point) chars))
+                  (eol (line-end-position)))
+              (if (> eol end)
+                  (delete-region end eol)
+                (goto-char eol)
+                (insert (make-string (- end eol) ?\s)))
+              (goto-char end)
+              (cond ((eobp) (when ends (insert "\n")))
+                    (ends (remove-text-properties (point) (1+ (point)) '(cooked-wrap nil))
+                          (forward-char 1))
+                    (t (delete-char 1)))))
+          (add-text-properties start (point)
+                               `(cooked-scrollback t ,@cooked--read-only-props))
+          (set-marker cooked--screen-start (point))
+          (unless (= count (1+ bottom) height)
+            (cooked--open-screen-rows (- (1+ bottom) count) count))
+          (cooked--prune-marks)
+          start)))))
+
 (defun cooked--prune-marks ()
   "Forget the marks that have scrolled into permanent scrollback.
 
@@ -743,16 +805,25 @@ costs its own contribution and neither the rest of the hook nor the drain.")
 ;;
 ;; Tracked through the render by the marker each of these already is, rather than
 ;; by the integer ghostel captures at the top of `redraw', and that is the design
-;; rather than a shortcut.  A drain does much more than rewrite rows: it inserts
-;; this batch's scrollback above the screen, moves rows for a scroll, extends and
-;; trims the region, lifts and reinstates the pending input, and evicts from the
-;; top.  Emacs' own marker adjustment is already right for every one of those,
-;; and re-deriving them all in arithmetic would be a second implementation of the
-;; drain with its own way of being wrong.  The single edit markers are wrong for
-;; is the row rewrite, because a delete-and-reinsert is not a replacement as far
-;; as that adjustment is concerned: a mark collapses to the run's *start* and a
-;; `window-point' is pushed to its *end*.  So that one edit is corrected where it
-;; happens, and nothing else is touched.
+;; rather than a shortcut.  A drain does much more than rewrite rows: it promotes
+;; the top rows into scrollback or inserts this batch's scrollback above the
+;; screen, moves rows for a scroll, extends and trims the region, lifts and
+;; reinstates the pending input, and evicts from the top.  Emacs' own marker
+;; adjustment is already right for every one of those, and re-deriving them all
+;; in arithmetic would be a second implementation of the drain with its own way
+;; of being wrong.  The edit markers are wrong for is the row rewrite, because a
+;; delete-and-reinsert is not a replacement as far as that adjustment is
+;; concerned: a mark collapses to the run's *start* and a `window-point' is pushed
+;; to its *end*.  So that edit is corrected where it happens, and nothing else is
+;; touched.
+;;
+;; A row leaving the top of the screen is a rewrite of the same kind when it is
+;; sent as text -- a copy inserted above and the original deleted -- and nothing
+;; carries a position across that.  It is sent as text only when the buffer does
+;; not hold it as the core last sent it: a row the width guard trimmed, the rows a
+;; flood scrolled through between drains, a row after a resize or a screen switch.
+;; Every other row is promoted, and a position on it stays on its character; see
+;; `cooked--promote-rows'.
 
 (cl-defstruct (cooked-relocation (:constructor cooked--relocation-make) (:copier nil))
   "A position `cooked--render-rows' has to carry across a run it rewrites.
