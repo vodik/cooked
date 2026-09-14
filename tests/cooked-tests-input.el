@@ -2015,6 +2015,42 @@ batch cannot draw."
       (should (equal (cooked--screen-cell (+ x 2)) '(0 . 6)))
       (should (equal (cooked--mouse-cell nil (list x 0)) '(0 . 3))))))
 
+(ert-deftest cooked-a-screen-cell-and-its-position-convert-both-ways ()
+  "Going to a cell lands where `cooked--screen-cell' reads that cell back.
+
+A view the user has wandered away from is remembered as a cell and restored
+from one after every drain.  The cell is counted in cells and the restore used
+to move by characters, so on a row with a wide character it landed further
+right each time: column 4 of `日本XYZ' is `X', and four characters along is
+`Z'.  The second half of a wide character goes to the character, as the
+core's `chars_before' has it, and a box-drawing run counts its cells whatever
+it is drawn as."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033[?1049h日本XYZ\\r\\n│ │x中y─┼─z'; stty raw; exec sleep 30")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "│ │x中y─┼─z" (cooked-tests--text)))))
+    (let ((inhibit-read-only t)
+          (run (save-excursion (goto-char (cooked--screen-start-position))
+                               (search-forward "│ │") (match-beginning 0))))
+      ;; Drawn wider than its cells, as a zoomed box-drawing image is.
+      (put-text-property run (+ run 3) 'display '(space :width 5)))
+    ;; Characters before each column from 0 to one past the row, and the column
+    ;; each of those positions reads back as.
+    (pcase-dolist (`(,row ,chars ,cells)
+                   '((0 (0 0 1 1 2 3 4 5 5) (0 0 2 2 4 5 6 7 7))
+                     (1 (0 1 2 3 4 4 5 6 7 8 9 10 10)
+                        (0 1 2 3 4 4 6 7 8 9 10 11 11))))
+      (let ((start (save-excursion (cooked--goto-screen-row row) (point))))
+        (dotimes (col (length chars))
+          (ert-info ((format "row %d, column %d" row col))
+            (cooked--goto-screen-cell (cons row col))
+            (should (= (- (point) start) (nth col chars)))
+            (should (equal (cooked--screen-cell) (cons row (nth col cells))))
+            ;; And a position read as a cell goes back to itself.
+            (let ((pos (point)))
+              (cooked--goto-screen-cell (cooked--screen-cell))
+              (should (= (point) pos)))))))))
+
 (ert-deftest cooked-mouse-is-left-to-emacs-when-unrequested ()
   "A child that never asked for mouse reports must not steal the click."
   (cooked-tests--with-session '("/bin/cat")

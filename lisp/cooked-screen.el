@@ -141,9 +141,31 @@ column 13.  See `cooked--mouse-glyph\=', which measures the same way."
                 (string-width (buffer-substring-no-properties (max bol start) pos))))))))
 
 (defun cooked--goto-screen-cell (cell)
-  "Move point to CELL, a (ROW . COL) pair, clamped to what the row holds."
+  "Move point to CELL, a (ROW . COL) pair, clamped to what the row holds.
+
+The inverse of `cooked--screen-cell\=', so COL is counted in cells as that
+function counts them: point lands after the most characters of the row whose
+`string-width\=' is still at most COL.  On `日本XYZ\=' column 4 is `X\=', where
+moving four characters stopped on `Z\=', and column 3, the second half of
+`本\=', is `本\=' itself.  That is the rule the core\='s `chars_before\=' gives
+a cursor inside a wide character, and a combining mark after the last
+character that fits is taken along with it.
+
+A binary search over the row\='s text, since the width of a prefix only grows
+with its length, and so a restore after every drain costs a handful of
+`string-width\=' calls however wide the row is."
   (cooked--goto-screen-row (car cell))
-  (forward-char (min (cdr cell) (- (line-end-position) (point)))))
+  (let* ((start (point))
+         (text (buffer-substring-no-properties start (line-end-position)))
+         (col (cdr cell))
+         (low 0)
+         (high (length text)))
+    (while (< low high)
+      (let ((mid (/ (+ low high 1) 2)))
+        (if (<= (string-width text 0 mid) col)
+            (setq low mid)
+          (setq high (1- mid)))))
+    (goto-char (+ start low))))
 
 (defun cooked--at-child-cursor-p ()
   "Whether point is sitting where the child's cursor is."
