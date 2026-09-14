@@ -115,5 +115,42 @@ command whose whole output is still live offers nothing to find yet."
           (should-error (cooked-next-error-function 1 t) :type 'user-error))
       (delete-file file))))
 
+;; `ghostel-compile' unwraps soft wraps before it parses, because a diagnostic
+;; the terminal broke across two rows is two lines no error regexp matches.
+;; Here the emulator already knows which scrolled-off rows were continuations,
+;; and with `cooked-rejoin-wrapped-lines' the scrollback holds them as the one
+;; line the child wrote, so nothing needs undoing before the parse.
+(ert-deftest cooked-next-error-finds-an-error-the-terminal-wrapped ()
+  "A gcc error the terminal wrapped inside its line number is still found.
+
+The file name is padded so that `FILE:1' fills the row exactly and `2:3:
+error' starts the next.  Left split, the second row parses as an error in a
+file with no name, and visiting it asks where that file is."
+  :tags '(zsh)
+  (skip-unless (executable-find "zsh"))
+  (let ((dir (make-temp-file "cooked-next-error-wrap" t)))
+    (unwind-protect
+        (cooked-tests--with-zsh
+          (let* ((stem (expand-file-name "f" dir))
+                 (file (concat stem (make-string (- cooked--cols (length stem) 4) ?x) ".c")))
+            (should (= (length (concat file ":1")) cooked--cols))
+            (with-temp-file file (dotimes (_ 20) (insert "\n")))
+            (cooked--replace-input
+             (format "printf '%s:12:3: error: wrapped\\n'; seq 1 %d"
+                     file (* 2 cooked--rows)))
+            (cooked-send-input)
+            (should (cooked-tests--settle (lambda () cooked--commands) 8))
+            ;; Pushed off the screen by the numbers after it, into the scrollback
+            ;; `cooked-next-error-function' parses.
+            (should (< (save-excursion
+                         (goto-char (point-min))
+                         (search-forward ":12:3: error" nil t))
+                       (cooked--screen-start-position)))
+            (cooked-next-error-function 1 t)
+            (should (equal (buffer-file-name) file))
+            (should (= (line-number-at-pos) 12))
+            (kill-buffer)))
+      (delete-directory dir t))))
+
 (provide 'cooked-tests-next-error)
 ;;; cooked-tests-next-error.el ends here
