@@ -2432,6 +2432,80 @@ genuinely printed nothing."
           (should (> (cooked--command-end-position command) (point-min)))
           (should (<= (cooked--command-end-position command) (max screen (point-max)))))))))
 
+(defun cooked-tests--push-scrollback (count)
+  "Put COUNT lines of text above the live screen, as a scroll would."
+  (save-restriction
+    (widen)
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (goto-char (cooked--screen-start-position))
+        (dotimes (i count)
+          (insert (format "old%d\n" i)))
+        (add-text-properties (point-min) (point)
+                             `(cooked-scrollback t ,@cooked--read-only-props))
+        (set-marker cooked--screen-start (point))))))
+
+(ert-deftest cooked-scrollback-cap-counts-only-what-arrived ()
+  "The trim's line count must not walk the scrollback it has already counted.
+
+It runs at the end of every drain, and a count from `point-min' cost 57 us a
+drain under ten thousand 80-column lines.  So after one count of forty
+lines, three more are counted as three lines' worth of text: what the count
+may walk is measured as the distance from the start of its accessible region,
+or from `point-min' of the whole buffer when it is asked for an absolute line."
+  (let ((cooked-scrollback-lines 50))
+    (cooked-tests--with-session '("/bin/sh" "-c" "echo ready; sleep 30")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "ready" (cooked-tests--text)))))
+      (cooked-tests--push-scrollback 60)
+      (cooked--trim-scrollback)
+      (should (= (cooked-tests--scrollback-lines) 50))
+      ;; The trim deleted what the count before it walked, so this one counts
+      ;; the fifty lines left from the top.
+      (cooked--trim-scrollback)
+      (let* ((walked nil)
+             (record (lambda (&optional pos absolute)
+                       (let ((pos (or pos (point))))
+                         (push (- pos (if absolute
+                                          (save-restriction (widen) (point-min))
+                                        (point-min)))
+                               walked)))))
+        (advice-add 'line-number-at-pos :before record)
+        (unwind-protect
+            (progn
+              (cooked-tests--push-scrollback 3)
+              (cooked--trim-scrollback))
+          (advice-remove 'line-number-at-pos record))
+        (should walked)
+        (should (<= (apply #'max walked) (length "old0\nold1\nold2\n")))
+        (should (= (cooked-tests--scrollback-lines) 53))))))
+
+(ert-deftest cooked-scrollback-cap-recounts-after-a-deletion ()
+  "A count taken before scrollback was deleted from must not be built on.
+
+Forty-eight lines are counted under a cap of forty-five, which trims at
+forty-nine.  Ten of them are then deleted out of the middle, as deleting one
+command's output does, and nine more arrive: forty-seven lines, inside the
+slack.  Counted as though the ten were still there, the total would be
+fifty-seven and the trim would cut the transcript back to forty-five."
+  (let ((cooked-scrollback-lines 45))
+    (cooked-tests--with-session '("/bin/sh" "-c" "echo ready; sleep 30")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "ready" (cooked-tests--text)))))
+      (cooked-tests--push-scrollback 48)
+      (cooked--trim-scrollback)
+      (should (= (cooked-tests--scrollback-lines) 48))
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (let ((beg (progn (forward-line 10) (point))))
+          (forward-line 10)
+          (cooked--discard-scrollback-region beg (point))))
+      (should (= (cooked-tests--scrollback-lines) 38))
+      (cooked-tests--push-scrollback 9)
+      (cooked--trim-scrollback)
+      (should (= (cooked-tests--scrollback-lines) 47)))))
+
 (ert-deftest cooked-glyph-scale-clamps-each-side-not-the-sum ()
   "The three-way min, which is the detail an implementation skips.
 

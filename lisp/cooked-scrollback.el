@@ -128,6 +128,48 @@ where there is nothing to do."
       (cooked--forget-history cooked--session)
       (setf (cooked-grid-head cooked--grid) 0))))
 
+(defvar-local cooked--scrollback-counted nil
+  "Where `cooked--scrollback-newlines\=' last counted to.
+
+A list (MARKER CHARS . NEWLINES): MARKER is where the count stopped, CHARS how
+many characters were above it and NEWLINES how many of those were newlines.")
+
+(defun cooked--scrollback-newlines (screen)
+  "How many newlines the buffer holds above SCREEN, counting only new text.
+
+Scrollback is appended at the screen and otherwise only ever deleted from, so
+until something is deleted the newlines above the last count are still there:
+a drain that pushed three rows off the screen is counted three rows\=' worth.
+Whether the text above the last count is still the text that was counted is
+judged by its length.  A deletion from it, by a trim or by
+`cooked--discard-scrollback-region\=', changes the length, and the next call
+counts from `point-min\=' again.
+
+This is what `cooked--trim-scrollback\=' runs on every drain of a long session.
+Counting from `point-min\=' instead cost 57 us a drain under ten thousand
+80-column lines and 159 us under 800-column ones, against 0.7 and 1.2 us for
+this, interleaved in one compiled Emacs at load 1.8 over 16 CPUs; the newline
+cache made no difference to it.
+
+Called with the buffer widened."
+  (pcase-let ((`(,marker ,chars . ,newlines) cooked--scrollback-counted))
+    (unless (and marker
+                 (<= marker screen)
+                 (= (- marker (point-min)) chars))
+      (setq marker (set-marker (or marker (make-marker)) (point-min))
+            newlines 0))
+    (setq newlines (+ newlines
+                      ;; `save-excursion' too, because narrowing moves point
+                      ;; into the region, and point is on the screen below it.
+                      (save-excursion
+                        (save-restriction
+                          (narrow-to-region marker screen)
+                          (1- (line-number-at-pos screen))))))
+    (set-marker marker screen)
+    (setq cooked--scrollback-counted
+          (cons marker (cons (- screen (point-min)) newlines)))
+    newlines))
+
 (defun cooked--trim-scrollback ()
   "Cut the transcript back to `cooked-scrollback-lines\=' if it has outgrown it.
 
@@ -154,13 +196,11 @@ been split rather than before."
                 ;; some average width would never open for output narrower than
                 ;; that, and a flood of `line1234' would sit far past the cap.
                 ((>= (- screen (point-min)) threshold))
-                ;; `line-number-at-pos' walks from `point-min', which is affordable
-                ;; precisely because the cap bounds what it walks: the buffer this
-                ;; runs against is a capped one, and an uncapped session never
-                ;; reaches here at all.  It is a C-level scan for newlines,
-                ;; which beats a bounded `forward-line' walk back from the
-                ;; screen even though that one is O(cap) rather than O(buffer).
-                ((> (line-number-at-pos screen t) threshold)))
+                ;; Only the scrollback added since the last drain is counted, which
+                ;; is what makes it affordable on every drain of a long session:
+                ;; see `cooked--scrollback-newlines'.  A line is a newline and the
+                ;; screen's own, so THRESHOLD lines is THRESHOLD newlines above it.
+                ((>= (cooked--scrollback-newlines screen) threshold)))
       (save-excursion
         (goto-char screen)
         (forward-line (- cap))
