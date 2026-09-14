@@ -18,8 +18,8 @@
 #   oc                was \E]104\007, "reset all colours to defaults" -- and
 #                     the same sequence has gone from `rs1', which is now `\Ec'
 #                     alone. It follows from the line above rather than standing
-#                     on its own: OSC 4 is declined, so there is no palette left
-#                     for OSC 104 to reset. The only colours a child can change
+#                     on its own: OSC 4 answers a query but ignores every set, so
+#                     there is no changed palette for OSC 104 to reset. The only colours a child can change
 #                     here are the three defaults of OSC 10/11/12, and 110, 111
 #                     and 112 each undo one of those -- see `Cr'. A reset that
 #                     claimed to undo more than those three would be claiming a
@@ -70,11 +70,13 @@
 #   Sync              synchronized output (mode 2026)
 #
 # And a second group, declared late: features the core already had, named in the
-# vocabulary of the programs that read them. None of these is in ncurses'
-# registry -- they are extended names, and each one's spelling here was checked
-# against the reader it is for rather than against a standard. tmux is the main
-# one, and it matters that tmux uses a capability it finds in the entry directly,
-# with no terminal-features line needed to switch it on.
+# vocabulary of the programs that read them. Only some are standard. `hs', `tsl',
+# `fsl' and `dsl' are term(5) capabilities, `TS' ships in ncurses' xterm+sl and
+# `Su' in its xterm-kitty; the rest are extended names no entry in ncurses' database
+# uses, so each one's spelling here was checked against the reader it is for
+# rather than against a standard. tmux is the main one, and it matters that tmux
+# uses a capability it finds in the entry directly, with no terminal-features line
+# needed to switch it on.
 #
 #   Su                styled underlines, as the boolean neovim looks for. It
 #                     promises nothing Smulx does not already describe: SGR
@@ -89,8 +91,11 @@
 #                     id= and a URI, closed by ST. The id is accepted and
 #                     not needed -- links are interned by destination.
 #   Eneks, Dseks      modifyOtherKeys level 2 on and off (CSI > 4 ; 2 m and a
-#                     bare CSI > 4 m), for tmux's extended-keys. Level 2 is the
-#                     one cooked encodes; level 1 falls back to legacy keys.
+#                     bare CSI > 4 m), for tmux's extended-keys. Level 1 is
+#                     honoured too, as xterm does it: emacs -nw asks for it,
+#                     and it spells only the Control chords that have no
+#                     control byte of their own: C-; is sent as CSI 27;5;59~
+#                     at either level, and Shift-a is re-spelled only at 2.
 #   Enfcs, Dsfcs      focus reporting, mode 1004 -- `fe' and `fd' under the
 #                     names tmux's focus-events asks for.
 #   Swd               the working directory as OSC 7, closed by `fsl', which
@@ -102,10 +107,6 @@
 #                     percentage closed by ST, in tmux's exact spelling. tmux's
 #                     progressbar feature hands on the active pane's report
 #                     through it, and sends -1 for a report with no percentage.
-#
-# Not yet `Sxl', although sixel is decoded. Whether a sixel can be shown depends
-# on the frame the buffer is in, and an entry cannot change its answer when the
-# buffer moves to a terminal frame; that is for the graphics work to settle.
 #
 # Everything else xterm-256color declares is kept, and is now implemented. That
 # includes a dozen it declares under `infocmp -x' that we used to claim and

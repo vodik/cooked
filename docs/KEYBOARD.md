@@ -155,7 +155,15 @@ three maps that forward everything are therefore worn through a child keymap on 
 graphical frame: `ESC` becomes the prefix there, and the Escape key keeps its
 zero-latency spelling through the `escape` event a graphical frame actually sends.
 `vterm` and `eat` both resolve it the same way, unconditionally; cooked's variant is
-chosen at the moment the map is installed, so terminal frames never pay for it.
+chosen at the moment the map is installed, so a terminal frame does not get the prefix.
+
+A terminal frame pays a different, smaller cost, and only where Emacs owns the line. There
+a tty Emacs has no `escape` event, because the Escape key and the first byte of a sequence
+are the same byte, so configuration keyed on `escape`, which is most evil configuration,
+would do nothing. cooked waits `cooked-tty-escape-delay` (10 ms) after a lone ESC and
+delivers `escape` if no byte follows. A Meta chord pays nothing, since its second byte is
+already queued. Neither does ESC sent to a child that owns the keyboard: vim's Escape still
+reaches vim the instant it is pressed. Set the option to nil to turn the translation off.
 
 `cooked-send-literal-key` is the escape hatch in the other direction: it sends the very
 next key to the child exactly as typed, regardless of what's reserved — including `C-c`

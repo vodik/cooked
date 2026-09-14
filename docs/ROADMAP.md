@@ -160,12 +160,20 @@ looking, both of which already exist.
 
 ## 5. TRAMP bridging over ssh
 
-OSC 7 already tells us the child's working directory. If we can also tell we are inside
-`ssh` — the title, the annotation, or an explicit marker from the remote shell — then
-`find_file foo` could open `/ssh:host:/path/foo` in the *local* Emacs.
+**Half shipped.** Telling that the shell is on another host is done: OSC 7 carries the
+host, `cooked--foreign-host-p` compares it with this one, and with `cooked-remote-directory`
+at its default the reported path becomes a TRAMP name. So after `ssh prod` and `cd /srv`,
+`C-x C-f` in the buffer starts at a name such as `/ssh:prod:/srv/`, and a multi-hop prefix the session
+already had is kept rather than flattened. That needs only the far shell to report its
+directory, which the shipped snippets do and fish 4 does on its own.
 
-You would ssh somewhere, type `find_file config.rs`, and get a real buffer with your LSP,
-your keybindings, your everything — editing a remote file from a remote shell.
+What is left is the other half: typing `find_file config.rs` at that remote prompt and
+getting `/ssh:prod:/srv/config.rs` in the local Emacs, with your LSP and your keybindings.
+The `OSC 51;E` verbs carry a path and no host, and resolve it through
+`cooked--local-name`, so today they open a same-named local file or refuse a remote name.
+Routing them through `cooked--remote-prefix` when the host is foreign is the change, and
+it has to keep that function's rule that the byte stream can choose the path but never the
+host or the method.
 
 The other direction exists: `M-x cooked` in a `/ssh:host:` directory starts the shell on
 that host with `ssh -t` in cooked's own pty (`cooked-remote.el`). Starting over TRAMP's own
@@ -173,9 +181,9 @@ that host with `ssh -t` in cooked's own pty (`cooked-remote.el`). Starting over 
 second kind of session without the reader thread or backpressure. Methods that do not log
 in with ssh are refused.
 
-**Effort:** medium. **Risk:** medium; detecting "we are remote" reliably is the crux, and
-the remote shell needs our integration installed. **Payoff:** this is a genuinely new
-capability rather than a nicer terminal.
+**Effort:** small. **Risk:** low, provided the verbs reuse the OSC 7 guards rather than
+growing their own; the remote shell still needs our integration installed. **Payoff:**
+this is a genuinely new capability rather than a nicer terminal.
 
 ---
 
@@ -205,11 +213,13 @@ there already — the module boundary is a session handle and a wakeup pipe.
 
 - **Predictive echo, mosh-style.** We know cooked versus raw and we own the pty. Over a
   laggy ssh, echo keystrokes locally and reconcile when the real bytes arrive.
-- **Sixel / kitty graphics** rendered as Emacs images.
+- **Sixel / kitty graphics** rendered as Emacs images — **shipped**; see the Images
+  section of `docs/FEATURES.md` and `docs/IMAGES.md`.
 - **Prompt inference without shell integration**, for remote hosts where the snippet is
   not installed — heuristics over termios transitions and cursor movement.
 - **Auto-answer** sudo and ssh prompts from auth-source, keyed on the host parsed from the
-  prompt text. The hook (`cooked-password-function`) already exists.
+  prompt text. The hook (`cooked-password-functions`) already exists, and composes, so an
+  auth-source entry can sit in front of `read-passwd`.
 
 ---
 

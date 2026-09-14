@@ -1,7 +1,7 @@
 # Terminfo
 
-Why cooked ships its own entry, and what is in it. Every capability below has been
-checked against the code.
+Why cooked ships its own entry, and what is in it, and which of its claims a test holds
+the core to.
 
 
 We ship `terminfo/cooked.ti` and default `TERM` to `cooked-256color` — what alacritty,
@@ -13,7 +13,7 @@ applications drop to 256 unless they happen to honour the `COLORTERM` convention
 Inheriting `use=xterm-256color` and cancelling a few entries turned out to be the wrong
 shape for that promise: it claims everything xterm has, and everything ncurses ever adds to
 it, so the entry drifts out of true every time nobody looks. The entry is now written out
-in full, and every capability in it has been checked against the code. `bce` is the one
+in full, so that every capability in it can be checked against the code. `bce` is the one
 that mattered — ncurses *optimises* on the strength of it, setting a background and erasing
 rather than writing spaces, so ignoring it mis-drew every coloured panel and status bar.
 
@@ -51,11 +51,20 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 | `Swd` | the working directory (OSC 7, closed by `fsl`), which tmux's `osc7` feature sends for the active pane while `set-titles` is on |
 | `Spb` | the OSC 9;4 progress report, a state and a percentage closed by ST, in the spelling tmux's `progressbar` feature uses; tmux sends -1 for a report with no percentage |
 
-The second group are extended names with no registry: ncurses' `terminfo.src` has none of
-them, so each was checked against the program that reads it. tmux uses any of them it
-finds in the entry, with no `terminal-features` line. `Sxl` is held back although sixel
-is decoded, because whether a picture can be shown depends on the frame, and the entry
-cannot change its answer when the buffer moves.
+Only some of the second group are standard. `hs`, `tsl`, `fsl` and `dsl` are term(5)
+capabilities, `TS` ships in ncurses' `xterm+sl` and `Su` in its `xterm-kitty`. The rest
+are extended names that no entry in ncurses' database uses, so each was checked against
+the program that reads it. tmux uses any of them it finds in the entry, with no
+`terminal-features` line.
+
+**Kept, and made true:** some capabilities xterm-256color declares had a value that
+described xterm rather than cooked.
+
+| Capability | What was wrong |
+|---|---|
+| `rv` | the pattern for the secondary DA reply expected xterm's patch level; cooked answers `CSI > 0 ; 0 ; 0 c`, and the pattern now matches that |
+| `xr` | the pattern for the XTVERSION reply expected `XTerm(…)`; cooked answers with its own name, so it is now `cooked(…)` |
+| `ka1` … `kpZRO` | all nineteen keypad capabilities were declared and none was ever sent. The strings were xterm's and already right; cooked now sends them, the SS3 forms under `smkx` and the plain digits, operators and cursor keys under `rmkx` |
 
 **Removed, being things we do not implement and do not intend to:**
 
@@ -106,6 +115,15 @@ capability names answers 0, a declined mode answers anything but 4 or is set by 
 capability, or one of the queries `u7`, `u9`, `RV` and `XR` goes unanswered. `flash`
 came back only once DECSCNM answered 1 or 2, and removing mode 5 again would fail it.
 
+The other capabilities are held to less. `terminfo_sequences_are_all_recognised` feeds
+every string capability to the core, the parametrised ones expanded, and fails if any
+sequence reaches no arm, if an SGR leaves the pen as it was, or if an OSC never reaches
+Lisp. Recognised is not the same as done right: a `rep` arm that repeated the character
+twice instead of three times would pass it, and so the rest still rests on the tests of
+each feature. The keys are what cooked sends rather than what it reads, and
+`cooked-terminfo-keys-are-what-cooked-sends` checks each of them against the bytes the key
+it names is encoded as, under `smkx` and under `rmkx`.
+
 DECRQSS (`DCS $ q Pt ST`) does the same for settings rather than modes: it answers the pen
 (`m`, as the SGR that recreates it, direct colour included), the scroll region (`r`), the
 cursor style (`SP q`) and the conformance level (`"p`, VT220 as DA1 says), and refuses
@@ -149,9 +167,10 @@ ghostty send, with any `$<…>` delay left out, since `tputs` takes that and the
 sees it. `TN` (or `name`) and `Co` are answered too, as the entry's name and `colors`, and
 so are the keys under their termcap names, `ku` as `kcuu1`, as xterm answers them. `RGB` is
 answered only under `cooked-direct`, where it is declared: it claims that `setaf` takes an
-RGB value, which is true of that entry and false of `cooked-256color`. The
-reply stops at the first capability the entry lacks, as xterm's does, and names it only
-in hex: a token that is not hex gets a bare `DCS 0 + r ST`, so nothing the child sent comes
+RGB value, which is true of that entry and false of `cooked-256color`. Each
+capability is answered in a `DCS` of its own, as kitty and ghostty do, where xterm puts
+every answer in one. Like xterm's, the reply stops at the first capability the entry
+lacks, and names it only in hex: a token that is not hex gets a bare `DCS 0 + r ST`, so nothing the child sent comes
 back as text it could type into a shell. The in-band answer
 has no list of its own to keep: `terminfo_entry_is_answered_in_full` in
 `src/emu/term/xtgettcap.rs` queries every capability line in the file, and fails if one is
