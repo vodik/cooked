@@ -171,6 +171,35 @@ the last thing in the buffer."
     (cooked-tests-comint--say "\r\nfile\n$ ")
     (should (equal (cooked-tests-comint--text) "$ ls\n\nfile\n$ "))))
 
+(ert-deftest cooked-comint-notices-input-after-a-prompt-with-no-text ()
+  ;; A prompt that only moves the cursor leaves an open line with nothing in it, so
+  ;; the buffer ends in the empty string whatever comint inserts after it, and a check
+  ;; of the text alone cannot see the input.  The command's output then continued the
+  ;; prompt's line, at the column the prompt had moved to, eight blanks after a tab.
+  (cooked-tests-comint--with
+    (cooked-tests-comint--say "done\n\t")
+    (cooked-tests-comint--type "ls\n")
+    (cooked-tests-comint--say "file\n")
+    (should (equal (cooked-tests-comint--text) "done\nls\nfile\n")))
+  ;; And for the first output the buffer ever saw, which no earlier text placed.
+  (cooked-tests-comint--with
+    (cooked-tests-comint--say "\e[5C")
+    (cooked-tests-comint--type "ls\n")
+    (cooked-tests-comint--say "file\n")
+    (should (equal (cooked-tests-comint--text) "ls\nfile\n"))))
+
+(ert-deftest cooked-comint-keeps-a-cursor-move-that-arrived-alone ()
+  ;; Output after the input that begins with a read holding only a cursor movement.
+  ;; The core gives up the prompt's line for that read and starts a new one, with the
+  ;; cursor moved.  The filter used to go on believing the prompt was the open line, so
+  ;; the next read found it missing again and gave up the new line too, move and all.
+  (cooked-tests-comint--with
+    (cooked-tests-comint--say "$ ")
+    (cooked-tests-comint--type "ls\n")
+    (cooked-tests-comint--say "\e[5C")
+    (cooked-tests-comint--say "x\n")
+    (should (equal (cooked-tests-comint--text) "$ ls\n     x\n"))))
+
 (ert-deftest cooked-comint-never-deletes-text-it-did-not-write ()
   ;; The check that makes the retraction safe.  Here the child *does* rewrite its open
   ;; line, but the user's input is in the way, so nothing before the process mark may

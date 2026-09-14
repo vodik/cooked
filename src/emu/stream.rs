@@ -1162,6 +1162,9 @@ mod tests {
             /// `cooked-comint--open': the text of the open line as last handed over,
             /// which is what decides whether the next feed may retract.
             open: String,
+            /// `cooked-comint--open-start': where in `shown` the open line begins, so
+            /// that input typed after an open line with no text is noticed too.
+            open_start: usize,
         }
 
         impl Consumer {
@@ -1170,14 +1173,16 @@ mod tests {
                     filter: Filter::new(),
                     shown: Vec::new(),
                     open: String::new(),
+                    open_start: 0,
                 }
             }
 
             /// Whether the buffer still ends in the open line, as
-            /// `cooked-comint--intact-p' asks it: by text alone.
+            /// `cooked-comint--intact-p' asks it: by its text, and by where it begins.
             fn intact(&self) -> bool {
                 let open: Vec<char> = self.open.chars().collect();
                 self.shown.len() >= open.len()
+                    && self.open_start == self.shown.len() - open.len()
                     && self.shown[self.shown.len() - open.len()..]
                         .iter()
                         .map(|(c, ..)| *c)
@@ -1189,6 +1194,16 @@ mod tests {
                 let intact = self.intact();
                 self.filter.feed(chunk.as_bytes(), intact);
                 let emission = self.filter.emission();
+                // The core gave the line up, so `cooked-comint--emit' forgets it whether
+                // or not the chunk made anything.
+                if !intact {
+                    self.open.clear();
+                    self.open_start = self.shown.len();
+                }
+                // `cooked--filter-feed' answers nil, and nothing more happens.
+                if emission.is_empty() {
+                    return;
+                }
                 assert!(
                     intact || emission.retract == 0,
                     "an unsynced feed retracted"
@@ -1212,6 +1227,8 @@ mod tests {
                     let keep = self.open.chars().count() - emission.retract;
                     self.open = self.open.chars().take(keep).collect::<String>() + tail;
                 }
+                // `cooked-comint--place-open-start', once the text is in.
+                self.open_start = self.shown.len() - self.open.chars().count();
             }
 
             /// What `comint-send-input' does to the buffer: INPUT inserted after the
@@ -1296,11 +1313,10 @@ mod tests {
             /// drawn, the input, and then the output exactly as a filter would show it on a
             /// fresh line with the prompt's rendition still set.
             ///
-            /// Except where the prompt left an open line with no text in it, such as `\t`
-            /// or `abc\x1b[2K` on their own. The buffer then ends in nothing the filter
-            /// can check, so the input goes unnoticed and the output starts at the column
-            /// the prompt left the cursor on. That costs some leading blanks and nothing
-            /// else, and the expected side follows it rather than pretending otherwise.
+            /// That includes a prompt that left an open line with no text in it, such as
+            /// `\t` or `abc\x1b[2K` on their own, where the buffer ends in nothing the
+            /// text could be checked against and only the open line's place shows the
+            /// input.
             #[test]
             fn output_after_typed_input_starts_a_line_however_it_is_cut(
                 prompt in script(),
@@ -1312,11 +1328,9 @@ mod tests {
                 let input = input + "\n";
                 let mut expected = Consumer::new();
                 expected.feed(&prompt);
-                if !expected.open.is_empty() {
-                    let shown = expected.shown.clone();
-                    expected.feed("\n");
-                    expected.shown = shown;
-                }
+                let shown = expected.shown.clone();
+                expected.feed("\n");
+                expected.shown = shown;
                 expected.type_input(&input);
                 expected.feed(&output);
 

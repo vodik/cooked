@@ -100,6 +100,25 @@ when the buffer no longer ends in them -- which is what comint inserting the
 user's input looks like from here.  Empty whenever the last thing emitted ended
 a line, which is most of the time.")
 
+(defvar-local cooked-comint--open-start nil
+  "A marker where `cooked-comint--open' begins in the buffer, or nil.
+
+The text is not enough to tell that the buffer still ends in the open line
+when the open line has no text.  A prompt of `\\t' or `ESC [ 5 C' leaves one,
+and the buffer ends in the empty string whatever comint inserts after it.  So
+the place is kept too: comint inserting the user\='s input at the process mark
+leaves a marker before the input, and the distance to the mark stops being the
+open line\='s length.
+
+Placed by `cooked-comint--place-open-start' once comint has inserted what the
+filter returned, since the open line may begin inside that text.  Nil while
+that is still to happen, and `cooked-comint--intact-p' then goes by the text
+alone.")
+
+(defvar-local cooked-comint--placing nil
+  "Whether the filter has returned text whose open line is not yet placed.
+See `cooked-comint--open-start'.")
+
 ;;;; Output
 
 (defun cooked-comint--tail (text)
@@ -126,6 +145,10 @@ columns cost it 20 ms, and a 10,000-character line then a prompt cost 375 ms."
 (defun cooked-comint--intact-p (mark)
   "Whether `cooked-comint--open' is still the text just before MARK.
 
+Asked of the place as well as the text: the open line must begin at
+`cooked-comint--open-start\=' when that is known.  A prompt with no text on
+its line otherwise matches the end of any buffer.
+
 The one question that decides whether anything may be deleted.  A nil answer
 is not an error and not rare: comint inserts what the user typed at the process
 mark, so at every prompt the characters this filter emitted for that prompt have
@@ -136,8 +159,11 @@ the `save-restriction' in `comint-output-filter' -- and the process mark is
 allowed to be outside a narrowing."
   (save-restriction
     (widen)
-    (let ((from (- mark (length cooked-comint--open))))
+    (let ((from (- mark (length cooked-comint--open)))
+          (start (and cooked-comint--open-start
+                      (marker-position cooked-comint--open-start))))
       (and (>= from (point-min))
+           (or (null start) (= start from))
            (string= cooked-comint--open
                     (buffer-substring-no-properties from mark))))))
 
@@ -210,8 +236,23 @@ Nothing is deleted that this filter did not emit, and nothing is deleted across
 a newline: `cooked-comint--open' holds one unfinished line at most."
   (let* ((proc (get-buffer-process (current-buffer)))
          (mark (and proc (process-mark proc)))
-         (intact (and mark (cooked-comint--intact-p mark)))
+         (intact (and mark
+                      (progn
+                        ;; Before the first text, the open line is the empty one
+                        ;; at the mark, whatever the buffer held before this mode.
+                        (unless (or cooked-comint--open-start cooked-comint--placing)
+                          (setq cooked-comint--open-start (copy-marker mark)))
+                        (cooked-comint--intact-p mark))))
          (result (cooked--filter-feed cooked-comint--core-filter string intact)))
+    (unless intact
+      ;; The core gave the old line up before parsing, whether or not anything came
+      ;; of the chunk, so the open line is now an empty one at the mark.  Forgotten
+      ;; here and not only when there is text, or a chunk that only moved the cursor
+      ;; would leave the check failing, and the next chunk would give up the line the
+      ;; move was on.
+      (cooked-comint--forget-open-line)
+      (when mark
+        (setq cooked-comint--open-start (copy-marker mark))))
     (if (null result)
         ""
       (pcase-let* ((`(,retract ,text ,styles ,links ,directory ,table) result)
@@ -233,9 +274,29 @@ a newline: `cooked-comint--open' holds one unfinished line at most."
                 (concat (substring cooked-comint--open
                                    0 (- (length cooked-comint--open) retract))
                         tail)))
+        (when cooked-comint--open-start
+          (set-marker cooked-comint--open-start nil)
+          (setq cooked-comint--open-start nil))
+        (setq cooked-comint--placing t)
         (when directory (cooked-comint--set-directory directory))
         (cooked--install-styles table)
         (cooked-comint--propertize text styles links)))))
+
+(defun cooked-comint--place-open-start (_string)
+  "Mark where the open line begins, now comint has inserted it.
+
+On `comint-output-filter-functions\=', which comint runs after every insertion
+with the process mark moved past the text, so the open line is the
+`cooked-comint--open\=' characters before the mark.  Only once per text the
+filter returned: a later run, for a chunk the filter swallowed whole, would
+find the user\='s input before the mark and place the open line after it."
+  (when-let* ((cooked-comint--placing)
+              (proc (get-buffer-process (current-buffer))))
+    (setq cooked-comint--placing nil
+          cooked-comint--open-start
+          (save-restriction
+            (widen)
+            (copy-marker (- (process-mark proc) (length cooked-comint--open)))))))
 
 (defun cooked-comint--core ()
   "This buffer's parser handle, loading the native core for it if need be.
@@ -304,8 +365,9 @@ that is missing or needs building turns this off again; see
   :lighter " cooked"
   (if cooked-comint-mode
       (progn
-        (setq cooked-comint--core-filter nil
-              cooked-comint--open "")
+        (setq cooked-comint--core-filter nil)
+        (cooked-comint--forget-open-line)
+        (add-hook 'comint-output-filter-functions #'cooked-comint--place-open-start nil t)
         ;; comint's own pass over the chunk, which deletes to the start of the line
         ;; where a terminal overwrites.  There is nothing left for it to find in any
         ;; case: the string it would scan has had its carriage returns spent.
@@ -320,14 +382,23 @@ that is missing or needs building turns this off again; see
         (setq-local ansi-color-for-comint-mode nil)
         (add-hook 'comint-preoutput-filter-functions #'cooked-comint--filter nil t))
     (remove-hook 'comint-preoutput-filter-functions #'cooked-comint--filter t)
+    (remove-hook 'comint-output-filter-functions #'cooked-comint--place-open-start t)
     (kill-local-variable 'comint-inhibit-carriage-motion)
     ;; With no filter made, nothing in the buffer was resolved here, so there is
     ;; nothing for `ansi-color' to disagree with.  This is the path a missing core
     ;; takes, and without it that buffer would show escape sequences raw.
     (unless cooked-comint--core-filter
       (kill-local-variable 'ansi-color-for-comint-mode))
-    (setq cooked-comint--core-filter nil
-          cooked-comint--open "")))
+    (setq cooked-comint--core-filter nil)
+    (cooked-comint--forget-open-line)))
+
+(defun cooked-comint--forget-open-line ()
+  "Forget the open line, its text and its place both."
+  (when cooked-comint--open-start
+    (set-marker cooked-comint--open-start nil))
+  (setq cooked-comint--open ""
+        cooked-comint--open-start nil
+        cooked-comint--placing nil))
 
 (defun cooked-comint--turn-on ()
   "Enable `cooked-comint-mode' if this buffer is a comint buffer.
