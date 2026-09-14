@@ -3119,25 +3119,33 @@ row dirty on the strength of having printed.
 
 ** The false-positive matrix
 
-| Event                                   | cooked                                                                                                                                                                                           | ghostel                                                                                                                                                      |
-|-----------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Event                                   | cooked                                                                                                                                                                                          | ghostel                                                                                                                                                      |
+|-----------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | bare cursor move, no output             | *0 rows* — the cursor rides the =Delta= as a level                                                                                                                                              | *1–2 rows*, marked twice over (=Screen.zig:1453=, =Renderer.zig:908=). Structural: ghostel encodes the cursor column in the row's *text length* (=:592-597=) |
-| cursor show/hide                        | 0 rows                                                                                                                                                                                           | 1–2, inherited                                                                                                                                               |
-| one character typed                     | 1 row                                                                                                                                                                                            | 1 row                                                                                                                                                        |
-| SGR change, no glyphs                   | *0 rows, and **no wake byte at all*** — =Term::feed= returns false (=term/mod.rs:592=)                                                                                                          | 0 dirty rows, but =ghostel--invalidate= fires on any output → a full 4×N-funcall row walk for zero repaint                                                  |
+| cursor show/hide                        | 0 rows                                                                                                                                                                                          | 1–2, inherited                                                                                                                                               |
+| one character typed                     | 1 row                                                                                                                                                                                           | 1 row                                                                                                                                                        |
+| SGR change, no glyphs                   | *0 rows, and **no wake byte at all*** — =Term::feed= returns false (=term/mod.rs:592=)                                                                                                          | 0 dirty rows, but =ghostel--invalidate= fires on any output → a full 4×N-funcall row walk for zero repaint                                                   |
 | =CSI K= on an already-blank row         | *0 rows — suppressed.* "a shell wiping a prompt line it is about to redraw identically is the single commonest thing a terminal is asked to do, and it need not cost a repaint" (=cell.rs:990=) | 1 row, unconditional ("We always mark our row as dirty")                                                                                                     |
-| =CSI 3J= (clear scrollback)             | all rows + handover                                                                                                                                                                              | *erase-buffer and re-materialise the entire scrollback* (=Renderer.zig:200-206=)                                                                             |
-| *one-line scroll, primary, full screen* | *all rows in the region* — =touch_range= after =rotate_left=, because every index genuinely holds new text                                                                                      | *2 rows.* The pagelist *grew*, the viewport slid, and the surviving buffer text was already correct                                                          |
-| one-line scroll, *alt screen*           | region rows                                                                                                                                                                                      | *all rows* — =eraseRow= sets =page.dirty=                                                                                                                   |
-| *scroll region scroll* (DECSTBM)        | rows =top..=bottom= only                                                                                                                                                                         | *all rows of the viewport* — =cursorScrollRegionUp= sets =page.dirty=. A 3-row status region repaints 50 rows                                               |
-| =IL=/=DL=                               | correct minimum                                                                                                                                                                                  | correct minimum                                                                                                                                              |
-| =ICH=/=DCH=                             | 1 row                                                                                                                                                                                            | 1 row, but *misses the previous row's spacer head* — fixed upstream in =eb722cb26=, absent at ghostel's pin. A live stale-cell bug                          |
-| alt screen enter/leave                  | all rows (=touch_all=)                                                                                                                                                                           | =clear()= → *the whole scrollback of the target screen*                                                                                                     |
-| resize / width reflow                   | all grid rows; scrollback above the seam untouched                                                                                                                                               | =clear()= on *every* resize → whole buffer re-materialised                                                                                                  |
-| scrollback eviction                     | 0 rows                                                                                                                                                                                           | 0 rows                                                                                                                                                       |
-| identical repaint                       | *0 rows, no wake, no redisplay*                                                                                                                                                                  | 1 row                                                                                                                                                        |
-| title / OSC 7 / OSC 8 / mouse modes     | *0 rows*                                                                                                                                                                                         | 0 dirty rows, but a full row walk each                                                                                                                       |
-| kitty placement                         | 1 row per image row; *payload crosses once ever*                                                                                                                                                 | rows dirty, *plus the full payload re-emitted every redraw regardless*                                                                                       |
+| =CSI 3J= (clear scrollback)             | all rows + handover                                                                                                                                                                             | *erase-buffer and re-materialise the entire scrollback* (=Renderer.zig:200-206=)                                                                             |
+| *one-line scroll, primary, full screen* | *1 row* for a line of text, *0* for a bare line feed: the scroll is a shift, the opened row is known blank, and the departing row is promoted to scrollback in place                            | *2 rows.* The pagelist *grew*, the viewport slid, and the surviving buffer text was already correct                                                          |
+| one-line scroll, *alt screen*           | *0 rows* — a shift, and the opened row is known blank                                                                                                                                           | *all rows* — =eraseRow= sets =page.dirty=                                                                                                                    |
+| *scroll region scroll* (DECSTBM)        | *0 rows* — a shift confined to =top..=bottom=                                                                                                                                                   | *all rows of the viewport* — =cursorScrollRegionUp= sets =page.dirty=. A 3-row status region repaints 50 rows                                                |
+| =IL=/=DL=                               | *0 rows* — the opened lines are blank, as Emacs already holds them                                                                                                                              | correct minimum                                                                                                                                              |
+| =ICH=/=DCH=                             | 1 row                                                                                                                                                                                           | 1 row, but *misses the previous row's spacer head* — fixed upstream in =eb722cb26=, absent at ghostel's pin. A live stale-cell bug                           |
+| alt screen enter/leave                  | all rows (=touch_all=)                                                                                                                                                                          | =clear()= → *the whole scrollback of the target screen*                                                                                                      |
+| resize / width reflow                   | all grid rows; scrollback above the seam untouched                                                                                                                                              | =clear()= on *every* resize → whole buffer re-materialised                                                                                                   |
+| scrollback eviction                     | 0 rows                                                                                                                                                                                          | 0 rows                                                                                                                                                       |
+| identical repaint                       | *0 rows, no wake, no redisplay*                                                                                                                                                                 | 1 row                                                                                                                                                        |
+| title / OSC 7 / OSC 8 / mouse modes     | *0 rows*                                                                                                                                                                                        | 0 dirty rows, but a full row walk each                                                                                                                       |
+| kitty placement                         | 1 row per image row; *payload crosses once ever*                                                                                                                                                | rows dirty, *plus the full payload re-emitted every redraw regardless*                                                                                       |
+
+*As surveyed on 2026-09-12, apart from the four scroll rows.* Those have moved
+since: a scroll is sent as a shift (25365a1), the core keeps a copy of what
+Emacs shows so a row a shift opens and a repaint that writes the same cells back
+cost nothing (96accf3), and a row leaving the top is promoted into scrollback
+where it stands instead of being resent (305f97e). =tests/scroll_damage.rs= and
+=a_line_fed_at_the_bottom_promotes_the_top_row= pin the counts now given. The
+other rows, and the paragraphs that follow, are as surveyed.
 
 *The shape:* cooked's false positives are **all in the row-shifting family** plus
 resize; everywhere else it is at or below the minimum, and in five cells it is
@@ -3150,6 +3158,8 @@ ghostel wins the single most common operation a terminal performs, decisively an
 without a scroll opcode on the wire: =index= at the region bottom grows the
 pagelist, =active_pin= slides, and the scroll is expressed as *the buffer already
 being right*. 2 rows against cooked's 25 — ~12× narrower on damage, ~4× on bytes.
+(As surveyed. cooked now sends one row for a line of text and keeps the
+departing row, so this is no longer ghostel's win; see the matrix above.)
 
 But it only works where =no_scrollback == false= and the region is the full screen
 with =top == 0=. Every other scroll shape hits a =page.dirty = true= path and,
@@ -3164,15 +3174,15 @@ redraw* — a wholesale trigger, not a scroll path.)
 
 ** Volume, with arithmetic
 
-| Workload                         | cooked                                                                       | ghostel                                                                             |
-|----------------------------------+------------------------------------------------------------------------------+-------------------------------------------------------------------------------------|
-| one char echoed                  | 1 crossing, ~100 B                                                           | ~106 crossings (4×24 row walk + fixed + edits)                                      |
-| spinner, 1 row @ 30 fps          | 30 crossings/s, ~1.3 KB/s — *or zero if the frame is byte-identical*        | ~3,200 crossings/s, repaints regardless                                             |
-| =cat=, 1000 lines/drain          | 1 crossing; one 80 KB =:scrolled= insert + 1.9 KB of grid rows               | ~4,100 crossings; one 81 KB insert                                                  |
-| full-screen TUI repaint          | 6.1 KB, *24 inserts + 24 delete-regions*                                     | 1.9 KB, *1 insert + 1 delete-region*                                                |
-| box-drawing frame                | *4 bytes for an 80-cell border row* (RLE deco); 9.5 → 2.8 ms/frame measured | per-cell font shaping; *their TUI benchmark emits ASCII and cannot see this*        |
-| one-line scroll, full screen     | 25 rows, ~6.2 KB, 25 inserts                                                 | 2 rows, ~160 B, 1 insert                                                            |
-| 640×480 image on screen @ 30 fps | *0 bytes of payload after the first*; ~14–290 KB/s of placement records      | *~921 KB per frame → ~27 MB/s*, plus 30 =create-image= calls/s on a ~900 KB string |
+| Workload                         | cooked                                                                                          | ghostel                                                                            |
+|----------------------------------+-------------------------------------------------------------------------------------------------+------------------------------------------------------------------------------------|
+| one char echoed                  | 1 crossing, ~100 B                                                                              | ~106 crossings (4×24 row walk + fixed + edits)                                     |
+| spinner, 1 row @ 30 fps          | 30 crossings/s, ~1.3 KB/s — *or zero if the frame is byte-identical*                            | ~3,200 crossings/s, repaints regardless                                            |
+| =cat=, 1000 lines/drain          | 1 crossing; one 80 KB =:scrolled= insert + 1.9 KB of grid rows                                  | ~4,100 crossings; one 81 KB insert                                                 |
+| full-screen TUI repaint          | 1 block, 3 buffer changes since coalescing, and only the rows that differ from what Emacs shows | 1.9 KB, *1 insert + 1 delete-region*                                               |
+| box-drawing frame                | *4 bytes for an 80-cell border row* (RLE deco); 9.5 → 2.8 ms/frame measured                     | per-cell font shaping; *their TUI benchmark emits ASCII and cannot see this*       |
+| one-line scroll, full screen     | 1 row and 1 insert; the departing row is promoted, so no scrollback bytes                       | 2 rows, ~160 B, 1 insert                                                           |
+| 640×480 image on screen @ 30 fps | *0 bytes of payload after the first*; ~14–290 KB/s of placement records                         | *~921 KB per frame → ~27 MB/s*, plus 30 =create-image= calls/s on a ~900 KB string |
 
 The image row is ~100–2000× and, unlike the others, is not a granularity trade —
 it is an absent cache.
@@ -3239,17 +3249,17 @@ performance story rests on. This is §9's item 1 with the invariant spelled out.
 
 ** Verdict: narrow in different places, and it traces to where each put the scroll
 
-| Workload                                        | Narrower  | Margin                                                                        |
-|-------------------------------------------------+-----------+-------------------------------------------------------------------------------|
-| bare cursor motion (=vim= =hjkl=, readline nav) | *cooked*  | 2 rows → 0                                                                   |
-| identical repaint (spinner, prompt rewrite)     | *cooked*  | 1–24 rows → 0, *and no wake at all*                                          |
-| SGR/OSC/mode-only traffic                       | *cooked*  | 0 either way, but ghostel pays 4N funcalls                                    |
-| one-line scroll, primary, no region             | *ghostel* | 25 rows → 2                                                                  |
-| sustained flood                                 | tie       | both get one big insert, by different routes                                  |
-| full-screen repaint                             | split     | ghostel on insert count (24→1); cooked on bytes and on box-drawing/CJK cells |
-| scroll-region or alt-screen scroll              | *cooked*  | ghostel degrades to whole viewport                                            |
-| resize, reflow, alt enter/leave                 | *cooked*  | ghostel re-materialises the whole scrollback                                  |
-| any frame with an image                         | *cooked*  | ~100–2000× on payload                                                         |
+| Workload                                        | Narrower | Margin                                                                                                       |
+|-------------------------------------------------+----------+--------------------------------------------------------------------------------------------------------------|
+| bare cursor motion (=vim= =hjkl=, readline nav) | *cooked* | 2 rows → 0                                                                                                   |
+| identical repaint (spinner, prompt rewrite)     | *cooked* | 1–24 rows → 0, *and no wake at all*                                                                          |
+| SGR/OSC/mode-only traffic                       | *cooked* | 0 either way, but ghostel pays 4N funcalls                                                                   |
+| one-line scroll, primary, no region             | *cooked* | 2 rows → 1, and the departing row keeps its markers                                                          |
+| sustained flood                                 | tie      | both get one big insert, by different routes                                                                 |
+| full-screen repaint                             | *cooked* | 3 buffer changes against 2, but only rows that differ: 4,247 of 100,001 on a mostly unchanged 50x200 repaint |
+| scroll-region or alt-screen scroll              | *cooked* | ghostel degrades to whole viewport                                                                           |
+| resize, reflow, alt enter/leave                 | *cooked* | ghostel re-materialises the whole scrollback                                                                 |
+| any frame with an image                         | *cooked* | ~100–2000× on payload                                                                                        |
 
 cooked kept the grid authoritative and hands rows to Emacs as text on their way
 out, which makes scrollback handover, reflow, the seam and image identity all
@@ -3264,6 +3274,13 @@ of dirty-bit precision substitutes for), the image cache, the wake gate, and the
 absence of six wholesale triggers. But a session that is mostly =tail -f= at one
 line per frame is measurably better served by ghostel's model, and that is not a
 rare session. Items §7-2 and §12's scroll note are what close it.
+
+Both have since landed, and they closed it. Coalescing (de55e35) made a repaint
+one block, the scroll became a shift (25365a1), the core's copy of the screen
+(96accf3) stopped sending rows Emacs already holds, and promotion in place
+(305f97e) stopped resending the row that leaves. The two scroll and repaint rows
+of the verdict table, and the matching rows above it, give the counts as they
+stand.
 
 * 13. Elisp or Rust: does ghostel change the calculus?
 

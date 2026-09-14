@@ -9,6 +9,14 @@
 Punchlist for [[file:REPORT.org][REPORT.org]]. Each task cites its section; the
 reasoning lives there, not here.
 
+This file is closed. Work since 2026-09-13 lives in two others:
+[[file:TERM.org][TERM.org]], the terminal protocol punch list drawn from the
+emulator comparison, and [[file:PLAN2.org][PLAN2.org]], which files the audit of
+both as waves and records what each task landed. Where a task here was finished,
+re-measured or corrected there, its entry says so and names the PLAN2 task, so
+the typing-latency figures below, for one, point at the idle re-take that
+replaced them.
+
 * Operating protocol
 :PROPERTIES:
 :VISIBILITY: content
@@ -80,7 +88,10 @@ of the form "redisplay is the bottleneck" needs a second backend before it is
 load-bearing; "redisplay is *not* the bottleneck" is safe from here.
 
 The load guard applies here more than anywhere: quiet the machine, and do not
-fan out agents across a measurement task.
+fan out agents across a measurement task. The scripts under =scripts/= now do
+both halves themselves: =scripts/bench-prelude.el= byte-compiles =lisp/= into a
+temporary directory from a separate Emacs and refuses above the load threshold
+unless =COOKED_BENCH_FORCE= is set (6fa8849).
 
 Conventions: =:GATE:= names a task that must be =DONE= first. =:GAIN:= is the
 expected payoff, so a flat result is a finding rather than a failure. Waves are
@@ -95,12 +106,15 @@ Benchmarking and fuzzing first: both are cheap, both are informative before any
 code changes, and one of them can *delete* work. Nothing here is gated on
 anything else, so these can run in parallel.
 
-** REVIEW [#A] =make bench= must byte-compile
+** DONE [#A] =make bench= must byte-compile
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §9 D — found by auditing the UNSTABLE rule, not by the report
 :GAIN:     every number already recorded in Waves 0 and 1 is re-taken and some change by 3x
-:BRANCH:   a681ce2
+:BRANCH:   a681ce2, c3f9074
+:END:
+:LOGBOOK:
+- State "DONE"       from "REVIEW"     [2026-09-14 Mon 02:11]
 :END:
 *Every published bench number in this file was measured on interpreted Lisp that
 no user ever runs.* =BATCH= is =emacs -Q --batch -L lisp -L tests=, the =bench=
@@ -166,14 +180,39 @@ positives to zero, where the literal §9 D rule fired on 8 of 18. And the
 per-frame floor is now ~19 µs, which is small enough that the remaining Wave 2
 items should be judged on the redisplay-driven rows rather than on =apply=.
 
-** REVIEW [#A] Measure the scroll ceiling with rejoining off
+*** Why it sat at REVIEW, and what closed it
+
+It was merged but held, because two holes stayed open. The =.elc= trap covered
+only the recipe's last line, so an interrupted =make bench= could leave compiled
+Lisp behind for the next test run; and the graphical scripts under =scripts/=
+were run as =emacs -Q -l script= and so were still interpreted. Both are closed
+in PLAN2's Wave 6: c3f9074 puts every step on one shell line under the trap, and
+6fa8849 has each script compile itself through =scripts/bench-prelude.el= and
+log that =cooked--apply= came from an =.elc=. The table above is superseded by
+the idle re-take in PLAN2's "Real-child bench cases leave most applies out of
+the timing", which also charges the drains the wake filter makes; flood 20k
+plain is 17.35 ms there, not 3.24, because the old harness timed 5 of about 15
+applies.
+
+** DONE [#A] Measure the scroll ceiling with rejoining off
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   §7 "The highest-information measurement available right now"
 :GAIN:     may delete the guard/wrap-cache/mark-truncation subsystem
-:BRANCH:   16b9be2
+:BRANCH:   16b9be2, b6a243d, 0ead555, c1269bb
 :RESULT:   confirmed on a gesture — flat at ordinary wrapping, p90 doubles at 10x; styling amplifies it but does not create it at 3x
 :END:
+:LOGBOOK:
+- State "DONE"       from "REVIEW"     [2026-09-14 Mon 02:11]
+:END:
+Closed on the gesture tables, which answer the question the task asked. It sat
+at REVIEW because its append table could not be trusted: the harness ran
+interpreted and timed only the drains it made itself, not the ones the wake
+filter made inside =accept-process-output=. That table is replaced below by
+PLAN2's idle re-take. The gesture tables were not re-taken; they are mostly
+redisplay, so the filter race barely touches them, but they ran interpreted
+with 60 gestures, which makes each p90 the sixth-slowest sample.
+
 No code. =cooked-toggle-rejoin-wrapped-lines= already exists
 (=cooked-mode.el:147=). The three scroll causes are not independent: =rejoin=t=
 forces =truncate-lines nil=, which is what makes =cooked--guard-row-width=,
@@ -212,30 +251,44 @@ splits it in two, because only the first half is cooked's:
 - *redisplay* = =(redisplay t)=, which on pgtk includes the compositor's frame
   callback.
 
-Four runs, two backends. pgtk under the gamescope recipe above at =-r 1000=;
-tty under =foot -W 100x32 -- emacs -nw= (foot will not start *inside* gamescope
-— it needs =wl_subcompositor=, which gamescope does not expose — so the tty runs
-are on the host compositor).
+The table first recorded here is withdrawn. It ran interpreted, and its apply
+column missed the drains the wake filter made inside =accept-process-output=
+(fixed in 741187b). What replaced it is PLAN2's idle re-take, compiled through
+=bench-prelude=, 200 bursts after 30 warmups, load 1.1–1.8. pgtk is under the
+gamescope recipe above at =-r 1000=; tty is =script -qfc 'stty rows 66 cols 115;
+emacs -nw'=, not foot, since an agent has no host compositor. Milliseconds per
+ten-line burst, p50, with rejoining on (t) and off (nil):
 
-Milliseconds per ten-line scroll, p50, and the ratio that is actually the
-question:
+| backend        | frame / term    | content  | apply t | apply nil | redisp t | redisp nil |
+|----------------+-----------------+----------+---------+-----------+----------+------------|
+| pgtk           | 100x32 / 29x99  | short    |    2.11 |      2.12 |     4.40 |       4.34 |
+| pgtk           | 100x32 / 29x99  | 3x-wrap  |    6.46 |      6.91 |     3.92 |       3.70 |
+| pgtk           | 100x32 / 29x99  | 10x-wrap |   26.50 |     20.35 |     4.04 |       3.49 |
+| pgtk           | 115x66 / 63x114 | short    |   10.88 |      7.52 |    11.16 |      11.48 |
+| pgtk           | 115x66 / 63x114 | 3x-wrap  |   17.35 |     16.72 |     5.50 |       5.25 |
+| pgtk           | 115x66 / 63x114 | 10x-wrap |   62.00 |     61.01 |     6.30 |       5.87 |
+| tty            | 115x65 / 63x114 | short    |    4.51 |      4.50 |     2.26 |       2.23 |
+| tty            | 115x65 / 63x114 | 3x-wrap  |   10.60 |     10.19 |     2.14 |       2.07 |
+| tty            | 115x65 / 63x114 | 10x-wrap |   53.43 |     50.76 |     2.54 |       2.37 |
+| tty, links off | 115x65 / 63x114 | short    |    0.90 |      0.85 |          |            |
+| tty, links off | 115x65 / 63x114 | 3x-wrap  |    0.88 |      0.94 |          |            |
+| tty, links off | 115x65 / 63x114 | 10x-wrap |    1.21 |      1.28 |          |            |
 
-| backend | geometry | content     | apply t | apply nil | t/nil | redisp t | redisp nil | t/nil |
-|---------+----------+-------------+---------+-----------+-------+----------+------------+-------|
-| pgtk    | 25x99    | no wrapping |    2.03 |      1.94 |  1.05 |     1.90 |       1.91 |  0.99 |
-| pgtk    | 29x99    | no wrapping |    2.28 |      2.48 |  0.92 |     1.99 |       2.03 |  0.98 |
-| pgtk    | 64x115   | no wrapping |   11.39 |     11.02 |  1.03 |     5.89 |       6.31 |  0.93 |
-| tty     | 65x115   | no wrapping |    4.80 |      4.75 |  1.01 |     1.66 |       1.63 |  1.02 |
-|---------+----------+-------------+---------+-----------+-------+----------+------------+-------|
-| pgtk    | 25x99    | 3x-wrapped  |    2.57 |      2.32 |  1.11 |     2.06 |       2.04 |  1.01 |
-| pgtk    | 29x99    | 3x-wrapped  |    1.85 |      1.95 |  0.95 |     1.75 |       1.81 |  0.97 |
-| pgtk    | 64x115   | 3x-wrapped  |    7.62 |      9.70 |  0.79 |     9.13 |       9.46 |  0.97 |
-| tty     | 65x115   | 3x-wrapped  |    4.24 |      4.69 |  0.91 |     1.56 |       1.60 |  0.97 |
-|---------+----------+-------------+---------+-----------+-------+----------+------------+-------|
-| pgtk    | 25x99    | 10x-wrapped |    4.15 |      2.69 |  1.54 |     2.58 |       2.19 |  1.18 |
-| pgtk    | 29x99    | 10x-wrapped |    4.27 |      3.01 |  1.42 |     2.52 |       2.34 |  1.08 |
-| pgtk    | 64x115   | 10x-wrapped |   11.42 |     11.80 |  0.97 |     5.75 |       5.63 |  1.02 |
-| tty     | 65x115   | 10x-wrapped |    4.87 |      5.22 |  0.93 |     1.70 |       1.82 |  0.93 |
+*Read the apply column as the URL scan, not as the guard.* The harness writes
+each line as one unbroken word, and =goto-address-url-regexp= is quadratic in
+the length of a word: the 10x-wrapped tty apply is 53.4 ms with links on and
+1.2 ms with =cooked-detect-links= nil. On rejoining, the question this table was
+for, tty is flat in every row and pgtk in four of six; the two pgtk rows that
+differ (short lines at 115x66, 10.88 against 7.52, and 10x-wrapped at 100x32,
+26.50 against 20.35) are one run each and were not repeated.
+
+Part of that scan was a bug, fixed in PLAN2's Wave 1 task "Typing into a long
+word rescans it for URLs on every keystroke" (f35f18e): =cooked--protect= swept
+read-only over the whole screen with change hooks live, so jit-lock refontified
+every row on every drain. Re-taken on tty at load 6–9, so as ratios only, short
+lines went from 5.1–11.4 ms to 1.7–1.8, while 10x-wrapped lines stayed at 60–75
+ms. Those are ten new 1150-character words per burst, and scanning new text once
+is the quadratic cost itself rather than a rescan.
 
 *** Measurement (gesture: the viewport moving)
 
@@ -341,6 +394,9 @@ is what a shell session ordinarily produces.
 
 *** Superseded: the append run, and why it answered the wrong question
 
+This section and the next argued from the withdrawn table, so read each claim
+against the re-take above before relying on it.
+
 *For output arriving, the ceiling does not move.* Across twelve comparisons the
 t/nil ratio sits on 1.0, wandering to either side of it — nine of the twelve are
 within ±10%, and the direction is not consistent even for one content shape at
@@ -385,6 +441,13 @@ sanity check on the reading.
 Keep =emacs -nw= under foot as a standing comparison point for anything that
 touches the guard or the wrap cache: it is the control that says whether a cost
 is cooked's or the backend's.
+
+*Not established, on the re-take.* pgtk apply is still about 2.4x tty's at this
+geometry (10.88 ms against 4.51 for short lines), but on tty 3.6 ms of that 4.51
+is the URL scan, since links off gives 0.90. pgtk was not re-taken with links
+off, so how much of its 10.88 is font metrics in the guard and how much is the
+same scan is unknown. Take that measurement before moving any work onto the
+guard's source of widths.
 
 *** An unrelated finding, worth its own task
 
@@ -458,13 +521,16 @@ p99 together and divides out — under load the styled median went 0.6 → 7.5 m
 twelve times slower on every iteration, and the ratio barely moved. The two
 guards are complementary in *both* directions, not one covering for the other.
 
-** REVIEW [#A] Typing latency benchmark, three configurations
+** DONE [#A] Typing latency benchmark, three configurations
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §9 "C. Typing latency"; §7 for what it settles
 :GATE:     Load guard and variance flag — satisfied, 370c21f
 :GAIN:     settles cooked-vs-ghostel interactivity; sees the decorated-buffer risk
-:BRANCH:   cooked/typing-latency
+:BRANCH:   1b29617, fbb4d91
+:END:
+:LOGBOOK:
+- State "DONE"       from "REVIEW"     [2026-09-14 Mon 02:11]
 :END:
 Child: =sh -c "stty raw -echo; printf READY; exec cat"=. Detect arrival with
 =buffer-chars-modified-tick= (O(1), unaffected by buffer growth), not by
@@ -522,6 +588,38 @@ p99 on a decorated screen is not comfortably so, and that is the figure to watch
 *Plain, idle prompt, tty p50 1.98 ms / p99 2.76 ms.* Any later pacing work has
 to leave that unchanged; it is the number to re-take, and the tty column is the
 one to compare because it has no compositor tail to hide a regression in.
+
+*** Superseded by PLAN2, and what survived
+
+It sat at REVIEW because the harness could not be trusted. It ran interpreted,
+drained around the pacer by calling =cooked--apply= itself instead of waiting on
+the wake filter, and took 200 samples, which makes p99 the second-slowest key.
+PLAN2's "Typing latency through the production pacer" (fa02f17) rebuilt it: the
+wake filter only, 1000 keys 30 ms apart, timeouts counted, and redisplay timed
+on its own. Re-taken at idle (load 0.4–0.8) at a 115-column frame and a 63x114
+terminal, drawn p50 and p99 in ms:
+
+| config | tty p50 | tty p99 | pgtk p50 | pgtk p99 |
+|--------+---------+---------+----------+----------|
+| plain  |    2.84 |    4.24 |     3.04 |     4.56 |
+| box    |    5.82 |    7.12 |     5.15 |     7.36 |
+| link   |    4.50 |    5.93 |     5.49 |     8.64 |
+
+*The median still does not depend on the backend; the tail no longer does
+either.* Plain pgtk p99 is 4.56 against tty's 4.24, not 8.97 against 2.76. The
+decorated-buffer cost is real but smaller than recorded: box over plain is 2.05x
+on tty and 1.69x on pgtk, not 2.7x.
+
+*The idle figures are slower than the loaded ones*, and that is the CPU, not
+cooked. The governor is powersave, and a key after a 30 ms pause wakes an idle
+core: with no gap and =cooked-min-redisplay-interval= 0, plain tty drawn is
+1.34 ms. So the baseline above is replaced by tty p50 2.84 / p99 4.24 as "the
+first key after a pause".
+
+The second half of "Done when" holds. The echo waiver (07160b0) is the pacing
+work that landed since, and its A/B in PLAN2 leaves an idle =cat= at 0.72 ms p50
+with the waiver off and 0.77 with it on, while keys typed back to back go from
+5.9 to 0.7 ms.
 
 ** DONE [#B] Attach a window to the bench buffer
 :PROPERTIES:
@@ -702,14 +800,14 @@ fixed or written down as declined.
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §9 "Makefile and CI mechanics"
-:BRANCH:   d94ed8b
+:BRANCH:   b8fa5dc
 :END:
 ERT tags on the dependency axis (~100 tests: zsh 47, evil 19, bash 12, plus
 fish/tic/git/htop/base64/script/terminfo), driving
 =make lisp-test SELECTOR='(not (tag zsh))'=. Per-file stamps:
-=make -j8 lisp-test-parallel= is *24 s against 80 s* measured here, and touching
-one test file reruns it in 0.3 s. =make bench-quick= is *7 s*, and byte-compiles
-and removes its own =.elc= from a trap exactly as =bench= does.
+=make -j8 lisp-test-parallel= is *29 s against 78 s*, as b8fa5dc records it,
+and touching one test file reruns it in 0.3 s. =make bench-quick= is *8 s*, and
+byte-compiles and removes its own =.elc= from a trap exactly as =bench= does.
 
 =COOKED_TEST_TIMEOUT_SCALE= verified against the hazard the task names — empty
 and garbage both fall back to 1, *never* 0:
@@ -784,7 +882,7 @@ write throws — or document that sources must =copy-sequence=.
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §2 "The cheaper half"
-:GAIN:     664ms → 10.5ms measured ceiling
+:GAIN:     REPORT §2 estimated 664ms → 10.5ms; landing measured 3.0 → 0.43 ms/frame, batch only
 :BRANCH:   b7a60ff
 :END:
 *Measured, deterministically*: =display= intervals on a 24×80 box-drawing frame
@@ -816,12 +914,14 @@ per-cell to per-run, and the existing glyph tests still pass.
 :PROPERTIES:
 :EFFORT:   2h
 :REPORT:   §7 ranked borrowables, item 1
-:GAIN:     +21% plain / +55% box drawing, by cooked's own measurement
+:GAIN:     fewer change-hook calls per styled frame; REPORT's +21%/+55% belonged to another change, see below
 :BRANCH:   7170741
 :END:
-Measured on the *primary* screen, interleaved A/B, medians: box drawing −38%
-(4.45 → 2.77 ms/frame), styled −11%, plain −12%, URL rows −18%. Box drawing
-lands on REPORT's +55%; plain comes in at about half its +21%.
+*Measured: −36% styled, −9% box drawing, 0% plain per frame*, on the primary
+screen in batch; the table is below. A first A/B read box drawing −38% and plain
+−12%, which seemed to confirm REPORT's +55%/+21%, but it did not assert whether
+the jit-lock registration was on in each arm, and the corrections below explain
+why neither figure was this binding's.
 
 *The stated subtlety is wrong, and this is the correction that matters.* The
 plan — and =cooked.el:2180= — say the rewrite must stay outside the binding
@@ -861,10 +961,11 @@ fixture. And *box drawing now gains 8.6% rather than 55%* because the run-wide
 glyph task (b7a60ff) landed first and had already removed most of the per-cell
 property applications. The two Wave 1 tasks overlap, and the second inherited a
 much smaller frame.
-*Only* around the property loops — the style-span walk, =cooked--apply-deco=,
-=cooked--render-link-spans=. Leave =insert=/=delete-region= outside the binding,
-because =cooked--render-rows= relies on the row rewrite firing
-=jit-lock-after-change= to mark the row unfontified (=cooked.el:2180=).
+The task as written: bind it *only* around the property loops (the style-span
+walk, =cooked--apply-deco=, =cooked--render-link-spans=) and leave
+=insert=/=delete-region= outside it. That is what landed. Its stated reason,
+that the rewrite must fire =jit-lock-after-change= to mark the row unfontified,
+is the one refuted above.
 
 Done when: the per-frame benchmark moves and fontification still happens.
 
@@ -958,7 +1059,6 @@ Three done, one *refuted with evidence*:
   =cooked--mouse-track= exists and handles the drag half of 1003.
 - =auto-hscroll-mode nil= and =default-text-properties nil= buffer-locally.
 - Terminfo round-trip verification in the Makefile (one =infocmp= line).
-- A =-C link-arg=-Wl,--version-script== equivalent of =symbols.map=.
 
 * Wave 2 — redisplay                                              :perf:core:
 :PROPERTIES:
@@ -1025,7 +1125,7 @@ in the viewport. Coalesce runs of *genuinely* damaged rows.
 :EFFORT:   2d
 :REPORT:   §2 "The mechanism, confirmed"
 :GATE:     Coalesce contiguous damaged rows into one Block — satisfied, de55e35
-:GAIN:     the 20x
+:GAIN:     the 20x, which is REPORT §2's prediction: only interval counts and batch apply were measured, never a gesture over an image
 :BRANCH:   94b43e6, 8246229
 :END:
 *A 24x80 frame of picture: 1944 intervals → 48*, one per row plus the newlines
@@ -1098,7 +1198,7 @@ shape, and a pinned cell size so =cooked--deco-cell-size= does not answer from a
 :REPORT:   §12 "Scroll is where the models genuinely differ"
 :GATE:     Coalesce contiguous damaged rows into one Block
 :GAIN:     25 rows of damage → 2, on the most common terminal operation
-:BRANCH:   361c5ff
+:BRANCH:   25365a1
 :END:
 *The largest win in the report, and it landed.* Counted independently on merge,
 with a probe that compiles against both trees:
@@ -1119,9 +1219,23 @@ marker is dragged to the deletion point and the overlay collapses to zero length
 matrix calls =IL=/=DL= "correct minimum" when they were damaging every row from
 the cursor down. And its verdict — that "a session that is mostly =tail -f= at
 one line per frame is measurably better served by ghostel's model" — *no longer
-holds*: ghostel's 2 includes cursor rows their model marks structurally, cooked's
-cursor rides the =Delta= and costs nothing, so cooked is now narrower than
-ghostel on the one workload §12 conceded.
+holds* — though this entry first overstated why. It said cooked was now
+narrower than ghostel on =tail -f=, and at this commit it was level: the
+headline case is a bare line feed, while a real =tail -f= line writes the bottom
+row and then scrolls, which damages two rows (the text row and the row the
+scroll opens), and cooked still resent the departing row as scrollback text and
+made about five buffer edits against ghostel's one delete and one insert.
+
+*It is narrower now, for two later reasons.* Since 96accf3 the core keeps a copy
+of what Emacs shows for each row, so a blank row a scroll opens is known and
+sent as nothing, and a repaint that writes the same text back sends only rows
+that differ: 100,001 rows handed to Lisp become 4,247 on the 50x200
+mostly-unchanged repaint bench, where ghostel reinserts every dirty row. And
+since 305f97e (PLAN2's "Scroll without rewriting the row that leaves the
+screen") the departing row is promoted in place instead of resent, so a
+=tail -f= line is one row sent and one insertion, with markers and overlays on
+the departing row kept. =a_line_fed_at_the_bottom_promotes_the_top_row= pins
+that shape. REPORT §12's matrix and volume table carry the same correction.
 
 *PLAN's "ring-buffer =Screen::rows= instead of =rotate_left=" was solving a
 non-problem and was deliberately not done.* =rotate_left= moves =Row= structs,
@@ -1403,14 +1517,19 @@ a test. =cooked-file-link= was only *partly* guarded — =cooked--foreign-host-p
 is not the same condition as a remote =default-directory=, which you get from
 =M-x cooked= in a buffer visiting a remote file with no OSC 7 involved at all;
 second guard added.
-Reuse the existing =file-remote-p= prefix so multi-hop survives, and *skip
+Keep a multi-hop prefix by taking =default-directory= minus its localname (not
+=file-remote-p=, which flattens hops, as point 1 above found), and *skip
 =file-directory-p= on the remote branch* — validating opens a TRAMP connection
 on every =cd=. Three follow-ons: keep the hostile-=cat= defence on the local
 branch only (construct the TRAMP name from =cooked--host=, never from the
 payload); guard =cooked-file-link= off when =default-directory= is remote; have
 =cooked--native-completion= decline on a foreign host.
 
-*Ship the mapping alone.* The remote spawn is architectural — see §5.
+*Ship the mapping alone.* The remote spawn was architectural, and later landed
+narrower than §5 sketched it: =M-x cooked= in an ssh-family TRAMP directory runs
+=ssh -t= inside cooked's own pty (553b257, PLAN2 Wave 11), and a session keeps
+the ssh alias it was started over when its far shell reports the real hostname
+(7f82450).
 
 ** DONE [#B] Shell history via the shell's own command
 :PROPERTIES:
@@ -1565,11 +1684,14 @@ paths, because Emacs ports disagree — =dnd-protocol-alist= for X11/pgtk,
 =[drag-n-drop]= for NS/w32 — plus an emulation keymap for mode-line and fringe
 drops.
 
-** REVIEW [#C] Glyph scaling before trimming
+** DONE [#C] Glyph scaling before trimming
 :PROPERTIES:
 :EFFORT:   2d
 :REPORT:   §2 "The framing that matters: repair vs destroy"
-:BRANCH:   d7007db
+:BRANCH:   d7007db, 2dda682, 788bff3, a660106
+:END:
+:LOGBOOK:
+- State "DONE"       from "REVIEW"     [2026-09-14 Mon 02:11]
 :END:
 Turns a destructive repair into a non-destructive one. Needs a metrics cache
 first, or it will =font-at= per cell per drain. Use ghostel's key shape with
@@ -1747,8 +1869,9 @@ What to look for, in order of how much it matters:
 
 Reported from real use: htop out of line where it had rendered perfectly, btop a
 mess, =tree= with an extra line of coloured corruption between every =│=, and
-scrollback in a large directory very slow. Off by default now (feff41b) and the
-cause fixed (788bff3), but *both* diagnoses on the way are worth keeping.
+scrollback in a large directory very slow. It went off by default (feff41b) and
+the cause was fixed (788bff3), but *both* diagnoses on the way are worth
+keeping. It is back on: see "Where it stands" below.
 
 *The first guess was wrong.* Box-drawing glyphs coming from fallback fonts with
 roomier metrics, firing the scaler — plausible, and false. Measured, every one
@@ -1771,28 +1894,44 @@ it is what keeps the claim path away from glyphs that need neither.
 caught it — a text oracle cannot see a bug that lives entirely in what is hung
 on the text. The regression test asserts the *absence* of a decision.
 
-*** Still open
+*** Where it stands
 
-- *Bench case landed and the slowness is explained*, but not by this. =tree= in
-  a large directory is now a fixture — =cooked-bench-tree= and
-  =scripts/bench-tree.el= — and it did find a real 10× (d2bb50d, see the =tree=
-  task above). The cause was a per-decoration-record window measurement, not
-  the glyph walk: with the walk disabled entirely the timings are flat against
-  baseline both before and after that fix, and it never appears in the profile.
-  The walk visiting every cluster of every non-uniform row is real and still
-  costs something, but it is not what the user felt.
-- *Turning scaling back on* is the open question. The guard makes the
-  box-drawing case correct, but being wrong twice about what this touches is
-  reason enough to let it be asked for. Try =(setq cooked-glyph-scale-floor
-  0.5)= against htop, btop and tree before considering a default.
-- *Only the first cluster of a run is measured*, which is right for a border row
-  and wrong for a row of mixed CJK — each distinct cluster still costs a shaping
-  call the first time it is seen under a given font.
-- =cooked--around-font-scale= is *done* (2157a1a), and the re-anchoring half it
-  was written to want turns out not to exist: ghostel snapshots anchored windows
-  because its anchoring is *latched*, where =cooked--pin-transcript-bottom=
-  computes the view from the buffer on every drain and the resize causes one.
-  Nothing to save and put back.
+Closed. What this entry left open has since been settled, and one defect is
+kept knowingly.
+
+- *It is on by default again, and the floor is a clamp* (a660106). Iosevka draws
+  its arrows at twice its cell width, which wants a scale of 0.5 and quantizes
+  just under it, so a floor read as a threshold refused the one glyph the
+  mechanism exists for. =cooked-glyph-scale-floor= is now 0.5, and a glyph
+  needing less is shrunk to 0.5 and left slightly over its cell, as ghostel
+  does. Two btop rows that were a cell out of line on the reporting machine are
+  aligned, and =tree= is untouched either way.
+- *It measures every character, not the first cluster of a run.* This entry
+  said otherwise. =cooked--scale-offenders= steps one character at a time and
+  measures a base with its combining marks through the composition covering
+  them; each distinct glyph costs one shaping call per font.
+- *The regression test now reaches the walk.* The test for the =tree= breakage
+  asked =cooked--glyph-fits-p= and never =cooked--scale-offenders=, so dropping
+  the fits check from the walk left the suite green. Since 3880b11 it also runs
+  the walk over a row of cell-shaped glyphs and asserts nothing is hung on it.
+- *Three bugs found by the audit are fixed*, in PLAN2's Wave 1: the baseline was
+  measured against the unzoomed font (482e8f9), a scaled cell inside a
+  box-drawing run replaced that cell's image and drew the run twice (547aebb),
+  and a terminal frame re-measured on every drain into an unbounded table
+  (73aa473).
+- *The =tree= slowness was not this.* =tree= is a bench fixture now
+  (=cooked-bench-tree=, =scripts/bench-tree.el=), and the 10x it found was a
+  per-record window measurement (d2bb50d). With the walk disabled the timings
+  do not move.
+- =cooked--around-font-scale= is done (2157a1a). The re-anchoring half it was
+  written to want does not exist here: ghostel snapshots anchored windows
+  because its anchoring is latched, while =cooked--pin-transcript-bottom=
+  computes the view from the buffer on every drain.
+- *Kept: the gap after a height-bound glyph.* A CJK character shrunk for its
+  ascent still draws left-aligned in its slot, with about 5.5 px after it on a
+  9x20 cell, as ghostel's does. Of the four options above this is the fourth,
+  and the one to revisit if anyone reports it; =cooked-glyph-scale-floor= nil
+  restores trim-only.
 
 *** The metrics recipe, and two details a Lisp port gets wrong
 
@@ -1802,12 +1941,19 @@ gstring's glyph is at index *2*, not 1. And the metrics come from =query-font=
 — pixel size 2, ascent 4, descent 5 — *not* =font-info=, which has a different
 layout and answers 0 for those indices without complaining.
 
-** WIP [#C] Remaining smaller items
+** DONE [#C] Remaining smaller items
 :PROPERTIES:
 :REPORT:   §4, §5, §6, §8, §10
-:BRANCH:   cooked/smaller-items
+:BRANCH:   65b7916, cfe4e85, 780e8f8, d633794, 2157a1a, 754493e, 75d32c6, c13973e, cb2a1fc
 :AGENT:    yes
 :END:
+:LOGBOOK:
+- State "DONE"       from "WIP"        [2026-09-14 Mon 02:11]
+:END:
+Every row below is done or declined; the last, picker annotations, went in with
+=cooked-consult.el=. The =cooked/smaller-items= branch no longer exists, and
+the commits are listed above.
+
 Kitty flags beyond bit 1 (or stop claiming them in =CSI ? u=) · remote-gated
 password regex fallback · =cooked-password-functions= as a chain · prompts as an
 imenu index (in =cooked-command-decorations.el=) · =around-font-scale= advice ·
@@ -1827,19 +1973,19 @@ building.
 
 State of the other eleven, by whether the code has anything:
 
-| item                              | state                                     |
-|-----------------------------------+-------------------------------------------|
-| lone-ESC =input-decode-map= filter | *DONE*, 65b7916                          |
-| pixel-delta wheel accumulation    | *DONE*, cfe4e85                           |
-| password regex fallback           | *DONE*, 780e8f8                           |
-| =cooked-password-functions= chain | *DONE*, 780e8f8                           |
-| minibuffer resize exception       | *DONE*, 2157a1a's sibling                 |
-| kitty flags beyond bit 1          | *DONE*, d633794 — stopped claiming them   |
-| =around-font-scale= advice        | *DONE*, 2157a1a                           |
-| medium gating defcustom           | *DECLINED*, 75d32c6 — =t=t= deletes files |
-| bash < 4.4 DEBUG-trap fallback    | *DECLINED*, c13973e — decays and says so  |
-| nushell arm                       | *DECLINED* — nu is not installed here     |
-| picker annotations                | =cooked--title= used in five files        |
+| item                               | state                                                   |
+|------------------------------------+---------------------------------------------------------|
+| lone-ESC =input-decode-map= filter | *DONE*, 65b7916                                         |
+| pixel-delta wheel accumulation     | *DONE*, cfe4e85                                         |
+| password regex fallback            | *DONE*, 780e8f8                                         |
+| =cooked-password-functions= chain  | *DONE*, 780e8f8                                         |
+| minibuffer resize exception        | *DONE*, 2157a1a's sibling                               |
+| kitty flags beyond bit 1           | *DONE*, d633794 — stopped claiming them                 |
+| =around-font-scale= advice         | *DONE*, 2157a1a                                         |
+| medium gating defcustom            | *DECLINED*, 75d32c6 — =t=t= deletes files               |
+| bash < 4.4 DEBUG-trap fallback     | *DECLINED*, c13973e — decays and says so                |
+| nushell arm                        | *DECLINED* — nu is not installed here                   |
+| picker annotations                 | *DONE*, cb2a1fc — =cooked--title= is now =cooked-title= |
 
 **** Done: pixel-delta wheel accumulation (cfe4e85)
 
@@ -2336,10 +2482,10 @@ chunks huge and measures the defence instead of the bug.
 :PROPERTIES:
 :EFFORT:   1d
 :REPORT:   none — extends REPORT §2's run-wide image to the shapes it cannot reach
-:BRANCH:   cooked/glyph-run-patterns
+:BRANCH:   773a15e
 :AGENT:    yes
 :END:
-The run-wide glyph image (783b0f4) collapsed a border row from 1920 =display=
+The run-wide glyph image (b7a60ff) collapsed a border row from 1920 =display=
 intervals to 24 and moved cooked's scroll ceiling. It could not help =tree=, and
 measuring the gesture rather than the arrival said how much that cost.
 
@@ -2509,20 +2655,34 @@ what says the rest is the change and not the machine.
 
 Images were 67% of the gesture and a 3.1x effect; they are now *32%* and a 1.5x
 effect — 6.89ms of attributable cost down to 1.48ms, a *4.7x* drop in what
-images charge. Glyph scaling is flat for the fourth time and should stop being
-suspected.
+images charge. Glyph scaling is flat for the fourth time, which says it costs
+this gesture nothing and says nothing about whether it draws correctly: the
+same walk was overwriting box-drawing images and splitting their runs, a
+correctness hazard no timing arm can see, fixed in PLAN2's Wave 1 (547aebb).
 
 *What is now the largest single component: links.* 4.65 baseline against 2.78
 with =cooked-detect-links= nil is 1.87ms, 40% of a gesture that used to be 21%
 links — the same absolute cost against a baseline half the size. The next task
 below is where that goes.
 
-** TODO [#B] The file-link scan doubles its syscalls on every name that misses
+** DONE [#B] The file-link scan doubles its syscalls on every name that misses
 :PROPERTIES:
 :EFFORT:   3h
 :REPORT:   none — found while attributing the =tree= slowness
-:BRANCH:
+:BRANCH:   48679ad
 :END:
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-09-14 Mon 02:11]
+:END:
+*Superseded by PLAN2's Wave 8 task* "File-link scan: six syscalls per miss, and
+=foo.gz= means =foo=", which landed as 48679ad. The count below understated it
+threefold: =ffap-file-exists-string= also tries =NAME.gz= and =NAME.Z= on a
+miss, so a miss cost six =access= calls, not two. With the suffix search off and
+the root retry skipped when the root is the current directory, strace counts 100
+calls per 100 misses at a project root (was 600) and 200 in a subdirectory. A
+directory holding only =foo.gz= no longer links =foo=.
+
+The original entry:
 Split out of the =tree= investigation, where it was measured and found *real
 but secondary*. =cooked-file-link-scan= runs from =cooked--fontify-region=, so
 it fires at redisplay over settled scrollback, not on the flood path — during
@@ -2541,13 +2701,25 @@ slow", and it never explained output *arriving* slowly. Likely shape: a
 negative cache spanning the scan, or declining the project-root retry for a
 candidate with no directory separator in it.
 
-** TODO [#C] The blue underlined space after =│= in =tree= output
+** DONE [#C] The blue underlined space after =│= in =tree= output
 :PROPERTIES:
 :EFFORT:   1h
 :REPORT:   none — reported from real use
-:GATE:     Three facts from the user, below
-:BRANCH:
+:BRANCH:   e8ffb38
 :END:
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-09-14 Mon 02:11]
+:END:
+*Found and fixed in e8ffb38; confirm by eye in a live session.* It was neither
+the child's colour nor a cooked decoration, which is why the probes below found
+nothing. tree(1) indents with U+00A0, and at its default =nobreak-char-display=
+makes redisplay paint every U+00A0 in the =nobreak-space= face, an underlined
+=escape-glyph= colour, without putting any text property on it. So
+=describe-text-properties= and every property dump call the character clean.
+cooked buffers now set =nobreak-char-display= to nil, since a grid has no line
+to break and no writer to warn. The gate below is moot.
+
+The investigation as recorded:
 Reported alongside the =tree= slowness: the space after the white =│= appears
 to carry a blue underline. *Not reproduced*, and the file-link path — the
 obvious suspect, since =cooked-link= inherits =link= and =link= is blue and
@@ -2569,13 +2741,24 @@ both pay the per-record cost fixed above; =pstree= is ~100 rows and
 volume explains the contrast on its own, with no need for filenames to be
 involved.
 
-** TODO [#C] =TERMINFO=b64:…= for the remote spawn only
+** DONE [#C] =TERMINFO=b64:…= for the remote spawn only
 :PROPERTIES:
 :EFFORT:   4h
 :REPORT:   §3 "b64 comes back, scoped"
-:GATE:     Prebuilt module download
-:BRANCH:
+:GATE:     Remote spawn (PLAN2 Wave 11) — satisfied, 553b257
+:BRANCH:   553b257
 :END:
+:LOGBOOK:
+- State "DONE"       from "TODO"       [2026-09-14 Mon 02:11]
+:END:
+*Delivered by the remote spawn.* This was gated on the prebuilt download, but
+what it needs is a remote spawn, and PLAN2's Wave 11 task "Remote spawn: ssh -t
+inside cooked's pty for ssh-family TRAMP directories" built one. Its far-side
+script runs =infocmp= for TERM, and where the entry is missing exports
+=TERMINFO=b64:= with the compiled entry from =cooked--remote-terminfo=, falling
+back to =xterm-256color= where the far ncurses does not read it. Nothing is
+written on the far host. =cooked-remote-terminfo-is-the-compiled-entry-inline=
+decodes the payload and has a local =infocmp= read it.
 Commit 83206c1's argument stands for the *local* child and is untouched. The
 remote case is the one a directory cannot reach: zero filesystem writes on the
 far end, which deletes ghostel's whole remote-terminfo apparatus. Directory
@@ -2585,13 +2768,33 @@ always; =b64:= only where no directory is reachable.
 :PROPERTIES:
 :EFFORT:   3d
 :REPORT:   §"Why this document"; §13
-:GATE:     Typing latency benchmark, three configurations
+:GATE:     Typing latency benchmark, three configurations — satisfied
 :BRANCH:
 :END:
 Only if the Wave 0 numbers say this is where the remaining gap is. §13's
 conclusion: the gap is the parse rate, not the architecture — cooked's
 per-drain marshalling is already *cheaper* than ghostel's per-redraw property
 application.
+
+*The numbers to beat*, from PLAN2's "Throughput: record a cooked MB/s before
+anyone touches the parser" and its idle re-take (release build, rustc 1.96.0,
+=cargo test --release --test throughput -- --ignored=, load 1.2–1.3, three runs):
+
+| test             | plain MB/s | styled MB/s |
+|------------------+------------+-------------|
+| =feed_only=      | 117–120    | 84          |
+| =feed_and_drain= | 114–118    | 79–83       |
+
+For a regression check that does not depend on load, the whole process counts
+4,814.7M =instructions:u= for =feed_only= and 4,882.1M for =feed_and_drain= at
+0d4d365, stable to 17k across runs; drains add about 1.4%. Promotion in place
+(305f97e) has since added 1.43% to =feed_and_drain=, the cost of copying each
+departing row to compare it with what Emacs holds.
+
+ghostel claims 75 MB/s against vterm's 18 and eat's 6.2. cooked's parser alone
+is above that, but ghostel's figure includes Emacs rendering with its lock held,
+so the comparable cooked number is an end-to-end =cat= of a large file, which
+nothing here measures yet. Take that before deciding the parse loop is the gap.
 
 * Deliberately not doing
 :PROPERTIES:
