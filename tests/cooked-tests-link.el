@@ -1395,6 +1395,30 @@ answered `nested/file.txt\=', and `find-file\=' offered that."
                          "src/some/deeply/nested/file.txt"))
           (should (equal (bounds-of-thing-at-point 'filename) (cons beg end))))))))
 
+(ert-deftest cooked-a-wrapped-compile-location-keeps-its-line-number ()
+  "The compilation rules read the logical line, not the row a file name is on.
+
+With a region active, ffap takes the region as the file name and the line and
+column come from `cooked-file-link-error-rules'.  Those were matched against the
+row, and the twenty-column screen breaks this line after the name's colon, so
+the row matched nothing and the file opened at no line."
+  (cooked-tests--with-file-links
+    (cooked-tests--with-wrapped-line "lisp/cooked-link.el:12:3: error end"
+      (setq-local default-directory
+                  (file-name-directory
+                   (directory-file-name (file-name-directory (locate-library "cooked-link")))))
+      (let ((beg (cooked-tests--link-at "lisp/cooked-link.el")))
+        ;; The row break really falls before the line number.
+        (should (cooked-link--wrap-at beg (+ beg 21)))
+        (should-not (save-excursion (goto-char beg)
+                                    (search-forward "12" (line-end-position) t)))
+        (transient-mark-mode 1)
+        (goto-char (+ beg (length "lisp/cooked-link.el")))
+        (push-mark beg t t)
+        (unwind-protect
+            (should (equal (cdr (cooked-file-link--at-point)) '(12 3)))
+          (deactivate-mark))))))
+
 ;; The join's own pieces, over a buffer written by hand.  A terminal cannot
 ;; produce a fifty-row logical line at any width a test would want to run at, and
 ;; the binary search is worth pinning at a size where a linear walk would have

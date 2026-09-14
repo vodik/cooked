@@ -270,10 +270,19 @@ Probed against the text of the line point is on, and only after NAME has been
 established as a file that exists -- the rules are a way of reading the numbers
 beside a known file name, never a way of deciding that something is one.  A
 match whose own FILE group disagrees with NAME is dropped, which is what stops
-a rule that matched some other part of the line from contributing numbers."
-  (let ((line (buffer-substring-no-properties
-               (line-beginning-position) (line-end-position)))
-        (found (list nil nil)))
+a rule that matched some other part of the line from contributing numbers.
+
+The line is the logical one, joined across soft wraps by
+`cooked-link--join-wrapped\=', as `cooked-file-link--string-at-point\=' reads
+it.  On a twenty-column screen `lisp/cooked-link.el:12:3: error\=' breaks
+after the first colon, and the row alone matches no rule, so the file name
+taken from an active region there used to open at no line at all."
+  (let* ((bounds (cooked-link-logical-line-bounds (line-beginning-position)
+                                                  (line-end-position)))
+         (line (or (car (cooked-link--join-wrapped (car bounds) (cdr bounds)))
+                   (buffer-substring-no-properties
+                    (line-beginning-position) (line-end-position))))
+         (found (list nil nil)))
     (catch 'done
       (dolist (key cooked-file-link-error-rules (list nil nil))
         (when-let* ((rule (cdr (assq key compilation-error-regexp-alist-alist)))
