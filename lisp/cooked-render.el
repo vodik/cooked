@@ -1139,11 +1139,11 @@ candidate the joining exists to put back together.  See
 `cooked-link-logical-line-bounds\=', which is bounded so this cannot round out to
 a screenful.
 
-Nothing at all on the alternate screen, which is what
-`cooked-detect-links-on-alt-screen\=' asks for and is safe to answer by simply
-returning: that grid is rewritten row by row on the way back to the primary
-screen, and rewriting text is what marks it unfontified again, so nothing is
-stranded by having been skipped here."
+Nothing at all on the alternate screen, where a full-screen program repaints
+continuously and usually wants the mouse for itself.  That is safe to answer by
+simply returning: that grid is rewritten row by row on the way back to the
+primary screen, and rewriting text is what marks it unfontified again, so
+nothing is stranded by having been skipped here."
   (when (and cooked--session (not cooked--alt))
     (let* ((inhibit-read-only t)
            ;; The only `syntax-table' property in the buffer is the prompt's,

@@ -1204,11 +1204,10 @@ exactly as they were."
   (cooked-bench--frames "per-frame, 24x80 styled, bar tail, as an edit"
                         nil 200 :height 24 :prime (cooked-bench--styled-rows 24 80)
                         :edits (list (cooked-bench--edit 0 70 nil 80 "##########")))
-  ;; There was a URL-per-row frame after this one, on the alternate screen with
-  ;; `cooked-detect-links-on-alt-screen' bound.  The scan runs from jit-lock and
-  ;; not from the render, batch never redisplays, and that option is read by
-  ;; nothing, so the row scanned no URLs at all.  `cooked-bench-links' times the
-  ;; scan itself.
+  ;; There was a URL-per-row frame after this one, on the alternate screen.
+  ;; The scan runs from jit-lock and not from the render, batch never
+  ;; redisplays, and the alternate screen is never scanned, so the row scanned
+  ;; no URLs at all.  `cooked-bench-links' times the scan itself.
   (cooked-bench--frames "per-frame, 24x80 every cell linked and underlined"
                         (cooked-bench--linked-rows 24 80) 200))
 
@@ -1443,9 +1442,9 @@ per-unit figure printed beside the group is the per-frame number the earlier
 shape reported."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-tests--settle-briefly)
-    ;; The primary screen: the alternate one has the URL scan off by default,
+    ;; The primary screen, because the alternate one is never scanned for URLs,
     ;; and what is under test is when the scan is paid rather than which screen
-    ;; pays it.  See `cooked-detect-links-on-alt-screen'.
+    ;; pays it.  See `cooked--fontify-region'.
     (let ((update (cooked-bench--update rows)))
       (cooked-bench--measure
        label ratio

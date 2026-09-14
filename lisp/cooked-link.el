@@ -145,19 +145,6 @@ A plain `setq\=' reaches only output rendered afterwards."
   :set #'cooked-link--set-detect-links
   :group 'cooked-link)
 
-(defcustom cooked-detect-links-on-alt-screen nil
-  "Whether to scan the alternate screen for URLs as well.
-
-Off, and the reasoning is worth having.  The alternate screen is a full-screen
-program repainting continuously — the one place where a regexp scan is paid
-over and over for text that is about to be overwritten — and it is also
-where the child is most likely to have grabbed the mouse for itself, so a link
-under the pointer is the last thing a click there should mean.  A program that
-wants a hyperlink on its own screen can say so with `OSC 8', which is honoured
-on both screens regardless of this."
-  :type 'boolean
-  :group 'cooked-link)
-
 (defface cooked-link '((t :inherit link))
   "Face for `OSC 8' hyperlinks whose text carries no styling of its own.
 

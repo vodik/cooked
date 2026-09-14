@@ -550,10 +550,11 @@ matches, its `help-echo` and `mouse-1-click-follows-link` support without cooked
 inventing a regexp. The scan itself is cooked's, run from `jit-lock` over the text a
 window is about to show rather than over every row as it is drawn — so a program
 painting faster than Emacs redraws costs nothing here — and it marks what it finds with
-text properties rather than goto-addr's overlays. `cooked-detect-links` turns it off;
-`cooked-detect-links-on-alt-screen` turns it on for a full-screen program, which is off
-by default because that screen repaints continuously and is usually where the child
-wants the mouse for itself.
+text properties rather than goto-addr's overlays. `cooked-detect-links` turns it off.
+It never runs on the alternate screen: a full-screen program repaints it continuously,
+so the scan would be paid over and over for text about to be overwritten, and that is
+usually where the child wants the mouse for itself. A program that wants a link on its
+own screen can say so with `OSC 8`, which works on both screens.
 
 One visible gap, and it is accepted rather than hidden: a URL the child *wrapped* across
 a column boundary is not matched while it is on screen, because every live row is its own

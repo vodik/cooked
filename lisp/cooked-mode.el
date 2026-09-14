@@ -2131,11 +2131,6 @@ state rather than merely checking that it parses."
                                             (not cooked-detect-links))
       :style toggle :selected cooked-detect-links
       :help "Highlight things that look like URLs as output is rendered"]
-     ["Detect Links on the Alt Screen"
-      (setq cooked-detect-links-on-alt-screen (not cooked-detect-links-on-alt-screen))
-      :style toggle :selected cooked-detect-links-on-alt-screen
-      :enable cooked-detect-links
-      :help "A full-screen program usually wants the mouse for itself"]
      ["Inline Images" (setq cooked-inline-images (not cooked-inline-images))
       :style toggle :selected cooked-inline-images
       :help "Show images the child sends rather than their placeholder cells"]
