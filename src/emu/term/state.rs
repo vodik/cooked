@@ -459,6 +459,14 @@ impl State {
         // scrollback above were all built from cells written before this drain began.
         let styles = self.styles.take_unsent();
         let fonts = self.styles.font_bits().to_vec();
+        // A drain that shows the alternate screen ends the primary's line in the buffer:
+        // the alt grid's row 0 begins a line of its own, so the last row of this batch is
+        // given a newline (see `Delta::scrolled_lines`) and a screen that began mid-line is
+        // broken there (`cooked--end-seam-line`). Neither is taken back when the primary
+        // returns, so its row 0 begins a line too, and the carry saying otherwise goes.
+        if levels.alt {
+            self.screens.primary.forget_carry();
+        }
         let screen = self.screen();
         Delta {
             images,

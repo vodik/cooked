@@ -517,6 +517,33 @@ core counts a promoted row\='s characters into those offsets."
           (cooked--prune-marks)
           start)))))
 
+(defun cooked--end-seam-line ()
+  "End the buffer line the live screen begins in, if it begins mid-line.
+
+For a drain that shows the alternate screen, whose row 0 begins a buffer line
+of its own: the drain reports a `:head\=' of 0 for it.  A screen that began
+mid-line on the primary, continuing a wrapped line whose head scrolled away in
+an earlier drain, would have the alternate screen's row 0 appended to that
+head.  So the line ends here, with a newline that belongs to the scrollback
+above it.
+
+It is not taken back when the primary screen returns.  The core forgets the
+primary's carry on the same drain, so the primary's row 0 begins a line too:
+a line wrapped across the top of the screen when a full-screen program started
+stays split there.  Undoing the break instead would mean tracking it through
+every drain the alternate screen is up for, including a resize, which evicts
+rows from the primary and inserts them at this very seam.
+
+Widens first, for the reason `cooked--render-scrolled\=' does."
+  (save-restriction
+    (widen)
+    (when-let* ((start (cooked--screen-start-position)))
+      (unless (or (= start (point-min)) (eq (char-before start) ?\n))
+        (save-excursion
+          (goto-char start)
+          (insert (apply #'propertize "\n" 'cooked-scrollback t cooked--read-only-props))
+          (set-marker cooked--screen-start (point)))))))
+
 (defun cooked--prune-marks ()
   "Forget the marks that have scrolled into permanent scrollback.
 

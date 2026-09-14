@@ -171,16 +171,7 @@ two things the child did."
     (when chunk (push (nreverse chunk) chunks))
     (setq chunks (nreverse chunks))
     (list :rows rows :cols cols
-          ;; Never rejoined with the alternate screen in the script.  A wrapped
-          ;; row that scrolled away before the switch leaves `cooked--screen-start'
-          ;; mid-line while the drain's `:head' says 0, and one that scrolls away
-          ;; in the drain that switches is given a newline while the primary's
-          ;; carry still counts it, so `cooked--check-seam' signals either way; see
-          ;; `cooked-render-oracle-the-alternate-screen-and-a-rejoined-seam'.
-          :rejoin (and (/= 0 (cooked-tests--oracle-below rng 4))
-                       (not (seq-some (lambda (token)
-                                        (member token '("\e[?1049h" "\e[?1049l" "\e[?47h" "\e[?47l")))
-                                      (apply #'append chunks))))
+          :rejoin (/= 0 (cooked-tests--oracle-below rng 4))
           :chunks chunks)))
 
 ;;;; Running a case
@@ -615,17 +606,21 @@ character it does not overwrite."
    '((nil :rows 2 :cols 6 :rejoin t :chunks (("日本語" "\r" "│ │┌─") ("\e[2;1H"))))))
 
 (ert-deftest cooked-render-oracle-the-alternate-screen-and-a-rejoined-seam ()
-  "The alternate screen agrees with the core about a rejoined seam.
+  "Showing the alternate screen ends the line the primary screen began in.
 
-It does not yet, which is why generated cases with a screen switch are never
-rejoined.  Switching after a wrapped row scrolled away leaves
-`cooked--screen-start' mid-line while the drain's `:head' says 0 for the
-alternate screen, and a wrapped row that scrolls away in the switching drain
-is given a newline while the primary's carry still counts it."
-  :expected-result :failed
+Switching after a wrapped row had scrolled away left `cooked--screen-start'
+mid-line while the drain's `:head' said 0 for the alternate screen.  A wrapped
+row that scrolled away in the switching drain was given a newline, and the
+primary's carry still counted it once the primary came back.  The line now
+ends at the seam and stays ended, so the primary's row 0 begins a line when
+it returns.  A switch there and back inside one drain shows Emacs nothing, and
+the line stays whole."
   (cooked-tests--oracle-check
    '((nil :rows 5 :cols 6 :rejoin t :chunks ((" 42%xy┌─" "\e[1S") ("\e[?47h")))
-     (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h"))))))
+     (nil :rows 5 :cols 6 :rejoin t
+          :chunks ((" 42%xy┌─" "\e[1S") ("\e[?47h") ("x") ("\e[?47l") ("y" "\e[1S")))
+     (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h") ("\e[?47l")))
+     (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h" "\e[?47l"))))))
 
 (provide 'cooked-tests-oracle)
 ;;; cooked-tests-oracle.el ends here
