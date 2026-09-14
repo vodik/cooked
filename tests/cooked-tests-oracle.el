@@ -687,6 +687,22 @@ character it does not overwrite."
   (cooked-tests--oracle-check
    '((nil :rows 2 :cols 6 :rejoin t :chunks (("日本語" "\r" "│ │┌─") ("\e[2;1H"))))))
 
+(ert-deftest cooked-render-oracle-rows-promoted-before-the-shift-log-fills ()
+  "Rows promoted by a scroll the shift log later dropped arrive as text.
+
+Seed 1464.  On a 2-row screen, two line feeds promote `├─┤' and `$ ls' by one
+scroll, `CSI 2 T' logs a second move, and the next line feed finds the log as
+long as the screen is tall and drops both.  The line feed after that is
+logged alone, and the promotion was taken out of it as though it were the
+scroll the promoted rows had left by, which lost one of the blank rows above
+`┌──┐'.  The promotion now goes with the moves the log dropped."
+  (let ((cases '((nil :rows 2 :cols 12 :rejoin t
+                       :chunks (("\e[2;1H\r\n├─┤\r\n$ ls")
+                                ("\e[2;1H\r\n 42%\r\n$ ls\r\nabc" "\e[2T"
+                                 "\e[2;1H\r\n┌──┐\r\n 42%"))))))
+    (cooked-tests--oracle-check cases)
+    (cooked-tests--oracle-check cases #'ignore #'cooked-tests--oracle-unpromoted)))
+
 (ert-deftest cooked-render-oracle-the-alternate-screen-and-a-rejoined-seam ()
   "Showing the alternate screen ends the line the primary screen began in.
 

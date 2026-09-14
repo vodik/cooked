@@ -245,6 +245,12 @@ pub struct Screen {
     /// order. Consecutive moves of the same rows the same way coalesce, so a thousand-line
     /// `cat` is not a thousand pairs of buffer edits.
     shifts: Vec<Shift>,
+    /// Whether moves were dropped from `shifts` since the last drain, because the log grew
+    /// as long as the screen is tall; see [`Screen::shift`].
+    ///
+    /// A row promoted before then left by a scroll that is no longer in the log, so there
+    /// is nothing left to take its share from; see [`Screen::dropped_shifts`].
+    dropped_shifts: bool,
     /// How many times a row has been marked damaged; see [`Screen::touches`].
     touches: u64,
     tabs: Vec<bool>,
@@ -314,6 +320,7 @@ impl Screen {
             saved: None,
             dirty: vec![true; rows],
             shifts: Vec::new(),
+            dropped_shifts: false,
             touches: 0,
             tabs: default_tabs(cols),
             carried: 0,
@@ -552,6 +559,18 @@ impl Screen {
         }
     }
 
+    /// Whether the log has dropped moves since the last drain, having grown as long as the
+    /// screen is tall; see [`Screen::shift`].
+    ///
+    /// The first scroll in the log is then not always the one that took the rows handed
+    /// to scrollback off the top. A 2-row screen that scrolls up twice, down twice and up
+    /// twice more in one drain logs the first two moves, drops them at the fifth, and
+    /// logs the sixth alone, so rows promoted by the first scroll would be taken out of
+    /// the sixth, which moved other rows.
+    pub fn dropped_shifts(&self) -> bool {
+        self.dropped_shifts
+    }
+
     /// Row moves since the last drain, taken with the damage they go with.
     ///
     /// Ordered, and Lisp must apply them in this order and *before* it renders the
@@ -561,6 +580,7 @@ impl Screen {
     /// Saturated entries are dropped here, since a region that turned over completely has
     /// every row damaged; see [`Screen::shift`] for why they stay in the log until then.
     pub fn drain_shifts(&mut self) -> Vec<Shift> {
+        self.dropped_shifts = false;
         let mut shifts = std::mem::take(&mut self.shifts);
         shifts.retain(|s| s.count < s.bottom + 1 - s.top);
         shifts
@@ -591,7 +611,8 @@ impl Screen {
     /// more moves than there are rows costs more than rewriting every row, so every row is
     /// damaged instead. Dropping the moves is safe because Emacs has applied none of them:
     /// its text and the core's copy of that text still agree row for row, so the rows
-    /// that match the copy are still left out.
+    /// that match the copy are still left out. A promotion is one of those moves, so the
+    /// drain drops it too; see [`Screen::dropped_shifts`].
     fn shift(&mut self, top: usize, bottom: usize, n: usize, direction: Direction) -> bool {
         let height = bottom + 1 - top;
         if let Some(last) = self.shifts.last_mut() {
@@ -602,6 +623,7 @@ impl Screen {
         }
         if self.shifts.len() >= self.height() {
             self.shifts.clear();
+            self.dropped_shifts = true;
             self.dirty.fill(true);
             self.touches += 1;
             return false;
