@@ -982,6 +982,11 @@ the prefix a click in the mode line is read with.  The lookup
 ;; it regardless, and that is the one place this departs from the protocol on
 ;; purpose: with reporting off, a click selects text in the ordinary Emacs way,
 ;; and an Emacs pointer is the honest thing to show over text Emacs will select.
+;;
+;; The same split decides the pointer when the child has set none.  kitty and
+;; Ghostty show the I-beam over a terminal whose clicks select text, and an
+;; arrow while the program has grabbed the mouse, since a click then selects
+;; nothing.  `cooked-grabbed-pointer-shape' is that arrow.
 
 (defcustom cooked-allow-pointer-shape t
   "Whether the child may set the mouse pointer over its screen, via OSC 22.
@@ -991,8 +996,31 @@ narrower: the pointer changes over this terminal\='s own grid and only while
 the child is being sent mouse reports, so a hostile stream can do no more than
 draw a hand over text it already controls.  When off, sets are ignored and a
 query is told that no shape is supported, which is the truth about what a set
-would then do.  Turning it off removes a shape already on show at once."
+would then do.  Turning it off takes a shape already on show away at once,
+leaving `cooked-grabbed-pointer-shape\=' in its place."
   :type 'boolean
+  :group 'cooked)
+
+(defcustom cooked-grabbed-pointer-shape 'arrow
+  "The mouse pointer over the screen while the child has the mouse, or nil.
+
+A program with mouse reporting on, such as htop or vim with `mouse=a\=', is sent
+every click, so a click over its text selects nothing and the I-beam Emacs
+shows over buffer text is misleading there.  kitty and Ghostty show an arrow
+instead, and so does this by default.  A shape the child sets with OSC 22 is
+shown in its place, when `cooked-allow-pointer-shape\=' lets it.
+
+The value is one of Emacs\=' pointer symbols, as the `pointer\=' text property
+takes them: `arrow\=', `text\=', `hand\=', `vdrag\=', `hdrag\=', `nhdrag\=',
+`modeline\=' or `hourglass\='.  Nil leaves Emacs\=' own pointer, the I-beam over
+text, as it is over any other buffer.
+
+A drag with Shift held selects text even while the child has the mouse, and the
+arrow stays for it: Emacs gives no event when Shift alone goes down, so the
+pointer could change only once the drag had begun."
+  :type '(choice (const :tag "Emacs\=' own pointer" nil)
+                 (const arrow) (const text) (const hand) (const vdrag)
+                 (const hdrag) (const nhdrag) (const modeline) (const hourglass))
   :group 'cooked)
 
 (defconst cooked--pointer-shapes
@@ -1100,15 +1128,19 @@ oldest shape is the one least likely to be popped back to."
   "The OSC 22 query answer for NAME, with CURRENT the name on top of the stack.
 
 `__default__\=' and `__grabbed__\=' ask what the pointer is when no child shape is
-in force, with and without mouse reporting.  cooked changes nothing for either,
-so both are Emacs\=' own pointer over buffer text.
+in force, without and with mouse reporting.  The first is Emacs\=' own pointer
+over buffer text, `text\='.  The second is `cooked-grabbed-pointer-shape\=' by
+its CSS name, so the default `arrow\=' answers `default\='.  A nil there answers
+`text\=', and so does `nhdrag\=' or `modeline\=', which CSS has no name for.
 
 A shape is supported only where it can be seen: on a text terminal there is no
 pointer to change, so a buffer shown only on tty frames answers 0 for every
 name, as it does with `cooked-allow-pointer-shape\=' off."
   (pcase name
     ("__current__" (or current "0"))
-    ((or "__default__" "__grabbed__") "text")
+    ("__default__" "text")
+    ("__grabbed__" (or (car (rassq cooked-grabbed-pointer-shape cooked--pointer-shapes))
+                       "text"))
     (_ (if (and cooked-allow-pointer-shape
                 (assoc name cooked--pointer-shapes)
                 (cooked--pointer-displayable-p))
@@ -1125,16 +1157,22 @@ graphical frame is enough: that is where the pointer would be seen."
             (or (mapcar #'window-frame (get-buffer-window-list nil nil t))
                 (list (selected-frame)))))
 
-(defun cooked--sync-pointer-shape (&optional allow)
-  "Show the child\='s pointer shape over the screen if it may be, or remove it.
+(defun cooked--sync-pointer-shape (&optional override)
+  "Show the pointer the screen should have while the child has the mouse.
 
-ALLOW, when given, is `(VALUE)\=' and stands in for
-`cooked-allow-pointer-shape\=', for the variable watcher, which runs before the
-new value is in place.
+That is the child\='s OSC 22 shape when it has set one Emacs can draw and
+`cooked-allow-pointer-shape\=' allows it, and otherwise
+`cooked-grabbed-pointer-shape\='.  With neither, or with the child not having
+the mouse, the overlay is removed and Emacs\=' own pointer shows.
+
+OVERRIDE, when given, is `(SYMBOL . VALUE)\=' and stands in for one of those two
+knobs, for the variable watcher, which runs before the new value is in place.
 
 Shown while the child is being sent mouse reports: the reporting gate is
 `cooked--mouse-grab\=', and `enabled\=' is asked as well because that gate also
 opens for alternate scroll, where the child asked for nothing about the mouse.
+`less\=' with alternate scroll on still selects text on a click, so it keeps
+the I-beam.
 
 An overlay rather than a text property, and from `cooked--screen-start\=' to
 the end: the rows under it are deleted and reinserted on every redraw, which
@@ -1160,13 +1198,19 @@ sit on, and Emacs shows `void-text-area-pointer\=' there.  That variable is read
 in whatever buffer is current when the pointer moves, not the one under it, so
 setting it here would repaint the void of every window while this one was
 selected; the blank tail of a short row keeps Emacs\=' own pointer instead."
-  (let ((pointer (and (if allow (car allow) cooked-allow-pointer-shape)
-                      cooked--session
-                      cooked--mouse-grab
-                      (cooked-mouse-state-enabled cooked--mouse-state)
-                      (cdr (assoc (car (alist-get (cooked--pointer-screen)
-                                                  cooked--pointer-stacks))
-                                  cooked--pointer-shapes))))
+  (let ((pointer
+         (and cooked--session
+              cooked--mouse-grab
+              (cooked-mouse-state-enabled cooked--mouse-state)
+              (cl-flet ((knob (symbol)
+                          (if (eq (car override) symbol) (cdr override) (symbol-value symbol))))
+                ;; An empty stack, a nil top (kitty's reset), and a name Emacs
+                ;; has no pointer for all fall back to the grabbed shape.
+                (or (and (knob 'cooked-allow-pointer-shape)
+                         (cdr (assoc (car (alist-get (cooked--pointer-screen)
+                                                     cooked--pointer-stacks))
+                                     cooked--pointer-shapes)))
+                    (knob 'cooked-grabbed-pointer-shape)))))
         (start (cooked--screen-start-position)))
     (if (and pointer start)
         (save-restriction
@@ -1184,7 +1228,9 @@ selected; the blank tail of a short row keeps Emacs\=' own pointer instead."
         (setq cooked--pointer-overlay nil)))))
 
 (defun cooked--sync-pointer-shape-on-toggle (symbol newval operation where)
-  "Follow SYMBOL, the pointer shape knob, to NEWVAL, as a variable watcher.
+  "Follow SYMBOL, a pointer shape knob, to NEWVAL, as a variable watcher.
+
+SYMBOL is `cooked-allow-pointer-shape\=' or `cooked-grabbed-pointer-shape\='.
 
 WHERE is the buffer a buffer-local OPERATION applies to, and nil for the default
 value, which reaches every buffer that has not made the variable local.  Without
@@ -1198,10 +1244,10 @@ value the buffer is left with is the default one, so that is what it syncs to."
           (with-current-buffer where
             (when (derived-mode-p 'cooked-mode)
               (cooked--sync-pointer-shape
-               (list (if (eq operation 'makunbound) (default-value symbol) newval))))))
+               (cons symbol (if (eq operation 'makunbound) (default-value symbol) newval))))))
       (cooked--dolist-buffers
-        (unless (local-variable-p 'cooked-allow-pointer-shape)
-          (cooked--sync-pointer-shape (list newval)))))))
+        (unless (local-variable-p symbol)
+          (cooked--sync-pointer-shape (cons symbol newval)))))))
 
 (defun cooked--reset-pointer-shapes ()
   "Empty both OSC 22 stacks, on RIS as the protocol requires, and after a command.

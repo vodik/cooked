@@ -2140,7 +2140,7 @@ and the selection moving to another window and back."
       (set-frame-parameter frame 'cursor-color own))))
 
 (defun cooked-tests--osc-22-query-reply (graphic)
-  "What a real child is told for five OSC 22 names.
+  "What a real child is told for six OSC 22 names.
 GRAPHIC non-nil stands in for a graphical frame; nil leaves the batch frame,
 which is a text terminal's."
   (let ((out (make-temp-file "cooked-osc22")))
@@ -2152,7 +2152,7 @@ which is a text terminal's."
           (unless graphic (should-not (display-graphic-p)))
           (cooked-tests--with-session
               (cooked-tests--reply-to
-               "\\033]22;?pointer,crosshair,ew-resize,__current__,__default__\\033\\\\" out)
+               "\\033]22;?pointer,crosshair,ew-resize,__current__,__default__,__grabbed__\\033\\\\" out)
             (should (cooked-tests--settle
                      (lambda () (string-suffix-p "\033\\" (cooked-tests--contents out)))))
             (cooked-tests--contents out)))
@@ -2160,19 +2160,23 @@ which is a text terminal's."
 
 (ert-deftest cooked-osc-22-query-says-which-shapes-can-be-shown ()
   "One answer per name, in order: 1 for a shape Emacs has a pointer for, 0 for
-one it has not, the top of the stack -- empty, so 0 -- for `__current__', and
-Emacs' own text pointer for `__default__'."
+one it has not, the top of the stack -- empty, so 0 -- for `__current__',
+Emacs' own text pointer for `__default__', and the arrow shown while the child
+has the mouse, by its CSS name, for `__grabbed__'."
   (should (equal (cooked-tests--osc-22-query-reply t)
-                 "\033]22;1,0,1,0,text\033\\")))
+                 "\033]22;1,0,1,0,text,default\033\\"))
+  (let ((cooked-grabbed-pointer-shape nil))
+    (should (equal (cooked-tests--osc-22-query-reply t)
+                   "\033]22;1,0,1,0,text,text\033\\"))))
 
 (ert-deftest cooked-osc-22-query-supports-nothing-where-no-pointer-is-seen ()
   "On a text terminal, and with the knob off, a real child is told no shape is
 supported, since a set would change nothing it could see."
   (should (equal (cooked-tests--osc-22-query-reply nil)
-                 "\033]22;0,0,0,0,text\033\\"))
+                 "\033]22;0,0,0,0,text,default\033\\"))
   (let ((cooked-allow-pointer-shape nil))
     (should (equal (cooked-tests--osc-22-query-reply t)
-                   "\033]22;0,0,0,0,text\033\\"))))
+                   "\033]22;0,0,0,0,text,default\033\\"))))
 
 (ert-deftest cooked-osc-22-empty-set-resets-and-a-full-stack-drops-its-bottom ()
   "kitty's `ESC ] 22 ; ST' resets the top of the stack to the default pointer
@@ -2191,7 +2195,7 @@ and turning the knob off takes a shape on show away at once."
         (osc ">text,pointer")
         (should (eq (shown) 'hand))
         (osc reset)
-        (should-not (shown))
+        (should (eq (shown) 'arrow))
         (should (equal (stack) '(nil "text")))
         (osc "<")
         (should (eq (shown) 'text))
@@ -2206,13 +2210,13 @@ and turning the knob off takes a shape on show away at once."
       (should (= (length (stack)) 16))
       (should-not (member "wait" (stack)))
       (should (eq (shown) 'hand))
-      ;; The knob off removes the overlay without waiting for a drain.
+      ;; The knob off takes the shape away without waiting for a drain.
       (setq-local cooked-allow-pointer-shape nil)
-      (should-not cooked--pointer-overlay)
+      (should (eq (shown) 'arrow))
       (kill-local-variable 'cooked-allow-pointer-shape)
       (should (eq (shown) 'hand))
       (let ((cooked-allow-pointer-shape nil))
-        (should-not cooked--pointer-overlay))
+        (should (eq (shown) 'arrow)))
       (should (eq (shown) 'hand)))))
 
 (ert-deftest cooked-osc-22-shape-covers-the-grid-only-while-reporting ()
@@ -2288,6 +2292,39 @@ exec sleep 30"
             (should (= moves 0))))
       (ignore-errors (delete-file go)))))
 
+(ert-deftest cooked-grabbed-pointer-is-an-arrow-until-the-child-sets-one ()
+  "While the child has the mouse and has set no shape, the screen shows
+`cooked-grabbed-pointer-shape', an arrow, as kitty and Ghostty do.  With
+reporting off, or with only alternate scroll opening the gate, Emacs' own
+I-beam shows; a shape the child sets replaces the arrow; and the knob follows a
+change without waiting for a drain."
+  (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; exec sleep 30")
+    (cl-flet ((shown () (and cooked--pointer-overlay
+                             (overlay-get cooked--pointer-overlay 'pointer))))
+      (should-not cooked--mouse-grab)
+      (should-not (shown))
+      ;; Alternate scroll opens the gate without the child asking for the mouse.
+      (cl-letf (((symbol-function 'cooked--alt-scroll-active-p) (lambda () t)))
+        (should (cooked-tests--settle (lambda () (cooked--update-mouse-grab)
+                                        cooked--mouse-grab)))
+        (should-not (shown)))
+      (cooked--set-mouse-state t nil nil nil nil)
+      (should cooked--mouse-grab)
+      (should (eq (shown) 'arrow))
+      (should (eq (get-char-property (cooked--screen-start-position) 'pointer) 'arrow))
+      (cooked--osc-pointer-shape '("pointer"))
+      (should (eq (shown) 'hand))
+      (cooked--osc-pointer-shape '("<"))
+      (should (eq (shown) 'arrow))
+      (setq-local cooked-grabbed-pointer-shape 'hand)
+      (should (eq (shown) 'hand))
+      (setq-local cooked-grabbed-pointer-shape nil)
+      (should-not (shown))
+      (kill-local-variable 'cooked-grabbed-pointer-shape)
+      (should (eq (shown) 'arrow))
+      (cooked--set-mouse-state nil nil nil nil nil)
+      (should-not (shown)))))
+
 (ert-deftest cooked-osc-22-stacks-per-screen-and-honours-the-knob ()
   "Push, pop and set move the top of the current screen's stack; the other
 screen's stack is untouched; a reset empties both; and with the knob off a set
@@ -2306,9 +2343,9 @@ does nothing and a query is told nothing is supported."
           (osc "<")
           (should (eq (shown) 'text))
           ;; A shape Emacs cannot draw is still pushed, so its pop stays paired;
-          ;; while it is on top, Emacs' own pointer shows.
+          ;; while it is on top, the grabbed pointer shows.
           (osc ">crosshair")
-          (should-not (shown))
+          (should (eq (shown) 'arrow))
           (osc "?__current__")
           (should (equal (pop replies) '(22 . "crosshair")))
           (osc "<")
@@ -2319,18 +2356,18 @@ does nothing and a query is told nothing is supported."
           ;; The alternate screen starts with a stack of its own.
           (let ((cooked--alt t))
             (cooked--sync-pointer-shape)
-            (should-not (shown))
+            (should (eq (shown) 'arrow))
             (osc "hand")
             (should (eq (shown) 'hand)))
           (cooked--sync-pointer-shape)
           (should (eq (shown) 'hourglass))
           (cooked--reset-pointer-shapes)
           (should-not cooked--pointer-stacks)
-          (should-not (shown))
+          (should (eq (shown) 'arrow))
           (let ((cooked-allow-pointer-shape nil))
             (osc "pointer")
             (should-not cooked--pointer-stacks)
-            (should-not (shown))
+            (should (eq (shown) 'arrow))
             (osc "?pointer,text")
             (should (equal (pop replies) '(22 . "0,0")))))))))
 
