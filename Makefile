@@ -126,12 +126,24 @@ rust-test:
 # including one that had just rebuilt nothing.  Skipping an identical install
 # cannot reintroduce the SIGBUS this target exists to avoid, because it writes
 # nothing at all.
+#
+# An identical artifact is still touched when cargo has linked it again since
+# it was installed, because the mtime is also what `cooked--module-stale-p'
+# reads.  A rebase or a comment-only edit rewrites a source file, cargo relinks
+# the same bytes, and an artifact left at its old time stays older than its
+# sources for good.  `M-x cooked' then builds again on every start, and
+# `cooked-comint--core', which never builds, refuses the core outright: every
+# test in cooked-tests-comint.el failed with "the native core is older than its
+# sources" when that file was run alone.  A build that relinked nothing leaves
+# cargo's output older than the artifact, so the stamps are still left alone.
 module:
 	cargo build --release
-	@mkdir -p target/release
+	@mkdir -p $(dir $(MODULE))
 	@if ! cmp -s $(CARGO_TARGET_DIR)/release/libcooked$(MODULE_SUFFIX) $(MODULE); then \
 	  cp $(CARGO_TARGET_DIR)/release/libcooked$(MODULE_SUFFIX) $(MODULE).new && \
 	  mv -f $(MODULE).new $(MODULE); \
+	elif [ $(CARGO_TARGET_DIR)/release/libcooked$(MODULE_SUFFIX) -nt $(MODULE) ]; then \
+	  touch $(MODULE); \
 	fi
 
 # Depends on `module' because the two halves are one protocol: the defuns the

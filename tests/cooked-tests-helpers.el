@@ -74,7 +74,7 @@ Returns the packages that could not be found."
            (if (cdr missing) "them" "it")))
 
 (defconst cooked-tests--optional-programs
-  '("zsh" "bash" "fish" "tmux" "script" "base64" "git" "htop" "tar" "tic")
+  '("zsh" "bash" "fish" "tmux" "script" "base64" "git" "htop" "tar" "tic" "make")
   "Programs a `skip-unless\=' asks PATH for, each also the tag of its tests.
 A new one goes here; `cooked-every-dependency-skip-carries-its-tag\=' fails
 until it does.")

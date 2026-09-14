@@ -422,6 +422,61 @@ artifact could never have been a bare .so."
                                       "cooked-256color"))
       (should (file-exists-p (expand-file-name "terminfo/63/cooked-256color" target))))))
 
+(ert-deftest cooked-make-module-leaves-no-core-older-than-its-sources ()
+  "An artifact `make module' finds identical is still no older than its sources.
+
+The target installs only bytes that differ, so that a build which changed
+nothing leaves the test stamps alone.  But a rebase rewrites a source file and
+cargo links the same bytes again, and an artifact left at its old time is older
+than its sources as far as `cooked--module-stale-p' can tell.
+`cooked-comint--core' never builds, so it refused that core, and every test in
+cooked-tests-comint.el failed when the file was run alone.  In a parallel run
+only the first of them did, since a session test in another Emacs builds the
+core when it finds it stale, which gives it a new time.
+
+A `cargo' that does nothing stands in for the build, with cargo's output
+already linked after the source changed.  A second run, with nothing linked
+since, does not move the artifact's time."
+  :tags '(make)
+  (skip-unless (executable-find "make"))
+  (cooked-tests--with-temp-directory dir
+    (let* ((bin (expand-file-name "bin" dir))
+           (linked (expand-file-name (concat "cargo/release/libcooked" module-file-suffix) dir))
+           (module (expand-file-name (concat "release/libcooked" module-file-suffix) dir))
+           (source (expand-file-name "src/lib.rs" dir))
+           (then (time-subtract nil 1000))
+           (process-environment
+            (cons (concat "PATH=" bin path-separator (getenv "PATH"))
+                  (seq-remove (lambda (entry)
+                                (string-match-p "\\`\\(MAKEFLAGS\\|MFLAGS\\|MAKELEVEL\\)=" entry))
+                              process-environment))))
+      (dolist (file (list linked module source (expand-file-name "Cargo.toml" dir)))
+        (make-directory (file-name-directory file) t)
+        (write-region "the same bytes" nil file nil 'silent))
+      (make-directory bin)
+      (write-region "#!/bin/sh\n" nil (expand-file-name "cargo" bin) nil 'silent)
+      (set-file-modes (expand-file-name "cargo" bin) #o755)
+      (set-file-times module then)
+      (set-file-times source (time-add then 5))
+      (set-file-times (expand-file-name "Cargo.toml" dir) then)
+      (set-file-times linked (time-add then 10))
+      (should (cooked--module-stale-p module dir))
+      (cl-flet ((make-module ()
+                  (should (eq 0 (call-process
+                                 "make" nil nil nil "-C" (cooked--root) "module"
+                                 (concat "CARGO_TARGET_DIR=" (expand-file-name "cargo" dir))
+                                 (concat "MODULE=" module))))))
+        (make-module)
+        (should (equal (with-temp-buffer
+                         (insert-file-contents module)
+                         (buffer-string))
+                       "the same bytes"))
+        (should-not (cooked--module-stale-p module dir))
+        (let ((installed (file-attribute-modification-time (file-attributes module))))
+          (make-module)
+          (should (equal (file-attribute-modification-time (file-attributes module))
+                         installed)))))))
+
 (ert-deftest cooked-nothing-is-downloaded-while-no-release-publishes-one ()
   "The mechanism is built and the endpoint is not wired, and it says so.
 
