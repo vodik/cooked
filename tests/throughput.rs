@@ -43,6 +43,15 @@ fn styled(lines: usize) -> Vec<u8> {
         .collect()
 }
 
+/// East Asian text, the case that leaves the batched path: every wide character is
+/// placed on its own by `Screen::place`, which writes a lead cell and its continuation
+/// and has to leave no half of an older wide character behind either side of them.
+fn wide(lines: usize) -> Vec<u8> {
+    (0..lines)
+        .flat_map(|i| format!("行 {i:06} 日本語の文章を端末に表示する\r\n").into_bytes())
+        .collect()
+}
+
 /// Hyperlinked output, and the two shapes it comes in.
 ///
 /// `distinct` links, cycled over `lines` rows. The two ends of that are the two things
@@ -98,6 +107,7 @@ fn feed_only() {
     for (label, data) in [
         ("plain, parse only", plain(200_000)),
         ("styled, parse only", styled(200_000)),
+        ("wide, parse only", wide(200_000)),
     ] {
         let mut term = Term::new(50, 200);
         let mut forced = 0usize;

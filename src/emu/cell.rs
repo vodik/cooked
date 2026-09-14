@@ -774,6 +774,8 @@ impl Row {
     /// paths reach here -- the alternate screen, and a `Resize::Clamp` -- and neither has
     /// buffer text under it for a mark to be describing.
     pub fn resize(&mut self, cols: usize, style: StyleId) {
+        // A wide character across the new edge would keep its lead and lose the rest.
+        self.clear_torn(cols, cols);
         self.cells.resize(cols, Cell::blank(style));
         self.prune(cols.., Marks::Drop);
     }
@@ -1395,6 +1397,65 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
         changed
     }
 
+    /// Blank every wide character that straddles either end of START..END, the columns a
+    /// writer is about to overwrite, and return whether there was one.
+    ///
+    /// A wide character is a lead cell and the continuations after it, and they go
+    /// together or not at all. `a` printed over the second half of `日` would otherwise
+    /// leave `日` on one column, which Emacs still draws two wide, so the row reaches the
+    /// buffer a column long, the cursor is counted a character early and a glyph run is
+    /// cut in the wrong place. Printed over the first half, it leaves a continuation with
+    /// no character before it, which the runs skip. Like xterm and Ghostty, the writer
+    /// blanks the half it does not overwrite. The blanks keep the character's rendition,
+    /// so a torn `日` on a red background leaves a red blank rather than a hole.
+    ///
+    /// Called before the write rather than after it, because only the old cell at START
+    /// can say whether START was inside a wide character. END is the first column not
+    /// written, so a continuation there belongs to a character whose lead was just
+    /// overwritten, whenever it is tested.
+    ///
+    /// Every writer that replaces part of a row calls this -- [`Row::fill_run`],
+    /// [`Row::fill`], [`Row::place`], [`Row::insert_blank`], [`Row::delete`],
+    /// [`Row::resize`], and the grid's single-character print, which writes a lead and its
+    /// continuations cell by cell. [`Row::set`] does not, because a continuation written on
+    /// its own is half of a character by design. The two edge tests are all an ordinary
+    /// write pays; the blanking is out of line.
+    #[inline]
+    pub fn clear_torn(&mut self, start: usize, end: usize) -> bool {
+        let cells = self.cells();
+        let torn = |col: usize| cells.get(col).is_some_and(|cell| cell.is_continuation());
+        if !torn(start) && !torn(end) {
+            return false;
+        }
+        self.blank_wide(start);
+        self.blank_wide(end);
+        true
+    }
+
+    /// Blank the whole of the wide character COL is a continuation of, if it is one.
+    ///
+    /// [`Row::clear_torn`]'s slow half. A continuation with no lead before it, which only
+    /// an older tear could have left, is blanked from the start of the row.
+    #[cold]
+    #[inline(never)]
+    fn blank_wide(&mut self, col: usize) {
+        let cells = self.cells();
+        if !cells.get(col).is_some_and(|cell| cell.is_continuation()) {
+            return;
+        }
+        let lead = cells[..col]
+            .iter()
+            .rposition(|cell| !cell.is_continuation())
+            .unwrap_or(0);
+        let end = cells[col..]
+            .iter()
+            .position(|cell| !cell.is_continuation())
+            .map_or(cells.len(), |n| col + n);
+        let blank = Cell::blank(cells[lead].style);
+        Cell::fill(&mut self.cells_mut()[lead..end], blank);
+        self.prune(lead..end, Marks::Keep);
+    }
+
     /// Place a run of characters from COL, each one column wide.
     ///
     /// [`Row::set`] in bulk, with the same effect as calling it per character. The
@@ -1422,6 +1483,9 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
         if !changed {
             return false;
         }
+        let end = col + slots.len().min(text.len());
+        self.clear_torn(col, end);
+        let slots = &mut self.cells_mut()[col..];
         let mut placed = 0;
         for (slot, ch) in slots.iter_mut().zip(text.chars()) {
             *slot = pen.with_char(ch);
@@ -1445,6 +1509,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
         if col >= self.cells().len() {
             return;
         }
+        self.clear_torn(col, col + 1);
         // `set` first, so it retires whatever the old occupant had attached before the
         // placement goes on; the other order would prune the placement just made.
         let _ = self.set(col, Cell::blank(style));
@@ -1469,7 +1534,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
 
     /// Blank a span of columns, returning whether that changed anything; see [`Row::set`]
     /// for what the answer is for.
-    pub fn fill(&mut self, range: impl IntoIterator<Item = usize>, style: StyleId) -> bool {
+    pub fn fill(&mut self, range: std::ops::Range<usize>, style: StyleId) -> bool {
         // Not `set` per column. `fill` is the erase path — a full-screen program clears
         // rows every frame — and a per-cell side-table check in the loop stops this being
         // a bulk write. The tables are pruned once, outside it.
@@ -1477,6 +1542,7 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
         let mut lo = usize::MAX;
         let mut hi = 0;
         let mut changed = self.meta().extras.is_some();
+        changed |= self.clear_torn(range.start, range.end);
         for col in range {
             if let Some(slot) = self.cells_mut().get_mut(col) {
                 changed |= *slot != blank;
@@ -1534,6 +1600,9 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
             return;
         }
         let n = count.min(cols - col);
+        // A wide character split by the insertion, or by the end of the row where the
+        // cells from `cols - n` fall off, would be left in halves.
+        self.clear_torn(col, cols - n);
         // In place, because `Cell` is `Copy` and the row's length does not change: growing
         // past `cols` and truncating would realloc once per character in insert mode.
         self.cells_mut().copy_within(col..cols - n, col + n);
@@ -1549,6 +1618,8 @@ impl<C: BorrowMut<[Cell]>, M: BorrowMut<RowMeta>> RowOf<C, M> {
             return;
         }
         let gone = (col + count).min(cols) - col;
+        // A wide character across either edge of the gap would lose one half to it.
+        self.clear_torn(col, col + gone);
         // In place, as `insert_blank` is: the row's length does not change, so the cells
         // right of the gap slide left over it and blanks fill in behind them.
         let cells = self.cells_mut();

@@ -604,14 +604,13 @@ arrived as an empty line."
      (nil :rows 5 :cols 11 :rejoin t :chunks (("\e[1;42m" "\e[4M") ("\e[2S"))))))
 
 (ert-deftest cooked-render-oracle-a-glyph-run-over-a-torn-wide-character ()
-  "Writing over half of a wide character leaves the other half standing.
+  "Writing over half of a wide character leaves nothing of the other half.
 
-`┌─' over the first half of `語' keeps its second half as a continuation cell
-with no character before it.  The core then counts the cursor after `─' one
-character early, so the glyph run is cut before `─' and, once the cursor has
-gone, never drawn whole again.  Known and not fixed here: every writer that
-can overwrite half a wide character has to blank the other half."
-  :expected-result :failed
+`┌─' over the first half of `語' kept its second half as a continuation cell
+with no character before it.  The core then counted the cursor after `─' one
+character early, so the glyph run was cut before `─' and, once the cursor had
+gone, never drawn whole again.  Every writer now blanks the half of a wide
+character it does not overwrite."
   (cooked-tests--oracle-check
    '((nil :rows 2 :cols 6 :rejoin t :chunks (("日本語" "\r" "│ │┌─") ("\e[2;1H"))))))
 

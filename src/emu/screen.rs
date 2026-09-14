@@ -711,7 +711,9 @@ impl Screen {
             Cell::blank(lead_cell.style)
         };
         self.edit(row, |r| {
-            let mut changed = false;
+            // A widening writes continuations over the columns after the cell, and the
+            // character standing there may be wide itself.
+            let mut changed = after > before && r.clear_torn(lead + before, lead + after);
             for col in lead + after.min(before)..lead + after.max(before) {
                 changed |= r.set(col, cell);
             }
@@ -770,6 +772,7 @@ impl Screen {
                 r.insert_blank(col, width, pen.erase);
                 changed = true;
             }
+            changed |= r.clear_torn(col, col + width);
             changed |= r.set(col, pen.cell(ch));
             for offset in 1..width {
                 changed |= r.set(col + offset, pen.cell(CONTINUATION));
@@ -1137,7 +1140,7 @@ impl Screen {
         let style = pen.erase;
         self.edit(row, |r| match how {
             Erase::ToEnd => r.fill(col..cols, style),
-            Erase::ToStart => r.fill(0..=col.min(cols - 1), style),
+            Erase::ToStart => r.fill(0..col.min(cols - 1) + 1, style),
             // The one whole-row erase that keeps semantic marks: see `Row::erase_all`.
             Erase::All => r.erase_all(style),
         });

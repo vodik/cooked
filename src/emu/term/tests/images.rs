@@ -1006,3 +1006,15 @@ fn a_pending_picture_weighs_on_the_backlog() {
     t.drain();
     assert_eq!(t.backlog(), 0);
 }
+
+#[test]
+fn a_picture_over_half_a_wide_character_blanks_the_other_half() {
+    let mut t = with_metrics(2, 6);
+    let png = rgba_png(1, 1, &[0, 0, 0, 255]);
+    t.feed("a日b\x1b[1;3H".as_bytes());
+    t.feed(format!("\x1b_Ga=T,f=100,c=1,r=1,i=1;{}\x1b\\", b64(&png)).as_bytes());
+    let row = t.screen().row(0).unwrap();
+    assert!(row.cells().iter().all(|cell| !cell.is_continuation()));
+    assert_eq!(row.to_text(), "a  b");
+    assert_eq!(placements(&t, 0).len(), 1);
+}

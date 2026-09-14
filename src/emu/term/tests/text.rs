@@ -357,3 +357,50 @@ fn a_mark_after_a_declared_block_joins_the_block() {
     assert_eq!(runs[0].text, "x\u{301}");
     assert_eq!(runs[0].cols, 3);
 }
+
+/// Row 0 cell by cell, a continuation spelled `+`, so a torn wide character shows as a
+/// `+` with no wide character before it, or a wide character with no `+` after it.
+fn cell_chars(t: &Term) -> String {
+    t.screen()
+        .row(0)
+        .unwrap()
+        .cells()
+        .iter()
+        .map(|cell| if cell.is_continuation() { '+' } else { cell.ch })
+        .collect()
+}
+
+#[test]
+fn every_writer_blanks_the_half_of_a_wide_character_it_does_not_overwrite() {
+    // `日本語` fills columns 0 to 5 of an eight-column row, and each case lands on one
+    // half of one of them. A torn character would show as `日 ` (a lead with no
+    // continuation) or ` +` (a continuation with no lead), and Emacs would count and cut
+    // the rest of the row a character out.
+    for (label, escape, want) in [
+        ("ASCII over a second half", "\x1b[1;2Ha", " a本+語+  "),
+        ("ASCII over a first half", "\x1b[1;3Hab", "日+ab語+  "),
+        ("ASCII ending on a first half", "\x1b[1;2Hab", " ab 語+  "),
+        ("é over a second half", "\x1b[1;2H\u{e9}", " \u{e9}本+語+  "),
+        ("wide over two halves", "\x1b[1;2H漢", " 漢+ 語+  "),
+        ("IRM print inside one", "\x1b[4h\x1b[1;2Hx", " x 本+語+ "),
+        ("EL 1 to a first half", "\x1b[1;3H\x1b[1K", "    語+  "),
+        ("EL 0 from a second half", "\x1b[1;4H\x1b[K", "日+      "),
+        ("ECH across two", "\x1b[1;2H\x1b[2X", "    語+  "),
+        ("ICH inside one", "\x1b[1;2H\x1b[@", "   本+語+ "),
+        ("ICH pushing one off", "\x1b[1;1H\x1b[3@", "   日+本+ "),
+        ("DCH inside one", "\x1b[1;2H\x1b[P", " 本+語+   "),
+        ("DCH ending inside one", "\x1b[1;1H\x1b[3P", " 語+     "),
+    ] {
+        let t = term(1, 8, format!("日本語{escape}").as_bytes());
+        assert_eq!(cell_chars(&t), want, "{label}");
+    }
+}
+
+#[test]
+fn a_widened_cell_blanks_the_wide_character_it_grows_over() {
+    // `U+2714` is one column until `U+FE0F` promotes it, and the column it grows into is
+    // the first half of `日`.
+    let mut t = term(1, 6, "\u{2714}日".as_bytes());
+    t.feed("\x1b[1;1H\u{2714}\u{FE0F}".as_bytes());
+    assert_eq!(cell_chars(&t), "\u{2714}+    ");
+}
