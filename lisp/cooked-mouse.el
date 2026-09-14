@@ -773,19 +773,29 @@ was spent on the movement rather than on the command it was typed for,
 
 A movement some other binding wants is left alone.  `mouse-drag-region\=' reads
 the drag it selects text with as bound movements in a transient map, and the
-shifted drag is how text is selected out of a program that has the mouse."
+shifted drag is how text is selected out of a program that has the mouse.
+
+A movement nothing wants is deleted wherever the key is being read, not only in
+the command loop.  A command that reads a key of its own starts the sequence
+afresh and often under maps of its own, where `cooked-mouse-hover\=' is not
+bound.  With `cooked-evil-normal-state-render\=' nil the child keeps the mouse
+in normal state, and a twitch of the pointer after evil\='s \\`r\=' was read as
+the replacement character, which failed, while one between \\`y\=' and \\`w\='
+was read as the motion, which abandoned the yank."
   (let ((event last-input-event))
     (when (and (mouse-movement-p event) cooked--mouse-grab)
-      (let* ((ours (eq (key-binding (vector event)) #'cooked-mouse-hover))
+      (let* ((binding (key-binding (vector event) nil nil (event-start event)))
+             (ours (eq binding #'cooked-mouse-hover))
              (reported (and ours (cooked--hover-report (event-start event)))))
         (and (or reported
                  ;; Everything read so far, the movement included, minus the
                  ;; movements: a key already begun is one being cut in half.
                  (seq-some (lambda (key) (not (mouse-movement-p key)))
                            (this-command-keys-vector))
-                 (and ours
-                      (memq (cooked--mouse-fallback-binding event (vector event))
-                            '(nil ignore ignore-preserving-kill-region))))
+                 (memq (if ours
+                           (cooked--mouse-fallback-binding event (vector event))
+                         binding)
+                       '(nil ignore ignore-preserving-kill-region)))
              [])))))
 
 (defun cooked-mouse-hover ()

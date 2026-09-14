@@ -2122,6 +2122,40 @@ all, so the global value governs everywhere else."
         (cooked--update-mouse-grab))
       (should-not (local-variable-p 'track-mouse)))))
 
+(ert-deftest cooked-hover-movements-stay-out-of-evils-own-key-reads ()
+  "With `cooked-evil-normal-state-render' nil the child keeps the mouse in normal
+state, and hover with it.  evil reads an operator's motion and \\`r''s character
+with `read-key-sequence' afresh, where `cooked-mouse-hover' is not what a
+movement reaches, so a movement read there used to be taken as the key: \\`r'
+then failed for want of a character, and \\`y' followed by \\`w' abandoned the
+yank.  A movement nothing is bound to is now deleted from those reads too."
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (let ((cooked-evil-normal-state-render nil)
+        (cooked-mouse-hover-motion t))
+    (cooked-tests--with-session cooked-tests--hover-child
+      (should (cooked-tests--settle
+               (lambda () (and (cooked-mouse-state-motion cooked--mouse-state)
+                               (string-match-p "bravo" (cooked-tests--text))))))
+      (cooked-tests--display-buffer)
+      (unwind-protect
+          (let* ((pos (save-excursion (goto-char (point-min))
+                                      (search-forward "bravo") (- (point) 3)))
+                 (movement (list 'mouse-movement (cooked-tests--posn pos))))
+            (evil-normal-state)
+            (should cooked--mouse-grab)
+            (should (eq track-mouse t))
+            (let ((unread-command-events (list movement ?a)))
+              (should (eq (evil-read-key) ?a)))
+            (goto-char pos)
+            (kill-new "before")
+            (execute-kbd-macro (vector ?y movement ?w))
+            (should (eq evil-state 'normal))
+            (should (equal (substring-no-properties (current-kill 0)) "avo")))
+        (evil-emacs-state)))))
+
 (ert-deftest cooked-hover-tracking-and-the-pointer-shape-share-one-gate ()
   "The OSC 22 pointer and hover reporting both follow `cooked--mouse-grab', but
 only hover stands down while a gesture is being followed: the pointer a child
