@@ -1038,8 +1038,28 @@ impl Screen {
         } else {
             self.touch_range(top..=bottom);
         }
+        self.unwrap_above(top);
         self.carry(&evicted);
         evicted
+    }
+
+    /// End the line of the row above TOP, whose continuation a scroll of the region
+    /// starting at TOP has just moved away.
+    ///
+    /// A row's wrap flag says its line goes on in the row below, and a region scroll or
+    /// an `IL`/`DL` at TOP puts a different row there: `abcdefghij` wrapped over two
+    /// rows, then `DL` on the second, leaves `abcde` joined to whatever came up from
+    /// below, in the buffer, in a URL scanned across the wrap, and in the next rewrap.
+    /// Row 0 has no row above it, and what continues into it is the carry's business.
+    fn unwrap_above(&mut self, top: usize) {
+        if let Some(above) = top.checked_sub(1) {
+            self.edit(above, |r| r.set_wrapped(false));
+        }
+    }
+
+    /// End the line of row INDEX, whose continuation below it an `IL` or `DL` has taken.
+    fn unwrap(&mut self, index: usize) {
+        self.edit(index, |r| r.set_wrapped(false));
     }
 
     /// Remove `count` rows starting at `first`, closing the gap from below.
@@ -1101,6 +1121,11 @@ impl Screen {
         } else {
             self.touch_range(top..=bottom);
         }
+        self.unwrap_above(top);
+        // The row pushed down to the bottom of the region went on in a row that has
+        // fallen off it. Not so for `scroll_up`, whose bottom row is followed by the blank
+        // a wrapping linefeed is about to write the continuation into.
+        self.unwrap(bottom);
     }
 
     pub fn set_region(&mut self, top: usize, bottom: usize) {
@@ -1175,9 +1200,9 @@ impl Screen {
                     let used = self.last_used_row();
                     let mut history = Evicted::from_rows(self.rows().take(used + 1));
                     // The last row archived ends its line, whatever its wrap flag says. The
-                    // flag can outlive the row it pointed at: `DL` below a wrapped row
-                    // pulls a blank up in place of the continuation, and the blank is not
-                    // archived. Handed over as wrapped, the row would reach the buffer with
+                    // flag can point at a row with nothing on it: `CSI 2K` on the
+                    // continuation blanks it and leaves the row above wrapped, and the blank
+                    // is not archived. Handed over as wrapped, the row would reach the buffer with
                     // no newline, leaving the new row 0 appended to it while the carry
                     // below says row 0 begins a line.
                     if let (Some(last), Some(row)) = (history.0.last_mut(), self.row(used))
@@ -1274,6 +1299,12 @@ impl Screen {
         let carried = (self.carried, self.carried_chars);
         self.scroll_up(n, pen).discard();
         (self.carried, self.carried_chars) = carried;
+        // What was the bottom row of the region now has blanks below it, where a wrapping
+        // linefeed's scroll would have left the blank its continuation goes into.
+        let moved = saved.bottom + 1 - n.min(saved.bottom + 1 - self.cursor.row);
+        if moved > self.cursor.row {
+            self.unwrap(moved - 1);
+        }
         self.region = saved;
     }
 
@@ -2269,10 +2300,10 @@ mod tests {
     fn clearing_the_display_ends_the_line_it_archives() {
         let mut screen = Screen::new(4, 5);
         write(&mut screen, "aaaaabb");
-        // The continuation is deleted, and row 0 still says it wraps onto the blank row
-        // pulled up in its place, which is below the last row holding anything.
+        // The continuation is erased, and row 0 still says it wraps onto the blank row,
+        // which is below the last row holding anything.
         screen.goto(1, 0);
-        screen.delete_lines(1, Pen::default());
+        screen.erase_line(Erase::All, Pen::default());
         assert!(screen.row(0).is_some_and(|row| row.wrapped()));
 
         let history = screen.erase_display(Erase::All, Pen::default());
@@ -2414,5 +2445,53 @@ mod tests {
         assert_eq!(screen.row(0).unwrap().to_text(), "");
         assert_eq!(screen.row(1).unwrap().to_text(), "a");
         assert_eq!(screen.row(2).unwrap().to_text(), "b");
+    }
+
+    /// The wrap flags down a screen, top first.
+    fn wraps(screen: &Screen) -> Vec<bool> {
+        screen.rows().map(|row| row.wrapped()).collect()
+    }
+
+    #[test]
+    fn deleting_a_continuation_ends_the_line_above_it() {
+        // `abcdefgh` over rows 0 and 1, then `ijklmnop` over rows 2 and 3.
+        let mut screen = Screen::new(5, 4);
+        write(&mut screen, "abcdefgh");
+        screen.carriage_return();
+        screen.linefeed(Pen::default()).discard();
+        write(&mut screen, "ijklmnop");
+        assert_eq!(wraps(&screen), [true, false, true, false, false]);
+
+        // `DL` on row 1 brings `ijkl` up under `abcd`, which must not join it.
+        screen.goto(1, 0);
+        screen.delete_lines(1, Pen::default());
+        assert_eq!(wraps(&screen), [false, true, false, false, false]);
+
+        // In a region of rows 0 and 1, `DL` brings `ijkl` up from the bottom of the
+        // region with a blank under it, and `mnop` stays outside.
+        screen.set_region(0, 1);
+        screen.delete_lines(1, Pen::default());
+        assert_eq!(screen.row(0).unwrap().to_text(), "ijkl");
+        assert_eq!(wraps(&screen), [false, false, false, false, false]);
+    }
+
+    #[test]
+    fn inserting_lines_ends_the_lines_they_come_between() {
+        let mut screen = Screen::new(3, 4);
+        write(&mut screen, "abcdefgh");
+        assert_eq!(wraps(&screen), [true, false, false]);
+        // A blank row now follows `abcd`.
+        screen.goto(1, 0);
+        screen.insert_lines(1, Pen::default());
+        assert_eq!(wraps(&screen), [false, false, false]);
+
+        // `abcd` pushed to the bottom row loses `efgh` off the end.
+        let mut screen = Screen::new(3, 4);
+        screen.goto(1, 0);
+        write(&mut screen, "abcdefgh");
+        screen.goto(0, 0);
+        screen.insert_lines(1, Pen::default());
+        assert_eq!(screen.row(2).unwrap().to_text(), "abcd");
+        assert_eq!(wraps(&screen), [false, false, false]);
     }
 }

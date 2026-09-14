@@ -559,11 +559,13 @@ fell off the screen."
 (ert-deftest cooked-render-oracle-clearing-a-wrapped-row-ends-its-line ()
   "Clearing the display archives its last row as a line that has ended.
 
-`DL' under a wrapped row pulls a blank up in place of its continuation, and
-the flag stays.  The clear archived the row still wrapped, so it reached the
-buffer with no newline while the core said row 0 began a line."
+`CSI 2K' on the continuation of a wrapped row blanks it, and the flag on the
+row above stays.  The clear archived that row still wrapped, so it reached the
+buffer with no newline while the core said row 0 began a line.  `DL' used to
+leave the flag the same way."
   (cooked-tests--oracle-check
-   '((nil :rows 4 :cols 7 :rejoin t :chunks (("abcdefghij" "\e[1M" "\e[H\e[2J"))))))
+   '((nil :rows 4 :cols 7 :rejoin t :chunks (("abcdefghij" "\e[1M" "\e[H\e[2J")))
+     (nil :rows 4 :cols 7 :rejoin t :chunks (("abcdefghij" "\e[2K" "\e[H\e[2J"))))))
 
 (ert-deftest cooked-render-oracle-clearing-under-a-scroll-region-keeps-the-seam ()
   "A clear that archives nothing leaves the head of row 0's line where it was.
