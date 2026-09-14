@@ -470,6 +470,12 @@ that is not dashed or a diagonal that misses the corner its neighbour has to mee
 - **Read-only above the input.** Scrollback and rendered screen carry `read-only` with
   `front-sticky`/`rear-nonsticky` chosen so the transcript refuses edits while typing at
   the start of the input line is still accepted.
+- **Copies can leave a TUI's frame behind.** With `cooked-copy-strip-box-borders` set,
+  every copy — `M-w`, a mouse selection, `evil-yank`, `cooked-copy-output` — drops lines
+  that are nothing but box-drawing borders and takes the borders off the ends of the rest,
+  so `│ src/main.rs │` copies as `src/main.rs`. It is off by default because `tree` draws
+  its branches with the same characters. `cooked-write-output` always writes the copied
+  text with trailing blanks trimmed, so a padded row does not reach the file.
 - **Colours follow your theme.** ANSI 0–15 resolve through the `ansi-color-*` faces, so a
   theme that styles those wins; `cooked-color-names` is only a fallback. One `face`
   property carries a run: comint leaves `font-lock-defaults` at `(nil t)`, under which the

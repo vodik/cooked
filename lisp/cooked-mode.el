@@ -1757,6 +1757,11 @@ to the child verbatim."
   (add-hook 'yank-transform-functions #'cooked--mark-pasted nil t)
   (setq-local text-property-default-nonsticky
               (cons '(cooked-pasted . t) text-property-default-nonsticky))
+  ;; Every copy out of the buffer, and not only cooked's own verbs, may leave a
+  ;; TUI's borders behind; see `cooked-copy-strip-box-borders'.  Installed
+  ;; whatever the option says, since it is read on each copy.
+  (add-function :around (local 'filter-buffer-substring-function)
+                #'cooked--filter-buffer-substring)
   (add-hook 'post-command-hook #'cooked--track-wandering nil t)
   ;; From the same hook and for the same reason: the user's own commands produce
   ;; no output, so a drain is never what discovers that one of them scrolled the

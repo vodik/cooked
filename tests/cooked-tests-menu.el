@@ -229,6 +229,38 @@ the input mark points nowhere."
                                                      (buffer-string)))))
         (delete-file file)))))
 
+(ert-deftest cooked-write-output-trims-trailing-blanks ()
+  "A terminal row is padded to the width of the screen, and the padding is not
+part of what the command printed: `cooked--pad-to-cursor' can leave it on the
+cursor's row even with wrapped lines rejoined.  `write-region' on the region
+would have written it, and read the buffer past `filter-buffer-substring' too."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (let ((command (cooked-tests--make-command "$ " "ls" "a   \nb\t \n" 0))
+          (file (make-temp-file "cooked-write-output")))
+      (unwind-protect
+          (progn
+            (cooked-write-output file nil command)
+            (should (equal (with-temp-buffer (insert-file-contents file) (buffer-string))
+                           "a\nb")))
+        (delete-file file)))))
+
+(ert-deftest cooked-copy-strips-box-borders-only-when-asked ()
+  "Every copy goes through the filter, so `kill-ring-save' is tested rather than
+cooked's own verb.  Off, the frame is copied as it is drawn, because the same
+characters are the branches of `tree'; on, a frame line goes and a pane's side
+borders come off, while the divider between two panes stays."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((inhibit-read-only t))
+      (insert "┌──────┐\n│ one  │\n│ a │ b│  \n└──────┘\n├── src\n"))
+    (kill-ring-save (point-min) (point-max))
+    (should (equal (current-kill 0) (buffer-string)))
+    (setq-local cooked-copy-strip-box-borders t)
+    (kill-ring-save (point-min) (point-max))
+    (should (equal (current-kill 0) " one\n a │ b\n src\n"))))
+
 (ert-deftest cooked-copy-command-kills-the-input-line ()
   (with-temp-buffer
     (cooked-mode)

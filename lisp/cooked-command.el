@@ -402,6 +402,76 @@ would spend half a window on the command before it."
   (goto-char (car (cooked--command-region (cooked--command-here command))))
   (recenter 0))
 
+;;;; Copying text out
+
+(defcustom cooked-copy-strip-box-borders nil
+  "Whether text copied out of a cooked buffer leaves box-drawing borders behind.
+
+A full-screen program draws its panes with box-drawing characters, and a copy
+out of one takes the frame along with the text inside it:
+
+  │ src/main.rs   │        becomes        src/main.rs
+
+With this non-nil, every copy that goes through `filter-buffer-substring\=' --
+\\[kill-ring-save], a mouse selection, `evil-yank\=', `cooked-copy-output\=' and
+`cooked-write-output\=' -- drops a line made of nothing but borders and blanks,
+and takes the borders off either end of every other line, with the blanks that
+lie outside them.  Characters in the middle of a line are kept, so the divider
+between two panes side by side stays where it was.
+
+Off by default because the same characters are content as often as they are
+frame: `tree\=' draws its branches with them, and a line reading
+\"├── src\" would be copied as \"src\".  The borders are U+2500 to U+257F, the
+Unicode box-drawing block, and never ASCII look-alikes such as `|\=' and `+\=',
+which are far more often text.
+
+Read on every copy, so `setq-local\=' in one buffer takes effect at once."
+  :type 'boolean
+  :group 'cooked)
+
+(defconst cooked--box-border-edges
+  "^[ \t]*[─-╿]+\\|[─-╿]+[ \t]*$"
+  "Regexp matching the box-drawing run at either end of a line.
+
+Blanks outside the run go with it, and blanks inside it stay: in
+\"  │ foo │  \" the match takes \"  │\" and \"│  \", which leaves \" foo \" for
+the trailing-blank trim to finish.")
+
+(defun cooked--trim-trailing-blanks (text)
+  "TEXT with the spaces and tabs at the end of each of its lines removed.
+
+A terminal row is as wide as the screen, and the part of it a program left
+unwritten is blanks the emulator still owns.  Rejoining wrapped lines keeps
+most of that padding out of the buffer, but `cooked--pad-to-cursor\=' can still
+put some on the cursor's row, so \"ls   \" there is copied as \"ls\"."
+  (replace-regexp-in-string "[ \t]+$" "" text t t))
+
+(defun cooked--strip-box-borders (text)
+  "TEXT with its box-drawing borders taken off.
+
+A line of only borders and blanks, such as \"└──────┘\", goes entirely, newline
+and all; any other line loses the border run at each end, so \"│ a │\" becomes
+\" a\".  Trailing blanks are trimmed from every line as well, since removing a
+right-hand border is what exposes the padding in front of it."
+  (cooked--trim-trailing-blanks
+   (replace-regexp-in-string
+    cooked--box-border-edges ""
+    (replace-regexp-in-string "^[ \t─-╿]*[─-╿][ \t─-╿]*\\(?:\n\\|\\'\\)"
+                              "" text t t)
+    t t)))
+
+(defun cooked--filter-buffer-substring (filter beg end delete)
+  "Call FILTER on BEG, END and DELETE, then strip box borders when asked to.
+
+Around the buffer-local `filter-buffer-substring-function\=' in `cooked-mode\=',
+so whatever else is filtering copied text still runs first and this sees its
+answer.  With `cooked-copy-strip-box-borders\=' nil the string is returned
+untouched, which is the default and costs one variable lookup per copy."
+  (let ((text (funcall filter beg end delete)))
+    (if cooked-copy-strip-box-borders
+        (cooked--strip-box-borders text)
+      text)))
+
 (defun cooked-write-output (file &optional outer command)
   "Write COMMAND's output to FILE, or with OUTER its whole record.
 
@@ -421,7 +491,13 @@ report, and the one `cooked--command-region\=' already has an argument for."
                                        "Write output to file: "))
                      current-prefix-arg))
   (pcase-let ((`(,beg . ,end) (cooked--command-region (cooked--command-here command) outer)))
-    (write-region beg end file)))
+    ;; The string rather than the region: `write-region\=' on positions reads the
+    ;; buffer directly and would bypass `filter-buffer-substring-function\=', so a
+    ;; border the user asked to have stripped from every copy would still reach
+    ;; the file.
+    (write-region (cooked--trim-trailing-blanks
+                   (substring-no-properties (filter-buffer-substring beg end)))
+                  nil file)))
 
 (defun cooked-copy-command (&optional command)
   "Put COMMAND's input line on the kill ring."
@@ -434,7 +510,7 @@ report, and the one `cooked--command-region\=' already has an argument for."
   "Put COMMAND's output region on the kill ring."
   (interactive)
   (pcase-let ((`(,beg . ,end) (cooked--command-region (cooked--command-here command))))
-    (kill-new (buffer-substring-no-properties beg end))
+    (kill-new (substring-no-properties (filter-buffer-substring beg end)))
     (message "cooked: copied output")))
 
 (provide 'cooked-command)
