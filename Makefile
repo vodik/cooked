@@ -89,7 +89,7 @@ ASSET     := cooked-$(VERSION)-$(DIST_ARCH)-$(DIST_OS).tar.gz
 # both.  Both print `<digest>  <file>', which is what the `cut' below reads.
 SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo 'shasum -a 256')
 
-.PHONY: all test rust-test lisp-test lisp-test-parallel lint checkdoc citations \
+.PHONY: all test rust-test lisp-test lisp-test-parallel lint checkdoc citations escapes \
         compile bench bench-quick clean module terminfo \
         dist dist-checksums dist-digests
 
@@ -335,7 +335,7 @@ dist-digests:
 	@echo '    )'
 	@echo '  "...")'
 
-lint: compile checkdoc citations
+lint: compile checkdoc citations escapes
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 
@@ -409,6 +409,11 @@ checkdoc:
 # `--document-private-items' is not optional: without it this crate documents
 # about four items, because everything else is private, and rustdoc checks the
 # links of only what it documents.
+# Gating, unlike the two above: see scripts/check-escapes.el for why a single
+# backslash before `=' in a string is always a mistake.
+escapes:
+	@$(EMACS) -Q --batch -l scripts/check-escapes.el -f cooked-escapes-batch
+
 citations:
 	@$(BATCH) $(EVIL_LOAD_PATH) -l ert -l cooked-tests.el \
 	  -l scripts/check-citations.el -f cooked-citations-batch
