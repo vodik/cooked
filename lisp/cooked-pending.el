@@ -179,6 +179,38 @@ row the line sits on is the screen\='s, not the line\='s."
         (setq from to)))
     text))
 
+(defvar cooked-input-syntax-table)      ; cooked-mode.el, with the buffer's own.
+
+(defun cooked--mark-input-syntax ()
+  "Give the pending input the prompt\='s word syntax.
+
+The buffer\='s own table, `cooked-mode-syntax-table\=', makes `?#@&+=\=' word
+constituents for the output, so a double-click takes `simon@example.com\=' whole.
+At the prompt that same table made \\[backward-kill-word] after
+`git log --author=simon\=' kill the whole flag where a shell\='s line editor
+kills `simon\='.  So the input region carries `cooked-input-syntax-table\=' as a
+`syntax-table\=' property, which `parse-sexp-lookup-properties\=' makes every
+word motion and every syntax-aware regexp honour.
+
+Put back from three places, because each of them can leave text in the region
+without it.  `cooked--restore-pending-input\=' re-creates the region on every
+drain, `cooked--replace-input\=' fills it from history, and
+`cooked--mark-input-syntax-before-command\=' covers whatever the last command
+inserted: a character typed at the very start of the line inherits nothing, and
+a yank inherits nothing anywhere."
+  (when-let* ((region (cooked--input-region)))
+    (when (< (car region) (cdr region))
+      (with-silent-modifications
+        (put-text-property (car region) (cdr region)
+                           'syntax-table cooked-input-syntax-table)))))
+
+(defun cooked--mark-input-syntax-before-command ()
+  "Run `cooked--mark-input-syntax\=' before a command reads the words.
+On `pre-command-hook\=', so \\[backward-kill-word] or evil\='s `dw\=' sees the
+narrow words over the text the previous command typed."
+  (cooked--protect-hook
+    (cooked--mark-input-syntax)))
+
 (defvar cooked-snap-commands
   '(self-insert-command
     cooked-newline newline newline-and-indent
@@ -260,7 +292,8 @@ pushing it along."
       ;; ever changes, this marker needs a cell rather than a position behind it.
       (set-marker comint-last-input-start (point))
       (when text (insert text))
-      (setq cooked--input-end (copy-marker (point) t)))))
+      (setq cooked--input-end (copy-marker (point) t))
+      (cooked--mark-input-syntax))))
 
 (defun cooked--point-after-input ()
   "Where point belongs after a redisplay."

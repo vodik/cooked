@@ -4649,23 +4649,58 @@ half right and ship it broken."
         (pcase-let ((`(,from ,to) (mouse-start-end (point) (point) 1)))
           (should (equal (buffer-substring-no-properties from to) subject)))))))
 
-(ert-deftest cooked-a-word-at-the-prompt-is-the-same-word ()
-  "\\[backward-kill-word] at the prompt moves by the words a double-click selects.
+(ert-deftest cooked-output-words-are-wide-and-prompt-words-are-narrow ()
+  "A double-click in output takes a login whole; M-DEL at the prompt stops at `='.
 
-The trade `cooked-word-constituent-string' records: the table that makes a
-double-click take `--author=simon' whole makes \\[backward-kill-word] kill it
-whole too, where a shell's line editor would stop at the `='.  Pinned so the
-docstring stays true, in either direction."
-  (with-temp-buffer
-    (set-syntax-table cooked-mode-syntax-table)
-    (dolist (case '(("git commit --amend" . "--amend")
-                    ("git log --author=simon" . "--author=simon")
-                    ("make && make install" . "install")))
-      (erase-buffer)
-      (insert "$ " (car case))
-      (let ((kill-ring nil))
-        (backward-kill-word 1)
-        (should (equal (car kill-ring) (cdr case)))))))
+One buffer holds both, because the two used to be one syntax table: widening
+words for selection made \\[backward-kill-word] after `--author=simon' kill the
+whole flag.  The input region now carries `cooked-input-syntax-table' as a
+`syntax-table' property, and each way text gets into the region has to leave it
+there: typing, which inherits nothing at the start of the line and is covered
+before the next command runs; a drain, which lifts the line out and puts it
+back; and history, which replaces it."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf 'mail simon@example.com\\n$ '; exec cat")
+    (should (cooked-tests--settle
+             (lambda () (and (string-match-p "example" (cooked-tests--text))
+                             (cooked--input-start-position)))))
+    (cl-flet ((kills-at-end ()
+                (goto-char cooked--input-end)
+                (let ((kill-ring nil))
+                  (backward-kill-word 1)
+                  (car kill-ring))))
+      ;; Output: the wide words, through the double-click's own chain.
+      (goto-char (point-min))
+      (search-forward "simon@")
+      (pcase-let ((`(,from ,to) (mouse-start-end (point) (point) 1)))
+        (should (equal (buffer-substring-no-properties from to)
+                       "simon@example.com")))
+      ;; Typed, then the hook the command loop runs before M-DEL.
+      (goto-char cooked--input-end)
+      (insert "git log --author=simon")
+      (run-hooks 'pre-command-hook)
+      (should (equal (kills-at-end) "simon"))
+      ;; A flag is still one word at the prompt, `=' going with it.
+      (should (equal (kills-at-end) "--author="))
+      ;; Across a drain.
+      (cooked--replace-input "echo --author=simon")
+      (cooked--drain-and-apply)
+      (should (eq (get-text-property (cooked--input-start-position) 'syntax-table)
+                  cooked-input-syntax-table))
+      (should (equal (kills-at-end) "simon"))
+      ;; From history.
+      (cooked--replace-input "git log --author=simon")
+      (cooked-send-input)
+      (should (cooked-tests--settle (lambda () (cooked--input-region))))
+      (cooked-previous-input)
+      (should (equal (cooked--pending-input) "git log --author=simon"))
+      (should (equal (kills-at-end) "simon"))
+      ;; And the output is still wide after all of it.
+      (goto-char (point-min))
+      (search-forward "simon@")
+      (pcase-let ((`(,from ,to) (mouse-start-end (point) (point) 1)))
+        (should (equal (buffer-substring-no-properties from to)
+                       "simon@example.com"))))))
 
 (ert-deftest cooked-a-box-border-does-not-join-two-panes ()
   "A double-click in a two-pane TUI must not take the border with it.

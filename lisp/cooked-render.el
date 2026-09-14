@@ -975,6 +975,12 @@ screen, and rewriting text is what marks it unfontified again, so nothing is
 stranded by having been skipped here."
   (when (and cooked--session (not cooked--alt))
     (let* ((inhibit-read-only t)
+           ;; The only `syntax-table' property in the buffer is the prompt's,
+           ;; see `cooked--mark-input-syntax', and the held row below keeps
+           ;; these passes off the prompt.  Consulting properties would only
+           ;; slow the syntax-aware URL regexp at every face boundary, by about
+           ;; a sixth over styled output.
+           (parse-sexp-lookup-properties nil)
            (lines (cooked-link-logical-line-bounds
                    (save-excursion (goto-char beg) (line-beginning-position))
                    (save-excursion (goto-char end) (line-end-position))))

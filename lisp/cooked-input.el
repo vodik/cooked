@@ -143,13 +143,16 @@ newline survives until you submit."
 ;; is the half comint has no counterpart for.
 
 (defun cooked--replace-input (text)
-  "Replace the pending input with TEXT."
+  "Replace the pending input with TEXT.
+The prompt\='s word syntax goes on the new text at once; see
+`cooked--mark-input-syntax\='."
   (when-let* ((region (cooked--input-region)))
     (let ((inhibit-read-only t))
       (delete-region (car region) (cdr region))
       (save-excursion
         (goto-char (car region))
         (insert text)))
+    (cooked--mark-input-syntax)
     (goto-char cooked--input-end)))
 
 (defun cooked--history-record (text)

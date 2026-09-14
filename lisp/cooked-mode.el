@@ -66,28 +66,39 @@ spoken about is `nil\=' here and inherits, so undoing a previous realization is
 setting those characters back to `nil\=' rather than trying to remember what
 class they had before.")
 
+(defvar cooked-input-syntax-table (make-syntax-table comint-mode-syntax-table)
+  "Syntax table for the line being edited at cooked\='s own prompt.
+
+Realized from `cooked-input-word-constituent-string\=' and
+`cooked-word-boundary-string\=' in place, as `cooked-mode-syntax-table\=' is,
+and put on the input region as a `syntax-table\=' text property by
+`cooked--mark-input-syntax\='.  Its parent is comint\='s table rather than
+`cooked-mode-syntax-table\=', so a character the output treats as part of a
+word is not one here unless the input\='s own string says so.")
+
 (defvar cooked--syntax-overridden nil
   "Characters `cooked--realize-syntax-table\=' has given a class of their own.
 
-Kept so the next realization can hand them back to the parent table.  Without
-it, removing a character from `cooked-word-boundary-string\=' would leave it a
+An alist of (TABLE . CHARACTERS), one entry for each of the two tables.  Kept
+so the next realization can hand them back to the parent table.  Without it,
+removing a character from `cooked-word-boundary-string\=' would leave it a
 boundary forever.")
 
-;; Defined by the two `defcustom's below, whose setters call this function and
-;; so need it to exist first.
+;; Defined by the `defcustom's below, whose setters call this function and so
+;; need it to exist first.
 (defvar cooked-word-constituent-string)
+(defvar cooked-input-word-constituent-string)
 (defvar cooked-word-boundary-string)
 
-(defun cooked--realize-syntax-table ()
-  "Put the two boundary customs into `cooked-mode-syntax-table\=', in place."
-  (let ((table cooked-mode-syntax-table))
-    ;; Hand back everything the last realization claimed.  `nil' means "ask the
-    ;; parent", which is exactly the state these characters were in before.
-    (dolist (ch cooked--syntax-overridden) (aset table ch nil))
-    (setq cooked--syntax-overridden nil)
-    (dolist (ch (string-to-list cooked-word-constituent-string))
+(defun cooked--realize-syntax-table-from (table constituents)
+  "Put CONSTITUENTS and `cooked-word-boundary-string\=' into TABLE, in place."
+  ;; Hand back everything the last realization claimed.  `nil' means "ask the
+  ;; parent", which is exactly the state these characters were in before.
+  (dolist (ch (alist-get table cooked--syntax-overridden)) (aset table ch nil))
+  (let ((claimed nil))
+    (dolist (ch (string-to-list constituents))
       (modify-syntax-entry ch "w" table)
-      (push ch cooked--syntax-overridden))
+      (push ch claimed))
     (dolist (ch (string-to-list cooked-word-boundary-string))
       ;; Punctuation, not whitespace.  Both end a word, but whitespace is a
       ;; claim about layout that `skip-syntax-forward' users act on, and a box
@@ -96,7 +107,30 @@ boundary forever.")
       ;; function would then have to remember to undo.
       (unless (eq (char-syntax ch) ?\s)
         (modify-syntax-entry ch "." table)
-        (push ch cooked--syntax-overridden)))))
+        (push ch claimed)))
+    (setf (alist-get table cooked--syntax-overridden) claimed)))
+
+(defun cooked--realize-syntax-table ()
+  "Put the word customs into `cooked-mode-syntax-table\=' and the input\='s table."
+  (cooked--realize-syntax-table-from cooked-mode-syntax-table
+                                     cooked-word-constituent-string)
+  (cooked--realize-syntax-table-from cooked-input-syntax-table
+                                     cooked-input-word-constituent-string))
+
+(defun cooked--syntax-custom-setter (symbol value)
+  "Set SYMBOL to VALUE and realize the syntax tables from it.
+
+The `:set\=' of the three word customs.  `custom-declare-variable\=' calls the
+setter to establish the default when the variable is not already bound, so this
+runs once at load before its siblings exist.  It guards on the variables rather
+than on the function, since the function is defined first and being `fboundp\='
+says nothing about whether it can run yet.  The explicit call after the
+defcustoms does the first real realization."
+  (set-default symbol value)
+  (when (and (boundp 'cooked-word-constituent-string)
+             (boundp 'cooked-input-word-constituent-string)
+             (boundp 'cooked-word-boundary-string))
+    (cooked--realize-syntax-table)))
 
 (defcustom cooked-word-constituent-string "./~-_?#@&+="
   "Characters a word may run through in a cooked buffer.
@@ -114,26 +148,30 @@ separates the entries of a PATH.  So a double-click on
 `https://example.com/a?b=1\=' takes `//example.com/a?b=1\=', without its scheme;
 a link is followed whole through `cooked-link\=' instead.
 
-The same table edits the line at cooked\='s own prompt, which is Emacs text, so
-\\[backward-kill-word] and evil\='s `dw\=' move by these words too: after
-`git log --author=simon\=' one \\[backward-kill-word] kills `--author=simon\=',
-where a shell\='s own line editor would kill `simon\='.
+The line at cooked\='s own prompt does not use these words; see
+`cooked-input-word-constituent-string\='.
 
 Set through customize and it reaches live buffers; see
 `cooked-mode-syntax-table\='."
   :type 'string
   :group 'cooked
-  :set (lambda (symbol value)
-         (set-default symbol value)
-         ;; `custom-declare-variable' calls the setter to establish the default
-         ;; when the variable is not already bound, so this runs once at load
-         ;; *before* its sibling below exists.  Guard on the variables rather
-         ;; than on the function: the function is defined first and being
-         ;; `fboundp' says nothing about whether it can run yet.  The explicit
-         ;; call after both defcustoms does the first real realization.
-         (when (and (boundp 'cooked-word-constituent-string)
-                    (boundp 'cooked-word-boundary-string))
-           (cooked--realize-syntax-table))))
+  :set #'cooked--syntax-custom-setter)
+
+(defcustom cooked-input-word-constituent-string "./~-_"
+  "Characters a word may run through in the line at cooked\='s own prompt.
+
+Narrower than `cooked-word-constituent-string\=', which is for selecting in
+output, because editing a command line wants smaller words.  After
+`git log --author=simon\=' one \\[backward-kill-word] kills `simon\=', as a
+shell\='s line editor does, where the output\='s words would kill the whole flag.
+Paths and flags stay one word as before: \\[backward-kill-word] after
+`git commit --amend\=' kills `--amend\='.
+
+`cooked-word-boundary-string\=' applies here too.  Set through customize and it
+reaches live buffers; see `cooked-input-syntax-table\='."
+  :type 'string
+  :group 'cooked
+  :set #'cooked--syntax-custom-setter)
 
 (defcustom cooked-word-boundary-string "\"'`|:;,()[]{}<>$│─┌┐└┘├┤┬┴┼"
   "Characters that end a word in a cooked buffer, whatever else says otherwise.
@@ -167,17 +205,7 @@ would be a no-op this then has to remember to undo.  Set through customize and
 it reaches live buffers; see `cooked-mode-syntax-table\='."
   :type 'string
   :group 'cooked
-  :set (lambda (symbol value)
-         (set-default symbol value)
-         ;; `custom-declare-variable' calls the setter to establish the default
-         ;; when the variable is not already bound, so this runs once at load
-         ;; *before* its sibling below exists.  Guard on the variables rather
-         ;; than on the function: the function is defined first and being
-         ;; `fboundp' says nothing about whether it can run yet.  The explicit
-         ;; call after both defcustoms does the first real realization.
-         (when (and (boundp 'cooked-word-constituent-string)
-                    (boundp 'cooked-word-boundary-string))
-           (cooked--realize-syntax-table))))
+  :set #'cooked--syntax-custom-setter)
 
 (cooked--realize-syntax-table)
 
@@ -1671,6 +1699,12 @@ to the child verbatim."
   ;; snapped against the command it replaced.
   (add-hook 'pre-command-hook #'cooked--guard-insertion -50 t)
   (add-hook 'pre-command-hook #'cooked--snap-to-input nil t)
+  ;; After the snap, which may have moved point into the region whose words
+  ;; the command is about to read.
+  (add-hook 'pre-command-hook #'cooked--mark-input-syntax-before-command 10 t)
+  ;; The prompt's narrower words ride on a `syntax-table' property, which only
+  ;; counts while this is set; see `cooked--mark-input-syntax'.
+  (setq-local parse-sexp-lookup-properties t)
   ;; A yank marks what it inserts, so its control bytes can be stripped on
   ;; submission while typed ones are not; see `cooked--mark-pasted'.  The mark
   ;; is not inherited, or a character typed with `quoted-insert' right after a
