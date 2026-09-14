@@ -670,11 +670,32 @@ is there to avoid."
                  (cons schemes (regexp-opt schemes)))))))
 
 (defconst cooked-link--url-properties
-  '(cooked-link-url cooked-link-fragment face mouse-face follow-link help-echo keymap)
+  '(cooked-link-url cooked-link-fragment cooked-link-face mouse-face follow-link help-echo keymap)
   "The properties the detected-URL pass owns, and the only ones it removes.
 
 Named once so unfontifying cannot drift from fontifying and leave a stray
-`mouse-face' highlighting text that is no longer a link.")
+`mouse-face' highlighting text that is no longer a link.  `face' is not among
+them, because it was the child's before it was the link's: see
+`cooked-link--cover-face'.")
+
+(defun cooked-link--cover-face (beg end)
+  "Keep the face of each run in BEG..END under `cooked-link-face'.
+
+For a detected link about to put its own face over the child's.  The child's
+face is what the text has to go back to once it stops being a link, and
+nothing else holds it: the row is not drawn again unless the child writes to
+it.  Removing `face' along with the link left `https://e.x/a' printed in red
+uncoloured once a rescan found no URL there.  Each run is kept as a list, so a
+run with no face at all is told apart from one never covered, and a run
+already covered keeps what it had."
+  (let ((pos beg))
+    (while (< pos end)
+      (let ((next (min (next-single-property-change pos 'face nil end)
+                       (next-single-property-change pos 'cooked-link-face nil end))))
+        (unless (get-text-property pos 'cooked-link-face)
+          (put-text-property pos next 'cooked-link-face
+                             (list (get-text-property pos 'face))))
+        (setq pos next)))))
 
 (defun cooked-link--unfontify-urls (beg end)
   "Remove the detected-URL pass's own properties from BEG..END.
@@ -689,12 +710,21 @@ explicit hyperlink -- and cooked-file-link.el's spans -- untouched."
       (let ((next (or (next-single-property-change pos 'cooked-link-url nil end)
                       end)))
         (when (get-text-property pos 'cooked-link-url)
+          ;; The child's face back first, while `cooked-link-face' still says
+          ;; what it was.
+          (let ((run pos))
+            (while (< run next)
+              (let ((stop (next-single-property-change run 'cooked-link-face nil next)))
+                (when-let* ((covered (get-text-property run 'cooked-link-face)))
+                  (put-text-property run stop 'face (car covered)))
+                (setq run stop))))
           (remove-list-of-text-properties pos next cooked-link--url-properties))
         (setq pos next)))))
 
 (defun cooked-link--fontify-url-match (beg end url face mouse-face help-echo)
   "Make BEG..END a detected link to URL, unless something outranks it."
   (unless (cooked-link--claimed-p beg end 'goto-addr)
+    (cooked-link--cover-face beg end)
     (cooked-link--propertize beg end
                              'cooked-link-url url
                              'help-echo help-echo
@@ -716,6 +746,7 @@ they were one."
   (unless (cooked-link--claimed-p beg end 'goto-addr)
     (let ((id (cons 'cooked-link-detected url)))
       (pcase-dolist (`(,from . ,to) (cooked-link--wrap-fragments beg end))
+        (cooked-link--cover-face from to)
         (cooked-link--propertize from to
                                  'cooked-link-url url
                                  'cooked-link-fragment id

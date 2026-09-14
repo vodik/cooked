@@ -34,8 +34,18 @@
 ;;
 ;; Not covered: the width guard, which needs a window with real font metrics, and
 ;; so rows it trimmed; pending input, which needs a line editor reading; and the
-;; URLs and file names redisplay finds, which are scanned when a row is shown
-;; rather than when it is drawn.  An `OSC 8' span is drawn, and is compared.
+;; file names redisplay finds.  An `OSC 8' span is drawn, and is compared.
+;;
+;; The URLs redisplay finds are checked, but not compared.  Both buffers are
+;; fontified whenever they are compared, as redisplay would fontify them before
+;; showing them -- so not while a hidden subject's screen is left out -- and each
+;; must hold no detected link to anything but the text it covers.  Whether a URL
+;; is linked at all depends on history rather than on the text: the cursor's row is held
+;; from the scan until the cursor leaves it, so a URL the subject linked before
+;; the cursor arrived stays linked, while the reference, whose rows are all new,
+;; holds the same row back.  So the detected-link properties are left out of the
+;; comparison, and the check is that neither buffer links a URL that is no longer
+;; there.
 
 ;;; Code:
 
@@ -231,11 +241,21 @@ its kind and pattern: the column and row after them say where the run was
 drawn, nothing reads them back, and a row a shift moved keeps the row it was
 drawn on where the same row resent says where it is now.
 
+On the characters a detected link covers, the link's own properties are left
+out, for the reason the Commentary gives, and the face is the one the link
+covered: the child's, which is what the characters show once they are no longer
+a link.
+
 The stickiness in `cooked--read-only-props' means something only beside
 `read-only' itself: `cooked--protect' lifts `read-only' from text the input
 line moves over and leaves the stickiness, which on text that is not read-only
 has nothing to make sticky, while the same text resent arrives with neither."
-  (let ((rest plist)
+  (let ((rest (if (not (plist-get plist 'cooked-link-url))
+                  plist
+                (append (list 'face (car (plist-get plist 'cooked-link-face)))
+                        (cl-loop for (key value) on plist by #'cddr
+                                 unless (memq key (cons 'face cooked-link--url-properties))
+                                 append (list key value)))))
         pairs)
     (while rest
       (unless (or (memq (car rest) '(fontified front-sticky rear-nonsticky))
@@ -354,6 +374,46 @@ reads without a diff tool."
                return (list key (plist-get subject key)
                             :expected (plist-get reference key))))))
 
+(defun cooked-tests--oracle-stale-link ()
+  "The first detected link in this buffer that names other text, or nil.
+
+Fontifies whatever redisplay has not yet seen first, as redisplay would before
+showing it, holding the cursor's row back as it does.  A link is a run of
+`cooked-link-url', or the fragments one wrapped URL shares a
+`cooked-link-fragment' with, and its text must read as its URL.  The answer is
+\(URL . TEXT).
+
+Nil on the alternate screen, where no scan runs and the scrollback is not
+shown.  Scrollback that arrived with the switch is unfontified text, which the
+scan rounds out to whole lines once the primary screen is back, so a link it
+left behind there is mended before anyone can see it."
+  (unless cooked--alt
+   (save-restriction
+    (widen)
+    (when jit-lock-mode
+      (jit-lock-fontify-now (point-min) (point-max)))
+    (let ((pos (point-min))
+          (fragments nil)
+          stale)
+      (while (and (not stale)
+                  (setq pos (text-property-not-all pos (point-max) 'cooked-link-url nil)))
+        (let* ((url (get-text-property pos 'cooked-link-url))
+               (id (get-text-property pos 'cooked-link-fragment))
+               (end (min (next-single-property-change pos 'cooked-link-url nil (point-max))
+                         (next-single-property-change pos 'cooked-link-fragment nil (point-max))))
+               (text (buffer-substring-no-properties pos end)))
+          (if id
+              (if-let* ((entry (assq id fragments)))
+                  (setcdr entry (concat (cdr entry) text))
+                (push (cons id text) fragments))
+            (unless (equal text url)
+              (setq stale (cons url text))))
+          (setq pos end)))
+      (or stale
+          (cl-loop for (id . text) in fragments
+                   unless (equal text (cdr id))
+                   return (cons (cdr id) text)))))))
+
 (defun cooked-tests--oracle-drain (buffer rejoin treatment)
   "Run TREATMENT in BUFFER, then drain and apply its session under REJOIN.
 The drain is a hidden buffer's when TREATMENT returns `hidden', and promotes no
@@ -394,8 +454,9 @@ After every drain the two buffers are compared, except
 while the subject's screen is left out, and at the end a subject still left out
 is caught up with `cooked--sync' and compared once more.  The first difference
 is returned as a plist with :drain, the index of the chunk just fed, and
-:difference, from `cooked-tests--oracle-difference'.  A signal from either
-buffer is returned the same way, as :error."
+:difference, from `cooked-tests--oracle-difference', or \(:stale-link (SUBJECT
+REFERENCE)) for a detected link either buffer holds to text that is no longer
+there.  A signal from either buffer is returned the same way, as :error."
   (let* ((rows (plist-get case :rows))
          (cols (plist-get case :cols))
          (rejoin (plist-get case :rejoin))
@@ -406,9 +467,15 @@ buffer is returned the same way, as :error."
         (condition-case err
             (let ((compare (lambda ()
                              (unless (buffer-local-value 'cooked--withheld a)
-                               (cooked-tests--oracle-difference
-                                (with-current-buffer a (cooked-tests--oracle-snapshot))
-                                (with-current-buffer b (cooked-tests--oracle-snapshot))))))
+                               (let ((stale (list (with-current-buffer a
+                                                    (cooked-tests--oracle-stale-link))
+                                                  (with-current-buffer b
+                                                    (cooked-tests--oracle-stale-link)))))
+                                 (if (seq-some #'identity stale)
+                                     (list :stale-link stale)
+                                   (cooked-tests--oracle-difference
+                                    (with-current-buffer a (cooked-tests--oracle-snapshot))
+                                    (with-current-buffer b (cooked-tests--oracle-snapshot))))))))
                   (chunks (plist-get case :chunks)))
               (or (cl-loop
                    for chunk in chunks
@@ -623,6 +690,32 @@ the line stays whole."
           :chunks ((" 42%xy┌─" "\e[1S") ("\e[?47h") ("x") ("\e[?47l") ("y" "\e[1S")))
      (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h") ("\e[?47l")))
      (nil :rows 3 :cols 4 :rejoin t :chunks (("=======" "wwwwwww" "\e[?47h" "\e[?47l"))))))
+
+;; Detected links are checked against the text they cover after every drain;
+;; see the Commentary.
+
+(ert-deftest cooked-render-oracle-a-url-rewritten-on-the-cursor-row-is-unlinked ()
+  "A URL changed on the row the cursor is on keeps no link to what it said.
+
+The cursor's row is held from the scan until the cursor leaves it, and the
+characters an edit did not touch kept their properties, so `https://e.x/abc'
+rewritten to `https://e.x/aZc' still followed to the old address.  The same
+held rescan left the first row of `https://e' linked after an erase took the
+row it wrapped onto."
+  (cooked-tests--oracle-check
+   '((nil :rows 4 :cols 30 :rejoin nil
+          :chunks (("see https://e.x/abc ok" "\r\n\n") ("\e[1;18HZ")))
+     (nil :rows 3 :cols 5 :rejoin nil
+          :chunks (("https://e.x/a") ("\e[2;1H\e[2K 42%"))))))
+
+(ert-deftest cooked-render-oracle-an-unlinked-url-keeps-its-colour ()
+  "Text that stops being a detected link goes back to the child's face.
+
+The link's face replaced the child's, and taking the link off removed the
+face altogether, so a red URL came back uncoloured."
+  (cooked-tests--oracle-check
+   '((nil :rows 3 :cols 5 :rejoin nil
+          :chunks (("\e[3;2H/" " " "\e[31m" "日" "https://e.x/a") ("\e[1;6H"))))))
 
 (provide 'cooked-tests-oracle)
 ;;; cooked-tests-oracle.el ends here

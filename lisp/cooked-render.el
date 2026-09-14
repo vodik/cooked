@@ -1132,6 +1132,14 @@ stranded by having been skipped here."
       ;; exclusive and the held row's own newline may be in it, hence the `1+'.
       (if (not (and held (< from (cdr held)) (< (car held) to)))
           (cooked--fontify-links from to)
+        ;; The held row's logical line may have changed since it was last
+        ;; scanned, and a link left on it would name a URL that is no longer
+        ;; there: `https://e.x/abc' rewritten in place to `https://e.x/aZc', or
+        ;; the half of a wrapped URL left on the row above once the row below is
+        ;; erased.  Nothing rescans that line until the hold is released, so it
+        ;; shows no detected link until then, as a line drawn afresh would not.
+        (let ((line (cooked-link-logical-line-bounds (car held) (cdr held))))
+          (cooked-link--unfontify-urls (car line) (cdr line)))
         (when (< beg (car held)) (cooked--fontify-links from (car held)))
         (when (> end (1+ (cdr held))) (cooked--fontify-links (cdr held) to))
         ;; jit-lock marks the whole chunk fontified regardless of what was
