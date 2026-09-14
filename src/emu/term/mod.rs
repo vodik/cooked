@@ -792,6 +792,20 @@ impl Term {
         Pending::of(&self.state) != before
     }
 
+    /// Parse BYTES for a buffer no window shows, reporting whether Emacs has to be woken.
+    ///
+    /// [`Term::feed`]'s question with the screen taken out of it, since
+    /// [`Term::drain_hidden`] would leave the screen behind anyway. What remains is an
+    /// event, which a child may be waiting on, and a backlog half way to LIMIT, the
+    /// point at which the reader stops and the child blocks: a hidden build printing a
+    /// line a millisecond wakes Emacs once every four thousand lines rather than once a
+    /// frame, and one flooding the pty is drained as often as it would be if shown.
+    pub fn feed_hidden(&mut self, bytes: &[u8], limit: usize) -> bool {
+        let events = self.state.events.len();
+        self.parser.advance(&mut self.state, bytes);
+        self.state.events.len() != events || self.backlog() >= limit / 2
+    }
+
     pub fn drain(&mut self) -> Delta {
         let route = &mut self.state.replies;
         route.handling |= std::mem::take(&mut route.undrained);

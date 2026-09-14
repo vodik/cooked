@@ -510,6 +510,9 @@ struct Shared {
     /// Starts true, so a session Emacs never reports on — a test, a buffer driven from
     /// Lisp — keeps the eager tick it has always had.
     attended: AtomicBool,
+    /// Whether no window shows this session's buffer; see [`Session::set_hidden`]. Starts
+    /// false, for the reason `attended` starts true.
+    hidden: AtomicBool,
     /// When the eager tick, restored by input, stops being owed to an unattended session;
     /// see [`INTERACTION_WINDOW`]. `None` until something is sent to the child.
     ///
@@ -657,6 +660,7 @@ impl Session {
             backlog_limit: AtomicUsize::new(options.backlog_limit),
             shutdown: AtomicBool::new(false),
             attended: AtomicBool::new(true),
+            hidden: AtomicBool::new(false),
             interacted_until: Mutex::new(None),
             interrupt: Interrupt::new()?,
             exited: Mutex::new(None),
@@ -920,6 +924,19 @@ impl Session {
     pub(crate) fn set_attended(&self, attended: bool) {
         if self.shared.attended.swap(attended, Ordering::Relaxed) != attended && attended {
             self.shared.interrupt.raise();
+        }
+    }
+
+    /// Say whether any window shows this session's buffer, which decides what output wakes
+    /// Emacs; see [`Term::feed_hidden`].
+    ///
+    /// Coming back announces, because output that woke nothing while hidden is still
+    /// waiting to be drawn, and a child that has since gone quiet would not wake Emacs
+    /// again. Lisp drains the buffer whole as its window is drawn as well, and whichever
+    /// comes second finds nothing.
+    pub(crate) fn set_hidden(&self, hidden: bool) {
+        if self.shared.hidden.swap(hidden, Ordering::Relaxed) && !hidden {
+            self.shared.announce();
         }
     }
 
@@ -1230,7 +1247,12 @@ impl Shared {
                 Ok(data) => {
                     let (drawable, outbound) = {
                         let mut term = self.term.held();
-                        (term.feed(data), term.take_outbound())
+                        let drawable = if self.hidden.load(Ordering::Relaxed) {
+                            term.feed_hidden(data, self.backlog_limit.load(Ordering::Relaxed))
+                        } else {
+                            term.feed(data)
+                        };
+                        (drawable, term.take_outbound())
                     };
                     // Answered from here rather than from a drain, so a frozen or hidden
                     // buffer's child is answered too. See `ReplyRoute` for which replies
@@ -2046,6 +2068,37 @@ mod tests {
             "`ready` must release the notification the drain deliberately withheld"
         );
         drop(session);
+    }
+
+    /// Output that only changes a hidden buffer's screen wakes nobody, and showing the
+    /// buffer again wakes Emacs for it. See [`Term::feed_hidden`] and
+    /// [`Session::set_hidden`].
+    ///
+    /// The child writes only once told to, so the drain before that has emptied whatever
+    /// its start-up left, and the silence after it is the gate and not an empty pty.
+    #[test]
+    fn a_hidden_session_holds_screen_output_until_it_is_shown() {
+        let (session, read) = session_with(
+            &["/bin/sh", "-c", "read -r _; printf 'text\\n'; sleep 5"],
+            Options::default(),
+        );
+        session.set_hidden(true);
+        std::thread::sleep(Duration::from_millis(100));
+        session.drain();
+        session.ready();
+        let _ = woke_within(&read, Duration::from_millis(100));
+
+        session.send(b"\n").expect("release the write");
+        assert!(
+            !woke_within(&read, Duration::from_millis(300)),
+            "a hidden session woke Emacs for text on its screen"
+        );
+        session.set_hidden(false);
+        assert!(
+            woke_within(&read, Duration::from_millis(300)),
+            "showing the session did not wake Emacs for the output it held"
+        );
+        assert!(rendered(&session.drain()).contains("text"));
     }
 
     #[test]

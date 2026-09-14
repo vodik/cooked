@@ -101,3 +101,18 @@ fn the_move_log_a_hidden_buffer_accumulates_stays_shorter_than_the_screen() {
     let delta = t.drain();
     assert!(delta.shifts.len() <= 4, "{} moves", delta.shifts.len());
 }
+
+/// A hidden buffer is woken for an event, which a child may be waiting on, and for a
+/// backlog half way to the limit that would stop the reader, and for nothing else.
+#[test]
+fn a_hidden_buffer_is_woken_only_for_events_and_a_filling_backlog() {
+    let mut t = term(3, 10, b"");
+    t.drain();
+    assert!(!t.feed_hidden(b"text\r\n\x1b[2;5Hmore", 10));
+    assert!(t.feed_hidden(b"\x1b]2;title\x07", 10));
+    t.drain_hidden();
+    // The cursor is on the middle row, so four line feeds scroll three rows away and the
+    // fourth and fifth reach half of ten.
+    assert!(!t.feed_hidden(b"\r\n\r\n\r\n\r\n", 10));
+    assert!(t.feed_hidden(b"\r\n\r\n", 10));
+}

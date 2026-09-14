@@ -318,6 +318,15 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// reach a typed character.
         "cooked--set-attended" 2..=2 => set_attended;
 
+        /// Tell SESSION whether any window shows its buffer, as HIDDEN.
+        ///
+        /// While hidden, output that only changes the screen does not wake Emacs: only an
+        /// event does, or scrollback piling up towards the backlog limit.  Draining with
+        /// HIDDEN, as `cooked--drain' takes it, is what leaves the screen out; this is what
+        /// keeps the screen from asking.  Being shown again wakes Emacs, so what was held
+        /// back is drawn.
+        "cooked--set-hidden" 2..=2 => set_hidden;
+
         /// Tell SESSION that Emacs renders SCHEME, either `dark' or `light'.
         ///
         /// Returns the bytes owed to a child that subscribed with DEC mode 2031, or nil when
@@ -785,6 +794,12 @@ fn set_attended(env: Env, args: &[Value]) -> Result<Value> {
     // caller means by a boolean -- so anything non-nil reads as attended and there is no
     // wrong value to report.
     handle(env, args[0])?.set_attended(env.from_lisp(args[1])?);
+    Ok(env.nil())
+}
+
+/// Not an `accessors!` entry, for the reason `set_attended` is not.
+fn set_hidden(env: Env, args: &[Value]) -> Result<Value> {
+    handle(env, args[0])?.set_hidden(env.from_lisp(args[1])?);
     Ok(env.nil())
 }
 
