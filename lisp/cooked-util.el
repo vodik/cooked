@@ -34,8 +34,8 @@
       cooked--osc-reply cooked--prompt-text cooked--ready cooked--redraw
       cooked--remove-rows cooked--reply cooked--resize cooked--row-unsent
       cooked--sample-mode cooked--send cooked--set-attended
-      cooked--set-color-scheme cooked--set-graphics-shown cooked--set-tuning
-      cooked--signal cooked--spawn)
+      cooked--set-color-scheme cooked--set-graphics-shown cooked--set-hidden
+      cooked--set-tuning cooked--signal cooked--spawn)
     "Every function the native core defines, by name.
 
 The core registers these when `cooked--load-module\=' loads it, so the

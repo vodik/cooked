@@ -1037,6 +1037,139 @@ provably sent after the freeze is in place."
       (delete-file out)
       (ignore-errors (delete-file flag)))))
 
+(ert-deftest cooked-a-hidden-buffer-answers-and-records-its-commands ()
+  "A child in a buffer no window shows is answered, and its commands recorded.
+
+Hiding a buffer leaves its screen undrawn, and none of this is drawing: DA1
+goes out from the core, and the OSC 133 marks that make a command record ask
+for a whole drain because a marker needs its row.  The child waits on a flag
+file, so everything it sends is sent after the buffer is hidden."
+  (let ((out (make-temp-file "cooked-hidden-da1"))
+        (flag (make-temp-name (expand-file-name "cooked-hidden-flag"
+                                                temporary-file-directory))))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "stty raw -echo; printf ready; until [ -e %s ]; do sleep 0.02; done; printf '\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007done\\r\\n\\033]133;D;0\\007\\033[c'; cat > %s"
+                          flag out))
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "ready" (cooked-tests--text)))))
+          (cooked-tests--hide-buffer)
+          (write-region "" nil flag)
+          ;; Pumped, so every drain is the wake filter's, as a hidden buffer's are.
+          (let ((deadline (+ (float-time) (cooked-tests-timeout 3))))
+            (while (and (< (float-time) deadline)
+                        (not (and cooked--commands
+                                  (string-suffix-p "c" (cooked-tests--contents out)))))
+              (accept-process-output nil 0.05)))
+          (should cooked--hidden)
+          (should (string-match-p "\\`\033\\[\\?62\\(;4\\)?;22c\\'"
+                                  (cooked-tests--contents out)))
+          (should (= 1 (length cooked--commands)))
+          (should (= 0 (cooked-command-code (car cooked--commands)))))
+      (delete-file out)
+      (ignore-errors (delete-file flag)))))
+
+(ert-deftest cooked-a-hidden-buffer-draws-its-screen-only-when-read ()
+  "Output that only changes a hidden buffer's screen waits until something reads it.
+
+The child prints after the buffer is hidden and says so with a file, and the
+screen still does not show it: nothing woke Emacs, and a drain would have left
+the rows out anyway.  `cooked--sync', which readers of the text call, draws it."
+  (let ((flag (make-temp-name (expand-file-name "cooked-hidden-flag"
+                                                temporary-file-directory)))
+        (done (make-temp-name (expand-file-name "cooked-hidden-done"
+                                                temporary-file-directory))))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "stty raw -echo; printf ready; until [ -e %s ]; do sleep 0.02; done; printf '\\r\\nlater'; touch %s; exec cat"
+                          flag done))
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "ready" (cooked-tests--text)))))
+          (cooked-tests--hide-buffer)
+          (write-region "" nil flag)
+          (let ((deadline (+ (float-time) (cooked-tests-timeout 3))))
+            (while (and (< (float-time) deadline) (not (file-exists-p done)))
+              (accept-process-output nil 0.05)))
+          (cooked-tests--pump 0.2)
+          (should-not (string-match-p "later" (cooked-tests--text)))
+          (cooked--sync)
+          (should (string-match-p "ready\nlater\\'" (cooked-tests--text)))
+          (should-not cooked--withheld))
+      (ignore-errors (delete-file flag))
+      (ignore-errors (delete-file done)))))
+
+(ert-deftest cooked-a-hidden-flood-runs-to-the-end-without-drawing-a-row ()
+  "Two million lines into a hidden buffer are appended, never drawn, and never stall.
+
+Holding the screen back must not hold the scrollback back with it: pending
+scrollback counts towards the backlog, and at the limit the reader stops and the
+child blocks, so a hidden drain that kept it would stop the build for good.
+Every drain until the child exits leaves the rows out; the one that reports the
+exit is whole, since the session is gone after it and nothing could draw the
+screen later."
+  (let ((rows 0))
+    (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; printf ready; read -r _; yes \"$(printf 'y\\r')\" | head -n 2000000")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "ready" (cooked-tests--text)))))
+      (cooked-tests--hide-buffer)
+      (cl-letf* ((apply (symbol-function 'cooked--apply))
+                 ((symbol-function 'cooked--apply)
+                  (lambda (update)
+                    (unless (plist-get update :exit)
+                      (setq rows (+ rows (length (plist-get update :rows)))))
+                    (funcall apply update))))
+        (cooked--send cooked--session "\n")
+        (let ((deadline (+ (float-time) (cooked-tests-timeout 60))))
+          (while (and (< (float-time) deadline) (null cooked--exit))
+            (accept-process-output nil 0.05))))
+      (should (eql cooked--exit 0))
+      (should (= rows 0))
+      (should (string-match-p "^y\ny\n" (buffer-string))))))
+
+(ert-deftest cooked-showing-a-hidden-buffer-catches-it-up-before-it-is-drawn ()
+  "A buffer shown again is drawn whole before its window is, following the cursor.
+
+Ten thousand lines went by while hidden, enough for the backlog to have woken
+Emacs to append scrollback above a screen it left alone.  Coming back, the
+window hook says a whole drain is owed and `cooked--sync-before-redisplay'
+makes it, so the first frame is the child's screen as it is now, with point on
+its cursor rather than somewhere in the scrollback that went in above.  The
+cursor starts at the top of the screen, where an insertion leaves point behind."
+  (let ((done (make-temp-name (expand-file-name "cooked-hidden-done"
+                                                temporary-file-directory)))
+        (appended 0))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c"
+                  (format "stty raw -echo; printf 'ready\\r'; read -r _; i=0; while [ $i -lt 10000 ]; do printf 'line %%s\\r\\n' $i; i=$((i+1)); done; printf tail; touch %s; exec cat"
+                          done))
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "ready" (cooked-tests--text)))))
+          ;; At the very start of the screen, where the scrollback goes in.
+          (should (= (point) (cooked--cursor-position) (cooked--screen-start-position)))
+          (cooked-tests--hide-buffer)
+          (cl-letf* ((apply-withheld (symbol-function 'cooked--apply-withheld))
+                     ((symbol-function 'cooked--apply-withheld)
+                      (lambda (update)
+                        (setq appended (1+ appended))
+                        (funcall apply-withheld update))))
+            (cooked--send cooked--session "\n")
+            (let ((deadline (+ (float-time) (cooked-tests-timeout 10))))
+              (while (and (< (float-time) deadline) (not (file-exists-p done)))
+                (accept-process-output nil 0.05)))
+            (cooked-tests--pump 0.2))
+          (should (> appended 0))
+          (should-not (string-match-p "tail" (cooked-tests--text)))
+          (let ((window (cooked-tests--show-buffer)))
+            (should cooked--withheld)
+            (cooked--sync-before-redisplay window))
+          (should-not cooked--withheld)
+          (should (string-match-p "line 9999\ntail\\'" (cooked-tests--text)))
+          (should (= (point) (cooked--cursor-position))))
+      (ignore-errors (delete-file done)))))
+
 (ert-deftest cooked-xtgettcap-answers-for-the-entry-term-names ()
   "The core answers from the entry the child was told about, not a fixed one.
 

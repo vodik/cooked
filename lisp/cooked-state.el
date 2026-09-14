@@ -172,6 +172,30 @@ buffer afterwards: once another buffer takes over its window, a cooked buffer
 is displayed nowhere, which is indistinguishable from never having been shown
 except by having watched it happen.")
 
+(defvar-local cooked--hidden nil
+  "Whether no window on a visible frame shows this buffer.
+
+nil until the buffer has been on screen at all, for the reason
+`cooked--attention' starts out nil: a buffer driven from Lisp, or a test, has
+no window to lose, and calling it hidden would leave every drain it takes
+without its screen.  A buffer started in the background and never shown is
+therefore rendered in full, as it always was.
+
+Kept by `cooked--update-buffer-visibility' from the window hooks, and read by
+`cooked--on-wake', which drains a hidden buffer without its screen.  See
+`cooked--withheld' for what that leaves owing.")
+
+(defvar-local cooked--withheld nil
+  "Whether this buffer's screen is owed a whole drain.
+
+Set when a drain leaves the screen out, and when a hidden buffer is shown
+again, since the core held back output without waking anyone; cleared by the
+next whole drain.  Meanwhile the rows below `cooked--screen-start' are whatever
+the buffer held when it was hidden: a hidden `make -j' has appended its output
+above a screen that still reads as it did an hour ago.  Anything that reads
+those rows catches them up first with `cooked--sync', and showing the buffer
+does the same.")
+
 (defun cooked--frozen-p ()
   "Whether the render is being deferred.
 

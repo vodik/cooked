@@ -21,6 +21,10 @@
 (require 'seq)
 (require 'cooked-util)
 
+;; Upward, like `cooked--drain-and-apply' from cooked-util.el: a record is read
+;; here, and reading one is what catches a hidden buffer's screen up.
+(declare-function cooked--sync "cooked-render")
+
 ;;;; The record
 
 (cl-defstruct (cooked-command (:constructor cooked--command-make) (:copier nil))
@@ -252,7 +256,12 @@ The output alone, or with OUTER the prompt and the command line above it as
 well.  The end is pulled back off the following prompt's first column, since
 `cooked--command-end-position' is one past the output: without that a linewise
 selection of one command's output reaches down into the next command's prompt
-line."
+line.
+
+Catches a hidden buffer's screen up first, since a region is asked for to be
+read and the end of a running or just-finished command can be on the rows a
+hidden drain left out; see `cooked--sync'."
+  (cooked--sync)
   (let* ((beg (if outer
                   (or (cooked--command-prompt-position command)
                       (cooked--command-start-position command))

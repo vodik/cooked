@@ -985,6 +985,8 @@ walk answers both rather than each walking the sessions for itself."
   (cooked--dolist-buffers
     ;; Protected apart, so a failure in one still lets the other run.
     (cooked--protect-hook (cooked--update-buffer-attention))
+    ;; After attention, which is what says the buffer has been on screen at all.
+    (cooked--protect-hook (cooked--update-buffer-visibility))
     (when cooked--session
       (cooked--sync-graphics))))
 
@@ -1045,6 +1047,47 @@ back to.  See `cooked-bell-pending'."
           (cooked--defer
            (lambda ()
              (when cooked--session (cooked--drain-and-apply)))))))))
+
+(defun cooked--update-buffer-visibility ()
+  "Track whether any window on a visible frame shows the current buffer.
+
+A hidden buffer is drained without its screen; see `cooked--hidden'.  Coming
+back owes it a whole drain, which `cooked--sync-before-redisplay' makes before
+the window is drawn.  It is also deferred from here, for a window that is shown
+without being redisplayed -- a buffer displayed from a batch Emacs, or on a
+frame that is not being drawn -- and the second one finds nothing left to do.
+
+Only a buffer that has been on screen can be hidden, which `cooked--attention'
+already knows."
+  (when cooked--session
+    (let ((hidden (and cooked--attention
+                       (not (get-buffer-window nil 'visible))
+                       t)))
+      (unless (eq hidden cooked--hidden)
+        (setq cooked--hidden hidden)
+        (cooked--set-hidden cooked--session hidden)
+        ;; Owed whether or not a drain has run since: the core wakes nothing for
+        ;; output that only changes the screen while the buffer is hidden.
+        (unless hidden
+          (setq cooked--withheld t)
+          (cooked--defer #'cooked--sync))))))
+
+(defun cooked--sync-before-redisplay (_window)
+  "Catch the screen up before a window shows it, if it was hidden.
+
+On `pre-redisplay-functions', buffer-locally, so it runs only when a window on
+this buffer is about to be drawn, and costs two variable tests when the buffer
+was not hidden.  Here rather than deferred from the window hooks as their other
+reactions are, because a deferred drain lands after the redisplay that shows
+the buffer: the first frame of a buffer coming back would be its screen as it
+was when it was hidden, under the scrollback that has gone in since.  The
+drain it makes is the same whole drain the next wake would make, once.
+
+`cooked--hidden' is asked as well as `cooked--withheld' because this can run
+before the window hook that notices the buffer is back: a window is about to
+draw it either way."
+  (when (or cooked--hidden cooked--withheld)
+    (cooked--protect-hook (cooked--sync))))
 
 (defun cooked--install-global-hooks ()
   "Install the hooks that cannot be buffer-local."
@@ -1737,6 +1780,7 @@ to the child verbatim."
   ;; `cooked--advise-font-scale'.
   (cooked--advise-font-scale)
   (add-hook 'window-selection-change-functions #'cooked--window-selection-changed nil t)
+  (add-hook 'pre-redisplay-functions #'cooked--sync-before-redisplay nil t)
   (add-hook 'context-menu-functions #'cooked--context-menu nil t)
   (add-hook 'kill-buffer-hook #'cooked--cleanup nil t))
 

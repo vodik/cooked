@@ -309,11 +309,25 @@ reads without a diff tool."
                             :expected (plist-get reference key))))))
 
 (defun cooked-tests--oracle-drain (buffer rejoin treatment)
-  "Run TREATMENT in BUFFER, then drain and apply its session under REJOIN."
+  "Run TREATMENT in BUFFER, then drain and apply its session under REJOIN.
+The drain is a hidden buffer's when TREATMENT returns `hidden'."
   (with-current-buffer buffer
-    (funcall treatment)
-    (let ((cooked-rejoin-wrapped-lines rejoin))
-      (cooked--drain-and-apply))))
+    (let ((hidden (eq (funcall treatment) 'hidden))
+          (cooked-rejoin-wrapped-lines rejoin))
+      (cooked--drain-and-apply hidden))))
+
+(defvar-local cooked-tests--oracle-drains 0
+  "How many drains `cooked-tests--oracle-hide' has been asked about in this buffer.")
+
+(defun cooked-tests--oracle-hide ()
+  "Drain as a hidden buffer twice, then as a shown one, and so on round.
+
+A treatment for `cooked-tests--oracle-compare': two drains that leave the
+screen out, then a whole one that has to catch it up.  Counted per buffer, so a
+case run again while shrinking hides the same drains."
+  (setq cooked-tests--oracle-drains (1+ cooked-tests--oracle-drains))
+  (unless (zerop (% cooked-tests--oracle-drains 3))
+    'hidden))
 
 (defun cooked-tests--oracle-compare (case &optional subject reference)
   "Run CASE into two buffers and return where they first differ, or nil.
@@ -321,10 +335,13 @@ reads without a diff tool."
 CASE is a plist as `cooked-tests--oracle-generate' makes one.  SUBJECT and
 REFERENCE are functions run in their buffer before each drain; SUBJECT defaults
 to doing nothing, the ordinary drain, and REFERENCE to
-`cooked-tests--oracle-resend'.  After every drain the two buffers are compared,
-and the first difference is returned as a plist with :drain, the index of the
-chunk just fed, and :difference, from `cooked-tests--oracle-difference'.  A
-signal from either buffer is returned the same way, as :error."
+`cooked-tests--oracle-resend'.  A treatment that returns `hidden' drains as a
+buffer no window shows.  After every drain the two buffers are compared, except
+while the subject's screen is left out, and at the end a subject still left out
+is caught up with `cooked--sync' and compared once more.  The first difference
+is returned as a plist with :drain, the index of the chunk just fed, and
+:difference, from `cooked-tests--oracle-difference'.  A signal from either
+buffer is returned the same way, as :error."
   (let* ((rows (plist-get case :rows))
          (cols (plist-get case :cols))
          (rejoin (plist-get case :rejoin))
@@ -333,19 +350,29 @@ signal from either buffer is returned the same way, as :error."
          (b (cooked-tests--oracle-buffer rows cols)))
     (unwind-protect
         (condition-case err
-            (cl-loop
-             for chunk in (plist-get case :chunks)
-             for index from 0
-             for bytes = (apply #'concat chunk)
-             do (with-current-buffer a (cooked--feed cooked--session bytes))
-             do (with-current-buffer b (cooked--feed cooked--session bytes))
-             do (cooked-tests--oracle-drain a rejoin (or subject #'ignore))
-             do (cooked-tests--oracle-drain b rejoin (or reference #'cooked-tests--oracle-resend))
-             for difference = (cooked-tests--oracle-difference
-                               (with-current-buffer a (cooked-tests--oracle-snapshot))
-                               (with-current-buffer b (cooked-tests--oracle-snapshot)))
-             when difference
-             return (list :drain index :difference difference))
+            (let ((compare (lambda ()
+                             (unless (buffer-local-value 'cooked--withheld a)
+                               (cooked-tests--oracle-difference
+                                (with-current-buffer a (cooked-tests--oracle-snapshot))
+                                (with-current-buffer b (cooked-tests--oracle-snapshot))))))
+                  (chunks (plist-get case :chunks)))
+              (or (cl-loop
+                   for chunk in chunks
+                   for index from 0
+                   for bytes = (apply #'concat chunk)
+                   do (with-current-buffer a (cooked--feed cooked--session bytes))
+                   do (with-current-buffer b (cooked--feed cooked--session bytes))
+                   do (cooked-tests--oracle-drain a rejoin (or subject #'ignore))
+                   do (cooked-tests--oracle-drain b rejoin (or reference #'cooked-tests--oracle-resend))
+                   for difference = (funcall compare)
+                   when difference
+                   return (list :drain index :difference difference))
+                  (progn
+                    (with-current-buffer a
+                      (let ((cooked-rejoin-wrapped-lines rejoin))
+                        (cooked--sync)))
+                    (when-let* ((difference (funcall compare)))
+                      (list :drain (length chunks) :difference difference)))))
           (error (list :error err)))
       (dolist (buffer (list a b))
         (with-current-buffer buffer (cooked--cleanup))
@@ -426,6 +453,17 @@ COOKED_ORACLE_CASES=1, and a wider net is a bigger count or another start."
             (number-sequence 0 (1- count)))))
 
 ;;;; Tests
+
+(ert-deftest cooked-render-oracle-a-hidden-buffer-catches-up-in-one-drain ()
+  "A buffer drained while hidden ends each whole drain as a never-hidden one does.
+
+The subject drains two chunks out of three as a buffer no window shows, which
+appends the scrollback and leaves the screen out, and catches the screen up
+with the third; see `cooked-tests--oracle-hide'.  After every whole drain its
+text, properties, point and screen start must match the reference's, which
+resends every row, so the rows a hidden drain left out are neither lost nor
+drawn twice and the shift log accumulated meanwhile is replayed right."
+  (cooked-tests--oracle-check (cooked-tests--oracle-cases) #'cooked-tests--oracle-hide))
 
 (ert-deftest cooked-render-oracle-generated-cases ()
   "Every generated script leaves the buffer as resending every row would.

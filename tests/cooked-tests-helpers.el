@@ -762,6 +762,28 @@ scaled by `cooked-tests-timeout\=', like every other wait in the suite."
   (list "/bin/sh" "-c"
         (format "stty raw -echo; printf '%s'; cat > %s" query out)))
 
+;;;; Hiding a buffer
+
+(defun cooked-tests--hide-buffer ()
+  "Show the current buffer in the selected window, then show another there.
+
+Each step reports the window change as `window-buffer-change-functions' would,
+which batch Emacs never runs, so the buffer is known to have been on screen and
+then to be on screen nowhere: `cooked--hidden'."
+  (set-window-buffer (selected-window) (current-buffer))
+  (cooked--window-buffers-changed)
+  (set-window-buffer (selected-window) (get-buffer-create " *cooked-test-elsewhere*"))
+  (cooked--window-buffers-changed)
+  (should cooked--hidden))
+
+(defun cooked-tests--show-buffer ()
+  "Show the current buffer in the selected window again, reporting the change.
+Returns the window."
+  (set-window-buffer (selected-window) (current-buffer))
+  (cooked--window-buffers-changed)
+  (should-not cooked--hidden)
+  (selected-window))
+
 (defun cooked-tests--contents (file)
   "Contents of FILE, or the empty string if it has none yet."
   (with-temp-buffer

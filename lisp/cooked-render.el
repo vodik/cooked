@@ -108,8 +108,12 @@ and blocking on it for no reason a mid-drag `cooked--sync-size\=' would forgive.
     (cooked--dolist-windows w (get-buffer-window-list (current-buffer) nil t)
       (force-window-update w))))
 
-(defun cooked--drain-and-apply ()
+(defun cooked--drain-and-apply (&optional hidden)
   "Apply whatever the native core has accumulated since the last drain.
+
+With HIDDEN, the buffer is one no window shows, and the core may leave the
+screen out of the drain; see `cooked--apply-withheld'.  A drain asked for
+while this one runs is always whole, since whoever asked wants to see it.
 
 Re-entrant calls are folded into the drain already under way rather than
 nested inside it.  `cooked--apply' decides `follow', `wandered' and the
@@ -146,7 +150,10 @@ again is safe."
           (progn
             (setq cooked--draining t
                   cooked--drain-pending nil)
-            (cooked--apply (cooked--drain cooked--session cooked-rejoin-wrapped-lines))
+            (let ((update (cooked--drain cooked--session cooked-rejoin-wrapped-lines hidden)))
+              (if (plist-get update :withheld)
+                  (cooked--apply-withheld update)
+                (cooked--apply update)))
             ;; Bounded in practice: the pending flag is set by a freeze lifting,
             ;; and a freeze that has lifted does not lift again.
             (while (and cooked--drain-pending cooked--session)
@@ -197,6 +204,8 @@ again is safe."
 (defun cooked--on-wake (buffer)
   "Drain BUFFER's session and apply what changed.
 
+A buffer no window shows is drained without its screen; see `cooked--hidden'.
+
 An error here is otherwise invisible: Emacs swallows `process-filter' errors,
 and
 the symptom reaches the user as a buffer that stopped updating or a point that
@@ -218,20 +227,90 @@ selected one, so leaving a frozen buffer resumes it rather than stranding it."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when (and cooked--session (not (cooked--frozen-p)))
-        (if cooked-debug
-            (cooked--drain-and-apply)
-          (condition-case err
-              (cooked--drain-and-apply)
-            (error
-             (message "cooked: redisplay failed: %S (point %s, cursor %S, screen-start %s)%s"
-                      err (point) cooked--cursor
-                      (cooked--screen-start-position)
-                      (if cooked--resyncing "" "; resyncing"))
-             (unless cooked--resyncing
-               (let ((cooked--resyncing t))
-                 (condition-case again
-                     (cooked-refresh)
-                   (error (message "cooked: resync failed too: %S" again))))))))))))
+        (cooked--drain-and-repair cooked--hidden)))))
+
+(defun cooked--drain-and-repair (hidden)
+  "Drain and apply as `cooked--drain-and-apply' does, and repair a failure.
+HIDDEN is passed on.  The failure is named and the screen resynced, once; see
+`cooked--on-wake'."
+  (if cooked-debug
+      (cooked--drain-and-apply hidden)
+    (condition-case err
+        (cooked--drain-and-apply hidden)
+      (error
+       (message "cooked: redisplay failed: %S (point %s, cursor %S, screen-start %s)%s"
+                err (point) cooked--cursor
+                (cooked--screen-start-position)
+                (if cooked--resyncing "" "; resyncing"))
+       (unless cooked--resyncing
+         (let ((cooked--resyncing t))
+           (condition-case again
+               (cooked-refresh)
+             (error (message "cooked: resync failed too: %S" again)))))))))
+
+(defun cooked--sync ()
+  "Bring the current buffer's screen up to date, if a drain left it out.
+
+The one way in for anything that reads the text of a buffer no window shows:
+command search counting a running command's output, `cooked-write-output',
+`next-error' walking a build log.  While the buffer is hidden, or
+`cooked--withheld' is set, the rows below `cooked--screen-start' can be stale,
+and this drains the buffer whole, as showing it would.  Everywhere else it
+costs two variable tests, so a reader calls it unconditionally rather than
+learning what hidden means.
+
+Hidden is enough on its own because the core does not wake Emacs for output
+that only changes a hidden buffer's screen: a child that printed one line has
+left nothing drained that could have set `cooked--withheld'.
+
+Not for code that already runs inside a drain: there the drain under way has
+the text as current as it is going to be, and the request is folded into a
+whole drain that runs once it returns."
+  (when (and (or cooked--hidden cooked--withheld) cooked--session)
+    (cooked--drain-and-repair nil)))
+
+(defun cooked--apply-withheld (update)
+  "Apply UPDATE, a drain that left the screen out, to a buffer no window shows.
+
+Only what has to happen whether or not anyone can see it: the scrollback is
+appended, the marks that scrolled away with it are moved there, the tty mode is
+adopted, so a password prompt is still noticed, and the events are handled, so
+bells, titles, progress and notifications still arrive.  The rows below
+`cooked--screen-start' are left as they are, and so is everything shaped by
+them: the guard, the region's height, the padding, the input line, the window.
+The core has kept the damage, and the next whole drain repaints what changed.
+
+Appending is an insertion above the stale rows and nothing more, which leaves
+the one thing the whole drain reads off them before it repaints: whether point
+was on the screen.  Point and `cooked--point' are kept where they were relative
+to the screen's start, so a buffer left at its cursor still follows the cursor
+when it is shown, however much scrollback went in above it meanwhile."
+  (cooked--install-resources update)
+  (let* ((screen (cooked--screen-start-position))
+         (on-screen (and screen (>= (point) screen) (- (point) screen)))
+         (recorded (and screen cooked--point (>= cooked--point screen)
+                        (- cooked--point screen))))
+    (let* ((inhibit-read-only t)
+           (buffer-undo-list t)
+           ;; Lifted over the insertion as `cooked--apply' lifts it.  An empty
+           ;; input line at the top of the screen has its end marker advancing and
+           ;; its start not, so text inserted there would land inside it.
+           (pending (cooked--take-pending-input))
+           (batch-start (when-let* ((scrolled (plist-get update :scrolled)))
+                          (cooked--render-scrolled scrolled))))
+      (cooked--restore-pending-input pending)
+      (when batch-start (setq cooked--pin-screen-top nil))
+      (cooked--relocate-marks (plist-get update :marks) batch-start)
+      (cooked--set-mode (plist-get update :mode))
+      (cooked--batching-replies cooked--session
+        (dolist (event (plist-get update :events))
+          (cooked--handle-event event batch-start))))
+    (setq cooked--withheld t)
+    (cooked--trim-scrollback)
+    (when-let* ((screen (cooked--screen-start-position)))
+      (when on-screen (goto-char (min (+ screen on-screen) (point-max))))
+      (when recorded (setq cooked--point (min (+ screen recorded) (point-max))))))
+  (cooked--check-undo-anchor))
 
 ;;;; Applying an update
 
@@ -562,6 +641,8 @@ The order below is the whole of it, and every step depends on the one above:
 resources before the rows that name them, the viewport before the render that
 invalidates it, the render before the marks resolved against the text it wrote,
 and the region shaped before anything measures it."
+  ;; First, so a reader reached from inside this drain does not ask for another.
+  (setq cooked--withheld nil)
   (cooked--install-resources update)
   ;; `let*', emphatically: these initialisers delete and insert, and under plain
   ;; `let' they would run before the two bindings above them took effect -- so a

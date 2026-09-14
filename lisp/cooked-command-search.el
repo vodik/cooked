@@ -110,6 +110,9 @@ NAME is computed here, in the candidate's own buffer, because the fallback for a
 command with no recorded line is its prompt line, which is text in that buffer."
   (let (running finished)
     (cooked--dolist-buffers
+      ;; A buffer no window shows may be holding its screen back, and the running
+      ;; command's output is counted to the end of it.
+      (cooked--sync)
       ;; Widened, since a full-screen program narrows its buffer to the alt
       ;; screen and the prompt a fallback name is read from lies above it.
       (save-restriction
