@@ -27,9 +27,10 @@
 ;; round trip per shrinking step.
 ;;
 ;; `cooked-tests--oracle-compare' is the harness, and takes the two treatments as
-;; functions, so a later comparison ("promoted against resent", a narrower
-;; `cooked--protect') is a new pair of functions and possibly new motifs rather
-;; than a new harness.
+;; functions, so a later comparison (a narrower `cooked--protect') is a new pair of
+;; functions and possibly new motifs rather than a new harness.  The second
+;; comparison, promoted rows against the same rows sent again as scrollback
+;; text, is one such pair.
 ;;
 ;; Not covered: the width guard, which needs a window with real font metrics, and
 ;; so rows it trimmed; pending input, which needs a line editor reading; and the
@@ -72,12 +73,17 @@ an edit, so both need a line to have been seen before.")
   '((text . 8) (line . 4) (wrap . 2) (newline . 5) (cup . 5) (move . 3)
     (erase . 4) (insert-delete . 3) (scroll . 3) (region . 2) (sgr . 3)
     (alt . 1) (link . 2) (rewrite . 4) (cell . 5) (save . 1) (autowrap . 1)
-    (clear . 1))
+    (clear . 1) (lines . 3))
   "The kinds of token a script is made of, each with its weight.
 
 `rewrite' and `cell' are the two the task asks for by name: erasing a row and
 writing a line back over it, and addressing one cell and writing one character
-there, which is a spinner and a TUI's cursor-addressed field.")
+there, which is a spinner and a TUI's cursor-addressed field.
+
+`lines' is output a shell prints: whole lines from the bottom of the screen, or
+of a region above a status line, which scroll rows the buffer already shows
+into history.  Those rows are promoted rather than sent again, so they are
+what the promotion comparison is about.")
 
 (defun cooked-tests--oracle-motif (rng rows cols)
   "One token of a script for a ROWS by COLS screen, chosen by RNG.
@@ -128,7 +134,18 @@ nondeterminism `cooked--feed' exists to keep out."
                      (cooked-tests--oracle-pick rng '("|" "/" "-" "─" "日" " " "x"))))
       ('save (cooked-tests--oracle-pick rng '("\e7" "\e8")))
       ('autowrap (cooked-tests--oracle-pick rng '("\e[?7l" "\e[?7h")))
-      ('clear (cooked-tests--oracle-pick rng '("\e[H\e[2J" "\e[3J" "\ec"))))))
+      ('clear (cooked-tests--oracle-pick rng '("\e[H\e[2J" "\e[3J" "\ec")))
+      ;; From the bottom of the screen, or of a region over all but a status line on
+      ;; the last row, which scrolls into history too.
+      ('lines (concat (if (and (> rows 2) (zerop (cooked-tests--oracle-below rng 3)))
+                          (format "\e[1;%dr\e[%d;1H" (1- rows) (1- rows))
+                        (format "\e[%d;1H" rows))
+                      (mapconcat (lambda (_)
+                                   (concat "\r\n" (cooked-tests--oracle-pick
+                                                   rng (cons (make-string (+ cols 2) ?w)
+                                                             cooked-tests--oracle-lines))))
+                                 (number-sequence 1 (funcall n 3))
+                                 ""))))))
 
 (defun cooked-tests--oracle-generate (seed)
   "The case SEED names, a plist of :rows, :cols, :rejoin and :chunks.
@@ -189,6 +206,15 @@ cursor; see `cooked-tests--cell'."
 
 The reference treatment: see the Commentary."
   (cooked--redraw cooked--session))
+
+(defun cooked-tests--oracle-unpromoted ()
+  "Have the next drain send every row that scrolled away as text.
+
+The reference for the promotion comparison.  Every drain `cooked--drain-and-apply'
+makes asks the core to promote the rows the buffer already holds; this one does
+not, and nothing else differs, so shifts, edits and rows left out arrive as they
+do in the subject.  See `cooked-tests--oracle-drain'."
+  'unpromoted)
 
 ;; Two things differ between the buffers by history alone, and neither is
 ;; rendering, so a snapshot leaves both out.
@@ -252,41 +278,70 @@ every position after it."
 :lines is the whole buffer, scrollback included, one entry per line, and each
 entry is a list of (TEXT . PROPERTIES) runs, adjacent characters with equal
 properties merged, since where Emacs happens to split an interval is not
-something anyone sees.  :screen-start and :point are places as
-`cooked-tests--oracle-place' gives them, and :alt is the screen shown.  See
-above for the padding and the final newline, which are left out."
+something anyone sees.  The newline ending a line of scrollback is a last run
+of its own, (newline . PROPERTIES), when it carries any, so a newline that kept
+the live screen\='s `cooked-wrap' mark on its way into history is a difference.
+On the screen the mark is left out: a row made to exist below a row that wraps
+gets an unmarked newline, which the same row resent over an existing line does
+not, and that is not yet held to.
+:screen-start and :point are places as `cooked-tests--oracle-place' gives them,
+and :alt is the screen shown.  See above for the padding, left out of the
+screen's lines, and the final newline, which is left out."
   (save-restriction
     (widen)
-    (let* ((text (buffer-substring (point-min) (point-max)))
-           (lines (split-string text "\n")))
-      (when (and (cdr lines) (equal (car (last lines)) ""))
-        (setq lines (butlast lines)))
-      (list :lines
-            (mapcar
-             (lambda (line)
-               (let ((end (length line)))
-                 (while (and (> end 0) (eq (aref line (1- end)) ?\s)
-                             (not (get-text-property (1- end) 'face line)))
-                   (setq end (1- end)))
-                 (let ((pos 0) runs)
-                   (while (< pos end)
-                     (let ((next (next-property-change pos line end))
-                           (props (cooked-tests--oracle-properties
-                                   (text-properties-at pos line))))
-                       (if (and runs (equal (cdar runs) props))
-                           (setcar (car runs) (concat (caar runs)
-                                                      (substring-no-properties line pos next)))
-                         (push (cons (substring-no-properties line pos next) props) runs))
-                       (setq pos next)))
-                   (nreverse runs))))
-             lines)
-            :screen-start (cooked-tests--oracle-place (cooked--screen-start-position))
+    (let* ((screen (cooked--screen-start-position))
+           (screen-line (and screen (save-excursion
+                                      (goto-char screen)
+                                      (line-beginning-position))))
+           ;; The end of the last row the screen has, which leaves out the final
+           ;; newline above, and any empty line after it.
+           (limit (or (and screen
+                           (save-excursion
+                             (and (zerop (cooked--goto-screen-row
+                                          (1- (max 1 (if cooked--alt
+                                                         (cooked-grid-height cooked--grid)
+                                                       (cooked-grid-used cooked--grid))))))
+                                  (line-end-position))))
+                      (point-max)))
+           lines)
+      (save-excursion
+        (goto-char (point-min))
+        (while (< (point) limit)
+          (let* ((bol (point))
+                 (eol (min (line-end-position) limit))
+                 (end eol)
+                 (pos bol)
+                 runs)
+            ;; Padding is only ever on the live screen: scrollback is the core's
+            ;; text, and a trailing space in it is one the child wrote.
+            (when (and screen-line (>= bol screen-line))
+              (while (and (> end bol) (eq (char-before end) ?\s)
+                          (not (get-text-property (1- end) 'face)))
+                (setq end (1- end))))
+            (while (< pos end)
+              (let ((next (next-property-change pos nil end))
+                    (props (cooked-tests--oracle-properties (text-properties-at pos))))
+                (if (and runs (equal (cdar runs) props))
+                    (setcar (car runs) (concat (caar runs)
+                                               (buffer-substring-no-properties pos next)))
+                  (push (cons (buffer-substring-no-properties pos next) props) runs))
+                (setq pos next)))
+            (when (and (< eol limit) screen (< eol screen))
+              (when-let* ((props (cooked-tests--oracle-properties
+                                  (text-properties-at eol))))
+                (push (cons 'newline props) runs)))
+            (push (nreverse runs) lines)
+            (goto-char (min (1+ eol) limit)))))
+      (list :lines (nreverse lines)
+            :screen-start (cooked-tests--oracle-place screen)
             :point (cooked-tests--oracle-place (point))
             :alt cooked--alt))))
 
 (defun cooked-tests--oracle-text (snapshot)
   "SNAPSHOT's text, lines joined, for a failure message."
-  (mapconcat (lambda (line) (mapconcat #'car line "")) (plist-get snapshot :lines) "\n"))
+  (mapconcat (lambda (line)
+               (mapconcat (lambda (run) (if (stringp (car run)) (car run) "")) line ""))
+             (plist-get snapshot :lines) "\n"))
 
 (defun cooked-tests--oracle-difference (subject reference)
   "Where snapshot SUBJECT first differs from snapshot REFERENCE, or nil.
@@ -310,11 +365,18 @@ reads without a diff tool."
 
 (defun cooked-tests--oracle-drain (buffer rejoin treatment)
   "Run TREATMENT in BUFFER, then drain and apply its session under REJOIN.
-The drain is a hidden buffer's when TREATMENT returns `hidden'."
+The drain is a hidden buffer's when TREATMENT returns `hidden', and promotes no
+row when it returns `unpromoted'."
   (with-current-buffer buffer
-    (let ((hidden (eq (funcall treatment) 'hidden))
+    (let ((how (funcall treatment))
           (cooked-rejoin-wrapped-lines rejoin))
-      (cooked--drain-and-apply hidden))))
+      (if (eq how 'unpromoted)
+          (let ((drain (symbol-function 'cooked--drain)))
+            (cl-letf (((symbol-function 'cooked--drain)
+                       (lambda (session rejoin &optional hidden _promote)
+                         (funcall drain session rejoin hidden nil))))
+              (cooked--drain-and-apply)))
+        (cooked--drain-and-apply (eq how 'hidden))))))
 
 (defvar-local cooked-tests--oracle-drains 0
   "How many drains `cooked-tests--oracle-hide' has been asked about in this buffer.")
@@ -336,7 +398,8 @@ CASE is a plist as `cooked-tests--oracle-generate' makes one.  SUBJECT and
 REFERENCE are functions run in their buffer before each drain; SUBJECT defaults
 to doing nothing, the ordinary drain, and REFERENCE to
 `cooked-tests--oracle-resend'.  A treatment that returns `hidden' drains as a
-buffer no window shows.  After every drain the two buffers are compared, except
+buffer no window shows, and one that returns `unpromoted' promotes no row.
+After every drain the two buffers are compared, except
 while the subject's screen is left out, and at the end a subject still left out
 is caught up with `cooked--sync' and compared once more.  The first difference
 is returned as a plist with :drain, the index of the chunk just fed, and
@@ -472,6 +535,18 @@ See the Commentary for what is compared with what.  A failure prints its seed
 and the smallest script that still fails; put that script in a named test below
 once the cause is understood."
   (cooked-tests--oracle-check (cooked-tests--oracle-cases)))
+
+(ert-deftest cooked-render-oracle-promoted-rows-are-what-resending-them-would-leave ()
+  "Every generated script leaves the buffer as it would sending scrolled rows as text.
+
+The subject drains as a user's buffer does, promoting the rows that scroll off
+the top while the buffer already shows them.  The reference is the same drain
+told to promote nothing, so every row that scrolls away is inserted again as
+scrollback text and the rows it copied are deleted.  Both buffers must hold
+the same text under the same properties, the scrollback included, after every
+drain.  See `cooked--promote-rows'."
+  (cooked-tests--oracle-check (cooked-tests--oracle-cases)
+                              #'ignore #'cooked-tests--oracle-unpromoted))
 
 ;; Each of these is a script the generated cases found, shrunk and then trimmed by
 ;; hand, kept so the bug it found stays found whatever the generator turns into.
