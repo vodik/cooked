@@ -1324,6 +1324,56 @@ the buffer\'s own text, and the status line stays below the region."
       (should (equal (cooked-tests--at marker 3) "fgh"))
       (should (equal (cooked-tests--text) "abcdefghij\ntwo\nthree\nstatus")))))
 
+(ert-deftest cooked-a-rejoined-row-scrolls-into-history-losing-only-its-newline ()
+  "A wrapped row joins the next on its way into history by one small deletion.
+
+With `cooked-rejoin-wrapped-lines' scrollback has no newline between a wrapped
+row and its continuation.  Promoted, the rows keep their text and the newline
+between them is deleted, which is the only text change above the screen."
+  (let ((cooked-rejoin-wrapped-lines t))
+    (cooked-tests--with-fed-screen 3 5
+      (cooked-tests--fed "abcdefg")
+      (let ((marker (copy-marker (+ (cooked--screen-start-position) 3)))
+            (changes nil))
+        (add-hook 'after-change-functions
+                  (lambda (beg end old) (push (list beg end old) changes))
+                  nil t)
+        (cooked-tests--fed "\r\n\r\n")
+        (let ((seam (cooked--screen-start-position)))
+          ;; The screen now starts mid-line, after the head of the wrapped line.
+          (should (equal (cooked-tests--at (line-beginning-position 1) 0) ""))
+          (should (equal (buffer-substring-no-properties
+                          (save-excursion (goto-char seam) (line-beginning-position))
+                          seam)
+                         "abcde"))
+          (should (equal (cooked-tests--at marker 2) "de"))
+          ;; Property changes report as many characters as they cover; a text
+          ;; change does not.  Above the seam there is exactly one, the newline.
+          (should (equal (seq-filter (lambda (change)
+                                       (pcase-let ((`(,beg ,end ,old) change))
+                                         (and (<= beg seam) (/= old (- end beg)))))
+                                     changes)
+                         (list (list seam seam 1)))))
+        (cooked-tests--fed "\r\n")
+        (should (equal (cooked-tests--at marker 2) "de"))
+        (should (equal (buffer-substring-no-properties
+                        (point-min) (cooked--screen-start-position))
+                       "abcdefg\n"))))))
+
+(ert-deftest cooked-a-mark-on-a-promoted-row-lands-on-its-character ()
+  "A semantic mark on a row that scrolls into history stays on its character.
+
+The eviction reports the mark again, anchored into this drain\'s scrollback,
+and the promoted rows are that scrollback, so the offset counts their
+characters: past the row above and its newline, and then four characters into
+its own row after `日本 x', not six columns."
+  (cooked-tests--with-fed-screen 3 20
+    (cooked-tests--fed "abc\r\n日本 x\e]133;C\ayz\r\nc")
+    (should (equal (cooked-tests--at cooked--command-start 2) "yz"))
+    (cooked-tests--fed "\r\nd\r\ne")
+    (should (< cooked--command-start (cooked--screen-start-position)))
+    (should (equal (cooked-tests--at cooked--command-start 2) "yz"))))
+
 (ert-deftest cooked-rows-emacs-does-not-hold-scroll-into-history-as-text ()
   "Only a row the buffer holds as the core last sent it is promoted.
 
