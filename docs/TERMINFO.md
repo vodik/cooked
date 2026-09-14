@@ -49,6 +49,7 @@ rather than writing spaces, so ignoring it mis-drew every coloured panel and sta
 | `Eneks`, `Dseks` | modifyOtherKeys level 2 on and off, for tmux's `extended-keys` |
 | `Enfcs`, `Dsfcs` | focus reporting (mode 1004), under the names tmux's `focus-events` uses |
 | `Swd` | the working directory (OSC 7, closed by `fsl`), which tmux's `osc7` feature sends for the active pane while `set-titles` is on |
+| `Spb` | the OSC 9;4 progress report, a state and a percentage closed by ST, in the spelling tmux's `progressbar` feature uses; tmux sends -1 for a report with no percentage |
 
 The second group are extended names with no registry: ncurses' `terminfo.src` has none of
 them, so each was checked against the program that reads it. tmux uses any of them it

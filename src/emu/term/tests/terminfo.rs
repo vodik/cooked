@@ -595,6 +595,8 @@ fn terminfo_arguments(name: &str) -> &'static [&'static [Arg]] {
         // The write, and the read form: `?` asks for the clipboard back.
         "Ms" => &[&[S("c"), S("aGk=")], &[S("c"), S("?")]],
         "Hls" => &[&[S("7"), S("https://example.com/")], &[S(""), S("")]],
+        // A percentage, and tmux's -1 for a report that had none.
+        "Spb" => &[&[N(1), N(42)], &[N(3), N(-1)]],
         _ => panic!("`{name}' is parametrised and the audit has no arguments for it"),
     }
 }
@@ -730,8 +732,8 @@ fn terminfo_alternate_charset_draws_every_pair() {
 /// The extended names tmux reads do what tmux will use them for.
 ///
 /// The DECRQM check above already covers `Enfcs`, whose mode it can see. It cannot
-/// see these three: modifyOtherKeys is not a mode, and OSC 8 and OSC 7 are not control
-/// sequences at all. `Hls` is parametrised, so its value is pinned to tmux's own spelling in
+/// see these four: modifyOtherKeys is not a mode, and OSC 8, OSC 7 and OSC 9;4 are not
+/// control sequences at all. `Hls` is parametrised, so its value is pinned to tmux's own spelling in
 /// `tty-features.c` and the two expansions tmux sends are fed by hand -- an open with
 /// an `id=`, and the empty close it writes before every reset. `ol` is an SGR, which
 /// no mode check sees either.
@@ -778,6 +780,26 @@ fn the_extended_names_tmux_reads_do_what_they_say() {
         t.drain().events,
         vec![Event::Osc(7, vec!["file://h/tmp".into()], Terminator::Bel)],
         "`Swd'"
+    );
+
+    // `Spb' is what tmux's progressbar feature writes the active pane's OSC 9;4 report
+    // with, always as a state and a percentage, so a report with no percentage goes out
+    // with -1. Both must reach Lisp as the parts `cooked--osc-progress' reads, and the
+    // Lisp side's reading of -1 is `cooked-progress-arrives-through-tmux-spb'.
+    assert_eq!(value("Spb"), r"\E]9;4;%p1%d;%p2%d\E\\");
+    let mut t = term(
+        2,
+        8,
+        &terminfo_expand(value("Spb"), &[Arg::N(3), Arg::N(-1)]),
+    );
+    assert_eq!(
+        t.drain().events,
+        vec![Event::Osc(
+            9,
+            vec!["4".into(), "3".into(), "-1".into()],
+            Terminator::St
+        )],
+        "`Spb'"
     );
 
     // `ol' is tmux's name for SGR 59 and not ncurses', which has no `ol' at all, so

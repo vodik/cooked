@@ -98,6 +98,10 @@
 #                     the active pane while set-titles is on. That follows
 #                     pane and window switches, which marks passed through
 #                     from every pane cannot.
+#   Spb               ConEmu's OSC 9;4 progress report, a state and a
+#                     percentage closed by ST, in tmux's exact spelling. tmux's
+#                     progressbar feature hands on the active pane's report
+#                     through it, and sends -1 for a report with no percentage.
 #
 # Not yet `Sxl', although sixel is decoded. Whether a sixel can be shown depends
 # on the frame the buffer is in, and an entry cannot change its answer when the
@@ -486,6 +490,7 @@ cooked-256color|cooked terminal emulator for Emacs,
 	Dseks=\E[>4m,
 	Hls=\E]8;%?%p1%l%tid=%p1%s%;;%p2%s\E\\,
 	Swd=\E]7;,
+	Spb=\E]9;4;%p1%d;%p2%d\E\\,
 	Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
 
 cooked|cooked terminal emulator for Emacs,

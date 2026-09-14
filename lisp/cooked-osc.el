@@ -474,13 +474,17 @@ thing I was doing failed\" without restating how far it had got.  `bad\=' means
 it sent something that is not a number, which is a different situation entirely
 and one the caller refuses outright.
 
+`-1\=' is nil as well.  It is how tmux says no number: it hands on every report
+through its `Spb\=' as a state and a percentage, and a report that came without
+one goes out as `9;4;3;-1\='.
+
 `string-to-number\=' cannot tell those apart -- it answers 0 for the empty
 string, for `nan\=', and for a megabyte of NUL bytes -- so the digits are
 checked before it is asked.  Out of range is clamped rather than refused, on
 rockorager.dev's rule for the sequence and because a build tool that computes
 101% has a rounding bug, not a hostile intent."
   (cond
-   ((or (null field) (string-empty-p field)) nil)
+   ((member field '(nil "" "-1")) nil)
    ((string-match-p (rx bos (+ digit) eos) field)
     (min 100 (string-to-number field)))
    (t 'bad)))

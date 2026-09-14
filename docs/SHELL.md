@@ -118,12 +118,11 @@ every child, so a tmux server started from a cooked buffer carries it into every
 On fish 4 the snippet does not stand down inside tmux as it does elsewhere, since fish's
 own marks go to tmux and stop there.
 
-**tmux has to pass the sequences on, and learn what the entry cannot tell it.**
+**tmux has to pass the sequences on.**
 
 ```tmux
 set -g allow-passthrough on
 set -ga update-environment COOKED_SHELL_INTEGRATION_FEATURES
-set -as terminal-features ',cooked*:progressbar'
 set -g set-titles on
 ```
 
@@ -145,10 +144,10 @@ declares `Swd`, and with `set-titles` on tmux sends OSC 7 for whichever pane is 
 again whenever you switch panes or windows. That follows the pane you are in, which
 reports passed through from the panes cannot.
 
-The feature on the `terminal-features` line is the one `cooked-256color` does not
-declare: `progressbar` needs `Spb`. Everything else tmux looks for is found in the entry:
-`RGB` (from `COLORTERM`), `hyperlinks`, `extkeys`, `focus`, `title`, `sync`, `usstyle`,
-`overline`, `strikethrough`, `bpaste`, `cstyle`, `ccolour` and `osc7`. To check, run `tmux display -p '#{I/f:hyperlinks}'`, which prints 1 or
+No `terminal-features` line is needed: every feature tmux looks for is found in the
+entry, which is `RGB` (from `COLORTERM`), `hyperlinks`, `extkeys`, `focus`, `title`,
+`sync`, `usstyle`, `overline`, `strikethrough`, `bpaste`, `cstyle`, `ccolour`, `osc7` and
+`progressbar`. To check, run `tmux display -p '#{I/f:hyperlinks}'`, which prints 1 or
 0 for any feature. Don't use `#{client_termfeatures}` for this: it lists only the
 features switched on by name, and never the ones tmux found in terminfo.
 

@@ -3020,7 +3020,14 @@ whole construct would say only its last line."
     ;; A bare `2' with nothing to carry says the state and no number.
     (should (equal (cooked-tests--progress '("4" "2")) '(error)))
     ;; A bare `1' has to invent one, since a set is nothing but its number.
-    (should (equal (cooked-tests--progress '("4" "0") '("4" "1")) '(set . 0)))))
+    (should (equal (cooked-tests--progress '("4" "0") '("4" "1")) '(set . 0)))
+    ;; tmux's `Spb' always sends a percentage, and `-1' for none, so each of
+    ;; the bare reports above reaches cooked through tmux in this spelling.
+    (should (equal (cooked-tests--progress '("4" "1" "42") '("4" "3" "-1"))
+                   '(indeterminate)))
+    (should (equal (cooked-tests--progress '("4" "1" "70") '("4" "2" "-1"))
+                   '(error . 70)))
+    (should (null (cooked-tests--progress '("4" "1" "42") '("4" "0" "-1"))))))
 
 (ert-deftest cooked-progress-refuses-what-it-cannot-parse ()
   "A malformed report leaves the indicator exactly as it was.
@@ -3035,6 +3042,7 @@ mode line and then go quiet, leaving it there."
                    ("4" "1.0")
                    ("4" " 1")
                    ("4" "-1")
+                   ("4" "1" "-2")           ; only tmux's -1 means no number
                    ("4" "1" "nan")          ; `string-to-number' answers 0 to all
                    ("4" "1" "0x40")         ; of these; the digit check is what
                    ("4" "1" "1e2")          ; keeps them from becoming a number
@@ -3129,6 +3137,18 @@ including one that renders nothing and puts the state somewhere else entirely."
       '("/bin/sh" "-c" "printf '\\033]9;4;1;37\\007'; sleep 5")
     (should (cooked-tests--settle (lambda () (equal cooked--progress '(set . 37)))))
     (should (string-match-p (regexp-quote "[37%%]") (cooked--mode-line)))))
+
+(ert-deftest cooked-progress-arrives-through-tmux-spb ()
+  "tmux\='s spelling of an indeterminate report shows as indeterminate.
+
+tmux passes on a pane\='s `9;4;3\=' as `Spb\=' with a percentage of -1, closed
+by ST, and that is what the child sends here.  The Rust test
+`the_extended_names_tmux_reads_do_what_they_say\=' pins the entry\='s `Spb\=' to
+the same bytes."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c" "printf '\\033]9;4;1;37\\033\\\\\\033]9;4;3;-1\\033\\\\'; sleep 5")
+    (should (cooked-tests--settle
+             (lambda () (equal cooked--progress '(indeterminate)))))))
 
 (ert-deftest cooked-progress-repeated-report-does-not-repaint ()
   "A report identical to the one on show asks the mode line for nothing.
