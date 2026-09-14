@@ -1039,6 +1039,15 @@ TRAMP\='s *own* syntax out of a position where it would be read as syntax; see
 `cooked--remote-directory\='.  An IPv6 literal does not match and is declined,
 which costs a rare case a rewrite it would otherwise have got.")
 
+(defun cooked--tramp-prefix (name)
+  "NAME without its localname, hops included, or nil when NAME is local.
+
+/ssh:jump|ssh:host:/tmp/ gives /ssh:jump|ssh:host:.  See
+`cooked--remote-directory\=' for why this subtracts the localname rather than
+asking `file-remote-p\=' for the prefix, which would leave the hop out."
+  (when-let* ((local (file-remote-p name 'localname)))
+    (substring name 0 (- (length name) (length local)))))
+
 (defun cooked--remote-prefix (host)
   "The TRAMP prefix, `/METHOD:HOST:\=' or longer, that names HOST, or nil.
 
@@ -1063,9 +1072,7 @@ usually your local user and not the one the alias logs in as.  A `Host
 ip-10-0-0-1\=' entry in ~/.ssh/config, with the alias\='s HostName and User,
 makes the built name work."
   (or (and (cooked--same-host-p (file-remote-p default-directory 'host) host)
-           (when-let* ((local (file-remote-p default-directory 'localname)))
-             (substring default-directory
-                        0 (- (length default-directory) (length local)))))
+           (cooked--tramp-prefix default-directory))
       (and (cooked--same-host-p host cooked--host)
            (string-match-p cooked--host-name-regexp cooked--host)
            ;; Only here, and only on this branch: reading

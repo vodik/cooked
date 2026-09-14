@@ -167,6 +167,12 @@ OSC 7 already tells us the child's working directory. If we can also tell we are
 You would ssh somewhere, type `find_file config.rs`, and get a real buffer with your LSP,
 your keybindings, your everything — editing a remote file from a remote shell.
 
+The other direction exists: `M-x cooked` in a `/ssh:host:` directory starts the shell on
+that host with `ssh -t` in cooked's own pty (`cooked-remote.el`). Starting over TRAMP's own
+`make-process`, as vterm, eat and ghostel do for every method, is declined: it would be a
+second kind of session without the reader thread or backpressure. Methods that do not log
+in with ssh are refused.
+
 **Effort:** medium. **Risk:** medium; detecting "we are remote" reliably is the crux, and
 the remote shell needs our integration installed. **Payoff:** this is a genuinely new
 capability rather than a nicer terminal.

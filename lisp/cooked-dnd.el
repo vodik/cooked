@@ -82,8 +82,8 @@ rather than typed.  Dropping ~/notes.txt on a session whose `default-directory\=
 is /ssh:host:/srv/ would type /home/me/notes.txt to a shell on host, where it
 names nothing or, worse, a different file.  Copying the file there through TRAMP
 would make the name true, but it is a transfer of unbounded size started by a
-drag, and it waits on the open question of how cooked runs anything on a remote
-host."
+drag, and a session started over ssh by `cooked--remote-invocation\=' changes
+nothing about that: the copy would go through TRAMP either way."
   (let ((host (file-remote-p default-directory 'host)))
     (unless (equal (file-remote-p file 'host) host)
       (user-error "cooked: %s is not on %s, where the shell runs; copy it there"

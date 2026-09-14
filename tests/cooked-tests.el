@@ -11,6 +11,7 @@
 ;;   cooked-tests-render.el      the grid becoming buffer text, and the seam
 ;;   cooked-tests-input.el       keys, mouse, paste, keyboard ownership
 ;;   cooked-tests-dnd.el         drops and yank-media, the optional layer
+;;   cooked-tests-remote.el      starting a session on a TRAMP host over ssh
 ;;   cooked-tests-history.el     the optional shell-history layer
 ;;   cooked-tests-consult.el     the optional terminal picker, and the
 ;;                               annotations it shares with plain completion
@@ -93,6 +94,7 @@
 (require 'cooked-tests-menu)
 (require 'cooked-tests-display)
 (require 'cooked-tests-process)
+(require 'cooked-tests-remote)
 (require 'cooked-tests-comint)
 (require 'cooked-tests-eshell)
 (require 'cooked-tests-oracle)

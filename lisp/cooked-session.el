@@ -152,6 +152,12 @@ from wherever Emacs happened to be.  What that left was a buffer reading
 unexplained number -- and it is reached by nothing more unusual than
 \\[cooked] from a buffer visiting a remote file.
 
+This refusal is the floor rather than the whole answer.  \\[cooked] from a
+buffer at /ssh:box:/srv/ starts the shell on box, because
+`cooked--start-session\\=' builds an `ssh -t\\=' ARGV before calling this and
+passes the local home as DIRECTORY.  What still lands here with a TRAMP name is
+a caller that spawns ARGV as given, which has no host to run it on but this one.
+
 `cooked--local-name\\=' is what refuses it, rather than a `file-remote-p\\=' of
 our own, because that is the chokepoint every other path from a string to the
 filesystem already goes through, and its message is the one the user is told.

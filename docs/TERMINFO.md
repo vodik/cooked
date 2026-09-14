@@ -128,8 +128,12 @@ The entry installs itself into `~/.terminfo` on first use — no root needed —
 back to `xterm-256color` when `tic` is unavailable. Set `cooked-term-name` to nil to always
 present as xterm.
 
-Remote hosts are the real cost, and `M-x cooked-install-terminfo-remote` runs the usual
-incantation:
+Remote hosts are the real cost. A session `M-x cooked` starts over TRAMP pays none of it:
+the command it runs on the far host asks `infocmp` for the entry, and when it is missing
+exports it inline as `TERMINFO=b64:…`, which ncurses 6.1 and later read as the compiled
+entry itself, falling back to `xterm-256color` where even that is not understood. Nothing
+is written on the far host. An `ssh` typed at a prompt has no such command to carry it,
+and for that `M-x cooked-install-terminfo-remote` runs the usual incantation:
 
 ```sh
 infocmp -x cooked-256color | ssh host 'mkdir -p ~/.terminfo && tic -x -o ~/.terminfo -'

@@ -47,6 +47,7 @@
 (require 'cooked-keymaps)
 (require 'cooked-completion)
 (require 'cooked-shell-integration)
+(require 'cooked-remote)
 (require 'cooked-mode-line)
 (require 'cooked-ime)
 
@@ -2265,16 +2266,34 @@ size is only knowable once something is displaying it."
 
 COMMAND is a shell's file name, which gets the shell integration its name
 calls for, or a list that is the child's argv exactly: (\"htop\" \"-d\" \"5\")
-is run as it is, with no startup files written for it."
+is run as it is, with no startup files written for it.
+
+When `default-directory' is a TRAMP name the child is started on that host, by
+`ssh -t' in this buffer's own pty; `cooked--remote-invocation' builds it.  There
+COMMAND nil means the far user's login shell, and a shell's name or an argv is
+run on the far host as given.  The pty itself starts in the local home
+directory, since a TRAMP name is nowhere a local process can be, while
+`default-directory' keeps the TRAMP name, so \[find-file] at the first prompt
+already opens files on that host.  `cooked--host' is set to the host before
+anything is reported, so the buffer treats the shell as remote from the start.
+
+A method that cannot be started over ssh is refused with a message, and the
+child starts locally in the home directory, as it did before remote starts
+existed."
   (let ((buffer (generate-new-buffer (cooked--buffer-name))))
     (with-current-buffer buffer
       (cooked-mode)
-      (pcase-let ((`(,argv ,env ,scratch)
-                   (if (consp command)
-                       (list command nil nil)
-                     (cooked--shell-invocation (or command cooked-shell)))))
-        (setq cooked--scratch scratch)
-        (cooked--start argv default-directory env))
+      (let* ((remote-p (file-remote-p default-directory))
+             (remote (and remote-p
+                          (cooked--remote-invocation default-directory command))))
+        (when remote
+          (setq cooked--host (file-remote-p default-directory 'host)))
+        (pcase-let ((`(,argv ,env ,scratch)
+                     (cond (remote)
+                           ((consp command) (list command nil nil))
+                           (t (cooked--shell-invocation (or command cooked-shell))))))
+          (setq cooked--scratch scratch)
+          (cooked--start argv (if remote-p "~" default-directory) env)))
       (cooked--refresh-keymap)
       ;; A program named by its argv was never offered the snippet, so its
       ;; missing marks are no news.

@@ -393,6 +393,14 @@ is a no-op, so having it in your rc /and/ getting injected locally is the normal
 arrangement, not a conflict. Where a shell stays unmarked, cooked says =bare= in the mode
 line.
 
+=M-x cooked= from a buffer whose directory is on another host over TRAMP starts the
+shell there: =/ssh:box:/srv/= runs =ssh -t box= in the terminal and lands in =/srv=,
+hops such as =/ssh:jump|ssh:box:= included, with the arguments TRAMP itself would use.
+Only methods that log in with ssh (=ssh=, =sshx=, =scp=, =scpx=, =rsync= and your own)
+are started this way; anything else is refused with a message and the shell starts
+locally. The far host needs the rc line above for integration, and needs nothing for
+=TERM=: when it lacks the terminfo entry, the entry travels inline as =TERMINFO=b64:=.
+
 Set ~cooked-shell-integration~ to =none= to turn injection off, or name a shell to force
 a scheme the basename guess would miss. [[file:docs/SHELL.md][docs/SHELL.md]] has the
 OSC 133 marks in full for anyone writing their own prompt integration, and the wire
