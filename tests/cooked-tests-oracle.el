@@ -548,16 +548,24 @@ starts again from it, until no candidate fails."
             (or (plist-get result :difference) (plist-get result :error)))))
 
 (defun cooked-tests--oracle-check (cases &optional subject reference)
-  "Fail the current test on the first of CASES whose buffers differ.
+  "Fail the current test if the buffers differ for any of CASES, naming each such case.
 
 CASES is a list of (SEED . CASE), SEED nil for a case written out by hand.
-The failing case is shrunk before it is reported.  SUBJECT and REFERENCE are as for `cooked-tests--oracle-compare'."
-  (pcase-dolist (`(,seed . ,case) cases)
-    (when (cooked-tests--oracle-compare case subject reference)
-      (let ((small (cooked-tests--oracle-shrink
-                    case (lambda (c) (cooked-tests--oracle-compare c subject reference)))))
-        (ert-fail (cooked-tests--oracle-report
-                   seed small (cooked-tests--oracle-compare small subject reference)))))))
+Every case is run, and each failing one is shrunk and reported, so a run over
+4000 seeds that fails at 1464 still says whether 2291 fails too.  SUBJECT and
+REFERENCE are as for `cooked-tests--oracle-compare'."
+  (let ((reports nil))
+    (pcase-dolist (`(,seed . ,case) cases)
+      (when (cooked-tests--oracle-compare case subject reference)
+        (let ((small (cooked-tests--oracle-shrink
+                      case (lambda (c) (cooked-tests--oracle-compare c subject reference)))))
+          (push (cooked-tests--oracle-report
+                 seed small (cooked-tests--oracle-compare small subject reference))
+                reports))))
+    (when reports
+      (ert-fail (format "%d of %d cases fail:\n%s"
+                        (length reports) (length cases)
+                        (string-join (nreverse reports) "\n"))))))
 
 (defun cooked-tests--oracle-cases ()
   "The generated cases this run checks, as (SEED . CASE).
@@ -686,6 +694,29 @@ gone, never drawn whole again.  Every writer now blanks the half of a wide
 character it does not overwrite."
   (cooked-tests--oracle-check
    '((nil :rows 2 :cols 6 :rejoin t :chunks (("日本語" "\r" "│ │┌─") ("\e[2;1H"))))))
+
+(ert-deftest cooked-render-oracle-a-box-run-over-a-wide-character-below-a-region ()
+  "A box run written over half of a wide character on a row below a region is drawn whole.
+
+Seed 2291.  `├─┤' over `日' and the first half of `本', on the row below a
+scroll region, left the second half of `本' standing, and the row was drawn
+with its glyph run cut before `┤'.  Fixed by blanking the torn half; see
+`cooked-render-oracle-a-glyph-run-over-a-torn-wide-character'."
+  (cooked-tests--oracle-check
+   '((nil :rows 4 :cols 8 :rejoin t
+           :chunks (("\e[1;3r\e[3;1H\r\n├─┤\r\néé\r\n 42%"
+                     "\e[4;1H\r\n│ x │\r\n│ x │\r\n日本語" "\e[4;1H\r\n├─┤")
+                    ("\e[3C"))))))
+
+(ert-deftest cooked-render-oracle-a-box-run-ending-inside-a-wide-character ()
+  "A box run whose last column lands on a wide character is drawn whole in scrollback.
+
+Seed 2608.  `┌──┐' written from the column before `日' ends on the first half of
+`本', and left its second half standing.  The row scrolled away with its glyph
+run cut in two, where the resent row draws it whole."
+  (cooked-tests--oracle-check
+   '((nil :rows 6 :cols 11 :rejoin t
+           :chunks (("\e[1;7H" "日本語" "\e[1;5Hx" "┌──┐") ("\e[6;1H\r\n 42%"))))))
 
 (ert-deftest cooked-render-oracle-rows-promoted-before-the-shift-log-fills ()
   "Rows promoted by a scroll the shift log later dropped arrive as text.
