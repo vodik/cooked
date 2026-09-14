@@ -1167,18 +1167,22 @@ it. Every gate in `Notifier::flush` can only push a redraw later. There is no ur
 path, no bypass, no "this one matters, send it now" — the floor is absolute.
 
 **What actually paces a session is Emacs, and the interval is the floor beneath that.**
-The core sends one wake byte and then stays quiet until `cooked--ready` says the buffer
-has been drawn, so a slow render paces the child by itself. Measured in a live frame,
-`cooked--apply` runs 40 times against 91 redisplays while `yes` floods a buffer, and 155
-against 215 for a spinner rewriting one line. Renders never outrun redisplays. The
-interval is what stops a *fast* render from being asked for a thousand times a second;
-it is not what decides the rate in the ordinary case.
+The core sends one wake byte and then stays quiet until `cooked--ready` says the drain
+has been applied to the buffer, so a slow apply paces the child by itself. The ack is not
+a report that the frame is on screen: `cooked--ready` runs inside the process filter,
+right after `cooked--apply` returns, and Emacs redisplays only once the filter is done.
+Measured in a live frame, `cooked--apply` runs 40 times against 91 redisplays while `yes`
+floods a buffer, and 155 against 215 for a spinner rewriting one line. Applies did not
+outrun redisplays there, but that is an observation, not a guarantee: Emacs can run
+several filters between two redisplays, and it is the interval that leaves the redraw its
+room. The interval is what stops a *fast* apply from being asked for a thousand times a
+second; it is not what decides the rate in the ordinary case.
 
 Four things delay a redraw, and `flush` consults them in this order:
 
 | Gate | Holds the frame while | Retired by |
 |---|---|---|
-| `notified` | a wake byte is already in flight | `Session::ready`, i.e. Emacs having drawn |
+| `notified` | a wake byte is already in flight | `Session::ready`, i.e. Emacs having applied the drain |
 | `sync_until` | the child is mid-frame under **DEC mode 2026** (`CSI ? 2026 h`) | the child's own `2026 l`, or the deadline |
 | `min_interval` | less than one interval has passed since the last wake | the clock |
 | `hold(quiescence)` | the child wrote something under 0.5ms ago | the pty going quiet, or `frame_ceiling` |

@@ -93,15 +93,16 @@ once this interval has passed rather than waiting for a gap that is not
 coming.  One interval is therefore the whole answer to how often a busy child
 redraws the buffer -- there is no second cap underneath it.
 
-Measured against the redisplay rather than against the drain: the core sends
-one wakeup and stays quiet until Emacs has finished drawing what the last one
-brought, so a slow render (box drawing costs some 70 times what plain text
+Measured from the end of the apply rather than from the drain: the core sends
+one wakeup and stays quiet until Emacs has applied to the buffer what the last
+one brought, so a slow apply (box drawing costs some 70 times what plain text
 does) paces the child by itself and this interval is the floor beneath that
-rather than a rate of its own.
+rather than a rate of its own.  Redisplay comes after the apply, and the
+interval is what leaves it room.
 
 A floor and never a clock: nothing in cooked draws faster than this, and no
 urgent path bypasses it.  Four things can make a redraw *later* -- Emacs
-not having finished the last one, DEC mode 2026, this interval, and the child
+not having applied the last one, DEC mode 2026, this interval, and the child
 still writing -- and only the first is what usually decides the rate.  See
 docs/DESIGN.md.
 

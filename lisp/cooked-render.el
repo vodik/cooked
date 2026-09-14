@@ -174,12 +174,14 @@ again is safe."
             (unless applied
               (cooked--forget-sent-rows))
             ;; The far end of the core's backpressure: one wake byte is in flight
-            ;; from the drain that brought us here until this says the buffer has
-            ;; been drawn, so `cooked-min-redisplay-interval' paces rendering --
+            ;; from the drain that brought us here until this says the drain has
+            ;; been applied, so `cooked-min-redisplay-interval' paces applying --
             ;; which is where the milliseconds are -- rather than the taking of a
             ;; delta, which costs nothing.  Once, at the very end: the loop above
-            ;; may have drained several times, and it is the last render that the
-            ;; interval is measured from.
+            ;; may have drained several times, and it is the last apply that the
+            ;; interval is measured from.  Not after redisplay, which runs once the
+            ;; process filter this is called from has returned: the window covers
+            ;; the Lisp work, and the interval is what leaves the redraw its room.
             ;;
             ;; In the cleanup rather than the body, and for a stronger reason than
             ;; tidiness: an apply that signals must still re-arm, or the core waits

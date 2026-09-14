@@ -19,15 +19,17 @@ parse rate against the vendored vte, not the shape of the design.
 *Two caveats on that, both worth stating before any number below is read as a
 verdict.*
 
-*The throughput benchmark rewards unbounded buffering.* ghostel drains the pty
-as fast as the kernel supplies and buffers *events* without limit; cooked
-deliberately stops reading at =backlog_limit= and blocks the child in =write=.
+*The throughput benchmark rewards looser buffering.* ghostel drains the pty
+as fast as its render lock and a 16 KB event pipe let it, with 5 MB of
+scrollback; cooked deliberately stops reading at =backlog_limit= and blocks the
+child in =write=.
 A =time cat bigfile= therefore scores cooked's better behaviour worse.
 ghostel's README makes exactly this argument against vterm and eat — that the
 wall clock hides a frozen main thread — and the same argument cuts the other way
-here along a different axis: ghostel stays responsive *and* unbounded, cooked
-stays responsive *and* bounded. At roughly 90 MB/s ghostel is also close enough
-to a pty's practical ceiling that the headroom for cooked to lose is limited.
+here along a different axis: ghostel stays responsive with incidental
+backpressure, cooked stays responsive with a deliberate bound. At roughly
+90 MB/s ghostel is also close enough to a pty's practical ceiling that the
+headroom for cooked to lose is limited.
 
 *On interactivity the bet plausibly runs the other way, and ghostel's own source
 is the evidence.* =ghostel-bench-typing-latency='s docstring names the one place
@@ -187,8 +189,10 @@ destination-spoofing hole.
   ghostel's =redraw= returns early whenever the mode is set, *with no timeout* —
   a child that never resets it freezes the display.
 - *Real backpressure*: the reader stops =read(2)=ing at =backlog_limit=, the pty
-  fills, the child blocks in =write=. ghostel buffers *events* rather than
-  throttling *input*, so memory is unbounded under a flood.
+  fills, the child blocks in =write=. ghostel has no deliberate equivalent,
+  only an incidental one: its reader parses under the lock the render holds,
+  its events go through a 16 KB buffer with a blocking write to the event
+  pipe, and its scrollback is capped at 5 MB.
 - *The wake protocol is a token, not a message* — one byte, not re-armed until
   Emacs acknowledges by draining. ghostel serializes Lisp *source text* into a
   pipe and =eval=s it (=NativeProcess.zig:176-232=): more allocation, a larger
@@ -1700,7 +1704,7 @@ Four gates, consulted in order, and every one can only /delay/:
 
 | Gate                                                                    | Holds while                       | Retired by                                          |
 |-------------------------------------------------------------------------+-----------------------------------+-----------------------------------------------------|
-| #ERROR                                                                  | a wake byte is already in flight  | =Session::ready= (=:826=) — Emacs finished drawing |
+| #ERROR                                                                  | a wake byte is already in flight  | =Session::ready= (=:826=) — Emacs finished applying |
 | =sync_until= (=:281=)                                                   | child is mid-frame under DEC 2026 | child's =2026 l=, or =SYNC_TIMEOUT= 150 ms          |
 | =min_interval= (=:245=)                                                 | < 8 ms since last wake            | the clock                                           |
 | =hold(quiescence)= (=:168=, =QUIESCENCE= 500 µs; =HOLD_CEILING= 150 ms) | child wrote anything < 0.5 ms ago | pty going quiet, or the ceilings                    |
@@ -1997,9 +2001,10 @@ Three findings that bear directly on cooked:
    cross-implementation mandate of anything surveyed.
 3. *The real floor is display backpressure, not a clock* — WT's
    presentation-released waitable, ghostty's DisplayLink, foot's Wayland frame
-   callback, alacritty's =RedrawRequested=. cooked already has this *in the
-   strongest form*: the token is released when Emacs reports the frame **drawn**,
-   not when it submits. And where the field does express input priority it is as
+   callback, alacritty's =RedrawRequested=. cooked has this only *in a
+   weaker form*: the token is released when Lisp has **applied** the drain,
+   inside the process filter and before redisplay, not when the frame is drawn
+   or even submitted. And where the field does express input priority it is as
    *scheduling* priority (vte's idle-priority repeat, xterm's event peek,
    iTerm2's rate drop) — never as a bypass of the anti-tearing wait.
 
@@ -2026,13 +2031,13 @@ active output is worth up to a full 8 ms, which against the 33–88 ms end-to-en
 figures Chad Austin measured on Windows is 10–25% of the visible budget.
 
 *Why the waiver cannot run away here*, for two reasons specific to cooked:
-=notified= means at most one wake is ever in flight, and =rearm= does not fire
-until Emacs reports the frame *drawn*. Removing an 8 ms clock from a pipeline
-whose real limiter is a 0.16–11.9 ms render acknowledged by the consumer cannot
-produce a runaway — and =DESIGN.md='s own 40-applies-against-91-redisplays
-measurement is the proof. This is Windows Terminal's =SetMaximumFrameLatency(1)=
-argument, and cooked's version is stronger because the ack comes from the draw
-rather than the submit.
+=notified= means at most one wake is ever in flight, and the waiver is
+one-shot: the first read after a keystroke takes it, so it adds at most one
+wake per keystroke to whatever the interval already allows. The ack is no
+help here. =rearm= fires once Lisp has *applied* the drain, before redisplay,
+which is weaker than Windows Terminal's =SetMaximumFrameLatency(1)=, whose
+waitable is released on presentation; =DESIGN.md='s 40 applies against 91
+redisplays is an observation, not a guarantee.
 
 *** Classification without losing the choke point
 
@@ -2065,7 +2070,7 @@ Not distinguishable at the byte level, and worth not trying. Instead
 registers a drawable change consumes it with =Option::take=, converting it into a
 *one-shot* waiver for the frame being assembled. That buys exactly one waived
 frame per write (so key-repeat at 30/s buys at most 30, each still bounded by the
-drawn-ack), self-decay so a keystroke into a program that never echoes leaves no
+apply ack), self-decay so a keystroke into a program that never echoes leaves no
 latent waiver, and no pattern matching or per-frame state beyond one
 =Option<Instant>=.
 

@@ -376,19 +376,19 @@ impl Notifier {
     /// Emacs has taken the delta, so the wake byte we sent has done its work.
     ///
     /// This says nothing about when the next byte may go out; [`Self::rearm`] does, and
-    /// Lisp calls it once the buffer is drawn. The two sit at opposite ends of Emacs' work
-    /// because taking a delta is cheap and drawing it is the whole cost of a frame -- about
-    /// 12ms for a screen of box drawing. Re-arming here would end the backpressure window
-    /// before the render, and `min_interval` would always have elapsed by the time it was
-    /// consulted.
+    /// Lisp calls it once the delta is applied to the buffer. The two sit at opposite ends
+    /// of Emacs' work because taking a delta is cheap and applying it is most of the cost
+    /// of a frame -- about 12ms for a screen of box drawing. Re-arming here would end the
+    /// backpressure window before the apply, and `min_interval` would always have elapsed
+    /// by the time it was consulted.
     fn acknowledge(&self) {
         self.notified.store(false, Ordering::SeqCst);
     }
 
-    /// Emacs has finished drawing, so the next change is worth another byte.
+    /// Emacs has applied the delta, so the next change is worth another byte.
     ///
     /// Returns whether a throttled notification is still waiting. Flushing here retires
-    /// the ordinary case, where the render lands after `min_interval` has already elapsed.
+    /// the ordinary case, where the apply ends after `min_interval` has already elapsed.
     /// A re-arm that lands inside the window leaves the retry to the reader thread — which
     /// computed its [`Shared::poll_timeout`] while the previous wakeup was still in flight,
     /// and so is asleep for the whole of `POLL_TIMEOUT_MS` rather than for the few
@@ -733,7 +733,7 @@ impl Session {
     /// compile pump reads the scrollback as text and does not.
     ///
     /// Acknowledging is not re-arming: the next wake byte waits on [`Session::ready`],
-    /// which Emacs calls once it has drawn what this returned. See
+    /// which Emacs calls once it has applied what this returned. See
     /// [`Notifier::acknowledge`] for why the window covers the render rather than the
     /// collection.
     ///
@@ -774,12 +774,18 @@ impl Session {
         }
     }
 
-    /// Emacs has drawn the last drain and will take another wakeup.
+    /// Emacs has applied the last drain to its buffer and will take another wakeup.
     ///
     /// One wake byte is in flight until this is called, so the child's writes accumulate
-    /// in [`Term`] rather than each buying a redisplay. Calling it here, after the render,
-    /// makes `min_redisplay_interval` a floor on the rendering rate, which is where the
-    /// cost is.
+    /// in [`Term`] rather than each buying a buffer update. Calling it here, after the
+    /// apply, makes `min_redisplay_interval` a floor on how often Lisp applies a drain,
+    /// which is where most of the cost is.
+    ///
+    /// It is not a report that the frame is on screen. `cooked--drain-and-apply` calls it
+    /// from inside the process filter, and Emacs redisplays after the filter returns, so
+    /// the window ends before the redraw it pays for. Emacs does redraw between wakes in
+    /// practice, 91 redisplays against 40 applies with `yes` flooding a buffer, but it is
+    /// the interval that leaves it the room, not this call.
     ///
     /// Safe to omit, as the tests and the benchmark do: a session nobody re-arms is woken
     /// by the reader's ordinary tick instead, slower but never stuck.
@@ -2033,11 +2039,11 @@ mod tests {
     }
 
     /// The backpressure window ends at [`Session::ready`] and not at [`Session::drain_with`]:
-    /// a drain that took a delta buys no second wake byte until Emacs says it has drawn
+    /// a drain that took a delta buys no second wake byte until Emacs says it has applied
     /// the first.
     ///
     /// This is the ordering the protocol rests on: if `drain` flushed, the window would
-    /// cover taking the delta rather than rendering it, which is what
+    /// cover taking the delta rather than applying it, which is what
     /// `min_redisplay_interval` paces.
     ///
     /// Unattended, so the reader's own tick is [`UNATTENDED_POLL_TIMEOUT`] away rather than
@@ -2056,7 +2062,7 @@ mod tests {
     /// wait: every path to the wake descriptor is gated on `notified`, which only the
     /// drain below clears.
     #[test]
-    fn a_drain_earns_no_second_wakeup_until_ready_says_the_frame_is_drawn() {
+    fn a_drain_earns_no_second_wakeup_until_ready_says_the_drain_is_applied() {
         let (session, read) = session_with(
             &[
                 "/bin/sh",
@@ -2079,7 +2085,7 @@ mod tests {
         assert!(
             !woke_within(&read, Duration::from_millis(200)),
             "the second write was announced by the drain itself; the re-arm belongs to \
-             `ready`, after Emacs has rendered"
+             `ready`, after Emacs has applied the delta"
         );
 
         session.ready();

@@ -444,15 +444,16 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// running program, not to a transcript.
         "cooked--clear-to-prompt" => |s| s.term().clear_to_prompt();
 
-        /// Tell SESSION that Emacs has finished drawing the last drain.
+        /// Tell SESSION that Emacs has applied the last drain to the buffer.
         ///
         /// Re-arms the wakeup: the core sends one wake byte and then stays quiet until this
-        /// says the buffer is drawn, so the child's output accumulates in the emulator
-        /// instead of buying a redisplay per write.  That is the whole of cooked's
+        /// says the drain is applied, so the child's output accumulates in the emulator
+        /// instead of buying a buffer update per write.  That is the whole of cooked's
         /// backpressure, and it is deliberately released here rather than at
-        /// `cooked--drain' -- taking a delta is cheap, rendering it is not, and re-arming
-        /// before the render would make `cooked-min-redisplay-interval' a floor that had
-        /// always elapsed by the time it was consulted.
+        /// `cooked--drain' -- taking a delta is cheap, applying it is not, and re-arming
+        /// before the apply would make `cooked-min-redisplay-interval' a floor that had
+        /// always elapsed by the time it was consulted.  It does not wait for redisplay,
+        /// which Emacs runs after the process filter that calls this has returned.
         ///
         /// Call it once per drain, from the cleanup of an `unwind-protect' rather than the
         /// body: a render that signals must still re-arm.  Failing to call it is slow
