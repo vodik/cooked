@@ -470,8 +470,24 @@ uncharged.  SECONDS bounds the wait, 30 by default."
           cooked-bench--last-detail (format "%d drains, nothing rendered" drains))
     spent))
 
-(defun cooked-bench--session (label argv &optional iterations)
+(defun cooked-bench--hide ()
+  "Take the current buffer off screen, as switching another buffer into its window does.
+
+Both window changes are reported by hand, because batch Emacs runs no window
+change functions: first that the buffer is on screen, which is what makes it
+one that can be hidden, then that no window shows it.  On a tree without the
+hidden level this changes nothing a drain does, which is what makes the same
+case its own before figure."
+  (cooked--window-buffers-changed)
+  (set-window-buffer (selected-window) (get-buffer-create " *cooked-bench-elsewhere*"))
+  (cooked--window-buffers-changed))
+
+(defun cooked-bench--session (label argv &optional iterations hidden)
   "Measure LABEL as repeated whole sessions of ARGV, drained to exit.
+
+With HIDDEN, each session's buffer is taken off screen before its child runs;
+see `cooked-bench--hide'.  The child is started by the first line Emacs sends
+it, so every drain of its output is a hidden buffer's.
 
 One iteration is one spawn, one flood and one teardown, because there is no
 smaller repeatable unit for a case whose whole point is a real child: the
@@ -485,7 +501,13 @@ check downstream wants from it."
   (cooked-bench--measure
    label 1
    (lambda ()
-     (cooked-bench--with-session argv (cooked-bench--drain-until-exit)))
+     (cooked-bench--with-session (if hidden
+                                     `("/bin/sh" "-c" ,(concat "read -r _; " (nth 2 argv)))
+                                   argv)
+       (when hidden
+         (cooked-bench--hide)
+         (cooked--send cooked--session "\n"))
+       (cooked-bench--drain-until-exit)))
    (or iterations 3))
   (message "  %-40s   %s" "" cooked-bench--last-detail))
 
@@ -506,6 +528,21 @@ so it is the shape that turns a per-run cost into a visible one."
    '("/bin/sh" "-c" "i=0; while [ $i -lt 20000 ]; do \
 printf '\\033[1;32mword\\033[0m \\033[38;2;10;20;30mrgb\\033[0m plain %s\\n' $i; \
 i=$((i+1)); done")))
+
+(defun cooked-bench-hidden ()
+  "Output into a buffer no window shows, next to the same output shown.
+
+Two children.  A yes flood keeps the backlog at its limit, so a hidden buffer
+is still drained as often as a shown one and the difference is the screen each
+drain leaves out.  A build printing a line a millisecond never gets near the
+limit, so a hidden buffer is not woken for it at all until the child exits.
+Each is a /bin/sh -c script, which the hidden rows prefix with a read so the
+buffer is off screen before the first line."
+  (pcase-dolist (`(,label . ,script)
+                 '(("yes flood, 2M lines" . "yes | head -n 2000000")
+                   ("build, 1000 lines a ms apart" . "perl -e '$|=1; for (1..1000) { print \"make: line $_ of the build\\n\"; select(undef,undef,undef,0.001) }'")))
+    (cooked-bench--session (concat label ", shown") (list "/bin/sh" "-c" script))
+    (cooked-bench--session (concat label ", hidden") (list "/bin/sh" "-c" script) nil t)))
 
 (defun cooked-bench-repaint ()
   "Full-screen repaint over the alternate screen: the `htop' case.
@@ -1771,6 +1808,7 @@ a result."
   '(("marshalling" . cooked-bench-marshalling)
     ("flood" . cooked-bench-flood)
     ("styled" . cooked-bench-styled)
+    ("hidden" . cooked-bench-hidden)
     ("repaint" . cooked-bench-repaint)
     ("box-drawing" . cooked-bench-box-drawing)
     ("bottom-row" . cooked-bench-bottom-row)
