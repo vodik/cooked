@@ -82,8 +82,8 @@ an edit, so both need a line to have been seen before.")
 (defconst cooked-tests--oracle-motifs
   '((text . 8) (line . 4) (wrap . 2) (newline . 5) (cup . 5) (move . 3)
     (erase . 4) (insert-delete . 3) (scroll . 3) (region . 2) (sgr . 3)
-    (alt . 1) (link . 2) (rewrite . 4) (cell . 5) (save . 1) (autowrap . 1)
-    (clear . 1) (lines . 3))
+    (alt . 2) (link . 2) (rewrite . 4) (cell . 5) (save . 1) (autowrap . 1)
+    (clear . 1) (lines . 3) (resize . 1))
   "The kinds of token a script is made of, each with its weight.
 
 `rewrite' and `cell' are the two the task asks for by name: erasing a row and
@@ -93,7 +93,11 @@ there, which is a spinner and a TUI's cursor-addressed field.
 `lines' is output a shell prints: whole lines from the bottom of the screen, or
 of a region above a status line, which scroll rows the buffer already shows
 into history.  Those rows are promoted rather than sent again, so they are
-what the promotion comparison is about.")
+what the promotion comparison is about.
+
+`resize' is the one token that is not bytes: (resize ROWS COLS), the window
+changing size between two writes, which reflows the primary screen even while
+the alternate screen is shown.")
 
 (defun cooked-tests--oracle-motif (rng rows cols)
   "One token of a script for a ROWS by COLS screen, chosen by RNG.
@@ -134,7 +138,11 @@ nondeterminism `cooked--feed' exists to keep out."
                    (format "\e[%d;%dr" top (+ top (cooked-tests--oracle-below rng rows))))))
       ('sgr (cooked-tests--oracle-pick
              rng '("\e[31m" "\e[1;42m" "\e[0m" "\e[7m" "\e[4m" "\e[38;5;208m")))
-      ('alt (cooked-tests--oracle-pick rng '("\e[?1049h" "\e[?1049l" "\e[?47h" "\e[?47l")))
+      ;; A switch there and back inside one token too, so that one drain sees both.
+      ('alt (cooked-tests--oracle-pick
+             rng (list "\e[?1049h" "\e[?1049l" "\e[?47h" "\e[?47l"
+                       (format "\e[?1049h\e[H%s\e[?1049l"
+                               (cooked-tests--oracle-pick rng cooked-tests--oracle-lines)))))
       ('link (if (zerop (cooked-tests--oracle-below rng 2))
                  "\e]8;;\e\\"
                (format "\e]8;;https://e.x/%d\e\\" (cooked-tests--oracle-below rng 3))))
@@ -145,6 +153,9 @@ nondeterminism `cooked--feed' exists to keep out."
       ('save (cooked-tests--oracle-pick rng '("\e7" "\e8")))
       ('autowrap (cooked-tests--oracle-pick rng '("\e[?7l" "\e[?7h")))
       ('clear (cooked-tests--oracle-pick rng '("\e[H\e[2J" "\e[3J" "\ec")))
+      ('resize (list 'resize
+                     (+ 2 (cooked-tests--oracle-below rng 5))
+                     (+ 4 (cooked-tests--oracle-below rng 9))))
       ;; From the bottom of the screen, or of a region over all but a status line on
       ;; the last row, which scrolls into history too.
       ('lines (concat (if (and (> rows 2) (zerop (cooked-tests--oracle-below rng 3)))
@@ -161,10 +172,11 @@ nondeterminism `cooked--feed' exists to keep out."
   "The case SEED names, a plist of :rows, :cols, :rejoin and :chunks.
 
 :chunks is a list of chunks, each a list of tokens: what is fed between two
-drains.  A cut falls only between tokens.  Cutting inside an escape sequence is
-the parser's business, which the Rust suite covers; what reaches Lisp is the
-grid as of a drain, and a cut between tokens already puts a drain between any
-two things the child did."
+drains, a token being a string of bytes or a resize, as
+`cooked-tests--oracle-feed' takes them.  A cut falls only between tokens.
+Cutting inside an escape sequence is the parser's business, which the Rust
+suite covers; what reaches Lisp is the grid as of a drain, and a cut between
+tokens already puts a drain between any two things the child did."
   (let* ((rng (cooked-tests--oracle-rng seed))
          (rows (+ 2 (cooked-tests--oracle-below rng 5)))
          (cols (+ 4 (cooked-tests--oracle-below rng 9)))
@@ -201,6 +213,20 @@ cursor; see `cooked-tests--cell'."
       (cooked--resize cooked--session rows cols)
       (cooked-tests--cell 10 20))
     buffer))
+
+(defun cooked-tests--oracle-feed (buffer chunk)
+  "Feed CHUNK, a list of tokens, to BUFFER\='s session in order.
+
+A string is bytes the child wrote.  (resize ROWS COLS) resizes the session as a
+window changing size does, without draining."
+  (with-current-buffer buffer
+    (dolist (token chunk)
+      (pcase token
+        ((pred stringp) (cooked--feed cooked--session token))
+        (`(resize ,rows ,cols)
+         (setq cooked--rows rows cooked--cols cols
+               cooked--last-size (cons rows cols))
+         (cooked--resize cooked--session rows cols))))))
 
 (defun cooked-tests--oracle-resend ()
   "Damage every row of this buffer's session, so the next drain sends them whole.
@@ -478,9 +504,8 @@ there.  A signal from either buffer is returned the same way, as :error."
               (or (cl-loop
                    for chunk in chunks
                    for index from 0
-                   for bytes = (apply #'concat chunk)
-                   do (with-current-buffer a (cooked--feed cooked--session bytes))
-                   do (with-current-buffer b (cooked--feed cooked--session bytes))
+                   do (cooked-tests--oracle-feed a chunk)
+                   do (cooked-tests--oracle-feed b chunk)
                    do (cooked-tests--oracle-drain a rejoin (or subject #'ignore))
                    do (cooked-tests--oracle-drain b rejoin (or reference #'cooked-tests--oracle-resend))
                    for difference = (funcall compare)
