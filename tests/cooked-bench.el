@@ -948,11 +948,12 @@ happens before any timing starts; the timed loop only ever applies the result."
   "COUNT rows of a `tree -C\=' listing, COLS wide, as the core sends them.
 
 Box drawing, but not the border kind.  `cooked-bench--box-rows\=' is one
-decoration record covering the whole row, the best case the packed encoding
-was designed for, while a `tree\=' row interleaves verticals, indentation and
-coloured names, so the depth of every row changes how many records and style
-spans it carries.  Measured on `tree -C /usr/include\=': 86,107 records over
-30,326 rows.
+decoration record covering the whole row, and so is a `tree\=' row now: the
+core absorbs the blanks between its verticals into one glyph run, so `│ │ ├──\='
+is a single record however deep the entry.  What depth still changes is how
+wide that record is, which sets the bitmap drawn for it, and the coloured name
+beside it adds style spans.  Before the blanks were absorbed, `tree -C
+/usr/include\=' sent 86,107 records over its 30,326 rows.
 
 The listing mixes depths one to six, continuing and finished levels, and every
 colour `tree\=' emits, so a frame is not one row cached twenty-four times."
@@ -1285,7 +1286,7 @@ tests/cooked-tests-render.el pins it."
                         :height 24 :shifts '((4 9 1 t))))
 
 (defun cooked-bench-tree ()
-  "`tree\=' in a large directory: many short decoration runs on every row.
+  "`tree\=' in a large directory: an indent of box glyphs beside a name on every row.
 
 The third shape this file could not see, filed with the other two because the
 lesson is the same one for the third time.  A user reported `tree\=' in a large
