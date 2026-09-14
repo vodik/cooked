@@ -1231,6 +1231,23 @@ and the assertion is on the URL *recorded*, which is the thing a click opens."
       ;; it has rows.
       (should (> (length runs) 1)))))
 
+(ert-deftest cooked-a-url-the-terminal-wrapped-at-a-space-ends-there ()
+  "A blank the child wrote at the end of a row still ends the URL before it.
+
+Twenty columns, and \"see https://e.x/abc \" is exactly twenty characters, so
+the space is the row's last cell and \"end\" goes on the row below it, with
+the row marked as wrapped.  A screen row is inserted without its trailing
+blanks, so joining the two rows at the wrap newline used to read
+\"https://e.x/abcend\" and link that.  The joined text keeps a blank where the
+row's cells end short of the width, as the scrollback's rejoined line does."
+  (cooked-tests--with-wrapped-line "see https://e.x/abc end"
+    (should (get-text-property (cooked-tests--link-at "abc") 'cooked-link-url))
+    (let ((runs (cooked-tests--url-runs)))
+      (should (equal (mapcar (lambda (run) (nth 2 run)) runs)
+                     '("https://e.x/abc")))
+      (should-not (get-text-property (cooked-tests--link-at "end")
+                                     'cooked-link-url)))))
+
 (ert-deftest cooked-a-wrapped-links-row-breaks-carry-no-link-property ()
   "The newline between two rows of one link is not part of the link.
 

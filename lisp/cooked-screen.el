@@ -901,7 +901,7 @@ the user was pointing is the end of what the row now holds."
       (cooked--relocation-set
        relocation (min (+ start (cooked-relocation-column relocation)) end)))))
 
-(defun cooked--mark-row-wrap (eol wrapped)
+(defun cooked--mark-row-wrap (eol wrapped &optional width)
   "Record on the newline at EOL whether the row it ends was soft-wrapped.
 
 The `cooked-wrap\=' property, and this is the only place it is written: WRAPPED
@@ -930,13 +930,24 @@ only a row that has just started or stopped wrapping pays anything.
 
 Nothing to mark at `point-max\=': the last screen row is left unterminated -- see
 `cooked--fit-screen\=' -- so a wrap on it has no newline to sit on yet.  The row
-below it does not exist, which is the sense in which the flag is not yet true."
+below it does not exist, which is the sense in which the flag is not yet true.
+
+WIDTH is how many cells the row's text occupies, from the row table, and a
+wrapped row narrower than `cooked--cols' is marked `blank' rather than t.  A
+row is inserted without its trailing blanks, wrapped or not, so the cells past
+its text are blanks the child wrote before the line went on to the next row,
+and nothing in the buffer says so.  At twenty columns \"see https://e.x/abc
+end\" leaves \"see https://e.x/abc\" on the first row, nineteen cells wide,
+and \"end\" on the second; joined at the newline with nothing between them
+they read as \"https://e.x/abcend\".  `cooked-link--join-wrapped' joins a
+`blank' row with a space instead."
   (when (< eol (point-max))
-    (let ((marked (get-text-property eol 'cooked-wrap)))
-      (cond ((and wrapped (not marked))
-             (put-text-property eol (1+ eol) 'cooked-wrap t))
-            ((and marked (not wrapped))
-             (remove-text-properties eol (1+ eol) '(cooked-wrap nil)))))))
+    (let ((marked (get-text-property eol 'cooked-wrap))
+          (mark (and wrapped
+                     (if (and width (< width cooked--cols)) 'blank t))))
+      (cond ((eq mark marked))
+            (mark (put-text-property eol (1+ eol) 'cooked-wrap mark))
+            (t (remove-text-properties eol (1+ eol) '(cooked-wrap nil)))))))
 
 (defun cooked--goto-screen-run-end (start first count)
   "End of the last of COUNT screen rows, the first of them row FIRST at START.
@@ -1175,7 +1186,7 @@ which has no such seam at all."
                 (goto-char pos)
                 ;; After the guard, which is the one thing in this loop that can
                 ;; shorten a row -- and so move the newline this is about.
-                (cooked--mark-row-wrap (line-end-position) wrapped))
+                (cooked--mark-row-wrap (line-end-position) wrapped cells))
               ;; Nothing scans the row here.  Rewriting the text is what tells
               ;; jit-lock the row is no longer fontified, so redisplay asks
               ;; `cooked--fontify-region' for it -- and only if this frame is one
