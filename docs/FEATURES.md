@@ -188,7 +188,7 @@ so pointing it at a repo somebody else chose executes what that repo says to.
 Prefer a wrapper of your own over the bare command when the argument is a path.
 
 OSC 52 puts text on the kill ring, up to `cooked-clipboard-max-size`; the `p` target
-sets PRIMARY instead. Set `cooked-clipboard-write` to nil to refuse writes.
+sets PRIMARY instead, and `q` sets SECONDARY. Set `cooked-clipboard-write` to nil to refuse writes.
 
 Clipboard *reads* are always answered, because the program asking waits for the answer —
 neovim's OSC 52 paste provider hangs on a terminal that stays silent. What the answer
@@ -197,7 +197,7 @@ payload, since replying with the clipboard would hand it to whatever asked. `pri
 answers only the cut buffers `0`–`7`, which OSC 52 writes fill per buffer and which never
 reach the kill ring. `ask` prompts, naming the buffer and the program, before handing
 over the clipboard, and wants a typed `yes` so that a `y` meant for the program cannot
-answer it. `t` answers from the kill ring, or PRIMARY for `p`, without asking. A reply
+answer it. `t` answers from the kill ring, or PRIMARY for `p` and SECONDARY for `q`, without asking. A reply
 larger than `cooked-clipboard-max-size` goes out empty, with a message saying so. A query naming
 several targets, `cp` say, names them all in its reply and is answered from the first
 that has something to give.
@@ -462,6 +462,27 @@ bitmap's `:data-width` back off the spec, which is the one way the merge is obse
 without a display. The geometry is tested against pixel grids directly, without a
 session, because a test that only checks a `display` property exists cannot see a dash
 that is not dashed or a diagonal that misses the corner its neighbour has to meet.
+
+## Glyphs wider than their cells
+
+The grid gives each character a whole number of cells, and a font does not have to agree.
+Iosevka draws its arrows and geometric shapes at twice its cell width, so a row of `btop`
+with one `→` in it comes out a cell too wide, and every column after it is out of line.
+
+cooked shrinks such a glyph to fit instead. A row the grid thinks may be mismeasured has
+each distinct character on it measured once, through the same shaping the display uses;
+one that is wider than its cells is drawn at a smaller `height`, and a `min-width` holds
+its cells at the width the grid budgeted, so the rest of the row stays where it was. A row
+of plain fixed-pitch text is never measured, and box drawing and images are left alone,
+being cut to their cells already.
+
+`cooked-glyph-scale-floor`, 0.5 by default, is how far a glyph may shrink. It is a clamp
+rather than a threshold: an arrow that needs a little under 0.5 is drawn at 0.5 and left
+slightly over its cell, since a slightly wide character is better than a missing one. Set
+to nil, nothing is measured, and a row that does not fit loses characters off its end
+behind a truncation arrow, which is also what happens to a glyph that is still too wide
+at the floor. A terminal frame has no font to measure, so there the row is left as the
+terminal draws it.
 
 ## UI notes
 
