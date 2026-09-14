@@ -148,8 +148,47 @@ protocol gives them all a spelling, `ESC [ 97 ; 9 u\=' for \\`s-a\=' and
 could only be sent as a plain `a\=', as xterm sends it, and Pause as nothing.
 Taking the key from Emacs to send that would be all loss -- \\`s-v\=' is a
 paste on macOS -- so while nothing is negotiated the binding is nil, and the
-key falls through to whatever Emacs binds it to."
+key falls through to whatever Emacs binds it to.  A Super or Hyper chord goes
+further, and stays Emacs\=' while Emacs binds it; see `cooked--kitty-chord\='."
   `(menu-item "" ,command :filter cooked--kitty-binding))
+
+(defvar cooked--asking-emacs-about-chord nil
+  "Non-nil while `cooked--kitty-chord-binding\=' asks what Emacs binds a chord to.
+
+Every Super and Hyper chord answers nil while this is set, so the lookup made
+from inside the filter sees past cooked\='s own binding to the one under it,
+instead of calling the same filter again.")
+
+(defun cooked--kitty-chord-binding (key binding)
+  "BINDING for the Super or Hyper chord KEY, if a kitty child should have it.
+
+That is while the kitty protocol is negotiated and nothing else in the active
+keymaps binds KEY, which is how a terminal treats its own shortcuts: it takes
+the ones it has and passes the rest through.  \\`s-v\=' bound to a paste in the
+user\='s config stays a paste with Claude Code running, while an unbound \\`s-j\='
+reaches the child as `ESC [ 106 ; 9 u\='.  An `undefined\=' binding counts as
+none, since it exists only to shadow one.
+
+Asked on every lookup rather than when the map is built, so a chord bound or
+unbound after the session started goes the right way at once."
+  (and (cooked--kitty-negotiated-p)
+       (not cooked--asking-emacs-about-chord)
+       (memq (let ((cooked--asking-emacs-about-chord t))
+               (key-binding key))
+             '(nil undefined))
+       binding))
+
+(defun cooked--kitty-chord (command event)
+  "A binding of COMMAND for EVENT, a Super or Hyper chord, for a kitty child only.
+
+Like `cooked--kitty-only\=', and yielding besides to any binding Emacs has for
+the chord; see `cooked--kitty-chord-binding\='.  EVENT is the chord as it is
+looked up from the top of the active maps: a binding stored under an ESC
+prefix is passed the Meta event its prefix spells.  Each chord needs a filter
+of its own because a filter is told only the binding, not the key it was
+reached by."
+  `(menu-item "" ,command
+              :filter ,(apply-partially #'cooked--kitty-chord-binding (vector event))))
 
 (defun cooked--super-chord-events (exceptions)
   "The chords on printable keys held with Super or Hyper, but for EXCEPTIONS.
@@ -200,8 +239,8 @@ the other way: ESC being a key of its own is what stops it being the prefix
 `M-t' would have to be stored under.  That is invisible on a terminal frame,
 where Meta chords arrive as two forwarded bytes, and is why
 `cooked--build-meta-overlay' exists for the frame where it is not.  Super and
-Hyper are bound through `cooked--kitty-only', since only the kitty protocol can
-spell them."
+Hyper are bound through `cooked--kitty-chord', since only the kitty protocol can
+spell them, and a chord Emacs binds is left to Emacs."
   (let ((map (make-sparse-keymap))
         (kitty-only (cooked--kitty-only #'cooked-send-key)))
     ;; First, because `define-key' puts each new binding at the head of the list
@@ -209,14 +248,15 @@ spell them."
     ;; found before this long tail of chords that are hardly ever pressed.
     (unless reserve-chords
       (dolist (event (cooked--super-chord-events exceptions))
-        (define-key map (vector event) kitty-only))
+        (define-key map (vector event) (cooked--kitty-chord #'cooked-send-key event)))
       (dolist (key (append (mapcar #'car cooked--key-encodings)
                            (mapcar #'car cooked--key-event-aliases)))
         (dolist (extra '((super) (hyper)))
           (dolist (mods cooked--modifier-sets)
             (let ((event (event-convert-list (append extra mods (list key)))))
               (unless (memq event exceptions)
-                (define-key map (vector event) kitty-only)))))))
+                (define-key map (vector event)
+                            (cooked--kitty-chord #'cooked-send-key event))))))))
     (define-key map [remap self-insert-command] #'cooked-send-key)
     (dolist (code (number-sequence 0 127))
       (unless (or (eq code cooked--escape-key)
@@ -290,7 +330,7 @@ The prefix covers every character, not only 0-127, so that \\`M-é\=' is
 forwarded as `ESC é\=' like \\`M-e\=' -- the ESC map is a full keymap, whose
 char-table answers for all of them at once.  Chords held with Super or Hyper
 are bound as `cooked--build-passthrough-map\=' binds them, through
-`cooked--kitty-only\='.
+`cooked--kitty-chord\='.
 
 EXCEPTIONS are MAP\='s, as events, and only a Meta chord among them is kept
 back here: an exception of `M-x\=' leaves `ESC x\=' unbound, so the chord
@@ -299,10 +339,11 @@ An exception of `C-g\=' names an unmodified control character, and reserving
 `C-M-g\=' along with it would take a key from the child on the strength of a
 binding Emacs does not have."
   (let ((overlay (make-sparse-keymap))
-        (esc (make-keymap))
-        (kitty-only (cooked--kitty-only #'cooked-send-meta-key)))
+        (esc (make-keymap)))
     (dolist (event (cooked--super-chord-events nil))
-      (define-key esc (vector event) kitty-only))
+      (define-key esc (vector event)
+                  (cooked--kitty-chord #'cooked-send-meta-key
+                                       (event-apply-modifier event 'meta 27 "M-"))))
     (set-char-table-range (nth 1 esc) t #'cooked-send-meta-key)
     (dolist (code (cooked--control-chord-events nil))
       (define-key esc (vector code) #'cooked-send-meta-key))

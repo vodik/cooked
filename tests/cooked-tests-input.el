@@ -3355,6 +3355,47 @@ Emacs', since no other protocol can spell them."
       (dolist (key '("C-M-S-<up>" "<f13>" "<menu>"))
         (should (eq (key-binding (kbd key)) #'cooked-send-key))))))
 
+(ert-deftest cooked-super-chords-emacs-binds-stay-with-emacs-under-kitty ()
+  "Through the command loop, a Super or Hyper chord Emacs binds runs Emacs'
+binding while a kitty child runs, and one it does not bind reaches the child.
+Every chord used to go to the child, so \\`s-v' stopped pasting.  Decided on
+each lookup: binding a chord mid-session takes it back, and unbinding it hands
+it over again, with no map rebuilt."
+  (let* ((ran nil)
+         (command (lambda () (interactive) (push (this-command-keys-vector) ran))))
+    (unwind-protect
+        (cooked-tests--with-session
+            '("/bin/sh" "-c" "printf '\\033[?1049h\\033[>1u'; stty raw -echo; cat -v")
+          (should (cooked-tests--settle (lambda () (cooked--kitty-negotiated-p))))
+          (cooked-tests--display-buffer)
+          (global-set-key (kbd "s-v") command)
+          (global-set-key (kbd "H-<up>") command)
+          (should (eq (key-binding (kbd "s-v")) command))
+          (should (eq (key-binding (kbd "s-j")) #'cooked-send-key))
+          ;; The Meta overlay a graphical frame wears holds Super chords of its
+          ;; own, under its ESC prefix.
+          (global-set-key (kbd "M-s-v") command)
+          (let ((local (current-local-map)))
+            (unwind-protect
+                (progn
+                  (use-local-map (cooked--build-meta-overlay local))
+                  (should (eq (key-binding (kbd "M-s-v")) command))
+                  (should (eq (key-binding (kbd "M-s-j")) #'cooked-send-meta-key)))
+              (use-local-map local)))
+          (execute-kbd-macro (vconcat (kbd "s-v") (kbd "H-<up>") (kbd "s-j")))
+          (should (equal (reverse ran) (list (kbd "s-v") (kbd "H-<up>"))))
+          (should (cooked-tests--settle
+                   (lambda () (string-search "^[[106;9u" (cooked-tests--text)))))
+          (should-not (string-search "^[[118;9u" (cooked-tests--text)))
+          ;; Unbound again, the chord is the child's at once.
+          (global-unset-key (kbd "s-v"))
+          (execute-kbd-macro (kbd "s-v"))
+          (should (cooked-tests--settle
+                   (lambda () (string-search "^[[118;9u" (cooked-tests--text))))))
+      (global-unset-key (kbd "s-v"))
+      (global-unset-key (kbd "H-<up>"))
+      (global-unset-key (kbd "M-s-v")))))
+
 (ert-deftest cooked-meta-chords-beyond-ascii-forward-on-a-graphical-frame ()
   "A graphical frame\='s \\`M-é' is one event, and the overlay\='s ESC map bound
 only 0-127, so it reached Emacs.  The ESC map is now a full keymap."
