@@ -217,6 +217,13 @@ fn poll_timeout(remaining: std::time::Duration) -> PollTimeout {
 /// to stay that short.
 const DROP_KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// The longest [`Pty::spawn`] waits for the child to reach `execve`.
+///
+/// Reaching it takes well under a millisecond, so this only bounds the case where the
+/// child is stuck before it, which would otherwise freeze Emacs for good: past it, spawn
+/// returns anyway, as it did before it waited at all.
+const SPAWN_EXEC_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl Pty {
     /// Fork `argv` on a fresh pty in its own session, with `size` and `env` applied.
     pub(crate) fn spawn(
@@ -275,6 +282,16 @@ impl Pty {
         // only async-signal-safe calls. `libc::fork` rather than `nix::unistd::fork` for
         // the same reason `child_exec` is raw: nix's wrapper runs registered `atfork`
         // handlers, which is exactly the kind of arbitrary code this window forbids.
+        //
+        // `exec_seen` is closed in the child by `execve` or by its `_exit`, whichever comes
+        // first, and nothing is ever written to it: its end of file is the signal. Both
+        // ends are close-on-exec, so neither this child nor any other keeps one open past
+        // its `execve`. Set with `fcntl` because macOS has no `pipe2`; Emacs forks only
+        // from its main thread, which is this one, so nothing forks between the calls.
+        let (exec_seen, exec_seen_child) = nix::unistd::pipe()?;
+        for end in [&exec_seen, &exec_seen_child] {
+            fcntl(end, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+        }
         let master_fd = master.as_raw_fd();
         let child = Errno::result(unsafe { libc::fork() })?;
         if child == 0 {
@@ -290,6 +307,14 @@ impl Pty {
                 )
             }
         }
+
+        // Waited for before the session is handed out, because until `setsid` the child is
+        // still in Emacs' process group, where no signal cooked sends can reach it: the
+        // `killpg` of its pid fails with ESRCH. And until `execve` it still runs Emacs'
+        // signal handlers, so a signal that did reach it would run those in the wrong
+        // process. `vfork`, which Emacs' own `make-process` uses, waits for the same thing.
+        drop(exec_seen_child);
+        wait_for_eof(&exec_seen, SPAWN_EXEC_GRACE);
 
         // Non-blocking, so a reply can be offered to a child that is not reading without
         // waiting on it; see `Pty::write_some`. Nothing here ever relied on blocking: the
@@ -535,6 +560,32 @@ impl Drop for Pty {
         }
         let _ = killpg(NixPid::from_raw(self.child.0), Signal::SIGKILL);
         let _ = self.reap(DROP_KILL_GRACE);
+    }
+}
+
+/// Block until FD reads end of file or GRACE passes, whichever is first.
+///
+/// Errors end the wait as end of file does: the caller is waiting for a child to get
+/// somewhere, and a pipe it cannot read tells it nothing more by being retried.
+fn wait_for_eof(fd: &impl AsFd, grace: std::time::Duration) {
+    let deadline = std::time::Instant::now() + grace;
+    let mut byte = [0u8; 1];
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let mut fds = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+        match nix::poll::poll(&mut fds, poll_timeout(remaining)) {
+            Ok(0) | Err(Errno::EINTR) => continue,
+            Ok(_) => {}
+            Err(_) => return,
+        }
+        match nix::unistd::read(fd.as_fd(), &mut byte) {
+            Err(Errno::EINTR) => continue,
+            // Nothing is ever written, so a byte is as final as end of file.
+            _ => return,
+        }
     }
 }
 
@@ -840,6 +891,31 @@ mod tests {
                 pty.signal(Signal::SIGHUP).is_err(),
                 "must refuse to signal a dead session"
             );
+        }
+    }
+
+    #[test]
+    fn a_spawned_child_can_be_signalled_at_once() {
+        // `Session::spawn` hands Lisp a live session as soon as this returns, and
+        // `cooked--signal` can follow on the next line. A child that has not yet reached
+        // `setsid` is still in Emacs' process group, so the `killpg` of its pid that
+        // `signal` falls back to found no such group, and a Lisp test that signals a
+        // fresh shell failed with ESRCH under load. SIGCONT, because a child that does
+        // receive it carries on as before.
+        for _ in 0..200 {
+            let pty = Pty::spawn(
+                &["/bin/sh", "-c", "sleep 5"],
+                &[("PATH", "/usr/bin:/bin")],
+                Winsize {
+                    rows: 24,
+                    cols: 80,
+                    cell: None,
+                },
+                None,
+            )
+            .expect("spawn");
+            pty.signal(Signal::SIGCONT)
+                .expect("the child is in a process group of its own");
         }
     }
 
