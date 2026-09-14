@@ -303,7 +303,7 @@ enum Repeat {
 }
 
 /// A response pattern such as `rv` or `xr`, decoded from terminfo's escapes and then
-/// parsed as the POSIX ERE that `tset` and tmux hand to `regcomp`.
+/// parsed as the POSIX ERE terminfo writes it in, for a reader to hand to `regcomp`.
 ///
 /// This is the subset those patterns use -- literals, backslash-escaped literals, `.`,
 /// bracket expressions, groups and the `* + ?` quantifiers -- and not a regex engine.
@@ -528,10 +528,11 @@ fn terminfo_entry_matches_what_decrqm_says() {
     }
 
     // A query the entry declares gets a reply, and the reply is the one the entry says
-    // to expect: `tset` and tmux match it against `rv` and `xr`, so a reply that drifts
-    // from the pattern is as good as none. Which capabilities are queries is not a list
-    // kept here: `terminfo_sequences_are_all_recognised` fails for any capability that
-    // is answered and has no pattern in `TERMINFO_QUERIES`.
+    // to expect in `rv` and `xr`. No reader is known to match against them (tmux parses
+    // DA2 and XTVERSION replies itself), so what a drifting reply breaks is the entry's
+    // own description of the terminal, which is still worth holding. Which capabilities
+    // are queries is not a list kept here: `terminfo_sequences_are_all_recognised` fails
+    // for any capability that is answered and has no pattern in `TERMINFO_QUERIES`.
     for &(query, pattern) in TERMINFO_QUERIES {
         let value = |name: &str| {
             capabilities
