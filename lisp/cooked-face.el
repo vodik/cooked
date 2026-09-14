@@ -182,14 +182,38 @@ stamp already current, because `cooked--flush-face-cache\=' records it."
 
 (advice-add 'set-face-attribute :after #'cooked--notice-face-change)
 
+(defvar cooked--theme-redraw-timer nil
+  "The pending `cooked--redraw-every-screen\=' call after a theme change, or nil.")
+
+(defun cooked--theme-changed (&rest _)
+  "Flush the resolved colours, and redraw every screen in the new theme soon.
+
+Flushing alone let a later drain resolve faces again, but nothing sends one: a
+shell idle at its prompt repaints nothing, and a full-screen program that
+rewrites the same cells damages nothing, so the screen kept the old theme\='s
+colours until the child wrote something different.  So every screen is redrawn
+as an ANSI face edit redraws it; see `cooked--refresh-ansi-colors\='.  Rows in
+the scrollback keep the colours they were drawn in.
+
+The redraw waits for an idle moment, because switching theme is usually two
+calls: `load-theme\=' after `disable-theme\=' on the old one, or several themes
+enabled in a row by an init file.  Each call flushes, which is cheap, and all of
+them share one redraw."
+  (cooked--flush-face-cache)
+  (unless cooked--theme-redraw-timer
+    (setq cooked--theme-redraw-timer
+          (run-at-time 0 nil (lambda ()
+                               (setq cooked--theme-redraw-timer nil)
+                               (cooked--redraw-every-screen))))))
+
 ;; `enable-theme-functions' arrived in Emacs 29, and `add-hook' on an unbound variable
 ;; quietly defines it rather than failing — so on 28 this looked fine and did nothing.
 (if (boundp 'enable-theme-functions)
     (progn
-      (add-hook 'enable-theme-functions #'cooked--flush-face-cache)
-      (add-hook 'disable-theme-functions #'cooked--flush-face-cache))
-  (advice-add 'enable-theme :after #'cooked--flush-face-cache)
-  (advice-add 'disable-theme :after #'cooked--flush-face-cache))
+      (add-hook 'enable-theme-functions #'cooked--theme-changed)
+      (add-hook 'disable-theme-functions #'cooked--theme-changed))
+  (advice-add 'enable-theme :after #'cooked--theme-changed)
+  (advice-add 'disable-theme :after #'cooked--theme-changed))
 
 (defun cooked--underline-styles-for (major)
   "The `:underline' styles Emacs MAJOR can draw, indexed by SGR 4:x.

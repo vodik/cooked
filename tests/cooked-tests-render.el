@@ -3738,6 +3738,40 @@ repainting the same cells afterwards gets them in the new colours."
         (cooked--flush-face-cache))
       (should (member (cons session nil) unsent)))))
 
+(ert-deftest cooked-a-theme-change-redraws-a-still-screen ()
+  "A screen nothing writes to is drawn in the new theme's colours soon after it.
+
+Forgetting the core's copy of the screen was not enough: a shell idle at its
+prompt repaints nothing, and a child rewriting the same cells damages nothing,
+so the rows kept the colours of the theme they were drawn under.  Two theme
+calls in a row share one redraw."
+  (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[31mred\\033[0m'; exec sleep 30")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "red" (cooked-tests--text)))))
+    (let ((face (lambda () (plist-get (get-text-property (cooked--screen-start-position) 'face)
+                                      :foreground)))
+          (redraws 0))
+      (should (equal (funcall face) (cooked--color 1)))
+      (cooked--ansi-faces-changed-p)
+      (custom-declare-theme 'cooked-tests-red nil)
+      (put 'cooked-tests-red 'theme-settings nil)
+      (custom-theme-set-faces 'cooked-tests-red
+                              '(ansi-color-red ((t :foreground "#123456"))))
+      (unwind-protect
+          (cl-letf* ((redraw (symbol-function 'cooked--redraw-every-screen))
+                     ((symbol-function 'cooked--redraw-every-screen)
+                      (lambda () (cl-incf redraws) (funcall redraw))))
+            (enable-theme 'cooked-tests-red)
+            (disable-theme 'cooked-tests-red)
+            (enable-theme 'cooked-tests-red)
+            (should (equal (face-foreground 'ansi-color-red nil t) "#123456"))
+            (should (cooked-tests--settle
+                     (lambda () (equal (funcall face) "#123456"))))
+            (should (= redraws 1)))
+        (disable-theme 'cooked-tests-red)
+        (setq custom-known-themes (delq 'cooked-tests-red custom-known-themes))
+        (cooked-tests--settle (lambda () (null cooked--theme-redraw-timer)))))))
+
 (ert-deftest cooked-an-ansi-face-edited-outside-a-theme-redraws-the-screen ()
   "A repaint after `set-face-attribute' on an ANSI face draws the new colour.
 

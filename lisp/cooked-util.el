@@ -472,15 +472,16 @@ layout stamp has just said is gone.")
 The core leaves a damaged row out of a drain when its cells match what it last
 sent, which is right while the text Emacs holds for the row is still what that
 drain rendered.  Anything that changes how the same cells are drawn breaks
-that without touching a character.  A theme change is one: the faces on the
-rows were resolved against the old theme, and a full-screen program that
-repaints the same frame afterwards expects the new colours.
+that without touching a character.  An OSC 11 background set is one: the faces
+on the rows were resolved against the old colours, and a full-screen program
+that repaints its frame in reply expects to see it in the new ones.
 
 With REDRAW the rows are damaged as well, so the next drain sends every one of
 them whether the child repaints or not.  That is for a change a row has to be
 rendered again to show at all, rather than one a repaint merely picks up: a
 zoom leaves the glyph scaling on a row measured against the old font, and a
-shell sitting at its prompt never repaints to replace it.
+shell sitting at its prompt never repaints to replace it.  A theme change is
+one of those as well, and redraws through `cooked--redraw-every-screen\='.
 
 The one way the copy is cleared, so that the theme, the layout stamp moving and
 the options that change rendering all mean the same thing by it.  On
