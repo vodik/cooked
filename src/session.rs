@@ -141,6 +141,34 @@ const QUIESCENCE: std::time::Duration = std::time::Duration::from_micros(500);
 /// buffer still cannot drift from a second.
 const HOLD_CEILING: std::time::Duration = crate::emu::term::SYNC_TIMEOUT;
 
+/// How long after a keystroke the first frame that changes the screen may skip
+/// `min_interval`; see [`NotifyState::echo`].
+///
+/// Typing into a session that drew a frame a moment ago otherwise waits out the rest of
+/// the interval for its own echo: a key held down against `cat` is echoed 6-7ms late at
+/// the 8ms default, every time, because the previous echo is what set the clock. vterm
+/// makes the same exception for the same reason, redrawing at once on the first update
+/// after `vterm-send-key`.
+///
+/// Fifty milliseconds is ghostel's number for its own input path, and generous for an
+/// echo, which a line editor or a shell writes within a millisecond or two of the key.
+/// The window is only an upper bound on how stale a keystroke may be; what keeps it from
+/// waiving more than one frame is that the first drawable read takes it.
+const ECHO_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// What bytes bound for the child are, as far as the pace is concerned; see
+/// [`Session::send`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Input {
+    /// A key the user pressed, whose echo is worth drawing without waiting out
+    /// `min_interval`; see [`ECHO_WINDOW`].
+    Keyboard,
+    /// Anything else: a mouse report, a wheel notch turned into cursor keys, a dropped
+    /// file. A pointer sweep under mode 1003 writes a report per motion event, and
+    /// drawing the reply to each early would be a frame per report.
+    Other,
+}
+
 /// A snapshot handed to Lisp on each drain.
 pub(crate) struct Update {
     pub delta: Delta,
@@ -227,6 +255,26 @@ struct NotifyState {
     /// change and is the pace a busy client is drawn at; this is armed by the first and is
     /// the outer bound on the whole hold, however quiet or noisy the client turns out to be.
     held_since: Option<std::time::Instant>,
+    /// When the window a keystroke opened for its echo closes; see [`ECHO_WINDOW`].
+    ///
+    /// Taken by the first drawable read on a shown screen, whether or not it has expired,
+    /// so one keystroke can turn into at most one waived frame however much the child
+    /// writes after it. `None` while no keystroke is waiting.
+    echo_until: Option<std::time::Instant>,
+    /// Whether the frame being assembled carries a keystroke's echo, which lets it skip
+    /// `min_interval`; the other three gates in [`Notifier::flush`] still apply.
+    ///
+    /// Only the throttle is waived because it is the only gate that is a pure clock.
+    /// [`QUIESCENCE`] is what keeps a line editor redrawing its line in several writes
+    /// from being drawn half done, and echo is exactly that write, so the echo still waits
+    /// for the pty to go quiet. A child that never goes quiet is still drawn at
+    /// `frame_ceiling`, which this leaves alone: waiving it would hold the frame for
+    /// [`HOLD_CEILING`] instead.
+    ///
+    /// Set by [`Notifier::fed`] from `echo_until`, and cleared by the flush that sends the
+    /// frame, so under a flood with a key held down the wake rate rises by at most one
+    /// frame per keystroke.
+    echo: bool,
 }
 
 impl NotifyState {
@@ -269,6 +317,8 @@ impl Notifier {
                 sync_until: None,
                 last_read: None,
                 ceiling_at: None,
+                echo_until: None,
+                echo: false,
             }),
             quiescence: options.quiescence,
         }
@@ -320,18 +370,35 @@ impl Notifier {
         self.flush()
     }
 
+    /// A keystroke is about to be written, so the frame that echoes it may skip
+    /// `min_interval`; see [`NotifyState::echo`].
+    ///
+    /// Called before the write rather than after it, because the child's echo can reach
+    /// the reader thread before the writing thread gets the lock back.
+    fn expect_echo(&self) {
+        self.state.held().echo_until = Some(std::time::Instant::now() + ECHO_WINDOW);
+    }
+
     /// Note a read from the pty, `drawable` saying whether it changed anything Emacs
-    /// would draw.
+    /// would draw, and `shown` whether any window shows the screen it changed.
     ///
     /// The entry point for output, in place of [`Self::announce`]: it marks the frame and
     /// leaves the decision of when to draw it to [`Self::flush`], which the reader
     /// retries on every tick. Both halves of [`NotifyState::hold`] are armed here — the
     /// timestamp on every read, and the ceiling from the second drawable change onwards,
     /// which is what `dirty` already being set says.
-    fn fed(&self, drawable: bool) {
+    ///
+    /// A keystroke's echo window is taken here too. A hidden screen leaves it alone: the
+    /// drawable read there is a bell or a prompt mark, which Emacs handles without drawing
+    /// anything, so there is no echo on screen to hurry, and a hidden buffer woken early
+    /// would pay a drain for nothing.
+    fn fed(&self, drawable: bool, shown: bool) {
         let now = std::time::Instant::now();
         let mut state = self.state.held();
         state.last_read = Some(now);
+        if drawable && shown && remaining(state.echo_until.take()).is_some() {
+            state.echo = true;
+        }
         if drawable {
             if self.dirty.swap(true, Ordering::SeqCst) {
                 let ceiling = state.frame_ceiling;
@@ -345,7 +412,8 @@ impl Notifier {
     }
 
     /// Send the wake byte if something is pending, nothing is already in flight, and
-    /// `min_interval` has elapsed since the last send.
+    /// `min_interval` has elapsed since the last send or the frame carries a keystroke's
+    /// echo.
     fn flush(&self) -> bool {
         if self.notified.load(Ordering::SeqCst) || !self.dirty.load(Ordering::SeqCst) {
             return true;
@@ -357,7 +425,7 @@ impl Notifier {
         if remaining(state.sync_until).is_some() {
             return true;
         }
-        if state.last.is_some_and(|t| t.elapsed() < state.min_interval) {
+        if !state.echo && state.last.is_some_and(|t| t.elapsed() < state.min_interval) {
             return true;
         }
         // Same reasoning as the sync check above, and the same handling: the frame stays
@@ -368,6 +436,7 @@ impl Notifier {
         state.last = Some(std::time::Instant::now());
         state.ceiling_at = None;
         state.held_since = None;
+        state.echo = false;
         drop(state);
         self.dirty.store(false, Ordering::SeqCst);
         self.notify()
@@ -443,8 +512,10 @@ impl Notifier {
             return base;
         }
         let state = self.state.held();
+        // An echo does not wait on the throttle, so it has no remainder to sleep out.
         let throttle = state
             .last
+            .filter(|_| !state.echo)
             .map(|t| state.min_interval.saturating_sub(t.elapsed()))
             .unwrap_or_default();
         // A frame held by DEC mode 2026 or by the quiescence hold keeps `dirty` set with
@@ -812,7 +883,15 @@ impl Session {
     /// paste into a stopped job always has. Replies already queued go first, inside the
     /// same deadline: they were owed before this input was typed, and writing input
     /// between the halves of a reply would garble both.
-    pub(crate) fn send(&self, bytes: &[u8]) -> Result<()> {
+    ///
+    /// INPUT says whether a key was pressed. [`Input::Keyboard`] lets the frame that
+    /// echoes it skip `min_interval`; see [`ECHO_WINDOW`]. The window opens before
+    /// [`Shared::interacted`], whose early return for an attended session would otherwise
+    /// be an easy place to lose it.
+    pub(crate) fn send(&self, bytes: &[u8], input: Input) -> Result<()> {
+        if input == Input::Keyboard {
+            self.shared.notifier.expect_echo();
+        }
         self.shared.interacted();
         let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
         let writer = self.shared.writer.held();
@@ -1271,9 +1350,10 @@ impl Shared {
             match self.pty.read(&mut buf) {
                 Ok([]) => return self.finish(Ended::ChildGone),
                 Ok(data) => {
+                    let hidden = self.hidden.load(Ordering::Relaxed);
                     let (drawable, outbound) = {
                         let mut term = self.term.held();
-                        let drawable = if self.hidden.load(Ordering::Relaxed) {
+                        let drawable = if hidden {
                             term.feed_hidden(data, self.backlog_limit.load(Ordering::Relaxed))
                         } else {
                             term.feed(data)
@@ -1290,7 +1370,7 @@ impl Shared {
                     // once the child has finished writing. Passing whether the read changed
                     // anything drawable matters because most reads of an image transfer do
                     // not, and waking Emacs to repaint an identical grid is wasted work.
-                    self.notifier.fed(drawable);
+                    self.notifier.fed(drawable, !hidden);
                     // The child has just written, so the tty is worth asking about again
                     // shortly: the prompt of a secret read lands here, and the
                     // `tcsetattr` behind it a fraction of a millisecond later. See
@@ -1693,11 +1773,11 @@ mod tests {
         let (read, write) = pipe();
         let notifier = Notifier::new(write, &Options::default());
         // One drawable change -- the frame -- and then nothing but reads.
-        notifier.fed(true);
+        notifier.fed(true, true);
         let start = Instant::now();
         let mut held_for = None;
         while start.elapsed() < HOLD_CEILING * 2 {
-            notifier.fed(false);
+            notifier.fed(false, true);
             notifier.flush();
             if woke_within(&read, Duration::ZERO) {
                 held_for = Some(start.elapsed());
@@ -1742,7 +1822,7 @@ mod tests {
         // it, short enough to fail quickly when one is.
         while start.elapsed() < emu::term::SYNC_TIMEOUT * 2 {
             // A read that is drawable, is inside a frame, and begins another one.
-            notifier.fed(true);
+            notifier.fed(true, true);
             notifier.set_sync(Some(Instant::now() + emu::term::SYNC_TIMEOUT));
             notifier.flush();
             if woke_within(&read, Duration::ZERO) {
@@ -1839,10 +1919,14 @@ mod tests {
             Drain::BeforeTheWrite => {
                 session.drain();
                 session.ready();
-                session.send(b"\n").expect("release the second write");
+                session
+                    .send(b"\n", Input::Other)
+                    .expect("release the second write");
             }
             Drain::AfterTheWrite => {
-                session.send(b"\n").expect("release the second write");
+                session
+                    .send(b"\n", Input::Other)
+                    .expect("release the second write");
                 // Long enough that the write is certainly in, short enough that the re-arm
                 // still lands inside the throttle window -- outside it there is nothing
                 // held back, because `ready`'s own flush sends the byte on the spot.
@@ -2077,7 +2161,9 @@ mod tests {
             "the first write was never announced at all"
         );
 
-        session.send(b"\n").expect("release the second write");
+        session
+            .send(b"\n", Input::Other)
+            .expect("release the second write");
         // The window itself, plus a couple of eager ticks' slack for the reader to have
         // settled back onto the long one.
         std::thread::sleep(INTERACTION_WINDOW + Duration::from_millis(250));
@@ -2094,6 +2180,188 @@ mod tests {
             "`ready` must release the notification the drain deliberately withheld"
         );
         drop(session);
+    }
+
+    /// The redisplay interval the echo tests run at, long enough that a frame the interval
+    /// holds cannot be mistaken for one sent at once, however loaded the machine is.
+    const PACED: Duration = Duration::from_secs(3);
+
+    /// A session running the shell SCRIPT at [`PACED`], with the frame its start-up prints
+    /// already drained, so the interval is running when the test begins.
+    fn paced_session(script: &str) -> (Session, OwnedFd) {
+        let (session, read) = session_with(
+            &["/bin/sh", "-c", script],
+            Options::with_min_redisplay_interval(PACED),
+        );
+        assert!(
+            woke_within(&read, patience(2.0)),
+            "the child's start-up was never announced"
+        );
+        session.drain();
+        session.ready();
+        (session, read)
+    }
+
+    /// A keystroke's echo is drawn at once, although the last frame went out moments ago
+    /// and the interval has most of its length still to run. See [`ECHO_WINDOW`].
+    ///
+    /// The echo is the tty's own, one write and then silence, as a line editor's is.
+    #[test]
+    fn a_keystroke_is_echoed_without_waiting_out_the_interval() {
+        let (session, read) = paced_session("printf a; read -r _; sleep 5");
+        session.send(b"b", Input::Keyboard).expect("type");
+        assert!(
+            woke_within(&read, patience(0.5)),
+            "the echo of a key waited on the redisplay interval"
+        );
+        assert!(rendered(&session.drain()).contains("ab"));
+    }
+
+    /// A mouse report is not a keystroke, and the child's answer to it waits out the
+    /// interval like any other output: under mode 1003 a pointer sweep sends a report per
+    /// motion event, and a frame per report is what the interval is there to prevent.
+    ///
+    /// The drain afterwards shows the child did answer, so the silence is the interval and
+    /// not a child that wrote nothing.
+    #[test]
+    fn a_mouse_report_waits_out_the_interval() {
+        let (session, read) = paced_session("printf a; read -r _; sleep 5");
+        session.send(b"\x1b[<0;1;1M", Input::Other).expect("report");
+        assert!(
+            !woke_within(&read, Duration::from_millis(500)),
+            "the answer to a mouse report skipped the redisplay interval"
+        );
+        assert!(rendered(&session.drain()).contains("[<0;1;1M"));
+    }
+
+    /// A keystroke to a buffer no window shows wakes nothing early, even when what the
+    /// child writes back is an event that does wake a hidden buffer: there is no echo on
+    /// screen to hurry. See [`Notifier::fed`].
+    #[test]
+    fn a_keystroke_to_a_hidden_session_waits_out_the_interval() {
+        let (session, read) = paced_session("printf '\\a'; read -r _; printf '\\a'; sleep 5");
+        session.set_hidden(true);
+        session.send(b"\n", Input::Keyboard).expect("type");
+        assert!(
+            !woke_within(&read, Duration::from_millis(500)),
+            "a hidden session was woken early for a keystroke"
+        );
+        assert!(
+            session.drain_hidden().delta.events.contains(&Event::Bell),
+            "the child never rang, so the silence proves nothing"
+        );
+    }
+
+    /// The window a keystroke opens waives one frame: the first drawable read takes it,
+    /// and the read after that waits out the interval as usual. An echo window nobody
+    /// used waives nothing once it has expired. Driven through the notifier, since a
+    /// child cannot be made to split its output across reads on demand.
+    ///
+    /// The reader's tick is checked on the echo as well. A tick that slept out the
+    /// interval would leave a lone echo, which nothing else wakes the reader for, to the
+    /// next resample some 50ms later.
+    #[test]
+    fn a_keystroke_waives_the_interval_for_one_frame_only() {
+        let (read, write) = pipe();
+        let notifier = Notifier::new(write, &Options::with_min_redisplay_interval(PACED));
+        // Past `QUIESCENCE` before each flush, so the throttle is the only gate left.
+        let settled = || std::thread::sleep(QUIESCENCE * 4);
+        let frame = |notifier: &Notifier| {
+            notifier.fed(true, true);
+            settled();
+            notifier.flush();
+            let woke = woke_within(&read, Duration::ZERO);
+            notifier.acknowledge();
+            woke
+        };
+        assert!(
+            frame(&notifier),
+            "the first frame has no interval to wait on"
+        );
+
+        notifier.expect_echo();
+        notifier.fed(true, true);
+        let tick = notifier.poll_wait(PACED);
+        assert!(
+            tick <= QUIESCENCE,
+            "the reader would sleep {tick:?} before flushing an echo"
+        );
+        assert!(frame(&notifier), "the echo waited on the interval");
+        assert!(
+            !frame(&notifier),
+            "a second read after one keystroke skipped the interval too"
+        );
+
+        notifier.expect_echo();
+        std::thread::sleep(ECHO_WINDOW + Duration::from_millis(10));
+        assert!(
+            !frame(&notifier),
+            "an expired echo window still waived the interval"
+        );
+    }
+
+    /// A key held down against a child writing flat out adds at most one frame per key,
+    /// and does add them.
+    ///
+    /// The upper bound is the waiver's failure mode: an `echo` that was never cleared
+    /// would draw the child at its own write rate, a frame every few milliseconds, instead
+    /// of at the interval. The lower bound is the waiver working, the echo of each key
+    /// drawn without waiting on the frame before it.
+    ///
+    /// The child pauses a few milliseconds between writes, so each write passes
+    /// [`QUIESCENCE`] and only the interval stands between it and a frame. It is bounded,
+    /// so it dies on its own if the teardown ever stops working.
+    #[test]
+    fn a_key_held_down_beside_a_busy_child_adds_at_most_a_frame_a_key() {
+        const INTERVAL: Duration = Duration::from_millis(100);
+        const KEY_EVERY: Duration = Duration::from_millis(20);
+        const RUN: Duration = Duration::from_secs(1);
+        let (session, read) = session_with(
+            &[
+                "/bin/sh",
+                "-c",
+                "i=0; while [ $i -lt 3000 ]; do printf .; sleep 0.003; i=$((i+1)); done",
+            ],
+            Options::with_min_redisplay_interval(INTERVAL),
+        );
+        nix::fcntl::fcntl(
+            read.as_fd(),
+            nix::fcntl::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .expect("nonblock");
+        let start = Instant::now();
+        let mut next_key = start;
+        let (mut keys, mut wakes) = (0u32, 0u32);
+        let mut byte = [0u8; 1];
+        while start.elapsed() < RUN {
+            if Instant::now() >= next_key {
+                session.send(b"j", Input::Keyboard).expect("type");
+                keys += 1;
+                next_key += KEY_EVERY;
+            }
+            let mut fds = [PollFd::new(read.as_fd(), PollFlags::POLLIN)];
+            let wait = next_key.saturating_duration_since(Instant::now());
+            let _ = poll(
+                &mut fds,
+                PollTimeout::try_from(wait).unwrap_or(PollTimeout::ZERO),
+            );
+            if let Ok(1) = nix::unistd::read(read.as_fd(), &mut byte) {
+                wakes += 1;
+                session.drain();
+                session.ready();
+            }
+        }
+        let cadence = (RUN.as_millis() / INTERVAL.as_millis()) as u32;
+        assert!(
+            wakes <= cadence + keys + 2,
+            "{wakes} wakes for {keys} keys in {RUN:?}; the interval allows {cadence} and \
+             each key at most one more"
+        );
+        assert!(
+            wakes > 2 * cadence,
+            "{wakes} wakes for {keys} keys in {RUN:?}; the interval alone allows \
+             {cadence}, so the keys' echoes were not drawn early"
+        );
     }
 
     /// Output that only changes a hidden buffer's screen wakes nobody, and showing the
@@ -2114,7 +2382,9 @@ mod tests {
         session.ready();
         let _ = woke_within(&read, Duration::from_millis(100));
 
-        session.send(b"\n").expect("release the write");
+        session
+            .send(b"\n", Input::Other)
+            .expect("release the write");
         assert!(
             !woke_within(&read, Duration::from_millis(300)),
             "a hidden session woke Emacs for text on its screen"
@@ -2130,7 +2400,7 @@ mod tests {
     #[test]
     fn input_round_trips_through_the_pty() {
         let (session, _read) = session(&["/bin/cat"]);
-        session.send(b"ping\n").expect("send");
+        session.send(b"ping\n", Input::Other).expect("send");
         let update = wait_for(&session, |u| rendered(u).contains("ping"));
         assert!(rendered(&update).contains("ping"));
     }
@@ -2205,7 +2475,7 @@ mod tests {
         session.set_attended(false);
         std::thread::sleep(Duration::from_millis(250));
         let start = Instant::now();
-        session.send(b"j").expect("send");
+        session.send(b"j", Input::Other).expect("send");
         let update = wait_for(&session, |u| u.mode == Mode::Raw);
         assert_eq!(update.mode, Mode::Raw);
         let elapsed = start.elapsed();
@@ -2232,7 +2502,7 @@ mod tests {
             "an unattended session nobody has touched must rest on the long tick"
         );
 
-        session.send(b"j").expect("send");
+        session.send(b"j", Input::Other).expect("send");
         assert_eq!(
             session.shared.base_poll_wait(),
             Duration::from_millis(u64::from(POLL_TIMEOUT_MS)),
@@ -2255,7 +2525,7 @@ mod tests {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 5"]);
         let attended = session.shared.base_poll_wait();
         session.set_attended(false);
-        session.send(b"j").expect("send");
+        session.send(b"j", Input::Other).expect("send");
         assert_eq!(session.shared.base_poll_wait(), attended);
     }
 
@@ -2266,7 +2536,7 @@ mod tests {
         let (session, _read) = session(&["/bin/cat"]);
         session.set_attended(false);
         let start = Instant::now();
-        session.send(b"ping\n").expect("send");
+        session.send(b"ping\n", Input::Other).expect("send");
         let update = wait_for(&session, |u| rendered(u).contains("ping"));
         assert!(rendered(&update).contains("ping"));
         let elapsed = start.elapsed();

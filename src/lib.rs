@@ -203,6 +203,9 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Write STRING to the pty of SESSION.
         /// Waits up to three seconds for a child that is not reading, then signals, having
         /// sent whatever it took by then. Replies already queued for the child go first.
+        ///
+        /// When `last-input-event' is a key rather than a mouse event, the frame that
+        /// echoes STRING is drawn without waiting out `cooked-min-redisplay-interval'.
         "cooked--send" 2..=2 => send;
 
         /// Owe SESSION's child STRING, a reply, without waiting for it to be read.
@@ -633,9 +636,31 @@ fn drain(env: Env, args: &[Value]) -> Result<Value> {
     update_to_lisp(env, &update, rejoin)
 }
 
+/// What the command that is sending input was invoked by, as far as the pace cares;
+/// see [`session::Input`].
+///
+/// Asked of `last-input-event` rather than read off the bytes, because the bytes cannot
+/// tell. `cooked--alt-scroll-keys` turns a wheel notch into plain cursor keys, which a
+/// test for the `ESC [ M` and `ESC [ <` mouse report prefixes would take for typing. A key
+/// is an integer or a symbol; a click, a wheel notch, a drag, a drop and a tty paste are
+/// all lists.
+///
+/// The variable is stale when input is sent from a timer or a process filter, such as a
+/// completion request, and names whatever key the user last pressed. The cost of that is
+/// one frame drawn a few milliseconds early, never a frame lost or torn.
+fn input_kind(env: Env) -> Result<session::Input> {
+    let event = env.call("symbol-value", &[env.intern("last-input-event")?])?;
+    if env.is_nil(event) || !env.is_nil(env.call("consp", &[event])?) {
+        Ok(session::Input::Other)
+    } else {
+        Ok(session::Input::Keyboard)
+    }
+}
+
 fn send(env: Env, args: &[Value]) -> Result<Value> {
     let mut bytes = env.from_lisp::<Vec<u8>>(args[1])?;
-    let sent = handle(env, args[0]).map(|s| s.send(&bytes));
+    let sent =
+        input_kind(env).and_then(|input| handle(env, args[0]).map(|s| s.send(&bytes, input)));
     // Zero unconditionally rather than only for secrets: at keystroke sizes it costs
     // nothing, and it means the password path needs no special case to be covered.
     // `write_volatile` because an ordinary write to a buffer about to be freed is

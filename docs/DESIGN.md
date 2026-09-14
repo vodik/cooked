@@ -1162,9 +1162,10 @@ Five consequences that are easy to get wrong separately:
 ## The pace is a floor, not a clock
 
 `cooked-min-redisplay-interval` is the one number in the tree that sets a rate, and the
-thing most worth knowing about it is what it *cannot* do: nothing ever draws faster than
-it. Every gate in `Notifier::flush` can only push a redraw later. There is no urgent
-path, no bypass, no "this one matters, send it now" — the floor is absolute.
+thing most worth knowing about it is what it *cannot* do: nothing draws faster than it,
+bar the echo of a key. Every gate in `Notifier::flush` can only push a redraw later. There
+is no urgent path for output, no "this one matters, send it now". The one exception is
+scoped to a single frame per keystroke and to this gate alone, and is described below.
 
 **What actually paces a session is Emacs, and the interval is the floor beneath that.**
 The core sends one wake byte and then stays quiet until `cooked--ready` says the drain
@@ -1184,7 +1185,7 @@ Four things delay a redraw, and `flush` consults them in this order:
 |---|---|---|
 | `notified` | a wake byte is already in flight | `Session::ready`, i.e. Emacs having applied the drain |
 | `sync_until` | the child is mid-frame under **DEC mode 2026** (`CSI ? 2026 h`) | the child's own `2026 l`, or the deadline |
-| `min_interval` | less than one interval has passed since the last wake | the clock |
+| `min_interval` | less than one interval has passed since the last wake | the clock, or the frame carrying a key's echo |
 | `hold(quiescence)` | the child wrote something under 0.5ms ago | the pty going quiet, or `frame_ceiling` |
 
 The mode-2026 gate is a **DEC private mode**, not an OSC — it arrives through `csi.rs`
@@ -1210,12 +1211,40 @@ reader's poll to whatever is left of the throttle window, so a notification defe
 `POLL_TIMEOUT_MS`. That is avoiding an accidental hundred milliseconds, not going faster
 than the floor.
 
-**Input is not a case the pace declines to special-case; it is not a category the pace
-can see.** `Session::send` is one line — it writes the bytes to the pty and touches
-nothing else. Every call into the notifier is on the reader thread or the drain. So a
-wheel notch is bytes to the child, and whatever the child writes back arrives on the same
-read loop as a build log: input to process, standard pace, process and draw. There is no
-input path to give an exception to.
+**Input is one exception, and only a key, and only for one frame.** A key echoed after
+a quiet moment passes every gate on the spot, the throttle having long since elapsed and
+quiescence being half a millisecond. But the throttle runs from the last wake, and typing
+is what makes wakes. A key held down against `cat` waits out the rest of the interval the
+previous echo started, every time, and a key typed beside a spinner lands inside the
+spinner's interval. Measured with Emacs played by a 2ms render, keys and mouse reports
+interleaved in one process on a loaded machine, the median echo of keys sent back to back
+went from 5.9ms to 0.7ms, and beside a child writing every 4ms from 4.2ms to 0.7ms. At an
+idle prompt both were 0.7ms.
+
+So `Session::send` opens a 50ms window (`ECHO_WINDOW`) before it writes a key. The first
+read that changes a shown screen takes the window, and the frame it starts skips
+`min_interval`. Nothing else is skipped. `QUIESCENCE` still waits out a line editor
+redrawing its line across several writes, which is the most tearing-prone write there is,
+DEC mode 2026 still holds, and a child that never goes quiet is still drawn at
+`frame_ceiling`; waiving that would hold the frame for `HOLD_CEILING` instead. The flush
+that sends the frame ends the waiver, so a key held down beside a busy child adds at most
+one wake per key (`a_key_held_down_beside_a_busy_child_adds_at_most_a_frame_a_key`).
+
+The bound that keeps this from running away is that one-shot, not the ack. `cooked--ready`
+comes back after the apply and before redisplay, so it bounds Lisp work and not frames on
+screen, and a waiver that leaned on it would lean on an observation.
+
+What counts as a key is asked of Emacs rather than read off the bytes: `send` in
+`lib.rs` looks at `last-input-event`, and anything that is a list there is not a key —
+a click, a wheel notch, a drag, a drop. A pointer sweep under mode 1003 is a report per
+motion event, and waiving the interval for each would be a frame per report. A test on the
+`ESC [ M` and `ESC [ <` prefixes would miss alternate scroll, where a wheel notch becomes
+plain cursor keys. A buffer no window shows is not hurried either: its drawable reads are
+bells and prompt marks, with no echo on screen to wait for. The variable is stale when
+input goes out from a timer or a filter, such as a completion request, and the worst that
+costs is one frame drawn a few milliseconds early. Every other byte for the child, a wheel
+notch included, goes through the standard path: whatever the child writes back arrives on
+the same read loop as a build log.
 
 Which is why the mouse wheel appears in `poll_wait` as a *symptom* rather than as an
 exception. Scrolling a full-screen program was simply the workload where an accidental
@@ -1224,14 +1253,12 @@ notification, the child then falling quiet, and nothing waking the loop until th
 `POLL_TIMEOUT_MS` tick. That is a bug in the standard path, and it was fixed in the
 standard path, for every workload at once.
 
-Nor would an exception buy anything if one were written. The 8ms default is half a 60Hz
-frame, so the most it could save is under one frame on any display anyone owns, and it
-would fire exactly when a full-screen program is repainting hardest — the one moment the
-throttle is earning its keep. What makes typing feel instant is not an exception but the
-floor failing to bite where anyone would notice: a keystroke echoed after a quiet moment
-passes every gate on the spot, the throttle having long since elapsed and quiescence
-being half a millisecond. The interval only constrains a child that is already writing
-continuously, which is the case where no single frame is worth anything.
+Nor would a wider exception buy anything. The 8ms default is half a 60Hz frame, so the
+most any exception can save is under one frame on any display anyone owns. One that waived
+more than the interval, or more than one frame, would fire exactly when a full-screen
+program is repainting hardest, the one moment the throttle is earning its keep. The
+interval only constrains a child that is already writing continuously, which is the case
+where no single frame is worth anything, except the one showing the key just pressed.
 
 **And the backlog limit is not part of any of this.** `cooked-backlog-limit` sets no rate.
 It is backpressure: how much may pile up while Emacs falls behind before `read_loop`

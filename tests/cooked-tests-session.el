@@ -1573,6 +1573,54 @@ state a user setting this in their init file is in."
     (should (= cooked-min-redisplay-interval 0.02))
     (customize-set-variable 'cooked-min-redisplay-interval 0.008)))
 
+;;;; The echo of a key
+
+(defun cooked-tests--echo-arrives-early-p (event)
+  "Whether a byte sent with `last-input-event' bound to EVENT is drawn early.
+
+The session runs at a three-second `cooked-min-redisplay-interval', and the
+frame its child prints on starting has just been applied, so the interval has
+nearly all of its length to run when the byte goes out.  The tty echoes the
+byte, and only the wake filter drains: an echo in the buffer within half a
+second skipped the interval."
+  (let ((cooked-min-redisplay-interval 3))
+    (cooked-tests--with-session '("/bin/sh" "-c" "printf ready; read -r _; sleep 5")
+      (let ((deadline (+ (float-time) (cooked-tests-timeout 5))))
+        (while (and (< (float-time) deadline)
+                    (not (string-search "ready" (cooked-tests--text))))
+          (accept-process-output nil 0.01)))
+      (should (string-search "ready" (cooked-tests--text)))
+      (let ((last-input-event event))
+        (cooked--send cooked--session "z"))
+      (let ((deadline (+ (float-time) 0.5)))
+        (while (and (< (float-time) deadline)
+                    (not (string-search "readyz" (cooked-tests--text))))
+          (accept-process-output nil 0.01)))
+      (prog1 (and (string-search "readyz" (cooked-tests--text)) t)
+        ;; The echo does arrive, so a nil answer is the interval holding it and
+        ;; not a child that never wrote.
+        (should (cooked-tests--settle
+                 (lambda () (string-search "readyz" (cooked-tests--text)))))))))
+
+(ert-deftest cooked-a-key-is-echoed-without-waiting-out-the-interval ()
+  "A key typed moments after the last frame is echoed at once.
+
+`cooked--send' asks `last-input-event' whether a key was pressed, and a key
+lets the frame that echoes it skip `cooked-min-redisplay-interval'.  Held down,
+every key otherwise waited out the rest of the interval that the previous echo
+had started."
+  (should (cooked-tests--echo-arrives-early-p ?z)))
+
+(ert-deftest cooked-a-mouse-event-waits-out-the-interval ()
+  "A byte sent for a mouse event is paced like any other output.
+
+A pointer sweep under mode 1003 sends a report per motion event, and a wheel
+notch under alternate scroll sends cursor keys no byte test could tell from
+typing, so it is the event that says what the input was, and a mouse event
+waives nothing."
+  (should-not (cooked-tests--echo-arrives-early-p
+               `(mouse-movement ,(posn-at-point)))))
+
 ;;;; The seam, with wrapped rows kept split
 
 ;; `cooked-tests--settle' drains with `(cooked--drain cooked--session)', and the

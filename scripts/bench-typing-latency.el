@@ -41,9 +41,14 @@
 ;; Keystrokes are COOKED_LATENCY_GAP seconds apart, 0.03 by default, waited out in
 ;; `accept-process-output' and not timed.  That is a fast typist, and the gap is
 ;; not decoration: sent back to back, every echo lands inside the core's
-;; `cooked-min-redisplay-interval' of the previous one and waits the rest of it,
-;; so the figure becomes that interval, 8 ms, whatever the buffer holds.  Set the
-;; gap to 0 to see the throttle rather than the keystroke.
+;; `cooked-min-redisplay-interval' of the previous one.
+;;
+;; Every other byte is sent as a mouse event rather than a key, by binding
+;; `last-input-event', which is what `cooked--send' asks.  A key's echo skips the
+;; interval and a mouse event's answer does not, so the two rows of each
+;; configuration are an A/B taken interleaved, and a loaded machine slows both
+;; alike.  Set the gap to 0 to see the difference: the mouse row becomes the
+;; interval, 8 ms, whatever the buffer holds, and the key row does not.
 
 (setq debug-on-error t)
 
@@ -58,6 +63,7 @@
           nil t)))
 (defconst latency--out (or (getenv "COOKED_LATENCY_OUT") "/tmp/cooked-latency.out"))
 (cooked-bench-script-start latency--out)
+(require 'cl-lib)
 (require 'cooked)
 (require 'cooked-mode)
 (require 'cooked-bench)
@@ -140,7 +146,9 @@ in its output instead of passing for a plain one."
 (defun latency--run (kind keystrokes warmup)
   "Time KEYSTROKES round trips with the screen dressed as KIND."
   (let* ((buffer (generate-new-buffer (format "*latency %s*" kind)))
-         (drawn nil) (applied nil) (redisplays nil)
+         ;; One (DRAWN APPLIED REDISPLAYS) per input kind.
+         (samples (list (cons 'key (list nil nil nil))
+                        (cons 'mouse (list nil nil nil))))
          (timeouts 0))
     (unwind-protect
         (with-current-buffer buffer
@@ -178,10 +186,13 @@ in its output instead of passing for a plain one."
                        (let ((until (+ (float-time) latency--gap)))
                          (while (< (float-time) until)
                            (accept-process-output nil (max 0.001 (- until (float-time))))))
-                       (let* ((tick (buffer-chars-modified-tick))
+                       (let* ((kind (if (cl-evenp i) 'key 'mouse))
+                              (tick (buffer-chars-modified-tick))
                               (t0 (float-time))
                               (deadline (+ t0 latency--timeout)))
-                         (cooked--send-to-child "x")
+                         (let ((last-input-event
+                                (if (eq kind 'key) ?x `(mouse-movement ,(posn-at-point)))))
+                           (cooked--send-to-child "x"))
                          (while (and (= tick (buffer-chars-modified-tick))
                                      (< (float-time) deadline))
                            (accept-process-output nil 0.001))
@@ -193,9 +204,10 @@ in its output instead of passing for a plain one."
                              (when (>= i warmup)
                                (if (not arrived)
                                    (setq timeouts (1+ timeouts))
-                                 (push (* 1000 (- t2 t0)) drawn)
-                                 (push (* 1000 (- t1 t0)) applied)
-                                 (push (* 1000 (- t2 t1)) redisplays)))))))))))
+                                 (let ((row (alist-get kind samples)))
+                                   (push (* 1000 (- t2 t0)) (nth 0 row))
+                                   (push (* 1000 (- t1 t0)) (nth 1 row))
+                                   (push (* 1000 (- t2 t1)) (nth 2 row)))))))))))))
               (let ((extra (format "%dx%d term, %d chars, %d timeouts, %d drains for %d keys, drain+apply mean %.3f ms, dressing %d runs%s"
                                    cooked--rows cooked--cols (buffer-size) timeouts
                                    drains (+ warmup keystrokes)
@@ -203,9 +215,11 @@ in its output instead of passing for a plain one."
                                    dressing
                                    (if (and (not (eq kind 'plain)) (zerop dressing))
                                        " -- NOT DRESSED" ""))))
-                (latency--report (format "%s drawn" kind) drawn extra)
-                (latency--report (format "%s applied" kind) applied "")
-                (latency--report (format "%s redisplay" kind) redisplays "")))))
+                (latency--say "%s: %s" kind extra)
+                (pcase-dolist (`(,input ,drawn ,applied ,redisplays) samples)
+                  (latency--report (format "%s %s drawn" kind input) drawn "")
+                  (latency--report (format "%s %s applied" kind input) applied "")
+                  (latency--report (format "%s %s redisplay" kind input) redisplays ""))))))
       (with-current-buffer buffer (cooked--cleanup))
       (kill-buffer buffer))))
 

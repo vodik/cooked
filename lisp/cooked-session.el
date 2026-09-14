@@ -100,10 +100,12 @@ does) paces the child by itself and this interval is the floor beneath that
 rather than a rate of its own.  Redisplay comes after the apply, and the
 interval is what leaves it room.
 
-A floor and never a clock: nothing in cooked draws faster than this, and no
-urgent path bypasses it.  Four things can make a redraw *later* -- Emacs
-not having applied the last one, DEC mode 2026, this interval, and the child
-still writing -- and only the first is what usually decides the rate.  See
+A floor and never a clock: nothing in cooked draws faster than this, bar the
+echo of a key.  Four things can make a redraw *later* -- Emacs not having
+applied the last one, DEC mode 2026, this interval, and the child still
+writing -- and only the first is what usually decides the rate.  The frame
+that echoes a key skips this interval, though none of the other three.  A mouse
+event earns no such frame, or a pointer sweep would draw one per report.  See
 docs/DESIGN.md.
 
 Lower it if the terminal feels less responsive than it should; raise it if a
