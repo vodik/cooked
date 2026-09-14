@@ -759,6 +759,19 @@ scroll the promoted rows had left by, which lost one of the blank rows above
     (cooked-tests--oracle-check cases)
     (cooked-tests--oracle-check cases #'ignore #'cooked-tests--oracle-unpromoted)))
 
+(ert-deftest cooked-render-oracle-a-hidden-buffer-without-rejoining-resizes-against-no-head ()
+  "A hidden buffer that does not rejoin wrapped lines tells the core so before a resize.
+
+`日本語' at 5 columns wraps `語' onto a second row, and a line feed scrolls the
+first away with a newline of its own.  A whole drain then has the core forget
+that it counted the row into row 0\='s line, and a drain that left the screen
+out did not, so widening the screen to 9 columns rewrapped against a head the
+buffer never held and sent `語' to scrollback.  The generator's resizes found
+it."
+  (cooked-tests--oracle-check
+   '((nil :rows 2 :cols 5 :rejoin nil :chunks (("日本語" "\eE") ((resize 5 9)))))
+   (lambda () 'hidden)))
+
 (ert-deftest cooked-render-oracle-the-alternate-screen-and-a-rejoined-seam ()
   "Showing the alternate screen ends the line the primary screen began in.
 

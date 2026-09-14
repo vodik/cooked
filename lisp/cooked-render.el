@@ -323,6 +323,15 @@ when it is shown, however much scrollback went in above it meanwhile."
                           (cooked--render-scrolled scrolled))))
       (cooked--restore-pending-input pending)
       (when batch-start (setq cooked--pin-screen-top nil))
+      ;; The seam is scrollback's business, so it is settled here as a whole drain
+      ;; settles it.  With `cooked-rejoin-wrapped-lines' off, a wrapped row sent now
+      ;; ends its line, and the core's carry has to be told before a resize under a
+      ;; hidden buffer rewraps against it: `日本語' at 5 columns, its first row
+      ;; scrolled away and the screen then widened to 9, sent `語' to scrollback as
+      ;; though it had been cut from that row's line.  The head is the drain's own,
+      ;; the screen's `cooked--grid' being otherwise left as it was.
+      (setf (cooked-grid-head cooked--grid) (plist-get update :head))
+      (cooked--split-seam)
       (cooked--relocate-marks (plist-get update :marks) batch-start)
       (cooked--set-mode (plist-get update :mode))
       (cooked--batching-replies cooked--session
