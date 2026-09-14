@@ -353,6 +353,32 @@ pub(crate) enum DecoCell {
     Image(Placement),
 }
 
+/// What CELL displays in place of its text, given the combining MARKS and the image
+/// PLACED attached to it, for [`Row::build_runs`].
+///
+/// A placement wins over the character's own shape: it is state attached to this cell,
+/// while the shape is derived from a character that an image cell keeps as a blank. In
+/// practice they cannot both be here, since writing a character retires whatever was
+/// attached, so this is an ordering, not a conflict resolution.
+///
+/// A cell carrying combining marks is not decorated at all, and draws from the font. A
+/// decoration has one record per character of its run, and the marks are characters on
+/// no column: `\u{2500}\u{300}\u{2500}\u{2500}` is four characters over three
+/// columns, and three glyph records would leave Emacs drawing the last `\u{2500}` from
+/// the font while the image covers the accent. A record per mark would widen the bitmap
+/// instead. The font is the one thing that knows where an accent sits on a line, and a
+/// picture cell with an accent on it is something only a confused child sends, so both
+/// kinds give way to the text.
+#[inline]
+fn decoration(cell: &Cell, marks: Option<&str>, placed: Option<Placement>) -> Option<DecoCell> {
+    if marks.is_some() {
+        return None;
+    }
+    placed
+        .map(DecoCell::Image)
+        .or_else(|| DecoCell::classify(cell.ch))
+}
+
 /// The decoration of a whole run, one entry per character of [`Run::text`].
 ///
 /// A run is homogeneous in its kind: [`Row::build_runs`] will not merge characters
@@ -945,9 +971,11 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                     Extra::Mark(_) => {}
                 }
             }
-            let deco = placed
-                .map(DecoCell::Image)
-                .or_else(|| DecoCell::classify(cell.ch));
+            let deco = match (marks, placed) {
+                (Some(_), _) => None,
+                (None, Some(placement)) => Some(DecoCell::Image(placement)),
+                (None, None) => DecoCell::classify(cell.ch),
+            };
             let joins = runs.last().is_some_and(|run| {
                 run.style == cell.style
                     && run.link == cell.link
@@ -1190,14 +1218,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                     Extra::Mark(_) => {}
                 }
             }
-            // A placement wins over the character's own shape: it is state attached to
-            // this cell, while the shape is derived from a character that an image cell
-            // keeps as a blank. In practice they cannot both be here — writing a
-            // character retires whatever was attached — so this is an ordering, not a
-            // conflict resolution.
-            let deco = placed
-                .map(DecoCell::Image)
-                .or_else(|| DecoCell::classify(cell.ch));
+            let deco = decoration(cell, marks, placed);
             match runs.last_mut() {
                 Some(run)
                     if run.style == cell.style
@@ -1232,8 +1253,8 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                     link: cell.link,
                 }),
             }
-            // Combining marks never legitimately attach to a box-drawing base
-            // character, so no padding is needed to keep the decoration aligned.
+            // A cell carrying marks is undecorated (see `decoration`), so the marks never
+            // land inside a decorated run, whose records are one per character.
             if let (Some(marks), Some(run)) = (marks, runs.last_mut()) {
                 run.text.push_str(marks);
             }
@@ -2219,23 +2240,8 @@ mod tests {
                     runs, expected,
                     "case {case}, end {end}: runs disagree with the reference"
                 );
-                // A combining mark on a decorated cell adds a character with no decoration
-                // of its own, which misaligns every decoration after it in the run. That is
-                // the builders' doing rather than the absorption's, and the property below
-                // is stated for rows where each character has one.
-                let aligned = unabsorbed.iter().all(|run| {
-                    run.deco
-                        .as_ref()
-                        .is_none_or(|deco| deco.len() == run.text.chars().count())
-                });
-                if aligned {
-                    assert_absorbed_only_blanks(
-                        &unabsorbed,
-                        &runs,
-                        &format!("case {case}, end {end}"),
-                    );
-                    absorbed_rows += usize::from(runs.len() < unabsorbed.len());
-                }
+                assert_absorbed_only_blanks(&unabsorbed, &runs, &format!("case {case}, end {end}"));
+                absorbed_rows += usize::from(runs.len() < unabsorbed.len());
             }
         }
 

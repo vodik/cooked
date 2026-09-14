@@ -552,7 +552,11 @@ fn glyph_run_across(old: &[Cell], new: &[Cell], at: usize) -> Option<(usize, usi
     Some((first, last))
 }
 
-/// Whether CELL draws a box glyph.
+/// Whether CELL draws a box glyph, or would but for a combining mark on it.
+///
+/// The cell alone, without the row's attachments, so a `\u{2500}` carrying an accent
+/// counts though the runs draw it as text. That only ever makes a glyph run look longer
+/// than it is, which widens an edit and never cuts a run Lisp draws.
 fn is_glyph(cell: Cell) -> bool {
     glyph::classify(cell.ch).is_some()
 }

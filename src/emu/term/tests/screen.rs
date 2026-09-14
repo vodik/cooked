@@ -634,6 +634,23 @@ fn box_drawing_bytes_produce_glyphs_in_the_drained_delta() {
 }
 
 #[test]
+fn a_box_glyph_carrying_a_combining_mark_draws_as_text() {
+    // Four characters over three columns. Were the accented `\u{2500}` still a glyph,
+    // its run would carry three records for four characters, and Emacs would draw the
+    // last `\u{2500}` from the font with the accent under the image.
+    let t = term(2, 8, "\u{2500}\u{300}\u{2500}\u{2500}".as_bytes());
+    let runs = t.screen().row(0).unwrap().runs();
+    let shapes: Vec<(&str, Option<usize>)> = runs
+        .iter()
+        .map(|run| (run.text.as_str(), run.deco.as_ref().map(Deco::len)))
+        .collect();
+    assert_eq!(
+        shapes,
+        [("\u{2500}\u{300}", None), ("\u{2500}\u{2500}", Some(2))]
+    );
+}
+
+#[test]
 fn diagonal_and_stub_bytes_also_produce_glyphs() {
     let mut t = term(2, 10, "\u{2571}\u{2572}\u{2573}\u{2574}".as_bytes());
     let delta = t.drain();

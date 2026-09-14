@@ -1147,6 +1147,15 @@ mod tests {
         use super::*;
         use proptest::prelude::*;
 
+        /// How many renditions the cut side's filter holds before it collects the ids
+        /// nothing holds.
+        ///
+        /// Small so that a script of a few `SGR`s and erases collects several times.
+        /// Whether an id is held is decided by the roots `Stream::style_id` marks, and a
+        /// root left off that list has its id reused while a run still names it, which
+        /// resolves to the wrong rendition on the cut side and not on the whole one.
+        const STYLE_LIMIT: usize = 2;
+
         /// What a consumer displays: each character, with the rendition and the `OSC 8`
         /// destination it was inserted under.
         ///
@@ -1175,6 +1184,15 @@ mod tests {
                     open: String::new(),
                     open_start: 0,
                 }
+            }
+
+            /// A consumer whose filter looks for renditions to free once
+            /// [`STYLE_LIMIT`] are live, rather than at the four thousand an ordinary
+            /// one holds.
+            fn with_tiny_style_table() -> Self {
+                let mut consumer = Self::new();
+                consumer.filter.stream.styles = StyleStore::with_limit(STYLE_LIMIT);
+                consumer
             }
 
             /// Whether the buffer still ends in the open line, as
@@ -1274,6 +1292,11 @@ mod tests {
                     .prop_map(str::to_string),
                 2 => prop::sample::select(vec!["\x1b[K", "\x1b[1K", "\x1b[2K"])
                     .prop_map(str::to_string),
+                // A progress line repainted in another rendition: the text comes back the
+                // same, so only the rendition ids say whether it has to be emitted again.
+                2 => (prop::sample::select(vec!["\x1b[31m", "\x1b[1;42m", "\x1b[0m"]),
+                      prop::sample::select(vec!["abc", " 42%"]))
+                    .prop_map(|(pen, text)| format!("\r\x1b[2K{pen}{text}")),
                 3 => (1usize..12, prop::sample::select(vec!['G', 'X', 'P', '@', 'C', 'D']))
                     .prop_map(|(n, verb)| format!("\x1b[{n}{verb}")),
                 2 => prop::sample::select(vec!["\x1b[31m", "\x1b[1;42m", "\x1b[0m"])
@@ -1334,7 +1357,7 @@ mod tests {
                 expected.type_input(&input);
                 expected.feed(&output);
 
-                let mut actual = Consumer::new();
+                let mut actual = Consumer::with_tiny_style_table();
                 actual.feed_cut(&prompt, &prompt_cuts);
                 actual.type_input(&input);
                 actual.feed_cut(&output, &output_cuts);
@@ -1345,7 +1368,7 @@ mod tests {
             fn cutting_the_output_into_reads_changes_nothing(script in script(), cuts in cuts()) {
                 let mut whole = Consumer::new();
                 whole.feed(&script);
-                let mut pieces = Consumer::new();
+                let mut pieces = Consumer::with_tiny_style_table();
                 pieces.feed_cut(&script, &cuts);
                 prop_assert_eq!(pieces.shown, whole.shown);
             }
