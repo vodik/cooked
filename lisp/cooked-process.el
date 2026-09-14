@@ -298,7 +298,10 @@ cannot be the child's own process."
                              (and directory
                                   (expand-file-name (or (cooked--local-name directory) "~")))
                              (round (* 1000 cooked-min-redisplay-interval))
-                             cooked-backlog-limit))))
+                             cooked-backlog-limit))
+        ;; Where the query handlers `cooked-process--answer' calls look for
+        ;; the session to reply on, as they would in a session buffer.
+        (setq cooked--session cooked-process--session)))
     proc))
 
 (defun cooked-process-start-shell-command (name buffer command)
@@ -497,30 +500,76 @@ of the build twice."
 
 ;;;; The pump
 
+(defconst cooked-process--query-handlers '(cooked--osc-color cooked--osc-palette)
+  "The OSC handlers a headless session answers a query through.
+
+The colours are the questions a child asks to decide how to draw, and their
+answers come from faces every buffer shares, so the hidden host answers them as
+a terminal would: a build tool asking `OSC 11 ; ?\=' for the background is told
+the theme\='s.  The rest of `cooked-osc-handlers\=' act on the buffer showing the
+terminal, and there is none: a title would rename the host, and OSC 7 would move
+its `default-directory\='.  The clipboard and the pointer shape are not offered
+to a build either, so those queries go unanswered, as they did before any of
+this.")
+
+(defun cooked-process--answer (events)
+  "Owe the child what EVENTS, a drain\='s `:events\=', ask of its terminal.
+
+A `reply\=' is one the core composed alone but held behind a query only Lisp
+answers, so it is passed on in its place.  An OSC query is answered through
+`cooked-process--query-handlers\='.  A colour set in the same sequence is
+refused, since it would remap a face in a buffer nobody sees, or set the
+cursor colour of the whole frame.  Every other event is about a buffer showing
+the terminal and is dropped.
+
+The caller says `cooked--ready\=' afterwards, and must: until then the core
+keeps every later reply behind the query, so DA1 after `OSC 11 ; ?\=' would
+wait for as long as the child lived."
+  (cooked--batching-replies cooked--session
+    (dolist (event events)
+      (pcase event
+        (`(reply . ,bytes) (cooked--queue-reply cooked--session bytes))
+        (`(osc ,code ,bell . ,parts)
+         (when (memq (alist-get code cooked-osc-handlers)
+                     cooked-process--query-handlers)
+           (let ((cooked-allow-color-set nil))
+             (cooked--handle-osc code bell parts))))))))
+
 (defun cooked-process--pump (host)
   "Drain HOST's session and pass what retired to the consumer.
 
 Errors are reported rather than swallowed: this runs from a process filter,
 where Emacs discards them, and the symptom would be a compilation buffer that
-simply stopped filling."
+simply stopped filling.
+
+The drain is followed by `cooked--ready\=' however it went, as
+`cooked--drain-and-apply\=' follows its own, because that is what tells the core
+the drain\='s queries have been answered."
   (when (and host (buffer-live-p host))
     (with-current-buffer host
-      (when cooked-process--session
-        (condition-case err
-            (let* ((update (cooked--drain cooked-process--session cooked-process--rejoin))
-                   (scrolled (plist-get update :scrolled))
-                   (exit (plist-get update :exit)))
-              (cooked--install-styles (plist-get update :styles))
-              (when scrolled
-                (cooked-process--emit (cooked-process--text scrolled)))
-              (cooked-process--remember-rows (plist-get update :rows)
-                                             (plist-get update :height)
-                                             (plist-get update :shifts)
-                                             (plist-get update :edits))
-              (if exit
-                  (cooked-process--finish host exit)
-                (cooked-process--refresh-tail host)))
-          (error (message "cooked-process: %S" err)))))))
+      (when-let* ((session cooked-process--session))
+        (unwind-protect
+            (condition-case err
+                (let* ((update (cooked--drain session cooked-process--rejoin))
+                       (scrolled (plist-get update :scrolled))
+                       (exit (plist-get update :exit)))
+                  (cooked-process--answer (plist-get update :events))
+                  (cooked--install-styles (plist-get update :styles))
+                  (when scrolled
+                    (cooked-process--emit (cooked-process--text scrolled)))
+                  (cooked-process--remember-rows (plist-get update :rows)
+                                                 (plist-get update :height)
+                                                 (plist-get update :shifts)
+                                                 (plist-get update :edits))
+                  (if exit
+                      (cooked-process--finish host exit)
+                    (cooked-process--refresh-tail host)))
+              (error (message "cooked-process: %S" err)))
+          ;; Not once the exit has reaped the session, which kills it and the
+          ;; host with it.
+          (when (and (buffer-live-p host)
+                     (buffer-local-value 'cooked-process--session host))
+            (cooked--ready session)))))))
 
 ;;;; Exit
 
@@ -624,7 +673,8 @@ session -- but the reader thread, the pty, and the two pipe processes."
     (with-current-buffer host
       (when cooked-process--session
         (ignore-errors (cooked--kill cooked-process--session))
-        (setq cooked-process--session nil))
+        (setq cooked-process--session nil
+              cooked--session nil))
       ;; Before the processes go, while `cooked-process--proc' still names the
       ;; buffer the overlay is in: a session reaped without exiting -- a
       ;; `recompile' over a running build -- has one standing.

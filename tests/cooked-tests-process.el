@@ -94,6 +94,27 @@ So the assertion is the geometry and the name, not the tty."
       (should (equal (cooked-tests-process--body)
                      (format "tty\n8 120\n%s" (cooked--terminfo)))))))
 
+(ert-deftest cooked-process-answers-a-colour-query-and-then-da1 ()
+  "A compile child asking for the background and then DA1 hears both, in order.
+
+That pair is how a program asks for a colour with a deadline: DA1 is answered
+by every terminal, so its reply arriving first means the colour query went
+unanswered.  The core sends DA1 itself, but once a query only Lisp answers has
+been drained, every later reply waits until Lisp says it has handled that
+drain.  A headless session that never said so held back every reply after the
+first query for as long as the child lived, which is what the second DA1 here
+checks.  The child reads until a second passes with nothing to read, and
+prints what came, `ESC\=' spelled as `E\='."
+  (cooked-tests-process--with
+      (concat "stty -icanon -echo min 0 time 10; "
+              "printf '\\033]11;?\\033\\\\\\033[c'; cat | tr '\\033' E; "
+              "printf '\\033[c'; cat | tr '\\033' E; echo")
+    (should (string-match-p
+             (concat "\\`E\\]11;rgb:[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}/[0-9a-f]\\{4\\}E\\\\"
+                     "E\\[\\?[0-9;]+c"
+                     "E\\[\\?[0-9;]+c\\'")
+             (cooked-tests-process--body)))))
+
 (ert-deftest cooked-process-leaves-plain-output-alone ()
   "Output with nothing for an emulator to resolve comes through unchanged.
 
