@@ -1546,6 +1546,29 @@ to the child verbatim."
               ;; here, since redisplay reads the value with the window\='s
               ;; buffer current, so prose elsewhere keeps its margin.
               overline-margin 0
+              ;; A terminal grid has no space between its rows, and box
+              ;; drawing cannot have it either.  Emacs adds `line-spacing\='
+              ;; below every glyph on a row, a bitmap as much as a character,
+              ;; so a box-drawing bitmap as tall as the line box gets the
+              ;; spacing twice: with a global `line-spacing\=' of 2 in a font
+              ;; of ascent 13 and descent 4, a row of borders was 21 pixels in
+              ;; a 19-pixel line box, and htop ran three rows past its window.
+              ;; A bitmap drawn at the text\='s height fits, but leaves a gap
+              ;; the size of the spacing between the strokes of a vertical
+              ;; border, which is the defect drawing borders as bitmaps exists
+              ;; to remove.  No `:ascent\=' and no `line-height\=' property avoids
+              ;; both, so the spacing goes.
+              ;;
+              ;; 0 rather than nil: nil falls back to the frame\='s
+              ;; `line-spacing\=' parameter, and 0 does not.  A value set again
+              ;; from `cooked-mode-hook\=' is left alone, as every other
+              ;; variable here is: the hook runs after this body so that a user
+              ;; can have the last word, and watching the variable to take it
+              ;; back would be a fight the user started on purpose.  It costs
+              ;; what it did before this line existed.  With 2 in that font,
+              ;; a screen of borders draws rows of 21 pixels in a 19-pixel line
+              ;; box, and the last three of 31 rows fall below the window.
+              line-spacing 0
               ;; A grid, not prose.  Cell (ROW . COL) is the COLth character of
               ;; the ROWth line and nothing may make it otherwise: `cooked--mouse-cell'
               ;; turns a click's column back into a cell, the ghost cursor is

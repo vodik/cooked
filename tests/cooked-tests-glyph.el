@@ -854,43 +854,50 @@ such row came out 18 pixels tall.  htop and btop are mostly such rows, so the
 screen ran a row or two past its window, and the stroke of a vertical line
 stopped a pixel short of the one below it.
 
-Emacs also adds `line-spacing\=' below an image as it does below a character,
-so a bitmap as tall as the line box made its row taller by the spacing again.
-It is drawn at the height of the text instead.
+Emacs also adds `line-spacing\=' below a bitmap as it does below a character,
+so with a global `line-spacing\=' of 2 a bitmap filling the 19-pixel line box
+of that font made its row 21 pixels tall.  A cooked buffer has no line spacing,
+whatever the global value, so its line box is the font\='s and a bitmap that
+fills it touches the next row\='s.
 
 The line box is worked out as redisplay works it out: the taller of the
 font\='s and the image\='s ascent, over the taller of their descents, plus the
-spacing, the image ascent being the truncation Emacs makes.  The fonts are the
-ones a pgtk frame reported for Adwaita Mono at heights 100, 130, 160, 200 and
-220, and three more with other ratios.  Without spacing the bitmap fills the
-line box, so a vertical stroke on its top and bottom pixel rows meets the next
-row\='s."
-  (dolist (font '((13 4 8) (17 5 10) (21 6 12) (27 8 16) (29 9 17)
-                  (15 5 9) (11 3 7) (40 13 23)))
-    (dolist (spacing '(0 2 5))
-      (with-temp-buffer
-        (cooked-tests--with-glyph-font font
-          (pcase-let* ((`(,ascent ,descent ,cell) font)
-                       (text (+ ascent descent))
-                       (line (+ text spacing))
-                       (bits (cooked-tests--line-bits 1 1 0 0))
-                       (image (cooked--box-glyph-image
-                               (cooked--glyph-pattern bits 1)
-                               (selected-window) (cons cell line)))
-                       (height (plist-get (cdr image) :data-height))
-                       (percent (plist-get (cdr image) :ascent))
-                       (image-ascent (truncate (* height (/ percent 100.0))))
-                       (bitmap (cooked-tests--glyph-grid bits cell height)))
-            (ert-info ((format "font %S, spacing %d, :ascent %S" font spacing percent))
-              (should (= image-ascent ascent))
-              (should (= (+ (max ascent image-ascent)
-                            (max descent (- height image-ascent))
-                            spacing)
-                         line))
-              (when (zerop spacing)
+spacing the buffer holds, the image ascent being the truncation Emacs makes.
+The fonts are the ones a pgtk frame reported for Adwaita Mono at heights 100,
+130, 160, 200 and 220, and three more with other ratios.  With every row one
+line box tall, the rows `cooked--window-rows\=' counts in a window are the rows
+that fit in it."
+  (dolist (global '(2 nil))
+    (let ((line-spacing global))
+      (dolist (font '((13 4 8) (17 5 10) (21 6 12) (27 8 16) (29 9 17)
+                      (15 5 9) (11 3 7) (40 13 23)))
+        (with-temp-buffer
+          (cooked-mode)
+          (cooked-tests--with-glyph-font font
+            (pcase-let* ((`(,ascent ,descent ,cell) font)
+                         (spacing (or line-spacing 0))
+                         (line (+ ascent descent spacing))
+                         (bits (cooked-tests--line-bits 1 1 0 0))
+                         (image (cooked--box-glyph-image
+                                 (cooked--glyph-pattern bits 1)
+                                 (selected-window) (cons cell line)))
+                         (height (plist-get (cdr image) :data-height))
+                         (percent (plist-get (cdr image) :ascent))
+                         (image-ascent (truncate (* height (/ percent 100.0))))
+                         (row (+ (max ascent image-ascent)
+                                 (max descent (- height image-ascent))
+                                 spacing))
+                         (bitmap (cooked-tests--glyph-grid bits cell height)))
+              (ert-info ((format "global line-spacing %S, font %S, :ascent %S"
+                                 global font percent))
+                (should (= line (+ ascent descent)))
+                (should (= image-ascent ascent))
+                (should (= row line))
                 (should (= height line))
                 (should (cooked--bitmap-ref bitmap (/ cell 2) 0))
-                (should (cooked--bitmap-ref bitmap (/ cell 2) (1- line)))))))))))
+                (should (cooked--bitmap-ref bitmap (/ cell 2) (1- height)))
+                (should (equal (car (last (cooked--layout-stamp (selected-window))))
+                               0))))))))))
 
 (ert-deftest cooked-a-font-with-another-baseline-moves-a-drawn-border ()
   "A border drawn in one font is placed on the next font's baseline.
