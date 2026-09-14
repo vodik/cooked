@@ -213,6 +213,21 @@ impl Event {
             _ => false,
         }
     }
+
+    /// Whether Lisp needs the screen's text in the buffer to act on this, which is what
+    /// makes [`Term::drain_hidden`] a whole drain.
+    ///
+    /// A mark becomes a marker on a row, so the row has to be there: a prompt mark on
+    /// screen row 3 of a buffer whose screen region was last drawn a thousand lines ago
+    /// would land on whatever row 3 said then. `CSI 3 J` deletes the scrollback above the
+    /// screen and `CSI 2 J` pins the window to the screen's top, and each has to happen
+    /// between the scrollback before it and the scrollback after it.
+    fn needs_text(&self) -> bool {
+        matches!(
+            self,
+            Self::Mark(..) | Self::EraseScrollback | Self::DisplayCleared
+        )
+    }
 }
 
 /// A push or a pop, for [`Event::TitleStack`].
@@ -400,6 +415,10 @@ pub struct Delta {
     /// Marks that left the grid during a resize are here too, anchored into this drain's
     /// scrollback batch, which `anchor_to_lisp` already knows how to spell.
     pub marks: Vec<(MarkId, Anchor)>,
+    /// Whether this drain left the screen out, being [`Term::drain_hidden`]'s: `rows`,
+    /// `shifts` and the marks still on the grid wait in the core, and the next drain that
+    /// is not hidden brings them.
+    pub withheld: bool,
 }
 
 impl Delta {
@@ -777,6 +796,30 @@ impl Term {
         let route = &mut self.state.replies;
         route.handling |= std::mem::take(&mut route.undrained);
         self.state.drain()
+    }
+
+    /// Drain for a buffer no window shows: everything but the screen.
+    ///
+    /// The events, the scrollback and the resources it names go, so a hidden child is
+    /// answered, its bells and titles and notifications arrive, and the backlog that would
+    /// otherwise stop the reader is emptied. The damaged rows, the shifts and the marks
+    /// still on the grid stay behind and keep accumulating, so the core's copy of the rows
+    /// Emacs holds stays true: Emacs has not touched them either. The next [`Term::drain`]
+    /// brings the screen up to date in one go, and a shift log that turned the screen over
+    /// in the meantime saturates into a repaint of the rows that really changed.
+    ///
+    /// The marks that scrolled away do go, anchored in this drain's scrollback, because
+    /// the rows they sit on arrive here and nowhere else.
+    ///
+    /// A whole drain after all, marked by [`Delta::withheld`] being false, when an event
+    /// needs the screen's text; see [`Event::needs_text`].
+    pub fn drain_hidden(&mut self) -> Delta {
+        if self.state.events.iter().any(Event::needs_text) {
+            return self.drain();
+        }
+        let route = &mut self.state.replies;
+        route.handling |= std::mem::take(&mut route.undrained);
+        self.state.drain_hidden()
     }
 
     /// Send replies to [`Term::take_outbound`] from now on, rather than with the drain,

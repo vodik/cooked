@@ -428,6 +428,47 @@ impl State {
             cursor_chars,
             events,
             marks,
+            withheld: false,
+        }
+    }
+
+    /// [`Term::drain_hidden`]'s half: the drain less the screen, for a caller that has
+    /// already checked no event needs the screen's text.
+    pub(super) fn drain_hidden(&mut self) -> Delta {
+        self.shed_unplaced_images();
+        let scrolled = Vec::from(std::mem::take(&mut self.pending_scrollback));
+        let scrolled_base = self.evicted_total - scrolled.len();
+        // Only the marks that left the grid, whose rows are in `scrolled`. `marks_dirty`
+        // stays up, so the next whole drain still reports the ones on the grid, against
+        // rows it has sent by then.
+        let marks = std::mem::take(&mut self.evicted_marks);
+        let events = std::mem::take(&mut self.events);
+        self.bell_queued = false;
+        let images = std::mem::take(&mut self.pending_images);
+        let links = std::mem::take(&mut self.pending_links);
+        let styles = self.styles.take_unsent();
+        let fonts = self.styles.font_bits().to_vec();
+        let levels = Levels::of(self);
+        let screen = self.screen();
+        let cursor_chars = screen
+            .row(levels.cursor.row)
+            .map_or(levels.cursor.col, |row| row.chars_before(levels.cursor.col));
+        Delta {
+            images,
+            links,
+            styles,
+            fonts,
+            height: screen.height(),
+            used: screen.used(),
+            head: if levels.alt { 0 } else { screen.head() },
+            scrolled,
+            scrolled_base,
+            levels,
+            cursor_chars,
+            events,
+            marks,
+            withheld: true,
+            ..Delta::default()
         }
     }
 

@@ -266,6 +266,7 @@ symbols! {
     Styles => ":styles",
     Events => ":events",
     Exit => ":exit",
+    Withheld => ":withheld",
     Intr => ":intr",
     Quit => ":quit",
     Susp => ":susp",

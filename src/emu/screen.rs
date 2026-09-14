@@ -541,6 +541,15 @@ impl Screen {
     /// line feed would push a fresh entry that climbs back to the height, and a flood would
     /// hand Emacs buffer edits per drain for rows it is about to rewrite. Kept, every later
     /// scroll answers false in two comparisons.
+    ///
+    /// **False, and the log emptied, once it holds as many entries as the screen has
+    /// rows.** A drain normally takes the log every frame, so it never gets there; a
+    /// buffer no window shows is drained without it, and a child scrolling two regions in
+    /// turn would grow it by an entry per scroll for as long as nobody looks. Replaying
+    /// more moves than there are rows costs more than rewriting every row, so every row is
+    /// damaged instead. Dropping the moves is safe because Emacs has applied none of them:
+    /// its text and the core's copy of that text still agree row for row, so the rows
+    /// that match the copy are still left out.
     fn shift(&mut self, top: usize, bottom: usize, n: usize, direction: Direction) -> bool {
         let height = bottom + 1 - top;
         if let Some(last) = self.shifts.last_mut() {
@@ -548,6 +557,12 @@ impl Screen {
                 last.count = (last.count + n).min(height);
                 return last.count < height;
             }
+        }
+        if self.shifts.len() >= self.height() {
+            self.shifts.clear();
+            self.dirty.fill(true);
+            self.touches += 1;
+            return false;
         }
         self.shifts.push(Shift {
             top,

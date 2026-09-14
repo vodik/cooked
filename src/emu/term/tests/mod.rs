@@ -74,6 +74,7 @@ fn cell_style(t: &Term, row: usize, col: usize) -> Style {
 
 mod decrqss;
 mod front;
+mod hidden;
 mod images;
 mod keyboard;
 mod marks;

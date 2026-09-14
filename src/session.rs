@@ -730,6 +730,26 @@ impl Session {
         }
     }
 
+    /// [`Session::drain`] for a buffer no window shows; see [`Term::drain_hidden`].
+    ///
+    /// Whole once the child has exited. The screen it left is what the buffer keeps, and
+    /// Lisp appends its exit line below that screen, which has to be there first.
+    pub(crate) fn drain_hidden(&self) -> Update {
+        self.shared.notifier.acknowledge();
+        let exit = *self.shared.exited.held();
+        let mut term = self.shared.term.held();
+        let delta = if exit.is_some() {
+            term.drain()
+        } else {
+            term.drain_hidden()
+        };
+        Update {
+            delta,
+            mode: self.shared.mode.load(),
+            exit,
+        }
+    }
+
     /// Emacs has drawn the last drain and will take another wakeup.
     ///
     /// One wake byte is in flight until this is called, so the child's writes accumulate

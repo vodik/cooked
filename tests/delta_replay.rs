@@ -100,6 +100,11 @@ enum Step {
     /// so a later drain that leaves the row out on the strength of the core's copy -- a
     /// copy the edit made wrong -- shows up as a shadow row that no longer matches.
     Trim { row: u8 },
+    /// No window shows the buffer any more, so its drains leave the screen out; see
+    /// `Term::drain_hidden`.
+    Hide,
+    /// A window shows the buffer again, which catches it up with a whole drain at once.
+    Show,
 }
 
 impl Step {
@@ -525,6 +530,8 @@ fn script() -> impl Strategy<Value = Vec<Step>> {
         1 => save_resize_restore(),
         1 => Just(vec![Step::ForgetHistory]),
         1 => (0u8..MAX_ROWS as u8).prop_map(|row| vec![Step::Trim { row }]),
+        1 => Just(vec![Step::Hide]),
+        1 => Just(vec![Step::Show]),
     ];
     prop::collection::vec(group, 1..14).prop_map(|groups| groups.concat())
 }
@@ -632,6 +639,11 @@ struct Replay {
     /// The levels and the cursor's character offset as the last drain stated them, which
     /// is what Emacs is drawing from until the next.
     levels: (Levels, usize),
+    /// Whether the buffer is hidden, so a drain is `Term::drain_hidden`'s.
+    hidden: bool,
+    /// Whether a hidden drain has left the screen out since the last whole one, which is
+    /// what showing the buffer owes a drain for.
+    withheld: bool,
 }
 
 impl Replay {
@@ -653,6 +665,8 @@ impl Replay {
             announced: Default::default(),
             woken: false,
             levels: Default::default(),
+            hidden: false,
+            withheld: false,
         };
         replay.drain();
         replay
@@ -894,6 +908,16 @@ impl Replay {
                 self.term.forget_history();
                 self.reference.forget_history();
             }
+            Step::Hide => {
+                self.hidden = true;
+                return;
+            }
+            Step::Show => {
+                self.hidden = false;
+                if !(self.woken || self.withheld) {
+                    return;
+                }
+            }
             Step::Trim { row } => {
                 // The guard runs as a drain is rendered, so the drain comes first.
                 if self.woken {
@@ -916,9 +940,34 @@ impl Replay {
     }
 
     /// Drain both terminals and absorb what they said.
+    ///
+    /// While hidden, `term`'s drain may leave the screen out. Then only its scrollback is
+    /// absorbed, as Lisp appends only that, and the reference is not drained at all, so the
+    /// moves it logs keep accumulating alongside `term`'s for the whole drain that follows.
     fn drain(&mut self) {
         self.woken = false;
-        let delta = self.announced[0].canonical(self.term.drain());
+        let delta = if self.hidden {
+            let delta = self.announced[0].canonical(self.term.drain_hidden());
+            if delta.withheld {
+                assert!(
+                    delta.rows.is_empty() && delta.shifts.is_empty(),
+                    "a hidden drain carried the screen"
+                );
+                self.withheld = true;
+                if !delta.scrolled.is_empty() {
+                    self.scrollback.push(Delta {
+                        scrolled: delta.scrolled,
+                        levels: delta.levels,
+                        ..Delta::default()
+                    });
+                }
+                return;
+            }
+            delta
+        } else {
+            self.announced[0].canonical(self.term.drain())
+        };
+        self.withheld = false;
         self.reference.forget_sent(None);
         let reference = self.announced[1].canonical(self.reference.drain());
         self.absorb(delta, reference);
@@ -934,7 +983,8 @@ impl Replay {
         // Whatever the script left undrained is drained first, as it would be by the next
         // wake, so the shadow is up to date before it is compared. A change no feed
         // reported woke nothing, and stays out of the shadow.
-        if self.woken {
+        self.hidden = false;
+        if self.woken || self.withheld {
             self.drain();
         }
         self.term.touch_all();
@@ -1106,6 +1156,40 @@ fn fragmenting_changes_nothing(
     Ok(())
 }
 
+/// Property 3: hiding the buffer for a while changes nothing once it is shown again.
+///
+/// The same script run with its `Hide` and `Show` steps and without them must end on the
+/// same grid and hand Emacs the same scrollback, row for row. Property 1 already holds the
+/// hidden run's drains to the grid; this holds the scrollback, which a hidden drain
+/// delivers in batches a visible one never would, to the rows a visible run delivered.
+fn hiding_changes_nothing(rows: usize, cols: usize, steps: &[Step]) -> Result<(), TestCaseError> {
+    let mut hidden = Replay::new(rows, cols);
+    let mut shown = Replay::new(rows, cols);
+    for step in steps {
+        hidden.step(step, true);
+        if !matches!(step, Step::Hide | Step::Show) {
+            shown.step(step, true);
+        }
+    }
+    let (a, b) = (hidden.full(), shown.full());
+    prop_assert_eq!(
+        (a.levels, a.cursor_chars),
+        (b.levels, b.cursor_chars),
+        "hiding the buffer left different levels"
+    );
+    let (a, b) = (dense(&a)?, dense(&b)?);
+    if let Some(where_) = difference(&a, &b, &[]) {
+        return Err(TestCaseError::fail(format!(
+            "hiding the buffer produced a different grid — {where_}"
+        )));
+    }
+    let runs = |batches: &[Delta]| -> Vec<Scrolled> {
+        batches.iter().flat_map(|b| b.scrolled.clone()).collect()
+    };
+    prop_assert_eq!(runs(&hidden.scrollback), runs(&shown.scrollback));
+    Ok(())
+}
+
 proptest! {
     // 1024 rather than proptest's default 256: a case is a few dozen cells and a few
     // hundred bytes, so the pair of properties still runs in about a second and
@@ -1134,6 +1218,11 @@ proptest! {
         ((rows, cols), steps, rejoin) in (size(), script(), any::<bool>())
     ) {
         fragmenting_changes_nothing(rows, cols, &steps, rejoin)?;
+    }
+
+    #[test]
+    fn hiding_the_buffer_changes_nothing(((rows, cols), steps) in (size(), script())) {
+        hiding_changes_nothing(rows, cols, &steps)?;
     }
 }
 
@@ -1432,4 +1521,25 @@ fn a_pen_whose_erase_rendition_fills_the_table() {
         write("\x1b[H\x1b[41mabcdefgh", &[], false),
     ];
     replays_the_whole_grid(1, 1, &steps).unwrap();
+}
+
+/// Two overlapping scroll regions taking turns while the buffer is hidden: the top six
+/// rows scrolled down, then the whole screen up. Nothing coalesces, so the log reaches the
+/// screen's height and is emptied at a scroll of the small region. The rows below it that
+/// the whole-screen scrolls moved, and no write touched, must still be repainted.
+#[test]
+fn two_scroll_regions_taking_turns_while_hidden() {
+    let lines: Vec<String> = (0..8).map(|i| format!("row{i}")).collect();
+    let mut steps = vec![write(&lines.join("\r\n"), &[], true), Step::Hide];
+    for _ in 0..4 {
+        steps.push(write(
+            "\x1b[1;3r\x1b[1;1H\x1bM\x1b[r\x1b[8;1H\x1bD",
+            &[],
+            true,
+        ));
+    }
+    steps.push(write("\x1b[1;3r\x1b[1;1H\x1bM\x1b[r", &[], true));
+    steps.push(Step::Show);
+    replays_the_whole_grid(8, 5, &steps).unwrap();
+    hiding_changes_nothing(8, 5, &steps).unwrap();
 }

@@ -148,8 +148,8 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Collect everything that changed in SESSION since the last call.
         /// Returns a plist with :scrolled, :shifts, :rows, :edits, :height, :used, :head,
         /// :cursor, :reverse, :reverse-toggles, :marks, :alt, :app-cursor, :keys,
-        /// :kitty-flags, :modify-other-keys, :mode, :images, :links, :styles, :events and
-        /// :exit.
+        /// :kitty-flags, :modify-other-keys, :mode, :images, :links, :styles, :events, :exit
+        /// and :withheld.
         ///
         /// :scrolled and :rows are the same shape, so one renderer handles both: a block is
         /// (TEXT STYLES DECOS ROWS), where the spans carry character offsets into TEXT and
@@ -181,7 +181,13 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// crosses once, however often the child sends or places it.  :styles is
         /// (ID FG BG UL ATTRS) per rendition first named, or named anew after its id was
         /// freed and reused.
-        "cooked--drain" 1..=2 => drain;
+        ///
+        /// With HIDDEN non-nil, for a buffer no window shows, the screen is left out:
+        /// :rows, :edits and :shifts are empty and :marks holds only marks that scrolled
+        /// away, while the damage waits in SESSION for the next drain without HIDDEN.
+        /// :withheld is then t.  It is nil, and the drain whole, when an event needs the
+        /// screen's text (an OSC 133 mark, CSI 2 J or CSI 3 J) or the child has exited.
+        "cooked--drain" 1..=3 => drain;
 
         /// Write STRING to the pty of SESSION.
         /// Waits up to three seconds for a child that is not reading, then signals, having
@@ -595,7 +601,13 @@ fn spawn(env: Env, args: &[Value]) -> Result<Value> {
 
 fn drain(env: Env, args: &[Value]) -> Result<Value> {
     let rejoin = args.get(1).is_none_or(|v| !env.is_nil(*v));
-    let update = handle(env, args[0])?.drain();
+    let hidden = args.get(2).is_some_and(|v| !env.is_nil(*v));
+    let session = handle(env, args[0])?;
+    let update = if hidden {
+        session.drain_hidden()
+    } else {
+        session.drain()
+    };
     update_to_lisp(env, &update, rejoin)
 }
 

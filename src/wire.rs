@@ -275,6 +275,7 @@ pub(crate) fn update_to_lisp(env: Env, update: &Update, rejoin: bool) -> Result<
         ":styles"      => styles_to_lisp(env, &update.delta.styles)?,
         ":events"      => events,
         ":exit"        => update.exit.map(i64::from),
+        ":withheld"    => update.delta.withheld,
     })
 }
 
