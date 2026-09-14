@@ -97,8 +97,7 @@ Displayed through `consult--buffer-display', so
 `consult-cooked-other-window' places a new session where it would have placed
 a picked one, and then sized: a session is started before it has a window,
 which is what `cooked--display' does the same thing for."
-  (let* ((default-directory (or directory default-directory))
-         (buffer (cooked--start-session)))
+  (let ((buffer (cooked-create nil directory)))
     (unless (string-blank-p name)
       (with-current-buffer buffer
         (rename-buffer (generate-new-buffer-name name))))

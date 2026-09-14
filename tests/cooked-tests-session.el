@@ -1317,6 +1317,92 @@ the binding existed to replace."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (memq (current-buffer) (cooked--live-buffers)))))
 
+(defmacro cooked-tests--with-created (binding &rest body)
+  "Bind (VAR FORM), a form returning a session buffer, and clean it up after BODY."
+  (declare (indent 1))
+  `(let ((,(car binding) nil)
+         (cooked-debug t))
+     (unwind-protect
+         (progn (setq ,(car binding) ,(cadr binding)) ,@body)
+       (when (buffer-live-p ,(car binding))
+         (with-current-buffer ,(car binding) (cooked--cleanup))
+         (kill-buffer ,(car binding))))))
+
+(ert-deftest cooked-create-starts-an-argv-in-a-directory-without-showing-it ()
+  "The public constructor returns the buffer and leaves showing it to the caller,
+which is what `vterm' and `eat' never offered: their commands display what they
+make.  A list is the child's argv, and `cooked-buffer-list' finds the session by
+where its shell is, at or below the directory asked about."
+  (let ((directory (file-name-as-directory (make-temp-file "cooked-create" t))))
+    (unwind-protect
+        (cooked-tests--with-created (buffer (cooked-create '("/bin/sh" "-c" "exec sleep 5")
+                                                           directory))
+          (should (buffer-live-p buffer))
+          (should (eq (buffer-local-value 'major-mode buffer) 'cooked-mode))
+          (should-not (get-buffer-window buffer t))
+          (should (equal (buffer-local-value 'default-directory buffer) directory))
+          (should (memq buffer (cooked-buffer-list)))
+          (should (memq buffer (cooked-buffer-list directory)))
+          (should (memq buffer (cooked-buffer-list (file-name-directory
+                                                    (directory-file-name directory)))))
+          (should-not (memq buffer (cooked-buffer-list (expand-file-name "below" directory))))
+          ;; An argv has no startup files written for it.
+          (should-not (buffer-local-value 'cooked--scratch buffer))
+          ;; And once the child has gone it is not listed at all.
+          (with-current-buffer buffer
+            (cooked--kill cooked--session)
+            (should (cooked-tests--settle (lambda () (not cooked--session)))))
+          (should-not (memq buffer (cooked-buffer-list))))
+      (delete-directory directory t))))
+
+(ert-deftest cooked-create-with-an-action-shows-the-session ()
+  (let ((other (generate-new-buffer "*cooked-tests-other*")))
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (set-window-buffer (selected-window) other)
+          (cooked-tests--with-created (buffer (cooked-create '("/bin/sh" "-c" "exec sleep 5")
+                                                             nil '(display-buffer-same-window)))
+            (should (eq (window-buffer (selected-window)) buffer))))
+      (kill-buffer other))))
+
+(ert-deftest cooked-exec-runs-the-command-at-the-first-prompt ()
+  "The line is held until the shell marks a prompt and then submitted as typed
+input, so it becomes a command record with the line as its input.  Sent at once
+instead, it reaches a tty still in canonical mode, which echoes it above the
+prompt before the shell's line editor echoes it again after."
+  :tags '(zsh)
+  (skip-unless (executable-find "zsh"))
+  (let ((cooked-shell (executable-find "zsh"))
+        ;; Long enough that the fallback cannot be what sends it.
+        (cooked-integration-hint-delay 60))
+    (cooked-tests--with-created (buffer (cooked-exec "echo exec-$((6 * 7))"))
+      (with-current-buffer buffer
+        (should (cooked-tests--settle
+                 (lambda ()
+                   (and cooked--commands
+                        (save-excursion
+                          (goto-char (point-min))
+                          (search-forward "exec-42" nil t))))
+                 10))
+        (should (equal (cooked-command-input (car (last cooked--commands)))
+                       "echo exec-$((6 * 7))"))
+        (should (= 1 (how-many (regexp-quote "echo exec-") (point-min) (point-max))))))))
+
+(ert-deftest cooked-exec-sends-to-a-shell-without-marks-after-the-hint-delay ()
+  "A shell with no integration never marks a prompt, and waiting for one forever
+would leave a caller with a session that silently never ran what it was given."
+  (let ((cooked-shell "/bin/sh")
+        (cooked-integration-hint-delay 0.2))
+    (cooked-tests--with-created (buffer (cooked-exec "echo fallback-$((6 * 7))"))
+      (with-current-buffer buffer
+        (should-not cooked--semantic-seen)
+        (should (cooked-tests--settle
+                 (lambda ()
+                   (save-excursion
+                     (goto-char (point-min))
+                     (search-forward "fallback-42" nil t)))))))))
+
 (ert-deftest cooked-mx-cooked-takes-over-the-selected-window ()
   "`cooked-display-action' puts `display-buffer-same-window' first, the way
 `vterm' and `eat' do it: a terminal is what \\[cooked] was asked for, so it

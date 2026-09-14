@@ -116,15 +116,116 @@ three times over.  Deliberately not a `defcustom\=': the customisable choice is
 `cooked-display-action\=', and a command whose whole name is `other-window\='
 has already been told what to do.")
 
+;;;; The Lisp interface
+
+;; Three functions for a package that wants a terminal without knowing how one
+;; is made: create a session, find the ones there are, and run a command in a
+;; fresh one.  Sending to a session already running is `cooked-send-string',
+;; and a key is `cooked-send-key'.  Everything named with a double dash stays
+;; free to change under them; see docs/FEATURES.md.
+;;
+;; vterm and eat offer only their commands (`vterm-other-window', `eat') and a
+;; buffer-filling `eat-exec', so a caller wanting a buffer back has to go through
+;; one that also displays it.  ghostel's `ghostel-create' and `ghostel-exec' are
+;; the shape followed here, with one difference: `cooked-exec' runs its command
+;; in a shell, where `ghostel-exec' replaces the shell with the program.  Running
+;; a program on its own is `cooked-create' with an argv list.
+
+;;;###autoload
+(defun cooked-create (&optional command directory display)
+  "Start a session and return its buffer.
+
+COMMAND is what `\\[cooked]' would run: nil for `cooked-shell', or another
+shell's file name, either getting its shell integration.  A list is an argv
+run exactly as given, with no integration, so (\"htop\" \"-d\" \"5\") starts
+htop itself rather than a shell.
+
+DIRECTORY is where the child starts, and defaults to `default-directory'.
+
+DISPLAY is a `display-buffer' action, such as `cooked-display-action'.  With
+one the buffer is shown with `pop-to-buffer' and the child is sized to the
+window it landed in straight away; with nil the buffer is not shown, and the
+child starts at the default size until something displays it.
+
+A new session every time: reusing a live one is the caller's decision, and
+`cooked-buffer-list' is how to find one."
+  (let* ((default-directory (or directory default-directory))
+         (buffer (cooked--start-session command)))
+    (if display
+        (cooked--display buffer display)
+      buffer)))
+
+;;;###autoload
+(defun cooked-buffer-list (&optional directory)
+  "Buffers whose session is still running, the most recently used first.
+
+With DIRECTORY, only those whose shell is in it or somewhere below it, which is
+where the shell is now rather than where it started: OSC 7 keeps each buffer's
+`default-directory' current, so a shell that ran \"cd /tmp\" is listed under
+/tmp.  A buffer whose child has exited is not listed."
+  (let ((buffers (cooked--live-buffers)))
+    (if directory
+        (seq-filter (lambda (buffer)
+                      (with-current-buffer buffer
+                        (ignore-errors
+                          (file-in-directory-p default-directory directory))))
+                    buffers)
+      buffers)))
+
+;;;###autoload
+(defun cooked-exec (command &optional directory display)
+  "Start a shell, run COMMAND at its first prompt, and return the buffer.
+
+COMMAND is a line of shell input, such as \"make test\", submitted as if typed
+and entered, so it lands in the shell's history and in cooked's command records
+like anything else run there.  DIRECTORY and DISPLAY mean what they do in
+`cooked-create'.
+
+The line is sent once the shell marks its first prompt, which is when a line
+editor is reading and the line is submitted the way \\[cooked-send-input] would
+submit it.  Sent at once, it would arrive while the shell was still reading its
+startup files, with the tty still echoing, and the transcript would show it
+twice: once above the first prompt and once after it.  Waiting needs the shell
+integration, so a shell that never marks a prompt is sent COMMAND after
+`cooked-integration-hint-delay' seconds instead, the same wait after which
+cooked says the marks are missing."
+  (let ((buffer (cooked-create nil directory display))
+        (sent nil))
+    (with-current-buffer buffer
+      (letrec ((send
+                (lambda ()
+                  (unless sent
+                    (setq sent t)
+                    (remove-hook 'cooked--refresh-hook at-prompt t)
+                    (when (and (buffer-live-p buffer)
+                               (buffer-local-value 'cooked--session buffer))
+                      (with-current-buffer buffer
+                        (cooked--send-input-string command))))))
+               (at-prompt
+                (lambda ()
+                  ;; This hook runs inside the drain that applied the mark, which
+                  ;; is still editing the buffer, so the line is sent from a timer
+                  ;; once the drain has finished.
+                  (when (eq cooked--semantic 'input)
+                    (remove-hook 'cooked--refresh-hook at-prompt t)
+                    (run-at-time 0 nil send)))))
+        (add-hook 'cooked--refresh-hook at-prompt nil t)
+        (run-at-time cooked-integration-hint-delay nil
+                     (lambda ()
+                       (when (and (buffer-live-p buffer)
+                                  (not (buffer-local-value 'cooked--semantic-seen buffer)))
+                         (funcall send))))))
+    buffer))
+
 (defun cooked--open-session (new command action)
   "Display a session using ACTION, starting one unless a live one may be reused.
 
 The body `cooked\=' and `cooked-other-window\=' share; NEW and COMMAND mean what
 they do there.  cooked-project.el has its own, which differs in looking for a
 session already rooted at a particular directory rather than for any at all."
-  (cooked--display (or (unless new (car (cooked--live-buffers)))
-                       (cooked--start-session command))
-                   action))
+  (if-let* ((live (unless new (car (cooked-buffer-list)))))
+      (cooked--display live action)
+    (cooked-create command nil action)))
 
 ;;;###autoload
 (defun cooked (&optional new command)

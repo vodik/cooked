@@ -2216,15 +2216,25 @@ size is only knowable once something is displaying it."
   buffer)
 
 (defun cooked--start-session (&optional command)
-  "Create a buffer running COMMAND, or `cooked-shell', and return it."
+  "Create a buffer running COMMAND, or `cooked-shell', and return it.
+
+COMMAND is a shell's file name, which gets the shell integration its name
+calls for, or a list that is the child's argv exactly: (\"htop\" \"-d\" \"5\")
+is run as it is, with no startup files written for it."
   (let ((buffer (generate-new-buffer (cooked--buffer-name))))
     (with-current-buffer buffer
       (cooked-mode)
-      (pcase-let ((`(,argv ,env ,scratch) (cooked--shell-invocation (or command cooked-shell))))
+      (pcase-let ((`(,argv ,env ,scratch)
+                   (if (consp command)
+                       (list command nil nil)
+                     (cooked--shell-invocation (or command cooked-shell)))))
         (setq cooked--scratch scratch)
         (cooked--start argv default-directory env))
       (cooked--refresh-keymap)
-      (cooked--schedule-integration-hint buffer))
+      ;; A program named by its argv was never offered the snippet, so its
+      ;; missing marks are no news.
+      (unless (consp command)
+        (cooked--schedule-integration-hint buffer)))
     buffer))
 
 (provide 'cooked-mode)

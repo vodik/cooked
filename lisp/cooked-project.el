@@ -31,11 +31,10 @@
 (defun cooked-project--session (root new display-action)
   "Display a cooked session rooted at ROOT, reusing one unless NEW.
 
-Passes DISPLAY-ACTION to `cooked--display'."
-  (let ((default-directory root))
-    (cooked--display (or (unless new (cooked--session-in-directory root))
-                         (cooked--start-session))
-                     display-action)))
+Shows it with DISPLAY-ACTION, whether it was found or started."
+  (if-let* ((live (unless new (cooked--session-in-directory root))))
+      (cooked--display live display-action)
+    (cooked-create nil root display-action)))
 
 (defun cooked-project--here-root ()
   "The current project's root, or `default-directory' if there is none."

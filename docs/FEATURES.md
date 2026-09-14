@@ -1,7 +1,7 @@
 # What you get
 
-The feature tour: completion, the command channel, images, box drawing, links, and the
-UI conventions a cooked buffer follows. Each of these is reachable from a stock session;
+The feature tour: completion, the command channel, images, box drawing, links, the
+UI conventions a cooked buffer follows, and the functions a package calls to use one. Each of these is reachable from a stock session;
 the ones that need a `require` say so.
 
 ## Completion
@@ -582,3 +582,45 @@ the same numbers where a compiler wrote them beside the name), and does that laz
 demand when you follow a name, and once per batch of output that has settled into the
 scrollback. Never on a live row.
 
+
+## From Lisp
+
+A package that wants a terminal calls these rather than anything with a double dash in
+its name. Those are internals, and they change without notice.
+
+```elisp
+;; A shell, not shown, in a directory of your choosing.
+(cooked-create nil "~/src/project/")
+
+;; A program by itself, shown in the selected window.
+(cooked-create '("htop" "-d" "5") nil '(display-buffer-same-window))
+
+;; A shell that runs a line at its first prompt.
+(cooked-exec "make test" (project-root (project-current)) cooked-other-window-action)
+
+;; The sessions still running, and those whose shell is under a directory.
+(cooked-buffer-list)
+(cooked-buffer-list "~/src/project/")
+```
+
+- **`cooked-create`** `(&optional COMMAND DIRECTORY DISPLAY)` starts a session and
+  returns its buffer, a new one every time. COMMAND is nil for `cooked-shell`, another
+  shell's file name, or an argv list run exactly as given with no shell integration.
+  DISPLAY is a `display-buffer` action; with one the buffer is shown and the child is
+  sized to its window at once, and without one nothing is shown.
+- **`cooked-exec`** `(COMMAND &optional DIRECTORY DISPLAY)` starts a shell and submits
+  COMMAND once the shell marks its first prompt, so the line lands in the history and in
+  a command record like one you typed. Sent any earlier, the tty would echo it above the
+  prompt and the transcript would show it twice. A shell with no integration never marks
+  a prompt, and is sent the line after `cooked-integration-hint-delay` seconds instead.
+- **`cooked-buffer-list`** `(&optional DIRECTORY)` returns the buffers whose child is
+  still running, most recently used first. With DIRECTORY it keeps those whose shell is in
+  it or below it, going by where OSC 7 says the shell is now rather than where it started.
+- **`cooked-send-string`** sends text to a session's child as keystrokes, and
+  **`cooked-send-key`** sends the key that invoked it. Both act on the current buffer,
+  so wrap them in `with-current-buffer`.
+
+`vterm` and `eat` offer commands that display what they create, and `eat-exec`, which
+fills a buffer you made yourself. ghostel's `ghostel-create` and `ghostel-exec` are
+closest to this set; the difference is that `cooked-exec` runs its line in a shell,
+while `ghostel-exec` runs a program by itself, which is `cooked-create` with a list here.
