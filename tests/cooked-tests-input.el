@@ -2106,9 +2106,15 @@ all, so the global value governs everywhere else."
       (should (local-variable-p 'track-mouse))
       (should (eq track-mouse t))
       (should-not (default-value 'track-mouse))
+      ;; A movement per pixel, not per glyph: a shade run is one stretch glyph,
+      ;; and hover across it used to report only the cell it entered.
+      (should (local-variable-p 'mouse-fine-grained-tracking))
+      (should (eq mouse-fine-grained-tracking t))
+      (should-not (default-value 'mouse-fine-grained-tracking))
       ;; The child dropping to 1002 takes hover away with it.
       (cooked--set-mouse-state t t t nil nil)
       (should-not (local-variable-p 'track-mouse))
+      (should-not (local-variable-p 'mouse-fine-grained-tracking))
       (cooked--set-mouse-state t t nil t nil)
       (should (eq track-mouse t))
       ;; So does the child losing the mouse, as a peek or a prompt makes it.
@@ -2334,10 +2340,14 @@ at t -- and every buffer generating motion events from then on."
           (cl-letf* ((report (symbol-function 'cooked--report-motion))
                      ((symbol-function 'cooked--report-motion)
                       (lambda (&rest args)
+                        ;; A drag reads a movement per pixel too, for the shade
+                        ;; runs hover needs it for.
+                        (should (eq mouse-fine-grained-tracking t))
                         (cooked--set-mouse-state t t t t nil)
                         (apply report args))))
             (cooked--mouse-track (selected-window)))))
       (should-not (default-value 'track-mouse))
+      (should-not (default-value 'mouse-fine-grained-tracking))
       (should (local-variable-p 'track-mouse))
       (should (eq track-mouse t)))))
 

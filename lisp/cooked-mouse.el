@@ -270,11 +270,11 @@ crossed, and only while the pointer is actually moving.  The cost that needs
 opting into is Emacs\=' rather than cooked\='s: the only way to receive motion
 with no button held is to leave the variable `track-mouse' on for as long as
 the child wants it, and Emacs then manufactures a `mouse-movement' event per
-glyph crossed -- per pixel over an image, which is how a panel\='s box drawing
-is shown -- and `read-key-sequence' reads every one.  `cooked--hover-translate'
-answers them inside that read, so none of them is a command with hooks behind
-it, but each is still an event read and a redisplay checked, and that cost has
-not been measured on a graphical frame.
+pixel moved -- through `mouse-fine-grained-tracking', which a run of one shade
+needs, since the run is one glyph -- and `read-key-sequence' reads every one.
+`cooked--hover-translate' answers them inside that read, so none of them is a
+command with hooks behind it, but each is still an event read and a redisplay
+checked, and that cost has not been measured on a graphical frame.
 
 Off, a 1003 child is still told where the pointer goes while a button is held,
 which is the half `cooked--mouse-track' serves unconditionally.  On, programs
@@ -350,7 +350,15 @@ followed; `cooked--mouse-track' calls this again once it has let go of the
 variable.  See `cooked--mouse-tracking\='.
 
 Turning it on also puts `cooked--hover-translate\=' on `key-translation-map\=',
-which is what keeps the movements this lets in out of the middle of a key."
+which is what keeps the movements this lets in out of the middle of a key.
+
+`mouse-fine-grained-tracking\=' goes on and off with it, locally the same way.
+Emacs otherwise sends a movement only when the pointer leaves the glyph it was
+over, and a run of one shade is a single `space\=' stretch as wide as the run,
+so hover across twenty cells of `░\=' reported only the first of them.  It
+costs a movement per pixel, which the pointer over a decoration image already
+cost, and `cooked--hover-cell\=' answers the repeats in a cell without
+measuring it again."
   (unless cooked--mouse-tracking
     (if (and cooked-mouse-hover-motion cooked--mouse-grab
              (cooked-mouse-state-motion cooked--mouse-state))
@@ -361,8 +369,10 @@ which is what keeps the movements this lets in out of the middle of a key."
           (unless (lookup-key key-translation-map [mouse-movement])
             (define-key key-translation-map [mouse-movement]
                         #'cooked--hover-translate))
-          (setq-local track-mouse t))
-      (kill-local-variable 'track-mouse))))
+          (setq-local track-mouse t)
+          (setq-local mouse-fine-grained-tracking t))
+      (kill-local-variable 'track-mouse)
+      (kill-local-variable 'mouse-fine-grained-tracking))))
 
 (defun cooked--mouse-cell-width (posn)
   "Width in pixels of one cell of the screen POSN is over.
@@ -650,7 +660,7 @@ one place that knows how to report a button coming up.
 
 Only the drag half of 1003 is served here: any-motion with no button down means
 tracking the pointer for as long as the child asks, which is an event read per
-glyph crossed anywhere in the frame whether or not the user is doing anything.
+pixel moved anywhere in the frame whether or not the user is doing anything.
 A `track-mouse\=' bounded by a gesture is the affordable part, and it is the
 part every 1003 client also gets from 1002; the rest is
 `cooked--hover-translate\=' and `cooked-mouse-hover\=', behind
@@ -667,9 +677,15 @@ was skipped."
     (cooked--update-hover-tracking)))
 
 (defun cooked--mouse-track-1 (window)
-  "The loop of `cooked--mouse-track\=' over WINDOW, inside `track-mouse\='."
+  "The loop of `cooked--mouse-track\=' over WINDOW, inside `track-mouse\='.
+
+With `mouse-fine-grained-tracking\=' bound on, for the reason
+`cooked--update-hover-tracking\=' gives: without it a drag across a run of one
+shade, a single stretch glyph, was reported at the cell it entered and then
+not again until it left the run."
   (track-mouse
-    (let (event)
+    (let ((mouse-fine-grained-tracking t)
+          event)
       (while (progn (setq event (read-event))
                     (and (consp event) (eq (event-basic-type event) 'mouse-movement)))
         (let ((posn (event-start event)))
