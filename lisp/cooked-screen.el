@@ -33,6 +33,22 @@
 ;; constantly.  `cooked--goto-screen-row' is the primitive both directions rest
 ;; on, and row 0 is the awkward case in each of them.
 
+(defvar-local cooked--owed-wrap nil
+  "The `cooked-wrap' mark owed to the newline the last screen row lacks.
+
+Nil, or (END . MARK): END is a marker at the end of the last row of the screen
+region, which is left unterminated, and MARK is what `cooked--mark-row-wrap'
+would have put on that row\='s newline had there been one.  A newline is added
+there later by extending the region rather than by rendering the row again --
+the cursor moving to the row below, or a row further down being drawn -- and
+`cooked--goto-screen-row' pays the mark then.  Without it the wrapped row
+\=`日hel\=' at the bottom of a five-column screen got a plain newline when the
+cursor moved under it, and a URL across that wrap was read as two.
+
+END advances over text inserted at it, so padding and pending input added to
+the row stay part of the row.  It is only believed while it is still the end of
+the buffer; see `cooked--owed-wrap-mark'.")
+
 (defun cooked--goto-screen-row (index &optional extend)
   "Move point to the start of screen row INDEX.
 
@@ -63,7 +79,12 @@ because row 0 owns the remainder of the shared one."
       (setq missing (1+ missing)))
     (when (and extend (> missing 0))
       (goto-char (point-max))
-      (insert (make-string missing ?\n)))
+      (let ((owed (cooked--owed-wrap-mark))
+            (at (point)))
+        (insert (make-string missing ?\n))
+        (when owed
+          (put-text-property at (1+ at) 'cooked-wrap owed))
+        (cooked--owe-wrap nil nil)))
     missing))
 
 ;;;; Cells, anchors and positions
@@ -321,10 +342,15 @@ row unterminated, which is the shape every other path in this file expects."
       (let ((beg (point)))
         (if (zerop (cooked--goto-screen-row (+ first count)))
             (delete-region beg (point))
-          (delete-region (if (and (> beg start) (eq (char-before beg) ?\n))
-                             (1- beg)
-                           beg)
-                         (point-max)))))))
+          (let ((from (if (and (> beg start) (eq (char-before beg) ?\n))
+                          (1- beg)
+                        beg)))
+            ;; The newline taken may carry the row above's wrap mark, which
+            ;; that row, now the last, is owed back when a row below it next
+            ;; exists.
+            (cooked--owe-wrap from (and (< from beg)
+                                        (get-text-property from 'cooked-wrap)))
+            (delete-region from (point-max))))))))
 
 (defun cooked--open-screen-rows (at count)
   "Insert COUNT blank screen rows before index AT.
@@ -451,6 +477,7 @@ split a glyph run at."
         ;; continuation row onto the line above it, so a URL the live screen
         ;; broke across two rows is one string by the time anything scans it.
         (set-marker cooked--screen-start (point))
+        (cooked--forget-owed-wrap-above (point))
         ;; After the marker moves, so it names the seam these marks are now above.
         (cooked--prune-marks)
         start))))
@@ -512,6 +539,7 @@ core counts a promoted row\='s characters into those offsets."
           (add-text-properties start (point)
                                `(cooked-scrollback t ,@cooked--read-only-props))
           (set-marker cooked--screen-start (point))
+          (cooked--forget-owed-wrap-above (point))
           (unless (= count (1+ bottom) height)
             (cooked--open-screen-rows (- (1+ bottom) count) count))
           (cooked--prune-marks)
@@ -692,11 +720,17 @@ copy of the live screen, and a blankness test leaves the screen showing twice."
           ;; exactly as the primary's last row already is, and is stable across
           ;; drains: the next one lands `bolp' on it and deletes nothing.
           (progn (cooked--goto-screen-row (1- rows) 'extend)
-                 (delete-region (line-end-position) (point-max)))
+                 (let ((eol (line-end-position)))
+                   (when (< eol (point-max))
+                     (cooked--owe-wrap eol (get-text-property eol 'cooked-wrap))
+                     (delete-region eol (point-max)))))
         ;; Without `extend' a region already short enough reports the
-        ;; shortfall and is left alone.
+        ;; shortfall and is left alone.  What is left ends in a newline, so
+        ;; no row is owed a mark.
         (when (zerop (cooked--goto-screen-row rows))
-          (delete-region (point) (point-max)))))))
+          (when (< (point) (point-max))
+            (cooked--owe-wrap nil nil)
+            (delete-region (point) (point-max))))))))
 
 (defun cooked--check-seam ()
   "Signal if the buffer disagrees with the emulator about the seam.
@@ -1004,9 +1038,10 @@ A row inside a run has a freshly inserted newline
 that carries nothing, so the common case reads a property and writes none;
 only a row that has just started or stopped wrapping pays anything.
 
-Nothing to mark at `point-max\=': the last screen row is left unterminated -- see
-`cooked--fit-screen\=' -- so a wrap on it has no newline to sit on yet.  The row
-below it does not exist, which is the sense in which the flag is not yet true.
+At `point-max\=' there is nothing to mark yet: the last screen row is left
+unterminated -- see `cooked--fit-screen\=' -- so a wrap on it has no newline to
+sit on.  The mark is owed instead, and paid when extending the region gives the
+row its newline; see `cooked--owed-wrap\='.
 
 WIDTH is how many cells the row's text occupies, from the row table, and a
 wrapped row narrower than `cooked--cols' is marked `blank' rather than t.  A
@@ -1017,13 +1052,50 @@ end\" leaves \"see https://e.x/abc\" on the first row, nineteen cells wide,
 and \"end\" on the second; joined at the newline with nothing between them
 they read as \"https://e.x/abcend\".  `cooked-link--join-wrapped' joins a
 `blank' row with a space instead."
-  (when (< eol (point-max))
-    (let ((marked (get-text-property eol 'cooked-wrap))
-          (mark (and wrapped
-                     (if (and width (< width cooked--cols)) 'blank t))))
-      (cond ((eq mark marked))
-            (mark (put-text-property eol (1+ eol) 'cooked-wrap mark))
-            (t (remove-text-properties eol (1+ eol) '(cooked-wrap nil)))))))
+  (let ((mark (and wrapped
+                   (if (and width (< width cooked--cols)) 'blank t))))
+    (if (>= eol (point-max))
+        (cooked--owe-wrap eol mark)
+      (let ((marked (get-text-property eol 'cooked-wrap)))
+        (cond ((eq mark marked))
+              (mark (put-text-property eol (1+ eol) 'cooked-wrap mark))
+              (t (remove-text-properties eol (1+ eol) '(cooked-wrap nil))))))))
+
+(defun cooked--owe-wrap (end mark)
+  "Record that the row ending at END, the end of the buffer, is owed MARK.
+MARK nil forgets any debt.  See `cooked--owed-wrap'."
+  (cond (mark
+         (if cooked--owed-wrap
+             (progn (set-marker (car cooked--owed-wrap) end)
+                    (setcdr cooked--owed-wrap mark))
+           (setq cooked--owed-wrap (cons (copy-marker end t) mark))))
+        (cooked--owed-wrap
+         (set-marker (car cooked--owed-wrap) nil)
+         (setq cooked--owed-wrap nil))))
+
+(defun cooked--owed-wrap-mark ()
+  "The mark `cooked--owed-wrap' holds, if it is still owed to the last row.
+
+Still owed when its marker is the end of the buffer.  Text added at the end
+moves the marker along, so it is anywhere else only once the row it was
+recorded for has stopped being the last, and the two ways a row stops being
+the last with the marker still at the end forget the debt themselves: a trim
+of the rows at the end, in `cooked--fit-screen\=', and history taking the row,
+in `cooked--forget-owed-wrap-above\='.  The row may be empty: a wide character
+that did not fit wraps a row of nothing but blanks."
+  (when-let* ((owed cooked--owed-wrap)
+              ((= (marker-position (car owed)) (point-max))))
+    (cdr owed)))
+
+(defun cooked--forget-owed-wrap-above (start)
+  "Forget the owed wrap mark if the row it was owed to is history above START.
+
+Called where `cooked--screen-start\=' moves to START.  The row ending at the
+owed marker went into history with the rows above START when the marker is
+not below it, and history carries no wrap marks."
+  (when-let* ((owed cooked--owed-wrap)
+              ((<= (car owed) start)))
+    (cooked--owe-wrap nil nil)))
 
 (defun cooked--goto-screen-run-end (start first count)
   "End of the last of COUNT screen rows, the first of them row FIRST at START.

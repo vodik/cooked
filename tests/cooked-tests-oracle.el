@@ -291,10 +291,8 @@ entry is a list of (TEXT . PROPERTIES) runs, adjacent characters with equal
 properties merged, since where Emacs happens to split an interval is not
 something anyone sees.  The newline ending a line of scrollback is a last run
 of its own, (newline . PROPERTIES), when it carries any, so a newline that kept
-the live screen\='s `cooked-wrap' mark on its way into history is a difference.
-On the screen the mark is left out: a row made to exist below a row that wraps
-gets an unmarked newline, which the same row resent over an existing line does
-not, and that is not yet held to.
+the live screen\='s `cooked-wrap' mark on its way into history is a difference,
+and so is a newline on the screen that lost it.
 :screen-start and :point are places as `cooked-tests--oracle-place' gives them,
 and :alt is the screen shown.  See above for the padding, left out of the
 screen's lines, and the final newline, which is left out."
@@ -337,7 +335,7 @@ screen's lines, and the final newline, which is left out."
                                                (buffer-substring-no-properties pos next)))
                   (push (cons (buffer-substring-no-properties pos next) props) runs))
                 (setq pos next)))
-            (when (and (< eol limit) screen (< eol screen))
+            (when (and (< eol limit) screen)
               (when-let* ((props (cooked-tests--oracle-properties
                                   (text-properties-at eol))))
                 (push (cons 'newline props) runs)))
@@ -662,6 +660,21 @@ arrived as an empty line."
   (cooked-tests--oracle-check
    '((nil :rows 3 :cols 10 :rejoin t :chunks (("\e[7m" "\e[3M") ("\r\n")))
      (nil :rows 5 :cols 11 :rejoin t :chunks (("\e[1;42m" "\e[4M") ("\e[2S"))))))
+
+(ert-deftest cooked-render-oracle-a-wrapped-last-row-keeps-its-mark-when-a-row-appears-below ()
+  "A wrapped row drawn last on the screen gets its mark with its newline.
+
+The last row of the screen region has no newline, so there is nowhere for its
+`cooked-wrap\=' mark to go when it is drawn.  The newline comes later, from
+extending the region for the row below: here the cursor sits under
+`日hel\=' once `DL\=' has taken its continuation, and under an empty row whose
+wide character did not fit in the last column, once at the bottom of the
+screen and once as row 0 after a scroll took the rows above it.  That newline arrived unmarked,
+while the same rows resent over existing lines were marked."
+  (cooked-tests--oracle-check
+   '((nil :rows 3 :cols 5 :rejoin nil :chunks (("日") ("hello" "\e[1M")))
+     (nil :rows 4 :cols 5 :rejoin nil :chunks (("\e[1;3H") ("\e[4;5H日" "\e[2K")))
+     (nil :rows 6 :cols 12 :rejoin t :chunks (("\e[1;3r") ("\e[3;13H" "日本語" "\r\n"))))))
 
 (ert-deftest cooked-render-oracle-a-glyph-run-over-a-torn-wide-character ()
   "Writing over half of a wide character leaves nothing of the other half.
