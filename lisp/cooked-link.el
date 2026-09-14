@@ -713,6 +713,61 @@ they were one."
                                  'mouse-face mouse-face
                                  'face (and goto-address-fontify-p face))))))
 
+(defconst cooked-link--stock-mail-regexp
+  "[-a-zA-Z0-9=._+]+@\\([-a-zA-Z0-9_]+\\.\\)+[a-zA-Z0-9]+"
+  "The value goto-addr gives `goto-address-mail-regexp', spelled out.
+
+`cooked-link--next-mail' finds the start of an address by knowing what this
+pattern is, so it only does that while the variable still holds this pattern.
+A test compares the two, so an Emacs that changes goto-addr's pattern shows
+up as a failure rather than as a scan that quietly stopped matching it.")
+
+(defun cooked-link--next-mail (end)
+  "Move to the end of the next mail address before END and return non-nil.
+
+The match data describes the address, as `re-search-forward' would leave it
+for `goto-address-mail-regexp' bounded by END, and the matches found are the
+same ones.  What differs is the cost on a long unbroken word.  The pattern opens
+with a run of word characters, so a plain search tries it from every position
+in the word and each attempt runs to the end of the word before it fails: a
+1600-character word with no at sign in it cost 14 ms, and 3200 cost 57.  Output
+of long unbroken words -- a base64 blob, a minified bundle -- paid that on
+every screenful.
+
+So while the variable holds goto-addr's own pattern, the search starts from
+the at sign every address has.  `search-forward' finds one in C, and from
+there the address can only begin where the run of characters its local part
+allows begins, one backward class search away.  The pattern is tried once, at
+that position, with the region narrowed to END so that nothing past the bound
+is seen, as the bound would have hidden it.  In \"x user@host.example\" the at
+sign is found at 7, the run before it starts at 3, and the pattern matches
+from 3.  Each character is looked at a bounded number of times, and a word
+with no at sign in it costs one `search-forward'.
+
+The backward search goes no further back than where the search began, which
+after a match is where that address ended, since `re-search-forward' would
+not have looked there either.  In \"a@b.c@d.e\" the first address is a@b.c
+and ends at the second at sign, so the run before that sign is empty and no
+second address is found, which is also what the plain search answers.  A
+pattern of the user's own is searched for plainly, since nothing here knows
+where its matches can begin."
+  (if (not (equal goto-address-mail-regexp cooked-link--stock-mail-regexp))
+      (re-search-forward goto-address-mail-regexp end t)
+    (let ((floor (point))
+          (found nil))
+      (save-restriction
+        (narrow-to-region (point-min) end)
+        (while (and (not found) (search-forward "@" nil t))
+          (let ((at (1- (point))))
+            (goto-char at)
+            (when (re-search-backward "[^-a-zA-Z0-9=._+]" floor 'move)
+              (forward-char 1))
+            (if (and (< (point) at) (looking-at goto-address-mail-regexp))
+                (progn (goto-char (match-end 0))
+                       (setq found t))
+              (goto-char (1+ at))))))
+      found)))
+
 (defun cooked-link--scan (beg end match)
   "Run goto-addr's two patterns over BEG..END, calling MATCH for each hit.
 
@@ -743,7 +798,7 @@ would be a second thing to keep faithful."
                  "mouse-2, C-c RET: follow URL"))))
   (save-excursion
     (goto-char beg)
-    (while (re-search-forward goto-address-mail-regexp end t)
+    (while (cooked-link--next-mail end)
       (funcall match (match-beginning 0) (match-end 0)
                (concat "mailto:" (match-string-no-properties 0))
                goto-address-mail-face goto-address-mail-mouse-face

@@ -1491,5 +1491,68 @@ the URL the edit did not touch is scanned again with the rest."
       (should (equal (get-text-property (+ at 22) 'cooked-link-url)
                      "https://example.com/bbb")))))
 
+(ert-deftest cooked-a-long-word-is-scanned-for-addresses-in-linear-time ()
+  "A long unbroken word must not cost the square of its length to scan.
+
+`goto-address-mail-regexp' opens with a run of word characters, so a plain
+search tries it from every position of a word and runs each try to the end of
+the word.  A 20,000-character word took over two seconds to scan that way,
+which output of long unbroken words paid on every screenful.  Found from the at
+sign instead, the same scan takes about a millisecond, so a quarter of a second
+leaves room for a busy machine on one side and the old cost on the other.
+
+Two words, because the at sign is a case of its own: one with none in it, and
+one whose only at sign ends a 20,000-character local part and starts a domain
+the pattern then refuses."
+  (with-temp-buffer
+    (insert (make-string 20000 ?a) " "
+            (make-string 20000 ?b) "@" (make-string 100 ?c) "\n")
+    (let ((start (float-time))
+          (hits 0))
+      (cooked-link--scan (point-min) (point-max)
+                         (lambda (&rest _) (setq hits (1+ hits))))
+      (should (= hits 0))
+      (should (< (- (float-time) start) (cooked-tests-timeout 0.25))))))
+
+(ert-deftest cooked-the-mail-search-finds-what-goto-addr-finds ()
+  "Searching for addresses from the at sign must find exactly the plain search's.
+
+`cooked-link--next-mail' is faithful to goto-addr only while it knows the
+pattern, so the pattern it knows is compared with goto-addr's own first.  Then
+short random strings over the characters that decide where an address starts
+and ends, the at sign, the dot and the separators among them, are searched both
+ways over a random stretch of each, and every match has to agree.  A Kelvin
+sign and a long s are in the alphabet because they case-fold into the local
+part's letters, which a search that ignored `case-fold-search' would get wrong.
+A pattern of the user's own is searched for plainly."
+  (should (equal cooked-link--stock-mail-regexp
+                 (default-value 'goto-address-mail-regexp)))
+  (let ((alphabet "aZ9@@..-_ +=\nK!\x212A\x17F")
+        ;; A fixed seed, so a failure names the same strings when it is rerun.
+        (_ (random "cooked-mail")))
+    (dolist (case-fold-search '(t nil))
+      (dotimes (_ 2000)
+        (with-temp-buffer
+          (dotimes (_ (random 40))
+            (insert (aref alphabet (random (length alphabet)))))
+          (let* ((beg (1+ (random (point-max))))
+                 (end (+ beg (random (1+ (- (point-max) beg)))))
+                 (plain nil)
+                 (fast nil))
+            (goto-char beg)
+            (while (re-search-forward goto-address-mail-regexp end t)
+              (push (match-data) plain))
+            (goto-char beg)
+            (while (cooked-link--next-mail end)
+              (push (match-data) fast))
+            (should (equal (list (buffer-string) beg end fast)
+                           (list (buffer-string) beg end plain))))))))
+  (with-temp-buffer
+    (insert "one a@b.example two")
+    (goto-char (point-min))
+    (let ((goto-address-mail-regexp "one"))
+      (should (cooked-link--next-mail (point-max)))
+      (should (equal (match-string 0) "one")))))
+
 (provide 'cooked-tests-link)
 ;;; cooked-tests-link.el ends here
