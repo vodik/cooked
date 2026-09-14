@@ -202,7 +202,7 @@ impl KittySetMode {
 ///
 /// Only the two levels cooked honours exist. They differ in which keys they cover, not in
 /// how a covered key is spelled; the rules are xterm's and live with the encoder, in
-/// `cooked--modify-other-p`. Level 1 is the one `emacs -nw` asks for, so it is not a
+/// `cooked--modify-other-mods`. Level 1 is the one `emacs -nw` asks for, so it is not a
 /// curiosity. Level 3 sends unmodified keys as escapes too, which nothing here does, so it
 /// reads as no level at all: a child handed level 2's spelling would still be waiting for
 /// every plain key, and the legacy encoding at least types.
