@@ -267,6 +267,24 @@ fn a_bare_cursor_move_out_of_a_glyph_run_redraws_the_run() {
 }
 
 #[test]
+fn a_forgotten_row_the_cursor_cut_is_redrawn_when_the_cursor_leaves() {
+    // The width guard edited row 0 after it was drawn with the cursor inside `┌──┐`, so
+    // the copy stopped knowing the row. The cursor then leaves without writing anything:
+    // no row is damaged, and the run Lisp cut around the cursor must still be drawn again.
+    let mut t = settled(
+        3,
+        40,
+        "a \u{250c}\u{2500}\u{2500}\u{2510} b\x1b[1;4H".as_bytes(),
+    );
+    t.forget_sent(Some(0));
+    t.feed(b"\x1b[3;1H");
+    assert_eq!(sent(&mut t), vec![0]);
+    // Sent whole and recorded with the cursor elsewhere, so the next move sends nothing.
+    t.feed(b"\x1b[2;1H");
+    assert_eq!(sent(&mut t), Vec::<usize>::new());
+}
+
+#[test]
 fn a_bare_cursor_move_into_a_glyph_run_redraws_the_run() {
     let mut t = settled(
         3,

@@ -211,7 +211,10 @@ impl Front {
         // promotion of every row of a region is one: its rows leave the top, and as many
         // blank rows open below, so every row of it is blank.
         if bottom >= self.rows.len() || count == 0 || count > bottom + 1 - top {
-            // A shift this copy cannot follow; forgetting is always safe.
+            // A shift this copy cannot follow. Forgetting sends each of these rows whole
+            // the next time it is damaged, and a row drawn with the cursor cutting one
+            // of its glyph runs is still asked about when the cursor leaves; see
+            // [`Front::cursor_rows`].
             self.forget_from(top);
             return;
         }
@@ -250,11 +253,17 @@ impl Front {
     /// column shows `┌` as one image and the rest as another for as long as nothing
     /// writes to the row. [`Front::settle_cursor`] keeps this to the row or two the
     /// cursor has actually been on since.
+    ///
+    /// A row the copy has forgotten is among them if it was drawn with the cursor on it.
+    /// Forgetting says the buffer's text for the row may differ, not that the cut is
+    /// gone: the width guard trims a row after it is drawn, and a shift the copy cannot
+    /// follow forgets rows the buffer still holds as they were cut. Such a row matches
+    /// nothing, so asking about it sends it whole, once.
     pub(super) fn cursor_rows(&self) -> impl Iterator<Item = usize> + '_ {
         self.rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.known && row.cursor.is_some())
+            .filter(|(_, row)| row.cursor.is_some())
             .map(|(index, _)| index)
     }
 

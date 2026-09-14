@@ -750,21 +750,27 @@ impl Replay {
         }
         let mut shadow = self.shadow.clone();
         let mut wrapped = self.wrapped.clone();
+        let mut trimmed = self.trimmed.clone();
         shadow.resize(delta.height, Vec::new());
         wrapped.resize(delta.height, false);
+        trimmed.resize(delta.height, false);
         for shift in promotion(delta).iter().chain(&delta.shifts) {
             Self::shift(&mut shadow, *shift);
             Self::shift(&mut wrapped, *shift);
+            Self::shift(&mut trimmed, *shift);
         }
         let sent: Vec<usize> = delta.rows.iter().map(|r| r.index).collect();
         for row in &delta.rows {
             // A row nothing wrote to is still sent when the cursor moves into or out of a
             // glyph run on it, which the reference, knowing no row, never asks about. Its
-            // runs are then the ones Emacs already holds.
+            // runs are then the ones Emacs already holds, unless Lisp trimmed the row, in
+            // which case sending it is what mends it.
             let theirs = reference.rows.iter().find(|r| r.index == row.index);
             assert!(
-                theirs.map_or(shadow.get(row.index) == Some(&row.runs), |r| r.runs
-                    == row.runs),
+                theirs.map_or(
+                    shadow.get(row.index) == Some(&row.runs) || trimmed[row.index],
+                    |r| r.runs == row.runs
+                ),
                 "row {} was sent without the reference sending it the same way",
                 row.index
             );
