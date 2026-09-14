@@ -278,7 +278,9 @@ already loaded and running is a switch in name only — these are separate files
   (require 'cooked-command-search)
   (require 'cooked-consult)             ; wants consult
   (require 'cooked-process)
-  (cooked-process-mode 1))
+  (cooked-process-mode 1)
+  (require 'cooked-eshell)
+  (cooked-eshell-visual-command-mode 1))
 #+end_src
 
 ** cooked-evil
@@ -321,6 +323,12 @@ Wires up [[*Compile integration][compile integration]] inside a cooked buffer �
 
 Wires up [[*Compile integration][compile integration]] for =M-x compile=, =grep= and the
 rest, outside any cooked buffer at all — see below.
+
+** cooked-eshell
+
+~cooked-eshell-visual-command-mode~ runs the programs eshell treats as visual — =vim=,
+=htop=, =less=, whatever ~eshell-visual-commands~ names — in a cooked buffer instead of
+=term-mode=.
 
 ** cooked-comint
 

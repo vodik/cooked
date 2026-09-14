@@ -624,3 +624,11 @@ its name. Those are internals, and they change without notice.
 fills a buffer you made yourself. ghostel's `ghostel-create` and `ghostel-exec` are
 closest to this set; the difference is that `cooked-exec` runs its line in a shell,
 while `ghostel-exec` runs a program by itself, which is `cooked-create` with a list here.
+
+eshell hands the programs it cannot draw — those in `eshell-visual-commands`,
+`eshell-visual-subcommands` and `eshell-visual-options` — to `eshell-exec-visual`, which
+starts them in `term-mode`. `(cooked-eshell-visual-command-mode 1)` from `cooked-eshell`
+starts them with `cooked-create` instead, in a buffer named after the program. It is the
+smaller of eat's two designs: `eat-eshell-mode` renders every command's output inside
+the eshell buffer, which cooked cannot do without a second renderer, since a cooked
+buffer is one terminal from its first line to its last.

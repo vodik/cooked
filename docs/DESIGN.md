@@ -1504,8 +1504,8 @@ lisp/            layered one way, from cooked-util.el up to cooked.el; see "How 
                  cooked-next-error, cooked-command-decorations, cooked-project,
                  cooked-consult, cooked-dnd, cooked-history, cooked-command-search)
                  sit on top and are `require`d, not toggled by a variable.
-                 cooked-process.el is opt-in too, but as an autoloaded minor mode
-                 rather than by being loaded
+                 cooked-process.el and cooked-eshell.el are opt-in too, but as
+                 autoloaded minor modes rather than by being loaded
 shell-integration/  bash, zsh, fish, plus zsh's completion capture
 docs/            this file, plus KEYBOARD, FEATURES, SHELL, TERMINFO, IMAGES, ROADMAP
 tests/           cooked-tests.el loads the suite; the rest are split by subject
