@@ -636,10 +636,18 @@ that make a row exist.  A sweep that misses one of those leaves a hole in the
 transcript the user can type into, which is not a failure any test would show.
 Sweeping text that is already protected costs microseconds; what costs is the
 text the drain actually wrote, and that has to be paid wherever it is paid
-from."
+from.
+
+The sweep runs with change hooks inhibited, for the reason
+`cooked--render-block\=' gives for its property phases.  `add-text-properties\='
+reports a change over the whole range it was handed as soon as one character in
+it lacked the properties, and jit-lock is on that hook: one echoed keystroke
+marked every row of the screen unfontified, and the next redisplay scanned all
+of them for URLs again.  Making text read-only changes nothing any hook reads."
   (when-let* ((screen (cooked--screen-start-position)))
     (let ((tick (buffer-chars-modified-tick))
-          (beg (min screen limit)))
+          (beg (min screen limit))
+          (inhibit-modification-hooks t))
       (pcase cooked--protected
         ;; Nothing moved at all: the previous call\='s answer still stands.
         (`(,(pred (eql tick)) . ,(pred (eql limit))) nil)

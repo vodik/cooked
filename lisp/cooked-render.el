@@ -997,10 +997,23 @@ stranded by having been skipped here."
       ;; old output scanned 67 KB.  Past `goto-address-fontify-maximum-size' the
       ;; scan is skipped outright, and jit-lock still marks the chunk done, so
       ;; the URLs in it were never linked at all.
+      ;;
+      ;; And a side of the held row is scanned only when jit-lock's own chunk
+      ;; reaches into it, not merely because the rounding out to the logical
+      ;; line does.  Typing into a long word rewrites the cursor's row and
+      ;; nothing else, so the chunk is that row; rounding it out and scanning
+      ;; what lay either side rescanned rows that had not changed, once per
+      ;; keystroke, and the regexp is quadratic in an unbroken word: on a
+      ;; 1000-character word 114 columns wide, 920 characters a keystroke.
+      ;; Nothing is lost by skipping them.  Their text is what it was when they
+      ;; were last scanned, and a URL that runs on into the held row is put
+      ;; together whole when the hold is released, since that rescan rounds out
+      ;; to the logical line with no hold left to split it.  The chunk's END is
+      ;; exclusive and the held row's own newline may be in it, hence the `1+'.
       (if (not (and held (< from (cdr held)) (< (car held) to)))
           (cooked--fontify-links from to)
-        (when (< from (car held)) (cooked--fontify-links from (car held)))
-        (when (> to (cdr held)) (cooked--fontify-links (cdr held) to))
+        (when (< beg (car held)) (cooked--fontify-links from (car held)))
+        (when (> end (1+ (cdr held))) (cooked--fontify-links (cdr held) to))
         ;; jit-lock marks the whole chunk fontified regardless of what was
         ;; actually looked at, so the held part has to be remembered and asked
         ;; for again -- see `cooked--release-held-link-row'.  Without this a URL

@@ -209,6 +209,104 @@ chunk of its own the way scrolling there does."
       (should (equal (get-text-property at 'cooked-link-url)
                      "https://scrolled.example/")))))
 
+(defmacro cooked-tests--with-narrow-cat (&rest body)
+  "Run BODY in a 6x20 session whose child echoes what it is sent, byte for byte.
+
+Twenty columns, so a word of a few dozen characters is a logical line of
+several rows, which is the shape the URL guess has to join and the one typing
+into a long word makes."
+  (declare (indent 0))
+  `(let ((buffer (generate-new-buffer "*cooked-narrow*"))
+         (cooked-debug t))
+     (unwind-protect
+         (with-current-buffer buffer
+           (cooked-mode)
+           (setq cooked--rows 6 cooked--cols 20 cooked--last-size '(6 . 20))
+           ;; The handshake is load-bearing: a byte sent before `stty' has run
+           ;; is echoed by the line discipline and then again by `cat'.
+           (cooked--start '("/bin/sh" "-c" "stty raw -echo; printf 'READY\\r\\n'; exec cat"))
+           (cooked--refresh-keymap)
+           (should (cooked-tests--settle
+                    (lambda () (string-search "READY" (cooked-tests--text)))))
+           ,@body)
+       (with-current-buffer buffer (cooked--cleanup))
+       (kill-buffer buffer))))
+
+(defun cooked-tests--count-char (char)
+  "How many times CHAR occurs in the buffer, case and all."
+  (seq-count (lambda (c) (eq c char)) (buffer-string)))
+
+(defun cooked-tests--type-and-settle (string predicate)
+  "Send STRING to the child and wait until PREDICATE holds."
+  (cooked--send-to-child string)
+  (should (cooked-tests--settle predicate)))
+
+(ert-deftest cooked-typing-into-a-long-word-scans-nothing-until-the-cursor-leaves ()
+  "A keystroke on the last row of a long word must not rescan the word.
+
+Two things used to make it.  `cooked--protect' re-applied the read-only
+properties over the whole screen with change hooks live, so jit-lock was told
+every row had changed and marked the screen unfontified on every drain that
+inserted a character.  And `cooked--fontify-region', asked for the cursor's row
+alone, rounded it out to the logical line and scanned the rows either side of
+the hold, which had not changed.  The regexp is quadratic in the length of an
+unbroken word, so on a 1000-character line that was 6.7 ms a keystroke against
+0.5 ms with links off.
+
+Seventy characters fill three rows and ten of a fourth, so five more keep the
+cursor on that row and the scan has no reason to look at anything."
+  (cooked-tests--with-narrow-cat
+    (cooked-tests--type-and-settle
+     (make-string 70 ?a)
+     (lambda () (= 70 (cooked-tests--count-char ?a))))
+    (cooked-tests--fontify)
+    (should (> (count-lines (point-min) (point-max)) 3))
+    (let* ((scanned 0)
+           (count (lambda (beg end) (setq scanned (+ scanned (- end beg))))))
+      (advice-add 'cooked--fontify-links :before count)
+      (unwind-protect
+          (dotimes (i 5)
+            (cooked-tests--type-and-settle
+             "a" (lambda () (= (+ 71 i) (cooked-tests--count-char ?a))))
+            ;; Only the cursor's row was rewritten, so only it is owed a look.
+            (let ((row (save-excursion (goto-char (cooked--cursor-position))
+                                       (line-beginning-position))))
+              (should-not (text-property-any (point-min) row 'fontified nil)))
+            (cooked-tests--fontify))
+        (advice-remove 'cooked--fontify-links count))
+      (should (= scanned 0)))))
+
+(ert-deftest cooked-a-long-word-that-becomes-a-url-is-linked-whole ()
+  "Declining the cursor's row must not leave a stale guess about its line.
+
+The child writes a fifty-character word, which ends on its third row, and then
+rewrites the word's first row to begin with a scheme while the cursor stays where it
+was.  The rewritten row is scanned at once, since only the cursor's own row is
+held.  Once the cursor leaves the line, the whole of it is scanned again and
+every row of it carries the one URL."
+  (cooked-tests--with-narrow-cat
+    (cooked-tests--type-and-settle
+     (make-string 50 ?a)
+     (lambda () (= 50 (cooked-tests--count-char ?a))))
+    (cooked-tests--fontify)
+    (should-not (cooked-tests--url-runs))
+    (cooked-tests--type-and-settle
+     "\e7\e[2;1Hhttps://x.example/\e8"
+     (lambda () (string-search "https" (cooked-tests--text))))
+    (cooked-tests--fontify)
+    (should (string-prefix-p "https://x.example/"
+                             (get-text-property (cooked-tests--link-at "https")
+                                                'cooked-link-url)))
+    (cooked-tests--type-and-settle
+     "\r\nnext"
+     (lambda () (string-search "next" (cooked-tests--text))))
+    (cooked-tests--fontify)
+    (let ((url (concat "https://x.example/" (make-string 32 ?a)))
+          (runs (cooked-tests--url-runs)))
+      (should (= (length runs) 3))
+      (dolist (run runs)
+        (should (equal (nth 2 run) url))))))
+
 (ert-deftest cooked-an-explicit-link-wins-over-the-guess ()
   ;; The text is a URL *and* an OSC 8 span pointing somewhere else.  What the child
   ;; said wins, and the guess is dropped rather than layered underneath it.
