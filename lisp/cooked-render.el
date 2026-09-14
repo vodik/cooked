@@ -331,7 +331,7 @@ when it is shown, however much scrollback went in above it meanwhile."
       ;; though it had been cut from that row's line.  The head is the drain's own,
       ;; the screen's `cooked--grid' being otherwise left as it was.
       (setf (cooked-grid-head cooked--grid) (plist-get update :head))
-      (cooked--split-seam)
+      (cooked--split-seam (and batch-start (plist-get update :alt)))
       (cooked--relocate-marks (plist-get update :marks) batch-start)
       (cooked--set-mode (plist-get update :mode))
       (cooked--batching-replies cooked--session
@@ -813,7 +813,7 @@ and the region shaped before anything measures it."
     ;; took.  Reset after the assertion had already looked, the claim was still
     ;; standing when it looked, which is why the assertion had to exclude this
     ;; mode instead of covering it.  See `cooked--split-seam'.
-    (cooked--split-seam)
+    (cooked--split-seam (and batch-start (plist-get update :alt)))
     (when cooked-debug (cooked--check-seam))
     (cooked--restore-pending-input pending)
     (cooked--protect (or (and (cooked--input-state-p) (cooked--input-start-position))

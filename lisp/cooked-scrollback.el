@@ -35,6 +35,7 @@
 (require 'cooked-command)
 (require 'cooked-deco)
 (require 'cooked-pending)
+(require 'cooked-screen)
 
 (cooked--declare-core)
 
@@ -81,7 +82,7 @@ almost every drain of a flood, and each deletion costs a walk of the text being
 cut to find the images in it -- so the buffer is allowed to overshoot and the
 cost is paid once for many lines instead of many times for one.")
 
-(defun cooked--split-seam ()
+(defun cooked--split-seam (&optional unseen)
   "Drop the emulator's carry once the buffer has stopped holding a continuation.
 
 The seam is one number the two ends co-own: how much of screen row 0's logical
@@ -117,16 +118,31 @@ notices.  Which is also why `cooked-toggle-rejoin-wrapped-lines' needs nothing
 of its own: at the moment the flag flips the two ends still agree, so a resize
 arriving before the next drain rewraps against a head that is really there.
 
-Called once per drain from `cooked--trim-scrollback', because every eviction of
-a wrapped row makes the claim again.  Two integer comparisons on the drains
-where there is nothing to do."
+UNSEEN non-nil says the drain showed the alternate screen and brought
+scrollback.  Its `:head' is then 0 whatever the primary carries, so the claim
+cannot be read off it, yet a resize under `less' pushes the primary's rows
+off the top and makes the claim as any eviction does.  Ten `=' at 4 columns
+on a 3-row screen, resized to 1x4 under the alternate screen, hand a wrapped
+`====' over and leave a carry of 4 that the drain reports as 0; resized again
+to 1x3, the rewrap cut a stub `=' off row 0 to top that carry up.  So such a
+drain forgets the carry whenever the buffer line it would continue has ended,
+which is harmless when there was none.  That line ends above the newline
+`cooked--place-seam' holds while the alternate screen is shown, if one is.
+
+Called once per drain from `cooked--apply' and `cooked--apply-withheld',
+because every eviction of a wrapped row makes the claim again.  Two integer
+comparisons on the drains where there is nothing to do.  Widens to look, since
+the drain that leaves the alternate screen is still narrowed to it here."
   (when (and cooked--session
              (not cooked-rejoin-wrapped-lines)
-             (/= 0 (cooked-grid-head cooked--grid)))
-    (when-let* ((start (cooked--screen-start-position))
-                ((save-excursion (goto-char start) (bolp))))
-      (cooked--forget-history cooked--session)
-      (setf (cooked-grid-head cooked--grid) 0))))
+             (or unseen (/= 0 (cooked-grid-head cooked--grid))))
+    (when-let* ((start (cooked--screen-start-position)))
+      (save-restriction
+        (widen)
+        (let ((line (or (cooked--held-seam start) start)))
+          (when (or (= line (point-min)) (eq (char-before line) ?\n))
+            (cooked--forget-history cooked--session)
+            (setf (cooked-grid-head cooked--grid) 0)))))))
 
 (defvar-local cooked--scrollback-counted nil
   "Where `cooked--scrollback-newlines' last counted to.

@@ -874,6 +874,52 @@ inside one drain."
         (should (= first (+ start 1)))
         (should (= last (+ start 9)))))))
 
+(ert-deftest cooked-render-oracle-resizes-under-the-alternate-screen-without-rejoining-cut-no-stub ()
+  "Resizes under `less' with rejoining off rewrap the primary against no head.
+
+With `cooked-rejoin-wrapped-lines' off every row handed over ends its line, so
+the core must count none of row 0's line as already in the buffer.  A drain
+that shows the alternate screen says its head is 0 whatever the primary's
+carry is, so the carry a resize made by pushing a wrapped row off the primary
+stood, and the next resize cut a stub off row 0 to top it up.  Ten `=' at
+4 columns on a 3-row screen, the alternate screen shown, then 1x4 and 1x3,
+left `====\\n====\\n=\\n=' where `====\\n====\\n==' belongs.  Likewise when
+the drain that switches screens is the one that pushes the wrapped row off,
+whether drains are whole or leave the screen out."
+  (dolist (run '((3 4 (("==========") ("\e[?1049h") ((resize 1 4)) ((resize 1 3)) ("\e[?1049l"))
+                    ("====" "====" "=="))
+                 (3 4 (("==========") ("\e[?1049h") ((resize 1 4)) ((resize 1 3)) ("\e[?1049l"))
+                    ("====" "====" "==")
+                    hidden)
+                 (2 4 (("==========" "\e[?1049h") ((resize 1 3)) ("\e[?1049l"))
+                    ("====" "===" "==="))
+                 (3 4 (("=========================") ("\e[?1049h") ((resize 2 4)) ((resize 1 5))
+                       ("\e[?1049l"))
+                    ("====" "====" "====" "====" "====" "====="))))
+    (pcase-let* ((`(,rows ,cols ,chunks ,lines ,hidden) run)
+                 (buffer (cooked-tests--oracle-buffer rows cols))
+                 (cooked-debug t)
+                 (drains 0))
+      (unwind-protect
+          (progn
+            (dolist (chunk chunks)
+              (cooked-tests--oracle-feed buffer chunk)
+              ;; Every drain but the first and the last leaves the screen out when
+              ;; HIDDEN, so the resizes are drained by a buffer no window shows.
+              (setq drains (1+ drains))
+              (cooked-tests--oracle-drain
+               buffer nil (lambda () (and hidden (< 1 drains (length chunks)) 'hidden))))
+            (with-current-buffer buffer
+              (should (equal (split-string
+                              (string-trim-right
+                               (save-restriction
+                                 (widen)
+                                 (buffer-substring-no-properties (point-min) (point-max))))
+                              "\n")
+                             lines))))
+        (with-current-buffer buffer (cooked--cleanup))
+        (kill-buffer buffer)))))
+
 ;; Detected links are checked against the text they cover after every drain;
 ;; see the Commentary.
 
