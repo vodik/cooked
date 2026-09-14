@@ -266,6 +266,27 @@ exactly the text it covers."
     (cooked-tests-process--with "echo one; echo two"
       (should (equal (cooked-tests-process--body) "one\ntwo")))))
 
+(ert-deftest cooked-process-honours-auto-jump-to-first-error ()
+  "`compilation-auto-jump-to-first-error' visits the first error of a pty build.
+
+ghostel's compile buffer is a terminal until the build ends, so it has to jump
+by hand.  This one is a `compilation-mode' buffer throughout, and the error
+reaches `compilation-filter' as text: `compilation-start' arms the jump and the
+parse takes it.  Both ways an error arrives are checked, a line that scrolled
+off the grid while the child ran and a line only the flush at exit hands over."
+  (let ((file (make-temp-file "cooked-process-jump" nil ".c"))
+        (compilation-auto-jump-to-first-error t))
+    (with-temp-file file (dotimes (_ 20) (insert "\n")))
+    (unwind-protect
+        (dolist (after (list (format "seq 1 %d; sleep 0.5" (* 2 cooked-process-rows)) "true"))
+          (cooked-tests-process--with
+              (format "printf '%s:12:3: error: jump here\\n'; %s; exit 1" file after)
+            (should (cooked-tests--settle (lambda () (get-file-buffer file)) 2))
+            (with-current-buffer (get-file-buffer file)
+              (should (= (line-number-at-pos) 12))
+              (kill-buffer))))
+      (delete-file file))))
+
 (defun cooked-tests-process--tail ()
   "The live tail\='s text in the current buffer, or nil if none is showing."
   (when-let* ((overlay (seq-find (lambda (o) (overlay-get o 'after-string))
