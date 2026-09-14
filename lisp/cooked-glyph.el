@@ -619,11 +619,11 @@ The one-shape case of `cooked--bitmap-tile', which is what a border row is."
 (defun cooked--render-box-glyph-cell (bits width height)
   "Unpacked single-cell bitmap for glyph descriptor BITS at WIDTH x HEIGHT.
 
-The shape math -- `cooked--box-draw-arc\='s per-pixel coverage among it --
+The shape math -- `cooked--box-draw-arc's per-pixel coverage among it --
 lives entirely here and nowhere else, which is what makes this the one half of
-`cooked--render-box-glyph\=' worth caching without a run length in the key: a
+`cooked--render-box-glyph' worth caching without a run length in the key: a
 shape at a given size is drawn exactly once no matter how many adjacent cells
-later tile it.  See `cooked--pack-box-glyph-cell\=' for the other half."
+later tile it.  See `cooked--pack-box-glyph-cell' for the other half."
   (let ((bitmap (cooked--bitmap-make width height)))
     (if (cooked--box-block-p bits)
         (cooked--box-draw-block bitmap bits)
@@ -655,9 +655,9 @@ The one-shape case of `cooked--pack-box-glyph-run'."
 COUNT, defaulting to 1, is how many adjacent cells draw this shape: the bitmap
 comes back COUNT cells wide, holding COUNT copies of it, so that a whole run can
 be displayed as one image.  A thin wrapper over `cooked--render-box-glyph-cell'
-and `cooked--pack-box-glyph-cell\=' kept for callers -- tests among them -- that
+and `cooked--pack-box-glyph-cell' kept for callers -- tests among them -- that
 want the raw pixels in one call and have no reason to cache the two halves
-separately; `cooked--box-glyph-bits\=' in cooked-deco.el is the caller that does."
+separately; `cooked--box-glyph-bits' in cooked-deco.el is the caller that does."
   (cooked--pack-box-glyph-cell
    (cooked--render-box-glyph-cell bits width height) count))
 

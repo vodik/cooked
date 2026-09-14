@@ -77,13 +77,13 @@ number of lines."
 (ert-deftest cooked-process-gives-the-child-a-sized-named-terminal ()
   "The child gets a terminal with a size and a name, which is the whole point.
 
-Not a terminal at all -- it had one of those already.  `compilation-start\='
-never binds `process-connection-type\=', so a stock `emacs -Q\=' compile runs
-its child on a pty and `[ -t 1 ]\=' has always said yes.  What that pty reports
-is `stty size\=' of `0 0\=' and whatever TERM the environment Emacs was launched
+Not a terminal at all -- it had one of those already.  `compilation-start'
+never binds `process-connection-type', so a stock `emacs -Q' compile runs
+its child on a pty and `[ -t 1 ]' has always said yes.  What that pty reports
+is `stty size' of `0 0' and whatever TERM the environment Emacs was launched
 from happened to carry, and those are the two answers a program reads as
 \"no terminal here\": cargo draws its bar at 120x40 and draws nothing at 0x0,
-and a child told `TERM=dumb\=' emits no escape sequences at all however wide
+and a child told `TERM=dumb' emits no escape sequences at all however wide
 its terminal is.
 
 So the assertion is the geometry and the name, not the tty."
@@ -104,7 +104,7 @@ been drained, every later reply waits until Lisp says it has handled that
 drain.  A headless session that never said so held back every reply after the
 first query for as long as the child lived, which is what the second DA1 here
 checks.  The child reads until a second passes with nothing to read, and
-prints what came, `ESC\=' spelled as `E\='."
+prints what came, `ESC' spelled as `E'."
   (cooked-tests-process--with
       (concat "stty -icanon -echo min 0 time 10; "
               "printf '\\033]11;?\\033\\\\\\033[c'; cat | tr '\\033' E; "
@@ -137,10 +137,10 @@ anything else here would be a regression in the only case that is common."
 (ert-deftest cooked-process-resolves-carriage-returns ()
   "A meter redrawn in place retires as its final state, not as three lines.
 
-Emacs gets this case right already -- `comint-carriage-motion\=' runs from
-`compilation-filter\=' -- so the assertion is that nothing here regressed it,
+Emacs gets this case right already -- `comint-carriage-motion' runs from
+`compilation-filter' -- so the assertion is that nothing here regressed it,
 which is worth having precisely because it is the common shape.  Where the two
-part company is `cooked-process-overwrites-rather-than-deleting-on-return\=':
+part company is `cooked-process-overwrites-rather-than-deleting-on-return':
 comint deletes to the start of the line and a terminal overwrites."
   (cooked-tests-process--with
       "for i in 1 2 3; do printf 'Building [%s]\\r' $i; done; printf '\\ndone\\n'"
@@ -149,20 +149,20 @@ comint deletes to the start of the line and a terminal overwrites."
 (ert-deftest cooked-process-overwrites-rather-than-deleting-on-return ()
   "A carriage return moves the cursor; it does not erase what it moved over.
 
-The divergence from `comint-carriage-motion\=', whose docstring says it makes
+The divergence from `comint-carriage-motion', whose docstring says it makes
 \"single carriage returns delete to the beginning of the line\".  That is the
 right approximation for a meter, which reprints its whole line every time, and
 the wrong one whenever the second write is shorter than the first: the tail of
 the earlier text is still on the screen of any real terminal, and comint has
-thrown it away.  Measured on the stock path, the line below arrives as `XYZ\='."
+thrown it away.  Measured on the stock path, the line below arrives as `XYZ'."
   (cooked-tests-process--with "printf 'abcdefghij\\rXYZ\\n'"
     (should (equal (cooked-tests-process--body) "XYZdefghij"))))
 
 (ert-deftest cooked-process-applies-an-erase-to-end-of-line ()
-  "`CSI K\=' takes effect, where nothing in Emacs would have applied it.
+  "`CSI K' takes effect, where nothing in Emacs would have applied it.
 
-Past the carriage return and the backspace, Emacs stops: `comint-carriage-motion\='
-knows those two characters and `ansi-color\=' drops every non-SGR sequence it
+Past the carriage return and the backspace, Emacs stops: `comint-carriage-motion'
+knows those two characters and `ansi-color' drops every non-SGR sequence it
 meets.  So an erase is the first thing on this path that no consumer could have
 resolved for itself -- the text it removes was already emitted, and only a grid
 is holding it.
@@ -288,17 +288,17 @@ off the grid while the child ran and a line only the flush at exit hands over."
       (delete-file file))))
 
 (defun cooked-tests-process--tail ()
-  "The live tail\='s text in the current buffer, or nil if none is showing."
+  "The live tail's text in the current buffer, or nil if none is showing."
   (when-let* ((overlay (seq-find (lambda (o) (overlay-get o 'after-string))
                                  (overlays-in (point-min) (point-max)))))
     (overlay-get overlay 'after-string)))
 
 (defmacro cooked-tests-process--while (command &rest body)
-  "Run COMMAND under `cooked-process-mode\=' and evaluate BODY while it runs.
+  "Run COMMAND under `cooked-process-mode' and evaluate BODY while it runs.
 
 The other macro waits for the child to finish, which is exactly wrong for the
 live grid: everything the tail says is gone by then, on purpose.  BODY is
-evaluated in the consumer\='s buffer with the child still going, and the child
+evaluated in the consumer's buffer with the child still going, and the child
 is interrupted afterwards however BODY leaves."
   (declare (indent 1))
   `(let ((cooked-process-mode nil)
@@ -334,7 +334,7 @@ why there is something here that reads it from there."
   "A cell rewritten in place reaches the tail, although only it is sent.
 
 The core sends the changed character alone, as an edit of the row it last sent,
-and the tail\='s copy of the row has to take the edit at the right offset."
+and the tail's copy of the row has to take the edit at the right offset."
   (cooked-tests-process--while
       "printf 'working | done'; sleep 0.3; printf '\\033[9G/'; sleep 30"
     (should (cooked-tests--settle
@@ -357,9 +357,9 @@ line out of date and the last one twice."
 (ert-deftest cooked-process-tail-is-not-buffer-text ()
   "The tail is an overlay, so nothing that parses the buffer can see it.
 
-The whole reason it is allowed to exist in a foreign consumer\='s buffer: a
-`compilation-mode\=' regexp scanning for a diagnostic must not match a frame of
-a progress bar, and `next-error\=' must not be able to land in one."
+The whole reason it is allowed to exist in a foreign consumer's buffer: a
+`compilation-mode' regexp scanning for a diagnostic must not match a frame of
+a progress bar, and `next-error' must not be able to land in one."
   (cooked-tests-process--while
       "printf 'src/main.rs:1:1: error: half-drawn\\r'; sleep 30"
     (should (cooked-tests-process--tail))
@@ -369,8 +369,8 @@ a progress bar, and `next-error\=' must not be able to land in one."
 (ert-deftest cooked-process-tail-adds-no-blank-line ()
   "The tail begins where the retired text left off, not a line below it.
 
-Retired rows arrive with their newline, so `point-max\=' is already at column
-zero and a newline of the tail\='s own is a blank line sitting between the
+Retired rows arrive with their newline, so `point-max' is already at column
+zero and a newline of the tail's own is a blank line sitting between the
 output and the bar -- for the length of the build, the tail being replaced
 rather than moved.  Nine rows against a grid of eight, so something has
 certainly retired by the time the tail is read."
@@ -387,7 +387,7 @@ certainly retired by the time the tail is read."
 (ert-deftest cooked-process-tail-clears-a-half-retired-line ()
   "A drain that retired half a logical line gets the newline back.
 
-`Update::scrolled_rows\=' withholds the newline after a row it expects to
+`Update::scrolled_rows' withholds the newline after a row it expects to
 rejoin, so the buffer can end mid-line, and the tail has to start below that
 rather than welding onto the end of it.
 
@@ -417,7 +417,7 @@ residue the flush retires."
     (should (equal (cooked-tests-process--body) "one\ntwo"))))
 
 (ert-deftest cooked-process-tail-can-be-turned-off ()
-  "With `cooked-process-live-tail\=' nil the buffer is only retired text."
+  "With `cooked-process-live-tail' nil the buffer is only retired text."
   (let ((cooked-process-live-tail nil))
     (cooked-tests-process--while
         "printf 'Building [==>]\\r'; sleep 30"
@@ -441,7 +441,7 @@ being the pipe's own fictional exit, always says the build succeeded."
                                   (split-string (buffer-string) "\n"))))))
 
 (ert-deftest cooked-process-interrupts-the-process-group ()
-  "`kill-compilation\=' reaches the child, and its output survives the kill.
+  "`kill-compilation' reaches the child, and its output survives the kill.
 
 Spelled out rather than written through the macro, which waits for the child
 to finish first -- and this child is chosen not to."
@@ -500,14 +500,14 @@ outlive the buffer unless something reaps them."
     'ordinary))
 
 (ert-deftest cooked-process-declines-a-remote-directory ()
-  "A remote `default-directory\=' keeps the ordinary spawner.
+  "A remote `default-directory' keeps the ordinary spawner.
 
 Not a preference: our pty is local whatever the directory says, so taking this
 one would not degrade a remote compile but run a different command on a
 different machine -- against the local checkout, if one sits at that path.
 
-The advice is called directly, with a stand-in for `compilation-start\=' that
-reports which spawner was in place when it ran.  Rebinding `compilation-start\='
+The advice is called directly, with a stand-in for `compilation-start' that
+reports which spawner was in place when it ran.  Rebinding `compilation-start'
 itself would have replaced the advice along with it and asserted nothing."
   (let (reached)
     (let ((default-directory "/ssh:nowhere:/tmp/"))
@@ -522,9 +522,9 @@ itself would have replaced the advice along with it and asserted nothing."
     (should (eq reached 'cooked))))
 
 (ert-deftest cooked-process-declines-grep-mode ()
-  "`grep-mode\=' keeps its escape sequences, which it parses rather than shows.
+  "`grep-mode' keeps its escape sequences, which it parses rather than shows.
 
-`grep' asks for `--color=always' and `grep-filter\=' turns the result into the
+`grep' asks for `--color=always' and `grep-filter' turns the result into the
 face on each match, so resolving the styling away -- the service this file
 offers every other consumer -- would cost a grep buffer its highlighting."
   (let (reached)

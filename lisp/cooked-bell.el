@@ -27,7 +27,7 @@
   "Function called, in the session's buffer and with no arguments, on a BEL.
 
 Called at most once per drain, however many BELs the child sent in it: a
-`cat\=' of a binary that sends two hundred in one read calls it once.  Bells
+`cat' of a binary that sends two hundred in one read calls it once.  Bells
 in different drains are separate calls, so a function that makes a noise still
 has to do its own rate limiting; the default does.  A signal from it is caught
 and reported once, like any other seam inside a drain.
@@ -62,10 +62,10 @@ would let a dozen of them sound a dozen times.")
 (defun cooked-bell-ring ()
   "Ring the bell, without ending a keyboard macro that happens to be running.
 
-A plain `ding\=' also terminates an executing keyboard macro, by signalling
-`user-error\='.  That is right for a command that failed, and wrong for output
+A plain `ding' also terminates an executing keyboard macro, by signalling
+`user-error'.  That is right for a command that failed, and wrong for output
 that arrived while a macro ran: the macro is not what rang, and a
-`kmacro-call-macro\=' with a repeat count would stop after the first iteration
+`kmacro-call-macro' with a repeat count would stop after the first iteration
 because some unrelated session printed a BEL."
   (ding t))
 
@@ -87,13 +87,13 @@ the output that rang is on screen for you to read.  The frame need not have
 focus, so a session left on screen still rings while you are in another
 application.
 
-This is where cooked parts from tmux, whose default `bell-action any\=' both
+This is where cooked parts from tmux, whose default `bell-action any' both
 rings and marks a hidden window.  tmux has one status line to point at the
 window that rang; Emacs has many buffers and no such place, so a sound from
 nowhere visible would send you looking without saying where.  A hidden bell
 is silent, and the mark is the whole of what it does.
 
-The noise is `cooked-bell-ring\=', so a bell never ends a keyboard macro."
+The noise is `cooked-bell-ring', so a bell never ends a keyboard macro."
   (if (get-buffer-window (current-buffer))
       (let ((now (float-time)))
         (unless (and cooked--bell-last
@@ -107,9 +107,9 @@ The noise is `cooked-bell-ring\=', so a bell never ends a keyboard macro."
 (defun cooked--reset-bell ()
   "Forget a bell this buffer rang unseen, because the child sent RIS.
 
-A `reset\=' is typed to put a terminal back as it was, and a mark from before it
-would outlast everything else that the reset cleared.  For example, `reset\='
-after a `cat\=' of a binary that rang would otherwise leave `bell\=' on the mode
+A `reset' is typed to put a terminal back as it was, and a mark from before it
+would outlast everything else that the reset cleared.  For example, `reset'
+after a `cat' of a binary that rang would otherwise leave `bell' on the mode
 line, pointing at output the reset has just wiped."
   (when cooked-bell-pending
     (setq cooked-bell-pending nil)

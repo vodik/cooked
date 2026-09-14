@@ -33,7 +33,7 @@
 (require 'cooked-bench)
 
 (ert-deftest cooked-bench-style-records-are-the-stride-the-reader-steps-by ()
-  "`cooked--render-block\=' finds the next span by adding `cooked--style-record\='
+  "`cooked--render-block' finds the next span by adding `cooked--style-record'
 and never by decoding a length, so a fixture whose records are a different width
 does not fail -- it reads every span after the first out of its neighbour's
 bytes.  One record, one stride, asserted against the constant itself."
@@ -49,8 +49,8 @@ bytes.  One record, one stride, asserted against the constant itself."
     (should (= (cooked--u32 packed cooked--style-link) 7))))
 
 (ert-deftest cooked-bench-style-records-resolve-to-the-rendition-they-name ()
-  "A fixture\='s rendition id resolves, through the table the fixture installs,
-to the face the same rendition spelled out has.  `cooked--face\=' is the entry
+  "A fixture's rendition id resolves, through the table the fixture installs,
+to the face the same rendition spelled out has.  `cooked--face' is the entry
 point for a caller holding decoded colours, which makes it the independent
 statement of the answer.  Both a palette colour and a truecolor one, because a
 fixture that packed the tag wrong would still look right on one of them."
@@ -84,17 +84,17 @@ Two things this needs in order to assert anything, and it asserted nothing
 without either.
 
 *Forty columns, not eighty.*  The stale two-bytes-per-character encoding read as
-four-byte runs gives a first record of `bits\=' #x50 and `count\=' #x50 -- the next
+four-byte runs gives a first record of `bits' #x50 and `count' #x50 -- the next
 glyph's low byte -- and at eighty columns that count *is* eighty, so the row came
 out correctly decorated by coincidence.  A width whose low byte is not the glyph's
 own leaves nothing to coincide.
 
-*`cooked-debug\=' bound.*  The records after the first run past the row, and
-`cooked--apply-deco\=' is wrapped in `cooked--protect-seam\=', which outside
-`cooked-debug\=' catches that and reports it once -- so the overrun was swallowed
-and the count came back plausible.  `cooked-tests--with-session\=' binds the flag
+*`cooked-debug' bound.*  The records after the first run past the row, and
+`cooked--apply-deco' is wrapped in `cooked--protect-seam', which outside
+`cooked-debug' catches that and reports it once -- so the overrun was swallowed
+and the count came back plausible.  `cooked-tests--with-session' binds the flag
 for the whole suite for exactly this reason and states it in its docstring;
-`cooked-bench--with-session\=' does not, because the benchmark wants a drain to
+`cooked-bench--with-session' does not, because the benchmark wants a drain to
 survive a cosmetic failure rather than stop for it.  So it is bound here, around
 the one call under test."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
@@ -112,15 +112,15 @@ the one call under test."
       (should (= decorated 40)))))
 
 (ert-deftest cooked-bench-tree-rows-take-the-path-real-tree-output-takes ()
-  "The `tree\=' fixture is what the core sends for a `tree -C\=' listing.
+  "The `tree' fixture is what the core sends for a `tree -C' listing.
 
 It used to be written by hand, with its NO-BREAK SPACE padding outside every
-glyph record, so each row was flagged nil and measured the width guard\='s slow
-path -- a path real `tree\=' output never takes, because the core absorbs the
+glyph record, so each row was flagged nil and measured the width guard's slow
+path -- a path real `tree' output never takes, because the core absorbs the
 blanks between two glyph runs into the run.  Now the rows come from the
 emulator, and this pins the two facts that make the fixture honest.
 
-Every row drawn with box glyphs is flagged `glyph\=' and carries one decoration
+Every row drawn with box glyphs is flagged `glyph' and carries one decoration
 record, since a vertical, its padding and the branch after it are one run.  And
 once applied, every box-drawing character is decorated while the names beside
 them are not, which is the check a byte-level assertion cannot make."
@@ -175,32 +175,32 @@ position at which every one of the four fields is distinct."
 
 (ert-deftest cooked-bench-image-rows-coalesce-to-one-run-a-row ()
   "The consequence, and the assertion that would survive a wire format this file
-has not thought of: applying the fixture has to leave one `display\=' run and one
-`cooked-deco\=' run *per screen row*, forty cells wide, because that is the state
-94b43e6 produced and the whole of what `cooked-bench-image\=' claims to be timing.
+has not thought of: applying the fixture has to leave one `display' run and one
+`cooked-deco' run *per screen row*, forty cells wide, because that is the state
+94b43e6 produced and the whole of what `cooked-bench-image' claims to be timing.
 
 The failure this guards is not a crash.  A fixture whose CCOLs did not rise by
 one -- every cell claiming column 0, say, which is the shape a per-row record
 would decode to -- still applies, still decorates every cell, and still reports
 a number.  It would just report the per-cell cost the change removed, labelled
 as the coalesced one, and the benchmark would say the commit did nothing.
-Reverting 94b43e6\='s cooked-deco.el hunk turns the seven runs below into a
+Reverting 94b43e6's cooked-deco.el hunk turns the seven runs below into a
 hundred and sixty-three, so this is the assertion that fails on the old code.
 
 Asserted as \"every decorated run is a whole row wide\" and not as a total over
 the buffer, which is what it said first, because a total is hostage to how many
-rows the buffer has and one thing in the suite takes a row away.  `evil-mode\='
-is a global minor mode, `cooked-a-mouse-report-in-visual-state-leaves-evil-agreeing\='
+rows the buffer has and one thing in the suite takes a row away.  `evil-mode'
+is a global minor mode, `cooked-a-mouse-report-in-visual-state-leaves-evil-agreeing'
 turns it on and nothing turns it off, so every test after it in the run has evil
-loaded -- and with evil loaded, `cooked--set-mode\=' drives an evil state exit,
-whose hook calls `evil-maybe-remove-spaces\=', which deletes a line consisting
+loaded -- and with evil loaded, `cooked--set-mode' drives an evil state exit,
+whose hook calls `evil-maybe-remove-spaces', which deletes a line consisting
 entirely of whitespace.  An image cell *is* a blank, so a frame of picture loses
 the row point is standing on and the total comes back one short.  That is worth
-knowing and is not this test\='s subject: the run width says exactly what
+knowing and is not this test's subject: the run width says exactly what
 coalescing means and says it about whichever rows survived.
 
-`cooked-debug\=' bound for the reason `cooked-bench-box-rows-decorate-every-cell-they-claim\='
-binds it: `cooked--apply-deco\=' runs inside `cooked--protect-seam\=', which outside
+`cooked-debug' bound for the reason `cooked-bench-box-rows-decorate-every-cell-they-claim'
+binds it: `cooked--apply-deco' runs inside `cooked--protect-seam', which outside
 the flag swallows a malformed record and lets the row come back plausible."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-bench--settle-briefly)
@@ -264,9 +264,9 @@ last of which is the one the fixture wrote."
                        (make-string 40 ?x)))))))
 
 (defun cooked-tests-bench--uniformity (line offset decos)
-  "The UNIFORM the core would send for LINE, given the run\='s DECOS.
+  "The UNIFORM the core would send for LINE, given the run's DECOS.
 
-OFFSET is added to a decoration\='s start to make it relative to LINE."
+OFFSET is added to a decoration's start to make it relative to LINE."
   (if (= (string-bytes line) (length line))
       t
     (let ((covered (make-bool-vector (length line) nil)))
@@ -282,30 +282,30 @@ OFFSET is added to a decoration\='s start to make it relative to LINE."
            'glyph))))
 
 (ert-deftest cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need ()
-  "A fixture is one run -- `(0 . BLOCK)\=' -- and a block is (TEXT STYLE-SPANS
+  "A fixture is one run -- `(0 . BLOCK)' -- and a block is (TEXT STYLE-SPANS
 DECO-SPANS LINK-SPANS ROWS), where ROWS has one (START WIDTH UNIFORM) per screen
 row.  Every generator here has to supply it, and the row table has to describe
 the text it rides on.
 
 The measurements are the ones that went stale before, and they went stale in the
 quietest way this file has yet seen.  Nothing reads them in
-`cooked--render-block\='; `cooked--render-rows\=' reads them off the block
-afterwards and hands them to `cooked--guard-row-width\=', which does nothing at
+`cooked--render-block'; `cooked--render-rows' reads them off the block
+afterwards and hands them to `cooked--guard-row-width', which does nothing at
 all unless the buffer is displayed.  The benchmark displayed nothing, so blocks
 missing them drove every figure in the file for as long as they existed, and the
 moment a window was attached the guard got a nil WIDTH and the run died in
-`cooked--row-mismeasured-p\='.  A crash was the lucky outcome: had the fixture
+`cooked--row-mismeasured-p'.  A crash was the lucky outcome: had the fixture
 said a WIDTH the guard could work with and UNIFORM t, it would have reported the
 fast path's cost for rows that in production take the slow one.
 
 So the table is asserted against the *text*, row by row: START must be where
 that row actually begins, WIDTH its cell count, and UNIFORM t for a row of
-one-byte characters, `glyph\=' for one whose multi-byte characters all sit in
-box-glyph records, and nil otherwise -- which makes the box row `glyph\=' and
-so too the tree listing\='s rows, whose padding the core absorbs into their
+one-byte characters, `glyph' for one whose multi-byte characters all sit in
+box-glyph records, and nil otherwise -- which makes the box row `glyph' and
+so too the tree listing's rows, whose padding the core absorbs into their
 glyph runs.  The style and decoration offsets are checked to land inside the row they were written for,
 since re-basing them onto the assembled text is the one thing
-`cooked-bench--run\=' does that a per-row fixture never had to."
+`cooked-bench--run' does that a per-row fixture never had to."
   (dolist (rows (list (cooked-bench--plain-rows 2 80)
                       (cooked-bench--styled-rows 2 80)
                       (cooked-bench--url-rows 2 80)
@@ -339,9 +339,9 @@ since re-basing them onto the assembled text is the one thing
             (should (< from limit))))))))
 
 (ert-deftest cooked-bench-allocation-prints-a-row-per-fixture ()
-  "`cooked-bench-allocation\=' runs last in `cooked-bench\=', after every timed case,
+  "`cooked-bench-allocation' runs last in `cooked-bench', after every timed case,
 so a crash there costs the whole run its only machine-independent rows.  It
-once called `cooked-bench--update\=' positionally after that helper had become
+once called `cooked-bench--update' positionally after that helper had become
 keyword-only, and nothing but a full benchmark run would have said so; the
 byte-compiler does not check keyword arguments.  Running it here is eight
 frames and eight sessions, cheap enough to pin.
@@ -364,7 +364,7 @@ counting those made seventeen rows where there were eight."
                               row)))))
 
 (ert-deftest cooked-bench-allocation-of-a-url-row-counts-the-scan ()
-  "The URL row of `cooked-bench-allocation\=' scans the URLs it is named for.
+  "The URL row of `cooked-bench-allocation' scans the URLs it is named for.
 
 The scan runs from jit-lock and batch never redisplays, so a row of URLs
 applied and left alone allocates exactly what a plain row does, and the row
@@ -377,11 +377,11 @@ link behind on 23 of its 24 rows: the cursor sits on the first, and
                    :fontify t)))))
 
 (ert-deftest cooked-a-box-row-drawn-as-bitmaps-is-not-measured ()
-  "A row the core calls `glyph\=' skips the guard while its glyphs are bitmaps.
+  "A row the core calls `glyph' skips the guard while its glyphs are bitmaps.
 
 Every box glyph cooked draws itself is exactly one cell wide, so there is
-nothing for `cooked--scale-offenders\=' to find and nothing to wrap: measuring
-the font\='s glyph for a character the font never draws was nine tenths of what
+nothing for `cooked--scale-offenders' to find and nothing to wrap: measuring
+the font's glyph for a character the font never draws was nine tenths of what
 a box-drawing frame allocated.  With the bitmaps turned off the font draws the
 characters after all, and the same row has to be measured again."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
@@ -401,7 +401,7 @@ characters after all, and the same row has to be measured again."
 (ert-deftest cooked-a-cjk-row-is-still-scaled ()
   "A row the font draws still reaches the scale walk, and is scaled.
 
-The other side of `cooked-a-box-row-drawn-as-bitmaps-is-not-measured\=': the
+The other side of `cooked-a-box-row-drawn-as-bitmaps-is-not-measured': the
 fast paths added for box drawing must not let a glyph that is really too big
 through.  The metrics are the mock -- batch Emacs has no font to shape with --
 and say the CJK character is half again wider than its two cells."
@@ -435,9 +435,9 @@ and say the CJK character is half again wider than its two cells."
     calls))
 
 (ert-deftest cooked-bench-a-session-charges-every-apply-the-filter-makes ()
-  "Every `cooked--apply\=' of a real-child case happens inside the charged time.
+  "Every `cooked--apply' of a real-child case happens inside the charged time.
 
-The wake-pipe filter drains inside `accept-process-output\=', and the harness
+The wake-pipe filter drains inside `accept-process-output', and the harness
 once timed only the drains it made itself afterwards, so on a flood most of
 the applies were never charged.  Counted independently of the harness, the
 applies it charged must be all of them, and there must be several, or the
@@ -453,7 +453,7 @@ than the harness waits and than the core paces wakeups, so there are."
       (should (= (nth 1 cooked-bench--last-counts) applies)))))
 
 (ert-deftest cooked-bench-drain-only-charges-every-drain-and-applies-nothing ()
-  "The marshalling case times each `cooked--drain\=' and renders nothing.
+  "The marshalling case times each `cooked--drain' and renders nothing.
 
 Its filter is switched off, so no drain is taken where it cannot be timed and
 no apply sneaks into a figure meant to exclude them.  Its loop condition once
@@ -475,10 +475,10 @@ pauses between lines so that there is more than one drain to count."
 ;;;; Named cases
 
 (ert-deftest cooked-bench-every-case-is-named-and-runs-alone ()
-  "`cooked-bench-run-one\=' runs the case it is named and no other.
+  "`cooked-bench-run-one' runs the case it is named and no other.
 
-Every name in `cooked-bench-cases\=' must reach a defined function, or
-`make bench CASE=NAME\=' fails for the one case somebody asked for, and an unknown
+Every name in `cooked-bench-cases' must reach a defined function, or
+`make bench CASE=NAME' fails for the one case somebody asked for, and an unknown
 name must say so rather than run nothing and print an empty table."
   (dolist (entry cooked-bench-cases)
     (should (fboundp (cdr entry))))
@@ -560,10 +560,10 @@ the script, and the caller's `process-environment'."
       (delete-directory dir t))))
 
 (ert-deftest cooked-bench-script-refuses-a-busy-machine-unless-forced ()
-  "The scripts judge the load by the batch bench\='s own rule.
+  "The scripts judge the load by the batch bench's own rule.
 
 A load of 9 over 16 CPUs is refused at the default fraction of one half, 7 is
-not, and `COOKED_BENCH_FORCE\=' lets the refused one through.  The sentence
+not, and `COOKED_BENCH_FORCE' lets the refused one through.  The sentence
 names the limit, because a refusal that does not say how quiet is quiet enough
 sends the reader to the source."
   (load (expand-file-name "scripts/bench-prelude" (cooked--root)) nil t)
@@ -580,8 +580,8 @@ End to end, through a child Emacs, because both failures are silent from
 inside.  An interpreted run reports numbers three times too slow with nothing
 to say so, and a refusal printed to stdout under gamescope is never seen.  So
 the refusal has to reach the output file with exit status 1 and the body must
-not run, and a forced run must record `.elc\=' for both the script and
-`cooked--apply\='.  A load fraction of 0 makes any machine busy."
+not run, and a forced run must record `.elc' for both the script and
+`cooked--apply'.  A load fraction of 0 makes any machine busy."
   (let ((cooked-tests--bench-script-args
          '("--eval" "(setq cooked-bench-load-fraction 0.0)"))
         (body "(with-temp-file probe--out (insert (cooked-bench-script-provenance)))"))

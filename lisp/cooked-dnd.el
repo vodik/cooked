@@ -54,11 +54,11 @@
   :group 'cooked)
 
 (defcustom cooked-dnd-image-directory nil
-  "Where `yank-media\=' writes the image whose name is typed, or nil.
+  "Where `yank-media' writes the image whose name is typed, or nil.
 
 nil means the temporary directory of the host the shell runs on, asked of the
-function `temporary-file-directory\=' when the image is yanked.  In a session
-whose `default-directory\=' is /ssh:host:/srv/ that is /ssh:host:/tmp/, so
+function `temporary-file-directory' when the image is yanked.  In a session
+whose `default-directory' is /ssh:host:/srv/ that is /ssh:host:/tmp/, so
 the file is written through TRAMP and the remote shell is given
 /tmp/cooked-XXXX.png, which exists there.  The variable of the same name is
 always local, and a local path typed to a remote shell names nothing.
@@ -70,19 +70,19 @@ the images accumulated."
   :group 'cooked-dnd)
 
 (defun cooked-dnd--quote (file)
-  "FILE\='s name as the shell running in this buffer should see it, quoted.
+  "FILE's name as the shell running in this buffer should see it, quoted.
 
-`file-remote-p ... \='localname\=' is what makes a TRAMP name right.  When
-`default-directory\=' is remote the child is running on the far host, so the
+`file-remote-p ... \\='localname' is what makes a TRAMP name right.  When
+`default-directory' is remote the child is running on the far host, so the
 name it needs is the path there: /ssh:host:/tmp/x.png means nothing to a shell
 on host, while /tmp/x.png is exactly right.  A local name is used as it stands.
 
-A file on a different host from the shell\='s is refused with a `user-error\='
-rather than typed.  Dropping ~/notes.txt on a session whose `default-directory\='
+A file on a different host from the shell's is refused with a `user-error'
+rather than typed.  Dropping ~/notes.txt on a session whose `default-directory'
 is /ssh:host:/srv/ would type /home/me/notes.txt to a shell on host, where it
 names nothing or, worse, a different file.  Copying the file there through TRAMP
 would make the name true, but it is a transfer of unbounded size started by a
-drag, and a session started over ssh by `cooked--remote-invocation\=' changes
+drag, and a session started over ssh by `cooked--remote-invocation' changes
 nothing about that: the copy would go through TRAMP either way."
   (let ((host (file-remote-p default-directory 'host)))
     (unless (equal (file-remote-p file 'host) host)
@@ -93,11 +93,11 @@ nothing about that: the copy would go through TRAMP either way."
 (defun cooked-dnd--insert (files)
   "Type the names of FILES, a list, shell-quoted and separated by spaces.
 
-Through `cooked--deliver-paste\=', and so through `cooked--send-paste\=' when
+Through `cooked--deliver-paste', and so through `cooked--send-paste' when
 the child owns the line, because a file name is attacker-controlled far more
 often than a paste is.  A name can contain ESC as easily as a space, and
-`shell-quote-argument\=' protects the shell from it but not the terminal; the
-paste path\='s control-byte strip does that, and at a prompt the name is marked
+`shell-quote-argument' protects the shell from it but not the terminal; the
+paste path's control-byte strip does that, and at a prompt the name is marked
 as pasted so the same strip applies when the line is submitted.
 
 A trailing space, because the common case is a name being added to a command
@@ -106,36 +106,36 @@ that is still being typed."
    (concat (mapconcat #'cooked-dnd--quote files " ") " ")))
 
 (defun cooked-dnd-handle-url (url action)
-  "Type the file URL names, for `dnd-protocol-alist\='.
+  "Type the file URL names, for `dnd-protocol-alist'.
 
-Returns `private\=', which is dnd\='s way of saying the drop was consumed and no
+Returns `private', which is dnd's way of saying the drop was consumed and no
 copy or move should be attempted: nothing was moved anywhere, a name was typed.
 
 Once the child has exited there is no line to type on, so the file is visited
-with `dnd-open-local-file\=' and ACTION, as a drop on any other buffer would."
+with `dnd-open-local-file' and ACTION, as a drop on any other buffer would."
   (when-let* ((file (dnd-get-local-file-name url t)))
     (if (cooked--live-session)
         (progn (cooked-dnd--insert (list file)) 'private)
       (dnd-open-local-file url action))))
 
 (defun cooked-dnd--payload (arg)
-  "What the `drag-n-drop\=' event argument ARG carries, as (KIND . VALUE).
+  "What the `drag-n-drop' event argument ARG carries, as (KIND . VALUE).
 
-KIND is `files\=' with a list of file names, `text\=' with a string, or nil
+KIND is `files' with a list of file names, `text' with a string, or nil
 for an event that is not a drop.  ARG is the third element of the event, and
-its shape is the port\='s own.
+its shape is the port's own.
 
-On NS, `ns-drag-n-drop\=' in term/ns-win.el reads it as (TYPE OPERATIONS .
-OBJECTS), which nsterm.m builds in performDragOperation.  TYPE is `file\=' for
-file names, `url\=' for URLs and nil for text, so a Finder drop of two files is
+On NS, `ns-drag-n-drop' in term/ns-win.el reads it as (TYPE OPERATIONS .
+OBJECTS), which nsterm.m builds in performDragOperation.  TYPE is `file' for
+file names, `url' for URLs and nil for text, so a Finder drop of two files is
 \\(file (ns-drag-operation-copy) \"/Users/me/a.png\" \"/Users/me/b.png\").
-While the drag is still moving over the frame ARG is the symbol `lambda\='.
+While the drag is still moving over the frame ARG is the symbol `lambda'.
 
-On w32, `w32-drag-n-drop\=' in term/w32-win.el reads it as a list of file
+On w32, `w32-drag-n-drop' in term/w32-win.el reads it as a list of file
 names for a file drop, a string for a text drop, and nil while the drag is
 moving; w32term.c builds it from the WM_EMACS_DROP message.
 
-A `file:\=' URL on NS is taken as the file it names, and any other URL as text."
+A `file:' URL on NS is taken as the file it names, and any other URL as text."
   (pcase arg
     ((or 'nil 'lambda) nil)
     ((pred stringp) (cons 'text arg))
@@ -152,11 +152,11 @@ A `file:\=' URL on NS is taken as the file it names, and any other URL as text."
      (cons 'files arg))))
 
 (defun cooked-dnd-drop (event)
-  "Handle a drop EVENT on a cooked buffer\='s mode line, fringe or margin.
+  "Handle a drop EVENT on a cooked buffer's mode line, fringe or margin.
 
-Those drops arrive as `drag-n-drop\=' events under an area prefix, which the
-ports' own handlers are not bound to; see this file\='s Commentary.  The
-event\='s payload is parsed by `cooked-dnd--payload\=', whose docstring gives
+Those drops arrive as `drag-n-drop' events under an area prefix, which the
+ports' own handlers are not bound to; see this file's Commentary.  The
+event's payload is parsed by `cooked-dnd--payload', whose docstring gives
 the NS and w32 shapes.  Files have their names typed and text is delivered as it
 is, in the buffer of the window the drop landed on rather than whichever buffer
 is current.  An event that is only a drag moving across the frame does nothing."
@@ -171,16 +171,16 @@ is current.  An event that is only a drag moving across the frame does nothing."
 (defun cooked-dnd-yank-media (type data)
   "Write DATA, an image of mime TYPE, to a file and type its name.
 
-`yank-media\=' hands over the *bytes* of an image on the clipboard, and there is
+`yank-media' hands over the *bytes* of an image on the clipboard, and there is
 nowhere to put bytes on a PTY -- see this file's Commentary.  So they become a
 file, and the file's name is what crosses.
 
 The extension is taken from the mime subtype, which is what makes the result
-useful: a program told to open `x.png\=' behaves differently from one told to
-open `x\=', and the subtype is the only thing here that knows which it is.
+useful: a program told to open `x.png' behaves differently from one told to
+open `x', and the subtype is the only thing here that knows which it is.
 
 The file is written on the host the shell runs on; see
-`cooked-dnd-image-directory\='."
+`cooked-dnd-image-directory'."
   (unless (cooked--live-session)
     (user-error "No live session"))
   (let* ((extension (replace-regexp-in-string "\\`.*/" "" (symbol-name type)))
@@ -194,20 +194,20 @@ The file is written on the host the shell runs on; see
     (cooked-dnd--insert (list file))))
 
 (defvar-keymap cooked-dnd-map
-  :doc "The area prefixes a drop can arrive under, bound to `cooked-dnd-drop\='.
+  :doc "The area prefixes a drop can arrive under, bound to `cooked-dnd-drop'.
 
 The mode line, the header line, the fringes and the margins deliver their
 events under their own prefixes, such as [mode-line drag-n-drop], and nothing
-binds those globally.  The plain `[drag-n-drop]\=' is not here: on NS and w32
-its global binding already reaches `cooked-dnd-handle-url\=' through
-`dnd-protocol-alist\='.
+binds those globally.  The plain `[drag-n-drop]' is not here: on NS and w32
+its global binding already reaches `cooked-dnd-handle-url' through
+`dnd-protocol-alist'.
 
-An emulation keymap rather than bindings in `cooked-mode-map\=', because this is
+An emulation keymap rather than bindings in `cooked-mode-map', because this is
 an optional layer: writing into the mode map at load time would turn the feature
 on for every cooked buffer, including ones made before the file was loaded, and
-`local-set-key\=' mutates `current-local-map\=', which for a derived mode is
+`local-set-key' mutates `current-local-map', which for a derived mode is
 the shared mode map.  A buffer-local flag gating an emulation entry keeps the
-layer per-buffer, which is what the rest of cooked\='s optional layers do."
+layer per-buffer, which is what the rest of cooked's optional layers do."
   "<mode-line> <drag-n-drop>"    #'cooked-dnd-drop
   "<header-line> <drag-n-drop>"  #'cooked-dnd-drop
   "<left-fringe> <drag-n-drop>"  #'cooked-dnd-drop
@@ -217,16 +217,16 @@ layer per-buffer, which is what the rest of cooked\='s optional layers do."
 
 (defvar cooked-dnd--emulation-alist
   (list (cons 'cooked-dnd--active cooked-dnd-map))
-  "`emulation-mode-map-alists\=' entry, live only where the flag is set.")
+  "`emulation-mode-map-alists' entry, live only where the flag is set.")
 
 (defvar-local cooked-dnd--active nil
-  "Whether `cooked-dnd-map\=' applies to this buffer.")
+  "Whether `cooked-dnd-map' applies to this buffer.")
 
 (defun cooked-dnd-setup ()
   "Install the drop handlers in this buffer.
 
 Buffer-locally throughout, which is the point of the layer being loadable at
-all: `dnd-protocol-alist\=' and `yank-media\='s handler table are global, and a
+all: `dnd-protocol-alist' and `yank-media's handler table are global, and a
 cooked handler answering for some other buffer would type a file name into
 whatever happened to be there."
   (setq cooked-dnd--active t)

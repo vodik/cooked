@@ -22,11 +22,11 @@
   (concat (apply #'string (number-sequence ?\s ?~))
           " -> => == != <= >= :: // <> |> === !== <-> ... >>= <<= "
           "&& || ++ -- ** /* */ www fi ff ffi")
-  "The text `cooked--ascii-fixed-pitch-p\=' measures a font with.
+  "The text `cooked--ascii-fixed-pitch-p' measures a font with.
 
 Every printable ASCII character, so nothing in the range is measured by proxy,
 followed by the sequences a programming font ligates.  The ligatures are there
-because they are the case the answer is *about*: a shaper hands `->\=' to the
+because they are the case the answer is *about*: a shaper hands `->' to the
 font as one glyph, and if that glyph were wider than the two cells the two
 characters occupy, a row of them would render wider than the grid said and
 softwrap.  Written out as literal pairs rather than generated, because what is
@@ -34,7 +34,7 @@ being asked is a question about specific glyphs a specific font may or may not
 have.")
 
 (defcustom cooked-wrap-cache-limit 4096
-  "How many rows `cooked--wrap-memo\=' remembers before it starts over.
+  "How many rows `cooked--wrap-memo' remembers before it starts over.
 
 Not an eviction policy -- there is no ordering here to evict by -- but a bound.
 The memo is keyed by row text, and a buffer whose every row is different (a log
@@ -44,7 +44,7 @@ about again.  Four thousand is many screenfuls of a full-height frame, so the
 repeating rows this exists for -- a border, a status line, a table rule -- are
 never the ones a reset loses, and the whole table is a few hundred kilobytes at
 its largest.  Reached, it is cleared outright rather than halved: a wrong guess
-about which entries were worth keeping costs a `vertical-motion\=' apiece, and
+about which entries were worth keeping costs a `vertical-motion' apiece, and
 cheap-and-obvious beats clever here.
 
 Raise it for a session that spends most of its life full-screen in a program
@@ -62,12 +62,12 @@ lower it to make a reset cheaper at the cost of more memo misses."
 TABLE maps a row's text to t when Emacs was seen to lay that text out on a
 single screen line.  Only that direction is recorded: a row that *did* wrap is
 not remembered, because the caller's next step on that answer is
-`cooked--trim-to-one-line\=', which measures again for itself and would not
+`cooked--trim-to-one-line', which measures again for itself and would not
 believe a cached yes anyway.
 
 That asymmetry is also what makes a stale or colliding entry harmless, and it is
 worth being explicit about since it is the whole safety argument for keying on
-text alone.  A wrong \"this wraps\" costs one `vertical-motion\=' and deletes
+text alone.  A wrong \"this wraps\" costs one `vertical-motion' and deletes
 nothing -- the trim loop re-measures and stops immediately.  A wrong \"this does
 not wrap\" costs a row that softwraps until something rewrites it.  Neither can
 delete a character that should have stayed, which is the failure this guard
@@ -77,34 +77,34 @@ What the key deliberately omits is the row's *styling*.  Two rows of identical
 text in different faces could in principle lay out differently -- a bold face
 whose font is not the same width as the regular one -- and the key would not
 tell them apart.  Including the packed style spans would fix that and was not
-done: the styling that reaches a row here is `cooked-face\=''s, which sets
+done: the styling that reaches a row here is `cooked-face''s, which sets
 weight, slant and colour and never a family or a height, and the cost of being
 wrong is the cosmetic half of the pair above.
 
-FIXED-PITCH is `cooked--ascii-fixed-pitch-p\=' for the font STAMP names, held
+FIXED-PITCH is `cooked--ascii-fixed-pitch-p' for the font STAMP names, held
 here because it is a per-font question with a per-font answer and this is
 already the thing that notices the font moving.
 
-STAMP is `cooked--layout-stamp\='.")
+STAMP is `cooked--layout-stamp'.")
 
 (defun cooked--layout-stamp (window)
   "Everything about WINDOW that can change what Emacs' layout makes of a row.
 
 The memo's validity, stated as a value rather than as a hook.  The events that
-matter are a font change, a face remap (`text-scale-adjust\=' is one), a change
-in how much room the text area has, and a change of `line-spacing\='; each of
+matter are a font change, a face remap (`text-scale-adjust' is one), a change
+in how much room the text area has, and a change of `line-spacing'; each of
 them moves one of these six values, and nothing else here is expected to.
 
-`line-spacing\=' does not move where a row wraps.  It is here because a moving
+`line-spacing' does not move where a row wraps.  It is here because a moving
 stamp also says every row on screen was rendered for a layout that has gone, and
-`cooked--wrap-cache\=' has the core send them all again: a box-drawing bitmap is
-placed on the line box, which `line-spacing\=' changes, and a row the child does
+`cooked--wrap-cache' has the core send them all again: a box-drawing bitmap is
+placed on the line box, which `line-spacing' changes, and a row the child does
 not repaint would otherwise keep the old placement.
 
 Observed rather than notified, which is a deliberate choice against hanging
-this off `cooked--rescale-deco\=' -- the other place in this package that reacts
+this off `cooked--rescale-deco' -- the other place in this package that reacts
 to the font moving.  A notification only invalidates for the events somebody
-remembered to connect: `cooked--rescale-deco\=' is reached by a cell-size change
+remembered to connect: `cooked--rescale-deco' is reached by a cell-size change
 and by a zoom, and would not be reached by a window losing a fringe, gaining a
 margin, or being dragged a pixel narrower -- all of which change where a row
 wraps.  Comparing the stamp cannot miss an event it was not told about; it can
@@ -112,18 +112,18 @@ only be too conservative, and being too conservative here costs one rebuilt
 hash table.
 
 Five of the six are cheap accessors, none of which selects a window.  The
-`font\=' frame parameter is the expensive one and is here anyway: it names the
+`font' frame parameter is the expensive one and is here anyway: it names the
 font outright, where the rest only describe its metrics, so without it a font
 swapped for another of exactly the same cell size would leave the memo answering
 for the outgoing font.
 
 Reading it costs about 21us on pgtk, which is more than everything else here put
 together and too much to pay per row.  So the stamp is built once per drain, in
-`cooked--render-rows\=', and threaded in by way of `cooked--wrap-cache\=', where
+`cooked--render-rows', and threaded in by way of `cooked--wrap-cache', where
 the same read is small against the cost of the drain.  A caller that has not
 threaded it is answered per row, correctly and slowly.
 
-`window-body-width\=' in pixels rather than in columns: the column form divides
+`window-body-width' in pixels rather than in columns: the column form divides
 by the frame's character width, so a font change and a resize can cancel out in
 it, and a fringe or margin change does not move it at all."
   (let ((frame (window-frame window)))
@@ -137,19 +137,19 @@ it, and a fringe or margin change does not move it at all."
 (defconst cooked--string-pixel-width-takes-buffer
   (let ((most (cdr (func-arity #'string-pixel-width))))
     (and (integerp most) (>= most 2)))
-  "Whether `string-pixel-width\=' can be told which buffer to measure as.
+  "Whether `string-pixel-width' can be told which buffer to measure as.
 Asked once, here, rather than per call: it is a question about which Emacs this
 is -- the argument arrived in Emacs 30 -- and the answer cannot change while one
-is running.  See `cooked--string-pixel-width\='.")
+is running.  See `cooked--string-pixel-width'.")
 
 (defun cooked--string-pixel-width (string)
   "The width STRING renders at, in pixels, as this buffer would render it.
 
-`string-pixel-width\=' measures in a work buffer of its own, and only from
-Emacs 30 can it be told to inherit a buffer's `face-remapping-alist\='.  Where it
-cannot, a buffer under `text-scale-adjust\=' or `buffer-face-mode\=' is measured
+`string-pixel-width' measures in a work buffer of its own, and only from
+Emacs 30 can it be told to inherit a buffer's `face-remapping-alist'.  Where it
+cannot, a buffer under `text-scale-adjust' or `buffer-face-mode' is measured
 unscaled -- which disagrees with the cell size its window reports, so
-`cooked--ascii-fixed-pitch-p\=' concludes the font is not fixed pitch and the
+`cooked--ascii-fixed-pitch-p' concludes the font is not fixed pitch and the
 rows go through the full probe.  That is the safe direction to be wrong in, and
 it is wrong only on Emacs 29 and only while a remap is in force."
   (if cooked--string-pixel-width-takes-buffer
@@ -159,28 +159,28 @@ it is wrong only on Emacs 29 and only while a remap is in force."
 (defun cooked--ascii-fixed-pitch-p (window)
   "Whether plain ASCII in WINDOW occupies exactly one cell per character.
 
-The question that licenses `cooked--guard-row-width\=' to skip a row outright.
+The question that licenses `cooked--guard-row-width' to skip a row outright.
 Asked of the font in force rather than of the row, because it is a property of
 the font: the answer is the same for every ASCII row until the font changes,
-and `cooked--wrap-memo\=' is what holds it in between.
+and `cooked--wrap-memo' is what holds it in between.
 
 A terminal frame has no shaping engine and no per-face fonts, so ASCII there is
 one cell per character by construction and nothing is measured.
 
-On a graphical frame the probe is `cooked--fixed-pitch-probe\=' measured against
+On a graphical frame the probe is `cooked--fixed-pitch-probe' measured against
 the cell width, in each of the faces cooked's own renditions can put a row into
 -- default, bold, light and italic, which is the whole of what
-`cooked--attr-face-properties\=' varies that a font could answer with different
+`cooked--attr-face-properties' varies that a font could answer with different
 metrics.
 
-Ligatures are not the hazard they look like.  A monospace font draws `->\=' as
+Ligatures are not the hazard they look like.  A monospace font draws `->' as
 one glyph inside the two cells its characters already occupy -- that is what
 makes it monospace -- and this guard only ever trims a row that renders *wider*
 than nominal.  Across Noto Sans Mono, Iosevka Fixed and Adwaita Mono, every
 ligature sequence in the probe rendered at its nominal width.
 
 The real hazard is a face whose font is not fixed pitch at all:
-`buffer-face-mode\=', a `:family\=' on the default face, or a fallback font
+`buffer-face-mode', a `:family' on the default face, or a fallback font
 chosen for a character the primary font lacks.  ASCII in a proportional face
 such as Iosevka Aile is wider than the grid assumed, exactly as a mismeasured
 wide character is, and that is what this measures."
@@ -198,8 +198,8 @@ wide character is, and that is what this measures."
 (defun cooked--wrap-cache (window)
   "This buffer's (FIXED-PITCH WRAPS METRICS) for WINDOW, rebuilt when it moves.
 
-The whole of `cooked--wrap-memo\=''s invalidation: one comparison against
-`cooked--layout-stamp\=', and a new table and a fresh font probe when it
+The whole of `cooked--wrap-memo''s invalidation: one comparison against
+`cooked--layout-stamp', and a new table and a fresh font probe when it
 differs.  Nothing is invalidated piecemeal, because nothing here outlives the
 font it was measured under.
 
@@ -210,7 +210,7 @@ with a second stamp would cost more than either table saves.
 
 The rows already on screen were measured, scaled and trimmed under the stamp
 that has just gone, so a move also has the core send every row again with
-`cooked--forget-sent-rows\='.  Otherwise the copy of the screen the core keeps
+`cooked--forget-sent-rows'.  Otherwise the copy of the screen the core keeps
 would leave them out: a zoom that keeps the grid size, followed by a program
 repainting the same cells, would keep every CJK character on screen scaled for
 the old font.  The rows are damaged rather than only forgotten, for a screen
@@ -232,14 +232,14 @@ no earlier layout to disagree with."
   "Whether a row is one Emacs may render wider than Rust assumed.
 
 WIDTH is how many cells the row occupies on the grid, which the drain carries
-alongside the text -- see `Block::push_runs\=' in src/wire.rs -- and is always
-supplied: `cooked--render-rows\=' is the only caller, and a block always has
-one.  A row already wider than `cooked--cols\=' is genuinely long, scrollback
+alongside the text -- see `Block::push_runs' in src/wire.rs -- and is always
+supplied: `cooked--render-rows' is the only caller, and a block always has
+one.  A row already wider than `cooked--cols' is genuinely long, scrollback
 from a wider grid predating a resize, and should soft-wrap rather than be
 trimmed.
 
-Compared against `cooked--cols\=' rather than a fresh
-`window-max-chars-per-line\=': the two agree only once `cooked--sync-size\=' has
+Compared against `cooked--cols' rather than a fresh
+`window-max-chars-per-line': the two agree only once `cooked--sync-size' has
 caught up with the window's pixel geometry, and a wake-driven drain can land in
 the gap during a resize drag.  There the row was rendered against the old width
 while a fresh measurement already answers for the new one, which reads an
@@ -247,16 +247,16 @@ ordinary render as a too-wide row and waves it through to a silent, unmarked
 soft-wrap.
 
 UNIFORM says nothing in the row can come out wider than a byte-per-column
-reading of it, as the caller has already resolved the drain\='s flag: every
+reading of it, as the caller has already resolved the drain's flag: every
 character is one byte on one cell, or the ones that are not are box glyphs
-cooked is drawing as bitmaps of exactly one cell -- see `cooked--render-rows\='.
-It is not \"is ASCII\": a run of ASCII declared a different width by `OSC 66\='
+cooked is drawing as bitmaps of exactly one cell -- see `cooked--render-rows'.
+It is not \"is ASCII\": a run of ASCII declared a different width by `OSC 66'
 fails it just the same.  FIXED-PITCH is
-`cooked--ascii-fixed-pitch-p\=' for the font in force.  Together they are the
+`cooked--ascii-fixed-pitch-p' for the font in force.  Together they are the
 one case that can be answered without asking Emacs' layout anything at all: a
 uniform row in a font that renders ASCII one cell per character cannot come out
 wider than the grid said, on a graphical frame or a terminal one.  See
-`cooked--ascii-fixed-pitch-p\=' for why a ligature is not a counterexample and a
+`cooked--ascii-fixed-pitch-p' for why a ligature is not a counterexample and a
 proportional face is."
   (and (<= width cooked--cols)
        (not (and uniform fixed-pitch))))
@@ -266,12 +266,12 @@ proportional face is."
 
 The one question about a row that cannot be answered anywhere but here.  Rust
 knows what it put on the grid and how wide the cells are -- Emacs tells it, see
-`cooked--sync-size\=' -- but not which of those characters this font will
+`cooked--sync-size' -- but not which of those characters this font will
 compose into one grapheme, which it will substitute another font for, or what
-that substitute's metrics are.  So this stays a `vertical-motion\=' in Emacs'
+that substitute's metrics are.  So this stays a `vertical-motion' in Emacs'
 own layout, and the work is in not asking it twice.
 
-MEMO is `cooked--wrap-cache\=''s table for the font and geometry in force; nil
+MEMO is `cooked--wrap-cache''s table for the font and geometry in force; nil
 skips the memo entirely.  A hit is a row whose text was laid out on one line
 under this very stamp, and nothing but the text, the font and the width decides
 that -- so the answer stands until the stamp moves, which is when the table is
@@ -279,18 +279,18 @@ thrown away.
 
 The row that motivates the memo is a border: a few hundred identical
 box-drawing characters, rewritten by a full-screen program on every frame it
-paints, and laying out the same way every time.  `vertical-motion\=' over a row
+paints, and laying out the same way every time.  `vertical-motion' over a row
 of box glyphs is most of what the guard costs per row, and across a whole
 screen of them it adds up to more than a 60Hz frame.
 
-Only the negative is stored; see `cooked--wrap-memo\=' for why that is also the
+Only the negative is stored; see `cooked--wrap-memo' for why that is also the
 safety argument.
 
-KEY is the row\='s layout hash from the drain\='s row table -- its text and the
-renditions that change its font, see `BlockRow::hash\=' in src/wire.rs -- so a
+KEY is the row's layout hash from the drain's row table -- its text and the
+renditions that change its font, see `BlockRow::hash' in src/wire.rs -- so a
 row is looked up without being copied out of the buffer.  The row has just been
-written from that very text, so the hash describes what `vertical-motion\=' is
-about to measure.  Without one, as for a row driven from Lisp, the row\='s text
+written from that very text, so the hash describes what `vertical-motion' is
+about to measure.  Without one, as for a row driven from Lisp, the row's text
 is copied and used instead."
   (let ((key (and memo (or key (buffer-substring-no-properties start end)))))
     (unless (and key (gethash key memo))
@@ -356,8 +356,8 @@ without: the scaling only touches a glyph whose measured size disagrees with
 its cells, but that judgement rests on font metrics, and a font can always
 surprise it.
 
-Setting it through `customize\=' or `setopt\=' redraws the screens already
-running; see `cooked--set-rendering-option\='."
+Setting it through `customize' or `setopt' redraws the screens already
+running; see `cooked--set-rendering-option'."
   :type '(choice (const :tag "Never scale, only trim" nil)
                  (number :tag "Smallest scale a glyph may be shrunk to"))
   :set #'cooked--set-rendering-option
@@ -366,36 +366,36 @@ running; see `cooked--set-rendering-option\='."
 (defun cooked--glyph-metrics (beg end window metrics)
   "What the cluster in BEG..END actually measures, as (WIDTH ASCENT DESCENT PIXEL).
 
-Memoised in METRICS, `cooked--wrap-memo\='s third slot, first by face and then
+Memoised in METRICS, `cooked--wrap-memo's third slot, first by face and then
 by the cluster's own character or text -- so a border row of five hundred
 identical characters is one measurement and four hundred and ninety-nine hash
 lookups that allocate nothing, while the same character in bold is measured
 again, which it must be: a bold face is a
 different font and so a different glyph with different metrics.  The cache is
-a prerequisite rather than an optimisation: without one this is a `font-at\='
+a prerequisite rather than an optimisation: without one this is a `font-at'
 and a shaping call per cell per drain.
 
 The shaping is asked for the way the display engine asks: a composition if there
-is one -- `find-composition\=' answers for a ligature or a base plus combining
+is one -- `find-composition' answers for a ligature or a base plus combining
 marks, and its gstring is what will actually be drawn -- and otherwise a gstring
 shaped from the font at BEG.  Measuring the characters separately would answer a
 question nobody is rendering.
 
 Two indices that are easy to get wrong and silent when they are.  The glyph sits
 at index *2* of the gstring, not 1.  And the font's own metrics come from
-`query-font\=' -- pixel size 2, ascent 4, descent 5 -- not from `font-info\=',
+`query-font' -- pixel size 2, ascent 4, descent 5 -- not from `font-info',
 which is a different vector whose slots 4 and 5 are a baseline offset and a
 compose rule, and which therefore answers 0 for both without complaining.
 
 A cluster that cannot be measured is remembered as nil, rather than asked about
-again on every drain: `font-at\=' has no font for a character nothing covers,
+again on every drain: `font-at' has no font for a character nothing covers,
 and a cache that only held answers would shape that cluster once per cell per
 drain for as long as it stayed on screen.
 
-Bounded like `cooked--wrap-memo\=', by `cooked-wrap-cache-limit\=' measurements
+Bounded like `cooked--wrap-memo', by `cooked-wrap-cache-limit' measurements
 across every face, and emptied outright past it.  The key has a face in it, and
 a truecolour stream hands out a new face for nearly every run it colours:
-`lolcat\=' over a file of CJK text is one entry per distinct colour and
+`lolcat' over a file of CJK text is one entry per distinct colour and
 character, and nothing but a font change would otherwise ever drop one."
   (let* ((face (get-text-property beg 'face))
          (table (gethash face metrics))
@@ -439,12 +439,12 @@ character, and nothing but a font change would otherwise ever drop one."
 (defun cooked--composition-possible-p (pos)
   "Whether a composition could cover the character at POS.
 
-`find-composition\=' is the expensive half of a measurement, and nearly every
+`find-composition' is the expensive half of a measurement, and nearly every
 character it is asked about composes with nothing.  A composition needs either
-a `composition\=' property, or an entry in `composition-function-table\=' for
+a `composition' property, or an entry in `composition-function-table' for
 the character or the one after it -- after, because a combining mark or a
-zero-width joiner is what triggers composing the character before it.  So `e\='
-followed by U+0301 is still asked, and `e\=' followed by `f\=' is not."
+zero-width joiner is what triggers composing the character before it.  So `e'
+followed by U+0301 is still asked, and `e' followed by `f' is not."
   (or (get-text-property pos 'composition)
       (and auto-composition-mode
            (or (aref composition-function-table (char-after pos))
@@ -452,16 +452,16 @@ followed by U+0301 is still asked, and `e\=' followed by `f\=' is not."
                  (aref composition-function-table next))))))
 
 (defun cooked--glyph-fits-p (measured slot default)
-  "Whether MEASURED already sits inside SLOT pixels and DEFAULT\='s metrics.
+  "Whether MEASURED already sits inside SLOT pixels and DEFAULT's metrics.
 
 The guard that runs first: a glyph whose width is exactly its slot and whose
-ascent and descent are exactly the default face\='s is left entirely alone.
+ascent and descent are exactly the default face's is left entirely alone.
 
 A glyph that fits needs no scaling, and it also must not *claim* the next cell.
 A box-drawing character has precisely cell-shaped proportions, so
-`cooked--glyph-claims-next-cell-p\=' would compare two equal aspects, answer yes
-on the `>=\=', and hide the space after it -- in `tree\=' output every line
-begins `│ \=', and every one of those spaces would vanish.  So nothing else runs
+`cooked--glyph-claims-next-cell-p' would compare two equal aspects, answer yes
+on the `>=', and hide the space after it -- in `tree' output every line
+begins `│ ', and every one of those spaces would vanish.  So nothing else runs
 until this answers no."
   (pcase-let ((`(,width ,ascent ,descent ,_) measured)
               (`(,default-ascent ,default-descent) default))
@@ -472,22 +472,22 @@ until this answers no."
 (defun cooked--glyph-scale (measured slot default)
   "The scale that fits MEASURED into SLOT pixels, or nil if it already fits.
 
-MEASURED is `cooked--glyph-metrics\='s answer, SLOT is how many pixels wide the
-grid budgeted for it, and DEFAULT is `cooked--default-metrics\='s.
+MEASURED is `cooked--glyph-metrics's answer, SLOT is how many pixels wide the
+grid budgeted for it, and DEFAULT is `cooked--default-metrics's.
 
 Pixels rather than cells so that this is arithmetic and nothing else: taking
-cells would mean asking `frame-char-width\=', which answers 1 on a terminal
+cells would mean asking `frame-char-width', which answers 1 on a terminal
 frame and would make the whole function untestable in batch for a reason having
 nothing to do with what it computes.
 
 The minimum of three ratios, and the third one is the one an implementation
-skips.  A row realises `max(ascent) + max(descent)\=' across every glyph sharing
+skips.  A row realises `max(ascent) + max(descent)' across every glyph sharing
 its baseline, so a glyph overflows if *either* side is over, and scaling by the
 ratio of the sums can leave one side over the line.  A CJK glyph with ascent 18
 against a default of 15, and descent 5 against 5, has a sum ratio of 0.87 but
 an ascent ratio of 0.83: scaled by 0.87 the row is still too tall.
 
-Quantized, because `height\=' is applied as a scale of the font's pixel size and
+Quantized, because `height' is applied as a scale of the font's pixel size and
 Emacs rounds the result -- so a mathematically exact scale rounds back up and
 the cell overflows anyway.  Flooring at the pixel is what makes the fit
 hold."
@@ -508,28 +508,28 @@ hold."
         (and (< quantized 1.0) quantized)))))
 
 (defun cooked--default-metrics (window metrics)
-  "The default face\='s (ASCENT DESCENT CELL) in WINDOW, or nil without a font.
+  "The default face's (ASCENT DESCENT CELL) in WINDOW, or nil without a font.
 
 What a row is laid out *against*, and therefore what a glyph has to fit inside:
-the font\='s ascent and descent, and CELL, the width of one grid cell in pixels.
+the font's ascent and descent, and CELL, the width of one grid cell in pixels.
 
 All three as this buffer draws them, which after a zoom is not what the frame
-says.  Under `text-scale-increase\=' in a 15-pixel font the buffer is drawn in a
-26-pixel one with 16-pixel cells, while the frame\='s default face and
-`frame-char-width\=' still answer 15 and 9.  Measured against the frame, every
+says.  Under `text-scale-increase' in a 15-pixel font the buffer is drawn in a
+26-pixel one with 16-pixel cells, while the frame's default face and
+`frame-char-width' still answer 15 and 9.  Measured against the frame, every
 glyph on a row with a box character or a CJK one would be too big for its cell
 and shrink, while the ASCII rows beside it stayed zoomed.  So the font comes
-from `cooked--default-font\=' and the cell from `window-font-width\=', both of
-which follow `face-remapping-alist\='.
+from `cooked--default-font' and the cell from `window-font-width', both of
+which follow `face-remapping-alist'.
 
-Not `font-at\=' on the row: that answers about the font covering a position,
+Not `font-at' on the row: that answers about the font covering a position,
 which for a CJK character is the *fallback* font it was drawn from.  Asking it
 would compare the offender against itself and conclude everything fits.  The
 probe is a space in the default face, which is the font the grid is sized by.
 
 Nil on a terminal frame, where there is no font to fit a glyph inside and
 nothing to scale.  That answer is remembered like any other, so a terminal
-frame asks once per stamp and `cooked--scale-offenders\=' returns at once for
+frame asks once per stamp and `cooked--scale-offenders' returns at once for
 every row after it.
 
 Cached in METRICS under a key no cluster can collide with, because it is a fact
@@ -547,7 +547,7 @@ thrown away with them."
 (defun cooked--glyph-claims-next-cell-p (measured from to end default cell)
   "Whether the glyph at FROM..TO may take the cell after it instead of shrinking.
 
-After ghostel\='s `adjustWidth\=': a glyph too wide for its cell does not have to
+After ghostel's `adjustWidth': a glyph too wide for its cell does not have to
 be made smaller if there is somewhere for it to go.  Given two cells it is
 scaled less, or not at all, and less scaling leaves less of a gap behind.
 
@@ -566,12 +566,12 @@ beside it, the next one not -- looks worse than either answer applied evenly.
 And there must *be* a next cell: a glyph in the last column has nowhere to go.
 
 And the space must be free.  A blank between two box glyphs is absorbed into
-their run and carries its share of the run\='s image, so a space with a
-`cooked-deco\=' on it is already spoken for.  See `Row::absorb_blank_runs\=' in
+their run and carries its share of the run's image, so a space with a
+`cooked-deco' on it is already spoken for.  See `Row::absorb_blank_runs' in
 src/emu/cell.rs.
 
 CELL is the frame's character width in pixels, passed in for the same reason
-`cooked--glyph-scale\=' takes a slot in pixels: `frame-char-width\=' answers 1
+`cooked--glyph-scale' takes a slot in pixels: `frame-char-width' answers 1
 on a terminal frame, which would make every glyph relatively narrow and this
 untestable in batch for a reason having nothing to do with what it decides.
 
@@ -611,17 +611,17 @@ is a row the grid thinks may be mismeasured, and on such a row each *distinct*
 cluster costs one shaping call, one that cannot be measured included, until the
 font changes or `cooked-wrap-cache-limit' measurements empty the memo -- see
 `cooked--glyph-metrics'.  Nothing is measured
-on a terminal frame either, where `cooked--default-metrics\=' has no answer.
+on a terminal frame either, where `cooked--default-metrics' has no answer.
 
-A character carrying `cooked-deco\=' is passed over whole.  It is drawn as
-cooked\='s own image cut to its cells, so it fits by construction whatever the
+A character carrying `cooked-deco' is passed over whole.  It is drawn as
+cooked's own image cut to its cells, so it fits by construction whatever the
 font would have made of it -- and the image of a box-drawing run is one
-`display\=' spanning every cell of the run.  Scaling one character inside it
+`display' spanning every cell of the run.  Scaling one character inside it
 would replace the picture for that character with a shrunk font glyph and leave
 the rest of the run drawing the whole image again, two images wide.
 
-`min-width\=' as well as `height\=' because the two answer different halves: the
-scale shrinks the glyph, and `min-width\=' holds the cell it sits in at the size
+`min-width' as well as `height' because the two answer different halves: the
+scale shrinks the glyph, and `min-width' holds the cell it sits in at the size
 the grid budgeted, so a shrunk glyph does not pull the rest of the row left."
   (when-let* ((cooked-glyph-scale-floor)
               (default (cooked--default-metrics window metrics))
@@ -702,7 +702,7 @@ step exists to keep the next one from running:
   3. Only what is left reaches `vertical-motion', and only what that says wraps
      reaches the trim.
 
-HASH is the row\='s layout hash, the key step 2 looks it up by; see
+HASH is the row's layout hash, the key step 2 looks it up by; see
 `cooked--row-wraps-p'.
 
 CACHE is `cooked--wrap-cache' for WINDOW, which steps 1 and 2 are both answers
@@ -721,8 +721,8 @@ chance when it is displayed.  Computing WINDOW means asking
 that per row would run `select-window' advice in the middle of a render; see
 docs/DESIGN.md.
 
-Returns non-nil when characters were deleted, which makes the buffer\='s row
-differ from what the core sent; the caller says so with `cooked--row-unsent\='.
+Returns non-nil when characters were deleted, which makes the buffer's row
+differ from what the core sent; the caller says so with `cooked--row-unsent'.
 
 The cut is marked with the truncation bitmap `truncate-lines' would show, by
 hand, because `cooked-rejoin-wrapped-lines' keeps `truncate-lines' off
@@ -765,20 +765,20 @@ this to a bitmap symbol -- one of `fringe-bitmaps', or one of your own from
   "Mark the row from START to CUT as having had characters trimmed.
 
 Where the marker goes depends on whether WINDOW -- the one the trim was measured
-in -- has a fringe to put it in, and the difference is a column of the user\='s
-text.  WINDOW\='s frame rather than the selected one answers that, since the two
+in -- has a fringe to put it in, and the difference is a column of the user's
+text.  WINDOW's frame rather than the selected one answers that, since the two
 are the same only when the buffer is displayed where it is being rendered from.
 
-On a graphical frame the marker rides an overlay string rather than a `display\='
-property on CUT itself.  A fringe `display\=' spec shows its bitmap \"instead of
+On a graphical frame the marker rides an overlay string rather than a `display'
+property on CUT itself.  A fringe `display' spec shows its bitmap \"instead of
 the characters that have the display specification\", so putting one on a real
 character silently costs the row one more character than the trim already did --
 while the whole point of using the fringe is that it sits outside the text area
 and costs nothing.  The overlay evaporates on its own, because
-`cooked--render-rows\=' deletes the row before rewriting it.
+`cooked--render-rows' deletes the row before rewriting it.
 
-The string goes at the *start* of the row as a `before-string\=', not at CUT as
-an `after-string\='.  A fringe bitmap belongs to the screen line rather than to
+The string goes at the *start* of the row as a `before-string', not at CUT as
+an `after-string'.  A fringe bitmap belongs to the screen line rather than to
 the column it is anchored in, so either end draws the same picture -- but the
 string still has to be placed, and the trim loop leaves the row as wide as it
 can.  Anchoring at the cut therefore lands it flush with the right edge often
@@ -786,7 +786,7 @@ enough to matter, and redisplay opens an empty continuation line to put it on.
 Column zero is never full.
 
 On a terminal frame there is no fringe, so the marker has to cost a column,
-exactly as `truncate-lines\=' spends the last one on `$\='.
+exactly as `truncate-lines' spends the last one on `$'.
 
 Known gap: a graphical frame whose window has no right fringe has nowhere to
 draw the bitmap, so the marker is invisible there.  See docs/DESIGN.md."

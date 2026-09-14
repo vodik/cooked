@@ -105,21 +105,21 @@ sanctioned escape and must keep working whatever the child has grabbed.")
 (declare-function cooked--sync-fontification "cooked-render")
 
 (defun cooked-link--set-detect-links (symbol value)
-  "Set SYMBOL to VALUE and make every session\='s text agree with it.
+  "Set SYMBOL to VALUE and make every session's text agree with it.
 
 The guess runs from jit-lock, once per stretch of text, so switching it on left
 every URL already fontified without a link, and switching it off left every one
-already found clickable.  Off, each buffer loses the detected links\='
-properties at once, and an `OSC 8\=' span keeps its own.  On, the buffer has to
-be scanned again, and `cooked--sync-fontification\=' does that as it follows
-the switch with the jit-lock registration: `jit-lock-register\=' marks the
+already found clickable.  Off, each buffer loses the detected links'
+properties at once, and an `OSC 8' span keeps its own.  On, the buffer has to
+be scanned again, and `cooked--sync-fontification' does that as it follows
+the switch with the jit-lock registration: `jit-lock-register' marks the
 whole buffer unfontified, so redisplay scans what it shows, as it does for new
 output.  On the alternate screen nothing is registered, and the primary
-screen\='s rows are rewritten on the way back, which marks them the same way.
+screen's rows are rewritten on the way back, which marks them the same way.
 
 A cooked buffer exists only once cooked-render.el has loaded, so the walk can
-call into it.  At load, when `custom-declare-variable\=' calls this to set the
-default, there is no buffer to walk and nothing but the `set-default\=' happens."
+call into it.  At load, when `custom-declare-variable' calls this to set the
+default, there is no buffer to walk and nothing but the `set-default' happens."
   (set-default symbol value)
   (cooked--dolist-buffers
     (unless value
@@ -138,9 +138,9 @@ and stops `cooked--fontify-links' scanning at all; with no scan layer loaded
 either, `cooked--sync-fontification' then drops the jit-lock registration, so
 nothing about the guess is paid for.
 
-Setting it through `customize\=' or `setopt\=' applies to the text already in
-every session, scrollback included; see `cooked-link--set-detect-links\='.
-A plain `setq\=' reaches only output rendered afterwards."
+Setting it through `customize' or `setopt' applies to the text already in
+every session, scrollback included; see `cooked-link--set-detect-links'.
+A plain `setq' reaches only output rendered afterwards."
   :type 'boolean
   :set #'cooked-link--set-detect-links
   :group 'cooked-link)
@@ -169,19 +169,19 @@ local-file linking, and with that file not loaded there is nothing on the hook
 and no second switch that could disagree with its absence.")
 
 (defvar cooked-link-url-handlers nil
-  "Extra `browse-url-handlers\=' entries for while cooked opens a link.
+  "Extra `browse-url-handlers' entries for while cooked opens a link.
 
-Each is (REGEXP-OR-PREDICATE . FUNCTION), in `browse-url-handlers\=' own
-shape, contributed by the layer that knows the scheme.  The `file:\=' one is
-cooked-osc.el\='s, because opening a file URL safely needs the host the child
+Each is (REGEXP-OR-PREDICATE . FUNCTION), in `browse-url-handlers' own
+shape, contributed by the layer that knows the scheme.  The `file:' one is
+cooked-osc.el's, because opening a file URL safely needs the host the child
 last reported and the TRAMP prefix built from it, and this file is below both.
 
-Appended to the user\='s own list rather than put in front of it, so a
-`file:\=' handler you configured yourself still wins, and put in front of
-`browse-url-default-handlers\=', so cooked\='s answer beats Emacs\=' generic
-one.  Everything else -- `mailto:\=', `man:\=', the web -- falls through to
-those defaults untouched, which is what keeps an `OSC 8\=' destination, a
-detected URL and goto-addr\='s own match opening the same things the same way.")
+Appended to the user's own list rather than put in front of it, so a
+`file:' handler you configured yourself still wins, and put in front of
+`browse-url-default-handlers', so cooked's answer beats Emacs' generic
+one.  Everything else -- `mailto:', `man:', the web -- falls through to
+those defaults untouched, which is what keeps an `OSC 8' destination, a
+detected URL and goto-addr's own match opening the same things the same way.")
 
 (defvar cooked-link-scan-functions nil
   "Abnormal hook run over scrollback that is about to be shown.
@@ -203,27 +203,27 @@ contribution and nothing else's.")
 (defvar-local cooked--link-uris nil
   "Hash table mapping this buffer's `OSC 8' link ids to their URIs.
 
-Strong and buffer-local, like `cooked--image-data\=': the native core sends a
+Strong and buffer-local, like `cooked--image-data': the native core sends a
 URI exactly once per distinct destination however many cells or drains name it,
 so this holds the only copy Emacs has.  Bounded on the other side of the
-boundary rather than here -- see `LinkStore\=' in src/emu/link.rs -- because
+boundary rather than here -- see `LinkStore' in src/emu/link.rs -- because
 that is where the ids are minted.
 
 Which means this table is not bounded, and is never pruned: it holds every
 distinct destination the session has named.  Dropping the entries whose text
 has left the buffer is not safe from this side.  The core sends a URI only the
-first time it interns it, so if `ls --hyperlink\=' named a file an hour ago and
+first time it interns it, so if `ls --hyperlink' named a file an hour ago and
 names it again now, the second listing arrives as a bare id, and an entry
 pruned in between would leave that link with nowhere to go.  Pruning needs the
 core told which ids Lisp has let go of, so it can send them again.  Until then
 the cost is one string per destination: tens of kilobytes for every thousand
-distinct files a hyperlinked `ls\=' has named.")
+distinct files a hyperlinked `ls' has named.")
 
 (defun cooked--install-links (links)
-  "Record LINKS, a drain's `:links\=', before anything referring to them renders.
+  "Record LINKS, a drain's `:links', before anything referring to them renders.
 
-Each entry is (ID . URI).  Called from `cooked--apply\=' beside
-`cooked--install-images\=' and for the identical reason: a link is a resource the
+Each entry is (ID . URI).  Called from `cooked--apply' beside
+`cooked--install-images' and for the identical reason: a link is a resource the
 rows of this very drain name by id, so it has to be here before they render.
 Events are dispatched after both render passes, so a link arriving as one would
 arrive too late for the row that needed it."
@@ -242,11 +242,11 @@ arrive too late for the row that needed it."
 ;;;; Following
 
 (defun cooked-link--with-url-handlers (function &rest args)
-  "Call FUNCTION with ARGS while `cooked-link-url-handlers\=' are in force.
+  "Call FUNCTION with ARGS while `cooked-link-url-handlers' are in force.
 
-They go between the user\='s `browse-url-handlers\=' and Emacs\=' defaults, and
+They go between the user's `browse-url-handlers' and Emacs' defaults, and
 are bound around the call rather than set: the list is only right while cooked
-is the one following, so a `browse-url\=' from anywhere else in Emacs gets the
+is the one following, so a `browse-url' from anywhere else in Emacs gets the
 handlers it would have had with cooked not loaded."
   (let ((browse-url-handlers
          (append browse-url-handlers cooked-link-url-handlers)))
@@ -255,21 +255,21 @@ handlers it would have had with cooked not loaded."
 (defun cooked-link-browse (uri)
   "Open URI the way every kind of cooked link is opened.
 
-One function, so an `OSC 8\=' destination, a URL the scan detected and a match
+One function, so an `OSC 8' destination, a URL the scan detected and a match
 goto-addr reads out of the text cannot drift into three different ideas of
-what `file:///x#L3\=' means."
+what `file:///x#L3' means."
   (cooked-link--with-url-handlers #'browse-url uri))
 
 (defun cooked--open-link-at-point ()
   "Open whatever at point counts as a link, in the order the sources rank.
 
-An `OSC 8\=' destination first, because the child named it and nothing here has
-to guess; then `cooked-link-follow-functions\=', which is where local files are
-answered when that layer is loaded; then goto-addr\='s own
-`goto-address-at-point\=', which handles both the URL and the mail case.  Every
-branch that ends in a URL ends in `cooked-link-browse\=', goto-addr\='s included.
+An `OSC 8' destination first, because the child named it and nothing here has
+to guess; then `cooked-link-follow-functions', which is where local files are
+answered when that layer is loaded; then goto-addr's own
+`goto-address-at-point', which handles both the URL and the mail case.  Every
+branch that ends in a URL ends in `cooked-link-browse', goto-addr's included.
 
-The shared tail of `cooked-follow-link\=' and `cooked-follow-link-at-point\=',
+The shared tail of `cooked-follow-link' and `cooked-follow-link-at-point',
 which differ only in what they do *before* deciding to open anything."
   (if-let* ((uri (cooked-link-uri)))
       (cooked-link-browse uri)
@@ -287,19 +287,19 @@ which differ only in what they do *before* deciding to open anything."
   "Open the link at point, or hand EVENT to the child if it owns the input.
 
 The gate is not politeness, it is a documented guarantee.  A `keymap' text or
-overlay property is consulted *before* `emulation-mode-map-alists\=', so the
-binding this command sits on outranks `cooked--mouse-map\=' — and a plain click
+overlay property is consulted *before* `emulation-mode-map-alists', so the
+binding this command sits on outranks `cooked--mouse-map' — and a plain click
 while the child has grabbed the mouse belongs to the child, with Shift as the
 sanctioned escape -- see the README.  Without that rule a click meant for the
 program underneath would follow a link instead, which is the confusion the
 shifted variant exists to settle.  The same holds for RET while keys are being
 forwarded.  So an
 unshifted invocation in either of those states forwards exactly what it would
-have forwarded had this binding not existed, and the shifted variant — `S-RET\='
-and `S-mouse-2\=' — follows the link regardless, which is what keeps a link
+have forwarded had this binding not existed, and the shifted variant — `S-RET'
+and `S-mouse-2' — follows the link regardless, which is what keeps a link
 reachable at all inside a full-screen program.
 
-Once it does decide to open something, `cooked--open-link-at-point\=' says what
+Once it does decide to open something, `cooked--open-link-at-point' says what
 that is."
   (interactive (list last-nonmenu-event))
   ;; The shift test is asked of `last-input-event' rather than of EVENT: it is the
@@ -317,10 +317,10 @@ that is."
   "Follow the link at point, whoever owns the keyboard.
 
 The keyboard entry point that does not depend on point sitting inside a
-highlighted span: bound on `cooked-mode-map\=' under \\`C-c RET', which is
+highlighted span: bound on `cooked-mode-map' under \\`C-c RET', which is
 goto-addr's own advertised key and reaches cooked's commands in every state
 where Emacs is reading them at all.  It is what answers a file name that
-nothing highlighted, since `cooked-link-follow-functions\=' validates on demand."
+nothing highlighted, since `cooked-link-follow-functions' validates on demand."
   (interactive)
   (cooked--open-link-at-point))
 
@@ -347,14 +347,14 @@ whether cooked's own `C-c' map is reachable at all already decides it."
 ;;;; The OSC 8 pass
 
 (defun cooked-link--osc-8-claim-p (beg end)
-  "Whether an `OSC 8\=' span covers any of BEG..END."
+  "Whether an `OSC 8' span covers any of BEG..END."
   (text-property-not-all beg end 'cooked-link-id nil))
 
 (defun cooked-link--goto-addr-claim-p (beg end)
   "Whether the detected-URL pass has claimed any of BEG..END.
 
 A text property since the pass stopped making overlays -- see
-`cooked--fontify-links\='."
+`cooked--fontify-links'."
   (text-property-not-all beg end 'cooked-link-url nil))
 
 (defvar cooked-link-claim-functions
@@ -364,13 +364,13 @@ A text property since the pass stopped making overlays -- see
 
 An alist of (SYMBOL . PREDICATE); PREDICATE is called with the two ends of a
 buffer range and answers whether that source has claimed any of it.  Any, not
-the start: a child can open an `OSC 8\=' span halfway through text that also
+the start: a child can open an `OSC 8' span halfway through text that also
 reads as a URL, and a guess that asked only about its first character would
-put its own `keymap\=' and `help-echo\=' over the span\='s tail.  Earlier
-entries outrank later ones, and `cooked-link--claimed-p\=' is the arbiter.
+put its own `keymap' and `help-echo' over the span's tail.  Earlier
+entries outrank later ones, and `cooked-link--claimed-p' is the arbiter.
 
 The list is *data the layers contribute to* rather than an ordering written
-into this file.  A guessed file name is `cooked-file-link.el\='s output, so a
+into this file.  A guessed file name is `cooked-file-link.el's output, so a
 ranking written here would name a category that does not exist unless an
 optional layer above it happens to be loaded.  A source registers itself, at
 the rank it belongs at, from the file that produces it.
@@ -383,14 +383,14 @@ guessing is the only kind that can be wrong about what the text even is.")
 (defun cooked-link--claimed-p (beg end &optional source)
   "Which source, if any, has already made some of BEG..END a link.
 
-Returns the claiming source\='s symbol, or nil.  With SOURCE, answers only for
+Returns the claiming source's symbol, or nil.  With SOURCE, answers only for
 sources ranked *above* it: a source asks before claiming, and must not be told
 that it has claimed the text itself -- nor be blocked by something it
-outranks.  The walk therefore stops at SOURCE\='s own entry.
+outranks.  The walk therefore stops at SOURCE's own entry.
 
-For example, the URL pass asks with SOURCE `goto-addr\=' before it marks a
-match, in `cooked-link--fontify-url-match\=', and is told only about an
-`OSC 8\=' span over the same characters.  A guessed file name there ranks
+For example, the URL pass asks with SOURCE `goto-addr' before it marks a
+match, in `cooked-link--fontify-url-match', and is told only about an
+`OSC 8' span over the same characters.  A guessed file name there ranks
 below it and cannot keep a URL from being marked."
   (catch 'claimed
     (pcase-dolist (`(,symbol . ,predicate) cooked-link-claim-functions)
@@ -401,10 +401,10 @@ below it and cannot keep a URL from being marked."
 (defun cooked-link--propertize (beg end &rest extra)
   "Make BEG..END behave as a link, carrying EXTRA over the common properties.
 
-The three every link kind shares -- the highlight, `follow-link\=' for
-`mouse-1-click-follows-link\=', and the keymap that answers RET and mouse-2 --
+The three every link kind shares -- the highlight, `follow-link' for
+`mouse-1-click-follows-link', and the keymap that answers RET and mouse-2 --
 spelled once, so two kinds cannot drift into answering different keys.  EXTRA
-is a plist for what the caller\='s own kind adds: its id, its `help-echo\=', its
+is a plist for what the caller's own kind adds: its id, its `help-echo', its
 face."
   (add-text-properties beg end
                        (append extra
@@ -425,12 +425,12 @@ OSC 8 is the one link kind whose text and destination are independent -- the
 child chooses both -- so a span can read like one address and point at another,
 and unlike a goto-addr match there is nothing on screen to check it against.
 Showing the target is what kitty, VTE and iTerm2 all do about that, and it is
-the whole of the defence: following is the user\='s own doing, so the thing to
+the whole of the defence: following is the user's own doing, so the thing to
 protect is the decision rather than the act.
 
 A function rather than the string it returns, because the id has to be resolved
-against `cooked--link-uris\=' and doing that per span while rendering would put
-a hash lookup and a `format\=' on the render path for every link in every
+against `cooked--link-uris' and doing that per span while rendering would put
+a hash lookup and a `format' on the render path for every link in every
 damaged row.  Hover is rare; drains are not."
   (let ((buffer (if (bufferp object) object (current-buffer))))
     (if-let* ((uri (and (buffer-live-p buffer)
@@ -649,10 +649,10 @@ is there to avoid."
 ;;;; The goto-addr pass
 
 (defvar cooked--url-scheme-regexp-memo nil
-  "Cached (SCHEMES . REGEXP) for `thing-at-point-uri-schemes\='.")
+  "Cached (SCHEMES . REGEXP) for `thing-at-point-uri-schemes'.")
 
 (defun cooked--url-scheme-regexp ()
-  "The scheme alternation `thing-at-point\=' would have built, built once."
+  "The scheme alternation `thing-at-point' would have built, built once."
   (let ((schemes thing-at-point-uri-schemes))
     (if (eq (car cooked--url-scheme-regexp-memo) schemes)
         (cdr cooked--url-scheme-regexp-memo)
@@ -724,13 +724,13 @@ explicit hyperlink -- and cooked-file-link.el's spans -- untouched."
 (defun cooked-link--fontify-wrapped-match (beg end url face mouse-face help-echo)
   "Make BEG..END a detected link to URL, one fragment per row it spans.
 
-The soft-wrap counterpart of `cooked-link--fontify-url-match\=', and the two
+The soft-wrap counterpart of `cooked-link--fontify-url-match', and the two
 differ in exactly two things: the newlines between the rows are left unmarked,
-and every fragment carries the same `cooked-link-fragment\=' id so that what is
+and every fragment carries the same `cooked-link-fragment' id so that what is
 drawn as three highlighted pieces is still one link to everything that asks.
-`cooked-link--detected-bounds\=' is what asks.
+`cooked-link--detected-bounds' is what asks.
 
-A fresh cons per match, compared with `eq\=': two occurrences of the same URL on
+A fresh cons per match, compared with `eq': two occurrences of the same URL on
 the same row are two links, and comparing the URL string instead would have said
 they were one."
   (unless (cooked-link--claimed-p beg end 'goto-addr)
@@ -803,13 +803,13 @@ where its matches can begin."
   "Run goto-addr's two patterns over BEG..END, calling MATCH for each hit.
 
 MATCH is called as (BEG END URL FACE MOUSE-FACE HELP-ECHO), which is
-`cooked-link--fontify-url-match\='s own signature -- so the ordinary scan passes
+`cooked-link--fontify-url-match's own signature -- so the ordinary scan passes
 that function straight in and the soft-wrap scan passes a closure that maps the
 positions back into the buffer the text came from first.
 
 Split out for that second caller and for nothing else.  What the two share is
 everything that makes the scan a faithful reproduction of
-`goto-address-fontify-region\=' -- both regexps, `bounds-of-thing-at-point\=' for
+`goto-address-fontify-region' -- both regexps, `bounds-of-thing-at-point' for
 the URL bounds and the raw match for mail, the two faces and the two help
 strings -- and it is a reproduction precisely because goto-addr offers no hook
 to filter its matches with.  Having a second copy of it for the wrapped case
@@ -838,16 +838,16 @@ would be a second thing to keep faithful."
 (defun cooked-link--scan-joined (joined)
   "Scan JOINED, a rejoined region's text, and mark what it finds in the buffer.
 
-JOINED is `cooked-link--join-wrapped\='s (STRING . CHUNKS).  The string is put in
-a temporary buffer rather than matched with `string-match\=', because the scan
-asks `bounds-of-thing-at-point\=' where each URL really ends and thingatpt reads
+JOINED is `cooked-link--join-wrapped's (STRING . CHUNKS).  The string is put in
+a temporary buffer rather than matched with `string-match', because the scan
+asks `bounds-of-thing-at-point' where each URL really ends and thingatpt reads
 a buffer.  Matching the string directly would mean either giving that up or
 reimplementing it, and giving it up is what puts the trailing bracket of
 \"(https://example.com/x)\" inside the link.
 
 The source buffer's syntax table goes with the text.  thingatpt's idea of a word
 constituent is the current table's, so a scratch buffer left in
-`fundamental-mode\=' could disagree with the real one about where a URL ends --
+`fundamental-mode' could disagree with the real one about where a URL ends --
 about which the honest thing to say is that it does not today, and that a
 one-line guarantee is cheaper than knowing whether it ever will.
 
@@ -883,14 +883,14 @@ the session."
 (defun cooked-link--detected-bounds (&optional pos)
   "Bounds of the detected-URL span covering POS, or nil.
 
-The run of `cooked-link-url\=', extended across any soft wrap the match was
-broken over: the fragments of one match share a `cooked-link-fragment\=' id, so
+The run of `cooked-link-url', extended across any soft wrap the match was
+broken over: the fragments of one match share a `cooked-link-fragment' id, so
 the extension is exact rather than a guess from the text being adjacent.  An
 unwrapped match carries no id and the run is the whole answer, which is why the
 common case walks nothing.
 
 Returns the outer bounds, newlines included.  What the *properties* deliberately
-skip is a different question from what the link *is*: `thing-at-point\=' and
+skip is a different question from what the link *is*: `thing-at-point' and
 embark want the extent of the thing, and the thing spans the break."
   (let ((pos (or pos (point))))
     (when (get-text-property pos 'cooked-link-url)
@@ -997,11 +997,11 @@ was."
 ;; which is the same mistake `cooked-link-claim-functions' exists to undo.
 
 (defvar cooked-thing-at-point-providers nil
-  "Entries for `thing-at-point-provider-alist\=', contributed by each link layer.
+  "Entries for `thing-at-point-provider-alist', contributed by each link layer.
 An alist of (THING . FUNCTION); cooked-mode.el installs them buffer-locally.")
 
 (defvar cooked-bounds-of-thing-at-point-providers nil
-  "Entries for `bounds-of-thing-at-point-provider-alist\=', as above.
+  "Entries for `bounds-of-thing-at-point-provider-alist', as above.
 
 Kept separate rather than derived, because the two alists are consulted
 independently: a caller asking only for bounds -- which is what embark does to
@@ -1009,16 +1009,16 @@ highlight a target -- must not fall back to thingatpt's own idea of where a
 thing ends when this layer knows better.")
 
 (defvar cooked-file-name-at-point-functions nil
-  "Entries for `file-name-at-point-functions\=', contributed by each link layer.
+  "Entries for `file-name-at-point-functions', contributed by each link layer.
 
 Empty unless cooked-file-link.el is loaded -- naming a file is that layer's
 whole job -- but the variable lives here so cooked-mode.el has one place to
 install from whether or not the layer is present.")
 
 (defun cooked-link--osc-8-bounds (&optional pos)
-  "Bounds of the `OSC 8\=' span covering POS, or nil.
+  "Bounds of the `OSC 8' span covering POS, or nil.
 
-The span is delimited by the `cooked-link-id\=' property rather than by
+The span is delimited by the `cooked-link-id' property rather than by
 anything in the text, which is what makes it correct across a soft wrap and
 across a row boundary: the id travels with the row through eviction, so a
 destination broken over three screen rows still answers as one thing."
@@ -1028,13 +1028,13 @@ destination broken over three screen rows still answers as one thing."
             (or (next-single-property-change pos 'cooked-link-id) (point-max))))))
 
 (defun cooked-link--url-at-point ()
-  "The `OSC 8\=' destination at point, for `thing-at-point-provider-alist\='.
+  "The `OSC 8' destination at point, for `thing-at-point-provider-alist'.
 
 Only the OSC 8 case is answered here, and returning nil for everything else is
-deliberate: thingatpt\='s own `url\=' thing already reads a bare URL out of the
+deliberate: thingatpt's own `url' thing already reads a bare URL out of the
 text, and it reads more schemes than goto-addr does.  What it cannot know is
 that these particular characters carry a destination that is not written in
-them -- an `OSC 8\=' span\='s text is frequently a label, so the URL is nowhere
+them -- an `OSC 8' span's text is frequently a label, so the URL is nowhere
 on screen.  Answering only that case adds the knowledge without displacing
 anything.
 

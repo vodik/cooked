@@ -93,7 +93,7 @@ nowhere -- and installs `cooked-peek-map' instead.  Peek is look-only: typing
 a character or RET ends it and forwards what was pressed, same as it would
 have gone straight through without the interruption (see
 `cooked--peek-resume-and-send'), and so does any of cooked's own commands
-that write to the child (\\`C-c C-c\=', \\`C-c C-y\=', and the rest).  Calling this
+that write to the child (\\`C-c C-c', \\`C-c C-y', and the rest).  Calling this
 again leaves without acting on anything, and either way the buffer catches up
 on whatever the child produced meanwhile.
 

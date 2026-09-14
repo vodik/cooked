@@ -215,7 +215,7 @@ cursor; see `cooked-tests--cell'."
     buffer))
 
 (defun cooked-tests--oracle-feed (buffer chunk)
-  "Feed CHUNK, a list of tokens, to BUFFER\='s session in order.
+  "Feed CHUNK, a list of tokens, to BUFFER's session in order.
 
 A string is bytes the child wrote.  (resize ROWS COLS) resizes the session as a
 window changing size does, without draining."
@@ -317,7 +317,7 @@ entry is a list of (TEXT . PROPERTIES) runs, adjacent characters with equal
 properties merged, since where Emacs happens to split an interval is not
 something anyone sees.  The newline ending a line of scrollback is a last run
 of its own, (newline . PROPERTIES), when it carries any, so a newline that kept
-the live screen\='s `cooked-wrap' mark on its way into history is a difference,
+the live screen's `cooked-wrap' mark on its way into history is a difference,
 and so is a newline on the screen that lost it.
 :screen-start and :point are places as `cooked-tests--oracle-place' gives them,
 and :alt is the screen shown.  See above for the padding, left out of the
@@ -698,9 +698,9 @@ arrived as an empty line."
   "A wrapped row drawn last on the screen gets its mark with its newline.
 
 The last row of the screen region has no newline, so there is nowhere for its
-`cooked-wrap\=' mark to go when it is drawn.  The newline comes later, from
+`cooked-wrap' mark to go when it is drawn.  The newline comes later, from
 extending the region for the row below: here the cursor sits under
-`日hel\=' once `DL\=' has taken its continuation, and under an empty row whose
+`日hel' once `DL' has taken its continuation, and under an empty row whose
 wide character did not fit in the last column, once at the bottom of the
 screen and once as row 0 after a scroll took the rows above it.  That newline arrived unmarked,
 while the same rows resent over existing lines were marked."
@@ -764,7 +764,7 @@ scroll the promoted rows had left by, which lost one of the blank rows above
 
 `日本語' at 5 columns wraps `語' onto a second row, and a line feed scrolls the
 first away with a newline of its own.  A whole drain then has the core forget
-that it counted the row into row 0\='s line, and a drain that left the screen
+that it counted the row into row 0's line, and a drain that left the screen
 out did not, so widening the screen to 9 columns rewrapped against a head the
 buffer never held and sent `語' to scrollback.  The generator's resizes found
 it."
@@ -797,8 +797,8 @@ whole or left the screen out."
 (defun cooked-tests--oracle-run (rows cols chunks &optional treatment)
   "A buffer with a ROWS by COLS session fed CHUNKS, drained after each.
 
-TREATMENT is as for `cooked-tests--oracle-compare\='s SUBJECT, and the buffer
-is caught up with `cooked--sync\=' at the end.  The seam is checked on every
+TREATMENT is as for `cooked-tests--oracle-compare's SUBJECT, and the buffer
+is caught up with `cooked--sync' at the end.  The seam is checked on every
 whole drain.  The caller kills the buffer."
   (let ((buffer (cooked-tests--oracle-buffer rows cols))
         (cooked-debug t))
@@ -811,7 +811,7 @@ whole drain.  The caller kills the buffer."
     buffer))
 
 (defmacro cooked-tests--with-oracle-run (spec &rest body)
-  "Run BODY in the buffer `cooked-tests--oracle-run\=' makes from SPEC, then kill it."
+  "Run BODY in the buffer `cooked-tests--oracle-run' makes from SPEC, then kill it."
   (declare (indent 1))
   (let ((buffer (make-symbol "buffer")))
     `(let ((,buffer (cooked-tests--oracle-run ,@spec)))
@@ -821,10 +821,10 @@ whole drain.  The caller kills the buffer."
          (kill-buffer ,buffer)))))
 
 (ert-deftest cooked-render-oracle-a-line-wrapped-across-the-top-is-whole-after-the-alternate-screen ()
-  "A line wrapped across the top of the screen is one buffer line after `less\='.
+  "A line wrapped across the top of the screen is one buffer line after `less'.
 
-Ten `=\=' at 4 columns on a 2-row screen leave the first 4 in scrollback and
-the rest on row 0 and row 1, and row 0 continues the scrollback\='s last line.
+Ten `=' at 4 columns on a 2-row screen leave the first 4 in scrollback and
+the rest on row 0 and row 1, and row 0 continues the scrollback's last line.
 Showing the alternate screen and leaving it again leaves no newline between
 them: across two drains, with the switch there
 and back inside one drain, with drains that leave the screen out, and with a

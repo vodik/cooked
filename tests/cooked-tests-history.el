@@ -19,7 +19,7 @@
 (require 'cooked-history)
 
 (defmacro cooked-tests--with-history (entries &rest body)
-  "Run BODY with `cooked-history--entries\=' answering ENTRIES."
+  "Run BODY with `cooked-history--entries' answering ENTRIES."
   (declare (indent 1))
   `(let ((cooked-history-shell 'test)
          (cooked-history-commands (list (cons 'test (lambda () ,entries)))))
@@ -28,7 +28,7 @@
 (ert-deftest cooked-history-splits-on-nul-when-there-is-one ()
   "fish entries can contain newlines, so splitting those on newlines halves them.
 
-`history -z\=' is why fish is asked the way it is, and the split is decided per
+`history -z' is why fish is asked the way it is, and the split is decided per
 call rather than per shell: an unlisted shell works if it can do either, and a
 wrapper could reasonably emit NULs from anything."
   (should (equal (cooked-history--split "one\0two\nlines\0three\0")
@@ -42,7 +42,7 @@ wrapper could reasonably emit NULs from anything."
 (ert-deftest cooked-history-keeps-newest-first-and-drops-duplicates ()
   "The shells are asked for a *reversed* history, so order is the answer.
 
-`delete-dups\=' rather than a hash walk, because it keeps the first occurrence
+`delete-dups' rather than a hash walk, because it keeps the first occurrence
 -- which, the list being newest-first, is the most recent time you ran it."
   (cooked-tests--with-history '("newest" "middle" "newest" "oldest" "middle")
     (should (equal (cooked-history--entries) '("newest" "middle" "oldest")))))
@@ -53,7 +53,7 @@ wrapper could reasonably emit NULs from anything."
       (should (equal (cooked-history--entries) '("a" "b"))))))
 
 (ert-deftest cooked-history-refuses-a-shell-it-has-no-command-for ()
-  "A `user-error\=', not a silent empty list: an empty history and an unknown
+  "A `user-error', not a silent empty list: an empty history and an unknown
 shell look identical from the prompt, and only one of them is worth telling
 somebody about."
   (let ((cooked-history-shell 'nosuchshell)
@@ -61,7 +61,7 @@ somebody about."
     (should-error (cooked-history--entries) :type 'user-error)))
 
 (ert-deftest cooked-history-guesses-the-shell-from-cooked-shell ()
-  "Including when `cooked-shell\=' carries arguments, which it is allowed to."
+  "Including when `cooked-shell' carries arguments, which it is allowed to."
   (let ((cooked-history-shell nil))
     (dolist (case '(("/bin/zsh" . zsh) ("/usr/bin/fish" . fish) ("bash -l" . bash)))
       (let ((cooked-shell (car case)))
@@ -120,7 +120,7 @@ away from the entry you did not.  So: no newline, on either path."
           (should (get-text-property (1- (point-max)) 'cooked-pasted)))))))
 
 (defmacro cooked-tests--with-history-command (command &rest body)
-  "Run BODY with `cooked-history--entries\=' running the command line COMMAND."
+  "Run BODY with `cooked-history--entries' running the command line COMMAND."
   (declare (indent 1))
   `(let ((cooked-history-shell 'test)
          (cooked-history-commands (list (cons 'test ,command)))

@@ -38,16 +38,16 @@
       cooked--set-tuning cooked--signal cooked--spawn)
     "Every function the native core defines, by name.
 
-The core registers these when `cooked--load-module\=' loads it, so the
+The core registers these when `cooked--load-module' loads it, so the
 byte-compiler has never seen any of them.  Each file that calls one says
-`(cooked--declare-core)\=' once, rather than keeping a list of its own that a
+`(cooked--declare-core)' once, rather than keeping a list of its own that a
 new defun in src/lib.rs would leave behind.  The test
-`cooked-core-functions-match-lib-rs\=' holds this list and the Rust table in
+`cooked-core-functions-match-lib-rs' holds this list and the Rust table in
 step."))
 
 (defmacro cooked--declare-core ()
-  "Declare every function in `cooked--core-functions\=' to the byte-compiler.
-Expands to one `declare-function\=' per name, so it has to be called at the top
+  "Declare every function in `cooked--core-functions' to the byte-compiler.
+Expands to one `declare-function' per name, so it has to be called at the top
 level of each file that calls into the core."
   `(progn
      ,@(mapcar (lambda (name) `(declare-function ,name "ext:cooked-core"))
@@ -299,16 +299,16 @@ buffer position but no less correct."
 
 TABLE is a symbol naming a variable, not an expression: the table is made on
 first use and stored back, so no caller has to have been initialised first.
-That is the whole reason this exists rather than a bare `with-memoization\='.
+That is the whole reason this exists rather than a bare `with-memoization'.
 The caches it fronts are reached from paths that run before -- and without --
-`cooked--start\=', `cooked--rescale-deco\=' from a `text-scale\=' change being the
+`cooked--start', `cooked--rescale-deco' from a `text-scale' change being the
 one that actually bit, and a nil table there is a wrong-type error inside a
 redisplay hook that nothing catches.
 
 Only for caches whose key says everything about the value, which is what makes
 one shared with the session before it harmless.  Anything keyed on something the
 core hands out afresh per session -- an image id -- must be cleared when a
-session starts instead; see `cooked--reset-images\='."
+session starts instead; see `cooked--reset-images'."
   (declare (indent 2) (debug (symbolp form body)))
   `(progn
      (unless (hash-table-p ,table)
@@ -318,16 +318,16 @@ session starts instead; see `cooked--reset-images\='."
 (defmacro cooked--cached-bounded (table limit key &rest body)
   "Value of BODY for KEY, memoized in TABLE, dropping TABLE past LIMIT entries.
 
-`cooked--cached\=' for a cache whose key includes a dimension with no bound of
+`cooked--cached' for a cache whose key includes a dimension with no bound of
 its own -- a run length, a window width -- where every value that dimension has
 ever taken would otherwise be remembered for the life of the buffer.  Nothing
 here is a size estimate or a proper LRU: once TABLE holds more than LIMIT
 entries, it is emptied outright before the new one goes in, the same trade
-`cooked--wrap-cache\=' already makes for the same reason -- see
-`cooked-wrap-cache-limit\='.  That is only sound when BODY is one of the cheap
+`cooked--wrap-cache' already makes for the same reason -- see
+`cooked-wrap-cache-limit'.  That is only sound when BODY is one of the cheap
 tiers of a two-tier cache, i.e. when losing an entry costs recomputing it from
 another, unbounded cache rather than redoing the expensive work from scratch;
-callers pairing this with `cooked--cached\=' are relying on exactly that."
+callers pairing this with `cooked--cached' are relying on exactly that."
   (declare (indent 3) (debug (symbolp form form body)))
   `(progn
      (unless (hash-table-p ,table)
@@ -339,25 +339,25 @@ callers pairing this with `cooked--cached\=' are relying on exactly that."
            (puthash ,key cooked--cached-bounded-value ,table)))))
 
 (defmacro cooked--with-child-edit (&rest body)
-  "Run BODY as an edit made on the child\='s behalf rather than by the user.
+  "Run BODY as an edit made on the child's behalf rather than by the user.
 
 Two bindings, one reason each, and both follow from the same fact: the text
 BODY touches belongs to the emulator, not to whoever is typing.
 
-`inhibit-read-only\=', because the screen and the scrollback are protected
-\(`cooked--protect\=') against a keystroke damaging a picture Emacs has no way to
+`inhibit-read-only', because the screen and the scrollback are protected
+\(`cooked--protect') against a keystroke damaging a picture Emacs has no way to
 repair -- and these edits are the writer that protection was never aimed at.
 
-`buffer-undo-list\=', because a redraw deletes and reinserts whole rows on every
+`buffer-undo-list', because a redraw deletes and reinserts whole rows on every
 drain, and recording that is useless before it is harmful.  Undoing a row the
-child painted would put back text the emulator\='s grid does not have, and every
+child painted would put back text the emulator's grid does not have, and every
 later delta is computed against that grid, so nothing would ever mend the
 disagreement.  Meanwhile a busy screen turns its whole text over several times a
 second, and the list grows until Emacs warns that it has discarded megabytes --
 which is the only sign a user ever gets that undo was recording the terminal.
 
 What stays recorded is what the user typed at the prompt, the one piece of the
-buffer that is theirs.  Run `cooked--check-undo-anchor\=' *after* the macro and
+buffer that is theirs.  Run `cooked--check-undo-anchor' *after* the macro and
 never inside it, wherever BODY moves the input line: inside, the discard would
 land on the binding above and be thrown away with it while the anchor it records
 stayed."
@@ -395,7 +395,7 @@ For input the user did not type as such: a completion request, the interrupt
 that abandons a secret prompt.  There the child having just exited is an
 ordinary race rather than something the user asked for and should be told
 about — and signalling from inside a process filter would abort the rest of the
-redisplay.  A reply goes through `cooked--reply-if-live\=' instead."
+redisplay.  A reply goes through `cooked--reply-if-live' instead."
   (when-let* ((session (cooked--live-session)))
     (cooked--send session bytes)))
 
@@ -404,11 +404,11 @@ redisplay.  A reply goes through `cooked--reply-if-live\=' instead."
 (defvar cooked--reply-batch nil
   "The replies owed during the events being handled, as (SESSION . REPLIES).
 
-REPLIES is newest first.  Bound by `cooked--batching-replies\=' and nil
+REPLIES is newest first.  Bound by `cooked--batching-replies' and nil
 everywhere else, where a reply is queued the moment it is composed.")
 
 (defmacro cooked--batching-replies (session &rest body)
-  "Run BODY, then owe SESSION\='s child every reply BODY composed, as one string.
+  "Run BODY, then owe SESSION's child every reply BODY composed, as one string.
 
 A palette sweep asks for 256 entries in one sequence and is answered once per
 entry; queued one at a time, each would be its own write to the pty.  Held
@@ -426,13 +426,13 @@ the ones composed before the error."
            (cooked--reply (car ,batch) (apply #'concat (nreverse replies))))))))
 
 (defun cooked--queue-reply (session bytes)
-  "Owe SESSION\='s child BYTES, a reply, without waiting for it to read them.
+  "Owe SESSION's child BYTES, a reply, without waiting for it to read them.
 
 Replies are not keystrokes.  A child that has stopped reading -- a suspended
 job, or a program hung in raw mode -- would otherwise stall Emacs on every
 answer and every resize, so a reply joins a queue the core writes as the child
 makes room, and one owed to a child that has not read in a long while is
-dropped.  See `cooked--send\=' for input, which waits and then signals."
+dropped.  See `cooked--send' for input, which waits and then signals."
   (if (eq session (car cooked--reply-batch))
       (push bytes (cdr cooked--reply-batch))
     (cooked--reply session bytes)))
@@ -443,27 +443,27 @@ dropped.  See `cooked--send\=' for input, which waits and then signals."
 For what the terminal tells the child rather than what the user types: a
 device-status reply resolved mid-drain, a focus report from a global hook, a
 colour-scheme notification.  The child having just exited is an ordinary race
-there, as it is for `cooked--send-if-live\='."
+there, as it is for `cooked--send-if-live'."
   (when-let* ((session (cooked--live-session)))
     (cooked--queue-reply session bytes)))
 
 (defun cooked--reply-osc (session code payload bell)
   "Answer an OSC query on SESSION with CODE and PAYLOAD, ended by BEL if BELL.
 
-The reply is `ESC ] CODE ; PAYLOAD\=', framed by `cooked--osc-reply\=', which
+The reply is `ESC ] CODE ; PAYLOAD', framed by `cooked--osc-reply', which
 refuses a PAYLOAD holding control characters that could close it early.  Pass
-`cooked--osc-bell-terminated\=' as BELL, since a client that queried with BEL
+`cooked--osc-bell-terminated' as BELL, since a client that queried with BEL
 will not recognise an ST-terminated answer."
   (cooked--queue-reply session (cooked--osc-reply code payload bell)))
 
 (defvar cooked--redraw-hook nil
   "Run in a cooked buffer whose every row is about to be rendered again.
 
-That is, from `cooked--forget-sent-rows\=' with REDRAW, whose callers all mean
+That is, from `cooked--forget-sent-rows' with REDRAW, whose callers all mean
 that the same cells are about to be drawn differently.  A cache holding
 something measured under the old drawing adds itself here to be emptied first,
 since this file sits below the files that own those caches: the box-drawing
-spec cache in cooked-deco.el holds an `:ascent\=' measured from a font the
+spec cache in cooked-deco.el holds an `:ascent' measured from a font the
 layout stamp has just said is gone.")
 
 (defun cooked--forget-sent-rows (&optional redraw)
@@ -481,13 +481,13 @@ them whether the child repaints or not.  That is for a change a row has to be
 rendered again to show at all, rather than one a repaint merely picks up: a
 zoom leaves the glyph scaling on a row measured against the old font, and a
 shell sitting at its prompt never repaints to replace it.  A theme change is
-one of those as well, and redraws through `cooked--redraw-every-screen\='.
+one of those as well, and redraws through `cooked--redraw-every-screen'.
 
 The one way the copy is cleared, so that the theme, the layout stamp moving and
 the options that change rendering all mean the same thing by it.  On
-`cooked-theme-change-hook\=', which runs with each buffer current; from
-`cooked--wrap-cache\=' when `cooked--layout-stamp\=' moves; and from
-`cooked--set-rendering-option\='."
+`cooked-theme-change-hook', which runs with each buffer current; from
+`cooked--wrap-cache' when `cooked--layout-stamp' moves; and from
+`cooked--set-rendering-option'."
   (when (user-ptrp cooked--session)
     (if redraw
         (progn
@@ -501,17 +501,17 @@ the options that change rendering all mean the same thing by it.  On
 (defun cooked--set-rendering-option (symbol value)
   "Set SYMBOL to VALUE and redraw every live screen under it.
 
-The `:set\=' behind the options that change how the same cells are drawn, such
-as `cooked-box-drawing-images\=' and `cooked-glyph-scale-floor\='.  Neither is
+The `:set' behind the options that change how the same cells are drawn, such
+as `cooked-box-drawing-images' and `cooked-glyph-scale-floor'.  Neither is
 read anywhere but in rendering a row, so without this a screen already drawn
 keeps the old answer: a border stays a bitmap after box drawing is turned off,
 until the child happens to repaint it with different cells.
 
 Drained here rather than left to the child, for the same reason
-`cooked-refresh\=' drains: a customization is a request to see the result, and
+`cooked-refresh' drains: a customization is a request to see the result, and
 an idle prompt would not show it until the next keystroke.  At load, when
-`custom-declare-variable\=' calls this to set the default, there is no cooked
-buffer to walk and nothing but the `set-default\=' happens."
+`custom-declare-variable' calls this to set the default, there is no cooked
+buffer to walk and nothing but the `set-default' happens."
   (set-default symbol value)
   (cooked--redraw-every-screen))
 
@@ -519,8 +519,8 @@ buffer to walk and nothing but the `set-default\=' happens."
   "Render every live screen again now, in every cooked buffer.
 
 For a change to how the same cells are drawn that has to show at once: see
-`cooked--set-rendering-option\=' and `cooked--refresh-ansi-colors\='.  Each
-buffer\='s rows are damaged and drained, rather than left for the child to
+`cooked--set-rendering-option' and `cooked--refresh-ansi-colors'.  Each
+buffer's rows are damaged and drained, rather than left for the child to
 repaint, which it may never do."
   (cooked--dolist-buffers
     (when (user-ptrp cooked--session)
@@ -532,26 +532,26 @@ repaint, which it may never do."
    (file-truename (or load-file-name buffer-file-name default-directory)))
   "Directory holding this file, captured at load time.
 
-Through `file-truename\=' on the file rather than on the directory, because the
+Through `file-truename' on the file rather than on the directory, because the
 package managers symlink the .el files individually into a build directory that
 is itself a real directory -- so resolving the directory answers with the build
-tree, and only resolving the file lands in the clone.  `cooked--root\=' needs the
+tree, and only resolving the file lands in the clone.  `cooked--root' needs the
 clone: that is where Cargo.toml, terminfo/ and shell-integration/ are.")
 
 (defun cooked--root ()
   "Top of the source tree: the directory holding Cargo.toml.
 
-Found by walking up from `cooked--source-directory\=' rather than by taking its
-parent, which matters for the package managers: `straight\=' and `elpaca\=' load
+Found by walking up from `cooked--source-directory' rather than by taking its
+parent, which matters for the package managers: `straight' and `elpaca' load
 the Lisp from a build directory of symlinks into the clone, and its parent is
 the build root -- which has no Cargo.toml, no terminfo/ and no
-shell-integration/, and would send `cooked--load-module\=' off to build a crate
-that is not there.  `cooked--source-directory\=' has already resolved the link,
+shell-integration/, and would send `cooked--load-module' off to build a crate
+that is not there.  `cooked--source-directory' has already resolved the link,
 so the walk starts inside the clone, where all three are.
 
 Falls back to the parent directory, which is the answer for a plain
-`load-path\=' checkout and the only thing left to guess if the tree has been
-split up by an installer.  See `cooked-native-module\=' for pointing at a
+`load-path' checkout and the only thing left to guess if the tree has been
+split up by an installer.  See `cooked-native-module' for pointing at a
 prebuilt artifact instead."
   (let ((dir (file-name-as-directory cooked--source-directory)))
     (or (locate-dominating-file dir "Cargo.toml")
@@ -562,12 +562,12 @@ prebuilt artifact instead."
 
 Nil if either is nil, so an absent name never matches a present one.
 
-Deliberately generous about spelling and about nothing else.  `HOST\=' from zsh
-is usually short where `system-name\=' and a TRAMP prefix are fully qualified,
+Deliberately generous about spelling and about nothing else.  `HOST' from zsh
+is usually short where `system-name' and a TRAMP prefix are fully qualified,
 and the two spellings of one machine must not read as a move; but anything
 beyond a shared first label is treated as a different machine, because both
 callers would rather ask again than guess.  The generosity is one-sided in a
-useful way -- it can only ever say `same\=' about two names sharing their first
+useful way -- it can only ever say `same' about two names sharing their first
 label, never about two that do not."
   (and a b
        (let ((a (downcase a))
@@ -581,9 +581,9 @@ label, never about two that do not."
   "Whether HOST, the authority of an OSC 7 URL, names this machine.
 
 An empty authority does, being what a shell that has not bothered to name
-itself sends, and so does `localhost\='.  Otherwise the comparison with
-`system-name\=' is `cooked--same-host-p\=': generous about spelling, since
-`HOST\=' from zsh is usually short where `system-name\=' is fully qualified,
+itself sends, and so does `localhost'.  Otherwise the comparison with
+`system-name' is `cooked--same-host-p': generous about spelling, since
+`HOST' from zsh is usually short where `system-name' is fully qualified,
 and ungenerous about everything else.  Anything not recognisably here is
 elsewhere, because the cost of a false negative is a local file opened in
 place of a remote one."
@@ -593,18 +593,18 @@ place of a remote one."
        t))
 
 (defun cooked--parse-file-url (url)
-  "The (HOST . PATH) an OSC 7 `file://\=' URL names, both percent-decoded, or nil.
+  "The (HOST . PATH) an OSC 7 `file://' URL names, both percent-decoded, or nil.
 
 HOST is the empty string when the authority is empty.  The path is
 percent-encoded on the wire because that is what a URL is: a directory called
-`100%20cake\=' arrives as `100%2520cake\=', and decoding it once gives the name
+`100%20cake' arrives as `100%2520cake', and decoding it once gives the name
 back.  Nothing here looks at the file system; deciding what the path means is
-the caller\='s, and has to come after `cooked--local-host-p\=' and
-`cooked--local-name\='.
+the caller's, and has to come after `cooked--local-host-p' and
+`cooked--local-name'.
 
 The escapes are bytes of UTF-8, as every shell that sends one encodes them, so
-they are decoded as UTF-8 after unescaping: `caf%C3%A9\=' is `café\='.
-`url-unhex-string\=' alone leaves the two bytes as two raw-byte characters, a
+they are decoded as UTF-8 after unescaping: `caf%C3%A9' is `café'.
+`url-unhex-string' alone leaves the two bytes as two raw-byte characters, a
 name that matches no directory.  A character sent unescaped is encoded first,
 so the bytes decoded are the bytes the shell wrote."
   (when (and (stringp url)
@@ -649,18 +649,18 @@ Every path cooked takes from the child is a string somebody else chose: an OSC 7
 working directory, a file named over the command channel, a name parsed out of
 output.  Under TRAMP such a string is not inert.  Visiting
 \"/ssh:host:/etc/motd\" opens a connection to a host the sender picked and runs
-that method\='s own transport program to get there, which is a command executed
-on somebody else\='s say-so wearing the shape of a path.  \"/sudo::/etc/shadow\"
+that method's own transport program to get there, which is a command executed
+on somebody else's say-so wearing the shape of a path.  \"/sudo::/etc/shadow\"
 is the same move without leaving the machine.
 
 The check has to come before anything that so much as looks at the file,
-`file-exists-p\=' and `file-directory-p\=' included: those are the calls that
+`file-exists-p' and `file-directory-p' included: those are the calls that
 dispatch to the TRAMP handler, so asking whether the file is there is already
 the connection this exists to refuse.
 
 Here rather than in one of the layers because two of them need it and neither
-can require the other -- `cooked-osc.el\=' for OSC 7, which is always on, and
-`cooked-osc-eval.el\=' for the command channel, which is not.  That is what this
+can require the other -- `cooked-osc.el' for OSC 7, which is always on, and
+`cooked-osc-eval.el' for the command channel, which is not.  That is what this
 file is the floor for."
   (if (file-remote-p name)
       (progn (message "cooked: refused `%s' (a remote file name)" name) nil)
@@ -669,13 +669,13 @@ file is the floor for."
 (defun cooked--same-file-p (a b)
   "Whether file names A and B name the same file, as its inode and device say.
 
-Not `file-equal-p\=', which compares every attribute but the name, the times
-included.  A directory\='s modification time moves whenever a file is made or
+Not `file-equal-p', which compares every attribute but the name, the times
+included.  A directory's modification time moves whenever a file is made or
 removed in it, so asking about a busy directory such as /tmp or a project
 being built raced whatever was writing there: when a file was created in /tmp
-between its two `stat\=' calls, `file-equal-p\=' said /tmp/ was not /tmp/.
+between its two `stat' calls, `file-equal-p' said /tmp/ was not /tmp/.
 
-Both names are resolved first, since `file-attributes\=' describes a symbolic
+Both names are resolved first, since `file-attributes' describes a symbolic
 link rather than what it points at.  Nil if either does not exist."
   (when-let* ((one (file-attributes (file-truename a)))
               (other (file-attributes (file-truename b))))
@@ -720,21 +720,21 @@ which is the ordinary case and stays free."
                    (setq narrowest window width chars))))))))
 
 (defconst cooked--default-font-probe (propertize " " 'face 'default)
-  "The text `cooked--default-font\=' asks `font-at\=' about.
+  "The text `cooked--default-font' asks `font-at' about.
 A constant, so that asking allocates nothing.")
 
 (defun cooked--default-font (window)
-  "The font this buffer\='s default face is drawn in on WINDOW, or nil.
+  "The font this buffer's default face is drawn in on WINDOW, or nil.
 
-The font a row is laid out against, which is not the frame\='s: after
-`text-scale-increase\=' in a 15-pixel font, `face-attribute\=' on the frame
+The font a row is laid out against, which is not the frame's: after
+`text-scale-increase' in a 15-pixel font, `face-attribute' on the frame
 still answers the 15-pixel font while the buffer is drawn in a 26-pixel one.
-`font-at\=' on a space in the default face answers as the display engine would,
-through this buffer\='s `face-remapping-alist\=', so it has to be asked with the
+`font-at' on a space in the default face answers as the display engine would,
+through this buffer's `face-remapping-alist', so it has to be asked with the
 buffer current.  That is the probe ghostel makes, for the same reason.
 
-WINDOW nil means the selected window, as it does for `font-at\=' itself; only
-the frame is taken from it, since the remapping is the buffer\='s.  Nil on a
+WINDOW nil means the selected window, as it does for `font-at' itself; only
+the frame is taken from it, since the remapping is the buffer's.  Nil on a
 terminal frame, which has no fonts to ask about."
   (let ((window (or window (selected-window))))
     (and (display-graphic-p (window-frame window))
@@ -771,20 +771,20 @@ and runs `cooked-state-change-hook', which is arbitrary user code."
 (defun cooked--deactivate-mark ()
   "Give up the region, taking evil's visual state with it.
 
-`deactivate-mark\=' on its own is only half of that under evil, and which half
+`deactivate-mark' on its own is only half of that under evil, and which half
 depends on where it was called from.  What keeps evil in step is
-`evil-visual-deactivate-hook\=', which decides from `this-command\=': from a
+`evil-visual-deactivate-hook', which decides from `this-command': from a
 command there is one to decide with -- a mouse report is sent under
-`cooked-mouse-event\=', which carries no `:keep-visual\=' property, so evil exits
+`cooked-mouse-event', which carries no `:keep-visual' property, so evil exits
 visual state and the two agree.  From a drain there is not.  A process filter
-runs between commands, `this-command\=' is whatever the user last ran or nothing
+runs between commands, `this-command' is whatever the user last ran or nothing
 at all, and the hook falls through both of its arms: the mark goes, evil stays
-in visual state, and the next \\`v\=' *leaves* visual state rather than entering
-it -- the failure `cooked-evil--command-range\=' documents at length, arrived at
+in visual state, and the next \\`v' *leaves* visual state rather than entering
+it -- the failure `cooked-evil--command-range' documents at length, arrived at
 from the other side.
 
 So ask evil outright instead of through a hook whose answer depends on how we
-got here.  `evil-exit-visual-state\=' deactivates the mark itself on its way
+got here.  `evil-exit-visual-state' deactivates the mark itself on its way
 back to the state visual state was entered from, and does it the same way
 whether or not a command is running.
 

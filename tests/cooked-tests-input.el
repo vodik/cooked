@@ -28,10 +28,10 @@ customizable exceptions at all."
       (should (eq (lookup-key cooked-alt-map (kbd key)) #'cooked-send-key)))))
 
 (ert-deftest cooked-policy-keeps-nothing-back-once-the-shell-has-spoken ()
-  "`cooked-raw-exceptions\=' hedges a state cooked cannot read: a raw program and
+  "`cooked-raw-exceptions' hedges a state cooked cannot read: a raw program and
 a shell editing its own prompt line look alike.  OSC 133 removes the doubt, so
-once any mark has arrived the hedge is off and `C-u\='/`C-l\=' -- readline\='s
-kill-line and every shell\='s clear-screen -- go to the child like anything else."
+once any mark has arrived the hedge is off and `C-u'/`C-l' -- readline's
+kill-line and every shell's clear-screen -- go to the child like anything else."
   (cooked-tests--with-session '("/bin/sh" "-c" "stty -icanon -echo; exec cat")
     (should (cooked-tests--settle (lambda () (eq (cooked--policy) 'raw))))
     ;; No mark has arrived, so the exceptions still apply.
@@ -49,7 +49,7 @@ kill-line and every shell\='s clear-screen -- go to the child like anything else
     (should-not (eq (key-binding (kbd "C-c C-c")) #'cooked-send-key))))
 
 (ert-deftest cooked-command-state-still-reaches-cookeds-own-commands ()
-  "`cooked-command-map\=' is a child of `cooked-mode-map\=' like the others, or
+  "`cooked-command-map' is a child of `cooked-mode-map' like the others, or
 stepping out would be impossible from the one state that forwards the most."
   (should (eq (keymap-parent cooked-command-map) cooked-mode-map))
   (should (eq (lookup-key cooked-command-map (kbd "C-c C-v")) #'cooked-toggle-peek)))
@@ -329,7 +329,7 @@ result land where it can be seen."
     (should-not (cooked--suspended-p))))
 
 (defun cooked-tests--stopped-p (pid)
-  "Whether PID is a stopped job -- `T\=' in the state `ps\=' reports for it."
+  "Whether PID is a stopped job -- `T' in the state `ps' reports for it."
   (string-prefix-p "T" (string-trim
                         (shell-command-to-string (format "ps -o stat= -p %s" pid)))))
 
@@ -343,7 +343,7 @@ result land where it can be seen."
     (cooked--foreground-pid cooked--session)))
 
 (ert-deftest cooked-suspend-stops-the-job-with-isig-on ()
-  "The ordinary path: the tty still acts on its `susp\=' character, so writing
+  "The ordinary path: the tty still acts on its `susp' character, so writing
 that byte is the whole of it and the line discipline does the rest."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
@@ -360,13 +360,13 @@ that byte is the whole of it and the line discipline does the rest."
 had cleared ISIG.
 
 With ISIG off there is no byte to write -- the line discipline would hand it
-straight to the child instead of raising anything -- so `cooked--send-job-control\='
+straight to the child instead of raising anything -- so `cooked--send-job-control'
 falls back on the signal itself.  That signal was spelled 20, which is SIGTSTP
 on Linux and SIGCHLD on the BSDs, and SIGCHLD is ignored by default: the job
-carried on and the keystroke looked broken.  The number is the core\='s to pick
+carried on and the keystroke looked broken.  The number is the core's to pick
 now; this side names it.
 
-`stty raw -isig\=' is the smallest thing that reproduces it, and it is exactly
+`stty raw -isig' is the smallest thing that reproduces it, and it is exactly
 what a full-screen program does when it wants ^Z as a byte of its own."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
@@ -400,10 +400,10 @@ different things to be looking at."
           (should-not (string-match-p "still\\|semi\\|frozen" (cooked--mode-line))))))))
 
 (ert-deftest cooked-mode-line-names-the-program-without-shell-integration ()
-  "The `bare\= session is exactly where naming the program matters most.
+  "The `bare' session is exactly where naming the program matters most.
 
 A title is the shell's own summary and needs the snippet loaded; the foreground
-process group needs nothing at all.  So the fallback is what tells `htop\= from a
+process group needs nothing at all.  So the fallback is what tells `htop' from a
 shell editing its own line -- the pair the state word alone has never been able
 to separate, and the one this whole indicator is judged on."
   (with-temp-buffer
@@ -437,15 +437,15 @@ to separate, and the one this whole indicator is judged on."
 (ert-deftest cooked-mode-line-names-a-job-but-not-the-shell-itself ()
   "The suppression is keyed on which process, not on which policy.
 
-`tcgetpgrp\=' answers with a process *group*, and an interactive shell doing job
+`tcgetpgrp' answers with a process *group*, and an interactive shell doing job
 control puts each job in one of its own -- so the shell at its prompt is its own
-foreground group and every command it runs is not.  That is the whole test: `zsh\='
+foreground group and every command it runs is not.  That is the whole test: `zsh'
 in the mode line for the life of every session is a word always true and never
-news, while the job\='s name is the only thing on screen saying what the line
+news, while the job's name is the only thing on screen saying what the line
 being typed will be read by.
 
-`sleep\=' rather than a full-screen program on purpose.  It leaves the tty
-canonical, so cooked reads it as `edit\=' -- correctly, it is a line being edited
+`sleep' rather than a full-screen program on purpose.  It leaves the tty
+canonical, so cooked reads it as `edit' -- correctly, it is a line being edited
 -- and that is exactly the case the state word alone cannot distinguish from a
 shell prompt."
   :tags '(zsh)
@@ -467,10 +467,10 @@ shell prompt."
     (should (string-search "sleep" (cooked--mode-line)))))
 
 (ert-deftest cooked-mode-line-asks-the-os-nothing ()
-  "`cooked--mode-line\= runs from an `:eval\= on every redisplay, so it must be a
+  "`cooked--mode-line' runs from an `:eval' on every redisplay, so it must be a
 pure function of buffer-locals.  The foreground program is the one fact in it
 that has to come from outside, and it is cached for exactly that reason -- a
-`tcgetpgrp\= and a `process-attributes\= per frame to render one word is a cost
+`tcgetpgrp' and a `process-attributes' per frame to render one word is a cost
 nobody asked for, and easy to reintroduce by inlining the obvious call."
   (with-temp-buffer
     (setq-local cooked--mode 'raw
@@ -490,7 +490,7 @@ nobody asked for, and easy to reintroduce by inlining the obvious call."
 
 (ert-deftest cooked-mode-line-stops-describing-a-dead-session ()
   "Buffer-locals do not decay.  A child that exited ten minutes ago leaves
-`cooked--mode\=, `cooked--semantic\= and the rest holding whatever they last
+`cooked--mode', `cooked--semantic' and the rest holding whatever they last
 said, so an indicator that keeps reading them is not showing stale information
 -- it is showing wrong information in the same clothes as the live kind.  The
 exit status is the only thing about a dead session still true."
@@ -1005,7 +1005,7 @@ because cooked's input mark is the process mark comint asks for."
                                              (point-min) (point-max)))))))
 
 (ert-deftest cooked-a-source-supplied-secret-is-not-cleared-in-place ()
-  "The string `cooked-password-function\=' hands over must come back unharmed.
+  "The string `cooked-password-function' hands over must come back unharmed.
 
 An auth-source backend caches plaintext by design, and is free to answer a
 lookup with the very string sitting in that cache rather than a copy of it.
@@ -1034,11 +1034,11 @@ looked at again afterwards.  Before the split, this test read seven NULs."
       (should (equal (cdr (assoc "sudo" cache)) "hunter2")))))
 
 (ert-deftest cooked-a-password-source-may-answer-with-auth-sources-secret-function ()
-  "auth-source hands out `:secret\=' as a function, and a source may pass it on.
+  "auth-source hands out `:secret' as a function, and a source may pass it on.
 
-`copy-sequence\=' signals on a function, and that used to escape the prompt with
+`copy-sequence' signals on a function, and that used to escape the prompt with
 the child still blocked in its read.  The function is called for the string
-now.  An answer that is neither is dropped and `read-passwd\=' asks instead."
+now.  An answer that is neither is dropped and `read-passwd' asks instead."
   (let ((cooked-secret-debounce 60))
     (cooked-tests--with-session
         '("/bin/sh" "-c"
@@ -1068,7 +1068,7 @@ now.  An answer that is neither is dropped and `read-passwd\=' asks instead."
 
 A child that exited between the prompt and the answer makes the PTY write
 signal, and the copy is live at that moment, so the clear has to be in an
-`unwind-protect\=' nested inside the one guarding the source string rather than
+`unwind-protect' nested inside the one guarding the source string rather than
 sequenced after the writes.  Stubbing the write is the only way to see both at
 once: the copy handed to it comes back all NULs, and the source string the
 password function supplied comes back intact."
@@ -1087,17 +1087,17 @@ password function supplied comes back intact."
 (ert-deftest cooked-a-secret-prompt-is-held-back-while-the-user-is-elsewhere ()
   "A password read must not seize the minibuffer of a buffer nobody is in.
 
-`read-passwd\=' prompts in whatever frame is selected, so a prompt raised for an
+`read-passwd' prompts in whatever frame is selected, so a prompt raised for an
 off-screen session lands under the cursor wherever the user actually is -- and
 the next thing they type there is sent to *this* child with a newline after it.
 Late is fine; redirecting live keystrokes is not.
 
-Asserted on whether a read was *raised*, not on `cooked--secret-timer\=' being
+Asserted on whether a read was *raised*, not on `cooked--secret-timer' being
 nil: the timer clears itself as it fires, so a scheduled prompt and a withheld
 one leave that variable looking identical a moment later.  Answering through
-`cooked-password-function\=' is what makes the difference visible -- and keeps a
+`cooked-password-function' is what makes the difference visible -- and keeps a
 regression here a failing assertion rather than a batch Emacs blocked forever
-in a `read-passwd\=' nobody can answer."
+in a `read-passwd' nobody can answer."
   (let ((asked nil))
     (let ((cooked-password-function (lambda (_prompt) (setq asked t) "")))
       (cooked-tests--with-session '("/bin/sh" "-c" "printf 'Password: '; stty -echo; sleep 5")
@@ -1114,8 +1114,8 @@ in a `read-passwd\=' nobody can answer."
 (ert-deftest cooked-a-held-secret-prompt-is-raised-when-attention-returns ()
   "The other half: held is held until the user comes back, not dropped.
 
-Spelled through `cooked--update-attention\=' rather than by calling
-`cooked--resume-secret\=' directly, because the wiring between them is the part
+Spelled through `cooked--update-attention' rather than by calling
+`cooked--resume-secret' directly, because the wiring between them is the part
 that can rot -- a resume nothing calls looks exactly like this test passing."
   (let ((answered nil))
     (let ((cooked-password-function (lambda (_prompt) (setq answered t) "hunter2")))
@@ -1136,7 +1136,7 @@ that can rot -- a resume nothing calls looks exactly like this test passing."
 (ert-deftest cooked-returning-does-not-disturb-a-secret-read-already-on-screen ()
   "Leaving the buffer with the minibuffer up and coming back must not re-ask.
 
-`cooked--schedule-secret\=' begins with `cooked--cancel-secret\=', which bumps the
+`cooked--schedule-secret' begins with `cooked--cancel-secret', which bumps the
 epoch and dismisses the read on screen -- correct when the child has stopped
 asking, and destructive when the user is halfway through answering.  So the
 resume path has to decline while a read is in flight, and this pins the guard
@@ -1161,19 +1161,19 @@ rather than the timer it protects."
           (setq cooked--secret-read nil))))))
 
 (ert-deftest cooked-a-stale-cooked-mode-cannot-leak-a-typed-secret ()
-  "Typing must never insert under a `cooked--mode\=' the child has moved on from.
+  "Typing must never insert under a `cooked--mode' the child has moved on from.
 
 The window this closes: a child that turns echo off *without printing anything*
--- `read -s\=' with no prompt, `stty -echo\=' -- changes nothing the pty ever
-reports, so `cooked--mode\=' stays `cooked\=' until the next termios sample.
+-- `read -s' with no prompt, `stty -echo' -- changes nothing the pty ever
+reports, so `cooked--mode' stays `cooked' until the next termios sample.
 Emacs still owns the line, and every character of the password the user is
 already typing is rendered into the buffer, sent on RET, and left in the
 scrollback and the undo history.
 
 Spelled without waiting for a sample, deliberately: the point is the state
-between the child\='s `tcsetattr\=' and cooked noticing it, so the test puts the
+between the child's `tcsetattr' and cooked noticing it, so the test puts the
 buffer in exactly that state -- a real child really in secret mode, and a
-`cooked--mode\=' that still says otherwise -- and then types one character."
+`cooked--mode' that still says otherwise -- and then types one character."
   ;; The poll notices the child's `stty\=' during the pump below and puts up the
   ;; secret prompt for it -- which is the feature working, and in batch is a
   ;; `read-passwd\=' with nobody to answer it.  Answered from here instead; the
@@ -1204,19 +1204,19 @@ buffer in exactly that state -- a real child really in secret mode, and a
   "The refusal must forward the key and return, not re-dispatch it.
 
 The bug this rules out is not a wrong character but a command loop that never
-ends.  An earlier draft pushed the key back onto `unread-command-events\=' for
+ends.  An earlier draft pushed the key back onto `unread-command-events' for
 Emacs to look up again under the corrected keymap, which is only bounded while
 every map that key can reach binds something other than the pusher.  Where the
 *policy* moves without the *mode*
-moving, `cooked--set-mode\=' short-circuits, no refresh runs, the key lands in
+moving, `cooked--set-mode' short-circuits, no refresh runs, the key lands in
 the same map it came from, and the command re-dispatches itself forever --
 taking the editor with it rather than signalling.
 
-So `cooked--guard-insertion\=' *substitutes* instead: it rewrites `this-command\='
-to `cooked-send-key\=' and the loop runs that, once.  Nothing is ever queued and
+So `cooked--guard-insertion' *substitutes* instead: it rewrites `this-command'
+to `cooked-send-key' and the loop runs that, once.  Nothing is ever queued and
 no key is looked up twice, which is what makes one keystroke cost exactly one
-invocation.  Spelled against `raw\='
-rather than `secret\=' so that what is asserted is the forwarding itself, with
+invocation.  Spelled against `raw'
+rather than `secret' so that what is asserted is the forwarding itself, with
 no password prompt in the way."
   (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; cat -v")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
@@ -1246,7 +1246,7 @@ just as happily with the guard deleted.  Binding `this-command\' and running the
 hook by hand is the smallest faithful model, including the part that matters
 here, which is that the hook is allowed to substitute `this-command\' and the
 loop runs whatever it finds afterwards.  EVENT is the key typed, defaulting to
-`?p\='; it matters only for the commands that read `last-command-event\='."
+`?p'; it matters only for the commands that read `last-command-event'."
   (let ((this-command command)
         (last-command-event (or event ?p)))
     (run-hooks 'pre-command-hook)
@@ -1254,18 +1254,18 @@ loop runs whatever it finds afterwards.  EVENT is the key typed, defaulting to
     this-command))
 
 (ert-deftest cooked-a-stale-cooked-mode-cannot-leak-a-pasted-secret ()
-  "Pasting must never insert under a `cooked--mode\=' the child has moved on from.
+  "Pasting must never insert under a `cooked--mode' the child has moved on from.
 
-The same window `cooked-a-stale-cooked-mode-cannot-leak-a-typed-secret\=' closes,
+The same window `cooked-a-stale-cooked-mode-cannot-leak-a-typed-secret' closes,
 reached by the other door and arguably the likelier one: a password manager puts
-the secret on the clipboard and the user pastes it at the `sudo\=' prompt rather
+the secret on the clipboard and the user pastes it at the `sudo' prompt rather
 than typing it, so the whole secret lands in the buffer in a single edit rather
 than a character at a time.
 
 Both doors are checked here because they are guarded differently.
-`cooked-paste\=' is cooked\='s own and asks `cooked--input-state-p\=' for itself,
-so all it needed was a current answer; `yank\=' is a foreign command that would
-insert wherever point is, so `cooked--guard-insertion\=' substitutes the
+`cooked-paste' is cooked's own and asks `cooked--input-state-p' for itself,
+so all it needed was a current answer; `yank' is a foreign command that would
+insert wherever point is, so `cooked--guard-insertion' substitutes the
 equivalent that goes through the child.  A fix that covered only one of them
 would leave the other open."
   (let ((cooked-password-function (lambda (_prompt) "")))
@@ -1284,16 +1284,16 @@ would leave the other open."
         (should (eq cooked--mode 'secret))))))
 
 (ert-deftest cooked-a-foreign-inserter-is-substituted-not-refused ()
-  "`yank\=' at a line the child has taken becomes `cooked-paste\=', not an error.
+  "`yank' at a line the child has taken becomes `cooked-paste', not an error.
 
-The substitution is the half of `cooked--guard-insertion\=' that keeps the user
+The substitution is the half of `cooked--guard-insertion' that keeps the user
 able to act.  Refusing would be safe and useless: a paste that signals leaves
 them to work out that pressing it again would have worked, and a password
-manager\='s clipboard entry is often good for exactly one use.  So the intent
+manager's clipboard entry is often good for exactly one use.  So the intent
 survives the correction -- a paste is still a paste, it just reaches the child
 rather than the buffer.
 
-Spelled against `raw\=' so the assertion is the substitution itself, with no
+Spelled against `raw' so the assertion is the substitution itself, with no
 password prompt in the way."
   (cooked-tests--with-session '("/bin/sh" "-c" "stty raw -echo; cat -v")
     (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
@@ -1310,12 +1310,12 @@ password prompt in the way."
              (lambda () (string-match-p "zz" (cooked-tests--text)))))))
 
 (ert-deftest cooked-a-silent-secret-read-is-still-detected ()
-  "`read -s\=' with no prompt at all must still raise the secret prompt.
+  "`read -s' with no prompt at all must still raise the secret prompt.
 
 The feature that a timer is kept for.  A child that turns echo off without
 printing anything leaves nothing on the pty to wake the reader, so nothing but
 the periodic termios sample can notice it -- there is no output to ride in on
-and no keystroke to hang the question off.  `cooked--guard-insertion\=' covers
+and no keystroke to hang the question off.  `cooked--guard-insertion' covers
 the window before the sample lands, but only for a user who types or pastes
 into it; it does not replace the sample, and this is the test that says so."
   (let* ((asked nil)
@@ -1457,7 +1457,7 @@ next keystroke sent to the child is what takes it."
 (ert-deftest cooked-policy-derives-ownership-from-all-three-signals ()
   "The alt screen outranks the line discipline and the OSC 133 prompt state.
 
-The `seen\=' column is not decoration.  A session that has never had a mark is a
+The `seen' column is not decoration.  A session that has never had a mark is a
 different situation from one that is merely between them, and the indicator says
 so: everything else here can be inferred afresh each prompt, but \"this host has
 no integration at all\" only exists as a latch."
@@ -1494,7 +1494,7 @@ no integration at all\" only exists as a latch."
       (should (equal (substring-no-properties (cooked--mode-line)) indicator)))))
 
 (ert-deftest cooked-a-mark-alone-does-not-buy-the-keyboard ()
-  "A `133;B\=' is a claim, and claims cross an ssh as easily as facts do.
+  "A `133;B' is a claim, and claims cross an ssh as easily as facts do.
 
 The local case is unchanged and must stay that way: the child is ours, so the
 mark is corroborated by the pty it arrived on and Emacs keeps the line.  What
@@ -1598,8 +1598,8 @@ A fresh prompt is a fresh line, and Emacs may have it back."
     (should-not (cooked-line-delegated (cooked--line)))))
 
 (ert-deftest cooked-delegate-keys-put-back-what-they-replaced ()
-  "`TAB\=' is not delegated by default, and naming it must not be a one-way
-change: taking it out again has to leave `completion-at-point\=' behind rather
+  "`TAB' is not delegated by default, and naming it must not be a one-way
+change: taking it out again has to leave `completion-at-point' behind rather
 than nothing."
   (let ((original cooked-delegate-keys))
     (unwind-protect
@@ -1620,14 +1620,14 @@ than nothing."
   "Enter belonged to the completion popup while one was showing, and did not.
 
 The override that makes insert-state Enter submit has to sit on an evil
-auxiliary keymap to outrank `evil-collection-comint\=', and evil reaches those
-through `emulation-mode-map-alists\=' -- which Emacs searches *before*
-`minor-mode-overriding-map-alist\=', where `completion-in-region-mode\=' puts the
-UI\='s keymap.  So corfu\='s `RET\=' never saw the key: the popup stayed up and the
+auxiliary keymap to outrank `evil-collection-comint', and evil reaches those
+through `emulation-mode-map-alists' -- which Emacs searches *before*
+`minor-mode-overriding-map-alist', where `completion-in-region-mode' puts the
+UI's keymap.  So corfu's `RET' never saw the key: the popup stayed up and the
 half-completed line went to the shell underneath it.
 
 No corfu here on purpose.  What is being pinned is the precedence contract --
-an active `completion-in-region-mode\=' keymap wins Enter -- and every in-buffer
+an active `completion-in-region-mode' keymap wins Enter -- and every in-buffer
 completion UI, the built-in one included, is on the far side of that same test."
   :tags '(evil evil-collection)
   (skip-unless (require 'evil nil t))
@@ -1733,14 +1733,14 @@ point is the only cursor there is."
     (should-not (cooked--ghost-cursor-visible-p))))
 
 (ert-deftest cooked-a-running-command-may-hide-the-cursor-under-a-canonical-tty ()
-  "The other side of `cooked-a-canonical-child-hiding-its-cursor-leaves-emacs-one\='.
+  "The other side of `cooked-a-canonical-child-hiding-its-cursor-leaves-emacs-one'.
 
-That fix keyed on `cooked--input-state-p\=', which answers yes the moment termios
+That fix keyed on `cooked--input-state-p', which answers yes the moment termios
 says canonical -- and a command run from a shell that never puts the tty in raw
 mode is canonical too.  So a progress bar drawn by a *running* command kept a
 cursor Emacs had been told not to draw.  OSC 133 is what tells the two apart:
-while a command is running the mark says `output\=', and there the child\='s
-`CSI ?25l\=' is about its own picture and is honoured; at the prompt either side
+while a command is running the mark says `output', and there the child's
+`CSI ?25l' is about its own picture and is honoured; at the prompt either side
 of it the cursor comes back."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
@@ -1761,11 +1761,11 @@ of it the cursor comes back."
 (ert-deftest cooked-stepping-out-of-a-canonical-command-brings-the-cursor-back ()
   "Stepping out is the escape hatch from the test above: whatever the child
 said, a user navigating the buffer needs a cursor.  Gated on
-`cooked--input-mode\=' alone rather than `cooked--suspended-p\=', which cannot be
-true under policy `cooked\=' at all -- the child repainting a canonical tty
+`cooked--input-mode' alone rather than `cooked--suspended-p', which cannot be
+true under policy `cooked' at all -- the child repainting a canonical tty
 never took the keyboard to be suspended from, which is why
-`cooked-toggle-peek\=' refuses here and `evil\=' normal state is the door.  Driven
-through `cooked-input-mode-functions\=', the seam evil itself uses."
+`cooked-toggle-peek' refuses here and `evil' normal state is the door.  Driven
+through `cooked-input-mode-functions', the seam evil itself uses."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
@@ -1837,8 +1837,8 @@ is not editable."
 
 (ert-deftest cooked-history-lives-in-comints-ring ()
   "The ring is the storage, not a private list kept beside it -- which is what
-makes `comint-input-ignoredups\=', the ring size, and the history isearch
-`comint-mode\=' installs all along apply to cooked too."
+makes `comint-input-ignoredups', the ring size, and the history isearch
+`comint-mode' installs all along apply to cooked too."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle
              (lambda () (and (eq cooked--mode 'cooked) (cooked--input-start-position)))))
@@ -1855,10 +1855,10 @@ makes `comint-input-ignoredups\=', the ring size, and the history isearch
     (should (= (ring-length comint-input-ring) 1))))
 
 (ert-deftest cooked-history-recall-leaves-the-rendered-rows-alone ()
-  "comint\='s own `comint-goto-input\=' deletes from the process mark to `point-max\=',
+  "comint's own `comint-goto-input' deletes from the process mark to `point-max',
 assuming input is the last thing in the buffer.  cooked has rendered screen rows
 below the prompt, so recall has to work between the two ends of the input region
-instead -- this is the regression guard for using comint\='s version by mistake."
+instead -- this is the regression guard for using comint's version by mistake."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle
              (lambda () (and (eq cooked--mode 'cooked) (cooked--input-start-position)))))
@@ -2063,7 +2063,7 @@ it is drawn as."
 (defmacro cooked-tests--displayed (&rest body)
   "Run BODY with the current buffer showing in the selected window.
 
-`cooked-mouse-event\=' routes an event to the buffer the pointer names, so a test
+`cooked-mouse-event' routes an event to the buffer the pointer names, so a test
 that hands it a posn has to put the buffer somewhere a pointer could be."
   (declare (indent 0))
   `(save-window-excursion
@@ -2074,15 +2074,15 @@ that hands it a posn has to put the buffer somewhere a pointer could be."
   "A mouse position over buffer POS in the selected window, or over no text.
 
 Synthesised rather than recorded because the whole point of these tests is the
-shape of the event: `posn-point\=' is nil for a click past the last row or on the
-fringe, and that nil is the case that used to hand the tail of the child\='s
+shape of the event: `posn-point' is nil for a click past the last row or on the
+fringe, and that nil is the case that used to hand the tail of the child's
 gesture back to Emacs."
   (list (selected-window) (or pos 'text) '(0 . 0) 0 nil pos nil nil nil))
 
 (ert-deftest cooked-drag-reports-its-release-where-the-button-came-up ()
-  "Emacs does not deliver `mouse-1\=' when the pointer moved between press and
-release -- it delivers `drag-mouse-1\=', whose interesting end is `event-end\='.
-Unbound, that fell through to the global `mouse-set-region\=': the child was left
+  "Emacs does not deliver `mouse-1' when the pointer moved between press and
+release -- it delivers `drag-mouse-1', whose interesting end is `event-end'.
+Unbound, that fell through to the global `mouse-set-region': the child was left
 holding a button forever, and the region it never asked for appeared in one jump."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1000h\\033[?1006h'; \
@@ -2251,7 +2251,7 @@ pointer drifting afterwards."
         (should (string-match-p (funcall pattern a) text))))))
 
 (ert-deftest cooked-hover-under-1016-reports-its-pixel ()
-  "Hover passes the pointer\='s place in its glyph on, as a click does, so a child
+  "Hover passes the pointer's place in its glyph on, as a click does, so a child
 that asked for pixels is not handed the corner of every cell it hovers over."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033[?1049h\\033[?1003h\\033[?1016h'; \
@@ -2300,7 +2300,7 @@ to a child the user never opted into."
 (defmacro cooked-tests--with-hover (&rest body)
   "Run BODY in a live terminal reporting hover, with `from' over its text.
 
-The child is `cooked-tests--hover-child\=', the option is on, `track-mouse' is
+The child is `cooked-tests--hover-child', the option is on, `track-mouse' is
 on in the buffer as it would be, and the buffer is in the selected window."
   (declare (indent 0))
   `(cooked-tests--with-session cooked-tests--hover-child
@@ -2319,7 +2319,7 @@ on in the buffer as it would be, and the buffer is in the selected window."
          ,@body))))
 
 (ert-deftest cooked-hover-does-not-break-a-prefix-key ()
-  "A movement is ordinary input to `read-key-sequence\=', so a pointer twitch
+  "A movement is ordinary input to `read-key-sequence', so a pointer twitch
 after \\`C-c' made \\`C-c <mouse-movement>', which is undefined, and \\`C-c' was
 gone -- the only way back to Emacs from a full-screen program.  The movement is
 taken out of the key, and still reported."
@@ -2335,9 +2335,9 @@ taken out of the key, and still reported."
 
 (ert-deftest cooked-hover-is-not-a-command ()
   "Every movement used to be a turn of the command loop.  That spent a
-\\[universal-argument] on the movement, ran `tooltip-hide\=' from
-`pre-command-hook\=' so a link\='s help vanished on the first glyph crossed, and
-counted lines in `post-command-hook\='.  A movement that is hover never becomes a
+\\[universal-argument] on the movement, ran `tooltip-hide' from
+`pre-command-hook' so a link's help vanished on the first glyph crossed, and
+counted lines in `post-command-hook'.  A movement that is hover never becomes a
 key at all -- and one that some other binding wants still does."
   (cooked-tests--with-hover
     (let ((movement (list 'mouse-movement (cooked-tests--posn from))))
@@ -2360,7 +2360,7 @@ key at all -- and one that some other binding wants still does."
 
 (ert-deftest cooked-hover-repeats-do-not-count-lines ()
   "Emacs sends a movement per pixel over an image, so a pointer crossing a
-decorated panel arrives many times in one cell.  The cell is a `count-lines\='
+decorated panel arrives many times in one cell.  The cell is a `count-lines'
 away, and a repeat of the glyph just measured does not pay it again."
   (cooked-tests--with-hover
     (let ((movement (list 'mouse-movement (cooked-tests--posn from)))
@@ -2377,7 +2377,7 @@ away, and a repeat of the glyph just measured does not pay it again."
         (should (= counted 0))))))
 
 (ert-deftest cooked-literal-key-skips-the-pointer-moving ()
-  "`read-key\=' returns a movement like any key, so with hover on the pointer
+  "`read-key' returns a movement like any key, so with hover on the pointer
 drifting while \\`C-c C-q' waited was the key sent, and the real one was lost."
   (cooked-tests--with-hover
     (let ((unread-command-events
@@ -2423,7 +2423,7 @@ at t -- and every buffer generating motion events from then on."
 
 (defmacro cooked-tests--with-two-terminals (a b &rest body)
   "Run BODY with two live cooked buffers bound to A and B, side by side.
-A is the selected window\='s; B is the other\='s.  Both children take the alt
+A is the selected window's; B is the other's.  Both children take the alt
 screen and ask for SGR mouse reporting."
   (declare (indent 2))
   `(cooked-tests--with-session
@@ -2448,13 +2448,13 @@ screen and ask for SGR mouse reporting."
 (defun cooked-tests--other-window-event (window kind pos)
   "A KIND event over buffer position POS in WINDOW.
 
-Synthesised like `cooked-tests--posn\=', but naming a window the test does not
+Synthesised like `cooked-tests--posn', but naming a window the test does not
 have selected: what these tests are about is which buffer such an event ends up
 being handled in."
   (list kind (list window pos '(0 . 0) 0 nil pos nil nil nil) 1))
 
 (defun cooked-tests--child-heard (buffer)
-  "The first mouse report or cursor key BUFFER\='s child echoed, or nil."
+  "The first mouse report or cursor key BUFFER's child echoed, or nil."
   (with-current-buffer buffer
     (cooked-tests--settle (lambda () nil) 0.3)
     (save-excursion
@@ -2465,9 +2465,9 @@ being handled in."
 (ert-deftest cooked-a-click-on-another-terminal-focuses-and-reaches-it ()
   "One click on an unfocused terminal both selects it and reaches its child.
 
-Emacs settles a click\='s bindings in the buffer under the pointer but runs the
+Emacs settles a click's bindings in the buffer under the pointer but runs the
 command in the buffer that was current all along, so the click on B arrived in
-A: A\='s child was told about a cell A\='s screen made of a position in B\='s buffer,
+A: A's child was told about a cell A's screen made of a position in B's buffer,
 and the click that should have selected B was spent doing it.  Routing the event
 to the buffer the pointer names answers both halves -- anything less costs two
 clicks to press a button in an unfocused TUI, where one would do in any other
@@ -2487,7 +2487,7 @@ Emacs buffer."
       (should (string-match-p "\\[<0;[0-9]+;[0-9]+m" heard)))))
 
 (ert-deftest cooked-the-wheel-reaches-an-unfocused-terminal ()
-  "A notch over an unfocused terminal goes to that terminal\='s child, and
+  "A notch over an unfocused terminal goes to that terminal's child, and
 leaves the focus where it was -- the way scrolling any other Emacs buffer does
 not require selecting it first."
   (cooked-tests--with-two-terminals a b
@@ -2505,11 +2505,11 @@ not require selecting it first."
 swallowed rather than handed to Emacs.
 
 The buffer is narrowed to the screen the child is drawing, so scrolling can only
-move the picture off the window -- and putting it back is `cooked--pin-alt-windows\='
+move the picture off the window -- and putting it back is `cooked--pin-alt-windows'
 undoing, one command later, a scroll the user watched happen.  Claiming the notch
-is what stops it happening.  `still\=' because that is the state the wheel used to
-escape through: forwarding is suspended, so `cooked--mouse-grab\=' is off and the
-notch reached `mwheel-scroll\='.
+is what stops it happening.  `still' because that is the state the wheel used to
+escape through: forwarding is suspended, so `cooked--mouse-grab' is off and the
+notch reached `mwheel-scroll'.
 
 The escape hatch is the restriction, not the mode: widening is how the transcript
 behind a full-screen program is read, and the second half asserts the wheel comes
@@ -2535,9 +2535,9 @@ straight back when it happens."
       (should-not (cooked--screen-restricted-p)))))
 
 (ert-deftest cooked-a-drag-that-leaves-the-window-releases-where-it-left ()
-  "A drag out of the terminal is still the child\='s drag, and its release is
-still owed -- but `event-end\=' is then a position in somebody else\='s buffer, and
-`cooked--screen-cell\=' measures whatever number it finds against this buffer\='s
+  "A drag out of the terminal is still the child's drag, and its release is
+still owed -- but `event-end' is then a position in somebody else's buffer, and
+`cooked--screen-cell' measures whatever number it finds against this buffer's
 screen.  So letting go over another window reported the button up at a cell
 nobody had dragged to, chosen by how far into the other buffer the pointer
 happened to be."
@@ -2587,10 +2587,10 @@ happened to be."
         (should-not cooked--mouse-held)))))
 
 (ert-deftest cooked-a-report-to-the-child-gives-up-the-region ()
-  "A click the child answers is the child\='s click.
+  "A click the child answers is the child's click.
 
 Nothing used to clear the mark, so a region set before the child grabbed the
-mouse survived every click inside the window; `cooked--snap-to-cursor\=' then
+mouse survived every click inside the window; `cooked--snap-to-cursor' then
 walked point away from a mark that stayed put, growing a region the user never
 drew and could only escape by leaving the buffer."
   (with-temp-buffer
@@ -2721,7 +2721,7 @@ unable to know whether motion reports were asked for at all."
         (should (equal (car sent) "\e[<35;10;7M"))))))
 
 (ert-deftest cooked-a-release-off-the-screen-still-reaches-the-child ()
-  "Let go past the last row and `posn-point\=' is nil, but the button is still down
+  "Let go past the last row and `posn-point' is nil, but the button is still down
 as far as the child knows.  Falling through to Emacs there left it held forever."
   (with-temp-buffer
     (cooked-mode)
@@ -2753,13 +2753,13 @@ reported them."
 
 (defun cooked-tests--glyph-posn (pos dx &optional area)
   "A posn over buffer POS, DX pixels into its glyph, in AREA of the window.
-AREA nil is the text area; `left-fringe\=' is the fringe beside POS\='s row."
+AREA nil is the text area; `left-fringe' is the fringe beside POS's row."
   (list (selected-window) (or area pos) '(0 . 0) 0 nil pos nil nil
         (cons dx 7) '(9 . 20)))
 
 (ert-deftest cooked-mouse-cell-inside-a-decoration-run-is-the-pointers-own ()
-  "Emacs draws a run of box-drawing cells as one image and names the run\='s first
-character for every pixel of it, so a click in an empty panel reported the panel\='s
+  "Emacs draws a run of box-drawing cells as one image and names the run's first
+character for every pixel of it, so a click in an empty panel reported the panel's
 left border.  The offset into the image recovers the cell."
   (cooked-tests--with-mouse-rows '("ab" "┌────────┐")
     (let* ((start (save-excursion (goto-char (point-min)) (forward-line 1) (point)))
@@ -2783,7 +2783,7 @@ left border.  The offset into the image recovers the cell."
 
 (ert-deftest cooked-mouse-cell-past-a-rows-end-and-over-the-fringe ()
   "Rows are inserted without their trailing blanks, so a click past the text lands
-on the newline, whose glyph runs to the window\='s edge.  It reported the column
+on the newline, whose glyph runs to the window's edge.  It reported the column
 the text ended at.  And a fringe posn names the row beside it, which reported
 column 0 of that row for a pointer over no cell at all."
   (cooked-tests--with-mouse-rows '("ls" "x")
@@ -2851,7 +2851,7 @@ the overhang reported into the next column.  A two-cell character keeps both."
   "Under `pixel-scroll-precision-mode' every trackpad tick is an event carrying a
 few pixels, and alternate scroll sent three lines for each of them, so a gentle
 swipe in `less' scrolled pages.  Travel is a line per row crossed, carried
-between events as a mouse report\='s notches are."
+between events as a mouse report's notches are."
   (with-temp-buffer
     (cooked-mode)
     (setq-local cooked--app-cursor nil)
@@ -2896,11 +2896,11 @@ between events as a mouse report\='s notches are."
       (should-not cooked--mouse-grab))))
 
 (ert-deftest cooked-focus-install-survives-other-packages-advice ()
-  "`after-focus-change-function\=' holds one function, not a hook.
+  "`after-focus-change-function' holds one function, not a hook.
 
-`add-hook\=' on it conses onto whatever is already there — doom-modeline puts
+`add-hook' on it conses onto whatever is already there — doom-modeline puts
 advice on it — leaving a list where Emacs expects something callable, and the
-next focus change signals `invalid-function\='."
+next focus change signals `invalid-function'."
   (let ((after-focus-change-function after-focus-change-function))
     (add-function :after after-focus-change-function #'ignore)
     ;; Twice, as a second session in the same Emacs would.
@@ -2961,17 +2961,17 @@ next focus change signals `invalid-function\='."
 (ert-deftest cooked-hidden-cursor-survives-the-render-selecting-a-window ()
   "A child that hid its cursor must still have none after a drain that scrolls.
 
-The render used to `recenter\=' through `with-selected-window\=', and `evil\='
-advises `select-window\=' to refresh its own cursor -- so setting `cursor-type\='
+The render used to `recenter' through `with-selected-window', and `evil'
+advises `select-window' to refresh its own cursor -- so setting `cursor-type'
 before that block let evil overwrite it inside the very same drain.  Because the
 write is skipped when the value has not changed, no later drain repaired it
 either, and a progress bar drawn without a cursor got one anyway, jumping about.
 
-`cooked--pin-transcript-bottom\=' computes the window start instead of selecting
+`cooked--pin-transcript-bottom' computes the window start instead of selecting
 the window to recentre it, so that particular route in is now structurally
 impossible.  The test stays: evil refreshes its cursor from
-`window-configuration-change-hook\=' and on every state change too, and the
-ordering in `cooked--sync-cursor-type\=' is what those still need.
+`window-configuration-change-hook' and on every state change too, and the
+ordering in `cooked--sync-cursor-type' is what those still need.
 
 The buffer has to be shown in a window for any of that to run, which is why the
 older visibility test never saw it."
@@ -3500,7 +3500,7 @@ it over again, with no map rebuilt."
       (global-unset-key (kbd "M-s-v")))))
 
 (ert-deftest cooked-meta-chords-beyond-ascii-forward-on-a-graphical-frame ()
-  "A graphical frame\='s \\`M-é' is one event, and the overlay\='s ESC map bound
+  "A graphical frame's \\`M-é' is one event, and the overlay's ESC map bound
 only 0-127, so it reached Emacs.  The ESC map is now a full keymap."
   (let ((map (cooked--build-meta-overlay cooked-alt-map)))
     (dolist (key '("M-é" "M-中" "M-x"))
@@ -3571,7 +3571,7 @@ that the `shifted' row the table spells it with is checked as well.")
 The terminfo audit checked modes and queries, and nothing checked the ~160 key
 capabilities: `kf5' could lose its row in `cooked--key-encodings' and every
 test pass, while ncurses waited on a sequence that never arrived.  Under `smkx'
-each capability is the key\='s spelling exactly.  Under `rmkx' the keypad and
+each capability is the key's spelling exactly.  Under `rmkx' the keypad and
 cursor keys go back to their other spelling and every other key is unchanged.
 A capability with no entry in `cooked-tests--terminfo-key-events' fails, so a
 new one is checked from the day it is added."
@@ -3766,7 +3766,7 @@ leaves the cursor at an empty prompt, since it pulls back off the end of a line.
   "A drain must not move point out of the line the user is typing.
 
 `cooked--apply' lifts the pending input out of the buffer and rebuilds it around
-the child\='s new cursor, so the buffer position point had cannot survive -- and
+the child's new cursor, so the buffer position point had cannot survive -- and
 what it used to do instead was send point to the end of the line, on the grounds
 that following the cursor is what carries it.  That is right only when point was
 at the end already.  Nothing about completion here on purpose: completion is
@@ -4217,9 +4217,9 @@ than merely non-erroring."
       (should (= (cooked--input-start-position) (marker-position (process-mark proc)))))))
 
 (ert-deftest cooked-eof-follows-the-tty-too ()
-  "`stty eof ^X\=' is as real as `stty intr ^X\='.  EOF is not a signal, so it has
+  "`stty eof ^X' is as real as `stty intr ^X'.  EOF is not a signal, so it has
 no ISIG half and nothing to fall back to -- but which byte to send is still the
-tty\='s to say, not ours to assume."
+tty's to say, not ours to assume."
   (cooked-tests--with-session '("/bin/sh" "-c" "exec cat")
     (cooked-tests--pump 0.4)
     (should (= (cooked--eof-byte) ?\C-d)))
@@ -4800,11 +4800,11 @@ state something the user can still see out of."
     (should (equal "alpha" (cooked--pending-input)))))
 
 (ert-deftest cooked-a-path-is-one-word-through-both-chains ()
-  "Asserted through `thing-at-point\=' *and* `mouse-start-end\=', which disagree.
+  "Asserted through `thing-at-point' *and* `mouse-start-end', which disagree.
 
 Stolen wholesale from ghostel, and the discipline is the point rather than the
-two functions: a double-click does not go through `thing-at-point\=' at all.  It
-goes through `mouse-start-end\=' with a click count of 1, which classifies by
+two functions: a double-click does not go through `thing-at-point' at all.  It
+goes through `mouse-start-end' with a click count of 1, which classifies by
 syntax class directly and has its own rules about which classes extend.  A
 syntax table that satisfies one and not the other is the normal way to get this
 half right and ship it broken."
@@ -4882,12 +4882,12 @@ back; and history, which replaces it."
 (ert-deftest cooked-a-box-border-does-not-join-two-panes ()
   "A double-click in a two-pane TUI must not take the border with it.
 
-Worth saying that this passes with `cooked-word-boundary-string\=' emptied, and
-is kept anyway: box-drawing characters are *symbol* constituents in Emacs\= own
+Worth saying that this passes with `cooked-word-boundary-string' emptied, and
+is kept anyway: box-drawing characters are *symbol* constituents in Emacs' own
 table, so they already end a word and cooked is agreeing rather than fixing.
-The test guards the outcome against a future default -- or a user\='s own wider
-`cooked-word-constituent-string\=' -- quietly making furniture part of a word.
-The next test is the one that pins cooked\='s own behaviour."
+The test guards the outcome against a future default -- or a user's own wider
+`cooked-word-constituent-string' -- quietly making furniture part of a word.
+The next test is the one that pins cooked's own behaviour."
   (with-temp-buffer
     (set-syntax-table cooked-mode-syntax-table)
     (dolist (border '(?│ ?─ ?├ ?┼))
@@ -4902,9 +4902,9 @@ The next test is the one that pins cooked\='s own behaviour."
   "The ordering between the two customs, which is the only thing arbitrating them.
 
 A character named in both strings must end up a boundary, or the defaults are a
-trap: widening `cooked-word-constituent-string\=' would silently swallow
+trap: widening `cooked-word-constituent-string' would silently swallow
 furniture, and there would be no way to take a character back once the
-constituent set had claimed it.  `cooked--realize-syntax-table\=' gets this by
+constituent set had claimed it.  `cooked--realize-syntax-table' gets this by
 applying the boundaries second, and nothing else says so."
   (let ((constituents cooked-word-constituent-string)
         (boundaries cooked-word-boundary-string))
@@ -4938,9 +4938,9 @@ applying the boundaries second, and nothing else says so."
 (ert-deftest cooked-a-boundary-customize-reaches-a-live-buffer ()
   "Realized into the table object, not rebuilt, or a preference means nothing.
 
-A rebuilt table would be picked up by the *next* `cooked-mode\=', which is not
+A rebuilt table would be picked up by the *next* `cooked-mode', which is not
 what changing a setting should mean.  The other half is that removing a
-character has to work too -- that is what `cooked--syntax-overridden\=' is for,
+character has to work too -- that is what `cooked--syntax-overridden' is for,
 and it is the half a naive in-place realization gets wrong."
   (let ((constituents cooked-word-constituent-string)
         (boundaries cooked-word-boundary-string))
@@ -4966,11 +4966,11 @@ and it is the half a naive in-place realization gets wrong."
       (customize-set-variable 'cooked-word-boundary-string boundaries))))
 
 (ert-deftest cooked-a-plain-selection-freezes-the-render ()
-  "cooked froze for evil\='s visual state and for nothing else.
+  "cooked froze for evil's visual state and for nothing else.
 
-So a plain \\[set-mark-command], a `consult-line\=' selection or a mouse drag
+So a plain \\[set-mark-command], a `consult-line' selection or a mouse drag
 was clobbered by the next drain -- the case this covers, and the reason the
-freeze cannot be evil\='s to own: the claim a selection makes about a region is
+freeze cannot be evil's to own: the claim a selection makes about a region is
 the same claim whatever put it there."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (cooked-tests--settle (lambda () cooked--session)))
@@ -5005,9 +5005,9 @@ the same claim whatever put it there."
         (should-not (eq cooked--input-mode 'frozen))))))
 
 (ert-deftest cooked-an-inactive-mark-is-not-a-selection ()
-  "`use-region-p\=', not `mark-active\='.
+  "`use-region-p', not `mark-active'.
 
-With `transient-mark-mode\=' off a mark is permanently active and is not a
+With `transient-mark-mode' off a mark is permanently active and is not a
 selection anyone is looking at; freezing the render for it would freeze the
 terminal for the rest of the session."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -5023,8 +5023,8 @@ terminal for the rest of the session."
 (ert-deftest cooked-a-wheel-notch-is-one-press-and-a-trackpad-is-not ()
   "A trackpad tick is pixels; a notch is a notch.  Ported from ghostel.
 
-With `mwheel-coalesce-scroll-events\=' nil -- which
-`pixel-scroll-precision-mode\=' and ultra-scroll both set -- every tick arrives
+With `mwheel-coalesce-scroll-events' nil -- which
+`pixel-scroll-precision-mode' and ultra-scroll both set -- every tick arrives
 as its own event carrying a pixel delta, and one report per event floods a child
 that asked for mouse tracking with dozens of notches per row of travel."
   (with-temp-buffer
@@ -5056,8 +5056,8 @@ that asked for mouse tracking with dozens of notches per row of travel."
 
 (ert-deftest cooked-a-notch-narrower-than-a-row-still-reports ()
   "macOS reports a notch as one line and fewer pixels than a row when
-`line-spacing\=' is set, so the row arithmetic yields zero and the notch would
-vanish.  The floor is the event\='s own line count, not a constant -- which is
+`line-spacing' is set, so the row arithmetic yields zero and the notch would
+vanish.  The floor is the event's own line count, not a constant -- which is
 what keeps a sub-row *trackpad* tick at zero while this reports once."
   (with-temp-buffer
     (let ((cooked--scroll-pending 0.0)
@@ -5073,11 +5073,11 @@ what keeps a sub-row *trackpad* tick at zero while this reports once."
   "Wrapping is idempotent and does not discard what was already there.
 
 Two details that look like paranoia and are not.  The entry is read with
-`assq\=' rather than `lookup-key\=', because `lookup-key\=' resolves a
-`menu-item\=' filter to the map behind it and would silently drop another
-package\='s wrapper -- evil\='s, in the case that matters.  And ours is
-recognised by its `:filter\=' symbol rather than by identity, because
-`define-key\=' copies the list, so identity never matches and every call would
+`assq' rather than `lookup-key', because `lookup-key' resolves a
+`menu-item' filter to the map behind it and would silently drop another
+package's wrapper -- evil's, in the case that matters.  And ours is
+recognised by its `:filter' symbol rather than by identity, because
+`define-key' copies the list, so identity never matches and every call would
 wrap again."
   (skip-unless (not (display-graphic-p)))
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -5114,8 +5114,8 @@ line there is no such claim on the byte."
 (ert-deftest cooked-evil-does-not-blank-a-row-of-spaces ()
   "A whitespace-only line in a cooked buffer is a *screen row*, not slack.
 
-Entering evil insert state hangs `evil-maybe-remove-spaces\=' on
-`post-command-hook\=' and arms it; leaving calls it directly, and it deletes the
+Entering evil insert state hangs `evil-maybe-remove-spaces' on
+`post-command-hook' and arms it; leaving calls it directly, and it deletes the
 whitespace from a line holding nothing else.  In an ordinary buffer that is a
 kindness.  Here the spaces are cells the child put there, so blanking them is
 data loss -- the grid says eight columns and the buffer then says none, about a
@@ -5141,12 +5141,12 @@ by the first bench fixture to contain one."
 (ert-deftest cooked-a-remote-password-prompt-is-caught-by-the-regex ()
   "The arm that reaches a child the termios probe cannot see.
 
-`ssh -t host sudo ...\=' puts the *far* tty into secret mode; the local one this
+`ssh -t host sudo ...' puts the *far* tty into secret mode; the local one this
 session owns never changes, so the detector never fires and the password is
 typed into the buffer in the clear.  Gated on the host being foreign, because
 matching a regex against local output would false-positive on any program
 displaying a file that mentions a password.  Remote means a foreign host, or
-one of `cooked-password-remote-programs\=' in the foreground."
+one of `cooked-password-remote-programs' in the foreground."
   ;; `sleep 5; :' rather than `sleep 5': a shell execs a lone last command, and
   ;; the foreground program then becomes `sleep' a moment after the start --
   ;; which made the `sh' gate below pass or fail on how soon the test got there.
@@ -5183,11 +5183,11 @@ one of `cooked-password-remote-programs\=' in the foreground."
 (defmacro cooked-tests--with-remote-prompt (script &rest body)
   "Run BODY in a session whose SCRIPT stands in for a remote password prompt.
 
-`/bin/sh\=' plays `ssh\=': it is named in `cooked-password-remote-programs\=' for
-the duration, so the regex arm\='s gate opens exactly as it does for a real
-`ssh -t host sudo …\=', and its `stty -icanon -echo\=' is the raw mode `ssh\=' puts
-the local tty in.  `asked\=' counts the reads, answered through
-`cooked-password-function\=' so that no `read-passwd\=' can block batch Emacs,
+`/bin/sh' plays `ssh': it is named in `cooked-password-remote-programs' for
+the duration, so the regex arm's gate opens exactly as it does for a real
+`ssh -t host sudo …', and its `stty -icanon -echo' is the raw mode `ssh' puts
+the local tty in.  `asked' counts the reads, answered through
+`cooked-password-function' so that no `read-passwd' can block batch Emacs,
 and the debounce is short so the real timer is what raises them."
   (declare (indent 1))
   `(let* ((asked 0)
@@ -5222,7 +5222,7 @@ declined because the tty was not in secret mode."
 (ert-deftest cooked-a-remote-password-retry-at-the-foot-of-the-screen-is-asked-again ()
   "A retry that lands on the cell just answered is still a new prompt.
 
-At the bottom of the screen, `Sorry, try again.\=' and the next prompt scroll the
+At the bottom of the screen, `Sorry, try again.' and the next prompt scroll the
 answered one away and leave the cursor on the same (ROW . COL) it was on.  The
 scroll is what says the line under that cell is a different one; without it the
 retry is taken for the prompt already answered and never read."
@@ -5238,19 +5238,19 @@ retry is taken for the prompt already answered and never read."
 (ert-deftest cooked-a-password-the-termios-arm-read-is-not-asked-for-again ()
   "The two arms must not both answer one prompt, and the right one answers it.
 
-`ssh\=' reads its own password with the local tty in secret mode, and once it has
-it switches that tty to raw while `simon@host\='s password: \=' is still the cursor
-row.  With `ssh\=' in the foreground the regex arm is open, so the moment the
+`ssh' reads its own password with the local tty in secret mode, and once it has
+it switches that tty to raw while `simon@host's password: ' is still the cursor
+row.  With `ssh' in the foreground the regex arm is open, so the moment the
 tty leaves secret mode it sees a matching row -- and only the cell the termios
 read left behind says that row was already answered.
 
 The first half is a race as well.  The prompt is printed before the tty goes
 into secret mode, and the termios sample that notices trails the text by 50ms,
-longer than the default debounce, so the regex arm\='s timer fires first.  Read
+longer than the default debounce, so the regex arm's timer fires first.  Read
 there, the password goes out while cooked still believes it owns the line, and
-with `read-passwd\=' on screen instead of a function answering, the termios
-arm\='s own schedule would dismiss the read the user is typing into.  So the
-read is attributed: at the default debounce, it has to be the termios arm\='s."
+with `read-passwd' on screen instead of a function answering, the termios
+arm's own schedule would dismiss the read the user is typing into.  So the
+read is attributed: at the default debounce, it has to be the termios arm's."
   (cooked-tests--with-remote-prompt
       "printf 'Password: '; stty -echo; read p; stty -icanon; sleep 1; \
        printf '\\nDONE\\n'; sleep 5"
@@ -5292,7 +5292,7 @@ from the buffer each re-arm posted the message again."
       (should (= asked 1)))))
 
 (ert-deftest cooked-password-sources-compose-and-defer-to-the-single-slot ()
-  "The chain is asked first, and `cooked-password-function\=' is the last word.
+  "The chain is asked first, and `cooked-password-function' is the last word.
 
 A single slot cannot compose -- a second source means writing a dispatcher, and
 every user wanting two writes the same one.  The existing slot keeps working and
@@ -5319,19 +5319,19 @@ keeps its meaning as the answer of last resort."
           (cooked-password-function nil))
       (should (equal (cooked--password-from-sources "Password:") "survived")))))
 (ert-deftest cooked-evil-does-not-expand-an-abbrev-in-the-childs-text ()
-  "`evil-maybe-expand-abbrev\=' rewrites a word the child printed.
+  "`evil-maybe-expand-abbrev' rewrites a word the child printed.
 
-It hangs on `evil-insert-state-exit-hook\=' whenever `abbrev-mode\=' is on, and
-`expand-abbrev\=' asks about the word before point without any notion of whose
-word it is.  Point over a rendered row is over the child\='s text, so a row
-reading `teh\=' comes back reading `the\=' -- a row the emulator\='s grid still
+It hangs on `evil-insert-state-exit-hook' whenever `abbrev-mode' is on, and
+`expand-abbrev' asks about the word before point without any notion of whose
+word it is.  Point over a rendered row is over the child's text, so a row
+reading `teh' comes back reading `the' -- a row the emulator's grid still
 believes says the other thing.
 
-Run under `inhibit-read-only\=', which is not a contrivance but the condition
-that makes this class silent: `cooked--refresh-keymap\=' runs
-`cooked-state-change-hook\=' -- and so `cooked-evil-sync\=', and so every evil
+Run under `inhibit-read-only', which is not a contrivance but the condition
+that makes this class silent: `cooked--refresh-keymap' runs
+`cooked-state-change-hook' -- and so `cooked-evil-sync', and so every evil
 state transition cooked itself forces -- from inside the drain, where
-`cooked--apply\=' has bound it.  Without the binding the `read-only\=' property
+`cooked--apply' has bound it.  Without the binding the `read-only' property
 answers for this, and the answer is a signal; with it, nothing answers."
   :tags '(evil)
   (skip-unless (require 'evil nil t))
@@ -5351,19 +5351,19 @@ answers for this, and the answer is a signal; with it, nothing answers."
                    "top\nteh\nbot\n"))))
 
 (ert-deftest cooked-evil-does-not-pad-the-childs-rows-out-to-a-column ()
-  "`evil-cleanup-insert-state\=' pads short rows with spaces the child never sent.
+  "`evil-cleanup-insert-state' pads short rows with spaces the child never sent.
 
-A visual-block \\`I\=' or \\`A\=' leaves `evil-insert-vcount\=' set, and the branch that
-reads it walks every line of the block calling `move-to-column ... t\=' -- the
+A visual-block \\`I' or \\`A' leaves `evil-insert-vcount' set, and the branch that
+reads it walks every line of the block calling `move-to-column ... t' -- the
 FORCE argument, which inserts spaces when the line is shorter than the column.
 On the way out of insert state that turns a two-column row into a four-column
 one, and the emulator, which was told nothing, keeps computing every later
 delta against the row it still thinks is there.
 
-Refused by switching `evil-insert-vcount\=' off for the call rather than by
+Refused by switching `evil-insert-vcount' off for the call rather than by
 refusing the call, so the fine-grained undo step it also ends -- bookkeeping
-about the user\='s own pending input -- still happens.  Under `inhibit-read-only\='
-for the reason `cooked-evil-does-not-expand-an-abbrev-in-the-childs-text\='
+about the user's own pending input -- still happens.  Under `inhibit-read-only'
+for the reason `cooked-evil-does-not-expand-an-abbrev-in-the-childs-text'
 gives."
   :tags '(evil)
   (skip-unless (require 'evil nil t))
@@ -5387,14 +5387,14 @@ gives."
 (ert-deftest cooked-state-change-hook-runs-inside-the-childs-edit ()
   "The premise the whole whitespace sweep rests on, pinned so it cannot drift.
 
-`cooked--apply\=' binds `inhibit-read-only\=' and `buffer-undo-list\=' so the
-emulator can rewrite rows the user may not, and `cooked--refresh-keymap\=' runs
-`cooked-state-change-hook\=' from inside that -- an OSC 133 `prompt-end\=' or the
+`cooked--apply' binds `inhibit-read-only' and `buffer-undo-list' so the
+emulator can rewrite rows the user may not, and `cooked--refresh-keymap' runs
+`cooked-state-change-hook' from inside that -- an OSC 133 `prompt-end' or the
 alternate screen going up reaches the hook without ever leaving the drain.
 Whatever the hook calls therefore edits with the protection off and the history
 disabled, which is why an edit made there is neither refused nor recorded, and
-why `cooked-evil--no-unbidden-edit\=' has to stop evil before it starts rather
-than let the `read-only\=' property answer.
+why `cooked-evil--no-unbidden-edit' has to stop evil before it starts rather
+than let the `read-only' property answer.
 
 If this ever stops being true the sweep can be reconsidered; while it is true,
 every layer invited onto that hook inherits it."
@@ -5600,15 +5600,15 @@ it there is theirs to ask for."
 (ert-deftest cooked-mode-is-special-enough-to-be-left-alone ()
   "What excuses cooked from every globalized whitespace tidier at once.
 
-`ws-butler-global-mode\=', which is the one actually installed here, turns
-`ws-butler-mode\=' on in every buffer except those whose major mode has a
-`mode-class\=' of `special\=' -- and `ws-butler-mode\=' would otherwise put a
-`ws-butler-chg\=' property on every row the child writes, on every drain, and
-trim the lot on the first save.  The same `mode-class\=' convention is what
-`define-globalized-minor-mode\=' users check generally.
+`ws-butler-global-mode', which is the one actually installed here, turns
+`ws-butler-mode' on in every buffer except those whose major mode has a
+`mode-class' of `special' -- and `ws-butler-mode' would otherwise put a
+`ws-butler-chg' property on every row the child writes, on every drain, and
+trim the lot on the first save.  The same `mode-class' convention is what
+`define-globalized-minor-mode' users check generally.
 
-cooked puts it itself rather than inheriting it from `comint-mode\=', which
-`define-derived-mode\=' copies only when the mode function first runs.  So a
+cooked puts it itself rather than inheriting it from `comint-mode', which
+`define-derived-mode' copies only when the mode function first runs.  So a
 fresh Emacs is asked, before any cooked buffer exists: an inherited class would
 answer nil there, and would be dropped by a move away from comint unnoticed."
   (let* ((emacs (expand-file-name invocation-name invocation-directory))

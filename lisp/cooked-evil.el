@@ -195,12 +195,12 @@ reaches the child.  For insert state that forwards every key, ESC included, set
   "The evil functions that edit a buffer without a command having asked them to.
 
 The whole list, from a sweep of every hook and advice evil installs; everything
-else it hangs on `post-command-hook\=', `pre-command-hook\=',
-`after-change-functions\=' or a state hook either moves point, keeps a
+else it hangs on `post-command-hook', `pre-command-hook',
+`after-change-functions' or a state hook either moves point, keeps a
 record, or sets a variable.
 
-`evil-maybe-remove-spaces\=' deletes the whitespace from a line holding nothing
-else.  Entering insert state hangs it on `post-command-hook\=' and arms it, and
+`evil-maybe-remove-spaces' deletes the whitespace from a line holding nothing
+else.  Entering insert state hangs it on `post-command-hook' and arms it, and
 leaving insert state calls it directly.  In an ordinary buffer that is a
 kindness -- you opened a line, typed nothing, and evil tidies up after you --
 and here it is data loss: the grid says twenty columns and the buffer then says
@@ -208,14 +208,14 @@ none, about a row neither can re-derive.  Not a corner, either.  A frame of any
 picture is mostly blank rows, which is how this was found: the first bench
 fixture to contain one lost it, and only with evil loaded.
 
-`evil-maybe-expand-abbrev\=' runs `expand-abbrev\=' on
-`evil-insert-state-exit-hook\=' whenever `abbrev-mode\=' is on, so a word the
+`evil-maybe-expand-abbrev' runs `expand-abbrev' on
+`evil-insert-state-exit-hook' whenever `abbrev-mode' is on, so a word the
 *child* printed that happens to match an abbrev is rewritten to its expansion.
-Reproduced: a row reading `teh\=' comes back as `the\='.
+Reproduced: a row reading `teh' comes back as `the'.
 
-`evil-cleanup-insert-state\=' replays the insertion when a count is pending --
-\\`3i\=', or a visual-block \\`I\=' -- and the vcount branch reaches every line
-of the block with `move-to-column ... t\=', which pads short rows with spaces.
+`evil-cleanup-insert-state' replays the insertion when a count is pending --
+\\`3i', or a visual-block \\`I' -- and the vcount branch reaches every line
+of the block with `move-to-column ... t', which pads short rows with spaces.
 Reproduced: a two-column row grows two spaces it was never sent.")
 
 (defconst cooked-evil--unbidden-switches
@@ -223,32 +223,32 @@ Reproduced: a two-column row grows two spaces it was never sent.")
     evil-want-abbrev-expand-on-insert-exit
     evil-insert-count
     evil-insert-vcount)
-  "Every switch that arms one of `cooked-evil--unbidden-editors\='.
+  "Every switch that arms one of `cooked-evil--unbidden-editors'.
 
-Bound together rather than one list per function, because it costs a `progv\='
+Bound together rather than one list per function, because it costs a `progv'
 of four symbols instead of a table to look one up in, and a function that is
 not armed by a switch does not read it.")
 
 (defun cooked-evil--no-unbidden-edit (fn &rest args)
-  "Call FN with ARGS, with evil\='s own tidying switched off in a cooked buffer.
+  "Call FN with ARGS, with evil's own tidying switched off in a cooked buffer.
 
-`:around\=' advice on each of `cooked-evil--unbidden-editors\='.
+`:around' advice on each of `cooked-evil--unbidden-editors'.
 
 One advice for the three, and it does not override evil so much as tell evil
-that its own switches are off here: `cooked-evil--unbidden-switches\=' are the
+that its own switches are off here: `cooked-evil--unbidden-switches' are the
 variables each of those functions consults before it edits, and with them nil
 each takes the branch it already has for having nothing to do.  That is why
-this is `:around\=' rather than three `:before-while\=' predicates refusing
-three functions outright -- `evil-cleanup-insert-state\=' also ends the fine
-grained undo step, which is bookkeeping about the *user\='s* pending input at a
+this is `:around' rather than three `:before-while' predicates refusing
+three functions outright -- `evil-cleanup-insert-state' also ends the fine
+grained undo step, which is bookkeeping about the *user's* pending input at a
 prompt and worth keeping, and amputating the function would lose it.
 
 Refused wholesale rather than for the alt screen or the live region alone; see
 the Commentary above for why every row counts and why refusing by signalling
 would be worse than the loss it prevents.
 
-One deliberate reach outside this buffer.  `evil-maybe-remove-spaces\=' hangs
-itself on the *global* `post-command-hook\=', so taking its \"nothing to
+One deliberate reach outside this buffer.  `evil-maybe-remove-spaces' hangs
+itself on the *global* `post-command-hook', so taking its \"nothing to
 remove\" branch here removes it globally -- which is the same cleanup evil does
 after any command that did not open a line, and reaching this buffer at all
 took a command that would have done it anyway."
@@ -357,7 +357,7 @@ the one left read-only when the child died under a freeze."
 (defcustom cooked-evil-insert-state-submits t
   "Whether Enter submits input even under `evil-collection'.
 
-`evil-collection-comint' registers RET, <return> and \\`C-m\=' -- the spellings a
+`evil-collection-comint' registers RET, <return> and \\`C-m' -- the spellings a
 terminal, a GUI frame, and a literal control character each produce for the
 same key -- on an evil auxiliary keymap tied to `comint-mode-map', which evil
 consults ahead of any buffer's ordinary local map; a plain `define-key' on
@@ -422,18 +422,18 @@ is ordinary editable text.  See `cooked-evil-normal-state-pastes'."
   "Undo COUNT changes to the line being typed, there being nothing else to undo.
 
 Undo in a cooked buffer is scoped to the pending input and kept there
-deliberately -- see `cooked--check-undo-anchor\=' for why a terminal\='s own
-redraws are neither recorded nor recoverable.  \\`u\=' therefore has an answer
+deliberately -- see `cooked--check-undo-anchor' for why a terminal's own
+redraws are neither recorded nor recoverable.  \\`u' therefore has an answer
 everywhere except at a prompt, and it is the same answer undo itself gives for
 an empty history; what it must not do is report the mechanism instead.  Plain
-`evil-undo\=' is `(interactive \"*p\")\=', so with the render suspended -- evil
-normal state at the default `cooked-evil-normal-state-render\=', a peek -- the
-\\`u\=' a user presses over a full-screen program answers \"Buffer is read-only\",
+`evil-undo' is `(interactive \"*p\")', so with the render suspended -- evil
+normal state at the default `cooked-evil-normal-state-render', a peek -- the
+\\`u' a user presses over a full-screen program answers \"Buffer is read-only\",
 which is true of the buffer and beside the point about the undo.
 
 A session that has ended counts with the prompt, as it does in
-`cooked--refresh-keymap\=': there is no child left to own the text, and whatever
-is in the history is the user\='s own."
+`cooked--refresh-keymap': there is no child left to own the text, and whatever
+is in the history is the user's own."
   (interactive "p")
   (if (or (null cooked--session) (cooked--input-state-p))
       (evil-undo count)
@@ -442,10 +442,10 @@ is in the history is the user\='s own."
 (defun cooked-evil--visual-writable-p ()
   "Whether every character the visual selection covers may be edited.
 
-Asked of the text rather than of cooked\='s state, because the two disagree in
+Asked of the text rather than of cooked's state, because the two disagree in
 the case that matters: at a prompt the pending line is ordinary editable text
-while the rows above it are the child\='s, and a selection is free to start in
-one and end in the other.  `read-only\=' is the property `cooked--protect\=' puts
+while the rows above it are the child's, and a selection is free to start in
+one and end in the other.  `read-only' is the property `cooked--protect' puts
 on everything the emulator owns, so the property is the question."
   (let ((range (evil-visual-range)))
     (and (not buffer-read-only)
@@ -454,15 +454,15 @@ on everything the emulator owns, so the property is the question."
                                      'read-only nil)))))
 
 (defun cooked-evil-visual-case ()
-  "Change the case of the visual selection, unless it is the child\='s text.
+  "Change the case of the visual selection, unless it is the child's text.
 
-\\`u\=', \\`U\=' and \\`~\=' are `evil-downcase\=', `evil-upcase\=' and
-`evil-invert-char\=' in visual state, and all three end in `downcase-region\=' or
+\\`u', \\`U' and \\`~' are `evil-downcase', `evil-upcase' and
+`evil-invert-char' in visual state, and all three end in `downcase-region' or
 its neighbours over whatever is selected.  Over a rendered row that signals,
-and a signal here is the failure `cooked-evil--command-range\=' documents at
-length: Emacs runs no `post-command-hook\=' after a command that signalled, so
-`evil-visual-post-command\=' never reconciles the selection and evil is left
-believing in a visual state the user cannot see -- after which the next \\`v\='
+and a signal here is the failure `cooked-evil--command-range' documents at
+length: Emacs runs no `post-command-hook' after a command that signalled, so
+`evil-visual-post-command' never reconciles the selection and evil is left
+believing in a visual state the user cannot see -- after which the next \\`v'
 *leaves* visual state rather than entering it.  The house rule that follows is
 that anything reachable from visual state here reports and returns.
 
@@ -470,10 +470,10 @@ Returning also leaves the selection standing, which is the honest outcome: the
 command did nothing, so nothing about the state should have changed either.
 
 One command for the three keys, dispatching on the key that ran it, the way
-`cooked-evil-paste\=' does for \\`p\=' and \\`P\='.  \\`gu\=' and its family in normal
+`cooked-evil-paste' does for \\`p' and \\`P'.  \\`gu' and its family in normal
 state are left alone: they signal for the same reason, but a signal in normal
 state costs a message rather than a state evil cannot see out of, and \"Buffer
-is read-only\" over a program\='s screen is a true thing to say."
+is read-only\" over a program's screen is a true thing to say."
   (interactive)
   (if (cooked-evil--visual-writable-p)
       (call-interactively (pcase last-command-event
@@ -492,7 +492,7 @@ is read-only\" over a program\='s screen is a true thing to say."
 
 (defun cooked-evil--goto-input-first-non-blank ()
   "Put point on the first non-blank character of the command being typed.
-Called only where `cooked--input-line-start\=' has already answered, so it moves
+Called only where `cooked--input-line-start' has already answered, so it moves
 unconditionally; the decision belongs to the caller, which has to make it
 before touching point either way."
   (goto-char (cooked--input-line-start))
@@ -501,25 +501,25 @@ before touching point either way."
 (defun cooked-evil-insert-line (count &optional vcount)
   "Insert at the start of the command being typed, not of the prompt.
 
-\\`I\=' is `evil-insert-line\=', which computes a position *and* changes state, so
+\\`I' is `evil-insert-line', which computes a position *and* changes state, so
 fixing point afterwards is not open to us -- and fixing it first is worse,
 since the command recomputes the position itself.  What it computes it with is
-`evil-first-non-blank\=', reached by `funcall\=' through the symbol, so the
+`evil-first-non-blank', reached by `funcall' through the symbol, so the
 position is exactly what a rebinding of that symbol can answer, and everything
-else \\`I\=' means -- the repeat count, the undo boundary, the insert-state
-bookkeeping `evil-repeat\=' needs for \\`.\=' -- goes on being evil\='s own code
+else \\`I' means -- the repeat count, the undo boundary, the insert-state
+bookkeeping `evil-repeat' needs for \\`.' -- goes on being evil's own code
 rather than a copy of it kept in step here.
 
 The rebinding is dynamic and lapses on return.  That is right rather than
-merely tidy: a visual-block \\`I\=' stores the move function in
-`evil-insert-vcount\=' and calls it again on each following line, after this has
+merely tidy: a visual-block \\`I' stores the move function in
+`evil-insert-vcount' and calls it again on each following line, after this has
 returned, and those lines are not the prompt row -- their column 0 already is
 the start of their text.
 
 COUNT and VCOUNT are passed through untouched.  What decides whether any of
-this happens is `cooked-beginning-of-line-skips-prompt\=': with it off, or
-anywhere but the row the prompt ends on, `cooked--input-line-start\=' answers
-nil and \\`I\=' is stock evil."
+this happens is `cooked-beginning-of-line-skips-prompt': with it off, or
+anywhere but the row the prompt ends on, `cooked--input-line-start' answers
+nil and \\`I' is stock evil."
   (interactive "p")
   (if (not (cooked--input-line-start))
       (evil-insert-line count vcount)
@@ -666,27 +666,27 @@ unchanged.  See `cooked-evil-insert-line' for the other half of the pair."
 (defvar evil-toggle-key)
 
 (defvar cooked-evil--kept-toggle-key nil
-  "The `evil-toggle-key\=' the forwarding leaves to evil, as a key vector.
-See `cooked-evil--keep-toggle-key\='.")
+  "The `evil-toggle-key' the forwarding leaves to evil, as a key vector.
+See `cooked-evil--keep-toggle-key'.")
 
 (defun cooked-evil--forwarding-maps ()
-  "Evil\='s minor-mode keymaps for `cooked--semi-map-worn\=', one per state.
-Replace state as well as insert, since `cooked-evil--input-mode\=' wears the
+  "Evil's minor-mode keymaps for `cooked--semi-map-worn', one per state.
+Replace state as well as insert, since `cooked-evil--input-mode' wears the
 semi map in both."
   (mapcar (lambda (state) (evil-get-minor-mode-keymap state 'cooked--semi-map-worn))
           '(insert replace)))
 
 (defun cooked-evil--keep-toggle-key (key)
-  "Leave KEY, a `kbd\=' string, to evil in the forwarding, and give back the last.
+  "Leave KEY, a `kbd' string, to evil in the forwarding, and give back the last.
 
-`evil-toggle-key\=' is the way out of insert state into emacs state, as ESC is
-the way into normal state, and forwarding it would send \\`C-z\=' to the child
+`evil-toggle-key' is the way out of insert state into emacs state, as ESC is
+the way into normal state, and forwarding it would send \\`C-z' to the child
 as a suspend.  So each forwarding map binds it to nil, which shadows the
-forwarding beneath and lets evil\='s insert state map answer.
+forwarding beneath and lets evil's insert state map answer.
 
 A variable watcher calls this again whenever the toggle key is set, which is
-also when evil\='s own `:set\=' moves evil\='s bindings.  Without it a toggle key
-chosen after cooked-evil loaded went to the child, and \\`C-z\=' stayed kept
+also when evil's own `:set' moves evil's bindings.  Without it a toggle key
+chosen after cooked-evil loaded went to the child, and \\`C-z' stayed kept
 back from a child that wanted it."
   (let ((keys (kbd key)))
     (dolist (map (cooked-evil--forwarding-maps))
@@ -696,22 +696,22 @@ back from a child that wanted it."
     (setq cooked-evil--kept-toggle-key keys)))
 
 (defun cooked-evil--toggle-key-changed (_symbol value operation where)
-  "Follow a new `evil-toggle-key\=', VALUE, in the forwarding.
+  "Follow a new `evil-toggle-key', VALUE, in the forwarding.
 A variable watcher.  OPERATION and WHERE are checked so that only a global
-`set\=' moves the global keymaps, not a `let\=' or a buffer-local value."
+`set' moves the global keymaps, not a `let' or a buffer-local value."
   (when (and (eq operation 'set) (null where) (stringp value))
     (cooked-evil--keep-toggle-key value)))
 
 (defun cooked-evil--forward-above ()
-  "Make the child\='s forwarding outrank evil\='s own keymaps in insert state.
+  "Make the child's forwarding outrank evil's own keymaps in insert state.
 
-`cooked--semi-forwarding-map\=' becomes the parent of evil\='s minor-mode keymap
-for `cooked--semi-map-worn\=', so it answers ahead of the state maps while that
+`cooked--semi-forwarding-map' becomes the parent of evil's minor-mode keymap
+for `cooked--semi-map-worn', so it answers ahead of the state maps while that
 variable is non-nil; see the Commentary for why a local map could not.  The
-parent is the forwarding alone, without `cooked-mode-map\=' and
-`comint-mode-map\=' beneath it, which would put comint\='s own bindings above
-evil\='s too.  `evil-toggle-key\=' is left to evil; see
-`cooked-evil--keep-toggle-key\='."
+parent is the forwarding alone, without `cooked-mode-map' and
+`comint-mode-map' beneath it, which would put comint's own bindings above
+evil's too.  `evil-toggle-key' is left to evil; see
+`cooked-evil--keep-toggle-key'."
   (dolist (map (cooked-evil--forwarding-maps))
     (set-keymap-parent map cooked--semi-forwarding-map))
   (cooked-evil--keep-toggle-key evil-toggle-key)
@@ -721,20 +721,20 @@ evil\='s too.  `evil-toggle-key\=' is left to evil; see
   (cooked-evil--forward-above))
 
 (defconst cooked-evil--prompt-keys '("S-<return>" "S-RET")
-  "Keys cooked\='s prompt binding wins in insert state, besides the delegated ones.
+  "Keys cooked's prompt binding wins in insert state, besides the delegated ones.
 
-Shift+Return composes a multi-line command at a prompt, see `cooked-newline\=',
-and `evil-collection-comint\=' binds both spellings to `newline\=' on an
-auxiliary keymap that outranks `cooked-input-map\='.")
+Shift+Return composes a multi-line command at a prompt, see `cooked-newline',
+and `evil-collection-comint' binds both spellings to `newline' on an
+auxiliary keymap that outranks `cooked-input-map'.")
 
 (defun cooked-evil--prompt-binding (key)
-  "A binding for KEY that answers with `cooked-input-map\=''s, at a prompt only.
+  "A binding for KEY that answers with `cooked-input-map''s, at a prompt only.
 
-A `menu-item\=' whose `:filter\=' looks KEY up in `cooked-input-map\=' while that
+A `menu-item' whose `:filter' looks KEY up in `cooked-input-map' while that
 map is the one worn, and answers nil everywhere else, which lets the lookup
-carry on into evil\='s own maps.  Looked up when the key is pressed rather than
-copied, so a later change to `cooked-delegate-keys\=' is followed: a key taken
-out of it is evil\='s again."
+carry on into evil's own maps.  Looked up when the key is pressed rather than
+copied, so a later change to `cooked-delegate-keys' is followed: a key taken
+out of it is evil's again."
   (let ((keys (kbd key)))
     `(menu-item
       "" nil
@@ -744,24 +744,24 @@ out of it is evil\='s again."
                         (and (not (numberp binding)) binding)))))))
 
 (defun cooked-evil--bind-prompt-keys (keys)
-  "Let `cooked-input-map\=' answer KEYS, a list of `kbd\=' strings, in insert state.
+  "Let `cooked-input-map' answer KEYS, a list of `kbd' strings, in insert state.
 
-At a prompt a readline user expects \\`C-r\=' to search the shell\='s history,
-which is what `cooked-delegate-keys\=' makes it do, and Shift+Return to add a
-line.  Evil\='s insert state map binds \\`C-r\=' to `evil-paste-from-register\='
-and `evil-collection-comint\=' binds Shift+Return to `newline\=', and both
-outrank the local map, so neither of cooked\='s bindings was reached.  The
-bindings go on an auxiliary keymap tied to `cooked-mode-map\=', for the reason
-Enter\='s does below, and each defers to evil wherever Emacs does not own the
-line; see `cooked-evil--prompt-binding\='."
+At a prompt a readline user expects \\`C-r' to search the shell's history,
+which is what `cooked-delegate-keys' makes it do, and Shift+Return to add a
+line.  Evil's insert state map binds \\`C-r' to `evil-paste-from-register'
+and `evil-collection-comint' binds Shift+Return to `newline', and both
+outrank the local map, so neither of cooked's bindings was reached.  The
+bindings go on an auxiliary keymap tied to `cooked-mode-map', for the reason
+Enter's does below, and each defers to evil wherever Emacs does not own the
+line; see `cooked-evil--prompt-binding'."
   (dolist (key keys)
     (evil-define-key* 'insert cooked-mode-map (kbd key)
                       (cooked-evil--prompt-binding key))))
 
 (defun cooked-evil--delegate-keys-changed (_symbol value operation where)
-  "Give each key newly in `cooked-delegate-keys\=', VALUE, the prompt binding.
+  "Give each key newly in `cooked-delegate-keys', VALUE, the prompt binding.
 A variable watcher; OPERATION and WHERE are checked as in
-`cooked-evil--toggle-key-changed\='.  A key that is no longer delegated needs
+`cooked-evil--toggle-key-changed'.  A key that is no longer delegated needs
 nothing, since its binding already defers to evil."
   (when (and (eq operation 'set) (null where))
     (cooked-evil--bind-prompt-keys value)))
@@ -779,15 +779,15 @@ nothing, since its binding already defers to evil."
   "Enter, except while an in-buffer completion is showing.
 
 The override below has to sit on an evil auxiliary keymap to beat
-`evil-collection-comint\=', and evil consults those through
-`emulation-mode-map-alists\=' -- which Emacs searches *before*
-`minor-mode-overriding-map-alist\=', where `completion-in-region-mode\=' puts the
-UI\='s own keymap.  So corfu\='s `RET\=' never got a look at the key: the popup
+`evil-collection-comint', and evil consults those through
+`emulation-mode-map-alists' -- which Emacs searches *before*
+`minor-mode-overriding-map-alist', where `completion-in-region-mode' puts the
+UI's own keymap.  So corfu's `RET' never got a look at the key: the popup
 stayed up and the half-completed line was submitted underneath it.
 
-A `:filter\=' returning nil is read as no binding at all, and lookup carries on
+A `:filter' returning nil is read as no binding at all, and lookup carries on
 into the lower-precedence maps -- which is exactly the corfu map that wanted the
-key.  Nothing here names corfu: `completion-in-region-mode\=' is the mode every
+key.  Nothing here names corfu: `completion-in-region-mode' is the mode every
 in-buffer UI turns on, the default one included, so the same fall-through serves
 all of them.
 

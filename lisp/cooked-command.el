@@ -115,23 +115,23 @@ search cannot come to disagree about what four minutes looks like."
 (defcustom cooked-command-started-functions nil
   "Functions called each time a command starts, with its anchor marker.
 
-The `C\=' half of the pair `cooked-command-finished-functions\=' is the `D\='
+The `C' half of the pair `cooked-command-finished-functions' is the `D'
 half of, and nil by default for the same reason: a session nothing is listening
-to pays only the `run-hook\='.
+to pays only the `run-hook'.
 
-Called from the `command-start\=' branch of `cooked--handle-semantic\=', once
+Called from the `command-start' branch of `cooked--handle-semantic', once
 the makings of the record are in place, with one argument --
-`cooked--running-anchor\='.
+`cooked--running-anchor'.
 
-There is no `cooked-command\=' to pass, and that is not an oversight to be fixed
-by building one early: a record exists because a `D\=' mark supplied an exit
-code, and a half-built one would carry `code\=' 0, which every reader of that
+There is no `cooked-command' to pass, and that is not an oversight to be fixed
+by building one early: a record exists because a `D' mark supplied an exit
+code, and a half-built one would carry `code' 0, which every reader of that
 field has always been entitled to read as success.  A consumer wanting more
-than the anchor reads `cooked--command-input\=' and `cooked--command-start\=',
+than the anchor reads `cooked--command-input' and `cooked--command-start',
 both of which are live at the moment this fires.
 
 Command decorations use it to put a marker up in the running colour that the
-`D\=' mark then repaints; a notifier for long-running commands wants this same
+`D' mark then repaints; a notifier for long-running commands wants this same
 moment to start its clock."
   :type 'hook
   :group 'cooked)
@@ -139,34 +139,34 @@ moment to start its clock."
 (defun cooked--running-anchor ()
   "Marker naming the row the running command was typed at, or nil.
 
-Its prompt where the shell sent an `A\=' mark and the start of its output
-otherwise -- the same fallback `cooked-command-decorations--anchor\=' makes for
+Its prompt where the shell sent an `A' mark and the start of its output
+otherwise -- the same fallback `cooked-command-decorations--anchor' makes for
 a finished record, made here for the command that does not have one yet.
 
-Nil between a `D\=' mark and the next `C\=', which is to say exactly when
+Nil between a `D' mark and the next `C', which is to say exactly when
 nothing is running: that is the question most callers are really asking."
   (when-let* ((marker (or cooked--command-prompt cooked--command-start))
               ((marker-position marker)))
     marker))
 
 (defcustom cooked-command-finished-functions nil
-  "Functions called with a `cooked-command\=' each time one finishes.
+  "Functions called with a `cooked-command' each time one finishes.
 
-Nil by default -- a session nothing is listening to pays only the `run-hook\='.
+Nil by default -- a session nothing is listening to pays only the `run-hook'.
 This is the seam for anything that wants \"a command just finished\" without
-growing its own copy of `cooked--mark-command-end\='s bookkeeping: command
+growing its own copy of `cooked--mark-command-end's bookkeeping: command
 decorations paint an indicator from it, and a notifier for long-running
 commands is the other obvious consumer.
 
-Called from `cooked--mark-command-end\=', after the record has been pushed onto
-`cooked--commands\=', with that same record.  `cooked-command-start\=' and
-`cooked-command-end\=' are markers by then; `cooked-command-prompt\=' is a marker
-too when the shell sent an `A\=' mark and nil otherwise.
+Called from `cooked--mark-command-end', after the record has been pushed onto
+`cooked--commands', with that same record.  `cooked-command-start' and
+`cooked-command-end' are markers by then; `cooked-command-prompt' is a marker
+too when the shell sent an `A' mark and nil otherwise.
 
 An abnormal hook rather than a single function, because two layers already want
 this moment and a plain variable would let the second silently replace the
-first.  Unlike `cooked-osc-eval-functions\=' this gates no
-channel the child can reach -- it fires only on cooked\='s own bookkeeping -- so
+first.  Unlike `cooked-osc-eval-functions' this gates no
+channel the child can reach -- it fires only on cooked's own bookkeeping -- so
 it is ordinary hook plumbing rather than a deliberate opt-in."
   :type 'hook
   :group 'cooked)
@@ -207,11 +207,11 @@ each record with a private copy nothing could reach."
 (defun cooked-goto-last-command ()
   "Move to the prompt of the most recently finished command.
 
-What the mode line\='s exit status is a click away from, and the reason it is a
+What the mode line's exit status is a click away from, and the reason it is a
 command rather than a closure: the status answers \"how did it go\" and the
 obvious next question is \"which one, and what did it print\", which is a
 position.  Lands on the prompt rather than the output for the reason
-`cooked-previous-command\=' does -- a command that printed nothing has no output
+`cooked-previous-command' does -- a command that printed nothing has no output
 to land in, and its exit status is exactly the one worth chasing."
   (interactive)
   (if-let* ((command (car cooked--commands)))
@@ -367,7 +367,7 @@ copy of the check."
 The argument is what lets the fringe marker and the menu share these commands
 without sharing their idea of *which* record is meant: a click on a marker
 knows exactly, from the overlay it was painted on, and a keystroke has only
-point to go on.  `cooked--command-around\=' is what answers for point, so the
+point to go on.  `cooked--command-around' is what answers for point, so the
 prompt below a command counts as that command -- see there for why that is the
 reading a user expects rather than a convenience.
 
@@ -380,18 +380,18 @@ the same check."
 (defun cooked-show-output (&optional command)
   "Scroll so COMMAND's output starts at the top of the window.
 
-Where comint puts `comint-show-output\=', and for the concept comint means by
-it -- but not its implementation.  `comint-show-output\=' finds the output group
-by walking `field\=' text properties, and cooked sets none anywhere: it marks
+Where comint puts `comint-show-output', and for the concept comint means by
+it -- but not its implementation.  `comint-show-output' finds the output group
+by walking `field' text properties, and cooked sets none anywhere: it marks
 the prompt read-only instead, because the transcript is one continuous thing
 the emulator rewrites in place, and fields over rows still being redrawn would
 have to be maintained on every render for the sake of two commands.  With no
-fields `field-beginning\=' answers `point-min\=', so the inherited command
+fields `field-beginning' answers `point-min', so the inherited command
 scrolls to the top of the *scrollback* -- silently, which is the worst way for
 it to be wrong, and the reason this exists rather than the menu entry simply
 being dropped.
 
-`cooked--command-here\=' is better than the field walk in the way that matters:
+`cooked--command-here' is better than the field walk in the way that matters:
 it answers from the prompt and the input line as well as from inside the
 output, so this does the right thing pressed from where the user is typing.
 
@@ -412,20 +412,20 @@ out of one takes the frame along with the text inside it:
 
   │ src/main.rs   │        becomes        src/main.rs
 
-With this non-nil, every copy that goes through `filter-buffer-substring\=' --
-\\[kill-ring-save], a mouse selection, `evil-yank\=', `cooked-copy-output\=' and
-`cooked-write-output\=' -- drops a line made of nothing but borders and blanks,
+With this non-nil, every copy that goes through `filter-buffer-substring' --
+\\[kill-ring-save], a mouse selection, `evil-yank', `cooked-copy-output' and
+`cooked-write-output' -- drops a line made of nothing but borders and blanks,
 and takes the borders off either end of every other line, with the blanks that
 lie outside them.  Characters in the middle of a line are kept, so the divider
 between two panes side by side stays where it was.
 
 Off by default because the same characters are content as often as they are
-frame: `tree\=' draws its branches with them, and a line reading
+frame: `tree' draws its branches with them, and a line reading
 \"├── src\" would be copied as \"src\".  The borders are U+2500 to U+257F, the
-Unicode box-drawing block, and never ASCII look-alikes such as `|\=' and `+\=',
+Unicode box-drawing block, and never ASCII look-alikes such as `|' and `+',
 which are far more often text.
 
-Read on every copy, so `setq-local\=' in one buffer takes effect at once."
+Read on every copy, so `setq-local' in one buffer takes effect at once."
   :type 'boolean
   :group 'cooked)
 
@@ -442,7 +442,7 @@ the trailing-blank trim to finish.")
 
 A terminal row is as wide as the screen, and the part of it a program left
 unwritten is blanks the emulator still owns.  Rejoining wrapped lines keeps
-most of that padding out of the buffer, but `cooked--pad-to-cursor\=' can still
+most of that padding out of the buffer, but `cooked--pad-to-cursor' can still
 put some on the cursor's row, so \"ls   \" there is copied as \"ls\"."
   (replace-regexp-in-string "[ \t]+$" "" text t t))
 
@@ -463,9 +463,9 @@ right-hand border is what exposes the padding in front of it."
 (defun cooked--filter-buffer-substring (filter beg end delete)
   "Call FILTER on BEG, END and DELETE, then strip box borders when asked to.
 
-Around the buffer-local `filter-buffer-substring-function\=' in `cooked-mode\=',
+Around the buffer-local `filter-buffer-substring-function' in `cooked-mode',
 so whatever else is filtering copied text still runs first and this sees its
-answer.  With `cooked-copy-strip-box-borders\=' nil the string is returned
+answer.  With `cooked-copy-strip-box-borders' nil the string is returned
 untouched, which is the default and costs one variable lookup per copy."
   (let ((text (funcall filter beg end delete)))
     (if cooked-copy-strip-box-borders
@@ -475,8 +475,8 @@ untouched, which is the default and costs one variable lookup per copy."
 (defun cooked-write-output (file &optional outer command)
   "Write COMMAND's output to FILE, or with OUTER its whole record.
 
-Where comint puts `comint-write-output\=', which writes from
-`comint-last-input-end\=' to the process mark -- here the input mark.  At a
+Where comint puts `comint-write-output', which writes from
+`comint-last-input-end' to the process mark -- here the input mark.  At a
 prompt that is the last command's output and works by coincidence; midway
 through a command the input mark points nowhere and it raises rather than
 writing anything.  This asks for the command at point, which is both the honest
@@ -485,7 +485,7 @@ something four screens up.
 
 With a prefix argument the region is the whole record -- the prompt, the
 command line and the output -- which is the form worth pasting into a bug
-report, and the one `cooked--command-region\=' already has an argument for."
+report, and the one `cooked--command-region' already has an argument for."
   (interactive (list (read-file-name (if current-prefix-arg
                                          "Write command and output to file: "
                                        "Write output to file: "))

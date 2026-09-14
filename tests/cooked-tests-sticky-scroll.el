@@ -83,9 +83,9 @@ the window happens to be scrolled."
         (should (string-search "finished-one" (cooked--sticky-header)))))))
 
 (ert-deftest cooked-sticky-scroll-is-off-until-asked-for ()
-  "Off by default, and read once in `cooked-mode\=' rather than consulted per
+  "Off by default, and read once in `cooked-mode' rather than consulted per
 redisplay: a header line costs a row of the window body, which
-`cooked--window-rows\=' folds straight into a PTY resize."
+`cooked--window-rows' folds straight into a PTY resize."
   (with-temp-buffer
     (let ((cooked-sticky-scroll nil))
       (cooked-mode)

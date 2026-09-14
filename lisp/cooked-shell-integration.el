@@ -22,39 +22,39 @@
 (defcustom cooked-shell-integration 'detect
   "Which shell to inject the OSC 133 integration into, if any.
 
-  `detect\='  match the basename of `cooked-shell\=' against the shells we know
-  `none\='    never inject; the snippet is yours to source
-  `zsh\=', `bash\='  force that scheme regardless of the name
+  `detect'  match the basename of `cooked-shell' against the shells we know
+  `none'    never inject; the snippet is yours to source
+  `zsh', `bash'  force that scheme regardless of the name
 
-  `fish\='   force fish regardless of the name
+  `fish'   force fish regardless of the name
 
-There *is* a `fish\=' scheme now, and the reason there was not is worth keeping:
-injecting it looked like it meant being right about `-C\=' ordering and
+There *is* a `fish' scheme now, and the reason there was not is worth keeping:
+injecting it looked like it meant being right about `-C' ordering and
 config.fish sourcing against a shell nothing here had run.  It does not.  fish
-sources `fish/vendor_conf.d/*.fish\=' out of every directory in
-`XDG_DATA_DIRS\=', at startup, interactive and login alike -- its own documented
-autoload path, with no ordering to be right about and nothing of the user\='s to
+sources `fish/vendor_conf.d/*.fish' out of every directory in
+`XDG_DATA_DIRS', at startup, interactive and login alike -- its own documented
+autoload path, with no ordering to be right about and nothing of the user's to
 shadow.  cooked prepends a scratch directory and drops one file in it.
 
-Injection generates startup files that source the user\='s own, so nobody\='s
+Injection generates startup files that source the user's own, so nobody's
 configuration is bypassed or edited, and the generated directory is deleted with
 the buffer.
 
 It is on by default, and the honest statement of its limit is that it composes
 with nothing.  A generated ZDOTDIR reaches exactly the shell cooked started:
-every `ssh\=', every `sudo -i\=', every `docker exec\=', every nested `zsh -f\='
-and every `exec zsh\=' lands outside it.  That is not a wart to be fixed but the
+every `ssh', every `sudo -i', every `docker exec', every nested `zsh -f'
+and every `exec zsh' lands outside it.  That is not a wart to be fixed but the
 shape of the mechanism, and it is why injection is the convenience rather than
 the contract -- the contract is a line in your own rc:
 
     [[ $TERM_PROGRAM == cooked ]] && source /path/to/cooked.zsh
 
-The same line works at both ends of an `ssh\=', and sourcing it twice is a
+The same line works at both ends of an `ssh', and sourcing it twice is a
 no-op, so having it *and* injection is the supported arrangement rather than
-a conflict.  Where the shell stays unmarked the mode line says `bare\=', and
-says it once in words -- see `cooked-integration-hint\='.
+a conflict.  Where the shell stays unmarked the mode line says `bare', and
+says it once in words -- see `cooked-integration-hint'.
 
-What gets turned on once loaded is `cooked-shell-integration-features\=', which
+What gets turned on once loaded is `cooked-shell-integration-features', which
 is a separate question from whether cooked put the code there."
   :type '(choice (const :tag "Detect from the shell's name" detect)
                  (const :tag "Never inject" none)
@@ -64,50 +64,50 @@ is a separate question from whether cooked put the code there."
 
 (defconst cooked-shell-integration-all-features
   '(marks input-mark cwd announce completion title eval-helpers)
-  "Every feature name `cooked-shell-integration-features\=' accepts.")
+  "Every feature name `cooked-shell-integration-features' accepts.")
 
 (defcustom cooked-shell-integration-features
   '(marks input-mark cwd announce completion title)
   "Which parts of the shell integration to turn on.
 
 A list of symbols, passed to the shell verbatim in the environment variable
-`COOKED_SHELL_INTEGRATION_FEATURES\=' and read there rather than acted on here,
+`COOKED_SHELL_INTEGRATION_FEATURES' and read there rather than acted on here,
 so the same list governs a shell cooked injected into and one that sources the
 snippet by hand.
 
-  `marks\='         OSC 133 `A\=', `C\=' and `D\=': where each prompt began,
-                  where its command\='s output began, and how it exited.
-                  Buys the per-command records, `next-error\=', rerun, and
+  `marks'         OSC 133 `A', `C' and `D': where each prompt began,
+                  where its command's output began, and how it exited.
+                  Buys the per-command records, `next-error', rerun, and
                   the fringe decorations.
-  `input-mark\='    OSC 133 `B\=', which is separate from the rest because it is
+  `input-mark'    OSC 133 `B', which is separate from the rest because it is
                   the one mark that changes who owns the keyboard: it is what
                   lifts the input line into Emacs.  Drop it and the marks above
                   still work -- the shell keeps its own line editor, and you
                   keep the extents and the exit codes.
-  `cwd\='           OSC 7, which tracks `default-directory\='.  Also what tells
+  `cwd'           OSC 7, which tracks `default-directory'.  Also what tells
                   cooked the shell is on this machine, which is half of
-                  `cooked--ownership-license\='.
-  `announce\='      the per-line OSC 51;CH announcement.  Licenses the editable
-                  line from the far end of an `ssh\=', where termios cannot see,
+                  `cooked--ownership-license'.
+  `announce'      the per-line OSC 51;CH announcement.  Licenses the editable
+                  line from the far end of an `ssh', where termios cannot see,
                   and carries the token a completion request must quote.
-  `completion\='    source the `compadd\=' capture, so TAB is answered by the
-                  shell\='s own completion system.  Needs the Emacs half loaded
-                  too -- `(require \\='cooked-shell-completion)\=' -- and does
+  `completion'    source the `compadd' capture, so TAB is answered by the
+                  shell's own completion system.  Needs the Emacs half loaded
+                  too -- `(require \\='cooked-shell-completion)' -- and does
                   nothing without it.
-  `title\='         report the running command as the title.  cooked shows it in
-                  the mode line, and `cooked-buffer-name-auto-update\=' can
+  `title'         report the running command as the title.  cooked shows it in
+                  the mode line, and `cooked-buffer-name-auto-update' can
                   put it in the buffer name.  If your prompt already writes
-                  `OSC 2\=' this is a redundant write rather than a conflict --
+                  `OSC 2' this is a redundant write rather than a conflict --
                   last one wins, and ours runs last -- so drop it if you would
                   rather keep your own wording.
-  `eval-helpers\='  define `find_file\=', `dired\=', `osc_copy\=' and
-                  `cooked_send\='.  Off by default, and the Emacs half
-                  (`(require \\='cooked-osc-eval)\=') gates what they can
-                  actually do -- see `cooked-eval-commands\='.
+  `eval-helpers'  define `find_file', `dired', `osc_copy' and
+                  `cooked_send'.  Off by default, and the Emacs half
+                  (`(require \\='cooked-osc-eval)') gates what they can
+                  actually do -- see `cooked-eval-commands'.
 
-Your rc may edit `COOKED_SHELL_INTEGRATION_FEATURES\=' before the snippet reads
+Your rc may edit `COOKED_SHELL_INTEGRATION_FEATURES' before the snippet reads
 it, which is the supported way to stand one part down from the shell side.  A
-prompt that already emits its own OSC 133 marks can append ` no-marks\=' to it
+prompt that already emits its own OSC 133 marks can append ` no-marks' to it
 and keep everything else, rather than choosing between duplicate marks and no
 integration at all.  The snippet defers its own setup to the first prompt so
 that there is a moment in which to do this."
@@ -118,12 +118,12 @@ that there is a moment in which to do this."
 (defun cooked--integration-shell (shell)
   "Which injection scheme SHELL should get, or nil for none.
 
-`detect\=' matches on the basename, which is what every terminal that does this
+`detect' matches on the basename, which is what every terminal that does this
 uses and is wrong in the same ways for all of them: a shell installed under
 another name is missed, and one *named* zsh that is not zsh is mangled.  Naming
 the scheme explicitly overrides the guess in both directions.
 
-A bare `t\=' is honoured as `detect\=', because that is what this option meant
+A bare t is honoured as `detect', because that is what this option meant
 while it was a boolean and a session that refuses to start is a poor way to
 learn that a setting grew values."
   (let ((setting (if (eq cooked-shell-integration t) 'detect cooked-shell-integration)))
@@ -134,19 +134,19 @@ learn that a setting grew values."
       (_ nil))))
 
 (defun cooked--integration-feature-p (feature)
-  "Whether FEATURE is enabled in `cooked-shell-integration-features\='."
+  "Whether FEATURE is enabled in `cooked-shell-integration-features'."
   (memq feature cooked-shell-integration-features))
 
 (defun cooked--integration-environment ()
   "The feature-list binding for a child, or nil when nothing is enabled.
 
 Space-separated symbol names, ordered as
-`cooked-shell-integration-all-features\=' lists them rather than as the user
+`cooked-shell-integration-all-features' lists them rather than as the user
 happened to write them, so the value a shell sees is stable across restarts
 and diffable in a bug report.
 
 Passed verbatim rather than as a normalized re-encoding, which is what makes the
-rc-side edit described in `cooked-shell-integration-features\=' possible: the
+rc-side edit described in `cooked-shell-integration-features' possible: the
 shell appends to the same vocabulary it received."
   (let ((on (seq-filter #'cooked--integration-feature-p
                         cooked-shell-integration-all-features)))
@@ -226,7 +226,7 @@ all; restart it, or source the file yourself."
   "STRING as a fish single-quoted word.
 
 Inside single quotes fish treats only a backslash and a quote specially, so
-those two are escaped and nothing else is: it\='s here becomes \='it\\\='s here\='."
+those two are escaped and nothing else is: it\\='s here becomes \\='it\\=\\\\='s here\\='."
   (concat "'" (replace-regexp-in-string "[\\\\']" "\\\\\\&" string t) "'"))
 
 (defun cooked--fish-restore-data-dirs (scratch injected original)
@@ -235,10 +235,10 @@ those two are escaped and nothing else is: it\='s here becomes \='it\\\='s here\
 INJECTED is the value cooked gave the variable, and ORIGINAL the value it had
 before, or nil when it was unset.  When the variable still holds INJECTED it is
 put back to ORIGINAL exactly, or erased.  When something that ran earlier in
-fish\='s startup has changed it since, only the SCRATCH entry is taken out, so
+fish's startup has changed it since, only the SCRATCH entry is taken out, so
 that change survives: a value of /tmp/cooked-x:/opt/share becomes /opt/share.
 
-Only `test\=', `set\=', `string\=' and `contains\=' are used, so the code runs on
+Only `test', `set', `string' and `contains' are used, so the code runs on
 the fish 3.x releases cooked.fish still supports."
   (concat
    "if test \"$XDG_DATA_DIRS\" = " (cooked--fish-quote injected) "\n"

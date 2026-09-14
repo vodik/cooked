@@ -97,7 +97,7 @@ operation: fresh rows are appended at the bottom and redisplay draws them once.
 A gesture moves the *viewport* over text that is already there, and redisplay
 lays a continued line out **from its start** -- so a window crossing into a
 700-character logical line pays for the whole line, every time, and that cost
-exists only when `cooked-rejoin-wrapped-lines\=' has made long lines to cross.
+exists only when `cooked-rejoin-wrapped-lines' has made long lines to cross.
 An append-only harness cannot see it, which is why it reported a flat result.
 
 The child fills the buffer and exits; nothing is drained during the gesture, so

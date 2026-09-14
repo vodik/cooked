@@ -210,11 +210,11 @@ before and after."
       (force-mode-line-update))))
 
 (defun cooked-osc-context--forget ()
-  "Drop every open context, on `cooked-exit-hook\='.
+  "Drop every open context, on `cooked-exit-hook'.
 
 Nothing is open once the child has exited, and the mode line already says so by
 showing nothing.  The stack has to say so too, or a second session started in
-the same buffer would begin inside the first one\='s `elevate\='."
+the same buffer would begin inside the first one's `elevate'."
   (setq cooked-osc-context--stack nil))
 
 (defun cooked-osc-context--current ()

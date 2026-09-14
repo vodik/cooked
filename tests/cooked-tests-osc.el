@@ -70,8 +70,8 @@
 (defmacro cooked-tests--raising-notifications (capabilities &rest body)
   "Run BODY against a stub desktop that advertises CAPABILITIES.
 
-BODY sees `raised\=', the arguments of every `notifications-notify\=' call so
-far, oldest first, and `said\=', every message, and can call `flush\=' to run
+BODY sees `raised', the arguments of every `notifications-notify' call so
+far, oldest first, and `said', every message, and can call `flush' to run
 the notifications it has deferred.  They are run before the stubs go in any
 case, so a timer left behind cannot reach the real desktop."
   (declare (indent 1))
@@ -131,11 +131,11 @@ case, so a timer left behind cannot reach the real desktop."
       (mapc #'kill-buffer buffers))))
 
 (ert-deftest cooked-notification-is-raised-outside-the-drain ()
-  "A real child\='s OSC 9 reaches the desktop from a timer, not from its drain.
+  "A real child's OSC 9 reaches the desktop from a timer, not from its drain.
 
 A desktop notification is a synchronous D-Bus call, and inside the drain a slow
-server would hold up the child\='s output.  The stub records the session\='s
-`cooked--draining\=' when it is called."
+server would hold up the child's output.  The stub records the session's
+`cooked--draining' when it is called."
   (let ((cooked-allow-notifications t)
         (session nil)
         (during nil))
@@ -344,7 +344,7 @@ and report a failure where a ring should have been."
         (should (= rings 1))))))
 
 (ert-deftest cooked-a-reset-clears-the-bell-mark ()
-  "RIS takes a bell\='s mark with it, as it takes the progress indicator.
+  "RIS takes a bell's mark with it, as it takes the progress indicator.
 
 Pinned at the seam, like `cooked-progress-is-cleared-by-a-reset'; that a BEL
 after the reset is raised afresh is the Rust test
@@ -624,11 +624,11 @@ a bell, must still be handled."
                (lambda () (string-match-p "after" (cooked-tests--text))))))))
 
 (defun cooked-tests--run-deferred ()
-  "Run the timers `cooked--defer\=' queued, without leaving the current bindings.
+  "Run the timers `cooked--defer' queued, without leaving the current bindings.
 
 The OSC 51;E arm hands the request to a timer rather than running it inside the
 drain, so a test that asserts on the command must pump the event loop -- and
-must do it *inside* the `let\=' that bound whatever it is asserting on -- those
+must do it *inside* the `let' that bound whatever it is asserting on -- those
 bindings are dynamic, and the timer reads them when it runs rather than when the
 request arrived."
   (dotimes (_ 3) (accept-process-output nil 0.02)))
@@ -723,7 +723,7 @@ out to a host of their choosing."
         (should-not visited)))))
 
 (ert-deftest cooked-osc-7-refuses-a-remote-directory-before-asking-about-it ()
-  "`file-directory-p\=' on a remote name is itself the connection, so the check
+  "`file-directory-p' on a remote name is itself the connection, so the check
 has to come first rather than second -- and OSC 7 is always on, with no `require'
 in front of it, which makes this the one that matters most."
   ;; Resolving a remote name autoloads TRAMP, which asks about directories of its
@@ -746,16 +746,16 @@ in front of it, which makes this the one that matters most."
   "The authority half of the OSC 7 URL used to be matched and thrown away.
 
 Throwing it away is what makes the remote case dangerous rather than merely
-useless: after an `ssh\=' the far shell reports its directory perfectly
+useless: after an `ssh' the far shell reports its directory perfectly
 honestly, and a tree kept in step with the local one turns that honest report
 into a local path that exists.  So the one thing a foreign host may never
-produce is a *local* `default-directory\='.
+produce is a *local* `default-directory'.
 
 What it produces instead is a remote one -- see
-`cooked-osc-7-maps-a-foreign-host-onto-a-tramp-path\=' -- which is the same
+`cooked-osc-7-maps-a-foreign-host-onto-a-tramp-path' -- which is the same
 answer to the same question: a name that says which machine it is on.  This test
 is about the spellings of *this* machine that must not be read as a move at all,
-and it is those that this file's `system-name\=' games are for."
+and it is those that this file's `system-name' games are for."
   (let* ((here (make-temp-file "cooked-osc7-" t))
          (there (file-name-as-directory here)))
     (unwind-protect
@@ -785,11 +785,11 @@ and it is those that this file's `system-name\=' games are for."
 (ert-deftest cooked-osc-7-decodes-a-percent-in-the-path ()
   "The path half of an OSC 7 URL is percent-encoded, and has to be decoded as one.
 
-A directory literally called `100%20cake\=' is reported as `100%2520cake\=', and
-anything that skipped the decoding would land in `100%20cake\=' -- the right
-answer by accident.  The reverse is the bug that was there: cooked\='s own
+A directory literally called `100%20cake' is reported as `100%2520cake', and
+anything that skipped the decoding would land in `100%20cake' -- the right
+answer by accident.  The reverse is the bug that was there: cooked's own
 snippets sent the path raw while this decoded it, so that directory arrived as
-`100 cake\=', which does not exist, and tracking stopped without a word."
+`100 cake', which does not exist, and tracking stopped without a word."
   (let* ((parent (make-temp-file "cooked-osc7-" t))
          (awkward (expand-file-name "100%20cake" parent)))
     (unwind-protect
@@ -828,7 +828,7 @@ at the first directory whose name was not ASCII."
 (ert-deftest cooked-osc-7-repeated-report-does-no-work ()
   "The shell reports its directory at every prompt, moved or not.  An identical
 report does no stat and no rename -- unless \\[cd] in the buffer has moved
-`default-directory\=' since, in which case the report puts it back."
+`default-directory' since, in which case the report puts it back."
   (let ((here (file-name-as-directory (make-temp-file "cooked-osc7-" t)))
         (stats 0)
         (renames 0))
@@ -860,12 +860,12 @@ report does no stat and no rename -- unless \\[cd] in the buffer has moved
 ;; make, and the first test below is what holds it out.
 
 (ert-deftest cooked-osc-7-maps-a-foreign-host-onto-a-tramp-path ()
-  "ROADMAP §5's scenario: after an outbound `ssh\=', the shell's own report of
-where it is becomes a `default-directory\=' Emacs can act on, so \\[find-file]
+  "ROADMAP §5's scenario: after an outbound `ssh', the shell's own report of
+where it is becomes a `default-directory' Emacs can act on, so \\[find-file]
 opens the file the prompt meant instead of a same-named local one.
 
-No `file-directory-p\=', and that is the load-bearing half.  Validating the name
-would open a synchronous TRAMP connection on every `cd\=' -- the shell's report
+No `file-directory-p', and that is the load-bearing half.  Validating the name
+would open a synchronous TRAMP connection on every `cd' -- the shell's report
 is trusted precisely because it is the only account available for free."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((default-directory "/tmp/")
@@ -883,7 +883,7 @@ is trusted precisely because it is the only account available for free."
         (should-not asked)))))
 
 (ert-deftest cooked-osc-7-takes-the-tramp-host-from-the-report-never-the-payload ()
-  "The hostile-`cat\=' defence, on the branch that cannot use `cooked--local-name\='.
+  "The hostile-`cat' defence, on the branch that cannot use `cooked--local-name'.
 
 OSC 7 is always on, so any program that can write to the terminal can send one,
 and a TRAMP name assembled out of the payload is a way to make Emacs dial a
@@ -891,13 +891,13 @@ machine the sender chose.  Both halves of the URL are attacker-chosen strings an
 TRAMP's syntax is punctuation, so both halves are checked here.
 
 The path half may say whatever it likes: appended after a complete
-`/method:host:\=' prefix it is a localname, so `/ssh:evil.example:/etc\=' names a
+`/method:host:' prefix it is a localname, so `/ssh:evil.example:/etc' names a
 file that does not exist on the host we were already talking about, and not a
-hop to `evil.example\='.
+hop to `evil.example'.
 
 The authority half is the one that could choose a method, and it is refused
-outright rather than quoted.  `a|sudo:\=' is a perfectly good `[^/]*\=' match and
-percent-decodes out of an innocent-looking URL; formatted into `/ssh:%s:\=' it
+outright rather than quoted.  `a|sudo:' is a perfectly good `[^/]*' match and
+percent-decodes out of an innocent-looking URL; formatted into `/ssh:%s:' it
 would read as a second hop to root.  A host containing TRAMP punctuation is not
 a host anyone has, so there is nothing to lose by declining it."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -929,8 +929,8 @@ a host anyone has, so there is nothing to lose by declining it."
 (ert-deftest cooked-osc-7-keeps-a-multi-hop-connection-across-a-cd ()
   "Reuse the prefix that is already there, rather than formatting a fresh one.
 
-A buffer reached through a bastion is at `/ssh:jump|ssh:host:\=', and a `cd\=' on
-the far side must not flatten that to `/ssh:host:\=' -- the whole reason the jump
+A buffer reached through a bastion is at `/ssh:jump|ssh:host:', and a `cd' on
+the far side must not flatten that to `/ssh:host:' -- the whole reason the jump
 is in the name is that the host is not reachable without it.  Reusing the prefix
 keeps the user and the method that were actually connected with, too."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -946,7 +946,7 @@ keeps the user and the method that were actually connected with, too."
                      "/ssh:jump.example|ssh:me@other.example:/srv/lib/")))))
 
 (ert-deftest cooked-osc-7-rebuilds-the-prefix-when-the-far-shell-moves-on ()
-  "An `ssh\=' *from* the far shell moves `cooked--host\=' and leaves the prefix
+  "An `ssh' *from* the far shell moves `cooked--host' and leaves the prefix
 behind.  Inheriting it then would hang the new host's paths off the old host's
 connection -- the wrong-file error this handler exists to avoid, arrived at from
 the other side."
@@ -979,8 +979,8 @@ across an `ssh' onward, which still gets a prefix of its own, and back."
       (should (equal default-directory "/ssh:prod:/var/")))))
 
 (ert-deftest cooked-osc-7-remote-mapping-can-be-turned-off ()
-  "`cooked-remote-directory\=' nil is what cooked did before the mapping existed:
-stop at `cooked--host\=', leaving `default-directory\=' where it was.  Still the
+  "`cooked-remote-directory' nil is what cooked did before the mapping existed:
+stop at `cooked--host', leaving `default-directory' where it was.  Still the
 right answer for anyone who would rather a foreign prompt resolve nothing."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((default-directory "/tmp/")
@@ -993,7 +993,7 @@ right answer for anyone who would rather a foreign prompt resolve nothing."
       (should (equal cooked--host "other.example")))))
 
 (ert-deftest cooked-osc-7-falls-back-to-tramps-own-default-method ()
-  "`cooked-tramp-default-method\=' nil defers to TRAMP rather than picking a
+  "`cooked-tramp-default-method' nil defers to TRAMP rather than picking a
 method of cooked's own, so a user who has already chosen one chooses once."
   (require 'tramp)
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -1004,12 +1004,12 @@ method of cooked's own, so a user who has already chosen one chooses once."
                      (format "/%s:other.example:/srv/" tramp-default-method))))))
 
 (ert-deftest cooked-command-start-takes-the-shells-own-command-line ()
-  "`OSC 133;C;cmdline_url=\=' is the shell saying what it is about to run.
+  "`OSC 133;C;cmdline_url=' is the shell saying what it is about to run.
 
 It is the only account of the command in every case where Emacs has none -- a
-prompt whose line the shell kept, the far end of an `ssh\=', a `no-input-mark\='
+prompt whose line the shell kept, the far end of an `ssh', a `no-input-mark'
 session -- where the record used to carry nothing at all.  Percent-encoded
-because kitty\='s older `cmdline=\=' spelling holds `printf %q\=' output, which
+because kitty's older `cmdline=' spelling holds `printf %q' output, which
 only the shell that wrote it can undo."
   (cooked-tests--with-session
       (cooked-tests--marks
@@ -1022,9 +1022,9 @@ only the shell that wrote it can undo."
     (should (equal (cooked-command-input (car cooked--commands)) "echo \"hi there\""))))
 
 (ert-deftest cooked-command-start-survives-a-command-line-it-cannot-use ()
-  "A `C\=' is the mark Emacs cannot do without; the command line on it is a
+  "A `C' is the mark Emacs cannot do without; the command line on it is a
 courtesy.  So one that is too long, or decodes to nothing, or is spelled in
-kitty\='s ambiguous `cmdline=\=', leaves the mark standing and the record\='s
+kitty's ambiguous `cmdline=', leaves the mark standing and the record's
 input merely empty -- never the mark dropped."
   (cooked-tests--with-session
       (cooked-tests--marks
@@ -1082,10 +1082,10 @@ verbs need no entry, so deny-by-default costs nothing here."
 (defun cooked-tests--pump-wakes (predicate &optional seconds)
   "Pump the event loop until PREDICATE holds or SECONDS elapse.
 
-Unlike `cooked-tests--settle\=', this never calls `cooked--apply\=' itself: the
-wake filter has to drive `cooked--drain-and-apply\=' for the drain's own
-bookkeeping -- `cooked--draining\=' and the `unwind-protect\=' that clears it --
-to be under test at all.  SECONDS is scaled by `cooked-tests-timeout\='."
+Unlike `cooked-tests--settle', this never calls `cooked--apply' itself: the
+wake filter has to drive `cooked--drain-and-apply' for the drain's own
+bookkeeping -- `cooked--draining' and the `unwind-protect' that clears it --
+to be under test at all.  SECONDS is scaled by `cooked-tests-timeout'."
   (let ((deadline (+ (float-time) (cooked-tests-timeout (or seconds 5)))))
     (while (and (< (float-time) deadline) (not (funcall predicate)))
       (accept-process-output nil 0.05))
@@ -1095,11 +1095,11 @@ to be under test at all.  SECONDS is scaled by `cooked-tests-timeout\='."
   "A command that switches buffers must not take the drain with it.
 
 The regression the stubbed end-to-end test below could never catch, because its
-stub only records its argument: the *real* `find-file\=' calls
-`switch-to-buffer\=', and when that happened from inside `cooked--handle-osc\='
-the rest of `cooked--apply\=' ran against the file buffer, signalled on its nil
-`cooked--screen-start\=', and `cooked--drain-and-apply\=''s cleanup cleared
-`cooked--draining\=' *there* -- leaving this buffer draining for good, so nothing
+stub only records its argument: the *real* `find-file' calls
+`switch-to-buffer', and when that happened from inside `cooked--handle-osc'
+the rest of `cooked--apply' ran against the file buffer, signalled on its nil
+`cooked--screen-start', and `cooked--drain-and-apply''s cleanup cleared
+`cooked--draining' *there* -- leaving this buffer draining for good, so nothing
 it printed afterwards ever appeared again."
   (let ((target (make-temp-file "cooked-open" nil ".txt" "opened by the child\n"))
         (terminal nil))
@@ -1127,7 +1127,7 @@ sleep 0.3; printf 'LATER\\n'; sleep 5"
       (delete-file target))))
 
 (ert-deftest cooked-osc-handler-that-relocates-does-not-strand-the-drain ()
-  "The containment `cooked--handle-osc\=' owes every handler, not just OSC 51.
+  "The containment `cooked--handle-osc' owes every handler, not just OSC 51.
 
 Handlers are an extension point run mid-drain, so one that switches buffers and
 forgets to switch back must cost nothing beyond its own confusion."
@@ -1233,9 +1233,9 @@ are called here where Emacs would call them: `cooked--update-attention' from
       (delete-file target))))
 
 (ert-deftest cooked-comint-markers-follow-the-osc-133-marks ()
-  "comint brackets the last input with `comint-last-input-start\='/`-end\=', and
-its whole output family measures from them.  They sat at `point-min\=' until the
-shell\='s own marks started feeding them -- which is why `comint-delete-output\='
+  "comint brackets the last input with `comint-last-input-start'/`-end', and
+its whole output family measures from them.  They sat at `point-min' until the
+shell's own marks started feeding them -- which is why `comint-delete-output'
 used to flush the entire buffer."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
@@ -1257,9 +1257,9 @@ used to flush the entire buffer."
                 (cooked--command-end-position command)))))))
 
 (defun cooked-tests--prompt-texts ()
-  "Each recorded command\='s input, paired with the text its prompt region holds.
+  "Each recorded command's input, paired with the text its prompt region holds.
 
-The prompt region is the marker the `A\=' mark left through to where the `C\=' mark
+The prompt region is the marker the `A' mark left through to where the `C' mark
 says the output began -- which is the prompt as drawn plus the command line
 typed at it, and nothing else.  Newlines are dropped because a narrow enough
 width wraps that region across several rows, and a row boundary inside it is a
@@ -1275,11 +1275,11 @@ fact about the width rather than about whether the marker is still right."
           cooked--commands))
 
 (defun cooked-tests--prompts-still-match-p ()
-  "Whether every recorded command\='s prompt marker still names its own prompt.
+  "Whether every recorded command's prompt marker still names its own prompt.
 
 Two conditions, and the second is what catches the reported drift: the marker
-sits at the start of a buffer line, as column 0 of a prompt\='s first row does,
-and the region it opens ends with that command\='s own input.  A marker that slid
+sits at the start of a buffer line, as column 0 of a prompt's first row does,
+and the region it opens ends with that command's own input.  A marker that slid
 onto a neighbouring command fails the second; one that slid into the middle of a
 row fails the first."
   (and (seq-every-p (lambda (command)
@@ -1296,16 +1296,16 @@ row fails the first."
 (ert-deftest cooked-command-records-survive-a-resize ()
   "The reported bug: resizing desyncs the fringe markers from their prompt lines.
 
-Not a decorations bug -- the markers paint exactly where `cooked--commands\=' says
--- and not confined to them: `next-error\=', `cooked-previous-command\=', sticky
-scroll and evil\='s command text objects all read the same records.  A rewrap
+Not a decorations bug -- the markers paint exactly where `cooked--commands' says
+-- and not confined to them: `next-error', `cooked-previous-command', sticky
+scroll and evil's command text objects all read the same records.  A rewrap
 re-lays every logical line at the new width and Emacs rebuilds every live row
 from it, which leaves markers taken from the original anchors naming text that
 has moved.  A scroll never does this, which is why it went unnoticed: rows leave
 the top and the buffer above grows by exactly what left.
 
 The emulator now keeps each mark on its cell and reports the ones a rewrap moved;
-see `cooked--relocate-marks\='."
+see `cooked--relocate-marks'."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
   (cooked-tests--with-zsh
@@ -1330,7 +1330,7 @@ see `cooked--relocate-marks\='."
 Smaller than the resize case and reached without touching the frame.  A row
 that leaves the live screen is *re-rendered* into the scrollback above it while
 the rows below move up a slot, and the two renderings differ whenever
-`cooked-rejoin-wrapped-lines\=' withholds the newline from a continuation row --
+`cooked-rejoin-wrapped-lines' withholds the newline from a continuation row --
 so every live position slides by one per wrapped row evicted, and a command
 printing wrapped output walks its own prompt marker away from its prompt.
 
@@ -1360,7 +1360,7 @@ continuation."
 (ert-deftest cooked-a-record-whose-rows-a-resize-evicts-keeps-its-marker ()
   "A rewrap narrow and short enough pushes rows off the top, and a mark on one of
 them is in text Emacs is about to *insert* rather than on a row it is about to
-rewrite.  Both spellings come through `cooked--anchor-position\=', so the records
+rewrite.  Both spellings come through `cooked--anchor-position', so the records
 that end up in scrollback and the ones still on the live screen are right
 together."
   :tags '(zsh)
@@ -1380,7 +1380,7 @@ together."
                (cooked--screen-start-position)))))
 
 (ert-deftest cooked-command-records-survive-a-refresh ()
-  "`cooked-refresh\=' deletes the whole screen region and has the emulator re-send
+  "`cooked-refresh' deletes the whole screen region and has the emulator re-send
 it, which collapses every marker Emacs holds into that text -- the rows coming
 back identical is no help, since it was the delete that destroyed them.  So the
 redraw reports its marks the same way a resize does."
@@ -1399,8 +1399,8 @@ redraw reports its marks the same way a resize does."
 
 (ert-deftest cooked-marks-are-forgotten-once-they-reach-scrollback ()
   "The relocation index is not a second copy of the transcript.  A mark below
-`cooked--screen-start\=' is on a row the emulator handed over and will never
-mention again, so `cooked--render-scrolled\=' drops it -- which keeps the table at
+`cooked--screen-start' is on a row the emulator handed over and will never
+mention again, so `cooked--render-scrolled' drops it -- which keeps the table at
 the handful of marks the live screen carries rather than four per command of the
 session.  The records keep their markers; what goes is the ability to relocate
 them, which nothing will ask for."
@@ -1445,7 +1445,7 @@ it: a prompt is whatever the user's theme decided to draw."
 (ert-deftest cooked-delete-output-removes-rows-through-the-emulator ()
   "The grid owns the rows, so deleting output asks the emulator and repaints,
 rather than cutting buffer text the grid would still hold.  The check that
-matters is that both ends still agree afterwards: a `cooked-refresh\=', which
+matters is that both ends still agree afterwards: a `cooked-refresh', which
 rebuilds the buffer from the grid alone, must not bring the output back."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
@@ -1519,7 +1519,7 @@ owns outright -- and the seam bookkeeping is only owed when the cut reaches it."
     (cooked--check-seam)))
 
 (ert-deftest cooked-delete-output-refuses-the-row-the-child-is-on ()
-  "Below the child\='s cursor the shell is editing its own prompt line and
+  "Below the child's cursor the shell is editing its own prompt line and
 tracking where it sits; moving it would corrupt a redisplay cooked cannot see."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf 'ready$ '; exec cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
@@ -1564,7 +1564,7 @@ tracking where it sits; moving it would corrupt a redisplay cooked cannot see."
 (defmacro cooked-tests--osc-52-replies (query &rest body)
   "Run BODY in a session that sends QUERY, with `replies' bound to a function.
 
-Calling `replies' with a predicate pumps until the child\='s input satisfies it,
+Calling `replies' with a predicate pumps until the child's input satisfies it,
 then pumps a little longer so that a second, unwanted reply has time to land,
 and returns everything the child received."
   (declare (indent 1))
@@ -1580,7 +1580,7 @@ and returns everything the child received."
        (delete-file out))))
 
 (ert-deftest cooked-osc-52-read-is-refused-out-loud-by-default ()
-  "A query blocks its sender -- neovim\='s paste provider waits on it -- so the
+  "A query blocks its sender -- neovim's paste provider waits on it -- so the
 refusal is an empty reply, sent once, and the kill ring is neither read nor
 touched."
   (cooked-tests--with-kill "secret"
@@ -1595,7 +1595,7 @@ touched."
                    "\033]52;p;\033\\"))))
 
 (ert-deftest cooked-osc-52-private-round-trips-through-a-cut-buffer ()
-  "Written to `0\=', read back from `0\=', and never near the kill ring --
+  "Written to `0', read back from `0', and never near the kill ring --
 while the real clipboard, asked for in the same breath, stays empty."
   (cooked-tests--with-kill "secret"
     (let ((cooked-clipboard-read 'private))
@@ -1642,12 +1642,12 @@ queued behind it."
             (should-not cooked--clipboard-prompting)))))))
 
 (defmacro cooked-tests--osc-52-ask (answer &rest body)
-  "Run BODY around an OSC 52 query under `ask\=', answered by ANSWER.
+  "Run BODY around an OSC 52 query under `ask', answered by ANSWER.
 
-ANSWER is called in place of both `y-or-n-p\=' and `yes-or-no-p\=' with the
-prompt.  BODY sees `query\=', which asks for the clipboard as `cat\=' and
-returns the deferred prompt without running it, `replies\=', the payloads sent
-so far, and `prompts\=', the prompts shown."
+ANSWER is called in place of both `y-or-n-p' and `yes-or-no-p' with the
+prompt.  BODY sees `query', which asks for the clipboard as `cat' and
+returns the deferred prompt without running it, `replies', the payloads sent
+so far, and `prompts', the prompts shown."
   (declare (indent 1))
   `(cooked-tests--with-kill "secret"
      (with-temp-buffer
@@ -1671,9 +1671,9 @@ so far, and `prompts\=', the prompts shown."
              ,@body))))))
 
 (ert-deftest cooked-osc-52-ask-is-not-answered-by-typeahead ()
-  "A `y\=' already queued when the prompt opens does not hand over the clipboard.
+  "A `y' already queued when the prompt opens does not hand over the clipboard.
 
-The stub answers yes to any prompt that finds a `y\=' waiting, as `y-or-n-p\='
+The stub answers yes to any prompt that finds a `y' waiting, as `y-or-n-p'
 does, so only discarding the input first keeps it out.  The prompt must also
 refuse the short answers a single key could give, and name the buffer and the
 program that asked, as it was when it asked."
@@ -1703,10 +1703,10 @@ For example a daemon with no usable frame to prompt on."
     (should-not cooked--clipboard-prompting)))
 
 (ert-deftest cooked-osc-52-read-over-the-size-bound-is-answered-empty ()
-  "`cooked-clipboard-max-size\=' bounds replies as it bounds writes.  A kill that
+  "`cooked-clipboard-max-size' bounds replies as it bounds writes.  A kill that
 would encode past it gets the empty reply, once, so the child is not left
 waiting, and a message says why the paste came back blank.  Both settings that
-can hand over the kill ring are checked, since `ask\=' builds its reply in a
+can hand over the kill ring are checked, since `ask' builds its reply in a
 deferred prompt rather than in the filter."
   (dolist (setting '(t ask))
     (cooked-tests--with-kill "0123456789"
@@ -1739,7 +1739,7 @@ deferred prompt rather than in the filter."
 (ert-deftest cooked-osc-52-read-is-measured-before-it-is-encoded ()
   "An oversized selection is refused on its byte count, without being encoded.
 
-The count is exact for UTF-8 text, so `héllo\=' at six bytes needs its full
+The count is exact for UTF-8 text, so `héllo' at six bytes needs its full
 eight characters of base64 and is refused at seven.  A query loop against the
 same oversized kill says so once rather than once per query."
   (with-temp-buffer
@@ -1762,7 +1762,7 @@ same oversized kill says so once rather than once per query."
 (ert-deftest cooked-osc-52-write-is-bounded-by-what-can-be-read-back ()
   "An unpadded write is measured padded, since that is what a query answers with.
 
-`aMOpbGxvID8+fiDDvA\=' is eighteen characters, and the cut buffer it fills reads
+`aMOpbGxvID8+fiDDvA' is eighteen characters, and the cut buffer it fills reads
 back as twenty.  Accepting it under a bound of eighteen would store text that
 every later query is refused."
   (with-temp-buffer
@@ -1777,10 +1777,10 @@ every later query is refused."
                      "aMOpbGxvID8+fiDDvA==")))))
 
 (ert-deftest cooked-osc-52-bound-cannot-exceed-the-cores ()
-  "Raising `cooked-clipboard-max-size\=' past the core\='s OSC limit raises nothing.
+  "Raising `cooked-clipboard-max-size' past the core's OSC limit raises nothing.
 
 A write the core would have dropped unseen is refused in Lisp with a message
-instead, and a reply the core\='s limit could not have carried is refused too."
+instead, and a reply the core's limit could not have carried is refused too."
   (with-temp-buffer
     (let ((cooked-clipboard-max-size (ash 1 22))
           (cooked-clipboard-write t)
@@ -1797,7 +1797,7 @@ instead, and a reply the core\='s limit could not have carried is refused too."
         (should (string-search "answered a clipboard read with nothing" (car said)))))))
 
 (ert-deftest cooked-osc-52-cut-buffer-writes-ignore-the-write-switch ()
-  "A cut buffer is the session\='s own, so refusing clipboard writes does not
+  "A cut buffer is the session's own, so refusing clipboard writes does not
 refuse it, and filling it does not touch the kill ring."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (let ((cooked-clipboard-write nil)
@@ -1829,7 +1829,7 @@ from the first of them that has something to give under the setting."
                          "\033]52;cp;cHJpbWFyeQ==\007")))))))
 
 (ert-deftest cooked-osc-52-empty-write-clears-rather-than-copies-nothing ()
-  "`52;c;\=' is not a copy of the empty string: the kill ring is left as it was
+  "`52;c;' is not a copy of the empty string: the kill ring is left as it was
 and nothing says a copy happened, while PRIMARY and a cut buffer are cleared."
   (with-temp-buffer
     (let ((cooked-clipboard-write t)
@@ -1883,7 +1883,7 @@ so a terminal that never answers costs them their whole timeout on startup."
 
 (ert-deftest cooked-osc-10-and-11-answer-the-colours-the-buffer-draws ()
   "A query after an OSC 11 set gets the colour set, and under DECSCNM the swap.
-The answer used to be the theme\='s face, read without the buffer\='s remaps, so a
+The answer used to be the theme's face, read without the buffer's remaps, so a
 child was told a background it had already replaced; xterm answers from the
 colours it draws, which DECSCNM exchanges."
   (let ((out (make-temp-file "cooked-osc-drawn"))
@@ -2055,8 +2055,8 @@ shifting the pairs after it, and a set stays silent even with sets allowed."
 (ert-deftest cooked-osc-13-to-18-answer-a-lone-query ()
   "Every colour xterm answers from 10 to 19 is answered, so a child asking one of
 them alone is not left waiting.  The pointer is the `mouse' face over the
-default background, and xterm\='s Tektronix window, which is not here, has the
-default colours and the cursor\='s.  None of them is settable."
+default background, and xterm's Tektronix window, which is not here, has the
+default colours and the cursor's.  None of them is settable."
   (let ((out (make-temp-file "cooked-osc-13")))
     (unwind-protect
         (cooked-tests--with-session
@@ -2105,8 +2105,8 @@ default colours and the cursor\='s.  None of them is settable."
       (should-not cooked--color-remaps))))
 
 (ert-deftest cooked-osc-12-is-worn-by-the-frame-while-the-buffer-is-selected ()
-  "The cursor is drawn in the frame\='s `cursor-color\=', so a remap of the `cursor\='
-face never reached the screen.  The frame wears the child\='s colour while the
+  "The cursor is drawn in the frame's `cursor-color', so a remap of the `cursor'
+face never reached the screen.  The frame wears the child's colour while the
 buffer is in its selected window, gives its own back when it is not, and gives
 back a colour something else set in the meantime rather than the stale one.
 
@@ -2496,7 +2496,7 @@ drain and cancel out before the buffer has seen the first."
       (should-not (alist-get 'default face-remapping-alist)))))
 
 (ert-deftest cooked-a-flash-inside-one-drain-still-flashes ()
-  "`flash\=' written in one go reverses the screen once and puts it back.
+  "`flash' written in one go reverses the screen once and puts it back.
 
 The set and the reset reach the core in one read, so the drain after them reports
 the level where it began; only the toggle count says anything happened.  Every
@@ -2541,8 +2541,8 @@ level the last of them reported, which a reset in the meantime may have moved."
 
 (ert-deftest cooked-reverse-screen-on-a-tty-swaps-the-terminals-own-colours ()
   "A text terminal that keeps its colours to itself is reversed by name.
-The remap is to `unspecified-bg\=' on `unspecified-fg\=', which Emacs draws in
-standout, rather than to the black and white `cooked--default-color\=' guesses.
+The remap is to `unspecified-bg' on `unspecified-fg', which Emacs draws in
+standout, rather than to the black and white `cooked--default-color' guesses.
 An OSC 11 background is still swapped as the colour it is.  The tty is
 simulated: batch Emacs crashes redisplaying a real tty frame with no colours."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -2607,7 +2607,7 @@ DECSCNM remaps came out in normal video."
 (ert-deftest cooked-reverse-video-swaps-default-colors-too ()
   "SGR 7 on text in the default colours draws it reversed, as `smso' promises.
 
-The face used to swap two nils and name no colour at all, so `less\=''s status
+The face used to swap two nils and name no colour at all, so `less''s status
 line and every other standout in the default pair came out as plain text.  A
 cell with colours of its own still swaps them; a default one follows an OSC 11
 set; and under DECSCNM, which has already reversed `default', it reads as
@@ -2841,7 +2841,7 @@ only the scrollback."
 (defun cooked-tests--marks (script)
   "An argv printing SCRIPT and then waiting, for driving marks by hand.
 
-SCRIPT is a `printf\=' format, so the marks are written as the octal escapes a
+SCRIPT is a `printf' format, so the marks are written as the octal escapes a
 shell would print rather than as literal control bytes.  The trailing sleep is
 what keeps the child alive long enough for the assertions: a session whose child
 has exited is torn down."
@@ -3161,11 +3161,11 @@ including one that renders nothing and puts the state somewhere else entirely."
     (should (string-match-p (regexp-quote "[37%%]") (cooked--mode-line)))))
 
 (ert-deftest cooked-progress-arrives-through-tmux-spb ()
-  "tmux\='s spelling of an indeterminate report shows as indeterminate.
+  "tmux's spelling of an indeterminate report shows as indeterminate.
 
-tmux passes on a pane\='s `9;4;3\=' as `Spb\=' with a percentage of -1, closed
+tmux passes on a pane's `9;4;3' as `Spb' with a percentage of -1, closed
 by ST, and that is what the child sends here.  The Rust test
-`the_extended_names_tmux_reads_do_what_they_say\=' pins the entry\='s `Spb\=' to
+`the_extended_names_tmux_reads_do_what_they_say' pins the entry's `Spb' to
 the same bytes."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\033]9;4;1;37\\033\\\\\\033]9;4;3;-1\\033\\\\'; sleep 5")

@@ -122,17 +122,17 @@ hypothetical -- `cooked--osc-emacs' can reach `find-file', which
 (defcustom cooked-buffer-name "*cooked: %p*"
   "How session buffers are named.
 
-A string is used as a `format-spec\=' template:
+A string is used as a `format-spec' template:
 
   %p    the abbreviated working directory
-  %t    the child\='s OSC 2 title, empty until it sets one
-  %h    the child\='s host, empty for a local session
+  %t    the child's OSC 2 title, empty until it sets one
+  %h    the child's host, empty for a local session
 
 A function is called with three arguments, DIR TITLE HOST -- the same three
 values, already abbreviated/defaulted to \"\" -- and should return a name.
 Either way the result is uniquified, so several sessions can coexist.
 
-Only a rename (see `cooked-buffer-name-auto-update\=') can supply a title or
+Only a rename (see `cooked-buffer-name-auto-update') can supply a title or
 host; the initial name is always formatted with TITLE and HOST empty, since
 neither is known before the child has said anything."
   :type '(choice (string :tag "Format")
@@ -145,13 +145,13 @@ neither is known before the child has said anything."
 Off by default: a buffer whose name changes under you is hard to find again and
 breaks anything holding on to the old name.  Turn it on for the vterm-like
 behaviour of showing the running command in the buffer list -- or, with a
-`cooked-buffer-name\=' that mixes %p, %t and %h, to keep the directory and the
+`cooked-buffer-name' that mixes %p, %t and %h, to keep the directory and the
 title current side by side.  Every OSC 7 (directory) and OSC 0/2 (title) update
 re-renders the name, whether or not the template actually uses that piece."
   :type 'boolean :group 'cooked)
 
 (defun cooked--format-buffer-name (dir title host)
-  "Apply `cooked-buffer-name\=' to DIR, TITLE and HOST."
+  "Apply `cooked-buffer-name' to DIR, TITLE and HOST."
   (if (functionp cooked-buffer-name)
       (funcall cooked-buffer-name dir title host)
     (format-spec cooked-buffer-name
@@ -164,11 +164,11 @@ re-renders the name, whether or not the template actually uses that piece."
     (abbreviate-file-name (or directory default-directory)) "" "")))
 
 (defun cooked--buffer-name-shows-title-p ()
-  "Whether the active `cooked-buffer-name\=' template would print the title.
+  "Whether the active `cooked-buffer-name' template would print the title.
 
 Used by the mode line to decide whether printing the title again would be
-redundant.  Nil when `cooked-buffer-name-auto-update\=' is off, since then
-nothing renames the buffer at all.  Also nil when `cooked-buffer-name\=' is a
+redundant.  Nil when `cooked-buffer-name-auto-update' is off, since then
+nothing renames the buffer at all.  Also nil when `cooked-buffer-name' is a
 function -- there is no way to know without calling it, and a mode-line query
 is not license to run one for its side effects."
   (and cooked-buffer-name-auto-update
@@ -179,13 +179,13 @@ is not license to run one for its side effects."
   "Rename the buffer after the child's directory or title, when asked to.
 
 Called on every OSC 7 and OSC 0/2, not just when the template's own fields
-changed: `cooked-buffer-name\=' can be a function that looks at other buffer
+changed: `cooked-buffer-name' can be a function that looks at other buffer
 state, so there is no cheap way to know in advance whether this particular
-update would change the name.  The `equal\=' check below is what keeps a quiet
+update would change the name.  The `equal' check below is what keeps a quiet
 child from being renamed to the name it already has.
 
-Also where `list-buffers-directory\=' is kept current, outside the
-`cooked-buffer-name-auto-update\=' gate: this is the one place both OSC 7 and
+Also where `list-buffers-directory' is kept current, outside the
+`cooked-buffer-name-auto-update' gate: this is the one place both OSC 7 and
 OSC 0/2 already pass through, and what the buffer list prints in its directory
 column is not the user's choice about buffer names."
   (setq-local list-buffers-directory default-directory)
@@ -202,8 +202,8 @@ column is not the user's choice about buffer names."
 (defcustom cooked-allow-notifications nil
   "Whether the child may raise desktop notifications, via OSC 9, 99 or 777.
 
-Off by default, for the same reason `cooked-allow-color-set\=' is: anything that
-can write to the terminal can send one.  A `cat\=' of a hostile file, a build log
+Off by default, for the same reason `cooked-allow-color-set' is: anything that
+can write to the terminal can send one.  A `cat' of a hostile file, a build log
 quoting attacker-controlled text, or output from a compromised host all reach
 your desktop if this is on."
   :type 'boolean
@@ -223,9 +223,9 @@ The cap is shared by every session, so ten buffers still raise at most COUNT."
 (defvar cooked--notification-times nil
   "Timestamps of recent notifications from any session, newest first.
 
-Global rather than buffer-local, as `cooked--bell-last\=' is and for the same
+Global rather than buffer-local, as `cooked--bell-last' is and for the same
 reason: the desktop is one place, and a cap per buffer would let a dozen
-sessions each fill it.  See `cooked-notification-rate\='.")
+sessions each fill it.  See `cooked-notification-rate'.")
 
 (defvar cooked--notification-markup nil
   "Whether the notification server interprets markup in a body, once known.
@@ -240,14 +240,14 @@ a server that answered no is not asked again.")
   "How many partial notifications to hold, and the most text each may accumulate.
 
 A child can open a chunked notification and never close it, so both are
-bounded: without that, `cooked--notification-chunks\=' is a buffer-local leak the
+bounded: without that, `cooked--notification-chunks' is a buffer-local leak the
 child controls.")
 
 (defun cooked--notification-clean (text limit)
   "TEXT without control or format characters, cut to at most LIMIT characters.
 
-Format characters, Unicode\='s class Cf, draw nothing and still change what is
-drawn.  U+202E RIGHT-TO-LEFT OVERRIDE before `txt.exe\=' shows `exe.txt\=', so a
+Format characters, Unicode's class Cf, draw nothing and still change what is
+drawn.  U+202E RIGHT-TO-LEFT OVERRIDE before `txt.exe' shows `exe.txt', so a
 child could make a notification read as something it does not say.  The
 joiners U+200C and U+200D are the exception, being how an emoji sequence such
 as a family is spelled, and they cannot reorder anything.  C1
@@ -268,7 +268,7 @@ screenful."
     (concat (nreverse kept))))
 
 (defun cooked--notification-allowed-p ()
-  "Whether another notification is within `cooked-notification-rate\='."
+  "Whether another notification is within `cooked-notification-rate'."
   (pcase-let* ((`(,count . ,seconds) cooked-notification-rate)
                (cutoff (- (float-time) seconds)))
     (setq cooked--notification-times
@@ -280,9 +280,9 @@ screenful."
 (defun cooked--notification-escape (text)
   "TEXT with the three characters that open markup written as entities.
 
-A server advertising `body-markup\=' reads the body as a subset of HTML, so
-`<img src=\"file:///etc/passwd\">\=' in a child\='s message would be
-fetched and drawn, and `<a href>\=' made clickable.  Escaped, both are shown
+A server advertising `body-markup' reads the body as a subset of HTML, so
+`<img src=\"file:///etc/passwd\">' in a child's message would be
+fetched and drawn, and `<a href>' made clickable.  Escaped, both are shown
 as the text they are."
   (replace-regexp-in-string
    "[&<>]"
@@ -293,9 +293,9 @@ as the text they are."
   "Raise a notification with TITLE and BODY from this buffer, within the cap.
 
 The text is cleaned here, but the notification is raised from a timer, by
-`cooked--raise-notification\='.  This runs inside a drain, and a desktop
+`cooked--raise-notification'.  This runs inside a drain, and a desktop
 notification is a synchronous D-Bus call that a slow or still-starting
-notification service can hold for seconds, with the child\='s output
+notification service can hold for seconds, with the child's output
 waiting behind it."
   (when (cooked--notification-allowed-p)
     (push (float-time) cooked--notification-times)
@@ -311,11 +311,11 @@ waiting behind it."
 (defun cooked--raise-notification (buffer title body)
   "Show TITLE and BODY, sent from the buffer named BUFFER, on the desktop.
 
-The buffer leads the title, as in `*cooked*<2>: Build failed\=', because a
+The buffer leads the title, as in `*cooked*<2>: Build failed', because a
 notification that does not say which session sent it cannot be acted on.  The
 body is escaped when the server would read markup in it.
 
-Shown with `message\=' instead when there is no desktop to show it on:
+Shown with `message' instead when there is no desktop to show it on:
 Emacs built without D-Bus, or a terminal Emacs over ssh with no session bus,
 where every call signals.  Falling back on each failure, rather than giving up
 after the first, means a notification is never lost without a trace."
@@ -356,9 +356,9 @@ notification is asked four questions, and each would otherwise rescan META."
 (defun cooked--osc-notify (parts)
   "Raise a desktop notification from OSC 99 PARTS.
 
-kitty's protocol: `ESC ] 99 ; METADATA ; PAYLOAD ST\=', where METADATA is a
-set of KEY=VALUE pairs.  `i\=' identifies a notification, `p\=' says whether
-the payload is its title or its body, and `d=0\=' means more chunks follow."
+kitty's protocol: `ESC ] 99 ; METADATA ; PAYLOAD ST', where METADATA is a
+set of KEY=VALUE pairs.  `i' identifies a notification, `p' says whether
+the payload is its title or its body, and `d=0' means more chunks follow."
   (when cooked-allow-notifications
     (pcase-let* ((meta (cooked--osc-99-metadata (car parts)))
                  (payload (string-join (cdr parts) ";"))
@@ -382,7 +382,7 @@ the payload is its title or its body, and `d=0\=' means more chunks follow."
         (cooked--notify (cadr cell) (cddr cell))))))
 
 (defun cooked--osc-notify-777 (parts)
-  "Raise a notification from PARTS, the older `777;notify;TITLE;BODY\=' form."
+  "Raise a notification from PARTS, the older `777;notify;TITLE;BODY' form."
   (when (equal (car parts) "notify")
     (when cooked-allow-notifications
       (cooked--notify (nth 1 parts) (string-join (nthcdr 2 parts) ";")))))
@@ -406,12 +406,12 @@ the payload is its title or its body, and `d=0\=' means more chunks follow."
 (defun cooked--osc-9 (parts)
   "Route OSC 9 PARTS to ConEmu's progress report or to iTerm2's notification.
 
-A first field of nothing but digits is a ConEmu command: `4\=' is handed to
-`cooked--osc-progress\=', and the other eleven are dropped rather than read as
-text.  Anything else is iTerm2's message, which may itself contain `;\=' and so
-is joined back together, and goes through `cooked-allow-notifications\=' and
-`cooked-notification-rate\=' like OSC 99 and 777.  An empty message is dropped
-too: there is nothing to say, and a bare `ESC ] 9 ST\=' is not a request."
+A first field of nothing but digits is a ConEmu command: `4' is handed to
+`cooked--osc-progress', and the other eleven are dropped rather than read as
+text.  Anything else is iTerm2's message, which may itself contain `;' and so
+is joined back together, and goes through `cooked-allow-notifications' and
+`cooked-notification-rate' like OSC 99 and 777.  An empty message is dropped
+too: there is nothing to say, and a bare `ESC ] 9 ST' is not a request."
   (cond
    ((or (null parts) (string-match-p (rx bos (+ digit) eos) (car parts)))
     (cooked--osc-progress parts))
@@ -455,13 +455,13 @@ reader downstream had to know to treat that symbol as nothing.")
 (defvar-local cooked--progress nil
   "What the child last said about its progress, or nil if it said nothing.
 
-A cons of STATE and PERCENT.  STATE is one of `set\=', `error\=',
-`indeterminate\=' or `paused\=' -- never a string, and never anything the child
+A cons of STATE and PERCENT.  STATE is one of `set', `error',
+`indeterminate' or `paused' -- never a string, and never anything the child
 chose.  PERCENT is an integer from 0 to 100, or nil when there is no number to
-show: `indeterminate\=' never carries one, and `error\=' and `paused\=' need
+show: `indeterminate' never carries one, and `error' and `paused' need
 not.
 
-Read by `cooked--mode-line-progress\=', which is the only consumer.  Buffer-local
+Read by `cooked--mode-line-progress', which is the only consumer.  Buffer-local
 because a progress report is one session's news and the mode line is per
 buffer.")
 
@@ -470,16 +470,16 @@ buffer.")
 
 Three answers rather than two.  nil means the child sent no number, which is
 legal for every state that takes one and is how `ESC ] 9 ; 4 ; 2 ST' says \"the
-thing I was doing failed\" without restating how far it had got.  `bad\=' means
+thing I was doing failed\" without restating how far it had got.  `bad' means
 it sent something that is not a number, which is a different situation entirely
 and one the caller refuses outright.
 
-`-1\=' is nil as well.  It is how tmux says no number: it hands on every report
-through its `Spb\=' as a state and a percentage, and a report that came without
-one goes out as `9;4;3;-1\='.
+`-1' is nil as well.  It is how tmux says no number: it hands on every report
+through its `Spb' as a state and a percentage, and a report that came without
+one goes out as `9;4;3;-1'.
 
-`string-to-number\=' cannot tell those apart -- it answers 0 for the empty
-string, for `nan\=', and for a megabyte of NUL bytes -- so the digits are
+`string-to-number' cannot tell those apart -- it answers 0 for the empty
+string, for `nan', and for a megabyte of NUL bytes -- so the digits are
 checked before it is asked.  Out of range is clamped rather than refused, on
 rockorager.dev's rule for the sequence and because a build tool that computes
 101% has a rounding bug, not a hostile intent."
@@ -494,15 +494,15 @@ rockorager.dev's rule for the sequence and because a build tool that computes
 
 PARTS is ConEmu's `4', the state digit, and an optional percentage.  Anything
 else -- a fifth field, a state outside 0-4, a percentage that is not a number --
-leaves `cooked--progress\=' exactly as it was rather than guessing at what was
+leaves `cooked--progress' exactly as it was rather than guessing at what was
 meant.  Refusing to act is the only safe reading of a malformed report: the
 alternative is a stream that can park a wrong number in the mode line and then
 stop sending, leaving it there.
 
 A state that takes a percentage and arrives without one keeps the percentage
-already on show.  That is what makes the two-sequence idiom work -- `1;70\='
-while the work runs, then a bare `2\=' when it fails -- and it reads as
-`[err 70%]\=', which says more than `[err]\=' does.  `indeterminate\=' drops it
+already on show.  That is what makes the two-sequence idiom work -- `1;70'
+while the work runs, then a bare `2' when it fails -- and it reads as
+`[err 70%]', which says more than `[err]' does.  `indeterminate' drops it
 instead, because a pulsing state with a stale number beside it is a lie about
 which of the two the child meant."
   (when (and (equal (car parts) "4") (<= 2 (length parts) 3))
@@ -542,17 +542,17 @@ re-evaluate every mode line showing this buffer to draw the text already there."
 (defun cooked--reset-progress ()
   "Drop any progress indicator, on RIS and when a command is over.
 
-Called from the `reset\=' event rather than from anything in this file, because
-RIS is `ESC c\=' and not an OSC at all.  It has to be reachable from Lisp: the
+Called from the `reset' event rather than from anything in this file, because
+RIS is `ESC c' and not an OSC at all.  It has to be reachable from Lisp: the
 indicator is the one piece of a session's visible state that lives entirely in
 Emacs, so a reset that Rust handled by itself would clear the screen and leave
 the mode line still claiming a build was 60% through -- and there would be no
-second thing for the user to type, `reset\=' being the thing you type when
+second thing for the user to type, `reset' being the thing you type when
 something is stuck.
 
-Also called from `cooked--end-of-command\=', for the report nobody finished: a
+Also called from `cooked--end-of-command', for the report nobody finished: a
 build interrupted at the keyboard, or an agent that crashed, never sends the
-`0\=' that removes its bar, and the shell prompting again is the proof it is
+`0' that removes its bar, and the shell prompting again is the proof it is
 gone."
   (cooked--set-progress nil nil))
 
@@ -582,18 +582,18 @@ gone."
 (defvar cooked-osc-eval-functions nil
   "Abnormal hook handling the OSC 51;E command channel, run with the payload.
 
-The payload is everything after the `E\=', so `E1;F;/tmp/x\=' arrives as
+The payload is everything after the `E', so `E1;F;/tmp/x' arrives as
 \"1;F;/tmp/x\": a version, a verb, and at most one argument.  Parsing it is the
-layer\='s business rather than this file\='s.
+layer's business rather than this file's.
 
 Empty means the channel is closed and requests are ignored -- and that
 emptiness is load-bearing rather than incidental: it is what
-`cooked--osc-emacs\=' reads to tell \"nobody is listening\" from \"somebody
+`cooked--osc-emacs' reads to tell \"nobody is listening\" from \"somebody
 refused\", and so what raises the once-per-buffer notice pointing at
-`cooked-osc-eval\='.  Requiring that file is how you opt in, and the point of
+`cooked-osc-eval'.  Requiring that file is how you opt in, and the point of
 the split is that opting in is something you do on purpose rather than inherit.
 
-Deliberately a `defvar\=' and not a `defcustom\=' with `:type \='hook\=', unlike
+Deliberately a `defvar' and not a `defcustom' with `:type \\='hook', unlike
 every other seam here: this is the one place terminal output becomes action, and
 a customize interface would be a way to open the channel without ever loading
 the file whose whole job is to make that a decision.")
@@ -602,17 +602,17 @@ the file whose whole job is to make that a decision.")
   "Abnormal hook handling an OSC 51;C *reply*, run with the payload.
 
 Empty means the completion layer is not loaded, and a reply arriving anyway is
-dropped unread.  Harmless: nothing asked for it, because asking is that layer\='s
+dropped unread.  Harmless: nothing asked for it, because asking is that layer's
 job.
 
 The announcement is deliberately not routed through here.  It is handled below,
-unconditionally, because `cooked--policy\=' reads it as a license to own the
+unconditionally, because `cooked--policy' reads it as a license to own the
 input line and that reading has to hold in a session that never loads the
-completion layer at all.  `cooked-shell-completion\=' sets this; see
-`cooked-shell-completion-functions\=' for the other half of the same switch.")
+completion layer at all.  `cooked-shell-completion' sets this; see
+`cooked-shell-completion-functions' for the other half of the same switch.")
 
 (defun cooked--osc-announce (payload)
-  "Record the prompt\='s OSC 51;CH announcement from PAYLOAD, minus its leading H.
+  "Record the prompt's OSC 51;CH announcement from PAYLOAD, minus its leading H.
 
 Inert by construction -- a version number and a nonce -- which is what makes it
 safe to believe with no opt-in in front of it.
@@ -690,15 +690,15 @@ E asks Emacs to run something; C is the completion channel."
   "Whether the child may write to the shared clipboard via OSC 52.
 
 This covers the selections Emacs shares with everything else: the kill ring
-for the `c\=' and `s\=' targets, PRIMARY for `p\=' and SECONDARY for `q\='.  The
-eight cut buffers `0\=' to `7\=' are not among them -- they are private to the
-buffer, see `cooked-clipboard-read\=' -- and are written whenever that lets
+for the `c' and `s' targets, PRIMARY for `p' and SECONDARY for `q'.  The
+eight cut buffers `0' to `7' are not among them -- they are private to the
+buffer, see `cooked-clipboard-read' -- and are written whenever that lets
 them be read back.
 
 A write of nothing, or of something that is not base64, clears PRIMARY and
 SECONDARY, as xterm clears a selection, and leaves the kill ring alone.
 
-Reading is a separate question, answered by `cooked-clipboard-read\='."
+Reading is a separate question, answered by `cooked-clipboard-read'."
   :type 'boolean
   :group 'cooked)
 
@@ -707,29 +707,29 @@ Reading is a separate question, answered by `cooked-clipboard-read\='."
 
 Every query is answered under every setting, because a program that asks waits
 for the reply; these settings only decide whether the reply has anything in it.
-Anything that can write to the terminal can ask -- a `cat\=' of a hostile file,
+Anything that can write to the terminal can ask -- a `cat' of a hostile file,
 output from a compromised host -- which is why the default hands over nothing.
 
 nil answers every query with an empty payload, and keeps nothing a write puts
 in a cut buffer, since nothing could read it.
 
-`private\=' answers the cut buffers `0\=' to `7\=' with what OSC 52 last wrote to
+`private' answers the cut buffers `0' to `7' with what OSC 52 last wrote to
 them in this buffer, and the shared selections with nothing.  The cut buffers
 never reach the kill ring, so a program can round-trip its own text through
-them without being able to read anything you copied.  This is eat\='s middle
+them without being able to read anything you copied.  This is eat's middle
 ground.
 
-`ask\=' prompts, naming the buffer and the program in the foreground, before
-answering a shared selection; the cut buffers are answered as under `private\='.
+`ask' prompts, naming the buffer and the program in the foreground, before
+answering a shared selection; the cut buffers are answered as under `private'.
 The prompt waits until the handler has returned rather than running inside the
 process filter, and a query that arrives while one is already open is refused
-rather than stacked behind it.  It wants a typed `yes\=', after discarding
-input already queued, so a `y\=' meant for the program cannot answer it.
-The program is only what the child calls itself, and `ssh\=' for anything
+rather than stacked behind it.  It wants a typed `yes', after discarding
+input already queued, so a `y' meant for the program cannot answer it.
+The program is only what the child calls itself, and `ssh' for anything
 remote, so the buffer is the better guide to who is asking.
 
-t answers `c\=' and `s\=' from the kill ring, which is the system clipboard
-when `interprogram-paste-function\=' is set, `p\=' from PRIMARY and `q\=' from
+t answers `c' and `s' from the kill ring, which is the system clipboard
+when `interprogram-paste-function' is set, `p' from PRIMARY and `q' from
 SECONDARY, with no prompt."
   :type '(choice (const :tag "Answer with nothing" nil)
                  (const :tag "Only the private cut buffers" private)
@@ -741,11 +741,11 @@ SECONDARY, with no prompt."
   "Largest OSC 52 payload, in base64 characters, in either direction.
 Anything writing to the terminal can push to the clipboard, so this bounds how
 much of the kill ring a runaway or hostile stream can take over.  It bounds
-replies to `cooked-clipboard-read\=' too: a selection that would encode to more
+replies to `cooked-clipboard-read' too: a selection that would encode to more
 is answered with an empty payload and a message, so the child still hears back
 and is not handed megabytes it would have to swallow before its next read.
 
-A value above `cooked--osc-52-core-limit\=' counts as that limit.  The native
+A value above `cooked--osc-52-core-limit' counts as that limit.  The native
 core drops any OSC longer than a mebibyte before Lisp sees it, so a write past
 it could only vanish without the message a refusal promises."
   :type 'natnum
@@ -755,39 +755,39 @@ it could only vanish without the message a refusal promises."
   "The longest OSC 52 payload the native core is sure to hand to Lisp.
 
 The core refuses any OSC whose fields after the code add up to more than its
-`OSC_PAYLOAD_LIMIT\=', one mebibyte.  For OSC 52 those fields are the targets
+`OSC_PAYLOAD_LIMIT', one mebibyte.  For OSC 52 those fields are the targets
 and the data, and the targets name at most the twelve selections
-`cpqs01234567\=', so twelve less than a mebibyte is always delivered.  It is a
+`cpqs01234567', so twelve less than a mebibyte is always delivered.  It is a
 multiple of four, which a padded base64 payload always is.")
 
 (defvar-local cooked--clipboard-refused nil
-  "The size of the reply last refused for `cooked-clipboard-max-size\=', or nil.
+  "The size of the reply last refused for `cooked-clipboard-max-size', or nil.
 
 Kept so that a program asking again and again for the same oversized selection
 gets one message rather than one per query: a paste provider polling the
 clipboard would otherwise take the echo area over.")
 
 (defun cooked--osc-52-max-size ()
-  "The effective OSC 52 bound: `cooked-clipboard-max-size\=', capped at the core\='s."
+  "The effective OSC 52 bound: `cooked-clipboard-max-size', capped at the core's."
   (min cooked-clipboard-max-size cooked--osc-52-core-limit))
 
 (defvar-local cooked--cut-buffers nil
   "The eight OSC 52 cut buffers, as a vector of byte strings, or nil if unused.
 
-Filled by writes to targets `0\=' to `7\=' while `cooked-clipboard-read\=' is
-`private\=', `ask\=' or t, and read back by queries under the same settings.
+Filled by writes to targets `0' to `7' while `cooked-clipboard-read' is
+`private', `ask' or t, and read back by queries under the same settings.
 Buffer-local, and never copied to the kill ring: that is what makes answering
 from them leak nothing the child did not put there itself.  The bytes are kept
 as decoded rather than as the base64 that arrived, so a read re-encodes them
 canonically and a malformed write cannot come back out verbatim.")
 
 (defvar-local cooked--clipboard-prompting nil
-  "Whether an OSC 52 prompt under `ask\=' is open for this buffer.")
+  "Whether an OSC 52 prompt under `ask' is open for this buffer.")
 
 (defun cooked--osc-52-targets (spec)
   "The selection targets named by SPEC, an OSC 52 first field, as characters.
 
-Unknown letters are dropped, and a SPEC that names nothing known means `s0\=',
+Unknown letters are dropped, and a SPEC that names nothing known means `s0',
 which is what xterm does with an empty one."
   (or (seq-filter (lambda (c) (string-search (string c) "cpqs01234567"))
                   (delete-dups (string-to-list spec)))
@@ -809,24 +809,24 @@ which is what xterm does with an empty one."
   "Answer an OSC 52 query for TARGETS with PAYLOAD, base64 or the empty string.
 
 The reply names every one of TARGETS, as xterm echoes the targets it
-understood, because a client that asked about `cp\=' matches its answer on
-that field.  They are the letters `cooked--osc-52-targets\=' kept, so nothing
+understood, because a client that asked about `cp' matches its answer on
+that field.  They are the letters `cooked--osc-52-targets' kept, so nothing
 the child sent comes back unless it is one of those twelve."
   (when-let* ((session (cooked--live-session)))
     (cooked--reply-osc session 52 (concat (concat targets) ";" payload)
                        cooked--osc-bell-terminated)))
 
 (defun cooked--osc-52-contents (target)
-  "The text TARGET holds, a cut buffer\='s or a shared selection\='s, or nil."
+  "The text TARGET holds, a cut buffer's or a shared selection's, or nil."
   (if-let* ((index (cooked--osc-52-cut-buffer target)))
       (and cooked--cut-buffers (aref cooked--cut-buffers index))
     (cooked--osc-52-shared-contents target)))
 
 (defun cooked--osc-52-answers-p (target)
-  "Whether a query can be answered from TARGET under `cooked-clipboard-read\='.
+  "Whether a query can be answered from TARGET under `cooked-clipboard-read'.
 
 A cut buffer can when it holds something, under any setting but nil.  A shared
-selection can under t when it holds something, and under `ask\=' whatever it
+selection can under t when it holds something, and under `ask' whatever it
 holds, since looking is what the prompt asks leave for."
   (and cooked-clipboard-read
        (if (or (cooked--osc-52-cut-buffer target)
@@ -837,13 +837,13 @@ holds, since looking is what the prompt asks leave for."
 (defun cooked--osc-52-encode (text)
   "TEXT as the base64 an OSC 52 reply carries, or the empty string for nil.
 
-A payload longer than `cooked-clipboard-max-size\=' is replaced by the empty
+A payload longer than `cooked-clipboard-max-size' is replaced by the empty
 string too, with a message.  The bound is measured on the base64, as it is for
 writes, so one number caps both directions.  Replying with nothing rather than
 not replying is the point: the child is still waiting, and a truncated payload
 would decode to text the user never copied.
 
-The length is worked out before anything is encoded, from `string-bytes\=',
+The length is worked out before anything is encoded, from `string-bytes',
 since padded base64 of N bytes is always 4 * ceiling(N / 3) characters.  A
 ten-megabyte kill is refused without first building the thirty megabytes of
 UTF-8 and base64 it would take to measure.  For text Emacs holds as UTF-8 the
@@ -870,14 +870,14 @@ one on the wire, so text with raw bytes in it can be refused a little early."
 (defun cooked--osc-52-ask (program target)
   "Whether the user lets PROGRAM read the shared selection TARGET.
 
-A child can print \"[y/n]\" and then query, so the `y\=' the user types for
+A child can print \"[y/n]\" and then query, so the `y' the user types for
 the child must not be the answer.  Input already queued is discarded first, and
-the question is a `yes-or-no-p\=', with `use-short-answers\=' bound to nil,
-because a single `y\=' arriving a moment after the prompt opens cannot finish a
-typed `yes\='.  A `read-multiple-choice\=' would also discard typeahead, but a
+the question is a `yes-or-no-p', with `use-short-answers' bound to nil,
+because a single `y' arriving a moment after the prompt opens cannot finish a
+typed `yes'.  A `read-multiple-choice' would also discard typeahead, but a
 keystroke racing the prompt would still answer it; this is also the prompt
 Emacs uses for other questions that are expensive to get wrong, such as
-killing the child in `cooked-kill-session\='."
+killing the child in `cooked-kill-session'."
   (discard-input)
   (let ((use-short-answers nil))
     (yes-or-no-p
@@ -893,12 +893,12 @@ killing the child in `cooked-kill-session\='."
   "Answer the OSC 52 query for TARGETS, exactly once.
 
 The answer comes from the first of TARGETS, in the order named, that
-`cooked--osc-52-answers-p\=' allows, as xterm falls through the selections it
+`cooked--osc-52-answers-p' allows, as xterm falls through the selections it
 was asked for to the first that has something.  With none, the reply is empty.
-Under `ask\=' the reply leaves this function in a deferred prompt, carrying the
-terminator it was asked with, since `cooked--osc-bell-terminated\=' is unbound
+Under `ask' the reply leaves this function in a deferred prompt, carrying the
+terminator it was asked with, since `cooked--osc-bell-terminated' is unbound
 by then.  The program is named as it was when the query arrived, since by the
-time the prompt runs a short-lived `cat\=' may have exited and handed the
+time the prompt runs a short-lived `cat' may have exited and handed the
 foreground back to the shell.  Any error inside the prompt is an empty reply
 rather than none, because the child is still waiting for one."
   (let ((target (seq-find #'cooked--osc-52-answers-p targets)))
@@ -936,16 +936,16 @@ rather than none, because the child is still waiting for one."
 (defun cooked--osc-52-write (targets data)
   "Put the base64 DATA into each of TARGETS.
 
-A cut buffer is this buffer\='s own, so `cooked-clipboard-write\=' does not
+A cut buffer is this buffer's own, so `cooked-clipboard-write' does not
 cover it, and putting it on the kill ring would be wrong under any setting.  It
-is kept only while `cooked-clipboard-read\=' lets a query read it back, since
+is kept only while `cooked-clipboard-read' lets a query read it back, since
 otherwise it is up to eight payloads held for nothing.  The shared selections
-need `cooked-clipboard-write\=', and the kill ring is written once however many
-of `c\=' and `s\=' were named.
+need `cooked-clipboard-write', and the kill ring is written once however many
+of `c' and `s' were named.
 
 DATA that is empty, or not base64, clears each target instead, which is what
-xterm does with it.  The kill ring has no way to be cleared, so a `c\=' or
-`s\=' with nothing in it is left alone rather than handed an empty kill."
+xterm does with it.  The kill ring has no way to be cleared, so a `c' or
+`s' with nothing in it is left alone rather than handed an empty kill."
   ;; Measured as the padded length, which is what a read-back re-encodes to, so
   ;; an unpadded write that fits is one whose contents can also be read back.
   (if (> (* 4 (ceiling (length data) 4)) (cooked--osc-52-max-size))
@@ -972,7 +972,7 @@ xterm does with it.  The kill ring has no way to be cleared, so a `c\=' or
                    (message "cooked: copied %d characters" (length text)))))))))))
 
 (defun cooked--osc-clipboard (parts)
-  "Write or answer the child\='s OSC 52 request, from PARTS."
+  "Write or answer the child's OSC 52 request, from PARTS."
   (let ((targets (cooked--osc-52-targets (if (cdr parts) (car parts) "")))
         (data (car (last parts))))
     (cond
@@ -998,31 +998,31 @@ xterm does with it.  The kill ring has no way to be cleared, so a `c\=' or
   (cooked--set-directory (string-join parts ";")))
 
 (defcustom cooked-remote-directory 'tramp
-  "What an OSC 7 report from another host does to `default-directory\='.
+  "What an OSC 7 report from another host does to `default-directory'.
 
-`tramp\=' rewrites the reported path into a TRAMP name for the host the child
-says it is on, so \\[find-file] at a shell you ssh\='d out to opens the file you
+`tramp' rewrites the reported path into a TRAMP name for the host the child
+says it is on, so \\[find-file] at a shell you ssh'd out to opens the file you
 meant -- in this Emacs, with your own configuration and your own language server
 -- instead of a same-named local file or nothing at all.
 
-nil leaves `default-directory\=' at the last place cooked could vouch for, which
+nil leaves `default-directory' at the last place cooked could vouch for, which
 is what it did before this existed and is still the right answer if you would
 rather a foreign prompt resolve nothing.
 
 Neither setting lets the byte stream choose the host or the method: see
-`cooked--remote-directory\=' for what is and is not taken from the payload."
+`cooked--remote-directory' for what is and is not taken from the payload."
   :type '(choice (const :tag "Rewrite as a TRAMP path" tramp)
                  (const :tag "Leave `default-directory' alone" nil))
   :group 'cooked)
 
 (defcustom cooked-tramp-default-method nil
-  "TRAMP method for a name built from an OSC 7 report, or nil for TRAMP\='s own.
+  "TRAMP method for a name built from an OSC 7 report, or nil for TRAMP's own.
 
 Only consulted when there is no remote connection to inherit one from -- an
-ordinary outbound `ssh\=' from a local buffer.  A `cd\=' reported by a shell we
-are already talking to over TRAMP keeps that connection\='s method, and its hops.
+ordinary outbound `ssh' from a local buffer.  A `cd' reported by a shell we
+are already talking to over TRAMP keeps that connection's method, and its hops.
 
-nil means `tramp-default-method\=', which is \"scp\" in a stock Emacs.  \"ssh\"
+nil means `tramp-default-method', which is \"scp\" in a stock Emacs.  \"ssh\"
 is the usual reason to set this: it multiplexes over one connection where scp
 opens a new one per file."
   :type '(choice (const :tag "`tramp-default-method'" nil) string)
@@ -1033,18 +1033,18 @@ opens a new one per file."
   "A host name cooked is willing to write into a TRAMP file name.
 
 Letters, digits, dots, hyphens and underscores, and it may not start or end with
-punctuation.  Not an attempt to validate a host name -- resolution is TRAMP\='s
+punctuation.  Not an attempt to validate a host name -- resolution is TRAMP's
 problem and a name that does not resolve merely fails.  It is there to keep
-TRAMP\='s *own* syntax out of a position where it would be read as syntax; see
-`cooked--remote-directory\='.  An IPv6 literal does not match and is declined,
+TRAMP's *own* syntax out of a position where it would be read as syntax; see
+`cooked--remote-directory'.  An IPv6 literal does not match and is declined,
 which costs a rare case a rewrite it would otherwise have got.")
 
 (defun cooked--tramp-prefix (name)
   "NAME without its localname, hops included, or nil when NAME is local.
 
 /ssh:jump|ssh:host:/tmp/ gives /ssh:jump|ssh:host:.  See
-`cooked--remote-directory\=' for why this subtracts the localname rather than
-asking `file-remote-p\=' for the prefix, which would leave the hop out."
+`cooked--remote-directory' for why this subtracts the localname rather than
+asking `file-remote-p' for the prefix, which would leave the hop out."
   (when-let* ((local (file-remote-p name 'localname)))
     (substring name 0 (- (length name) (length local)))))
 
@@ -1052,46 +1052,46 @@ asking `file-remote-p\=' for the prefix, which would leave the hop out."
   "The TRAMP prefix this session was started over, and the host it reported.
 
 A cons (PREFIX . HOST), or nil for a session started on this machine.
-`cooked--start-session\=' sets it with HOST nil when it starts a shell over
-ssh, and `cooked--set-directory\=' fills HOST in from the first report naming
+`cooked--start-session' sets it with HOST nil when it starts a shell over
+ssh, and `cooked--set-directory' fills HOST in from the first report naming
 another machine.  The shell started over /ssh:prod: that reports ip-10-0-0-1
 leaves (\"/ssh:prod:\" . \"ip-10-0-0-1\"), which is what lets
-`cooked--remote-prefix\=' treat the alias and the reported name as one host.
+`cooked--remote-prefix' treat the alias and the reported name as one host.
 
 The first report is trusted to come from the far end of that connection because
-the spawn sends it itself, from `cooked--remote-cd\=', before the far shell
+the spawn sends it itself, from `cooked--remote-cd', before the far shell
 starts.  Only an absolute directory is reported there, so a session started in
-a directory under ~ waits for its shell\='s own first report instead.")
+a directory under ~ waits for its shell's own first report instead.")
 
 (defun cooked--remote-prefix (host)
-  "The TRAMP prefix, `/METHOD:HOST:\=' or longer, that names HOST, or nil.
+  "The TRAMP prefix, `/METHOD:HOST:' or longer, that names HOST, or nil.
 
-Two ways to get one, and `cooked--remote-directory\=' has why each is shaped as
-it is.  The prefix `default-directory\=' already carries is reused whenever it
+Two ways to get one, and `cooked--remote-directory' has why each is shaped as
+it is.  The prefix `default-directory' already carries is reused whenever it
 names HOST, hops and user and method included.  Otherwise one is built, but
-only for `cooked--host\=' -- the host the child has already announced -- and
-only if that name passes `cooked--host-name-regexp\='.  A HOST that is neither
+only for `cooked--host' -- the host the child has already announced -- and
+only if that name passes `cooked--host-name-regexp'.  A HOST that is neither
 the connection in use nor the announced host gets nil, so no caller can make
 Emacs dial a machine by passing a name through here.
 
-Whether the prefix in `default-directory\=' names HOST is decided by name, and
+Whether the prefix in `default-directory' names HOST is decided by name, and
 a name is all either side has.  So an ssh-config alias reads as a move: a buffer
-at `/ssh:prod:\=' whose shell reports `ip-10-0-0-1\=', `prod\=' being that
-machine\='s alias, looks the same as one whose shell has gone on from prod to a
+at `/ssh:prod:' whose shell reports `ip-10-0-0-1', `prod' being that
+machine's alias, looks the same as one whose shell has gone on from prod to a
 second machine of that name.  The second is the case worth getting right, since
-keeping `/ssh:prod:\=' there would open a file of the same name on the wrong
-machine.  So both get a prefix built for `ip-10-0-0-1\=', which may not resolve
+keeping `/ssh:prod:' there would open a file of the same name on the wrong
+machine.  So both get a prefix built for `ip-10-0-0-1', which may not resolve
 from here and names no user.
 
 A session started over the connection is the exception, because it knows which
 host its own connection reaches: the first host that session reported is
-the one at the end of the ssh it ran.  `cooked--spawn-connection\=' keeps that
+the one at the end of the ssh it ran.  `cooked--spawn-connection' keeps that
 pair, and a HOST matching it gets the prefix the session was started with, hops
-and user included, wherever `default-directory\=' has been since.  So
-\\[cooked] at `/ssh:prod:/srv/\=' keeps `/ssh:prod:\=' when its shell says
-`ip-10-0-0-1\=', and again after an `ssh\=' onward and back.  For a buffer
-that got its prefix any other way, a `Host ip-10-0-0-1\=' entry in
-~/.ssh/config, with the alias\='s HostName and User, makes the built name
+and user included, wherever `default-directory' has been since.  So
+\\[cooked] at `/ssh:prod:/srv/' keeps `/ssh:prod:' when its shell says
+`ip-10-0-0-1', and again after an `ssh' onward and back.  For a buffer
+that got its prefix any other way, a `Host ip-10-0-0-1' entry in
+~/.ssh/config, with the alias's HostName and User, makes the built name
 work."
   (or (and (cooked--same-host-p host (cdr cooked--spawn-connection))
            (car cooked--spawn-connection))
@@ -1111,21 +1111,21 @@ work."
 (defun cooked--remote-directory (path)
   "PATH on the host the child last reported, as a TRAMP directory name, or nil.
 
-*The host comes from `cooked--host\=' and the method never comes from the
-payload.*  That is the hostile-`cat\=' defence carried across rather than
-dropped.  OSC 7 is always on -- no `require\=' in front of it, unlike the
+*The host comes from `cooked--host' and the method never comes from the
+payload.*  That is the hostile-`cat' defence carried across rather than
+dropped.  OSC 7 is always on -- no `require' in front of it, unlike the
 command channel -- so any program that can write to the terminal can send one,
 and a name assembled out of what it sent would be a way to make Emacs dial a
 machine
-of the sender\='s choosing.  `cooked--local-name\=' is what refuses that on the
+of the sender's choosing.  `cooked--local-name' is what refuses that on the
 local branch, and cannot be what refuses it here, because here the answer is a
 remote name by construction.
 
-`cooked--host\=' is not payload-free either -- it is the authority half of the
+`cooked--host' is not payload-free either -- it is the authority half of the
 same URL -- and the point is that it does not need to be.  It is the host the
 child is *claiming to be*, which cooked has already told the rest of the buffer
-to distrust: `cooked--foreign-host-p\=' is what makes the mode line say so,
-makes completion decline, and makes `cooked-file-link\=' resolve nothing.  A
+to distrust: `cooked--foreign-host-p' is what makes the mode line say so,
+makes completion decline, and makes `cooked-file-link' resolve nothing.  A
 hostile
 stream therefore buys exactly one thing it did not have before, a TRAMP name
 pointing at the host it already announced, and pays for it by announcing it.
@@ -1134,30 +1134,30 @@ What it must not buy is a *method*, and that is the whole of what the two guards
 below are for.  Both halves of the URL are attacker-chosen strings, and TRAMP
 file-name syntax is punctuation:
 
-- The authority is matched as `[^/]*\=' and percent-decoded, so `file://
-  a%7Csudo%3A/etc\=' would arrive as the host `a|sudo:\=' and, formatted
-  straight into `/ssh:%s:\=', produce `/ssh:a|sudo::/etc\=' -- a second hop to
+- The authority is matched as `[^/]*' and percent-decoded, so `file://
+  a%7Csudo%3A/etc' would arrive as the host `a|sudo:' and, formatted
+  straight into `/ssh:%s:', produce `/ssh:a|sudo::/etc' -- a second hop to
   root that nothing in the path half was needed for.  The regexp
-  `cooked--host-name-regexp\=' is what stops that, and declining outright is the
+  `cooked--host-name-regexp' is what stops that, and declining outright is the
   answer rather than quoting,
   because a host containing TRAMP punctuation is not a host anyone has.
-- The path is appended after a *complete* `/method:host:\=' prefix, which is the
+- The path is appended after a *complete* `/method:host:' prefix, which is the
   position where TRAMP stops parsing and starts taking bytes: a payload path of
-  `/ssh:evil:/tmp\=' becomes the localname `/ssh:evil:/tmp\=' on our host, a
-  file that merely does not exist, and not a hop to `evil\='.
+  `/ssh:evil:/tmp' becomes the localname `/ssh:evil:/tmp' on our host, a
+  file that merely does not exist, and not a hop to `evil'.
 
 An existing remote prefix is reused rather than rebuilt, and that is the whole
 of what keeps a multi-hop connection alive.  A buffer already at
-`/ssh:jump|ssh:host:\=' has to stay two hops across a `cd\=': formatting a fresh
-`/ssh:host:\=' would flatten it to one and dial a machine that is very likely
+`/ssh:jump|ssh:host:' has to stay two hops across a `cd': formatting a fresh
+`/ssh:host:' would flatten it to one and dial a machine that is very likely
 not reachable directly, which is the failure that makes a bastion setup useless
 rather than merely slower.  Reusing it also keeps the user and the method the
 user actually connected with.
 
-The prefix is taken as `default-directory\=' *minus its localname*, and not as
-`file-remote-p\=' of it, which is the obvious spelling and is wrong: TRAMP
-reassembles that return value from the dissected name and leaves the `hop\='
-slot out, so `/ssh:jump|ssh:host:/tmp/\=' comes back as plain `/ssh:host:\='.
+The prefix is taken as `default-directory' *minus its localname*, and not as
+`file-remote-p' of it, which is the obvious spelling and is wrong: TRAMP
+reassembles that return value from the dissected name and leaves the `hop'
+slot out, so `/ssh:jump|ssh:host:/tmp/' comes back as plain `/ssh:host:'.
 The
 flattening is silent and the result is a perfectly well-formed name for a
 machine the bastion exists because you cannot reach.  Subtracting the localname
@@ -1165,11 +1165,11 @@ keeps whatever was actually there, hops and all, without cooked having to know
 how TRAMP spells any of it.
 
 Reused only while that prefix still names the host the child does, though.  An
-`ssh\=' *from* the far shell moves `cooked--host\=' on and leaves the prefix
-where it was, and inheriting it then would hang the new host\='s paths off the
-old host\='s connection -- the same class of wrong-file error this whole handler
-exists to avoid, arrived at from the other side.  `cooked--same-host-p\=' is the
-comparison, shared with `cooked--foreign-host-p\=' so that a short name from zsh
+`ssh' *from* the far shell moves `cooked--host' on and leaves the prefix
+where it was, and inheriting it then would hang the new host's paths off the
+old host's connection -- the same class of wrong-file error this whole handler
+exists to avoid, arrived at from the other side.  `cooked--same-host-p' is the
+comparison, shared with `cooked--foreign-host-p' so that a short name from zsh
 and a fully qualified one in the prefix agree about being one machine."
   (when-let* ((prefix (cooked--remote-prefix cooked--host)))
     ;; The trailing slash is appended as a string operation, and
@@ -1182,50 +1182,50 @@ and a fully qualified one in the prefix agree about being one machine."
     (concat prefix path (unless (string-suffix-p "/" path) "/"))))
 
 (defvar-local cooked--directory-report nil
-  "The last OSC 7 URL acted on, with the `default-directory\=' it left, or nil.
+  "The last OSC 7 URL acted on, with the `default-directory' it left, or nil.
 
 A cons of the two strings.  The shell sends its report at every prompt whether
 or not it moved, so most reports repeat the one before; see
-`cooked--set-directory\=' for why the directory is kept beside the URL.")
+`cooked--set-directory' for why the directory is kept beside the URL.")
 
 (defun cooked--set-directory (url)
   "Track the child's directory from an OSC 7 URL.
 
 On this machine, the name is refused if it is remote, and refused *before*
-`file-directory-p\=' rather than after.  That order is the whole point: a `cat\='
+`file-directory-p' rather than after.  That order is the whole point: a `cat'
 of a hostile file can put a TRAMP name in the path half, and asking whether that
-directory exists is itself the connection.  See `cooked--local-name\='.
+directory exists is itself the connection.  See `cooked--local-name'.
 
 On another machine the path is rewritten into a TRAMP name -- see
-`cooked-remote-directory\=' for turning that off, and `cooked--remote-directory\='
+`cooked-remote-directory' for turning that off, and `cooked--remote-directory'
 for why the payload can choose the path but not the host or the method.  There
-is deliberately *no* `file-directory-p\=' on that branch, and it is not an
+is deliberately *no* `file-directory-p' on that branch, and it is not an
 oversight to be tidied up later: validating would open a synchronous TRAMP
-connection on every single `cd\=', which is the difference between a feature that
-costs nothing and one that stalls the shell.  The shell\='s report is trusted
+connection on every single `cd', which is the difference between a feature that
+costs nothing and one that stalls the shell.  The shell's report is trusted
 instead, on the grounds that it is the one party that actually knows -- and a
-wrong `default-directory\=' costs a failed `find-file\=', where a connection per
-`cd\=' costs every prompt.
+wrong `default-directory' costs a failed `find-file', where a connection per
+`cd' costs every prompt.
 
-Which branch runs is `cooked--foreign-host-p\=', so the URL\='s authority is kept
+Which branch runs is `cooked--foreign-host-p', so the URL's authority is kept
 rather than skipped: it is not decoration, it is the thing that decides whether
 a path means a file here or a file somewhere else.
 
 The path is percent-encoded, because that is what a URL is: a directory called
-`100%20cake\=' has to arrive as `100%2520cake\=' or it decodes to a different
+`100%20cake' has to arrive as `100%2520cake' or it decodes to a different
 directory that does not exist.  Both emitters that reach this parser --
-cooked\='s own snippets and a fish 4 doing its own reporting -- encode that way,
+cooked's own snippets and a fish 4 doing its own reporting -- encode that way,
 so there is one encoding on the wire and one decoding here.
 
-Ends by offering the buffer a rename, foreign host or not: `cooked--host\='
-changed either way, and a `cooked-buffer-name\=' with %h or %p in it wants to
+Ends by offering the buffer a rename, foreign host or not: `cooked--host'
+changed either way, and a `cooked-buffer-name' with %h or %p in it wants to
 know about both kinds of move, not just the ones that touch
-`default-directory\='.
+`default-directory'.
 
-A report identical to the last one does nothing: no `file-directory-p\=', which
+A report identical to the last one does nothing: no `file-directory-p', which
 is a stat per prompt, and no rename.  The directory it left is part of what
-must match, because \\[cd] in the buffer moves `default-directory\=' without the
-shell moving, and the shell\='s next report of the same place has to put it
+must match, because \\[cd] in the buffer moves `default-directory' without the
+shell moving, and the shell's next report of the same place has to put it
 back."
   (pcase-let ((`(,host . ,path)
                (unless (equal cooked--directory-report (cons url default-directory))
@@ -1267,21 +1267,21 @@ back."
 ;; link a file at all.
 
 (defcustom cooked-file-url-display #'find-file-other-window
-  "How a followed `file:\=' link is opened.
+  "How a followed `file:' link is opened.
 
-`find-file-other-window\=' by default, for the reason
-`cooked-file-link-display\=' gives: the terminal is usually the window you are
+`find-file-other-window' by default, for the reason
+`cooked-file-link-display' gives: the terminal is usually the window you are
 in."
   :type 'function
   :group 'cooked)
 
 (defun cooked--file-url-position (spec)
-  "LINE and COLUMN from SPEC, a `file:\=' URL\='s fragment, as a list, or nil.
+  "LINE and COLUMN from SPEC, a `file:' URL's fragment, as a list, or nil.
 
 The fragment is where the tools that put a line in a file link disagree most.
-`L12\=' is GitHub\='s and what most editors\=' \"copy link\" produce, a bare
-`12\=' is kitty\='s and ripgrep\='s `kitty\=' format, and a column rides after a
-`C\=', a `:\=' or a `,\=' depending on who wrote it.  A range, `L12-L20\=',
+`L12' is GitHub's and what most editors' \"copy link\" produce, a bare
+`12' is kitty's and ripgrep's `kitty' format, and a column rides after a
+`C', a `:' or a `,' depending on who wrote it.  A range, `L12-L20',
 opens at its start.
 Anything else is a fragment that means something to somebody else and is
 ignored rather than misread as a line."
@@ -1293,10 +1293,10 @@ ignored rather than misread as a line."
             (string-to-number (match-string 2 spec))))))
 
 (defun cooked--file-url-split (path local)
-  "PATH less a trailing `:LINE\=' or `:LINE:COL\=', as (PATH LINE COL).
+  "PATH less a trailing `:LINE' or `:LINE:COL', as (PATH LINE COL).
 
-The other place a line turns up: delta\='s and several build tools\=' link
-formats append it to the path.  A file can end in `:12\=' too, so on this
+The other place a line turns up: delta's and several build tools' link
+formats append it to the path.  A file can end in `:12' too, so on this
 machine -- LOCAL non-nil -- a PATH that exists as it stands is kept whole.
 Another machine is not asked, since asking is the connection; there the suffix
 is read as a line, and a file really named that way is the rare case that pays."
@@ -1310,21 +1310,21 @@ is read as a line, and a file really named that way is the rare case that pays."
             (string-to-number (match-string 3 path))))))
 
 (defun cooked--file-url-target (url)
-  "The (FILE LINE COL) a `file:\=' URL names, or nil having refused it.
+  "The (FILE LINE COL) a `file:' URL names, or nil having refused it.
 
-Both authority forms are accepted: `file:///x\=' and `file://host/x\=' are
-what `ls --hyperlink\=' and ripgrep send, and `file:/x\=' is the short spelling
+Both authority forms are accepted: `file:///x' and `file://host/x' are
+what `ls --hyperlink' and ripgrep send, and `file:/x' is the short spelling
 RFC 8089 allows.  The fragment is split off before the path is decoded, so a
-`#\=' that is part of a file name -- sent as `%23\=' -- stays in the name.
+`#' that is part of a file name -- sent as `%23' -- stays in the name.
 
-A local host has its path put through `cooked--local-name\=' before anything so
+A local host has its path put through `cooked--local-name' before anything so
 much as looks at it.  Another host is opened only through
-`cooked--remote-prefix\=', which answers for the connection already in use or
+`cooked--remote-prefix', which answers for the connection already in use or
 the host the child has announced, and for nothing else: a link naming a third
 machine is refused, because following it would be the byte stream choosing
 where Emacs connects.  The path is appended after that complete prefix, where
-TRAMP has stopped reading syntax.  `cooked-remote-directory\=' set to nil
-refuses every remote link, as it refuses every remote `cd\='."
+TRAMP has stopped reading syntax.  `cooked-remote-directory' set to nil
+refuses every remote link, as it refuses every remote `cd'."
   (when (string-match "\\`\\([^#]*\\)\\(?:#\\(.*\\)\\)?\\'" url)
     (let* ((fragment (match-string 2 url))
            (base (match-string 1 url))
@@ -1361,9 +1361,9 @@ refuses every remote link, as it refuses every remote `cd\='."
 (defun cooked--browse-file-url (url &rest _)
   "Open the file URL names, at its line if it names one.
 
-The `file:\=' entry in `cooked-link-url-handlers\='.  Every `file:\=' URL is
+The `file:' entry in `cooked-link-url-handlers'.  Every `file:' URL is
 claimed, the ones refused included: a refusal that fell through would reach
-`browse-url-emacs\=', which opens exactly what this declined."
+`browse-url-emacs', which opens exactly what this declined."
   (pcase-let ((`(,file ,line ,col) (cooked--file-url-target url)))
     (when file
       (funcall cooked-file-url-display file)

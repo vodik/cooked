@@ -144,8 +144,8 @@ newline survives until you submit."
 
 (defun cooked--replace-input (text)
   "Replace the pending input with TEXT.
-The prompt\='s word syntax goes on the new text at once; see
-`cooked--mark-input-syntax\='."
+The prompt's word syntax goes on the new text at once; see
+`cooked--mark-input-syntax'."
   (when-let* ((region (cooked--input-region)))
     (let ((inhibit-read-only t))
       (delete-region (car region) (cdr region))
@@ -233,15 +233,15 @@ Forwards \\`<down>' while the child owns the keyboard; see
 (defun cooked--eof-byte ()
   "The character this tty means by end-of-file.
 
-Read rather than assumed, for the reason `cooked--send-job-control\=' reads the
-others: `stty eof ^X\=' is a thing people do.  Deliberately not routed through
+Read rather than assumed, for the reason `cooked--send-job-control' reads the
+others: `stty eof ^X' is a thing people do.  Deliberately not routed through
 that function, whose shape is \"the character if ISIG, else the signal\" --
 neither half applies here.  EOF is not a signal, so there is nothing to fall
-back to, and `ISIG\=' does not govern it: `ICANON\=' decides whether the line
+back to, and `ISIG' does not govern it: `ICANON' decides whether the line
 discipline turns the byte into end-of-input, and a raw-mode program just reads
 it.  Either way the byte is what a terminal sends.
 
-`?\\C-d\=' when the character is disabled (`_POSIX_VDISABLE\='), which is the one
+`?\\C-d' when the character is disabled (`_POSIX_VDISABLE'), which is the one
 case with nothing to read -- the conventional value beats sending nothing."
   (or (and cooked--session (plist-get (cooked--job-control cooked--session) :eof))
       ?\C-d))
@@ -270,19 +270,19 @@ Which byte that is comes from the tty -- see `cooked--eof-byte'."
 (defun cooked--send-job-control (session key signal)
   "Ask SESSION for job control the way a terminal does.
 
-KEY is `:intr\=', `:quit\=' or `:susp\='.  A terminal sends no signal of its own:
-it writes the character the tty has in `c_cc\=' and lets the line discipline
+KEY is `:intr', `:quit' or `:susp'.  A terminal sends no signal of its own:
+it writes the character the tty has in `c_cc' and lets the line discipline
 decide.  Reading that character rather than assuming ^C/^\\/^Z is what makes
-`stty intr ^X\=' work, and honouring ISIG is what keeps a program that
+`stty intr ^X' work, and honouring ISIG is what keeps a program that
 deliberately cleared it -- so as to read the byte itself -- from being
 signalled behind its own back.
 
 SIGNAL is the fallback, for the two cases where writing cannot mean anything:
 ISIG is off, so no byte would be turned into one; or the character is disabled
-\=(`_POSIX_VDISABLE\='), so there is no byte to write.  It names the signal
+\(`_POSIX_VDISABLE'), so there is no byte to write.  It names the signal
 rather than numbering it, because the numbers are not the same everywhere:
 SIGTSTP is 20 on Linux and 18 on the BSDs, where 20 is SIGCHLD.  Written as
-numbers here they were Linux\='s, so on macOS the suspend fallback sent a
+numbers here they were Linux's, so on macOS the suspend fallback sent a
 SIGCHLD the child ignores -- the whole of why \\[cooked-suspend] did nothing to
 a program that had cleared ISIG.  The core links libc and can see which
 platform it is; this side cannot, so this side spells the name."
@@ -303,9 +303,9 @@ held behind the freeze."
 (defun cooked-quit ()
   "Quit the foreground command -- SIGQUIT, the harder sibling of \\[cooked-interrupt].
 
-Sent the way a terminal sends it; see `cooked--send-job-control\='.  Bound where
-comint puts it, on \\`C-c C-\\\\', whose own `comint-quit-subjob\=' would
-`quit-process\=' the wakeup pipe -- the only process this buffer has, and not the
+Sent the way a terminal sends it; see `cooked--send-job-control'.  Bound where
+comint puts it, on \\`C-c C-\\\\', whose own `comint-quit-subjob' would
+`quit-process' the wakeup pipe -- the only process this buffer has, and not the
 child."
   (interactive)
   (cooked--resume-forwarding)
@@ -330,14 +330,14 @@ first when peeking: a signal you cannot see land is not worth sending blind."
   "Kill the child outright, leaving the transcript behind.
 
 Not job control, and deliberately not routed through
-`cooked--send-job-control\=': there is no tty character for this and no line
+`cooked--send-job-control': there is no tty character for this and no line
 discipline to turn one into anything, so a signal is not the fallback here --
 it is the only thing this could ever have been.  Written as one directly, so
 the shape of the code says which kind of thing it is.
 
-Where comint puts `comint-kill-subjob\=', which cannot be inherited: it calls
-`kill-process\=' on the buffer\='s process, and this buffer\='s process is
-`cooked--wake\=', the pipe the child rings when output is pending.  Left alone,
+Where comint puts `comint-kill-subjob', which cannot be inherited: it calls
+`kill-process' on the buffer's process, and this buffer's process is
+`cooked--wake', the pipe the child rings when output is pending.  Left alone,
 that menu entry killed the doorbell and left the child running behind a buffer
 that had stopped hearing from it.
 
@@ -354,18 +354,18 @@ to anything that could decline it."
 
 Deliberately absent from the menu, which is worth saying here rather than
 leaving to look like an oversight.  A terminal has no continue character: the
-tty carries `intr\=', `quit\=' and `susp\=' in `c_cc\=' and nothing else, so
-`cooked-interrupt\=', `cooked-quit\=' and `cooked-suspend\=' each have a byte to
-write and this has none.  What resumes a stopped job is the shell\='s own `fg\=',
+tty carries `intr', `quit' and `susp' in `c_cc' and nothing else, so
+`cooked-interrupt', `cooked-quit' and `cooked-suspend' each have a byte to
+write and this has none.  What resumes a stopped job is the shell's own `fg',
 a piece of bookkeeping the terminal is not party to -- its part ended when it
-wrote the `susp\=' character.
+wrote the `susp' character.
 
-It exists because comint\='s `comint-continue-subjob\=' is inherited, and
-inherited it calls `continue-process\=' on `cooked--wake\='.  The remap is the
+It exists because comint's `comint-continue-subjob' is inherited, and
+inherited it calls `continue-process' on `cooked--wake'.  The remap is the
 point of this function; anyone reaching for it directly almost certainly wants
-`fg\='.
+`fg'.
 
-Named rather than numbered for the reason `cooked--send-job-control\=' is, and
+Named rather than numbered for the reason `cooked--send-job-control' is, and
 this was the worse of the two: 18 is SIGCONT on Linux and SIGTSTP on the BSDs,
 so on macOS the continue stopped the job it was asked to restart."
   (interactive)
@@ -380,37 +380,37 @@ so on macOS the continue stopped the job it was asked to restart."
 (defcustom cooked-beginning-of-line-skips-prompt t
   "Whether a start-of-line motion stops at the command rather than the prompt.
 
-Column 0 of the prompt row is inside the prompt, which is the child\='s text and
-carries `read-only\=': a motion landing there has found the start of a *line*
+Column 0 of the prompt row is inside the prompt, which is the child's text and
+carries `read-only': a motion landing there has found the start of a *line*
 and not the start of anything the user may edit, so the keystroke after it
-either signals or is thrown away by `cooked--snap-to-input\='.  The useful
-position is where the pending input begins, and `cooked--input-start-position\='
+either signals or is thrown away by `cooked--snap-to-input'.  The useful
+position is where the pending input begins, and `cooked--input-start-position'
 knows it exactly -- taken from the cursor cell at each drain, so it holds with
 no shell integration at all and for a prompt that ends mid-row, neither of
 which a line-oriented answer can manage.
 
 A deliberate divergence, this.  comint has the same position and binds it to
-\\`C-c C-a\=' (`comint-bol-or-process-mark\='), leaving \\`C-a\=' at true column 0;
-`eat\=' inherits that unchanged.  The argument for keeping the literal motion
+\\`C-c C-a' (`comint-bol-or-process-mark'), leaving \\`C-a' at true column 0;
+`eat' inherits that unchanged.  The argument for keeping the literal motion
 reachable is a good one and it is kept -- pressing the key again from the input
-start goes on to column 0, and evil\='s \\`0\=' and \\`gI\=' are left stock.  What
+start goes on to column 0, and evil's \\`0' and \\`gI' are left stock.  What
 is not kept is which of the two the unmodified key gets, because in a terminal
 the prompt is never a destination: it is not editable, not selectable as input,
 and not where any subsequent command wants to act.
 
-One knob for all of them: \\[cooked-beginning-of-line] and, where `cooked-evil\='
-is loaded, \\`^\=' and \\`I\='.  Nil restores the stock behaviour of each."
+One knob for all of them: \\[cooked-beginning-of-line] and, where `cooked-evil'
+is loaded, \\`^' and \\`I'.  Nil restores the stock behaviour of each."
   :type 'boolean :group 'cooked)
 
 (defun cooked--input-line-start ()
   "Where the pending input begins, if point is on the line it begins on.
 
-Nil everywhere else, which is how scrollback, a full-screen program\='s screen
+Nil everywhere else, which is how scrollback, a full-screen program's screen
 and a session that has died all fall through to the stock command instead of
 being dragged to a prompt that is elsewhere in the buffer.
 
-Point\='s own line is the test, rather than the input state alone, because input
-that has grown a second line through `cooked-newline\=' has ordinary line starts
+Point's own line is the test, rather than the input state alone, because input
+that has grown a second line through `cooked-newline' has ordinary line starts
 below the first -- the prompt is on the first row only, so on every row after
 it column 0 already is the start of the command."
   (when (and cooked-beginning-of-line-skips-prompt (cooked--input-state-p))
@@ -420,12 +420,12 @@ it column 0 already is the start of the command."
 (defun cooked-beginning-of-line (&optional n)
   "Move point to the start of the command being typed, not of the prompt.
 
-With N, or from the input start already, this is `move-beginning-of-line\=' --
-which makes the key comint\='s double-tap read the other way round: the first
+With N, or from the input start already, this is `move-beginning-of-line' --
+which makes the key comint's double-tap read the other way round: the first
 press leaves the prompt behind, and a second from there goes on to column 0 for
-anyone who wanted the line.  See `cooked-beginning-of-line-skips-prompt\='.
+anyone who wanted the line.  See `cooked-beginning-of-line-skips-prompt'.
 
-The interactive spec is `move-beginning-of-line\=''s own, `^\=' included, so
+The interactive spec is `move-beginning-of-line''s own, `^' included, so
 shift-selection extends from here exactly as it would from the command this
 replaces."
   (interactive "^p")

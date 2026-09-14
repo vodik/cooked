@@ -39,16 +39,16 @@
 (defun cooked--set-tuning-option (symbol value)
   "Set SYMBOL to VALUE and hand the pair to every session already running.
 
-The `:set' behind `cooked-min-redisplay-interval\=' and
-`cooked-backlog-limit\='.
+The `:set' behind `cooked-min-redisplay-interval' and
+`cooked-backlog-limit'.
 
 Two numbers, and only one of them is a pace.  That is what the name is being
-careful about: `cooked-min-redisplay-interval\=' says how often the screen is
+careful about: `cooked-min-redisplay-interval' says how often the screen is
 redrawn while the child is busy, and the frame ceiling derives from it, so it is
-the whole of how fast a session draws.  `cooked-backlog-limit\=' sets no rate at
+the whole of how fast a session draws.  `cooked-backlog-limit' sets no rate at
 all.  It is backpressure -- how much may pile up while Emacs falls behind before
 the reader stops taking bytes off the pty, at which point the pty's own buffer
-fills and the child blocks in `write\='.  One paces, the other pauses; calling
+fills and the child blocks in `write'.  One paces, the other pauses; calling
 the pair pacing would advertise a second pace mechanism that deliberately does
 not exist.
 
@@ -58,11 +58,11 @@ killing the terminal you are tuning it for.
 Both are sent whichever one changed, because the core takes them together: they
 are tuned as a pair, a longer interval leaving more to accumulate between drains
 and so filling the queue sooner, and one call is what stops half a pair being
-set.  `set-default\=' first, so what is sent is what the variables now say rather
+set.  `set-default' first, so what is sent is what the variables now say rather
 than one new value and one stale one.
 
 Sessions are walked rather than notified, for the reason
-`cooked--dolist-buffers\=' exists: a buffer displayed nowhere still has a child
+`cooked--dolist-buffers' exists: a buffer displayed nowhere still has a child
 running at whatever rate it was last told."
   (set-default symbol value)
   (cooked--dolist-buffers

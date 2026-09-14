@@ -144,16 +144,16 @@ child with a tall status block; lower it to see output sooner."
   "Columns to give the child, or nil to follow the buffer's window.
 
 Fixed by default, and that is not laziness.  COLUMNS decides where the child
-wraps, the wrap decides what `cooked-process--rejoin\=' rejoins, and a buffer
+wraps, the wrap decides what `cooked-process--rejoin' rejoins, and a buffer
 whose text depends on how wide a window happened to be when the build ran is
-not reproducible.  Following the window is friendlier and is one `setq\=' away.
+not reproducible.  Following the window is friendlier and is one `setq' away.
 
 Raising it to escape the wrap entirely is the tempting mistake, and it buys
 nothing: the wrap is exactly invertible, so a 20,000-line log retires
 byte-identical text at 120 columns and at 8192.  What changes is the cost.  A
 child that erases to end of line with a background colour set fills every
 column to the margin, and that log went from 2.4 MB and 1.3 seconds at 120 to
-164 MB and 70 seconds at 8192.  Eighty is the floor worth having -- `curl -#\='
+164 MB and 70 seconds at 8192.  Eighty is the floor worth having -- `curl -#'
 pads its progress bar to it -- and there is no reason above a few hundred."
   :type '(choice integer (const :tag "Follow the window" nil)))
 
@@ -161,14 +161,14 @@ pads its progress bar to it -- and there is no reason above a few hundred."
   "Whether the child's colours reach the consumer's buffer.
 
 On, because the reason to give a build a pty is to be shown what it shows a
-human, and half of that is colour: cargo's green `Compiling\=', rustc's red
-`error\=', the bold path in a diagnostic.  The emulator has already parsed the
-SGR that named them -- `cooked--drain\=' hands the styling back beside the text
+human, and half of that is colour: cargo's green `Compiling', rustc's red
+`error', the bold path in a diagnostic.  The emulator has already parsed the
+SGR that named them -- `cooked--drain' hands the styling back beside the text
 -- so dropping it would be throwing away the more expensive half of the work.
 
 Off is the older behaviour and still the right answer for a consumer that would
 rather own the styling itself, or one whose faces are load-bearing in some way
-`grep-mode\=' is not; see `cooked-process-excluded-modes\=' for the stronger
+`grep-mode' is not; see `cooked-process-excluded-modes' for the stronger
 version of that exception."
   :type 'boolean)
 
@@ -182,29 +182,29 @@ which is not a defect in the emulator but the child being careful.  The bar
 only ever exists on the *live* grid.
 
 So it is shown from there, as an overlay after the last retired line: not buffer
-text, which is the whole point.  `compilation-mode\=' never parses it, no
-`next-error\=' can land in it, `process-mark\=' does not move for it, and it is
+text, which is the whole point.  `compilation-mode' never parses it, no
+`next-error' can land in it, `process-mark' does not move for it, and it is
 replaced wholesale on every drain and gone at exit -- by which time the same
-rows have retired properly, as text, through `cooked-process--residue\='.
+rows have retired properly, as text, through `cooked-process--residue'.
 
 Off gives the buffer that is only ever what the child finished saying."
   :type 'boolean)
 
 (defconst cooked-process--rejoin t
-  "Always rejoin wrapped lines, unlike `cooked-rejoin-wrapped-lines\='.
+  "Always rejoin wrapped lines, unlike `cooked-rejoin-wrapped-lines'.
 
 That option is about a transcript somebody reads, where breaking a wrapped line
 back apart is a defensible taste.  Here it decides whether a regexp matches: a
-diagnostic the child wrapped at COLUMNS has `error:\=' with a newline through it
+diagnostic the child wrapped at COLUMNS has `error:' with a newline through it
 until this rejoins it, and no consumer of this file wants that.
 
 A constant rather than an option, and it has to stay one.  Giving the child a
 width is what makes it wrap at all -- nothing wraps on the 0x0 pty Emacs would
 have handed it -- so this is not a preference about presentation but the other
-half of a debt `cooked-process-columns\=' incurs.  The reason a wide grid buys
+half of a debt `cooked-process-columns' incurs.  The reason a wide grid buys
 nothing, and the reason the width may be chosen for cost alone, is that the
 imposed wrap inverts exactly; an option here would leave it inverted only
-sometimes, and the argument in `cooked-process-columns\=' would stop holding.")
+sometimes, and the argument in `cooked-process-columns' would stop holding.")
 
 (defvar-local cooked-process--session nil
   "Native session handle, in the hidden host buffer.")
@@ -221,10 +221,10 @@ sometimes, and the argument in `cooked-process-columns\=' would stop holding.")
 
 A drain reports only the rows it damaged, so the untouched ones have to be
 remembered somewhere to be shown at all.  Coherent under scrolling because
-`Screen::scroll_up\=' in src/emu/screen.rs damages the whole region: rows that
+`Screen::scroll_up' in src/emu/screen.rs damages the whole region: rows that
 merely shifted are re-reported rather than left for this to shift itself.")
 (defvar-local cooked-process--tail nil
-  "Overlay showing `cooked-process--live\=', in the consumer\='s buffer.")
+  "Overlay showing `cooked-process--live', in the consumer's buffer.")
 
 (defvar-local cooked-process--host nil
   "The hidden host buffer, set in the *consumer's* buffer.
@@ -316,44 +316,44 @@ one `compilation-start' rather than advising every caller of it."
 ;;;; Rendering
 
 (defun cooked-process--text (block)
-  "BLOCK\='s text, carrying the child\='s colours when they are wanted.
+  "BLOCK's text, carrying the child's colours when they are wanted.
 
-BLOCK is what `cooked--drain\=' hands back for a run of rendered text --
-`(TEXT STYLE-SPANS DECO-SPANS ROWS)\=', the shape
-`cooked--render-block\=' takes.  Only the first two are used, and that is a
+BLOCK is what `cooked--drain' hands back for a run of rendered text --
+`(TEXT STYLE-SPANS DECO-SPANS ROWS)', the shape
+`cooked--render-block' takes.  Only the first two are used, and that is a
 decision each.  The text can be several screen rows separated by newlines, since
 the core coalesces contiguous damaged rows into one block;
-`cooked-process--remember-rows\=' is where they are told apart again.
+`cooked-process--remember-rows' is where they are told apart again.
 
-Decorations are dropped because they are a *terminal\='s* answer to a glyph the
+Decorations are dropped because they are a *terminal's* answer to a glyph the
 font cannot draw -- a box character composed out of overlays, a shade dithered
 against the screen column it sits on.  A compilation buffer has no screen
 column, and text that displays as something other than itself is text a regexp
 matches and the eye does not.
 
 Links are dropped because they could not be followed from there.  A
-`cooked-link-id\=' resolves through `cooked--link-uris\=', which is buffer-local
-to the session -- the hidden host, here -- so an id carried into the consumer\='s
-buffer would arrive as a `mouse-face\=' over text whose destination nothing in
+`cooked-link-id' resolves through `cooked--link-uris', which is buffer-local
+to the session -- the hidden host, here -- so an id carried into the consumer's
+buffer would arrive as a `mouse-face' over text whose destination nothing in
 that buffer can look up.  Worse than no link.
 
 The styling is applied by rendering into the host buffer and lifting the result
-out again, rather than by building a propertized string: `cooked--render-block\='
+out again, rather than by building a propertized string: `cooked--render-block'
 is the one place that knows the packed span format, and its face cache is
 buffer-local, so the host is what gives the memoization a lifetime -- one
-build\='s worth.  A theme changed mid-build therefore leaves the rest of that
-build\='s colours resolved against the old theme, which is the same thing the
+build's worth.  A theme changed mid-build therefore leaves the rest of that
+build's colours resolved against the old theme, which is the same thing the
 text already above it in the buffer says, and the next build starts a fresh
 host and a fresh cache.
 
-Both `face\=' and `font-lock-face\=' are set, to the same value.  Neither alone
-covers both consumers: `compilation-mode\=' fontifies, and
-`font-lock-default-unfontify-region\=' strips a bare `face\=' from every region
-it touches -- which is why `ansi-color\=' reaches for `font-lock-face\=' in
+Both `face' and `font-lock-face' are set, to the same value.  Neither alone
+covers both consumers: `compilation-mode' fontifies, and
+`font-lock-default-unfontify-region' strips a bare `face' from every region
+it touches -- which is why `ansi-color' reaches for `font-lock-face' in
 exactly this situation -- while a consumer with no font-lock at all, such as
-`async-shell-command\='s buffer, never installs the
-`char-property-alias-alist\=' entry that would make `font-lock-face\=' visible.
-The alias is consulted only where `face\=' is absent, so the pair is read as
+`async-shell-command's buffer, never installs the
+`char-property-alias-alist' entry that would make `font-lock-face' visible.
+The alias is consulted only where `face' is absent, so the pair is read as
 one face and not as two."
   (when block
     (if (not cooked-process-styled)
@@ -387,9 +387,9 @@ business and therefore the consumer's, which is the whole of what makes
 ;;;; The live tail
 
 (defun cooked-process--remember-rows (rows height &optional shifts edits)
-  "Fold a drain\='s ROWS, SHIFTS and EDITS into `cooked-process--live\='.
+  "Fold a drain's ROWS, SHIFTS and EDITS into `cooked-process--live'.
 
-HEIGHT is the grid\='s row count, which decides the vector\='s length: a resize
+HEIGHT is the grid's row count, which decides the vector's length: a resize
 between drains means the remembered rows describe a screen that no longer
 exists, and the drain that carries the new height re-reports every row of the
 new one.
@@ -435,7 +435,7 @@ trimmed only when it is shown."
               (substring new 0 (min length (length new))))))))
 
 (defun cooked-process--tail-text ()
-  "`cooked-process--live\=' as text, or nil when the grid says nothing.
+  "`cooked-process--live' as text, or nil when the grid says nothing.
 
 Trailing blank rows are dropped rather than shown.  The grid is a fixed eight
 rows and a child using one of them would otherwise be followed by seven blank
@@ -450,12 +450,12 @@ lines, which is a worse answer than no tail at all."
     (mapconcat #'identity (cl-subseq live 0 (1+ last)) "\n")))
 
 (defun cooked-process--refresh-tail (host)
-  "Show HOST\='s live grid below the retired text, or take the overlay down.
+  "Show HOST's live grid below the retired text, or take the overlay down.
 
-Placed at `point-max\=' on every drain rather than left to a marker\='s insertion
+Placed at `point-max' on every drain rather than left to a marker's insertion
 type: the retired text of this same drain has just been inserted there, and
 moving the overlay afterwards is one call against reasoning about which side of
-an insertion at `process-mark\=' a zero-length overlay ends up on."
+an insertion at `process-mark' a zero-length overlay ends up on."
   (with-current-buffer host
     (let* ((proc cooked-process--proc)
            (buffer (and proc (process-buffer proc)))
@@ -485,7 +485,7 @@ an insertion at `process-mark\=' a zero-length overlay ends up on."
                                  text))))))))
 
 (defun cooked-process--drop-tail ()
-  "Remove the live tail from the consumer\='s buffer.  Runs in the host.
+  "Remove the live tail from the consumer's buffer.  Runs in the host.
 
 Called from the exit path before the residue is flushed: those same rows are
 about to arrive as text, and an overlay left standing would show the last frame
@@ -505,25 +505,25 @@ of the build twice."
 
 The colours are the questions a child asks to decide how to draw, and their
 answers come from faces every buffer shares, so the hidden host answers them as
-a terminal would: a build tool asking `OSC 11 ; ?\=' for the background is told
-the theme\='s.  The rest of `cooked-osc-handlers\=' act on the buffer showing the
+a terminal would: a build tool asking `OSC 11 ; ?' for the background is told
+the theme's.  The rest of `cooked-osc-handlers' act on the buffer showing the
 terminal, and there is none: a title would rename the host, and OSC 7 would move
-its `default-directory\='.  The clipboard and the pointer shape are not offered
+its `default-directory'.  The clipboard and the pointer shape are not offered
 to a build either, so those queries go unanswered, as they did before any of
 this.")
 
 (defun cooked-process--answer (events)
-  "Owe the child what EVENTS, a drain\='s `:events\=', ask of its terminal.
+  "Owe the child what EVENTS, a drain's `:events', ask of its terminal.
 
-A `reply\=' is one the core composed alone but held behind a query only Lisp
+A `reply' is one the core composed alone but held behind a query only Lisp
 answers, so it is passed on in its place.  An OSC query is answered through
-`cooked-process--query-handlers\='.  A colour set in the same sequence is
+`cooked-process--query-handlers'.  A colour set in the same sequence is
 refused, since it would remap a face in a buffer nobody sees, or set the
 cursor colour of the whole frame.  Every other event is about a buffer showing
 the terminal and is dropped.
 
-The caller says `cooked--ready\=' afterwards, and must: until then the core
-keeps every later reply behind the query, so DA1 after `OSC 11 ; ?\=' would
+The caller says `cooked--ready' afterwards, and must: until then the core
+keeps every later reply behind the query, so DA1 after `OSC 11 ; ?' would
 wait for as long as the child lived."
   (cooked--batching-replies cooked--session
     (dolist (event events)
@@ -542,9 +542,9 @@ Errors are reported rather than swallowed: this runs from a process filter,
 where Emacs discards them, and the symptom would be a compilation buffer that
 simply stopped filling.
 
-The drain is followed by `cooked--ready\=' however it went, as
-`cooked--drain-and-apply\=' follows its own, because that is what tells the core
-the drain\='s queries have been answered."
+The drain is followed by `cooked--ready' however it went, as
+`cooked--drain-and-apply' follows its own, because that is what tells the core
+the drain's queries have been answered."
   (when (and host (buffer-live-p host))
     (with-current-buffer host
       (when-let* ((session cooked-process--session))
@@ -574,20 +574,20 @@ the drain\='s queries have been answered."
 ;;;; Exit
 
 (defun cooked-process--residue (host)
-  "Everything still on HOST\='s grid, as text, or nil.
+  "Everything still on HOST's grid, as text, or nil.
 
 Retired by shrinking the grid to a single row rather than by reading the rows
-out of it.  The two are not the same text: `:rows\=' is one entry per *screen*
+out of it.  The two are not the same text: `:rows' is one entry per *screen*
 row, so a logical line the child wrapped comes back in the pieces the wrap made
-of it, and the rejoin that would have put them together belongs to `:scrolled\='
+of it, and the rejoin that would have put them together belongs to `:scrolled'
 -- which is to say, to rows that have retired.  A resize retires them.  Rows
 leaving the top of a shrinking grid scroll off exactly as they do under a child
 that keeps printing, so the last screenful of a build arrives in the same shape
 as every screenful before it, and a diagnostic that happened to be near the end
-is not the one `compilation-mode\=' fails to match.
+is not the one `compilation-mode' fails to match.
 
 What is left after that is row 0, which no scroll can reach.  It is the
-cursor\='s row and is usually empty; when it is not, `:head\=' is what says
+cursor's row and is usually empty; when it is not, `:head' is what says
 whether it continues the line above rather than starting one."
   (with-current-buffer host
     (let ((session cooked-process--session)
@@ -767,7 +767,7 @@ nobody can answer, and a pty session is exactly where somebody can -- the
 `getpass' case reaches the minibuffer.
 
 `cooked-process-excluded-modes' is consulted here rather than inside the
-predicate because the mode is `compilation-start\='s second argument and not
+predicate because the mode is `compilation-start's second argument and not
 something a user predicate over the command string could recover.
 
 A remote `default-directory' is left alone, and this is the one guard here

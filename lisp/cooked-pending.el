@@ -32,17 +32,17 @@ See `cooked--check-undo-anchor'.")
 (defun cooked--input-mark ()
   "The marker where the pending input begins, or nil before a session.
 
-This is the buffer\='s process mark, not a variable of our own.  comint\='s
-entire command set navigates relative to `process-mark\=', so keeping the near
-edge of the input region anywhere else is what made `comint-previous-input\='
+This is the buffer's process mark, not a variable of our own.  comint's
+entire command set navigates relative to `process-mark', so keeping the near
+edge of the input region anywhere else is what made `comint-previous-input'
 answer \"Not at command line\" -- the mark it consults was one cooked never
 maintained.  Storing it here rather than copying it into a private marker means
 there is no second opinion to drift.
 
-`cooked--wake\=' carries it.  The pipe is a doorbell the child rings and owns no
+`cooked--wake' carries it.  The pipe is a doorbell the child rings and owns no
 text, so its mark is free for this, and attaching it to the buffer is what
-makes `get-buffer-process\=' answer at all.  The mark points nowhere whenever
-the child owns the keyboard, so `cooked--input-region\=' is the guard callers
+makes `get-buffer-process' answer at all.  The mark points nowhere whenever
+the child owns the keyboard, so `cooked--input-region' is the guard callers
 should go through."
   (and cooked--wake (process-mark cooked--wake)))
 
@@ -57,10 +57,10 @@ should go through."
   (setq cooked--input-end nil))
 
 (defun cooked--input-region ()
-  "The pending input\='s bounds as (START . END), or nil when there is no region.
+  "The pending input's bounds as (START . END), or nil when there is no region.
 
-Both ends are set together by `cooked--restore-pending-input\=' and cleared
-together by `cooked--clear-input-region\=', but either can also be left pointing
+Both ends are set together by `cooked--restore-pending-input' and cleared
+together by `cooked--clear-input-region', but either can also be left pointing
 nowhere when its buffer text goes, so both have to be checked.  Callers that
 want one end of a region that exists should take it from here rather than
 repeating the pair of nil tests."
@@ -73,21 +73,21 @@ repeating the pair of nil tests."
   "Discard the undo history if the input line is no longer where it was.
 
 Undo records exactly one thing in a cooked buffer: what the user has typed at
-the prompt.  Everything else the buffer contains is written on the child\='s
-behalf and kept out of the history by `cooked--with-child-edit\='.
+the prompt.  Everything else the buffer contains is written on the child's
+behalf and kept out of the history by `cooked--with-child-edit'.
 
 What is left still has to be true, and undo entries name buffer positions.  Any
 output at all rewrites the rows around the prompt and so moves the input line;
 the entries recorded against the old position then describe screen text, which
-undo would damage as readily as it would repair a typo.  The line\='s start is
+undo would damage as readily as it would repair a typo.  The line's start is
 therefore the whole validity condition -- while it holds still every entry
 recorded against it is good, and the moment it moves they are worthless
 together.
 
 Cheap and idempotent by design, so every caller that can move the line calls it
-without coordinating: the drain, `cooked--drain-and-apply\=' once more on the way
+without coordinating: the drain, `cooked--drain-and-apply' once more on the way
 out in case the drain signalled partway, the two scrollback deletions, and
-`cooked-refresh\='."
+`cooked-refresh'."
   (let ((start (cooked--input-start-position)))
     (unless (eql start cooked--undo-anchor)
       (setq cooked--undo-anchor start)
@@ -103,18 +103,18 @@ out in case the drain signalled partway, the two scrollback deletions, and
 (defun cooked--discard-undo ()
   "Throw away the undo history, and everything else holding a piece of it.
 
-`buffer-undo-list\=' is only the half of it, because undo is not a function of
-the list alone.  A run of undos in progress is carried in `pending-undo-list\=',
-a cons *inside* that list, and `undo-more\=' walks it without consulting the list
-again; whether a run is in progress is decided by `last-command\=', which a drain
-does not touch.  So: \\`u\=', a background job prints, and the next \\`u\=' undoes
+`buffer-undo-list' is only the half of it, because undo is not a function of
+the list alone.  A run of undos in progress is carried in `pending-undo-list',
+a cons *inside* that list, and `undo-more' walks it without consulting the list
+again; whether a run is in progress is decided by `last-command', which a drain
+does not touch.  So: \\`u', a background job prints, and the next \\`u' undoes
 conses describing text that has since moved -- in a buffer whose history is
 supposedly empty, which is worse than the stale entries this was called to get
 rid of.  Locally, because that variable is global: a drain runs from a process
 filter, and clearing it outright would cut short an undo run in whatever other
 buffer the user was actually in.
 
-evil holds a cons of the list as well (`evil-undo-list-pointer\=', taken on
+evil holds a cons of the list as well (`evil-undo-list-pointer', taken on
 entering insert state so the whole insertion undoes as one step), and undo-tree
 keeps a tree beside the list, treating the list as its staging area.  Neither
 is ours to maintain and both are unreachable once the list they were taken from
@@ -146,19 +146,19 @@ was never built."
 (defun cooked--mark-pasted (text)
   "TEXT with every character marked as having arrived by paste.
 
-The mark is the `cooked-pasted\=' text property, and what reads it is
-`cooked--strip-pasted-controls\=', which strips control bytes from marked text
-only.  That is where a terminal draws the line: xterm\='s
-`disallowedPasteControls\=' filters what was pasted and never what was typed, so
+The mark is the `cooked-pasted' text property, and what reads it is
+`cooked--strip-pasted-controls', which strips control bytes from marked text
+only.  That is where a terminal draws the line: xterm's
+`disallowedPasteControls' filters what was pasted and never what was typed, so
 an ESC yanked into the line goes to the shell as a space while one typed with
 \\[quoted-insert] goes as ESC.
 
-Buffer-locally on `yank-transform-functions\=', which sees every string
-`insert-for-yank\=' inserts: `yank\=', `yank-pop\=', evil\='s paste commands, the
-`xterm-paste\=' a terminal frame delivers, and `mouse-yank-primary\='.  A drop
+Buffer-locally on `yank-transform-functions', which sees every string
+`insert-for-yank' inserts: `yank', `yank-pop', evil's paste commands, the
+`xterm-paste' a terminal frame delivers, and `mouse-yank-primary'.  A drop
 and a history entry are marked where they are inserted.  Two insertions go
 unmarked: an evil block paste, whose handler inserts its own copy of the lines,
-and any yank under a `yank-excluded-properties\=' of t, which removes every
+and any yank under a `yank-excluded-properties' of t, which removes every
 property from the text, this one included."
   (propertize text 'cooked-pasted t))
 
@@ -167,9 +167,9 @@ property from the text, this one included."
 
 The drain lifts the pending input out and puts it back on every redraw, and
 submitting or delegating the line reads it once more.  Each of those has to keep
-`cooked-pasted\=' or a yanked ESC is typing again by the time it is sent, and
+`cooked-pasted' or a yanked ESC is typing again by the time it is sent, and
 none should keep anything else: a face or a link property left over from the
-row the line sits on is the screen\='s, not the line\='s."
+row the line sits on is the screen's, not the line's."
   (let ((text (buffer-substring-no-properties start end))
         (from start))
     (while (< from end)
@@ -182,20 +182,20 @@ row the line sits on is the screen\='s, not the line\='s."
 (defvar cooked-input-syntax-table)      ; cooked-mode.el, with the buffer's own.
 
 (defun cooked--mark-input-syntax ()
-  "Give the pending input the prompt\='s word syntax.
+  "Give the pending input the prompt's word syntax.
 
-The buffer\='s own table, `cooked-mode-syntax-table\=', makes `?#@&+=\=' word
-constituents for the output, so a double-click takes `simon@example.com\=' whole.
+The buffer's own table, `cooked-mode-syntax-table', makes `?#@&+=' word
+constituents for the output, so a double-click takes `simon@example.com' whole.
 At the prompt that same table made \\[backward-kill-word] after
-`git log --author=simon\=' kill the whole flag where a shell\='s line editor
-kills `simon\='.  So the input region carries `cooked-input-syntax-table\=' as a
-`syntax-table\=' property, which `parse-sexp-lookup-properties\=' makes every
+`git log --author=simon' kill the whole flag where a shell's line editor
+kills `simon'.  So the input region carries `cooked-input-syntax-table' as a
+`syntax-table' property, which `parse-sexp-lookup-properties' makes every
 word motion and every syntax-aware regexp honour.
 
 Put back from three places, because each of them can leave text in the region
-without it.  `cooked--restore-pending-input\=' re-creates the region on every
-drain, `cooked--replace-input\=' fills it from history, and
-`cooked--mark-input-syntax-before-command\=' covers whatever the last command
+without it.  `cooked--restore-pending-input' re-creates the region on every
+drain, `cooked--replace-input' fills it from history, and
+`cooked--mark-input-syntax-before-command' covers whatever the last command
 inserted: a character typed at the very start of the line inherits nothing, and
 a yank inherits nothing anywhere."
   (when-let* ((region (cooked--input-region)))
@@ -205,8 +205,8 @@ a yank inherits nothing anywhere."
                            'syntax-table cooked-input-syntax-table)))))
 
 (defun cooked--mark-input-syntax-before-command ()
-  "Run `cooked--mark-input-syntax\=' before a command reads the words.
-On `pre-command-hook\=', so \\[backward-kill-word] or evil\='s `dw\=' sees the
+  "Run `cooked--mark-input-syntax' before a command reads the words.
+On `pre-command-hook', so \\[backward-kill-word] or evil's `dw' sees the
 narrow words over the text the previous command typed."
   (cooked--protect-hook
     (cooked--mark-input-syntax)))
@@ -263,7 +263,7 @@ submitted while the child is sent an empty line."
 
 (defun cooked--take-pending-input ()
   "Remove the pending input from the buffer and return it.
-The paste mark comes with it; see `cooked--input-substring\='."
+The paste mark comes with it; see `cooked--input-substring'."
   (when-let* ((region (cooked--input-region))
               (text (cooked--input-substring (car region) (cdr region))))
     (delete-region (car region) (cdr region))

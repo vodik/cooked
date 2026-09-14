@@ -45,17 +45,17 @@
   "How to ask each shell for its history, newest first.
 
 An alist of (SHELL . COMMAND).  COMMAND is either a shell command line, run
-by `cooked-history--run\=', or a *function*
-called with no arguments in the session\='s buffer, which returns the list of
+by `cooked-history--run', or a *function*
+called with no arguments in the session's buffer, which returns the list of
 entries itself.  The function form is the seam atuin, histdb and any other
 history database plug into, and it is why this is not a plain list of strings.
 
-The shells are asked *interactively* (`-i\=') because a non-interactive shell
-does not read the rc file that sets `HISTFILE\=', and would answer with an empty
+The shells are asked *interactively* (`-i') because a non-interactive shell
+does not read the rc file that sets `HISTFILE', and would answer with an empty
 history or with the wrong one.  That does mean the rc file runs, so a shell
 whose rc is slow makes this slow; a function value is the way out.
 
-fish emits NUL-separated entries, which is why it is asked with `history -z\=':
+fish emits NUL-separated entries, which is why it is asked with `history -z':
 its entries can contain newlines, and splitting those on newlines would offer
 you half a command.  The output is split on NUL whenever it contains one and on
 newlines otherwise, so a shell not listed here works if it can do either."
@@ -63,18 +63,18 @@ newlines otherwise, so a shell not listed here works if it can do either."
   :group 'cooked-history)
 
 (defcustom cooked-history-shell nil
-  "Which shell\='s history \\[cooked-history] asks for, or nil to guess.
+  "Which shell's history \\[cooked-history] asks for, or nil to guess.
 
-nil guesses from `cooked-shell\=', which is what `M-x cooked\=' starts.  The
+nil guesses from `cooked-shell', which is what `M-x cooked' starts.  The
 guess is wrong for a session started with an explicit command -- cooked keeps no
 per-buffer record of what it launched, and inventing one for this would be a
 change to the core on behalf of an optional layer.  Set this buffer-locally in
 such a session, or set it globally if you always use one shell.
 
-A remote session, one whose `default-directory\=' is a TRAMP path because the
-far shell reported its directory, guesses from the far host\='s `SHELL\='
-instead, since the local `cooked-shell\=' says nothing about what ssh started
-there.  That is the login shell, so it is wrong for someone who ran `fish\=' by
+A remote session, one whose `default-directory' is a TRAMP path because the
+far shell reported its directory, guesses from the far host's `SHELL'
+instead, since the local `cooked-shell' says nothing about what ssh started
+there.  That is the login shell, so it is wrong for someone who ran `fish' by
 hand after logging in to a host whose login shell is bash; the history command
 then fails and says so, and setting this is the way out."
   :type '(choice (const :tag "Guess from `cooked-shell'" nil) symbol)
@@ -91,8 +91,8 @@ oldest."
   :group 'cooked-history)
 
 (defun cooked-history--shell ()
-  "The shell symbol to look up in `cooked-history-commands\='.
-See `cooked-history-shell\=' for how it is guessed, here and on a remote host."
+  "The shell symbol to look up in `cooked-history-commands'.
+See `cooked-history-shell' for how it is guessed, here and on a remote host."
   (or cooked-history-shell
       (let ((name (file-name-nondirectory
                    (if (file-remote-p default-directory)
@@ -106,7 +106,7 @@ See `cooked-history-shell\=' for how it is guessed, here and on a remote host."
   "Split OUTPUT into entries, on NUL if it uses them and on newlines if not.
 
 Deciding per call rather than per shell so an unlisted shell works either way,
-and because `history -z\=' is a fish flag rather than a fish property -- a
+and because `history -z' is a fish flag rather than a fish property -- a
 wrapper could reasonably emit NULs from anything."
   (let ((entries (split-string output (if (string-search "\0" output) "\0" "\n") t)))
     (mapcar #'string-trim entries)))
@@ -114,9 +114,9 @@ wrapper could reasonably emit NULs from anything."
 (defun cooked-history--run (command)
   "Run the shell command line COMMAND and return what it wrote to stdout.
 
-Through `process-file\=', so a session whose `default-directory\=' is a TRAMP
-path asks the far host.  The command line is run by `shell-file-name\=' here,
-and by /bin/sh on a remote host.  `shell-file-name\=' is an absolute path on
+Through `process-file', so a session whose `default-directory' is a TRAMP
+path asks the far host.  The command line is run by `shell-file-name' here,
+and by /bin/sh on a remote host.  `shell-file-name' is an absolute path on
 this machine, such as /opt/homebrew/bin/fish, and TRAMP runs it by that path
 rather than looking the name up, so a Linux server would answer
 \"sh: /opt/homebrew/bin/fish: not found\".  Every host has /bin/sh.
@@ -124,7 +124,7 @@ rather than looking the name up, so a Linux server would answer
 Stderr goes to a file of its own rather than into the output.  An interactive
 shell with no controlling terminal, which is what a GUI Emacs starts, prints
 \"bash: no job control in this shell\" before the history, and that line would
-be offered as the newest entry.  A non-zero exit status signals a `user-error\='
+be offered as the newest entry.  A non-zero exit status signals a `user-error'
 with the first line of stderr, so a missing shell or an empty zsh history is
 reported rather than offered as a command."
   (let ((stderr (make-temp-file "cooked-history")))
@@ -145,18 +145,18 @@ reported rather than offered as a command."
       (delete-file stderr))))
 
 (defun cooked-history--refuse-while-busy ()
-  "Signal a `user-error\=' unless the shell is at its prompt.
+  "Signal a `user-error' unless the shell is at its prompt.
 
-While a command owns the keyboard, as `vim\=' does, an entry would be pasted
-into that program rather than put on the shell\='s line.  `cooked--policy\='
-says `command\=' or `alt\=' then, and those are the states refused.  `raw\=' is
+While a command owns the keyboard, as `vim' does, an entry would be pasted
+into that program rather than put on the shell's line.  `cooked--policy'
+says `command' or `alt' then, and those are the states refused.  `raw' is
 allowed, because without shell integration it is also what a shell at its own
 prompt looks like."
   (when (memq (cooked--policy) '(command alt))
     (user-error "cooked: a command is running; history is for the prompt")))
 
 (defun cooked-history--entries ()
-  "This session\='s history, newest first, without duplicates."
+  "This session's history, newest first, without duplicates."
   (let* ((shell (cooked-history--shell))
          (command (alist-get shell cooked-history-commands)))
     (unless command
@@ -203,13 +203,13 @@ prompt looks like."
 
 Two paths, because a cooked buffer is two different things depending on who
 owns the keyboard.  In an input state the buffer *is* editable and the prompt
-is Emacs\=' -- so this inserts, and \\[cooked-send-input] runs it.  The entry is
-marked as pasted, see `cooked--mark-pasted\=', so its control bytes are stripped
+is Emacs' -- so this inserts, and \\[cooked-send-input] runs it.  The entry is
+marked as pasted, see `cooked--mark-pasted', so its control bytes are stripped
 on the way out as they would be on the other path.  Otherwise the child owns the
 line editor and the only way in is the wire, so it goes through the paste path.
 
 Never a newline either way.  Offering a list of past commands and running the
-chosen one on the spot is a one-way door over somebody\='s shell history, and
+chosen one on the spot is a one-way door over somebody's shell history, and
 the entry you meant is one line away from the entry you did not."
   (if (cooked--input-state-p)
       (progn

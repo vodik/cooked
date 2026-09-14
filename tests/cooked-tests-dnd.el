@@ -15,7 +15,7 @@
 (require 'cooked-dnd)
 
 (defmacro cooked-tests--capturing-paste (&rest body)
-  "Run BODY with `cooked--send-paste\=' recording into `pasted\=' instead of writing.
+  "Run BODY with `cooked--send-paste' recording into `pasted' instead of writing.
 
 The session is taken to be live with the child owning the line, which is the
 state a drop is pasted in.  The child is not involved: what is under test is the text handed to the paste
@@ -42,9 +42,9 @@ out of the grid."
 
 A file name is attacker-controlled far more often than a paste is -- it can be
 chosen by whoever wrote the archive you just unpacked -- so a drop of
-`;rm -rf ~\=' must reach the shell as an argument and not as a second command.
+`;rm -rf ~' must reach the shell as an argument and not as a second command.
 Command substitution, a quote and a glob are here for the same reason: each is a
-different thing `sh\=' would otherwise do to the name before the program saw
+different thing `sh' would otherwise do to the name before the program saw
 it."
   (dolist (name '("/tmp/;rm -rf ~"
                   "/tmp/$(id)"
@@ -68,10 +68,10 @@ it."
 (ert-deftest cooked-dnd-sends-the-remote-localname-over-tramp ()
   "The whole of the remote story, and it is one function call.
 
-When `default-directory\=' is remote the child runs on the far host, so the name
-it needs is the path *there*: `/ssh:host:/tmp/x.png\=' means nothing to a shell
-on host, while `/tmp/x.png\=' is exactly right.  Nothing here opens a
-connection -- `file-remote-p\=' is pure string surgery on the name."
+When `default-directory' is remote the child runs on the far host, so the name
+it needs is the path *there*: `/ssh:host:/tmp/x.png' means nothing to a shell
+on host, while `/tmp/x.png' is exactly right.  Nothing here opens a
+connection -- `file-remote-p' is pure string surgery on the name."
   (with-temp-buffer
     (let ((default-directory "/ssh:host:/srv/"))
       (should (equal (cooked-tests--capturing-paste
@@ -109,8 +109,8 @@ is refused types neither."
 (ert-deftest cooked-dnd-writes-yanked-media-and-types-its-name ()
   "Clipboard bytes become a file, because a name is the only thing that crosses.
 
-Asserts the bytes land unmangled: `yank-media\=' hands over binary, and letting
-`coding-system-for-write\=' have an opinion about a PNG corrupts it silently --
+Asserts the bytes land unmangled: `yank-media' hands over binary, and letting
+`coding-system-for-write' have an opinion about a PNG corrupts it silently --
 the kind of bug that shows up as a viewer refusing the file rather than as an
 error here."
   (let ((cooked-dnd-image-directory (make-temp-file "cooked-dnd" t))
@@ -135,7 +135,7 @@ error here."
       (delete-directory cooked-dnd-image-directory t))))
 
 (ert-deftest cooked-dnd-handlers-do-not-answer-for-other-buffers ()
-  "`dnd-protocol-alist\=' is global; a cooked handler must not be.
+  "`dnd-protocol-alist' is global; a cooked handler must not be.
 
 Otherwise a drop on any buffer at all would type a file name into whichever
 terminal happened to have been set up last."

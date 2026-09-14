@@ -75,8 +75,8 @@ Returns the packages that could not be found."
 
 (defconst cooked-tests--optional-programs
   '("zsh" "bash" "fish" "tmux" "script" "base64" "git" "htop" "tar" "tic" "make" "infocmp")
-  "Programs a `skip-unless\=' asks PATH for, each also the tag of its tests.
-A new one goes here; `cooked-every-dependency-skip-carries-its-tag\=' fails
+  "Programs a `skip-unless' asks PATH for, each also the tag of its tests.
+A new one goes here; `cooked-every-dependency-skip-carries-its-tag' fails
 until it does.")
 
 ;; Programs cannot be found on the person's behalf the way packages can, but a
@@ -261,32 +261,32 @@ so refusing it made loading `notifications' signal."
   (advice-add 'ert-run-test :before #'cooked-tests--announce))
 
 (defun cooked-tests--stamp-background (image)
-  "Put a `:background\=' on IMAGE, as `solaire-mode\=' advises `create-image\=' to do.
+  "Put a `:background' on IMAGE, as `solaire-mode' advises `create-image' to do.
 
 A stand-in for third-party advice that colours every image unconditionally --
-see `cooked-box-drawing-resists-advice-that-colors-every-image\='.  Mutates the
-returned spec with `plist-put\=', which is what the original does and is the
+see `cooked-box-drawing-resists-advice-that-colors-every-image'.  Mutates the
+returned spec with `plist-put', which is what the original does and is the
 half that matters: the pair is spliced onto a list the caller already holds."
   (when (consp image)
     (plist-put (cdr image) :background "#123456"))
   image)
 
 (defun cooked-tests--mouse (&rest keys)
-  "Set this buffer's mouse state from KEYS, as a drain's `mouse\=' event would.
+  "Set this buffer's mouse state from KEYS, as a drain's `mouse' event would.
 
-KEYS are `cooked--mouse-state-make\=' keywords: :enabled, :sgr, :drag, :motion
-and :pixels.  A field not named is off, deliberately -- the child\='s request
+KEYS are `cooked--mouse-state-make' keywords: :enabled, :sgr, :drag, :motion
+and :pixels.  A field not named is off, deliberately -- the child's request
 arrives as one event rather than five independent switches, so a test naming
-only `:sgr\=' is describing a child that asked for SGR and nothing else.  Where
-a test means \"and keep the mouse on\", it says `:enabled t\=' as well."
+only `:sgr' is describing a child that asked for SGR and nothing else.  Where
+a test means \"and keep the mouse on\", it says `:enabled t' as well."
   (setq-local cooked--mouse-state (apply #'cooked--mouse-state-make keys)))
 
 (defun cooked-tests--cell (&optional width height)
   "Give the current buffer a cell size of WIDTH by HEIGHT pixels, default 10x20.
 
 Decorations -- box glyphs and image slices -- are cut to the cell, and
-`cooked--deco-cell-size\=' will not guess one: with the buffer in no window it
-answers from the buffer\='s own `cooked--last-cell\=', and with neither it answers
+`cooked--deco-cell-size' will not guess one: with the buffer in no window it
+answers from the buffer's own `cooked--last-cell', and with neither it answers
 nil and nothing is decorated at all.  Batch Emacs displays the test buffer in no
 window, so this is the ordinary no-window path rather than a stub -- and a real
 pixel size rather than the 1x1 a tty window would report, so slice geometry is
@@ -327,16 +327,16 @@ inside the timer, and `cooked-tests--refused-reads' is what reaches the test."
 (defun cooked-tests--settle (predicate &optional seconds)
   "Pump the event loop until PREDICATE holds or SECONDS elapse.
 
-The drain is asked for exactly what `cooked--drain-and-apply\=' asks it for,
-`cooked-rejoin-wrapped-lines\=' included.  That argument is not optional in the
-sense the module makes it look: `drain\=' reads it as
-`args.get(1).is_none_or(...)\=', so a missing second argument means *rejoin*,
+The drain is asked for exactly what `cooked--drain-and-apply' asks it for,
+`cooked-rejoin-wrapped-lines' included.  That argument is not optional in the
+sense the module makes it look: `drain' reads it as
+`args.get(1).is_none_or(...)', so a missing second argument means *rejoin*,
 not \"whatever the buffer is set to\" -- which is the opposite of what a test
 that has bound the flag to nil is asking for.
 
 What kept that from being a wrong answer everywhere is a race rather than
-anything deliberate: the wake pipe's filter runs `cooked--drain-and-apply\=' from
-inside `accept-process-output\=', with the flag, so by the time this asks there
+anything deliberate: the wake pipe's filter runs `cooked--drain-and-apply' from
+inside `accept-process-output', with the flag, so by the time this asks there
 are usually no rows left to join.  Over the whole render suite seven of this
 helper's drains carried evicted rows, and every one of them happened to be under
 rejoining anyway.  A test whose result depends on which of two drains got to a
@@ -497,11 +497,11 @@ off the buffer."
      ,@body))
 
 (defconst cooked-tests--prompt "$ "
-  "The prompt `cooked-tests--zshrc\=' sets, for tests that must recognise one.
+  "The prompt `cooked-tests--zshrc' sets, for tests that must recognise one.
 
 Counting prompts in the buffer is a real thing a test needs to do, and the
 string has to be written down somewhere for that to be possible.  Written down
-*here*, so that a test doing it is visibly coupled to the suite\='s own shell
+*here*, so that a test doing it is visibly coupled to the suite's own shell
 configuration rather than invisibly coupled to whatever prompt the person
 running it happens to use.")
 
@@ -517,49 +517,49 @@ dired()                  { osc_emacs_verb D \"${${1:-.}:a}\" }
 ")
   "The zsh configuration the suite runs against.
 
-Minimal on purpose, and `compinit\=' is in it because the completion tests drive
-the real compsys: without it `_main_complete\=' has nothing to call and those
+Minimal on purpose, and `compinit' is in it because the completion tests drive
+the real compsys: without it `_main_complete' has nothing to call and those
 tests fail for a reason that has nothing to do with cooked.  The prompt is a
-fixed two characters (`cooked-tests--prompt\='), so that what a test reads out of
-the buffer is the command\='s output and a prompt of known width -- rather than
+fixed two characters (`cooked-tests--prompt'), so that what a test reads out of
+the buffer is the command's output and a prompt of known width -- rather than
 a hostname, a working directory and a git branch that vary per machine.
 
-The `find_file\=' helpers are here rather than in the shipped snippet because
+The `find_file' helpers are here rather than in the shipped snippet because
 that is where they now live for everyone: they are an example in docs/SHELL.md
 to copy into your own rc, not something cooked puts in your shell.  Being user
 configuration is exactly what makes this file the right place for them, and the
 tests that drive the OSC 51;E channel end to end still need a caller.")
 
 (defvar cooked-tests--zdotdir nil
-  "Temporary ZDOTDIR the suite\='s shells are started against.")
+  "Temporary ZDOTDIR the suite's shells are started against.")
 
 (defun cooked-tests--isolate-zsh ()
-  "Point ZDOTDIR at `cooked-tests--zshrc\=' rather than at the user\='s own.
+  "Point ZDOTDIR at `cooked-tests--zshrc' rather than at the user's own.
 
 Done once, when this file loads, and so for every entry point: the full suite
-and a single subject file alike.  It is `setenv\=' rather than a macro around the
+and a single subject file alike.  It is `setenv' rather than a macro around the
 tests that want it because there is no test that wants the other thing --
-`cooked-tests--with-fake-zdotdir\=' rebinds this for the two that check the
+`cooked-tests--with-fake-zdotdir' rebinds this for the two that check the
 sourcing mechanism itself, and everything else should be running a shell whose
 configuration is written down in this file.
 
-The suite must not run the developer\='s own zsh configuration.  By default it
-would: `cooked--shell-invocation\=' generates startup stubs that source whatever
+The suite must not run the developer's own zsh configuration.  By default it
+would: `cooked--shell-invocation' generates startup stubs that source whatever
 ZDOTDIR or $HOME holds, which is the right behaviour for a terminal and the
 wrong one for a test.  Inherited configuration makes the suite untrustworthy in
 three separate ways, all of them observed here rather than imagined:
 
-  - *Timing.*  A `vcs_info\=' precmd shells out to git on every prompt.  In this
+  - *Timing.*  A `vcs_info' precmd shells out to git on every prompt.  In this
     repository, with cargo and Emacs already competing for the disk, that turns
     prompt latency into a variable and the settle timeouts into a coin flip.
     That is what made the zsh tests fail about one full run in ten locally while
     CI, whose containers have no ~/.zshrc, stayed green -- and why the shells
     here now reach their first prompt in a fifth of the time.
   - *Duplicate marks.*  A configuration that already emits OSC 133 from its own
-    precmd hook -- a common thing to have -- puts a second `133;A\=' on the wire
-    beside cooked\='s, so a test counting marks is counting someone else\='s too.
-  - *Widget collisions.*  `cooked.zsh\=' announces its completion widget from
-    `zle-line-init\='; a configuration defining that name wins or loses by source
+    precmd hook -- a common thing to have -- puts a second `133;A' on the wire
+    beside cooked's, so a test counting marks is counting someone else's too.
+  - *Widget collisions.*  `cooked.zsh' announces its completion widget from
+    `zle-line-init'; a configuration defining that name wins or loses by source
     order, and the completion tests then silently measure whichever won.
 
 HISTFILE points inside the temporary directory for the same reason, so running
@@ -585,34 +585,34 @@ the suite cannot append to the history of the person running it."
                                        &rest body)
   "Run BODY in a cooked buffer running SHELL, settled at its first prompt.
 
-SHELL is a program name looked up on PATH; callers should `skip-unless\=' it
+SHELL is a program name looked up on PATH; callers should `skip-unless' it
 themselves, since a macro cannot skip for them.  The shell is started through
-`cooked--shell-invocation\=', so the integration snippet is injected exactly as
+`cooked--shell-invocation', so the integration snippet is injected exactly as
 it would be for a user -- which is the point: the marks are what everything
 about prompts, command records and exit codes depends on, and a printf cannot
 produce them.
 
-  :name     buffer name, for reading a failure; defaults to the shell\='s.
-  :env      extra environment pairs, ahead of the invocation\='s own.
+  :name     buffer name, for reading a failure; defaults to the shell's.
+  :env      extra environment pairs, ahead of the invocation's own.
   :directory  where to start the child, when it matters what it completes
             against; nil leaves it wherever Emacs is.
-  :setup    one form run in the buffer after `cooked-mode\=' and before the
+  :setup    one form run in the buffer after `cooked-mode' and before the
             child, for a test that has to arrange something first.
   :settle   predicate for the first prompt, replacing the default below.
   :timeout  seconds to wait for it, before COOKED_TEST_TIMEOUT_SCALE is
-            applied -- `cooked-tests--settle\=' scales it, and scaling it here
+            applied -- `cooked-tests--settle' scales it, and scaling it here
             as well would square the multiplier.
 
-`cooked--scratch\=' is set from the invocation, which is not bookkeeping: it is
-the only handle on the generated startup files, and `cooked--cleanup\=' removes
+`cooked--scratch' is set from the invocation, which is not bookkeeping: it is
+the only handle on the generated startup files, and `cooked--cleanup' removes
 them through it.  The helper this replaces discarded it, and so left one
 temporary directory behind per test that used it.
 
-Like `cooked-tests--with-session\=', it fails a BODY that left a refused
-terminal read in `cooked-tests--refused-reads\='.
+Like `cooked-tests--with-session', it fails a BODY that left a refused
+terminal read in `cooked-tests--refused-reads'.
 
 The default settle condition asks for the editable line as well as the mark,
-because \"the prompt has arrived\" is what callers mean and `cooked--semantic\='
+because \"the prompt has arrived\" is what callers mean and `cooked--semantic'
 alone is true a moment before the input region exists."
   (declare (indent 1) (debug (sexp body)))
   (let ((invocation (gensym "invocation"))
@@ -642,8 +642,8 @@ alone is true a moment before the input region exists."
 (defmacro cooked-tests--with-zsh (&rest body)
   "Run BODY in a cooked buffer running zsh, settled at its first prompt.
 
-Started against `cooked-tests--zshrc\=', not the user\='s own; see
-`cooked-tests--isolate-zsh\=' for why that is not optional."
+Started against `cooked-tests--zshrc', not the user's own; see
+`cooked-tests--isolate-zsh' for why that is not optional."
   (declare (indent 0))
   `(cooked-tests--with-shell ("zsh") ,@body))
 
@@ -652,14 +652,14 @@ Started against `cooked-tests--zshrc\=', not the user\='s own; see
 
 fish needs a pty in a way bash does not: with stdin off a terminal it never runs
 its reader, so the prompt is never drawn and no mark is ever written.  The bash
-snippet tests can pipe into `call-process\='; this one has to go through a real
+snippet tests can pipe into `call-process'; this one has to go through a real
 session, which is why it lives here rather than beside them.
 
 fish is not injected -- cooked writes a startup file for zsh and bash, and fish
-needs none -- so the snippet is sourced from a generated `config.fish\=' reached
+needs none -- so the snippet is sourced from a generated `config.fish' reached
 by pointing XDG_CONFIG_HOME at it.  That is the arrangement the file documents
-for a user, run as documented.  The prompt is a bare `$ \=', so what a test reads
-off the buffer is the shell\='s output rather than a theme\='s."
+for a user, run as documented.  The prompt is a bare `$ ', so what a test reads
+off the buffer is the shell's output rather than a theme's."
   (declare (indent 0))
   `(let ((config (make-temp-file "cooked-tests-fish-" t)))
      (unwind-protect
@@ -676,9 +676,9 @@ off the buffer is the shell\='s output rather than a theme\='s."
        (delete-directory config t))))
 
 (defun cooked-tests--undo-entries ()
-  "The real entries in `buffer-undo-list\=', with the boundaries dropped.
+  "The real entries in `buffer-undo-list', with the boundaries dropped.
 
-Emacs\=' own command loop pushes a nil boundary after any command that modified
+Emacs' own command loop pushes a nil boundary after any command that modified
 the buffer, so \"the history is empty\" is a claim about what survives once
 those are taken out.  Nil in a buffer where undo is off, which is the same
 answer as nothing recorded and the one every caller here wants."
@@ -700,7 +700,7 @@ answer as nothing recorded and the one every caller here wants."
 (defun cooked-tests--run-until-dead (argv seconds)
   "Run ARGV in a cooked buffer and pump for up to SECONDS, killing it if alive.
 Returns non-nil when the buffer killed itself along the way.  SECONDS is
-scaled by `cooked-tests-timeout\=', like every other wait in the suite."
+scaled by `cooked-tests-timeout', like every other wait in the suite."
   (let ((buffer (generate-new-buffer "*cooked-test*")))
     (unwind-protect
         (progn
@@ -749,7 +749,7 @@ scaled by `cooked-tests-timeout\=', like every other wait in the suite."
        (kill-buffer buffer))))
 
 (defmacro cooked-tests--capturing-notifications (&rest body)
-  "Run BODY with notifications captured into `seen\=' instead of raised."
+  "Run BODY with notifications captured into `seen' instead of raised."
   (declare (indent 0))
   `(let ((seen nil))
      (cl-letf (((symbol-function 'cooked--notify)
@@ -924,11 +924,11 @@ buffer on screen before there is any trimming to assert about."
 (defmacro cooked-tests--with-glyph-font (font &rest body)
   "Run BODY as if the default face in every window were drawn in FONT.
 
-FONT is (ASCENT DESCENT CELL), and it is what `query-font\=' and
-`window-font-width\=' answer for the font `cooked--default-font\=' finds.  Batch
+FONT is (ASCENT DESCENT CELL), and it is what `query-font' and
+`window-font-width' answer for the font `cooked--default-font' finds.  Batch
 Emacs has no graphical frame and so no font to ask; this stands in for the one
-a zoomed pgtk frame reports, and leaves `face-attribute\=' and
-`frame-char-width\=' answering for the batch frame, as an unzoomed one would."
+a zoomed pgtk frame reports, and leaves `face-attribute' and
+`frame-char-width' answering for the batch frame, as an unzoomed one would."
   (declare (indent 1))
   `(pcase-let ((`(,ascent ,descent ,cell) ,font))
      (cl-letf* ((real-query-font (symbol-function 'query-font))
@@ -1046,10 +1046,10 @@ POLICY is the one the buffer must be under, named so a failure says which."
 (defmacro cooked-tests--with-mock-tramp (directory &rest body)
   "Run BODY with DIRECTORY bound to a TRAMP name for a local directory.
 
-The method is tramp-tests.el\='s own `mock\=': a login shell started locally
-with `sh -i\=', driven by tramp-sh exactly as an ssh connection would be.  So a
+The method is tramp-tests.el's own `mock': a login shell started locally
+with `sh -i', driven by tramp-sh exactly as an ssh connection would be.  So a
 name such as /mock::/tmp/x goes through every TRAMP file handler, and
-`process-file\=' and `temporary-file-directory\=' take their remote branches,
+`process-file' and `temporary-file-directory' take their remote branches,
 without a network or a key.  The directory is a fresh local one, and both it
 and the connection are gone afterwards."
   (declare (indent 1))

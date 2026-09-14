@@ -113,19 +113,19 @@ first glyph over the text beside it."
 (ert-deftest cooked-a-run-of-identical-glyphs-shares-one-deco-record ()
   "The point of the run-length wire format, seen from the buffer.
 
-`Deco::packed\=' in src/emu/cell.rs sends `(BITS COUNT)\=' per run of one shape, so
-`cooked--apply-glyph-deco\=' can look the image spec up once and put one
-`cooked-deco\=' record over the whole run with a single `put-text-property\='.
-What is asserted is the sharing itself -- `next-single-property-change\=' compares
-with `eq\=', so a run that shares its record is one step of that walk -- because
+`Deco::packed' in src/emu/cell.rs sends `(BITS COUNT)' per run of one shape, so
+`cooked--apply-glyph-deco' can look the image spec up once and put one
+`cooked-deco' record over the whole run with a single `put-text-property'.
+What is asserted is the sharing itself -- `next-single-property-change' compares
+with `eq', so a run that shares its record is one step of that walk -- because
 that is the observable the saving is made of, and it is also exactly what
-`cooked--rescale-deco\=' had to be taught to expect.
+`cooked--rescale-deco' had to be taught to expect.
 
-The `display\=' value is shared across the same run, and that is a second claim
+The `display' value is shared across the same run, and that is a second claim
 rather than the same one restated: sharing the record is safe because nothing in
 it is cell-specific, while sharing the value is safe only because the image
 under it was built COUNT cells wide.  See
-`cooked-adjacent-box-glyphs-share-only-a-run-wide-image\='."
+`cooked-adjacent-box-glyphs-share-only-a-run-wide-image'."
   (cooked-tests--with-session
       ;; Four of the same character in a row, which is what a border is.
       '("/bin/sh" "-c" "printf '\\342\\224\\200\\342\\224\\200\\342\\224\\200\\342\\224\\200\\n'")
@@ -146,13 +146,13 @@ under it was built COUNT cells wide.  See
                   (get-text-property (+ beg 3) 'display))))))
 
 (defun cooked-tests--deco-lookups (argv)
-  "Run ARGV and return (LOOKUPS . RECORDS) for the busiest `cooked--apply\=' of it.
+  "Run ARGV and return (LOOKUPS . RECORDS) for the busiest `cooked--apply' of it.
 
-LOOKUPS is how many times that apply asked `cooked--layout-window\=' -- the walk
-behind both `cooked--deco-window\=' and `cooked--deco-cell-size\=' -- and RECORDS
+LOOKUPS is how many times that apply asked `cooked--layout-window' -- the walk
+behind both `cooked--deco-window' and `cooked--deco-cell-size' -- and RECORDS
 how many decoration records it applied.  Counted per apply rather than per
 session, and by the maximum rather than the total, because the number of drains
-a child\='s output arrives in is not something a test may depend on: the ratio
+a child's output arrives in is not something a test may depend on: the ratio
 between the two figures is the invariant, and it is the same whether the output
 came in one drain or five."
   (let ((lookups 0) (records 0) (worst-lookups 0) (worst-records 0))
@@ -180,33 +180,33 @@ came in one drain or five."
     (cons worst-lookups worst-records)))
 
 (ert-deftest cooked-a-render-pass-measures-the-window-once-not-once-per-record ()
-  "`cooked--cell-size\=' has always said it is \"measured once per render pass and
+  "`cooked--cell-size' has always said it is \"measured once per render pass and
 passed down, rather than asked per character\", and for a long time the path that
-reaches it did the opposite: `cooked--apply-deco\=' asked `cooked--layout-window\='
-and `cooked--deco-cell-size\=' -- which walks the window list again -- afresh for
+reaches it did the opposite: `cooked--apply-deco' asked `cooked--layout-window'
+and `cooked--deco-cell-size' -- which walks the window list again -- afresh for
 every decoration record.
 
 A border hid that completely, being one record for the whole row, which is why
-no benchmark and no test here caught it.  A `tree\=' listing is the shape that
-does not hide it: `U+2502\=' separated by NO-BREAK SPACE is a record per nesting
+no benchmark and no test here caught it.  A `tree' listing is the shape that
+does not hide it: `U+2502' separated by NO-BREAK SPACE is a record per nesting
 level, so the per-record cost multiplies by the depth.  On
-`tree -C /usr/include\=' that was 172,224 window walks and 86,107 cell
+`tree -C /usr/include' that was 172,224 window walks and 86,107 cell
 measurements at 29.7us apiece on pgtk -- 2.56s of a 3.10s session, which the
 hoist took to 311ms.
 
 The invariant is stated as a *ratio* rather than as a number, which is what
 makes it robust: two rows differing only in how many records they carry must
 cost the same number of window lookups.  A count would have to be revised every
-time a render grew or lost an unrelated call to `cooked--layout-window\='; a
+time a render grew or lost an unrelated call to `cooked--layout-window'; a
 comparison cannot go stale, and it fails loudly on the defect -- before
-`cooked--deco-pass\=' the wide row cost five times the lookups of the narrow one.
+`cooked--deco-pass' the wide row cost five times the lookups of the narrow one.
 
 The separator is a letter, and it has to be something that is neither a glyph
 nor a blank: a space and a NO-BREAK SPACE are both absorbed into the run beside
-them now -- which is the whole of `Row::absorb_blank_runs\=' and exactly why
-`tree\=' got cheaper -- so a `tree\=' indent is one record however deep it is and
+them now -- which is the whole of `Row::absorb_blank_runs' and exactly why
+`tree' got cheaper -- so a `tree' indent is one record however deep it is and
 would make both rows here identical.  A letter is also what keeps the fixture
-off `cooked--glyph-claims-next-cell-p\=', which looks for a space; a fixture
+off `cooked--glyph-claims-next-cell-p', which looks for a space; a fixture
 using one would be exercising the claim path as well and measuring two things at
 once."
   (let* ((narrow (cooked-tests--deco-lookups
@@ -401,11 +401,11 @@ one interval, and without the cut after it the cursor's segment is four cells."
 (ert-deftest cooked-a-hidden-cursor-still-cuts-its-glyph-run ()
   "A cursor the child hid with DECTCEM is still cut out of its glyph run.
 
-Skipping the cut for a hidden cursor would save one `display\=' interval, and it
+Skipping the cut for a hidden cursor would save one `display' interval, and it
 would be wrong, because a hidden cursor is not always an undrawn one.  At a
 prompt, in canonical mode with no OSC 133 to say a command is running,
-`cooked--sync-cursor-type\=' gives point a visible cursor of its own, and point
-is on the child\='s cell: `cat\=' run after a program that left the cursor hidden
+`cooked--sync-cursor-type' gives point a visible cursor of its own, and point
+is on the child's cell: `cat' run after a program that left the cursor hidden
 is that case.  The core cannot see that decision, which also turns on the input
 mode, so the cut stays wherever the cursor is."
   (cooked-tests--with-session
@@ -526,7 +526,7 @@ in: `日 ┌──┐' with the cursor moved onto the first `─' is cut around 
 
 (defconst cooked-tests--white-on-black "\\033[38;2;255;255;255m\\033[48;2;0;0;0m"
   "SGR for white on black in truecolor, so a blend has colours a test can name.
-The palette resolves through the theme\='s `ansi-color\=' faces, which a batch
+The palette resolves through the theme's `ansi-color' faces, which a batch
 Emacs does not pin down.")
 
 (defun cooked-tests--shade-color (pos)
@@ -551,8 +551,8 @@ per-channel mix would say #808080."
 (ert-deftest cooked-a-run-of-shades-is-one-blended-stretch ()
   "▒▒▒ is one stretch of space three cells wide, in the blend of its colours.
 
-No bitmap and no dither: the stretch is painted in the face\='s background, and
-`cooked--apply-shade\=' has made that background the blend.  The foreground is
+No bitmap and no dither: the stretch is painted in the face's background, and
+`cooked--apply-shade' has made that background the blend.  The foreground is
 the same colour, so the character stays invisible wherever no stretch is drawn."
   (cooked-tests--with-session
       `("/bin/sh" "-c"
@@ -568,7 +568,7 @@ the same colour, so the character stays invisible wherever no stretch is drawn."
       (should (equal (car (get-text-property beg 'cooked-shade)) 2)))))
 
 (ert-deftest cooked-the-blank-between-shades-draws-nothing ()
-  "`░ ░\=' puts no `display\=' on the blank the wire absorbed between the shades.
+  "`░ ░' puts no `display' on the blank the wire absorbed between the shades.
 It would be a picture of the background the space already shows."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\226\\221 \\342\\226\\221\\n'")
@@ -630,7 +630,7 @@ The text beside it follows the remapped `default' live, so the shade must too."
                      (cooked--blend foreground "#ff0000" 0.5))))))
 
 (ert-deftest cooked-shades-and-lines-split-into-image-stretch-image ()
-  "`─▒─\=' is an image, a stretch and an image, each exactly its cells wide."
+  "`─▒─' is an image, a stretch and an image, each exactly its cells wide."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\342\\224\\200\\342\\226\\222\\342\\224\\200\\n'")
@@ -661,23 +661,23 @@ The text beside it follows the remapped `default' live, so the shade must too."
       (should (equal (get-text-property (+ beg 3) 'display) '(space :width (10)))))))
 
 (ert-deftest cooked-a-rescale-rebuilds-every-cell-of-a-shared-glyph-run ()
-  "`cooked--rescale-deco\=' walks with `next-single-property-change\=', which
-compares values with `eq\=' -- so cells sharing one `cooked-deco\=' record are a
-single step of that walk, and rebuilding only the step\='s first character would
+  "`cooked--rescale-deco' walks with `next-single-property-change', which
+compares values with `eq' -- so cells sharing one `cooked-deco' record are a
+single step of that walk, and rebuilding only the step's first character would
 leave the rest of the run drawn at the old cell size for as long as the buffer
 lives.
 
 That the walk reached every character was an accident of allocation rather than
-anything the property promised: `cooked--apply-deco\=' consed a fresh record per
-cell, so no two were ever `eq\=' and no run was ever longer than one.  A run of
+anything the property promised: `cooked--apply-deco' consed a fresh record per
+cell, so no two were ever `eq' and no run was ever longer than one.  A run of
 identical glyphs is exactly what a border is made of, so sharing one record
 across it is the obvious saving to make on the render path -- and making it
 would have broken this silently, the buffer simply ceasing to track the font
-with nothing to point at.  So the walk is pinned to the property\='s semantics
+with nothing to point at.  So the walk is pinned to the property's semantics
 here rather than to that accident.
 
 Glyphs and not an image placement, and the difference is the point: an image
-record carries the cell\='s own row and column within the picture, so no two
+record carries the cell's own row and column within the picture, so no two
 cells of one placement can share it.  A glyph record carries nothing
 cell-specific at all."
   (cooked-tests--with-session
@@ -832,13 +832,13 @@ cell-specific at all."
     (advice-remove 'create-image #'cooked-tests--stamp-background)))
 
 (ert-deftest cooked-a-box-glyph-sits-on-the-ascent-of-a-graphical-font ()
-  "A bitmap filling the line box is anchored at the font\='s ascent.
+  "A bitmap filling the line box is anchored at the font's ascent.
 
 A 20-pixel line box in a font of ascent 15 puts the baseline three quarters of
-the way down, so the image asks for `:ascent 75\='.  The font was read with
-`face-font\=' given the window as its CHARACTER argument, which signals on
+the way down, so the image asks for `:ascent 75'.  The font was read with
+`face-font' given the window as its CHARACTER argument, which signals on
 every graphical frame, so the percentage was never computed outside batch and
-every image fell back to `center\='.  The font here is the stand-in for the one
+every image fell back to `center'.  The font here is the stand-in for the one
 a pgtk frame reports, which batch Emacs does not have."
   (with-temp-buffer
     (cooked-tests--with-glyph-font '(15 5 9)
@@ -847,25 +847,25 @@ a pgtk frame reports, which batch Emacs does not have."
 (ert-deftest cooked-a-box-glyph-row-is-exactly-one-line-box ()
   "A row of box drawing is the default line height, and its borders meet.
 
-Emacs truncates an image\='s `:ascent\=' percentage back into pixels, so the
+Emacs truncates an image's `:ascent' percentage back into pixels, so the
 nearest percentage was often a pixel short: a 17-pixel bitmap in a font of
 ascent 13 and descent 4 got 76, an ascent of 12 and a descent of 5, and every
 such row came out 18 pixels tall.  htop and btop are mostly such rows, so the
 screen ran a row or two past its window, and the stroke of a vertical line
 stopped a pixel short of the one below it.
 
-Emacs also adds `line-spacing\=' below a bitmap as it does below a character,
-so with a global `line-spacing\=' of 2 a bitmap filling the 19-pixel line box
+Emacs also adds `line-spacing' below a bitmap as it does below a character,
+so with a global `line-spacing' of 2 a bitmap filling the 19-pixel line box
 of that font made its row 21 pixels tall.  A cooked buffer has no line spacing,
-whatever the global value, so its line box is the font\='s and a bitmap that
-fills it touches the next row\='s.
+whatever the global value, so its line box is the font's and a bitmap that
+fills it touches the next row's.
 
 The line box is worked out as redisplay works it out: the taller of the
-font\='s and the image\='s ascent, over the taller of their descents, plus the
+font's and the image's ascent, over the taller of their descents, plus the
 spacing the buffer holds, the image ascent being the truncation Emacs makes.
 The fonts are the ones a pgtk frame reported for Adwaita Mono at heights 100,
 130, 160, 200 and 220, and three more with other ratios.  With every row one
-line box tall, the rows `cooked--window-rows\=' counts in a window are the rows
+line box tall, the rows `cooked--window-rows' counts in a window are the rows
 that fit in it."
   (dolist (global '(2 nil))
     (let ((line-spacing global))
@@ -902,7 +902,7 @@ that fit in it."
 (ert-deftest cooked-a-font-with-another-baseline-moves-a-drawn-border ()
   "A border drawn in one font is placed on the next font's baseline.
 
-The `:ascent\=' was memoized by line height alone, and the spec holding it by
+The `:ascent' was memoized by line height alone, and the spec holding it by
 pattern and cell size, so swapping the default font for one of the same height
 with a lower baseline kept every border at the old placement, rows drawn
 afterwards included.  The swap moves the layout stamp, which now empties both

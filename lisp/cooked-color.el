@@ -114,16 +114,16 @@ exists to fix."
           (if dark "white" "black"))))))
 
 (defun cooked--color-scheme ()
-  "Whether this buffer renders dark or light, as `dark\=' or `light\='.
+  "Whether this buffer renders dark or light, as `dark' or `light'.
 
-Derived from `cooked--child-color\=', which is what OSC 11 answers from, rather
-than from `frame-background-mode\=' — and that is the whole point.  A child told
+Derived from `cooked--child-color', which is what OSC 11 answers from, rather
+than from `frame-background-mode' — and that is the whole point.  A child told
 the scheme changed reacts by querying OSC 11 for the actual background, so two
 readings of one value cannot be allowed to contradict each other.
 
-`color-dark-p\=' is what `frame--current-background-mode\=' uses to derive
-`frame-background-mode\=' in the first place, gamma correction and empirical
-cutoff included, so with nothing remapped this agrees with Emacs\=' own answer
+`color-dark-p' is what `frame--current-background-mode' uses to derive
+`frame-background-mode' in the first place, gamma correction and empirical
+cutoff included, so with nothing remapped this agrees with Emacs' own answer
 rather than approximating it."
   (if (color-dark-p (mapcar (lambda (v) (/ v 65535.0))
                             (color-values (cooked--child-color 'background))))
@@ -195,7 +195,7 @@ Buffer-local rather than frame-wide: a child gets to repaint its own terminal,
 not every window in the Emacs running it.  The cursor is the exception, because
 Emacs has no buffer-local cursor colour to give it; see `cooked--cursor-color'.
 
-A `background\=' set also remaps `fringe\=', not just `default\=': the fringe is
+A `background' set also remaps `fringe', not just `default': the fringe is
 its own face, styled by the Emacs theme rather than by anything a shell can
 see, so without this a child that paints its own background leaves the fringe
 sitting in whatever shade the Emacs theme picked -- visibly split down the
@@ -234,7 +234,7 @@ window edge from the terminal background right next to it."
   "Undo an OSC 10/11/12 set, from OSC 110, 111 or 112.
 
 Three codes and no fourth: OSC 104, \"reset the palette\", is deliberately not
-handled and `oc\=' has been dropped from terminfo/cooked.ti to say so.  There is
+handled and `oc' has been dropped from terminfo/cooked.ti to say so.  There is
 no palette here to reset -- OSC 4 answers queries but declines every set, for
 the reason that entry gives, that Emacs owns colour and a per-buffer 256-entry
 palette is the wrong seam -- so the only colours a child can have changed are
@@ -260,28 +260,28 @@ the three defaults above, and each of those already has its own undo."
 ;; it since, in which case that newer colour is the one given back.
 
 (defun cooked--set-cursor-color (color)
-  "Make COLOR, or nil for none, this buffer\='s OSC 12 cursor color.
+  "Make COLOR, or nil for none, this buffer's OSC 12 cursor color.
 Applied at once to every frame whose selected window shows this buffer."
   (setq cooked--cursor-color color)
   (cooked--sync-cursor-color-everywhere))
 
 (defun cooked--frame-cursor-color (frame)
-  "FRAME\='s own cursor color, beneath any OSC 12 color it is wearing.
+  "FRAME's own cursor color, beneath any OSC 12 color it is wearing.
 
-The frame parameter `cooked--cursor-color\=' records what is worn, as a cons of
-the color put on and the color it replaced.  When the frame\='s `cursor-color\='
-no longer matches the first, something other than `cooked--sync-cursor-color\='
-changed it, and that newer color is the frame\='s own."
+The frame parameter `cooked--cursor-color' records what is worn, as a cons of
+the color put on and the color it replaced.  When the frame's `cursor-color'
+no longer matches the first, something other than `cooked--sync-cursor-color'
+changed it, and that newer color is the frame's own."
   (let ((current (frame-parameter frame 'cursor-color))
         (worn (frame-parameter frame 'cooked--cursor-color)))
     (if (and worn (equal (car worn) current)) (cdr worn) current)))
 
 (defun cooked--sync-cursor-color (frame)
-  "Put on or take off FRAME\='s OSC 12 cursor color, for its selected window.
-What is taken off is replaced by `cooked--frame-cursor-color\='.
+  "Put on or take off FRAME's OSC 12 cursor color, for its selected window.
+What is taken off is replaced by `cooked--frame-cursor-color'.
 
-From `window-selection-change-functions\=' and
-`window-buffer-change-functions\=', whose global values run once per frame."
+From `window-selection-change-functions' and
+`window-buffer-change-functions', whose global values run once per frame."
   (when (frame-live-p frame)
     (let* ((color (buffer-local-value 'cooked--cursor-color
                                       (window-buffer (frame-selected-window frame))))
@@ -298,14 +298,14 @@ From `window-selection-change-functions\=' and
                (set-frame-parameter frame 'cursor-color own)))))))
 
 (defun cooked--sync-cursor-color-everywhere (&rest _)
-  "Run `cooked--sync-cursor-color\=' on every frame."
+  "Run `cooked--sync-cursor-color' on every frame."
   (mapc #'cooked--sync-cursor-color (frame-list)))
 
 (defun cooked--sync-cursor-color-here ()
   "Sync the cursor color of each frame whose selected window shows this buffer.
 
-On `cooked-theme-change-hook\=', since a theme that sets the `cursor\=' face
-repaints the frame\='s cursor without any window changing.  That hook runs once
+On `cooked-theme-change-hook', since a theme that sets the `cursor' face
+repaints the frame's cursor without any window changing.  That hook runs once
 in every cooked buffer, so syncing every frame from it did the whole job once
 per buffer.  A frame wears a color only while its selected window shows the
 buffer that set it, so the frames showing this buffer are all this run has to
@@ -383,21 +383,21 @@ second table that could disagree with it."
 
 (defvar-local cooked--reverse-screen nil
   "Whether the screen is drawn in reverse video, DEC mode 5.
-The child\='s own setting, `cooked--reverse-screen-level\=', except while a flash
-is held; see `cooked--set-reverse-screen\='.")
+The child's own setting, `cooked--reverse-screen-level', except while a flash
+is held; see `cooked--set-reverse-screen'.")
 
 (defvar-local cooked--reverse-screen-level nil
   "Whether the child wants the screen in reverse video, as of the last drain.")
 
 (defvar-local cooked--reverse-screen-toggles 0
-  "The drain\='s count of DECSCNM changes, as of the last drain.")
+  "The drain's count of DECSCNM changes, as of the last drain.")
 
 (defvar-local cooked--flash-timer nil
-  "The timer ending a flash `cooked--set-reverse-screen\=' is holding, or nil.")
+  "The timer ending a flash `cooked--set-reverse-screen' is holding, or nil.")
 
 (defconst cooked--flash-seconds 0.1
   "How long a flash that arrived inside one drain is shown for.
-The pause `flash\=' in our terminfo makes between its set and its reset.")
+The pause `flash' in our terminfo makes between its set and its reset.")
 
 (defvar-local cooked--reverse-screen-remaps nil
   "The face remapping cookies drawing `cooked--reverse-screen', or nil.")
@@ -419,8 +419,8 @@ was given."
 For the two defaults that is the color the buffer draws: an OSC 10 or 11 set
 counts, and under DECSCNM the two are swapped, as xterm swaps its own.  So a
 child that set its background to #ff0000 and asks for it back is told #ff0000,
-and not the theme\='s color, which `face-background\=' reads without the remap.
-Every other kind is `cooked--default-color\=''s."
+and not the theme's color, which `face-background' reads without the remap.
+Every other kind is `cooked--default-color''s."
   (pcase kind
     ((or 'foreground 'background)
      (let ((other (if (eq kind 'foreground) 'background 'foreground)))
@@ -428,15 +428,15 @@ Every other kind is `cooked--default-color\=''s."
     (_ (cooked--default-color kind))))
 
 (defun cooked--reversible-color (kind)
-  "The color `cooked--apply-reverse-screen\=' swaps in for KIND.
+  "The color `cooked--apply-reverse-screen' swaps in for KIND.
 
-`cooked--screen-color\=', except on a text terminal that has not said what its
-default colors are.  There `cooked--default-color\=' can only guess black or
-white, but the names `unspecified-fg\=' and `unspecified-bg\=' stand for the
-terminal\='s own pair, and Emacs draws a face whose foreground is the default
-background in standout.  So the swap comes out as the terminal\='s real colors
+`cooked--screen-color', except on a text terminal that has not said what its
+default colors are.  There `cooked--default-color' can only guess black or
+white, but the names `unspecified-fg' and `unspecified-bg' stand for the
+terminal's own pair, and Emacs draws a face whose foreground is the default
+background in standout.  So the swap comes out as the terminal's real colors
 reversed: for example, light grey on black becomes black on light grey rather
-than black on white.  Checked by running `emacs -nw\=' under `script\=' against
+than black on white.  Checked by running `emacs -nw' under `script' against
 xterm-direct, where every cell of the remapped buffer went out under SGR 7."
   (let ((name (if (eq kind 'foreground) "unspecified-fg" "unspecified-bg")))
     (if (and (tty-type)
@@ -478,7 +478,7 @@ newest."
 
 Called wherever those colors move -- an OSC 10/11 set or reset, DECSCNM, a theme
 change -- so text already concealed on the screen stays hidden rather than
-showing in the colors of the moment it was drawn.  See `cooked--face-build\='."
+showing in the colors of the moment it was drawn.  See `cooked--face-build'."
   (let ((foreground (cooked--screen-color 'foreground))
         (background (cooked--screen-color 'background)))
     (if cooked--reverse-screen
@@ -488,13 +488,13 @@ showing in the colors of the moment it was drawn.  See `cooked--face-build\='."
 (defun cooked--set-reverse-screen (on &optional toggles)
   "Adopt DECSCNM state ON from the drain, remapping only when it changes.
 
-TOGGLES is the drain\='s count of changes to the mode.  A count that moved while
+TOGGLES is the drain's count of changes to the mode.  A count that moved while
 the level ended the drain where it began is a flash whose set and reset both
 landed between two drains -- which a drain held by a synchronised frame, or by
-load, makes likely, since `flash\=' pauses only 100ms.  Adopting the level alone
+load, makes likely, since `flash' pauses only 100ms.  Adopting the level alone
 would draw nothing at all, so the reversal is drawn instead and held for
-`cooked--flash-seconds\=' before the level is.  For example, `vim\=''s
-`visualbell\=' sends ESC [ ? 5 h, pauses, then ESC [ ? 5 l, and a drain that
+`cooked--flash-seconds' before the level is.  For example, `vim''s
+`visualbell' sends ESC [ ? 5 h, pauses, then ESC [ ? 5 l, and a drain that
 reads both in one go still flashes the screen once."
   (let ((on (and on t))
         (was cooked--reverse-screen-level))

@@ -96,13 +96,13 @@ BUFFER defaults to the current buffer."
   "The fewest seconds between two refusal messages from one buffer.")
 
 (defvar-local cooked-user-var--refused-at nil
-  "When this buffer last reported a refused set, as a `float-time\=', or nil.")
+  "When this buffer last reported a refused set, as a `float-time', or nil.")
 
 (defun cooked-user-var--refuse (format-string &rest args)
   "Report a refused set with FORMAT-STRING and ARGS, at most once a second.
 
 A stream of oversized sets would otherwise put one line each in the echo area
-and `*Messages*\='.  The first says what happened and names the knob, and the
+and `*Messages*'.  The first says what happened and names the knob, and the
 rest of a burst would only repeat it, so they are dropped rather than
 deferred."
   (let ((now (float-time)))
@@ -114,7 +114,7 @@ deferred."
 
 (defun cooked-user-var--name-for-message (name)
   "NAME shortened for a refusal message, with its format controls removed.
-The name is the child\='s text, so a right-to-left override in it could
+The name is the child's text, so a right-to-left override in it could
 otherwise reorder the message around it."
   (truncate-string-to-width
    (replace-regexp-in-string "[[:cntrl:]\u200e\u200f\u202a-\u202e\u2066-\u2069]" "" name)
@@ -147,9 +147,9 @@ payload; this checks the name limit and the decoding."
 (defun cooked-user-var--osc (parts)
   "Handle an OSC 1337 payload PARTS, acting only on SetUserVar.
 
-The value is base64 and so never contains a `;\=', so a SetUserVar the core
+The value is base64 and so never contains a `;', so a SetUserVar the core
 split into more than one part is malformed and ignored, and the one part is
-read where it lies rather than rejoined.  The name ends at the first `=\=' and
+read where it lies rather than rejoined.  The name ends at the first `=' and
 may not be empty, which is also how WezTerm reads it.
 
 The size bound is checked from the match positions, before the value is copied

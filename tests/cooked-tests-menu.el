@@ -21,7 +21,7 @@
 (require 'cooked-tests-helpers)
 
 (defun cooked-tests--menu ()
-  "The `Cooked\=' menu keymap."
+  "The `Cooked' menu keymap."
   (lookup-key cooked-mode-map [menu-bar cooked]))
 
 (defun cooked-tests--menu-items (&optional keymap)
@@ -45,7 +45,7 @@ wants is the leaves, since those are what carry a command and a guard."
   (cddr (assoc name (cooked-tests--menu-items))))
 
 (defun cooked-tests--menu-guards (item)
-  "The guard forms ITEM carries: its `:enable\=', `:visible\=' and toggle."
+  "The guard forms ITEM carries: its `:enable', `:visible' and toggle."
   (let ((plist (cddr item)))
     (delq nil (list (plist-get plist :enable)
                     (plist-get plist :visible)

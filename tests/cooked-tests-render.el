@@ -434,7 +434,7 @@ output with the prompt that followed it."
   "The hazard coalescing brings with it, pinned from the Emacs side.
 
 Contiguous damaged rows arrive as one block and are rewritten with one
-`delete-region\=' and one `insert\=' -- see `cooked--render-rows\='.  The version of
+`delete-region' and one `insert' -- see `cooked--render-rows'.  The version of
 that idea worth refusing is the one that breaks a run only where a row is
 *known* to be clean: a damage tracker with page granularity then reports the
 whole viewport, the coalescer faithfully turns it into a single reinsert, and
@@ -896,19 +896,19 @@ off the window with nothing left to put it back."
 
 (ert-deftest cooked-alt-screen-is-pinned-for-every-window-not-just-the-selected-one ()
   "The pin answers for every window on the buffer, because the one the wheel
-moved is not always the one the user is in: `mouse-wheel-follow-mouse\=' sends a
+moved is not always the one the user is in: `mouse-wheel-follow-mouse' sends a
 notch to the window under the pointer.
 
 This used to be answered by a second copy of the pin on
-`pre-redisplay-functions\=', which named the window about to be drawn.  That hook
-is gone -- it fired once per window per redisplay, and setting a window\='s start
+`pre-redisplay-functions', which named the window about to be drawn.  That hook
+is gone -- it fired once per window per redisplay, and setting a window's start
 from inside redisplay makes redisplay start over -- so the walk here is what is
 left to catch the unselected window, and it is worth an assertion of its own.
 
 What is deliberately no longer covered: a notch that lands in a *different*
-buffer entirely, which is where `post-command-hook\=' runs when the pointer is
+buffer entirely, which is where `post-command-hook' runs when the pointer is
 over an unselected terminal cooked does not hold the wheel for.  That window is
-repaired by the child\='s next output, or by the next command in its own buffer."
+repaired by the child's next output, or by the next command in its own buffer."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\033[?1049h'; printf 'top\n'; sleep 5")
     (should (cooked-tests--settle (lambda () cooked--alt)))
     (set-window-buffer (selected-window) (current-buffer))
@@ -1125,11 +1125,11 @@ cursor, the same restraint `follow' already shows for the buffer's own point."
 
 (ert-deftest cooked-new-output-scrolls-a-following-window ()
   "Redisplay will not move a window whose point nothing touched, and the drain
-moves `window-point\=' explicitly for exactly that reason -- so the window start
+moves `window-point' explicitly for exactly that reason -- so the window start
 has to follow it down rather than be left where the last screenful put it.
 
-Asserted on `window-start\=' and `window-point\=' rather than on the pin firing:
-the pin is now a computed `set-window-start\=', so there is no call to count,
+Asserted on `window-start' and `window-point' rather than on the pin firing:
+the pin is now a computed `set-window-start', so there is no call to count,
 and the rendered effect is the thing worth asserting anyway."
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
     (should (cooked-tests--settle
@@ -1185,10 +1185,10 @@ user's actual work out from under them."
       (should (= (window-point window) point)))))
 
 (ert-deftest cooked-pinning-the-transcript-is-idempotent ()
-  "The property the old `recenter\='-and-correct pin never had, and the whole
+  "The property the old `recenter'-and-correct pin never had, and the whole
 point of computing the start instead: run twice over the same view, the second
-run writes nothing.  Four writes to `window-start\=' per window per drain --
-`set-window-point\=', `recenter\=', and the whole-line corrections after it --
+run writes nothing.  Four writes to `window-start' per window per drain --
+`set-window-point', `recenter', and the whole-line corrections after it --
 each of which redisplay was then free to disagree with, is what the terminal
 was visibly jittering to."
   (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--two-stage-output-script)
@@ -1204,8 +1204,8 @@ was visibly jittering to."
         (should (= (window-start window) start))))))
 
 (ert-deftest cooked-a-moving-buffer-end-does-not-move-the-transcript ()
-  "The structural oscillator this was jittering to: `cooked--fit-screen\=' shapes
-the region to the rows the grid says are *used*, so `point-max\=' moves between
+  "The structural oscillator this was jittering to: `cooked--fit-screen' shapes
+the region to the rows the grid says are *used*, so `point-max' moves between
 drains whenever a child alternates a tall screen with a short one -- while the
 row the cursor is on, which is what the window is following, has not moved at
 all.  Pinning the buffer's end to the foot of the window shifted the whole
@@ -1418,10 +1418,10 @@ each is now an edit of the cell that changed, as a lone row already was."
   "Narrowing or widening the screen leaves the mark on the character it was on.
 
 A rewrap lays every logical line out again, so the row and column the mark was
-carried by named some other character afterwards: on `KLMNOPQRST\=', the second
-row of a wrapped line at ten columns, `M\=' is row 2 column 2, and at twenty
+carried by named some other character afterwards: on `KLMNOPQRST', the second
+row of a wrapped line at ten columns, `M' is row 2 column 2, and at twenty
 columns that cell holds the next line.  A row the child left blanks at the end
-of before it wrapped counts them, so `c\=' after eight of them is found again
+of before it wrapped counts them, so `c' after eight of them is found again
 whichever width the blanks end up inside, and narrowing far enough to push the
 line into history carries the mark up there with it.  A point that wandered off
 the cursor is kept on its character the same way."
@@ -1725,11 +1725,11 @@ follows really is the continuation."
       (kill-buffer buffer))))
 
 (ert-deftest cooked-wrapped-lines-stay-split-when-asked ()
-  "The exact counterpart of `cooked-wrapped-lines-rejoin-in-scrollback\=', and it
+  "The exact counterpart of `cooked-wrapped-lines-rejoin-in-scrollback', and it
 has to be asserted where the two modes actually differ.  The *live screen* is one
 buffer line per row in both modes -- a row is written into its own line whatever
 the flag says -- so a test that reads the top of the buffer and finds
-`AAAAAAAAAABBBBBBBBBB\=' at a line end has learned nothing about the flag: it
+`AAAAAAAAAABBBBBBBBBB' at a line end has learned nothing about the flag: it
 passes with rejoining fully on.  What the flag decides is what happens to a row
 on its way *out* of the screen, so the assertion is about scrollback: each
 evicted row keeps its own newline instead of being joined onto the line above."
@@ -1798,13 +1798,13 @@ simulating the `é' rendering wider than one column.  The guard trims."
 
 (ert-deftest cooked-guard-row-width-skips-pure-ascii-rows-on-a-terminal-frame ()
   "A terminal frame has no font-shaping engine and no per-face fonts, so a plain
-ASCII row cannot disagree with cooked\='s width model there -- skipped as a cheap
+ASCII row cannot disagree with cooked's width model there -- skipped as a cheap
 fast path, exercised here by leaving a row Emacs would (per the mock) report as
 wrapped untouched, since it never contains anything but ASCII.
 
-Which row is plain ASCII is now the core\='s answer rather than a `string-match-p\='
-taken here, so the flag is passed in the way `cooked--render-rows\=' passes it off
-the block -- see `cooked--guard-row-width\='."
+Which row is plain ASCII is now the core's answer rather than a `string-match-p'
+taken here, so the flag is passed in the way `cooked--render-rows' passes it off
+the block -- see `cooked--guard-row-width'."
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--display-buffer)
@@ -1820,17 +1820,17 @@ the block -- see `cooked--guard-row-width\='."
 (ert-deftest cooked-guard-row-width-skips-pure-ascii-rows-in-a-fixed-pitch-font ()
   "The graphical half of the fast path above, and the one that pays for itself:
 a plain ASCII row in a font that renders ASCII one cell per character is not
-measured at all -- no `string-width\=', no `vertical-motion\=', not even a memo
+measured at all -- no `string-width', no `vertical-motion', not even a memo
 lookup -- because nothing about it can come out wider than the grid said.
 
-The sibling of `cooked-guard-row-width-checks-pure-ascii-rows-on-a-graphical-frame\='
+The sibling of `cooked-guard-row-width-checks-pure-ascii-rows-on-a-graphical-frame'
 below, which is the same row in a face that is *not* fixed pitch.  The two of
-them are the whole of the decision `cooked--ascii-fixed-pitch-p\=' makes.
+them are the whole of the decision `cooked--ascii-fixed-pitch-p' makes.
 
 Batch Emacs has no graphical frame to measure in, so the frame is claimed and the
-font metrics are the mock: a 10-pixel cell and a `string-pixel-width\=' that
+font metrics are the mock: a 10-pixel cell and a `string-pixel-width' that
 answers ten pixels a character, which is what a monospace font answers.  A
-ligature would not change that -- see `cooked--ascii-fixed-pitch-p\=' for the
+ligature would not change that -- see `cooked--ascii-fixed-pitch-p' for the
 measurement across four monospace fonts that says so."
   (with-temp-buffer
     (cooked-mode)
@@ -1853,22 +1853,22 @@ character, so the fast path above must not apply to every ASCII row -- this one
 is measured, and trimmed.
 
 The reason has changed, and the test is set up to the new one.  It used to be
-ligatures: a shaper turning `->\=' into one glyph that no per-character metric
+ligatures: a shaper turning `->' into one glyph that no per-character metric
 predicts.  Measured, that is not a thing that can happen -- across Noto Sans
-Mono, Iosevka Fixed SS10, Adwaita Mono and generic `monospace\=', with 27
+Mono, Iosevka Fixed SS10, Adwaita Mono and generic `monospace', with 27
 ligature sequences and with ligatures forced on the way ligature.el does it, not
-one rendered at anything but `frame-char-width\=' times its length.  A monospace
+one rendered at anything but `frame-char-width' times its length.  A monospace
 font draws a ligature inside the cells its characters already had; that is what
 makes it monospace, and this guard only ever trims a row that renders *wider*
 than nominal.
 
 What does render ASCII wider is a face whose font is not fixed pitch at all --
-`buffer-face-mode\=', a `:family\=' on the default face, a fallback font for a
+`buffer-face-mode', a `:family' on the default face, a fallback font for a
 character the primary font lacks.  In the same measurement a quasi-proportional
-face got 26 of the 27 wrong, `=>\=' at 20 pixels where two cells are 18 and
-`www\=' at 39 where three are 27.  So that is the condition set up here: a
-claimed graphical frame whose `string-pixel-width\=' does not agree with its cell
-width, which is exactly what `cooked--ascii-fixed-pitch-p\=' asks and exactly
+face got 26 of the 27 wrong, `=>' at 20 pixels where two cells are 18 and
+`www' at 39 where three are 27.  So that is the condition set up here: a
+claimed graphical frame whose `string-pixel-width' does not agree with its cell
+width, which is exactly what `cooked--ascii-fixed-pitch-p' asks and exactly
 what a proportional family answers.  The row is ASCII and is checked anyway."
   (with-temp-buffer
     (cooked-mode)
@@ -2364,14 +2364,14 @@ resync went and got it."
 (ert-deftest cooked-a-still-render-at-a-prompt-holds-the-view-but-not-the-line ()
   "The three axes come apart at a prompt.
 
-`still\=' there means the view stops chasing the child -- a program repainting a
+`still' there means the view stops chasing the child -- a program repainting a
 tty it never took out of canonical mode is exactly what that is for, and gating
 the freeze on forwarding made it unreachable in that case.  The keyboard half of
 the mode lapses instead: Emacs owns the line, so nothing is read-only and
-`cooked-input-map\=' stays installed.
+`cooked-input-map' stays installed.
 
 Point inside the pending input is the one thing the held view cannot speak for.
-That region is lifted out and rebuilt around the child\='s cursor on every drain,
+That region is lifted out and rebuilt around the child's cursor on every drain,
 so \"stay where you are\" is not a position a *buffer position* can hold; the
 offset into the region is, because the text is reinserted verbatim.  Carrying
 that offset is what keeps the user where they were typing, and without it a
@@ -2423,7 +2423,7 @@ repaint would drop them at the start of their own line."
 
 (ert-deftest cooked-scrollback-cap-holds-under-a-flood ()
   "Without a cap a session grows for as long as it runs.  The buffer is allowed
-to overshoot by `cooked--scrollback-slack\=', so this asserts a bound rather than
+to overshoot by `cooked--scrollback-slack', so this asserts a bound rather than
 an exact count."
   (let ((cooked-scrollback-lines 50))
     (cooked-tests--with-session (cooked-tests--flood 600)
@@ -2446,7 +2446,7 @@ an exact count."
       (should (> (cooked-tests--scrollback-lines) 300)))))
 
 (ert-deftest cooked-scrollback-cap-keeps-the-seam-honest ()
-  "A trim is a deletion above `cooked--screen-start\=', so it owes the emulator
+  "A trim is a deletion above `cooked--screen-start', so it owes the emulator
 the news that its top row begins a line again.  Left unsaid, the desync is
 silent until the next resize -- which is what this drives."
   (let ((cooked-scrollback-lines 40))
@@ -2460,7 +2460,7 @@ silent until the next resize -- which is what this drives."
       (cooked--check-seam))))
 
 (ert-deftest cooked-scrollback-cap-trims-at-a-line-beginning ()
-  "`cooked--discard-scrollback\=' hands the emulator a seam, and half a line is
+  "`cooked--discard-scrollback' hands the emulator a seam, and half a line is
 not one.  A flood of lines long enough to wrap makes the mid-line cut reachable."
   (let ((cooked-scrollback-lines 30))
     (cooked-tests--with-session
@@ -2570,11 +2570,11 @@ fifty-seven and the trim would cut the transcript back to forty-five."
 (ert-deftest cooked-glyph-scale-clamps-each-side-not-the-sum ()
   "The three-way min, which is the detail an implementation skips.
 
-A row realises `max(ascent) + max(descent)\=' across every glyph sharing its
+A row realises `max(ascent) + max(descent)' across every glyph sharing its
 baseline, so a glyph overflows if *either* side is over and scaling by the ratio
 of the sums can leave one side over the line.
 
-The numbers are this machine\='s, measured in a real frame: default ascent 15,
+The numbers are this machine's, measured in a real frame: default ascent 15,
 descent 5, and a CJK glyph at ascent 18, descent 5, pixel size 15.  The sum
 ratio is 20/23 = 0.869; the ascent ratio is 15/18 = 0.833.  Take the sum and the
 row is still too tall."
@@ -2588,7 +2588,7 @@ row is still too tall."
     (should (<= scale (/ 15.0 18.0)))))
 
 (ert-deftest cooked-glyph-scale-quantizes-down-to-a-whole-pixel ()
-  "`height\=' scales the font\='s pixel size and Emacs rounds the result, so a
+  "`height' scales the font's pixel size and Emacs rounds the result, so a
 mathematically exact scale rounds back up and the cell overflows anyway.
 
 Asserted as the property rather than the value: whatever scale comes back, the
@@ -2630,7 +2630,7 @@ little over, a slightly wide character beats an illegible one."
       (should (cooked--glyph-scale '(16 13 4 13) 8 default)))))
 
 (ert-deftest cooked-glyph-scale-leaves-a-glyph-that-fits-alone ()
-  "nil, not 1.0: the caller puts no property on at all, and a `display\=' property
+  "nil, not 1.0: the caller puts no property on at all, and a `display' property
 per cell is exactly the cost the run-wide image work went to remove."
   (let ((default '(15 5)))
     ;; Exactly its slot in every dimension.
@@ -2643,7 +2643,7 @@ per cell is exactly the cost the run-wide image work went to remove."
 (ert-deftest cooked-glyph-scale-catches-a-glyph-that-is-only-too-tall ()
   "The case the plan this came from could not reach.
 
-Hanging the repair off `cooked--row-wraps-p\=' only ever finds glyphs too
+Hanging the repair off `cooked--row-wraps-p' only ever finds glyphs too
 *wide*.  A glyph whose width fits and whose ascent does not makes the row deeper
 without wrapping it, and the wrap check answers nil -- so this has to be decided
 from the metrics rather than from the symptom."
@@ -2654,7 +2654,7 @@ from the metrics rather than from the symptom."
     (should (cooked--glyph-scale '(9 15 9 15) 9 default))))
 
 (ert-deftest cooked-a-lone-wide-glyph-claims-the-cell-after-it ()
-  "ghostel\='s `adjustWidth\=', and the idea is better than shrinking.
+  "ghostel's `adjustWidth', and the idea is better than shrinking.
 
 A glyph too wide for its cell does not have to be made smaller if there is
 somewhere for it to go.  Three conditions, each with its own way of failing."
@@ -2691,16 +2691,16 @@ somewhere for it to go.  Three conditions, each with its own way of failing."
                      '(20 15 5 15) from (1+ from) (point-max) default 9))))))
 
 (ert-deftest cooked-a-face-remap-resizes-the-session-too ()
-  "`text-scale-mode-hook\=' is not the whole story, and the gap is the case
+  "`text-scale-mode-hook' is not the whole story, and the gap is the case
 cooked already knows how to detect.
 
-`buffer-face-set\=', `variable-pitch-mode\=' and `buffer-face-toggle\=' all
-rescale the buffer\='s font through `buffer-face-mode\=', which runs no hook --
+`buffer-face-set', `variable-pitch-mode' and `buffer-face-toggle' all
+rescale the buffer's font through `buffer-face-mode', which runs no hook --
 so a session put into a proportional face was never told to re-measure, even
-though `cooked--ascii-fixed-pitch-p\=' exists precisely to notice one.  Nothing
-else observes it either: the window\='s pixel dimensions do not change, so
-neither `window-configuration-change-hook\=' nor
-`window-size-change-functions\=' fires."
+though `cooked--ascii-fixed-pitch-p' exists precisely to notice one.  Nothing
+else observes it either: the window's pixel dimensions do not change, so
+neither `window-configuration-change-hook' nor
+`window-size-change-functions' fires."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (let ((synced 0))
@@ -2717,9 +2717,9 @@ neither `window-configuration-change-hook\=' nor
 (ert-deftest cooked-a-minibuffer-does-not-resize-the-child ()
   "A minibuffer costs every window on the frame a row, and each is a SIGWINCH.
 
-fish clears and re-emits its prompt on every one, so an `M-x\=' cycle -- grow
+fish clears and re-emits its prompt on every one, so an `M-x' cycle -- grow
 then shrink -- produces two prompt repaints for a gesture that never touched
-this window\='s width.  Deferred only where the width is unchanged, which is
+this window's width.  Deferred only where the width is unchanged, which is
 what makes it safe: a rewrap is what a child actually has to be told about, and
 the height reaches it at the next real resize."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
@@ -2776,18 +2776,18 @@ screen, which is worse than the repaint the deferral exists to avoid."
   "The guard whose absence misrendered htop, btop and tree.
 
 Dropping it looks harmless: a glyph that fits needs no *scaling*, and
-`cooked--glyph-scale\=' answers nil for it either way.  What it also needs is no
+`cooked--glyph-scale' answers nil for it either way.  What it also needs is no
 *claim*, and that is what went wrong.  A box-drawing character has exactly
 cell-shaped proportions -- 9 pixels over an ascent and descent of 20, against a
 cell of 9 over 20 -- so the claim test compared two equal aspects, answered yes
-on the `>=\=', took the cell after it and hid the space living there.  Every
-line of `tree\=' output begins `│ \=' and every one of them did it: measured, 8
+on the `>=', took the cell after it and hid the space living there.  Every
+line of `tree' output begins `│ ' and every one of them did it: measured, 8
 display properties and 4 hidden spaces over three lines.
 
 So this asserts the *absence* of a decision, which is the only thing that can
 catch it -- the text was never wrong, only what was hung on it.  It asks the
 predicate, and then the walk that consults it: the predicate alone stays true
-with the walk no longer asking it, and `│ \=' lines are the regression the walk
+with the walk no longer asking it, and `│ ' lines are the regression the walk
 produced."
   (let ((default '(15 5)))
     ;; Exactly its cell in all three dimensions: nothing to improve.
@@ -2816,9 +2816,9 @@ produced."
       (should-not (text-property-not-all (point-min) (point-max) 'display nil)))))
 
 (ert-deftest cooked-a-glyph-is-not-claimed-into-a-space-a-box-run-holds ()
-  "A blank inside a box-drawing run is part of the run\='s image, not free.
+  "A blank inside a box-drawing run is part of the run's image, not free.
 
-`Row::absorb_blank_runs\=' merges the gap in `│ │\=' into one run whose bitmap
+`Row::absorb_blank_runs' merges the gap in `│ │' into one run whose bitmap
 is three cells wide.  Hiding that space at zero width would pull the rest of
 the row one cell left under an image still three cells wide, so a glyph beside
 it must shrink rather than claim it.  The same row with a plain space claims."
@@ -2835,9 +2835,9 @@ it must shrink rather than claim it.  The same row with a plain space claims."
 (ert-deftest cooked-glyph-scaling-measures-against-the-zoomed-font ()
   "After a zoom, a glyph that fits the zoomed cell is left alone.
 
-`text-scale-increase\=' from a 15-pixel font draws the buffer in a 26-pixel one
+`text-scale-increase' from a 15-pixel font draws the buffer in a 26-pixel one
 with 16-pixel cells, while the frame still says 15 pixels and 9.  Measured
-against the frame, the `│\=' below -- exactly one zoomed cell -- would be too
+against the frame, the `│' below -- exactly one zoomed cell -- would be too
 big for its slot and shrink, while the ASCII rows beside it stayed zoomed.
 Against the zoomed font it fits, and the glyph really twice the cell is the one
 that shrinks."
@@ -2862,10 +2862,10 @@ that shrinks."
         (should (= (cadr (assq 'height arrow)) 0.5))))))
 
 (ert-deftest cooked-glyph-scaling-leaves-a-box-drawing-image-whole ()
-  "A box-drawing run drawn as cooked\='s own image is never scaled.
+  "A box-drawing run drawn as cooked's own image is never scaled.
 
-The image of `┌──┐\=' is one `display\=' spanning four cells and fits them by
-construction.  The font\='s glyphs for the same characters can be any size at
+The image of `┌──┐' is one `display' spanning four cells and fits them by
+construction.  The font's glyphs for the same characters can be any size at
 all -- here every one is reported twice its cell -- and scaling one character
 would replace its share of the picture with a shrunk glyph while the rest of the
 run went on drawing the whole four-cell image.  The CJK character after it is
@@ -2896,7 +2896,7 @@ drawn from the font and is still scaled."
 (ert-deftest cooked-glyph-scaling-measures-nothing-on-a-terminal-frame ()
   "A terminal frame has no font to fit a glyph inside, so nothing is measured.
 
-`font-at\=' answers nil off a window frame, and the walk used to ask it about
+`font-at' answers nil off a window frame, and the walk used to ask it about
 every character of every non-uniform row on every drain anyway, for a scale it
 could never apply.  Batch Emacs is such a frame: a row of box drawing and CJK
 reaches the walk twice, and no character is measured either time."
@@ -2927,7 +2927,7 @@ reaches the walk twice, and no character is measured either time."
 (ert-deftest cooked-a-cluster-that-cannot-be-measured-is-asked-about-once ()
   "A nil measurement is remembered, and so is every other.
 
-`font-at\=' answers nil for a character on a frame with no font for it, and the
+`font-at' answers nil for a character on a frame with no font for it, and the
 cache could not hold nil, so the same character was shaped again on every
 drain.  Batch Emacs answers nil for everything, which makes it the case."
   (with-temp-buffer
@@ -2944,7 +2944,7 @@ drain.  Batch Emacs answers nil for everything, which makes it the case."
       (should (= asked 1)))))
 
 (ert-deftest cooked-glyph-metrics-are-bounded-like-the-wrap-memo ()
-  "The metrics table is emptied past `cooked-wrap-cache-limit\=' measurements.
+  "The metrics table is emptied past `cooked-wrap-cache-limit' measurements.
 
 It is keyed by face and cluster, and a truecolour stream mints a face for
 nearly every run it colours, so without a bound it grew until the font changed.
@@ -3016,10 +3016,10 @@ behind, counting across faces rather than per face."
 (defun cooked-tests--image-update (id cols rows &optional data)
   "An update placing image ID as a COLS by ROWS rectangle on screen row 0.
 
-Twelve bytes per cell, matching `cooked--apply-image-deco\=': the id, then the
-cell\='s row and column within the picture, then the rectangle this placement was
+Twelve bytes per cell, matching `cooked--apply-image-deco': the id, then the
+cell's row and column within the picture, then the rectangle this placement was
 laid at.  The rectangle is per placement rather than per image, so it is here
-rather than in `:images\=' -- see `cooked--image-spec\='."
+rather than in `:images' -- see `cooked--image-spec'."
   (let* ((u16 (lambda (n) (list (logand n 255) (logand (ash n -8) 255))))
          (packed (apply #'unibyte-string
                         (cl-loop for c below cols
@@ -3043,7 +3043,7 @@ rather than in `:images\=' -- see `cooked--image-spec\='."
           :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
 
 (defun cooked-tests--image-cell (id crow ccol cols rows)
-  "The twelve bytes `cooked--apply-image-deco\=' reads for one cell."
+  "The twelve bytes `cooked--apply-image-deco' reads for one cell."
   (let ((u16 (lambda (n) (list (logand n 255) (logand (ash n -8) 255)))))
     (apply #'unibyte-string
            (append (list (logand id 255) (logand (ash id -8) 255)
@@ -3052,13 +3052,13 @@ rather than in `:images\=' -- see `cooked--image-spec\='."
                    (funcall u16 cols) (funcall u16 rows)))))
 
 (defun cooked-tests--image-update-broken (id cols rows hole &optional data)
-  "Like `cooked-tests--image-update\=', with column HOLE overwritten by a letter.
+  "Like `cooked-tests--image-update', with column HOLE overwritten by a letter.
 
 What the grid does to a picture when a program writes over the middle of it: the
 overwritten cell holds a character of its own and is no longer part of the
 placement, so it contributes no record and the run arrives as *two* decoration
 spans at their own offsets.  Reproducing that shape here rather than driving a
-child is the point -- it is the input `cooked--apply-image-deco\=' has to break
+child is the point -- it is the input `cooked--apply-image-deco' has to break
 its runs against."
   (let ((text (make-string cols ?\s))
         (left nil)
@@ -3080,11 +3080,11 @@ its runs against."
           :app-cursor nil :keys 'legacy :mode 'raw :events nil :exit nil)))
 
 (ert-deftest cooked-a-row-of-image-cells-shares-one-run-wide-slice ()
-  "One `display\=' interval over the row, cutting a slice as wide as the run.
+  "One `display' interval over the row, cutting a slice as wide as the run.
 
 The invariant, and it is the same one
-`cooked-adjacent-box-glyphs-share-only-a-run-wide-image\=' pins for glyphs.
-Emacs merges a span of characters whose `display\=' values are `eq\=' into a
+`cooked-adjacent-box-glyphs-share-only-a-run-wide-image' pins for glyphs.
+Emacs merges a span of characters whose `display' values are `eq' into a
 single displayed image, and whether that is a hazard or the point depends
 entirely on how wide the image is: a *cell*-wide slice shared across three cells
 would collapse the row to one cell of picture, while a slice sized to exactly
@@ -3096,10 +3096,10 @@ its own slice advancing a cell per column -- and it was reading the mechanism
 for the requirement.  What must survive is that the *grid* addresses the picture
 one cell at a time, so that an overwrite, a scroll and a rewrap need no special
 case; that is a property of the wire records and of where the runs break, not of
-how many `put-text-property\=' calls the buffer ends up with.
-`cooked-an-image-run-broken-by-text-is-two-runs-at-their-own-columns\=' is the
+how many `put-text-property' calls the buffer ends up with.
+`cooked-an-image-run-broken-by-text-is-two-runs-at-their-own-columns' is the
 half that actually pins it, and this one is what a full-screen picture costs:
-1944 `display\=' intervals over a 24x80 frame become 48.
+1944 `display' intervals over a 24x80 frame become 48.
 
 Read the width back off the slice, which is what makes the merge observable from
 batch at all -- nothing here rasterizes, so the only evidence a run is drawn
@@ -3135,7 +3135,7 @@ exactly what a run-wide slice gets wrong if the runs are not cut where the grid
 cut them.
 
 Driven from the wire rather than through a child, because what is under test is
-where `cooked--apply-image-deco\=' breaks a run and that is a property of the
+where `cooked--apply-image-deco' breaks a run and that is a property of the
 records it is handed."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
@@ -3158,7 +3158,7 @@ records it is handed."
   "One span holding TWO adjacent placements of ID, each COLS wide.
 
 The case that makes the run-break check load-bearing rather than defensive.  A
-decoration span\='s records cover every character it covers, so a *gap* inside one
+decoration span's records cover every character it covers, so a *gap* inside one
 cannot arise -- but two placements of the same picture side by side on one row
 are contiguous characters, and therefore one span, whose column sequence
 *restarts*: 0 1 2 0 1 2.  Every other field agrees across the seam, so the
@@ -3183,7 +3183,7 @@ column is the only thing that can find it."
 (ert-deftest cooked-two-placements-of-one-picture-do-not-merge-into-one-run ()
   "The run break has to find a column that restarts, not only one that skips.
 
-`cooked-an-image-run-broken-by-text-is-two-runs-at-their-own-columns\=' does not
+`cooked-an-image-run-broken-by-text-is-two-runs-at-their-own-columns' does not
 reach this, and that is worth saying plainly: text over the middle of a picture
 ends the *span*, so the two fragments arrive as two record arrays and the
 coalescing loop never sees the discontinuity at all.  Two placements side by
@@ -3191,7 +3191,7 @@ side are one span, one array, and the only field that differs across the seam is
 the column -- which is exactly the comparison this pins.
 
 Merged, the second placement would be sliced as though it were columns 3-5 of
-the first: one six-cell run at `(slice 0 0 60 20)\=', drawing the left half of the
+the first: one six-cell run at `(slice 0 0 60 20)', drawing the left half of the
 picture stretched across both copies."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
@@ -3332,7 +3332,7 @@ oldest one still on screen."
       (should (= (hash-table-count cooked--image-data) 20)))))
 
 (ert-deftest cooked-a-displayed-image-is-recognised-as-displayed ()
-  "`cooked--image-displayed-p\=' reads the weak spec table, which is the only free
+  "`cooked--image-displayed-p' reads the weak spec table, which is the only free
 signal for \"something is still showing this\".  If it ever stopped answering yes
 for a picture on screen, eviction would quietly start preferring live images."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
@@ -3356,7 +3356,7 @@ blanks on the grid, and they stay blanks here."
                    "   "))))
 
 (defun cooked-tests--image-cells-without-display ()
-  "Buffer positions carrying an image `cooked-deco\=' and no `display\=' property.
+  "Buffer positions carrying an image `cooked-deco' and no `display' property.
 
 The invariant every image path has to keep: the placement and the picture are
 put on the same characters at the same moment, so a cell that claims to be part
@@ -3373,7 +3373,7 @@ of a picture and shows none is a cell whose image data went missing under it."
 
 (ert-deftest cooked-every-image-cell-that-is-drawn-carries-its-picture ()
   "The invariant the rest of the image path is judged against, and the probe for
-it.  A cell carrying an `(image ID ...)\=' `cooked-deco\=' and no `display\=' is a
+it.  A cell carrying an `(image ID ...)' `cooked-deco' and no `display' is a
 cell that claims to be part of a picture and shows none -- correct geometry,
 correct cursor, nothing drawn, which is what a placement of an id whose data
 went missing underneath it looks like.
@@ -3381,10 +3381,10 @@ went missing underneath it looks like.
 Both directions, because a probe that cannot fail proves nothing about the
 suite that leans on it: a rendered picture has one on every cell, and a
 placement of an id this buffer holds no data for has one on none.  The second
-is `cooked-image-placement-without-data-renders-as-blanks\=' seen from here, and
+is `cooked-image-placement-without-data-renders-as-blanks' seen from here, and
 it stays right for an id the buffer was never told about -- what must not
 happen is reaching that state for an id it was told about and dropped, which is
-`cooked-a-replayed-payload-draws-after-its-id-was-evicted\='."
+`cooked-a-replayed-payload-draws-after-its-id-was-evicted'."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
     (should (cooked-tests--settle (lambda () cooked--session)))
     (cooked-tests--cell)
@@ -3397,15 +3397,15 @@ happen is reaching that state for an id it was told about and dropped, which is
   "End to end, with a child transmitting real kitty graphics.
 
 Twenty distinct one-pixel pictures, each drawn over the last -- an animation,
-in miniature, and the shape `viu\=' draws a gif in.  Nineteen of them are then
-showing nowhere, so the cap spends them; the child sends the first one\='s bytes
+in miniature, and the shape `viu' draws a gif in.  Nineteen of them are then
+showing nowhere, so the cap spends them; the child sends the first one's bytes
 again on the next loop, and it has to arrive as a picture.  Before the module
 was told about eviction it arrived as the id it had minted the first time
 round, whose data this buffer no longer had, and the cells drew nothing.
 
 Properties only -- batch Emacs draws no pixels, and none are needed: the
 failure is entirely in whether a cell that says it is part of a picture has a
-`display\=' property."
+`display' property."
   ;; `stty raw -echo\=' for the reason `cooked-tests--with-echoing-child\=' uses it:
   ;; in cooked mode the line discipline would hold an APC with no newline in it
   ;; until one arrived, and echo it a second time when it did.
@@ -3455,7 +3455,7 @@ pictures cost twenty distinct colours and no encoder."
 (defun cooked-tests--kitty-rgb-block (w h)
   "A kitty transmission of a W by H picture of raw RGB pixels.
 
-No `c=\=' or `r=\=': the pixels are all that says how many cells this covers,
+No `c=' or `r=': the pixels are all that says how many cells this covers,
 which is what makes it a measurement against the cell size rather than a
 request."
   (format "\e_Ga=T,f=24,s=%d,v=%d,i=1;%s\e\\"
@@ -3530,7 +3530,7 @@ row once it is written, so a picture whose halves were built at two sizes stays
 mismatched until this runs.
 
 Read at the *second* cell of the three, which is a second claim riding along:
-the run's `display\=' value covers the whole run, so the middle cell answers with
+the run's `display' value covers the whole run, so the middle cell answers with
 the run's slice -- 3 cells wide and one tall -- rather than with one of its own.
 Both numbers in it move with the cell size, which is what is under test here."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 300")
@@ -3549,7 +3549,7 @@ Both numbers in it move with the cell size, which is what is under test here."
       (cooked--rescale-deco))))
 
 (ert-deftest cooked-the-image-order-tail-tracks-its-list-through-every-writer ()
-  "`cooked--image-order-tail\=' is a second copy of a fact -- which cons is last --
+  "`cooked--image-order-tail' is a second copy of a fact -- which cons is last --
 and the only thing that makes it safe is that nothing sets the list without it.
 So this pins the invariant at each of the three writers rather than trusting the
 call sites: an append, a forget taking an id out of the middle, and an eviction
@@ -3688,7 +3688,7 @@ Every other image test here starts partway along it."
 
 (ert-deftest cooked-discarding-the-scrollback-forgets-the-pictures-in-it ()
   "The whole eviction path with nothing stubbed: a real child transmits a real
-picture, scrolls it off the grid and into Emacs\=' scrollback, and clearing the
+picture, scrolls it off the grid and into Emacs' scrollback, and clearing the
 scrollback is what spends it.  Nothing here is a sweep, a budget or a timer --
 the bytes go because the last row referring to them went."
   (let ((b64 (base64-encode-string (cooked-tests--png) t)))
@@ -4139,7 +4139,7 @@ calls in a row share one redraw."
 No hook runs for a face edited outside a theme, so the face cache kept the red
 it resolved first, and nothing sent the row again: the child writes the same
 cells over themselves, which damages nothing and does not even wake a drain.
-`set-face-attribute\=' on an ANSI face now schedules a comparison of the ANSI
+`set-face-attribute' on an ANSI face now schedules a comparison of the ANSI
 colours, and a move flushes the faces and redraws every screen."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
@@ -4165,7 +4165,7 @@ colours, and a move flushes the faces and redraws every screen."
   "Rows rendered under one layout are sent again once the layout moves.
 
 The width guard measured, scaled and trimmed them against the font that has
-just gone, and the core\='s copy of the screen would leave every one of them out
+just gone, and the core's copy of the screen would leave every one of them out
 of a drain until its cells changed -- so a zoom that kept the grid size left
 the rows on screen scaled for the old font for as long as a program repainted
 the same frame.  The stamp moving is what says so, and nothing is sent while it
@@ -4188,8 +4188,8 @@ stays put."
   "An option that changes how the same cells are drawn reaches the screen now.
 
 A border already drawn as a bitmap stayed one after
-`cooked-box-drawing-images\=' was turned off, because nothing renders a row
-again until the child sends different cells for it.  Its `:set\=' redraws every
+`cooked-box-drawing-images' was turned off, because nothing renders a row
+again until the child sends different cells for it.  Its `:set' redraws every
 running screen instead."
   (cooked-tests--with-session
       '("/bin/sh" "-c" "printf '\\342\\224\\214\\342\\224\\200\\342\\224\\220\\n'; sleep 5")
@@ -4311,10 +4311,10 @@ run, and every glyph of it has to carry the same decoration afterwards."
 (ert-deftest cooked-a-theme-change-resolves-renditions-again-without-the-core-resending-them ()
   "Faces are resolved from the renditions Lisp already holds, not asked for again.
 
-The core announces each rendition id once, as a drain\='s `:styles\=', and a theme
+The core announces each rendition id once, as a drain's `:styles', and a theme
 change must not need it to announce them again: the buffer keeps the renditions
 and forgets only the faces made from them, so the next repaint of the same text
-comes out in the new theme\='s colours from ids the core already sent."
+comes out in the new theme's colours from ids the core already sent."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033[31mred\\033[0m'; read _; printf '\\033[31mred\\033[0m'; sleep 5")

@@ -115,16 +115,16 @@ percent of terminal output that contains no path-shaped token at all, which is
 what makes scanning a screenful of scrollback affordable.  Something has to
 have either a slash in it or an extension on it to qualify.
 
-A number with a point in it has an extension by that rule, so `1.5\=' and
-`192.168.0.1\=' match too.  `cooked-file-link-scan\=' drops those itself, by
-`cooked-file-link--number-regexp\=', because an Emacs regexp has no lookahead
+A number with a point in it has an extension by that rule, so `1.5' and
+`192.168.0.1' match too.  `cooked-file-link-scan' drops those itself, by
+`cooked-file-link--number-regexp', because an Emacs regexp has no lookahead
 to say \"but not only digits\" with.")
 
 (defconst cooked-file-link--number-regexp "\\`[0-9.]+\\'"
   "A candidate that is only digits and points: a version, a ratio, an address.
 
-Nothing a program prints as `3.14\=' or `10.0.0.1\=' is meant as a file, and
-each would otherwise cost a `file-exists-p\=' per scan.  Following one under
+Nothing a program prints as `3.14' or `10.0.0.1' is meant as a file, and
+each would otherwise cost a `file-exists-p' per scan.  Following one under
 point still asks, since there you pointed at it.")
 
 (defun cooked-file-link--split (string)
@@ -155,14 +155,14 @@ the project root, which is what makes the paths in a `make' or `cargo' log at
 the top of a tree resolve from anywhere inside it -- the project.el integration
 the report asked for, and it is one `let' rather than a mechanism.
 
-Each place costs one `file-exists-p\=', and a miss is most of what a scan
-does, so the count is the thing to keep down.  `ffap-file-exists-string\=' is
-called with NOMODIFY: without it a miss also tries `NAME.gz\=' and `NAME.Z\=',
+Each place costs one `file-exists-p', and a miss is most of what a scan
+does, so the count is the thing to keep down.  `ffap-file-exists-string' is
+called with NOMODIFY: without it a miss also tries `NAME.gz' and `NAME.Z',
 which made six calls of two, and it returns the compressed name while this
-returned `NAME\=' -- so a directory holding only `foo.gz\=' linked a `foo\='
+returned `NAME' -- so a directory holding only `foo.gz' linked a `foo'
 that opened an empty buffer.  And the root is not asked when it would be the
-same question again: at the project root itself, which is where `tree\=' and
-most builds run, or for an absolute NAME, which `default-directory\=' does not
+same question again: at the project root itself, which is where `tree' and
+most builds run, or for an absolute NAME, which `default-directory' does not
 touch.  The root is compared as a string, since asking the filesystem whether
 two directories are one would cost the stat being saved.
 
@@ -172,15 +172,15 @@ a checkout that is not the one that produced the log -- so the link would open,
 land in a real file, and be the wrong file.  Highlighting nothing says less
 than cooked knows, and everything it says is true.
 
-Nothing resolves against a remote `default-directory\=' either, and that is a
+Nothing resolves against a remote `default-directory' either, and that is a
 second condition rather than a restatement of the first.  It is the cost guard
 where the host check is the correctness one: every candidate on this path is a
-`file-exists-p\=' in disguise, and against a TRAMP name each one is a round
+`file-exists-p' in disguise, and against a TRAMP name each one is a round
 trip to another machine.  Scrolling back scans a screenful of candidates at a
 time, so what that buys is a stall per screenful for the rest of the session.
 The two conditions also do not imply each other in either direction --
 \\[cooked] from a buffer visiting a remote file starts with a remote
-`default-directory\=' and no OSC 7 at all, and `cooked-remote-directory\=' set
+`default-directory' and no OSC 7 at all, and `cooked-remote-directory' set
 to nil leaves a foreign host with a local one."
   (and (not (string-empty-p name))
        (not (cooked--foreign-host-p))
@@ -200,18 +200,18 @@ to nil leaves a foreign host with a local one."
              (when (ffap-file-exists-string name t) (expand-file-name name))))))
 
 (defun cooked-file-link--string-at-point ()
-  "`ffap-string-at-point\=' in its `file\=' mode, read across soft wraps.
+  "`ffap-string-at-point' in its `file' mode, read across soft wraps.
 
 ffap stops at the end of the buffer line, and on the live screen a buffer line
 is a row: a path the terminal ran out of columns for would be answered as the
-half point is in, and `find-file\=' would be offered that half.  So when the
+half point is in, and `find-file' would be offered that half.  So when the
 logical line under point is wrapped, ffap is asked about the line as the child
-wrote it, joined by `cooked-link--join-wrapped\=' and put in a scratch buffer,
-and `ffap-string-at-point-region\=' is mapped back to this buffer\='s
+wrote it, joined by `cooked-link--join-wrapped' and put in a scratch buffer,
+and `ffap-string-at-point-region' is mapped back to this buffer's
 positions.  With nothing wrapped, or a region active -- where ffap takes the
-region as it stands -- this is ffap\='s own call and costs one property search.
+region as it stands -- this is ffap's own call and costs one property search.
 
-Wrapped rows in scrollback carry no flag when `cooked-rejoin-wrapped-lines\=' is
+Wrapped rows in scrollback carry no flag when `cooked-rejoin-wrapped-lines' is
 nil, and a path wrapped there is still answered a row at a time."
   (let* ((line (cooked-link-logical-line-bounds (line-beginning-position)
                                                 (line-end-position)))
@@ -274,19 +274,19 @@ match whose own FILE group disagrees with NAME is dropped, which is what stops
 a rule that matched some other part of the line from contributing numbers.
 
 The line is the logical one, joined across soft wraps by
-`cooked-link--join-wrapped\=', as `cooked-file-link--string-at-point\=' reads
-it.  On a twenty-column screen `lisp/cooked-link.el:12:3: error\=' breaks
+`cooked-link--join-wrapped', as `cooked-file-link--string-at-point' reads
+it.  On a twenty-column screen `lisp/cooked-link.el:12:3: error' breaks
 after the first colon, and the row alone matches no rule, so the file name
 taken from an active region there used to open at no line at all.
 
 Each rule is matched against the whole line first, and then from each place
 NAME begins in it.  The rules are written for compiler output, where the file
-starts the line, and `gnu\=' reads leading words into its FILE group: on
-`see lisp/cooked-link.el:12:3: here\=' it takes the file to be
-`see lisp/cooked-link.el\=', which is not NAME, so a location quoted after
+starts the line, and `gnu' reads leading words into its FILE group: on
+`see lisp/cooked-link.el:12:3: here' it takes the file to be
+`see lisp/cooked-link.el', which is not NAME, so a location quoted after
 other words got no line number.  The whole line still goes first for a rule
-whose own words come before the file, as `gcc-include\=' has
-`In file included from\='."
+whose own words come before the file, as `gcc-include' has
+`In file included from'."
   (let* ((bounds (cooked-link-logical-line-bounds (line-beginning-position)
                                                   (line-end-position)))
          (line (or (car (cooked-link--join-wrapped (car bounds) (cdr bounds)))
@@ -331,8 +331,8 @@ whose own words come before the file, as `gcc-include\=' has
 (defun cooked-file-link--claim-p (beg end)
   "Whether this layer has claimed any of BEG..END as a file name.
 
-The entry `cooked-link-claim-functions\=' carries for the guessing tier.  The
-property is the one `cooked-file-link-scan\=' puts down, so the answer is about
+The entry `cooked-link-claim-functions' carries for the guessing tier.  The
+property is the one `cooked-file-link-scan' puts down, so the answer is about
 spans this layer actually made rather than about text it merely could have
 matched."
   (text-property-not-all beg end 'cooked-file-link nil))
@@ -340,7 +340,7 @@ matched."
 (defun cooked-file-link-scan (beg end)
   "Highlight existing file names between BEG and END.
 
-An entry on `cooked-link-scan-functions\='.
+An entry on `cooked-link-scan-functions'.
 
 Runs over settled scrollback as redisplay reaches it, and never on a live row,
 which is the whole reason it may touch the filesystem at all.  Answers are
@@ -414,39 +414,39 @@ under your home directory reads as ~/src/lib.rs."
 (defun cooked-file-link--filename-at-point ()
   "The file name under point, whether or not it exists.
 
-`filename\=' rather than `existing-filename\=': the caller asked what the text
+`filename' rather than `existing-filename': the caller asked what the text
 *is*, not whether it resolves, so the split is done and the name returned
-without a `stat\='.  `cooked-file-link--exists\=' is the other provider\='s job."
+without a `stat'.  `cooked-file-link--exists' is the other provider's job."
   (when-let* ((string (cooked-file-link--string-at-point)))
     (car (cooked-file-link--split string))))
 
 (defun cooked-file-link--existing-filename-at-point ()
   "The file under point, resolved, or nil if nothing there is a file.
 
-Returns the *resolved* name -- `cooked-file-link--exists\=' has already tried
-`default-directory\=' and then the project root -- because a bare `src/lib.rs\='
-handed to `find-file\=' from some other buffer would not find anything.  What
+Returns the *resolved* name -- `cooked-file-link--exists' has already tried
+`default-directory' and then the project root -- because a bare `src/lib.rs'
+handed to `find-file' from some other buffer would not find anything.  What
 makes the answer useful is that it is absolute."
   (car (cooked-file-link--at-point)))
 
 (defun cooked-file-link--filename-bounds-at-point ()
   "Bounds of the file name under point, or nil.
 
-`ffap-string-at-point\=' records what it matched in
-`ffap-string-at-point-region\=', so the bounds come from the same pass that
+`ffap-string-at-point' records what it matched in
+`ffap-string-at-point-region', so the bounds come from the same pass that
 produced the string rather than from a second, possibly disagreeing, one.  The
-trailing `:LINE:COL\=' is included: it is part of the thing the user pointed at,
-and a caller wanting only the name has the `filename\=' provider for that."
+trailing `:LINE:COL' is included: it is part of the thing the user pointed at,
+and a caller wanting only the name has the `filename' provider for that."
   (when (cooked-file-link--string-at-point)
     (let ((region ffap-string-at-point-region))
       (when (and (car region) (cadr region))
         (cons (car region) (cadr region))))))
 
 (defun cooked-file-link--file-name-at-point ()
-  "Entry for `file-name-at-point-functions\='.
+  "Entry for `file-name-at-point-functions'.
 
-What `find-file\=' offers as the `M-n\=' default, and what ffap consults.  The
-existing file rather than the guess, because this hook\='s callers use the answer
+What `find-file' offers as the `M-n' default, and what ffap consults.  The
+existing file rather than the guess, because this hook's callers use the answer
 to *open* something."
   (cooked-file-link--existing-filename-at-point))
 

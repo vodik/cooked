@@ -112,9 +112,9 @@ guarded at each call site."
 (ert-deftest cooked-command-decorations-survive-a-resize-damaging-every-row ()
   "The gap the re-arm closes, driven the way it actually happens.
 
-The overlay carries `evaporate t\=' and rides on real characters, so
-`cooked--render-rows\=' deleting a damaged row takes it with it -- and a resize
-damages every live row at once, while `cooked-command-finished-functions\=' fires
+The overlay carries `evaporate t' and rides on real characters, so
+`cooked--render-rows' deleting a damaged row takes it with it -- and a resize
+damages every live row at once, while `cooked-command-finished-functions' fires
 exactly once per command.  A command whose prompt is still on the live screen
 would lose its marker the first time the window changed width."
   :tags '(zsh)
@@ -204,7 +204,7 @@ wearing its neighbour's colour."
   "A prompt row that scrolls off keeps its marker, and keeps only one.
 
 The drain that evicts a row renders it one last time as a live row and then
-deletes it, so an `evaporate t\=' overlay on it dies with the text -- while the
+deletes it, so an `evaporate t' overlay on it dies with the text -- while the
 scrollback copy that now owns the prompt is never rendered again and would be
 decorated by nothing.  The re-arm therefore asks about commands rather than
 about the row it was called for, and reaches the ones that have just settled."
@@ -334,8 +334,8 @@ to click, since all three menu actions want a command that has finished."
 
 (ert-deftest cooked-command-decorations-take-the-running-marker-down-again ()
   "Derived, not remembered.  Nothing has to notice the ways a running marker
-can be stranded -- a `D\=' whose `C\=' was lost, a session reset -- because the
-re-arm asks `cooked--running-anchor\=' what is running rather than trusting what
+can be stranded -- a `D' whose `C' was lost, a session reset -- because the
+re-arm asks `cooked--running-anchor' what is running rather than trusting what
 it painted last."
   (with-temp-buffer
     (cooked-mode)
@@ -354,7 +354,7 @@ it painted last."
 
 (ert-deftest cooked-command-decorations-hand-the-marker-over-at-the-exit-code ()
   "The two markers want the same row -- this command's prompt -- so the running
-one comes down as the finished one goes up, at the `D\=' mark rather than at the
+one comes down as the finished one goes up, at the `D' mark rather than at the
 next render.  One marker on that row throughout, and the colour changes under
 it."
   :tags '(zsh)

@@ -130,7 +130,7 @@ naming the same tests."
   "COOKED_TEST_TIMEOUT_SCALE multiplies every deadline in the suite, so a value
 that parses to zero does not slow the suite down -- it expires every wait before
 it is taken, fails every test that needs a child, and says nothing about why.
-`string-to-number\=' reads both \"\" and \"wat\" as 0, and an empty value is the
+`string-to-number' reads both \"\" and \"wat\" as 0, and an empty value is the
 ordinary accident: a CI configuration that declares the name without giving it
 one, or a makefile that exports a variable it never set.  So the parser rejects
 everything that is not a positive number and the caller falls back to 1."
@@ -149,9 +149,9 @@ everything that is not a positive number and the caller falls back to 1."
   "A batch read that would take its answer from stdin signals instead.
 
 Under a pipe that is open and silent such a read blocks, and under `</dev/null'
-`read-key\=' blocks too, so the suite stops with nothing on screen to say where.
+`read-key' blocks too, so the suite stops with nothing on screen to say where.
 A pushed event answers the event readers and is let through, but it does not
-answer `read-from-minibuffer\=', which in batch reads stdin whatever is queued.
+answer `read-from-minibuffer', which in batch reads stdin whatever is queued.
 A refusal raised from a timer only prints, so it is recorded as well, and the
 session fixtures fail the test that left one behind."
   (let ((cooked-tests--refused-reads nil))
@@ -177,8 +177,8 @@ session fixtures fail the test that left one behind."
   "Each wait loop in the suite stretches its deadline by the scale.
 
 A loop that reads its SECONDS raw keeps the idle-laptop bet the scale exists to
-correct, and three did: `cooked-tests--run-until-dead\=',
-`cooked-tests--pump-wakes\=' and `cooked-tests--split-settle\='.  Each is given
+correct, and three did: `cooked-tests--run-until-dead',
+`cooked-tests--pump-wakes' and `cooked-tests--split-settle'.  Each is given
 a tenth of a second that nothing will cut short under a scale of four, and has
 to take at least four tenths."
   (let ((cooked-tests-timeout-scale 4))
@@ -226,13 +226,13 @@ gives `zsh', and (skip-unless (require \\='evil nil t)) gives `evil'."
 The tags are how a run selects out what a machine lacks, and a skip reads as a
 pass, so an untagged one is coverage nobody can see is missing.  The convention
 had no check and eroded twice: the fish tests added with vendor injection, and
-`cooked-evil-does-not-blank-a-row-of-spaces\=', which also asked `featurep\='
+`cooked-evil-does-not-blank-a-row-of-spaces', which also asked `featurep'
 rather than requiring evil and so skipped whenever it ran alone.  The walk reads
 every test file the suite loaded and expands its macros, so a skip hidden
 inside a fixture counts too.
 
 Each dependency must also be one the helpers name at load when it is missing,
-`cooked-tests--optional-programs\=' or `cooked-tests--optional-packages\=', so
+`cooked-tests--optional-programs' or `cooked-tests--optional-packages', so
 a new kind of skip cannot arrive silent."
   (let ((files (delete-dups (delq nil (mapcar #'ert-test-file-name
                                               (ert-select-tests t t)))))

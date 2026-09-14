@@ -78,23 +78,23 @@
 
 (defcustom cooked-display-action '((display-buffer-same-window
                                     display-buffer-pop-up-window))
-  "Action `\\[cooked]' passes to `pop-to-buffer\='.
+  "Action `\\[cooked]' passes to `pop-to-buffer'.
 
-The selected window first, the way `vterm\=' and `eat\=' do it: a terminal is
-usually what you want to be looking at, whereas the fallback `display-buffer\='
+The selected window first, the way `vterm' and `eat' do it: a terminal is
+usually what you want to be looking at, whereas the fallback `display-buffer'
 uses -- reuse a window, else split -- would put it beside the buffer you
 invoked it from as often as not.  Splitting is still the second choice, for
 when the selected window will not take it (a dedicated or side window), and
-`\\[cooked-other-window]\=' remains the way to ask for the split on purpose.
+`\\[cooked-other-window]' remains the way to ask for the split on purpose.
 
 The extra pair of parentheses is load-bearing, and their absence was the bug
-this docstring described its way around for a long time.  A `display-buffer\='
+this docstring described its way around for a long time.  A `display-buffer'
 action is (FUNCTIONS . ALIST), so the flat list read as FUNCTIONS =
-`display-buffer-same-window\=' and ALIST = (display-buffer-pop-up-window) -- an
-alist entry `assq\=' never asks for and so silently drops.  The second choice
+`display-buffer-same-window' and ALIST = (display-buffer-pop-up-window) -- an
+alist entry `assq' never asks for and so silently drops.  The second choice
 therefore did not exist: a window that would not take the buffer fell through to
-`display-buffer-fallback-action\=', whose first entry is
-`display-buffer-reuse-window\=' -- the behaviour named two paragraphs up as the
+`display-buffer-fallback-action', whose first entry is
+`display-buffer-reuse-window' -- the behaviour named two paragraphs up as the
 one to avoid.
 
 Here rather than in cooked-mode.el with the other session options, because
@@ -107,13 +107,13 @@ as an *argument*."
   :type 'sexp :group 'cooked)
 
 (defconst cooked-other-window-action '(display-buffer-pop-up-window)
-  "Display action every `-other-window\=' command in cooked passes.
+  "Display action every `-other-window' command in cooked passes.
 
 A constant rather than the literal written out at each of them: there are three
 pairs of commands whose two halves differ in nothing else -- here, and the two
 in cooked-project.el -- so the literal was the only thing saying they agree,
-three times over.  Deliberately not a `defcustom\=': the customisable choice is
-`cooked-display-action\=', and a command whose whole name is `other-window\='
+three times over.  Deliberately not a `defcustom': the customisable choice is
+`cooked-display-action', and a command whose whole name is `other-window'
 has already been told what to do.")
 
 ;;;; The Lisp interface
@@ -220,7 +220,7 @@ cooked says the marks are missing."
 (defun cooked--open-session (new command action)
   "Display a session using ACTION, starting one unless a live one may be reused.
 
-The body `cooked\=' and `cooked-other-window\=' share; NEW and COMMAND mean what
+The body `cooked' and `cooked-other-window' share; NEW and COMMAND mean what
 they do there.  cooked-project.el has its own, which differs in looking for a
 session already rooted at a particular directory rather than for any at all."
   (if-let* ((live (unless new (car (cooked-buffer-list)))))

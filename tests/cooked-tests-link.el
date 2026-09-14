@@ -89,8 +89,8 @@
   "The whole point of the conversion, asserted as an absence.
 
 An overlay per detected URL is paid twice on a live row: redisplay assembles
-the overlay list per window per redisplay, and `note_mouse_highlight\=' walks
-`overlays_at\=' on every motion event.  A build log is mostly URLs, so this is
+the overlay list per window per redisplay, and `note_mouse_highlight' walks
+`overlays_at' on every motion event.  A build log is mostly URLs, so this is
 not a rounding error -- REPORT.org §7 ranks it fourth of the borrowables."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
@@ -111,11 +111,11 @@ not a rounding error -- REPORT.org §7 ranks it fourth of the borrowables."
 (ert-deftest cooked-unfontifying-the-guess-cannot-strip-an-explicit-link ()
   "Rescanning must clear only what the guess itself put down.
 
-`goto-address-fontify\=' opens with `goto-address-unfontify\=', and an overlay
-could simply be deleted.  Properties cannot: the guess sets `mouse-face\=',
-`keymap\=' and `help-echo\=' under the same names an `OSC 8\=' span sets them,
-so a blanket `remove-text-properties\=' over the region would silently
-de-link every real hyperlink on it.  Only runs carrying `cooked-link-url\='
+`goto-address-fontify' opens with `goto-address-unfontify', and an overlay
+could simply be deleted.  Properties cannot: the guess sets `mouse-face',
+`keymap' and `help-echo' under the same names an `OSC 8' span sets them,
+so a blanket `remove-text-properties' over the region would silently
+de-link every real hyperlink on it.  Only runs carrying `cooked-link-url'
 may be cleared."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
@@ -162,10 +162,10 @@ normal."
 (ert-deftest cooked-a-held-row-is-scanned-once-the-cursor-leaves-it ()
   "The deferral must not become a loss.
 
-A URL printed with no newline after it sits on the cursor\='s own row, so it is
+A URL printed with no newline after it sits on the cursor's own row, so it is
 declined -- and if nothing ever asked again it would never be a link at all.
-`cooked--release-held-link-row\=' runs from `cooked--apply\=', the moment the
-cursor can have moved, and puts the row back on jit-lock\='s unfontified list."
+`cooked--release-held-link-row' runs from `cooked--apply', the moment the
+cursor can have moved, and puts the row back on jit-lock's unfontified list."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf 'here https://later.example/'; sleep 0.3; printf '\\nand on\\n'; sleep 5")
@@ -184,15 +184,15 @@ cursor can have moved, and puts the row back on jit-lock\='s unfontified list."
                      "https://later.example/")))))
 
 (ert-deftest cooked-a-url-scrolled-far-back-is-linked-when-its-chunk-is-shown ()
-  "Scrolling back must not lose links to the cursor\='s hold.
+  "Scrolling back must not lose links to the cursor's hold.
 
 The row the cursor sits on is declined by splitting the chunk around it, and
 that split used to be made whether or not the row was in the chunk at all.  A
 chunk far above the cursor was then scanned from its start all the way down to
-the cursor, and once that span passed `goto-address-fontify-maximum-size\=' it
+the cursor, and once that span passed `goto-address-fontify-maximum-size' it
 was not scanned at all -- while jit-lock marked it done.  So a URL 180 KB back
-never became a link.  `cooked-tests--fontify\=' fontifies the whole buffer,
-which holds the cursor\='s row inside the one chunk, so this has to ask for a
+never became a link.  `cooked-tests--fontify' fontifies the whole buffer,
+which holds the cursor's row inside the one chunk, so this has to ask for a
 chunk of its own the way scrolling there does."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
@@ -394,9 +394,9 @@ ask where point landed."
 (ert-deftest cooked-osc-8-file-link-opens-at-the-line-it-names ()
   "What the change was for: a file hyperlink with a line in it lands on the line.
 
-`browse-url-emacs\=' opens the file and drops the fragment, so `#L3\=' used to
+`browse-url-emacs' opens the file and drops the fragment, so `#L3' used to
 arrive at the top of the file.  End to end, from the escape sequence, so the
-OSC 8 branch of `cooked--open-link-at-point\=' is what is exercised."
+OSC 8 branch of `cooked--open-link-at-point' is what is exercised."
   (let ((file (make-temp-file "cooked-link" nil ".txt" "one\ntwo\nthree\nfour\n")))
     (unwind-protect
         (cooked-tests--with-session
@@ -415,8 +415,8 @@ OSC 8 branch of `cooked--open-link-at-point\=' is what is exercised."
       (delete-file file))))
 
 (ert-deftest cooked-file-url-reads-a-line-wherever-the-tools-put-it ()
-  "GitHub's `#L12\=', kitty's `#12\=', a column after `C\=' or `:\=', a range, the
-short `file:/x\=' spelling, and delta's `:LINE:COL\=' on the end of the path."
+  "GitHub's `#L12', kitty's `#12', a column after `C' or `:', a range, the
+short `file:/x' spelling, and delta's `:LINE:COL' on the end of the path."
   (let ((dir (make-temp-file "cooked-link" t)))
     (unwind-protect
         (with-temp-buffer
@@ -452,8 +452,8 @@ short `file:/x\=' spelling, and delta's `:LINE:COL\=' on the end of the path."
       (delete-directory dir t))))
 
 (ert-deftest cooked-file-url-refuses-a-tramp-name-in-the-path ()
-  "The hole `browse-url-emacs\=' leaves: it hands the path to `find-file\=' as it
-stands, so a link to `file:///ssh:evil.example:/etc\=' -- which `cat\=' of a
+  "The hole `browse-url-emacs' leaves: it hands the path to `find-file' as it
+stands, so a link to `file:///ssh:evil.example:/etc' -- which `cat' of a
 hostile file can print -- would dial out when clicked.  Refused before anything
 looks at it, and refused *by the handler*, so it cannot fall through to Emacs'
 own and be opened there instead."
@@ -467,11 +467,11 @@ own and be opened there instead."
         (should-not opened)))))
 
 (ert-deftest cooked-file-url-on-another-host-opens-over-tramp-or-not-at-all ()
-  "`ls --hyperlink\=' over ssh names the far machine, and Emacs' handler opens the
+  "`ls --hyperlink' over ssh names the far machine, and Emacs' handler opens the
 same path here, which is a real file and the wrong one.  The host the child
-announced over OSC 7 maps to TRAMP exactly as a `cd\=' does; a host the child
+announced over OSC 7 maps to TRAMP exactly as a `cd' does; a host the child
 never announced is refused, since following it would let the byte stream choose
-where Emacs connects; and `cooked-remote-directory\=' nil turns the lot off."
+where Emacs connects; and `cooked-remote-directory' nil turns the lot off."
   (with-temp-buffer
     (setq-local cooked--host "other.example")
     (let ((default-directory "/tmp/")
@@ -497,9 +497,9 @@ where Emacs connects; and `cooked-remote-directory\=' nil turns the lot off."
                            3 nil))))))
 
 (ert-deftest cooked-link-browse-leaves-other-schemes-and-your-handlers-alone ()
-  "`cooked-link-url-handlers\=' is spliced *after* the user's own list, so a
-`file:\=' handler you configured still wins; and nothing but `file:\=' is
-touched, so `mailto:\=' reaches `browse-url-mailto-function\=' as it always did."
+  "`cooked-link-url-handlers' is spliced *after* the user's own list, so a
+`file:' handler you configured still wins; and nothing but `file:' is
+touched, so `mailto:' reaches `browse-url-mailto-function' as it always did."
   (with-temp-buffer
     (let ((mailed nil) (mine nil))
       (let ((browse-url-mailto-function (lambda (url &rest _) (setq mailed url))))
@@ -515,13 +515,13 @@ touched, so `mailto:\=' reaches `browse-url-mailto-function\=' as it always did.
 (ert-deftest cooked-a-link-follows-when-no-layer-claims-the-input ()
   "The base layer alone must not decide who owns a click.
 
-The point of `cooked-link-delegate-function\=' is that cooked-link.el is base
-tier and, by `docs/DESIGN.md\='s rule, carries notifications upward and never
-questions.  It used to ask `cooked--child-owns-keyboard-p\=' and
-`cooked--suspended-p\=' through `declare-function\=', which is that rule broken.
+The point of `cooked-link-delegate-function' is that cooked-link.el is base
+tier and, by `docs/DESIGN.md's rule, carries notifications upward and never
+questions.  It used to ask `cooked--child-owns-keyboard-p' and
+`cooked--suspended-p' through `declare-function', which is that rule broken.
 With no delegate installed there is nothing above to answer, and the only
 correct behaviour is to follow the link -- not to guess, and not to signal
-`void-function\=' reaching for a layer that was never loaded."
+`void-function' reaching for a layer that was never loaded."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033]8;;https://example.com/\\033\\\\here\\033]8;;\\033\\\\\\n'; sleep 5")
@@ -542,8 +542,8 @@ correct behaviour is to follow the link -- not to guess, and not to signal
 (ert-deftest cooked-link-claims-are-ordered-by-what-the-layers-registered ()
   "Precedence is data the layers contribute, not a constant in the base layer.
 
-The ranking used to be written into `cooked-link--claimed-p\=' as `OSC 8\=' >
-goto-addr > \"guessed shape\" -- but guessed shape is cooked-file-link.el\='s
+The ranking used to be written into `cooked-link--claimed-p' as `OSC 8' >
+goto-addr > \"guessed shape\" -- but guessed shape is cooked-file-link.el's
 output, so the bottom of the stack was naming a category that does not exist
 unless an optional layer above it is loaded.  Three things have to hold now:
 each source answers for itself, a source asking is not told it claimed the
@@ -587,12 +587,12 @@ position itself, and a source is not blocked by one it outranks."
     (should (= (length cooked-link-claim-functions) before))))
 
 (ert-deftest cooked-thing-at-point-answers-an-osc-8-destination ()
-  "`thing-at-point\=' `url\=' returns what the child named, not what is on screen.
+  "`thing-at-point' `url' returns what the child named, not what is on screen.
 
-The case no generic provider can get right: an `OSC 8\=' span\='s *text* is
+The case no generic provider can get right: an `OSC 8' span's *text* is
 usually a label, so the destination appears nowhere in the buffer.  This is
-also what makes ROADMAP §3 fall out with no embark dependency -- embark\='s URL
-finder goes through `thing-at-point\=', so answering here answers there."
+also what makes ROADMAP §3 fall out with no embark dependency -- embark's URL
+finder goes through `thing-at-point', so answering here answers there."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
         "printf '\\033]8;;https://example.com/deep\\033\\\\LABEL\\033]8;;\\033\\\\\\n'; sleep 5")
@@ -610,9 +610,9 @@ finder goes through `thing-at-point\=', so answering here answers there."
 (ert-deftest cooked-thing-at-point-providers-are-buffer-local ()
   "The alists are global, so a cooked provider must not answer elsewhere.
 
-`cooked-link--url-at-point\=' reads `cooked--link-uris\=', a table that exists
+`cooked-link--url-at-point' reads `cooked--link-uris', a table that exists
 only in a cooked buffer; left installed globally it would be consulted for
-every `thing-at-point\=' call in the session."
+every `thing-at-point' call in the session."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (assq 'url thing-at-point-provider-alist))
     (should (local-variable-p 'thing-at-point-provider-alist)))
@@ -621,7 +621,7 @@ every `thing-at-point\=' call in the session."
     (should-not (assq 'url (default-value 'thing-at-point-provider-alist)))))
 
 (ert-deftest cooked-thing-at-point-providers-straddle-the-tier-boundary ()
-  "`url\=' is the base layer\='s to give and the file things are the optional layer\='s.
+  "`url' is the base layer's to give and the file things are the optional layer's.
 
 The straddle is the finding REPORT.org §11 turned up, not an accident: the base
 layer must not name a provider only an upper layer can supply, so both merely
@@ -639,11 +639,11 @@ contribute and cooked-mode.el installs what is present."
       (should (= (length cooked-thing-at-point-providers) before)))))
 
 (ert-deftest cooked-existing-filename-at-point-resolves-against-the-child ()
-  "`existing-filename\=' answers with an absolute path, which is what openers need.
+  "`existing-filename' answers with an absolute path, which is what openers need.
 
-A bare `src/lib.rs\=' handed to `find-file\=' from another buffer finds nothing;
-`cooked-file-link--exists\=' has already tried `default-directory\=' -- which
-OSC 7 keeps on the child\='s own working directory -- and then the project root."
+A bare `src/lib.rs' handed to `find-file' from another buffer finds nothing;
+`cooked-file-link--exists' has already tried `default-directory' -- which
+OSC 7 keeps on the child's own working directory -- and then the project root."
   (let* ((dir (make-temp-file "cooked-tap" t))
          (file (expand-file-name "here.txt" dir)))
     (unwind-protect
@@ -668,11 +668,11 @@ OSC 7 keeps on the child\='s own working directory -- and then the project root.
 (ert-deftest cooked-a-file-found-under-the-project-root-resolves-there ()
   "The project-root fallback has to say *where* it found the file.
 
-`ffap-file-exists-string\=' returns the name it was given, not the directory it
-found it in, so `cooked-file-link--exists\=' used to answer a bare `sub/f.txt\='
+`ffap-file-exists-string' returns the name it was given, not the directory it
+found it in, so `cooked-file-link--exists' used to answer a bare `sub/f.txt'
 for a file that exists only under the project root -- and the caller then
-resolved that against the child\='s `default-directory\=', which is the one
-directory it had just been established not to be in.  A `make\=' log naming a
+resolved that against the child's `default-directory', which is the one
+directory it had just been established not to be in.  A `make' log naming a
 path relative to the top of the tree, read from a prompt in a subdirectory, is
 the everyday shape of this."
   (cooked-tests--with-file-links
@@ -722,11 +722,11 @@ the everyday shape of this."
 
 
 (ert-deftest cooked-switching-link-detection-applies-to-text-already-shown ()
-  "Customizing `cooked-detect-links\=' changes the links already on screen.
+  "Customizing `cooked-detect-links' changes the links already on screen.
 
 The guess runs once per stretch of text, from jit-lock, so a URL found before
 the switch stayed clickable after it was turned off, and one shown while it was
-off never became a link once it was turned back on.  The `OSC 8\=' span beside
+off never became a link once it was turned back on.  The `OSC 8' span beside
 it is what the child said, and survives both."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
@@ -850,10 +850,10 @@ land in a real file, and be the wrong file."
         (should-not (get-text-property (match-beginning 0) 'cooked-file-link))))))
 
 (ert-deftest cooked-a-compressed-file-does-not-make-its-plain-name-a-link ()
-  "Only `notes.txt.gz\=' exists, so `notes.txt\=' is not a file.
+  "Only `notes.txt.gz' exists, so `notes.txt' is not a file.
 
-`ffap-file-exists-string\=' tries the compression suffixes on a miss and
-returns the name it found, and `cooked-file-link--exists\=' threw that away and
+`ffap-file-exists-string' tries the compression suffixes on a miss and
+returns the name it found, and `cooked-file-link--exists' threw that away and
 answered with the name it was asked about, so the link opened an empty buffer."
   (should (rassq 'jka-compr-handler file-name-handler-alist))
   (cooked-tests--with-file-links
@@ -870,9 +870,9 @@ answered with the name it was asked about, so the link opened an empty buffer."
         (delete-directory dir t)))))
 
 (ert-deftest cooked-a-missed-file-name-is-asked-for-once-per-place ()
-  "A miss is most of what a scan does, so it costs one `file-exists-p\=' a place.
+  "A miss is most of what a scan does, so it costs one `file-exists-p' a place.
 
-Six it used to be at the project root: the name, then `.gz\=' and `.Z\=', all
+Six it used to be at the project root: the name, then `.gz' and `.Z', all
 twice, the second time against a root that was the directory already asked.
 A relative name in a subdirectory still gets its two places, an absolute one
 only the one, and a number with a point in it is not a candidate at all."
@@ -936,14 +936,14 @@ only the one, and a number with a point in it is not a candidate at all."
 
 (ert-deftest cooked-file-link-prefilter-cannot-assemble-a-remote-name ()
   "The scan hands everything its prefilter matches to the filesystem, and
-`ffap-file-exists-string\=' on a TRAMP name would connect.  Nothing is caught
+`ffap-file-exists-string' on a TRAMP name would connect.  Nothing is caught
 downstream: what keeps a remote name from ever being built is the character set
-in `cooked-file-link--candidate-regexp\=', which admits `:\=' only ahead of the
-digits of a `:LINE:COL\=' suffix.  That is load-bearing and easy to widen by
+in `cooked-file-link--candidate-regexp', which admits `:' only ahead of the
+digits of a `:LINE:COL' suffix.  That is load-bearing and easy to widen by
 accident, so it is pinned here rather than left to be rediscovered.
 
-See `cooked--local-name\=' for what the connection would cost, and
-`cooked--set-directory\=' for the other half -- a `default-directory\=' that has
+See `cooked--local-name' for what the connection would cost, and
+`cooked--set-directory' for the other half -- a `default-directory' that has
 gone remote would make even a relative name resolve over the wire."
   (cooked-tests--with-file-links
     (dolist (hostile '("/ssh:evil.example:/etc/motd"
@@ -962,14 +962,14 @@ gone remote would make even a relative name resolve over the wire."
 (ert-deftest cooked-file-links-decline-against-a-remote-default-directory ()
   "The cost guard, distinct from the foreign-host correctness guard beside it.
 
-Every candidate the scan produces becomes an `ffap-file-exists-string\=', and
-against a TRAMP `default-directory\=' each one of those is a round trip.
+Every candidate the scan produces becomes an `ffap-file-exists-string', and
+against a TRAMP `default-directory' each one of those is a round trip.
 Scrollback settles in batches of hundreds of lines, so a single remote
-`default-directory\=' turns every batch for the rest of the session into a stall.
+`default-directory' turns every batch for the rest of the session into a stall.
 
 Asserted here without a foreign host in play, because that is the case the other
 guard does not cover: \\[cooked] from a buffer visiting a remote file starts with
-a remote `default-directory\=' and no OSC 7 at all.  The names used are ones that
+a remote `default-directory' and no OSC 7 at all.  The names used are ones that
 would resolve locally, so a regression shows up as a link appearing rather than
 as one silently still missing."
   (cooked-tests--with-file-links
@@ -991,9 +991,9 @@ as one silently still missing."
          (should asked))))))
 
 (ert-deftest cooked-a-bare-url-waits-for-something-to-look-at-it ()
-  "The other half of `cooked-a-bare-url-is-fontified-by-goto-addr\='.
+  "The other half of `cooked-a-bare-url-is-fontified-by-goto-addr'.
 
-The guess is redisplay\='s work now, not the drain\='s, which is what stops a
+The guess is redisplay's work now, not the drain's, which is what stops a
 child painting faster than Emacs redraws from being scanned once per frame it
 paints.  Nothing has displayed this buffer, so nothing has guessed yet."
   (cooked-tests--with-session
@@ -1077,15 +1077,15 @@ sleep 5")
         (should (get-text-property pos 'cooked-link-url))))))
 
 (ert-deftest cooked-a-repaint-announces-its-rewrite-and-not-its-properties ()
-  "Where `cooked--render-block\='s `inhibit-modification-hooks\=' binding sits.
+  "Where `cooked--render-block's `inhibit-modification-hooks' binding sits.
 
-`cooked-rewriting-a-row-still-gets-it-scanned\=' holds with the binding gone and
+`cooked-rewriting-a-row-still-gets-it-scanned' holds with the binding gone and
 with it widened, so this watches the hook itself.  A change hook sees the
 rewrite -- the deletion and the insertion of the two repainted rows -- because a
 hook a user has added is entitled to see an edit.  It does not see the faces and
 glyphs applied to the new text, one call per span, because those are what the
 binding is there to keep quiet.  A property change is the one call whose length
-equals its extent, so on `go to https://...\=' with `to\=' in bold, the bold
+equals its extent, so on `go to https://...' with `to' in bold, the bold
 span would arrive as a change of 2 over 2 characters inside the rewrite."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
@@ -1127,10 +1127,10 @@ sleep 5")
                    changes))))))
 
 (ert-deftest cooked-the-scan-is-not-armed-when-it-has-nothing-to-scan ()
-  "Registering jit-lock is not free: it hangs `jit-lock-after-change\=' on every
+  "Registering jit-lock is not free: it hangs `jit-lock-after-change' on every
 text property the renderer applies, which measured at +21% on plain rows and
 +55% on box drawing with nothing ever being scanned.  So the registration
-follows the work -- see `cooked--sync-fontification\='."
+follows the work -- see `cooked--sync-fontification'."
   (cooked-tests--with-session '("/bin/sh" "-c" "sleep 5")
     (should (memq #'cooked--fontify-region jit-lock-functions))
     ;; The alternate screen is a rectangle the child owns; the guess declines it
@@ -1148,7 +1148,7 @@ follows the work -- see `cooked--sync-fontification\='."
     (should (memq #'cooked--fontify-region jit-lock-functions))))
 
 (ert-deftest cooked-the-scan-hook-sees-only-settled-text ()
-  "`cooked-link-scan-functions\=' is the seam an optional layer may touch the
+  "`cooked-link-scan-functions' is the seam an optional layer may touch the
 filesystem from, which is affordable only because scrollback is final.  The
 live screen is rewritten by the next drain, so an answer about it would be
 bought again every redraw."
@@ -1347,9 +1347,9 @@ runs over the buffer exactly as before."
 (ert-deftest cooked-an-osc-8-span-inside-a-url-keeps-its-own-properties ()
   "The guess asks whether any of its match is claimed, not just the first character.
 
-A child can open an `OSC 8\=' span halfway through text that also reads as a
+A child can open an `OSC 8' span halfway through text that also reads as a
 URL.  Asked only about the start, the guess found nothing there and laid its
-`help-echo\=' over the span\='s tail, so hovering the explicit link showed goto-addr\='s
+`help-echo' over the span's tail, so hovering the explicit link showed goto-addr's
 string instead of where the link goes."
   (cooked-tests--with-session
       '("/bin/sh" "-c"
@@ -1367,8 +1367,8 @@ string instead of where the link goes."
 (ert-deftest cooked-detected-bounds-just-after-a-leading-newline ()
   "Two characters back from a fragment is position 0 when a blank row starts the buffer.
 
-`cooked-link--detected-bounds\=' looks past the newline before a fragment for
-the row above, and at position 2 that look signalled `args-out-of-range\='."
+`cooked-link--detected-bounds' looks past the newline before a fragment for
+the row above, and at position 2 that look signalled `args-out-of-range'."
   (with-temp-buffer
     (insert "\nhttps://example.com/")
     (add-text-properties 2 (point-max)
@@ -1379,9 +1379,9 @@ the row above, and at position 2 that look signalled `args-out-of-range\='."
 (ert-deftest cooked-only-a-url-that-crosses-a-wrap-is-marked-as-fragments ()
   "A URL in a wrapped region that fits on its row is an ordinary link.
 
-The joined scan used to mark every match with a `cooked-link-fragment\=' id, so
+The joined scan used to mark every match with a `cooked-link-fragment' id, so
 the url provider answered an unwrapped URL from the property, which is the case
-`cooked-link--url-at-point\=' says it leaves to thingatpt."
+`cooked-link--url-at-point' says it leaves to thingatpt."
   (cooked-tests--with-wrapped-line "https://a.io/ https://example.com/a/long/path end"
     (let ((short (cooked-tests--link-at "https://a.io/"))
           ;; Found by column, since the row break is inside `https:'.
@@ -1396,8 +1396,8 @@ the url provider answered an unwrapped URL from the property, which is the case
   "A path the terminal wrapped is one file name, from whichever row you ask.
 
 ffap reads to the end of the buffer line, which on the live screen is a row, so
-point on the second row of `src/some/deeply/nested/file.txt\=' used to be
-answered `nested/file.txt\=', and `find-file\=' offered that."
+point on the second row of `src/some/deeply/nested/file.txt' used to be
+answered `nested/file.txt', and `find-file' offered that."
   (cooked-tests--with-file-links
     (cooked-tests--with-wrapped-line "see src/some/deeply/nested/file.txt end"
       (cooked--install-thing-at-point-providers)

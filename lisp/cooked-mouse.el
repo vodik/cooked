@@ -60,7 +60,7 @@
   "Button numbers standing for a wheel notch rather than a button held down.
 
 Derived from the two tables above rather than written out again.  A notch is
-whatever `cooked--wheel-events\=' maps to, and the literal `(64 65 66 67)\=' this
+whatever `cooked--wheel-events' maps to, and the literal `(64 65 66 67)' this
 replaces was a second copy of that fact with nothing keeping it in step.")
 
 (defconst cooked--mouse-x10-offset 32
@@ -70,7 +70,7 @@ Coordinates are 1-based on top of it, which is where the 33s come from.")
 (defconst cooked--mouse-motion-bit 32
   "Bit set in a button number to say the report is motion rather than a press.
 
-The same value as `cooked--mouse-x10-offset\=' and emphatically not the same
+The same value as `cooked--mouse-x10-offset' and emphatically not the same
 thing: this one is part of the button number, in SGR as much as in X10, while
 that one is how X10 spells a field.  Two 32s three lines apart, each meaning
 something the other does not, is what the names are for.")
@@ -84,10 +84,10 @@ go of, and what a 1003 child is told when the pointer moves with nothing down.")
   (append cooked--button-events cooked--wheel-events)
   "Every mouse event cooked forwards to the child, in either map that does it.
 
-One list because there are two maps -- `cooked--mouse-map\=' here and the one
-`cooked--build-passthrough-map\=' makes -- and they must agree about what a
+One list because there are two maps -- `cooked--mouse-map' here and the one
+`cooked--build-passthrough-map' makes -- and they must agree about what a
 mouse event is.  Spelled out separately, they drifted: the passthrough map
-listed only the vertical wheel, so `wheel-left\=' and `wheel-right\=' reached a
+listed only the vertical wheel, so `wheel-left' and `wheel-right' reached a
 child that had asked for the mouse and vanished for one doing an ordinary raw
 read.")
 
@@ -130,36 +130,36 @@ never claims it.")
   "Wheel bindings for an alt screen the child never asked for the mouse on.
 
 The alternate screen is a rectangle the size of the window, and
-`cooked--apply-alt-pin\=' narrows the buffer to exactly that rectangle -- so a
+`cooked--apply-alt-pin' narrows the buffer to exactly that rectangle -- so a
 wheel notch there has nowhere to scroll to.  What it could do is move the
-picture off the window, which is the thing `cooked--pin-alt-windows\=' then
+picture off the window, which is the thing `cooked--pin-alt-windows' then
 exists to undo, one command later and visibly.  Claiming the notch instead makes
-the question not arise: see the `here\=' and `wheel\=' arm of
-`cooked-mouse-event\='.
+the question not arise: see the `here' and `wheel' arm of
+`cooked-mouse-event'.
 
 Only the wheel, and a map of its own rather than a wider gate on
-`cooked--mouse-map\=', because everything else that map claims is a claim about
+`cooked--mouse-map', because everything else that map claims is a claim about
 the *child* wanting the mouse.  A click on a suspended terminal still selects
-text like any other buffer\='s, which is the whole of what
-`cooked--mouse-grab\=' turning off is for.
+text like any other buffer's, which is the whole of what
+`cooked--mouse-grab' turning off is for.
 
 Whether the notch is actually swallowed is decided in the command rather than
 here, by asking whether the buffer is still restricted to the screen: a
 deliberate \\[widen] inside a peek is how the transcript behind a full-screen
 program is read, and the wheel has to work again the moment it happens.  A
 keymap gate is recomputed only when something calls
-`cooked--update-mouse-grab\=', which a bare `widen\=' does not.")
+`cooked--update-mouse-grab', which a bare `widen' does not.")
 
 (cl-defstruct (cooked-mouse-state (:constructor cooked--mouse-state-make)
                                   (:copier nil))
   "What the child has asked for about the mouse, as of the last drain.
 
-The same wire shape `cooked-cursor\=' and `cooked-grid\=' get, decoded at the same
+The same wire shape `cooked-cursor' and `cooked-grid' get, decoded at the same
 boundary and for the same reason -- see \"What the two ends exchange\" in
 cooked-state.el.
 
-Never mutated in place.  `cooked--set-mouse-state\=' replaces it wholesale on
-every `mouse\=' event, which is what makes `cooked--mouse-state-none\=' safe to
+Never mutated in place.  `cooked--set-mouse-state' replaces it wholesale on
+every `mouse' event, which is what makes `cooked--mouse-state-none' safe to
 share as the default across every buffer that has never been told anything."
   (enabled nil :documentation "Whether the child asked for mouse reports at all.")
   (sgr nil :documentation "\
@@ -169,23 +169,23 @@ DEC mode 1002: report the pointer while a button is held.")
   (motion nil :documentation "\
 DEC mode 1003: report the pointer whether or not a button is held.
 
-Kept apart from `drag\=' even though cooked drives both from the same tracking
-loop, because the child asked two different questions and `cooked--mouse-track\='
+Kept apart from `drag' even though cooked drives both from the same tracking
+loop, because the child asked two different questions and `cooked--mouse-track'
 can only honestly answer one of them; see its docstring.  The other one is
-`cooked-mouse-hover\=', and only under `cooked-mouse-hover-motion\='.")
+`cooked-mouse-hover', and only under `cooked-mouse-hover-motion'.")
   (pixels nil :documentation "\
-DEC mode 1016: SGR reports carry the pointer\='s pixel instead of its cell.
+DEC mode 1016: SGR reports carry the pointer's pixel instead of its cell.
 
-Never set without `sgr\=': the core keeps the coordinate modes mutually
+Never set without `sgr': the core keeps the coordinate modes mutually
 exclusive, as xterm does, so 1016 is a unit for the SGR form rather than a form
-of its own.  See `cooked--mouse-report\='."))
+of its own.  See `cooked--mouse-report'."))
 
 (defconst cooked--mouse-state-none (cooked--mouse-state-make)
   "The state of a child that has asked for nothing.
 
-The default value of `cooked--mouse-state\=', so that `buffer-local-value\='
+The default value of `cooked--mouse-state', so that `buffer-local-value'
 answers a struct for *any* buffer -- including one that is not a cooked buffer
-at all, which `cooked-mouse-event\=' is handed whenever a drag ends over another
+at all, which `cooked-mouse-event' is handed whenever a drag ends over another
 window.  A nil there would be a wrong-type error inside a mouse command; one
 shared immutable struct is nil-safety at the source rather than a guard at each
 reader.")
@@ -196,9 +196,9 @@ reader.")
 (defun cooked--set-mouse-state (enabled sgr drag motion pixels)
   "Adopt ENABLED, SGR, DRAG, MOTION and PIXELS, and re-gate the keymap.
 
-The five fields of the drain\='s `mouse\=' event, in the order it carries them.
+The five fields of the drain's `mouse' event, in the order it carries them.
 
-Called from `cooked--handle-event\=', which is in cooked-render.el and requires
+Called from `cooked--handle-event', which is in cooked-render.el and requires
 this file, so the call is an ordinary one -- but it is still a notification that
 something changed rather than a question asked upward, which is why the state
 and the keymap it gates both live on this side of it."
@@ -214,17 +214,17 @@ and the keymap it gates both live on this side of it."
 Gates `cooked--mouse-map'; nil everywhere else, so the entry in
 `emulation-mode-map-alists' is inert outside a session that asked for it.
 
-Deliberately not a slot on `cooked-mouse-state\=', and the omission is not an
-oversight.  Two independent reasons: `cooked--mouse-map-alist\=' puts this
-*symbol* into `emulation-mode-map-alists\=', which Emacs evaluates as a
-variable, and `cooked-link.el\=' reads it through `bound-and-true-p\=', being a
+Deliberately not a slot on `cooked-mouse-state', and the omission is not an
+oversight.  Two independent reasons: `cooked--mouse-map-alist' puts this
+*symbol* into `emulation-mode-map-alists', which Emacs evaluates as a
+variable, and `cooked-link.el' reads it through `bound-and-true-p', being a
 base-tier file that cannot require this one.  It is also a *derived* value
 rather than something the child said, which is what that struct holds.")
 
 (defvar-local cooked--wheel-grab nil
   "Whether the wheel belongs to an alternate screen nobody else has claimed.
 
-Gates `cooked--wheel-map\='.  Mutually exclusive with `cooked--mouse-grab\=' by
+Gates `cooked--wheel-map'.  Mutually exclusive with `cooked--mouse-grab' by
 construction: a child that asked for the mouse is already being sent its
 notches, and this is only for the alternate screens where nobody is.")
 
@@ -267,7 +267,7 @@ session generating motion events nobody asked for.")
 
 Off by default, and not because the reports are expensive -- one per cell
 crossed, and only while the pointer is actually moving.  The cost that needs
-opting into is Emacs\=' rather than cooked\='s: the only way to receive motion
+opting into is Emacs' rather than cooked's: the only way to receive motion
 with no button held is to leave the variable `track-mouse' on for as long as
 the child wants it, and Emacs then manufactures a `mouse-movement' event per
 pixel moved -- through `mouse-fine-grained-tracking', which a run of one shade
@@ -338,26 +338,26 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
 (defun cooked--update-hover-tracking ()
   "Turn the variable `track-mouse' on here exactly while hover is to be reported.
 
-That is: the user opted in with `cooked-mouse-hover-motion\=', the child asked
-for any-motion, and it has the mouse -- `cooked--mouse-grab\=' rather than
-`enabled\=', so a peek or a prompt that hands clicks back to Emacs hands the
+That is: the user opted in with `cooked-mouse-hover-motion', the child asked
+for any-motion, and it has the mouse -- `cooked--mouse-grab' rather than
+`enabled', so a peek or a prompt that hands clicks back to Emacs hands the
 pointer back too.
 
 Off means the local binding is removed rather than set to nil, so that the
 global value is what governs again and a buffer that never had hover on never
 acquires a local binding it has no use for.  Skipped while a gesture is being
 followed; `cooked--mouse-track' calls this again once it has let go of the
-variable.  See `cooked--mouse-tracking\='.
+variable.  See `cooked--mouse-tracking'.
 
-Turning it on also puts `cooked--hover-translate\=' on `key-translation-map\=',
+Turning it on also puts `cooked--hover-translate' on `key-translation-map',
 which is what keeps the movements this lets in out of the middle of a key.
 
-`mouse-fine-grained-tracking\=' goes on and off with it, locally the same way.
+`mouse-fine-grained-tracking' goes on and off with it, locally the same way.
 Emacs otherwise sends a movement only when the pointer leaves the glyph it was
-over, and a run of one shade is a single `space\=' stretch as wide as the run,
-so hover across twenty cells of `░\=' reported only the first of them.  It
+over, and a run of one shade is a single `space' stretch as wide as the run,
+so hover across twenty cells of `░' reported only the first of them.  It
 costs a movement per pixel, which the pointer over a decoration image already
-cost, and `cooked--hover-cell\=' answers the repeats in a cell without
+cost, and `cooked--hover-cell' answers the repeats in a cell without
 measuring it again."
   (unless cooked--mouse-tracking
     (if (and cooked-mouse-hover-motion cooked--mouse-grab
@@ -377,11 +377,11 @@ measuring it again."
 (defun cooked--mouse-cell-width (posn)
   "Width in pixels of one cell of the screen POSN is over.
 
-`cooked--last-cell\=' first, because it is the width `CSI 16 t\=' reported and
+`cooked--last-cell' first, because it is the width `CSI 16 t' reported and
 the width every decoration was cut to, so a pointer measured against anything
 else could land in a different cell from the one the child and the picture
 agree on.  A terminal frame has no pixel size there, and its frame reports one
-character as one unit instead: `posn-object-x-y\=' counts in characters on such
+character as one unit instead: `posn-object-x-y' counts in characters on such
 a frame, so 1 is the right divisor rather than a guess."
   (let ((width (car-safe cooked--last-cell))
         (window (posn-window posn)))
@@ -393,31 +393,31 @@ a frame, so 1 is the right divisor rather than a guess."
 (defun cooked--mouse-glyph (posn)
   "Where POSN points on the screen text, as (POS CELLS . DX), or nil for no text.
 
-POS is `posn-point\='.  CELLS is how many cells to the right of POS\='s own cell
+POS is `posn-point'.  CELLS is how many cells to the right of POS's own cell
 the pointer is, and DX how many pixels into that cell.  Nil when POSN is over a
-fringe or margin, whose `posn-point\=' is the position of the row beside it and
+fringe or margin, whose `posn-point' is the position of the row beside it and
 not a cell the pointer is in: a click in the left fringe used to report
 column 0.
 
 Emacs names a position per glyph, and three kinds of glyph are wider than the
 one cell POS stands for, so the offset into the glyph is what recovers the rest:
 
-- A decoration drawn as one image over a run of cells.  POS is the run\='s
+- A decoration drawn as one image over a run of cells.  POS is the run's
   first character, so a click in the middle of an empty panel of box-drawing
-  characters used to report the panel\='s left border.  Twenty cells of 9-pixel
+  characters used to report the panel's left border.  Twenty cells of 9-pixel
   cells with the pointer 50 pixels in is CELLS 5 and DX 5.
 - The newline ending a row, whose trailing blanks are never inserted.  Its
-  glyph stretches to the window\='s edge, so a click ten cells past the text of
-  `ls\=' used to report the column where the text stopped.
-- A character whose glyph is wider than its cells, a fallback font\='s, which
+  glyph stretches to the window's edge, so a click ten cells past the text of
+  `ls' used to report the column where the text stopped.
+- A character whose glyph is wider than its cells, a fallback font's, which
   would otherwise report the part that overhangs as the next column.  DX is
   clamped to the cells the character stands on, so a two-cell character still
   reports both of its cells and a one-cell one only its own.
 
-The width of a run or character is `string-width\=' of its text without its
+The width of a run or character is `string-width' of its text without its
 properties, which is the cells the grid gave it.  Not the difference of two
-`current-column\='s: that counts an image as its pixels divided by the frame\='s
-character width, which is a different number once `text-scale-mode\=' has
+`current-column's: that counts an image as its pixels divided by the frame's
+character width, which is a different number once `text-scale-mode' has
 changed the cell."
   (let ((pos (posn-point posn)))
     (when (and pos (null (posn-area posn)))
@@ -441,18 +441,18 @@ changed the cell."
 (defun cooked--mouse-cell (posn &optional glyph)
   "Screen row and column of POSN, or nil if it is outside the screen.
 
-GLYPH is what `cooked--mouse-glyph\=' answers for POSN, for a caller that
+GLYPH is what `cooked--mouse-glyph' answers for POSN, for a caller that
 already has it.
 
 A posn rather than an event because the interesting end of an event is not
-always the same one: `drag-mouse-1\=' is a release, and where the button came up
-is `event-end\='.  Reading `event-start\=' there reported the release at the cell
+always the same one: `drag-mouse-1' is a release, and where the button came up
+is `event-end'.  Reading `event-start' there reported the release at the cell
 the press was already reported in, which is a gesture with no extent at all.
 
-`cooked--screen-cell\=' rather than a count of lines and columns from the marker:
+`cooked--screen-cell' rather than a count of lines and columns from the marker:
 row 0 does not always begin its buffer line — when the row handed to scrollback
-last was wrapped, `cooked--screen-start\=' sits mid-line — and a plain
-`current-column\=' there counts the characters ahead of the marker, which are
+last was wrapped, `cooked--screen-start' sits mid-line — and a plain
+`current-column' there counts the characters ahead of the marker, which are
 scrollback and not on the screen at all.  Reporting those to the child puts
 every click on row 0 to the right of where it was made.
 
@@ -467,17 +467,17 @@ pixels wider than its grid has blank space past it that is not a cell."
 (defun cooked--mouse-offset (posn &optional glyph)
   "Where in its cell POSN points, as (DX . DY) pixels, if the child wants to know.
 
-GLYPH is what `cooked--mouse-glyph\=' answers for POSN, for a caller that
+GLYPH is what `cooked--mouse-glyph' answers for POSN, for a caller that
 already has it.  Nil unless the child asked for pixel reports, so that a session
 reporting cells pays nothing for a measurement it would throw away.
 
 Only the offset *within* the cell is taken from Emacs; the cell it sits in is
-still `cooked--mouse-cell\='s, and `cooked--mouse-report\=' scales that by the
-cell size.  Adding `posn-x-y\=' to the screen\='s origin instead would have to
+still `cooked--mouse-cell's, and `cooked--mouse-report' scales that by the
+cell size.  Adding `posn-x-y' to the screen's origin instead would have to
 find that origin in pixels, and it is not a constant: row 0 is wherever
-`cooked--screen-start\=' happens to be drawn, which moves with scrollback,
-`window-start\=' and the header line.  A glyph-relative offset needs none of
-that, and `cooked--mouse-glyph\=' has already divided the part of it that is
+`cooked--screen-start' happens to be drawn, which moves with scrollback,
+`window-start' and the header line.  A glyph-relative offset needs none of
+that, and `cooked--mouse-glyph' has already divided the part of it that is
 whole cells out into the column."
   (when (cooked-mouse-state-pixels cooked--mouse-state)
     (when-let* ((glyph (or glyph (cooked--mouse-glyph posn))))
@@ -491,15 +491,15 @@ past column 223.
 
 Under DEC mode 1016 the coordinates are pixels: ROW and COL scaled by the cell
 size last reported to the child, plus OFFSET, the (DX . DY) returned by
-`cooked--mouse-offset\='.  Counted from 1, as xterm counts them, so that
-pixel P lies in cell (P - 1) / WIDTH -- the size `CSI 16 t\=' answers with is
+`cooked--mouse-offset'.  Counted from 1, as xterm counts them, so that
+pixel P lies in cell (P - 1) / WIDTH -- the size `CSI 16 t' answers with is
 what the child will divide by, so it is the size multiplied by here rather
 than a fresh measurement of the window that could disagree with it.  With no
-OFFSET, which is a report whose position stood in for the pointer\='s (a
-wheel notch over the fringe, a release carried off the screen), the cell\='s
+OFFSET, which is a report whose position stood in for the pointer's (a
+wheel notch over the fringe, a release carried off the screen), the cell's
 top-left pixel is sent.  DY is clamped into the row because a row holding a
 taller fallback glyph is drawn taller than the cell, and its excess must not
-read as the row below.  DX needs no clamp here, because `cooked--mouse-glyph\='
+read as the row below.  DX needs no clamp here, because `cooked--mouse-glyph'
 has already clamped it to the cells its character stands on and moved the whole
 cells into COL.
 
@@ -507,10 +507,10 @@ On a terminal frame there is no cell size, and the report degrades to cells
 counted from 1: a unit of one pixel per cell is the only claim that is not
 invented.  DECRQM still answers that 1016 is set, because the core answers it
 and cannot know what kind of frame the buffer is shown on.  What a child does
-learn is that `CSI 16 t\=' reports no size, and a child cannot scale pixels
-without asking that first.  The size is the one `cooked--sync-size\=' measured
-in `cooked--layout-window\=', so a buffer shown on a graphical and a terminal
-frame at once reports in whichever unit that window\='s frame has."
+learn is that `CSI 16 t' reports no size, and a child cannot scale pixels
+without asking that first.  The size is the one `cooked--sync-size' measured
+in `cooked--layout-window', so a buffer shown on a graphical and a terminal
+frame at once reports in whichever unit that window's frame has."
   (cond
    ((cooked-mouse-state-pixels cooked--mouse-state)
     (pcase-let* ((`(,width . ,height) cooked--last-cell)
@@ -535,21 +535,21 @@ frame at once reports in whichever unit that window\='s frame has."
   "Send one report for BUTTON at ROW/COL, PRESSED or not, and drop the region.
 
 OFFSET is where in the cell the pointer is, for a child reporting pixels; see
-`cooked--mouse-report\='.  With KEEP-REGION, leave the region alone; only hover
+`cooked--mouse-report'.  With KEEP-REGION, leave the region alone; only hover
 motion asks for that.
 
 Deactivating the mark is the point of routing every report through here.  A
-click that the child answers is the child\='s click, and leaving a region behind
+click that the child answers is the child's click, and leaving a region behind
 it is what made a selection impossible to get rid of: nothing here ever cleared
 one, so a region set before the child grabbed the mouse survived every
-subsequent click, and `cooked--snap-to-cursor\=' then walked point away from a
+subsequent click, and `cooked--snap-to-cursor' then walked point away from a
 mark that stayed put -- growing a region the user never drew and could only
 escape by leaving the buffer.
 
-Through `cooked--deactivate-mark\=' rather than `deactivate-mark\=' so that a
+Through `cooked--deactivate-mark' rather than `deactivate-mark' so that a
 report fired while evil is in visual state says so to evil as well.  A bare
-`deactivate-mark\=' happens to do the right thing from here -- evil reads
-`this-command\=', and there is one -- but only by depending on a fact about the
+`deactivate-mark' happens to do the right thing from here -- evil reads
+`this-command', and there is one -- but only by depending on a fact about the
 caller that the drain, which clears the same selection for the same reason, does
 not share.  One answer for both beats two that agree by accident.
 
@@ -574,8 +574,8 @@ selection away before it could be copied."
 
 One, normally.  A wheel notch is a notch and the child is told once.
 
-The case this exists for is `mwheel-coalesce-scroll-events\=' nil, which
-`pixel-scroll-precision-mode\=' and ultra-scroll both set: every trackpad tick
+The case this exists for is `mwheel-coalesce-scroll-events' nil, which
+`pixel-scroll-precision-mode' and ultra-scroll both set: every trackpad tick
 then arrives as its own event carrying a *pixel* delta, and forwarding one
 report per event floods a child that asked for mouse tracking with dozens of
 notches per row of travel.  Pixels are accumulated instead and one press is sent
@@ -583,16 +583,16 @@ per row actually crossed, with the remainder carried -- so a slow drag scrolls
 smoothly in Emacs and one line at a time in the child, which is the only thing
 the child can express.
 
-The two guards are the non-obvious part and both are ghostel\='s.
+The two guards are the non-obvious part and both are ghostel's.
 
 *A real mouse is excluded by device class*, not by the delta.  X11 and pgtk
 report a wheel notch as several rows of pixels with no line count, which
 arithmetic alone cannot tell from a fast trackpad swipe -- so a notch would be
-accumulated, rounded, and a click would go missing.  `device-class\=' is how
+accumulated, rounded, and a click would go missing.  `device-class' is how
 the question gets asked instead.
 
-*And the floor of one press is `nth 3\=', not a constant.* macOS reports a
-notch as one line and *fewer pixels than a row* when `line-spacing\=' is set,
+*And the floor of one press is `nth 3', not a constant.* macOS reports a
+notch as one line and *fewer pixels than a row* when `line-spacing' is set,
 so the row arithmetic yields zero and the notch would vanish.  Taking the larger
 of the two means a sub-row trackpad tick still accumulates -- its line count is
 0 -- while a notch that undershoots a row still reports once."
@@ -610,7 +610,7 @@ of the two means a sub-row trackpad tick still accumulates -- its line count is
 (defun cooked--wheel-pixel-delta (event)
   "The vertical pixel delta EVENT carries, if it is travel rather than a notch.
 
-Nil for a notch, which is whatever `cooked--wheel-presses\=' counts as one:
+Nil for a notch, which is whatever `cooked--wheel-presses' counts as one:
 an event with no delta, one Emacs has already coalesced, and one from a device
 that reports itself as a mouse."
   (let ((delta (cdr-safe (nth 4 event))))
@@ -623,7 +623,7 @@ that reports itself as a mouse."
 
 (defun cooked--report-button (button row col pressed &optional offset)
   "Report BUTTON at ROW/COL as PRESSED or released, remembering that it is held.
-OFFSET is passed on to `cooked--send-mouse\='."
+OFFSET is passed on to `cooked--send-mouse'."
   (cond ((memq button cooked--mouse-wheel-numbers)) ; a notch cannot be held
         (pressed (unless (memq button cooked--mouse-held)
                    (push button cooked--mouse-held)))
@@ -632,10 +632,10 @@ OFFSET is passed on to `cooked--send-mouse\='."
 
 (defun cooked--report-motion (row col &optional offset keep-region)
   "Report the pointer arriving at ROW/COL, if it is a cell it was not already in.
-OFFSET and KEEP-REGION are passed on to `cooked--send-mouse\='.
+OFFSET and KEEP-REGION are passed on to `cooked--send-mouse'.
 
-`cooked--mouse-motion-bit\=' is added to the button being dragged, or to
-`cooked--mouse-no-button\=' where nothing is held.  Suppressing
+`cooked--mouse-motion-bit' is added to the button being dragged, or to
+`cooked--mouse-no-button' where nothing is held.  Suppressing
 a repeat of the last cell is not an optimisation so much as the contract: Emacs
 tracks the pointer by pixel, and a child that asked for cells would otherwise
 receive several dozen identical reports per cell crossed."
@@ -647,26 +647,26 @@ receive several dozen identical reports per cell crossed."
 (defun cooked--mouse-track (window)
   "Follow the pointer into the child until the gesture ends, over WINDOW.
 
-Emacs manufactures `mouse-movement\=' events only inside `track-mouse\=', and only
+Emacs manufactures `mouse-movement' events only inside `track-mouse', and only
 for as long as that form is running; no keymap can ask for them.  So the press
 that begins a drag runs the rest of the gesture itself, exactly as
-`mouse-drag-region\=' does for Emacs\=' own selection.  Without it the child got a
+`mouse-drag-region' does for Emacs' own selection.  Without it the child got a
 press and, whenever the user let go, a release, with nothing in between -- so a
 program that highlights as you drag highlighted nothing until the end.
 
 Whatever ends the loop is pushed back rather than acted on, so the release
-returns through `cooked-mouse-event\=' by its ordinary binding and there is only
+returns through `cooked-mouse-event' by its ordinary binding and there is only
 one place that knows how to report a button coming up.
 
 Only the drag half of 1003 is served here: any-motion with no button down means
 tracking the pointer for as long as the child asks, which is an event read per
 pixel moved anywhere in the frame whether or not the user is doing anything.
-A `track-mouse\=' bounded by a gesture is the affordable part, and it is the
+A `track-mouse' bounded by a gesture is the affordable part, and it is the
 part every 1003 client also gets from 1002; the rest is
-`cooked--hover-translate\=' and `cooked-mouse-hover\=', behind
-`cooked-mouse-hover-motion\='.
+`cooked--hover-translate' and `cooked-mouse-hover', behind
+`cooked-mouse-hover-motion'.
 
-The form\='s own binding of `track-mouse\=' is why `cooked--mouse-tracking\=' is
+The form's own binding of `track-mouse' is why `cooked--mouse-tracking' is
 set around it, and why hover tracking is recomputed after it: a drain during the
 drag may have changed what the child wants, and the update it would have made
 was skipped."
@@ -677,10 +677,10 @@ was skipped."
     (cooked--update-hover-tracking)))
 
 (defun cooked--mouse-track-1 (window)
-  "The loop of `cooked--mouse-track\=' over WINDOW, inside `track-mouse\='.
+  "The loop of `cooked--mouse-track' over WINDOW, inside `track-mouse'.
 
-With `mouse-fine-grained-tracking\=' bound on, for the reason
-`cooked--update-hover-tracking\=' gives: without it a drag across a run of one
+With `mouse-fine-grained-tracking' bound on, for the reason
+`cooked--update-hover-tracking' gives: without it a drag across a run of one
 shade, a single stretch glyph, was reported at the cell it entered and then
 not again until it left the run."
   (track-mouse
@@ -701,18 +701,18 @@ not again until it left the run."
 (defvar-local cooked--hover-glyph nil
   "The glyph hover last measured and the cell it was, as (KEY . CELL).
 
-KEY is what the cell was derived from: the buffer\='s modification tick, the
-screen\='s start, the grid\='s width, and the position and cell offset
-`cooked--mouse-glyph\=' answered.  While all of those hold, the cell does too,
-and `cooked--hover-cell\=' hands it back without counting the lines above it.")
+KEY is what the cell was derived from: the buffer's modification tick, the
+screen's start, the grid's width, and the position and cell offset
+`cooked--mouse-glyph' answered.  While all of those hold, the cell does too,
+and `cooked--hover-cell' hands it back without counting the lines above it.")
 
 (defun cooked--hover-cell (glyph)
-  "The screen cell of GLYPH, a `cooked--mouse-glyph\=' answer, remembered.
+  "The screen cell of GLYPH, a `cooked--mouse-glyph' answer, remembered.
 
-Emacs sends a movement per pixel over an image and per column past a row\='s
+Emacs sends a movement per pixel over an image and per column past a row's
 end, so a pointer crossing a decorated panel arrives dozens of times in one
-cell.  `cooked--report-motion\=' drops every repeat, but only after being handed
-a cell, and a cell is a `count-lines\=' from the top of the screen.  Asking
+cell.  `cooked--report-motion' drops every repeat, but only after being handed
+a cell, and a cell is a `count-lines' from the top of the screen.  Asking
 whether the glyph is the one just measured is a comparison of five integers."
   (let ((key (list (buffer-chars-modified-tick) (cooked--screen-start-position)
                    cooked--cols (car glyph) (cadr glyph))))
@@ -725,17 +725,17 @@ whether the glyph is the one just measured is a comparison of five integers."
   "Report POSN as hover to the child under it, and say whether it takes hover.
 
 Non-nil when the buffer under POSN is a terminal whose user opted in with
-`cooked-mouse-hover-motion\=' and whose child asked for any-motion and has the
+`cooked-mouse-hover-motion' and whose child asked for any-motion and has the
 mouse, whether or not the movement was worth a report.  That buffer is asked
-rather than the current one, for the reason `cooked-mouse-event\=' gives, and
+rather than the current one, for the reason `cooked-mouse-event' gives, and
 it is asked again whether it wants motion, since some other package leaving
-`track-mouse\=' on globally would otherwise deliver hover to a child the user
+`track-mouse' on globally would otherwise deliver hover to a child the user
 never opted into.
 
 A pointer over no text -- past the last row, over the fringe -- reports nothing
 rather than a cell it is not in.  Repeats of the last cell are dropped by
-`cooked--report-motion\=', and repeats of the last glyph before that, by
-`cooked--hover-cell\='."
+`cooked--report-motion', and repeats of the last glyph before that, by
+`cooked--hover-cell'."
   (when-let* ((target (cooked--mouse-buffer (posn-window posn))))
     (with-current-buffer target
       (when (and cooked-mouse-hover-motion cooked--mouse-grab
@@ -747,14 +747,14 @@ rather than a cell it is not in.  Repeats of the last cell are dropped by
         t))))
 
 (defun cooked--hover-translate (_prompt)
-  "Take a `mouse-movement\=' out of the key being read, reporting it if it is hover.
+  "Take a `mouse-movement' out of the key being read, reporting it if it is hover.
 
-On `key-translation-map\=' under `[mouse-movement]\=', where
-`cooked--update-hover-tracking\=' puts it.  Answers the empty key, which deletes
+On `key-translation-map' under `[mouse-movement]', where
+`cooked--update-hover-tracking' puts it.  Answers the empty key, which deletes
 the movement from the sequence, or nil to leave it alone.
 
-A movement is ordinary input to `read-key-sequence\=', and nothing in Emacs
-keeps one out of the middle of a key.  With `track-mouse\=' left on for hover, a
+A movement is ordinary input to `read-key-sequence', and nothing in Emacs
+keeps one out of the middle of a key.  With `track-mouse' left on for hover, a
 pointer twitch after \\`C-c' made the key \\`C-c <mouse-movement>', which is
 undefined, and the \\`C-c' was lost -- and \\`C-c' is the only way back to Emacs
 from a full-screen program.  The same went for \\`C-x', \\`C-h' and \\`ESC'.  A
@@ -763,24 +763,24 @@ binding is not: binding the movement under each prefix would still end the key
 there.  So a movement after the first key of a sequence is always deleted.
 
 A movement that starts one is deleted too when it is ours to answer: the binding
-it would reach is `cooked-mouse-hover\=', and it either was reported as hover or
+it would reach is `cooked-mouse-hover', and it either was reported as hover or
 would have fallen back to a command that does nothing.  That keeps hover out of
 the command loop altogether.  Before, every glyph crossed was a command, with
-`pre-command-hook\=' and `post-command-hook\=' behind it: \\[universal-argument]
+`pre-command-hook' and `post-command-hook' behind it: \\[universal-argument]
 was spent on the movement rather than on the command it was typed for,
-`tooltip-hide\=' took down a link\='s help on the first glyph, and
-`cooked--track-wandering\=' counted the lines above point each time.
+`tooltip-hide' took down a link's help on the first glyph, and
+`cooked--track-wandering' counted the lines above point each time.
 
-A movement some other binding wants is left alone.  `mouse-drag-region\=' reads
+A movement some other binding wants is left alone.  `mouse-drag-region' reads
 the drag it selects text with as bound movements in a transient map, and the
 shifted drag is how text is selected out of a program that has the mouse.
 
 A movement nothing wants is deleted wherever the key is being read, not only in
 the command loop.  A command that reads a key of its own starts the sequence
-afresh and often under maps of its own, where `cooked-mouse-hover\=' is not
-bound.  With `cooked-evil-normal-state-render\=' nil the child keeps the mouse
-in normal state, and a twitch of the pointer after evil\='s \\`r\=' was read as
-the replacement character, which failed, while one between \\`y\=' and \\`w\='
+afresh and often under maps of its own, where `cooked-mouse-hover' is not
+bound.  With `cooked-evil-normal-state-render' nil the child keeps the mouse
+in normal state, and a twitch of the pointer after evil's \\`r' was read as
+the replacement character, which failed, while one between \\`y' and \\`w'
 was read as the motion, which abandoned the yank."
   (let ((event last-input-event))
     (when (and (mouse-movement-p event) cooked--mouse-grab)
@@ -801,19 +801,19 @@ was read as the motion, which abandoned the yank."
 (defun cooked-mouse-hover ()
   "Report the pointer moving with no button held to a child that asked for 1003.
 
-Bound to `mouse-movement\=' in `cooked--mouse-map\=', which Emacs delivers
-outside a gesture only where `track-mouse\=' is on, which
-`cooked--update-hover-tracking\=' arranges only under
-`cooked-mouse-hover-motion\='.  A movement during a drag never reaches here:
-`cooked--mouse-track\=' reads those itself.
+Bound to `mouse-movement' in `cooked--mouse-map', which Emacs delivers
+outside a gesture only where `track-mouse' is on, which
+`cooked--update-hover-tracking' arranges only under
+`cooked-mouse-hover-motion'.  A movement during a drag never reaches here:
+`cooked--mouse-track' reads those itself.
 
-Rarely a command in practice.  `cooked--hover-translate\=' answers the movement
+Rarely a command in practice.  `cooked--hover-translate' answers the movement
 before any binding is looked up whenever it is hover, and whenever declining it
 would do nothing, so what is left to run here is a movement over some other
 buffer whose own binding wants it -- which goes to that binding.
 
-`this-command\=' is handed back to `last-command\=' so that a movement between
-two commands is invisible to anything asking what ran before -- a `kill-region\='
+`this-command' is handed back to `last-command' so that a movement between
+two commands is invisible to anything asking what ran before -- a `kill-region'
 followed by another still appends, as it would with the pointer at rest."
   (interactive)
   (let ((event last-input-event))
@@ -824,7 +824,7 @@ followed by another still appends, as it would with the pointer at rest."
 (defun cooked--alt-scroll-keys (button &optional lines)
   "Cursor keys standing in for LINES of wheel travel of BUTTON.
 
-LINES defaults to `cooked-alternate-scroll-lines\=', which is what one notch is
+LINES defaults to `cooked-alternate-scroll-lines', which is what one notch is
 worth.  Only the vertical notches translate; a horizontal one has no cursor-key
 spelling a pager would understand, so it sends nothing."
   (if-let* ((final (cond ((= button (alist-get 'wheel-up cooked--mouse-buttons)) "A")
@@ -841,7 +841,7 @@ spelling a pager would understand, so it sends nothing."
 (defun cooked-mouse-event ()
   "Forward the mouse to the child under the pointer, or fall back to Emacs.
 
-Which child that is takes deciding.  Emacs settles a click\='s bindings in the
+Which child that is takes deciding.  Emacs settles a click's bindings in the
 buffer under the pointer but runs the command in the buffer that was current all
 along, so with two terminals side by side this command routinely runs in the one
 the user is *not* pointing at.  Everything below therefore happens in the buffer
@@ -849,7 +849,7 @@ the pointer names -- which is also what makes an unfocused terminal behave like
 any other Emacs buffer, receiving the click that focuses it and scrolling under
 the wheel without being focused at all.
 
-The exception is a gesture already in flight: a button this buffer\='s child was
+The exception is a gesture already in flight: a button this buffer's child was
 told went down is owed a release here whatever window the pointer has wandered
 into by the time it comes up."
   (interactive)
@@ -958,27 +958,27 @@ into by the time it comes up."
 (defun cooked--mouse-fallback (event)
   "Run whatever EVENT would do without cooked's binding.
 
-The whole active-map stack, not `global-map\='.  `lookup-key\=' on the global map
-alone skips every minor-mode map, the local map and any `keymap\=' property
+The whole active-map stack, not `global-map'.  `lookup-key' on the global map
+alone skips every minor-mode map, the local map and any `keymap' property
 under the pointer -- so the one binding this most needed to find was the one it
-could never reach: `pixel-scroll-precision-mode\=' puts `wheel-up\=' and
-`wheel-down\=' in a minor-mode map, and outranking that map is the entire reason
-`cooked--mouse-map-alist\=' sits in `emulation-mode-map-alists\='.  Declining a
-notch therefore scrolled by the global `mwheel-scroll\=' rather than by the
+could never reach: `pixel-scroll-precision-mode' puts `wheel-up' and
+`wheel-down' in a minor-mode map, and outranking that map is the entire reason
+`cooked--mouse-map-alist' sits in `emulation-mode-map-alists'.  Declining a
+notch therefore scrolled by the global `mwheel-scroll' rather than by the
 pixel-precise command the user had turned on, or -- where the mode had rebound
 the event to something the global map does not bind at all -- did nothing.
 
-Cooked\='s own maps are lifted out of the stack for the lookup rather than
+Cooked's own maps are lifted out of the stack for the lookup rather than
 guarded against afterwards.  They are the binding being declined, so leaving
 them in place would find this command again and recurse; removing the one entry
 that carries them answers exactly the question being asked, which is what the
 event would have done had cooked never claimed it.
 
-The click\='s own position is handed to `key-binding\=' so that the `keymap\='
+The click's own position is handed to `key-binding' so that the `keymap'
 property and the local map consulted are the ones under the *pointer*.  Emacs
-settles a click\='s binding in the buffer the pointer is over and then runs it in
+settles a click's binding in the buffer the pointer is over and then runs it in
 the buffer that was current, and that is the half of the question a plain
-`lookup-key\=' cannot even ask."
+`lookup-key' cannot even ask."
   (let ((command (cooked--mouse-fallback-binding event)))
     (when (and (commandp command) (not (eq command #'cooked-mouse-event)))
       (setq last-command-event event
@@ -986,11 +986,11 @@ the buffer that was current, and that is the half of the question a plain
       (call-interactively command))))
 
 (defun cooked--mouse-fallback-binding (event &optional keys)
-  "What EVENT would be bound to without cooked\='s mouse maps.
+  "What EVENT would be bound to without cooked's mouse maps.
 
-KEYS is the key it ends, by default `this-command-keys-vector\=', which carries
+KEYS is the key it ends, by default `this-command-keys-vector', which carries
 the prefix a click in the mode line is read with.  The lookup
-`cooked--mouse-fallback\=' makes; see there."
+`cooked--mouse-fallback' makes; see there."
   (let ((emulation-mode-map-alists
          (remq 'cooked--mouse-map-alist emulation-mode-map-alists)))
     (key-binding (or keys (this-command-keys-vector)) nil nil
@@ -1017,34 +1017,34 @@ the prefix a click in the mode line is read with.  The lookup
 (defcustom cooked-allow-pointer-shape t
   "Whether the child may set the mouse pointer over its screen, via OSC 22.
 
-On by default, unlike `cooked-allow-color-set\=', because what it can reach is
-narrower: the pointer changes over this terminal\='s own grid and only while
+On by default, unlike `cooked-allow-color-set', because what it can reach is
+narrower: the pointer changes over this terminal's own grid and only while
 the child is being sent mouse reports, so a hostile stream can do no more than
 draw a hand over text it already controls.  When off, sets are ignored and a
 query is told that no shape is supported, which is the truth about what a set
 would then do.  Turning it off takes a shape already on show away at once,
-leaving `cooked-grabbed-pointer-shape\=' in its place."
+leaving `cooked-grabbed-pointer-shape' in its place."
   :type 'boolean
   :group 'cooked)
 
 (defcustom cooked-grabbed-pointer-shape 'arrow
   "The mouse pointer over the screen while the child has the mouse, or nil.
 
-A program with mouse reporting on, such as htop or vim with `mouse=a\=', is sent
+A program with mouse reporting on, such as htop or vim with `mouse=a', is sent
 every click, so a click over its text selects nothing and the I-beam Emacs
 shows over buffer text is misleading there.  kitty and Ghostty show an arrow
 instead, and so does this by default.  A shape the child sets with OSC 22 is
-shown in its place, when `cooked-allow-pointer-shape\=' lets it.
+shown in its place, when `cooked-allow-pointer-shape' lets it.
 
-The value is one of Emacs\=' pointer symbols, as the `pointer\=' text property
-takes them: `arrow\=', `text\=', `hand\=', `vdrag\=', `hdrag\=', `nhdrag\=',
-`modeline\=' or `hourglass\='.  Nil leaves Emacs\=' own pointer, the I-beam over
+The value is one of Emacs' pointer symbols, as the `pointer' text property
+takes them: `arrow', `text', `hand', `vdrag', `hdrag', `nhdrag',
+`modeline' or `hourglass'.  Nil leaves Emacs' own pointer, the I-beam over
 text, as it is over any other buffer.
 
 A drag with Shift held selects text even while the child has the mouse, and the
 arrow stays for it: Emacs gives no event when Shift alone goes down, so the
 pointer could change only once the drag had begun."
-  :type '(choice (const :tag "Emacs\=' own pointer" nil)
+  :type '(choice (const :tag "Emacs' own pointer" nil)
                  (const arrow) (const text) (const hand) (const vdrag)
                  (const hdrag) (const nhdrag) (const modeline) (const hourglass))
   :group 'cooked)
@@ -1058,12 +1058,12 @@ pointer could change only once the drag had begun."
     ("ns-resize" . vdrag) ("row-resize" . vdrag)
     ("n-resize" . vdrag) ("s-resize" . vdrag) ("sb_v_double_arrow" . vdrag)
     ("wait" . hourglass) ("progress" . hourglass) ("watch" . hourglass))
-  "OSC 22 shape names Emacs can show, each with the `pointer\=' value showing it.
+  "OSC 22 shape names Emacs can show, each with the `pointer' value showing it.
 
 The CSS names kitty specifies, plus the X11 cursor-font spellings it permits as
 aliases, restricted to the ones with an Emacs pointer to stand for them.
-`crosshair\=', `grab\=', `not-allowed\=' and the diagonal resizes have none, so
-they are absent and a query answers 0 for them.  `nhdrag\=' and `modeline\=' go
+`crosshair', `grab', `not-allowed' and the diagonal resizes have none, so
+they are absent and a query answers 0 for them.  `nhdrag' and `modeline' go
 the other way: Emacs has them and CSS has no name that means them.")
 
 (defconst cooked--pointer-stack-limit 16
@@ -1073,52 +1073,52 @@ Sixteen is the minimum kitty requires of a terminal.")
 (defconst cooked--pointer-name-regexp "\\`[a-z0-9_-]\\{1,32\\}\\'"
   "What an OSC 22 name may look like to be kept on a stack.
 
-kitty\='s spec limits names to lowercase letters, digits, `_\=' and `-\=', and the
-longest in `cooked--pointer-shapes\=', `sb_v_double_arrow\=', is 17 of them, so
+kitty's spec limits names to lowercase letters, digits, `_' and `-', and the
+longest in `cooked--pointer-shapes', `sb_v_double_arrow', is 17 of them, so
 32 is room to spare.  A name outside that is refused rather than kept, because
-`__current__\=' reads the top of the stack back to the child: a push of
-`rm -rf ~ x\=' followed by that query would otherwise put the command on the
-child\='s input.")
+`__current__' reads the top of the stack back to the child: a push of
+`rm -rf ~ x' followed by that query would otherwise put the command on the
+child's input.")
 
 (defvar-local cooked--pointer-stacks nil
-  "OSC 22 shape stacks, an alist of `main\=' or `alt\=' to names, top first.
+  "OSC 22 shape stacks, an alist of `main' or `alt' to names, top first.
 
 One per screen, as the protocol asks: a full-screen program that pushes a shape
-and exits without popping it leaves it on the alternate screen\='s stack, so the
+and exits without popping it leaves it on the alternate screen's stack, so the
 shell underneath does not inherit it.  A drain applies its events after its
 screen switch, so an OSC 22 sent in the same drain as the switch lands on the
 stack of the screen the drain ends on.  That is the price of deciding this in
 Lisp, and a small one: a program sets a shape as the pointer moves, long after
 it took the screen.
 
-Names are kept whether or not `cooked--pointer-shapes\=' knows them, which is
+Names are kept whether or not `cooked--pointer-shapes' knows them, which is
 what keeps a push and its pop paired for a child that pushes a shape Emacs
-cannot draw.  A name that fails `cooked--pointer-name-regexp\=' is kept as nil
-for the same reason: it holds its place for the pop, shows Emacs\=' own pointer,
-and a query of `__current__\=' answers 0 for it.")
+cannot draw.  A name that fails `cooked--pointer-name-regexp' is kept as nil
+for the same reason: it holds its place for the pop, shows Emacs' own pointer,
+and a query of `__current__' answers 0 for it.")
 
 (defvar-local cooked--pointer-overlay nil
-  "Overlay carrying the child\='s pointer over the screen, or nil if none is.")
+  "Overlay carrying the child's pointer over the screen, or nil if none is.")
 
 (defun cooked--pointer-screen ()
-  "Which of `cooked--pointer-stacks\=' the child is drawing on."
+  "Which of `cooked--pointer-stacks' the child is drawing on."
   (if cooked--alt 'alt 'main))
 
 (defun cooked--osc-pointer-shape (parts)
   "Set, push, pop or query the pointer shape, from the OSC 22 payload PARTS.
 
 The payload is an operation character and a comma-separated list of names:
-`=\=' or nothing sets the top of the stack to the first name, `>\=' pushes each
-name in turn, `<\=' pops one and ignores the names, and `?\=' asks about each.
+`=' or nothing sets the top of the stack to the first name, `>' pushes each
+name in turn, `<' pops one and ignores the names, and `?' asks about each.
 A query is always answered, knob or not, with 1 or 0 per name -- or, for
-`__current__\=', the name on top of the stack, and 0 when it is empty.
+`__current__', the name on top of the stack, and 0 when it is empty.
 
-A set with no name at all, `ESC ] 22 ; ST\=', is kitty\='s reset to the default
+A set with no name at all, `ESC ] 22 ; ST', is kitty's reset to the default
 pointer.  It replaces the top of the stack with nil, as kitty does, so a
 program that pushed a shape and reset it can still pop it without taking the
 shape underneath with it.  On an empty stack there is nothing to reset.
 
-A push onto a full stack drops the bottom entry, which is kitty\='s rule: the
+A push onto a full stack drops the bottom entry, which is kitty's rule: the
 oldest shape is the one least likely to be popped back to."
   (let* ((payload (string-join parts ";"))
          (op (and (> (length payload) 0)
@@ -1153,15 +1153,15 @@ oldest shape is the one least likely to be popped back to."
 (defun cooked--pointer-query (name current)
   "The OSC 22 query answer for NAME, with CURRENT the name on top of the stack.
 
-`__default__\=' and `__grabbed__\=' ask what the pointer is when no child shape is
-in force, without and with mouse reporting.  The first is Emacs\=' own pointer
-over buffer text, `text\='.  The second is `cooked-grabbed-pointer-shape\=' by
-its CSS name, so the default `arrow\=' answers `default\='.  A nil there answers
-`text\=', and so does `nhdrag\=' or `modeline\=', which CSS has no name for.
+`__default__' and `__grabbed__' ask what the pointer is when no child shape is
+in force, without and with mouse reporting.  The first is Emacs' own pointer
+over buffer text, `text'.  The second is `cooked-grabbed-pointer-shape' by
+its CSS name, so the default `arrow' answers `default'.  A nil there answers
+`text', and so does `nhdrag' or `modeline', which CSS has no name for.
 
 A shape is supported only where it can be seen: on a text terminal there is no
 pointer to change, so a buffer shown only on tty frames answers 0 for every
-name, as it does with `cooked-allow-pointer-shape\=' off."
+name, as it does with `cooked-allow-pointer-shape' off."
   (pcase name
     ("__current__" (or current "0"))
     ("__default__" "text")
@@ -1186,44 +1186,44 @@ graphical frame is enough: that is where the pointer would be seen."
 (defun cooked--sync-pointer-shape (&optional override)
   "Show the pointer the screen should have while the child has the mouse.
 
-That is the child\='s OSC 22 shape when it has set one Emacs can draw and
-`cooked-allow-pointer-shape\=' allows it, and otherwise
-`cooked-grabbed-pointer-shape\='.  With neither, or with the child not having
-the mouse, the overlay is removed and Emacs\=' own pointer shows.
+That is the child's OSC 22 shape when it has set one Emacs can draw and
+`cooked-allow-pointer-shape' allows it, and otherwise
+`cooked-grabbed-pointer-shape'.  With neither, or with the child not having
+the mouse, the overlay is removed and Emacs' own pointer shows.
 
-OVERRIDE, when given, is `(SYMBOL . VALUE)\=' and stands in for one of those two
+OVERRIDE, when given, is `(SYMBOL . VALUE)' and stands in for one of those two
 knobs, for the variable watcher, which runs before the new value is in place.
 
 Shown while the child is being sent mouse reports: the reporting gate is
-`cooked--mouse-grab\=', and `enabled\=' is asked as well because that gate also
+`cooked--mouse-grab', and `enabled' is asked as well because that gate also
 opens for alternate scroll, where the child asked for nothing about the mouse.
-`less\=' with alternate scroll on still selects text on a click, so it keeps
+`less' with alternate scroll on still selects text on a click, so it keeps
 the I-beam.
 
-An overlay rather than a text property, and from `cooked--screen-start\=' to
+An overlay rather than a text property, and from `cooked--screen-start' to
 the end: the rows under it are deleted and reinserted on every redraw, which
 would take a text property with them, while an overlay whose end advances
 simply takes the new text in.  Its start does not follow a scroll by itself --
 scrollback is inserted at the start and would be taken in too -- so
-`cooked--apply\=' calls this after every drain to put it back on the marker.
+`cooked--apply' calls this after every drain to put it back on the marker.
 
-It is moved only when its bounds differ.  `move-overlay\=' to the bounds it
-already has still counts as a change to the buffer\='s overlays, and that costs
+It is moved only when its bounds differ.  `move-overlay' to the bounds it
+already has still counts as a change to the buffer's overlays, and that costs
 redisplay the shortcuts it takes for a buffer whose text and overlays are as it
 last drew them -- on every drain, which is the path those shortcuts are for.
-`overlay-put\=' of the value already there costs nothing, so it is not guarded.
+`overlay-put' of the value already there costs nothing, so it is not guarded.
 
 An overlay property outranks a text property, so over a command line the
-child\='s shape replaces the `pointer hand\=' that
-`cooked-command-decorations\=' puts on its text.  That is right for as long as
+child's shape replaces the `pointer hand' that
+`cooked-command-decorations' puts on its text.  That is right for as long as
 it lasts: the shape is shown only while the child is sent the clicks, and a
-click there is the child\='s, not a decoration\='s.
+click there is the child's, not a decoration's.
 
-Past the end of a row\='s text there is no buffer position for any property to
-sit on, and Emacs shows `void-text-area-pointer\=' there.  That variable is read
+Past the end of a row's text there is no buffer position for any property to
+sit on, and Emacs shows `void-text-area-pointer' there.  That variable is read
 in whatever buffer is current when the pointer moves, not the one under it, so
 setting it here would repaint the void of every window while this one was
-selected; the blank tail of a short row keeps Emacs\=' own pointer instead."
+selected; the blank tail of a short row keeps Emacs' own pointer instead."
   (let ((pointer
          (and cooked--session
               cooked--mouse-grab
@@ -1256,13 +1256,13 @@ selected; the blank tail of a short row keeps Emacs\=' own pointer instead."
 (defun cooked--sync-pointer-shape-on-toggle (symbol newval operation where)
   "Follow SYMBOL, a pointer shape knob, to NEWVAL, as a variable watcher.
 
-SYMBOL is `cooked-allow-pointer-shape\=' or `cooked-grabbed-pointer-shape\='.
+SYMBOL is `cooked-allow-pointer-shape' or `cooked-grabbed-pointer-shape'.
 
 WHERE is the buffer a buffer-local OPERATION applies to, and nil for the default
 value, which reaches every buffer that has not made the variable local.  Without
 this a shape on show when the knob went off stayed until the next drain.
 
-`kill-local-variable\=' arrives as `makunbound\=' with NEWVAL nil, while the
+`kill-local-variable' arrives as `makunbound' with NEWVAL nil, while the
 value the buffer is left with is the default one, so that is what it syncs to."
   (unless (eq operation 'defvaralias)
     (if where
@@ -1278,7 +1278,7 @@ value the buffer is left with is the default one, so that is what it syncs to."
 (defun cooked--reset-pointer-shapes ()
   "Empty both OSC 22 stacks, on RIS as the protocol requires, and after a command.
 
-See `cooked--end-of-command\=' for why a command\='s end is reason enough."
+See `cooked--end-of-command' for why a command's end is reason enough."
   (setq cooked--pointer-stacks nil)
   (cooked--sync-pointer-shape))
 

@@ -163,11 +163,11 @@ it rather than merely inheriting a nil nobody had touched."
 (ert-deftest cooked-mode-does-not-let-redisplay-mark-up-the-childs-spaces ()
   "U+00A0 is a cell the child asked for, not suspect whitespace in prose.
 
-At `nobreak-char-display\='s default, redisplay paints every no-break space in
-the `nobreak-space\=' face -- `escape-glyph\=' plus an underline -- at display
+At `nobreak-char-display's default, redisplay paints every no-break space in
+the `nobreak-space' face -- `escape-glyph' plus an underline -- at display
 time, carrying no text property.  A TUI that pads with U+00A0 then draws a row
 of blue underlined gaps that no program asked for, and because the markup is
-not a property, neither `describe-text-properties\=' nor an A/B against the
+not a property, neither `describe-text-properties' nor an A/B against the
 link passes can find it.  That is how the reported artifact stayed
 unattributed: every tool that looks at the buffer says the character is clean.
 
@@ -184,9 +184,9 @@ vterm and eat all leave it at the default."
 
 (ert-deftest cooked-mode-draws-an-overline-inside-the-row ()
   "An overlined row is exactly as tall as any other.
-Emacs grows a row with an overline by `overline-margin\=' pixels, and the rows
+Emacs grows a row with an overline by `overline-margin' pixels, and the rows
 told to the child are counted in the default line height, so the margin has to
-be 0 in the buffer.  Set globally first, as the user\='s own value would be."
+be 0 in the buffer.  Set globally first, as the user's own value would be."
   (let ((overline-margin 5))
     (with-temp-buffer
       (cooked-mode)

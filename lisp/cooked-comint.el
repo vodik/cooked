@@ -106,9 +106,9 @@ a line, which is most of the time.")
 The text is not enough to tell that the buffer still ends in the open line
 when the open line has no text.  A prompt of `\\t' or `ESC [ 5 C' leaves one,
 and the buffer ends in the empty string whatever comint inserts after it.  So
-the place is kept too: comint inserting the user\='s input at the process mark
+the place is kept too: comint inserting the user's input at the process mark
 leaves a marker before the input, and the distance to the mark stops being the
-open line\='s length.
+open line's length.
 
 Placed by `cooked-comint--place-open-start' once comint has inserted what the
 filter returned, since the open line may begin inside that text.  Nil while
@@ -146,7 +146,7 @@ columns cost it 20 ms, and a 10,000-character line then a prompt cost 375 ms."
   "Whether `cooked-comint--open' is still the text just before MARK.
 
 Asked of the place as well as the text: the open line must begin at
-`cooked-comint--open-start\=' when that is known.  A prompt with no text on
+`cooked-comint--open-start' when that is known.  A prompt with no text on
 its line otherwise matches the end of any buffer.
 
 The one question that decides whether anything may be deleted.  A nil answer
@@ -285,11 +285,11 @@ a newline: `cooked-comint--open' holds one unfinished line at most."
 (defun cooked-comint--place-open-start (_string)
   "Mark where the open line begins, now comint has inserted it.
 
-On `comint-output-filter-functions\=', which comint runs after every insertion
+On `comint-output-filter-functions', which comint runs after every insertion
 with the process mark moved past the text, so the open line is the
-`cooked-comint--open\=' characters before the mark.  Only once per text the
+`cooked-comint--open' characters before the mark.  Only once per text the
 filter returned: a later run, for a chunk the filter swallowed whole, would
-find the user\='s input before the mark and place the open line after it."
+find the user's input before the mark and place the open line after it."
   (when-let* ((cooked-comint--placing)
               (proc (get-buffer-process (current-buffer))))
     (setq cooked-comint--placing nil

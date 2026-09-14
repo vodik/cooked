@@ -83,23 +83,23 @@ is refused, since the maps forward one event at a time and never see a second."
 (defun cooked--control-chord-events (exceptions)
   "The Control chords on printable keys that no character code in 0-127 names.
 
-On a graphical frame `C-;\=' and `C-S-a\=' are events of their own, outside
-the range `cooked--build-passthrough-map\=' binds a code at a time.  Left
-unbound, `C-;\=' reached whatever Emacs binds globally, and `C-S-a\=' was
-shift-translated to `C-a\=' with the shift gone before `cooked-send-key\=' could
+On a graphical frame `C-;' and `C-S-a' are events of their own, outside
+the range `cooked--build-passthrough-map' binds a code at a time.  Left
+unbound, `C-;' reached whatever Emacs binds globally, and `C-S-a' was
+shift-translated to `C-a' with the shift gone before `cooked-send-key' could
 look -- so neither could be spelled by a protocol that has a spelling for it,
 which is what modifyOtherKeys and the kitty protocol both exist to provide.
 With no protocol they send what xterm sends: the key itself where Control
 makes no byte, and the control byte where it does.  A terminal frame never
 produces these events, so nothing changes there.
 
-Control on a Latin-1 key is here too, so that \\`C-é\=' on a French keyboard is
-`ESC [ 233 ; 5 u\=' to a kitty child rather than undefined in Emacs.  A key
+Control on a Latin-1 key is here too, so that \\`C-é' on a French keyboard is
+`ESC [ 233 ; 5 u' to a kitty child rather than undefined in Emacs.  A key
 beyond Latin-1 is not: a keymap can bind every character only without a
-modifier, through a char-table, and Control on one of those stays Emacs\='.
+modifier, through a char-table, and Control on one of those stays Emacs'.
 
 The events in EXCEPTIONS are left out, and so are those that stand in for one,
-as is the one standing in for `cooked--escape-key\=': `C-S-g\=' is `C-g\=' with a
+as is the one standing in for `cooked--escape-key': `C-S-g' is `C-g' with a
 shift Emacs would otherwise translate away, and forwarding it would take the key
 back from the binding the exception was made to keep."
   (let (events)
@@ -126,15 +126,15 @@ back from the binding the exception was made to keep."
     (control meta shift))
   "Every combination of Shift, Control and Meta, the modifiers xterm spells.
 
-`cooked--build-passthrough-map\=' binds each key of `cooked--key-encodings\='
+`cooked--build-passthrough-map' binds each key of `cooked--key-encodings'
 under all of them.  A combination left out is shift-translated when it has no
-binding: \\`C-M-S-<up>\=' used to run as \\`C-M-<up>\=', and a child that asked
-for `ESC [ 1 ; 8 A\=' got `ESC [ 1 ; 7 A\=' instead.")
+binding: \\`C-M-S-<up>' used to run as \\`C-M-<up>', and a child that asked
+for `ESC [ 1 ; 8 A' got `ESC [ 1 ; 7 A' instead.")
 
 (defun cooked--kitty-binding (binding)
   "BINDING while the child has negotiated the kitty protocol, and nil otherwise.
 
-The `:filter\=' of `cooked--kitty-only\=', read on every key, so a binding made
+The `:filter' of `cooked--kitty-only', read on every key, so a binding made
 with it follows the negotiation without the map being rebuilt."
   (and (cooked--kitty-negotiated-p) binding))
 
@@ -142,21 +142,21 @@ with it follows the negotiation without the map being rebuilt."
   "A binding of COMMAND that holds only while the kitty protocol is negotiated.
 
 For the keys no other protocol can spell: a chord held with Super or Hyper, and
-a key such as `pause\=' that has no sequence outside kitty\='s table.  The kitty
-protocol gives them all a spelling, `ESC [ 97 ; 9 u\=' for \\`s-a\=' and
-`ESC [ 57362 u\=' for Pause, but to a child that negotiated nothing \\`s-a\='
-could only be sent as a plain `a\=', as xterm sends it, and Pause as nothing.
-Taking the key from Emacs to send that would be all loss -- \\`s-v\=' is a
+a key such as `pause' that has no sequence outside kitty's table.  The kitty
+protocol gives them all a spelling, `ESC [ 97 ; 9 u' for \\`s-a' and
+`ESC [ 57362 u' for Pause, but to a child that negotiated nothing \\`s-a'
+could only be sent as a plain `a', as xterm sends it, and Pause as nothing.
+Taking the key from Emacs to send that would be all loss -- \\`s-v' is a
 paste on macOS -- so while nothing is negotiated the binding is nil, and the
 key falls through to whatever Emacs binds it to.  A Super or Hyper chord goes
-further, and stays Emacs\=' while Emacs binds it; see `cooked--kitty-chord\='."
+further, and stays Emacs' while Emacs binds it; see `cooked--kitty-chord'."
   `(menu-item "" ,command :filter cooked--kitty-binding))
 
 (defvar cooked--asking-emacs-about-chord nil
-  "Non-nil while `cooked--kitty-chord-binding\=' asks what Emacs binds a chord to.
+  "Non-nil while `cooked--kitty-chord-binding' asks what Emacs binds a chord to.
 
 Every Super and Hyper chord answers nil while this is set, so the lookup made
-from inside the filter sees past cooked\='s own binding to the one under it,
+from inside the filter sees past cooked's own binding to the one under it,
 instead of calling the same filter again.")
 
 (defun cooked--kitty-chord-binding (key binding)
@@ -164,9 +164,9 @@ instead of calling the same filter again.")
 
 That is while the kitty protocol is negotiated and nothing else in the active
 keymaps binds KEY, which is how a terminal treats its own shortcuts: it takes
-the ones it has and passes the rest through.  \\`s-v\=' bound to a paste in the
-user\='s config stays a paste with Claude Code running, while an unbound \\`s-j\='
-reaches the child as `ESC [ 106 ; 9 u\='.  An `undefined\=' binding counts as
+the ones it has and passes the rest through.  \\`s-v' bound to a paste in the
+user's config stays a paste with Claude Code running, while an unbound \\`s-j'
+reaches the child as `ESC [ 106 ; 9 u'.  An `undefined' binding counts as
 none, since it exists only to shadow one.
 
 Asked on every lookup rather than when the map is built, so a chord bound or
@@ -181,8 +181,8 @@ unbound after the session started goes the right way at once."
 (defun cooked--kitty-chord (command event)
   "A binding of COMMAND for EVENT, a Super or Hyper chord, for a kitty child only.
 
-Like `cooked--kitty-only\=', and yielding besides to any binding Emacs has for
-the chord; see `cooked--kitty-chord-binding\='.  EVENT is the chord as it is
+Like `cooked--kitty-only', and yielding besides to any binding Emacs has for
+the chord; see `cooked--kitty-chord-binding'.  EVENT is the chord as it is
 looked up from the top of the active maps: a binding stored under an ESC
 prefix is passed the Meta event its prefix spells.  Each chord needs a filter
 of its own because a filter is told only the binding, not the key it was
@@ -193,13 +193,13 @@ reached by."
 (defun cooked--super-chord-events (exceptions)
   "The chords on printable keys held with Super or Hyper, but for EXCEPTIONS.
 
-Every character from space to `~\=' with either modifier, as a graphical frame
-delivers it: \\`s-A\=' for Super+Shift+a, since Emacs folds Shift into the
+Every character from space to `~' with either modifier, as a graphical frame
+delivers it: \\`s-A' for Super+Shift+a, since Emacs folds Shift into the
 capital.
-The same with Control, which `cooked--control-chord-events\=' spells, and
-\\`S-s-a\=' as well, which is what `kbd\=' makes of that name and would
-otherwise be shift-translated to \\`s-a\='.  Meta is left to
-`cooked--build-meta-overlay\=', where a Meta character has to be bound."
+The same with Control, which `cooked--control-chord-events' spells, and
+\\`S-s-a' as well, which is what `kbd' makes of that name and would
+otherwise be shift-translated to \\`s-a'.  Meta is left to
+`cooked--build-meta-overlay', where a Meta character has to be bound."
   (let (events)
     (dolist (modifier '((super 23 "s-") (hyper 24 "H-")))
       (dolist (char (append (number-sequence ?\s ?~)
@@ -300,43 +300,43 @@ spell them, and a chord Emacs binds is left to Emacs."
     map))
 
 (defvar cooked--meta-overlays nil
-  "Alist of (MAP . OVERLAY), the cache behind `cooked--forwarding-map\='.
+  "Alist of (MAP . OVERLAY), the cache behind `cooked--forwarding-map'.
 
 Keyed by the map object rather than by name, and safe to keep across a
-customization because `cooked--replace-keymap\=' rebuilds a map\='s bindings
-without replacing the map itself -- so a cached overlay\='s parent stays the
+customization because `cooked--replace-keymap' rebuilds a map's bindings
+without replacing the map itself -- so a cached overlay's parent stays the
 map the user just changed.")
 
 (defun cooked--build-meta-overlay (map &optional exceptions)
   "A child of MAP that forwards the Meta space as well, but for EXCEPTIONS.
 
-MAP itself cannot carry that space.  `define-key\=' and `lookup-key\=' both
-translate a Meta character into ESC plus the character, so `M-t\=' is stored and
+MAP itself cannot carry that space.  `define-key' and `lookup-key' both
+translate a Meta character into ESC plus the character, so `M-t' is stored and
 found under an ESC prefix and nowhere else -- which means binding the Meta
 space at all and forwarding ESC as a key of its own are mutually exclusive
-within one keymap.  On a terminal frame that costs nothing: Escape and `t\=' are
-two separately-forwarded bytes there, and the child sees `ESC t\=' either way.
-On a graphical frame `M-t\=' is a single event, unbound by MAP, and reaches
-Emacs\=' own binding for it instead -- which is the bug this exists to fix.
+within one keymap.  On a terminal frame that costs nothing: Escape and t are
+two separately-forwarded bytes there, and the child sees `ESC t' either way.
+On a graphical frame `M-t' is a single event, unbound by MAP, and reaches
+Emacs' own binding for it instead -- which is the bug this exists to fix.
 
 So the overlay makes ESC the prefix, and gives the Escape key back its
-zero-latency spelling through `[escape]\=' -- the symbol a graphical frame
+zero-latency spelling through `[escape]' -- the symbol a graphical frame
 actually sends, which only decays to a bare ESC byte when nothing binds it.
-`ESC O\=' and `ESC [\=' are left out of the prefix map, as `vterm\=' and `eat\='
+`ESC O' and `ESC [' are left out of the prefix map, as `vterm' and `eat'
 also leave them out: they begin the escape sequences every other key arrives
 as, and a binding here would swallow one that had not been decoded yet.
 
-The prefix covers every character, not only 0-127, so that \\`M-é\=' is
-forwarded as `ESC é\=' like \\`M-e\=' -- the ESC map is a full keymap, whose
+The prefix covers every character, not only 0-127, so that \\`M-é' is
+forwarded as `ESC é' like \\`M-e' -- the ESC map is a full keymap, whose
 char-table answers for all of them at once.  Chords held with Super or Hyper
-are bound as `cooked--build-passthrough-map\=' binds them, through
-`cooked--kitty-chord\='.
+are bound as `cooked--build-passthrough-map' binds them, through
+`cooked--kitty-chord'.
 
-EXCEPTIONS are MAP\='s, as events, and only a Meta chord among them is kept
-back here: an exception of `M-x\=' leaves `ESC x\=' unbound, so the chord
+EXCEPTIONS are MAP's, as events, and only a Meta chord among them is kept
+back here: an exception of `M-x' leaves `ESC x' unbound, so the chord
 falls through to Emacs.  The rest of the Meta space forwards whatever MAP keeps.
-An exception of `C-g\=' names an unmodified control character, and reserving
-`C-M-g\=' along with it would take a key from the child on the strength of a
+An exception of `C-g' names an unmodified control character, and reserving
+`C-M-g' along with it would take a key from the child on the strength of a
 binding Emacs does not have."
   (let ((overlay (make-sparse-keymap))
         (esc (make-keymap)))
@@ -364,21 +364,21 @@ binding Emacs does not have."
 (defun cooked--frame-keymap-type (&optional frame)
   "Which spelling of Meta a keymap worn on FRAME has to answer.
 
-`graphic\=' where a Meta chord is a single event and `text\=' where it is two
+`graphic' where a Meta chord is a single event and `text' where it is two
 forwarded bytes -- the only thing about a frame that a cooked keymap depends
 on, named so that the dependency can be compared rather than re-derived.  See
-`cooked--keymap-frame-type\='."
+`cooked--keymap-frame-type'."
   (if (display-graphic-p frame) 'graphic 'text))
 
 (defvar-local cooked--keymap-frame-type nil
   "Frame type the local map now installed was built for, or nil.
 
-Nil where the answer does not depend on a frame: `cooked-input-map\=' and
-`cooked-peek-map\=' are worn as they are, and a buffer wearing one of them
+Nil where the answer does not depend on a frame: `cooked-input-map' and
+`cooked-peek-map' are worn as they are, and a buffer wearing one of them
 cannot be stale however its windows move.
 
-Set by `cooked--forwarding-map\=', which is the one place the frame is asked
-about, and cleared by `cooked--state-keymap\=' before it chooses -- so the
+Set by `cooked--forwarding-map', which is the one place the frame is asked
+about, and cleared by `cooked--state-keymap' before it chooses -- so the
 record cannot drift from what was actually installed by anyone adding a state
 that forwards or by anyone taking one away.")
 
@@ -386,10 +386,10 @@ that forwards or by anyone taking one away.")
 (defvar cooked-raw-exceptions)
 
 (defun cooked--meta-exceptions (map)
-  "The exceptions, as events, that MAP\='s Meta overlay has to leave out.
+  "The exceptions, as events, that MAP's Meta overlay has to leave out.
 
-Only `cooked-raw-map\=' has any.  `cooked-alt-map\=' and `cooked-command-map\='
-keep nothing back by design, and `cooked-semi-map\=' is never worn through an
+Only `cooked-raw-map' has any.  `cooked-alt-map' and `cooked-command-map'
+keep nothing back by design, and `cooked-semi-map' is never worn through an
 overlay, since it holds the whole Meta space back itself."
   (and (eq map cooked-raw-map)
        (mapcar #'cooked--exception-event cooked-raw-exceptions)))
@@ -398,16 +398,16 @@ overlay, since it holds the whole Meta space back itself."
   "MAP as it should be worn on the selected frame.
 
 MAP itself on a terminal frame, where it already forwards the Meta space a
-byte at a time; its `cooked--build-meta-overlay\=' child on a graphical frame,
-where it does not.  Asked at `use-local-map\=' time by `cooked--state-keymap\=',
+byte at a time; its `cooked--build-meta-overlay' child on a graphical frame,
+where it does not.  Asked at `use-local-map' time by `cooked--state-keymap',
 so a buffer shown on both frame types at once wears whichever answer the last
-refresh reached -- the alternative being to pay the overlay\='s one real cost,
+refresh reached -- the alternative being to pay the overlay's one real cost,
 Escape waiting for a Meta chord, on the terminal frames that never needed it.
 
-Which answer that is, is recorded in `cooked--keymap-frame-type\=', because a
+Which answer that is, is recorded in `cooked--keymap-frame-type', because a
 daemon serving one graphical frame and one terminal frame moves the buffer
 between the two with no state change of its own to notice it:
-`cooked--window-selection-changed\=' compares the record against the frame the
+`cooked--window-selection-changed' compares the record against the frame the
 buffer has just been selected in and asks for a refresh only when they differ."
   (let ((type (cooked--frame-keymap-type)))
     (setq cooked--keymap-frame-type type)
@@ -420,29 +420,29 @@ buffer has just been selected in and asks for a refresh only when they differ."
             overlay)))))
 
 (defun cooked--replace-keymap (map fresh)
-  "Give MAP the bindings of FRESH, keeping MAP\='s own identity.
+  "Give MAP the bindings of FRESH, keeping MAP's own identity.
 
 Every map in this file is reachable from a variable that other maps have as
-their parent and that `cooked--state-keymap\=' hands to `use-local-map\=', so a
-`:set\=' that rebuilt one by assigning a new keymap would leave every one of
+their parent and that `cooked--state-keymap' hands to `use-local-map', so a
+`:set' that rebuilt one by assigning a new keymap would leave every one of
 those pointing at the old object.  Replacing the bindings in place is what lets
-`cooked-raw-exceptions\=' and friends be customised in a running session.
+`cooked-raw-exceptions' and friends be customised in a running session.
 
-`set-keymap-parent\=' stores the parent as the list\='s own terminating cdr
-rather than in a separate slot, so a plain `(setcdr map (cdr fresh))\=' would
+`set-keymap-parent' stores the parent as the list's own terminating cdr
+rather than in a separate slot, so a plain `(setcdr map (cdr fresh))' would
 silently drop it; save and restore it around the replacement."
   (let ((parent (keymap-parent map)))
     (setcdr map (cdr fresh))
     (set-keymap-parent map parent)))
 
 (defun cooked--passthrough-setter (map &optional reserve-chords)
-  "A `defcustom\=' `:set\=' rebuilding MAP as a passthrough map for its value.
+  "A `defcustom' `:set' rebuilding MAP as a passthrough map for its value.
 
 The value is a list of key strings naming the keys to keep for Emacs;
-RESERVE-CHORDS means what it does in `cooked--build-passthrough-map\='.  MAP is
+RESERVE-CHORDS means what it does in `cooked--build-passthrough-map'.  MAP is
 named rather than passed, and checked for at call time, because the maps are
 defined below the options that configure them -- the option has to exist first
-for the `defvar\=' to read it.
+for the `defvar' to read it.
 
 A Meta overlay already built for MAP is rebuilt in place too, since a Meta chord
 among the exceptions is left out there rather than in MAP."
@@ -479,7 +479,7 @@ universal quit key outright is a worse trade than reserving a handful of
 control characters most raw programs do not need for themselves.
 
 Each entry names a single key via `kbd', e.g. \"C-g\", or \"C-;\" for a Control
-chord a graphical frame would otherwise forward.  \\`C-y\=' is deliberately not
+chord a graphical frame would otherwise forward.  \\`C-y' is deliberately not
 offered here even though it would otherwise be a plausible candidate: it is both
 vim's scroll-up-a-line and readline's own yank, real bindings a user relying on
 the child is actively using.  A Meta chord such as \"M-x\" is accepted, and is
@@ -633,7 +633,7 @@ and `comint-mode-map' beneath it exactly as it always did.")
 `cooked-raw-exceptions' (and, always, `C-c') keep some keys for Emacs while
 the child owns the keyboard; this is the way back the other direction, for a
 child that wants one of those keys for itself -- a readline-based REPL's own
-\\`C-u\=', say.  Reaches \\`C-c\=' too: \\`C-c C-q C-c\=' sends a literal \\`C-c\=' byte.
+\\`C-u', say.  Reaches \\`C-c' too: \\`C-c C-q C-c' sends a literal \\`C-c' byte.
 
 Bound on `cooked-mode-map', so it also reaches the child while peeking -- ending
 peek first, so the result is seen immediately -- but refuses once Emacs owns
@@ -659,10 +659,10 @@ the line -- see `cooked-send-string', which shares the reasoning."
   "A fresh input-line keymap, with DELEGATED keys handed to the child.
 
 Spelled as a builder rather than a literal for the same reason
-`cooked--build-passthrough-map\=' is: `cooked-delegate-keys\=' can change at any
+`cooked--build-passthrough-map' is: `cooked-delegate-keys' can change at any
 time, and rebuilding is the only way to put back a key that was
-delegated.  Unbinding it instead would leave `TAB\=' bound to nothing rather
-than to `completion-at-point\='."
+delegated.  Unbinding it instead would leave `TAB' bound to nothing rather
+than to `completion-at-point'."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "RET") #'cooked-send-input)
     (define-key map (kbd "<S-return>") #'cooked-newline)
@@ -696,14 +696,14 @@ so the same set reaches `cooked-raw-map'/`cooked-alt-map' and a bare peek
 without being declared three times over.")
 
 (defun cooked-delegate-key (key)
-  "Hand the pending input to the child\='s line editor, then send KEY to it.
+  "Hand the pending input to the child's line editor, then send KEY to it.
 
-The primitive behind `cooked-delegate-keys\=', and deliberately not a completion
-feature: nothing here knows what KEY means.  Send `C-r\=' and you get fzf or
-atuin; send the up arrow and you get the shell\='s own history, with
-`share_history\=', `zsh-histdb\=' and every `bindkey\=' the user has
+The primitive behind `cooked-delegate-keys', and deliberately not a completion
+feature: nothing here knows what KEY means.  Send `C-r' and you get fzf or
+atuin; send the up arrow and you get the shell's own history, with
+`share_history', `zsh-histdb' and every `bindkey' the user has
 accumulated.  That is worth more than any of it could be reimplemented for,
-because `comint-input-ring\=' here is fed only by `cooked--history-record\='
+because `comint-input-ring' here is fed only by `cooked--history-record'
 from what was typed in *this* buffer and so starts empty every session.
 
 Three things have to happen in this order.
@@ -711,7 +711,7 @@ Three things have to happen in this order.
 Ownership is dropped *first*.  The line is about to be echoed by the shell, and
 a buffer that still believes it owns an input region would render it a second
 time on top.  The text is left in place rather than deleted, for the reason
-`cooked-send-input\=' leaves it: the echo redraws identical characters over the
+`cooked-send-input' leaves it: the echo redraws identical characters over the
 same cells and nothing moves, where deleting it would empty the row for the one
 redisplay it takes to come back.
 
@@ -719,10 +719,10 @@ The *whole* line is sent, not the part before point.  Sending the prefix would
 silently drop whatever followed the cursor, and the left-arrows that avoid it
 cost one byte each.
 
-Then KEY, once the shell\='s cursor is back where the user\='s was.
+Then KEY, once the shell's cursor is back where the user's was.
 
 The pasted parts of the line are stripped of control bytes on the way, as a
-submitted line\='s are by `cooked--send-input-string\=', because the line reaches
+submitted line's are by `cooked--send-input-string', because the line reaches
 the line editor as typing: an ESC yanked into it would be read as the start of a
 key sequence.  What was typed goes as typed, and KEY is not stripped, since
 sending a control key is what it is for."
@@ -740,30 +740,30 @@ sending a control key is what it is for."
 
 (defun cooked-delegate-this-key ()
   "Delegate the pending input and send the key that invoked this command.
-See `cooked-delegate-key\=' and `cooked-delegate-keys\='."
+See `cooked-delegate-key' and `cooked-delegate-keys'."
   (interactive)
   (let ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys)))
     (when-let* ((bytes (cooked--encode-event last-command-event)))
       (cooked-delegate-key bytes))))
 
 (defcustom cooked-delegate-keys '("C-r")
-  "Keys that hand the line to the child\='s line editor before being sent.
+  "Keys that hand the line to the child's line editor before being sent.
 
-Each is a `kbd\=' string, bound in `cooked-input-map\=' -- so they apply only
+Each is a `kbd' string, bound in `cooked-input-map' -- so they apply only
 where Emacs owns the line, which is the only place there is anything to hand
 over.
 
-`C-r\=' is the default because reverse history search is the clearest case for
+`C-r' is the default because reverse history search is the clearest case for
 delegating: the flow is search, accept, Enter, so the line goes back to the
 shell at a point where Emacs editing was not going to be wanted again anyway,
-and the alternative is a history ring that knows nothing of the shell\='s.
+and the alternative is a history ring that knows nothing of the shell's.
 
-`TAB\=' is deliberately *not* here.  Delegation is a one-way door for the rest
+`TAB' is deliberately *not* here.  Delegation is a one-way door for the rest
 of the line, and losing the Emacs input region must never be a side effect of a
-key pressed fifty times an hour; `TAB\=' stays `completion-at-point\=' at every
+key pressed fifty times an hour; `TAB' stays `completion-at-point' at every
 level, and what answers it changes with the tier while what it means does not.
 Putting it here is supported and reasonable -- it is how a shell with marks but
-no completion channel reaches `git checkout <TAB>\=' -- but it should be chosen."
+no completion channel reaches `git checkout <TAB>' -- but it should be chosen."
   :type '(repeat string)
   :set (lambda (symbol value)
          (set-default symbol value)
@@ -778,14 +778,14 @@ no completion channel reaches `git checkout <TAB>\=' -- but it should be chosen.
   "How long to wait for a byte after ESC before calling it a lone ESC, or nil.
 
 On a graphical frame Emacs already distinguishes the ESC *key* from the ESC
-*byte* that starts an escape sequence, and binds the first as `escape\='.  On a
+*byte* that starts an escape sequence, and binds the first as `escape'.  On a
 terminal frame it cannot: both arrive as the same byte, and the only thing
 telling them apart is that a sequence's remaining bytes follow immediately.  So
-a tty Emacs has no `escape\=' event at all, and configuration keyed on one --
+a tty Emacs has no `escape' event at all, and configuration keyed on one --
 which is most evil configuration -- silently does nothing there.
 
-This is the same wait a terminal Emacs already makes for `ESC\=' as Meta, spelled
-so that the answer is an event rather than a prefix.  10ms is ghostel\='s number
+This is the same wait a terminal Emacs already makes for `ESC' as Meta, spelled
+so that the answer is an event rather than a prefix.  10ms is ghostel's number
 and is below the threshold at which a delay on a *deliberate* keypress is
 noticeable; it is never paid on a real escape sequence, because the following
 byte is already in the queue.
@@ -795,20 +795,20 @@ nil disables the translation entirely."
   :group 'cooked)
 
 (defun cooked--tty-esc (map)
-  "Translate a lone ESC to `escape\=', or answer MAP to decode as usual.
+  "Translate a lone ESC to `escape', or answer MAP to decode as usual.
 
-The `:filter\=' of a `menu-item\=' entry on ESC in `input-decode-map\='.
+The `:filter' of a `menu-item' entry on ESC in `input-decode-map'.
 
 *Only where the child is not reading the keyboard*, which is a deliberate
 departure from ghostel.  ESC is how you leave insert mode in the vim running
 inside the terminal, and a translation that reached it would be a bug of exactly
 the kind nobody would connect to this setting.  Where Emacs owns the line there
-is no such claim on the byte, and an `escape\=' event is strictly more than a tty
+is no such claim on the byte, and an `escape' event is strictly more than a tty
 had before.
 
-The `[27 27]\=' guard is ghostel\='s and is not optional: the first ESC of a fast
+The `[27 27]' guard is ghostel's and is not optional: the first ESC of a fast
 pair is already committed by the time the second decodes, so translating the
-second leaves `ESC ESC\=' looking for an unbound `ESC <escape>\=' instead of
+second leaves `ESC ESC' looking for an unbound `ESC <escape>' instead of
 reaching its own binding."
   (if (and cooked-tty-escape-delay
            cooked--session
@@ -830,11 +830,11 @@ than replaces -- whatever was there is wrapped, so evil's own filter still runs,
 and at most one translation delay is paid per key.
 
 Two details that look like paranoia and are not, both ghostel's.  The entry is
-read *structurally* with `assq\=' rather than with `lookup-key\=', because
-`lookup-key\=' resolves a `menu-item\=' filter to the map behind it, silently
+read *structurally* with `assq' rather than with `lookup-key', because
+`lookup-key' resolves a `menu-item' filter to the map behind it, silently
 dropping another package's wrapper on the way past.  And our own wrapper is
-recognised by its `:filter\=' symbol rather than by identity, because
-`define-key\=' copies the `menu-item\=' list and identity would never match, so
+recognised by its `:filter' symbol rather than by identity, because
+`define-key' copies the `menu-item' list and identity would never match, so
 every call would wrap again.
 
 Inert outside a cooked buffer with a live child, so nothing uninstalls it."

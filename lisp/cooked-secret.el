@@ -26,39 +26,39 @@
 
 (defcustom cooked-password-function nil
   "Function called with the prompt string to supply a password non-interactively.
-Should return a string, or nil to fall back to `read-passwd\='.  Lets auth-source
-or `pass\=' answer a prompt no ordinary terminal could even detect.
+Should return a string, or nil to fall back to `read-passwd'.  Lets auth-source
+or `pass' answer a prompt no ordinary terminal could even detect.
 
 The returned string is not modified: cooked copies it before writing it to the
 child and clears only that copy, because a backend is free to return the very
 string its own cache holds.  A source that would rather cooked did not keep the
-plaintext alive at all can return a `copy-sequence\=' and clear its own.
+plaintext alive at all can return a `copy-sequence' and clear its own.
 
 A single slot, kept for the configuration already using it.
-`cooked-password-functions\=' is the composing form and is asked first."
+`cooked-password-functions' is the composing form and is asked first."
   :type '(choice (const nil) function) :group 'cooked)
 
 (defcustom cooked-password-functions nil
   "Abnormal hook asked for a password, first non-nil answer winning.
 
-Each entry is called with the prompt string, in the session\='s buffer, and
+Each entry is called with the prompt string, in the session's buffer, and
 returns the password or nil to let the next one try.  The chain is the point:
-auth-source for the hosts it knows, `pass\=' for the rest, and `read-passwd\='
+auth-source for the hosts it knows, `pass' for the rest, and `read-passwd'
 at the tail is what cooked does anyway when every entry declines.
 
-A single `cooked-password-function\=' cannot compose -- a second source means
+A single `cooked-password-function' cannot compose -- a second source means
 writing a dispatcher, and every user who wants two writes the same one.  This is
 the seam idiom the rest of cooked uses, and it is asked *before*
-`cooked-password-function\=' so an existing configuration keeps working as the
+`cooked-password-function' so an existing configuration keeps working as the
 last word rather than the first.
 
 Two things worth knowing before writing an entry. Returning the empty string
 counts as an *answer*, not a decline -- some prompts genuinely take one, so
 cooked cannot guess, and an entry that means \"I have nothing\" must return
 nil. And whatever is returned is copied before it reaches the child and only the
-copy is cleared, for the reason `cooked-password-function\=' gives.
+copy is cleared, for the reason `cooked-password-function' gives.
 
-Run through `cooked--run-seam-until-success\=', so an entry that signals has
+Run through `cooked--run-seam-until-success', so an entry that signals has
 given no answer and the next is asked -- a broken auth-source backend does not
 take the prompt down with it."
   :type 'hook :group 'cooked)
@@ -66,18 +66,18 @@ take the prompt down with it."
 (defun cooked--password-from-sources (prompt)
   "Ask every configured source for the password PROMPT wants, or nil.
 
-The chain first, then the single slot: an existing `cooked-password-function\='
+The chain first, then the single slot: an existing `cooked-password-function'
 keeps working, and keeps its meaning as the answer of last resort rather than
 becoming one voice among several.
 
-An answer that is a function is called for the string.  That is auth-source\='s
-own convention -- the `:secret\=' of what `auth-source-search\=' finds is a
+An answer that is a function is called for the string.  That is auth-source's
+own convention -- the `:secret' of what `auth-source-search' finds is a
 closure, so that the plaintext is not lying about in the result -- and a source
 written as (plist-get (car (auth-source-search ...)) :secret) returns it as it
-stands.  It used to reach `copy-sequence\=', which signals on a function, and
+stands.  It used to reach `copy-sequence', which signals on a function, and
 only quit was handled, so the child was left blocked on a read nobody would
 answer.  Any other answer that is not a string is dropped with a message and
-`read-passwd\=' asks instead, which leaves the child with something to wait for."
+`read-passwd' asks instead, which leaves the child with something to wait for."
   (let ((answer (or (cooked--run-seam-until-success 'cooked-password-functions prompt)
                     (and cooked-password-function
                          (funcall cooked-password-function prompt)))))
@@ -109,7 +109,7 @@ is waiting on any more, and must not touch the child -- see
 (defvar-local cooked--secret-asking nil
   "Which detector is asking for the secret being collected, or nil.
 
-`termios\=' from the moment the tty goes into secret mode, `regex\=' from the
+`termios' from the moment the tty goes into secret mode, `regex' from the
 drain whose cursor row first looks like a remote password prompt, and nil again
 once the read returns or the child stops asking.  It covers the whole of one
 prompt -- the debounce, a read held while the user is elsewhere, and the read
@@ -120,8 +120,8 @@ goes on matching for fifty drains is asked about once, not fifty times.")
   "The (ROW . COL) screen cell the cursor was on when the last read returned.
 
 A remote child goes on showing its prompt after it has been answered, for as
-long as the round trip takes: `sudo\=' at the far end of an `ssh\=' prints the
-newline that moves the cursor off `[sudo] password for simon: \=' only once the
+long as the round trip takes: `sudo' at the far end of an `ssh' prints the
+newline that moves the cursor off `[sudo] password for simon: ' only once the
 password has crossed the network and been read.  Every drain in that window
 would look like a fresh prompt to the regex arm, and a second read answered
 there sends the password to whatever reads the line after it -- the remote
@@ -129,36 +129,36 @@ shell, which echoes it.  So the cell is remembered, and the regex arm stays
 quiet while the cursor is still on it.
 
 The same wait follows a password the *termios* arm collected, which is why both
-arms set this.  The prompt `ssh\=' prints for its own password is read with
-echo off, and once it is answered `ssh\=' puts the local tty into raw mode while
+arms set this.  The prompt `ssh' prints for its own password is read with
+echo off, and once it is answered `ssh' puts the local tty into raw mode while
 that prompt is still on the row and still matches.
 
 Forgotten as soon as the row stops matching, and whenever a drain scrolls: the
 cell is a screen coordinate, and a scroll puts a different line under it.  That
 second reset is what lets a retry at the bottom of the screen through, where
-`Sorry, try again.\=' and the next prompt can arrive in one drain and leave the
+`Sorry, try again.' and the next prompt can arrive in one drain and leave the
 cursor on exactly the cell it was on before.")
 
 (defcustom cooked-password-remote-programs '("ssh" "mosh-client")
   "Programs that carry a password prompt from a tty cooked cannot see.
 
 While one of these is in the foreground, the cursor row is matched against
-`cooked-password-prompt-regexp\='.  `ssh -t host sudo …\=' needs this: `sudo\='
-turns echo off on the far tty, the local one stays in the raw mode `ssh\=' put
+`cooked-password-prompt-regexp'.  `ssh -t host sudo …' needs this: `sudo'
+turns echo off on the far tty, the local one stays in the raw mode `ssh' put
 it in, and no shell on the far end sends the OSC 7 that would mark the host as
 foreign.
 
-Names are compared against the foreground process group\='s `comm\=', as
-`cooked--foreground-program\=' reports it.  Add `docker\=', `kubectl\=' or
-`tmux\=' to catch prompts inside those too, at the cost of matching the row
-while they run a pager or an editor that shows a line ending in `Password:\='."
+Names are compared against the foreground process group's `comm', as
+`cooked--foreground-program' reports it.  Add `docker', `kubectl' or
+`tmux' to catch prompts inside those too, at the cost of matching the row
+while they run a pager or an editor that shows a line ending in `Password:'."
   :type '(repeat string) :group 'cooked)
 
 (defcustom cooked-password-prompt-regexp comint-password-prompt-regexp
   "What a password prompt looks like, for a child the termios probe cannot see.
 
 Only consulted for a remote child: a *foreign host*, or one of
-`cooked-password-remote-programs\=' in the foreground.  That gate is the whole of
+`cooked-password-remote-programs' in the foreground.  That gate is the whole of
 why this is safe to have at all.
 
 cooked normally detects a password prompt from the terminal itself: the child
@@ -171,7 +171,7 @@ the *far* tty into secret mode; the local one this session owns never changes,
 so the detector never fires and the password is typed into the buffer in the
 clear.
 A regex is the only thing left, and matching one against every line of local
-output would false-positive on `less\=' reading a file that merely mentions
+output would false-positive on `less' reading a file that merely mentions
 a password -- which is exactly why it is gated rather than merely
 lower-priority.
 
@@ -184,19 +184,19 @@ case-insensitively; so does this."
   "Whether what the child is running reads from a tty cooked cannot sample.
 
 Two ways to know it, because they fail in different places.  A foreign host
-from OSC 7 covers a shell at the far end that runs cooked\='s integration, and
-keeps covering it through `sudo -i\=' or a nested shell whose name says nothing.
-A remote client in the foreground covers `ssh -t host sudo apt upgrade\=', where
+from OSC 7 covers a shell at the far end that runs cooked's integration, and
+keeps covering it through `sudo -i' or a nested shell whose name says nothing.
+A remote client in the foreground covers `ssh -t host sudo apt upgrade', where
 nothing at the far end speaks OSC 7 and the only local evidence is that
-`ssh\=' is running.
+`ssh' is running.
 
-A local `sudo\=' in a trusted shell passes neither, and that matters: it is the
-termios arm\='s case, and a regex match on the same
-`[sudo] password for simon: \=' row would otherwise ask for the password a
+A local `sudo' in a trusted shell passes neither, and that matters: it is the
+termios arm's case, and a regex match on the same
+`[sudo] password for simon: ' row would otherwise ask for the password a
 second time.
 
 The host is asked first, being a string comparison; the foreground program
-costs a `tcgetpgrp\=' per drain, and a `process-attributes\=' only when the
+costs a `tcgetpgrp' per drain, and a `process-attributes' only when the
 foreground changes."
   (or (cooked--foreign-host-p)
       (and cooked-password-remote-programs
@@ -207,8 +207,8 @@ foreground changes."
   "Whether the cursor's row looks like a password prompt from a remote child.
 
 The second arm of the detector, and the only one that can reach a remote
-child; see `cooked--remote-child-p\=' for what counts as one.  Asked of the
-*cursor\='s* row rather than of the whole screen: a prompt is where the cursor is
+child; see `cooked--remote-child-p' for what counts as one.  Asked of the
+*cursor's* row rather than of the whole screen: a prompt is where the cursor is
 waiting, and a screenful of a build log mentioning passwords is not one."
   (and (cooked--remote-child-p)
        (when-let* ((position (cooked--cursor-position))
@@ -222,26 +222,26 @@ waiting, and a screenful of a build log mentioning passwords is not one."
 (defun cooked--schedule-secret (origin)
   "Prompt for a secret once the prompt text has had time to arrive.
 
-ORIGIN is the detector asking, `termios\=' or `regex\=', and is kept in
-`cooked--secret-asking\=' until the read returns or the child stops asking.
+ORIGIN is the detector asking, `termios' or `regex', and is kept in
+`cooked--secret-asking' until the read returns or the child stops asking.
 
-Not while the user is looking at something else.  `read-passwd\=' takes the
+Not while the user is looking at something else.  `read-passwd' takes the
 minibuffer of whatever frame is selected, which for a buffer nobody is in means
 a masked prompt appearing under the cursor in an unrelated buffer -- and then
 the next thing typed there, whatever it was meant for, is sent to this child
 followed by a newline.  A password prompt that arrives late is a small thing; a
 password prompt that quietly redirects the keys you are already typing is not.
 
-So the read is held instead, and `cooked--resume-secret\=' raises it when
-attention comes back.  Nothing else is deferred with it: `cooked--mode\=' is
+So the read is held instead, and `cooked--resume-secret' raises it when
+attention comes back.  Nothing else is deferred with it: `cooked--mode' is
 already `secret', the keymap has already been swapped, and the child is
-blocked in a `getpass\=' that will wait as long as it takes.
+blocked in a `getpass' that will wait as long as it takes.
 
 Said out loud rather than held silently, because the buffer is off screen and
 the alternative is a session that has stopped for no visible reason.  A message
 is the smallest thing that cannot steal a keystroke; a notification is the
-better one, and is `cooked-command-finished-functions\=' territory rather than
-this function\='s.  It is posted once per prompt, because each detector
+better one, and is `cooked-command-finished-functions' territory rather than
+this function's.  It is posted once per prompt, because each detector
 schedules on a rising edge rather than on every drain the prompt is still there
 for."
   (cooked--cancel-secret)
@@ -260,7 +260,7 @@ Called as attention returns, and only then.  Three things have to be true and
 each rules out a different way of prompting for nothing: a detector must still
 be asking, or the prompt would be answered by whatever the child is running now,
 or a second time after it was already answered; no
-timer may be pending, or `cooked--schedule-secret\=' has already been through
+timer may be pending, or `cooked--schedule-secret' has already been through
 here and rescheduling would bump the epoch out from under it; and no read may
 be on screen, which is the case of leaving the buffer *while* the minibuffer
 was up and coming back to it, where cancelling and re-asking would dismiss a
@@ -276,17 +276,17 @@ prompt the user is part-way through answering."
 
 Called whenever the child stops asking: it left secret mode, the remote prompt
 left the cursor row, it exited, or the buffer was killed.  The pending timer is
-the easy half.  The hard half is a read already on screen -- `sudo\='
+the easy half.  The hard half is a read already on screen -- `sudo'
 interrupted from the terminal window leaves the minibuffer sitting there, and
-answering it later would hand a password, or a `C-c\=', to whatever the child is
+answering it later would hand a password, or a `C-c', to whatever the child is
 running by then.  That is not a stale window; it is the wrong program being
 killed.
 
 So two things happen.  The epoch moves, which is what makes the read harmless
-whatever it does next: `cooked--prompt-secret\=' compares before it sends
+whatever it does next: `cooked--prompt-secret' compares before it sends
 anything.  Then the minibuffer is dismissed from a zero-delay timer, because it
 is a recursive edit this is not inside -- the timer runs in that recursive
-edit\='s command loop, where `abort-recursive-edit\=' has a tag to throw to.  It
+edit's command loop, where `abort-recursive-edit' has a tag to throw to.  It
 is allowed to fail: if the user has since opened a minibuffer of their own on
 top of ours, both are left alone and the epoch carries the safety."
   (setq cooked--secret-epoch (1+ cooked--secret-epoch)
@@ -309,29 +309,29 @@ top of ours, both are left alone and the epoch carries the safety."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'cooked-secret-abort)
     map)
-  "Keys layered over the map `read-passwd\=' installs.
+  "Keys layered over the map `read-passwd' installs.
 
-`C-c C-c\=' only: the read is a minibuffer, so `C-g\=' already aborts it, but
-the prompt on screen is sudo\='s rather than Emacs\=', and the key that gets you
+`C-c C-c' only: the read is a minibuffer, so `C-g' already aborts it, but
+the prompt on screen is sudo's rather than Emacs', and the key that gets you
 out of a program asking for a password on a terminal is the interrupt.  It is
-spelled the same here as in the buffer, where `C-c C-c\=' is
-`cooked-interrupt\=', so the answer does not depend on which window point
+spelled the same here as in the buffer, where `C-c C-c' is
+`cooked-interrupt', so the answer does not depend on which window point
 happens to be in.")
 
 (defun cooked-secret-abort ()
   "Abandon the password read, leaving the child to be interrupted.
 
-Signals quit rather than sending anything itself; `cooked--prompt-secret\=' is
-already handling quit by sending the child `C-c\=', and that is the one place
-that knows which buffer\='s child is waiting."
+Signals quit rather than sending anything itself; `cooked--prompt-secret' is
+already handling quit by sending the child `C-c', and that is the one place
+that knows which buffer's child is waiting."
   (interactive)
   (abort-minibuffers))
 
 (defun cooked--read-passwd (prompt)
-  "Read a secret for PROMPT with `cooked-secret-map\=' in force.
+  "Read a secret for PROMPT with `cooked-secret-map' in force.
 
-The minibuffer is recorded on the session\='s buffer for as long as the read
-lasts, which is what lets `cooked--cancel-secret\=' take it back down when the
+The minibuffer is recorded on the session's buffer for as long as the read
+lasts, which is what lets `cooked--cancel-secret' take it back down when the
 child stops asking."
   (let ((buffer (current-buffer)))
     (unwind-protect
@@ -370,7 +370,7 @@ Nothing is read unless the detector that scheduled it is still asking: the
 termios arm while the tty is still in secret mode, the regex arm while the
 cursor row still looks like a remote prompt.  A read that returns, answered or
 quit, ends the prompt and leaves the cursor cell in
-`cooked--secret-answered\=', so the next drain does not take the prompt still on
+`cooked--secret-answered', so the next drain does not take the prompt still on
 screen for a new one."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
@@ -441,30 +441,30 @@ screen for a new one."
 (defun cooked--check-secret-prompt (scrolled)
   "Follow the edges of a prompt only the regex arm can see.
 
-The termios detector fires from `cooked--set-mode\=', on a *change* of what the
+The termios detector fires from `cooked--set-mode', on a *change* of what the
 local tty is doing.  A remote child changes the far tty and the local one never
 moves, so that path is never reached and there is no state transition to hang
 this off -- the question has to be asked per drain instead, and the edges found
-here.  ghostel\='s `ghostel--detect-password-prompt\=' is the same machine.
+here.  ghostel's `ghostel--detect-password-prompt' is the same machine.
 
 - The rising edge is the first drain whose cursor row matches while nothing is
   asking.  It schedules the read, once, however many drains the prompt then
   sits through.
 - The falling edge is the first drain whose row does not match.  It forgets the
   answered cell, and if the regex arm was still asking -- a read pending, held,
-  or on screen -- it cancels that read, which is `sudo\=' timing out at the far
+  or on screen -- it cancels that read, which is `sudo' timing out at the far
   end while the minibuffer was up.
-- A row that matches on the cell in `cooked--secret-answered\=' is the prompt
+- A row that matches on the cell in `cooked--secret-answered' is the prompt
   just answered, still on screen until the far end reads the password.
 
 SCROLLED is non-nil when this drain moved rows into the scrollback, which puts
 a different line under every cell and so forgets the answered one.
 
-None of this runs while the tty is in secret mode: that is the termios arm\='s
+None of this runs while the tty is in secret mode: that is the termios arm's
 prompt, and the answered cell it leaves behind has to survive until the tty
 leaves secret mode for it to mean anything.
 
-Cheap where it does not apply: `cooked--secret-prompt-on-row-p\=' asks whether
+Cheap where it does not apply: `cooked--secret-prompt-on-row-p' asks whether
 the child is remote before it builds the row, so a local shell pays no regexp."
   (when (and cooked--session (not (eq cooked--mode 'secret)))
     (when scrolled (setq cooked--secret-answered nil))

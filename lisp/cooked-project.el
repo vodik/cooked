@@ -105,7 +105,7 @@ NEW means what it does there."
 ;; that a label or key the user has since edited is left as they left it.
 
 (defconst cooked-project--switch-entry '(cooked-project "Terminal" ?t)
-  "The `project-switch-commands\=' entry `cooked-project.el\=' installs.")
+  "The `project-switch-commands' entry `cooked-project.el' installs.")
 
 (unless (assq 'cooked-project project-switch-commands)
   (add-to-list 'project-switch-commands cooked-project--switch-entry t))

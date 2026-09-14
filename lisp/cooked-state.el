@@ -33,9 +33,9 @@
   (row 0 :documentation "Screen row, zero-based.")
   (col 0 :documentation "Screen column, zero-based.")
   (chars 0 :documentation "\
-Characters of its row\='s text before it, which is where it is in the buffer.
-Not COL once a wide character or a combining mark comes before it: on `日本X\='
-with the cursor on `本\=' COL is 2 and this is 1.  The core counts it, by the
+Characters of its row's text before it, which is where it is in the buffer.
+Not COL once a wide character or a combining mark comes before it: on `日本X'
+with the cursor on `本' COL is 2 and this is 1.  The core counts it, by the
 rule its row edits are measured by.")
   (visible t :documentation "Whether the child has asked for it to be shown.")
   (shape 'block :documentation "`block', `underline' or `bar', from DECSCUSR."))
@@ -83,7 +83,7 @@ The grid's own height is in `cooked--grid'.")
 (defun cooked--screen-start-position ()
   "Where the live screen begins, or nil before a session has started one.
 
-The marker is nil until `cooked--start\=' makes it and can outlive its buffer
+The marker is nil until `cooked--start' makes it and can outlive its buffer
 text, so both have to be checked; doing that here keeps the check from being the
 loudest thing at every call site."
   (and cooked--screen-start (marker-position cooked--screen-start)))
@@ -151,14 +151,14 @@ state change that happened along.")
 Both halves: the mode says to withhold, and there is a child holding the
 keyboard to withhold from.  At a prompt there is not.  Emacs owns the line
 outright, so nothing is being forwarded for a mode to suspend -- and the two
-things this predicate gates besides the keymap, `buffer-read-only\=' and
-`cooked-peek-map\=', would each break the line being edited rather than protect
-it: one refuses the user\='s own typing outright, the other remaps
-`self-insert-command\=' to raw bytes that go past cooked\='s line editor entirely.
+things this predicate gates besides the keymap, `buffer-read-only' and
+`cooked-peek-map', would each break the line being edited rather than protect
+it: one refuses the user's own typing outright, the other remaps
+`self-insert-command' to raw bytes that go past cooked's line editor entirely.
 
 So this stays the narrow question of who the keyboard belongs to.  The two that
 generalise past it -- does the render run, does the view follow -- ask
-`cooked--input-mode\=' directly; see `cooked--frozen-p\=' and `cooked--follow-p\='."
+`cooked--input-mode' directly; see `cooked--frozen-p' and `cooked--follow-p'."
   (and (memq cooked--input-mode '(still frozen))
        (cooked--child-owns-keyboard-p)))
 
@@ -213,15 +213,15 @@ never stopped running either way -- the freeze only ever deferred the drain."
 (defun cooked--follow-p ()
   "Whether point and the window should track the child's cursor.
 
-The mode alone, deliberately, and not `cooked--suspended-p\=': whether keys are
-being withheld is a question about the child\='s keyboard, and a child that never
-took the keyboard can still be repainting.  `brew upgrade\=' draws its progress
+The mode alone, deliberately, and not `cooked--suspended-p': whether keys are
+being withheld is a question about the child's keyboard, and a child that never
+took the keyboard can still be repainting.  `brew upgrade' draws its progress
 bars over a tty that stays canonical throughout, which leaves the policy at
-`cooked\=' -- so gating the freeze on forwarding made `still\=' and `frozen\='
+`cooked' -- so gating the freeze on forwarding made `still' and `frozen'
 structurally unreachable in exactly the case a held view is worth most.
 
 Point inside the pending input is the one thing this does not speak for; see
-the `editing\=' binding in `cooked--apply\='."
+the `editing' binding in `cooked--apply'."
   (not (memq cooked--input-mode '(still frozen))))
 
 (defvar-local cooked--narrowed nil
@@ -264,14 +264,14 @@ escape `%' first, as `cooked--mode-line-quote' does.")
 (defvar-local cooked--host nil
   "Host the child last reported over OSC 7, or nil for this machine.
 
-The authority half of `file://HOST/PATH\='.  Keeping it is what stops every
-path-shaped thing in the buffer being answered locally: after an `ssh\=', the
+The authority half of `file://HOST/PATH'.  Keeping it is what stops every
+path-shaped thing in the buffer being answered locally: after an `ssh', the
 remote shell goes on reporting its directory faithfully and the names it sends
-are real -- on the other host.  A local `/home/you/src/thing\=' that happens to
+are real -- on the other host.  A local `/home/you/src/thing' that happens to
 exist here is the failure case, and it is the common one, because the layouts
 people ssh between are the ones they keep in step.
 
-Set by `cooked--set-directory\=' and read through `cooked--foreign-host-p\=';
+Set by `cooked--set-directory' and read through `cooked--foreign-host-p';
 see it for what declines and why.")
 (defvar-local cooked--mode 'cooked)
 (defvar-local cooked--exit nil)
@@ -283,52 +283,52 @@ Nil until a shell says otherwise, which is the right default twice over: a
 child that never sends OSC 7 is overwhelmingly a local one, and a hostile
 stream cannot reach *more* of the buffer by staying quiet.
 
-Which names count as this machine is `cooked--local-host-p\=', shared with the
-comint filter\='s own OSC 7 tracking and, through `cooked--same-host-p\=', with
-the TRAMP prefix in `cooked--remote-directory\='.  One deciding a host has
+Which names count as this machine is `cooked--local-host-p', shared with the
+comint filter's own OSC 7 tracking and, through `cooked--same-host-p', with
+the TRAMP prefix in `cooked--remote-directory'.  One deciding a host has
 changed while another decides it has not is exactly how a path ends up sent
 down the wrong connection."
   (and cooked--host
        (not (cooked--local-host-p cooked--host))))
 
 (defun cooked--csi (final &rest params)
-  "The control sequence `ESC [ PARAMS FINAL\=', with PARAMS joined by `;\='.
+  "The control sequence `ESC [ PARAMS FINAL', with PARAMS joined by `;'.
 
 Every escape sequence cooked sends the child that is not an OSC is framed here
-or in `cooked--ss3\=', and for the same reason an OSC handler calls
-`cooked--reply-osc\=' rather than writing the brackets out itself: the framing is
+or in `cooked--ss3', and for the same reason an OSC handler calls
+`cooked--reply-osc' rather than writing the brackets out itself: the framing is
 the part that is identical every time, so it is the part that has no business
 being respelled at each call site, across the keyboard, the mouse, the focus
 reports and the completion channel.  What actually differs between those sites
 is the parameters and the final byte, and that is all they say.
 
 FINAL is a string rather than a character because that is what it already is at
-both of the sites that have one to hand: `cooked--key-encodings\=' stores the
-final byte of a `csi\=' key as a string, and `cooked--mouse-report\=' chooses
+both of the sites that have one to hand: `cooked--key-encodings' stores the
+final byte of a `csi' key as a string, and `cooked--mouse-report' chooses
 between \"M\" and \"m\" for a press and a release.
 
-PARAMS are numbers, so `(cooked--csi \"~\" 5 2)\=' is `ESC [ 5 ; 2 ~\=', the
-modified spelling of `prior\='.  None of them at all is the unparameterised
-sequence `ESC [ FINAL\=', which is what an unmodified cursor key and the DEC 1004
+PARAMS are numbers, so `(cooked--csi \"~\" 5 2)' is `ESC [ 5 ; 2 ~', the
+modified spelling of `prior'.  None of them at all is the unparameterised
+sequence `ESC [ FINAL', which is what an unmodified cursor key and the DEC 1004
 focus notifications are.  A string is taken as the parameter verbatim, which is
 for the kitty keyboard protocol: its fields carry colon-separated sub-fields and
-may be empty, `ESC [ 97 : 65 ; ; 65 u\=', and neither is a number.
+may be empty, `ESC [ 97 : 65 ; ; 65 u', and neither is a number.
 
-See `cooked--csi-private\=' for the two sequences that carry a private-parameter
-prefix, and `cooked--cursor-key\=' for the one choice between CSI and SS3 that
+See `cooked--csi-private' for the two sequences that carry a private-parameter
+prefix, and `cooked--cursor-key' for the one choice between CSI and SS3 that
 depends on what the child has asked for."
   (apply #'cooked--csi-private nil final params))
 
 (defun cooked--csi-private (prefix final &rest params)
-  "The control sequence `ESC [ PREFIX PARAMS FINAL\='.
+  "The control sequence `ESC [ PREFIX PARAMS FINAL'.
 
 PREFIX is the byte ECMA-48 sets aside ahead of the parameters for private use,
-as a string, or nil for the ordinary sequence `cooked--csi\=' builds.  Cooked
-sends two of them.  `<\=' introduces an SGR mouse report, and is the whole of
+as a string, or nil for the ordinary sequence `cooked--csi' builds.  Cooked
+sends two of them.  `<' introduces an SGR mouse report, and is the whole of
 what tells the child it is reading one rather than an X10 report; see
-`cooked--mouse-report\='.  `>\=' introduces the completion request in
-`cooked--shell-completions\=', which is private in the stronger sense that
-nothing but cooked\='s own shell integration will ever recognise it, and
+`cooked--mouse-report'.  `>' introduces the completion request in
+`cooked--shell-completions', which is private in the stronger sense that
+nothing but cooked's own shell integration will ever recognise it, and
 which is why it may take a free-form payload after the final byte that no other
 sequence here would.
 
@@ -341,37 +341,37 @@ parameters and the final byte."
           final))
 
 (defun cooked--ss3 (final)
-  "The single-shift-three sequence `ESC O FINAL\='.
+  "The single-shift-three sequence `ESC O FINAL'.
 
 The application-keypad spelling of a cursor or function key: what the child
-receives for `up\=' once `smkx\=' has asked for it, and the unmodified spelling of
+receives for `up' once `smkx' has asked for it, and the unmodified spelling of
 F1 through F4 whatever mode it is in.
 
-Not `cooked--csi\=' with a different introducer, because SS3 shifts exactly one
+Not `cooked--csi' with a different introducer, because SS3 shifts exactly one
 character and so can carry no parameters at all.  That is not a limitation this
 has to work around -- a key with a modifier to report leaves SS3 behind and is
-spelled as a CSI instead, which `cooked--encode-event\=' does for both of the
+spelled as a CSI instead, which `cooked--encode-event' does for both of the
 cases above."
   (concat "\eO" final))
 
 (defun cooked--meta-prefixed (mods seq)
   "SEQ as a key held with MODS sends it where no protocol spells the modifier.
 
-That is SEQ with an ESC in front when MODS holds `meta\=', and SEQ unchanged
-otherwise: `M-x\=' is `ESC x\=', which is xterm\='s `metaSendsEscape\=' and the
+That is SEQ with an ESC in front when MODS holds `meta', and SEQ unchanged
+otherwise: `M-x' is `ESC x', which is xterm's `metaSendsEscape' and the
 only spelling of Meta a child that negotiated nothing can read.  Control and
-Shift are not this function\='s to apply, having already been folded into SEQ."
+Shift are not this function's to apply, having already been folded into SEQ."
   (if (memq 'meta mods) (concat "\e" seq) seq))
 
 (defun cooked--cursor-key (final)
   "Cursor key FINAL spelled the way the child last asked for it.
 
-`ESC O FINAL\=' while DECCKM is set -- see `cooked--app-cursor\=' -- and
-`ESC [ FINAL\=' otherwise.
+`ESC O FINAL' while DECCKM is set -- see `cooked--app-cursor' -- and
+`ESC [ FINAL' otherwise.
 
 Here rather than in cooked-keys.el because the choice is made twice and from
-two different subjects: `cooked--encode-event\=' makes it for an arrow the user
-pressed, and `cooked--alt-scroll-keys\=' for the arrows a wheel notch stands in
+two different subjects: `cooked--encode-event' makes it for an arrow the user
+pressed, and `cooked--alt-scroll-keys' for the arrows a wheel notch stands in
 for on the alternate screen.  Those had the conditional written out once each,
 which is the shape that lets a child in application mode be sent one spelling
 by the keyboard and the other by the mouse."
@@ -403,55 +403,55 @@ not say becomes informative -- see `cooked--policy'.")
   "What the shell has said about the line being typed, and what Emacs did with it.
 
 Every one of these is a claim about one line, so all of them end when a command
-starts: `cooked--handle-semantic\=' drops the whole record at `command-start\=',
+starts: `cooked--handle-semantic' drops the whole record at `command-start',
 and a field added here is cleared there without anyone remembering to.  A fresh
 prompt ends two of them sooner, as their slots say.
 
-Read and written through `cooked--line\=', which makes the record on first use."
+Read and written through `cooked--line', which makes the record on first use."
   (delegated nil :documentation "\
-Whether this line has been handed to the child\='s own line editor.
+Whether this line has been handed to the child's own line editor.
 
-Set by `cooked-delegate-key\='.  Delegation is a state rather than a send: once
+Set by `cooked-delegate-key'.  Delegation is a state rather than a send: once
 the line is in the pty the shell is echoing and editing it, so Emacs going on
 believing it owns an input region would render the line twice and edit a copy
 the child never sees.  Cleared at a fresh prompt as well as at a command, so it
 lasts exactly as long as the line it was about.  ZLE is still a line editor, so
-`C-a\=', `C-w\=' and the arrows keep working; they are the shell\='s now.")
+`C-a', `C-w' and the arrows keep working; they are the shell's now.")
   (completion-nonce nil :documentation "\
-Nonce from the prompt\='s OSC 51;CH announcement, or nil if it did not announce.
+Nonce from the prompt's OSC 51;CH announcement, or nil if it did not announce.
 
-Two signals wearing one name.  To `cooked-shell-completion\=' it is the token a
-request must carry.  To `cooked--policy\=' it is a license to own the input line:
+Two signals wearing one name.  To `cooked-shell-completion' it is the token a
+request must carry.  To `cooked--policy' it is a license to own the input line:
 the shell asserting, for this line, that a widget is bound and reading, which is
-the only corroboration left once termios has gone dark behind an `ssh\='.  So the
+the only corroboration left once termios has gone dark behind an `ssh'.  So the
 announcement is believed whether or not the completion layer is loaded.
 
-Dropped at `command-start\=' with the rest of the record, which keeps it a claim
-about the present: without that, `ssh host\=' would leave the local shell\='s
+Dropped at `command-start' with the rest of the record, which keeps it a claim
+about the present: without that, `ssh host' would leave the local shell's
 nonce standing and the bare remote prompt would inherit a license nothing on
 that host ever issued.")
   (completion-reply-capable nil :documentation "\
 Whether the announcing shell can also answer completion requests.
 
-Separate from the nonce because framing a reply needs `base64\=' and owning the
+Separate from the nonce because framing a reply needs `base64' and owning the
 line does not.  A shell without it announces anyway and says so here, keeping
-its editable line with nothing to offer `completion-at-point\='.")
+its editable line with nothing to offer `completion-at-point'.")
   (prompt-continued nil :documentation "\
 Whether the prompt on screen continues the line already submitted.
 
-Set by the OSC 133 `A;k=s\=' mark a shell puts on its `PS2\=' and cleared at the
-next real prompt.  `cooked--send-input-string\=' reads it: without it the record
-for \"for x in 1 2; do ... done\" would say only `done\=', because each
+Set by the OSC 133 `A;k=s' mark a shell puts on its `PS2' and cleared at the
+next real prompt.  `cooked--send-input-string' reads it: without it the record
+for \"for x in 1 2; do ... done\" would say only `done', because each
 continuation line is submitted separately and would overwrite the one before.")
   (submitted-input nil :documentation "\
 The line last submitted, waiting for the OSC 133 mark that says it started."))
 
 (defvar-local cooked--line-record nil
-  "This buffer\='s `cooked-line\=', or nil before anything has been said.
-Go through `cooked--line\=', which makes one when there is none.")
+  "This buffer's `cooked-line', or nil before anything has been said.
+Go through `cooked--line', which makes one when there is none.")
 
 (defun cooked--line ()
-  "The `cooked-line\=' for the line being typed in this buffer, made on first use."
+  "The `cooked-line' for the line being typed in this buffer, made on first use."
   (or cooked--line-record
       (setq cooked--line-record (cooked--line-make))))
 
@@ -477,34 +477,34 @@ about again.")
 (defun cooked--policy ()
   "How the buffer should behave right now.
 
-One of `cooked\=', `prompt\=', `command\=', `raw\=' or `alt\='.
+One of `cooked', `prompt', `command', `raw' or `alt'.
 
 Derived rather than reported, because no single source knows the answer.  The
-alt screen comes from the child\='s own output, the line discipline is sampled
+alt screen comes from the child's own output, the line discipline is sampled
 from termios, and the prompt state comes from OSC 133 -- and the three disagree
 routinely.  A shell sits in termios raw mode at every prompt, because readline
 does its own editing; a full-screen program can start while the last OSC 133
-mark still says `prompt-end\='.
+mark still says `prompt-end'.
 
 Alt wins over everything.  It is the one state in which the child has taken the
 screen over completely, so Emacs owns neither the keyboard nor the viewport --
 and it is in-band, arriving at an exact position in the byte stream, where the
 termios mode is sampled on a poll.
 
-`prompt\=', `command\=' and `raw\=' are the same situation -- the child owns the
+`prompt', `command' and `raw' are the same situation -- the child owns the
 keyboard -- told apart by how well we know it.  With OSC 133 working, a raw read
 that is not a prompt means the shell is running something, and it said so; that
-is as positive a signal as the alt screen, so `command\=' keeps nothing back.
-Without it, `raw\=' is a guess covering both a real full-screen program and a
-shell editing its own prompt line, and `cooked-raw-exceptions\=' hedges against
+is as positive a signal as the alt screen, so `command' keeps nothing back.
+Without it, `raw' is a guess covering both a real full-screen program and a
+shell editing its own prompt line, and `cooked-raw-exceptions' hedges against
 the second.
 
-`prompt\=' is a marked prompt with nothing corroborating the mark -- see
-`cooked--ownership-license\='.  It keeps nothing back either, for the same
-reason `command\=' does not: the shell said where it was, and a shell at its own
+`prompt' is a marked prompt with nothing corroborating the mark -- see
+`cooked--ownership-license'.  It keeps nothing back either, for the same
+reason `command' does not: the shell said where it was, and a shell at its own
 prompt wants every key.  It is the state a bare shell at the far end of an
-`ssh\=' sits in, and everything the marks buy other than the keyboard --
-extents, exit codes, `next-error\=', rerun -- works there unchanged."
+`ssh' sits in, and everything the marks buy other than the keyboard --
+extents, exit codes, `next-error', rerun -- works there unchanged."
   (cond (cooked--alt 'alt)
         ;; A password read forwards keys too; the minibuffer collects them.
         ((eq cooked--mode 'secret) 'raw)
@@ -523,8 +523,8 @@ extents, exit codes, `next-error\=', rerun -- works there unchanged."
 (defun cooked--ownership-license ()
   "Whether something corroborates the marked prompt enough to hand Emacs the line.
 
-An OSC 133 `B\=' says a prompt is reading, and it says so in bytes, which is
-what makes it survive an `ssh\=' -- and also what stops it corroborating itself.
+An OSC 133 `B' says a prompt is reading, and it says so in bytes, which is
+what makes it survive an `ssh' -- and also what stops it corroborating itself.
 After it arrives nothing says the far end is still at a prompt rather than three
 seconds into a program that emitted no mark, and lifting the line out of a pty
 that no line editor is reading is how keystrokes get eaten.
@@ -534,18 +534,18 @@ Two things corroborate it, and they are different in kind:
 - *The child is ours.*  When the shell is on this machine, the pty is one Emacs
   spawned and can sample; termios bounds what a mark can be wrong about, and
   every local path the line might name is a path that is really there.
-  `cooked--host\=' is how that is known, and it comes from the same snippet as
+  `cooked--host' is how that is known, and it comes from the same snippet as
   the mark, so it is present exactly when the mark is.
-- *A live announcement.*  `cooked-line-completion-nonce\=' is re-emitted per ZLE
-  line from `zle-line-init\=' -- after the widget is bound and the keyboard is
-  ZLE\='s, which is precisely the condition being claimed -- and cleared when a
+- *A live announcement.*  `cooked-line-completion-nonce' is re-emitted per ZLE
+  line from `zle-line-init' -- after the widget is bound and the keyboard is
+  ZLE's, which is precisely the condition being claimed -- and cleared when a
   command starts.  It is the one signal that is both byte-transparent and
   self-corroborating, which is why it can license ownership from the far end of
-  an `ssh\=' without the loophole it looks like.
+  an `ssh' without the loophole it looks like.
 
 What is deliberately *not* a license is the transport.  Keying decay to \"is
 this remote\" would refuse a remote host running the full snippet, which reaches
-the same certainty a local one does by the same bytes.  What `ssh\=' costs is
+the same certainty a local one does by the same bytes.  What `ssh' costs is
 termios, and termios is an ownership signal, not a completion one.
 
 Unlicensed, a marked prompt is not a broken state: the shell keeps its own line,
@@ -567,9 +567,9 @@ collected, not who owns the screen."
 (defun cooked--child-owns-keyboard-p ()
   "Whether the child, rather than Emacs, is the one being typed at.
 
-Every policy but `cooked\=', which is to say `alt\=', `prompt\=', `command\=' and
-`raw\=' -- said that way round on purpose.  Spelling it as a list of the states
-that qualify is what left `command\=' out of three separate checks when it was
+Every policy but `cooked', which is to say `alt', `prompt', `command' and
+`raw' -- said that way round on purpose.  Spelling it as a list of the states
+that qualify is what left `command' out of three separate checks when it was
 added: the answer is a property of not being at a prompt, so asking that
 directly cannot go stale when another state arrives."
   (not (cooked--input-state-p)))
@@ -580,18 +580,18 @@ directly cannot go stale when another state arrives."
 already owns the keyboard still counts as a change and is announced.")
 
 (defvar cooked--refresh-hook nil
-  "Normal hook run when something a buffer\='s keymap is derived from changes.
+  "Normal hook run when something a buffer's keymap is derived from changes.
 
-The alternate screen going up, the tty\='s mode moving, a shell mark arriving,
+The alternate screen going up, the tty's mode moving, a shell mark arriving,
 a peek beginning or ending, the child exiting: each changes what
-`cooked--policy\=' or the input mode would answer, and each is noticed in a
+`cooked--policy' or the input mode would answer, and each is noticed in a
 file below the one that installs the keymap.  Those files run this hook through
-`cooked--request-refresh\=' rather than naming that function, and
-cooked-mode.el puts `cooked--refresh-keymap\=' on it.")
+`cooked--request-refresh' rather than naming that function, and
+cooked-mode.el puts `cooked--refresh-keymap' on it.")
 
 (defun cooked--request-refresh ()
-  "Have this buffer\='s keymap and input mode derived again.
-See `cooked--refresh-hook\='."
+  "Have this buffer's keymap and input mode derived again.
+See `cooked--refresh-hook'."
   (run-hooks 'cooked--refresh-hook))
 
 (defcustom cooked-rejoin-wrapped-lines t
@@ -606,7 +606,7 @@ Set to nil for the literal thing a terminal shows: one buffer line per screen
 row, hard-wrapped at whatever width was in force when it was printed.
 
 Turning it off also shrinks the scrollback, which is not obvious and is not
-small: `cooked-scrollback-lines\=' counts *buffer* lines, so hard-splitting
+small: `cooked-scrollback-lines' counts *buffer* lines, so hard-splitting
 multiplies the line count by the wrap factor and the same cap then retains far
 less text -- about a ninth as much on 800-column output.  See there."
   :type 'boolean :group 'cooked)
@@ -635,31 +635,31 @@ able to name."
 (defvar-local cooked--foreground-label nil
   "Name of the program the child last had in the foreground, for the mode line.
 
-Maintained from `cooked--refresh-keymap\=' rather than read when the mode line
-asks, for the same reason `cooked--attention\=' is: `cooked--mode-line\=' runs
-from an `:eval\=' on every redisplay, and the answer costs a `tcgetpgrp\=' and,
-on a miss, a `process-attributes\=' -- which its own cache exists because it is
+Maintained from `cooked--refresh-keymap' rather than read when the mode line
+asks, for the same reason `cooked--attention' is: `cooked--mode-line' runs
+from an `:eval' on every redisplay, and the answer costs a `tcgetpgrp' and,
+on a miss, a `process-attributes' -- which its own cache exists because it is
 not free.  Recomputing that per frame to render one word would be paying a
 syscall for a string that changes when the policy does.
 
 Every transition worth naming already passes through that refresh: termios
-flipping as a full-screen program takes the tty, and an OSC 133 `C\=' as a
+flipping as a full-screen program takes the tty, and an OSC 133 `C' as a
 marked command starts.  What it misses is one quiet command following another
 at an unmarked shell, where nothing changes state -- so the label is a
 best-effort hint, and is allowed to be.")
 
 (defun cooked--update-foreground-label ()
-  "Refresh `cooked--foreground-label\=' for what the child is running now.
+  "Refresh `cooked--foreground-label' for what the child is running now.
 
-Nil when the foreground process group is the session\='s own child -- the shell
-cooked spawned, sitting at its prompt.  Naming it there would put `zsh\=' in the
+Nil when the foreground process group is the session's own child -- the shell
+cooked spawned, sitting at its prompt.  Naming it there would put `zsh' in the
 mode line for the whole life of every session, which is a word that is always
 true and never news.
 
 Deliberately *not* keyed on who owns the line.  A canonical tty is not a shell
-prompt: `cat\=' and `sleep\=' hold one too, and cooked reads those as `edit\='
+prompt: `cat' and `sleep' hold one too, and cooked reads those as `edit'
 because they genuinely are a line being edited.  Those are exactly the cases
-where the program\='s name is the only thing on screen saying what the line will
+where the program's name is the only thing on screen saying what the line will
 be read by -- so the test is which process, not which policy."
   (setq cooked--foreground-label
         (and cooked--session

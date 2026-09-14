@@ -41,14 +41,14 @@
 (defcustom cooked-scrollback-lines 10000
   "How many lines of transcript to keep above the live screen, or nil for all.
 
-Rows that scroll off the emulator\='s screen become ordinary buffer text and are
+Rows that scroll off the emulator's screen become ordinary buffer text and are
 never taken back, so without a cap a session grows for as long as it runs: one
-`yes\=', one chatty build, one `tail -f\=' left overnight, and the buffer is the
+`yes', one chatty build, one `tail -f' left overnight, and the buffer is the
 largest thing in your Emacs.  Every other terminal emulator caps this, and this
-is cooked\='s version of `vterm-max-scrollback\=' or `eat-term-scrollback-size\='.
+is cooked's version of `vterm-max-scrollback' or `eat-term-scrollback-size'.
 
-Counted in lines of the buffer above `cooked--screen-start\=', which is not
-quite the same as rows the child printed: `cooked-rejoin-wrapped-lines\=' joins
+Counted in lines of the buffer above `cooked--screen-start', which is not
+quite the same as rows the child printed: `cooked-rejoin-wrapped-lines' joins
 a wrapped row onto the line above, so one long line of output is one line here
 however many screen rows it took.  That is the honest unit, being the one the
 buffer is actually made of, and it is the unit every other emulator caps in.
@@ -74,7 +74,7 @@ mean to save, and is a decision to make deliberately."
   :group 'cooked)
 
 (defconst cooked--scrollback-slack 0.1
-  "How far over `cooked-scrollback-lines\=' the buffer may go before a trim.
+  "How far over `cooked-scrollback-lines' the buffer may go before a trim.
 
 A fraction of the cap.  Trimming on the very first line over would delete on
 almost every drain of a flood, and each deletion costs a walk of the text being
@@ -85,39 +85,39 @@ cost is paid once for many lines instead of many times for one.")
   "Drop the emulator's carry once the buffer has stopped holding a continuation.
 
 The seam is one number the two ends co-own: how much of screen row 0's logical
-line has already left for Emacs.  `cooked-rejoin-wrapped-lines\=' decides whether
+line has already left for Emacs.  `cooked-rejoin-wrapped-lines' decides whether
 Emacs holds one at all.  With rejoining on it does, and the carry is exactly
 what makes a rewrap resume that line where the buffer wraps it; with rejoining
 off every row handed over gets a newline of its own, so the buffer's half is
 zero and the emulator's is a claim about text that is not there.
 
-Nothing on the other side resets it.  The two `cooked--forget-history\=' calls
+Nothing on the other side resets it.  The two `cooked--forget-history' calls
 below are both discards, and this mode discards nothing -- it just never
 continues anything.  Left standing the claim is spent at the next rewrap:
-`Logical::take_front\=' cuts a fragment off the front of row 0's line to top the
+`Logical::take_front' cuts a fragment off the front of row 0's line to top the
 head up to a whole number of rows at the new width, and with rows staying split
 that fragment arrives as a line of its own -- a stub of a few characters, or of
 nothing but the padding a chunk boundary landed in, wedged between the
 transcript and the screen.  One more of them at every resize, and the head
-growing by the width of each.  `cooked--check-seam\=' said nothing about any of
-it for as long as this ran from `cooked--trim-scrollback\=', at the foot of the
+growing by the width of each.  `cooked--check-seam' said nothing about any of
+it for as long as this ran from `cooked--trim-scrollback', at the foot of the
 drain: the reset landed after the assertion had already looked, so the
-assertion had to exclude this mode.  Called from `cooked--apply\=' one line above
+assertion had to exclude this mode.  Called from `cooked--apply' one line above
 it, the claim is settled before the assertion reads it, and the assertion
-covers both modes -- with rows split, Emacs\=' half of the seam is simply always
+covers both modes -- with rows split, Emacs' half of the seam is simply always
 zero.
 
 The test is the buffer's own head rather than the flag alone, and that is what
 makes this safe to run unconditionally: the news is only given once
-`cooked--screen-start\=' is at a line beginning, which is the buffer saying it
+`cooked--screen-start' is at a line beginning, which is the buffer saying it
 continues nothing.  So a mid-line seam is left alone -- the text handed over
 while rejoining was still on is a continuation, and the emulator counting it is
 right about it until the next row handed over closes that line and this
-notices.  Which is also why `cooked-toggle-rejoin-wrapped-lines\=' needs nothing
+notices.  Which is also why `cooked-toggle-rejoin-wrapped-lines' needs nothing
 of its own: at the moment the flag flips the two ends still agree, so a resize
 arriving before the next drain rewraps against a head that is really there.
 
-Called once per drain from `cooked--trim-scrollback\=', because every eviction of
+Called once per drain from `cooked--trim-scrollback', because every eviction of
 a wrapped row makes the claim again.  Two integer comparisons on the drains
 where there is nothing to do."
   (when (and cooked--session
@@ -129,7 +129,7 @@ where there is nothing to do."
       (setf (cooked-grid-head cooked--grid) 0))))
 
 (defvar-local cooked--scrollback-counted nil
-  "Where `cooked--scrollback-newlines\=' last counted to.
+  "Where `cooked--scrollback-newlines' last counted to.
 
 A list (MARKER CHARS . NEWLINES): MARKER is where the count stopped, CHARS how
 many characters were above it and NEWLINES how many of those were newlines.")
@@ -139,14 +139,14 @@ many characters were above it and NEWLINES how many of those were newlines.")
 
 Scrollback is appended at the screen and otherwise only ever deleted from, so
 until something is deleted the newlines above the last count are still there:
-a drain that pushed three rows off the screen is counted three rows\=' worth.
+a drain that pushed three rows off the screen is counted three rows' worth.
 Whether the text above the last count is still the text that was counted is
 judged by its length.  A deletion from it, by a trim or by
-`cooked--discard-scrollback-region\=', changes the length, and the next call
-counts from `point-min\=' again.
+`cooked--discard-scrollback-region', changes the length, and the next call
+counts from `point-min' again.
 
-This is what `cooked--trim-scrollback\=' runs on every drain of a long session.
-Counting from `point-min\=' instead cost 57 us a drain under ten thousand
+This is what `cooked--trim-scrollback' runs on every drain of a long session.
+Counting from `point-min' instead cost 57 us a drain under ten thousand
 80-column lines and 159 us under 800-column ones, against 0.7 and 1.2 us for
 this, interleaved in one compiled Emacs at load 1.8 over 16 CPUs; the newline
 cache made no difference to it.
@@ -171,18 +171,18 @@ Called with the buffer widened."
     newlines))
 
 (defun cooked--trim-scrollback ()
-  "Cut the transcript back to `cooked-scrollback-lines\=' if it has outgrown it.
+  "Cut the transcript back to `cooked-scrollback-lines' if it has outgrown it.
 
 Runs at the end of every drain, and does nothing on all but a few of them: the
 line count is only taken once the buffer holds enough characters to have that
 many lines at all, and the deletion only happens once it is over the cap by
-`cooked--scrollback-slack\='.
+`cooked--scrollback-slack'.
 
-Cuts at a line beginning, because `cooked--discard-scrollback\=' hands the
+Cuts at a line beginning, because `cooked--discard-scrollback' hands the
 emulator a seam and half a line is not one.
 
-`cooked--split-seam\=' does not run here but in `cooked--apply\=', one line
-above `cooked--check-seam\=', so that the assertion sees the seam after it has
+`cooked--split-seam' does not run here but in `cooked--apply', one line
+above `cooked--check-seam', so that the assertion sees the seam after it has
 been split rather than before."
   (save-restriction
     (widen)
@@ -253,16 +253,16 @@ this would otherwise quietly do nothing."
 (defun cooked--discard-scrollback-region (beg end)
   "Delete scrollback between BEG and END, telling the emulator only if it must.
 
-The narrower sibling of `cooked--discard-scrollback\=', for deleting one
-command\='s output out of the middle rather than everything above a point.
+The narrower sibling of `cooked--discard-scrollback', for deleting one
+command's output out of the middle rather than everything above a point.
 
-What the two ends co-own is exactly one number: how much of the emulator\='s top
-row\='s line has already left for Emacs.  A cut that finishes short of
-`cooked--screen-start\=' cannot change it -- the text row 0 continues is still
+What the two ends co-own is exactly one number: how much of the emulator's top
+row's line has already left for Emacs.  A cut that finishes short of
+`cooked--screen-start' cannot change it -- the text row 0 continues is still
 there, still ending where it did -- so it needs no bookkeeping at all, and
 saying so is what makes deleting scrolled-off output possible.  A cut that
 reaches the seam does remove that head, and then this owes the emulator the same
-news `cooked--discard-scrollback\=' gives it."
+news `cooked--discard-scrollback' gives it."
   (when-let* ((screen (cooked--screen-start-position))
               ((< beg end)))
     (let ((end (min end screen)))

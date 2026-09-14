@@ -38,11 +38,11 @@
 
 Nil, or (END . MARK): END is a marker at the end of the last row of the screen
 region, which is left unterminated, and MARK is what `cooked--mark-row-wrap'
-would have put on that row\='s newline had there been one.  A newline is added
+would have put on that row's newline had there been one.  A newline is added
 there later by extending the region rather than by rendering the row again --
 the cursor moving to the row below, or a row further down being drawn -- and
 `cooked--goto-screen-row' pays the mark then.  Without it the wrapped row
-\=`日hel\=' at the bottom of a five-column screen got a plain newline when the
+`日hel' at the bottom of a five-column screen got a plain newline when the
 cursor moved under it, and a URL across that wrap was read as two.
 
 END advances over text inserted at it, so padding and pending input added to
@@ -146,12 +146,12 @@ scrollback, so the column is measured from the marker rather than from the
 line's beginning, which would count characters that are not on the screen
 at all.
 
-The column is the `string-width\=' of the row's text before POS, without its
-properties, which is the cells the grid gave that text.  Not `current-column\=':
-that counts a decoration image as its pixel width over the frame\='s character
-width, so after `text-scale-mode\=' has made a cell 12 pixels wide on a frame
+The column is the `string-width' of the row's text before POS, without its
+properties, which is the cells the grid gave that text.  Not `current-column':
+that counts a decoration image as its pixel width over the frame's character
+width, so after `text-scale-mode' has made a cell 12 pixels wide on a frame
 whose characters are 9, a cell after a ten-cell run of box drawing read as
-column 13.  See `cooked--mouse-glyph\=', which measures the same way."
+column 13.  See `cooked--mouse-glyph', which measures the same way."
   (let ((pos (or pos (point)))
         (start (cooked--screen-start-position)))
     (when (and start (>= pos start))
@@ -164,17 +164,17 @@ column 13.  See `cooked--mouse-glyph\=', which measures the same way."
 (defun cooked--goto-screen-cell (cell)
   "Move point to CELL, a (ROW . COL) pair, clamped to what the row holds.
 
-The inverse of `cooked--screen-cell\=', so COL is counted in cells as that
+The inverse of `cooked--screen-cell', so COL is counted in cells as that
 function counts them: point lands after the most characters of the row whose
-`string-width\=' is still at most COL.  On `日本XYZ\=' column 4 is `X\=', where
-moving four characters stopped on `Z\=', and column 3, the second half of
-`本\=', is `本\=' itself.  That is the rule the core\='s `chars_before\=' gives
+`string-width' is still at most COL.  On `日本XYZ' column 4 is `X', where
+moving four characters stopped on `Z', and column 3, the second half of
+`本', is `本' itself.  That is the rule the core's `chars_before' gives
 a cursor inside a wide character, and a combining mark after the last
 character that fits is taken along with it.
 
-A binary search over the row\='s text, since the width of a prefix only grows
+A binary search over the row's text, since the width of a prefix only grows
 with its length, and so a restore after every drain costs a handful of
-`string-width\=' calls however wide the row is."
+`string-width' calls however wide the row is."
   (cooked--goto-screen-row (car cell))
   (let* ((start (point))
          (text (buffer-substring-no-properties start (line-end-position)))
@@ -199,34 +199,34 @@ with its length, and so a restore after every drain costs a handful of
   "Insert BLOCK at point, with its styling and decoration applied.
 
 BLOCK is (TEXT STYLE-SPANS DECO-SPANS ROWS), the one shape rendered
-text crosses the module boundary in -- see `cooked--drain\='.  TEXT is the whole
+text crosses the module boundary in -- see `cooked--drain'.  TEXT is the whole
 run of characters, and every span carries offsets in characters into it; spans
 appear only where there is something to say, so a plain unstyled row carries no
 list at all.
 
-ROWS is the block\='s row table: one (START WIDTH UNIFORM WRAPPED HASH) per
+ROWS is the block's row table: one (START WIDTH UNIFORM WRAPPED HASH) per
 *screen row* the block covers, in order.  A block is a run of contiguous damaged
-rows joined by newlines -- see `cooked--render-rows\=' -- so START is where that
-row\='s text begins in TEXT, WIDTH how many grid cells it occupies, UNIFORM t
-when every character of it is one byte on one cell, `glyph\=' when the ones that
+rows joined by newlines -- see `cooked--render-rows' -- so START is where that
+row's text begins in TEXT, WIDTH how many grid cells it occupies, UNIFORM t
+when every character of it is one byte on one cell, `glyph' when the ones that
 are not are box glyphs, and nil otherwise, WRAPPED whether the row below
-continues this row\='s logical line, and HASH a key for its layout.  All four
+continues this row's logical line, and HASH a key for its layout.  All four
 are by-products of the core building the row; WIDTH, UNIFORM and HASH are
-`cooked--guard-row-width\='s and WRAPPED is `cooked--mark-row-wrap\='s, and
-all four are read by `cooked--render-rows\=' rather than here.  START is read
+`cooked--guard-row-width's and WRAPPED is `cooked--mark-row-wrap's, and
+all four are read by `cooked--render-rows' rather than here.  START is read
 here, and only for a decoration, which is the one thing that has to know which
 row of the run it landed on.  Scrollback
 carries no table at all: its lines are ordinary buffer text that is allowed to
 wrap, so there is nothing to guard, no screen row to phase against, and -- with
-`cooked-rejoin-wrapped-lines\=' on, which is the default -- no soft wrap left to
+`cooked-rejoin-wrapped-lines' on, which is the default -- no soft wrap left to
 mark, the continuation having been joined onto the line above as it was
 written.
 
 STYLE-SPANS is not a list but a unibyte string of fixed-width records, one per
 run that has a rendition or a link to name, both by id -- see
-`Block::push_style\=' in src/wire.rs for the layout and `cooked--style-record\='
-for the stride.  A rendition resolves through `cooked--style-faces\=', which the
-drain\='s `:styles\=' filled, and a link through `cooked--link-uris\='.  A
+`Block::push_style' in src/wire.rs for the layout and `cooked--style-record'
+for the stride.  A rendition resolves through `cooked--style-faces', which the
+drain's `:styles' filled, and a link through `cooked--link-uris'.  A
 DECO-SPAN is (START DECO), what its characters display instead of themselves,
 and repeats no colours: a box glyph takes them from the face at the position it
 sits on, which the style span has just put there.  Links are applied last, over
@@ -235,27 +235,27 @@ leave those alone.  UNLINKED leaves them off altogether, for text headed
 somewhere no link id can be followed from.
 
 One insert plus properties, rather than an insert per run: Emacs pays for every
-`insert\=', and building a propertized string in Lisp and inserting that instead
-measures three times slower, because `concat\=' on propertized strings makes
+`insert', and building a propertized string in Lisp and inserting that instead
+measures three times slower, because `concat' on propertized strings makes
 Emacs copy and merge property intervals over and over.
 
-Colour rides on `face\=' alone.  `cooked-mode\=' clears `font-lock-defaults\=',
+Colour rides on `face' alone.  `cooked-mode' clears `font-lock-defaults',
 which comint leaves at (nil t) -- under that setting any fontification of the
-buffer unfontifies it first and strips a bare `face\='.
+buffer unfontifies it first and strips a bare `face'.
 
-ROW is the screen row BLOCK\='s *first* row is, where the caller knows it: the
+ROW is the screen row BLOCK's *first* row is, where the caller knows it: the
 live screen does, scrollback does not.  With the origin it says which cell of a
-glyph run the child\='s cursor is on, which is where the run is split.
+glyph run the child's cursor is on, which is where the run is split.
 Scrollback passes neither, having no cursor.
 
 Each further row of the run is ROW plus its place in the row table, and its
 origin is where the table says its text begins.  That bookkeeping is why the
-table carries START at all: a cursor column is measured from its own row\='s
-start, not from the first row\='s.
+table carries START at all: a cursor column is measured from its own row's
+start, not from the first row's.
 
 ORIGIN, when given, is where the row begins in the buffer, for a BLOCK that
 replaces only part of a row: its text starts partway along, and the cursor
-column is still measured from the row\='s own start.
+column is still measured from the row's own start.
 
 Returns the position the text was inserted at."
   (pcase-let ((`(,text ,styles ,decos ,table) block))
@@ -420,21 +420,21 @@ what was displayed."
   '(read-only t front-sticky (read-only) rear-nonsticky (read-only))
   "The read-only property and the stickiness that makes it usable.
 
-Stickiness carries the whole design.  `rear-nonsticky\=' leaves the far edge
-open, so typing at the start of the input region is accepted; `front-sticky\='
+Stickiness carries the whole design.  `rear-nonsticky' leaves the far edge
+open, so typing at the start of the input region is accepted; `front-sticky'
 closes the near edge, so nothing can be wedged in above the transcript.
 
 One constant rather than the literal written out at both of the places that
-protect text -- `cooked--render-scrolled\=', which protects a batch of
-scrollback once and forever, and `cooked--protect\=', which keeps the live
+protect text -- `cooked--render-scrolled', which protects a batch of
+scrollback once and forever, and `cooked--protect', which keeps the live
 screen protected as the input boundary moves.  They were always the same three
 properties and had to stay the same, the two regions being adjacent halves of
 one read-only transcript: a difference between them would show as a seam the
 user could type into.
 
 Sharing the *object* matters as well as sharing the value.
-`add-text-properties\=' compares values with `eq\=', so two separately-written
-`(read-only)\=' lists read as a change and provoke an interval rewrite over text
+`add-text-properties' compares values with `eq', so two separately-written
+`(read-only)' lists read as a change and provoke an interval rewrite over text
 that already carries exactly what is being asked for.")
 
 (defun cooked--render-scrolled (block)
@@ -488,38 +488,38 @@ split a glyph run at."
 (defun cooked--promote-rows (promoted height)
   "Keep the top screen rows as history, returning where they begin.
 
-PROMOTED is the drain\='s `:promoted\=', (BOTTOM . ROWS): one (CHARS . ENDS) per
+PROMOTED is the drain's `:promoted', (BOTTOM . ROWS): one (CHARS . ENDS) per
 row, from screen row 0 down, for the rows that scrolled off the top of the
 region ending at row BOTTOM while the buffer already held them.  Their text
-stays where it is and `cooked--screen-start\=' moves past it.  Sent as text
-instead, `cooked--render-scrolled\=' would insert the same rows again above the
-screen and `cooked--apply-shift\=' would delete the originals.  So a marker, an
+stays where it is and `cooked--screen-start' moves past it.  Sent as text
+instead, `cooked--render-scrolled' would insert the same rows again above the
+screen and `cooked--apply-shift' would delete the originals.  So a marker, an
 overlay or a text property on one of them is still on its character once the
-row is history: a bookmark at column 5 of the line `tail -f\=' pushes off the
+row is history: a bookmark at column 5 of the line `tail -f' pushes off the
 top stays at column 5.
 
-The buffer\='s row and what scrollback gets differ in three ways, and each is
+The buffer's row and what scrollback gets differ in three ways, and each is
 mended by a small edit that leaves the rest of the row alone:
 - CHARS is how long the row is as scrollback.  A row carrying spaces
-  `cooked--pad-to-cursor\=' added is longer, and loses them; a wrapped row keeps
+  `cooked--pad-to-cursor' added is longer, and loses them; a wrapped row keeps
   its trailing blanks up there, which the live row trimmed, and gets them back.
-- ENDS nil means the row joins the next one, as `cooked-rejoin-wrapped-lines\='
+- ENDS nil means the row joins the next one, as `cooked-rejoin-wrapped-lines'
   joins a wrapped row, so its newline is deleted.  If the next row is still on
-  the screen, the screen then starts mid-line, at the seam `:head\=' counts.
-- A newline that stays loses its `cooked-wrap\=' mark, which only the live
+  the screen, the screen then starts mid-line, at the seam `:head' counts.
+- A newline that stays loses its `cooked-wrap' mark, which only the live
   screen carries.
 
 A promotion is its share of the scroll that took the rows off the top, and
-`:shifts\=' holds the rest of that scroll.  So it opens the blank rows at the
-bottom of the region that `cooked--apply-shift\=' would have opened for it,
+`:shifts' holds the rest of that scroll.  So it opens the blank rows at the
+bottom of the region that `cooked--apply-shift' would have opened for it,
 which keeps a status line below the region where it is, and leaves the newlines
-ending the rows where that scroll would have: the newline a wrapped row\='s mark
+ending the rows where that scroll would have: the newline a wrapped row's mark
 goes on is one of them.  None open when the region is the whole screen, HEIGHT
 rows tall, and every row of it went, since there is nothing below to hold apart.
 
-The return value is what `cooked--render-scrolled\=' returns: where this
-drain\='s scrollback begins, which a `scrolled\=' anchor is an offset from.  The
-core counts a promoted row\='s characters into those offsets."
+The return value is what `cooked--render-scrolled' returns: where this
+drain's scrollback begins, which a `scrolled' anchor is an offset from.  The
+core counts a promoted row's characters into those offsets."
   (pcase-let ((`(,bottom . ,rows) promoted))
     (save-restriction
       (widen)
@@ -549,11 +549,11 @@ core counts a promoted row\='s characters into those offsets."
           start)))))
 
 (defun cooked--held-seam (start)
-  "Where the newline `cooked--place-seam\=' holds before START is, or nil.
+  "Where the newline `cooked--place-seam' holds before START is, or nil.
 
 START is where the live screen begins.  Scrollback arriving while that newline
-is held goes above it, since it continues the primary screen\='s line rather
-than the alternate screen\='s row 0."
+is held goes above it, since it continues the primary screen's line rather
+than the alternate screen's row 0."
   (and (> start (point-min))
        (get-text-property (1- start) 'cooked-seam)
        (1- start)))
@@ -561,27 +561,27 @@ than the alternate screen\='s row 0."
 (defun cooked--place-seam (head alt)
   "Join or break the buffer line the live screen begins in, as this drain says.
 
-HEAD is the drain\='s `:head\=', how many characters of screen row 0\='s line
+HEAD is the drain's `:head', how many characters of screen row 0's line
 the buffer already holds, and ALT whether the drain shows the alternate screen.
 The seam is decided afresh on every whole drain rather than written once, so a
 switch of screens leaves nothing behind in the transcript.
 
-The alternate screen\='s row 0 begins a buffer line, but the primary keeps its
+The alternate screen's row 0 begins a buffer line, but the primary keeps its
 head in the core, so the transcript above can end mid-line: a wrapped line
-whose head scrolled away before `less\=' started.  While the alternate screen
-is shown, a newline marked `cooked-seam\=' is held between the two, and rows a
+whose head scrolled away before `less' started.  While the alternate screen
+is shown, a newline marked `cooked-seam' is held between the two, and rows a
 resize takes off the primary meanwhile go in above it, continuing the line
 they belong to.  Once the primary is back with a HEAD above 0 the newline is
-deleted, and row 0 continues the line again.  Ten `=\=' at 4 columns on a
+deleted, and row 0 continues the line again.  Ten `=' at 4 columns on a
 2-row screen leave 4 in scrollback and 4 on row 0 of the same buffer line, and
-after `1049h\=' and `1049l\=' they are one line still, however many drains
+after `1049h' and `1049l' they are one line still, however many drains
 came between.
 
 A HEAD of 0 on the primary screen while the buffer is mid-line is the core
 saying the line ended without Emacs holding its newline, so the newline stays:
 one is written for good, or the held one is kept for good.
 
-Widens first, for the reason `cooked--render-scrolled\=' does."
+Widens first, for the reason `cooked--render-scrolled' does."
   (save-restriction
     (widen)
     (when-let* ((start (cooked--screen-start-position)))
@@ -655,10 +655,10 @@ resumed."
 (defun cooked--screen-restricted-p ()
   "Whether the buffer is narrowed to the alternate screen and nothing else.
 
-The state `cooked--apply-alt-pin\=' leaves behind, asked as a question about the
-buffer rather than read off `cooked--narrowed\=': a user who answers
+The state `cooked--apply-alt-pin' leaves behind, asked as a question about the
+buffer rather than read off `cooked--narrowed': a user who answers
 \\[widen] has widened whatever the flag still says, and the callers of this all
-want to know what can be scrolled to *now*.  See `cooked--wheel-map\='."
+want to know what can be scrolled to *now*.  See `cooked--wheel-map'."
   (and cooked--alt
        (when-let* ((top (cooked--screen-start-position)))
          (= (point-min) top))))
@@ -672,28 +672,28 @@ want to know what can be scrolled to *now*.  See `cooked--wheel-map\='."
 (defun cooked--pin-alt-windows ()
   "Keep every window on this buffer showing the alt screen from its first row.
 
-`cooked--apply\=' already pins at the end of a drain, and that is not enough.  A
+`cooked--apply' already pins at the end of a drain, and that is not enough.  A
 drain is the child talking, and nothing the *user* does to a window produces
 one: a full-screen program sitting idle at its prompt draws nothing, so a wheel
 notch scrolled the picture off the window and left it there.  Run from
-`post-command-hook\=', the pin becomes the continuous invariant it always meant
-to be.  `eat\=' states it the same way, in `eat--synchronize-scroll\='.
+`post-command-hook', the pin becomes the continuous invariant it always meant
+to be.  `eat' states it the same way, in `eat--synchronize-scroll'.
 
-Forcing, unlike the drain\='s pin, because the wheel moves point along with the
+Forcing, unlike the drain's pin, because the wheel moves point along with the
 window and NOFORCE would let redisplay honour the point it left behind.  The
-vscroll goes with the start, because `pixel-scroll-precision-mode\=' carries a
+vscroll goes with the start, because `pixel-scroll-precision-mode' carries a
 remainder that survives being told where the window starts.
 
 Only while the buffer is *restricted* to the screen, which is the same rule
-`cooked--wheel-map\=' is gated on and means the same thing in both places: the
+`cooked--wheel-map' is gated on and means the same thing in both places: the
 rectangle is all there is to look at, so a window showing anything else is
 showing the wrong thing.  Widen -- which is how the transcript behind a
 full-screen program is read, inside a peek -- and there is somewhere to scroll
 to, the wheel goes back to Emacs, and a scroll the user asked for is theirs to
 keep.
 
-Not also on `pre-redisplay-functions\='.  A pin calls `set-window-start\=',
-which clears the window\='s end-valid flag and denies redisplay its incremental
+Not also on `pre-redisplay-functions'.  A pin calls `set-window-start',
+which clears the window's end-valid flag and denies redisplay its incremental
 path; doing that from inside redisplay makes redisplay start over for the move
 the pin itself just made, once per window per redisplay.  See docs/DESIGN.md
 for the two cases that hook caught and how they are answered instead."
@@ -795,19 +795,19 @@ that."
                head want)))))
 
 (defvar-local cooked--protected nil
-  "What `cooked--protect\=' last did, as (TICK . LIMIT), or nil for never.
+  "What `cooked--protect' last did, as (TICK . LIMIT), or nil for never.
 
-TICK is `buffer-chars-modified-tick\=' as of that call.  See there for what it
+TICK is `buffer-chars-modified-tick' as of that call.  See there for what it
 buys.")
 
 (defun cooked--protect-holes (beg end)
   "Protect every run between BEG and END that is not already read-only.
 
-A run is found by its `read-only\=' property alone.  That is sound because
-nothing removes the stickiness `cooked--read-only-props\=' carries:
-`cooked--protect\=' lifts `read-only\=' and leaves the rest.  On a screen whose
+A run is found by its `read-only' property alone.  That is sound because
+nothing removes the stickiness `cooked--read-only-props' carries:
+`cooked--protect' lifts `read-only' and leaves the rest.  On a screen whose
 only unprotected text is a row the drain rewrote, for example a shell prompt
-with one character echoed, this makes one call to `add-text-properties\=', over
+with one character echoed, this makes one call to `add-text-properties', over
 that row."
   (let ((pos beg))
     (while (setq pos (text-property-not-all pos end 'read-only t))
@@ -819,29 +819,29 @@ that row."
   "Make the screen read-only up to LIMIT, leaving anything after it editable.
 
 The properties, and why they are the ones they are, are
-`cooked--read-only-props\='.
+`cooked--read-only-props'.
 
 Runs on every drain, and most drains have nothing for it to do.  The property is
 lost only where text is *inserted*, since an insertion carries no properties of
 its own, so a drain that changed no characters can only have moved LIMIT -- and
 then the whole of the work is the strip of text between the old boundary and the
-new one, in whichever direction it went.  `buffer-chars-modified-tick\=' is what
+new one, in whichever direction it went.  `buffer-chars-modified-tick' is what
 says a drain changed no characters, and it says it about every writer rather
 than about the ones this file knows of: an insertion anywhere, by any layer,
 moves it.
 
 When characters did change, every hole in the screen is filled rather than the
-rows the render rewrote.  Those bounds do exist -- `cooked--render-rows\='
+rows the render rewrote.  Those bounds do exist -- `cooked--render-rows'
 returns them -- but they are not the whole of what a drain inserts:
-`cooked--pad-to-cursor\=' extends the cursor\='s row, which need not be the last
-one, `cooked--fit-screen\=', `cooked--goto-screen-row\=' and a shift add the
+`cooked--pad-to-cursor' extends the cursor's row, which need not be the last
+one, `cooked--fit-screen', `cooked--goto-screen-row' and a shift add the
 newlines that make a row exist, and a promotion opens blank rows at the foot of
 its region.  A sweep that misses one of those leaves a hole in the transcript
 the user can type into, which only the render oracle would show.  So the
-holes are found by asking the text, with `text-property-not-all\=', and that
+holes are found by asking the text, with `text-property-not-all', and that
 answer covers every writer, including ones this file does not know of.
 
-What the sweep must not do is hand the whole screen to `add-text-properties\='.
+What the sweep must not do is hand the whole screen to `add-text-properties'.
 That walks the same intervals, but once one of them lacks the properties it
 treats the entire range it was given as modified and adds to every interval in
 turn, so the sweep cost what the screen held rather than what the drain wrote.
@@ -851,7 +851,7 @@ compiled Emacs, load 4.9 over 16 CPUs).  Both cons the same 56 cells: a cons is
 per interval that gains the properties, and those are the same intervals.
 
 The sweep runs with change hooks inhibited, for the reason
-`cooked--render-block\=' gives for its property phases.  `add-text-properties\='
+`cooked--render-block' gives for its property phases.  `add-text-properties'
 reports a change over the whole range it was handed as soon as one character in
 it lacked the properties, and jit-lock is on that hook: one echoed keystroke
 marked every row of the screen unfontified, and the next redisplay scanned all
@@ -884,13 +884,13 @@ of them for URLs again.  Making text read-only changes nothing any hook reads."
 (defvar cooked-row-rendered-functions nil
   "Abnormal hook run with the bounds of each live row this drain rewrote.
 
-Each entry is called as (BEG END) with the row\='s own buffer positions, once
-per damaged row, from `cooked--notify-rows-rendered\=' at the end of the drain
-rather than from `cooked--render-rows\=' as each row is written.
+Each entry is called as (BEG END) with the row's own buffer positions, once
+per damaged row, from `cooked--notify-rows-rendered' at the end of the drain
+rather than from `cooked--render-rows' as each row is written.
 
 That delay is part of the contract rather than an implementation detail.  A
 drain that evicts rows inserts their text above the live screen, which pushes
-every marker below it forward by a whole row, so until `cooked--relocate-marks\='
+every marker below it forward by a whole row, so until `cooked--relocate-marks'
 runs every semantic mark on the screen names the row below the one it belongs
 to.  Rendering happens inside that window, and a layer painting from a mark
 there painted the row below once per scroll -- and since the correction that
@@ -900,13 +900,13 @@ still exact: nothing between the render and the notification moves text.
 This is the seam for a decoration that has to be re-applied rather than
 persisted.  A damaged row is deleted before it is rewritten, so anything
 anchored to its characters dies with it, and a resize damages every live row at
-once.  `cooked--fontify-links\=' is the same shape one level down and needs no
-hook, links being cooked\='s own business; this exists for the optional layers,
+once.  `cooked--fontify-links' is the same shape one level down and needs no
+hook, links being cooked's own business; this exists for the optional layers,
 which cannot reach into the render path themselves.
 
 Not called for alternate-screen rows: that grid is a rectangle the child owns
-outright, with no scrollback and no command records of Emacs\=' own to re-apply.
-Empty by default, and run through `cooked--run-seam\=', so an entry that signals
+outright, with no scrollback and no command records of Emacs' own to re-apply.
+Empty by default, and run through `cooked--run-seam', so an entry that signals
 costs its own contribution and neither the rest of the hook nor the drain.")
 
 ;; Carrying a position across a row the render rewrites.
@@ -988,10 +988,10 @@ costs its own contribution and neither the rest of the hook nor the drain.")
 Made by `cooked--capture-relocations', which is where the decision about *which*
 positions need one lives; everything here is mechanism."
   (window nil :documentation "\
-The window whose `window-point\=' this stands for, or nil for the mark.
+The window whose `window-point' this stands for, or nil for the mark.
 
 Two cases and no function slot, deliberately: a closure per window per drain is
-allocation on a path whose floor is `cooked-min-redisplay-interval\=', and it
+allocation on a path whose floor is `cooked-min-redisplay-interval', and it
 would spell a choice between two branches written down right here.")
   (row nil :documentation "\
 Which row of the run being rewritten this position was on, or nil.
@@ -1068,7 +1068,7 @@ the user was pointing is the end of what the row now holds."
 (defun cooked--logical-base ()
   "Where the logical line the screen begins in starts, the origin of a place.
 
-The start of the buffer line holding `cooked--screen-start\=', which is above it
+The start of the buffer line holding `cooked--screen-start', which is above it
 when row 0 continues a line whose head is already history.  Nothing a drain
 does moves text before this: scrollback goes in at the marker, which is at or
 after it, and the rows below are what gets rewritten."
@@ -1079,10 +1079,10 @@ after it, and the rows below are what gets rewritten."
 (defun cooked--wrap-blanks (newline cols)
   "Blank cells the row ending at NEWLINE had before it wrapped, at COLS wide.
 
-Nonzero only for a newline marked `blank\=': the row was written without the
+Nonzero only for a newline marked `blank': the row was written without the
 blanks the child left at its end, and a rewrap puts those cells back inside
-the line.  On a five-column screen `ab\=' wrapped with three blanks after it,
-and at ten columns the line reads `ab   cd\=', so a position on `c\=' is five
+the line.  On a five-column screen `ab' wrapped with three blanks after it,
+and at ten columns the line reads `ab   cd', so a position on `c' is five
 characters into it rather than two."
   (if (eq (get-text-property newline 'cooked-wrap) 'blank)
       (let ((start (max (save-excursion (goto-char newline)
@@ -1096,13 +1096,13 @@ characters into it rather than two."
   "POSITION as (LINES . CHARS), for carrying it across a rewrap of the screen.
 
 LINES is how many newlines that end a line lie between BASE, from
-`cooked--logical-base\=', and POSITION, and CHARS is how far into its logical
-line POSITION is.  A newline marked `cooked-wrap\=' is a row boundary rather
-than a line end, and counts nothing; the blanks before a `blank\=' one count,
+`cooked--logical-base', and POSITION, and CHARS is how far into its logical
+line POSITION is.  A newline marked `cooked-wrap' is a row boundary rather
+than a line end, and counts nothing; the blanks before a `blank' one count,
 measured at COLS, the width the rows were laid out at.  The rewrap chunks each
 logical line afresh and leaves its characters as they were, so the pair names
-the same character before and after: `hello world\=' wrapped at five columns,
-with the mark on `w\=' at row 1 column 1, is (0 . 6), and at twenty columns
+the same character before and after: `hello world' wrapped at five columns,
+with the mark on `w' at row 1 column 1, is (0 . 6), and at twenty columns
 that is row 0 column 6."
   (save-excursion
     (goto-char base)
@@ -1120,7 +1120,7 @@ that is row 0 column 6."
       (cons lines (+ chars (- position row))))))
 
 (defun cooked--logical-position (place base cols)
-  "The buffer position PLACE, from `cooked--logical-place\=', now names.
+  "The buffer position PLACE, from `cooked--logical-place', now names.
 
 BASE is the same origin, which the drain in between has not moved, and COLS
 the width the rows are now laid out at.  A place past the end of its line, as
@@ -1156,10 +1156,10 @@ lands at the end of the line."
 (defun cooked--place-reflowed (relocations reflow cols)
   "Put back RELOCATIONS and a wandered point after a drain rewrapped the screen.
 
-REFLOW is the viewport\='s `reflow\=', (BASE . POINT): the origin every place
-was counted from, and point\='s own place when it had wandered off the cursor.
+REFLOW is the viewport's `reflow', (BASE . POINT): the origin every place
+was counted from, and point's own place when it had wandered off the cursor.
 COLS is the width the rows are laid out at now.  Point is handed back as the
-cell it now sits on, which is what `cooked--place-point\=' restores a wandered
+cell it now sits on, which is what `cooked--place-point' restores a wandered
 point from.  Returns that cell, or nil, having moved point itself when the
 rewrap pushed its character up into history."
   (pcase-let ((`(,base . ,point) reflow))
@@ -1175,34 +1175,34 @@ rewrap pushed its character up into history."
 (defun cooked--mark-row-wrap (eol wrapped &optional width)
   "Record on the newline at EOL whether the row it ends was soft-wrapped.
 
-The `cooked-wrap\=' property, and this is the only place it is written: WRAPPED
-non-nil means the emulator\='s `Row::wrapped\=' was set, so the row below carries
+The `cooked-wrap' property, and this is the only place it is written: WRAPPED
+non-nil means the emulator's `Row::wrapped' was set, so the row below carries
 the rest of a logical line the child never broke.  The buffer has no other way
 to know that.  A screen row is one buffer line, so a line the child ended and a
 line the terminal ran out of columns for are the same two characters of text --
 and everything that reads the buffer as language rather than as a grid then gets
-the wrong answer.  cooked\='s one documented link-detection gap is exactly this:
+the wrong answer.  cooked's one documented link-detection gap is exactly this:
 a URL split across a row boundary matched only as far as the break.  See
-`cooked-link--join-wrapped\=', which is the reader.
+`cooked-link--join-wrapped', which is the reader.
 
 Only the live screen.  Scrollback needs nothing under
-`cooked-rejoin-wrapped-lines\=', which is the default: the continuation was
+`cooked-rejoin-wrapped-lines', which is the default: the continuation was
 joined onto the line above as it was written, so there is no wrap newline left
 to mark.  With rejoining off the rows do stay separate up there and no flag
 follows them, which is the one place this does not reach -- an accepted cost of
-a mode whose whole point is that the buffer keeps the grid\='s line structure.
+a mode whose whole point is that the buffer keeps the grid's line structure.
 
 Written only when it differs from what is already there, which on the ordinary
-row is never.  A property change runs `after-change-functions\=' exactly as an
-insertion does, and jit-lock is on that hook -- see `cooked--render-block\='.
+row is never.  A property change runs `after-change-functions' exactly as an
+insertion does, and jit-lock is on that hook -- see `cooked--render-block'.
 A row inside a run has a freshly inserted newline
 that carries nothing, so the common case reads a property and writes none;
 only a row that has just started or stopped wrapping pays anything.
 
-At `point-max\=' there is nothing to mark yet: the last screen row is left
-unterminated -- see `cooked--fit-screen\=' -- so a wrap on it has no newline to
+At `point-max' there is nothing to mark yet: the last screen row is left
+unterminated -- see `cooked--fit-screen' -- so a wrap on it has no newline to
 sit on.  The mark is owed instead, and paid when extending the region gives the
-row its newline; see `cooked--owed-wrap\='.
+row its newline; see `cooked--owed-wrap'.
 
 WIDTH is how many cells the row's text occupies, from the row table, and a
 wrapped row narrower than `cooked--cols' is marked `blank' rather than t.  A
@@ -1241,8 +1241,8 @@ Still owed when its marker is the end of the buffer.  Text added at the end
 moves the marker along, so it is anywhere else only once the row it was
 recorded for has stopped being the last, and the two ways a row stops being
 the last with the marker still at the end forget the debt themselves: a trim
-of the rows at the end, in `cooked--fit-screen\=', and history taking the row,
-in `cooked--forget-owed-wrap-above\='.  The row may be empty: a wide character
+of the rows at the end, in `cooked--fit-screen', and history taking the row,
+in `cooked--forget-owed-wrap-above'.  The row may be empty: a wide character
 that did not fit wraps a row of nothing but blanks."
   (when-let* ((owed cooked--owed-wrap)
               ((= (marker-position (car owed)) (point-max))))
@@ -1251,7 +1251,7 @@ that did not fit wraps a row of nothing but blanks."
 (defun cooked--forget-owed-wrap-above (start)
   "Forget the owed wrap mark if the row it was owed to is history above START.
 
-Called where `cooked--screen-start\=' moves to START.  The row ending at the
+Called where `cooked--screen-start' moves to START.  The row ending at the
 owed marker went into history with the rows above START when the marker is
 not below it, and history carries no wrap marks."
   (when-let* ((owed cooked--owed-wrap)
@@ -1261,22 +1261,22 @@ not below it, and history carries no wrap marks."
 (defun cooked--goto-screen-run-end (start first count)
   "End of the last of COUNT screen rows, the first of them row FIRST at START.
 
-The far edge of the region `cooked--render-rows\=' deletes before writing a
+The far edge of the region `cooked--render-rows' deletes before writing a
 coalesced run of damaged rows into it, and the rows below the first may not
 exist yet: the screen region is trimmed to its content, so a run reaching past
 what the buffer holds has to extend it exactly as a single row does.
 
-The cheap path is a `forward-line\=' from START, since the rows of a run are
+The cheap path is a `forward-line' from START, since the rows of a run are
 adjacent lines by construction.  It is trusted only when it both moved the whole
-way and landed at a line start -- `forward-line\=' counts a final line lacking a
-newline as a line moved, so it can report success while sitting at that line\='s
+way and landed at a line start -- `forward-line' counts a final line lacking a
+newline as a line moved, so it can report success while sitting at that line's
 end, which would put the far edge of the deletion a whole row short.  Anything
-else falls back to `cooked--goto-screen-row\=', which is the one place that knows
+else falls back to `cooked--goto-screen-row', which is the one place that knows
 how to add the missing lines.
 
 COUNT of one is answered without moving at all, and not merely as an
 optimisation: screen row 0 does not always begin a buffer line -- it continues
-the wrapped row handed to scrollback before it -- so the `bolp\=' test above
+the wrapped row handed to scrollback before it -- so the `bolp' test above
 would send the ordinary single-row case down the fallback for no reason."
   (goto-char start)
   (if (or (= count 1)
@@ -1288,12 +1288,12 @@ would send the ordinary single-row case down the fallback for no reason."
 (defun cooked--damage-in-order (rows edits)
   "ROWS and EDITS as one list in ascending row index.
 
-ROWS is the drain\='s `:rows\=', entries of (INDEX . BLOCK), and EDITS its
-`:edits\=', entries of (INDEX CHAR-START CHAR-END LENGTH . BLOCK).  The two are
+ROWS is the drain's `:rows', entries of (INDEX . BLOCK), and EDITS its
+`:edits', entries of (INDEX CHAR-START CHAR-END LENGTH . BLOCK).  The two are
 told apart by what follows INDEX: a block begins with its text, a string, and an
 edit with a number.  Both arrive in ascending order and never name the same
 row, so this is a merge, and the order it keeps is what lets
-`cooked--render-rows\=' walk forward from the row it placed last.  A drain
+`cooked--render-rows' walk forward from the row it placed last.  A drain
 without edits, which is most of them, is returned as it came."
   (if (null edits)
       rows
@@ -1310,15 +1310,15 @@ without edits, which is most of them, is returned as it came."
 
 Each entry is a *run* of contiguous damaged rows: FIRST is the index of its
 first row, and BLOCK holds them all as one string with newlines between them
-and a row table saying where each begins -- see `cooked--render-block\='.  The
+and a row table saying where each begins -- see `cooked--render-block'.  The
 core coalesces the run; a run of one row is the ordinary case and the same code
 path.
 
-EDITS are the drain\='s `:edits\=', rows of which only part changed, each
-\=(INDEX CHAR-START CHAR-END LENGTH . BLOCK): the characters CHAR-START to
+EDITS are the drain's `:edits', rows of which only part changed, each
+\(INDEX CHAR-START CHAR-END LENGTH . BLOCK): the characters CHAR-START to
 CHAR-END of the row, or to its end when CHAR-END is nil, are replaced with
-BLOCK\='s text, and anything past LENGTH characters is deleted -- spaces
-`cooked--pad-to-cursor\=' added for a cursor that has moved on, which rewriting
+BLOCK's text, and anything past LENGTH characters is deleted -- spaces
+`cooked--pad-to-cursor' added for a cursor that has moved on, which rewriting
 the whole row would have taken away too.
 A spinner turning then costs one character rather than the row, and the markers
 and overlays on the rest of the row stay where they are.  On the primary screen
@@ -1330,13 +1330,13 @@ row after it is written happens to an edited row too, measured over the whole
 row: the width guard, the wrap mark, the relocations and the notification.
 
 That is where the win is.  Emacs pays per edit rather than per character, so a
-24-row repaint that was 24 `delete-region\='s and 24 `insert\='s is one of each,
-and the style and decoration loops in `cooked--render-block\=' run once across
+24-row repaint that was 24 `delete-region's and 24 `insert's is one of each,
+and the style and decoration loops in `cooked--render-block' run once across
 the whole run instead of once per row.  What the core will not do is coalesce
 across a row it was not told about: an undamaged row between two damaged ones
 breaks the run, because deleting and reinserting it would destroy every marker
 and overlay anchored in text nothing asked to have rewritten.  See
-`contiguous_runs\=' in src/wire.rs, which is where that decision lives.
+`contiguous_runs' in src/wire.rs, which is where that decision lives.
 
 ROWS is expected in ascending index order, which is how the drain reports
 damage.  Order is not required for correctness -- a run out of sequence is
@@ -1532,7 +1532,7 @@ which has no such seam at all."
 (add-hook 'cooked-theme-change-hook #'cooked--forget-sent-rows)
 
 (defun cooked--notify-rows-rendered (bounds)
-  "Hand BOUNDS, this drain\='s rewritten live rows, to the optional layers.
+  "Hand BOUNDS, this drain's rewritten live rows, to the optional layers.
 
 Separate from `cooked--render-rows' and called well after it, which is the
 whole point of the split -- `cooked-row-rendered-functions' says why, and

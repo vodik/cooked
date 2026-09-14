@@ -54,36 +54,36 @@
 (cooked--declare-core)
 
 (defvar cooked-mode-syntax-table (make-syntax-table comint-mode-syntax-table)
-  "Syntax table for `cooked-mode\='.
+  "Syntax table for `cooked-mode'.
 
-Realized from `cooked-word-constituent-string\=' and
-`cooked-word-boundary-string\=' by `cooked--realize-syntax-table\=', and realized
+Realized from `cooked-word-constituent-string' and
+`cooked-word-boundary-string' by `cooked--realize-syntax-table', and realized
 *into this very object* rather than rebuilt, so a customize reaches buffers that
 already exist.  A rebuilt table would only be picked up by the next
-`cooked-mode\=', which is not what changing a preference should mean.
+`cooked-mode', which is not what changing a preference should mean.
 
-Made with `comint-mode-syntax-table\=' as its *parent* rather than as a copy, and
+Made with `comint-mode-syntax-table' as its *parent* rather than as a copy, and
 that is what makes re-realizing possible at all: a character this file has not
-spoken about is `nil\=' here and inherits, so undoing a previous realization is
-setting those characters back to `nil\=' rather than trying to remember what
+spoken about is nil here and inherits, so undoing a previous realization is
+setting those characters back to nil rather than trying to remember what
 class they had before.")
 
 (defvar cooked-input-syntax-table (make-syntax-table comint-mode-syntax-table)
-  "Syntax table for the line being edited at cooked\='s own prompt.
+  "Syntax table for the line being edited at cooked's own prompt.
 
-Realized from `cooked-input-word-constituent-string\=' and
-`cooked-word-boundary-string\=' in place, as `cooked-mode-syntax-table\=' is,
-and put on the input region as a `syntax-table\=' text property by
-`cooked--mark-input-syntax\='.  Its parent is comint\='s table rather than
-`cooked-mode-syntax-table\=', so a character the output treats as part of a
-word is not one here unless the input\='s own string says so.")
+Realized from `cooked-input-word-constituent-string' and
+`cooked-word-boundary-string' in place, as `cooked-mode-syntax-table' is,
+and put on the input region as a `syntax-table' text property by
+`cooked--mark-input-syntax'.  Its parent is comint's table rather than
+`cooked-mode-syntax-table', so a character the output treats as part of a
+word is not one here unless the input's own string says so.")
 
 (defvar cooked--syntax-overridden nil
-  "Characters `cooked--realize-syntax-table\=' has given a class of their own.
+  "Characters `cooked--realize-syntax-table' has given a class of their own.
 
 An alist of (TABLE . CHARACTERS), one entry for each of the two tables.  Kept
 so the next realization can hand them back to the parent table.  Without it,
-removing a character from `cooked-word-boundary-string\=' would leave it a
+removing a character from `cooked-word-boundary-string' would leave it a
 boundary forever.")
 
 ;; Defined by the `defcustom's below, whose setters call this function and so
@@ -93,7 +93,7 @@ boundary forever.")
 (defvar cooked-word-boundary-string)
 
 (defun cooked--realize-syntax-table-from (table constituents)
-  "Put CONSTITUENTS and `cooked-word-boundary-string\=' into TABLE, in place."
+  "Put CONSTITUENTS and `cooked-word-boundary-string' into TABLE, in place."
   ;; Hand back everything the last realization claimed.  `nil' means "ask the
   ;; parent", which is exactly the state these characters were in before.
   (dolist (ch (alist-get table cooked--syntax-overridden)) (aset table ch nil))
@@ -113,7 +113,7 @@ boundary forever.")
     (setf (alist-get table cooked--syntax-overridden) claimed)))
 
 (defun cooked--realize-syntax-table ()
-  "Put the word customs into `cooked-mode-syntax-table\=' and the input\='s table."
+  "Put the word customs into `cooked-mode-syntax-table' and the input's table."
   (cooked--realize-syntax-table-from cooked-mode-syntax-table
                                      cooked-word-constituent-string)
   (cooked--realize-syntax-table-from cooked-input-syntax-table
@@ -122,10 +122,10 @@ boundary forever.")
 (defun cooked--syntax-custom-setter (symbol value)
   "Set SYMBOL to VALUE and realize the syntax tables from it.
 
-The `:set\=' of the three word customs.  `custom-declare-variable\=' calls the
+The `:set' of the three word customs.  `custom-declare-variable' calls the
 setter to establish the default when the variable is not already bound, so this
 runs once at load before its siblings exist.  It guards on the variables rather
-than on the function, since the function is defined first and being `fboundp\='
+than on the function, since the function is defined first and being `fboundp'
 says nothing about whether it can run yet.  The explicit call after the
 defcustoms does the first real realization."
   (set-default symbol value)
@@ -138,39 +138,39 @@ defcustoms does the first real realization."
   "Characters a word may run through in a cooked buffer.
 
 Terminal output is mostly paths, URLs and identifiers, and Emacs' defaults cut
-all three up: without this a double-click on `~/src/foo/bar.txt\=' takes `foo\=',
-one on `items?id=42#top\=' takes `items\=', and one on `simon@example.com\='
-takes `example.com\='.  The whole name is almost always the thing being pointed
-at.  `%\=' needs no entry, being a word constituent already, so `a%20b\=' is one
+all three up: without this a double-click on `~/src/foo/bar.txt' takes `foo',
+one on `items?id=42#top' takes `items', and one on `simon@example.com'
+takes `example.com'.  The whole name is almost always the thing being pointed
+at.  `%' needs no entry, being a word constituent already, so `a%20b' is one
 word as it stands.
 
 A colon is not here, and stays a boundary through
-`cooked-word-boundary-string\=': it ends `main.c\=' in `main.c:42:\=' and
+`cooked-word-boundary-string': it ends `main.c' in `main.c:42:' and
 separates the entries of a PATH.  So a double-click on
-`https://example.com/a?b=1\=' takes `//example.com/a?b=1\=', without its scheme;
-a link is followed whole through `cooked-link\=' instead.
+`https://example.com/a?b=1' takes `//example.com/a?b=1', without its scheme;
+a link is followed whole through `cooked-link' instead.
 
-The line at cooked\='s own prompt does not use these words; see
-`cooked-input-word-constituent-string\='.
+The line at cooked's own prompt does not use these words; see
+`cooked-input-word-constituent-string'.
 
 Set through customize and it reaches live buffers; see
-`cooked-mode-syntax-table\='."
+`cooked-mode-syntax-table'."
   :type 'string
   :group 'cooked
   :set #'cooked--syntax-custom-setter)
 
 (defcustom cooked-input-word-constituent-string "./~-_"
-  "Characters a word may run through in the line at cooked\='s own prompt.
+  "Characters a word may run through in the line at cooked's own prompt.
 
-Narrower than `cooked-word-constituent-string\=', which is for selecting in
+Narrower than `cooked-word-constituent-string', which is for selecting in
 output, because editing a command line wants smaller words.  After
-`git log --author=simon\=' one \\[backward-kill-word] kills `simon\=', as a
-shell\='s line editor does, where the output\='s words would kill the whole flag.
+`git log --author=simon' one \\[backward-kill-word] kills `simon', as a
+shell's line editor does, where the output's words would kill the whole flag.
 Paths and flags stay one word as before: \\[backward-kill-word] after
-`git commit --amend\=' kills `--amend\='.
+`git commit --amend' kills `--amend'.
 
-`cooked-word-boundary-string\=' applies here too.  Set through customize and it
-reaches live buffers; see `cooked-input-syntax-table\='."
+`cooked-word-boundary-string' applies here too.  Set through customize and it
+reaches live buffers; see `cooked-input-syntax-table'."
   :type 'string
   :group 'cooked
   :set #'cooked--syntax-custom-setter)
@@ -178,16 +178,16 @@ reaches live buffers; see `cooked-input-syntax-table\='."
 (defcustom cooked-word-boundary-string "\"'`|:;,()[]{}<>$│─┌┐└┘├┤┬┴┼"
   "Characters that end a word in a cooked buffer, whatever else says otherwise.
 
-Applied *after* `cooked-word-constituent-string\=', so a character named in both
+Applied *after* `cooked-word-constituent-string', so a character named in both
 is a boundary.  That ordering is the whole job of this variable, and it is worth
 being plain about what the default does and does not buy.
 
-Every character in the default is *already* a boundary in Emacs\=' own table --
+Every character in the default is *already* a boundary in Emacs' own table --
 the box-drawing ones are symbol constituents, not word constituents, so
 \\[forward-word] and a double-click stop at them without help.  The list is
 therefore belt-and-braces, and it earns its place in two ways rather than one:
 it keeps them boundaries when someone widens
-`cooked-word-constituent-string\=', and it says in one readable place which
+`cooked-word-constituent-string', and it says in one readable place which
 characters a terminal buffer treats as furniture.  A double-click in a TUI with
 two panes side by side stops at the border between them, because U+2502 is
 furniture, not text.  That is all a syntax table can do: a region copied with
@@ -204,7 +204,7 @@ expecting it to be load-bearing.
 
 Whitespace characters are ignored: they already end a word, and claiming them
 would be a no-op this then has to remember to undo.  Set through customize and
-it reaches live buffers; see `cooked-mode-syntax-table\='."
+it reaches live buffers; see `cooked-mode-syntax-table'."
   :type 'string
   :group 'cooked
   :set #'cooked--syntax-custom-setter)
@@ -212,24 +212,24 @@ it reaches live buffers; see `cooked-mode-syntax-table\='."
 (cooked--realize-syntax-table)
 
 (defun cooked-toggle-rejoin-wrapped-lines ()
-  "Flip `cooked-rejoin-wrapped-lines\=', here and for buffers made after this.
+  "Flip `cooked-rejoin-wrapped-lines', here and for buffers made after this.
 
 A command rather than a menu item that sets the variable, because the variable
-is only half of what has to move: `cooked-mode\=' derives `truncate-lines\=' from
-it, and every drain since is asked with the value in force, so a bare `setq\='
+is only half of what has to move: `cooked-mode' derives `truncate-lines' from
+it, and every drain since is asked with the value in force, so a bare `setq'
 would change what happens to output arriving from now on and leave this
 buffer's own wrapping set the way it was.  The two would then disagree, quietly,
 which is exactly what a switch on a menu must not do.
 
-The seam is a third half that needs nothing here, and `cooked--split-seam\='
+The seam is a third half that needs nothing here, and `cooked--split-seam'
 says why: at the moment the flag flips, whatever head the buffer holds is one
 the emulator is right about, so a rewrap arriving before the next drain still
 resumes the line where the buffer wraps it.  What the emulator must stop
 counting is the head the *next* rows are handed over without, and that is the
 drain's to notice.
 
-Only this buffer's `truncate-lines\=' is touched.  Another live session keeps the
-answer it was started with until its next `cooked-mode\=', and saying so is
+Only this buffer's `truncate-lines' is touched.  Another live session keeps the
+answer it was started with until its next `cooked-mode', and saying so is
 better than walking every cooked buffer to impose a setting the user changed
 from inside one of them."
   (interactive)
@@ -249,22 +249,22 @@ from inside one of them."
 (defun cooked--resample-mode ()
   "Re-read the child's termios and adopt what it says, right now.
 
-The drain's `:mode\=' is whatever the reader thread last sampled, and the poll
+The drain's `:mode' is whatever the reader thread last sampled, and the poll
 interval is the whole of how fresh that is.  For redisplay that is exactly
 right: a drain describes a moment that has already gone by.  For a keystroke it
 is not, because one kind of mode change reaches the pty as nothing at all.
 
-A child that turns echo off *without printing anything* -- `read -s\=' with no
-prompt, a bare `stty -echo\=' -- moves the tty and writes no byte, so nothing
+A child that turns echo off *without printing anything* -- `read -s' with no
+prompt, a bare `stty -echo' -- moves the tty and writes no byte, so nothing
 wakes the reader and nothing schedules a drain.  Until the next timer tick
-`cooked--mode\=' still says `cooked\=', Emacs still believes it owns the line, and
+`cooked--mode' still says `cooked', Emacs still believes it owns the line, and
 the password the user has already started typing is being rendered into the
 buffer, sent on RET, and left behind in the scrollback and the undo history.
 
-Closing that costs one `tcgetattr\=' on the command that would have leaked --
+Closing that costs one `tcgetattr' on the command that would have leaked --
 paid only when something is about to put text on an editable line, against a
 timer that otherwise pays it ten times a second forever.  See
-`cooked--guard-insertion\=', which is the only caller and the only place the
+`cooked--guard-insertion', which is the only caller and the only place the
 answer can be spent."
   (when cooked--session
     (cooked--set-mode (cooked--sample-mode cooked--session))))
@@ -410,56 +410,56 @@ The answer for anyone not driving this from somewhere else."
 (defcustom cooked-selection-render 'frozen
   "What the render does while an ordinary Emacs selection is active.
 
-The same claim `cooked-evil-visual-state-render\=' makes, for everyone who is
+The same claim `cooked-evil-visual-state-render' makes, for everyone who is
 not running evil: a selection says something about a region of text, and text
 being rewritten underneath it turns the claim into a lie.  Without it a plain
 \\[set-mark-command] or a mouse drag is clobbered by the next drain.  A jump that
-only moves point, like `consult-line\=', makes no selection and so freezes
+only moves point, like `consult-line', makes no selection and so freezes
 nothing; point stays where the jump put it as it does after any motion off the
-child\='s cursor, see `cooked--wandered\='.
+child's cursor, see `cooked--wandered'.
 
 nil is a reasonable choice for anyone who selects in a terminal only to copy
 something that has already finished printing.
 
 The freeze cannot strand a buffer: it lifts when the selection goes away, and a
 drain that invalidates the region deactivates the mark anyway -- see
-`cooked--deactivate-mark\='."
+`cooked--deactivate-mark'."
   :type '(choice (const :tag "Defer the render" frozen)
                  (const :tag "Live, but the view stays put" still)
                  (const :tag "Keep following the cursor" nil))
   :group 'cooked)
 
 (defun cooked--selection-input-mode ()
-  "Freeze while a plain Emacs selection is active.  `cooked-selection-render\='.
+  "Freeze while a plain Emacs selection is active.  `cooked-selection-render'.
 
-`use-region-p\=' rather than `mark-active\=': it is the question every command
+`use-region-p' rather than `mark-active': it is the question every command
 that acts on a region asks, so this freezes exactly when something would have
-been operated on.  Under `transient-mark-mode\=' off it answers nil, which is
+been operated on.  Under `transient-mark-mode' off it answers nil, which is
 right -- a permanently active mark is not a selection anyone is looking at."
   (and cooked-selection-render
        (use-region-p)
        cooked-selection-render))
 
 (defvar-local cooked--selection-active nil
-  "Whether `use-region-p\=' was true after the last command.")
+  "Whether `use-region-p' was true after the last command.")
 
 (defun cooked--track-selection ()
   "Recompute the input mode when a selection appears or goes away.
 
 The input mode is *derived* rather than latched -- see
-`cooked-input-mode-functions\=' -- so it is only right as often as something
+`cooked-input-mode-functions' -- so it is only right as often as something
 recomputes it, and nothing recomputed it for a selection.
 
-`activate-mark-hook\=' is the obvious place and it is not enough:
+`activate-mark-hook' is the obvious place and it is not enough:
 \\[set-mark-command] activates the mark while point is still on it, so the
-region is empty and `use-region-p\=' is nil at exactly the moment the hook
+region is empty and `use-region-p' is nil at exactly the moment the hook
 runs.  Everything that makes it a selection happens afterwards, as ordinary
 motion, with no hook of its own.  So the question is asked once per command and
 the answer cached, which also covers a mouse drag.  It does not cover
-`consult-line\=' or any other jump, since those push the mark without
+`consult-line' or any other jump, since those push the mark without
 activating it and so leave no region.
 
-One `use-region-p\=' per command, and a refresh only on a *change* -- the
+One `use-region-p' per command, and a refresh only on a *change* -- the
 refresh rebuilds a keymap and must not run on every keystroke."
   (let ((active (use-region-p)))
     (unless (eq active cooked--selection-active)
@@ -478,12 +478,12 @@ refresh rebuilds a keymap and must not run on every keystroke."
 (defun cooked--state-keymap (mode policy)
   "The local map for input mode MODE under policy POLICY.
 
-The policy is asked first when it is `cooked\=', and the mode only otherwise.
+The policy is asked first when it is `cooked', and the mode only otherwise.
 A mode that suspends forwarding is a claim about keys on their way to the
-child, and at a prompt there are none: `cooked-peek-map\=' would take a line the
+child, and at a prompt there are none: `cooked-peek-map' would take a line the
 user is editing and make it unusable -- read-only through
-`cooked--refresh-keymap\=', with `self-insert-command\=' remapped to send raw
-bytes straight past cooked\='s own line editor.  What survives the prompt is the
+`cooked--refresh-keymap', with `self-insert-command' remapped to send raw
+bytes straight past cooked's own line editor.  What survives the prompt is the
 render half of the mode, which no keymap carries."
   ;; Cleared before the choice, and set again by `cooked--forwarding-map' in
   ;; the arms that consult the frame -- so a map worn without asking about one
@@ -623,9 +623,9 @@ are the ones left standing."
 (add-hook 'cooked--refresh-hook #'cooked--refresh-keymap)
 
 (defun cooked--get-old-input ()
-  "The command line at point, for `comint-get-old-input\='.
+  "The command line at point, for `comint-get-old-input'.
 
-comint\='s default scans backwards for a prompt it can recognise.  The OSC 133
+comint's default scans backwards for a prompt it can recognise.  The OSC 133
 records already know where the line began, so \\[comint-copy-old-input] recovers
 exactly what was run rather than whatever a regexp happened to match."
   (or (when-let* ((command (cooked--command-at (point))))
@@ -635,8 +635,8 @@ exactly what was run rather than whatever a regexp happened to match."
 (defun cooked-delete-output ()
   "Delete the output of the command at point, keeping the command line.
 
-Bound where comint puts `comint-delete-output\=', which cannot be reused: it
-puts its \"*** output flushed ***\" notice back through `comint-output-filter\=',
+Bound where comint puts `comint-delete-output', which cannot be reused: it
+puts its \"*** output flushed ***\" notice back through `comint-output-filter',
 the insertion path cooked replaced with the drain outright.
 
 Output can be in two places at once, and each half has one owner.  Whatever is
@@ -673,23 +673,23 @@ corrupt a redisplay cooked cannot see, let alone repair."
   "Delete everything above the current prompt.
 
 comint's \\[cooked-clear-scrollback] read literally, and the seam between the emulator's grid
-and Emacs\=' scrollback is not the user's business: whether what is above the
+and Emacs' scrollback is not the user's business: whether what is above the
 prompt has scrolled off the grid yet or is still on it, it goes.  Clearing
 scrollback alone would look inert at exactly the moment it is reached for -- a
 few commands into a session nothing has scrolled off at all, and every line on
 screen is a row the emulator still holds.
 
-Each side is asked for its own half.  `cooked--clear-to-prompt\=' removes the
+Each side is asked for its own half.  `cooked--clear-to-prompt' removes the
 rows, because rows have one owner and only the emulator knows which of them are
 above the prompt; the scrollback is buffer text, so Emacs deletes that itself;
-and the drain repaints what moved -- the shape of `cooked-delete-output\='.
+and the drain repaints what moved -- the shape of `cooked-delete-output'.
 
 The prompt line and anything typed at it stay, and end up at the top.  comint
 deletes its prompt because there it is only text; here it is a row the shell is
 still drawing on, and taking it would corrupt a redisplay cooked cannot repair.
 
 On the alternate screen the grid belongs to a running program rather than to a
-transcript, so only the scrollback goes -- see `cooked--clear-to-prompt\='."
+transcript, so only the scrollback goes -- see `cooked--clear-to-prompt'."
   (interactive)
   (when cooked--session
     (cooked--clear-to-prompt cooked--session))
@@ -701,17 +701,17 @@ transcript, so only the scrollback goes -- see `cooked--clear-to-prompt\='."
   "Hide or reveal the output of the command at point.
 
 A fold is opened by isearch as well as by hand.  Without
-`isearch-open-invisible\=' on the overlay, isearch treats folded output as text
+`isearch-open-invisible' on the overlay, isearch treats folded output as text
 that cannot be shown and skips every match inside it -- so a search for
 something you can see in the transcript, on a command whose output you happened
 to fold, silently finds nothing.  The two entry points do different things by
 design: stepping *through* a fold opens it for the duration
-\(`isearch-open-invisible-temporary\='), and stopping inside one unfolds it for
+\(`isearch-open-invisible-temporary'), and stopping inside one unfolds it for
 good, which is the same act as \[cooked-toggle-fold] and so is
-`delete-overlay\='.
+`delete-overlay'.
 
-The invisibility spec is the symbol `cooked-fold\=' rather than a bare t, and is
-registered here.  A bare t is invisible only while `buffer-invisibility-spec\='
+The invisibility spec is the symbol `cooked-fold' rather than a bare t, and is
+registered here.  A bare t is invisible only while `buffer-invisibility-spec'
 is itself t, which is merely its default -- any layer that narrows the spec to a
 list of its own would have made every fold in the buffer spring open."
   (interactive)
@@ -736,7 +736,7 @@ list of its own would have made every fold in the buffer spring open."
   "Resend COMMAND's input line through the ordinary submit path.
 
 The one verb of the three that cannot live beside the other two in
-cooked-command.el: `cooked-copy-command\=' and `cooked-copy-output\=' ask the
+cooked-command.el: `cooked-copy-command' and `cooked-copy-output' ask the
 records a question, and this one writes to the child, which is a direction that
 file deliberately does not face.
 
@@ -761,15 +761,15 @@ it looks like it worked."
 (defun cooked--font-scale-resync (&optional only)
   "Resize sessions whose font may just have moved.  ONLY limits it to one buffer.
 
-`:after\=' advice rather than ghostel\='s `:around\=', and the difference is a
+`:after' advice rather than ghostel's `:around', and the difference is a
 property of cooked rather than a shortcut.  ghostel snapshots which windows were
 anchored before the font moves and re-anchors them afterwards, because its
-anchoring is *latched*.  cooked\='s is computed: `cooked--pin-transcript-bottom\='
+anchoring is *latched*.  cooked's is computed: `cooked--pin-transcript-bottom'
 works the view out from the buffer on every drain, and the resize below causes
 one.  There is nothing to save and put back.
 
 The cache needs no telling either, for the same kind of reason:
-`cooked--layout-stamp\=' names the font, so `cooked--wrap-cache\=' and the glyph
+`cooked--layout-stamp' names the font, so `cooked--wrap-cache' and the glyph
 metrics in it are thrown away by comparison the next time they are asked for.
 What is genuinely missing without this is the *child* being told, since a font
 change alters how many rows and columns the window holds and nothing else
@@ -785,15 +785,15 @@ notices."
   (cooked--font-scale-resync (current-buffer)))
 
 (defun cooked--advise-font-scale ()
-  "Notice the font changes `text-scale-mode-hook\=' does not report.
+  "Notice the font changes `text-scale-mode-hook' does not report.
 
-Idempotent, and called from `cooked-mode\=' rather than at load: advice on a
+Idempotent, and called from `cooked-mode' rather than at load: advice on a
 global function is a cost every Emacs pays, and a configuration that loads
 cooked but never starts a session should not pay it.
 
-`buffer-face-mode\=' is the one that matters -- `buffer-face-set\=',
-`buffer-face-toggle\=' and `variable-pitch-mode\=' all rescale through it, and it
-runs no hook.  `global-text-scale-adjust\=' is the other, and is advised only
+`buffer-face-mode' is the one that matters -- `buffer-face-set',
+`buffer-face-toggle' and `variable-pitch-mode' all rescale through it, and it
+runs no hook.  `global-text-scale-adjust' is the other, and is advised only
 where it exists, being newer than the Emacs cooked still supports."
   (unless (advice-member-p #'cooked--font-scale-local 'buffer-face-mode)
     (advice-add 'buffer-face-mode :after #'cooked--font-scale-local))
@@ -803,23 +803,23 @@ where it exists, being newer than the Emacs cooked still supports."
     (advice-add 'global-text-scale-adjust :after #'cooked--font-scale-resync)))
 
 (defvar-local cooked--sized-line-height nil
-  "The (LINE-SPACING . FACE-REMAPPING-ALIST) `cooked--sync-size\=' last ran under.
+  "The (LINE-SPACING . FACE-REMAPPING-ALIST) `cooked--sync-size' last ran under.
 
 Both change how tall a row is, and so how many rows a window holds, without
-changing any window\='s size, and nothing runs a hook for either.
-`cooked--sync-size-for-line-height\=' compares them before each redisplay.  The
-remapping is held as a copy, because `face-remap-add-relative\=' edits an entry
+changing any window's size, and nothing runs a hook for either.
+`cooked--sync-size-for-line-height' compares them before each redisplay.  The
+remapping is held as a copy, because `face-remap-add-relative' edits an entry
 it already has in place.")
 
 (defun cooked--sync-size-for-line-height (_window)
-  "Resize the child if this buffer\='s rows have changed height since it was sized.
+  "Resize the child if this buffer's rows have changed height since it was sized.
 
-On `pre-redisplay-functions\=', buffer-locally, so it runs only when a window on
+On `pre-redisplay-functions', buffer-locally, so it runs only when a window on
 this buffer is about to be drawn.  A window 437 pixels tall holds 23 rows of a
-19-pixel font, and 20 once `line-spacing\=' is 2; without this the child went on
+19-pixel font, and 20 once `line-spacing' is 2; without this the child went on
 drawing 23 until the window next changed size.  A remapped default face is
-the other case, as `face-remap-add-relative\=' makes one with a new `:height\=':
-`text-scale-mode-hook\=' and the advice on `buffer-face-mode\=' catch the usual
+the other case, as `face-remap-add-relative' makes one with a new `:height':
+`text-scale-mode-hook' and the advice on `buffer-face-mode' catch the usual
 ways of making one, and this catches the rest.
 
 Deferred, as the window hooks defer, since the resize may drain.  The values are
@@ -839,17 +839,17 @@ The buffer text is not adjusted here directly: a resize marks every row damaged,
 and the drain this triggers below extends or trims the screen region to suit.
 
 That drain is forced rather than left to the next wakeup whenever the row or
-column count changed, because it cannot wait for the child.  `cooked--resize\='
-rewraps the native core\='s grid synchronously, but nothing carries that into the
+column count changed, because it cannot wait for the child.  `cooked--resize'
+rewraps the native core's grid synchronously, but nothing carries that into the
 buffer until something drains -- ordinarily the wake pipe, which only fires when
 the child writes.  A child that does not immediately repaint on SIGWINCH, such
 as an idle prompt, leaves the buffer showing rows sized for the old width
 against a window already the new one, and Emacs soft-wraps whatever no longer
 fits with no truncation marker.  Draining here closes that gap.
 
-Not forced for a cell-only move, an ordinary `text-scale\=' zoom that leaves the
-column count alone: nothing about the grid\='s content is stale then, only its
-pixel size, which `cooked--rescale-deco\=' below brings into agreement without a
+Not forced for a cell-only move, an ordinary `text-scale' zoom that leaves the
+column count alone: nothing about the grid's content is stale then, only its
+pixel size, which `cooked--rescale-deco' below brings into agreement without a
 real drain.
 
 The cell size in pixels goes along with the rows and columns, because the child
@@ -859,7 +859,7 @@ frame has no such thing and reports nil, which reaches the child as \"not
 reported\" rather than as a claim about zero.
 
 This is also the one place that notices the cell moving at all, which makes it
-the trigger for `cooked--rescale-deco\='."
+the trigger for `cooked--rescale-deco'."
   (when cooked--session
     (setq cooked--sized-line-height
           (cons line-spacing (copy-tree face-remapping-alist)))
@@ -950,12 +950,12 @@ which it usually is not.  Walk the frame's windows instead."
 ;; package changes nothing about Emacs until you actually use it.  `add-hook' dedupes,
 ;; so calling this once per buffer is free.
 (defun cooked--keymap-frame-stale-p (&optional frame)
-  "Whether the local map was built for a frame type other than FRAME\='s.
+  "Whether the local map was built for a frame type other than FRAME's.
 
 Nil unless the buffer is wearing one of the maps that forwards to the child,
 those being the only ones that depend on a frame at all -- see
-`cooked--keymap-frame-type\='.  Two buffer-local reads and one
-`display-graphic-p\=', which is why this is cheap enough to ask on every
+`cooked--keymap-frame-type'.  Two buffer-local reads and one
+`display-graphic-p', which is why this is cheap enough to ask on every
 window selection."
   (and cooked--keymap-frame-type
        (not (eq cooked--keymap-frame-type (cooked--frame-keymap-type frame)))))
@@ -965,25 +965,25 @@ window selection."
 
 Two things that want the same moment.  Focus is the reason this hook was
 installed; the keymap is here because nothing else runs when a buffer moves
-between a graphical frame and a terminal frame.  `cooked--forwarding-map\='
-decides between the two at `use-local-map\=' time, and on a daemon serving one
+between a graphical frame and a terminal frame.  `cooked--forwarding-map'
+decides between the two at `use-local-map' time, and on a daemon serving one
 of each the answer it reached can outlive the frame it was reached on --
-leaving `M-x\=' either eaten by the child on a graphical frame or answered by
+leaving `M-x' either eaten by the child on a graphical frame or answered by
 Emacs on a terminal one, until some unrelated state change happens to install
 a map again.
 
-The cost on the ordinary selection change is `cooked--keymap-frame-stale-p\=',
+The cost on the ordinary selection change is `cooked--keymap-frame-stale-p',
 which for a buffer at a prompt is one buffer-local read that answers nil, and
-otherwise two reads and a `display-graphic-p\='.  Nothing is rebuilt: the two
-overlays a session can want are cached in `cooked--meta-overlays\=' for the
+otherwise two reads and a `display-graphic-p'.  Nothing is rebuilt: the two
+overlays a session can want are cached in `cooked--meta-overlays' for the
 life of Emacs, so even the refresh is a lookup.
 
 Only when the buffer has *gained* the selection, which is what the
-`frame-selected-window\=' test says -- this hook also runs in the buffer being
+`frame-selected-window' test says -- this hook also runs in the buffer being
 left, and the map belongs to the frame being typed into.  And deferred, like
 every other reaction to a window hook: this runs inside redisplay, and
-`cooked--refresh-keymap\=' swaps the local map, can drain, and runs
-`cooked-state-change-hook\=', which is arbitrary user code.  The question is
+`cooked--refresh-keymap' swaps the local map, can drain, and runs
+`cooked-state-change-hook', which is arbitrary user code.  The question is
 asked again on the other side of the deferral, since by then the user may have
 moved back."
   (cooked--report-focus)
@@ -2013,15 +2013,15 @@ to the child verbatim."
 (define-key cooked-mode-map [menu-bar completion] nil)
 
 (easy-menu-define cooked-mode-menu cooked-mode-map
-  "Menu for `cooked-mode\='.
+  "Menu for `cooked-mode'.
 
-On `cooked-mode-map\=' rather than on each state map, for the reason cooked\='s
+On `cooked-mode-map' rather than on each state map, for the reason cooked's
 own commands are bound there: it should not evaporate because the child took the
 keyboard, and every state map reaches this one as a parent -- peek included.
-One menu rather than comint\='s three or `term.el\='s four, because four items of
+One menu rather than comint's three or `term.el's four, because four items of
 job control and one of completion do not each earn a place on the menu bar, and
 because this is the whole of what \\`mouse-1' on the mode name and a right-click
-under `context-menu-mode\=' will show.
+under `context-menu-mode' will show.
 
 Every item is guarded rather than left to signal when it is chosen.  A menu is
 the one interface that says what is possible *before* you commit to it, so an
@@ -2032,7 +2032,7 @@ which state the terminal is in is exactly what someone reaching for the menu is
 unsure of, and an item that vanishes answers nothing.
 
 The guard forms are data.  The byte-compiler never looks inside them, so `make
-lint\=' cannot catch a misspelled predicate or a command that does not exist the
+lint' cannot catch a misspelled predicate or a command that does not exist the
 way it catches one anywhere else in this file.  That is what the menu tests are
 for, and why they walk this whole structure and evaluate every guard in every
 state rather than merely checking that it parses."
@@ -2166,16 +2166,16 @@ state rather than merely checking that it parses."
 (defun cooked--context-menu (menu click)
   "Add the command under CLICK to MENU, and return it.
 
-`context-menu-local\=' already copies the menu above into every right-click, so
+`context-menu-local' already copies the menu above into every right-click, so
 this is not where the verbs first appear -- it is where they are asked about
 the right command.  Everything on that menu resolves its record from point, and
 for a right-click point is wrong by exactly the distance the mouse travelled;
 the three verbs that name a command are therefore worth a second copy up here,
-each closed over the record `posn-point\=' found.
+each closed over the record `posn-point' found.
 
-Nothing here has to consult `cooked--mouse-grab\='.  A child that asked for the
-mouse gets `down-mouse-3' from `cooked--mouse-map\=', which lives in
-`emulation-mode-map-alists\=' and so outranks the binding `context-menu-mode\='
+Nothing here has to consult `cooked--mouse-grab'.  A child that asked for the
+mouse gets `down-mouse-3' from `cooked--mouse-map', which lives in
+`emulation-mode-map-alists' and so outranks the binding `context-menu-mode'
 installs globally -- meaning this is never reached in that state at all, and
 Shift is the way in, exactly as it is everywhere else the child holds the
 pointer."
@@ -2206,8 +2206,8 @@ pointer."
 (defun cooked--cleanup ()
   "Tear down the session behind this buffer, and the files it generated.
 
-On `kill-buffer-hook\='.  `cooked--stop-session\=' is the half shared with
-`cooked--on-exit\='; the generated startup files are removed only here, since
+On `kill-buffer-hook'.  `cooked--stop-session' is the half shared with
+`cooked--on-exit'; the generated startup files are removed only here, since
 they are named by a path the buffer holds and nothing else can reach them."
   (cooked--cancel-secret)
   (cooked--stop-session)
@@ -2216,25 +2216,25 @@ they are named by a path the buffer holds and nothing else can reach them."
 (defun cooked--kill-emacs ()
   "Tear every session down on the way out of Emacs.
 
-On `kill-emacs-hook\='.  Killing a session *buffer* reaps its child correctly --
-`cooked--cleanup\=' is on `kill-buffer-hook\=' -- but exiting Emacs kills no
-buffers, so without this the escalation in `Session::shutdown\=' never runs and
-a child that ignores SIGHUP (`nohup\=', `trap \='\=' HUP\=', a detached session
+On `kill-emacs-hook'.  Killing a session *buffer* reaps its child correctly --
+`cooked--cleanup' is on `kill-buffer-hook' -- but exiting Emacs kills no
+buffers, so without this the escalation in `Session::shutdown' never runs and
+a child that ignores SIGHUP (`nohup', `trap \\='\\=' HUP', a detached session
 leader) simply outlives the Emacs that started it.  The generated shell startup
 files go the same way, and they are named by a path only the buffer holds, so
 nothing else could ever find them again.
 
 Cheap, and bounded.  A session with no child returns immediately; one with a
 child pays the same SIGHUP, short grace, SIGKILL escalation a buffer kill pays,
-which is tens of milliseconds and cannot wait on the child\='s own idea of when
-to leave.  `cooked--dolist-buffers\=' contains a failure to the buffer it
+which is tens of milliseconds and cannot wait on the child's own idea of when
+to leave.  `cooked--dolist-buffers' contains a failure to the buffer it
 happened in, which matters more here than anywhere else it is used: this is the
 last code to run, and a session that cannot be torn down must not take the
-sessions after it in `buffer-list\=' with it.
+sessions after it in `buffer-list' with it.
 
-`cooked--cancel-secret\=' is deliberately not called, unlike in
-`cooked--cleanup\='.  It exists to put the buffer and the echo area back the way
-a `getpass\=' prompt found them, and there is no after for it to restore to."
+`cooked--cancel-secret' is deliberately not called, unlike in
+`cooked--cleanup'.  It exists to put the buffer and the echo area back the way
+a `getpass' prompt found them, and there is no after for it to restore to."
   (cooked--dolist-buffers
     (cooked--stop-session)
     (cooked--remove-scratch)))

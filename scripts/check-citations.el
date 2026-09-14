@@ -379,7 +379,7 @@ directory would turn every one of those into a finding."
 ITEMS holds the names of items this tree declares -- modules, types, traits,
 functions -- and answers \"is the head of this path ours?\".  IDENTS holds
 every identifier appearing anywhere in Rust code, and answers \"does this name
-still exist?\" the way the Lisp half does, without having to model Rust\='s
+still exist?\" the way the Lisp half does, without having to model Rust's
 namespaces, its macro-generated associated constants, or its trait methods."
   (let ((items (make-hash-table :test #'equal))
         (idents (make-hash-table :test #'equal)))

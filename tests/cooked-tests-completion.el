@@ -179,11 +179,11 @@ request is a line of input.  Nothing is sent until the shell says it is listenin
 (ert-deftest cooked-completion-asks-nothing-once-the-shell-runs-something ()
   "Once a command is running, those bytes would land in it rather than in ZLE.
 
-The core forgets the nonce at `command-start\=' -- `cooked-completion-nonce-does-not-outlive-its-prompt\='
+The core forgets the nonce at `command-start' -- `cooked-completion-nonce-does-not-outlive-its-prompt'
 covers that -- so this is the second of the two guards rather than the only one:
 the question is asked again at the moment of sending, against a nonce that is
-somehow still standing.  It is the sharper one.  With `zsh\=' running a canonical
-reader like `cat\=', the termios mode is `cooked\=' and the policy stays `cooked\='
+somehow still standing.  It is the sharper one.  With `zsh' running a canonical
+reader like `cat', the termios mode is `cooked' and the policy stays `cooked'
 too, so nothing about keyboard ownership notices that ZLE has stopped reading.
 
 The announcement is therefore replayed *after* the command starts, which is the
@@ -293,14 +293,14 @@ after the cursor to make the difference visible."
 (ert-deftest cooked-completion-comes-from-bash-itself ()
   "The same exchange against bash, over the same wire.
 
-bash needs none of zsh\='s ZLE gymnastics -- `complete -p\=' names the registered
+bash needs none of zsh's ZLE gymnastics -- `complete -p' names the registered
 function and it can be invoked directly -- so the whole capture is bookkeeping.
 What is worth testing is that it is the *same* bookkeeping: one Emacs-side
 parser, one protocol, and a shell that announces for itself.
 
 The spec here is registered by the test rather than borrowed from
 bash-completion, which is not installed everywhere and would make this a test of
-somebody else\='s package."
+somebody else's package."
   :tags '(base64 bash)
   (skip-unless (executable-find "bash"))
   (skip-unless (executable-find "base64"))
@@ -357,9 +357,9 @@ somebody else\='s package."
 (ert-deftest cooked-completion-without-the-layer-stays-in-emacs ()
   "Unloaded, the layer is idle but the announcement is still heard.
 
-The two halves come apart here.  A request is this layer\='s business, so with
+The two halves come apart here.  A request is this layer's business, so with
 both seams nil nothing leaves Emacs and the CAPF answers from its own table.
-The *announcement* is not: `cooked--policy\=' reads it as a license to own the
+The *announcement* is not: `cooked--policy' reads it as a license to own the
 input line, and a session that never loads this file needs that reading as much
 as one that does -- so the nonce is kept regardless of who is listening for
 replies."
@@ -384,10 +384,10 @@ replies."
       (should-not sent))))
 
 (ert-deftest cooked-completion-announcement-carries-a-reply-capability ()
-  "Framing a reply needs `base64\='; owning the input line does not.
+  "Framing a reply needs `base64'; owning the input line does not.
 
 A shell without it announces anyway and says so in the last field, so it keeps
-its editable line and merely has nothing to offer `completion-at-point\='.
+its editable line and merely has nothing to offer `completion-at-point'.
 Snippets predating the field could only announce when they could also reply, so
 their silence reads as capable."
   (cooked-tests--with-session '("/bin/cat")
@@ -407,10 +407,10 @@ their silence reads as capable."
     (should-not (cooked-line-completion-nonce (cooked--line)))))
 
 (ert-deftest cooked-completion-nonce-does-not-outlive-its-prompt ()
-  "`ssh host\=' must not leave the local shell\='s license standing.
+  "`ssh host' must not leave the local shell's license standing.
 
 The announcement is a claim about the line being read now.  Once a command
-starts, whatever it spawns -- a remote shell, a nested `zsh -f\=', a REPL --
+starts, whatever it spawns -- a remote shell, a nested `zsh -f', a REPL --
 announces for itself or does not announce at all; inheriting the old nonce would
 hand a bare remote prompt a license nothing on that host ever issued."
   (cooked-tests--with-session '("/bin/cat")

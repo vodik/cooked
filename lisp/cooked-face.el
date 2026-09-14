@@ -38,8 +38,8 @@
 Consulted only where the corresponding `ansi-color-' face gives no foreground,
 so a theme that styles those faces wins.
 
-Setting it through `customize\=' or `setopt\=' redraws the screens already
-running in the new colours; see `cooked--refresh-ansi-colors\='."
+Setting it through `customize' or `setopt' redraws the screens already
+running in the new colours; see `cooked--refresh-ansi-colors'."
   :type '(vector (repeat :inline t string))
   :set (lambda (symbol value)
          (set-default symbol value)
@@ -58,8 +58,8 @@ their bold text is otherwise hard to read.  The text stays bold, and a colour
 given any other way, from the 256-colour cube or as RGB, is left as it is.
 
 Off by default, since a program that asks for bold blue gets bold blue.
-Setting it through `customize\=' or `setopt\=' redraws the screens already
-running; see `cooked--set-bold-is-bright\='."
+Setting it through `customize' or `setopt' redraws the screens already
+running; see `cooked--set-bold-is-bright'."
   :type 'boolean
   :set (lambda (symbol value)
          (set-default symbol value)
@@ -79,17 +79,17 @@ running; see `cooked--set-bold-is-bright\='."
 (defvar-local cooked--face-cache nil)
 
 (defvar-local cooked--style-specs nil
-  "Renditions by id, as the core announced them in a drain\='s `:styles\='.
+  "Renditions by id, as the core announced them in a drain's `:styles'.
 
-A vector indexed by id, each slot (FG BG UL ATTRS) in `cooked--color\=''s
+A vector indexed by id, each slot (FG BG UL ATTRS) in `cooked--color''s
 spelling, or nil for an id not announced.  Kept for the whole session, because
 the core announces an id once and names it by number from then on; an id it
 frees and hands out again is announced again, and overwrites its slot.")
 
 (defvar-local cooked--style-faces nil
-  "Faces by rendition id, resolved from `cooked--style-specs\=' as they are needed.
+  "Faces by rendition id, resolved from `cooked--style-specs' as they are needed.
 
-A slot is nil until the id is first drawn, and `none\=' for a rendition that
+A slot is nil until the id is first drawn, and `none' for a rendition that
 needs no face at all.  Cleared by a theme change, which is what resolves every
 rendition again against the new theme without the core having to resend one.")
 
@@ -119,19 +119,19 @@ rendition again against the new theme without the core having to resend one.")
   "Run in each cooked buffer when the theme changes, to drop stale colors.
 
 The layer above this one caches things it has already colored, and cannot say so
-from here: `cooked-deco.el\=' requires this file, so this file cannot reach back
+from here: `cooked-deco.el' requires this file, so this file cannot reach back
 into it for a cache to clear.  Adding to this hook is how it says so instead.")
 
 (defun cooked--flush-face-cache (&rest _)
   "Forget resolved colors so a new theme applies to subsequent output.
 
-Nothing colorless needs flushing: `cooked--box-glyph-cache\=' holds shape bitmaps
+Nothing colorless needs flushing: `cooked--box-glyph-cache' holds shape bitmaps
 that are colorized live at display time, so a theme change leaves them true.
 What does need it is anything holding a color already resolved against the old
-theme, which is what `cooked-theme-change-hook\=' is for.
+theme, which is what `cooked-theme-change-hook' is for.
 
 It also records the ANSI colours the caches will now be resolved against, so
-that `cooked--refresh-ansi-colors\=' after a theme finds nothing more to do."
+that `cooked--refresh-ansi-colors' after a theme finds nothing more to do."
   (cooked--ansi-faces-changed-p)
   (cooked--dolist-buffers
     (when (hash-table-p cooked--face-cache)
@@ -143,13 +143,13 @@ that `cooked--refresh-ansi-colors\=' after a theme finds nothing more to do."
 (defvar cooked--ansi-face-stamp nil
   "The ANSI colours the face caches were last resolved against, or nil.
 
-A vector of what `cooked--color\=' answers for indices 0 to 15, in index order,
-with `cooked-color-names\=' itself last.  Global, like the faces it describes.")
+A vector of what `cooked--color' answers for indices 0 to 15, in index order,
+with `cooked-color-names' itself last.  Global, like the faces it describes.")
 
 (defun cooked--ansi-faces-changed-p ()
   "Record the ANSI colours now in force, and say whether they have moved.
 
-Sixteen `face-foreground\=' calls compared in place, which allocates nothing
+Sixteen `face-foreground' calls compared in place, which allocates nothing
 unless something moved.  A theme sets every face whether or not its colour
 changes, and a face can be set to the colour it already had, so the moment of
 the set is not enough to know.  The first call answers t, since nothing says
@@ -182,17 +182,17 @@ after a theme change."
     (cooked--redraw-every-screen)))
 
 (defvar cooked--ansi-refresh-timer nil
-  "The pending `cooked--refresh-ansi-colors\=' call, or nil.")
+  "The pending `cooked--refresh-ansi-colors' call, or nil.")
 
 (defun cooked--notice-face-change (face &rest _)
-  "Refresh the screens soon if FACE is one of `cooked--ansi-faces\='.
+  "Refresh the screens soon if FACE is one of `cooked--ansi-faces'.
 
-After `set-face-attribute\=', which is where `set-face-foreground\=',
-`customize-face\=' and a theme all end up.  Only a theme runs a hook, so a face
-edited any other way stayed resolved in `cooked--face-cache\=' and drawn on the
+After `set-face-attribute', which is where `set-face-foreground',
+`customize-face' and a theme all end up.  Only a theme runs a hook, so a face
+edited any other way stayed resolved in `cooked--face-cache' and drawn on the
 screen until the child sent different cells.  Deferred to one idle call, so a
 theme setting all sixteen faces costs one comparison, and that one finds the
-stamp already current, because `cooked--flush-face-cache\=' records it."
+stamp already current, because `cooked--flush-face-cache' records it."
   (when (and (not cooked--ansi-refresh-timer)
              (cl-position face cooked--ansi-faces :test #'eq))
     (setq cooked--ansi-refresh-timer
@@ -203,20 +203,20 @@ stamp already current, because `cooked--flush-face-cache\=' records it."
 (advice-add 'set-face-attribute :after #'cooked--notice-face-change)
 
 (defvar cooked--theme-redraw-timer nil
-  "The pending `cooked--redraw-every-screen\=' call after a theme change, or nil.")
+  "The pending `cooked--redraw-every-screen' call after a theme change, or nil.")
 
 (defun cooked--theme-changed (&rest _)
   "Flush the resolved colours, and redraw every screen in the new theme soon.
 
 Flushing alone let a later drain resolve faces again, but nothing sends one: a
 shell idle at its prompt repaints nothing, and a full-screen program that
-rewrites the same cells damages nothing, so the screen kept the old theme\='s
+rewrites the same cells damages nothing, so the screen kept the old theme's
 colours until the child wrote something different.  So every screen is redrawn
-as an ANSI face edit redraws it; see `cooked--refresh-ansi-colors\='.  Rows in
+as an ANSI face edit redraws it; see `cooked--refresh-ansi-colors'.  Rows in
 the scrollback keep the colours they were drawn in.
 
 The redraw waits for an idle moment, because switching theme is usually two
-calls: `load-theme\=' after `disable-theme\=' on the old one, or several themes
+calls: `load-theme' after `disable-theme' on the old one, or several themes
 enabled in a row by an init file.  Each call flushes, which is cheap, and all of
 them share one redraw."
   (cooked--flush-face-cache)
@@ -267,7 +267,7 @@ supports Emacs 29, which draws fewer styles than 30.")
 (defun cooked--underline-spec (attrs ul)
   "The `:underline' value for the ATTRS bitmask with underline colour UL.
 
-Plain t whenever there is nothing to say beyond \='underlined\=', so the common
+Plain t whenever there is nothing to say beyond `underlined', so the common
 case produces exactly the face plist it did before styled underlines existed.
 A `line' style is never spelled out, for the same reason: it is the default."
   (let ((style (aref cooked--underline-styles
@@ -289,8 +289,8 @@ text again, which is the honest way to turn this off.  It is the whole of the
 policy, which is why there is no separate variable saying the same thing twice.
 
 The default is a hairline box because that is the one channel nothing else here
-uses.  Weight is bold and faint, slant is italic, `:underline\=' is a whole
-sub-protocol of its own, `:strike-through\=' is SGR 9, `:overline\=' is SGR 53,
+uses.  Weight is bold and faint, slant is italic, `:underline' is a whole
+sub-protocol of its own, `:strike-through' is SGR 9, `:overline' is SGR 53,
 and reverse and conceal both spend the two colours — so any of those would make
 blinking text indistinguishable from text carrying the attribute it collided
 with, which is the bug this face exists to fix rather than move.
@@ -313,44 +313,44 @@ repainting every blinking cell a couple of times a second, forever, on the path
 DESIGN.md's \"The pace is a floor, not a clock\" spends its whole argument
 keeping quiet — redisplay work that no child output asked for and that a
 buffer left on screen goes on paying while nothing at all is happening.  The
-cursor blink `eat\=' drives from a timer is one cell and one overlay; this
+cursor blink `eat' drives from a timer is one cell and one overlay; this
 would be up to a screenful of text properties.  Terminals from xterm down have
 always been allowed to render blink as a static distinction, and that is what
-this is: the compromise `cooked--face-build\=' already makes for conceal, which
-paints foreground over background rather than reaching for `invisible\='."
+this is: the compromise `cooked--face-build' already makes for conceal, which
+paints foreground over background rather than reaching for `invisible'."
   :group 'cooked)
 
 (defface cooked--concealed '((t))
   "Internal: what concealed text on the default background inherits.
 
-Not for customizing, since the buffer remaps it: `cooked--remap-concealed\='
-gives it a `:foreground\=' of the background this buffer draws, whatever OSC 11
-and DECSCNM have made that.  A face plist cannot say \='the colour of the default
-background\=' any other way, and naming the colour itself would freeze it at the
+Not for customizing, since the buffer remaps it: `cooked--remap-concealed'
+gives it a `:foreground' of the background this buffer draws, whatever OSC 11
+and DECSCNM have made that.  A face plist cannot say `the colour of the default
+background' any other way, and naming the colour itself would freeze it at the
 moment the plist was built.
 
 On a text terminal whose colours Emacs does not know, the background is
-`unspecified-bg\=', and concealed text shows anyway.  Emacs draws a foreground
-of `unspecified-bg\=' by turning on reverse video, since that is the only way a
+`unspecified-bg', and concealed text shows anyway.  Emacs draws a foreground
+of `unspecified-bg' by turning on reverse video, since that is the only way a
 terminal paints text in its own background colour, so a concealed password
 comes out as a reversed block with the letters legible in it.  No face hides
 text there, because every channel a face has is a colour or an attribute the
-terminal draws visibly.  Hiding it would take a `display\=' of blanks over the
+terminal draws visibly.  Hiding it would take a `display' of blanks over the
 cells, which the renderer does not put on concealed text.  A frame whose
-default colours are named, by a theme or its `background-color\=' parameter,
+default colours are named, by a theme or its `background-color' parameter,
 conceals as intended."
   :group 'cooked)
 
 (defface cooked--concealed-reversed '((t))
   "Internal: what reversed concealed text on the default foreground inherits.
 
-The mirror of `cooked--concealed\=': remapped to a `:background\=' of the default
+The mirror of `cooked--concealed': remapped to a `:background' of the default
 foreground, which inverse video then paints as the glyph over a cell that is
 that same colour."
   :group 'cooked)
 
 (defvar-local cooked--concealed-remaps nil
-  "The cookies remapping `cooked--concealed\=' and its reversed twin, or nil.")
+  "The cookies remapping `cooked--concealed' and its reversed twin, or nil.")
 
 (defun cooked--remap-concealed (foreground background)
   "Draw concealed default-coloured text in FOREGROUND and BACKGROUND from now on.
@@ -358,7 +358,7 @@ that same colour."
 The two are the colours this buffer draws as its defaults, swapped already if
 the screen is reversed.  Every concealed cell that inherits the faces follows
 at once, including the ones already on the screen, which is why this is a
-remap rather than a colour baked into the cell\='s face: a password prompt\='s
+remap rather than a colour baked into the cell's face: a password prompt's
 hidden echo must stay hidden when an OSC 11 set lands after it."
   (mapc #'face-remap-remove-relative cooked--concealed-remaps)
   (setq cooked--concealed-remaps
@@ -385,18 +385,18 @@ that was just computed — are handled separately in `cooked--face'.")
 
 (eval-and-compile
   (defconst cooked--style-record 16
-    "Bytes in one packed style span.  See `Block::push_style\=' in src/wire.rs.
+    "Bytes in one packed style span.  See `Block::push_style' in src/wire.rs.
 
 The stride *is* the format: a reader finds the next span by adding this and
 never by decoding a length.  The Rust side asserts the same number, so a field
 added to the record on one side without widening it on both desynchronises the
 two at the second span of the first styled row, where every later span reads
-its neighbour\='s bytes and the buffer comes out miscoloured with nothing to
+its neighbour's bytes and the buffer comes out miscoloured with nothing to
 point at.
 
-The fields are `u32\='s at the offsets the constants below name: START and END
-as character offsets, then the ids of the span\='s rendition and link.  They are
-available at compile time so that `cooked--do-style-spans\=' adds literals rather
+The fields are `u32's at the offsets the constants below name: START and END
+as character offsets, then the ids of the span's rendition and link.  They are
+available at compile time so that `cooked--do-style-spans' adds literals rather
 than look up variables on the render path.")
 
   (defconst cooked--style-start 0 "Offset of START in a style record.")
@@ -406,7 +406,7 @@ than look up variables on the render path.")
     "Offset of the link id in a style record, 0 for none."))
 
 (defun cooked--install-styles (styles)
-  "Record STYLES, a drain\='s `:styles\=', before anything naming them renders.
+  "Record STYLES, a drain's `:styles', before anything naming them renders.
 
 Each entry is (ID FG BG UL ATTRS).  A redefined id forgets the face it had,
 since the id now names a different rendition."
@@ -430,7 +430,7 @@ since the id now names a different rendition."
 (defun cooked--style-face-resolve (id)
   "Resolve rendition ID into a face, remembering the answer.
 
-Out of line from `cooked--style-face\=' because it runs once per id per theme
+Out of line from `cooked--style-face' because it runs once per id per theme
 rather than once per span."
   (pcase-let* ((`(,fg ,bg ,ul ,attrs)
                 (and (< id (length cooked--style-specs))
@@ -451,13 +451,13 @@ rather than once per span."
 (defmacro cooked--do-style-spans (spec &rest body)
   "Run BODY for each span in the packed style records STYLES.
 
-SPEC is (FROM TO FACE LINK STYLES): FROM and TO are bound to the span\='s START
+SPEC is (FROM TO FACE LINK STYLES): FROM and TO are bound to the span's START
 and END character offsets, FACE to the face its rendition resolves to or nil,
 and LINK to its link id or nil.  A span with neither runs nothing.
 
-The one walker for the records, shared by the terminal\='s renderer and the
-comint filter.  It steps by `cooked--style-record\=' and allocates nothing per
-span: resolving a face is an `aref\=' into `cooked--style-faces\='."
+The one walker for the records, shared by the terminal's renderer and the
+comint filter.  It steps by `cooked--style-record' and allocates nothing per
+span: resolving a face is an `aref' into `cooked--style-faces'."
   (declare (indent 1) (debug ((symbolp symbolp symbolp symbolp form) body)))
   (pcase-let ((`(,from ,to ,face ,link ,styles) spec)
               (packed (make-symbol "packed"))
@@ -483,7 +483,7 @@ span: resolving a face is an `aref\=' into `cooked--style-faces\='."
 (defun cooked--color-rgb (color)
   "COLOR as a list of three channels from 0.0 to 1.0, or nil if unreadable.
 
-A hex spelling is read here rather than handed to `color-name-to-rgb\=', which
+A hex spelling is read here rather than handed to `color-name-to-rgb', which
 asks the frame: a frame with few colours -- a tty, or batch -- answers with the
 nearest one it has, and a blend of those is not the blend of the colours the
 child sent.  Names still go to the frame, having no other source."
@@ -502,14 +502,14 @@ child sent.  Names still go to the frame, having no other source."
 (defun cooked--blend (fg bg alpha)
   "FG laid over BG at coverage ALPHA, mixed in linear light, as a hex colour.
 
-What a shade glyph is drawn in -- see `cooked--shade-face\=' in cooked-deco.el.
+What a shade glyph is drawn in -- see `cooked--shade-face' in cooked-deco.el.
 The mix is done on light rather than on the sRGB numbers, because that is what
 the eye does with a fine stipple of the two: half white and half black averages
 to #bcbcbc, and a naive per-channel mix would say #808080, visibly darker than
 the ▒ it stands for.  So each channel is decoded from sRGB to linear, mixed, and
 encoded back.
 
-A colour `color-name-to-rgb\=' cannot read -- a tty frame\='s unspecified pair --
+A colour `color-name-to-rgb' cannot read -- a tty frame's unspecified pair --
 leaves nothing to mix, and the nearer of the two colours stands in."
   (let ((front (cooked--color-rgb fg))
         (back (cooked--color-rgb bg)))
@@ -530,10 +530,10 @@ leaves nothing to mix, and the nearer of the two colours stands in."
 (defun cooked--face (fg bg attrs &optional ul)
   "Face plist for FG, BG, the ATTRS bitmask and underline colour UL.
 
-FG, BG and UL are in `cooked--color\='s spelling: nil, an index, or a list of
-R G B.  Memoized per buffer in `cooked--face-cache\=', so every rendition id that
+FG, BG and UL are in `cooked--color's spelling: nil, an index, or a list of
+R G B.  Memoized per buffer in `cooked--face-cache', so every rendition id that
 names the same rendition shares one face, and a theme change flushes them all
-with one `clrhash\='."
+with one `clrhash'."
   (cooked--cached cooked--face-cache (list fg bg attrs ul)
     (cooked--face-build fg bg attrs ul)))
 

@@ -75,34 +75,34 @@ ones `fringe-bitmaps' lists (\\[describe-variable] on that variable, or
 (defface cooked-command-decoration-success '((t :inherit (success fringe)))
   "Face for the fringe marker on a command that exited zero.
 
-Inherits `fringe\=' after `success\=' -- neither `success\=' nor the two faces
-below it ever set a `:background\=', so without this the bitmap's off-pixels
+Inherits `fringe' after `success' -- neither `success' nor the two faces
+below it ever set a `:background', so without this the bitmap's off-pixels
 fall back to whatever the *fringe drawing code* itself uses as a fringe
-background, which is not the same lookup as an `:inherit\=' reference: a plain
-`:inherit\=' is re-merged through `face-remapping-alist\=' on every redisplay,
+background, which is not the same lookup as an `:inherit' reference: a plain
+`:inherit' is re-merged through `face-remapping-alist' on every redisplay,
 the same as buffer text, while that other fallback is not.  A buffer with a
-remapped `fringe\=' -- `solaire-mode\=', say, dimming a non-file buffer -- then
+remapped `fringe' -- `solaire-mode', say, dimming a non-file buffer -- then
 shows the marker's own bar in the right colour sitting on the *unremapped*
 fringe background, a bright square around an otherwise dim fringe.  Naming
-`fringe\=' here explicitly routes the background through the remap-aware path
+`fringe' here explicitly routes the background through the remap-aware path
 instead of the fallback."
   :group 'cooked)
 
 (defface cooked-command-decoration-failure '((t :inherit (error fringe)))
   "Face for the fringe marker on a command that exited non-zero.
 
-See `cooked-command-decoration-success\=' for why `fringe\=' is inherited too."
+See `cooked-command-decoration-success' for why `fringe' is inherited too."
   :group 'cooked)
 
 (defface cooked-command-decoration-running '((t :inherit (shadow fringe)))
   "Face for the fringe marker on the command that is running right now.
 
-See `cooked-command-decoration-success\=' for why `fringe\=' is inherited too.
+See `cooked-command-decoration-success' for why `fringe' is inherited too.
 
-Inherits `shadow\=' rather than `warning\=' deliberately.  The other two faces are
+Inherits `shadow' rather than `warning' deliberately.  The other two faces are
 the two answers to one question, and a command that has not finished has not
 answered it -- so this has to sit off that axis rather than being a third
-colour on it, which is what an orange would be in a theme where `warning\=' means
+colour on it, which is what an orange would be in a theme where `warning' means
 \"finished, badly\".  Dim also keeps the loud markers loud: on a busy screen the
 one that matters is the failure."
   :group 'cooked)
@@ -135,7 +135,7 @@ command, same as `cooked--prompt-starts' falls back for navigation."
   "The overlay already decorating COMMAND at POSITION, if there is one.
 
 Asked before painting, because both callers can arrive at a row that is already
-decorated: `cooked-command-decorations--rearm\=' runs on every rewrite of a row,
+decorated: `cooked-command-decorations--rearm' runs on every rewrite of a row,
 and the rewrite that damaged the row may not have been one that emptied it."
   (seq-find (lambda (overlay)
               (eq (overlay-get overlay 'cooked-command-decoration) command))
@@ -186,11 +186,11 @@ than writing twice: the running marker and the finished one are the same
 overlay in the same fringe, differing only in what they are coloured by and in
 whether there is anything to click.  Returns the overlay, live and correct.
 
-Uses an overlay\='s `before-string\=', never a `display\=' property on the
-buffer\='s own text: `cooked--render-rows\=' deletes and reinserts whole rows,
-so a text property dies with the row, and a `display\=' spec on a real
-character costs that character a column.  `evaporate t\=' so
-`cooked--discard-scrollback\=' cleans the overlay up for free when the text it
+Uses an overlay's `before-string', never a `display' property on the
+buffer's own text: `cooked--render-rows' deletes and reinserts whole rows,
+so a text property dies with the row, and a `display' spec on a real
+character costs that character a column.  `evaporate t' so
+`cooked--discard-scrollback' cleans the overlay up for free when the text it
 anchors to goes.
 
 The \"already right\" test names FACE as well as the span: the running marker
@@ -201,7 +201,7 @@ command grey forever after it exited.
 HELP is the tooltip, read once per repaint rather than per hover, since it is a
 property of a virtual string and not a function.  KEYMAP nil makes a marker
 with nothing to click, which is what the running command gets -- see
-`cooked-command-decorations--sync-running\='."
+`cooked-command-decorations--sync-running'."
   (if (and overlay (overlay-buffer overlay)
            (= (overlay-start overlay) pos)
            (= (overlay-end overlay) (1+ pos))
@@ -223,24 +223,24 @@ with nothing to click, which is what the running command gets -- see
     overlay))
 
 (defun cooked-command-decorations--paint (command)
-  "Put COMMAND\='s fringe marker on its prompt row, or move it back onto it.
+  "Put COMMAND's fringe marker on its prompt row, or move it back onto it.
 
 Graphical frames only.  There is no sensible single-glyph substitute for a
 coloured status marker, and spending a real column of every prompt line on one
 is too high a tax, so a terminal frame gets no decoration -- an accepted gap in
-the same spirit as the `fringe-mode\=' 0 gap `cooked--mark-truncation\=' has.
+the same spirit as the `fringe-mode' 0 gap `cooked--mark-truncation' has.
 
 Idempotent, and that has to mean more than \"does not paint twice\": an overlay
 is not a fact about a command, it is two markers, and a drain moves markers for
 reasons having nothing to do with what they marked.  A drain that evicts rows
-inserts their text at `cooked--screen-start\=', and an overlay sitting exactly
+inserts their text at `cooked--screen-start', and an overlay sitting exactly
 there swallows the insertion -- its start stays put while its end is carried to
 the far side of the block.  So the check is not \"is something painted where I
-want\" but \"is *this command\='s* overlay exactly where and how big it should
+want\" but \"is *this command's* overlay exactly where and how big it should
 be\", and anything else is moved back into shape.
 
-`cooked--commands\=' is the source of truth throughout: the colour is read from
-the record\='s own exit code on every paint, so a marker re-armed a hundred
+`cooked--commands' is the source of truth throughout: the colour is read from
+the record's own exit code on every paint, so a marker re-armed a hundred
 redraws later still says what the record says."
   (when (display-graphic-p)
     (when-let* ((anchor (cooked-command-decorations--anchor command))
@@ -264,14 +264,14 @@ redraws later still says what the record says."
   "The overlay marking the command that is running right now, if there is one.
 
 A variable of its own rather than an entry in
-`cooked-command-decorations--overlays\=', because there is no record to key that
-table on: `cooked--commands\=' holds finished commands, and a command acquires a
-record when its `D\=' mark supplies an exit code.  Nothing is lost by keeping it
+`cooked-command-decorations--overlays', because there is no record to key that
+table on: `cooked--commands' holds finished commands, and a command acquires a
+record when its `D' mark supplies an exit code.  Nothing is lost by keeping it
 apart -- a shell runs one command at a time, so this marker is a singleton in a
 way the finished ones are not.
 
-Torn down and rebuilt freely: `cooked-command-decorations--sync-running\='
-derives it from `cooked--running-anchor\=' on every render rather than
+Torn down and rebuilt freely: `cooked-command-decorations--sync-running'
+derives it from `cooked--running-anchor' on every render rather than
 maintaining it, which is the same bargain the finished markers make with the
 re-arm.")
 
@@ -284,15 +284,15 @@ re-arm.")
 (defun cooked-command-decorations--sync-running ()
   "Make the running marker agree with what is actually running.
 
-Which is to say: up, on the anchor `cooked--running-anchor\=' names, whenever a
+Which is to say: up, on the anchor `cooked--running-anchor' names, whenever a
 command is running -- and down otherwise.  Both directions from one function
-and derived from cooked\='s own bookkeeping each time, so nothing has to notice
-the ways a running marker can be left stranded: a `D\=' mark whose `C\=' was
+and derived from cooked's own bookkeeping each time, so nothing has to notice
+the ways a running marker can be left stranded: a `D' mark whose `C' was
 lost, an alt screen coming up under it, a drain dragging the overlay off its
 row.
 
 Down under the alt screen for the reason
-`cooked-command-decorations--clear-live\=' takes the finished markers down -- a
+`cooked-command-decorations--clear-live' takes the finished markers down -- a
 full-screen program is drawn over these
 very rows -- and back up on the first render after it leaves, since the marker
 is derived and not remembered."
@@ -309,27 +309,27 @@ is derived and not remembered."
     (cooked-command-decorations--drop-running)))
 
 (defun cooked-command-decorations--started (_anchor)
-  "Put the running marker up, from `cooked-command-started-functions\='.
+  "Put the running marker up, from `cooked-command-started-functions'.
 
 The anchor is ignored and asked for again, because
-`cooked-command-decorations--sync-running\=' has to be able to answer this
+`cooked-command-decorations--sync-running' has to be able to answer this
 question from nothing at all when the re-arm calls it."
   (cooked-command-decorations--sync-running))
 
 (defun cooked-command-decorations--add (command)
-  "Paint COMMAND\='s marker, called from `cooked-command-finished-functions\='.
+  "Paint COMMAND's marker, called from `cooked-command-finished-functions'.
 
 Only half the story, and the shorter half: this fires exactly once per command,
 while the row it decorates can be rewritten any number of times afterwards.  See
-`cooked-command-decorations--rearm\=', which is the other half and does not
+`cooked-command-decorations--rearm', which is the other half and does not
 replace this one -- a command that finishes on a row nothing damages again would
 otherwise never be decorated at all.
 
 Takes the running marker down first.  The two want the same row -- this
-command\='s prompt -- and this is the moment the exit code the finished marker is
+command's prompt -- and this is the moment the exit code the finished marker is
 coloured by comes into existence, so the handover is here rather than left to
-the next render.  `cooked--command-start\=' is still live at this point, since
-`cooked--mark-command-end\=' clears it only after running its hook, so a sync
+the next render.  `cooked--command-start' is still live at this point, since
+`cooked--mark-command-end' clears it only after running its hook, so a sync
 called here would put the running marker straight back up."
   (cooked-command-decorations--drop-running)
   (cooked-command-decorations--paint command))
@@ -337,14 +337,14 @@ called here would put the running marker straight back up."
 (defun cooked-command-decorations--rearm (_beg _end)
   "Re-paint the markers of every command this drain may have moved or unpainted.
 
-The overlay a finished command gets carries `evaporate t\=' and rides on real
-characters, and `cooked--render-rows\=' deletes a damaged row before rewriting
+The overlay a finished command gets carries `evaporate t' and rides on real
+characters, and `cooked--render-rows' deletes a damaged row before rewriting
 it -- so Emacs tears the overlay down, and since
-`cooked-command-finished-functions\=' fires once per command, nothing would ever
+`cooked-command-finished-functions' fires once per command, nothing would ever
 put it back.  A resize damages every live row at once, so any command whose
 prompt is still on screen loses its marker the first time the window changes
-width.  Hence this, hung on `cooked-row-rendered-functions\=': re-applied per
-render rather than persisted, exactly as `cooked--fontify-links\=' re-runs
+width.  Hence this, hung on `cooked-row-rendered-functions': re-applied per
+render rather than persisted, exactly as `cooked--fontify-links' re-runs
 goto-addr over each freshly-rendered row.
 
 The row it is called for is deliberately ignored, which fixes two bugs rather
@@ -357,17 +357,17 @@ that then owns the prompt is never rendered again.  Asking about the commands
 rather than the row covers both, and is cheap: painting an already-correct
 decoration is a hash lookup and two integer comparisons.
 
-`cooked-command-decorations--floor\=' keeps that from walking the whole session.
-`cooked--commands\=' is newest first and its anchors only increase, so the walk
+`cooked-command-decorations--floor' keeps that from walking the whole session.
+`cooked--commands' is newest first and its anchors only increase, so the walk
 stops at the first command already settled in permanent scrollback when the last
 sweep ran.
 
-Called after `cooked--relocate-marks\=', not during the render -- see
-`cooked-row-rendered-functions\=', which runs late for exactly this consumer.
+Called after `cooked--relocate-marks', not during the render -- see
+`cooked-row-rendered-functions', which runs late for exactly this consumer.
 
 The running marker is re-derived here too, and unconditionally: it sits on the
 live screen by definition, which is the part of the buffer every render damages,
-and it is above `cooked-command-decorations--floor\=' by the same definition, so
+and it is above `cooked-command-decorations--floor' by the same definition, so
 the walk below would never reach it."
   (cooked-command-decorations--sync-running)
   (let* ((screen (cooked--screen-start-position))
@@ -394,7 +394,7 @@ the walk below would never reach it."
 No mention of clicking, because the running marker is given no keymap: the
 three actions the menu offers all want a command that has finished.  Rerunning
 one that is still going means submitting at a busy prompt, which
-`cooked-rerun-command\=' refuses on its own, and copying its output
+`cooked-rerun-command' refuses on its own, and copying its output
 would copy however much of it has arrived so far."
   (format "%s\nrunning" (or cooked--command-input "")))
 
@@ -403,7 +403,7 @@ would copy however much of it has arrived so far."
 
 The alt screen is drawn over the same buffer positions the live primary rows
 occupy, so a marker anchored to one of those rows would sit in the fringe beside
-a running program\='s frame, saying something about a command that is nowhere on
+a running program's frame, saying something about a command that is nowhere on
 it.  Scrollback markers are left alone: the buffer is narrowed to the alt screen
 while it is up, so they are not on display to be wrong.
 
@@ -413,11 +413,11 @@ marker is anchored to the prompt it was launched from -- a row now outside the
 narrowing, and so outside the range that sweep looks in.
 
 Nothing puts any of them back explicitly, and nothing needs to: restoring the
-primary rewrites every row the program\='s last frame left different, and
-`cooked-command-decorations--rearm\=' repaints every marker once any row is
+primary rewrites every row the program's last frame left different, and
+`cooked-command-decorations--rearm' repaints every marker once any row is
 rendered -- which is the whole reason the decoration is re-applied per render
 rather than persisted.  Only a frame identical to the primary in every row
-leaves them down, which a full-screen program over a command\='s output does
+leaves them down, which a full-screen program over a command's output does
 not draw."
   (when-let* ((screen (and cooked--alt (cooked--screen-start-position))))
     (cooked-command-decorations--drop-running)
@@ -450,11 +450,11 @@ fringe and so no marker to aim at."
 (defun cooked-command-decorations--act (command)
   "Offer the rerun / copy command / copy output menu for COMMAND.
 
-The three verbs are `cooked-rerun-command\=', `cooked-copy-command\=' and
-`cooked-copy-output\=', which live in the tree proper rather than here: they
+The three verbs are `cooked-rerun-command', `cooked-copy-command' and
+`cooked-copy-output', which live in the tree proper rather than here: they
 need a command record and nothing else, so tying them to a fringe this file
 paints would have made them opt-in for no reason -- and the menu on
-`cooked-mode-map\=' has to be able to name them whether this file was loaded or
+`cooked-mode-map' has to be able to name them whether this file was loaded or
 not.  Each is called with COMMAND rather than left to resolve point for itself,
 which is the whole reason they take one: a click on a marker knows exactly
 which record it means, and re-deriving that from point would sometimes answer

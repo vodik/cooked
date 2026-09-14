@@ -623,11 +623,11 @@ echo \"line $i the quick brown fox jumps over the lazy dog\"; i=$((i+1)); done")
 (defun cooked-bench--row-count (rows)
   "How many *screen rows* ROWS covers.
 
-Not `length\=': an entry is a run of contiguous damaged rows and its block\='s row
+Not `length': an entry is a run of contiguous damaged rows and its block's row
 table is what says how many of them there are.  Every figure in this file that
 is per row rather than per frame reads this, and the grid height does too --
-`:height\=' taken as the entry count declared a one-row screen, which
-`cooked--fit-screen\=' then trimmed the other twenty-three rows down to."
+`:height' taken as the entry count declared a one-row screen, which
+`cooked--fit-screen' then trimmed the other twenty-three rows down to."
   (cl-loop for (_first . block) in rows sum (length (nth 3 block))))
 
 (cl-defun cooked-bench--update (rows &key alt images shifts height edits)
@@ -659,8 +659,8 @@ SHIFTS is the drain's `:shifts', a list of (TOP BOTTOM COUNT UP) moves that
 rather than positional arguments from here on: four optional trailing values
 whose meanings are unrelated is exactly the call site nobody can read.
 
-EDITS is the drain\='s `:edits\=', rows of which only part is replaced; see
-`cooked-bench--edit\='."
+EDITS is the drain's `:edits', rows of which only part is replaced; see
+`cooked-bench--edit'."
   ;; The renditions the fixtures name go into this buffer here, once, rather than on
   ;; the plist: an update is applied over and over inside the timed loops, and a
   ;; `:styles' installed each time would charge every frame for resolving its faces
@@ -675,9 +675,9 @@ EDITS is the drain\='s `:edits\=', rows of which only part is replaced; see
 (defun cooked-bench--edit (index char-start char-end length text)
   "One `:edits' entry replacing CHAR-START..CHAR-END of row INDEX with TEXT.
 
-LENGTH is the row\='s length afterwards, as the core sends it.  TEXT is plain,
-and its block\='s row table is TEXT\='s own, which for a uniform ASCII row is the
-same answer the whole row\='s would be."
+LENGTH is the row's length afterwards, as the core sends it.  TEXT is plain,
+and its block's row table is TEXT's own, which for a uniform ASCII row is the
+same answer the whole row's would be."
   (cons index
         (cons char-start
               (cons char-end
@@ -687,28 +687,28 @@ same answer the whole row\='s would be."
 (defun cooked-bench--run (rows &optional first)
   "ROWS, each a description of one screen row, as the single run the module sends.
 
-The fixtures here hand `cooked--apply\=' what a full-screen repaint actually
+The fixtures here hand `cooked--apply' what a full-screen repaint actually
 produces, and since the core coalesces contiguous damaged rows that is *one*
-entry -- `(0 . BLOCK)\=' -- whose block holds every row, joined by newlines, with
-a row table saying where each of them begins.  See `contiguous_runs\=' in
-src/wire.rs, and `cooked--render-block\=' for the block's shape.  A fixture still
+entry -- `(0 . BLOCK)' -- whose block holds every row, joined by newlines, with
+a row table saying where each of them begins.  See `contiguous_runs' in
+src/wire.rs, and `cooked--render-block' for the block's shape.  A fixture still
 sending a block per row would measure a path the module no longer takes.
 
 Each element of ROWS is (TEXT SPANS DECOS UNIFORM): the row's characters, its
 style spans as (START END FG BG UNDERLINE ATTRS) with offsets *within the row* and
-colours in the tagged encoding `cooked-bench--color-spec\=' reads,
+colours in the tagged encoding `cooked-bench--color-spec' reads,
 its (START DECO) decoration spans likewise, and its answer to the guard's
-uniformity question -- t, `glyph\=' or nil, as the core spells it.  The row
-table's layout hash is the row text\='s `sxhash-equal\=': any fixnum that differs
-where the text does is a key the memo can use, which is all the core\='s is.  Offsets are given per row and re-based here because that
+uniformity question -- t, `glyph' or nil, as the core spells it.  The row
+table's layout hash is the row text's `sxhash-equal': any fixnum that differs
+where the text does is a key the memo can use, which is all the core's is.  Offsets are given per row and re-based here because that
 is the only place that knows where a row landed in the assembled text, and
 getting it wrong is a miscolouring rather than an error -- see
-`cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need\='.
+`cooked-bench-a-run-carries-every-row-the-guard-and-the-spans-need'.
 
 FIRST is the screen row the run begins at, defaulting to 0 because every
 fixture that repaints a whole screen begins there.  A scroll does not: the row
-a line feed recycles is the *last* one, so `cooked-bench--scrolled-row\=' asks
-for 23.  The index is what `cooked--render-rows\=' seeks to, so a run at the
+a line feed recycles is the *last* one, so `cooked-bench--scrolled-row' asks
+for 23.  The index is what `cooked--render-rows' seeks to, so a run at the
 wrong one would rewrite the top of the screen and leave the recycled row
 holding the text that scrolled away."
   (let ((text nil)
@@ -755,24 +755,24 @@ standing on one cell."
   (cl-loop for b below bytes collect (logand (ash value (* -8 b)) 255)))
 
 (defun cooked-bench--style-record (start end id link)
-  "One packed style span, as `Block::push_style\=' in src/wire.rs lays it out.
+  "One packed style span, as `Block::push_style' in src/wire.rs lays it out.
 
-START and END are character offsets, ID the rendition\='s id and LINK the link\='s,
+START and END are character offsets, ID the rendition's id and LINK the link's,
 0 for none.  Hand-built here because the point of these fixtures is to hand
-`cooked--apply\=' exactly what the module would, without a child having to
+`cooked--apply' exactly what the module would, without a child having to
 produce it -- so the layout is spelled out on this side too, and
-`cooked--style-record\=' is the number that has to agree."
+`cooked--style-record' is the number that has to agree."
   (append (cooked-bench--le start 4) (cooked-bench--le end 4)
           (cooked-bench--le id 4) (cooked-bench--le link 4)))
 
 (defvar cooked-bench--styles (make-hash-table :test #'equal)
   "Every rendition a fixture has named, as (FG BG UL ATTRS) to its id.
 
-Shared by every fixture, the way a session\='s store is shared by every row, and
+Shared by every fixture, the way a session's store is shared by every row, and
 numbered from 1 because 0 is the default rendition in the core too.")
 
 (defun cooked-bench--color-spec (packed)
-  "PACKED, a colour tagged in its top byte, in `cooked--color\=''s spelling.
+  "PACKED, a colour tagged in its top byte, in `cooked--color''s spelling.
 Tag 0 is the default, 1 a palette index in the low byte, 2 a direct colour."
   (pcase (ash packed -24)
     (0 nil)
@@ -788,17 +788,17 @@ Tag 0 is the default, 1 a palette index in the low byte, 2 a direct colour."
                                attrs)))
 
 (defun cooked-bench--spec-id (spec)
-  "The id of SPEC, a rendition as (FG BG UL ATTRS) in `cooked--color\=''s spelling."
+  "The id of SPEC, a rendition as (FG BG UL ATTRS) in `cooked--color''s spelling."
   (or (gethash spec cooked-bench--styles)
       (puthash spec (1+ (hash-table-count cooked-bench--styles))
                cooked-bench--styles)))
 
 (defun cooked-bench--adopt-styles (rows specs)
-  "ROWS, a drain\='s `:rows\=' from another session, renumbered into the fixtures\=' ids.
+  "ROWS, a drain's `:rows' from another session, renumbered into the fixtures' ids.
 
 The session that produced ROWS numbered its renditions in its own buffer, as
-SPECS, and the buffer a benchmark applies them in knows only the fixtures\=' table.
-Each record\='s id is rewritten to the id the same rendition has there, so the
+SPECS, and the buffer a benchmark applies them in knows only the fixtures' table.
+Each record's id is rewritten to the id the same rendition has there, so the
 captured rows resolve to the colours they were drawn in."
   (dolist (entry rows rows)
     (when-let* ((styles (nth 2 entry)))
@@ -814,7 +814,7 @@ captured rows resolve to the colours they were drawn in."
           (setq i (+ i cooked--style-record)))))))
 
 (defun cooked-bench--style-table ()
-  "Every rendition named so far, as a drain\='s `:styles\=' spells them."
+  "Every rendition named so far, as a drain's `:styles' spells them."
   (let (table)
     (maphash (lambda (spec id)
                (pcase-let ((`(,fg ,bg ,ul ,attrs) spec))
@@ -825,7 +825,7 @@ captured rows resolve to the colours they were drawn in."
 (defun cooked-bench--styled-rows (count cols)
   "COUNT damaged rows split into eight differently-styled spans.
 
-The spans arrive packed, not as lists -- see `cooked-bench--style-record\='.  An
+The spans arrive packed, not as lists -- see `cooked-bench--style-record'.  An
 indexed foreground and a default background, which is what a shell or a build
 log actually emits and so the case the encoding is tuned for.  The colour is
 rotated by row so that a screenful is not eight faces looked up once and cached
@@ -844,8 +844,8 @@ for the rest of the frame."
 (defun cooked-bench--url-rows (count cols)
   "COUNT damaged rows each carrying a URL, which is what the goto-addr scan costs.
 
-Plain text otherwise, so the gap against `cooked-bench--plain-rows\=' is the whole
-of what `cooked--fontify-links\=' spends on a row that has something to find."
+Plain text otherwise, so the gap against `cooked-bench--plain-rows' is the whole
+of what `cooked--fontify-links' spends on a row that has something to find."
   (let* ((url "curl https://example.com/some/long/path ")
          (text (truncate-string-to-width (concat url (make-string cols ?x)) cols)))
     (cooked-bench--run (cl-loop repeat count collect (list text nil nil t)))))
@@ -853,8 +853,8 @@ of what `cooked--fontify-links\=' spends on a row that has something to find."
 (defun cooked-bench--box-rows (count cols)
   "COUNT damaged rows of box drawing, every cell taking the bitmap path.
 
-The decoration is `(glyph . PACKED)\=' as the module hands it over: four
-little-endian bytes per run of one shape, the `BoxGlyph\=' bits and the number of
+The decoration is `(glyph . PACKED)' as the module hands it over: four
+little-endian bytes per run of one shape, the `BoxGlyph' bits and the number of
 characters drawing them.  0x0050 is a plain light horizontal -- left and right
 edges at weight 1 -- which is what a border is made of, and a row of them is the
 single record the encoding exists to produce."
@@ -871,21 +871,21 @@ single record the encoding exists to produce."
 
 (defconst cooked-bench--tree-continuing
   (concat (string #x2502) (string #xa0) (string #xa0) " ")
-  "One level of `tree\='s indent while that level has more entries below.
+  "One level of `tree's indent while that level has more entries below.
 
 A vertical, two NO-BREAK SPACEs and an ordinary space, which is what
-`tree -C\=' writes byte for byte.  Spelled with character codes because the
+`tree -C' writes byte for byte.  Spelled with character codes because the
 NO-BREAK SPACEs are invisible in a source file, and they are the reason a row of
 this is multi-byte in places the box glyphs alone would not be.")
 
 (defconst cooked-bench--tree-finished "    "
-  "One level of `tree\='s indent once that level has no entries left below it.")
+  "One level of `tree's indent once that level has no entries left below it.")
 
 (defun cooked-bench--tree-entries (depth)
   "The entries of a directory at DEPTH in the synthetic listing, sorted by name.
 
-Each entry is (NAME KIND . CHILDREN), where KIND is `dir\=', `exec\=',
-`link\=' or `file\=', so that every colour `tree -C\=' uses turns up on
+Each entry is (NAME KIND . CHILDREN), where KIND is `dir', `exec',
+`link' or `file', so that every colour `tree -C' uses turns up on
 screen.  A directory at depth six holds only files, which keeps the listing
 finite and puts the deepest rows six verticals in."
   (if (>= depth 6)
@@ -898,11 +898,11 @@ finite and puts the deepest rows six verticals in."
           (list (format "script-%d" depth) 'exec))))
 
 (defun cooked-bench--tree-lines ()
-  "The synthetic directory as `tree -C\=' prints it, one string per line.
+  "The synthetic directory as `tree -C' prints it, one string per line.
 
-Colours are `tree\='s own: bold blue for a directory, bold cyan for a symlink
-followed by its target, bold green for an executable, and `00\=' for a plain
-file, each closed with `ESC [ 0 m\='."
+Colours are `tree's own: bold blue for a directory, bold cyan for a symlink
+followed by its target, bold green for an executable, and `00' for a plain
+file, each closed with `ESC [ 0 m'."
   (let ((lines (list "\e[01;34m.\e[0m")))
     (cl-labels
         ((walk (entries prefix)
@@ -936,9 +936,9 @@ file, each closed with `ESC [ 0 m\='."
 
 The text goes through the real emulator rather than being described by hand, so
 the runs, the absorbed blanks, the decoration records and the row table's
-uniformity flag are whatever production would send.  A hand-written `tree\=' row
+uniformity flag are whatever production would send.  A hand-written `tree' row
 got that wrong once: it left the NO-BREAK SPACEs outside every glyph run, so its
-rows took the width guard\='s slow path, which real `tree\=' output never does.
+rows took the width guard's slow path, which real `tree' output never does.
 
 A child prints the first ROWS lines on the alternate screen and then sleeps, so
 nothing moves while the grid is read.  Once the last line has arrived the screen
@@ -982,18 +982,18 @@ happens before any timing starts; the timed loop only ever applies the result."
       (delete-file file))))
 
 (defun cooked-bench--tree-rows (count cols)
-  "COUNT rows of a `tree -C\=' listing, COLS wide, as the core sends them.
+  "COUNT rows of a `tree -C' listing, COLS wide, as the core sends them.
 
-Box drawing, but not the border kind.  `cooked-bench--box-rows\=' is one
-decoration record covering the whole row, and so is a `tree\=' row now: the
-core absorbs the blanks between its verticals into one glyph run, so `│ │ ├──\='
+Box drawing, but not the border kind.  `cooked-bench--box-rows' is one
+decoration record covering the whole row, and so is a `tree' row now: the
+core absorbs the blanks between its verticals into one glyph run, so `│ │ ├──'
 is a single record however deep the entry.  What depth still changes is how
 wide that record is, which sets the bitmap drawn for it, and the coloured name
 beside it adds style spans.  Before the blanks were absorbed, `tree -C
-/usr/include\=' sent 86,107 records over its 30,326 rows.
+/usr/include' sent 86,107 records over its 30,326 rows.
 
 The listing mixes depths one to six, continuing and finished levels, and every
-colour `tree\=' emits, so a frame is not one row cached twenty-four times."
+colour `tree' emits, so a frame is not one row cached twenty-four times."
   (cooked-bench--core-rows (cooked-bench--tree-lines) count cols))
 
 (defun cooked-bench--linked-rows (count cols)
@@ -1001,7 +1001,7 @@ colour `tree\=' emits, so a frame is not one row cached twenty-four times."
 
 What an editor listing search results or diagnostics draws: each row a link to
 its location, underlined in a colour of its own.  The rows come from the core,
-as `cooked-bench--tree-rows\=' does, so the records carry the links the way
+as `cooked-bench--tree-rows' does, so the records carry the links the way
 production sends them."
   (cooked-bench--core-rows
    (cl-loop for row from 1 to count
@@ -1016,11 +1016,11 @@ production sends them."
 (defun cooked-bench--deco-records (rows)
   "How many decoration records ROWS carries.
 
-The deterministic half of the `tree\=' case, and a count rather than a time for
-the reason `cooked-bench--property-intervals\=' is one: it is exact, it is the
+The deterministic half of the `tree' case, and a count rather than a time for
+the reason `cooked-bench--property-intervals' is one: it is exact, it is the
 same on a busy machine as on a quiet one, and it is the quantity the cost is
 proportional to.  Anything asked once per record -- which until this fixture
-existed included `cooked--layout-window\=' twice over and `cooked--cell-size\='
+existed included `cooked--layout-window' twice over and `cooked--cell-size'
 once -- is paid this many times per frame."
   (cl-loop for (_first . block) in rows sum (length (nth 2 block))))
 
@@ -1049,25 +1049,25 @@ change was."
            "DwABBAEAcCBlBQRbYf8AAAAASUVORK5CYII="))
   "A one-pixel PNG, so the fixture needs no file on disk.
 
-Valid rather than plausible, because `cooked--image-spec\=' hands it to
-`create-image\=' and a spec built over bytes Emacs would refuse is not the spec
+Valid rather than plausible, because `cooked--image-spec' hands it to
+`create-image' and a spec built over bytes Emacs would refuse is not the spec
 production builds.  One pixel because nothing here rasterizes -- batch has no
 glyph matrix -- so the decode cost is not what these rows are about, and a
 larger picture would only make the fixture slower to load.
 
-Byte for byte the PNG `cooked-tests--png\=' assembles from chunks and CRCs in
+Byte for byte the PNG `cooked-tests--png' assembles from chunks and CRCs in
 tests/cooked-tests-render.el, and kept as a literal here instead: that file
 builds it because its tests are partly *about* the format, and this one only
 needs something Emacs will accept.")
 
 (defun cooked-bench--image-cell (id crow ccol cols rows)
-  "The twelve bytes `cooked--apply-image-deco\=' reads for one image cell.
+  "The twelve bytes `cooked--apply-image-deco' reads for one image cell.
 
-A `u32\=' ID, then the cell\='s row CROW and column CCOL *within the picture*,
+A `u32' ID, then the cell's row CROW and column CCOL *within the picture*,
 then the cell rectangle COLS by ROWS the placement was laid at, all
 little-endian.
-See `Deco::packed\=' in src/emu/cell.rs for the encoder, and
-`cooked--apply-image-deco\=' for the walk that coalesces these back into runs."
+See `Deco::packed' in src/emu/cell.rs for the encoder, and
+`cooked--apply-image-deco' for the walk that coalesces these back into runs."
   (append (cooked-bench--le id 4)
           (cooked-bench--le crow 2) (cooked-bench--le ccol 2)
           (cooked-bench--le cols 2) (cooked-bench--le rows 2)))
@@ -1075,35 +1075,35 @@ See `Deco::packed\=' in src/emu/cell.rs for the encoder, and
 (defun cooked-bench--image-rows (count cols)
   "COUNT damaged rows holding one COUNT-row picture, COLS cells wide.
 
-The workload the run-wide `display\=' slice was built for and the one nothing
+The workload the run-wide `display' slice was built for and the one nothing
 here could measure before: a full-screen picture, redrawn every frame, which is
 what
-`icat\=', an image browser paging a directory, or a plotting TUI actually does.
+`icat', an image browser paging a directory, or a plotting TUI actually does.
 
 Per cell on the wire and per run in the buffer, and the fixture has to be
 per-cell or it measures the wrong side of that split.  The module addresses a
 picture one cell at a time -- that is what makes it survive an overwrite, a
-scroll and a rewrap -- and `cooked--apply-image-deco\=' coalesces the records
+scroll and a rewrap -- and `cooked--apply-image-deco' coalesces the records
 back into a maximal run of cells agreeing on the picture, the rectangle, the row
 within it and the next column along.  Emitting one record per row here would
 hand the renderer the answer and time the arithmetic that is left.
 
-So CCOL rises by one across each row and CROW is the screen row\='s own index,
+So CCOL rises by one across each row and CROW is the screen row's own index,
 which is the shape a freshly drawn picture has and therefore coalesces to
-exactly one `display\=' property and one `cooked-deco\=' per row -- 47 intervals
+exactly one `display' property and one `cooked-deco' per row -- 47 intervals
 over a 24x80 frame against the 1943 the per-cell code left, which is the figure
-this fixture exists to put a time against.  (One fewer than 94b43e6\='s 48 and
+this fixture exists to put a time against.  (One fewer than 94b43e6's 48 and
 1944, and the difference is the trailing newline: the last of these rows ends
-the buffer, so `cooked-bench--property-intervals\=' has 23 separators to walk and
+the buffer, so `cooked-bench--property-intervals' has 23 separators to walk and
 not 24.  Same measurement, one boundary apart.)
 
 The text is spaces because an image cell *is* a blank in the default style: see
-`Cell::is_content\=' in src/emu/cell.rs, where the placement is what keeps such
+`Cell::is_content' in src/emu/cell.rs, where the placement is what keeps such
 a row from measuring as empty and being trimmed off the end.  UNIFORM is
 therefore t, honestly and not by convenience -- a space is one byte on one cell
 -- and the guard finishes this row at step 1 as it does a plain one.  What separates this
-fixture from `cooked-bench--plain-rows\=' is the decoration and nothing else,
-which is what makes the gap between the two readable as the picture\='s cost."
+fixture from `cooked-bench--plain-rows' is the decoration and nothing else,
+which is what makes the gap between the two readable as the picture's cost."
   (cooked-bench--run
    (cl-loop
     for row below count
@@ -1117,13 +1117,13 @@ which is what makes the gap between the two readable as the picture\='s cost."
                   t))))
 
 (defun cooked-bench--image-resources (count cols)
-  "The `:images\=' records for the placement `cooked-bench--image-rows\=' makes.
+  "The `:images' records for the placement `cooked-bench--image-rows' makes.
 
 COUNT rows by COLS columns, the same rectangle those rows claim.
 
 One entry, because ids are content-addressed and the module sends a picture
 exactly once however often the child places it.  The pixel dimensions are the
-rectangle at the cell size the bench pins, which is what `cooked--image-spec\='
+rectangle at the cell size the bench pins, which is what `cooked--image-spec'
 would have been given had a real child transmitted it."
   (list (list 1 'png cooked-bench--png
               (* cols (car cooked-bench--cell))
@@ -1322,23 +1322,23 @@ tests/cooked-tests-render.el pins it."
                         :height 24 :shifts '((4 9 1 t))))
 
 (defun cooked-bench-tree ()
-  "`tree\=' in a large directory: an indent of box glyphs beside a name on every row.
+  "`tree' in a large directory: an indent of box glyphs beside a name on every row.
 
 The third shape this file could not see, filed with the other two because the
-lesson is the same one for the third time.  A user reported `tree\=' in a large
+lesson is the same one for the third time.  A user reported `tree' in a large
 directory as extremely slow and it could not be reproduced from here, because
-every box-drawing figure in this file was taken on `cooked-bench--box-rows\=' --
+every box-drawing figure in this file was taken on `cooked-bench--box-rows' --
 a border, which is one decoration record covering the whole row.  That is the
 shape the packed encoding is best at, and it hid a cost that is paid *per
 record* completely.
 
-What the profile said, on `tree -C /usr/include\=' in a pgtk frame under
-gamescope: `cooked--deco-cell-size\=' was 80% of the session, because
-`cooked--apply-deco\=' asked it, and `cooked--layout-window\=' twice, once for
-every one of 86,107 records.  `window-font-width\=' costs 20.8us on pgtk and
-`window-default-line-height\=' 8.9us, against `frame-char-width\=''s 0.085us, so
+What the profile said, on `tree -C /usr/include' in a pgtk frame under
+gamescope: `cooked--deco-cell-size' was 80% of the session, because
+`cooked--apply-deco' asked it, and `cooked--layout-window' twice, once for
+every one of 86,107 records.  `window-font-width' costs 20.8us on pgtk and
+`window-default-line-height' 8.9us, against `frame-char-width''s 0.085us, so
 the same window answered the same question 86,107 times for 2.56s of a 3.10s
-run.  Hoisting both to once per `cooked--apply\=' -- see `cooked--deco-pass\=' --
+run.  Hoisting both to once per `cooked--apply' -- see `cooked--deco-pass' --
 took the session to 311ms.
 
   wall for `tree -C /usr/include', 100x32 pgtk   3105 ms -> 311 ms
@@ -1348,23 +1348,23 @@ took the session to 311ms.
 Both arms byte-compiled, three sessions each, medians, load average 1.6-2.3;
 the graphical pair was re-run and agreed to 3%.
 
-The batch figure is the same change measured where `window-font-width\=' is
+The batch figure is the same change measured where `window-font-width' is
 cheap, and it is here to say what the graphical one is *not*: on a terminal
 frame only the redundant walks and the consing are saved, and 1.6x is what that
 alone is worth.  The other 2.5s was pgtk being asked about its font.
 
-Both arms of the pair are run here on one build, as `cooked-bench-scroll\=' does
-and for the same reason -- read the row against `per-frame, 24x80 box drawing\='
+Both arms of the pair are run here on one build, as `cooked-bench-scroll' does
+and for the same reason -- read the row against `per-frame, 24x80 box drawing'
 at the same width, and the gap between the two is entirely the record count.
 The count itself is printed beside the row, which is the half that needs no
 clock.
 
 The rows come from the core rather than being described by hand, so they carry
 what production does: the blanks between two glyph runs absorbed into the run,
-one record per box-drawn row, and every such row flagged `glyph\='.  A 24x80
+one record per box-drawn row, and every such row flagged `glyph'.  A 24x80
 frame is 23 records and applies at about 0.12ms p50 with 915 conses.  The
 hand-written rows it replaced left their padding unabsorbed, and so measured
-108 records, 0.56ms and 3,079 conses on a width-guard path `tree\=' never
+108 records, 0.56ms and 3,079 conses on a width-guard path `tree' never
 takes."
   (let ((rows (cooked-bench--tree-rows 24 80)))
     (cooked-bench--frames "per-frame, 24x80 tree listing" rows 200)
@@ -1418,7 +1418,7 @@ takes."
 
 Nothing at all while no jit-lock function is registered in this buffer, which
 is what makes one benchmark fair to both designs: today the scan has already
-been paid inside `cooked--apply\=' and there is nothing left here to do, so the
+been paid inside `cooked--apply' and there is nothing left here to do, so the
 figure is the render path's own cost and not an empty call added to it."
   (when (bound-and-true-p jit-lock-mode)
     (jit-lock-fontify-now beg end)))
@@ -1491,19 +1491,19 @@ shape reported."
    (cooked-bench--plain-rows 24 80) 200 1))
 
 (defun cooked-bench-rescale ()
-  "Cost of `cooked--rescale-deco\=', the walk a cell-size change runs.
+  "Cost of `cooked--rescale-deco', the walk a cell-size change runs.
 
 The one thing in cooked that rewrites decoration already in the scrollback, and
 so the only thing that can bring a transcript back into agreement with the font.
-It is a whole-buffer walk under `widen\=', paid per cell-size change -- a font
-change, a `text-scale-adjust\=', a frame dragged to a different-DPI monitor --
-and never per drain, which is what `cooked--sync-size\=''s gate is for.  What it
+It is a whole-buffer walk under `widen', paid per cell-size change -- a font
+change, a `text-scale-adjust', a frame dragged to a different-DPI monitor --
+and never per drain, which is what `cooked--sync-size''s gate is for.  What it
 scales with is the length of the transcript, so the figure to watch is the
 per-row one.
 
 The transcript is grown by copying rendered text, properties and all, rather
 than by driving forty thousand cells through the module: what is under test here
-is the walk, and the walk reads nothing but the `cooked-deco\=' property."
+is the walk, and the walk reads nothing but the `cooked-deco' property."
   (cooked-bench--with-session '("/bin/sh" "-c" "sleep 300")
     (cooked-bench--settle-briefly)
     (cooked--apply (cooked-bench--update (cooked-bench--box-rows 24 80)))
@@ -1726,7 +1726,7 @@ runs the screen holds afterwards, which is the proof that a scan ran: 23 for
 `cooked-bench--url-rows' of 24, whose cursor row the scan declines, and 0 for
 every fixture without FONTIFY.
 
-The fields are `memory-use-counts'\='s, whose order is easy to transpose and
+The fields are `memory-use-counts''s, whose order is easy to transpose and
 worth naming: (CONSES FLOATS VECTOR-CELLS SYMBOLS STRING-CHARS INTERVALS
 STRINGS).  Reading STRING-CHARS as STRINGS is a factor of a hundred on the box
 row and was made once already while these numbers were being taken.
@@ -1770,7 +1770,7 @@ not have."
   "What each fixture allocates per frame, exactly.
 
 Read the plain row as the floor and the others as what their content costs over
-it.  See this section\='s commentary for where a styled frame\='s 1,750 conses
+it.  See this section's commentary for where a styled frame's 1,750 conses
 go and why the obvious quarter of them was measured and left alone."
   (cooked-bench--allocation "alloc, 24x80 plain" (cooked-bench--plain-rows 24 80))
   (cooked-bench--allocation "alloc, 24x80 styled (8 runs/row)"

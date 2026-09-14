@@ -63,46 +63,46 @@ See `cooked--drain-and-apply', which is where re-entry is folded away.")
   "Whether a drain was asked for while one was already running.")
 
 (defvar-local cooked--repaint-pending nil
-  "Whether the next `cooked--apply\=' owes every window a real repaint.
+  "Whether the next `cooked--apply' owes every window a real repaint.
 
-`cooked--scroll-windows\=' only reaches the windows `cooked--capture-viewport\='
+`cooked--scroll-windows' only reaches the windows `cooked--capture-viewport'
 found still following the cursor -- a window showing this buffer but not
 selected, and not following, is never told anything there.  Ordinarily that is
 fine: an in-place row rewrite marks the buffer modified and Emacs' own
 incremental redisplay picks it up in any window regardless of selection.  A
-resize is the case that is not ordinary -- `cooked--sync-size\=' rewraps or
+resize is the case that is not ordinary -- `cooked--sync-size' rewraps or
 rescales every row at once -- and has been observed to leave exactly such a
 window's glyph matrix stale, showing blank or stale content until something
 else forces the window to be looked at again.
 
-Set by `cooked--sync-size\=' rather than acted on there, so the repaint rides
-`cooked--apply\='s own pacing instead of firing on the spot: a drag-resize can
-call `cooked--sync-size\=' many times before the next drain actually runs, and
+Set by `cooked--sync-size' rather than acted on there, so the repaint rides
+`cooked--apply's own pacing instead of firing on the spot: a drag-resize can
+call `cooked--sync-size' many times before the next drain actually runs, and
 each call only flips this flag, cheaply and idempotently.  Whichever
-`cooked--apply\=' runs next -- paced or, as a resize's own is, forced -- pays for
-the one `force-window-update\=' that flag earned, not one per resize event.
-See `cooked--flush-pending-repaint\='.")
+`cooked--apply' runs next -- paced or, as a resize's own is, forced -- pays for
+the one `force-window-update' that flag earned, not one per resize event.
+See `cooked--flush-pending-repaint'.")
 
 (defun cooked--schedule-repaint ()
-  "Ask the next `cooked--apply\=' to force every window on this buffer to redraw.
-See `cooked--repaint-pending\='.  Cheap and idempotent, so a caller with no way
-to know how many times it will run before the next drain -- `cooked--sync-size\='
+  "Ask the next `cooked--apply' to force every window on this buffer to redraw.
+See `cooked--repaint-pending'.  Cheap and idempotent, so a caller with no way
+to know how many times it will run before the next drain -- `cooked--sync-size'
 mid-drag -- may call this on every one of them."
   (setq cooked--repaint-pending t))
 
 (defun cooked--flush-pending-repaint ()
   "Force a real redisplay of every window on this buffer, if one is owed.
 
-Called once from `cooked--apply\=', after `cooked--scroll-windows\=' has settled
+Called once from `cooked--apply', after `cooked--scroll-windows' has settled
 where each window starts -- forcing a window before its start is right would
 force it a second time when the start then moved.  See
-`cooked--repaint-pending\='.
+`cooked--repaint-pending'.
 
-`force-window-update\=' rather than `redisplay\=': the former only marks the
+`force-window-update' rather than `redisplay': the former only marks the
 window for redisplay's ordinary next pass, which happens whenever Emacs gets
 back to its command loop, while the latter would run one synchronously right
 here, inside a process filter -- as expensive as the render that just finished
-and blocking on it for no reason a mid-drag `cooked--sync-size\=' would forgive."
+and blocking on it for no reason a mid-drag `cooked--sync-size' would forgive."
   (when cooked--repaint-pending
     (setq cooked--repaint-pending nil)
     (cooked--dolist-windows w (get-buffer-window-list (current-buffer) nil t)
@@ -352,9 +352,9 @@ when it is shown, however much scrollback went in above it meanwhile."
 A region is a claim about particular text, and the child rewriting that text
 makes the claim into a lie -- an invisible one, because the highlight stays.
 The mark itself is carried to its character across the rewrite (see
-`cooked--capture-relocations\='), but a character is all it keeps: select
-`alpha\=' on a live row, let the child redraw that row as `bravo\=', and the
-highlight now covers `bravo\=', which is not what was selected.  Every
+`cooked--capture-relocations'), but a character is all it keeps: select
+`alpha' on a live row, let the child redraw that row as `bravo', and the
+highlight now covers `bravo', which is not what was selected.  Every
 xterm-family terminal drops a selection whose cells are overwritten, for the
 reason this does.
 
@@ -457,7 +457,7 @@ answerable before the render, exactly like `others' above.  See
 For a drain that rewraps the screen, (BASE . POINT), and nil for any other.
 
 BASE is where the places in RELOCATIONS are counted from, and POINT is
-point\='s own place when it had wandered, standing in for `wandered\=', whose
+point's own place when it had wandered, standing in for `wandered', whose
 cell the rewrap gives to another character.  See `cooked--logical-place'."))
 
 (defun cooked--capture-relocations (others &optional reflow)
@@ -619,7 +619,7 @@ forcing would drag point along with it."
       (set-window-start w top t))))
 
 (defun cooked--pin-transcript-bottom (windows &optional pos bottom)
-  "Follow POS, defaulting to `point-max\=', with the bottom row of each of WINDOWS.
+  "Follow POS, defaulting to `point-max', with the bottom row of each of WINDOWS.
 
 BOTTOM, defaulting to POS, is what the bottom row is computed against: the
 child's cursor can sit above text it has already printed -- a couple of
@@ -628,31 +628,31 @@ for a non-TUI program that prints and then repositions -- and it is that
 trailing text, not the cursor, that must not be scrolled out of view.  POS
 still decides window-point, so editing and the caret stay at the cursor.
 
-Factored out of `cooked--scroll-transcript\=' because a drain is not the only
-thing that can grow the buffer\='s true end.  `cooked--on-exit\=' does too,
-appending the \"[exited N]\=\" line from outside `cooked--scroll-windows\='
+Factored out of `cooked--scroll-transcript' because a drain is not the only
+thing that can grow the buffer's true end.  `cooked--on-exit' does too,
+appending the \"[exited N]\" line from outside `cooked--scroll-windows'
 entirely, and it needs exactly this rather than a second copy of it.
 
-Computed and NOFORCE, rather than `recenter\='.  `recenter\=' sets a forced
-start that redisplay then overrules through `make-cursor-line-fully-visible\=',
+Computed and NOFORCE, rather than `recenter'.  `recenter' sets a forced
+start that redisplay then overrules through `make-cursor-line-fully-visible',
 so the window lands where neither chose; and it counts every screen line as the
-default font\='s height, so a row taller than that -- an image slice, a Nerd
+default font's height, so a row taller than that -- an image slice, a Nerd
 Font prompt separator -- is paid back in whole lines of scroll.  A NOFORCE start
 is a suggestion redisplay may settle against, and the pixels stay
-`make-cursor-line-fully-visible\='s business.  No `with-selected-window\=' either:
-`select-window\=' is advised -- by `evil\=', to refresh its cursor -- and nothing
+`make-cursor-line-fully-visible's business.  No `with-selected-window' either:
+`select-window' is advised -- by `evil', to refresh its cursor -- and nothing
 here needs the window selected.
 
 Monotone, which is what stops this jittering.  The follow direction is taken
 whenever the tail has grown, and the equality is the common case: a steady
 stream whose tail is the same length leaves TOP exactly where it already is and
 this writes nothing at all, at a drain rate whose floor is
-`cooked-min-redisplay-interval\='.  The shrink direction gives
-`comint-scroll-show-maximum-output\='s semantics, no blank space below the last
+`cooked-min-redisplay-interval'.  The shrink direction gives
+`comint-scroll-show-maximum-output's semantics, no blank space below the last
 line, and is taken only when the
-*last* redisplay had the buffer\='s end on screen, so it fires when the grid
+*last* redisplay had the buffer's end on screen, so it fires when the grid
 really has fewer used rows than before rather than every time
-`vertical-motion\='s whole-line count disagrees with what redisplay laid out in
+`vertical-motion's whole-line count disagrees with what redisplay laid out in
 pixels.  That disagreement is permanent on a window whose rows differ in height,
 and correcting for it once per drain is the oscillation itself."
   (let* ((target (or pos (point-max)))
@@ -906,13 +906,13 @@ two chances to disagree."
 
 RIS is a power-on reset, and every piece of it a child can change lives here
 rather than in the emulator: the OSC 9;4 progress indicator, the OSC 22 pointer
-stacks, the bell\='s mark, the OSC 10 and 11 colour remaps, the OSC 12 cursor
-colour and the title with its XTWINOPS stack.  `reset\=' is what a user types at
+stacks, the bell's mark, the OSC 10 and 11 colour remaps, the OSC 12 cursor
+colour and the title with its XTWINOPS stack.  `reset' is what a user types at
 a terminal a program left purple with a stale title, and it has to fix all of
-it, as ghostty's `fullReset\=' clears the title and eat's reset does.
+it, as ghostty's `fullReset' clears the title and eat's reset does.
 
 The OSC 3008 contexts are not here, on purpose: see
-`cooked-osc-context--stack\='."
+`cooked-osc-context--stack'."
   (cooked--reset-progress)
   (cooked--reset-pointer-shapes)
   (cooked--reset-bell)
@@ -931,21 +931,21 @@ marks, rather than D alone, because a shell that drops its D still sends the
 next C.  What the emulator holds for the shell -- the mouse, focus and size
 reports, the key encoding -- the core puts back itself at D, and explains there
 why D and not the prompt's A; a mouse that goes off reaches Emacs as an ordinary
-`mouse\=' event.  This is the Emacs half, for state that is about a command:
+`mouse' event.  This is the Emacs half, for state that is about a command:
 
-- the OSC 9;4 progress indicator: `cargo build\=' interrupted at the keyboard
-  never sends the report that removes its bar, so without this `[42%]\=' stays
+- the OSC 9;4 progress indicator: `cargo build' interrupted at the keyboard
+  never sends the report that removes its bar, so without this `[42%]' stays
   in the mode line through every command after it;
 - the OSC 22 pointer stacks, which no shell sets, so a pointer left as a
-  `text\=' bar by a crashed editor is not the shell\='s.
+  `text' bar by a crashed editor is not the shell's.
 
 Some state waits for EXITED, because a shell sets it too.  The OSC 12 cursor
-colour is one: base16-shell sets it from `.bashrc\=', before the first prompt,
+colour is one: base16-shell sets it from `.bashrc', before the first prompt,
 and clearing it at every mark would undo the theme the user chose.  The mouse
 state is another kind of wait: the core keeps it right while a child lives, but
 nothing reports it once the child is dead, so a kept buffer went on holding
-`track-mouse\=' on.  The OSC 3008 contexts belong to `cooked-exit-hook\=': a
-`run0 bash\=' prompts inside its `elevate\=' context, so no mark may end one."
+`track-mouse' on.  The OSC 3008 contexts belong to `cooked-exit-hook': a
+`run0 bash' prompts inside its `elevate' context, so no mark may end one."
   (cooked--reset-progress)
   ;; Guarded, since this runs twice per command and almost nothing sets a shape.
   (when cooked--pointer-stacks (cooked--reset-pointer-shapes))
@@ -1010,23 +1010,23 @@ See docs/DESIGN.md."
   "Register or drop the jit-lock pass, following whether it has work to do.
 
 Registration is not free and the cost is not at redisplay, which is the part
-worth knowing: jit-lock hangs `jit-lock-after-change\=' on
-`after-change-functions\=', and that fires for every text property applied as
-well as for every insertion.  Every styled run of a row is a `face\=' property,
-and every run of box drawing a `display\=' and a `cooked-deco\=' on top, so a
+worth knowing: jit-lock hangs `jit-lock-after-change' on
+`after-change-functions', and that fires for every text property applied as
+well as for every insertion.  Every styled run of a row is a `face' property,
+and every run of box drawing a `display' and a `cooked-deco' on top, so a
 frame of a full-screen program pays the hook once for each of them to be told
 something it could have been told once -- a fifth again on plain rows and half
-again on box drawing, with `cooked--fontify-region\=' never called.
+again on box drawing, with `cooked--fontify-region' never called.
 
 So the registration follows the work rather than the mode.  Two things can make
 it worthless, and both are ordinary.  The alternate screen is one: that grid is
-a rectangle the child owns, `cooked--fontify-region\=' declines it outright, and
+a rectangle the child owns, `cooked--fontify-region' declines it outright, and
 a full-screen program repainting flat out is exactly the thing that would pay
 the hook most and get nothing.  A session with the URL guess switched off and
 no scan layer loaded is the other.
 
-Idempotent, and cheap enough to call on any transition -- `jit-lock-register\='
-and `jit-lock-unregister\=' both go through `add-hook\='/`remove-hook\=' on a
+Idempotent, and cheap enough to call on any transition -- `jit-lock-register'
+and `jit-lock-unregister' both go through `add-hook'/`remove-hook' on a
 buffer-local hook.  What it must not do is run *between* a row being rewritten
 and that row being displayed, because unregistering drops jit-lock's record of
 what is still unfontified: the screen the alt flag has just turned off is
@@ -1054,8 +1054,8 @@ line itself when the hold is released.")
 (defun cooked--link-hold-bounds ()
   "The region the URL guess should decline to scan right now, or nil.
 
-The cursor\='s row always, and the whole input region on top of it when the user
-is typing -- the two are usually the same row and the `max\=' costs nothing when
+The cursor's row always, and the whole input region on top of it when the user
+is typing -- the two are usually the same row and the `max' costs nothing when
 they are.  Returns buffer positions, not markers.
 
 This lives here rather than in cooked-link.el on purpose.  Where the cursor is
@@ -1083,8 +1083,8 @@ to scan; it does not ask why."
 (defun cooked--release-held-link-row ()
   "Ask for the held row again once the cursor has left it.
 
-Called from `cooked--apply\=', which is the moment the cursor can have moved.
-`jit-lock-refontify\=' rather than a direct scan: the row may not be on screen,
+Called from `cooked--apply', which is the moment the cursor can have moved.
+`jit-lock-refontify' rather than a direct scan: the row may not be on screen,
 and the whole point of the deferral is that an invisible row costs nothing."
   (when-let* ((held cooked--held-link-row)
               (from (car held))
@@ -1110,35 +1110,35 @@ and the whole point of the deferral is that an invisible row costs nothing."
 (defun cooked--fontify-region (beg end)
   "Run the cosmetic link passes over BEG..END.  cooked\\='s jit-lock entry point.
 
-Registered by `cooked-mode\=' and called by redisplay, which is the whole point
+Registered by `cooked-mode' and called by redisplay, which is the whole point
 of it.  Both passes here are guesses about text -- what looks like a URL, what
 looks like a file name -- and a guess is only worth making about text somebody
 is about to read.  Running them from the render path instead meant scanning
 every damaged row whether or not that row was ever displayed, which for a child
-painting faster than Emacs redraws is most of them.  `goto-address-mode\=' has
+painting faster than Emacs redraws is most of them.  `goto-address-mode' has
 always worked this way; this is cooked wearing the same clothes, with the two
-bindings `cooked--fontify-links\=' makes on top.
+bindings `cooked--fontify-links' makes on top.
 
 One entry point for two passes because they are one question asked twice, and
-the order between them is the precedence `cooked-link--claimed-p\=' states: a
-`goto-addr\=' match is settled before the file layer looks, so the file layer can
+the order between them is the precedence `cooked-link--claimed-p' states: a
+`goto-addr' match is settled before the file layer looks, so the file layer can
 decline text already spoken for.
 
-`inhibit-read-only\=' because scrollback carries `read-only\=', and the file layer
+`inhibit-read-only' because scrollback carries `read-only', and the file layer
 answers by adding text properties to it.  The render path had this for free from
-`cooked--apply\='; redisplay does not.
+`cooked--apply'; redisplay does not.
 
 Rounded out to whole lines.  jit-lock hands over chunks of
-`jit-lock-chunk-size\=' characters and a chunk boundary falls wherever it falls,
+`jit-lock-chunk-size' characters and a chunk boundary falls wherever it falls,
 so a candidate straddling one would be matched by neither half.  Rounded here
 rather than in either pass, because neither does it for itself -- see
-`cooked--fontify-links\='.
+`cooked--fontify-links'.
 
 Whole *logical* lines, because
 a soft-wrapped line is several buffer lines, so rounding to buffer lines alone
 would let a chunk boundary fall between two rows of one line and split the very
 candidate the joining exists to put back together.  See
-`cooked-link-logical-line-bounds\=', which is bounded so this cannot round out to
+`cooked-link-logical-line-bounds', which is bounded so this cannot round out to
 a screenful.
 
 Nothing at all on the alternate screen, where a full-screen program repaints
@@ -1253,12 +1253,12 @@ into a closed pipe -- harmless, since it blocks SIGPIPE -- but this order costs
 nothing.
 
 The child is killed rather than left to the garbage collector: clearing
-`cooked--session\=' only drops the last reference, and nothing guarantees a
+`cooked--session' only drops the last reference, and nothing guarantees a
 collection ever runs, so the child would keep going long after whatever reason
 there was to stop it.
 
-Idempotent, and both callers rely on that -- `cooked--on-exit\=' runs when the
-child reports its own exit and `cooked--cleanup\=' when the buffer is killed,
+Idempotent, and both callers rely on that -- `cooked--on-exit' runs when the
+child reports its own exit and `cooked--cleanup' when the buffer is killed,
 and a session that exits and is then killed goes through both."
   (when cooked--session (ignore-errors (cooked--kill cooked--session)))
   (when cooked--wake (delete-process cooked--wake))
