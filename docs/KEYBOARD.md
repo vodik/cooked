@@ -99,6 +99,17 @@ than fight over the same key.
 Both apply only while the child owns the keyboard, and neither touches `cooked--keys`:
 what cooked sends of its own accord still follows the negotiation and nothing else.
 
+## Input methods
+
+An Emacs input method (`set-input-method`: `chinese-py`, `japanese`, `german-postfix`,
+`korean-hangul`) composes into the child as it does into any buffer. At a prompt it edits
+the input line. While the child owns the keyboard, in every state and from evil's insert
+state too, the preedit is drawn at the child's cursor and the composed text is what the
+program receives: `ni1` sends `你`, not the three keys. Output that arrives while a
+composition is under way is drawn when it ends, so the row under the preedit is not
+rewritten beneath it. `cooked-inhibit-redraw-functions` is that hold, for anything else
+that borrows the buffer's text for a moment.
+
 
 ## Keybindings
 

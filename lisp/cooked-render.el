@@ -201,6 +201,22 @@ again is safe."
             ;; flags: it is this buffer's anchor it exists to check.
             (cooked--check-undo-anchor)))))))
 
+(defvar cooked-inhibit-redraw-functions nil
+  "Abnormal hook asked whether a buffer's drain should wait.
+
+Each entry is called with the buffer, current, on every wake, and the first
+non-nil answer defers the drain.  It is for something that has borrowed the
+buffer's text for a moment and would be damaged by a redraw under it: an input
+method holding its preedit at the child's cursor while it reads the next key.
+Quail reads that key with `read-key-sequence', which runs the wake pipe's
+filter, and a drain there would rewrite the cursor row beneath the preedit.
+
+A deferred wake is not repeated.  The native core sends one wake byte and
+sends no other until Emacs has drained, so an entry that answered non-nil owes
+the buffer a call to `cooked--on-wake' once it would answer nil again;
+without it the buffer stops updating until something else drains.  See
+`cooked-ime--compose', which makes that call when its composition ends.")
+
 (defun cooked--on-wake (buffer)
   "Drain BUFFER's session and apply what changed.
 
@@ -223,10 +239,15 @@ authoritative grid state regardless of whether Lisp ever asks for it, so
 nothing is lost by deferring — `cooked--refresh-keymap' catches the buffer up
 with one more call to `cooked--drain-and-apply' the moment the freeze lifts.
 Note that `cooked--frozen-p' is false for a buffer whose window is not the
-selected one, so leaving a frozen buffer resumes it rather than stranding it."
+selected one, so leaving a frozen buffer resumes it rather than stranding it.
+Skipped the same way while `cooked-inhibit-redraw-functions' asks, whose
+entries owe the catch-up themselves."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (and cooked--session (not (cooked--frozen-p)))
+      (when (and cooked--session
+                 (not (cooked--frozen-p))
+                 (not (cooked--run-seam-until-success
+                       'cooked-inhibit-redraw-functions buffer)))
         (cooked--drain-and-repair cooked--hidden)))))
 
 (defun cooked--drain-and-repair (hidden)

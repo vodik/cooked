@@ -5588,5 +5588,134 @@ answer nil there, and would be dropped by a move away from comint unnoticed."
     (delay-mode-hooks (cooked-mode))
     (should (eq (get 'cooked-mode 'mode-class) 'special))))
 
+;;;; Input methods
+
+(defun cooked-tests--ime-received (method keys expected shell setup)
+  "What a child owning the keyboard read when KEYS were typed through METHOD.
+
+The child is `cat' into a file, after SHELL, so the answer is the bytes the
+program got rather than anything drawn.  SETUP is a function called in the
+buffer once the child owns the keyboard, to put it in the state under test.
+Waits until the file holds EXPECTED, and returns what it holds either way."
+  (let ((out (make-temp-file "cooked-ime")))
+    (unwind-protect
+        (cooked-tests--with-session
+            (list "/bin/sh" "-c" (format "%sstty raw -echo; exec cat > %s" shell out))
+          (switch-to-buffer (current-buffer))
+          (should (cooked-tests--settle (lambda () (eq cooked--mode 'raw))))
+          (funcall setup)
+          (should (cooked--child-owns-keyboard-p))
+          (set-input-method method)
+          (unwind-protect
+              (execute-kbd-macro keys)
+            (deactivate-input-method))
+          (let ((read (lambda ()
+                        (decode-coding-string
+                         (with-temp-buffer
+                           (set-buffer-multibyte nil)
+                           (insert-file-contents-literally out)
+                           (buffer-string))
+                         'utf-8))))
+            (cooked-tests--settle (lambda () (equal (funcall read) expected)) 2)
+            (funcall read)))
+      (delete-file out))))
+
+(defconst cooked-tests--ime-cases
+  '(("german-postfix" "ae" "ä")
+    ("chinese-py" "ni1" "你")
+    ("korean-hangul" "gks " "한 "))
+  "Input methods, the keys typed through each, and the text they compose.
+One Quail method that returns its composition as events, one whose Quail
+conversion picks a candidate, and hangul, which inserts what it composes.")
+
+(defun cooked-tests--ime-check (shell setup)
+  "Check each of `cooked-tests--ime-cases' composes for a child after SHELL and SETUP."
+  (pcase-dolist (`(,method ,keys ,expected) cooked-tests--ime-cases)
+    (should (equal (list method (cooked-tests--ime-received
+                                 method keys expected shell setup))
+                   (list method expected)))))
+
+(ert-deftest cooked-ime-composes-for-a-raw-child ()
+  "An input method sends the composed text to a child reading raw.
+
+Quail saw the read-only screen at point and sent `ae' for ä and `ni1' for 你,
+and hangul signalled `text-read-only' and lost the keys."
+  (cooked-tests--ime-check "" #'ignore))
+
+(ert-deftest cooked-ime-composes-for-a-child-on-the-alternate-screen ()
+  "An input method sends the composed text to a program on the alternate screen."
+  (cooked-tests--ime-check
+   "printf '\\033[?1049h'; "
+   (lambda ()
+     (should (cooked-tests--settle (lambda () (eq (cooked--policy) 'alt)))))))
+
+(ert-deftest cooked-ime-composes-for-a-command-the-shell-marked ()
+  "An input method sends the composed text to a command running after a shell mark."
+  (cooked-tests--ime-check
+   ""
+   (lambda ()
+     (cooked--handle-semantic '(command-start nil nil) nil)
+     (cooked--refresh-keymap)
+     (should (eq (cooked--policy) 'command)))))
+
+(ert-deftest cooked-ime-composes-for-a-child-from-evil-insert-state ()
+  "An input method composes for the child from evil's insert state, and after it.
+
+Evil turns the method off in normal state and on again in insert state without
+running `input-method-activate-hook', so the wrapper has to find its way back
+by itself before the next key."
+  :tags '(evil)
+  (skip-unless (require 'evil nil t))
+  (require 'cooked-evil)
+  (evil-mode 1)
+  (cooked-tests--ime-check
+   ""
+   (lambda ()
+     (evil-insert-state)
+     (should cooked--semi-map-worn)))
+  (should (equal (cooked-tests--ime-received
+                  "german-postfix" (vconcat [escape] "iae") "ä" ""
+                  (lambda () (evil-insert-state)))
+                 "ä")))
+
+(ert-deftest cooked-ime-composes-in-the-input-line-at-a-prompt ()
+  "At a prompt the input method edits the input line as in any buffer."
+  (pcase-dolist (`(,method ,keys ,expected) cooked-tests--ime-cases)
+    (cooked-tests--with-session '("/bin/sh" "-c" "printf '$ '; exec cat")
+      (switch-to-buffer (current-buffer))
+      (should (cooked-tests--settle
+               (lambda () (and (cooked--input-state-p)
+                               (string-search "$" (buffer-string))))))
+      (set-input-method method)
+      (unwind-protect
+          (execute-kbd-macro keys)
+        (deactivate-input-method))
+      (should (equal (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position))
+                     (concat "$ " expected))))))
+
+(ert-deftest cooked-ime-holds-the-drain-until-the-composition-ends ()
+  "Output that arrives while a method composes is drawn when it stops, not under it.
+
+A wake during the composition must not rewrite the row the preedit is on, and
+must not be lost either: the core sends no further wake until Emacs drains, so
+the catch-up is what keeps the buffer updating afterwards."
+  (cooked-tests--with-echoing-child ""
+    (let (during)
+      (setq-local input-method-function
+                  (lambda (key)
+                    (cooked--send-to-child "held")
+                    (cooked-tests--pump 0.3)
+                    (setq during (buffer-string))
+                    (list key)))
+      (cooked-ime--install)
+      (should (eq input-method-function #'cooked-ime--compose))
+      (should (equal (funcall input-method-function ?x) '(?x)))
+      (should-not (string-search "held" during))
+      (should (string-search "held" (buffer-string)))
+      (cooked--send-to-child "after")
+      (cooked-tests--pump 0.3)
+      (should (string-search "heldafter" (buffer-string))))))
+
 (provide 'cooked-tests-input)
 ;;; cooked-tests-input.el ends here

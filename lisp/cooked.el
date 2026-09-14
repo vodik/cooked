@@ -60,8 +60,8 @@
 ;; buffer text and the row guard under it; the pending input, the cursor, the
 ;; shell marks; the OSC handlers, the mouse and the bell; the drain pipeline in
 ;; cooked-render.el; starting a session; peek, the key encoding, the line's
-;; commands and the keymaps; and `cooked-mode' at the top.  Where a lower file
-;; has to report a change the keymap depends on, it runs
+;; commands, the keymaps and input methods; and `cooked-mode' at the top.
+;; Where a lower file has to report a change the keymap depends on, it runs
 ;; `cooked--refresh-hook' rather than naming the function above it.
 
 ;;; Code:

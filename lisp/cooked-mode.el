@@ -48,6 +48,7 @@
 (require 'cooked-completion)
 (require 'cooked-shell-integration)
 (require 'cooked-mode-line)
+(require 'cooked-ime)
 
 (cooked--declare-core)
 
@@ -1782,6 +1783,9 @@ to the child verbatim."
   (add-hook 'window-selection-change-functions #'cooked--window-selection-changed nil t)
   (add-hook 'pre-redisplay-functions #'cooked--sync-before-redisplay nil t)
   (add-hook 'context-menu-functions #'cooked--context-menu nil t)
+  ;; An input method composes by editing the buffer, and the screen it would
+  ;; edit while the child owns the keyboard is read-only; see cooked-ime.el.
+  (cooked-ime-setup)
   (add-hook 'kill-buffer-hook #'cooked--cleanup nil t))
 
 ;; A buffer of the child's rows, not text to edit, which is what `special' tells
