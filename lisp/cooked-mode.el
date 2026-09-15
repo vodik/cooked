@@ -1876,10 +1876,15 @@ to the child verbatim."
 (define-key cooked-mode-map (kbd "C-c C-c") #'cooked-interrupt)
 (define-key cooked-mode-map (kbd "C-c C-d") #'cooked-send-eof)
 (define-key cooked-mode-map (kbd "C-c C-e") #'cooked-send-string)
-(define-key cooked-mode-map (kbd "C-c M-x") #'cooked-meta-x)
+(define-key cooked-mode-map (kbd "C-c M-x") #'execute-extended-command)
 (define-key cooked-mode-map (kbd "C-c C-z") #'cooked-suspend)
 (define-key cooked-mode-map (kbd "C-c C-y") #'cooked-paste)
 (define-key cooked-mode-map (kbd "C-c C-q") #'cooked-send-literal-key)
+;; Both spellings: `[escape]' is the event a graphical frame sends, and the only
+;; one that does not collide with the `C-c M-' bindings below, which a terminal
+;; frame reads as `C-c ESC' plus a letter.
+(define-key cooked-mode-map [?\C-c escape] #'cooked-send-escape)
+(define-key cooked-mode-map (kbd "C-c ESC ESC") #'cooked-send-escape)
 (define-key cooked-mode-map (kbd "C-c C-v") #'cooked-toggle-peek)
 (define-key cooked-mode-map (kbd "C-c C-p") #'cooked-previous-command)
 (define-key cooked-mode-map (kbd "C-c C-n") #'cooked-next-command)
@@ -2084,8 +2089,10 @@ state rather than merely checking that it parses."
      :help "Send text of your own to the child"]
     ["Send Next Key Literally" cooked-send-literal-key :enable (cooked--live-session)
      :help "Send the next key even where Emacs would have bound it"]
-    ["Send M-x to the Child" cooked-meta-x :enable (cooked--live-session)
-     :help "For a child that has its own M-x, rather than reading one here"]
+    ["Send Escape" cooked-send-escape :enable (cooked--live-session)
+     :help "Send Escape to the child, where ESC would leave evil's insert state"]
+    ["Emacs M-x" execute-extended-command
+     :help "Run M-x in Emacs, where the key itself would reach the child"]
     "--"
     ("Signals"
      ["Interrupt" cooked-interrupt :enable (cooked--live-session)

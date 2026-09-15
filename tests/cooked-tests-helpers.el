@@ -1041,7 +1041,8 @@ POLICY is the one the buffer must be under, named so a failure says which."
       (should-not (eq (key-binding (kbd key)) #'cooked-send-key))))
   (should (eq (key-binding (kbd "<escape>")) #'evil-normal-state))
   (should (eq (key-binding (kbd "C-z")) #'evil-emacs-state))
-  (should (eq (key-binding (kbd "C-c C-v")) #'cooked-toggle-peek)))
+  (should (eq (key-binding (kbd "C-c C-v")) #'cooked-toggle-peek))
+  (should (eq (key-binding (kbd "C-c <escape>")) #'cooked-send-escape)))
 
 (defmacro cooked-tests--with-mock-tramp (directory &rest body)
   "Run BODY with DIRECTORY bound to a TRAMP name for a local directory.

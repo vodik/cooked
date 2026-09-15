@@ -169,6 +169,11 @@ reaches vim the instant it is pressed. Set the option to nil to turn the transla
 next key to the child exactly as typed, regardless of what's reserved — including `C-c`
 itself (`C-c C-q C-c` sends a literal `C-c` byte).
 
+`cooked-send-escape` is the same thing for the one key evil's insert state keeps that a
+child most often wants: `C-c <escape>` sends Escape, the way `C-c C-c` sends the
+interrupt. A terminal frame reads `C-c ESC` as the start of `C-c M-x`, so there it is
+`C-c ESC ESC`, which a graphical frame accepts too.
+
 **Pasted control bytes are turned into spaces**, whether or not the child asked for
 bracketed paste. The list is xterm's, whose `disallowedPasteControls` resource defaults
 to `BS,DEL,ENQ,EOT,ESC,NUL,STTY` — NUL, backspace, ENQ, EOT, ESC and DEL, plus the tty

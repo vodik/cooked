@@ -99,6 +99,13 @@ still put a literal `C-c' byte on the wire for a child that wants it."
     (should (cooked-tests--settle
              (lambda () (string-search "^C" (cooked-tests--text)))))))
 
+(ert-deftest cooked-send-escape-sends-escape-past-insert-state ()
+  "`C-c <escape>' puts ESC on the wire, for the insert state that keeps ESC."
+  (cooked-tests--with-echoing-child ""
+    (call-interactively #'cooked-send-escape)
+    (should (cooked-tests--settle
+             (lambda () (string-search "^[" (cooked-tests--text)))))))
+
 (ert-deftest cooked-toggle-peek-freezes-the-render-and-thaws-on-exit ()
   "Peeking suspends forwarding and drawing; toggling again resumes both and
 catches the buffer up on whatever the child produced meanwhile."
@@ -3807,17 +3814,19 @@ user parked it."
 
 (ert-deftest cooked-c-c-m-x-escapes-back-to-emacs ()
   "In raw state every key including ESC goes to the child, so plain M-x arrives
-there as ESC x.  C-c M-x is the way back to Emacs, and honours whatever the user
-has bound M-x to."
-  (should (eq (lookup-key cooked-raw-map (kbd "C-c M-x")) #'cooked-meta-x))
-  (should (eq (lookup-key cooked-input-map (kbd "C-c M-x")) #'cooked-meta-x))
+there as ESC x.  C-c M-x is the way back to Emacs, and a completion framework's
+remap of `execute-extended-command', as counsel-mode makes, still applies."
+  (should (eq (lookup-key cooked-raw-map (kbd "C-c M-x")) #'execute-extended-command))
+  (should (eq (lookup-key cooked-input-map (kbd "C-c M-x")) #'execute-extended-command))
   ;; Plain M-x is still the child's in raw state — that is the behaviour C-c M-x
   ;; exists to work around, not one to break.
   (should (eq (lookup-key cooked-raw-map (kbd "ESC")) #'cooked-send-key))
-  (let (ran)
-    (cl-letf (((symbol-function 'execute-extended-command) (lambda (&rest _) (interactive) (setq ran t))))
-      (call-interactively #'cooked-meta-x)
-      (should ran))))
+  (with-temp-buffer
+    (let ((map (make-sparse-keymap)))
+      (set-keymap-parent map cooked-raw-map)
+      (define-key map [remap execute-extended-command] #'ignore)
+      (use-local-map map)
+      (should (eq (key-binding (kbd "C-c M-x")) #'ignore)))))
 
 (ert-deftest cooked-modified-keys-survive-shift-translation ()
   "Without a binding of its own, Emacs translates S-return to return before the
@@ -4157,10 +4166,12 @@ they would evaporate while peeking."
   (dolist (binding '(("C-c C-c" . cooked-interrupt)
                       ("C-c C-d" . cooked-send-eof)
                       ("C-c C-e" . cooked-send-string)
-                      ("C-c M-x" . cooked-meta-x)
+                      ("C-c M-x" . execute-extended-command)
                       ("C-c C-z" . cooked-suspend)
                       ("C-c C-y" . cooked-paste)
                       ("C-c C-q" . cooked-send-literal-key)
+                      ("C-c <escape>" . cooked-send-escape)
+                      ("C-c ESC ESC" . cooked-send-escape)
                       ("C-c C-v" . cooked-toggle-peek)
                       ("C-c C-p" . cooked-previous-command)
                       ("C-c C-n" . cooked-next-command)
@@ -4265,7 +4276,7 @@ which left non-evil users stuck with no keyboard way out of peek at all."
     (call-interactively #'cooked-toggle-peek)
     (should-not (cooked--suspended-p))))
 
-(ert-deftest cooked-send-string-and-send-literal-key-refuse-at-a-prompt ()
+(ert-deftest cooked-send-string-and-send-literal-keys-refuse-at-a-prompt ()
   "Both write to the child out of band; doing that while Emacs owns the line
 would arrive ahead of whatever pending input is still sitting unsent in the
 buffer, so both refuse there rather than silently confusing the two."
@@ -4275,7 +4286,8 @@ buffer, so both refuse there rather than silently confusing the two."
     (cooked--refresh-keymap)
     (should-error (cooked-send-string "ls") :type 'user-error)
     (cl-letf (((symbol-function 'read-key) (lambda (&rest _) ?a)))
-      (should-error (call-interactively #'cooked-send-literal-key) :type 'user-error))))
+      (should-error (call-interactively #'cooked-send-literal-key) :type 'user-error))
+    (should-error (call-interactively #'cooked-send-escape) :type 'user-error)))
 
 (ert-deftest cooked-mouse-grab-is-suspended-while-peeking ()
   "A click during peek should select text like any other buffer's, not be

@@ -30,27 +30,15 @@
   "Prefix reserved for cooked's own commands while the child owns the keyboard.
 Everything `cooked-raw-map' and `cooked-alt-map' cover is otherwise forwarded
 verbatim, ESC included, so \\`M-x' reaches the child as ESC x — exactly as in
-any other terminal.  \\`C-c M-x' is the way back out; see `cooked-meta-x'.
+any other terminal.  \\`C-c M-x' is the way back out, bound on `cooked-mode-map'
+to `execute-extended-command' itself so that a completion framework's remap of
+it -- `counsel-M-x' -- still applies.
 On a graphical frame, where a Meta chord is one event rather than two bytes,
 that takes a keymap of its own -- see `cooked--build-meta-overlay'.
 
 `cooked-semi-map' is the exception, and deliberately so: it keeps ESC and the
 whole Meta space for Emacs, which is what makes evil's insert state a state you
 can leave.  See `cooked-semi-exceptions'.")
-
-(defun cooked-meta-x ()
-  "Run \\`M-x' in Emacs rather than sending it to the child.
-
-While the child owns the keyboard every key is forwarded, ESC included, so plain
-\\`M-x' arrives at the child as ESC x — which is what you want inside vim, and
-not at all what you want when you meant Emacs.  \\`C-c M-x' is the escape hatch.
-
-Whatever \\`M-x' is globally bound to is what runs, so `counsel-M-x', `helm-M-x'
-and the rest keep working."
-  (interactive)
-  (let ((command (or (global-key-binding (kbd "M-x")) #'execute-extended-command)))
-    (setq this-command command)
-    (call-interactively command)))
 
 ;;;; The maps the child is typed through
 ;;
@@ -639,16 +627,42 @@ Bound on `cooked-mode-map', so it also reaches the child while peeking -- ending
 peek first, so the result is seen immediately -- but refuses once Emacs owns
 the line -- see `cooked-send-string', which shares the reasoning."
   (interactive)
+  (cooked--send-forced-key
+   (lambda ()
+     (let ((event (read-key "Send key: ")))
+       ;; With hover on, the pointer drifting while the key is awaited is a key
+       ;; too, and `read-key' returns it; the key meant for the child would then
+       ;; reach Emacs instead.
+       (while (mouse-movement-p event)
+         (setq event (read-key "Send key: ")))
+       event))))
+
+(defun cooked-send-escape ()
+  "Send the Escape key to the child, whatever ESC is bound to here.
+
+The inverse of \\`C-c C-c' in a terminal.  There, a key the child owns needs
+the prefix to reach Emacs; in evil's insert state ESC is Emacs' -- it is how
+insert state is left -- so it is Escape for the child that needs the prefix.
+\\`C-c <escape>' on a graphical frame.  A terminal frame cannot tell that
+from the start of \\`C-c M-x', so there it is \\`C-c ESC ESC', which a
+graphical frame accepts as well.
+
+Sent as the `escape' key rather than as a bare byte, so a child that
+negotiated the kitty keyboard protocol gets its spelling of it.  Otherwise
+as `cooked-send-literal-key': ends peek first, and refuses once Emacs owns
+the line."
+  (interactive)
+  (cooked--send-forced-key (lambda () 'escape)))
+
+(defun cooked--send-forced-key (read)
+  "Send the event READ returns to the child, past every binding.
+READ is called only once forwarding has resumed and the line is known to be
+the child's, so a prompt it shows is not left waiting for nothing."
   (cooked--resume-forwarding)
   (when (cooked--input-state-p)
     (user-error "Emacs already owns the line; type directly instead"))
   (let ((cooked--keys (or (cooked--assumed-key-protocol) cooked--keys))
-        (event (read-key "Send key: ")))
-    ;; With hover on, the pointer drifting while the key is awaited is a key
-    ;; too, and `read-key' returns it; the key meant for the child would then
-    ;; reach Emacs instead.
-    (while (mouse-movement-p event)
-      (setq event (read-key "Send key: ")))
+        (event (funcall read)))
     (when-let* ((bytes (cooked--encode-event event)))
       (cooked--snap-to-cursor)
       (cooked--send-to-child bytes))))

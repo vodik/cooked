@@ -240,6 +240,7 @@ and moves you between them itself:
   - =C-c M-o=: clear the scrollback.
   - =C-c TAB=: fold a command's output to one line.
   - =C-c C-q=: send the next key exactly as typed, even =C-c= itself.
+  - =C-c <escape>= (=C-c ESC ESC= on a tty): send Escape, for when =ESC= itself is Emacs'.
   - =C-c M-x=: run whatever you have =M-x= bound to — the way out, whatever the child is doing.
 
 - A password prompt (=getpass=, no echo) is its own case: cooked asks in the minibuffer
