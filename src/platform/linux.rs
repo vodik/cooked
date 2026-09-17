@@ -3,6 +3,7 @@
 use nix::fcntl::OFlag;
 use nix::libc;
 use nix::pty::PtyMaster;
+use nix::unistd::Pid;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::OwnedFd;
@@ -94,11 +95,11 @@ pub(crate) struct ExitWatch(OwnedFd);
 impl ExitWatch {
     /// `None` where the kernel or a seccomp filter refuses, and the caller falls back to
     /// asking `waitpid` on a timer.
-    pub(crate) fn new(pid: libc::pid_t) -> Option<Self> {
+    pub(crate) fn new(pid: Pid) -> Option<Self> {
         use std::os::fd::FromRawFd;
         // SAFETY: `pidfd_open` takes a pid and flags and returns a new descriptor or -1;
         // there is no memory for it to touch. Every pidfd is close-on-exec by construction.
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.as_raw(), 0) };
         (fd >= 0).then(|| Self(unsafe { OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) }))
     }
 
@@ -186,12 +187,12 @@ pub(crate) fn spawn(
     envp: &[CString],
     slave: &CStr,
     cwd: Option<&CStr>,
-) -> Option<crate::error::Result<libc::pid_t>> {
+) -> Option<crate::error::Result<Pid>> {
     use nix::errno::Errno;
     use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, PosixSpawnFlags, posix_spawn};
     use nix::sys::signal::SigSet;
     use nix::sys::stat::Mode;
-    let spawned = (|| -> crate::error::Result<libc::pid_t> {
+    let spawned = (|| -> crate::error::Result<Pid> {
         let mut attr = PosixSpawnAttr::init()?;
         attr.set_sigdefault(&SigSet::all())?;
         attr.set_sigmask(&SigSet::empty())?;
@@ -217,7 +218,7 @@ pub(crate) fn spawn(
         actions.add_open(0, slave, OFlag::O_RDWR, Mode::empty())?;
         actions.add_dup2(0, 1)?;
         actions.add_dup2(0, 2)?;
-        Ok(posix_spawn(program, &actions, &attr, argv, envp)?.as_raw())
+        Ok(posix_spawn(program, &actions, &attr, argv, envp)?)
     })();
     Some(spawned)
 }

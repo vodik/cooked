@@ -12,8 +12,9 @@ use crate::emu::{
     KeyEncoding, LinkId, Mark, MarkId, Run, Style,
 };
 use crate::env::{self, Env, Result, Value, lisp_enum, list, plist, sym};
-use crate::pty::{Mode, Pid};
+use crate::pty::Mode;
 use crate::session::Update;
+use nix::unistd::Pid;
 
 /// The crate's id newtypes, which are all one integer wide.
 ///
@@ -68,7 +69,7 @@ impl env::IntoLisp for KeyEncoding {
 
 impl env::IntoLisp for Pid {
     fn into_lisp(self, env: &Env) -> Result<Value> {
-        self.get().into_lisp(env)
+        self.as_raw().into_lisp(env)
     }
 }
 

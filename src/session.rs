@@ -7,12 +7,13 @@
 use crate::emu::{Delta, Event, Feed, Term};
 use crate::error::Result;
 use crate::pty::{
-    AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pid, Pty, WRITE_TIMEOUT, Wait, Winsize,
+    AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pty, WRITE_TIMEOUT, Wait, Winsize,
 };
 use crate::replies::{ReplyKind, ReplyQueue};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{SigSet, Signal};
+use nix::unistd::Pid;
 use std::ffi::OsStr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
@@ -1617,7 +1618,7 @@ mod tests {
 
     /// `kill(pid, 0)` only probes for existence. ESRCH means the pid is gone for good.
     fn alive(pid: i32) -> nix::Result<()> {
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None)
+        nix::sys::signal::kill(Pid::from_raw(pid), None)
     }
 
     /// Close-on-exec, because these tests fork children concurrently, and an inheritable
@@ -2821,7 +2822,7 @@ mod tests {
     #[test]
     fn shutdown_is_idempotent_and_kills_the_child() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 300"]);
-        let pid = session.pid().get();
+        let pid = session.pid().as_raw();
         assert!(
             session.shutdown(),
             "the first call should be the one that tears down"
@@ -2890,7 +2891,7 @@ mod tests {
         // `exec`, so the ignored disposition is the sleep's own and the hangup is
         // refused by the only process there is.
         let (session, _read) = session(&["/bin/sh", "-c", "trap '' HUP; exec sleep 300"]);
-        let pid = session.pid().get();
+        let pid = session.pid().as_raw();
         std::thread::sleep(Duration::from_millis(150));
         session.shared.finish(Ended::Aborted);
         assert!(!session.alive());
@@ -2901,7 +2902,7 @@ mod tests {
     #[test]
     fn shutdown_survives_a_child_that_ignores_sighup() {
         let (session, _read) = session(&["/bin/sh", "-c", "trap '' HUP; sleep 300"]);
-        let pid = session.pid().get();
+        let pid = session.pid().as_raw();
         std::thread::sleep(Duration::from_millis(150));
         assert!(session.shutdown());
         assert_eq!(

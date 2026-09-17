@@ -28,7 +28,7 @@ use nix::pty::{PtyMaster, grantpt, posix_openpt, unlockpt};
 use nix::sys::signal::{Signal, killpg};
 use nix::sys::termios::{LocalFlags, SpecialCharacterIndices, Termios, tcgetattr};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{AccessFlags, Pid as NixPid, access, tcgetpgrp};
+use nix::unistd::{AccessFlags, Pid, access, tcgetpgrp};
 use std::ffi::{CStr, CString, OsStr};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -142,15 +142,6 @@ impl AtomicMode {
     pub(crate) fn store(&self, mode: Mode) {
         self.0
             .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Pid(libc::pid_t);
-
-impl Pid {
-    pub(crate) fn get(self) -> i32 {
-        self.0
     }
 }
 
@@ -376,7 +367,7 @@ impl Pty {
 
         Ok(Self {
             master,
-            child: Pid(child),
+            child,
             reaped: std::sync::atomic::AtomicBool::new(false),
             reap_lock: std::sync::Mutex::new(()),
             exit_watch: platform::ExitWatch::new(child),
@@ -405,7 +396,7 @@ impl Pty {
         argv: &[*const libc::c_char],
         envp: &[*const libc::c_char],
         cwd: Option<&CStr>,
-    ) -> Result<libc::pid_t> {
+    ) -> Result<Pid> {
         let (exec_seen, exec_seen_child) = nix::unistd::pipe()?;
         for end in [&exec_seen, &exec_seen_child] {
             fcntl(end, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
@@ -427,7 +418,7 @@ impl Pty {
         }
         drop(exec_seen_child);
         wait_for_eof(&exec_seen, SPAWN_EXEC_GRACE);
-        Ok(child)
+        Ok(Pid::from_raw(child))
     }
 
     pub(crate) fn as_fd(&self) -> BorrowedFd<'_> {
@@ -453,8 +444,8 @@ impl Pty {
 
     /// Process group in the foreground of the tty — i.e. what is actually running.
     pub(crate) fn foreground(&self) -> Result<Pid> {
-        match tcgetpgrp(self.master.as_fd())?.as_raw() {
-            pgrp if pgrp > 1 => Ok(Pid(pgrp)),
+        match tcgetpgrp(self.master.as_fd())? {
+            pgrp if pgrp.as_raw() > 1 => Ok(pgrp),
             _ => Err(Error::NoForeground),
         }
     }
@@ -633,7 +624,7 @@ impl Pty {
         match target {
             // `killpg` rather than `kill(-pid)`, which one missed negation turns into a
             // signal to the wrong process.
-            Pid(target) if target > 1 => Ok(killpg(NixPid::from_raw(target), sig)?),
+            target if target.as_raw() > 1 => Ok(killpg(target, sig)?),
             _ => Err(Error::NoForeground),
         }
     }
@@ -697,7 +688,7 @@ impl Pty {
         if self.reaped() {
             return Ok(None);
         }
-        let collected = match waitpid(NixPid::from_raw(self.child.0), Some(flags))? {
+        let collected = match waitpid(self.child, Some(flags))? {
             WaitStatus::Exited(_, code) => code,
             // The shell convention, and what `cooked-last-exit-code' renders.
             WaitStatus::Signaled(_, sig, _) => 128 + sig as i32,
@@ -719,7 +710,7 @@ impl Drop for Pty {
     /// the `SIGHUP` here would leak exactly the children `Session::shutdown` escalates to
     /// avoid, and which path a failure takes must not decide whether the child goes away.
     fn drop(&mut self) {
-        if self.child.0 <= 1 || self.reaped() {
+        if self.child.as_raw() <= 1 || self.reaped() {
             return;
         }
         let _ = self.hangup();
@@ -1239,7 +1230,7 @@ mod tests {
         let pty = Pty::spawn(&["/bin/cat"], &[("TERM", "dumb")], size, None).expect("spawn");
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(pty.mode().unwrap(), Mode::Cooked);
-        assert!(pty.foreground().unwrap().get() > 0);
+        assert!(pty.foreground().unwrap().as_raw() > 0);
     }
 
     #[test]

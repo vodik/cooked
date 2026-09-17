@@ -4,6 +4,7 @@ use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::libc;
 use nix::pty::PtyMaster;
 use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+use nix::unistd::Pid;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
@@ -104,10 +105,10 @@ impl ExitWatch {
     /// `None` when the kqueue cannot be made or the event cannot be registered -- the
     /// process may already be gone, which `kevent` answers with `ESRCH` -- and the
     /// caller falls back to asking `waitpid` on a timer.
-    pub(crate) fn new(pid: libc::pid_t) -> Option<Self> {
+    pub(crate) fn new(pid: Pid) -> Option<Self> {
         let kq = Kqueue::new().ok()?;
         let change = KEvent::new(
-            pid as libc::uintptr_t,
+            pid.as_raw() as libc::uintptr_t,
             EventFilter::EVFILT_PROC,
             EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
             FilterFlag::NOTE_EXIT,
@@ -169,6 +170,6 @@ pub(crate) fn spawn(
     _envp: &[CString],
     _slave: &CStr,
     _cwd: Option<&CStr>,
-) -> Option<crate::error::Result<libc::pid_t>> {
+) -> Option<crate::error::Result<Pid>> {
     None
 }
