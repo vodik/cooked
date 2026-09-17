@@ -22,6 +22,7 @@
 use crate::error::{Error, Result};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+use nix::libc;
 use nix::poll::{PollFd, PollFlags, PollTimeout};
 use nix::pty::{PtyMaster, grantpt, posix_openpt, unlockpt};
 use nix::sys::signal::{Signal, killpg};
@@ -348,7 +349,7 @@ impl Pty {
         // paragraphs above about the fork window do not apply: see `platform::spawn`. The
         // window size goes on the master afterwards, where the reader's pending-resize
         // retry already covers a tty that is not ready for it.
-        let child = match platform::spawn(&program, &cargv, &cenvp, &name, ccwd.as_deref()) {
+        let child = match platform::spawn(&program, &cargs, &cenv, &name, ccwd.as_deref()) {
             Some(spawned) => {
                 let child = spawned?;
                 let _ = set_winsize(master.as_fd(), size);
@@ -483,9 +484,8 @@ impl Pty {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        Errno::result(unsafe {
-            libc::ioctl(self.master.as_raw_fd(), platform::TIOCGWINSZ, &raw mut ws)
-        })?;
+        // SAFETY: an ioctl on a live descriptor into a struct that outlives it.
+        unsafe { platform::tiocgwinsz(self.master.as_raw_fd(), &raw mut ws) }?;
         Ok(Winsize {
             rows: ws.ws_row,
             cols: ws.ws_col,
@@ -818,11 +818,10 @@ fn open_master() -> Result<PtyMaster> {
     }
 }
 
-// nix's `ioctl_write_ptr_bad!` would generate an equivalent `unsafe fn` returning
-// `Result`, which is a lateral move for a single call that already goes through `check`.
 fn set_winsize(fd: BorrowedFd<'_>, size: Winsize) -> Result<()> {
     let ws = libc::winsize::from(size);
-    Errno::result(unsafe { libc::ioctl(fd.as_raw_fd(), platform::TIOCSWINSZ, &raw const ws) })?;
+    // SAFETY: an ioctl on a live descriptor from a struct that outlives it.
+    unsafe { platform::tiocswinsz(fd.as_raw_fd(), &raw const ws) }?;
     Ok(())
 }
 
@@ -860,7 +859,7 @@ unsafe fn child_exec(
         // over it would be a regression.
         let fd = platform::open_slave(master, slave);
         libc::close(master);
-        if fd == -1 || libc::ioctl(fd, platform::TIOCSCTTY, 0) == -1 {
+        if fd == -1 || platform::tiocsctty(fd, 0).is_err() {
             die();
         }
         // Best-effort: this is the first slave open, which is also the first moment any
@@ -868,7 +867,7 @@ unsafe fn child_exec(
         // rather than being left to race the parent's own attempt at it. A wrong initial
         // size self-heals at the caller's next `resize`, so it is not worth `die`-ing over.
         let ws = libc::winsize::from(size);
-        libc::ioctl(fd, platform::TIOCSWINSZ, &raw const ws);
+        let _ = platform::tiocswinsz(fd, &raw const ws);
         for target in 0..=2 {
             if libc::dup2(fd, target) == -1 {
                 die();
@@ -1210,10 +1209,9 @@ mod tests {
             None,
         )
         .unwrap();
-        let flags = unsafe { libc::fcntl(pty.as_fd().as_raw_fd(), libc::F_GETFD) };
-        assert_ne!(flags, -1);
+        let flags = fcntl(pty.as_fd(), FcntlArg::F_GETFD).expect("F_GETFD");
         assert_ne!(
-            flags & libc::FD_CLOEXEC,
+            flags & FdFlag::FD_CLOEXEC.bits(),
             0,
             "the master would be inherited by every child"
         );

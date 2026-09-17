@@ -1,7 +1,9 @@
 //! macOS. Three things Linux gives us for free have to be done by hand here.
 
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+use nix::libc;
 use nix::pty::PtyMaster;
+use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
@@ -13,10 +15,24 @@ use std::os::fd::{AsFd, OwnedFd};
 /// `TIOCGWINSZ` is `_IOR('t', 104, struct winsize)`, with `IOC_VOID = 0x20000000`,
 /// `IOC_IN = 0x80000000`, `IOC_OUT = 0x40000000` and the 8-byte `winsize` landing in
 /// bits 16..29. Written out rather than computed so they can be checked against
-/// `sys/ttycom.h` by eye.
-pub(crate) const TIOCSCTTY: libc::c_ulong = 0x2000_7461;
-pub(crate) const TIOCSWINSZ: libc::c_ulong = 0x8008_7467;
-pub(crate) const TIOCGWINSZ: libc::c_ulong = 0x4008_7468;
+/// `sys/ttycom.h` by eye. Wrapped as functions by nix's macros, as Linux's are.
+nix::ioctl_write_int_bad!(
+    #[allow(unreachable_pub)]
+    tiocsctty,
+    0x2000_7461
+);
+nix::ioctl_write_ptr_bad!(
+    #[allow(unreachable_pub)]
+    tiocswinsz,
+    0x8008_7467,
+    libc::winsize
+);
+nix::ioctl_read_bad!(
+    #[allow(unreachable_pub)]
+    tiocgwinsz,
+    0x4008_7468,
+    libc::winsize
+);
 
 /// `_POSIX_VDISABLE` — the `c_cc` value meaning "this character is turned off".
 ///
@@ -58,46 +74,25 @@ pub(crate) fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 /// is the BSD spelling of Linux's `pidfd`. Waited on with `kevent` rather than `poll`,
 /// since `poll` on a kqueue descriptor is not something every Darwin has supported.
 #[derive(Debug)]
-pub(crate) struct ExitWatch(OwnedFd);
+pub(crate) struct ExitWatch(Kqueue);
 
 impl ExitWatch {
     /// `None` when the kqueue cannot be made or the event cannot be registered -- the
     /// process may already be gone, which `kevent` answers with `ESRCH` -- and the
     /// caller falls back to asking `waitpid` on a timer.
     pub(crate) fn new(pid: libc::pid_t) -> Option<Self> {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        // SAFETY: `kqueue` takes nothing and returns a descriptor or -1.
-        let kq = unsafe { libc::kqueue() };
-        if kq < 0 {
-            return None;
-        }
-        // SAFETY: the descriptor is ours from the line above.
-        let kq = unsafe { OwnedFd::from_raw_fd(kq) };
-        // Close-on-exec, so a session spawned while this one is being torn down does not
-        // inherit it; kqueue descriptors are not inherited across fork, but the flag
-        // costs nothing and states the intent.
-        let _ = fcntl(kq.as_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
-        let change = libc::kevent {
-            ident: pid as libc::uintptr_t,
-            filter: libc::EVFILT_PROC,
-            flags: libc::EV_ADD | libc::EV_ONESHOT,
-            fflags: libc::NOTE_EXIT,
-            data: 0,
-            udata: std::ptr::null_mut(),
-        };
-        // SAFETY: one change, no events asked for, no timeout; the struct outlives the
-        // call.
-        let rc = unsafe {
-            libc::kevent(
-                kq.as_raw_fd(),
-                &change,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            )
-        };
-        (rc == 0).then_some(Self(kq))
+        let kq = Kqueue::new().ok()?;
+        let change = KEvent::new(
+            pid as libc::uintptr_t,
+            EventFilter::EVFILT_PROC,
+            EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
+            FilterFlag::NOTE_EXIT,
+            0,
+            0,
+        );
+        // No room in the event list, so a registration that fails is the call failing.
+        kq.kevent(&[change], &mut [], None).ok()?;
+        Some(Self(kq))
     }
 
     /// Wait up to TIMEOUT for the process to exit, answering whether it has.
@@ -105,24 +100,19 @@ impl ExitWatch {
     /// `EV_ONESHOT`, so the event is delivered once; a later wait times out, which is
     /// right because by then `waitpid` succeeds without waiting.
     pub(crate) fn wait(&self, timeout: std::time::Duration) -> bool {
-        use std::os::fd::AsRawFd;
         let timeout = libc::timespec {
             tv_sec: timeout.as_secs() as libc::time_t,
             tv_nsec: libc::c_long::from(timeout.subsec_nanos()),
         };
-        let mut event = std::mem::MaybeUninit::<libc::kevent>::uninit();
-        // SAFETY: no changes, room for one event, a timeout that outlives the call.
-        let rc = unsafe {
-            libc::kevent(
-                self.0.as_raw_fd(),
-                std::ptr::null(),
-                0,
-                event.as_mut_ptr(),
-                1,
-                &timeout,
-            )
-        };
-        rc > 0
+        let mut events = [KEvent::new(
+            0,
+            EventFilter::EVFILT_PROC,
+            EvFlags::empty(),
+            FilterFlag::empty(),
+            0,
+            0,
+        )];
+        matches!(self.0.kevent(&[], &mut events, Some(timeout)), Ok(1..))
     }
 }
 
@@ -151,8 +141,8 @@ pub(crate) fn signal_foreground(
 /// run here and is kept until the call can be tried on the platform itself.
 pub(crate) fn spawn(
     _program: &CStr,
-    _argv: &[*const libc::c_char],
-    _envp: &[*const libc::c_char],
+    _argv: &[CString],
+    _envp: &[CString],
     _slave: &CStr,
     _cwd: Option<&CStr>,
 ) -> Option<crate::error::Result<libc::pid_t>> {

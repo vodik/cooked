@@ -1,14 +1,42 @@
 //! Linux. Everything cooked wants, Linux has a first-class version of.
 
 use nix::fcntl::OFlag;
+use nix::libc;
 use nix::pty::PtyMaster;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::OwnedFd;
 
-pub(crate) const TIOCSCTTY: libc::c_ulong = libc::TIOCSCTTY;
-pub(crate) const TIOCSWINSZ: libc::c_ulong = libc::TIOCSWINSZ;
-pub(crate) const TIOCGWINSZ: libc::c_ulong = libc::TIOCGWINSZ;
+// The tty ioctls, as functions: `ioctl(fd, request, arg)` with the result checked, and
+// the request number written once. `unreachable_pub` is allowed because the macros can
+// only make them `pub`, and `pub(crate)` is what a private module makes of that.
+nix::ioctl_write_int_bad!(
+    #[allow(unreachable_pub)]
+    tiocsctty,
+    libc::TIOCSCTTY
+);
+nix::ioctl_write_ptr_bad!(
+    #[allow(unreachable_pub)]
+    tiocswinsz,
+    libc::TIOCSWINSZ,
+    libc::winsize
+);
+nix::ioctl_read_bad!(
+    #[allow(unreachable_pub)]
+    tiocgwinsz,
+    libc::TIOCGWINSZ,
+    libc::winsize
+);
+nix::ioctl_write_int_bad!(
+    #[allow(unreachable_pub)]
+    tiocsig,
+    libc::TIOCSIG
+);
+nix::ioctl_write_int_bad!(
+    #[allow(unreachable_pub)]
+    tiocgptpeer,
+    libc::TIOCGPTPEER
+);
 
 /// `_POSIX_VDISABLE` — the `c_cc` value meaning "this character is turned off".
 pub(crate) const POSIX_VDISABLE: libc::cc_t = 0;
@@ -68,13 +96,14 @@ impl ExitWatch {
 /// `TIOCGPTPEER` (Linux 4.13) opens it from the master alone, which needs no path and so
 /// works inside a mount namespace whose `/dev/pts` is not the one the master came from.
 /// Older kernels answer `ENOTTY` or `EINVAL`, and SLAVE, the path `ptsname_r` gave,
-/// is opened instead. Only async-signal-safe calls: this runs between fork and exec.
+/// is opened instead. Only async-signal-safe calls: this runs between fork and exec, so
+/// the fallback is `libc::open` rather than `nix::fcntl::open`, which is the same call
+/// behind a path conversion this window cannot afford to reason about.
 pub(crate) unsafe fn open_slave(master: libc::c_int, slave: *const libc::c_char) -> libc::c_int {
     let flags = libc::O_RDWR | libc::O_NOCTTY;
     // SAFETY: two syscalls on descriptors and a NUL-terminated path the caller owns.
     unsafe {
-        let fd = libc::ioctl(master, libc::TIOCGPTPEER, flags);
-        if fd >= 0 {
+        if let Ok(fd) = tiocgptpeer(master, flags) {
             return fd;
         }
         libc::open(slave, flags)
@@ -98,8 +127,7 @@ pub(crate) fn signal_foreground(
         return None;
     }
     // SAFETY: an ioctl on a live descriptor with an integer argument.
-    let rc = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSIG, sig as libc::c_int) };
-    Some(nix::errno::Errno::result(rc).map(drop))
+    Some(unsafe { tiocsig(master.as_raw_fd(), sig as libc::c_int) }.map(drop))
 }
 
 /// Start PROGRAM with ARGV and ENVP on the slave SLAVE, in a session of its own, with
@@ -119,6 +147,10 @@ pub(crate) fn signal_foreground(
 /// back to its default and the mask is emptied, since Emacs ignores SIGPIPE and blocks
 /// signals and a child inheriting that is subtly broken. The master is close-on-exec.
 ///
+/// Through `nix::spawn` but for two things it has no spelling for: the `SETSID` flag,
+/// which goes in as a raw bit, and `addchdir_np`, a glibc extension called on the
+/// actions object directly, which `repr(transparent)` makes sound.
+///
 /// The initial window size is not set here: the parent sets it on the master once this
 /// returns, which Linux accepts at any time.
 ///
@@ -126,80 +158,42 @@ pub(crate) fn signal_foreground(
 /// forks; see [`crate::platform`].
 pub(crate) fn spawn(
     program: &CStr,
-    argv: &[*const libc::c_char],
-    envp: &[*const libc::c_char],
+    argv: &[CString],
+    envp: &[CString],
     slave: &CStr,
     cwd: Option<&CStr>,
 ) -> Option<crate::error::Result<libc::pid_t>> {
     use nix::errno::Errno;
-    /// An errno-returning call, `posix_spawn` style: zero is success.
-    fn check(rc: libc::c_int) -> crate::error::Result<()> {
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(Errno::from_raw(rc).into())
-        }
-    }
-    // SAFETY: every call below is an FFI call on structures initialised by the matching
-    // `_init`, destroyed on every path out, with pointers that outlive the `posix_spawn`.
-    let result = unsafe {
-        let mut attr = std::mem::MaybeUninit::<libc::posix_spawnattr_t>::uninit();
-        if let Err(e) = check(libc::posix_spawnattr_init(attr.as_mut_ptr())) {
-            return Some(Err(e));
-        }
-        let mut actions = std::mem::MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
-        if let Err(e) = check(libc::posix_spawn_file_actions_init(actions.as_mut_ptr())) {
-            libc::posix_spawnattr_destroy(attr.as_mut_ptr());
-            return Some(Err(e));
-        }
-        let attr = attr.as_mut_ptr();
-        let actions = actions.as_mut_ptr();
-        let spawned = (|| {
-            let mut all = std::mem::zeroed::<libc::sigset_t>();
-            libc::sigfillset(&raw mut all);
-            let mut none = std::mem::zeroed::<libc::sigset_t>();
-            libc::sigemptyset(&raw mut none);
-            check(libc::posix_spawnattr_setsigdefault(attr, &raw const all))?;
-            check(libc::posix_spawnattr_setsigmask(attr, &raw const none))?;
-            let flags = [
-                libc::POSIX_SPAWN_SETSID as libc::c_short,
-                libc::POSIX_SPAWN_SETSIGDEF as libc::c_short,
-                libc::POSIX_SPAWN_SETSIGMASK as libc::c_short,
-            ]
-            .into_iter()
-            .fold(0, |acc, flag| acc | flag);
-            check(libc::posix_spawnattr_setflags(attr, flags))?;
-            if let Some(dir) = cwd {
-                check(libc::posix_spawn_file_actions_addchdir_np(
-                    actions,
+    use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, PosixSpawnFlags, posix_spawn};
+    use nix::sys::signal::SigSet;
+    use nix::sys::stat::Mode;
+    let spawned = (|| -> crate::error::Result<libc::pid_t> {
+        let mut attr = PosixSpawnAttr::init()?;
+        attr.set_sigdefault(&SigSet::all())?;
+        attr.set_sigmask(&SigSet::empty())?;
+        attr.set_flags(
+            PosixSpawnFlags::POSIX_SPAWN_SETSIGDEF
+                | PosixSpawnFlags::POSIX_SPAWN_SETSIGMASK
+                | PosixSpawnFlags::from_bits_retain(libc::POSIX_SPAWN_SETSID as libc::c_int),
+        )?;
+        let mut actions = PosixSpawnFileActions::init()?;
+        if let Some(dir) = cwd {
+            // SAFETY: `PosixSpawnFileActions` is `repr(transparent)` over the libc
+            // struct, initialised by the `init` above and destroyed on drop.
+            let rc = unsafe {
+                libc::posix_spawn_file_actions_addchdir_np(
+                    (&raw mut actions).cast::<libc::posix_spawn_file_actions_t>(),
                     dir.as_ptr(),
-                ))?;
+                )
+            };
+            if rc != 0 {
+                return Err(Errno::from_raw(rc).into());
             }
-            check(libc::posix_spawn_file_actions_addopen(
-                actions,
-                0,
-                slave.as_ptr(),
-                libc::O_RDWR,
-                0,
-            ))?;
-            check(libc::posix_spawn_file_actions_adddup2(actions, 0, 1))?;
-            check(libc::posix_spawn_file_actions_adddup2(actions, 0, 2))?;
-            let mut pid: libc::pid_t = 0;
-            check(libc::posix_spawn(
-                &raw mut pid,
-                program.as_ptr(),
-                actions,
-                attr,
-                // The prototype spells the vectors mutable, as C's does; nothing writes
-                // through them.
-                argv.as_ptr().cast::<*mut libc::c_char>(),
-                envp.as_ptr().cast::<*mut libc::c_char>(),
-            ))?;
-            Ok(pid)
-        })();
-        libc::posix_spawn_file_actions_destroy(actions);
-        libc::posix_spawnattr_destroy(attr);
-        spawned
-    };
-    Some(result)
+        }
+        actions.add_open(0, slave, OFlag::O_RDWR, Mode::empty())?;
+        actions.add_dup2(0, 1)?;
+        actions.add_dup2(0, 2)?;
+        Ok(posix_spawn(program, &actions, &attr, argv, envp)?.as_raw())
+    })();
+    Some(spawned)
 }

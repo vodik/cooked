@@ -29,10 +29,15 @@ description = "Terminal emulator core for Emacs, with termios and OSC 133 awaren
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-libc = "0.2"
 memchr = "2.7"
 miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
-nix = { version = "0.31", features = ["fs", "poll", "process", "pthread", "signal", "term"] }
+# nix re-exports the `libc` it is built on as `nix::libc`, and that is the only way this
+# crate reaches libc: one copy of the bindings, at the version nix was tested against.
+# `event` is kqueue, for Darwin's exit watch; `ioctl` is the macros every tty ioctl here
+# goes through; posix_spawn comes with `process`.
+nix = { version = "0.31", features = [
+  "event", "fs", "ioctl", "poll", "process", "pthread", "signal", "term",
+] }
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
 

@@ -10,7 +10,7 @@
 //!
 //! | item | why it is here |
 //! |---|---|
-//! | [`TIOCSCTTY`], [`TIOCSWINSZ`], [`TIOCGWINSZ`] | libc and nix do not define these for every target |
+//! | [`tiocsctty`], [`tiocswinsz`], [`tiocgwinsz`] | the request numbers differ, and libc and nix do not define them for every target |
 //! | [`POSIX_VDISABLE`] | zero on Linux, `0xff` on the BSDs |
 //! | [`slave_name`] | reentrant where possible, careful where not |
 //! | [`cloexec_pipe`] | atomic where possible, two-step where not |
@@ -22,22 +22,18 @@
 //! Nothing above the shim should carry a `cfg`; if a caller needs one, the abstraction
 //! is in the wrong place.
 //!
-//! # Why the rest of the crate still calls `libc` directly
+//! # Where `libc` is still called directly
 //!
-//! nix covers everything it reasonably can here, and errors cross as [`nix::errno::Errno`], which
-//! `?` widens to [`std::io::Error`] on its own -- there is no conversion shim, because nix's
-//! own `From` is exactly `io::Error::from_raw_os_error`. The `libc` calls that remain
-//! are not leftovers, and swapping them is not an improvement:
+//! nix covers nearly everything here, reached as `nix::libc` for the few things it does
+//! not wrap, and errors cross as [`nix::errno::Errno`], which `?` widens to the crate's
+//! own error. The raw calls that remain are not leftovers:
 //!
-//!   `fork`               nix's runs registered `pthread_atfork` handlers, which this
-//!                        cannot afford between the fork and the exec.
-//!   `ioctl` for winsize  no released nix has `tcgetwinsize`/`tcsetwinsize`; `nix::pty`
-//!                        only re-exports `libc::winsize`. The `ioctl_*_bad!` macros
-//!                        would generate the same `unsafe fn` while moving the request
-//!                        codes out of this module, which is the one place they belong.
-//!   everything in        only async-signal-safe calls are legal after a fork in a
-//!   `pty::child_exec`    multithreaded process, which rules out any wrapper that
-//!                        allocates. See that function's own comment.
+//!   `fork`, and everything  only async-signal-safe calls are legal after a fork in a
+//!   in `pty::child_exec`    multithreaded process, which rules out any wrapper that
+//!                           allocates or reasons about paths. See that function.
+//!   `pidfd_open`            nix has no binding; one raw syscall in [`ExitWatch`].
+//!   `addchdir_np`,          nix's `spawn` module has neither the glibc extension nor
+//!   `POSIX_SPAWN_SETSID`    the flag; both go in beside its own calls in [`spawn`].
 //!
 //! Everything else named `libc::` in this crate is a type or constant alias.
 
