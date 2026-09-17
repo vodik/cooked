@@ -10,7 +10,7 @@
 //!
 //! | item | why it is here |
 //! |---|---|
-//! | [`tiocsctty`], [`tiocswinsz`], [`tiocgwinsz`] | the request numbers differ, and libc and nix do not define them for every target |
+//! | [`winsize`], [`set_winsize`], and the raw `tiocsctty`, `tiocswinsz` for the child | the request numbers differ, and libc and nix do not define them for every target |
 //! | [`POSIX_VDISABLE`] | zero on Linux, `0xff` on the BSDs |
 //! | [`slave_name`] | reentrant where possible, careful where not |
 //! | [`cloexec_pipe`] | atomic where possible, two-step where not |

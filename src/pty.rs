@@ -478,14 +478,7 @@ impl Pty {
     /// master, return success, and then be overwritten by the child's own initialisation.
     /// Reading it back is what lets `session` tell "applied" from "applied and lost".
     pub(crate) fn winsize(&self) -> Result<Winsize> {
-        let mut ws = libc::winsize {
-            ws_row: 0,
-            ws_col: 0,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: an ioctl on a live descriptor into a struct that outlives it.
-        unsafe { platform::tiocgwinsz(self.master.as_raw_fd(), &raw mut ws) }?;
+        let ws = platform::winsize(self.master.as_fd())?;
         Ok(Winsize {
             rows: ws.ws_row,
             cols: ws.ws_col,
@@ -819,10 +812,7 @@ fn open_master() -> Result<PtyMaster> {
 }
 
 fn set_winsize(fd: BorrowedFd<'_>, size: Winsize) -> Result<()> {
-    let ws = libc::winsize::from(size);
-    // SAFETY: an ioctl on a live descriptor from a struct that outlives it.
-    unsafe { platform::tiocswinsz(fd.as_raw_fd(), &raw const ws) }?;
-    Ok(())
+    Ok(platform::set_winsize(fd, &libc::winsize::from(size))?)
 }
 
 /// Runs in the forked child and never returns.

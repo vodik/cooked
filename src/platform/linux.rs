@@ -38,6 +38,30 @@ nix::ioctl_write_int_bad!(
     libc::TIOCGPTPEER
 );
 
+/// The tty's window size, as the kernel holds it.
+pub(crate) fn winsize(fd: std::os::fd::BorrowedFd<'_>) -> nix::Result<libc::winsize> {
+    use std::os::fd::AsRawFd;
+    let mut ws = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: an ioctl on a live descriptor into a struct that outlives it.
+    unsafe { tiocgwinsz(fd.as_raw_fd(), &raw mut ws) }?;
+    Ok(ws)
+}
+
+/// Set the tty's window size.
+///
+/// The safe face of `tiocswinsz`, for the parent; the child between fork and exec calls
+/// the raw one on the descriptor number it has.
+pub(crate) fn set_winsize(fd: std::os::fd::BorrowedFd<'_>, ws: &libc::winsize) -> nix::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: an ioctl on a live descriptor from a struct that outlives it.
+    unsafe { tiocswinsz(fd.as_raw_fd(), ws) }.map(drop)
+}
+
 /// `_POSIX_VDISABLE` — the `c_cc` value meaning "this character is turned off".
 pub(crate) const POSIX_VDISABLE: libc::cc_t = 0;
 
