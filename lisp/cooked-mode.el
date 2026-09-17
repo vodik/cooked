@@ -721,6 +721,9 @@ list of its own would have made every fold in the buffer spring open."
         (delete-overlay existing)
       (add-to-invisibility-spec 'cooked-fold)
       (let ((overlay (make-overlay beg end)))
+        ;; A fold whose output the scrollback cap has since cut off would
+        ;; otherwise survive as an empty overlay at the cut, for good.
+        (overlay-put overlay 'evaporate t)
         (overlay-put overlay 'cooked-fold t)
         (overlay-put overlay 'invisible 'cooked-fold)
         (overlay-put overlay 'isearch-open-invisible #'delete-overlay)

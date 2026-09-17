@@ -774,7 +774,8 @@ other colour resolved against the old theme."
       ('cooked--concealed-reversed (setq bg fg)))
     (when (plist-get plist :inverse-video)
       (cl-rotatef fg bg))
-    (cooked--cached cooked--face-cache (list 'shade level fg bg)
+    (cooked--cached-bounded cooked--face-cache cooked--face-cache-limit
+        (list 'shade level fg bg)
       (let ((color (cooked--blend fg bg (aref cooked--shade-coverage level))))
         (list :foreground color :background color)))))
 

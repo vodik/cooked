@@ -235,6 +235,22 @@ t, which is invisible only for as long as that spec is left at its default."
         (funcall temporary fold t)
         (should (invisible-p (overlay-start fold)))))))
 
+(ert-deftest cooked-a-fold-whose-output-is-cut-off-does-not-outlive-it ()
+  "The scrollback cap deletes text from the top, and an overlay over deleted
+text is an empty overlay at the cut, kept for good unless it evaporates."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--make-command "$ " "some-command" "gone\n" 0)
+    (goto-char (point-max))
+    (forward-line -1)
+    (cooked-toggle-fold)
+    (should (seq-find (lambda (o) (overlay-get o 'cooked-fold))
+                      (overlays-in (point-min) (point-max))))
+    (let ((inhibit-read-only t))
+      (delete-region (point-min) (point-max)))
+    (should-not (seq-find (lambda (o) (overlay-get o 'cooked-fold))
+                          (overlays-in (point-min) (point-max))))))
+
 ;;;; The subsystems that ask a buffer what its parts are
 
 (ert-deftest cooked-imenu-indexes-the-commands-and-not-the-text ()

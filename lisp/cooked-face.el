@@ -78,6 +78,21 @@ running; see `cooked--set-bold-is-bright'."
 
 (defvar-local cooked--face-cache nil)
 
+(defconst cooked--face-cache-limit 8192
+  "Entries `cooked--face-cache' may hold before it is emptied and begun again.
+
+The key is the rendition itself -- foreground, background, attributes and
+underline colour -- and truecolor output has no bound on how many of those a
+child prints: a `chafa' or `timg' animation names hundreds of new colours a
+frame, and every one was remembered for the life of the buffer.  Three
+thousand distinct colours were three thousand entries, measured.
+
+Twice what the core keeps live: its rendition table frees an id once 4096 are
+in use (`STYLE_TABLE_CAPACITY'), so a face for a rendition no cell names any
+more is one nothing will ask for again until the child prints it afresh.
+Emptying is the whole policy, as `cooked--cached-bounded' says: a face is a
+plist rebuilt in microseconds, and text already carrying one keeps it.")
+
 (defvar-local cooked--style-specs nil
   "Renditions by id, as the core announced them in a drain's `:styles'.
 
@@ -534,7 +549,7 @@ FG, BG and UL are in `cooked--color's spelling: nil, an index, or a list of
 R G B.  Memoized per buffer in `cooked--face-cache', so every rendition id that
 names the same rendition shares one face, and a theme change flushes them all
 with one `clrhash'."
-  (cooked--cached cooked--face-cache (list fg bg attrs ul)
+  (cooked--cached-bounded cooked--face-cache cooked--face-cache-limit (list fg bg attrs ul)
     (cooked--face-build fg bg attrs ul)))
 
 (defun cooked--face-build (fg bg attrs ul)

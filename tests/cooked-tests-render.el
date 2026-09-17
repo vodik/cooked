@@ -1040,6 +1040,20 @@ is the collision `cooked-blink' was written to avoid in the first place."
           (b (cooked--face nil nil cooked--attr-underline 2)))
       (should-not (equal a b)))))
 
+(ert-deftest cooked-the-face-cache-does-not-grow-with-every-colour-printed ()
+  "Truecolor output names as many renditions as it likes, and each was an entry
+for the life of the buffer: three thousand colours were three thousand entries,
+measured.  The cache empties past `cooked--face-cache-limit' instead, and a
+face asked for again is simply built again."
+  (with-temp-buffer
+    (cooked-mode)
+    (setq-local cooked--face-cache (make-hash-table :test #'equal))
+    (dotimes (i (* 3 cooked--face-cache-limit))
+      (cooked--face (list (% i 256) (/ i 256) 7) nil 0))
+    (should (<= (hash-table-count cooked--face-cache) (1+ cooked--face-cache-limit)))
+    ;; Emptied, not broken: the same rendition still answers the same face.
+    (should (equal (cooked--face '(1 2 3) nil 0) (cooked--face-build '(1 2 3) nil 0 nil)))))
+
 (ert-deftest cooked-clear-scrollback-keeps-the-line-the-child-is-on ()
   "Everything above the child's line goes, on both sides of the seam: the output
 that scrolled off into the buffer and the rows the grid is still holding.  Only
