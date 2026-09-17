@@ -3,10 +3,16 @@
 //! We allocate the pty ourselves rather than letting Emacs do it, because only the master
 //! fd exposes the child's termios via [`Pty::mode`].
 //!
-//! Note that Linux offers no push notification for this. Packet mode (`TIOCPKT`) reports
-//! only flow-control and `EXTPROC` transitions — `ICANON`/`ECHO` changes are silent, so
-//! callers must sample [`Pty::mode`]. The reader thread already wakes on a poll timeout,
-//! which makes sampling free in practice; see `session::read_loop`.
+//! Note that neither kernel pushes a termios change to the master. Packet mode
+//! (`TIOCPKT`) reports flow control and flushes, and reports a `tcsetattr` only while
+//! `EXTPROC` is set in the slave's `c_lflag`. That flag looks like the answer and is
+//! not: it means "the line is edited elsewhere", and both line disciplines then hand
+//! every byte straight to the reader -- no echo, no erase, no `ISIG`, so a typed line
+//! never appears in the transcript and `^C` stops being an interrupt. Tried, and the
+//! echo tests failed at once. So `ICANON`/`ECHO` changes are silent and callers sample
+//! [`Pty::mode`]; the reader thread already wakes on a poll timeout, which makes sampling
+//! free in practice, and takes an extra sample after output for the common `getpass`.
+//! See `session::read_loop`.
 
 //! Parent-side syscalls go through `nix`, so failures arrive as `Result` and termios and
 //! wait statuses as types rather than bit patterns. The one exception is `child_exec`,
