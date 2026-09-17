@@ -77,20 +77,30 @@ stops using it, so it is the setting to flip while chasing a slow
 completer rather than the way to turn the feature off.  Not asking at all
 is `unload-feature' or not requiring the file.  `both' offers the shell's
 candidates and appends Emacs' own, for a `cape' or `corfu' setup that
-would rather see everything."
+would rather see everything -- appends them to the same list, so they are
+there alongside the shell's rather than only when it had none."
   :type '(choice (const :tag "Shell, falling back to Emacs" shell)
                  (const :tag "Emacs only, layer idle" native)
                  (const :tag "Shell, then Emacs as well" both))
   :group 'cooked-completion)
 
-(defcustom cooked-completion-timeout 0.4
+(defcustom cooked-completion-timeout 0.6
   "Seconds to wait for the shell to answer a completion request.
 
 Emacs is blocked for this long at worst, so it is a latency budget rather
 than a generous allowance: a completer slower than this (a remote `ssh'
 host list, `git' against a cold repository) falls back to completing in
 Emacs.  Note that drains are paced by `cooked-min-redisplay-interval',
-which the reply has to wait for."
+which the reply has to wait for.
+
+Measured against a stock compsys over the real wire, one round trip costs
+20-50ms for the everyday cases and around 200ms for `git checkout ' in a
+small repository; a large one, a cold cache, or a `completer' list with
+`_approximate' and `_expand' in it goes further.  The old default of 0.4
+put that well inside the budget's reach, and overrunning it is silent --
+the capf declines and `cooked-completion-at-point' falls back to the Emacs
+table, which looks to the user like TAB having simply misfired.  See
+`cooked--completion-report-timeout'."
   :type 'number
   :group 'cooked-completion)
 
@@ -180,7 +190,8 @@ writes, so pumping that process is what lets it in."
              ;; the spent nonce would be typed into that command's stdin.
              (eq cooked--semantic 'input)
              (cooked--live-session))
-    (let ((serial (cl-incf cooked--completion-serial)))
+    (let ((serial (cl-incf cooked--completion-serial))
+          (buffer (current-buffer)))
       (setq cooked--completion-reply nil)
       (cooked--send-if-live
        (concat (cooked--csi-private ">" "u" 99)
@@ -188,12 +199,35 @@ writes, so pumping that process is what lets it in."
                        (cooked-line-completion-nonce (cooked--line)) serial point
                        (cooked--completion-encode line))))
       (let ((deadline (+ (float-time) cooked-completion-timeout)))
-        ;; `with-local-quit' rather than nothing: this is the one place cooked
-        ;; blocks, and C-g has to get the user out of a shell that stopped talking.
-        (with-local-quit
-          (while (and (not (eq (car-safe cooked--completion-reply) serial))
-                      (< (float-time) deadline))
-            (accept-process-output cooked--wake (- deadline (float-time)))))
+        (unwind-protect
+            (progn
+              ;; From here until the reply, what the child draws is compsys
+              ;; working rather than the child's answer: the line Emacs is
+              ;; holding, echoed a second time under the prompt by a refresh
+              ;; compsys makes on its way to a message or a beep.  The shell
+              ;; erases it before it replies, but a drain in between renders it,
+              ;; and what the user sees is the command briefly doubled --
+              ;; `git commit -am '"'"'Some' drawn twice on the one row.  See
+              ;; `cooked--withhold-screen', and note that this withholds the
+              ;; screen rather than the drain: the reply arrives as an event, so
+              ;; a drain that did not run would never deliver the thing being
+              ;; waited for.
+              (setq cooked--withhold-screen t)
+              ;; `with-local-quit' rather than nothing: this is the one place cooked
+              ;; blocks, and C-g has to get the user out of a shell that stopped talking.
+              (with-local-quit
+                (while (and (not (eq (car-safe cooked--completion-reply) serial))
+                            (< (float-time) deadline))
+                  (accept-process-output cooked--wake (- deadline (float-time))))))
+          ;; In the buffer the flag was set in, whatever a callee has made
+          ;; current, and on the quit path too -- a flag left standing is a
+          ;; terminal that stops repainting. The drain that follows is what pays
+          ;; the debt `cooked--withheld' recorded: the repaired prompt, and
+          ;; anything else that arrived while the screen was held back.
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (setq cooked--withhold-screen nil)
+              (when cooked--session (cooked--drain-and-apply)))))
         ;; A reply for an older request is not an answer to this one; drop it rather
         ;; than complete against a line the user has already moved on from.
         (when (eq (car-safe cooked--completion-reply) serial)
@@ -257,22 +291,148 @@ half of that pair."
           (puthash candidate group groups))))
     (nreverse matches)))
 
-(defun cooked--completion-settled-p (word cached-word cached-matches)
+;;;; Candidates that replace the span
+;;
+;; A candidate here is what the shell would have put on the line in place of the
+;; word, which is not the same thing as a *completion of* that word, and the
+;; difference is the whole of why this section exists.
+;;
+;; compsys decides what matches, and it is not deciding by prefix.  A stock
+;; `matcher-list' folds case; `r:|[._-]=*' matches `p-k' against `pacman-key';
+;; `_expand' answers `$HOME/sr' with `/home/simon/sr'; `_approximate' answers a
+;; misspelt `shel-integration/cooked.z' with the corrected path.  None of those
+;; candidates begin with the text they replace.
+;;
+;; Handed to an ordinary completion table, every one of them is then thrown away
+;; again by Emacs, which filters what the table returns against the span using
+;; `completion-styles' -- prefix-wise and case-sensitively by default.  The
+;; symptom is a popup that is empty, or that offers only the word already typed
+;; (`_expand' above hands back three candidates; Emacs keeps the useless one),
+;; and candidates that cannot be accepted because they never matched.
+;;
+;; So the table below does not filter, and a style is registered to stop the
+;; styles from filtering on its behalf.  Narrowing between round trips still
+;; happens, but only where the shell's own answer proves it is sound: see
+;; `cooked--completion-plain-p'.
+
+(defconst cooked--completion-category 'cooked-shell-completion
+  "Completion category for the shell's candidates.
+Exists to hang `cooked-shell' off in `completion-category-defaults', which is
+what keeps `completion-styles' from re-filtering an answer the shell has
+already matched.  A user who would rather have their own styles here can say
+so through `completion-category-overrides'.")
+
+(defun cooked--completion-style-try (string table pred point)
+  "`try-completion' for the `cooked-shell' style, over TABLE at POINT.
+
+TABLE's sole candidate for STRING when there is exactly one, and STRING
+untouched otherwise, PRED narrowing as it does everywhere.  Never a common
+prefix computed across the candidates: they are replacements for the span, so
+their shared head is a fact about the shell's answers rather than about
+anything the user typed, and inserting it would rewrite the line into something
+nobody asked for -- `/home/simon/' across the two expansions of `$HOME/sr'."
+  (let ((all (all-completions string table pred)))
+    (cond ((null all) nil)
+          ((cdr all) (cons string point))
+          ((equal (car all) string) t)
+          (t (cons (car all) (length (car all)))))))
+
+(defun cooked--completion-style-all (string table pred _point)
+  "`all-completions' for the `cooked-shell' style: the answer, entire.
+
+TABLE's candidates for STRING, narrowed by PRED and by nothing else -- the
+shell has already decided what matches."
+  (all-completions string table pred))
+
+(add-to-list 'completion-styles-alist
+             '(cooked-shell
+               cooked--completion-style-try
+               cooked--completion-style-all
+               "Candidates the shell has already matched, kept as it sent them."))
+
+;; `completion--styles' appends `completion-styles' after a category's own, and
+;; tries each until one answers, so this is a first refusal rather than a
+;; replacement: a user's orderless or flex still runs if the shell said nothing.
+(add-to-list 'completion-category-defaults
+             `(,cooked--completion-category (styles cooked-shell)))
+
+(defun cooked--completion-table (fetch)
+  "A completion table over FETCH, which is called with the span's text.
+
+Every action is answered from what FETCH returns and none of them filters it,
+because FETCH's answer is already the set of candidates that match -- see this
+section's commentary.  PRED is still honoured, being the caller's own business
+rather than a restatement of the matching rules."
+  (lambda (string pred action)
+    (pcase action
+      ('metadata
+       ;; compsys orders its answers, and the order carries meaning that
+       ;; alphabetising destroys: `checkout' comes before `check-attr' because
+       ;; it is the one you meant.
+       `(metadata (category . ,cooked--completion-category)
+                  (display-sort-function . identity)
+                  (cycle-sort-function . identity)))
+      (`(boundaries . ,_) nil)
+      ('t (let ((all (funcall fetch string)))
+            (if pred (seq-filter pred all) all)))
+      ('nil (let ((all (funcall fetch string)))
+              (when pred (setq all (seq-filter pred all)))
+              (cond ((null all) nil)
+                    ((cdr all) string)
+                    ((equal (car all) string) t)
+                    (t (car all)))))
+      ('lambda (and (member string (funcall fetch string)) t))
+      (_ nil))))
+
+(defun cooked--completion-plain-p (word matches)
+  "Whether every candidate in MATCHES extends WORD.
+
+The licence to narrow in Emacs rather than ask the shell again, and it is
+exactly as wide as the evidence: if everything the shell offered for WORD
+begins with WORD, then for this completion the shell was matching by plain
+prefix, and prefix-filtering its answer as the word grows is the same
+operation it would have performed.  One candidate that does not -- a folded
+case, an `_expand' expansion, an `_approximate' correction -- says the shell
+is matching by a rule Emacs cannot reproduce, and from there every keystroke
+has to be a round trip or candidates go missing.
+
+True for an empty WORD, which is the common and welcome case: the first TAB of
+a command name is answered in full and narrowed for free."
+  (seq-every-p (lambda (candidate) (string-prefix-p word candidate)) matches))
+
+(defun cooked--completion-settled-p (word cached-word cached-matches truncated plain)
   "Whether CACHED-MATCHES, collected for CACHED-WORD, still answers for WORD.
 
-Only when the cached answer was complete -- the shell did not stop at its cap --
-the word has only grown, and something in the list still matches it.  Each of
-those is doing work:
+Only when the cached answer was complete -- not TRUNCATED, the shell did not
+stop at its cap -- the shell matched CACHED-WORD by prefix (PLAIN, see
+`cooked--completion-plain-p'), the word has only grown, and something in the
+list still matches it.  Each of those is doing work:
 
 The cap is why `pacman' was missing from a list that included `pacman-key': the
 answer was cut off before it, and no filtering recovers a candidate that was
-never sent.  Growth matters because a word that shrank is a different question.
+never sent.  PLAIN is why `Pac' came back empty against a case-folding
+`matcher-list': the shell had offered `pacman', and narrowing in Emacs is what
+dropped it.  Growth matters because a word that shrank is a different question.
 And a list that no longer matches usually means the completion changed kind
 rather than narrowed -- typing `-' after `git checkout ' turns branches into
 flags -- which filtering cannot produce either."
   (and cached-word
+       (not truncated)
+       plain
        (string-prefix-p cached-word word)
        (seq-some (lambda (candidate) (string-prefix-p word candidate)) cached-matches)))
+
+(defun cooked--completion-also-native (input)
+  "Emacs' own candidates for INPUT, for `cooked-completion-backend' `both'.
+
+Filtered here rather than left to a table of its own, because the shell's half
+is exempt from filtering and the two halves have to arrive as one list for the
+`cooked-shell' style to hand over whole.  It also makes `both' mean what its
+documentation says: `completion-table-in-turn', which this replaces, stops at
+the first table that answers, so Emacs' candidates were reached only when the
+shell had none -- which is what `shell' already does."
+  (append (all-completions input (cooked--executable-table))
+          (all-completions input #'completion-file-name-table)))
 
 (defun cooked--completion-dynamic (head tail annotations groups seed)
   "A table that asks the shell again as the word typed into it grows.
@@ -283,20 +443,23 @@ ANNOTATIONS and GROUPS are refilled by each query.  SEED is (WORD TRUNCATED .
 RECORDS), the answer already in hand for the word as it stands, so opening the
 popup does not cost a second round trip.
 
-Which keystrokes are worth a round trip is `cooked--completion-settled-p'.  The
-rest are filtered in Emacs, which is instant and exact -- and the difference is
-not academic: a completer that takes 140ms is one that stutters if it is asked
-on every letter."
-  (let ((buffer (current-buffer))
-        (word (car seed))
-        (truncated (cadr seed))
-        (matches (cooked--completion-index (cddr seed) "" annotations groups)))
-    (completion-table-dynamic
+Which keystrokes are worth a round trip is `cooked--completion-settled-p', and
+the rest are narrowed in Emacs, which is instant and exact.  The difference is
+not academic -- a completer that takes 140ms is one that stutters if it is
+asked on every letter -- but neither is its price: narrowing is only ever the
+shell's own prefix match replayed, and the moment the shell's answer shows it
+was matching by anything else, every keystroke is a round trip again.  Paying
+that is the point; the alternative is the candidate that never appears."
+  (let* ((buffer (current-buffer))
+         (word (car seed))
+         (truncated (cadr seed))
+         (matches (cooked--completion-index (cddr seed) "" annotations groups))
+         (plain (cooked--completion-plain-p word matches)))
+    (cooked--completion-table
      (lambda (input)
        (with-current-buffer buffer
          (unless (or (equal word input)
-                     (and (not truncated)
-                          (cooked--completion-settled-p input word matches)))
+                     (cooked--completion-settled-p input word matches truncated plain))
            (pcase (cooked--shell-completions (concat head input tail)
                                              (+ (length head) (length input)))
              ;; What the shell answered relative to may be less than the whole
@@ -318,12 +481,44 @@ on every letter."
                   (setq word input
                         truncated cut
                         matches (cooked--completion-index records extra
-                                                          annotations groups)))))
+                                                          annotations groups)
+                        plain (cooked--completion-plain-p input matches)))))
              ;; A query that fails mid-word -- the shell busy, a completer past the
              ;; timeout -- keeps the last answer rather than emptying the popup
              ;; under the user.
              (_ nil)))
-         matches)))))
+         ;; The answer in hand is for WORD.  Where INPUT has grown past it the
+         ;; query was skipped, which only happens when PLAIN said prefix
+         ;; narrowing is what the shell itself would have done; anywhere else
+         ;; the list stands as it came, since there is no filter here that would
+         ;; not be inventing a matching rule.
+         (let ((all (if (and plain (not (equal word input)))
+                        (seq-filter (lambda (candidate)
+                                      (string-prefix-p input candidate))
+                                    matches)
+                      matches)))
+           (if (eq cooked-completion-backend 'both)
+               (delete-dups (append all (cooked--completion-also-native input)))
+             all)))))))
+
+(defun cooked--completion-report-timeout (reply asked)
+  "Say so when a completion REPLY did not arrive, ASKED being when it was sent.
+
+Only for the query the user's TAB actually paid for, and only when the whole
+budget went by: the refinements a popup makes as the word grows fail quietly on
+purpose, keeping the last answer rather than interrupting someone mid-word.
+
+Worth saying at all because the fallback is silent and looks like a bug in
+something else.  `cooked-completion-at-point' reaches the Emacs table when this
+returns nothing, so TAB answers with programs and file names -- a plausible
+answer, from the wrong source, with nothing to say it is not the shell's.  The
+distinction that matters is the one the user can act on: a shell that had
+nothing to offer needs no action, and a shell that was still thinking wants
+`cooked-completion-timeout' raised."
+  (when (and (null reply)
+             (>= (- (float-time) asked) cooked-completion-timeout))
+    (message "cooked: the shell did not complete within %ss; see %s"
+             cooked-completion-timeout 'cooked-completion-timeout)))
 
 (defun cooked--shell-completion-at-point (region)
   "Ask the shell to complete the pending input in REGION, as (START . END).
@@ -349,7 +544,9 @@ file, which is the whole of how the core reaches it."
            ;; offset into it is exactly the thing that does survive -- the same
            ;; argument `cooked--apply''s `editing' rests on.
            (offset (- (min (point) end) start))
+           (asked (float-time))
            (reply (cooked--shell-completions line offset)))
+      (cooked--completion-report-timeout reply asked)
       ;; Re-seat on the far side of the block, and give up if there is nothing
       ;; left to re-seat into: a drain that ended the prompt -- the child ran
       ;; something, the shell exited -- takes the region with it, and there is no
@@ -372,12 +569,9 @@ file, which is the whole of how the core reaches it."
                           annotations groups
                           `(,(buffer-substring-no-properties word-start (point))
                             ,truncated . ,records))))
-             (list word-start (point)
-                   (if (eq cooked-completion-backend 'both)
-                       (completion-table-in-turn table
-                                                 (cooked--executable-table)
-                                                 #'completion-file-name-table)
-                     table)
+             ;; `both' is folded into the table rather than wrapped around it;
+             ;; see `cooked--completion-also-native'.
+             (list word-start (point) table
                    :exclusive 'no
                    :annotation-function (lambda (candidate) (gethash candidate annotations))
                    :group-function (lambda (candidate transform)

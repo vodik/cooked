@@ -188,6 +188,31 @@ Kept by `cooked--update-buffer-visibility' from the window hooks, and read by
 `cooked--on-wake', which drains a hidden buffer without its screen.  See
 `cooked--withheld' for what that leaves owing.")
 
+(defvar-local cooked--withhold-screen nil
+  "Whether drains should leave the screen out even though the buffer is shown.
+
+The same treatment `cooked--hidden' gets, asked for rather than observed, and
+for the one case where the child is drawing something that is not the child's
+answer: a completion request.  The shell puts the line Emacs is holding into
+ZLE's own buffer to run compsys over it, and compsys refreshes the display on
+its way to a message or a beep -- which draws that buffer, on a screen whose
+own line is empty, so a second copy of the command appears exactly where the
+completion would have gone.  The shell repairs it before replying, but a drain
+landing in between renders the copy, and the user sees the command flicker
+doubled.
+
+Withholding is what closes that window rather than another repair, because the
+repair can only ever run after the fact and the flicker is the interval itself.
+Events are still handled while it is set, which is the whole reason this is not
+`cooked-inhibit-redraw-functions': the reply being waited for arrives as an
+event, so a drain that never runs would deadlock the request it was protecting.
+
+Set by `cooked--shell-completions' for the length of one exchange, and it owes
+the whole drain that `cooked--withheld' names.  A plain buffer-local rather
+than a seam, because the core reads it and the layer that sets it is optional:
+nil is both \"no layer\" and \"not mid-request\", which is the same bargain
+`cooked-shell-completion-functions' makes.")
+
 (defvar-local cooked--withheld nil
   "Whether this buffer's screen is owed a whole drain.
 

@@ -254,6 +254,66 @@ the shell you are typing at, over a line it has never seen."
           (should (member "README.org" (all-completions "" table)))
           (should (equal (all-completions "--colo" table) '("--color"))))))))
 
+(ert-deftest cooked-completion-survives-a-configured-compsys ()
+  "The same exchange against a zsh configured the way people configure zsh.
+
+Every other zsh test here runs a stock compsys, where matching happens to be by
+prefix and the candidates happen to extend the word -- which is precisely the
+condition that let this break unnoticed.  Two settings out of an ordinary
+`.zshrc' are enough to leave it:
+
+  `matcher-list m:{a-zA-Z}={A-Za-z}'  folds case, so `RE' offers `README.org'
+  `completer ... _expand ...'         offers `$PWD/x' as the path it expands to
+
+Neither candidate begins with the text it replaces.  Before the `cooked-shell'
+style they were both filtered out again between the shell and the popup, which
+reached the user as a popup that came back empty and as candidates that could
+not be accepted."
+  :tags '(zsh)
+  (skip-unless (executable-find "zsh"))
+  (cooked-tests--with-fake-zdotdir
+      '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\n\
+zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'\n\
+zstyle ':completion:*' completer _expand _complete\n\
+PS1='%% '\n"))
+    (cooked-tests--with-shell
+        ("zsh"
+         :name "*cooked-complete-configured*"
+         :directory (file-name-directory (directory-file-name cooked--source-directory))
+         :settle (lambda () (and (cooked--input-start-position)
+                                 (cooked-line-completion-nonce (cooked--line)))))
+      (goto-char cooked--input-end)
+      ;; Case folded by the matcher: the candidate replaces `RE', it does not
+      ;; extend it.
+      (insert "cat RE")
+      (let ((cooked-completion-timeout 5))
+        (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
+          (should (equal (buffer-substring-no-properties start end) "RE"))
+          (should (member "README.org" (all-completions "RE" table)))))
+      ;; And the answer stays whole as the word grows, which is the half that
+      ;; filtering in Emacs used to take away.
+      (insert "A")
+      (let ((cooked-completion-timeout 5))
+        (pcase-let ((`(,_start ,_end ,table . ,_) (cooked-completion-at-point)))
+          (should (member "README.org" (all-completions "REA" table)))))
+      ;; `_expand' answers with the expansion of the word rather than a
+      ;; completion of it, so its candidate shares no head with what was typed.
+      ;; Both halves matter here.  The expansion has to survive at all -- Emacs
+      ;; used to keep only `$PWD/READ', the one candidate that says nothing,
+      ;; which is what a popup offering you back your own typing looked like.
+      ;; And TAB must not rewrite the line to a head invented across the two.
+      (delete-region (cooked--input-start-position) (point))
+      (insert "cat $PWD/READ")
+      (let ((cooked-completion-timeout 5))
+        (pcase-let ((`(,start ,end ,table . ,_) (cooked-completion-at-point)))
+          (let* ((word (buffer-substring-no-properties start end))
+                 (all (all-completions word table)))
+            (should (equal word "$PWD/READ"))
+            (should (member (expand-file-name "READ" default-directory) all))
+            ;; The one Emacs would have kept, and on its own it is no answer.
+            (should (member word all))
+            (should (equal (try-completion word table) word))))))))
+
 (ert-deftest cooked-completion-mid-line-replaces-the-word-under-the-cursor ()
   "The span is anchored at the cursor the request was *sent* from.
 
@@ -496,6 +556,194 @@ flags have already said everything, so `_git' offers nothing and explains why."
         (should (equal (cooked-tests--text) before))
         (cooked-tests--settle (lambda () nil) 0.3)
         (should (equal (cooked-tests--text) before))))))
+
+(ert-deftest cooked-completion-withholds-the-screen-while-the-shell-works ()
+  "And the copy must not be rendered even for the instant before it is erased.
+
+The repair travels ahead of the reply, so the *settled* screen is clean -- which
+is what the test above asserts, and it is not the whole story.  A drain landing
+between compsys' refresh and the widget's repair renders the copy and the next
+one takes it away again, which reached the user as the command flickering
+doubled under the prompt for as long as a drain interval.
+
+Nothing after the fact can close that window, because the window is the point.
+So the screen is withheld for the length of the exchange: drains still run --
+the reply is an event and would otherwise never arrive -- but they leave the
+rows alone, and the whole drain that follows renders the repaired prompt
+straight from the shell's own corrected screen.  Asserted through the argument
+`cooked--on-wake' passes rather than by watching for a flicker, a race being a
+poor thing to assert on: every wake taken while the request was outstanding has
+to have been a withheld one."
+  :tags '(git zsh)
+  (skip-unless (executable-find "zsh"))
+  (skip-unless (executable-find "git"))
+  (cooked-tests--with-fake-zdotdir
+      '((".zshrc" . "autoload -Uz compinit\ncompinit -u -d $ZDOTDIR/zcompdump\nPS1='%% '\n"))
+    (cooked-tests--with-shell
+        ("zsh"
+         :name "*cooked-complete-flicker*"
+         :directory (file-name-directory (directory-file-name cooked--source-directory))
+         :settle (lambda () (and (cooked--input-start-position)
+                                 (cooked-line-completion-nonce (cooked--line)))))
+      (goto-char cooked--input-end)
+      (insert "git commit -am 'Some")
+      (let* ((before (cooked-tests--text))
+             (cooked-completion-timeout 5)
+             (withheld nil)
+             (original (symbol-function 'cooked--drain-and-repair)))
+        (cl-letf (((symbol-function 'cooked--drain-and-repair)
+                   (lambda (hidden &rest rest)
+                     (push (and hidden t) withheld)
+                     (apply original hidden rest))))
+          (cooked--shell-completions "git commit -am 'Some" 20))
+        ;; The shell answered, so at least one wake happened inside the request.
+        (should withheld)
+        (should (seq-every-p #'identity withheld))
+        ;; The flag is the request's, not the session's.
+        (should-not cooked--withhold-screen)
+        ;; And the debt it left has been paid: the prompt on screen is the
+        ;; repaired one, with no second copy of the command anywhere in it.
+        (should (equal (cooked-tests--text) before))
+        (cooked-tests--settle (lambda () nil) 0.3)
+        (should (equal (cooked-tests--text) before))
+        (should-not cooked--withheld)))))
+
+(ert-deftest cooked-completion-gives-the-screen-back-when-a-request-quits ()
+  "C-g out of a shell that stopped talking must not leave the screen held.
+
+`cooked--withhold-screen' left standing is a terminal that never repaints
+again, which is a far worse outcome than the flicker it was set to prevent --
+so it is cleared on the way out however the exchange ends."
+  (cooked-tests--with-session '("/bin/cat")
+    (should (cooked-tests--settle #'cooked--input-start-position))
+    (cl-letf (((symbol-function 'accept-process-output)
+               (lambda (&rest _) (signal 'quit nil))))
+      (let ((cooked-completion-timeout 5))
+        ;; The nonce is what licenses a request at all; without one nothing is
+        ;; sent and the flag is never reached.
+        (setf (cooked-line-completion-nonce (cooked--line)) "nonce"
+              (cooked-line-completion-reply-capable (cooked--line)) t)
+        ;; `with-local-quit' lets the cleanup run and then re-signals, which is
+        ;; the behaviour under test: C-g leaves the request, and the screen
+        ;; comes back with it.
+        (let ((cooked--semantic 'input))
+          (should-not (condition-case nil
+                          (cooked--shell-completions "ls" 2)
+                        (quit nil))))))
+    (setq quit-flag nil)
+    (should-not cooked--withhold-screen)))
+
+;;;; Candidates the shell matched by a rule Emacs does not have
+;;
+;; compsys is not matching by prefix, and every test below is one way of finding
+;; that out.  A stock `matcher-list' folds case; `_expand' answers `$HOME/sr'
+;; with `/home/simon/sr'; `_approximate' answers a misspelling with the
+;; correction.  Handed to an ordinary table, none of those candidates survives
+;; the filtering `completion-in-region' does on the way to the popup -- which is
+;; the bug this section exists to hold shut, reported as a popup that came back
+;; empty and as candidates that could be seen but not accepted.
+
+(ert-deftest cooked-completion-keeps-what-the-shell-already-matched ()
+  "A case-folded answer is the shell's to make, and Emacs must not overrule it.
+
+`zstyle :completion:* matcher-list m:{a-zA-Z}={A-Za-z}' is what makes `Pac'
+offer `pacman'.  Every candidate here replaces the span rather than extending
+it, so prefix filtering -- which is what `completion-in-region' does by default
+-- removes the entire answer and leaves nothing to choose from."
+  (cooked-tests--with-stub-shell '() _queries
+    (let* ((records '(("pacman" "" "") ("pacman-key" "" "") ("paclist" "" "")))
+           (table (cooked--completion-dynamic
+                   "" "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                   `("Pac" nil . ,records))))
+      (should (equal (all-completions "Pac" table)
+                     '("pacman" "pacman-key" "paclist")))
+      ;; And through the styles, which is the path the popup actually takes:
+      ;; `cooked-shell' is registered for the table's category and answers first.
+      (should (equal (seq-take (completion-all-completions "Pac" table nil 3) 3)
+                     '("pacman" "pacman-key" "paclist"))))))
+
+(ert-deftest cooked-completion-asks-again-when-the-shell-did-not-match-by-prefix ()
+  "Narrowing in Emacs is licensed by the answer, not assumed of it.
+
+The shell offered `pacman' for `Pac', so for this completion it is matching by
+something other than prefix and Emacs has no way to reproduce it.  Growing the
+word therefore has to be a round trip: filtering the list in hand would drop
+every candidate, which is exactly the reported \"as I type I am refining this
+subset rather than requerying\"."
+  (cooked-tests--with-stub-shell
+      '(("Pacm" . (4 0 nil ("pacman" "" "") ("pacman-key" "" ""))))
+      queries
+    (let ((table (cooked--completion-dynamic
+                  "" "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                  '("Pac" nil ("pacman" "" "") ("pacman-key" "" "") ("paclist" "" "")))))
+      (should (equal (all-completions "Pacm" table) '("pacman" "pacman-key")))
+      (should (= queries 1)))))
+
+(ert-deftest cooked-completion-narrows-a-prefix-answer-without-asking ()
+  "The licence is real, though: an answer that did match by prefix is narrowed here.
+
+The fast path, and the reason the round trip is not simply made on every
+keystroke -- a completer that takes 200ms is one that stutters if it is."
+  (cooked-tests--with-stub-shell '() queries
+    (let ((table (cooked--completion-dynamic
+                  "" "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                  '("pac" nil ("pacman" "" "") ("pacman-key" "" "") ("paclist" "" "")))))
+      (should (equal (all-completions "pacm" table) '("pacman" "pacman-key")))
+      (should (= queries 0)))))
+
+(ert-deftest cooked-completion-does-not-insert-a-head-it-invented ()
+  "`_expand' offers the expansion; its common head is not the user's text.
+
+Completing `$HOME/sr' offers `/home/simon/sr' alongside the word itself.  The
+two share no head with what was typed, and `try-completion' over candidates
+that replace the span must therefore hand the string back untouched rather than
+rewrite the line to something nobody asked for."
+  (cooked-tests--with-stub-shell '() _queries
+    (let ((table (cooked--completion-dynamic
+                  "cat " "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                  '("$HOME/sr" nil ("/home/simon/sr" "" "") ("$HOME/sr" "" "")))))
+      (should (equal (try-completion "$HOME/sr" table) "$HOME/sr"))
+      (should (equal (all-completions "$HOME/sr" table)
+                     '("/home/simon/sr" "$HOME/sr")))
+      ;; One candidate and it is not the string: that one *is* worth inserting.
+      (should (equal (completion-try-completion "$HOME/sr" table nil 8)
+                     '("$HOME/sr" . 8))))))
+
+(ert-deftest cooked-completion-sole-candidate-replaces-the-span ()
+  "`_approximate' corrects a misspelling, and accepting the correction is the point."
+  (cooked-tests--with-stub-shell '() _queries
+    (let ((table (cooked--completion-dynamic
+                  "cat " "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                  '("shel-integration/cooked.z" nil
+                    ("shell-integration/cooked.zsh" "" "")))))
+      (should (equal (try-completion "shel-integration/cooked.z" table)
+                     "shell-integration/cooked.zsh"))
+      (should (equal (completion-try-completion "shel-integration/cooked.z" table nil 25)
+                     (cons "shell-integration/cooked.zsh" 28))))))
+
+(ert-deftest cooked-completion-both-appends-rather-than-falls-back ()
+  "`both' means both, which `completion-table-in-turn' never did.
+
+It stops at the first table that answers, so Emacs' candidates were reached
+only when the shell had none -- which is what `shell' already does."
+  (cooked-tests--with-stub-shell '() _queries
+    (let* ((cooked-completion-backend 'both)
+           (cooked--executables '("pacman-mirrors"))
+           (table (cooked--completion-dynamic
+                   "" "" (make-hash-table :test #'equal) (make-hash-table :test #'equal)
+                   '("pacman" nil ("pacman" "" "") ("pacman-key" "" ""))))
+           (all (all-completions "pacman" table)))
+      (should (member "pacman-key" all))
+      (should (member "pacman-mirrors" all)))))
+
+(ert-deftest cooked-completion-limit-reaches-the-shell ()
+  "`cooked-completion-limit' is the shell's cap, so it has to get there."
+  (let ((cooked-completion-limit 4242)
+        (cooked-shell-integration 'detect))
+    (pcase-let ((`(,_argv ,env ,scratch) (cooked--shell-invocation "/bin/zsh")))
+      (unwind-protect
+          (should (equal (cdr (assoc "COOKED_COMPLETE_LIMIT" env)) "4242"))
+        (when scratch (delete-directory scratch t))))))
 
 (ert-deftest cooked-completion-is-a-normal-capf ()
   "So corfu, cape and friends work without knowing about cooked."

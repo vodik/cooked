@@ -48,6 +48,30 @@ choose rather than something you inherit.  This is also the flag
 to install its half at all, which is why turning the layer on mid-session
 reaches Emacs at once but the shell only at its next start.")
 
+(defcustom cooked-completion-limit 1000
+  "How many candidates the shell is asked to send at most.
+
+An empty word at a command position completes to every program on PATH, and
+past some point the list is something to narrow rather than to read.  The cap
+is the shell's, not Emacs': it is what keeps a reply from carrying tens of
+thousands of base64'd records through a pty.
+
+Whether the cap was hit comes back with the answer, and it is spent rather than
+merely reported -- a truncated answer is re-asked as the word grows, where a
+complete one can be narrowed in Emacs.  So raising this trades a bigger first
+reply for fewer round trips afterwards, and lowering it the other way round;
+neither loses candidates.
+
+Here rather than in `cooked-shell-completion' with the rest of the layer's
+settings, because `cooked--shell-invocation' has to read it while building a
+child's environment and that runs whether or not the layer was ever required --
+the same reason `cooked-shell-completion-functions' lives here.  It reaches the
+shell as COOKED_COMPLETE_LIMIT at spawn, so a session already running keeps the
+value it started with, and an rc that sets `__cooked_complete_limit' itself
+still wins over both."
+  :type 'natnum
+  :group 'cooked-completion)
+
 ;;;; The native table
 
 (defvar cooked--executables nil "Cached PATH lookup, see `cooked--executable-table'.")

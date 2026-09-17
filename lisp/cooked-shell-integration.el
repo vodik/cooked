@@ -271,7 +271,13 @@ Injection is how the code gets there; the variable is what it does once it
 arrives."
   (let* ((dir (cooked--integration-directory))
          (features (cooked--integration-environment))
-         (env (and features `(("COOKED_SHELL_INTEGRATION_FEATURES" . ,features))))
+         (env `(,@(and features `(("COOKED_SHELL_INTEGRATION_FEATURES" . ,features)))
+                ;; Read only by the capture, and set whether or not the capture
+                ;; is sourced, for the reason the feature list is: a shell that
+                ;; picks the snippet up by hand should honour the same settings
+                ;; as one cooked set up itself.
+                ("COOKED_COMPLETE_LIMIT"
+                 . ,(number-to-string cooked-completion-limit))))
          ;; Both halves have to agree before the capture is worth sourcing: the
          ;; user asked for it, and the Emacs side that answers is loaded.  The
          ;; decision is made *here*, by writing the line or not, because a

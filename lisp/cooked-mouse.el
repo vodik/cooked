@@ -36,6 +36,11 @@
 
 (cooked--declare-core)
 
+;; Focus reporting lives in cooked-mode.el, which requires this file; the click
+;; that selects a window owes the child a focus report before the click itself.
+;; See `cooked-mouse-event'.
+(declare-function cooked--report-focus "cooked-mode" ())
+
 (defconst cooked--mouse-buttons
   '((mouse-1 . 0) (mouse-2 . 1) (mouse-3 . 2)
     ;; A GUI frame spells the wheel `wheel-up'; a terminal spells the same notch
@@ -887,7 +892,17 @@ into by the time it comes up."
                        (buffer-local-value 'cooked--mouse-state target)))))
     (if (null target)
         (cooked--mouse-fallback event)
-      (when select (select-window window))
+      (when select
+        (select-window window)
+        ;; And say so before the click is reported.  `cooked--report-focus' runs
+        ;; from `window-selection-change-functions', which Emacs runs during
+        ;; redisplay -- after this command has returned, and so after the press,
+        ;; and after every motion and the release too when `cooked--mouse-track'
+        ;; takes the gesture below.  A real terminal is focused by the window
+        ;; manager before the click is delivered, and a program that re-arms on
+        ;; FocusGained would otherwise act on the click in the wrong state.  The
+        ;; later hook run sees no change and sends nothing.
+        (with-current-buffer target (cooked--report-focus)))
       (with-current-buffer target
         (let* (;; Whether the pointer is over this buffer, as opposed to naming
                ;; the far end of a drag that started in it.

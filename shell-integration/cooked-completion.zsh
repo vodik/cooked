@@ -52,9 +52,23 @@ typeset -ga __cooked_matches __cooked_display __cooked_groups
 # which Emacs is doing anyway, on a prefix the shell has already applied.
 #
 # Whether the cap was reached goes back with the answer, and Emacs spends it: a
-# complete list is filtered there as the word grows, and only a truncated one is worth
+# complete list is narrowed there as the word grows, and only a truncated one is worth
 # another round trip.
-typeset -g __cooked_complete_limit=1000
+#
+# Set from `cooked-completion-limit' through the environment, so the Emacs side has a
+# `defcustom' to move rather than a file to edit.  Either can be overridden from your
+# rc, which is why the value already in the variable wins over both: assign
+# `__cooked_complete_limit' before sourcing this file and nothing here disturbs it.
+# A junk or non-positive COOKED_COMPLETE_LIMIT is ignored rather than honoured -- a
+# cap of zero is a completion system that answers nothing, which is a bad way to
+# learn that a variable was misspelt.
+if [[ -z ${__cooked_complete_limit-} ]]; then
+  if [[ ${COOKED_COMPLETE_LIMIT-} == <1-> ]]; then
+    typeset -g __cooked_complete_limit=$COOKED_COMPLETE_LIMIT
+  else
+    typeset -g __cooked_complete_limit=1000
+  fi
+fi
 
 # `compadd' is shadowed for the duration of one capture only; every other caller in
 # the session — a user's own completion function, a plugin — reaches the builtin
@@ -163,11 +177,29 @@ compadd() {
   # -- send the span per record and let Emacs sort it out -- buys nothing here,
   # since `completion-in-region' gets exactly one span to replace and something has
   # to pick it.
+  #
+  # All of which rests on the suffix relation actually holding, and it is not
+  # guaranteed by anything: it is what descending *through* a word does, and a
+  # completer is free to answer relative to a word it rewrote instead.
+  # `_expand' offers `/home/simon/sr' where `$HOME/sr' was typed; `_approximate'
+  # answers a misspelling with the correction; `_oldlist' hands back a list
+  # collected for an older word entirely.  Comparing lengths alone cannot tell
+  # those from a descent, and mistaking one for the other glues an arbitrary
+  # head onto every match -- including, through the second branch, onto matches
+  # already collected.
+  #
+  # So the relation is checked rather than assumed, and a call that fails it is
+  # dropped.  Dropping loses that completer's candidates, which is a real cost;
+  # the alternative is candidates that carry a head they never had, which cannot
+  # be typed, cannot be accepted, and do not say where they came from.  Emacs
+  # makes the same call for a PREFIX wider than the span it was given.
   local head=
   if (( ${#PREFIX} < ${#__cooked_prefix_text} )); then
     head=${__cooked_prefix_text[1,${#__cooked_prefix_text} - ${#PREFIX}]}
+    [[ "$head$PREFIX" == "$__cooked_prefix_text" ]] || return $status_
   elif (( ${#PREFIX} > ${#__cooked_prefix_text} )); then
     local grew=${PREFIX[1,${#PREFIX} - ${#__cooked_prefix_text}]}
+    [[ "$grew$__cooked_prefix_text" == "$PREFIX" ]] || return $status_
     __cooked_matches=( "${(@)__cooked_matches/#/$grew}" )
     __cooked_prefix_text=$PREFIX
   fi

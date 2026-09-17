@@ -250,7 +250,11 @@ entries owe the catch-up themselves."
                  (not (cooked--frozen-p))
                  (not (cooked--run-seam-until-success
                        'cooked-inhibit-redraw-functions buffer)))
-        (cooked--drain-and-repair cooked--hidden)))))
+        ;; `cooked--withhold-screen' asks for a hidden buffer's treatment in a
+        ;; buffer that is not hidden; see there for why a completion request
+        ;; wants it.  Both leave the same debt, and `cooked--withheld' is what
+        ;; collects it.
+        (cooked--drain-and-repair (or cooked--hidden cooked--withhold-screen))))))
 
 (defun cooked--drain-and-repair (hidden)
   "Drain and apply as `cooked--drain-and-apply' does, and repair a failure.

@@ -2431,19 +2431,25 @@ at t -- and every buffer generating motion events from then on."
 (defmacro cooked-tests--with-two-terminals (a b &rest body)
   "Run BODY with two live cooked buffers bound to A and B, side by side.
 A is the selected window's; B is the other's.  Both children take the alt
-screen and ask for SGR mouse reporting."
+screen and ask for SGR mouse reporting, and for focus events -- which cost the
+tests that do not care about them nothing, since no focus report is sent in
+batch unless `frame-focus-state' is stubbed; see
+`cooked-a-click-that-focuses-a-terminal-reports-focus-first'."
   (declare (indent 2))
   `(cooked-tests--with-session
-       '("/bin/sh" "-c" "printf '\033[?1049h\033[?1000h\033[?1006h'; stty raw; cat -v")
+       '("/bin/sh" "-c" "printf '\033[?1049h\033[?1000h\033[?1006h\033[?1004h'; \
+                         stty raw; cat -v")
      (let ((,a (current-buffer)))
        (cooked-tests--with-session
-           '("/bin/sh" "-c" "printf '\033[?1049h\033[?1000h\033[?1006h'; \
+           '("/bin/sh" "-c" "printf '\033[?1049h\033[?1000h\033[?1006h\033[?1004h'; \
                              stty raw; cat -v")
          (let ((,b (current-buffer)))
            (dolist (buffer (list ,a ,b))
              (with-current-buffer buffer
                (should (cooked-tests--settle
-                        (lambda () (and cooked--alt (cooked-mouse-state-enabled cooked--mouse-state)))))
+                        (lambda () (and cooked--alt
+                                        (cooked-mouse-state-enabled cooked--mouse-state)
+                                        (cooked--focus-events-p cooked--session)))))
                (should cooked--mouse-grab)))
            (save-window-excursion
              (set-window-buffer (selected-window) ,a)
@@ -2492,6 +2498,46 @@ Emacs buffer."
           (heard (with-current-buffer b (cooked-tests--text))))
       (should (string-match-p "\\[<0;[0-9]+;[0-9]+M" heard))
       (should (string-match-p "\\[<0;[0-9]+;[0-9]+m" heard)))))
+
+(ert-deftest cooked-a-click-that-focuses-a-terminal-reports-focus-first ()
+  "The child is told it gained focus before it is told about the click.
+
+`cooked-mouse-event' selects the window inline and reports the button a few
+lines later, but the `CSI I' that says so comes from `cooked--report-focus' on
+`window-selection-change-functions' -- which Emacs runs during redisplay, after
+the command has returned.  So the child reads the press, and under
+`cooked--mouse-track' the whole drag, while still believing it has no keyboard.
+Every real terminal focuses before the window manager delivers the click, and a
+TUI that re-arms on FocusGained -- nvim's autocmds, tmux's redraw -- acts on the
+click in the wrong state.
+
+`frame-focus-state' is nil for a batch frame, so a focus report can never be
+observed here without saying the frame has focus; the half under test is the
+window selection, which is left real.  The selection hook is run by hand
+afterwards because batch never redisplays, and running it after the click is
+exactly the ordering being asserted."
+  (cooked-tests--with-two-terminals a b
+    (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) t)))
+      ;; B is unfocused and its child knows: the report saying so went out when
+      ;; the split put it there.  Nothing ran it in batch, so say it here.
+      (with-current-buffer b (setq-local cooked--focused nil))
+      (with-current-buffer a
+        (execute-kbd-macro
+         (vector (cooked-tests--other-window-event window 'down-mouse-1 3)
+                 (cooked-tests--other-window-event window 'mouse-1 3))))
+      (should (eq (window-buffer (selected-window)) b))
+      (with-current-buffer b
+        (run-hook-with-args 'window-selection-change-functions (selected-frame))
+        ;; Both reports are on the child's input by now; this waits for the echo
+        ;; of whichever came second, and asserts on neither.
+        (cooked-tests--settle (lambda () nil) 0.5))
+      (let* ((case-fold-search nil)
+             (heard (with-current-buffer b (cooked-tests--text)))
+             (focus (string-match "\\[I" heard))
+             (press (string-match "\\[<0;[0-9]+;[0-9]+M" heard)))
+        (should focus)
+        (should press)
+        (should (< focus press))))))
 
 (ert-deftest cooked-the-wheel-reaches-an-unfocused-terminal ()
   "A notch over an unfocused terminal goes to that terminal's child, and
