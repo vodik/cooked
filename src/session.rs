@@ -16,7 +16,7 @@ use nix::sys::signal::{SigSet, Signal};
 use std::ffi::OsStr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::JoinHandle;
 
@@ -62,23 +62,37 @@ const READ_CHUNK: usize = 64 * 1024;
 /// `cooked-a-child-that-exits-while-suspended-hands-the-buffer-back` and
 /// `cooked-evil-normal-state-does-not-outlive-the-child`, whose children go raw silently
 /// and exit 200ms later, from observing the mode at all. [`RESAMPLE_DELAY`] and
-/// [`UNATTENDED_POLL_TIMEOUT`] take the parts of that saving that cost nothing.
+/// the backoff to [`ATTENDED_TICK_CAP`] take the parts of that saving that cost nothing.
 const POLL_TIMEOUT_MS: u8 = 100;
 
-/// The same tick, for a session nobody is looking at. See [`Session::set_attended`].
+/// The longest a quiet tick grows to while somebody is looking; see
+/// [`Shared::base_poll_wait`].
 ///
-/// The trade [`POLL_TIMEOUT_MS`] refuses to make globally is a bargain while the buffer
-/// is off screen, because a stale mode only costs somebody watching. Noticing a silent
-/// mode change buys two things, raising a password prompt and swapping a keymap, and
-/// neither is worth anything to a buffer in no window. No keystroke can arrive without
-/// [`Session::sample_mode`] reading the tty first, and Emacs forces a sample when
-/// attention returns.
+/// The tick starts at [`POLL_TIMEOUT_MS`] after anything happens and doubles on every
+/// tick that finds nothing, so a session in use is sampled as often as it ever was and
+/// an idle one costs a wakeup a second rather than ten. A silent termios change -- a
+/// program that sleeps and then calls `tcsetattr` with no I/O either side -- is what
+/// the tick still exists for, and how urgently it needs noticing decays with the
+/// silence around it: most such changes follow output by microseconds and are caught
+/// by [`RESAMPLE_DELAY`] before this is consulted at all.
+const ATTENDED_TICK_CAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The same cap, for a session nobody is looking at. See [`Session::set_attended`].
+///
+/// A stale mode only costs somebody watching: noticing a silent mode change buys a
+/// password prompt and a keymap swap, and neither is worth anything to a buffer in no
+/// window. No keystroke can arrive without [`Session::sample_mode`] reading the tty
+/// first, and Emacs forces a sample when attention returns.
 ///
 /// Bounded rather than infinite, because the pending resize, the throttled-notification
 /// retry and the resample deadline all ride on this loop turning over. Each has its own
 /// wakeup, but an infinite timeout would make the tick something nothing could rely on,
-/// where a second keeps every invariant working at a tenth of the rate.
-const UNATTENDED_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+/// where a few seconds keeps every invariant working at a fraction of the rate.
+const UNATTENDED_TICK_CAP: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// How many doublings the quiet tick is allowed; past this the cap decides. Six from
+/// 100ms is 6.4 seconds, past both caps.
+const TICK_DOUBLINGS_MAX: u32 = 6;
 
 /// How long input keeps the eager tick on a session nobody is looking at.
 ///
@@ -502,8 +516,8 @@ impl Notifier {
 
     /// How long the reader thread may sleep in `poll`.
     ///
-    /// `base` is the caller's answer for the quiet case, [`POLL_TIMEOUT_MS`] or
-    /// [`UNATTENDED_POLL_TIMEOUT`]. It is a parameter because how often the tty is worth
+    /// `base` is the caller's answer for the quiet case, [`Shared::base_poll_wait`]'s
+    /// backoff. It is a parameter because how often the tty is worth
     /// asking about is a termios question, which the notifier has no business knowing.
     /// What the notifier owns are the deadlines below, which override the base.
     ///
@@ -581,6 +595,9 @@ struct Shared {
     /// Atomic because Emacs may set `cooked-backlog-limit' on a running session. Relaxed
     /// ordering is enough: the worst a stale read can do is let one more chunk through.
     backlog_limit: AtomicUsize,
+    /// How many ticks in a row have found nothing, for the backoff in
+    /// [`Shared::base_poll_wait`]. Zeroed by [`Shared::activity`].
+    quiet_ticks: AtomicU32,
     /// Whether the reader has stopped pulling from the pty because the backlog is full;
     /// see [`Shared::read_loop`]. A drain is what empties the backlog, so a drain that
     /// finds this set wakes the reader through the interrupt rather than leaving it to
@@ -739,6 +756,7 @@ impl Session {
             notifier: Notifier::new(wake, &options),
             resample_at: Mutex::new(None),
             backlog_limit: AtomicUsize::new(options.backlog_limit),
+            quiet_ticks: AtomicU32::new(0),
             throttled: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             attended: AtomicBool::new(true),
@@ -977,8 +995,9 @@ impl Session {
                 .set_size(size.rows.into(), size.cols.into(), size.cell);
         *self.shared.pending_resize.held() = Some(size);
         // Wake the reader rather than leaving the retry to its next tick, which under
-        // [`UNATTENDED_POLL_TIMEOUT`] can be a second away for a buffer resized while off
+        // [`UNATTENDED_TICK_CAP`] can be seconds away for a buffer resized while off
         // screen. Resizes are rare, so the extra wakeup costs nothing.
+        self.shared.activity();
         self.shared.interrupt.raise();
         let result = match self.shared.pty.resize(size) {
             // Not ours to set yet; the reader thread keeps trying.
@@ -1033,9 +1052,10 @@ impl Session {
 
     /// Say whether anyone is looking at this session, which sets the tick it polls on.
     ///
-    /// Attended is [`POLL_TIMEOUT_MS`]; unattended is [`UNATTENDED_POLL_TIMEOUT`], ten
-    /// times longer, because the tick only notices silent termios changes and there is
-    /// nobody to tell. Emacs decides what "looking" means, from `cooked--attention`.
+    /// Attended, the tick backs off to [`ATTENDED_TICK_CAP`]; unattended, to
+    /// [`UNATTENDED_TICK_CAP`], four times longer, because the tick only notices silent
+    /// termios changes and there is nobody to tell. Emacs decides what "looking" means,
+    /// from `cooked--attention`.
     ///
     /// [`Shared::interacted`] also restores the eager tick whenever anything is sent to
     /// the child, so unattended is a resting state the user is never stuck in while
@@ -1046,6 +1066,7 @@ impl Session {
     /// [`Session::sample_mode`] as it re-enters.
     pub(crate) fn set_attended(&self, attended: bool) {
         if self.shared.attended.swap(attended, Ordering::Relaxed) != attended && attended {
+            self.shared.activity();
             self.shared.interrupt.raise();
         }
     }
@@ -1168,25 +1189,60 @@ impl Shared {
     /// `None` once a deadline has passed, so an expired resample cannot pin the timeout at
     /// zero and spin this thread. The unattended stretch is only the base, so pending
     /// deadlines still cut it short.
-    fn poll_timeout(&self) -> PollTimeout {
-        let mut wait = self.notifier.poll_wait(self.base_poll_wait());
+    /// How long the next poll may sleep, and whether that is the quiet tick itself
+    /// rather than a nearer deadline -- a held frame, a throttled notification, a
+    /// resample -- that happens to be shorter. Only the tick counts as quiet when it
+    /// expires; see [`Shared::quiet_tick`].
+    fn poll_timeout(&self) -> (PollTimeout, bool) {
+        let tick = self.base_poll_wait();
+        let mut wait = self.notifier.poll_wait(tick);
         if let Some(left) = remaining(*self.resample_at.held()) {
             wait = wait.min(left);
         }
-        PollTimeout::try_from(wait).unwrap_or_else(|_| PollTimeout::from(POLL_TIMEOUT_MS))
+        let timeout =
+            PollTimeout::try_from(wait).unwrap_or_else(|_| PollTimeout::from(POLL_TIMEOUT_MS));
+        (timeout, wait >= tick)
     }
 
-    /// How long a quiet tick lasts, which is the whole of what attention changes.
+    /// How long a quiet tick lasts: [`POLL_TIMEOUT_MS`] doubled for every tick that has
+    /// found nothing since the last activity, up to a cap attention decides.
     ///
-    /// Two things earn the eager tick: attention, which is Emacs saying the buffer is under
-    /// the user's eyes, and [`INTERACTION_WINDOW`], which covers a terminal being scrolled
-    /// in an unselected window.
+    /// Two things earn the shorter cap: attention, which is Emacs saying the buffer is
+    /// under the user's eyes, and [`INTERACTION_WINDOW`], which covers a terminal being
+    /// scrolled in an unselected window. See [`ATTENDED_TICK_CAP`] for the backoff.
+    ///
+    /// Pinned at the base while a resize has not taken or a reply waits for room: both
+    /// ride on the tick and neither is a thing to let a quiet session decay.
     fn base_poll_wait(&self) -> std::time::Duration {
-        if self.attended.load(Ordering::Relaxed) || self.interacting() {
-            std::time::Duration::from_millis(u64::from(POLL_TIMEOUT_MS))
-        } else {
-            UNATTENDED_POLL_TIMEOUT
+        let base = std::time::Duration::from_millis(u64::from(POLL_TIMEOUT_MS));
+        if self.pending_resize.held().is_some() || self.awaits_room() {
+            return base;
         }
+        let cap = if self.attended.load(Ordering::Relaxed) || self.interacting() {
+            ATTENDED_TICK_CAP
+        } else {
+            UNATTENDED_TICK_CAP
+        };
+        let doublings = self
+            .quiet_ticks
+            .load(Ordering::Relaxed)
+            .min(TICK_DOUBLINGS_MAX);
+        (base * (1 << doublings)).min(cap)
+    }
+
+    /// Something happened -- output, input, a resize, attention -- so the next quiet tick
+    /// starts short again; see [`Shared::base_poll_wait`].
+    fn activity(&self) {
+        self.quiet_ticks.store(0, Ordering::Relaxed);
+    }
+
+    /// A tick found nothing: the next one may wait longer.
+    fn quiet_tick(&self) {
+        let _ = self
+            .quiet_ticks
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                (n < TICK_DOUBLINGS_MAX).then_some(n + 1)
+            });
     }
 
     /// Whether input has been sent recently enough to owe this session the eager tick.
@@ -1204,6 +1260,7 @@ impl Shared {
     /// the reader is asleep on a timeout computed earlier, so without it the first notch of
     /// a gesture would get its fast tick up to a second late.
     fn interacted(&self) {
+        self.activity();
         if self.attended.load(Ordering::Relaxed) {
             return;
         }
@@ -1339,7 +1396,8 @@ impl Shared {
                 PollFd::new(self.pty.as_fd(), events),
                 PollFd::new(self.interrupt.read.as_fd(), PollFlags::POLLIN),
             ];
-            match poll(&mut fds, self.poll_timeout()) {
+            let (timeout, is_tick) = self.poll_timeout();
+            match poll(&mut fds, timeout) {
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(_) => break,
                 Ok(_) => {}
@@ -1347,6 +1405,12 @@ impl Shared {
             let interrupted = fds[1].revents().is_some_and(|r| !r.is_empty());
             let revents = fds[0].revents().unwrap_or(PollFlags::empty());
             let ready = !(revents - PollFlags::POLLOUT).is_empty();
+            // A tick that ran out with nothing to show for it lets the next one wait
+            // longer. A poll the interrupt woke, or one cut short by a nearer deadline,
+            // is neither quiet nor activity.
+            if !ready && !interrupted && is_tick {
+                self.quiet_tick();
+            }
             // Either teardown asked us to stop -- in which case do not touch the pty on the
             // way out -- or a drain left a throttled notification for the `flush` below,
             // and all that was wanted was this iteration itself.
@@ -1392,6 +1456,7 @@ impl Shared {
             match self.pty.read(&mut buf) {
                 Ok([]) => return self.finish(Ended::ChildGone),
                 Ok(data) => {
+                    self.activity();
                     let hidden = self.hidden.load(Ordering::Relaxed);
                     let (drawable, outbound) = self.feed(data, hidden);
                     // Answered from here rather than from a drain, so a frozen or hidden
@@ -2218,21 +2283,19 @@ mod tests {
     /// cover taking the delta rather than applying it, which is what
     /// `min_redisplay_interval` paces.
     ///
-    /// Unattended, so the reader's own tick is [`UNATTENDED_POLL_TIMEOUT`] away rather than
+    /// Unattended, so the reader's own tick backs off towards [`UNATTENDED_TICK_CAP`] rather than
     /// [`POLL_TIMEOUT_MS`]: the tick flushes unconditionally and would otherwise send the
     /// byte inside the patience below, which must not be mistaken for the re-arm. The
     /// second write is driven by input rather than a sleep so it cannot land before the
     /// first wakeup has been read.
     ///
-    /// The wait after that input is what buys the long tick back, and is the one part of
-    /// this that is arithmetic rather than protocol: input restores the eager tick for
-    /// [`INTERACTION_WINDOW`] (see [`Shared::interacted`]), so the drain has to happen
-    /// after that has expired *and* after the reader has computed a fresh timeout past
-    /// it, or the 100ms tick lands inside the patience below and is read as the drain
-    /// having flushed. Past [`RESAMPLE_DELAY`] by construction, so no armed resample is
-    /// left to bring a tick forward either. Nothing can escape onto the pipe during the
-    /// wait: every path to the wake descriptor is gated on `notified`, which only the
-    /// drain below clears.
+    /// The wait after that input is the one part of this that is arithmetic rather than
+    /// protocol: input resets the tick's backoff (see [`Shared::activity`]), so the drain
+    /// has to land between two ticks of it, or a tick inside the patience below is read
+    /// as the drain having flushed. Past [`RESAMPLE_DELAY`] and [`INTERACTION_WINDOW`] by
+    /// construction, so neither brings a tick forward. Nothing can escape onto the pipe
+    /// during the wait: every path to the wake descriptor is gated on `notified`, which
+    /// only the drain below clears.
     #[test]
     fn a_drain_earns_no_second_wakeup_until_ready_says_the_drain_is_applied() {
         let (session, read) = session_with(
@@ -2254,7 +2317,11 @@ mod tests {
             .expect("release the second write");
         // The window itself, plus a couple of eager ticks' slack for the reader to have
         // settled back onto the long one.
-        std::thread::sleep(INTERACTION_WINDOW + Duration::from_millis(250));
+        // Past the window, and placed between two ticks of the backoff: after the
+        // input and the output it releases, the quiet ticks fall at about 100, 300, 700
+        // and 1500ms, so a drain at a second and a 200ms watch after it sit clear of
+        // both neighbours.
+        std::thread::sleep(INTERACTION_WINDOW + Duration::from_millis(500));
         session.drain();
         assert!(
             !woke_within(&read, Duration::from_millis(200)),
@@ -2540,12 +2607,31 @@ mod tests {
     /// while unattended, just later. Worth pinning because "nobody is looking" is a
     /// reason to ask less often and never a reason to stop parsing or stop sampling,
     /// and an infinite timeout would pass every other test in this file.
+    /// A quiet session's tick backs off, and output brings it straight back.
+    ///
+    /// Attended throughout: the backoff is what an idle terminal under the user's eyes
+    /// costs, and it must not be paid for as staleness once the child speaks again.
+    #[test]
+    fn an_idle_tick_backs_off_and_output_resets_it() {
+        let (session, _read) = session(&["/bin/sh", "-c", "sleep 1; echo hi; sleep 5"]);
+        let base = Duration::from_millis(u64::from(POLL_TIMEOUT_MS));
+        std::thread::sleep(Duration::from_millis(800));
+        let backed_off = session.shared.base_poll_wait();
+        assert!(
+            backed_off > base,
+            "still at the base after 800ms of silence"
+        );
+        assert!(backed_off <= ATTENDED_TICK_CAP);
+        wait_for(&session, |u| rendered(u).contains("hi"));
+        assert_eq!(session.shared.base_poll_wait(), base);
+    }
+
     #[test]
     fn an_unattended_session_still_observes_a_silent_mode_change() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 0.2; stty -echo; sleep 5"]);
         session.set_attended(false);
         assert_eq!(session.mode(), Mode::Cooked);
-        // Generously past `UNATTENDED_POLL_TIMEOUT`; the assertion is that it arrives at
+        // Generously past `UNATTENDED_TICK_CAP`; the assertion is that it arrives at
         // all, not when. `wait_for` polls `Session::mode`, which is the reader thread's
         // cached sample rather than a fresh `tcgetattr`, so nothing here can observe the
         // transition except the tick under test.
@@ -2619,23 +2705,24 @@ mod tests {
     fn the_interaction_window_decays_back_to_the_long_tick() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 5"]);
         session.set_attended(false);
-        assert_eq!(
-            session.shared.base_poll_wait(),
-            UNATTENDED_POLL_TIMEOUT,
-            "an unattended session nobody has touched must rest on the long tick"
+        let base = Duration::from_millis(u64::from(POLL_TIMEOUT_MS));
+        // Long enough for a few ticks to find nothing: 100, 200 and 400ms.
+        std::thread::sleep(Duration::from_millis(800));
+        assert!(
+            session.shared.base_poll_wait() > base,
+            "an unattended session nobody has touched must have backed off"
         );
 
         session.send(b"j", Input::Other, &|| false).expect("send");
         assert_eq!(
             session.shared.base_poll_wait(),
-            Duration::from_millis(u64::from(POLL_TIMEOUT_MS)),
+            base,
             "input must buy the eager tick back"
         );
 
         std::thread::sleep(INTERACTION_WINDOW + Duration::from_millis(50));
-        assert_eq!(
-            session.shared.base_poll_wait(),
-            UNATTENDED_POLL_TIMEOUT,
+        assert!(
+            session.shared.base_poll_wait() > base,
             "the window must expire on its own once the gesture is over"
         );
     }
