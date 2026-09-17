@@ -2776,6 +2776,19 @@ mod tests {
         assert_eq!(session.drain().exit, Some(3));
     }
 
+    /// An interrupt reaches the foreground group, whichever way the platform sends it.
+    ///
+    /// `sh -c` with two commands keeps the shell in the foreground with `sleep` in its
+    /// group, so SIGINT interrupts the sleep and the shell's trap decides the status.
+    #[test]
+    fn an_interrupt_reaches_the_foreground_group() {
+        let (session, _read) = session(&["/bin/sh", "-c", "trap 'exit 5' INT; sleep 300; exit 9"]);
+        std::thread::sleep(Duration::from_millis(150));
+        session.signal(Signal::SIGINT).expect("signal");
+        let update = wait_for(&session, |u| u.exit.is_some());
+        assert_eq!(update.exit, Some(5));
+    }
+
     /// A reader that leaves with the child still there ends the session anyway.
     ///
     /// Left to itself, the child kept running with nothing reading its output and

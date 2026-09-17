@@ -52,10 +52,94 @@ pub(crate) fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((read, write))
 }
 
-/// A descriptor that becomes readable once the process PID has exited, or `None`.
+/// Something that says when the process PID has exited.
 ///
-/// macOS has no `pidfd`; `kqueue` with `EVFILT_PROC` is the equivalent and is not yet
-/// wired up, so `Pty::reap` asks `waitpid` on a short timer here instead.
-pub(crate) fn exit_watch(_pid: libc::pid_t) -> Option<OwnedFd> {
+/// A `kqueue` with one `EVFILT_PROC` / `NOTE_EXIT` event registered for the pid, which
+/// is the BSD spelling of Linux's `pidfd`. Waited on with `kevent` rather than `poll`,
+/// since `poll` on a kqueue descriptor is not something every Darwin has supported.
+#[derive(Debug)]
+pub(crate) struct ExitWatch(OwnedFd);
+
+impl ExitWatch {
+    /// `None` when the kqueue cannot be made or the event cannot be registered -- the
+    /// process may already be gone, which `kevent` answers with `ESRCH` -- and the
+    /// caller falls back to asking `waitpid` on a timer.
+    pub(crate) fn new(pid: libc::pid_t) -> Option<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: `kqueue` takes nothing and returns a descriptor or -1.
+        let kq = unsafe { libc::kqueue() };
+        if kq < 0 {
+            return None;
+        }
+        // SAFETY: the descriptor is ours from the line above.
+        let kq = unsafe { OwnedFd::from_raw_fd(kq) };
+        // Close-on-exec, so a session spawned while this one is being torn down does not
+        // inherit it; kqueue descriptors are not inherited across fork, but the flag
+        // costs nothing and states the intent.
+        let _ = fcntl(kq.as_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
+        let change = libc::kevent {
+            ident: pid as libc::uintptr_t,
+            filter: libc::EVFILT_PROC,
+            flags: libc::EV_ADD | libc::EV_ONESHOT,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: std::ptr::null_mut(),
+        };
+        // SAFETY: one change, no events asked for, no timeout; the struct outlives the
+        // call.
+        let rc = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                &change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        (rc == 0).then_some(Self(kq))
+    }
+
+    /// Wait up to TIMEOUT for the process to exit, answering whether it has.
+    ///
+    /// `EV_ONESHOT`, so the event is delivered once; a later wait times out, which is
+    /// right because by then `waitpid` succeeds without waiting.
+    pub(crate) fn wait(&self, timeout: std::time::Duration) -> bool {
+        use std::os::fd::AsRawFd;
+        let timeout = libc::timespec {
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_nsec: libc::c_long::from(timeout.subsec_nanos()),
+        };
+        let mut event = std::mem::MaybeUninit::<libc::kevent>::uninit();
+        // SAFETY: no changes, room for one event, a timeout that outlives the call.
+        let rc = unsafe {
+            libc::kevent(
+                self.0.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                event.as_mut_ptr(),
+                1,
+                &timeout,
+            )
+        };
+        rc > 0
+    }
+}
+
+/// The slave end of MASTER, opened for the child; see `pty::child_exec`.
+///
+/// By path: Darwin has no `TIOCGPTPEER`. Only async-signal-safe calls, since this runs
+/// between fork and exec.
+pub(crate) unsafe fn open_slave(_master: libc::c_int, slave: *const libc::c_char) -> libc::c_int {
+    // SAFETY: one syscall on a NUL-terminated path the caller owns.
+    unsafe { libc::open(slave, libc::O_RDWR | libc::O_NOCTTY) }
+}
+
+/// Signal the pty's foreground process group: not something Darwin's master can be
+/// asked to do, so `None` and the caller reads the group and signals it itself.
+pub(crate) fn signal_foreground(
+    _master: std::os::fd::BorrowedFd<'_>,
+    _sig: nix::sys::signal::Signal,
+) -> Option<nix::Result<()>> {
     None
 }

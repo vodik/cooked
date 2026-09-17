@@ -195,10 +195,10 @@ pub(crate) struct Pty {
     /// single `killpg` — never blocking — so holding this across either is always
     /// short.
     reap_lock: std::sync::Mutex<()>,
-    /// Readable once the child has exited, where the platform can say so; see
-    /// [`crate::platform::exit_watch`]. What lets [`Pty::reap`] wait on the kernel
-    /// instead of on a timer.
-    exit_watch: Option<std::os::fd::OwnedFd>,
+    /// Says when the child has exited, where the platform can; see
+    /// [`platform::ExitWatch`]. What lets [`Pty::reap`] wait on the kernel instead of
+    /// on a timer.
+    exit_watch: Option<platform::ExitWatch>,
 }
 
 /// How long [`Pty::write`] waits on a child that is not draining its input before it
@@ -385,7 +385,7 @@ impl Pty {
             child: Pid(child),
             reaped: std::sync::atomic::AtomicBool::new(false),
             reap_lock: std::sync::Mutex::new(()),
-            exit_watch: platform::exit_watch(child),
+            exit_watch: platform::ExitWatch::new(child),
         })
     }
 
@@ -536,7 +536,15 @@ impl Pty {
         if self.reaped() {
             return Err(Error::Reaped);
         }
-        Self::send_to(self.foreground().unwrap_or(self.child), sig)
+        match self.foreground() {
+            // The platform may deliver to the foreground group itself, under the
+            // kernel's lock; otherwise the group is read here and signalled in two steps.
+            Ok(foreground) => match platform::signal_foreground(self.master.as_fd(), sig) {
+                Some(result) => Ok(result?),
+                None => Self::send_to(foreground, sig),
+            },
+            Err(_) => Self::send_to(self.child, sig),
+        }
     }
 
     /// Hang up on the child, as a terminal window closing does.
@@ -618,33 +626,28 @@ impl Pty {
     /// one it asks `waitpid` every [`REAP_TICK`], which is the shape this always had.
     pub(crate) fn reap(&self, patience: std::time::Duration) -> Option<i32> {
         let deadline = std::time::Instant::now() + patience;
+        // Whether the watch has already said the child is gone; see the match below.
+        let mut exited = false;
         loop {
             // Collected already, by whoever got there first: there is nothing to wait
             // for, and `try_wait` cannot say so, since `None` is also "still running".
             if self.reaped() {
                 return None;
             }
-            let exited = match self.try_wait() {
+            match self.try_wait() {
                 Ok(Some(status)) => return Some(status),
-                Ok(None) => false,
+                Ok(None) => {}
                 Err(_) => return None,
-            };
+            }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return None;
             }
             match &self.exit_watch {
                 // A watch that reports the child gone while `waitpid` still says otherwise
-                // is the gap between the two the kernel is closing; `exited` is never set
-                // on that path, so the tick below covers it rather than a spin here.
-                Some(watch) if !exited => {
-                    let mut fds = [PollFd::new(watch.as_fd(), PollFlags::POLLIN)];
-                    match nix::poll::poll(&mut fds, poll_timeout(remaining)) {
-                        Ok(0) | Err(Errno::EINTR) => continue,
-                        Ok(_) => continue,
-                        Err(_) => std::thread::sleep(REAP_TICK.min(remaining)),
-                    }
-                }
+                // is the gap between the two the kernel is closing, and a tick covers it
+                // rather than a spin here.
+                Some(watch) if !exited => exited = watch.wait(remaining),
                 _ => std::thread::sleep(REAP_TICK.min(remaining)),
             }
         }
@@ -810,11 +813,13 @@ unsafe fn child_exec(
         if libc::setsid() == -1 {
             die();
         }
-        // Belt to `O_CLOEXEC`'s braces: the master is ours alone, and a child that can
-        // read it can steal input meant for its own siblings. Nothing useful can be done
-        // if this fails, and failing the spawn over it would be a regression.
+        // The slave is opened from the master where the platform allows, so the master
+        // is closed after rather than before. Belt to `O_CLOEXEC`'s braces: the master is
+        // ours alone, and a child that can read it can steal input meant for its own
+        // siblings. Nothing useful can be done if the close fails, and failing the spawn
+        // over it would be a regression.
+        let fd = platform::open_slave(master, slave);
         libc::close(master);
-        let fd = libc::open(slave, libc::O_RDWR);
         if fd == -1 || libc::ioctl(fd, platform::TIOCSCTTY, 0) == -1 {
             die();
         }

@@ -14,7 +14,9 @@
 //! | [`POSIX_VDISABLE`] | zero on Linux, `0xff` on the BSDs |
 //! | [`slave_name`] | reentrant where possible, careful where not |
 //! | [`cloexec_pipe`] | atomic where possible, two-step where not |
-//! | [`exit_watch`] | `pidfd` where there is one, a timer where not |
+//! | [`ExitWatch`] | `pidfd` on Linux, `kqueue` on Darwin |
+//! | [`open_slave`] | `TIOCGPTPEER` where there is one, the path where not |
+//! | [`signal_foreground`] | `TIOCSIG` where there is one, `None` where not |
 //!
 //! Nothing above the shim should carry a `cfg`; if a caller needs one, the abstraction
 //! is in the wrong place.
