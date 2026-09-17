@@ -17,6 +17,7 @@
 //! | [`ExitWatch`] | `pidfd` on Linux, `kqueue` on Darwin |
 //! | [`open_slave`] | `TIOCGPTPEER` where there is one, the path where not |
 //! | [`signal_foreground`] | `TIOCSIG` where there is one, `None` where not |
+//! | [`spawn`] | `posix_spawn` where its attributes suffice, `None` where the fork path stays |
 //!
 //! Nothing above the shim should carry a `cfg`; if a caller needs one, the abstraction
 //! is in the wrong place.

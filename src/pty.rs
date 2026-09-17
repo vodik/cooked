@@ -344,39 +344,26 @@ impl Pty {
         // only async-signal-safe calls. `libc::fork` rather than `nix::unistd::fork` for
         // the same reason `child_exec` is raw: nix's wrapper runs registered `atfork`
         // handlers, which is exactly the kind of arbitrary code this window forbids.
-        //
-        // `exec_seen` is closed in the child by `execve` or by its `_exit`, whichever comes
-        // first, and nothing is ever written to it: its end of file is the signal. Both
-        // ends are close-on-exec, so neither this child nor any other keeps one open past
-        // its `execve`. Set with `fcntl` because macOS has no `pipe2`; Emacs forks only
-        // from its main thread, which is this one, so nothing forks between the calls.
-        let (exec_seen, exec_seen_child) = nix::unistd::pipe()?;
-        for end in [&exec_seen, &exec_seen_child] {
-            fcntl(end, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-        }
-        let master_fd = master.as_raw_fd();
-        let child = Errno::result(unsafe { libc::fork() })?;
-        if child == 0 {
-            unsafe {
-                child_exec(
-                    name.as_ptr(),
-                    master_fd,
-                    size,
-                    program.as_ptr(),
-                    &cargv,
-                    &cenvp,
-                    ccwd.as_deref(),
-                )
+        // The platform may start the child itself, by `posix_spawn`, and then the
+        // paragraphs above about the fork window do not apply: see `platform::spawn`. The
+        // window size goes on the master afterwards, where the reader's pending-resize
+        // retry already covers a tty that is not ready for it.
+        let child = match platform::spawn(&program, &cargv, &cenvp, &name, ccwd.as_deref()) {
+            Some(spawned) => {
+                let child = spawned?;
+                let _ = set_winsize(master.as_fd(), size);
+                child
             }
-        }
-
-        // Waited for before the session is handed out, because until `setsid` the child is
-        // still in Emacs' process group, where no signal cooked sends can reach it: the
-        // `killpg` of its pid fails with ESRCH. And until `execve` it still runs Emacs'
-        // signal handlers, so a signal that did reach it would run those in the wrong
-        // process. `vfork`, which Emacs' own `make-process` uses, waits for the same thing.
-        drop(exec_seen_child);
-        wait_for_eof(&exec_seen, SPAWN_EXEC_GRACE);
+            None => Self::fork_child(
+                &master,
+                &name,
+                size,
+                &program,
+                &cargv,
+                &cenvp,
+                ccwd.as_deref(),
+            )?,
+        };
 
         // Non-blocking, so a reply can be offered to a child that is not reading without
         // waiting on it; see `Pty::write_some`. Nothing here ever relied on blocking: the
@@ -393,6 +380,53 @@ impl Pty {
             reap_lock: std::sync::Mutex::new(()),
             exit_watch: platform::ExitWatch::new(child),
         })
+    }
+
+    /// The fork-and-exec way of starting the child, for a platform without
+    /// [`platform::spawn`].
+    ///
+    /// `exec_seen` is closed in the child by `execve` or by its `_exit`, whichever comes
+    /// first, and nothing is ever written to it: its end of file is the signal. Both ends
+    /// are close-on-exec, so neither this child nor any other keeps one open past its
+    /// `execve`. Set with `fcntl` because macOS has no `pipe2`; Emacs forks only from its
+    /// main thread, which is this one, so nothing forks between the calls.
+    ///
+    /// Waited for before the session is handed out, because until `setsid` the child is
+    /// still in Emacs' process group, where no signal cooked sends can reach it: the
+    /// `killpg` of its pid fails with ESRCH. And until `execve` it still runs Emacs'
+    /// signal handlers, so a signal that did reach it would run those in the wrong
+    /// process. `vfork`, which Emacs' own `make-process` uses, waits for the same thing.
+    fn fork_child(
+        master: &PtyMaster,
+        slave: &CStr,
+        size: Winsize,
+        program: &CStr,
+        argv: &[*const libc::c_char],
+        envp: &[*const libc::c_char],
+        cwd: Option<&CStr>,
+    ) -> Result<libc::pid_t> {
+        let (exec_seen, exec_seen_child) = nix::unistd::pipe()?;
+        for end in [&exec_seen, &exec_seen_child] {
+            fcntl(end, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+        }
+        let master_fd = master.as_raw_fd();
+        let child = Errno::result(unsafe { libc::fork() })?;
+        if child == 0 {
+            unsafe {
+                child_exec(
+                    slave.as_ptr(),
+                    master_fd,
+                    size,
+                    program.as_ptr(),
+                    argv,
+                    envp,
+                    cwd,
+                )
+            }
+        }
+        drop(exec_seen_child);
+        wait_for_eof(&exec_seen, SPAWN_EXEC_GRACE);
+        Ok(child)
     }
 
     pub(crate) fn as_fd(&self) -> BorrowedFd<'_> {
@@ -1095,6 +1129,32 @@ mod tests {
         // Named, not `ErrorKind::NotFound`, which cannot tell this from "child already
         // reaped" or "no foreground process group". See `error.rs`.
         assert!(matches!(missing, Error::NotOnPath(_)), "{missing:?}");
+    }
+
+    /// A program that cannot be exec'd is an error from `spawn`, not a child that dies.
+    ///
+    /// Where the platform starts the child with `posix_spawn`, the call returns once the
+    /// exec has happened or failed, so the failure comes back as its errno. The fork path
+    /// cannot know until the child has exited 127, and is not held to this.
+    #[test]
+    fn an_unexecutable_program_fails_the_spawn_itself() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let result = Pty::spawn(
+            &["/etc/passwd"],
+            &[("PATH", "/usr/bin:/bin")],
+            Winsize {
+                rows: 24,
+                cols: 80,
+                cell: None,
+            },
+            None,
+        );
+        assert!(
+            matches!(result, Err(Error::Os(Errno::EACCES))),
+            "expected EACCES from the spawn, got {result:?}"
+        );
     }
 
     #[test]

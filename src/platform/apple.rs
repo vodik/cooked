@@ -2,7 +2,7 @@
 
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::pty::PtyMaster;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
 
@@ -141,5 +141,20 @@ pub(crate) fn signal_foreground(
     _master: std::os::fd::BorrowedFd<'_>,
     _sig: nix::sys::signal::Signal,
 ) -> Option<nix::Result<()>> {
+    None
+}
+
+/// Start a child on the slave: not done here, so `None`, and the caller forks.
+///
+/// Darwin has `posix_spawn` with `POSIX_SPAWN_SETSID` and `addchdir_np`, and the `libc`
+/// crate binds neither for it yet. The fork path in `pty::child_exec` is what has always
+/// run here and is kept until the call can be tried on the platform itself.
+pub(crate) fn spawn(
+    _program: &CStr,
+    _argv: &[*const libc::c_char],
+    _envp: &[*const libc::c_char],
+    _slave: &CStr,
+    _cwd: Option<&CStr>,
+) -> Option<crate::error::Result<libc::pid_t>> {
     None
 }

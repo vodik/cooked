@@ -2,7 +2,7 @@
 
 use nix::fcntl::OFlag;
 use nix::pty::PtyMaster;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::OwnedFd;
 
@@ -100,4 +100,106 @@ pub(crate) fn signal_foreground(
     // SAFETY: an ioctl on a live descriptor with an integer argument.
     let rc = unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSIG, sig as libc::c_int) };
     Some(nix::errno::Errno::result(rc).map(drop))
+}
+
+/// Start PROGRAM with ARGV and ENVP on the slave SLAVE, in a session of its own, with
+/// CWD as its directory: the pid, or the error that stopped it.
+///
+/// `posix_spawn`, which glibc runs on `clone(CLONE_VM | CLONE_VFORK)`: no copy of Emacs'
+/// page tables, which for a large heap is milliseconds a spawn and can fail outright
+/// under strict overcommit, and no window in which a half-made child runs Emacs' signal
+/// handlers. The call returns once the child has exec'd or failed to, so a program that
+/// cannot be run comes back here as its errno rather than as a session that dies with
+/// status 127 a moment later.
+///
+/// What the fork path did by hand is done by attributes and file actions:
+/// `POSIX_SPAWN_SETSID` makes the session, and a session leader that then opens a tty
+/// without `O_NOCTTY` acquires it as its controlling terminal, so the open of the slave
+/// onto fd 0 is also the `TIOCSCTTY`; the two `dup2`s fill 1 and 2; every signal goes
+/// back to its default and the mask is emptied, since Emacs ignores SIGPIPE and blocks
+/// signals and a child inheriting that is subtly broken. The master is close-on-exec.
+///
+/// The initial window size is not set here: the parent sets it on the master once this
+/// returns, which Linux accepts at any time.
+///
+/// `Some` always: this platform has the call. Darwin answers `None` and the caller
+/// forks; see [`crate::platform`].
+pub(crate) fn spawn(
+    program: &CStr,
+    argv: &[*const libc::c_char],
+    envp: &[*const libc::c_char],
+    slave: &CStr,
+    cwd: Option<&CStr>,
+) -> Option<crate::error::Result<libc::pid_t>> {
+    use nix::errno::Errno;
+    /// An errno-returning call, `posix_spawn` style: zero is success.
+    fn check(rc: libc::c_int) -> crate::error::Result<()> {
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(Errno::from_raw(rc).into())
+        }
+    }
+    // SAFETY: every call below is an FFI call on structures initialised by the matching
+    // `_init`, destroyed on every path out, with pointers that outlive the `posix_spawn`.
+    let result = unsafe {
+        let mut attr = std::mem::MaybeUninit::<libc::posix_spawnattr_t>::uninit();
+        if let Err(e) = check(libc::posix_spawnattr_init(attr.as_mut_ptr())) {
+            return Some(Err(e));
+        }
+        let mut actions = std::mem::MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
+        if let Err(e) = check(libc::posix_spawn_file_actions_init(actions.as_mut_ptr())) {
+            libc::posix_spawnattr_destroy(attr.as_mut_ptr());
+            return Some(Err(e));
+        }
+        let attr = attr.as_mut_ptr();
+        let actions = actions.as_mut_ptr();
+        let spawned = (|| {
+            let mut all = std::mem::zeroed::<libc::sigset_t>();
+            libc::sigfillset(&raw mut all);
+            let mut none = std::mem::zeroed::<libc::sigset_t>();
+            libc::sigemptyset(&raw mut none);
+            check(libc::posix_spawnattr_setsigdefault(attr, &raw const all))?;
+            check(libc::posix_spawnattr_setsigmask(attr, &raw const none))?;
+            let flags = [
+                libc::POSIX_SPAWN_SETSID as libc::c_short,
+                libc::POSIX_SPAWN_SETSIGDEF as libc::c_short,
+                libc::POSIX_SPAWN_SETSIGMASK as libc::c_short,
+            ]
+            .into_iter()
+            .fold(0, |acc, flag| acc | flag);
+            check(libc::posix_spawnattr_setflags(attr, flags))?;
+            if let Some(dir) = cwd {
+                check(libc::posix_spawn_file_actions_addchdir_np(
+                    actions,
+                    dir.as_ptr(),
+                ))?;
+            }
+            check(libc::posix_spawn_file_actions_addopen(
+                actions,
+                0,
+                slave.as_ptr(),
+                libc::O_RDWR,
+                0,
+            ))?;
+            check(libc::posix_spawn_file_actions_adddup2(actions, 0, 1))?;
+            check(libc::posix_spawn_file_actions_adddup2(actions, 0, 2))?;
+            let mut pid: libc::pid_t = 0;
+            check(libc::posix_spawn(
+                &raw mut pid,
+                program.as_ptr(),
+                actions,
+                attr,
+                // The prototype spells the vectors mutable, as C's does; nothing writes
+                // through them.
+                argv.as_ptr().cast::<*mut libc::c_char>(),
+                envp.as_ptr().cast::<*mut libc::c_char>(),
+            ))?;
+            Ok(pid)
+        })();
+        libc::posix_spawn_file_actions_destroy(actions);
+        libc::posix_spawnattr_destroy(attr);
+        spawned
+    };
+    Some(result)
 }
