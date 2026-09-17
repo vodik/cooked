@@ -6,7 +6,9 @@
 
 use crate::emu::{Delta, Event, Term};
 use crate::error::Result;
-use crate::pty::{AtomicMode, JobControl, Mode, Pid, Pty, WRITE_TIMEOUT, Winsize};
+use crate::pty::{
+    AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pid, Pty, WRITE_TIMEOUT, Winsize,
+};
 use crate::replies::{ReplyKind, ReplyQueue};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -108,9 +110,11 @@ const INTERACTION_WINDOW: std::time::Duration = std::time::Duration::from_millis
 const RESAMPLE_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 /// How long to wait for a child that closed the pty to become reapable.
 const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500);
-/// How long an explicit shutdown gives the child to honour SIGHUP before SIGKILL,
-/// and again to become reapable afterwards.
-const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// What `exit` holds for a session whose reader gave up on the pty with the child still
+/// unreapable: not an exit status, since there is none, but Lisp still needs the session
+/// to end. `cooked--on-exit' spells it out. Negative because no `waitpid` status is.
+pub(crate) const LOST: i32 = -1;
 
 /// How quiet the pty must go before a frame is drawn; see [`NotifyState::hold`].
 ///
@@ -136,9 +140,10 @@ const QUIESCENCE: std::time::Duration = std::time::Duration::from_micros(500);
 ///
 /// So this is a backstop: long enough that an ordinary transfer finishes inside it, short
 /// enough that nobody watching calls it a freeze. It is
-/// [`SYNC_TIMEOUT`](crate::emu::term::SYNC_TIMEOUT) exactly, because a client using DEC
-/// mode 2026 is made the same promise, and one number for how long anything may hold the
-/// buffer still cannot drift from a second.
+/// [`SYNC_TIMEOUT`](crate::emu::term::SYNC_TIMEOUT) exactly -- 150ms, the figure xterm
+/// and contour use for mode 2026 and kitty comes within 50ms of -- because a client using
+/// that mode is made the same promise, and one number for how long anything may hold the
+/// buffer still cannot drift from another.
 const HOLD_CEILING: std::time::Duration = crate::emu::term::SYNC_TIMEOUT;
 
 /// How long after a keystroke the first frame that changes the screen may skip
@@ -753,14 +758,19 @@ impl Session {
     /// Tear the child down now and reap it, reporting whether this call was the one that
     /// did it. Idempotent, cheap after the first call, and safe from `Drop`.
     ///
-    /// Emacs must never wait on someone else's `sleep 3600`, so the child gets SIGHUP, a
-    /// short grace period, then SIGKILL, because a child that ignores SIGHUP -- `nohup`,
-    /// `trap '' HUP` -- would otherwise survive an explicit kill and never be reaped.
+    /// What a terminal window closing does: the shell is hung up, given
+    /// [`HANGUP_GRACE`] to forward that to its jobs and save its history, and only then
+    /// killed. Emacs must never wait on someone else's `sleep 3600`, and a child that
+    /// ignores SIGHUP -- `nohup`, `trap '' HUP` -- would otherwise survive an explicit
+    /// kill and never be reaped, which is what the SIGKILL is for.
+    ///
+    /// The grace is a bound and not a cost: the reader reaps the child the moment its
+    /// side of the pty closes, so a shell that exits at once is joined at once.
     pub(crate) fn shutdown(&self) -> bool {
         if self.shared.shutdown.swap(true, Ordering::SeqCst) {
             return false;
         }
-        let _ = self.shared.pty.signal(Signal::SIGHUP);
+        let _ = self.shared.pty.hangup();
         self.shared.interrupt.raise();
         self.shared.notifier.close();
         if let Some(reader) = self.reader.held().take() {
@@ -771,10 +781,7 @@ impl Session {
         // already reaped and the pid is no longer ours to signal.
         let mut exited = self.shared.exited.held();
         if exited.is_none() {
-            *exited = self.shared.pty.reap(KILL_GRACE).or_else(|| {
-                let _ = self.shared.pty.signal(Signal::SIGKILL);
-                self.shared.pty.reap(KILL_GRACE)
-            });
+            *exited = Some(self.shared.reap_or_kill().unwrap_or(LOST));
         }
         true
     }
@@ -1398,15 +1405,34 @@ impl Shared {
         self.finish(Ended::Aborted);
     }
 
+    /// The child's exit status, after the hangup it has been sent and, failing that, a
+    /// kill. `None` only for a child that cannot be reaped even then.
+    fn reap_or_kill(&self) -> Option<i32> {
+        self.pty.reap(HANGUP_GRACE).or_else(|| {
+            let _ = self.pty.kill();
+            self.pty.reap(KILL_GRACE)
+        })
+    }
+
     fn finish(&self, why: Ended) {
-        let patience = match why {
-            Ended::ChildGone => REAP_PATIENCE,
-            Ended::Aborted => std::time::Duration::ZERO,
+        let status = match why {
+            Ended::ChildGone => self.pty.reap(REAP_PATIENCE),
+            // The reader is leaving with the child still there. Nothing will read the pty
+            // again, so the session is over whether or not the child agrees, and a
+            // session that ends has to say so: left as it was, `alive` went on
+            // answering yes for a buffer nothing would ever write to again.
+            Ended::Aborted => {
+                let _ = self.pty.hangup();
+                self.reap_or_kill().or(Some(LOST))
+            }
         };
-        let Some(status) = self.pty.reap(patience) else {
+        let Some(status) = status else {
             return;
         };
-        *self.exited.held() = Some(status);
+        // Never over a status already recorded: an abort races the ordinary end, since
+        // the hangup it sends is what makes the child exit, and `Session::shutdown`
+        // reaps on its own thread.
+        self.exited.held().get_or_insert(status);
         // Acknowledged on Emacs' behalf, because a wakeup still in flight would otherwise
         // swallow the one below, which is the last this session sends. Not `rearm`: the
         // byte goes out regardless of the throttle.
@@ -2621,6 +2647,56 @@ mod tests {
             Err(Errno::ESRCH),
             "the child outlived an explicit shutdown"
         );
+    }
+
+    /// The hangup goes to the shell, not to whatever it is running.
+    ///
+    /// An interactive bash puts `sleep` in a process group of its own and makes that the
+    /// foreground. Hanging up the foreground group killed the sleep and left bash to
+    /// carry on and exit 0 in its own time; hanging up bash's group runs its HUP trap,
+    /// which is the exit status a shell saving its history on the way out would have.
+    #[test]
+    fn shutdown_hangs_up_the_shell_rather_than_its_foreground_job() {
+        if !std::path::Path::new("/bin/bash").exists() {
+            eprintln!("skipping: no /bin/bash");
+            return;
+        }
+        let (session, _read) = session(&[
+            "/bin/bash",
+            "--norc",
+            "-i",
+            "-c",
+            "trap 'exit 3' HUP; sleep 300; exit 9",
+        ]);
+        // Let bash reach the sleep and hand it the foreground; the trap is installed
+        // first, so a hangup any earlier still lands on the shell.
+        wait_for_within(&session, 5.0, |_| {
+            session
+                .shared
+                .pty
+                .foreground()
+                .is_ok_and(|fg| fg != session.pid())
+        });
+        assert!(session.shutdown());
+        assert_eq!(session.drain().exit, Some(3));
+    }
+
+    /// A reader that leaves with the child still there ends the session anyway.
+    ///
+    /// Left to itself, the child kept running with nothing reading its output and
+    /// `alive` answering yes for good. Now it is hung up, killed if that is what it
+    /// takes, and the status lands where any exit would.
+    #[test]
+    fn an_aborted_reader_still_ends_the_session() {
+        // `exec`, so the ignored disposition is the sleep's own and the hangup is
+        // refused by the only process there is.
+        let (session, _read) = session(&["/bin/sh", "-c", "trap '' HUP; exec sleep 300"]);
+        let pid = session.pid().get();
+        std::thread::sleep(Duration::from_millis(150));
+        session.shared.finish(Ended::Aborted);
+        assert!(!session.alive());
+        assert_eq!(alive(pid), Err(Errno::ESRCH));
+        assert_eq!(session.drain().exit, Some(128 + Signal::SIGKILL as i32));
     }
 
     #[test]

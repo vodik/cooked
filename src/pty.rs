@@ -195,6 +195,10 @@ pub(crate) struct Pty {
     /// single `killpg` — never blocking — so holding this across either is always
     /// short.
     reap_lock: std::sync::Mutex<()>,
+    /// Readable once the child has exited, where the platform can say so; see
+    /// [`crate::platform::exit_watch`]. What lets [`Pty::reap`] wait on the kernel
+    /// instead of on a timer.
+    exit_watch: Option<std::os::fd::OwnedFd>,
 }
 
 /// How long [`Pty::write`] waits on a child that is not draining its input before it
@@ -210,12 +214,26 @@ fn poll_timeout(remaining: std::time::Duration) -> PollTimeout {
     PollTimeout::try_from(remaining).unwrap_or(PollTimeout::MAX)
 }
 
-/// The grace period `Drop`'s own `SIGHUP`-then-`SIGKILL` escalation gives at each step.
-/// Same value as `session::KILL_GRACE`, kept as its own constant rather than shared:
-/// this path only runs when something has already gone wrong (teardown outside
-/// `Session::shutdown`), and it should not gain a dependency on `session`'s internals
-/// to stay that short.
-const DROP_KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+/// How long a hung-up child has to exit on its own before it is killed.
+///
+/// What a closing terminal window gives its shell, and it has to cover what a shell does
+/// on SIGHUP: forward it to its jobs, write its history, run its exit hooks. zsh does all
+/// three in a few milliseconds on an idle machine and can take much longer on a loaded
+/// one, and a shell killed part-way through loses the history of the session. Fifty
+/// milliseconds, the old figure, was that loss on any busy machine.
+///
+/// The wait is not paid in the common case: [`Pty::reap`] returns the moment the child
+/// is reapable, so a shell that exits at once costs its own exit time and nothing more.
+/// The full period is only spent on a child that ignores SIGHUP -- `nohup`, `trap ''
+/// HUP` -- and then once, on the thread tearing the session down.
+pub(crate) const HANGUP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long a killed child has to become reapable. SIGKILL cannot be caught, so this
+/// only covers the kernel's own bookkeeping and a child stuck in uninterruptible sleep.
+pub(crate) const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long [`Pty::reap`] waits between `waitpid`s on a platform with no exit watch.
+const REAP_TICK: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// The longest [`Pty::spawn`] waits for the child to reach `execve`.
 ///
@@ -329,6 +347,7 @@ impl Pty {
             child: Pid(child),
             reaped: std::sync::atomic::AtomicBool::new(false),
             reap_lock: std::sync::Mutex::new(()),
+            exit_watch: platform::exit_watch(child),
         })
     }
 
@@ -482,7 +501,60 @@ impl Pty {
         if self.reaped() {
             return Err(Error::Reaped);
         }
-        match self.foreground().unwrap_or(self.child) {
+        Self::send_to(self.foreground().unwrap_or(self.child), sig)
+    }
+
+    /// Hang up on the child, as a terminal window closing does.
+    ///
+    /// SIGHUP to the child's *own* process group first, which [`Pty::signal`] never
+    /// targets. The child is the session leader -- the shell -- and a hangup is its news
+    /// to break: bash, zsh and fish all forward it to their jobs, save what they save,
+    /// and exit. Sending it to the foreground job alone killed the job and left the shell
+    /// standing, with nothing telling it the terminal was gone until the master closed.
+    ///
+    /// Then to the foreground group as well, when that is a different one. It is what
+    /// the kernel does on a real hangup once the leader is gone, and it matters for a
+    /// shell that traps SIGHUP: a trap runs only once the foreground command returns, so
+    /// a shell waiting on `sleep` would sit on the trap for as long as the sleep lasted,
+    /// and be killed for it at the end of the grace. A job that gets the hangup twice,
+    /// once from here and once forwarded by its shell, is no worse off than one closing
+    /// terminal window already leaves it.
+    pub(crate) fn hangup(&self) -> Result<()> {
+        let _guard = self
+            .reap_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.reaped() {
+            return Err(Error::Reaped);
+        }
+        let result = Self::send_to(self.child, Signal::SIGHUP);
+        if let Ok(foreground) = self.foreground()
+            && foreground != self.child
+        {
+            let _ = Self::send_to(foreground, Signal::SIGHUP);
+        }
+        result
+    }
+
+    /// Kill the child's process group outright, for a child that has ignored a hangup.
+    pub(crate) fn kill(&self) -> Result<()> {
+        self.signal_group(Signal::SIGKILL)
+    }
+
+    fn signal_group(&self, sig: Signal) -> Result<()> {
+        let _guard = self
+            .reap_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.reaped() {
+            return Err(Error::Reaped);
+        }
+        Self::send_to(self.child, sig)
+    }
+
+    /// `killpg` TARGET, refusing anything that could reach our own process group.
+    fn send_to(target: Pid, sig: Signal) -> Result<()> {
+        match target {
             // `killpg` rather than `kill(-pid)`, which one missed negation turns into a
             // signal to the wrong process.
             Pid(target) if target > 1 => Ok(killpg(NixPid::from_raw(target), sig)?),
@@ -505,15 +577,40 @@ impl Pty {
     /// A plain `try_wait` races a child that has closed the pty but has not yet been
     /// reaped, which loses the real exit code; a blocking `waitpid` would deadlock
     /// teardown against a child that is not exiting at all. Hence a bounded wait.
+    ///
+    /// The wait is spent in `poll` on the exit watch where the platform has one, so it
+    /// returns the instant the child exits and costs nothing while it has not. Without
+    /// one it asks `waitpid` every [`REAP_TICK`], which is the shape this always had.
     pub(crate) fn reap(&self, patience: std::time::Duration) -> Option<i32> {
         let deadline = std::time::Instant::now() + patience;
         loop {
-            match self.try_wait() {
+            // Collected already, by whoever got there first: there is nothing to wait
+            // for, and `try_wait` cannot say so, since `None` is also "still running".
+            if self.reaped() {
+                return None;
+            }
+            let exited = match self.try_wait() {
                 Ok(Some(status)) => return Some(status),
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                Ok(None) => false,
+                Err(_) => return None,
+            };
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            match &self.exit_watch {
+                // A watch that reports the child gone while `waitpid` still says otherwise
+                // is the gap between the two the kernel is closing; `exited` is never set
+                // on that path, so the tick below covers it rather than a spin here.
+                Some(watch) if !exited => {
+                    let mut fds = [PollFd::new(watch.as_fd(), PollFlags::POLLIN)];
+                    match nix::poll::poll(&mut fds, poll_timeout(remaining)) {
+                        Ok(0) | Err(Errno::EINTR) => continue,
+                        Ok(_) => continue,
+                        Err(_) => std::thread::sleep(REAP_TICK.min(remaining)),
+                    }
                 }
-                _ => return None,
+                _ => std::thread::sleep(REAP_TICK.min(remaining)),
             }
         }
     }
@@ -554,12 +651,12 @@ impl Drop for Pty {
         if self.child.0 <= 1 || self.reaped() {
             return;
         }
-        let _ = killpg(NixPid::from_raw(self.child.0), Signal::SIGHUP);
-        if self.reap(DROP_KILL_GRACE).is_some() {
+        let _ = self.hangup();
+        if self.reap(HANGUP_GRACE).is_some() {
             return;
         }
-        let _ = killpg(NixPid::from_raw(self.child.0), Signal::SIGKILL);
-        let _ = self.reap(DROP_KILL_GRACE);
+        let _ = self.kill();
+        let _ = self.reap(KILL_GRACE);
     }
 }
 

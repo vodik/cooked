@@ -1286,7 +1286,11 @@ and a session that exits and is then killed goes through both."
     (cooked--with-child-edit
       (save-excursion
         (goto-char (point-max))
-        (insert (format "\n[exited %s]\n" code))))
+        ;; -1 is not a status: the core reports it when its reader lost the pty
+        ;; with the child still unreapable, and the session is over either way.
+        (insert (if (< code 0)
+                    "\n[session lost]\n"
+                  (format "\n[exited %s]\n" code)))))
     (cooked--dolist-windows w (get-buffer-window-list nil nil t)
       (when (>= (window-point w) (1- old-end))
         (cooked--pin-transcript-bottom (list w)))))

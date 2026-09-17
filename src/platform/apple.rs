@@ -51,3 +51,11 @@ pub(crate) fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     }
     Ok((read, write))
 }
+
+/// A descriptor that becomes readable once the process PID has exited, or `None`.
+///
+/// macOS has no `pidfd`; `kqueue` with `EVFILT_PROC` is the equivalent and is not yet
+/// wired up, so `Pty::reap` asks `waitpid` on a short timer here instead.
+pub(crate) fn exit_watch(_pid: libc::pid_t) -> Option<OwnedFd> {
+    None
+}

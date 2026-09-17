@@ -151,6 +151,9 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// :kitty-flags, :modify-other-keys, :mode, :images, :links, :styles, :events, :exit
         /// and :withheld.
         ///
+        /// :exit is the child's status once it has one, or -1 for a session whose reader
+        /// gave up on the pty with the child still unreapable.
+        ///
         /// With PROMOTE non-nil and HIDDEN nil, the rows scrolled off the top that the buffer already holds
         /// as its top screen rows come as :promoted rather than in :scrolled: (BOTTOM . ROWS),
         /// ROWS having one (CHARS . ENDS) per row, oldest first, saying how many characters
