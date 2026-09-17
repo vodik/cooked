@@ -581,6 +581,11 @@ struct Shared {
     /// Atomic because Emacs may set `cooked-backlog-limit' on a running session. Relaxed
     /// ordering is enough: the worst a stale read can do is let one more chunk through.
     backlog_limit: AtomicUsize,
+    /// Whether the reader has stopped pulling from the pty because the backlog is full;
+    /// see [`Shared::read_loop`]. A drain is what empties the backlog, so a drain that
+    /// finds this set wakes the reader through the interrupt rather than leaving it to
+    /// the poll tick.
+    throttled: AtomicBool,
     shutdown: AtomicBool,
     /// Whether anyone is looking at this session's buffer; see [`Session::set_attended`].
     /// Starts true, so a session Emacs never reports on — a test, a buffer driven from
@@ -734,6 +739,7 @@ impl Session {
             notifier: Notifier::new(wake, &options),
             resample_at: Mutex::new(None),
             backlog_limit: AtomicUsize::new(options.backlog_limit),
+            throttled: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             attended: AtomicBool::new(true),
             hidden: AtomicBool::new(false),
@@ -825,6 +831,7 @@ impl Session {
             term.drain()
         };
         drop(term);
+        self.shared.unthrottle();
         Update {
             delta,
             mode: self.shared.mode.load(),
@@ -845,6 +852,8 @@ impl Session {
         } else {
             term.drain_hidden()
         };
+        drop(term);
+        self.shared.unthrottle();
         Update {
             delta,
             mode: self.shared.mode.load(),
@@ -1258,6 +1267,17 @@ impl Shared {
         !queue.is_empty()
     }
 
+    /// A drain has emptied the backlog: wake a reader that stopped on it.
+    ///
+    /// The wake is the interrupt, and it is sent only when the reader said it had
+    /// stopped, so an ordinary drain costs no syscall here. The reader re-reads the
+    /// backlog for itself on waking, so a drain that left it still full is harmless.
+    fn unthrottle(&self) {
+        if self.throttled.load(Ordering::SeqCst) {
+            self.interrupt.raise();
+        }
+    }
+
     /// Whether the reader should watch the pty for room: replies are waiting, and no
     /// sender is about to write them itself.
     fn awaits_room(&self) -> bool {
@@ -1284,14 +1304,33 @@ impl Shared {
         let mut buf = vec![0u8; READ_CHUNK];
 
         while !self.shutdown.load(Ordering::SeqCst) {
+            // Backpressure: with a full backlog, leave the bytes in the pty. Its buffer
+            // fills and the child blocks in `write`, so output waits instead of being
+            // dropped or piling up in memory faster than Emacs can render it. The pty is
+            // then not polled for input at all -- a readable pty nobody reads would
+            // return from every poll at once -- and the drain that empties the backlog
+            // raises the interrupt to say so; see [`Shared::unthrottle`].
+            let throttled =
+                self.term.held().backlog() >= self.backlog_limit.load(Ordering::Relaxed);
+            self.throttled.store(throttled, Ordering::SeqCst);
+            if throttled {
+                // A child that filled the backlog inside one frame has forfeited atomicity:
+                // holding the wakeup here would deadlock the backlog against its own blocked
+                // write, waiting on a frame it cannot finish because we are not reading.
+                self.notifier.set_sync(None);
+                self.announce();
+            }
             // Room is watched for only while a reply waits for it: a child that is not
             // reading keeps the pty full, and a writable pty with nothing to write would
             // return from every poll at once.
-            let events = if self.awaits_room() {
-                PollFlags::POLLIN | PollFlags::POLLOUT
+            let mut events = if throttled {
+                PollFlags::empty()
             } else {
                 PollFlags::POLLIN
             };
+            if self.awaits_room() {
+                events |= PollFlags::POLLOUT;
+            }
             let mut fds = [
                 PollFd::new(self.pty.as_fd(), events),
                 PollFd::new(self.interrupt.read.as_fd(), PollFlags::POLLIN),
@@ -1339,20 +1378,10 @@ impl Shared {
             // on Emacs' thread obeys it too.
             self.flush();
 
-            if !ready {
-                continue;
-            }
-
-            // Backpressure: with a full backlog, leave the bytes in the pty. Its buffer
-            // fills and the child blocks in `write`, so output waits instead of being
-            // dropped or piling up in memory faster than Emacs can render it.
-            if self.term.held().backlog() >= self.backlog_limit.load(Ordering::Relaxed) {
-                // A child that filled the backlog inside one frame has forfeited atomicity:
-                // holding the wakeup here would deadlock the backlog against its own blocked
-                // write, waiting on a frame it cannot finish because we are not reading.
-                self.notifier.set_sync(None);
-                self.announce();
-                std::thread::sleep(std::time::Duration::from_millis(2));
+            // A hangup or error still arrives while throttled, since those need no
+            // event bits asked for, and the read below is what reports them.
+            if !ready || (throttled && !revents.intersects(PollFlags::POLLHUP | PollFlags::POLLERR))
+            {
                 continue;
             }
 
@@ -1698,7 +1727,8 @@ mod tests {
         );
 
         let mut collected: Vec<String> = Vec::new();
-        let deadline = Instant::now() + patience(10.0);
+        let start = Instant::now();
+        let deadline = start + patience(10.0);
         while Instant::now() < deadline {
             let update = session.drain();
             collected.extend(update.delta.scrolled.iter().map(|line| {
@@ -1725,6 +1755,14 @@ mod tests {
         );
         assert_eq!(numbers[0], "1");
         assert_eq!(numbers[LINES - 1], LINES.to_string());
+        // Each drain wakes the reader through the interrupt, so a stalled reader resumes
+        // at once and not at the next poll tick. Two hundred lines through a backlog of
+        // one, resumed once per tick, would be twenty seconds.
+        assert!(
+            start.elapsed() < patience(3.0),
+            "the reader waited out the tick rather than the drain: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
