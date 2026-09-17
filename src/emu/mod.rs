@@ -156,4 +156,6 @@ pub use cell::{Deco, Run};
 pub use image::ImageId;
 pub use screen::{Direction, Shift};
 pub use style::StyleId;
-pub use term::{BACKLOG_HIGH_WATER, DamagedRow, Delta, Edit, Levels, Scrolled, Term};
+pub use term::{
+    BACKLOG_HIGH_WATER, DamagedRow, Delta, Edit, Feed, Levels, Progress, Scrolled, Term,
+};

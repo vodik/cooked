@@ -249,6 +249,11 @@ impl Perform for State {
         self.apc(bytes);
     }
 
+    /// A picture is waiting to be decoded, which the parser stops for; see [`Decode`].
+    fn terminated(&self) -> bool {
+        self.decode.is_some()
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         self.end_cluster();
         self.osc(params, bell_terminated);

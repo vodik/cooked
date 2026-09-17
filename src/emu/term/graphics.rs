@@ -288,7 +288,13 @@ impl State {
             Some(DcsString::CapabilityRequest(request)) => return self.capability_report(request),
             None => return,
         };
-        let Some(bitmap) = sixel::decode(&body) else {
+        // Decoded with the terminal unlocked; see [`Decode`].
+        self.decode = Some(Decode(Job::Sixel(body)));
+    }
+
+    /// A sixel the reader has decoded, or failed to.
+    fn sixel_decoded(&mut self, bitmap: Option<sixel::Bitmap>) {
+        let Some(bitmap) = bitmap else {
             return;
         };
         // Into the same `ImageData` a kitty transmission produces, by the same route.
@@ -298,6 +304,14 @@ impl State {
         let (format, bytes) = bitmap.encode();
         let id = self.intern_image(format, bytes, px, None);
         self.lay_image(id, CursorAfterImage::NextLine);
+    }
+
+    /// Take up what a [`Decode`] produced, as though `apc` or `dcs_unhook` had done it.
+    pub(super) fn apply_decoded(&mut self, decoded: Decoded) {
+        match decoded.0 {
+            Picture::Kitty(outcome, reply) => self.kitty_outcome(outcome, reply),
+            Picture::Sixel(bitmap) => self.sixel_decoded(bitmap),
+        }
     }
 
     /// `ESC _ ... ST` — the kitty graphics protocol, and nothing else so far.
@@ -317,10 +331,18 @@ impl State {
             return;
         }
         let (outcome, reply) = self.kitty.feed(bytes);
+        self.kitty_outcome(outcome, reply);
+    }
+
+    /// Act on what a kitty command came to, and answer it.
+    fn kitty_outcome(&mut self, outcome: Outcome, reply: Option<Vec<u8>>) {
         if let Some(reply) = reply {
             self.push_reply(Event::Reply(reply));
         }
         match outcome {
+            // The parser stops here -- see `Perform::terminated` -- so the reader can run
+            // the decode unlocked and bring the result to `apply_decoded`.
+            Outcome::Decode(transfer) => self.decode = Some(Decode(Job::Kitty(transfer))),
             Outcome::Image {
                 format,
                 bytes,

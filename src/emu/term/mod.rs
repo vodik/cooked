@@ -807,9 +807,67 @@ impl Term {
     /// them field by field rather than checking a damage flag: a cursor move with no
     /// damage is still a real update.
     pub fn feed(&mut self, bytes: &[u8]) -> bool {
-        let before = Pending::of(&self.state);
-        self.parser.advance(&mut self.state, bytes);
-        Pending::of(&self.state) != before
+        let progress = self.feed_start();
+        self.feed_all(bytes);
+        self.woken(&progress, false, 0)
+    }
+
+    /// Where a feed began, for [`Term::woken`] to compare against.
+    pub fn feed_start(&self) -> Progress {
+        Progress {
+            pending: Pending::of(&self.state),
+            events: self.state.events.len(),
+        }
+    }
+
+    /// Parse BYTES until they run out or a picture needs decoding.
+    ///
+    /// The reader's half of [`Term::feed`]: it holds the lock for the parse, which is
+    /// microseconds, and not for the decode, which for a kitty transfer is base64 over
+    /// megabytes, an inflate and a PNG encode. On [`Feed::Decode`] the caller runs the
+    /// job with the terminal unlocked, brings the result to [`Term::resume`], and feeds
+    /// the bytes past the count returned. Nothing after the picture is parsed until the
+    /// picture is placed, so the cursor moves in the order the child wrote.
+    pub fn feed_step(&mut self, bytes: &[u8]) -> Feed {
+        let consumed = self.parser.advance_until_terminated(&mut self.state, bytes);
+        match self.state.decode.take() {
+            Some(job) => Feed::Decode(job, consumed),
+            None => Feed::Done,
+        }
+    }
+
+    /// Place what a [`Feed::Decode`] job produced.
+    pub fn resume(&mut self, decoded: Decoded) {
+        self.state.apply_decoded(decoded);
+    }
+
+    /// Whether anything since PROGRESS warrants waking Emacs.
+    ///
+    /// For a shown screen, anything Emacs would draw: [`Pending`]'s contents, read field
+    /// by field rather than as a damage flag, because a cursor move with no damage is
+    /// still a real update. For a HIDDEN one, an event, which a child may be waiting on,
+    /// or a backlog half way to LIMIT; see [`Term::feed_hidden`].
+    pub fn woken(&self, progress: &Progress, hidden: bool, limit: usize) -> bool {
+        if hidden {
+            self.state.events.len() != progress.events || self.backlog() >= limit / 2
+        } else {
+            Pending::of(&self.state) != progress.pending
+        }
+    }
+
+    /// [`Term::feed_step`] to the end, decoding in place: for a caller with no lock to
+    /// drop, which is Lisp's `cooked--feed' and the tests.
+    fn feed_all(&mut self, bytes: &[u8]) {
+        let mut offset = 0;
+        loop {
+            match self.feed_step(&bytes[offset..]) {
+                Feed::Done => return,
+                Feed::Decode(job, consumed) => {
+                    offset += consumed;
+                    self.resume(job.run());
+                }
+            }
+        }
     }
 
     /// Parse BYTES for a buffer no window shows, reporting whether Emacs has to be woken.
@@ -821,9 +879,9 @@ impl Term {
     /// line a millisecond wakes Emacs once every four thousand lines rather than once a
     /// frame, and one flooding the pty is drained as often as it would be if shown.
     pub fn feed_hidden(&mut self, bytes: &[u8], limit: usize) -> bool {
-        let events = self.state.events.len();
-        self.parser.advance(&mut self.state, bytes);
-        self.state.events.len() != events || self.backlog() >= limit / 2
+        let progress = self.feed_start();
+        self.feed_all(bytes);
+        self.woken(&progress, true, limit)
     }
 
     /// Everything that changed since the last drain, every scrolled row as text.
@@ -1284,6 +1342,69 @@ impl Default for Modes {
     }
 }
 
+/// A picture's payload, collected whole and owed a decode.
+///
+/// Decoding is the one thing the parser does that is not proportional to the bytes it
+/// was handed: a 32MB kitty transfer arrives in five hundred reads that each cost a
+/// scan, and then one that costs the base64, the inflate and the PNG encode of the
+/// whole. Done under the terminal's lock that last read stalled every drain, resize and
+/// keystroke on Emacs' thread for as long as it took. So the dispatch that completes a
+/// picture stores it here and the parser stops -- `Perform::terminated` -- and the
+/// reader runs [`Decode::run`] with the lock dropped.
+///
+/// Stopping the parser is what keeps the order: nothing after the picture is parsed
+/// until [`Term::resume`] has placed it, so a newline the child printed after its image
+/// still lands below it.
+#[derive(Debug)]
+pub struct Decode(Job);
+
+/// The two producers whose payloads are worth decoding off the lock. iTerm2's `OSC 1337`
+/// is not one: its file is bounded by the OSC limit and sniffed rather than decoded.
+#[derive(Debug)]
+enum Job {
+    Kitty(crate::emu::kitty::Transfer),
+    Sixel(Vec<u8>),
+}
+
+/// What a [`Decode`] came to, for [`Term::resume`].
+#[derive(Debug)]
+pub struct Decoded(Picture);
+
+#[derive(Debug)]
+enum Picture {
+    Kitty(Outcome, Option<Vec<u8>>),
+    Sixel(Option<sixel::Bitmap>),
+}
+
+impl Decode {
+    /// The decode itself. Pure: nothing here reads or writes the terminal.
+    pub fn run(self) -> Decoded {
+        Decoded(match self.0 {
+            Job::Kitty(transfer) => {
+                let (outcome, reply) = transfer.decode();
+                Picture::Kitty(outcome, reply)
+            }
+            Job::Sixel(body) => Picture::Sixel(sixel::decode(&body)),
+        })
+    }
+}
+
+/// What one [`Term::feed_step`] came to.
+#[derive(Debug)]
+pub enum Feed {
+    /// Every byte was parsed.
+    Done,
+    /// A picture wants decoding; this many bytes were parsed before the parser stopped
+    /// for it, and the rest wait on [`Term::resume`].
+    Decode(Decode, usize),
+}
+
+/// Where a feed began; see [`Term::feed_start`].
+pub struct Progress {
+    pending: Pending,
+    events: usize,
+}
+
 /// A DCS string cooked answers, with its payload so far.
 ///
 /// All three are collected whole and acted on at the terminator, because neither means
@@ -1323,6 +1444,10 @@ struct State {
     links: LinkStore,
     /// Destinations first seen since the last drain, awaiting their one trip to Lisp.
     pending_links: Vec<(LinkId, String)>,
+    /// A picture collected whole and not yet decoded; see [`Decode`]. Set by the
+    /// dispatch that collected it, at which point the parser stops, and taken by
+    /// [`Term::feed_step`].
+    decode: Option<Decode>,
     /// The DCS string being collected, if one is open and it is one of ours.
     ///
     /// `None` for every other DCS: the parser hands over the payload of whatever string

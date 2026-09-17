@@ -205,12 +205,13 @@ impl Parser {
     /// Returns the number of bytes read before termination.
     ///
     /// See [`Self::advance`] for more details.
+    ///
+    /// Upstream added this for synchronized updates; cooked handles those through
+    /// `Modes::sync_until` and uses it instead to stop at a picture that needs decoding,
+    /// so the reader can decode with the terminal unlocked. See `term::Decode`. The two
+    /// bulk string states are taken here as in [`Self::advance`], which upstream lacks.
     #[inline]
     #[must_use = "Returned value should be used to processs the remaining bytes"]
-    // Unused in cooked, which handles synchronized updates through `Modes::sync_until`
-    // rather than by stopping the parser. Kept because this file's contract is to stay
-    // faithful to vte 0.15.0; see the module header.
-    #[allow(dead_code)]
     pub fn advance_until_terminated<P: Perform>(
         &mut self,
         performer: &mut P,
@@ -226,6 +227,8 @@ impl Parser {
         while i != bytes.len() && !performer.terminated() {
             match self.state {
                 State::Ground => i += self.advance_ground(performer, &bytes[i..]),
+                State::DcsPassthrough => i += self.advance_dcs_bulk(performer, &bytes[i..]),
+                State::ApcString => i += self.advance_apc_bulk(performer, &bytes[i..]),
                 _ => {
                     // Inlining it results in worse codegen.
                     let byte = bytes[i];
@@ -1036,8 +1039,6 @@ pub trait Perform {
     /// This is checked after every parsed byte, so no expensive computation
     /// should take place in this function.
     #[inline(always)]
-    // The other half of `Parser::advance_until_terminated`, and kept for the same reason.
-    #[allow(dead_code)]
     fn terminated(&self) -> bool {
         false
     }

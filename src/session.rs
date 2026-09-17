@@ -4,7 +4,7 @@
 //! the reader never touches Lisp. It parses into the shared [`Term`] and pokes a pipe
 //! descriptor obtained from `open_channel`; Emacs' filter then drains on the main thread.
 
-use crate::emu::{Delta, Event, Term};
+use crate::emu::{Delta, Event, Feed, Term};
 use crate::error::Result;
 use crate::pty::{
     AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pid, Pty, WRITE_TIMEOUT, Wait, Winsize,
@@ -896,7 +896,7 @@ impl Session {
     /// session; see [`Shared::interacted`].
     ///
     /// Waits up to `WRITE_TIMEOUT` for the child to take them, and fails after that, as a
-    /// paste into a stopped job always has -- or sooner, with [`Error::Interrupted`],
+    /// paste into a stopped job always has -- or sooner, with [`Error::Interrupted`](crate::error::Error::Interrupted),
     /// when STOP says so; `cooked--send` passes `should_quit`, so `C-g` ends the wait.
     /// Replies already queued go first, inside the same deadline: they were owed before
     /// this input was typed, and writing input between the halves of a reply would
@@ -1389,15 +1389,7 @@ impl Shared {
                 Ok([]) => return self.finish(Ended::ChildGone),
                 Ok(data) => {
                     let hidden = self.hidden.load(Ordering::Relaxed);
-                    let (drawable, outbound) = {
-                        let mut term = self.term.held();
-                        let drawable = if hidden {
-                            term.feed_hidden(data, self.backlog_limit.load(Ordering::Relaxed))
-                        } else {
-                            term.feed(data)
-                        };
-                        (drawable, term.take_outbound())
-                    };
+                    let (drawable, outbound) = self.feed(data, hidden);
                     // Answered from here rather than from a drain, so a frozen or hidden
                     // buffer's child is answered too. See `ReplyRoute` for which replies
                     // wait for Lisp instead.
@@ -1469,6 +1461,32 @@ impl Shared {
         // byte goes out regardless of the throttle.
         self.notifier.acknowledge();
         self.notify();
+    }
+
+    /// Parse DATA into the terminal, decoding any picture in it with the lock dropped.
+    ///
+    /// Returns whether Emacs has something to draw, and the replies owed the child.
+    /// The lock is held for each parse and released around each decode -- see
+    /// `Term::feed_step` -- so a drain, a resize or a keystroke on Emacs' thread waits
+    /// on microseconds of parsing and never on the decode of a picture.
+    fn feed(&self, data: &[u8], hidden: bool) -> (bool, Vec<Event>) {
+        let limit = self.backlog_limit.load(Ordering::Relaxed);
+        let mut term = self.term.held();
+        let progress = term.feed_start();
+        let mut offset = 0;
+        loop {
+            match term.feed_step(&data[offset..]) {
+                Feed::Done => break,
+                Feed::Decode(job, consumed) => {
+                    offset += consumed;
+                    drop(term);
+                    let decoded = job.run();
+                    term = self.term.held();
+                    term.resume(decoded);
+                }
+            }
+        }
+        (term.woken(&progress, hidden, limit), term.take_outbound())
     }
 
     /// Re-read the child's termios, reporting whether it changed.

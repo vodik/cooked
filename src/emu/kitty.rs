@@ -186,11 +186,23 @@ pub(crate) enum CursorMove {
     Stay,
 }
 
+/// A transmission collected whole and not yet decoded; see [`Transfer::decode`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Transfer {
+    cmd: Command,
+    base64: Vec<u8>,
+}
+
 /// What the terminal should do once a command's payload is complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     /// Nothing yet — more chunks are coming.
     Incomplete,
+    /// The payload is complete and still encoded. Decoding it is the expensive part of
+    /// the whole protocol -- base64, an inflate, a re-encode as PNG -- and is a pure
+    /// function of what was collected, so it is handed back rather than done here: the
+    /// reader does it with the terminal unlocked, and brings the [`Outcome`] back.
+    Decode(Transfer),
     /// Hand these bytes to the image store, and display them if `display` says how.
     Image {
         format: ImageFormat,
@@ -325,7 +337,7 @@ impl Kitty {
                 self.pending = Some((opened, buf));
                 return (Outcome::Incomplete, None);
             }
-            return self.finish(opened, buf);
+            return Self::collected(opened, buf);
         }
 
         self.begin(cmd, body)
@@ -384,10 +396,22 @@ impl Kitty {
             self.pending = Some((cmd, buf));
             return (Outcome::Incomplete, None);
         }
-        self.finish(cmd, buf)
+        Self::collected(cmd, buf)
     }
 
-    fn finish(&mut self, cmd: Command, base64: Vec<u8>) -> (Outcome, Option<Vec<u8>>) {
+    /// The whole payload is in: hand it back to be decoded.
+    fn collected(cmd: Command, base64: Vec<u8>) -> (Outcome, Option<Vec<u8>>) {
+        (Outcome::Decode(Transfer { cmd, base64 }), None)
+    }
+}
+
+impl Transfer {
+    /// Decode the payload into the picture it carries, or the refusal it earns.
+    ///
+    /// Nothing here touches the session: the answer depends on the bytes alone, which is
+    /// what lets the reader run it with the terminal unlocked.
+    pub(crate) fn decode(self) -> (Outcome, Option<Vec<u8>>) {
+        let Self { cmd, base64 } = self;
         let Some(raw) = decode_base64(&base64) else {
             return (Outcome::Nothing, response(&cmd, Some("EINVAL:base64")));
         };
@@ -615,6 +639,18 @@ mod tests {
     use super::encode_base64 as b64;
     use super::*;
 
+    /// [`Kitty::feed`] with the decode done on the spot, which is what these tests are
+    /// about: what a command comes to, not who runs the decode.
+    fn fed(k: &mut Kitty, payload: &[u8]) -> (Outcome, Option<Vec<u8>>) {
+        match k.feed(payload) {
+            (Outcome::Decode(transfer), reply) => {
+                let (outcome, decoded) = transfer.decode();
+                (outcome, join(reply, decoded))
+            }
+            other => other,
+        }
+    }
+
     #[test]
     fn the_default_action_is_transmit_not_display() {
         // The protocol's default for a missing `a=` is `t`, and the difference shows:
@@ -625,8 +661,8 @@ mod tests {
     #[test]
     fn an_apc_not_addressed_to_g_is_not_ours() {
         let mut k = Kitty::default();
-        assert_eq!(k.feed(b"Zsomething-else").0, Outcome::Nothing);
-        assert!(k.feed(b"Zsomething-else").1.is_none());
+        assert_eq!(fed(&mut k, b"Zsomething-else").0, Outcome::Nothing);
+        assert!(fed(&mut k, b"Zsomething-else").1.is_none());
     }
 
     #[test]
@@ -666,7 +702,10 @@ mod tests {
         // What `icat` sends: kitty's own client compresses by default, so declining this
         // declined the reference implementation.
         let mut k = Kitty::default();
-        let (outcome, reply) = k.feed(format!("Ga=T,f=100,o=z,i=3;{}", b64(DEFLATED)).as_bytes());
+        let (outcome, reply) = fed(
+            &mut k,
+            format!("Ga=T,f=100,o=z,i=3;{}", b64(DEFLATED)).as_bytes(),
+        );
         match outcome {
             Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATA".repeat(20)),
             other => panic!("{other:?}"),
@@ -679,8 +718,10 @@ mod tests {
         // The order matters and only one of the two produces a picture: `o=z` describes
         // the bytes the base64 *carries*, not the base64 itself.
         let mut k = Kitty::default();
-        let (outcome, _) =
-            k.feed(format!("Ga=T,f=24,s=2,v=1,o=z,i=1;{}", b64(DEFLATED)).as_bytes());
+        let (outcome, _) = fed(
+            &mut k,
+            format!("Ga=T,f=24,s=2,v=1,o=z,i=1;{}", b64(DEFLATED)).as_bytes(),
+        );
         match outcome {
             // Six bytes of RGB from the inflated 140, not from the 18 compressed ones.
             Outcome::Image { bytes, .. } => assert_eq!(&bytes[11..17], b"PNGDAT"),
@@ -691,8 +732,10 @@ mod tests {
     #[test]
     fn a_payload_that_is_not_deflate_is_refused_rather_than_rendered() {
         let mut k = Kitty::default();
-        let (outcome, reply) =
-            k.feed(format!("Ga=T,f=100,o=z,i=8;{}", b64(b"not zlib")).as_bytes());
+        let (outcome, reply) = fed(
+            &mut k,
+            format!("Ga=T,f=100,o=z,i=8;{}", b64(b"not zlib")).as_bytes(),
+        );
         assert_eq!(outcome, Outcome::Nothing);
         assert_eq!(reply.unwrap(), b"\x1b_Gi=8;EINVAL:compression\x1b\\");
     }
@@ -703,7 +746,10 @@ mod tests {
         // checksum is what distinguishes it from a complete one.
         let mut k = Kitty::default();
         let short = &DEFLATED[..DEFLATED.len() - 3];
-        let (outcome, _) = k.feed(format!("Ga=T,f=100,o=z,i=9;{}", b64(short)).as_bytes());
+        let (outcome, _) = fed(
+            &mut k,
+            format!("Ga=T,f=100,o=z,i=9;{}", b64(short)).as_bytes(),
+        );
         assert_eq!(outcome, Outcome::Nothing);
     }
 
@@ -715,11 +761,10 @@ mod tests {
         let whole = b64(DEFLATED);
         let (first, rest) = whole.split_at(12);
         assert_eq!(
-            k.feed(format!("Ga=T,f=100,o=z,i=2,m=1;{first}").as_bytes())
-                .0,
+            fed(&mut k, format!("Ga=T,f=100,o=z,i=2,m=1;{first}").as_bytes()).0,
             Outcome::Incomplete
         );
-        match k.feed(format!("Gm=0;{rest}").as_bytes()).0 {
+        match fed(&mut k, format!("Gm=0;{rest}").as_bytes()).0 {
             Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATA".repeat(20)),
             other => panic!("{other:?}"),
         }
@@ -728,7 +773,10 @@ mod tests {
     #[test]
     fn a_png_transmission_becomes_an_image() {
         let mut k = Kitty::default();
-        let (outcome, reply) = k.feed(format!("Ga=T,f=100,i=3;{}", b64(b"PNGDATA")).as_bytes());
+        let (outcome, reply) = fed(
+            &mut k,
+            format!("Ga=T,f=100,i=3;{}", b64(b"PNGDATA")).as_bytes(),
+        );
         assert_eq!(
             outcome,
             Outcome::Image {
@@ -749,10 +797,10 @@ mod tests {
         let whole = b64(b"PNGDATAPNGDATA");
         let (first, rest) = whole.split_at(8);
         assert_eq!(
-            k.feed(format!("Ga=T,f=100,i=1,m=1;{first}").as_bytes()).0,
+            fed(&mut k, format!("Ga=T,f=100,i=1,m=1;{first}").as_bytes()).0,
             Outcome::Incomplete
         );
-        let (outcome, _) = k.feed(format!("Gm=0;{rest}").as_bytes());
+        let (outcome, _) = fed(&mut k, format!("Gm=0;{rest}").as_bytes());
         match outcome {
             Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATAPNGDATA"),
             other => panic!("{other:?}"),
@@ -768,16 +816,16 @@ mod tests {
         let whole = b64(b"PNGDATAPNGDATA");
         let (first, rest) = whole.split_at(8);
         assert_eq!(
-            k.feed(format!("Ga=T,f=100,i=1,m=1;{first}").as_bytes()).0,
+            fed(&mut k, format!("Ga=T,f=100,i=1,m=1;{first}").as_bytes()).0,
             Outcome::Incomplete
         );
 
-        let (outcome, reply) = k.feed(b"Ga=q,i=99;");
+        let (outcome, reply) = fed(&mut k, b"Ga=q,i=99;");
         assert_eq!(outcome, Outcome::Nothing);
         assert_eq!(reply.unwrap(), b"\x1b_Gi=99;OK\x1b\\");
 
         // ...and the picture is still exactly the one that was being sent.
-        let (outcome, _) = k.feed(format!("Gm=0;{rest}").as_bytes());
+        let (outcome, _) = fed(&mut k, format!("Gm=0;{rest}").as_bytes());
         match outcome {
             Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATAPNGDATA"),
             other => panic!("{other:?}"),
@@ -788,15 +836,21 @@ mod tests {
     fn a_second_picture_abandons_the_first_rather_than_splicing_into_it() {
         let mut k = Kitty::default();
         assert_eq!(
-            k.feed(format!("Ga=T,f=100,i=1,m=1;{}", b64(b"FIRST")).as_bytes())
-                .0,
+            fed(
+                &mut k,
+                format!("Ga=T,f=100,i=1,m=1;{}", b64(b"FIRST")).as_bytes()
+            )
+            .0,
             Outcome::Incomplete
         );
 
         // A different `i=` is a different picture, so the transfer in flight is dropped
         // -- and the client is told about the one it will now never get, addressed to
         // *that* id, alongside the answer for the one that displaced it.
-        let (outcome, reply) = k.feed(format!("Ga=T,f=100,i=2;{}", b64(b"SECOND")).as_bytes());
+        let (outcome, reply) = fed(
+            &mut k,
+            format!("Ga=T,f=100,i=2;{}", b64(b"SECOND")).as_bytes(),
+        );
         match outcome {
             Outcome::Image { bytes, .. } => assert_eq!(bytes, b"SECOND"),
             other => panic!("{other:?}"),
@@ -816,10 +870,10 @@ mod tests {
         let whole = b64(b"PNGDATAPNGDATA");
         let (first, rest) = whole.split_at(8);
         assert_eq!(
-            k.feed(format!("Ga=T,f=100,i=4,m=1;{first}").as_bytes()).0,
+            fed(&mut k, format!("Ga=T,f=100,i=4,m=1;{first}").as_bytes()).0,
             Outcome::Incomplete
         );
-        let (outcome, _) = k.feed(format!("Ga=T,f=100,i=4,m=0;{rest}").as_bytes());
+        let (outcome, _) = fed(&mut k, format!("Ga=T,f=100,i=4,m=0;{rest}").as_bytes());
         match outcome {
             Outcome::Image { bytes, .. } => assert_eq!(bytes, b"PNGDATAPNGDATA"),
             other => panic!("{other:?}"),
@@ -829,7 +883,10 @@ mod tests {
     #[test]
     fn rgb_becomes_a_ppm_and_rgba_a_png() {
         let mut k = Kitty::default();
-        let (outcome, _) = k.feed(format!("Ga=T,f=24,s=1,v=1,i=1;{}", b64(&[1, 2, 3])).as_bytes());
+        let (outcome, _) = fed(
+            &mut k,
+            format!("Ga=T,f=24,s=1,v=1,i=1;{}", b64(&[1, 2, 3])).as_bytes(),
+        );
         match outcome {
             Outcome::Image { format, bytes, .. } => {
                 assert_eq!(format, ImageFormat::Ppm);
@@ -838,8 +895,10 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
-        let (outcome, _) =
-            k.feed(format!("Ga=T,f=32,s=1,v=1,i=2;{}", b64(&[1, 2, 3, 255])).as_bytes());
+        let (outcome, _) = fed(
+            &mut k,
+            format!("Ga=T,f=32,s=1,v=1,i=2;{}", b64(&[1, 2, 3, 255])).as_bytes(),
+        );
         match outcome {
             Outcome::Image { format, bytes, .. } => {
                 assert_eq!(format, ImageFormat::Png);
@@ -852,7 +911,7 @@ mod tests {
     #[test]
     fn raw_pixels_without_dimensions_are_refused_rather_than_guessed() {
         let mut k = Kitty::default();
-        let (outcome, reply) = k.feed(format!("Ga=T,f=32,i=4;{}", b64(&[0; 4])).as_bytes());
+        let (outcome, reply) = fed(&mut k, format!("Ga=T,f=32,i=4;{}", b64(&[0; 4])).as_bytes());
         assert_eq!(outcome, Outcome::Nothing);
         assert_eq!(reply.unwrap(), b"\x1b_Gi=4;EINVAL:dimensions\x1b\\");
     }
@@ -865,22 +924,31 @@ mod tests {
         let mut k = Kitty::default();
         for format in ["f=24", "f=32"] {
             let apc = format!("Ga=T,{format},s=65535,v=65535,i=4;{}", b64(&[0; 4]));
-            let (outcome, reply) = k.feed(apc.as_bytes());
+            let (outcome, reply) = fed(&mut k, apc.as_bytes());
             assert_eq!(outcome, Outcome::Nothing, "{format}");
             assert_eq!(reply.unwrap(), b"\x1b_Gi=4;EINVAL:dimensions\x1b\\");
         }
         // Short by less than half is drawn as far as it got: a frame cut off by the
         // signal that stopped the child is a partial picture, not a malformed one.
         let apc = format!("Ga=T,f=32,s=2,v=1,i=4;{}", b64(&[0; 7]));
-        assert!(matches!(k.feed(apc.as_bytes()).0, Outcome::Image { .. }));
+        assert!(matches!(
+            fed(&mut k, apc.as_bytes()).0,
+            Outcome::Image { .. }
+        ));
         // Half of one pixel is not most of a two-pixel picture.
         let apc = format!("Ga=T,f=32,s=2,v=1,i=4;{}", b64(&[0; 3]));
-        assert_eq!(k.feed(apc.as_bytes()).0, Outcome::Nothing);
+        assert_eq!(fed(&mut k, apc.as_bytes()).0, Outcome::Nothing);
         // Exactly enough is enough, and trailing slack is the client's business.
         let apc = format!("Ga=T,f=32,s=2,v=1,i=4;{}", b64(&[0; 8]));
-        assert!(matches!(k.feed(apc.as_bytes()).0, Outcome::Image { .. }));
+        assert!(matches!(
+            fed(&mut k, apc.as_bytes()).0,
+            Outcome::Image { .. }
+        ));
         let apc = format!("Ga=T,f=32,s=2,v=1,i=5;{}", b64(&[0; 12]));
-        assert!(matches!(k.feed(apc.as_bytes()).0, Outcome::Image { .. }));
+        assert!(matches!(
+            fed(&mut k, apc.as_bytes()).0,
+            Outcome::Image { .. }
+        ));
     }
 
     #[test]
@@ -889,7 +957,7 @@ mod tests {
         // so the check has to sit after the inflate rather than before it.
         let mut k = Kitty::default();
         let apc = format!("Ga=T,f=32,o=z,s=65535,v=65535,i=7;{}", b64(DEFLATED));
-        let (outcome, reply) = k.feed(apc.as_bytes());
+        let (outcome, reply) = fed(&mut k, apc.as_bytes());
         assert_eq!(outcome, Outcome::Nothing);
         assert_eq!(reply.unwrap(), b"\x1b_Gi=7;EINVAL:dimensions\x1b\\");
     }
@@ -897,7 +965,7 @@ mod tests {
     #[test]
     fn placing_an_unknown_id_says_so() {
         let mut k = Kitty::default();
-        let (outcome, reply) = k.feed(b"Ga=p,i=9");
+        let (outcome, reply) = fed(&mut k, b"Ga=p,i=9");
         assert_eq!(outcome, Outcome::Nothing);
         assert_eq!(reply.unwrap(), b"\x1b_Gi=9;ENOENT:image\x1b\\");
     }
@@ -907,7 +975,7 @@ mod tests {
         let mut k = Kitty::default();
         k.bind(9, ImageId::from_index(42));
         assert_eq!(
-            k.feed(b"Ga=p,i=9").0,
+            fed(&mut k, b"Ga=p,i=9").0,
             Outcome::Place {
                 id: ImageId::from_index(42),
                 cursor: CursorMove::Advance,
@@ -925,33 +993,33 @@ mod tests {
     #[test]
     fn a_query_leaves_no_trace_but_is_answered() {
         let mut k = Kitty::default();
-        let (outcome, reply) = k.feed(b"Ga=q,i=5,s=1,v=1");
+        let (outcome, reply) = fed(&mut k, b"Ga=q,i=5,s=1,v=1");
         assert_eq!(outcome, Outcome::Nothing);
         assert_eq!(reply.unwrap(), b"\x1b_Gi=5;OK\x1b\\");
         // ...and it did not become a placeable image.
-        assert_eq!(k.feed(b"Ga=p,i=5").0, Outcome::Nothing);
+        assert_eq!(fed(&mut k, b"Ga=p,i=5").0, Outcome::Nothing);
     }
 
     #[test]
     fn quiet_levels_suppress_the_right_answers() {
         let mut k = Kitty::default();
         // q=1 keeps errors and drops successes.
-        assert!(k.feed(b"Ga=q,i=1,q=1").1.is_none());
-        assert!(k.feed(b"Ga=p,i=1,q=1").1.is_some());
+        assert!(fed(&mut k, b"Ga=q,i=1,q=1").1.is_none());
+        assert!(fed(&mut k, b"Ga=p,i=1,q=1").1.is_some());
         // q=2 drops both.
-        assert!(k.feed(b"Ga=p,i=1,q=2").1.is_none());
+        assert!(fed(&mut k, b"Ga=p,i=1,q=2").1.is_none());
     }
 
     #[test]
     fn a_command_without_an_id_is_unaddressable_and_gets_no_reply() {
         let mut k = Kitty::default();
-        assert!(k.feed(b"Ga=q").1.is_none());
+        assert!(fed(&mut k, b"Ga=q").1.is_none());
     }
 
     #[test]
     fn a_malformed_payload_is_refused_rather_than_rendered() {
         let mut k = Kitty::default();
-        let (outcome, reply) = k.feed(b"Ga=T,f=100,i=6;not*base64");
+        let (outcome, reply) = fed(&mut k, b"Ga=T,f=100,i=6;not*base64");
         assert_eq!(outcome, Outcome::Nothing);
         assert_eq!(reply.unwrap(), b"\x1b_Gi=6;EINVAL:base64\x1b\\");
     }

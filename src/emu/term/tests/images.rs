@@ -64,6 +64,53 @@ fn a_kitty_transmission_puts_a_picture_on_the_grid() {
     assert!(delta.images[0].bytes.starts_with(b"P6\n20 20\n255\n"));
 }
 
+/// The reader's path through a picture: the parser stops at it, the decode runs with
+/// nothing borrowed, and the bytes after it are not parsed until the picture is placed.
+///
+/// One read carrying a transmission and then a line of text. Stepping stops with the
+/// APC consumed and the text untouched, nothing is placed or drawable there, and only the
+/// resume followed by the rest puts the text after the picture -- the order the child
+/// wrote, which parsing the text first would have broken.
+#[test]
+fn a_feed_stops_at_a_picture_and_the_text_after_it_waits_for_the_decode() {
+    let mut t = with_metrics(10, 20);
+    let pixels = vec![0u8; 20 * 20 * 3];
+    let apc = format!("\x1b_Ga=T,f=24,s=20,v=20,i=1;{}\x1b\\", b64(&pixels));
+    let read = format!("{apc}after\r\n");
+    let progress = t.feed_start();
+    let Feed::Decode(job, consumed) = t.feed_step(read.as_bytes()) else {
+        panic!("the parser did not stop for the picture");
+    };
+    // The ESC of `ESC \` is what dispatches the string, so the stop lands on it and
+    // the backslash is parsed on resume, where it is the ST it always was.
+    let rest = &read[consumed..];
+    assert!(
+        rest == "\\after\r\n" || rest == "after\r\n",
+        "stopped at the picture and not in the text: {rest:?}"
+    );
+    assert!(
+        placements(&t, 0).is_empty(),
+        "nothing placed before the decode"
+    );
+    assert!(!t.woken(&progress, false, 0), "nothing to draw yet");
+    let decoded = job.run();
+    t.resume(decoded);
+    assert_eq!(placements(&t, 0).len(), 2);
+    assert!(matches!(
+        t.feed_step(&read.as_bytes()[consumed..]),
+        Feed::Done
+    ));
+    assert!(t.woken(&progress, false, 0));
+    // Kitty leaves the cursor past the picture's right edge, so the text follows it on
+    // the same row and the newline takes the cursor down: the order the child wrote.
+    assert!(
+        text(&t, 0).trim().ends_with("after"),
+        "the text follows the picture on its row: {:?}",
+        text(&t, 0)
+    );
+    assert_eq!(t.screen().cursor().row, 1);
+}
+
 #[test]
 fn a_sixel_puts_a_picture_on_the_grid() {
     // The second producer of the same `ImageData`: a sixel arrives as a DCS rather
