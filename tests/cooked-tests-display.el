@@ -235,6 +235,20 @@ t, which is invisible only for as long as that spec is left at its default."
         (funcall temporary fold t)
         (should (invisible-p (overlay-start fold)))))))
 
+(ert-deftest cooked-command-records-are-capped-without-touching-the-text ()
+  "With no scrollback cap the records, and their markers, grew for the life of
+the session.  Past `cooked-command-records-limit' the oldest go, and the
+transcript is left as it was."
+  (with-temp-buffer
+    (cooked-mode)
+    (let ((cooked-command-records-limit 3))
+      (dotimes (i 5)
+        (cooked-tests--make-command "$ " (format "cmd%d" i) "out\n" 0))
+      (should (= (length cooked--commands) 3))
+      (should (equal (mapcar #'cooked-command-input cooked--commands)
+                     '("cmd4" "cmd3" "cmd2")))
+      (should (string-match-p "cmd0" (buffer-string))))))
+
 (ert-deftest cooked-a-fold-whose-output-is-cut-off-does-not-outlive-it ()
   "The scrollback cap deletes text from the top, and an overlay over deleted
 text is an empty overlay at the cut, kept for good unless it evaporates."

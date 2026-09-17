@@ -229,19 +229,39 @@ pub(crate) struct Kitty {
     /// caught by [`Command::explicit_id`] and told so, rather than having its two
     /// pictures spliced into one.
     ///
-    /// Bounded by [`MAX_PAYLOAD`] but not by time: a client that begins a chunked
-    /// transfer and then goes permanently silent holds this buffer until the session
-    /// ends or another transmission displaces it. Reclaiming it sooner would need a
-    /// deadline swept from somewhere that runs while the child is quiet — the reader
-    /// thread's poll tick — since nothing here is called at all in the meantime.
-    pending: Option<(Command, Vec<u8>)>,
+    /// Bounded by [`MAX_PAYLOAD`], and in time by [`TRANSFER_TIMEOUT`]: a client that
+    /// begins a chunked transfer and then goes permanently silent would otherwise hold
+    /// this buffer until the session ended or another transmission displaced it. The
+    /// instant is when the last chunk arrived, and [`Kitty::abandon_stale`] is what reads
+    /// it, from the reader thread's tick, since nothing here is called while the child
+    /// is quiet.
+    pending: Option<(Command, Vec<u8>, std::time::Instant)>,
     /// The child's own image ids, which are not ours — ours are content-addressed, so
     /// two clients reusing the same number cannot collide, and one client reusing a
     /// number for a different picture cannot alias.
     by_client: HashMap<u32, ImageId>,
 }
 
+/// How long a chunked transfer may go without a chunk before its buffer is dropped.
+///
+/// Chunks of one transmission follow each other within microseconds from a local
+/// client and within a round trip from one over ssh. Ten seconds is past any pause a
+/// live transfer takes and short enough that a client killed mid-picture does not
+/// leave 32MB behind it for the rest of the session.
+pub(crate) const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Kitty {
+    /// Drop a chunked transfer whose last chunk is older than [`TRANSFER_TIMEOUT`] at
+    /// NOW, answering whether one was dropped.
+    ///
+    /// Silently: the client that stopped sending is not waiting for an answer, and a
+    /// refusal typed at the next prompt would be worse than none.
+    pub(crate) fn abandon_stale(&mut self, now: std::time::Instant) -> bool {
+        self.pending
+            .take_if(|(_, _, since)| now.saturating_duration_since(*since) >= TRANSFER_TIMEOUT)
+            .is_some()
+    }
+
     /// Note that CLIENT_ID now means the image we interned as OURS.
     pub(crate) fn bind(&mut self, client_id: u32, ours: ImageId) {
         if client_id != 0 {
@@ -312,9 +332,9 @@ impl Kitty {
             // that restates its full control data on every chunk is unaffected; two
             // transfers sharing one id are indistinguishable from a continuation by any
             // means, and nothing here pretends otherwise.
-            if let Some((stale, _)) = self
+            if let Some((stale, ..)) = self
                 .pending
-                .take_if(|(pending, _)| cmd.explicit_id.is_some_and(|id| id != pending.id))
+                .take_if(|(pending, ..)| cmd.explicit_id.is_some_and(|id| id != pending.id))
             {
                 let refusal = response(&stale, Some("EINVAL:interleaved"));
                 let (outcome, reply) = self.begin(cmd, body);
@@ -329,12 +349,12 @@ impl Kitty {
         // the one already in flight, whose format and geometry still apply. Only `m=` is
         // read off the chunk itself -- everything else about the picture was settled by
         // the command that opened the transfer.
-        if let Some((opened, mut buf)) = self.pending.take() {
+        if let Some((opened, mut buf, _)) = self.pending.take() {
             if !append(&mut buf, body) {
                 return (Outcome::Nothing, response(&opened, Some("EBIG:payload")));
             }
             if cmd.more {
-                self.pending = Some((opened, buf));
+                self.pending = Some((opened, buf, std::time::Instant::now()));
                 return (Outcome::Incomplete, None);
             }
             return Self::collected(opened, buf);
@@ -393,7 +413,7 @@ impl Kitty {
             return (Outcome::Nothing, response(&cmd, Some("EBIG:payload")));
         }
         if cmd.more {
-            self.pending = Some((cmd, buf));
+            self.pending = Some((cmd, buf, std::time::Instant::now()));
             return (Outcome::Incomplete, None);
         }
         Self::collected(cmd, buf)
@@ -638,6 +658,25 @@ pub(super) fn encode_base64(bytes: &[u8]) -> String {
 mod tests {
     use super::encode_base64 as b64;
     use super::*;
+
+    #[test]
+    fn a_transfer_that_stops_arriving_is_dropped_after_the_timeout() {
+        let mut k = Kitty::default();
+        assert_eq!(
+            fed(&mut k, b"Ga=T,f=24,s=1,v=1,i=1,m=1;AAAA").0,
+            Outcome::Incomplete
+        );
+        let now = std::time::Instant::now();
+        assert!(!k.abandon_stale(now), "a fresh chunk is not stale");
+        assert!(
+            k.abandon_stale(now + TRANSFER_TIMEOUT),
+            "dropped once the timeout has passed"
+        );
+        assert!(k.pending.is_none());
+        // The chunk that comes after is a command of its own rather than a
+        // continuation of the transfer that was dropped.
+        assert!(matches!(fed(&mut k, b"Ga=q,i=1;").0, Outcome::Nothing));
+    }
 
     /// [`Kitty::feed`] with the decode done on the spot, which is what these tests are
     /// about: what a command comes to, not who runs the decode.

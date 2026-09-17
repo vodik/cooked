@@ -926,6 +926,13 @@ impl Term {
         self.state.drain_hidden()
     }
 
+    /// Drop what a child has stopped sending: a chunked picture with no chunk for
+    /// [`crate::emu::kitty::TRANSFER_TIMEOUT`]. For the reader's tick, which is the one
+    /// thing that runs while the child is quiet.
+    pub fn sweep(&mut self) {
+        self.state.kitty.abandon_stale(std::time::Instant::now());
+    }
+
     /// Send replies to [`Term::take_outbound`] from now on, rather than with the drain,
     /// whenever nothing Lisp answers is ahead of them. See [`ReplyRoute`].
     pub fn answer_directly(&mut self) {

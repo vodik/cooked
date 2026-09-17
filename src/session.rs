@@ -1310,8 +1310,12 @@ impl Shared {
             // then not polled for input at all -- a readable pty nobody reads would
             // return from every poll at once -- and the drain that empties the backlog
             // raises the interrupt to say so; see [`Shared::unthrottle`].
-            let throttled =
-                self.term.held().backlog() >= self.backlog_limit.load(Ordering::Relaxed);
+            let throttled = {
+                let mut term = self.term.held();
+                // Once a tick, while the lock is held anyway: see `Term::sweep`.
+                term.sweep();
+                term.backlog() >= self.backlog_limit.load(Ordering::Relaxed)
+            };
             self.throttled.store(throttled, Ordering::SeqCst);
             if throttled {
                 // A child that filled the backlog inside one frame has forfeited atomicity:

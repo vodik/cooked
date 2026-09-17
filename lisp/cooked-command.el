@@ -112,6 +112,20 @@ search cannot come to disagree about what four minutes looks like."
 (defvar-local cooked--commands nil
   "Finished `cooked-command' records, newest first.")
 
+(defcustom cooked-command-records-limit 10000
+  "How many finished commands to keep records for, or nil for all of them.
+
+A record holds three markers, and Emacs moves every marker in a buffer on every
+edit, so records cost the drain a little each and the session forever.  They
+are dropped with the text they describe when `cooked-scrollback-lines' cuts it,
+and this is the bound for a session that keeps all of its text: the oldest
+records go once there are more than this, and the text stays.  The same number
+as the scrollback's default, since a command is at least one line, so under the
+defaults this never fires and a session with the scrollback uncapped still
+stops at thirty thousand markers."
+  :type '(choice (const :tag "All of them" nil) natnum)
+  :group 'cooked)
+
 (defcustom cooked-command-started-functions nil
   "Functions called each time a command starts, with its anchor marker.
 
@@ -171,6 +185,13 @@ it is ordinary hook plumbing rather than a deliberate opt-in."
   :type 'hook
   :group 'cooked)
 
+(defun cooked--record-command (command)
+  "Add COMMAND to `cooked--commands', dropping the oldest past the limit."
+  (push command cooked--commands)
+  (when-let* ((limit cooked-command-records-limit)
+              (last (nthcdr (1- (max 1 limit)) cooked--commands)))
+    (setcdr last nil)))
+
 (defun cooked--mark-command-end (code end)
   "Record exit CODE for the command that just finished, whose output ends at END.
 
@@ -192,7 +213,7 @@ each record with a private copy nothing could reach."
       (let ((command (cooked--command-make :start cooked--command-start :end end
                                            :code code :input cooked--command-input
                                            :prompt cooked--command-prompt)))
-        (push command cooked--commands)
+        (cooked--record-command command)
         (run-hook-with-args 'cooked-command-finished-functions command))))
   (setq cooked--command-start nil cooked--command-input nil cooked--command-prompt nil
         cooked--command-started-at nil))

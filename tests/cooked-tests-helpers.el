@@ -986,7 +986,7 @@ the command's output, and CODE is the exit status.  Returns the new record."
       (let* ((end (point-marker))
              (command (cooked--command-make :start start :end end :code code
                                             :input input-text :prompt prompt)))
-        (push command cooked--commands)
+        (cooked--record-command command)
         command))))
 
 (defmacro cooked-tests--with-evil-collection (modes &rest body)
