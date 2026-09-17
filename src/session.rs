@@ -7,7 +7,7 @@
 use crate::emu::{Delta, Event, Term};
 use crate::error::Result;
 use crate::pty::{
-    AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pid, Pty, WRITE_TIMEOUT, Winsize,
+    AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pid, Pty, WRITE_TIMEOUT, Wait, Winsize,
 };
 use crate::replies::{ReplyKind, ReplyQueue};
 use nix::errno::Errno;
@@ -887,22 +887,24 @@ impl Session {
     /// session; see [`Shared::interacted`].
     ///
     /// Waits up to `WRITE_TIMEOUT` for the child to take them, and fails after that, as a
-    /// paste into a stopped job always has. Replies already queued go first, inside the
-    /// same deadline: they were owed before this input was typed, and writing input
-    /// between the halves of a reply would garble both.
+    /// paste into a stopped job always has -- or sooner, with [`Error::Interrupted`],
+    /// when STOP says so; `cooked--send` passes `should_quit`, so `C-g` ends the wait.
+    /// Replies already queued go first, inside the same deadline: they were owed before
+    /// this input was typed, and writing input between the halves of a reply would
+    /// garble both.
     ///
     /// INPUT says whether a key was pressed. [`Input::Keyboard`] lets the frame that
     /// echoes it skip `min_interval`; see [`ECHO_WINDOW`]. The window opens before
     /// [`Shared::interacted`], whose early return for an attended session would otherwise
     /// be an easy place to lose it.
-    pub(crate) fn send(&self, bytes: &[u8], input: Input) -> Result<()> {
+    pub(crate) fn send(&self, bytes: &[u8], input: Input, stop: &dyn Fn() -> bool) -> Result<()> {
         if input == Input::Keyboard {
             self.shared.notifier.expect_echo();
         }
         self.shared.interacted();
-        let deadline = std::time::Instant::now() + WRITE_TIMEOUT;
+        let wait = Wait::new(std::time::Instant::now() + WRITE_TIMEOUT, stop);
         let writer = self.shared.writer.held();
-        let result = self.shared.write_after_replies(bytes, deadline);
+        let result = self.shared.write_after_replies(bytes, &wait);
         // A reply queued while the writer was held found it busy and left itself here, so
         // offer the queue once more. The writer is released with the queue still locked:
         // a reply queued after that finds the writer free and goes out on its own.
@@ -1264,7 +1266,7 @@ impl Shared {
     }
 
     /// [`Session::send`]'s write, after the replies queued ahead of it.
-    fn write_after_replies(&self, bytes: &[u8], deadline: std::time::Instant) -> Result<()> {
+    fn write_after_replies(&self, bytes: &[u8], wait: &Wait<'_>) -> Result<()> {
         loop {
             let mut queue = self.replies.held();
             queue.flush(|b| self.pty.write_some(b))?;
@@ -1272,9 +1274,9 @@ impl Shared {
                 break;
             }
             drop(queue);
-            self.pty.wait_writable(deadline)?;
+            self.pty.wait_writable(wait)?;
         }
-        self.pty.write(bytes, deadline)
+        self.pty.write(bytes, wait)
     }
 
     fn read_loop(&self) {
@@ -1946,12 +1948,12 @@ mod tests {
                 session.drain();
                 session.ready();
                 session
-                    .send(b"\n", Input::Other)
+                    .send(b"\n", Input::Other, &|| false)
                     .expect("release the second write");
             }
             Drain::AfterTheWrite => {
                 session
-                    .send(b"\n", Input::Other)
+                    .send(b"\n", Input::Other, &|| false)
                     .expect("release the second write");
                 // Long enough that the write is certainly in, short enough that the re-arm
                 // still lands inside the throttle window -- outside it there is nothing
@@ -2188,7 +2190,7 @@ mod tests {
         );
 
         session
-            .send(b"\n", Input::Other)
+            .send(b"\n", Input::Other, &|| false)
             .expect("release the second write");
         // The window itself, plus a couple of eager ticks' slack for the reader to have
         // settled back onto the long one.
@@ -2235,7 +2237,9 @@ mod tests {
     #[test]
     fn a_keystroke_is_echoed_without_waiting_out_the_interval() {
         let (session, read) = paced_session("printf a; read -r _; sleep 5");
-        session.send(b"b", Input::Keyboard).expect("type");
+        session
+            .send(b"b", Input::Keyboard, &|| false)
+            .expect("type");
         assert!(
             woke_within(&read, patience(0.5)),
             "the echo of a key waited on the redisplay interval"
@@ -2252,7 +2256,9 @@ mod tests {
     #[test]
     fn a_mouse_report_waits_out_the_interval() {
         let (session, read) = paced_session("printf a; read -r _; sleep 5");
-        session.send(b"\x1b[<0;1;1M", Input::Other).expect("report");
+        session
+            .send(b"\x1b[<0;1;1M", Input::Other, &|| false)
+            .expect("report");
         assert!(
             !woke_within(&read, Duration::from_millis(500)),
             "the answer to a mouse report skipped the redisplay interval"
@@ -2267,7 +2273,9 @@ mod tests {
     fn a_keystroke_to_a_hidden_session_waits_out_the_interval() {
         let (session, read) = paced_session("printf '\\a'; read -r _; printf '\\a'; sleep 5");
         session.set_hidden(true);
-        session.send(b"\n", Input::Keyboard).expect("type");
+        session
+            .send(b"\n", Input::Keyboard, &|| false)
+            .expect("type");
         assert!(
             !woke_within(&read, Duration::from_millis(500)),
             "a hidden session was woken early for a keystroke"
@@ -2361,7 +2369,9 @@ mod tests {
         let mut byte = [0u8; 1];
         while start.elapsed() < RUN {
             if Instant::now() >= next_key {
-                session.send(b"j", Input::Keyboard).expect("type");
+                session
+                    .send(b"j", Input::Keyboard, &|| false)
+                    .expect("type");
                 keys += 1;
                 next_key += KEY_EVERY;
             }
@@ -2409,7 +2419,7 @@ mod tests {
         let _ = woke_within(&read, Duration::from_millis(100));
 
         session
-            .send(b"\n", Input::Other)
+            .send(b"\n", Input::Other, &|| false)
             .expect("release the write");
         assert!(
             !woke_within(&read, Duration::from_millis(300)),
@@ -2423,10 +2433,37 @@ mod tests {
         assert!(rendered(&session.drain()).contains("text"));
     }
 
+    /// A write the child is not taking ends when STOP says so, not at the deadline.
+    ///
+    /// Raw mode, so the line discipline holds what it is given rather than discarding
+    /// past a line, and a sleep that reads nothing, so the pty fills and `write` has to
+    /// wait. The stop check is the third question asked, which is well inside
+    /// `WRITE_TIMEOUT` and well outside a write that never waited at all.
+    #[test]
+    fn a_stop_check_cuts_a_blocked_write_short() {
+        let (session, _read) = session(&["/bin/sh", "-c", "stty raw -echo; sleep 300"]);
+        wait_for(&session, |u| u.mode == Mode::Raw);
+        let asked = std::cell::Cell::new(0);
+        let stop = || {
+            asked.set(asked.get() + 1);
+            asked.get() >= 3
+        };
+        let start = Instant::now();
+        let result = session.send(&vec![b'x'; 1 << 20], Input::Other, &stop);
+        assert_eq!(result, Err(crate::error::Error::Interrupted));
+        assert!(
+            start.elapsed() < WRITE_TIMEOUT / 2,
+            "took {:?}, which is the deadline and not the stop",
+            start.elapsed()
+        );
+    }
+
     #[test]
     fn input_round_trips_through_the_pty() {
         let (session, _read) = session(&["/bin/cat"]);
-        session.send(b"ping\n", Input::Other).expect("send");
+        session
+            .send(b"ping\n", Input::Other, &|| false)
+            .expect("send");
         let update = wait_for(&session, |u| rendered(u).contains("ping"));
         assert!(rendered(&update).contains("ping"));
     }
@@ -2501,7 +2538,7 @@ mod tests {
         session.set_attended(false);
         std::thread::sleep(Duration::from_millis(250));
         let start = Instant::now();
-        session.send(b"j", Input::Other).expect("send");
+        session.send(b"j", Input::Other, &|| false).expect("send");
         let update = wait_for(&session, |u| u.mode == Mode::Raw);
         assert_eq!(update.mode, Mode::Raw);
         let elapsed = start.elapsed();
@@ -2528,7 +2565,7 @@ mod tests {
             "an unattended session nobody has touched must rest on the long tick"
         );
 
-        session.send(b"j", Input::Other).expect("send");
+        session.send(b"j", Input::Other, &|| false).expect("send");
         assert_eq!(
             session.shared.base_poll_wait(),
             Duration::from_millis(u64::from(POLL_TIMEOUT_MS)),
@@ -2551,7 +2588,7 @@ mod tests {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 5"]);
         let attended = session.shared.base_poll_wait();
         session.set_attended(false);
-        session.send(b"j", Input::Other).expect("send");
+        session.send(b"j", Input::Other, &|| false).expect("send");
         assert_eq!(session.shared.base_poll_wait(), attended);
     }
 
@@ -2562,7 +2599,9 @@ mod tests {
         let (session, _read) = session(&["/bin/cat"]);
         session.set_attended(false);
         let start = Instant::now();
-        session.send(b"ping\n", Input::Other).expect("send");
+        session
+            .send(b"ping\n", Input::Other, &|| false)
+            .expect("send");
         let update = wait_for(&session, |u| rendered(u).contains("ping"));
         assert!(rendered(&update).contains("ping"));
         let elapsed = start.elapsed();

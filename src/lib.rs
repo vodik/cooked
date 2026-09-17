@@ -662,8 +662,12 @@ fn input_kind(env: Env) -> Result<session::Input> {
 
 fn send(env: Env, args: &[Value]) -> Result<Value> {
     let mut bytes = env.from_lisp::<Vec<u8>>(args[1])?;
-    let sent =
-        input_kind(env).and_then(|input| handle(env, args[0]).map(|s| s.send(&bytes, input)));
+    // `should_quit` is asked while the write waits on a child that is not reading, so
+    // `C-g` ends the wait. Emacs raises the quit itself once this returns; all that is
+    // owed here is to return.
+    let sent = input_kind(env).and_then(|input| {
+        handle(env, args[0]).map(|s| s.send(&bytes, input, &|| env.should_quit()))
+    });
     // Zero unconditionally rather than only for secrets: at keystroke sizes it costs
     // nothing, and it means the password path needs no special case to be covered.
     // `write_volatile` because an ordinary write to a buffer about to be freed is
@@ -672,7 +676,10 @@ fn send(env: Env, args: &[Value]) -> Result<Value> {
         unsafe { std::ptr::write_volatile(b, 0) };
     }
     std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-    sent?.or_signal(env)?;
+    match sent? {
+        Err(crate::error::Error::Interrupted) => {}
+        other => other.or_signal(env)?,
+    }
     Ok(env.nil())
 }
 

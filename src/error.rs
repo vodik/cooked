@@ -34,6 +34,8 @@ pub enum Error {
     NoForeground,
     /// A write could not be handed to the kernel before its deadline.
     WriteTimeout,
+    /// A write was cut short because the user asked to quit; see `pty::Wait`.
+    Interrupted,
     /// A syscall failed, with the errno it failed with kept intact.
     Os(Errno),
 }
@@ -68,6 +70,7 @@ impl fmt::Display for Error {
             Self::Reaped => f.write_str("child already reaped"),
             Self::NoForeground => f.write_str("no foreground process group"),
             Self::WriteTimeout => f.write_str("write timed out"),
+            Self::Interrupted => f.write_str("write interrupted"),
             Self::Os(errno) => write!(f, "{errno}"),
         }
     }
@@ -97,6 +100,7 @@ impl From<Error> for std::io::Error {
             Error::Os(errno) => Self::from_raw_os_error(errno as i32),
             Error::NotOnPath(_) => Self::new(std::io::ErrorKind::NotFound, e.to_string()),
             Error::WriteTimeout => Self::new(std::io::ErrorKind::TimedOut, e.to_string()),
+            Error::Interrupted => Self::new(std::io::ErrorKind::Interrupted, e.to_string()),
             other => Self::other(other.to_string()),
         }
     }

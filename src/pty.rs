@@ -214,6 +214,44 @@ fn poll_timeout(remaining: std::time::Duration) -> PollTimeout {
     PollTimeout::try_from(remaining).unwrap_or(PollTimeout::MAX)
 }
 
+/// How often a wait on the child asks whether it should stop early; see [`Wait`].
+///
+/// Fifty milliseconds is below what a person notices between pressing `C-g` and the
+/// editor answering, and far above the cost of the question, which is one call.
+const STOP_CHECK: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long a write to the child may block, and who may cut it short.
+///
+/// A deadline, and a question asked every [`STOP_CHECK`] while the deadline has not
+/// passed. The question is for the thread holding the `emacs_env`: `should_quit` says the
+/// user pressed `C-g`, and a paste into a stopped job should stop then rather than three
+/// seconds later. A caller with nothing to ask passes `&|| false`.
+pub(crate) struct Wait<'a> {
+    deadline: std::time::Instant,
+    stop: &'a dyn Fn() -> bool,
+}
+
+impl<'a> Wait<'a> {
+    /// Wait until DEADLINE, asking STOP along the way.
+    pub(crate) fn new(deadline: std::time::Instant, stop: &'a dyn Fn() -> bool) -> Self {
+        Self { deadline, stop }
+    }
+
+    /// The error to give up with now, if any: the deadline has passed, or STOP says so.
+    fn check(&self) -> Result<std::time::Duration> {
+        let remaining = self
+            .deadline
+            .saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::WriteTimeout);
+        }
+        if (self.stop)() {
+            return Err(Error::Interrupted);
+        }
+        Ok(remaining.min(STOP_CHECK))
+    }
+}
+
 /// How long a hung-up child has to exit on its own before it is killed.
 ///
 /// What a closing terminal window gives its shell, and it has to cover what a shell does
@@ -427,22 +465,19 @@ impl Pty {
     /// writability and gives up at DEADLINE rather than waiting on the child indefinitely.
     /// A short individual poll keeps the common case (plenty of room) indistinguishable
     /// from an unconditional write; the bound only ever bites when the child truly cannot
-    /// make progress.
-    pub(crate) fn write(&self, mut buf: &[u8], deadline: std::time::Instant) -> Result<()> {
+    /// make progress, and WAIT says how long that may go on and who may cut it short.
+    pub(crate) fn write(&self, mut buf: &[u8], wait: &Wait<'_>) -> Result<()> {
         while !buf.is_empty() {
-            self.wait_writable(deadline)?;
+            self.wait_writable(wait)?;
             buf = &buf[self.write_some(buf)?..];
         }
         Ok(())
     }
 
-    /// Wait until the child's input queue has room, or DEADLINE passes.
-    pub(crate) fn wait_writable(&self, deadline: std::time::Instant) -> Result<()> {
+    /// Wait until the child's input queue has room, or WAIT says to stop.
+    pub(crate) fn wait_writable(&self, wait: &Wait<'_>) -> Result<()> {
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(Error::WriteTimeout);
-            }
+            let remaining = wait.check()?;
             let mut fds = [PollFd::new(self.master.as_fd(), PollFlags::POLLOUT)];
             match nix::poll::poll(&mut fds, poll_timeout(remaining)) {
                 // Timed out this round; the loop re-checks the deadline.
