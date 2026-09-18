@@ -355,6 +355,150 @@ every row of it carries the one URL."
         (should browsed)
         (should-not forwarded)))))
 
+(defconst cooked-tests--file-link-child
+  '("/bin/sh" "-c" "printf '\033[?1000h\033[?1006h'; \
+                    printf '\342\227\217 Write(lisp/cooked-link.el)\r\n'; \
+                    i=0; while [ $i -lt 40 ]; do printf 'x\r\n'; i=$((i+1)); done; \
+                    stty raw -echo; cat -v")
+  "A child holding the mouse whose first line names a file that exists here.
+
+The line has to be pushed off the screen: `cooked-link-scan-functions' never
+sees a live row -- deciding whether a name is a file costs a syscall, and a row
+being repainted would pay it every frame -- so a file link exists only in
+settled scrollback.  Forty rows is more than the test session's screen.
+
+`cat -v' at the end, without the tty's own echo, so that every report the child
+receives appears exactly once in the text as printable characters.")
+
+(ert-deftest cooked-a-click-on-a-file-link-does-not-recurse-into-the-mouse ()
+  "The reported case: `mouse-1' on a file name printed by a program that has
+the mouse, which left `*Messages*' holding `Lisp nesting exceeds
+\\=`max-lisp-eval-depth\\='\\=' and no file opened.
+
+Emacs rewrites a release into `mouse-2' where `mouse-1-click-follows-link' is
+on and the text says `follow-link', and it does so while the key sequence is
+read -- before any map of cooked's is consulted.  What followed was a loop:
+the `keymap' property answered `cooked-follow-link', the delegate saw the grab
+and called `cooked-mouse-event', which had no cell to report -- scrollback is
+not part of the child's screen -- and declined into `cooked--mouse-fallback',
+whose lookup can lift `cooked--mouse-map-alist' out of the way but not a text
+property, so it found `cooked-follow-link' again.
+
+Both halves of the fix are here: the rewrite does not happen while the grab is
+on, and a rewrite that happened anyway is answered once rather than forever."
+  (cooked-tests--with-file-links
+    (cooked-tests--with-session cooked-tests--file-link-child
+      (should (cooked-tests--settle
+               (lambda () (and cooked--mouse-grab
+                               (string-match-p "cooked-link.el" (cooked-tests--text))))))
+      (cooked-tests--fontify)
+      (let ((at (cooked-tests--link-at "lisp/cooked-link.el"))
+            opened yanked)
+        (should at)
+        ;; The property that outranks every map of ours, over a position the
+        ;; child's screen does not cover.
+        (should (eq (lookup-key (get-text-property at 'keymap) [mouse-2])
+                    #'cooked-follow-link))
+        (should-not (cooked--screen-cell at))
+        ;; The rewrite, off for as long as the grab is on and the user's own
+        ;; value untouched anywhere else.
+        (should (local-variable-p 'mouse-1-click-follows-link))
+        (should-not mouse-1-click-follows-link)
+        (should (default-value 'mouse-1-click-follows-link))
+        (cl-letf (((symbol-function 'find-file-other-window)
+                   (lambda (file) (setq opened file)
+                     (set-buffer (get-buffer-create " *cooked-tests-visit*"))))
+                  ((symbol-function 'mouse-yank-primary)
+                   (lambda (&rest _) (setq yanked t))))
+          (cooked-tests--displayed
+            ;; Spelled the way the rewrite spells it and dispatched the way a
+            ;; `keymap' property is dispatched, through the command it names.
+            ;; `this-command-keys-vector' is what `cooked--mouse-fallback-binding'
+            ;; reads, and batch has no key sequence for it to read.
+            (let* ((release (list 'mouse-2 (cooked-tests--posn at)))
+                   (last-input-event release)
+                   (last-nonmenu-event release)
+                   ;; Low enough that the loop ends in a signal rather than in a
+                   ;; minute of stack; `cooked-debug' is on, so it would reach here.
+                   (max-lisp-eval-depth 200))
+              (cl-letf (((symbol-function 'this-command-keys-vector)
+                         (lambda () [mouse-2])))
+                (call-interactively #'cooked-follow-link))))
+          ;; The click belongs to the child, so no link is followed -- and
+          ;; nothing was owed to the child either, the press never having been
+          ;; reported from a position it has no cell for.
+          (should-not opened)
+          (should-not yanked)
+          (should-not cooked--mouse-held)
+          ;; Shift is the documented way to the link inside a program that has
+          ;; the mouse, and it still is.
+          (let* ((event (list 'S-mouse-2 (cooked-tests--posn at)))
+                 (last-input-event event)
+                 (last-nonmenu-event event))
+            (cooked-tests--displayed (call-interactively #'cooked-follow-link)))
+          (should (string-suffix-p "lisp/cooked-link.el" (or opened "")))
+          ;; The neighbouring case, and the other message the gesture produced:
+          ;; the bullet is outside the link property, so the rewritten release
+          ;; used to reach the global `mouse-2' -- `mouse-yank-primary', into a
+          ;; read-only screen.  Unrewritten, it is a click like any other.
+          (let ((bullet (cooked-tests--link-at "●")))
+            (cooked-tests--displayed
+              (dolist (event (list 'down-mouse-1 'mouse-1))
+                (let ((last-input-event (list event (cooked-tests--posn bullet))))
+                  (cooked-mouse-event)))))
+          (should-not yanked)
+          (should-not cooked--mouse-held))
+        (when (get-buffer " *cooked-tests-visit*")
+          (kill-buffer " *cooked-tests-visit*"))))))
+
+(ert-deftest cooked-a-renamed-release-still-puts-the-childs-button-down ()
+  "The other half of the same gesture.  A press the child was told about is a
+button it holds until it is told otherwise, and the release is the half Emacs
+may have renamed: `mouse-1' pressed on the screen, let go over a link in the
+scrollback, arrives as `mouse-2' -- naming button 1, which is not the button
+that is down.  It was owed nothing, fell through, and the child went on
+highlighting as though the drag had never ended, which is what the reporter saw
+Claude Code do.
+
+`cooked--suppress-link-clicks' keeps the rename from happening while the grab
+is on; this is what closes the gesture when it happened anyway, the grab having
+arrived between the press and the release."
+  (cooked-tests--with-file-links
+    (cooked-tests--with-session cooked-tests--file-link-child
+      (should (cooked-tests--settle
+               (lambda () (and cooked--mouse-grab
+                               (string-match-p "cooked-link.el" (cooked-tests--text))))))
+      (cooked-tests--fontify)
+      (let* ((at (cooked-tests--link-at "lisp/cooked-link.el"))
+             (row (save-excursion (goto-char (point-max))
+                                  (forward-line -1)
+                                  (point)))
+             (cell (cooked--screen-cell row))
+             opened)
+        (should cell)
+        (cl-letf (((symbol-function 'find-file-other-window)
+                   (lambda (file) (setq opened file))))
+          (cooked-tests--displayed
+            (let ((last-input-event (list 'down-mouse-1 (cooked-tests--posn row))))
+              (cooked-mouse-event))
+            (should (equal cooked--mouse-held '(0)))
+            (let* ((release (list 'mouse-2 (cooked-tests--posn at)))
+                   (last-input-event release)
+                   (last-nonmenu-event release)
+                   (max-lisp-eval-depth 200))
+              (cl-letf (((symbol-function 'this-command-keys-vector)
+                         (lambda () [mouse-2])))
+                (call-interactively #'cooked-follow-link)))))
+        (should-not opened)
+        (should-not cooked--mouse-held)
+        ;; Both halves reached the child, and the release names button 0.  Case
+        ;; matters: `m' is the release this test exists to demand.
+        (let ((case-fold-search nil))
+          (should (cooked-tests--settle
+                   (lambda () (string-match-p "\\[<0;[0-9]+;[0-9]+m" (cooked-tests--text)))))
+          (should (string-match-p (format "\\[<0;%d;%dM" (1+ (cdr cell)) (1+ (car cell)))
+                                  (cooked-tests--text))))))))
+
 (ert-deftest cooked-a-link-does-not-steal-return-from-the-child ()
   (cooked-tests--with-session
       '("/bin/sh" "-c"

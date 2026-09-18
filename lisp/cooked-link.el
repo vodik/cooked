@@ -20,7 +20,8 @@
 ;; customised, all of which a private implementation would have had to reproduce and
 ;; would have reproduced worse.  `follow-link' and `help-echo' are set here, so
 ;; `mouse-1-click-follows-link' and the tooltip work as they do under
-;; `goto-address-mode'.
+;; `goto-address-mode' -- everywhere but a buffer whose child holds the mouse, where
+;; `cooked--suppress-link-clicks' turns that option off for as long as the grab lasts.
 ;;
 ;; What is *not* borrowed is the scan.  `cooked--fontify-links' reproduces
 ;; `goto-address-fontify-region' rather than calling it, because a match has to be

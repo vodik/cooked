@@ -585,7 +585,11 @@ URL and far shorter than a minified JSON blob. A click on either half opens the 
 `mouse-2` and `RET` follow a link, `C-c RET` follows whatever is at point whether or not
 it is highlighted, and `S-mouse-2`/`S-RET` follow one even while the child has grabbed the
 mouse or the keyboard — because a plain click or `RET` in that state still belongs to the
-child, exactly as it does everywhere else, with Shift as the escape.
+child, exactly as it does everywhere else, with Shift as the escape. `mouse-1` follows a
+link under `mouse-1-click-follows-link` as it does in any other buffer, except while the
+child holds the mouse: the option is turned off in that buffer for as long as the grab
+lasts, since Emacs rewrites such a click into `mouse-2` before any keymap is consulted,
+and a rewritten click is one the child would never be told had ended.
 
 `C-c M-n` and `C-c M-p` move to the next and previous link of any kind, wrapping around
 the buffer, and with `repeat-mode` on a plain `n` and `p` keep going. A URL wrapped over

@@ -226,6 +226,41 @@ variable, and `cooked-link.el' reads it through `bound-and-true-p', being a
 base-tier file that cannot require this one.  It is also a *derived* value
 rather than something the child said, which is what that struct holds.")
 
+(defvar-local cooked--mouse-saved-link-clicks nil
+  "How `mouse-1-click-follows-link' is to be put back, or nil while it stands.
+
+`global' where the buffer had no value of its own when the grab began, and a
+one-element list holding the value it did have otherwise -- a list because nil
+is a value a user can have set.  See `cooked--suppress-link-clicks'.")
+
+(defun cooked--suppress-link-clicks (suppress)
+  "Stop Emacs rewriting a plain click here into a link follow, or let it again.
+
+SUPPRESS is `cooked--mouse-grab', and the rule it implements is the one
+`cooked-follow-link' documents: while the child holds the mouse a plain click
+belongs to the child, and `S-mouse-2' and \\`C-c RET' are the sanctioned ways
+to a link.  `mouse-1-click-follows-link' is what breaks that rule, and it
+breaks it before any keymap of ours is consulted -- Emacs rewrites the release
+into `mouse-2' while reading the key sequence, so what the buffer's maps are
+offered is an event the child's own press has nothing to do with.  The press
+went to the child as button 0; the rewritten release arrives spelled as button
+1, which is not the button that is down.
+
+Buffer-locally, because the option is the user's and only the buffers a child
+has the mouse in are ours to speak for."
+  (cond ((and suppress (not cooked--mouse-saved-link-clicks))
+         (setq cooked--mouse-saved-link-clicks
+               (if (local-variable-p 'mouse-1-click-follows-link)
+                   (list mouse-1-click-follows-link)
+                 'global))
+         (setq-local mouse-1-click-follows-link nil))
+        ((and (not suppress) cooked--mouse-saved-link-clicks)
+         (if (eq cooked--mouse-saved-link-clicks 'global)
+             (kill-local-variable 'mouse-1-click-follows-link)
+           (setq-local mouse-1-click-follows-link
+                       (car cooked--mouse-saved-link-clicks)))
+         (setq cooked--mouse-saved-link-clicks nil))))
+
 (defvar-local cooked--wheel-grab nil
   "Whether the wheel belongs to an alternate screen nobody else has claimed.
 
@@ -331,6 +366,9 @@ DEC mode 1007, which is what makes the wheel scroll in `less', `man' and
   ;; rectangle whether or not the child wanted the mouse, and whether or not the
   ;; keyboard is suspended for a peek.  See `cooked--wheel-map'.
   (setq cooked--wheel-grab (and cooked--alt (not cooked--mouse-grab) t))
+  ;; A click belongs to the child for exactly as long as the map does, and the
+  ;; rewrite that would take it away happens before that map is reached.
+  (cooked--suppress-link-clicks cooked--mouse-grab)
   (cooked--update-hover-tracking)
   ;; The pointer shape a child set is shown under the same gate, so every path
   ;; that moves the gate has to move the pointer with it.  Beside the hover
@@ -868,6 +906,19 @@ into by the time it comes up."
          ;; buttons 64/65 is a report every application discards, so the scroll
          ;; would vanish on the way to a child that had asked for it.
          (pressed (or wheel (memq 'down modifiers)))
+         ;; A release that names a button nothing is holding, in a buffer that is
+         ;; holding one, is a release Emacs has renamed on the way here: that is
+         ;; what `mouse-1-click-follows-link' does to a click on a link, and a
+         ;; `mouse-2' arriving with only button 0 down would otherwise be owed
+         ;; nothing, land in `cooked--mouse-fallback', and leave the child holding
+         ;; a button it can never put down.  `cooked--suppress-link-clicks' keeps
+         ;; the rewrite from happening at all while the grab is on; this is what
+         ;; closes the gesture when it happened anyway -- the grab arriving
+         ;; between the press and the release, or any other renaming.
+         (button (or (and button (not pressed) (not wheel)
+                          (not (memq button cooked--mouse-held))
+                          (car cooked--mouse-held))
+                     button))
          ;; `drag-mouse-1' is a release that happens to know where it started;
          ;; the end is the half that has not been reported yet.
          (posn (if (memq 'drag modifiers) (event-end event) (event-start event)))
@@ -970,6 +1021,20 @@ into by the time it comes up."
                            (cooked-mouse-state-motion cooked--mouse-state)))
               (cooked--mouse-track window)))))))))
 
+(defvar cooked--mouse-falling-back nil
+  "Non-nil while `cooked--mouse-fallback' is running a declined event's command.
+
+Read by `cooked--link-delegate', which is the one binding the fallback can
+find that leads straight back here: `cooked-follow-link' sits on a `keymap'
+text property, which no lookup of ours can lift out the way
+`cooked--mouse-map-alist' is lifted out, so declining a click over a link
+found the delegate, the delegate called `cooked-mouse-event', and the event
+that had already been declined was declined again -- until
+`max-lisp-eval-depth'.  Under this the delegate takes the event and does
+nothing with it, which is what the state it is asked about says: the child
+holds the mouse, so no link is followed, and the report the child was owed was
+already made or already found to have no cell to be made at.")
+
 (defun cooked--mouse-fallback (event)
   "Run whatever EVENT would do without cooked's binding.
 
@@ -994,7 +1059,8 @@ property and the local map consulted are the ones under the *pointer*.  Emacs
 settles a click's binding in the buffer the pointer is over and then runs it in
 the buffer that was current, and that is the half of the question a plain
 `lookup-key' cannot even ask."
-  (let ((command (cooked--mouse-fallback-binding event)))
+  (let ((cooked--mouse-falling-back t)
+        (command (cooked--mouse-fallback-binding event)))
     (when (and (commandp command) (not (eq command #'cooked-mouse-event)))
       (setq last-command-event event
             this-command command)

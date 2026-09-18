@@ -889,7 +889,13 @@ Only the unshifted case reaches here; cooked-link.el filters the rest, because
 link reachable at all inside a full-screen program."
   (cond
    ((mouse-event-p event)
-    (when (bound-and-true-p cooked--mouse-grab) (cooked-mouse-event) t))
+    (when (bound-and-true-p cooked--mouse-grab)
+      ;; Taken, but not forwarded again: under `cooked--mouse-falling-back' this
+      ;; click has already been through `cooked-mouse-event' and was declined
+      ;; there, and the only reason it reached a link binding at all is that the
+      ;; fallback cannot lift a `keymap' text property out of the lookup.
+      (unless cooked--mouse-falling-back (cooked-mouse-event))
+      t))
    ((and (cooked--child-owns-keyboard-p) (not (cooked--suspended-p)))
     (cooked-send-key)
     t)))
