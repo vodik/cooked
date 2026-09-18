@@ -522,7 +522,7 @@ about."
       ;; Worn as for a graphical frame, so that the tty frame the window is on
       ;; really is the other kind and the deferral really is asked for.
       (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
-        (cooked--state-keymap nil 'raw))
+        (cooked--state-keymap 'raw))
       (set-window-buffer (frame-root-window) (current-buffer))
       (let ((deferred nil)
             ;; `cooked-debug' so nothing of ours swallows a signal either; what
@@ -547,7 +547,7 @@ A real tty frame, because that is where redisplay runs in batch and where
   (cooked-tests--with-tty-frame
     (with-temp-buffer
       (cooked-mode)
-      (cooked--state-keymap nil 'raw)
+      (cooked--state-keymap 'raw)
       (set-window-buffer (frame-root-window) (current-buffer))
       (let ((other (split-window)))
         (redisplay t)
