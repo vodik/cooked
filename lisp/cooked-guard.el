@@ -59,19 +59,17 @@ lower it to make a reset cheaper at the cost of more memo misses."
 
 (STAMP FIXED-PITCH . TABLE), rebuilt from scratch whenever STAMP moves.
 
-TABLE maps a row's text to t when Emacs was seen to lay that text out on a
-single screen line.  Only that direction is recorded: a row that *did* wrap is
-not remembered, because the caller's next step on that answer is
-`cooked--trim-to-one-line', which measures again for itself and would not
-believe a cached yes anyway.
+TABLE maps a row's layout hash to t when Emacs was seen to lay that row out on
+a single screen line.  Only that direction is recorded *here*, and the
+asymmetry is the whole safety argument for keying on a hash.  A colliding
+\"this does not wrap\" costs a row that softwraps until something rewrites it.
+A colliding \"this wraps\" would delete characters off a row that fits, which
+is the failure this guard exists to avoid -- so no hash is ever allowed to say
+it.
 
-That asymmetry is also what makes a stale or colliding entry harmless, and it is
-worth being explicit about since it is the whole safety argument for keying on
-text alone.  A wrong \"this wraps\" costs one `vertical-motion' and deletes
-nothing -- the trim loop re-measures and stops immediately.  A wrong \"this does
-not wrap\" costs a row that softwraps until something rewrites it.  Neither can
-delete a character that should have stayed, which is the failure this guard
-exists to avoid and the reason it is allowed to be trimmed by hand at all.
+A row that did wrap is remembered too, but in a table of its own and under a
+key that cannot collide: see `cooked--wrap-cache' for the TRIMS table and
+`cooked--fit-row' for what reads it.
 
 The key is the drain's layout hash, which folds in the renditions that change
 the font as well as the text; a caller with no hash gets the same question
@@ -202,17 +200,26 @@ wide character is, and that is what this measures."
                 (:inherit cooked-blink)))))))
 
 (defun cooked--wrap-cache (window)
-  "This buffer's (FIXED-PITCH WRAPS METRICS) for WINDOW, rebuilt when it moves.
+  "This buffer's layout cache for WINDOW, rebuilt when the layout moves.
+
+The value is (FIXED-PITCH WRAPS METRICS TRIMS).
 
 The whole of `cooked--wrap-memo''s invalidation: one comparison against
 `cooked--layout-stamp', and a new table and a fresh font probe when it
 differs.  Nothing is invalidated piecemeal, because nothing here outlives the
 font it was measured under.
 
-WRAPS memoises which rows Emacs lays out on one line, and METRICS what a
-cluster actually measures.  They share one cache because the same events
-invalidate both, and because the stamp is the expensive part: a second cache
-with a second stamp would cost more than either table saves.
+WRAPS memoises which rows Emacs lays out on one line, METRICS what a cluster
+actually measures, and TRIMS how many characters a row that did *not* fit was
+cut back to.  They share one cache because the same events invalidate all
+three, and because the stamp is the expensive part: a second cache with a
+second stamp would cost more than any table saves.
+
+TRIMS is keyed by `cooked--wrap-fallback-key', the row's own text and faces,
+and not by the layout hash WRAPS uses.  An entry there deletes characters, so
+its key has to be the row and not a digest of it; a row that wraps is rare
+enough that copying it out of the buffer is cheap next to the layout queries
+the entry saves.
 
 The rows already on screen were measured, scaled and trimmed under the stamp
 that has just gone, so a move also has the core send every row again with
@@ -232,7 +239,8 @@ no earlier layout to disagree with."
                  (cons stamp
                        (list (cooked--ascii-fixed-pitch-p window)
                              (make-hash-table :test #'equal :size 64)
-                             (make-hash-table :test #'equal :size 64))))))))
+                             (make-hash-table :test #'equal :size 64)
+                             (make-hash-table :test #'equal :size 16))))))))
 
 (defun cooked--row-mismeasured-p (width uniform fixed-pitch)
   "Whether a row is one Emacs may render wider than Rust assumed.
@@ -311,8 +319,8 @@ paints, and laying out the same way every time.  `vertical-motion' over a row
 of box glyphs is most of what the guard costs per row, and across a whole
 screen of them it adds up to more than a 60Hz frame.
 
-Only the negative is stored; see `cooked--wrap-memo' for why that is also the
-safety argument.
+Only the negative is stored here; see `cooked--wrap-memo' for why that is also
+the safety argument, and `cooked--fit-row' for where the positive goes.
 
 KEY is the row's layout hash from the drain's row table -- its text and the
 renditions that change its font, see `BlockRow::hash' in src/wire.rs -- so a
@@ -355,6 +363,50 @@ of it -- and the loop then eats the newline above START and the row below."
       (setq trimmed t)
       (delete-region (1- eol) eol))
     trimmed))
+
+(defun cooked--fit-row (start end window memo trims hash)
+  "Cut the row START..END back to one screen line, if Emacs lays it out on more.
+
+Returns non-nil when characters were deleted.
+
+The three answers, cheapest first.  MEMO says the row was seen to fit, by HASH,
+and nothing is asked.  TRIMS says this very row was cut before, and to how many
+characters, and it is cut to that again with nothing measured.  Only a row
+neither table knows reaches `vertical-motion', and the trim loop after it.
+
+TRIMS is what keeps a row that never fits from being expensive for ever.  A
+status bar carrying an icon the font draws two cells wide is repainted on every
+frame of a full-screen program, and without the table each repaint paid one
+layout query to learn that it wraps and one more per character deleted to learn
+where it stops -- the same answer every time, to the same row under the same
+font.
+
+The key is `cooked--wrap-fallback-key', read off the row as it stands: after
+`cooked--scale-offenders', which the caller runs first, and before anything is
+deleted, so the row that is looked up is the row that was recorded.  See
+`cooked--wrap-cache' for why this table may not be keyed by HASH.  The stamp
+that guards MEMO guards this too, so an entry never outlives the font or the
+width it was measured under.
+
+WINDOW is the window whose layout decides what wrapping means, as for
+`cooked--row-wraps-p'.  With TRIMS nil nothing is remembered, and every
+wrapping row is measured."
+  (let* ((exact (and trims
+                     (not (and memo hash (gethash hash memo)))
+                     (cooked--wrap-fallback-key start end)))
+         (kept (and exact (gethash exact trims))))
+    (cond ((and kept (< (+ start kept) end))
+           (delete-region (+ start kept) end)
+           t)
+          ((and (cooked--row-wraps-p start end window memo hash)
+                (cooked--trim-to-one-line start window))
+           (when exact
+             ;; Bounded as the other two tables are; see `cooked-wrap-cache-limit'.
+             (when (> (hash-table-count trims) cooked-wrap-cache-limit)
+               (clrhash trims))
+             (goto-char start)
+             (puthash exact (- (line-end-position) start) trims))
+           t))))
 
 (defcustom cooked-glyph-scale-floor 0.5
   "How far a glyph may be shrunk to make it fit its cell, or nil not to shrink.
@@ -726,9 +778,10 @@ step exists to keep the next one from running:
      of rows -- see `cooked--row-mismeasured-p' and
      `cooked--ascii-fixed-pitch-p'.
   2. A row whose text was already seen to fit under this font and this geometry
-     is finished at a hash lookup -- see `cooked--row-wraps-p'.
+     is finished at a hash lookup -- see `cooked--row-wraps-p' -- and one
+     already seen *not* to fit is cut to the length it was cut to before.
   3. Only what is left reaches `vertical-motion', and only what that says wraps
-     reaches the trim.
+     reaches the trim.  See `cooked--fit-row', which is steps 2 and 3.
 
 HASH is the row's layout hash, the key step 2 looks it up by; see
 `cooked--row-wraps-p'.
@@ -764,7 +817,7 @@ was mismeasured rather than an adjacent one."
     (when (and cooked-rejoin-wrapped-lines window (< start (line-end-position)))
       (goto-char start)
       (pcase-let* ((end (line-end-position))
-                   (`(,fixed-pitch ,memo ,metrics)
+                   (`(,fixed-pitch ,memo ,metrics ,trims)
                     (or cache (cooked--wrap-cache window))))
         (when (cooked--row-mismeasured-p width uniform fixed-pitch)
           ;; Before the wrap question rather than after it.  A repair hung off
@@ -772,8 +825,7 @@ was mismeasured rather than an adjacent one."
           ;; too *tall*, such as a CJK character from a fallback font, makes
           ;; the row deeper while its width fits and the wrap check says nil.
           (cooked--scale-offenders start end window metrics)
-          (when (and (cooked--row-wraps-p start end window memo hash)
-                     (cooked--trim-to-one-line start window))
+          (when (cooked--fit-row start end window memo trims hash)
             (goto-char start)
             (cooked--mark-truncation start (1- (line-end-position)) window)
             t))))))

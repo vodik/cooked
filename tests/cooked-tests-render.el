@@ -2140,6 +2140,93 @@ to agree with it."
                 (should (eq (and bare t) (and hit t)))
                 (forward-line 1)))))))))
 
+;; What the three tests below count: layout queries, with a wrap after ten
+;; characters.  The guard is driven through `cooked--guard-row-width' with a
+;; hash, as `cooked--render-rows' drives it, because the trims table is only
+;; worth anything on the path that has one.
+(defmacro cooked-tests--counting-wraps (count &rest body)
+  "Run BODY with `vertical-motion' wrapping after ten characters, counted in COUNT."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'vertical-motion)
+              (lambda (&rest _)
+                (setq ,count (1+ ,count))
+                (goto-char (min (point-max) (+ (point) 10))))))
+     ,@body))
+
+(ert-deftest cooked-a-row-trimmed-once-is-trimmed-again-without-being-measured ()
+  "A status bar that never fits is repainted on every frame of a full-screen
+program.  The first sight of it pays a layout query to learn that it wraps and
+one more per character deleted; the repaint, which writes the same row back,
+must cost none, and must leave exactly what the measured trim left."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (measured 0)
+          (row (concat (make-string 5 ?x) "é" (make-string 6 ?y))))
+      (cooked-tests--counting-wraps measured
+        (insert row "\n")
+        (should (cooked--guard-row-width (point-min) 12 nil nil nil 7))
+        (let ((first (buffer-string))
+              (cost measured))
+          (should (equal first (concat (substring row 0 10) "\n")))
+          (should (> cost 1))
+          ;; The repaint: the core sends the row whole again, since Lisp said
+          ;; its copy was no longer true.
+          (erase-buffer)
+          (insert row "\n")
+          (should (cooked--guard-row-width (point-min) 12 nil nil nil 7))
+          (should (equal (buffer-string) first))
+          (should (= measured cost))
+          (goto-char (point-min))
+          (should (equal (get-text-property (1- (line-end-position)) 'display)
+                         "$")))))))
+
+(ert-deftest cooked-a-remembered-trim-is-never-spent-on-another-row ()
+  "The safety half.  Two rows with one layout hash -- a collision, stated here by
+handing both the same number -- are two rows to the trims table, which is keyed
+by the row itself.  The second is measured rather than cut to the first's
+length, and being short enough to fit, it loses nothing."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (measured 0))
+      (cooked-tests--counting-wraps measured
+        (insert "éxxxxxxxxxxx\n")
+        (should (cooked--guard-row-width (point-min) 12 nil nil nil 7))
+        (erase-buffer)
+        (insert "éyyyyyyy\n")
+        (let ((before measured))
+          (should-not (cooked--guard-row-width (point-min) 8 nil nil nil 7))
+          (should (equal (buffer-string) "éyyyyyyy\n"))
+          (should (> measured before)))))))
+
+(ert-deftest cooked-a-remembered-trim-does-not-outlive-its-layout ()
+  "The trims table hangs off the same stamp as the wrap memo, so a font or a
+width that moves throws it away: the row is measured again, against the layout
+it will now be shown in, rather than cut to what fitted the old one."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (let ((cooked-rejoin-wrapped-lines t)
+          (inhibit-read-only t)
+          (measured 0)
+          (width 10)
+          (row "éxxxxxxxxxxx"))
+      (cl-letf (((symbol-function 'frame-char-width) (lambda (&rest _) width)))
+        (cooked-tests--counting-wraps measured
+          (insert row "\n")
+          (should (cooked--guard-row-width (point-min) 12 nil nil nil 7))
+          (setq width 12)
+          (erase-buffer)
+          (insert row "\n")
+          (let ((before measured))
+            (should (cooked--guard-row-width (point-min) 12 nil nil nil 7))
+            (should (> measured before))))))))
+
 (ert-deftest cooked-wrap-memo-is-discarded-when-the-layout-moves ()
   "Invalidation, which is the half of a memo that can be quietly wrong.
 
@@ -2166,8 +2253,8 @@ invalidating it undoes."
                  (lambda (&rest _) (setq measured (1+ measured)) (forward-line 1)))
                 ((symbol-function 'frame-char-width) (lambda (&rest _) width)))
         (let ((probe (lambda ()
-                       ;; (FIXED-PITCH WRAPS METRICS) since glyph scaling gave
-                       ;; the cache a third slot; the wrap memo is the second.
+                       ;; (FIXED-PITCH WRAPS METRICS TRIMS); the wrap memo is
+                       ;; the second.
                        (pcase-let ((`(,_ ,memo ,_)
                                     (cooked--wrap-cache (selected-window))))
                          (cooked--row-wraps-p (point-min) (line-end-position)
