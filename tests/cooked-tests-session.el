@@ -318,6 +318,39 @@ to the value that would be wrong to inherit."
         (with-current-buffer buffer (cooked--cleanup))
         (kill-buffer buffer)))))
 
+(ert-deftest cooked-a-torn-down-session-gives-its-descriptors-back ()
+  "A session holds four descriptors, and `cooked--cleanup\\=' has to return them.
+
+They are the pty master, the watch that says when the child exits, and both ends
+of the interrupt pipe, and until `Session::shutdown\\=' closed them they went back
+only when the garbage collector reached the user-pointer Emacs keeps the session
+in.  Nothing in Lisp makes a collection happen at a chosen moment, so the suite
+carried every finished session\\='s four until one happened to run: it peaked
+1017 descriptors deep against Emacs\\=' own limit of 1024, and a test that
+allocated enough to move the collection could fail a test five hundred later with EMFILE
+having touched nothing it used.
+
+Forty sessions rather than one, so that a leak of even a single descriptor
+apiece is well clear of the handful an unrelated allocation moves.  The settle
+is for the reader thread, which keeps the descriptors open for the length of the
+poll it is in when teardown reaches it -- deliberately, since a descriptor closed
+under a polling thread is a number the kernel may hand straight to the next pty.
+
+Skipped where the running process\\=' descriptors are not listed in a directory."
+  (let ((directory (seq-find #'file-directory-p '("/proc/self/fd" "/dev/fd"))))
+    (skip-unless directory)
+    (cl-flet ((descriptors () (length (directory-files directory))))
+      (let ((before (descriptors)))
+        (dotimes (_ 40)
+          (let ((buffer (generate-new-buffer " *cooked-descriptors*")))
+            (unwind-protect
+                (with-current-buffer buffer
+                  (cooked-mode)
+                  (cooked--start '("/bin/sh" "-c" "sleep 300")))
+              (with-current-buffer buffer (cooked--cleanup))
+              (kill-buffer buffer))))
+        (should (cooked-tests--settle (lambda () (<= (descriptors) before))))))))
+
 (ert-deftest cooked-core-refuses-values-that-are-not-sessions ()
   "The core compares a user-pointer's finalizer against its own before casting.
 Emacs cannot tell one module's user-pointer from another's, so without that check

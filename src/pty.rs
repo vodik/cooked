@@ -196,10 +196,30 @@ impl From<Winsize> for libc::winsize {
     }
 }
 
+/// The descriptors a pty holds: the master end, and the kernel's word on when the child
+/// exits.
+///
+/// Behind one [`Arc`](std::sync::Arc) so that [`Pty::close`] can release them all the moment the session
+/// is over, and so that a thread already inside a call keeps them alive for the length of
+/// it. The reader polls the master on a thread [`crate::session::Session::shutdown`]
+/// deliberately does not join, so an fd closed out from under it would be one the kernel
+/// is free to hand straight back for the next session's pty -- and the reader would then
+/// be polling somebody else's child. Holding an `Arc` for the call is what makes the
+/// close wait for the last user rather than race it.
+#[derive(Debug)]
+pub(crate) struct Fds {
+    pub(crate) master: PtyMaster,
+    /// Says when the child has exited, where the platform can; see
+    /// [`platform::ExitWatch`]. What lets [`Pty::reap`] wait on the kernel instead of
+    /// on a timer.
+    exit_watch: Option<platform::ExitWatch>,
+}
+
 /// A forked child attached to a pty we own the master end of.
 #[derive(Debug)]
 pub(crate) struct Pty {
-    master: PtyMaster,
+    /// `None` once [`Pty::close`] has released them; see [`Fds`].
+    fds: std::sync::Mutex<Option<std::sync::Arc<Fds>>>,
     child: Pid,
     /// Set once `waitpid` has collected the child. Signalling after that point would
     /// aim at a pid the kernel is free to have handed to somebody else.
@@ -224,10 +244,6 @@ pub(crate) struct Pty {
     /// single `killpg` — never blocking — so holding this across either is always
     /// short.
     reap_lock: std::sync::Mutex<()>,
-    /// Says when the child has exited, where the platform can; see
-    /// [`platform::ExitWatch`]. What lets [`Pty::reap`] wait on the kernel instead of
-    /// on a timer.
-    exit_watch: Option<platform::ExitWatch>,
 }
 
 /// How long [`Pty::write`] waits on a child that is not draining its input before it
@@ -410,12 +426,14 @@ impl Pty {
         fcntl(&master, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
 
         Ok(Self {
-            master,
+            fds: std::sync::Mutex::new(Some(std::sync::Arc::new(Fds {
+                master,
+                exit_watch: platform::ExitWatch::new(child),
+            }))),
             child,
             reaped: std::sync::atomic::AtomicBool::new(false),
             collected: std::sync::Mutex::new(None),
             reap_lock: std::sync::Mutex::new(()),
-            exit_watch: platform::ExitWatch::new(child),
         })
     }
 
@@ -466,8 +484,30 @@ impl Pty {
         Ok(Pid::from_raw(child))
     }
 
-    pub(crate) fn as_fd(&self) -> BorrowedFd<'_> {
-        self.master.as_fd()
+    /// The descriptors, for the length of the caller's own call.
+    ///
+    /// Cloned out from under the lock rather than borrowed through it, so nothing holds
+    /// this lock while it polls or writes: it is a leaf, taken and let go in the same
+    /// expression everywhere it appears.
+    pub(crate) fn fds(&self) -> Result<std::sync::Arc<Fds>> {
+        self.fds.held().clone().ok_or(Error::Closed)
+    }
+
+    /// Release the descriptors, leaving the pid and the exit status this pty recorded.
+    ///
+    /// Called by [`crate::session::Session::shutdown`] once the child has been reaped, so
+    /// that the four descriptors a session holds go back when the session ends rather than
+    /// when the garbage collector reaches the user pointer Emacs keeps it in. Nothing in
+    /// Lisp makes a collection happen at a chosen moment, so without this a suite that
+    /// starts a session per test ran hundreds of finished ptys deep into Emacs' own
+    /// 1024-descriptor limit and failed with EMFILE somewhere unrelated.
+    ///
+    /// A reader still inside a poll or a read holds its own `Arc` and keeps the
+    /// descriptors open until it returns; see [`Fds`]. Every call after this answers
+    /// [`Error::Closed`], which is what a caller acting on a session that is over should
+    /// hear anyway.
+    pub(crate) fn close(&self) {
+        drop(self.fds.held().take());
     }
 
     pub(crate) fn pid(&self) -> Pid {
@@ -476,7 +516,7 @@ impl Pty {
 
     /// The child's current line-discipline state.
     pub(crate) fn mode(&self) -> Result<Mode> {
-        Ok(Mode::from(&tcgetattr(self.master.as_fd())?))
+        Ok(Mode::from(&tcgetattr(self.fds()?.master.as_fd())?))
     }
 
     /// The child's job-control characters, as the tty currently defines them.
@@ -484,12 +524,12 @@ impl Pty {
     /// Sampled on demand rather than carried in [`Mode`]: these change when someone runs
     /// `stty`, not on every read, and the one caller asks only when about to send one.
     pub(crate) fn job_control(&self) -> Result<JobControl> {
-        Ok(JobControl::from(&tcgetattr(self.master.as_fd())?))
+        Ok(JobControl::from(&tcgetattr(self.fds()?.master.as_fd())?))
     }
 
     /// Process group in the foreground of the tty — i.e. what is actually running.
     pub(crate) fn foreground(&self) -> Result<Pid> {
-        match tcgetpgrp(self.master.as_fd())? {
+        match tcgetpgrp(self.fds()?.master.as_fd())? {
             pgrp if pgrp.as_raw() > 1 => Ok(pgrp),
             _ => Err(Error::NoForeground),
         }
@@ -504,7 +544,7 @@ impl Pty {
     /// is the layer that knows what to do with that `ENOTTY`, by way of its already-running
     /// reader thread; see `Session::resize`.
     pub(crate) fn resize(&self, size: Winsize) -> Result<()> {
-        set_winsize(self.master.as_fd(), size)
+        set_winsize(self.fds()?.master.as_fd(), size)
     }
 
     /// The size the tty currently reports, which is not always the size we last set.
@@ -514,7 +554,7 @@ impl Pty {
     /// master, return success, and then be overwritten by the child's own initialisation.
     /// Reading it back is what lets `session` tell "applied" from "applied and lost".
     pub(crate) fn winsize(&self) -> Result<Winsize> {
-        let ws = platform::winsize(self.master.as_fd())?;
+        let ws = platform::winsize(self.fds()?.master.as_fd())?;
         Ok(Winsize {
             rows: ws.ws_row,
             cols: ws.ws_col,
@@ -547,7 +587,8 @@ impl Pty {
     pub(crate) fn wait_writable(&self, wait: &Wait<'_>) -> Result<()> {
         loop {
             let remaining = wait.check()?;
-            let mut fds = [PollFd::new(self.master.as_fd(), PollFlags::POLLOUT)];
+            let held = self.fds()?;
+            let mut fds = [PollFd::new(held.master.as_fd(), PollFlags::POLLOUT)];
             match nix::poll::poll(&mut fds, poll_timeout(remaining)) {
                 // Timed out this round; the loop re-checks the deadline.
                 Ok(0) | Err(Errno::EINTR) => continue,
@@ -569,7 +610,7 @@ impl Pty {
     /// offered to a child that may have stopped reading.
     pub(crate) fn write_some(&self, buf: &[u8]) -> Result<usize> {
         loop {
-            return match nix::unistd::write(self.master.as_fd(), buf) {
+            return match nix::unistd::write(self.fds()?.master.as_fd(), buf) {
                 Ok(n) => Ok(n),
                 Err(Errno::EAGAIN) => Ok(0),
                 Err(Errno::EINTR) => continue,
@@ -581,7 +622,7 @@ impl Pty {
     /// Read available output. An empty slice means the child closed the slave end.
     pub(crate) fn read<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8]> {
         loop {
-            return match nix::unistd::read(self.master.as_fd(), buf) {
+            return match nix::unistd::read(self.fds()?.master.as_fd(), buf) {
                 Ok(n) => Ok(&buf[..n]),
                 Err(Errno::EINTR) => continue,
                 Err(e) => Err(e.into()),
@@ -605,7 +646,7 @@ impl Pty {
         match self.foreground() {
             // The platform may deliver to the foreground group itself, under the
             // kernel's lock; otherwise the group is read here and signalled in two steps.
-            Ok(foreground) => match platform::signal_foreground(self.master.as_fd(), sig) {
+            Ok(foreground) => match platform::signal_foreground(self.fds()?.master.as_fd(), sig) {
                 Some(result) => Ok(result?),
                 None => Self::send_to(foreground, sig),
             },
@@ -709,7 +750,12 @@ impl Pty {
             if remaining.is_zero() {
                 return None;
             }
-            match &self.exit_watch {
+            match self
+                .fds()
+                .ok()
+                .as_deref()
+                .and_then(|fds| fds.exit_watch.as_ref())
+            {
                 // A watch that reports the child gone while `waitpid` still says otherwise
                 // is the gap between the two the kernel is closing, and a tick covers it
                 // rather than a spin here.
@@ -1238,7 +1284,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let flags = fcntl(pty.as_fd(), FcntlArg::F_GETFD).expect("F_GETFD");
+        let flags =
+            fcntl(pty.fds().expect("open").master.as_fd(), FcntlArg::F_GETFD).expect("F_GETFD");
         assert_ne!(
             flags & FdFlag::FD_CLOEXEC.bits(),
             0,

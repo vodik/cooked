@@ -30,6 +30,10 @@ pub enum Error {
     NotOnPath(OsString),
     /// The child has already been waited for, so there is no process to act on.
     Reaped,
+    /// The session's descriptors have been released, so there is no pty to act on.
+    /// Distinct from `Reaped`: the child may have been collected long before, and what
+    /// this names is the teardown that closed the master end after it.
+    Closed,
     /// The tty has no foreground process group -- nothing is claiming the terminal.
     NoForeground,
     /// A write could not be handed to the kernel before its deadline.
@@ -68,6 +72,7 @@ impl fmt::Display for Error {
                 write!(f, "{} not found on PATH", program.to_string_lossy())
             }
             Self::Reaped => f.write_str("child already reaped"),
+            Self::Closed => f.write_str("session already closed"),
             Self::NoForeground => f.write_str("no foreground process group"),
             Self::WriteTimeout => f.write_str("write timed out"),
             Self::Interrupted => f.write_str("write interrupted"),

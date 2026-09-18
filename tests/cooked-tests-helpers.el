@@ -336,7 +336,15 @@ see `cooked-osc-handler-errors-do-not-break-redisplay'.
 
 BODY also fails if anything it ran, a timer included, tried to read the
 terminal: a secret prompt raised 30ms after BODY pumped past it signals only
-inside the timer, and `cooked-tests--refused-reads' is what reaches the test."
+inside the timer, and `cooked-tests--refused-reads' is what reaches the test.
+
+`cooked--cleanup' is what returns the session's four descriptors, and a macro
+that starts a session has to call it for that reason as much as to reap the
+child: a session left to the collector holds its pty master, its exit watch and
+both ends of its interrupt pipe until a collection happens to run, and nothing
+here makes one happen at a chosen moment.
+`cooked-a-torn-down-session-gives-its-descriptors-back' pins that, and the
+EMFILE this suite used to fail with is what it prevents."
   (declare (indent 1))
   `(let ((buffer (generate-new-buffer "*cooked-test*"))
          (cooked-debug t)

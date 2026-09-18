@@ -967,6 +967,14 @@ impl Drop for Sending<'_> {
 /// apart, and it is set before the interrupt is raised — so the reader need only empty the
 /// pipe and look at the flag.
 struct Interrupt {
+    /// `None` once [`Interrupt::close`] has released them. Behind an `Arc` for the same
+    /// reason [`crate::pty::Fds`] is: the reader polls the read end on a thread teardown
+    /// does not join, and a pipe closed out from under it is a descriptor number the
+    /// kernel may hand to the next session.
+    ends: Mutex<Option<Arc<Ends>>>,
+}
+
+struct Ends {
     read: OwnedFd,
     write: OwnedFd,
 }
@@ -977,19 +985,34 @@ impl Interrupt {
         // to the trouble of closing. O_NONBLOCK so a raise can never park its caller behind
         // a full pipe, and so `clear` cannot block on a byte another raise got to first.
         let (read, write) = crate::platform::cloexec_pipe()?;
-        Ok(Self { read, write })
+        Ok(Self {
+            ends: Mutex::new(Some(Arc::new(Ends { read, write }))),
+        })
+    }
+
+    /// The pipe, for the length of the caller's own call; `None` once closed.
+    fn ends(&self) -> Option<Arc<Ends>> {
+        self.ends.held().clone()
+    }
+
+    /// Release the pipe, as [`crate::pty::Pty::close`] releases the pty's descriptors.
+    fn close(&self) {
+        drop(self.ends.held().take());
     }
 
     fn raise(&self) {
-        let _ = nix::unistd::write(self.write.as_fd(), b"q");
+        if let Some(ends) = self.ends() {
+            let _ = nix::unistd::write(ends.write.as_fd(), b"q");
+        }
     }
 
     /// Empty the pipe, so the next poll blocks again rather than returning at once.
     fn clear(&self) {
         // A raise while this runs simply arrives on the next poll; nothing is lost, since
         // what the reader does on waking is unconditional and idempotent either way.
+        let Some(ends) = self.ends() else { return };
         let mut buf = [0u8; 64];
-        while let Ok(1..) = nix::unistd::read(self.read.as_fd(), &mut buf) {}
+        while let Ok(1..) = nix::unistd::read(ends.read.as_fd(), &mut buf) {}
     }
 }
 
@@ -1215,6 +1238,27 @@ impl Session {
             return false;
         }
         self.shared.reap_after_hangup();
+
+        // The four descriptors a session holds -- the pty master, the exit watch, and the
+        // two ends of the interrupt pipe -- go back here rather than at the collection that
+        // eventually drops this `Session`. Emacs keeps the session in a user pointer whose
+        // finalizer is the only thing that frees it, and no Lisp makes a collection happen
+        // at a chosen moment, so left to the finalizer the descriptors of every finished
+        // session pile up: the test suite ran 1017 deep into Emacs' own 1024 and then failed
+        // with EMFILE in whichever test happened to be running. Closing on the kill Lisp
+        // already makes is what takes the peak off allocation and puts it on how many
+        // sessions are live at once.
+        //
+        // Here rather than in `begin_shutdown` because this is the explicit kill, which
+        // waits out the grace on purpose. [`Session::drop`] takes the other path and must
+        // not wait for anything; the descriptors it leaves go back when the reader thread
+        // drops the last `Shared` moments later.
+        //
+        // After the reap above, which needs the exit watch, and after the hangup, which
+        // needs the master. A reader still inside its poll keeps both alive for as long as
+        // that poll lasts; see [`crate::pty::Fds`].
+        self.shared.pty.close();
+        self.shared.interrupt.close();
         true
     }
 
@@ -1896,9 +1940,17 @@ impl Shared {
             if self.awaits_room() {
                 events |= PollFlags::POLLOUT;
             }
+            // Held for this turn round the loop: while these live the descriptors cannot
+            // be closed under us, so a teardown that arrives mid-poll waits for the poll
+            // rather than freeing a number the kernel may hand straight to the next
+            // session's pty. Gone already means teardown got here first and there is
+            // nothing left to watch.
+            let (Ok(pty), Some(interrupt)) = (self.pty.fds(), self.interrupt.ends()) else {
+                break;
+            };
             let mut fds = [
-                PollFd::new(self.pty.as_fd(), events),
-                PollFd::new(self.interrupt.read.as_fd(), PollFlags::POLLIN),
+                PollFd::new(pty.master.as_fd(), events),
+                PollFd::new(interrupt.read.as_fd(), PollFlags::POLLIN),
             ];
             let (wait, is_tick) = self.poll_timeout();
             match crate::platform::poll(&mut fds, wait) {
@@ -2287,6 +2339,7 @@ mod tests {
     use crate::emu::{self, CellMetrics, Event};
     use nix::errno::Errno;
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+    use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
 
     /// `kill(pid, 0)` only probes for existence. ESRCH means the pid is gone for good.
@@ -4092,6 +4145,59 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("the child outlived the handle nobody waited for");
+    }
+
+    /// Whether RAW still names the same open file it named when WAS was taken.
+    ///
+    /// Asked rather than "is RAW open", because these tests fork concurrently and the
+    /// number a close frees is one another test's pty may already have been given. A
+    /// different file behind it is our descriptor gone just as surely as a closed one.
+    fn same_file(raw: std::os::fd::RawFd, was: &nix::sys::stat::FileStat) -> bool {
+        // SAFETY: nothing is done with the borrow but `fstat`, which cannot close it, and
+        // the borrow does not outlive the call.
+        let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) };
+        nix::sys::stat::fstat(fd)
+            .is_ok_and(|now| (now.st_dev, now.st_ino) == (was.st_dev, was.st_ino))
+    }
+
+    /// The descriptors a session holds go back when it is shut down, not when it is
+    /// dropped.
+    ///
+    /// `Session` reaches Lisp as a user pointer whose finalizer is the only thing that
+    /// drops it, and no Lisp makes a collection happen at a chosen moment. So a suite
+    /// that starts a session per test carried every finished session's four descriptors
+    /// -- master, exit watch, and both ends of the interrupt pipe -- until the collector
+    /// happened to run, which put it 1017 deep into Emacs' own limit of 1024 and then
+    /// failed whichever unrelated test was running with EMFILE.
+    ///
+    /// The session is deliberately still alive below: nothing but `shutdown` can be what
+    /// closed the master. The wait is for the reader, which keeps the descriptors open
+    /// for the length of the poll it is in when teardown arrives -- on purpose, since a
+    /// descriptor closed under a polling thread is a number the kernel is free to hand
+    /// straight to the next pty.
+    #[test]
+    fn shutdown_closes_the_descriptors_without_waiting_for_the_drop() {
+        let (session, _read) = session(&["/bin/sh", "-c", "sleep 300"]);
+        let fds = session.shared.pty.fds().expect("the pty is open");
+        let master = fds.master.as_fd().as_raw_fd();
+        let was = nix::sys::stat::fstat(fds.master.as_fd()).expect("fstat");
+        drop(fds);
+
+        assert!(session.shutdown());
+        assert!(
+            session.shared.pty.fds().is_err(),
+            "the session is still offering a pty it has torn down"
+        );
+        assert!(session.shared.interrupt.ends().is_none());
+
+        let deadline = Instant::now() + patience(5.0);
+        while same_file(master, &was) {
+            assert!(
+                Instant::now() < deadline,
+                "the master end outlived the session's teardown"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
