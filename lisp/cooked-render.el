@@ -292,10 +292,16 @@ core does not wake Emacs for output that only changes a hidden buffer's screen,
 so a child that printed one line there has left nothing drained that could have
 owed anything.
 
+Except under a `completion' claim, which refuses: see
+`cooked--screen-kept-still-p'.  The reader is answered from rows one drain
+stale rather than shown the shell's scratch copy of its own command line, and
+the release drains whole straight afterwards.
+
 Not for code that already runs inside a drain: there the drain under way has
 the text as current as it is going to be, and the request is folded into a
 whole drain that runs once it returns."
-  (when (and (cooked--screen-debt) cooked--session)
+  (when (and (cooked--screen-debt) cooked--session
+             (not (cooked--screen-kept-still-p)))
     (cooked--drain-and-repair nil)))
 
 (defun cooked--apply-withheld (update)

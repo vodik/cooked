@@ -1136,8 +1136,14 @@ drain it makes is the same whole drain the next wake would make, once.
 
 Either debt will do, because this can run before the window hook that notices
 the buffer is back: a window is about to draw it either way, and a screen still
-being held back is as stale as one that was."
-  (when (cooked--screen-debt)
+being held back is as stale as one that was.
+
+A `completion' claim is the exception.  `cooked--sync' refuses it too, for
+every other reader, and it is asked about here as well because this is the hook
+the refusal exists for: the request blocks in `accept-process-output', which
+redisplays while it waits, so this is what would draw the shell's copy of the
+command line.  See `cooked--screen-kept-still-p'."
+  (when (and (cooked--screen-debt) (not (cooked--screen-kept-still-p)))
     (cooked--protect-hook (cooked--sync))))
 
 (defun cooked--install-global-hooks ()

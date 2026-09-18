@@ -787,6 +787,81 @@ to have been a withheld one."
         (should (equal (cooked-tests--text) before))
         (should-not (cooked--screen-debt))))))
 
+(ert-deftest cooked-a-redisplay-during-a-request-draws-no-copy-of-the-line ()
+  "And the withheld drain is only half of what keeps it off the screen.
+
+The test above asserts what `cooked--on-wake' is *passed*, which is why this
+survived two spellings of the flags: the drain does leave the rows alone, and
+then `cooked--sync-before-redisplay' sees a debt and drains them whole anyway.
+`accept-process-output' -- the one thing the request blocks in -- redisplays
+while it waits, so that hook fires in the middle of every request there is
+anything to wait for, and what it renders is the copy withholding exists to
+hide.  So the debt is refused while a `completion' claim stands; see
+`cooked--screen-kept-still-p'.
+
+Watching a real shell for a flicker is the race the test above declined to
+assert on, and none of this needs one.  The copy is put on the emulator's grid
+with `cooked--feed', which wakes nobody, so the intermediate state arrives at a
+moment this test picks; the wait is stubbed, so the redisplay happens at a
+moment this test picks; and the frame is a real tty one, so `redisplay' really
+runs and the hook really fires.
+
+Both halves are here.  The screen does not gain the copy while the claim
+stands, and a reader calling `cooked--sync' meanwhile is answered from the same
+pre-request rows -- then the release drains whole and the copy appears, because
+refusing the debt defers it rather than dropping it."
+  (cooked-tests--with-tty-frame
+    (cooked-tests--with-session
+        ;; Echo off and stdin never read, so nothing the request writes comes
+        ;; back: every byte this buffer's emulator sees is one fed below, at a
+        ;; point of this test's choosing.  The marker is how the test knows
+        ;; `stty' has run before it sends anything.
+        '("/bin/sh" "-c" "stty -echo; printf ready; exec sleep 60")
+      (should (cooked-tests--settle
+               (lambda () (string-match-p "ready" (cooked-tests--text)))))
+      (set-window-buffer (frame-root-window) (current-buffer))
+      (cooked--window-buffers-changed)
+      ;; The line as the user typed it, and one redisplay to settle the window
+      ;; on it, so that what `before' holds is what a further redisplay draws.
+      (cooked--feed cooked--session "\r\n$ git commit -am 'Some")
+      (cooked--drain-and-apply)
+      (redisplay t)
+      (cl-flet ((copies ()
+                  (cl-loop with text = (cooked-tests--text)
+                           with at = 0 with seen = 0
+                           while (setq at (string-search "git commit -am 'Some"
+                                                         text at))
+                           do (cl-incf seen) (cl-incf at)
+                           finally return seen)))
+        (let ((before (cooked-tests--text))
+              (during nil)
+              (reader nil)
+              (cooked--semantic 'input))
+          (should (= (copies) 1))
+          (setf (cooked-line-completion-nonce (cooked--line)) "nonce"
+                (cooked-line-completion-reply-capable (cooked--line)) t)
+          (cl-letf (((symbol-function 'accept-process-output)
+                     (lambda (&rest _)
+                       ;; compsys' refresh: the line Emacs is holding, drawn a
+                       ;; second time under the prompt on its way to a beep.
+                       (cooked--feed cooked--session "\r\ngit commit -am 'Some")
+                       (redisplay t)
+                       (setq during (cooked-tests--text))
+                       ;; The other half: a reader that asks mid-request.
+                       (cooked--sync)
+                       (setq reader (cooked-tests--text))
+                       ;; Answer this request, so the wait ends here.
+                       (setq cooked--completion-reply
+                             (list cooked--completion-serial 0 0 nil)))))
+            (should (equal (cooked--shell-completions "git commit -am 'Some" 20)
+                           '(0 0 nil))))
+          (should (equal during before))
+          (should (equal reader before))
+          ;; Released, and the drain the release makes pays what was refused.
+          (should-not (memq 'completion cooked--screen-held-by))
+          (should-not (cooked--screen-debt))
+          (should (= (copies) 2)))))))
+
 (ert-deftest cooked-completion-gives-the-screen-back-when-a-request-quits ()
   "C-g out of a shell that stopped talking must not leave the screen held.
 

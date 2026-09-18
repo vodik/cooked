@@ -187,7 +187,9 @@ except by having watched it happen.")
 ;; from another file, which its own docstring called a bargain.
 ;;
 ;; So the asking is `cooked--withhold-screen' and `cooked--release-screen', one
-;; claim each, and what every reader asks is `cooked--screen-debt'.
+;; claim each, and what every reader asks is `cooked--screen-debt' -- plus, for
+;; the readers that would pay the debt, `cooked--screen-kept-still-p', which is
+;; the one place the two claims want different things.
 
 (defvar-local cooked--screen-held-by nil
   "The claims for which drains are leaving this buffer's screen out.
@@ -211,8 +213,9 @@ Events are still handled while it is held, which is the whole reason this is
 not `cooked-inhibit-redraw-functions': the reply being waited for arrives as an
 event, so a drain that never ran would deadlock the request it was protecting.
 
-Never read outside the two functions below; `cooked--screen-debt' is the
-question.")
+Never read outside the questions below; `cooked--screen-debt' is what a
+reader of the rows asks, and `cooked--screen-kept-still-p' is what it asks
+next if it means to pay.")
 
 (defvar-local cooked--screen-owed nil
   "Whether a whole drain is owed this buffer's screen.
@@ -235,12 +238,32 @@ drain and is held by nothing.")
 
 `hidden' is a screen being left out of drains right now, whoever asked for
 that; `withheld' is one that was left out and has not been caught up since.
-Both mean the rows below `cooked--screen-start' may be stale, which is why
-`cooked--sync' and `cooked--sync-before-redisplay' ask only whether there is a
-debt at all.  Only `cooked--on-wake' tells them apart, because only it is
-deciding what *this* drain should do."
+Both mean the rows below `cooked--screen-start' may be stale, which is all a
+reader of the text has to know, so `cooked--sync' and
+`cooked--sync-before-redisplay' ask this and then ask
+`cooked--screen-kept-still-p' whether paying the debt is allowed.
+`cooked--on-wake' asks this alone, because it is deciding what *this* drain
+should do rather than whether the rows can be trusted, and a drain runs under
+either claim."
   (cond (cooked--screen-held-by 'hidden)
         (cooked--screen-owed 'withheld)))
+
+(defun cooked--screen-kept-still-p ()
+  "Whether a claim wants this buffer's rows left exactly as they are.
+
+The two claims differ here, and only here.  A `hidden' screen pays its debt
+gladly: a redisplay of a buffer that was hidden means somebody is looking
+again, and the rows they would otherwise read are an hour old.  A `completion'
+screen must not, because what a drain would render mid-request is the shell's
+own copy of the command line rather than anything the user asked for -- the
+flicker the claim exists to prevent -- and `accept-process-output', which the
+request blocks in, redisplays while it waits.  So the debt is refused for as
+long as the request holds it.
+
+What that costs is bounded by the request: a reader asking meanwhile gets rows
+one drain stale, and `cooked--shell-completions' drains whole the moment it
+releases."
+  (and (memq 'completion cooked--screen-held-by) t))
 
 (defun cooked--withhold-screen (claim)
   "Have drains leave this buffer's live screen out, on behalf of CLAIM.
