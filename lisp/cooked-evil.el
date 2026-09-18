@@ -268,12 +268,19 @@ evil should behave as in any other buffer.
 Only ever called for the child's own ownership of the keyboard changing, which
 is what makes a deliberate `C-z' survive: `cooked--refresh-keymap' suppresses
 `cooked-state-change-hook' for a refresh evil itself triggered, and runs it at
-all only when `cooked--input-state-p' has actually flipped.  The `raw'<->`alt'
-transitions and termios polls a full-screen program produces by the dozen must
-not reach here: each one would otherwise put the user back in emacs state."
+all only when `cooked-ownership-keyboard' has actually flipped.  The
+`raw'<->`alt' transitions and termios polls a full-screen program produces by
+the dozen must not reach here: each one would otherwise put the user back in
+emacs state.
+
+The keyboard field and not the policy, which is the question this file has:
+which of the five states the child is in makes no difference to whether evil
+should be interpreting keys, and asking about them one at a time is how a state
+added later gets left out."
   (when (and cooked-evil-integration (bound-and-true-p evil-local-mode))
-    (let ((state (bound-and-true-p evil-state)))
-      (cond ((cooked--input-state-p)
+    (let ((state (bound-and-true-p evil-state))
+          (keyboard (cooked-ownership-keyboard (cooked--ownership))))
+      (cond ((eq keyboard 'emacs)
              (when (eq state 'emacs) (evil-insert-state)))
             ((null cooked-evil-child-state))
             ((eq cooked-evil-child-state 'insert)
@@ -405,7 +412,7 @@ While the child owns the keyboard this is `cooked-paste', which hands the kill
 ring to the child.  At a prompt it is evil's own paste, since the pending line
 is ordinary editable text.  See `cooked-evil-normal-state-pastes'."
   (interactive)
-  (if (cooked--input-state-p)
+  (if (eq (cooked-ownership-keyboard (cooked--ownership)) 'emacs)
       (call-interactively
        (if (eq last-command-event ?P) #'evil-paste-before #'evil-paste-after))
     (cooked-paste)))
@@ -435,7 +442,8 @@ A session that has ended counts with the prompt, as it does in
 `cooked--refresh-keymap': there is no child left to own the text, and whatever
 is in the history is the user's own."
   (interactive "p")
-  (if (or (null cooked--session) (cooked--input-state-p))
+  (if (or (null cooked--session)
+          (eq (cooked-ownership-keyboard (cooked--ownership)) 'emacs))
       (evil-undo count)
     (user-error "No further undo information")))
 

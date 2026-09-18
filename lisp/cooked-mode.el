@@ -475,16 +475,15 @@ refresh rebuilds a keymap and must not run on every keystroke."
 
 (add-hook 'cooked-input-mode-functions #'cooked--default-input-mode 90)
 
-(defun cooked--state-keymap (mode policy)
-  "The local map for input mode MODE under policy POLICY.
+(defun cooked--state-keymap (name)
+  "The local map NAME asks for, as `cooked-ownership-keymap' spells it.
 
-The policy is asked first when it is `cooked', and the mode only otherwise.
-A mode that suspends forwarding is a claim about keys on their way to the
-child, and at a prompt there are none: `cooked-peek-map' would take a line the
-user is editing and make it unusable -- read-only through
-`cooked--refresh-keymap', with `self-insert-command' remapped to send raw
-bytes straight past cooked's own line editor.  What survives the prompt is the
-render half of the mode, which no keymap carries."
+Which of the six a state comes to is `cooked--derive-ownership' and not this
+function: the choice is made from the same inputs as the rest of the record and
+is enumerated with it, and what is left here is turning the name into an object.
+That split is why a name arrives rather than an input mode and a policy -- this
+file is where the maps are, and the file where the deciding happens sits two
+layers below them."
   ;; Cleared before the choice, and set again by `cooked--forwarding-map' in
   ;; the arms that consult the frame -- so a map worn without asking about one
   ;; leaves nothing behind for `cooked--window-selection-changed' to think is
@@ -493,25 +492,22 @@ render half of the mode, which no keymap carries."
         ;; Likewise, so the forwarding evil wears above its insert state is
         ;; switched off by any refresh that chooses another map.
         cooked--semi-map-worn nil)
-  (pcase (and (not (eq policy 'cooked)) mode)
-    ((or 'still 'frozen) cooked-peek-map)
+  (pcase name
+    ('peek cooked-peek-map)
+    ;; Not asked about the frame either: `cooked-semi-map' holds the Meta
+    ;; space back on purpose.
     ('semi (setq cooked--semi-map-worn t)
            cooked-semi-map)
+    ;; Emacs owns the line, so there is nothing to forward and the frame gets
+    ;; no say.
+    ('input cooked-input-map)
     ;; The three that forward everything go through `cooked--forwarding-map',
-    ;; which is where the frame gets a say: on a graphical frame a Meta chord is
-    ;; one event that no list of character codes can name, and the map worn there
-    ;; is a child that binds it.  `cooked-input-map' is not asked -- Emacs owns
-    ;; the line, so there is nothing to forward -- and neither is
-    ;; `cooked-semi-map', which holds the Meta space back on purpose.
-    (_ (pcase policy
-         ('cooked cooked-input-map)
-         ('alt (cooked--forwarding-map cooked-alt-map))
-         ;; A marked prompt with no license reads exactly like a running command
-         ;; as far as the keyboard is concerned: the shell said where it is, so
-         ;; there is nothing left to hedge and `cooked-raw-exceptions' would only
-         ;; take keys away from a line editor that wants them.
-         ((or 'command 'prompt) (cooked--forwarding-map cooked-command-map))
-         (_ (cooked--forwarding-map cooked-raw-map))))))
+    ;; which is where the frame does get one: on a graphical frame a Meta chord
+    ;; is one event that no list of character codes can name, and the map worn
+    ;; there is a child that binds it.
+    ('alt (cooked--forwarding-map cooked-alt-map))
+    ('command (cooked--forwarding-map cooked-command-map))
+    (_ (cooked--forwarding-map cooked-raw-map))))
 
 (defvar cooked--quiet-refresh nil
   "Whether the refresh under way was asked for quietly.
@@ -525,15 +521,14 @@ Two axes meet here: `cooked--policy', which is what the child is doing, and
 `cooked-input-mode-functions', which is what the user is doing.  Both are always
 asked; where they disagree, the policy wins over the keyboard and the mode wins
 over the render.  At a prompt that means the line stays editable however the
-mode reads -- `cooked--suspended-p' and `cooked--state-keymap' each drop the
-mode's claim on the keys -- while a `still' or `frozen' still holds the view,
-which is what a child repainting a canonical tty needs and what a single
-combined flag cannot express.  A deliberate peek ends there all the same: it is
-the door out of
-forwarding, and at a prompt there is no forwarding for it to be the door out
-of.  Everywhere else the mode decides outright, which is how a peek survives a
-`raw'<->`alt' transition: it is recomputed to the same answer rather than
-preserved.
+mode reads -- `cooked--derive-ownership' drops the mode's claim on the keys in
+the SUSPENDED and KEYMAP fields alike -- while a `still' or `frozen' still
+holds the view, which is what a child repainting a canonical tty needs and what
+a single combined flag cannot express.  A deliberate peek ends there all the
+same: it is the door out of forwarding, and at a prompt there is no forwarding
+for it to be the door out of.  Everywhere else the mode decides outright, which
+is how a peek survives a `raw'<->`alt' transition: it is recomputed to the same
+answer rather than preserved.
 
 With QUIET, `cooked-state-change-hook' is not run.  That hook means \"who owns
 the keyboard changed\", and `cooked-evil-sync' acts on it by putting evil into
@@ -547,34 +542,38 @@ child that predates the keystroke being answered.
 The hook runs last, after everything here has settled, so that a handler which
 changes state and refreshes again nests cleanly: the inner refresh's decisions
 are the ones left standing."
-  (let* ((policy (cooked--policy))
-         ;; Where a deliberate peek has nothing left to mean.  A dead session
-         ;; counts with the prompt: there is no child to keep keys from and
-         ;; nothing to defer, so a buffer left suspended when the child exited
-         ;; must not stay read-only with no way back.  Cleared rather than
-         ;; merely ignored, so that `cooked-toggle-peek' answers "Already
-         ;; editable" at a prompt instead of toggling a flag nothing reads.
-         (settled (or (eq policy 'cooked) (not cooked--session)))
-         (was cooked--input-mode)
+  (let* ((was cooked--input-mode)
          (cooked--quiet-refresh (or quiet cooked--quiet-refresh))
          ;; The clearing has to happen before the mode is computed, not after:
          ;; `cooked--default-input-mode' -- and `cooked-evil--input-mode' ahead
          ;; of it -- read the flag, so clearing it afterwards would leave one
          ;; refresh's worth of freeze standing at a prompt.  A dead session is
          ;; asked nothing at all; there is no state left for a mode to describe.
-         (mode (progn (when settled (setq cooked--peek-explicit nil))
+         ;;
+         ;; Where a deliberate peek still means something is
+         ;; `cooked-ownership-peek', which is asked of a record derived before
+         ;; the mode exists: the field depends on the policy and the session and
+         ;; not on the mode.  Cleared rather than merely ignored, so that
+         ;; `cooked-toggle-peek' answers "Already editable" at a prompt instead
+         ;; of toggling a flag nothing reads.
+         (mode (progn (unless (cooked-ownership-peek (cooked--ownership))
+                        (setq cooked--peek-explicit nil))
                       (and cooked--session
                            (cooked--run-seam-until-success
                             'cooked-input-mode-functions)))))
     (setq cooked--input-mode mode)
-    ;; Only ever undoes its own protection; see `cooked--read-only'.
-    (cond ((cooked--suspended-p)
-           (setq cooked--read-only t
-                 buffer-read-only t))
-          (cooked--read-only
-           (setq cooked--read-only nil
-                 buffer-read-only nil)))
-    (use-local-map (cooked--state-keymap mode policy))
+    ;; One derivation for the two decisions below, which is the whole of what
+    ;; this function chooses; everything after the catch-up drain asks again,
+    ;; because that drain can move the state it would be asking about.
+    (let ((ownership (cooked--ownership)))
+      ;; Only ever undoes its own protection; see `cooked--read-only'.
+      (cond ((cooked-ownership-suspended ownership)
+             (setq cooked--read-only t
+                   buffer-read-only t))
+            (cooked--read-only
+             (setq cooked--read-only nil
+                   buffer-read-only nil)))
+      (use-local-map (cooked--state-keymap (cooked-ownership-keymap ownership))))
     ;; After the mode is already set, so the drain's own `cooked--set-mode' does
     ;; not find a freeze still in force and recurse back into here.
     (when (and cooked--session (eq was 'frozen) (not (eq mode 'frozen)))
@@ -609,12 +608,14 @@ are the ones left standing."
     ;; would put a cursor back until the child next drew something.
     (cooked--sync-cursor-type)
     (cooked--update-ghost-cursor)
-    (let ((owner (cooked--input-state-p)))
+    (let ((ownership (cooked--ownership)))
       ;; Recorded even for a quiet refresh, which is a refresh evil asked for and
       ;; must not be told about: what it changed is still the state the next
       ;; comparison is against.
-      (unless (eq owner cooked--ownership)
-        (setq cooked--ownership owner)
+      (unless (eq (cooked-ownership-keyboard ownership)
+                  (and cooked--announced-ownership
+                       (cooked-ownership-keyboard cooked--announced-ownership)))
+        (setq cooked--announced-ownership ownership)
         (unless cooked--quiet-refresh
           (run-hooks 'cooked-state-change-hook))))))
 
@@ -1090,7 +1091,11 @@ back to.  See `cooked-bell-pending'."
           ;; so nothing changes for `cooked--set-mode' to notice.
           (cooked--resample-mode)
           (cooked--resume-secret))
-        (when (and (eq state 'away) (eq cooked--input-mode 'frozen))
+        ;; A freeze the mode still asks for and that is no longer in force,
+        ;; which is what walking away from one means -- see `cooked--frozen-p'.
+        ;; Asked of the record rather than of the attention again, so the two
+        ;; cannot come to different answers about the same moment.
+        (when (and (eq cooked--input-mode 'frozen) (not (cooked--frozen-p)))
           (cooked--defer
            (lambda ()
              (when cooked--session (cooked--drain-and-apply)))))))))

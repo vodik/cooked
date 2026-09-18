@@ -376,7 +376,7 @@ screen for a new one."
     (with-current-buffer buffer
       (setq cooked--secret-timer nil)
       (when (pcase cooked--secret-asking
-              ('termios (eq cooked--mode 'secret))
+              ('termios (cooked--secret-p))
               ;; The termios sample trails output by up to `RESAMPLE_DELAY',
               ;; longer than the debounce, so `ssh' asking for its own
               ;; password in the foreground shows a matching row first.
@@ -466,7 +466,7 @@ leaves secret mode for it to mean anything.
 
 Cheap where it does not apply: `cooked--secret-prompt-on-row-p' asks whether
 the child is remote before it builds the row, so a local shell pays no regexp."
-  (when (and cooked--session (not (eq cooked--mode 'secret)))
+  (when (and cooked--session (not (cooked--secret-p)))
     (when scrolled (setq cooked--secret-answered nil))
     (cond ((not (cooked--secret-prompt-on-row-p))
            (setq cooked--secret-answered nil)

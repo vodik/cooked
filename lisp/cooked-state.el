@@ -4,8 +4,9 @@
 
 ;; What a cooked buffer knows about its child between drains: the cursor and the
 ;; grid as the native core last described them, the modes the child negotiated,
-;; what OSC 133 has said about the line, and `cooked--policy', which is the
-;; answer to who owns the keyboard derived from all of it.
+;; what OSC 133 has said about the line, and `cooked-ownership', which is who
+;; owns the keyboard, whether the render runs and whether the view follows,
+;; derived from all of it in one place.
 ;;
 ;; This file sits directly on cooked-util.el and below everything that renders,
 ;; forwards or binds a key, because all of those ask these questions.  It calls
@@ -157,10 +158,10 @@ it: one refuses the user's own typing outright, the other remaps
 `self-insert-command' to raw bytes that go past cooked's line editor entirely.
 
 So this stays the narrow question of who the keyboard belongs to.  The two that
-generalise past it -- does the render run, does the view follow -- ask
-`cooked--input-mode' directly; see `cooked--frozen-p' and `cooked--follow-p'."
-  (and (memq cooked--input-mode '(still frozen))
-       (cooked--child-owns-keyboard-p)))
+generalise past it -- does the render run, does the view follow -- are the
+RENDER and FOLLOW fields, which the input mode answers on its own; see
+`cooked--frozen-p' and `cooked--follow-p'."
+  (cooked-ownership-suspended (cooked--ownership)))
 
 (defvar-local cooked--attention nil
   "Whether the user is looking at this buffer: nil, `here' or `away'.
@@ -232,8 +233,7 @@ keep a picture still while it is being read; a buffer the user has left is not
 being read, and a terminal that stopped updating because its window lost
 selection is the complaint this whole distinction exists to answer.  The child
 never stopped running either way -- the freeze only ever deferred the drain."
-  (and (eq cooked--input-mode 'frozen)
-       (not (eq cooked--attention 'away))))
+  (eq (cooked-ownership-render (cooked--ownership)) 'deferred))
 
 (defun cooked--follow-p ()
   "Whether point and the window should track the child's cursor.
@@ -247,7 +247,7 @@ structurally unreachable in exactly the case a held view is worth most.
 
 Point inside the pending input is the one thing this does not speak for; see
 the `editing' binding in `cooked--apply'."
-  (not (memq cooked--input-mode '(still frozen))))
+  (cooked-ownership-follow (cooked--ownership)))
 
 (defvar-local cooked--narrowed nil
   "Whether the restriction in force is ours, from `cooked--apply-alt-pin'.")
@@ -499,6 +499,168 @@ Pruned in `cooked--render-scrolled', where entries stop being reachable: a mark
 below `cooked--screen-start' is in settled text the emulator will never speak
 about again.")
 
+(cl-defstruct (cooked-ownership (:constructor cooked--ownership-make) (:copier nil))
+  "Who owns the keyboard, whether the render runs, and whether the view follows.
+
+Those are three independent questions -- see `cooked--input-mode' for what
+happens to a terminal when they are collapsed into one flag -- and each of them
+used to be recombined from the raw state at its own call site.  That shape is
+what left `command' out of three separate checks when it was added, and what
+kept the freeze unreachable at a prompt until the follow question was split off
+from the forwarding one.  Neither was caught by the shape of the code: it was
+right because the tests pinned the combinations, not because a wrong one could
+not be written.
+
+So the recombination happens exactly once, in `cooked--derive-ownership', and
+every field here is a function of the ten inputs `cooked--ownership' collects
+for it.  A new state is then a row in that function rather than a grep across
+seven files, and `cooked-ownership-is-derived-from-its-inputs' enumerates the
+combinations so a row that answers wrongly fails before anyone runs a shell
+under it.
+
+Read through `cooked--ownership', which derives a fresh record from the buffer's
+state as it is now.  The named predicates below -- `cooked--policy' and its
+eight neighbours -- are field reads of that record and are what most callers
+should still use; they are the vocabulary the rest of the tree is written in."
+  (policy 'cooked :documentation "\
+`cooked', `prompt', `command', `raw' or `alt'; see `cooked--policy'.
+Kept as a value of its own rather than folded into KEYBOARD because the mode
+line names it and the keymap choice distinguishes four of the five.")
+  (keyboard 'emacs :documentation "\
+`emacs' or `child': who the keys being pressed are for.
+`emacs' is the `cooked' policy and nothing else -- said that way round on
+purpose, so a state arriving cannot be forgotten by a list of the states that
+qualify.  See `cooked--child-owns-keyboard-p'.")
+  (render 'live :documentation "\
+`live' or `deferred': whether a drain is applied or held back.
+`deferred' only while the user is looking; see `cooked--frozen-p'.")
+  (follow t :documentation "\
+Whether point and the window should track the child's cursor.
+The input mode alone, and deliberately not KEYBOARD; see `cooked--follow-p'.")
+  (suspended nil :documentation "\
+Whether keys are being kept from a child that has the keyboard.
+Both halves, which is what keeps a mode's claim on the keys away from a line
+Emacs is editing; see `cooked--suspended-p'.")
+  (secret nil :documentation "\
+Whether the child is reading with echo off; see `cooked--secret-p'.")
+  (license nil :documentation "\
+Whether a marked prompt was corroborated; see `cooked--ownership-license'.
+Recorded rather than recomputed so the reason for a `cooked' policy at a
+marked prompt is legible in the record itself.")
+  (peek nil :documentation "\
+Whether a deliberate `cooked-toggle-peek' is still in force.
+The flag survives a `raw'<->`alt' transition and does not survive a prompt or
+the child exiting, which is the whole of the difference between it and the
+input mode; see `cooked--peek-explicit'.")
+  (keymap 'input :documentation "\
+Which map the buffer should wear: `input', `peek', `semi', `alt', `command'
+or `raw'.  A name and not a keymap, because the maps are built two layers
+above this file and because a name is what a table test can assert on;
+`cooked--state-keymap' is what turns it into an object."))
+
+(cl-defun cooked--derive-ownership
+    (&key (mode 'cooked) alt semantic semantic-seen delegated (license t)
+          input-mode peek-explicit attention (session t))
+  "The `cooked-ownership' that the state described by the arguments comes to.
+
+Pure, and that is the point of it: it reads no buffer-local and calls nothing
+that does, so every combination of its arguments can be put to it directly.
+`cooked--ownership' is the one caller that knows where the real values live.
+
+The arguments are the ten inputs, defaulted to a buffer that has just started
+against a local shell: MODE is `cooked--mode', ALT `cooked--alt', SEMANTIC and
+SEMANTIC-SEEN the OSC 133 state, DELEGATED `cooked-line-delegated', LICENSE
+`cooked--ownership-license', INPUT-MODE `cooked--input-mode', PEEK-EXPLICIT
+`cooked--peek-explicit', ATTENTION `cooked--attention', and SESSION whether
+there is a live session at all.
+
+The policy is derived rather than reported, because no single source knows the
+answer; `cooked--policy' is where that argument is written out.  What is only
+visible from here is how the rest hangs off it.  A deliberate peek is dropped
+wherever it has nothing left to mean -- at a prompt, and after the child has
+gone -- rather than merely ignored, so that `cooked-toggle-peek' answers
+\"Already editable\" instead of toggling a flag nothing reads.  A dead session
+settles for the same reason a prompt does: there is no child to keep keys from
+and nothing to defer, and a buffer left suspended when its child exited must
+not stay read-only with no way back.
+
+The keymap follows the policy where the two disagree and the mode only
+otherwise, which is the same precedence `cooked--suspended-p' states: a mode
+that suspends forwarding is a claim about keys on their way to the child, and
+at a prompt there are none."
+  (let* ((policy
+          (cond (alt 'alt)
+                ;; A password read forwards keys too; the minibuffer collects
+                ;; them.
+                ((eq mode 'secret) 'raw)
+                ;; OSC 133 before termios: MODE is poll-sampled and
+                ;; approximate, SEMANTIC is exact and in-band.  But a mark is
+                ;; only a claim, so it takes the keyboard only with a license
+                ;; behind it.
+                ((and (eq semantic 'input) (not delegated) license) 'cooked)
+                ((eq mode 'cooked) 'cooked)
+                ((eq semantic 'input) 'prompt)
+                (semantic-seen 'command)
+                (t 'raw)))
+         (keyboard (if (eq policy 'cooked) 'emacs 'child))
+         (held (and (memq input-mode '(still frozen)) t))
+         (suspended (and held (eq keyboard 'child)))
+         ;; Where a deliberate peek, and the mode's claim on the keys with it,
+         ;; has nothing left to mean.
+         (settled (or (eq policy 'cooked) (not session))))
+    (cooked--ownership-make
+     :policy policy
+     :keyboard keyboard
+     ;; Freezing exists to keep a picture still while it is being read, and a
+     ;; buffer the user has left is not being read.
+     :render (if (and (eq input-mode 'frozen) (not (eq attention 'away)))
+                 'deferred
+               'live)
+     :follow (not held)
+     :suspended suspended
+     :secret (eq mode 'secret)
+     :license (and license t)
+     :peek (and peek-explicit (not settled) t)
+     :keymap (cond
+              (suspended 'peek)
+              ((and (eq input-mode 'semi) (eq keyboard 'child)) 'semi)
+              ;; The three that forward everything are told apart here and
+              ;; given their maps in `cooked--state-keymap'.  A marked prompt
+              ;; with no license reads exactly like a running command as far as
+              ;; the keyboard is concerned: the shell said where it is, so
+              ;; there is nothing left for `cooked-raw-exceptions' to hedge and
+              ;; it would only take keys away from a line editor that wants
+              ;; them.
+              ((eq policy 'cooked) 'input)
+              ((eq policy 'alt) 'alt)
+              ((memq policy '(command prompt)) 'command)
+              (t 'raw)))))
+
+(defun cooked--ownership ()
+  "This buffer's `cooked-ownership', derived from its state as it stands now.
+
+Derived on every call rather than latched, because the inputs move in nine
+different files and on their own schedules -- a termios poll, an OSC 133 mark,
+the alternate screen going up mid-drain -- and a latch would need every one of
+them to remember to invalidate it.  The record is small and the derivation is a
+`cond'; what a latch would buy is not worth a stale answer about who the next
+keystroke belongs to.
+
+`cooked--refresh-keymap' is the one caller that derives it once and acts on
+several fields at a time, and it stores what it decided in
+`cooked--announced-ownership'."
+  (cooked--derive-ownership
+   :mode cooked--mode
+   :alt cooked--alt
+   :semantic cooked--semantic
+   :semantic-seen cooked--semantic-seen
+   :delegated (cooked-line-delegated (cooked--line))
+   :license (cooked--ownership-license)
+   :input-mode cooked--input-mode
+   :peek-explicit cooked--peek-explicit
+   :attention cooked--attention
+   :session (and cooked--session t)))
+
 (defun cooked--policy ()
   "How the buffer should behave right now.
 
@@ -529,21 +691,12 @@ the second.
 reason `command' does not: the shell said where it was, and a shell at its own
 prompt wants every key.  It is the state a bare shell at the far end of an
 `ssh' sits in, and everything the marks buy other than the keyboard --
-extents, exit codes, `next-error', rerun -- works there unchanged."
-  (cond (cooked--alt 'alt)
-        ;; A password read forwards keys too; the minibuffer collects them.
-        ((eq cooked--mode 'secret) 'raw)
-        ;; OSC 133 before termios: `cooked--mode' is poll-sampled and
-        ;; approximate, `cooked--semantic' is exact and in-band.  But a mark is
-        ;; only a claim, so it takes the keyboard only with a license behind it.
-        ((and (eq cooked--semantic 'input)
-              (not (cooked-line-delegated (cooked--line)))
-              (cooked--ownership-license))
-         'cooked)
-        ((eq cooked--mode 'cooked) 'cooked)
-        ((eq cooked--semantic 'input) 'prompt)
-        (cooked--semantic-seen 'command)
-        (t 'raw)))
+extents, exit codes, `next-error', rerun -- works there unchanged.
+
+The derivation is `cooked--derive-ownership', which answers this and the rest of
+`cooked-ownership' from the same inputs at the same moment.  This is the field
+read, and the name the rest of the tree asks the question by."
+  (cooked-ownership-policy (cooked--ownership)))
 
 (defun cooked--ownership-license ()
   "Whether something corroborates the marked prompt enough to hand Emacs the line.
@@ -583,11 +736,11 @@ and rerun that the marks were always the point of."
   "Whether the child is reading with echo off.
 An overlay on the policy rather than one of its values: it says how input is
 collected, not who owns the screen."
-  (eq cooked--mode 'secret))
+  (cooked-ownership-secret (cooked--ownership)))
 
 (defun cooked--input-state-p ()
   "Whether Emacs should be editing rather than passing keys through."
-  (eq (cooked--policy) 'cooked))
+  (eq (cooked-ownership-keyboard (cooked--ownership)) 'emacs))
 
 (defun cooked--child-owns-keyboard-p ()
   "Whether the child, rather than Emacs, is the one being typed at.
@@ -597,12 +750,19 @@ Every policy but `cooked', which is to say `alt', `prompt', `command' and
 that qualify is what left `command' out of three separate checks when it was
 added: the answer is a property of not being at a prompt, so asking that
 directly cannot go stale when another state arrives."
-  (not (cooked--input-state-p)))
+  (eq (cooked-ownership-keyboard (cooked--ownership)) 'child))
 
-(defvar-local cooked--ownership 'unset
-  "Who owned the keyboard as of the last `cooked-state-change-hook' decision.
-`unset' until the first refresh, so a session starting against a child that
-already owns the keyboard still counts as a change and is announced.")
+(defvar-local cooked--announced-ownership nil
+  "The `cooked-ownership' the last `cooked-state-change-hook' was run for.
+
+Nil until the first refresh, so a session starting against a child that already
+owns the keyboard still counts as a change and is announced.  Only the keyboard
+field is compared against it: the hook means \"who owns the keyboard changed\",
+and a render or a keymap moving is not news `cooked-evil-sync' can act on.
+
+The one record that is kept rather than derived again -- see `cooked--ownership'
+for why that is the exception -- because what it holds is not the state now but
+the state the last announcement was made about.")
 
 (defvar cooked--refresh-hook nil
   "Normal hook run when something a buffer's keymap is derived from changes.
@@ -742,7 +902,7 @@ quiet is something the shell has to ask for, by telling us it is at a prompt."
 See `cooked-confirm-kill'."
   (pcase cooked-confirm-kill
     ('nil nil)
-    ('auto (not (cooked--input-state-p)))
+    ('auto (cooked--child-owns-keyboard-p))
     (_ t)))
 
 (defun cooked--sync-query-flag ()

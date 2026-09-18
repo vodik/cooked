@@ -1538,7 +1538,8 @@ the same certainty a local one does, by the same bytes."
     (should (equal (substring-no-properties (cooked--mode-line)) " @other prompt"))
     ;; And it keeps nothing back, for the reason `command' does not: the shell
     ;; said where it was, and a shell at its own prompt wants every key.
-    (should (eq (cooked--state-keymap nil 'prompt) cooked-command-map))
+    (should (eq (cooked--state-keymap (cooked-ownership-keymap (cooked--ownership)))
+                cooked-command-map))
     ;; The same remote host, running the full snippet.
     (setf (cooked-line-completion-nonce (cooked--line)) "1234")
     (should (eq (cooked--policy) 'cooked))
@@ -1546,6 +1547,306 @@ the same certainty a local one does, by the same bytes."
     ;; The host stays named -- it is still not this machine, and that is what
     ;; every path in the buffer now means -- but the state word moves.
     (should (equal (substring-no-properties (cooked--mode-line)) " @other edit"))))
+
+;;;; The ownership record
+
+(defconst cooked-tests--ownership-axes
+  '((:mode cooked raw secret)
+    (:alt nil t)
+    (:semantic nil prompt input output)
+    (:semantic-seen nil t)
+    (:delegated nil t)
+    (:license nil t)
+    (:input-mode nil semi still frozen)
+    (:peek-explicit nil t)
+    (:attention nil here away)
+    (:session nil t))
+  "The inputs `cooked--derive-ownership' takes, and every value each of them has.
+
+Every value, and not a sample: the states are few and the derivation is pure, so
+the whole product is 9,216 rows and a fraction of a second to walk -- which is cheaper than
+the judgement about which combinations are worth trying, and cannot be wrong the
+way that judgement was twice.  A value added to a slot is added here, and the
+count in `cooked-ownership-is-derived-from-its-inputs' says so out loud.")
+
+(defun cooked-tests--ownership-walk (axes row fn)
+  "Call FN on every combination of AXES, each prepended to ROW.
+
+AXES is `cooked-tests--ownership-axes' or a tail of it: an alist of keyword to
+the values that keyword takes.  Each call gets one plist of arguments for
+`cooked--derive-ownership'.
+
+One row at a time, and none of them kept, which is not a nicety.  Built as a
+list instead, the product is 9,216 plists held live at once, and the garbage
+collector it moves is shared with every other test in this Emacs -- the session
+handles are freed by a finalizer, so deferring a collection defers closing a
+pty.  A run of the whole suite hit EMFILE in the render oracle, five hundred
+tests later, over a list this function no longer builds."
+  (if (null axes)
+      (funcall fn row)
+    (dolist (value (cdar axes))
+      (cooked-tests--ownership-walk
+       (cdr axes) (cons (caar axes) (cons value row)) fn))))
+
+(defmacro cooked-tests--with-ownership-row (row &rest body)
+  "Run BODY, naming ROW if one of its assertions fails.
+
+`ert-info' is the usual way to do this and it does it eagerly: the message form
+is evaluated on every pass, so a `format' of the row across 9,216 rows is a
+megabyte of strings nobody reads and a garbage collection the rest of the suite
+pays for -- see `cooked-tests--ownership-walk' for why that is not free here.
+Only a failure needs the row, so only a failure builds the string."
+  (declare (indent 1))
+  `(condition-case err
+       (progn ,@body)
+     (ert-test-failed
+      (signal (car err) (cons (format "row %S" ,row) (cdr err))))))
+
+(defun cooked-tests--ownership-violations (o row)
+  "The relations OWNERSHIP O breaks for the inputs ROW, by name, or nil for none.
+
+One function returning names rather than a `should' apiece, and that is not a
+matter of taste: `should' builds a description of its own form on every
+evaluation, pass or fail, and twenty of them across 9,216 rows allocates enough
+to move the garbage collector -- which in this Emacs is what closes a finished
+session's pty, so the render oracle five hundred tests later reaches EMFILE on
+the difference.  One `should' per row, and the name says which relation went.
+
+What is checked is the relations between the fields and not the `cond' again,
+which would only assert that the derivation is what it is.  Both defects this
+record exists to prevent were relations coming apart rather than a case decided
+wrongly, and each of them is one entry below."
+  (cl-destructuring-bind
+      (&key mode alt semantic delegated license input-mode peek-explicit
+            attention session &allow-other-keys)
+      row
+    (let ((policy (cooked-ownership-policy o))
+          (keyboard (cooked-ownership-keyboard o))
+          (render (cooked-ownership-render o))
+          (keymap (cooked-ownership-keymap o))
+          (follow (cooked-ownership-follow o))
+          (suspended (cooked-ownership-suspended o))
+          (secret (cooked-ownership-secret o))
+          (peek (cooked-ownership-peek o))
+          (held (and (memq input-mode '(still frozen)) t)))
+      (delq
+       nil
+       (list
+        ;; Totality: every field is one of the values its slot documents, and
+        ;; the flags are flags rather than whatever an `and' happened to return.
+        (unless (memq policy '(cooked prompt command raw alt)) 'policy-value)
+        (unless (memq keyboard '(emacs child)) 'keyboard-value)
+        (unless (memq render '(live deferred)) 'render-value)
+        (unless (memq keymap '(input peek semi alt command raw)) 'keymap-value)
+        (unless (cl-every (lambda (flag) (memq flag '(nil t)))
+                          (list follow suspended secret peek
+                                (cooked-ownership-license o)))
+          'flags-are-flags)
+
+        ;; Emacs owns the keyboard at the `cooked' policy and nowhere else, and
+        ;; the map that edits a line is worn exactly then.  These two are what
+        ;; `command' broke: it was a new state in which the child owns the
+        ;; keyboard, and three checks spelled as lists of the states that
+        ;; qualify did not have it.
+        (unless (eq (eq keyboard 'emacs) (eq policy 'cooked)) 'keyboard-is-policy)
+        (unless (eq (eq keymap 'input) (eq keyboard 'emacs)) 'input-map-is-ownership)
+
+        ;; The alt screen outranks everything, being the one state that arrives
+        ;; at an exact position in the byte stream rather than on a poll.
+        (unless (eq (and alt t) (eq policy 'alt)) 'alt-wins)
+
+        ;; A password read is an overlay on the policy and never a line Emacs
+        ;; owns: the minibuffer collects those keys.
+        (unless (eq secret (eq mode 'secret)) 'secret-is-the-mode)
+        (when (and secret (eq keyboard 'emacs)) 'secret-keeps-the-keyboard)
+
+        ;; Following the cursor is the input mode alone -- a child that never
+        ;; took the keyboard can still be repainting, which is what made the
+        ;; freeze unreachable at a prompt when the two were one question --
+        ;; while withholding keys needs a child to withhold them from.
+        (unless (eq follow (not held)) 'follow-is-the-mode)
+        (unless (eq suspended (and held (eq keyboard 'child))) 'suspended-needs-a-child)
+        (unless (eq (eq keymap 'peek) suspended) 'peek-map-is-suspension)
+        (unless (eq (eq keymap 'semi) (and (eq input-mode 'semi) (eq keyboard 'child)))
+          'semi-map-needs-a-child)
+
+        ;; Nothing but a `frozen' mode defers a drain, and not for a buffer the
+        ;; user has walked away from; a deferred render always holds the view,
+        ;; since a picture nobody may scroll is not being kept still.
+        (unless (eq (eq render 'deferred)
+                    (and (eq input-mode 'frozen) (not (eq attention 'away))))
+          'deferred-is-a-watched-freeze)
+        (when (and (eq render 'deferred) follow) 'deferred-follows-nothing)
+
+        ;; The license is recorded as it was given, and a marked prompt that has
+        ;; none keeps the shell's own line -- as does one whose line has already
+        ;; been handed to the shell's own editor.
+        (unless (eq (cooked-ownership-license o) (and license t)) 'license-recorded)
+        (when (and (eq semantic 'input) (not alt) (not (memq mode '(secret cooked)))
+                   (not (eq policy (if (and license (not delegated)) 'cooked 'prompt))))
+          'marked-prompt-needs-a-license)
+
+        ;; A deliberate peek survives where it still means something, which is a
+        ;; live child that owns the keyboard, and nowhere else.
+        (unless (eq peek (and peek-explicit session (eq keyboard 'child)))
+          'peek-outlives-nothing)
+
+        ;; And what the user is doing never moves the keyboard: the policy wins
+        ;; over it outright, which is why a `still' at a prompt keeps the line
+        ;; editable.  The same inputs with none of the three the user drives.
+        (unless (eq keyboard
+                    (cooked-ownership-keyboard
+                     (cooked--derive-ownership
+                      :mode mode :alt alt :semantic semantic
+                      :semantic-seen (plist-get row :semantic-seen)
+                      :delegated delegated :license license :session session)))
+          'the-user-cannot-take-the-keyboard))))))
+
+(ert-deftest cooked-ownership-is-derived-from-its-inputs ()
+  "Every combination of the inputs, and what has to hold of all of them.
+
+The relations are `cooked-tests--ownership-violations', which says why they are
+the thing worth pinning rather than the `cond' written out a second time.  This
+walks the product and asks it.
+
+`cooked-policy-derives-ownership-from-all-three-signals' is the other half: it
+pins the concrete policy for nine real situations, where this pins the shape of
+every possible one."
+  (let ((seen 0))
+    (cooked-tests--ownership-walk
+     cooked-tests--ownership-axes nil
+     (lambda (row)
+       (setq seen (1+ seen))
+       (cooked-tests--with-ownership-row row
+         (should-not (cooked-tests--ownership-violations
+                      (apply #'cooked--derive-ownership row) row)))))
+    ;; 3 modes x 2 alt x 4 semantic x 2 seen x 2 delegated x 2 license
+    ;; x 4 input modes x 2 peeks x 3 attentions x 2 sessions.
+    (should (= seen 9216))))
+
+(ert-deftest cooked-ownership-answers-what-the-tree-already-pins ()
+  "The whole record for the situations other tests reach through a real child.
+
+Each row names the test that pins the same combination from the outside, where
+there is one.  Those are the expensive half of the argument -- they spawn a
+shell, wait for termios to move and read the buffer back -- and each covers one
+combination.  This is the cheap half: the same answers, written out field by
+field, so that a change to the derivation says which situation it changed rather
+than failing four files away in something about evil."
+  (pcase-dolist
+      (`(,name ,inputs ,expected)
+       '(("a canonical tty: `cat', or a shell whose readline is not running"
+          (:mode cooked)
+          (:policy cooked :keyboard emacs :render live :keymap input
+           :follow t :suspended nil :peek nil :secret nil))
+         ("a marked prompt on a local shell -- cooked-a-mark-alone-does-not-buy-the-keyboard"
+          (:mode raw :semantic input :semantic-seen t :license t)
+          (:policy cooked :keyboard emacs :render live :keymap input
+           :follow t :suspended nil :peek nil :secret nil))
+         ("the same prompt behind an ssh that announces nothing"
+          (:mode raw :semantic input :semantic-seen t :license nil)
+          (:policy prompt :keyboard child :render live :keymap command
+           :follow t :suspended nil :peek nil :secret nil))
+         ("a line already handed to the shell's own editor -- cooked-delegation-hands-the-whole-line-to-the-shell"
+          (:mode raw :semantic input :semantic-seen t :license t :delegated t)
+          (:policy prompt :keyboard child :render live :keymap command
+           :follow t :suspended nil :peek nil :secret nil))
+         ("a marked command running -- the state `command' was added for"
+          (:mode raw :semantic output :semantic-seen t :license t)
+          (:policy command :keyboard child :render live :keymap command
+           :follow t :suspended nil :peek nil :secret nil))
+         ("a raw read with no integration at all"
+          (:mode raw)
+          (:policy raw :keyboard child :render live :keymap raw
+           :follow t :suspended nil :peek nil :secret nil))
+         ("a password read -- cooked-a-silent-secret-read-is-still-detected"
+          (:mode secret)
+          (:policy raw :keyboard child :render live :keymap raw
+           :follow t :suspended nil :peek nil :secret t))
+         ("a full-screen program started straight from a marked prompt"
+          (:mode raw :alt t :semantic input :semantic-seen t :license t)
+          (:policy alt :keyboard child :render live :keymap alt
+           :follow t :suspended nil :peek nil :secret nil))
+         ("evil normal state over it -- cooked-evil-normal-state-does-not-outlive-the-child"
+          (:mode raw :alt t :input-mode still)
+          (:policy alt :keyboard child :render live :keymap peek
+           :follow nil :suspended t :peek nil :secret nil))
+         ("a deliberate peek over it -- cooked-toggle-peek-freezes-the-render-and-thaws-on-exit"
+          (:mode raw :alt t :input-mode frozen :peek-explicit t :attention here)
+          (:policy alt :keyboard child :render deferred :keymap peek
+           :follow nil :suspended t :peek t :secret nil))
+         ("the child gone, the peek with it -- cooked-a-child-that-exits-while-suspended-hands-the-buffer-back"
+          (:mode raw :input-mode nil :peek-explicit t :session nil)
+          (:policy raw :keyboard child :render live :keymap raw
+           :follow t :suspended nil :peek nil :secret nil))
+         ("the same freeze, the user having walked away -- cooked-reaching-for-the-minibuffer-is-not-walking-away"
+          (:mode raw :alt t :input-mode frozen :peek-explicit t :attention away)
+          (:policy alt :keyboard child :render live :keymap peek
+           :follow nil :suspended t :peek t :secret nil))
+         ("`brew upgrade' repainting a canonical tty, held still"
+          (:mode cooked :input-mode frozen :attention here)
+          (:policy cooked :keyboard emacs :render deferred :keymap input
+           :follow nil :suspended nil :peek nil :secret nil))
+         ("evil insert state over a full-screen program -- cooked-evil-hybrid-insert"
+          (:mode raw :input-mode semi)
+          (:policy raw :keyboard child :render live :keymap semi
+           :follow t :suspended nil :peek nil :secret nil))
+         ("evil insert state at a prompt, where there is nothing to hold back"
+          (:mode cooked :input-mode semi)
+          (:policy cooked :keyboard emacs :render live :keymap input
+           :follow t :suspended nil :peek nil :secret nil))))
+    (let ((o (apply #'cooked--derive-ownership inputs)))
+      (ert-info (name)
+        (should (eq (cooked-ownership-policy o) (plist-get expected :policy)))
+        (should (eq (cooked-ownership-keyboard o) (plist-get expected :keyboard)))
+        (should (eq (cooked-ownership-render o) (plist-get expected :render)))
+        (should (eq (cooked-ownership-keymap o) (plist-get expected :keymap)))
+        (should (eq (cooked-ownership-follow o) (plist-get expected :follow)))
+        (should (eq (cooked-ownership-suspended o) (plist-get expected :suspended)))
+        (should (eq (cooked-ownership-peek o) (plist-get expected :peek)))
+        (should (eq (cooked-ownership-secret o) (plist-get expected :secret)))))))
+
+(ert-deftest cooked-the-predicates-are-field-reads-of-the-record ()
+  "The nine names the tree is written in, answering out of the one record.
+
+They are kept because they are the vocabulary: `cooked--input-state-p' at a call
+site says what is being asked in a way `(eq (cooked-ownership-keyboard
+\(cooked--ownership)) \\='emacs)' does not.  What they are not any more is nine
+separate recombinations of the raw state, and this is what says so -- each is
+compared against the field it stands for, over the same buffer."
+  (with-temp-buffer
+    (pcase-dolist (`(,mode ,alt ,semantic ,seen ,input-mode ,attention)
+                   '((cooked nil nil    nil nil    nil)
+                     (cooked nil input  t   frozen here)
+                     (raw    nil input  t   nil    nil)
+                     (raw    nil output t   still  nil)
+                     (raw    t   nil    nil frozen away)
+                     (secret nil nil    nil semi   here)))
+      (setq-local cooked--mode mode
+                  cooked--alt alt
+                  cooked--semantic semantic
+                  cooked--semantic-seen seen
+                  cooked--input-mode input-mode
+                  cooked--attention attention
+                  cooked--host nil
+                  cooked--line-record nil
+                  cooked--session nil)
+      (let ((o (cooked--ownership)))
+        (ert-info ((format "%S" (list mode alt semantic seen input-mode attention)))
+          (should (eq (cooked--policy) (cooked-ownership-policy o)))
+          (should (eq (cooked--input-state-p)
+                      (eq (cooked-ownership-keyboard o) 'emacs)))
+          (should (eq (cooked--child-owns-keyboard-p)
+                      (eq (cooked-ownership-keyboard o) 'child)))
+          (should (eq (cooked--suspended-p) (cooked-ownership-suspended o)))
+          (should (eq (cooked--frozen-p)
+                      (eq (cooked-ownership-render o) 'deferred)))
+          (should (eq (cooked--follow-p) (cooked-ownership-follow o)))
+          (should (eq (cooked--secret-p) (cooked-ownership-secret o)))
+          (should (eq (cooked--ownership-license) (cooked-ownership-license o)))
+          (let ((cooked-confirm-kill 'auto))
+            (should (eq (cooked--query-on-kill-p)
+                        (eq (cooked-ownership-keyboard o) 'child)))))))))
 
 (ert-deftest cooked-delegation-hands-the-whole-line-to-the-shell ()
   "The line reaches ZLE, the cursor is put back, and Emacs stops owning it.

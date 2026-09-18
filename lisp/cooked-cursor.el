@@ -116,7 +116,8 @@ one jumping around it.
 A hidden cursor is honoured by default: every full-screen program drawing a
 frame, `less', and any progress bar worth the name relies on that.  Two cases
 override it, and both are cases where point is the only cursor there is.  The
-user has stepped out, which the mode alone answers -- `still' or `frozen'.
+user has stepped out, which the mode alone answers -- `still' or `frozen',
+which is `cooked--follow-p' saying the view is being held rather than followed.
 Or Emacs is editing the line, which `cooked--input-state-p' alone is too wide
 to say, because `brew upgrade' hides the cursor and repaints progress bars
 without ever leaving canonical mode.  Under a shell that sends OSC 133 we know
@@ -124,7 +125,7 @@ which of the two it is, and while a command is running the child's `CSI ?25l'
 is about the picture it is painting and is honoured."
   (let ((shape (cond ((and cooked--cursor (cooked-cursor-visible cooked--cursor))
                       (cooked--cursor-type))
-                     ((memq cooked--input-mode '(still frozen)) t)
+                     ((not (cooked--follow-p)) t)
                      ((and (cooked--input-state-p)
                            (not (eq cooked--semantic 'output)))
                       t))))
