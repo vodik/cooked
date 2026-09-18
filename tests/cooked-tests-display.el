@@ -484,7 +484,14 @@ or answered by Emacs, whichever is wrong there.
 reporting.  What it must not do is rebuild anything on the ordinary selection
 change, so the three cases are all here: same frame type, a buffer that has
 just *lost* the selection rather than gained it, and the one that asks for a
-refresh -- deferred, because this hook runs inside redisplay."
+refresh -- deferred, because this hook runs inside redisplay.
+
+And a fourth, on a real tty frame and with nothing stubbed: the argument a
+*buffer-local* entry on `window-selection-change-functions' is handed is the
+window showing the buffer, not the frame, which is the only way this hook is
+ever called in a session.  `display-graphic-p' signals on a window rather than
+coercing it, so the case that has to work is the one the code was never asked
+about."
   (with-temp-buffer
     (cooked-mode)
     (cooked-tests--display-buffer)
@@ -508,7 +515,51 @@ refresh -- deferred, because this hook runs inside redisplay."
           (should deferred)
           (funcall deferred)
           (should refreshed))))
-    (kill-buffer "*cooked-tests-elsewhere*")))
+    (kill-buffer "*cooked-tests-elsewhere*"))
+  (cooked-tests--with-tty-frame
+    (with-temp-buffer
+      (cooked-mode)
+      ;; Worn as for a graphical frame, so that the tty frame the window is on
+      ;; really is the other kind and the deferral really is asked for.
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+        (cooked--state-keymap nil 'raw))
+      (set-window-buffer (frame-root-window) (current-buffer))
+      (let ((deferred nil)
+            ;; `cooked-debug' so nothing of ours swallows a signal either; what
+            ;; hid this in the field was Emacs muting the hook for us.
+            (cooked-debug t))
+        (cl-letf (((symbol-function 'cooked--defer) (lambda (f) (setq deferred f))))
+          (cooked--window-selection-changed (frame-root-window)))
+        (should deferred)))))
+
+(ert-deftest cooked-selecting-a-cooked-window-and-back-signals-nothing ()
+  "The hook above, reached the way a session reaches it.
+
+`cooked-mode' adds `cooked--window-selection-changed' buffer-locally, and
+Emacs calls a buffer-local entry once per window showing the buffer, with the
+*window*.  It calls it inside redisplay through `safe_call', which reports a
+signal to `*Messages*' and carries on -- so the only thing a broken hook does
+is fill the log and silently skip the re-wear it exists for, which is why this
+went unnoticed until a user read `*Messages*'.
+
+A real tty frame, because that is where redisplay runs in batch and where
+`display-graphic-p' has a real answer to give."
+  (cooked-tests--with-tty-frame
+    (with-temp-buffer
+      (cooked-mode)
+      (cooked--state-keymap nil 'raw)
+      (set-window-buffer (frame-root-window) (current-buffer))
+      (let ((other (split-window)))
+        (redisplay t)
+        (with-current-buffer "*Messages*"
+          (let ((inhibit-read-only t)) (erase-buffer)))
+        (select-window other)
+        (redisplay t)
+        (select-window (frame-first-window))
+        (redisplay t)
+        (should-not (string-match-p
+                     "Error muted"
+                     (with-current-buffer "*Messages*" (buffer-string))))))))
 
 (ert-deftest cooked-a-bookmark-records-where-the-shell-was ()
   "A position cannot be what a bookmark into a terminal means: the buffer is

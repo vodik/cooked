@@ -963,8 +963,15 @@ window selection."
   (and cooked--keymap-frame-type
        (not (eq cooked--keymap-frame-type (cooked--frame-keymap-type frame)))))
 
-(defun cooked--window-selection-changed (frame)
-  "Report focus, and re-wear the keymap if FRAME spells Meta differently.
+(defun cooked--window-selection-changed (window-or-frame)
+  "Report focus, and re-wear the keymap if WINDOW-OR-FRAME spells Meta differently.
+
+A window or a frame, and which one is not ours to choose:
+`window-selection-change-functions' hands its default value the frame that
+changed, and a buffer-local entry -- which is how `cooked-mode' adds this one
+-- the window showing the buffer.  Everything below wants the frame, and
+`display-graphic-p' signals rather than coerce, so the window is resolved to
+its frame first.
 
 Two things that want the same moment.  Focus is the reason this hook was
 installed; the keymap is here because nothing else runs when a buffer moves
@@ -990,11 +997,14 @@ every other reaction to a window hook: this runs inside redisplay, and
 asked again on the other side of the deferral, since by then the user may have
 moved back."
   (cooked--report-focus)
-  (when (and (cooked--keymap-frame-stale-p frame)
-             (eq (window-buffer (frame-selected-window frame)) (current-buffer)))
-    (cooked--defer (lambda ()
-                     (when (cooked--keymap-frame-stale-p)
-                       (cooked--refresh-keymap))))))
+  (let ((frame (if (windowp window-or-frame)
+                   (window-frame window-or-frame)
+                 window-or-frame)))
+    (when (and (cooked--keymap-frame-stale-p frame)
+               (eq (window-buffer (frame-selected-window frame)) (current-buffer)))
+      (cooked--defer (lambda ()
+                       (when (cooked--keymap-frame-stale-p)
+                         (cooked--refresh-keymap)))))))
 
 (defun cooked--user-window ()
   "The window the user is working in, looking past an active minibuffer.
