@@ -287,5 +287,30 @@ having looked at the buffer at all."
                    (cooked-tests--red)))
     (should (= 0 cooked--pending-styles))))
 
+(ert-deftest cooked-a-decorated-batch-of-scrollback-keeps-its-colours-eager ()
+  "A decoration reads the face off the text as it lands, so it cannot wait.
+
+`cooked--apply-shade' blends the cell's own two colours into the `face' it
+writes over the shade, so a rendition that arrived later would be both
+invisible to the blend and written over it.  The block is the unit either way,
+so a batch with any decoration span on it is coloured as it is inserted."
+  (cooked-tests--with-session
+      (list "/bin/sh" "-c"
+            (concat "i=0; while [ $i -lt 90 ]; do "
+                    "printf '\033[31m\342\226\222\342\226\222\033[0m shade %s\n' $i; "
+                    "i=$((i+1)); done; sleep 5"))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "shade 89" (cooked-tests--text)))))
+    (goto-char (point-min))
+    (should (search-forward "▒" nil t))
+    (let ((pos (match-beginning 0)))
+      (should (< pos (cooked--screen-start-position)))
+      (should-not (get-text-property pos 'cooked-pending-style))
+      (should (= 0 cooked--pending-styles))
+      ;; Whether the shade is painted at all depends on what this Emacs can
+      ;; display; what the eagerness is for is that the rendition is there to
+      ;; be read either way.
+      (should (get-text-property pos 'face)))))
+
 (provide 'cooked-tests-lazy-style)
 ;;; cooked-tests-lazy-style.el ends here

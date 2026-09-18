@@ -616,6 +616,9 @@ The answer is a two-element plist, for the caller to add in the same
 there is nothing to defer -- an unstyled batch, or the deferral switched off.
 So a caller reads it as \"is this batch deferred\" as well.
 
+Whether a batch *may* be deferred is the caller's question and not this one's:
+`cooked--render-scrolled' keeps a decorated batch eager, and says why.
+
 The value is a fresh cons holding PACKED and nothing else.  Fresh because the
 property functions compare values with `eq' and the interval is what says
 where the batch begins: two batches sharing a value would read as one."

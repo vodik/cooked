@@ -1500,6 +1500,15 @@ command's output out of the middle. The insertions are all at a batch's edges �
 newline `cooked--place-seam` writes, and the next batch above it — and plain `insert`
 inherits no properties, so neither lands inside one.
 
+**A decorated batch stays eager.** `cooked--apply-shade` reads the face off the very
+characters it covers and blends the cell's two colours into the `face` it then writes
+there, so a rendition arriving afterwards would be both invisible to the blend and written
+over it. A box glyph would survive — its bitmap is uncoloured and takes the face at
+display time — but the two travel in one block and telling them apart is not worth a
+second pass. So a batch carrying any decoration span is coloured as it is inserted, which
+costs it exactly what it cost before. Decorated scrollback is the rare case anyway: a
+full-screen program repaints the alternate screen, where nothing scrolls off at all.
+
 **Links do not wait; faces do.** Both ride the same records, and the split is not
 symmetric because the two are read differently. A face is read by redisplay, and only ever
 about text on screen. A link id is read off the buffer without anything being displayed —

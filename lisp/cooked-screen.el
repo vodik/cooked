@@ -484,7 +484,19 @@ text property and what it costs.  Its links do go on now; see
              ;; Before the render, which needs to be told whether the debt was
              ;; taken on: an unstyled batch, or the deferral switched off for a
              ;; test, is coloured as it is inserted like any other text.
-             (owed (cooked--defer-styles (cadr block)))
+             ;;
+             ;; And so is a batch carrying decorations, however styled it is,
+             ;; because a decoration reads the face off the very characters it
+             ;; covers as it lands: `cooked--apply-shade' blends the cell's two
+             ;; colours into the `face' it then writes there, so a deferred
+             ;; rendition would be both invisible to the blend and, arriving
+             ;; afterwards, written over it.  A box glyph would survive -- its
+             ;; bitmap is uncoloured and takes the face at display time -- but
+             ;; the two travel together in one block and the distinction is not
+             ;; worth a second pass to draw.  Decorated scrollback is rare (a
+             ;; full-screen program repaints the alternate screen, where nothing
+             ;; scrolls off) and this costs it only what it cost before.
+             (owed (unless (nth 2 block) (cooked--defer-styles (cadr block))))
              (start (progn (goto-char (or seam cooked--screen-start))
                            (cooked--render-block block nil nil nil (and owed t)))))
         ;; Scrollback never changes again, so it is protected once, here, rather
