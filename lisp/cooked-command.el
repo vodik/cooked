@@ -497,7 +497,9 @@ untouched, which is the default and costs one variable lookup per copy."
   ;; still owed its colours would otherwise be copied as plain text, where the
   ;; same copy a moment after the region was displayed carried its faces.  See
   ;; `cooked--settle-styles'.
-  (cooked--settle-styles beg end)
+  ;; Either order, which `filter-buffer-substring' permits and a mouse selection
+  ;; dragged upwards produces.
+  (cooked--settle-styles (min beg end) (max beg end))
   (let ((text (funcall filter beg end delete)))
     (if cooked-copy-strip-box-borders
         (cooked--strip-box-borders text)
