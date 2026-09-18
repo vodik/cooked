@@ -1534,6 +1534,16 @@ rendition it already had changes nothing. Under a child that does genuinely chur
 thousands of renditions the deferral degrades to the eager behaviour, which is the right
 direction to degrade in.
 
+**The theme seam this opened has been closed underneath it.** While a colour was written
+onto the text, a deferred batch resolved *late* — at the moment somebody looked at it —
+and an already-paid batch resolved *early*, so a theme change between the output and the
+looking put a visible seam somewhere in the middle of the transcript, at a position
+decided by where the user had happened to scroll. That was documented here as the one way
+deferred scrollback differs from scrollback already coloured. It differs in nothing now:
+`cooked--face-build` puts a face on the text rather than a colour, so both kinds of batch
+resolve at redisplay, every time, and the seam has nowhere to fall. The deferral is left
+as a pure throughput device, which is all it was ever meant to be.
+
 Two smaller consequences, both deliberate. The pass is registered when the first batch is
 deferred and not per drain, because `jit-lock-register` marks the *whole buffer*
 unfontified — see `cooked--owe-fontification`, and the typing test that catches the
@@ -1541,6 +1551,62 @@ alternative. And `cooked--settle-styles` runs outside `cooked--fontify-region`'s
 and alt-screen guards, because the debt belongs to the text and not to the session: a
 child that has exited leaves `cooked--session` nil and a transcript that outlives it, and
 scrolling back through that transcript is precisely when the deferral has to come good.
+
+## `cooked--face-build`: a colour the theme can still move
+
+A cell that the child printed in ANSI red used to arrive in the buffer as `(:foreground
+"#a60000")`, resolved by reading `ansi-color-red`'s foreground at the moment the row was
+drawn. That is what `ansi-color.el` does to this day — `ansi-color--face-vec-face` writes
+`(:background ,(face-background ...))` — and it is a decision that spreads. A theme change
+then had to flush a cache of resolved faces, ask the core to send every row again, and
+redraw every live screen to provoke it; a face edited outside a theme ran no hook at all,
+so `set-face-attribute` needed an advice to notice; and none of it reached the scrollback,
+which kept the colours of whatever theme was loaded when those rows scrolled off. A
+transcript scrolled through after a light/dark flip was half one palette and half the
+other.
+
+The text wears a face now. Index N comes out as an `:inherit` of `cooked-fg-N` for a
+foreground and `cooked-bg-N` for a background, sixteen faces of each, and
+`cooked--sync-ansi-faces` is the whole of following a theme: it compares what the sixteen
+indices resolve to against the last answer and moves the faces that changed with
+`set-face-attribute`. Redisplay does the rest, wherever the text is — the live screen, the
+scrollback, a batch that has not been coloured yet, text already copied into another
+buffer. Nothing is flushed, nothing is walked, no row is sent again, and the `face`
+property on a red run is the same cons before and after, which is what
+`cooked-scrollback-follows-a-theme-whether-it-was-coloured-or-not` asserts with `eq`.
+
+**Why not inherit `ansi-color-red` itself**, which is what vterm and eat effectively do
+with faces of their own, and what would need no synchronisation at all: because those
+faces name *both* colours. `ansi-color-red` is `:foreground "red3" :background "red3"`, so
+a cell inheriting it for its foreground comes out on a red background too. A face plist
+cannot inherit one attribute of a face and not another, so cooked keeps a face per index
+per channel and pays sixteen comparisons on a theme change instead. `cooked-fg-N` could
+have been given an `:inherit ansi-color-N` instead of a copied colour, which would have
+saved the foreground sync — but not the background one, and one mechanism for both
+channels was worth more than half a mechanism saved.
+
+**What stays baked, and why each one has to.** The 256-colour cube and RGB, because the
+child named an absolute colour and there is no palette entry for a theme to have an
+opinion about; every other terminal does the same. A shade's blend, because a blend is a
+third colour that has to be computed from two — `cooked--reblend-shades` is on
+`cooked-theme-change-hook` and rewrites it in place, in the scrollback too, so it follows
+without being a face. And an indexed SGR 58 underline colour, because `:underline` takes a
+colour and has nowhere to put a face; that one is the only reason
+`cooked--theme-changed` can still ask for a redraw, and `cooked--bakes-an-indexed-color-p`
+looks for it first, so an ordinary session's theme change costs nothing. Conceal needed no
+baking in the end: it copies one colour onto the other, and copying the *specification*
+rather than the resolved colour means a concealed cell on an indexed background wears that
+index's faces and follows like anything else.
+
+`cooked-bold-is-bright` is the one colour setting that still redraws, and it is not a
+colour: it changes which face a rendition wears — `cooked-fg-1` becomes `cooked-fg-9` —
+rather than what that face is, so the plists have to be rebuilt and put on the text again.
+
+One thing had to be given back. Reading a colour off a rendition is no longer a
+`plist-get`, because the plist does not have one; `cooked--face-color` follows the single
+step of inherit chain instead. There is no stock function for this — `face-attribute`
+takes a face *name* and signals on an anonymous plist — and the caller that needs it is
+`cooked--shade-face`, which has to have the colour itself to mix.
 
 ## A transcript has parts, and three subsystems ask for them in three different words
 

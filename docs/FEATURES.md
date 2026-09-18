@@ -497,12 +497,18 @@ terminal draws it.
   so `│ src/main.rs │` copies as `src/main.rs`. It is off by default because `tree` draws
   its branches with the same characters. `cooked-write-output` always writes the copied
   text with trailing blanks trimmed, so a padded row does not reach the file.
-- **Colours follow your theme.** ANSI 0–15 resolve through the `ansi-color-*` faces, so a
-  theme that styles those wins; `cooked-color-names` is only a fallback. One `face`
+- **Colours follow your theme, including the scrollback.** ANSI 0–15 resolve through the
+  `ansi-color-*` faces, so a theme that styles those wins; `cooked-color-names` is only a
+  fallback. The colour is never written onto the text: a red run wears `cooked-fg-1`, one
+  of sixteen faces per channel that cooked keeps in step with the `ansi-color-*` ones, so
+  loading a theme recolours everything already in the buffer — a transcript you scrolled
+  past an hour ago included — with nothing redrawn. Colours from the 256-colour cube and
+  truecolour stay as the child gave them, as they do in every terminal. One `face`
   property carries a run: comint leaves `font-lock-defaults` at `(nil t)`, under which the
   first fontification strips a bare `face`, so `cooked-mode` clears it.
   `cooked-bold-is-bright` draws bold text in colours 0–7 in their bright twins, as
-  xterm's `boldColors` does; it is off by default.
+  xterm's `boldColors` does; it is off by default, and toggling it does redraw, since it
+  changes which colour a cell is asking for rather than what that colour is.
 - **Evil.** Evil's states decide how much of the keyboard the child gets, and cooked
   moves the state itself when a full-screen program takes over. `[[`/`]]` walk prompts,
   `vic`/`vac` select a command's output or the whole record, normal state keeps the view
