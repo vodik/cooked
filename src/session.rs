@@ -3566,4 +3566,107 @@ mod tests {
         let update = wait_for_within(&session, 10.0, |u| rendered(u).contains("12 40"));
         assert!(rendered(&update).contains("12 40"));
     }
+
+    /// Emacs' thread gets the terminal while a read is still being parsed, not after.
+    ///
+    /// The mechanism [`PARSE_SLICE`] and [`Shared::hand_over`] describe, stated as the
+    /// thing it is for. A waiter takes the lock over and over through
+    /// [`Session::term`] -- the same [`Shared::term_for_lisp`] a drain, a resize and
+    /// every accessor go through -- while [`Shared::feed`] parses two megabytes, and
+    /// records the backlog it found each time. A backlog strictly between nothing and
+    /// the finished total is an acquisition that landed in the middle of the parse,
+    /// which is exactly what could not happen before: one `feed` held the lock from the
+    /// first byte to the last, so every acquisition saw either the backlog before it or
+    /// the backlog after it and nothing in between.
+    ///
+    /// That assertion is about an ordering and not about a duration, so it does not care
+    /// how loaded the machine is. The wait is asserted too, against half of the parse
+    /// this test measured for itself rather than against a figure written down here --
+    /// the unsliced wait is the whole parse, so half of it tells the two apart with a
+    /// factor of a hundred of slack for a descheduled waiter.
+    ///
+    /// `feed` is called directly rather than through a child flooding the pty because
+    /// the reader's read size is the pty's business: a child that hands it four
+    /// kilobytes at a time would never reach a slice boundary, and the test would go
+    /// quietly green with the slicing deleted. This is the reader's own call, with the
+    /// reader's own argument.
+    #[test]
+    fn a_waiter_takes_the_terminal_mid_parse() {
+        const LINES: usize = 36_000;
+        let data: Vec<u8> = (0..LINES)
+            .flat_map(|i| {
+                format!("line {i:06} the quick brown fox jumps over the lazy dog\r\n").into_bytes()
+            })
+            .collect();
+        // A child that says nothing, so the only parse in flight is the one below.
+        let (session, _read) = session(&["/bin/sh", "-c", "sleep 30"]);
+
+        let parsing = AtomicBool::new(true);
+        let (elapsed, drawable, seen) = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let mut seen: Vec<(usize, Duration)> = Vec::new();
+                while parsing.load(Ordering::SeqCst) {
+                    let asked = Instant::now();
+                    let term = session.term();
+                    let waited = asked.elapsed();
+                    seen.push((term.backlog(), waited));
+                    drop(term);
+                    std::thread::yield_now();
+                }
+                seen
+            });
+            let start = Instant::now();
+            let (drawable, outbound) = session.shared.feed(&data, false);
+            let elapsed = start.elapsed();
+            parsing.store(false, Ordering::SeqCst);
+            assert!(outbound.is_empty(), "plain text owes the child nothing");
+            (elapsed, drawable, waiter.join().expect("waiter"))
+        });
+
+        assert!(drawable, "thirty-six thousand lines are worth drawing");
+        let total = session.term().backlog();
+        let mid = seen
+            .iter()
+            .filter(|(backlog, _)| (1..total).contains(backlog))
+            .count();
+        assert!(
+            mid > 0,
+            "no acquisition landed mid-parse: {} tries against a final backlog of {total}",
+            seen.len()
+        );
+        let worst = seen
+            .iter()
+            .map(|(_, waited)| *waited)
+            .max()
+            .expect("the waiter ran at least once");
+        assert!(
+            worst < elapsed / 2,
+            "waited {worst:?} for the lock against a {elapsed:?} parse"
+        );
+
+        // And the slicing lost nothing: every line the parse was given is in the
+        // scrollback, in order, none of them cut in two at a slice boundary.
+        let update = session.drain();
+        let scrolled: Vec<String> = update
+            .delta
+            .scrolled
+            .iter()
+            .map(|line| {
+                line.runs
+                    .iter()
+                    .map(|run| run.text.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            scrolled.len() + 24 >= LINES,
+            "{} lines scrolled off, {LINES} fed",
+            scrolled.len()
+        );
+        let wrong = scrolled
+            .iter()
+            .enumerate()
+            .find(|(i, line)| line.trim_end() != format!("line {i:06} the quick brown fox jumps over the lazy dog"));
+        assert!(wrong.is_none(), "line out of order or cut in two: {wrong:?}");
+    }
 }
