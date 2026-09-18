@@ -402,6 +402,25 @@ Skipped where the `xterm-direct' terminfo entry is not installed."
        (when (frame-live-p frame) (delete-frame frame t))
        (delete-process pty))))
 
+(defmacro cooked-tests--with-ansi-red (color &rest body)
+  "Run BODY with a theme that gives `ansi-color-red' a foreground of COLOR.
+
+A real `enable-theme', not a `set-face-attribute', so that what is exercised
+is the hook path a user's `load-theme' takes.  The theme is enabled and then
+taken out of `custom-known-themes' again, because a theme defined in one test
+and left behind is a theme the next one loads."
+  (declare (indent 1) (debug (form body)))
+  `(progn
+     (custom-declare-theme 'cooked-tests-red nil)
+     (put 'cooked-tests-red 'theme-settings nil)
+     (custom-theme-set-faces 'cooked-tests-red
+                             (list 'ansi-color-red (list (list t :foreground ,color))))
+     (unwind-protect
+         (progn (enable-theme 'cooked-tests-red) ,@body)
+       (disable-theme 'cooked-tests-red)
+       (setq custom-known-themes (delq 'cooked-tests-red custom-known-themes))
+       (cooked-tests--settle (lambda () (null cooked--theme-redraw-timer))))))
+
 (defun cooked-tests--realized-colors (buffer char)
   "The foreground and background the selected tty frame draws CHAR in.
 

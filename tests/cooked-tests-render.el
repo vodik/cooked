@@ -230,6 +230,40 @@ it unchanged."
                 (should (equal (foreground ?X) "#c80000")))
             (customize-set-variable 'cooked-bold-is-bright saved)))))))
 
+(ert-deftest cooked-a-theme-reaches-the-terminal-without-cooked-drawing-a-row ()
+  "The colour going out to a tty is the theme's, and cooked sent nothing new.
+
+Read off a real frame rather than off the text, because the claim is about
+redisplay and not about a plist: the `face' on the cell says `cooked-fg-1' both
+before and after, and what has to be true is that Emacs paints Q in the new red
+anyway.  So the frame is redrawn -- by Emacs, from the buffer it already has --
+and the escape sequence it emits for Q is read back.
+
+`cooked--redraw-every-screen' is counted and must stay at nought.  Rendering
+every live row again is what a theme change used to cost, and the only thing
+that still asks for it is an indexed SGR 58 underline colour, which nothing
+here prints."
+  (cooked-tests--with-tty-frame
+    (cooked-tests--with-session
+        '("/bin/sh" "-c" "printf '\\033[31mQ\\033[0m\\n'; sleep 5")
+      (should (cooked-tests--settle
+               (lambda () (string-search "Q" (cooked-tests--text)))))
+      (let ((buffer (current-buffer))
+            (redraws 0))
+        (cl-flet ((foreground ()
+                    (car (cooked-tests--realized-colors buffer ?Q))))
+          (should (equal (foreground)
+                         (apply #'format "#%02x%02x%02x"
+                                (mapcar (lambda (v) (ash v -8))
+                                        (color-values (cooked--color 1))))))
+          (cl-letf (((symbol-function 'cooked--redraw-every-screen)
+                     (lambda () (cl-incf redraws))))
+            (cooked-tests--with-ansi-red "#123456"
+              (should (equal (foreground) "#123456"))
+              (cooked-tests--settle
+               (lambda () (null cooked--theme-redraw-timer)))
+              (should (= redraws 0)))))))))
+
 (ert-deftest cooked-bold-is-bright-is-off-by-default ()
   "A program asking for bold blue gets bold blue unless the user says otherwise."
   (should-not (eval (car (get 'cooked-bold-is-bright 'standard-value)))))
@@ -4139,28 +4173,43 @@ nothing to redraw because nothing on this screen bakes a themed colour; see
       (should (equal (cooked--face-color before :foreground) (cooked--color 1)))
       ;; Nothing in the plist is the colour itself.
       (should-not (plist-get before :foreground))
-      (custom-declare-theme 'cooked-tests-red nil)
-      (put 'cooked-tests-red 'theme-settings nil)
-      (custom-theme-set-faces 'cooked-tests-red
-                              '(ansi-color-red ((t :foreground "#123456"))))
-      (unwind-protect
-          (cl-letf* ((redraw (symbol-function 'cooked--redraw-every-screen))
-                     ((symbol-function 'cooked--redraw-every-screen)
-                      (lambda () (cl-incf redraws) (funcall redraw))))
-            (enable-theme 'cooked-tests-red)
-            (disable-theme 'cooked-tests-red)
-            (enable-theme 'cooked-tests-red)
-            (should (equal (face-foreground 'ansi-color-red nil t) "#123456"))
-            ;; No settling: the faces moved inside `enable-theme' itself.
-            (should (equal (cooked--face-color (get-text-property pos 'face)
-                                               :foreground)
-                           "#123456"))
-            (should (eq (get-text-property pos 'face) before))
-            (cooked-tests--settle (lambda () (null cooked--theme-redraw-timer)))
-            (should (= redraws 0)))
-        (disable-theme 'cooked-tests-red)
-        (setq custom-known-themes (delq 'cooked-tests-red custom-known-themes))
-        (cooked-tests--settle (lambda () (null cooked--theme-redraw-timer)))))))
+      (cl-letf* ((redraw (symbol-function 'cooked--redraw-every-screen))
+                 ((symbol-function 'cooked--redraw-every-screen)
+                  (lambda () (cl-incf redraws) (funcall redraw))))
+        (cooked-tests--with-ansi-red "#123456"
+          ;; Enabled twice with a disable between, as switching theme usually is.
+          (disable-theme 'cooked-tests-red)
+          (enable-theme 'cooked-tests-red)
+          (should (equal (face-foreground 'ansi-color-red nil t) "#123456"))
+          ;; No settling: the faces moved inside `enable-theme' itself.
+          (should (equal (cooked--face-color (get-text-property pos 'face)
+                                             :foreground)
+                         "#123456"))
+          (should (eq (get-text-property pos 'face) before))
+          (cooked-tests--settle (lambda () (null cooked--theme-redraw-timer)))
+          (should (= redraws 0)))))))
+
+(ert-deftest cooked-an-indexed-underline-colour-still-costs-a-theme-a-redraw ()
+  "The one rendition that bakes a themed colour is the one that still redraws.
+
+`:underline' takes a colour and has no room for a face, so SGR 58 with a
+palette index is resolved when the row is drawn and cannot follow a theme by
+itself.  `cooked--bakes-an-indexed-color-p' looks for exactly that, which is
+why an ordinary session pays nothing; here the child prints one and the deferred
+pass finds it."
+  (cooked-tests--with-session
+      ;; Curly underline in ANSI red under plain text.
+      '("/bin/sh" "-c" "printf '\\033[4:3;58:5:1munder\\033[0m'; exec sleep 30")
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "under" (cooked-tests--text)))))
+    (should (cooked--bakes-an-indexed-color-p))
+    (let ((redraws 0))
+      (cl-letf (((symbol-function 'cooked--redraw-every-screen)
+                 (lambda () (cl-incf redraws))))
+        (cooked--theme-changed)
+        (should (cooked-tests--settle
+                 (lambda () (null cooked--theme-redraw-timer))))
+        (should (= redraws 1))))))
 
 (ert-deftest cooked-an-ansi-face-edited-outside-a-theme-recolours-the-screen ()
   "A `set-face-attribute' on an ANSI face reaches the screen with no hook to run.

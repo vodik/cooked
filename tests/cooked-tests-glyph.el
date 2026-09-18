@@ -567,6 +567,29 @@ the same colour, so the character stays invisible wherever no stretch is drawn."
       (should (equal (cooked-tests--shade-color beg) "#bcbcbc"))
       (should (equal (car (get-text-property beg 'cooked-shade)) 2)))))
 
+(ert-deftest cooked-a-shade-in-an-indexed-colour-blends-through-the-inherit ()
+  "A blend needs the colour itself, and an indexed cell does not carry one.
+
+The cell wears `cooked-fg-1' and names no `:foreground', so reading the plist
+for one answers nil and the shade would be mixed from the default pair --
+which is what `cooked--face-color' is for.  The theme is moved underneath to
+check both halves at once: the blend follows through the inherit chain, and
+`cooked--reblend-shades' puts the new one on the text, in the scrollback as
+well as on the screen."
+  (cooked-tests--with-session
+      '("/bin/sh" "-c"
+        ;; Half-shade in ANSI red on an RGB black, so only one end is indexed.
+        "printf '\\033[31m\\033[48;2;0;0;0m\\342\\226\\222\\033[0m\\n'; sleep 5")
+    (cooked-tests--cell 9 20)
+    (should (cooked-tests--settle
+             (lambda () (get-text-property (point-min) 'cooked-shade))))
+    (let ((beg (point-min)))
+      (should (equal (cooked-tests--shade-color beg)
+                     (cooked--blend (cooked--color 1) "#000000" 0.5)))
+      (cooked-tests--with-ansi-red "#ff0000"
+        (should (equal (cooked-tests--shade-color beg)
+                       (cooked--blend "#ff0000" "#000000" 0.5)))))))
+
 (ert-deftest cooked-the-blank-between-shades-draws-nothing ()
   "`░ ░' puts no `display' on the blank the wire absorbed between the shades.
 It would be a picture of the background the space already shows."

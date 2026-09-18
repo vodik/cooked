@@ -312,5 +312,53 @@ so a batch with any decoration span on it is coloured as it is inserted."
       ;; be read either way.
       (should (get-text-property pos 'face)))))
 
+(ert-deftest cooked-scrollback-follows-a-theme-whether-it-was-coloured-or-not ()
+  "Rows in the scrollback do not keep the colours they were drawn in any more.
+
+That sentence was true of every version that wrote a colour onto the text, and
+it is the thing this file's own deferral made worse: with a batch coloured
+whenever somebody first looked at it, the seam between the old theme and the
+new one could fall anywhere in the transcript.  There is no seam now, because
+there is no colour on the text -- a red run wears `cooked-fg-1' and that face
+is what the theme moves.
+
+Both kinds of scrollback are here on purpose.  One batch is paid before the
+theme lands, so it holds a `face' value built under the old red; the batch
+after it is still owing, and is paid afterwards.  They have to agree, and they
+have to agree on the new colour.  Nothing is redrawn and nothing walks the
+buffer: the paid batch's `face' is the very same cons after the theme as
+before, which is what `eq' is asserting."
+  (let ((loop (concat "i=0; while [ $i -lt 90 ]; do "
+                      "printf '\\033[31mred\\033[0m line %s\\n' $i; i=$((i+1)); done; ")))
+    (cooked-tests--with-session
+        (list "/bin/sh" "-c" (concat loop "read -r _; " loop "sleep 5"))
+      (cooked-tests--settled-flood)
+      ;; The first flood, paid: this is scrollback carrying faces built under
+      ;; the theme in force when it scrolled off.
+      (cooked-tests--fontify)
+      (let ((paid (cooked-tests--scrollback-red))
+            (owing nil))
+        (should (= 0 cooked--pending-styles))
+        ;; And a second flood behind it, which nobody has looked at.
+        (cooked--send-to-child "\n")
+        (should (cooked-tests--settle (lambda () (> cooked--pending-styles 0))))
+        (setq owing (car (cooked-tests--pending-style-positions)))
+        (should owing)
+        (should-not (get-text-property owing 'face))
+        (let ((face (get-text-property paid 'face)))
+          (should face)
+          (should (equal (cooked--face-color face :foreground) (cooked--color 1)))
+          (cooked-tests--with-ansi-red "#123456"
+            (should (eq (get-text-property paid 'face) face))
+            (should (equal (cooked--face-color face :foreground) "#123456"))
+            (cooked-tests--fontify)
+            (should (equal (cooked--face-color (get-text-property owing 'face)
+                                               :foreground)
+                           "#123456")))
+          ;; And back again when the theme goes, with the same value on the text.
+          (should (eq (get-text-property paid 'face) face))
+          (should (equal (cooked--face-color face :foreground)
+                         (cooked--color 1))))))))
+
 (provide 'cooked-tests-lazy-style)
 ;;; cooked-tests-lazy-style.el ends here
