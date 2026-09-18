@@ -312,7 +312,7 @@ the one thing the whole drain reads off them before it repaints: whether point
 was on the screen.  Point and `cooked--point' are kept where they were relative
 to the screen's start, so a buffer left at its cursor still follows the cursor
 when it is shown, however much scrollback went in above it meanwhile."
-  (cooked--install-resources update)
+  (cooked--apply-resources update)
   (let* ((screen (cooked--screen-start-position))
          (on-screen (and screen (>= (point) screen) (- (point) screen)))
          (recorded (and screen cooked--point (>= cooked--point screen)
@@ -392,7 +392,7 @@ window that fell behind."
     (seq-filter (lambda (w) (>= (window-point w) start))
                 (delq (selected-window) (get-buffer-window-list nil nil t)))))
 
-(defun cooked--install-resources (update)
+(defun cooked--apply-resources (update)
   "Record the images, links and renditions UPDATE's rows refer to by id.
 
 Before any rendering: this is the drain's third category -- neither a level
@@ -698,152 +698,198 @@ and correcting for it once per drain is the oscillation itself."
      ((cooked-viewport-follow viewport)
       (cooked--pin-transcript-bottom (append here others) target (point-max))))))
 
+(defun cooked--reflow-width (update)
+  "The width this buffer's rows are laid out at, when UPDATE rewrapped them.
+
+A drain reporting another width has rewrapped the primary screen's rows, which
+moves every character on them to another cell; the width the buffer's rows are
+laid out at is the last drain's, and that is what `cooked--capture-viewport'
+needs to count the places it carries.  Nil when nothing was rewrapped.
+
+Nil too with `cooked-rejoin-wrapped-lines' off, where the rows that scroll into
+history keep newlines nothing marks, so the logical lines a position is counted
+in cannot be read back; and nil on the alternate screen, which is clipped rather
+than rewrapped."
+  (let ((was (cooked-grid-width cooked--grid))
+        (now (plist-get update :width)))
+    (and was now (/= was now)
+         cooked-rejoin-wrapped-lines
+         (not cooked--alt) (not (plist-get update :alt))
+         was)))
+
+(defun cooked--apply-scrollback (update)
+  "Hand UPDATE's evicted rows to the scrollback, and say where they landed.
+
+The answer is where this drain's scrollback begins, for resolving a `scrolled'
+anchor against, and nil when the drain evicted nothing.
+
+The rows the buffer already holds are promoted first, since they are the batch's
+first rows and the top of the screen, and the rest is inserted after them."
+  (let ((promoted (when-let* ((promoted (plist-get update :promoted)))
+                    (cooked--promote-rows promoted (plist-get update :height))))
+        (inserted (when-let* ((scrolled (plist-get update :scrolled)))
+                    (cooked--render-scrolled scrolled))))
+    (or promoted inserted)))
+
+(defun cooked--apply-rows (update viewport)
+  "Write UPDATE's damaged rows, and place what a rewrap moved.
+
+Returns the bounds `cooked--render-rows' rewrote, for
+`cooked--notify-rows-rendered'.
+
+The places are put back here, right after the rows and before anything else
+inserts or deletes: a place is counted in the lines as the render leaves them.
+VIEWPORT's `wandered' is answered by that count, the rewrap having given the
+cell point sat on to another character."
+  (let ((rendered (cooked--render-rows (plist-get update :rows)
+                                       (plist-get update :alt)
+                                       (cooked-viewport-relocations viewport)
+                                       (plist-get update :edits))))
+    (when-let* ((reflow (cooked-viewport-reflow viewport)))
+      (setf (cooked-viewport-wandered viewport)
+            (cooked--place-reflowed (cooked-viewport-relocations viewport)
+                                    reflow (plist-get update :width))))
+    rendered))
+
+(defun cooked--apply-events (update batch-start rendered)
+  "React to everything in UPDATE that is not a row.
+
+BATCH-START is where this drain's scrollback began, from
+`cooked--apply-scrollback', and RENDERED the bounds `cooked--apply-rows' wrote.
+
+After both render passes, which is what every step here needs: a mark's anchor
+is resolved against text that has to be in the buffer before it can be pointed
+at, and `cooked-row-rendered-functions' is documented against that order too."
+  ;; Cleared before the events, so a drain that both scrolls and then clears
+  ;; stays pinned.
+  (when batch-start (setq cooked--pin-screen-top nil))
+  ;; A drain that both resizes and carries a fresh mark should end with the
+  ;; fresh mark's own anchor.
+  (cooked--relocate-marks (plist-get update :marks) batch-start)
+  ;; Batched, so a drain that asks for the whole palette is answered in one
+  ;; write rather than one per entry.  See `cooked--batching-replies'.
+  (cooked--batching-replies cooked--session
+    (dolist (event (plist-get update :events))
+      (cooked--handle-event event batch-start)))
+  (cooked--notify-rows-rendered rendered)
+  ;; After the render, so the cursor is where this drain put it: a row the URL
+  ;; guess declined while the cursor sat on it has to be asked for again once
+  ;; the cursor has moved on.
+  (cooked--release-held-link-row)
+  ;; And the other question that can only be asked once the cursor has landed:
+  ;; whether a *remote* child is at a password prompt.  The termios detector
+  ;; fires on a change of the local tty, which a remote child never makes, so
+  ;; there is no transition to hang it off -- see `cooked--check-secret-prompt'.
+  (cooked--check-secret-prompt batch-start))
+
+(defun cooked--apply-shape (update batch-start pending)
+  "Shape the screen region UPDATE's rows were written into, and give PENDING back.
+
+BATCH-START is where this drain's scrollback began, from
+`cooked--apply-scrollback'.
+
+The seam is split immediately before the assertion that reads it, which is the
+whole reason it is here rather than riding `cooked--trim-scrollback' at the foot
+of the drain.  The two are one subject -- the seam the emulator and the buffer
+co-own -- and a drain that evicts a wrapped row with
+`cooked-rejoin-wrapped-lines' off remakes the emulator's claim about a
+continuation the buffer never took.  Reset after the assertion had already
+looked, the claim was still standing when it looked, which is why the assertion
+had to exclude this mode instead of covering it.  See `cooked--split-seam'."
+  (cooked--fit-screen)
+  (cooked--pad-to-cursor)
+  (cooked--split-seam (and batch-start (plist-get update :alt)))
+  (when cooked-debug (cooked--check-seam))
+  (cooked--restore-pending-input pending)
+  (cooked--protect (or (and (cooked--input-state-p) (cooked--input-start-position))
+                       (point-max)))
+  (cooked--apply-alt-pin)
+  ;; After the rows and the scrollback have both landed: the pointer overlay's
+  ;; start has to be put back on the screen marker a scroll just moved, or it
+  ;; spreads up into history.  See `cooked--sync-pointer-shape'.
+  (when cooked--pointer-overlay (cooked--sync-pointer-shape)))
+
+(defun cooked--apply-view (viewport)
+  "Put the view VIEWPORT captured back on top of what the drain wrote.
+
+The mark goes before the point block, not after it: under evil this leaves
+visual state, and evil adjusts point on the way into normal state -- so cooked's
+own pin has to be the last thing to speak about where point ends up."
+  (when (cooked-viewport-stale-mark viewport) (cooked--deactivate-mark))
+  (cooked--place-point viewport)
+  ;; Recorded, not merely left in the buffer: a window not showing this buffer
+  ;; has a stale point marker Emacs will restore on the way back, over the top
+  ;; of this.  See `cooked--point'.
+  (setq cooked--point (point))
+  (cooked--scroll-windows viewport)
+  ;; After `cooked--scroll-windows', which is what decides where each window's
+  ;; start belongs: forcing a window before that would force it a second time
+  ;; once the start then moved.  See `cooked--repaint-pending'.
+  (cooked--flush-pending-repaint)
+  ;; After the window block, not before it: see `cooked--sync-cursor-type'.
+  (cooked--sync-cursor-type)
+  (cooked--update-ghost-cursor))
+
 (defun cooked--apply (update)
   "Apply UPDATE, the plist returned by `cooked--drain'.
 
 The order below is the whole of it, and every step depends on the one above:
 resources before the rows that name them, the viewport before the render that
 invalidates it, the render before the marks resolved against the text it wrote,
-and the region shaped before anything measures it."
+and the region shaped before anything measures it.  Each step says in its own
+docstring why it stands where it does; this is the list, and nothing here does
+anything a stage does not do.
+
+The three steps that are still bindings rather than calls are the ones later
+steps read: the cursor two of them decode against, the viewport the render
+invalidates, and the pending input lifted out before the rows move under it.
+
+`cooked--place-seam' and `cooked--apply-shifts' sit between the scrollback and
+the rows and have to be exactly there.  After the scrollback, because the rows a
+scroll pushed off the top are inserted above `cooked--screen-start' or promoted
+past it, and the shift's first row is measured from the marker once that has
+moved it.  Before the damaged rows, because their indices are in post-shift
+coordinates -- the emulator's dirty flags travel with their rows through every
+move precisely so that they can be.  `tests/cooked-tests-oracle.el' is what
+holds that order in place: the read-back there fails five generated cases in
+five with the shifts moved after the rows."
   ;; First, so a reader reached from inside this drain does not ask for another.
   (setq cooked--withheld nil)
-  (cooked--install-resources update)
+  (cooked--apply-resources update)
   ;; `let*', emphatically: these initialisers delete and insert, and under plain
   ;; `let' they would run before the two bindings above them took effect -- so a
   ;; protected buffer would abort the redisplay half-done from inside the process
   ;; filter, and lifting the pending input would land in the undo history.  They
-  ;; are the pair `cooked--with-child-edit' binds, spelled out because a body this
-  ;; long is not worth nesting one level deeper.
+  ;; are the pair `cooked--with-child-edit' binds, spelled out because the
+  ;; sequence below is not worth nesting one level deeper.
   (let* ((inhibit-read-only t)
          (buffer-undo-list t)
          ;; Decoded once, here, for the two readers below that need it at
          ;; different moments: the render passes and `cooked--apply-levels'.
          (cursor (cooked--cursor-decode (plist-get update :cursor)))
-         ;; A third dynamic binding for the duration of the apply, and here in
-         ;; the `let*' rather than wrapped around it precisely because `let*'
-         ;; binds in order: the two render passes below are initialisers, and
-         ;; they are what this is for.  It is the box the window and the cell
-         ;; size are measured into once, instead of once per decoration record
-         ;; -- see `cooked--deco-pass', which has the numbers.
+         ;; Two more dynamic bindings, here in the `let*' rather than wrapped
+         ;; around it precisely because `let*' binds in order: the render below
+         ;; is an initialiser, and it is what both are for.  The first is the box
+         ;; the window and the cell size are measured into once instead of once
+         ;; per decoration record; the second is where this drain is putting the
+         ;; cursor, which `cooked--cursor' cannot say until `cooked--apply-levels'
+         ;; runs below the render, and which a glyph run has to be broken at.
+         ;; See `cooked--deco-pass' and `cooked--deco-cursor'.
          (cooked--deco-pass (list 'unset))
-         ;; And a fourth, for the same window: where this drain is putting the
-         ;; child's cursor.  `cooked--apply-levels' is below the render passes and
-         ;; has to stay there, so `cooked--cursor' is still the *previous* drain's
-         ;; answer while the rows are being written -- and a glyph run has to be
-         ;; broken at the cursor this drain puts on it.  See `cooked--deco-cursor'.
          (cooked--deco-cursor
           (cons (cooked-cursor-row cursor) (cooked-cursor-chars cursor)))
-         ;; A drain reporting another width has rewrapped the primary screen's
-         ;; rows, which moves every character on them to another cell; the width
-         ;; the buffer's rows are laid out at is the last drain's.  Not with
-         ;; `cooked-rejoin-wrapped-lines' off, where the rows that scroll into
-         ;; history keep newlines nothing marks, so the logical lines a
-         ;; position is counted in cannot be read back; nor on the alternate
-         ;; screen, which is clipped rather than rewrapped.
-         (viewport (cooked--capture-viewport
-                    (let ((was (cooked-grid-width cooked--grid))
-                          (now (plist-get update :width)))
-                      (and was now (/= was now)
-                           cooked-rejoin-wrapped-lines
-                           (not cooked--alt) (not (plist-get update :alt))
-                           was))))
+         (viewport (cooked--capture-viewport (cooked--reflow-width update)))
          (pending (cooked--take-pending-input))
-         ;; Where this drain's scrollback landed, for resolving a `scrolled'
-         ;; anchor against.  nil when the drain evicted nothing.  The rows the
-         ;; buffer already holds are promoted first, since they are the batch's
-         ;; first rows and the top of the screen, and the rest is inserted after
-         ;; them.
-         (batch-start (let ((promoted (when-let* ((promoted (plist-get update :promoted)))
-                                        (cooked--promote-rows
-                                         promoted (plist-get update :height))))
-                            (inserted (when-let* ((scrolled (plist-get update :scrolled)))
-                                        (cooked--render-scrolled scrolled))))
-                        (or promoted inserted)))
+         (batch-start (cooked--apply-scrollback update))
          ;; After the scrollback, which is what the line ends or continues after,
          ;; and before anything is measured from `cooked--screen-start'.
          (_ (cooked--place-seam (plist-get update :head) (plist-get update :alt)))
-         ;; Between the two render passes, and it has to be exactly here.  After the
-         ;; scrollback, because the rows a scroll pushed off the top are inserted above
-         ;; `cooked--screen-start' or promoted past it, and the shift's first row is
-         ;; measured from the marker once that has moved it.  Before the damaged rows, because their
-         ;; indices are in post-shift coordinates -- the emulator's dirty flags travel
-         ;; with their rows through every move precisely so that they can be.  See
-         ;; `cooked--apply-shifts'.
          (_ (cooked--apply-shifts (plist-get update :shifts)))
-         (rendered (cooked--render-rows (plist-get update :rows)
-                                        (plist-get update :alt)
-                                        (cooked-viewport-relocations viewport)
-                                        (plist-get update :edits)))
-         ;; Right after the rows, before anything else inserts or deletes: a
-         ;; place is counted in the lines as the render leaves them.
-         (_ (when-let* ((reflow (cooked-viewport-reflow viewport)))
-              (setf (cooked-viewport-wandered viewport)
-                    (cooked--place-reflowed
-                     (cooked-viewport-relocations viewport)
-                     reflow (plist-get update :width))))))
+         (rendered (cooked--apply-rows update viewport)))
     (cooked--apply-levels update cursor)
-    ;; Cleared before the events, so a drain that both scrolls and then clears
-    ;; stays pinned.
-    (when batch-start (setq cooked--pin-screen-top nil))
-    ;; After both render passes and before the events: a mark's anchor is
-    ;; resolved against text that has to be in the buffer before it can be
-    ;; pointed at, and a drain that both resizes and carries a fresh mark should
-    ;; end with the fresh mark's own anchor.
-    (cooked--relocate-marks (plist-get update :marks) batch-start)
-    ;; Batched, so a drain that asks for the whole palette is answered in one
-    ;; write rather than one per entry.  See `cooked--batching-replies'.
-    (cooked--batching-replies cooked--session
-      (dolist (event (plist-get update :events))
-        (cooked--handle-event event batch-start)))
-    ;; After both, which is the ordering `cooked-row-rendered-functions' is
-    ;; documented against.
-    (cooked--notify-rows-rendered rendered)
-    ;; After the render, so the cursor is where this drain put it: a row the URL
-    ;; guess declined while the cursor sat on it has to be asked for again once
-    ;; the cursor has moved on.
-    (cooked--release-held-link-row)
-    ;; And the other question that can only be asked once the cursor has landed:
-    ;; whether a *remote* child is at a password prompt.  The termios detector
-    ;; fires on a change of the local tty, which a remote child never makes, so
-    ;; there is no transition to hang it off -- see `cooked--check-secret-prompt'.
-    (cooked--check-secret-prompt batch-start)
-    (cooked--fit-screen)
-    (cooked--pad-to-cursor)
-    ;; Immediately before the assertion, which is the whole reason it is here
-    ;; rather than riding `cooked--trim-scrollback' at the foot of the drain.
-    ;; The two are one subject -- the seam the emulator and the buffer co-own --
-    ;; and a drain that evicts a wrapped row with `cooked-rejoin-wrapped-lines'
-    ;; off remakes the emulator's claim about a continuation the buffer never
-    ;; took.  Reset after the assertion had already looked, the claim was still
-    ;; standing when it looked, which is why the assertion had to exclude this
-    ;; mode instead of covering it.  See `cooked--split-seam'.
-    (cooked--split-seam (and batch-start (plist-get update :alt)))
-    (when cooked-debug (cooked--check-seam))
-    (cooked--restore-pending-input pending)
-    (cooked--protect (or (and (cooked--input-state-p) (cooked--input-start-position))
-                         (point-max)))
-    (cooked--apply-alt-pin)
-    ;; After the rows and the scrollback have both landed: the pointer overlay's
-    ;; start has to be put back on the screen marker a scroll just moved, or it
-    ;; spreads up into history.  See `cooked--sync-pointer-shape'.
-    (when cooked--pointer-overlay (cooked--sync-pointer-shape))
-    ;; Before the point block, not after it: under evil this leaves visual state,
-    ;; and evil adjusts point on the way into normal state -- so cooked's own pin
-    ;; has to be the last thing to speak about where point ends up.
-    (when (cooked-viewport-stale-mark viewport) (cooked--deactivate-mark))
-    (cooked--place-point viewport)
-    ;; Recorded, not merely left in the buffer: a window not showing this buffer
-    ;; has a stale point marker Emacs will restore on the way back, over the top
-    ;; of this.  See `cooked--point'.
-    (setq cooked--point (point))
-    (cooked--scroll-windows viewport)
-    ;; After `cooked--scroll-windows', which is what decides where each window's
-    ;; start belongs: forcing a window before that would force it a second time
-    ;; once the start then moved.  See `cooked--repaint-pending'.
-    (cooked--flush-pending-repaint)
-    ;; After the window block, not before it: see `cooked--sync-cursor-type'.
-    (cooked--sync-cursor-type)
-    (cooked--update-ghost-cursor)
+    (cooked--apply-events update batch-start rendered)
+    (cooked--apply-shape update batch-start pending)
+    (cooked--apply-view viewport)
     (when cooked--exit (cooked--on-exit cooked--exit)))
   ;; Both outside the `let*', and in this order.  The binding above is what kept
   ;; this drain out of the undo history, and a discard has to reach the buffer's

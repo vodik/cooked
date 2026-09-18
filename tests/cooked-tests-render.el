@@ -4362,3 +4362,127 @@ comes out in the new theme's colours from ids the core already sent."
                                             :foreground)
                                  "#123456"))))))
         (should-not announced)))))
+
+;;;; The stages of `cooked--apply', each called on its own
+
+;; `cooked--apply' is a list of calls, and the order is the algorithm; the
+;; randomized check that the order is still right is
+;; `tests/cooked-tests-oracle.el', which fails when two of these are swapped.
+;; What follows is the other half: each stage asked its own question, with the
+;; rest of the drain not running, so that a change to one of them fails here
+;; before it fails as a screen somewhere that is subtly wrong.
+
+(ert-deftest cooked-apply-resources-records-a-link-before-any-row-names-it ()
+  "The resources stage puts a drain's link id in the table the render reads."
+  (cooked-tests--with-fed-screen 3 20
+    (cooked--feed cooked--session
+                  "\e]8;;https://example.invalid/\e\\link\e]8;;\e\\")
+    (let ((update (cooked--drain cooked--session t nil t)))
+      (should (plist-get update :links))
+      (setq cooked--link-uris nil)
+      (cooked--apply-resources update)
+      (should (member "https://example.invalid/"
+                      (hash-table-values cooked--link-uris))))))
+
+(ert-deftest cooked-the-reflow-width-is-the-width-the-rows-were-laid-out-at ()
+  "Only a drain that rewrapped the primary screen names a width to count from."
+  (cooked-tests--with-fed-screen 3 20
+    (should-not (cooked--reflow-width '(:width 20)))
+    (should (= (cooked--reflow-width '(:width 10)) 20))
+    (should-not (cooked--reflow-width '(:width 10 :alt t)))
+    (let ((cooked-rejoin-wrapped-lines nil))
+      (should-not (cooked--reflow-width '(:width 10))))))
+
+(ert-deftest cooked-the-scrollback-stage-says-where-the-evicted-rows-landed ()
+  "Rows that scrolled off the top are in the buffer above the screen, at the answer."
+  (cooked-tests--with-fed-screen 2 10
+    (cooked-tests--fed "one\r\ntwo")
+    (cooked--feed cooked--session "\r\nthree")
+    (let* ((update (cooked--drain cooked--session t nil t))
+           (inhibit-read-only t)
+           (buffer-undo-list t)
+           (start (cooked--apply-scrollback update)))
+      (should start)
+      (should (equal (cooked-tests--at start 3) "one"))
+      (should (< start (cooked--screen-start-position))))))
+
+(ert-deftest cooked-the-shift-stage-moves-the-rows-and-not-their-text ()
+  "A scroll replayed on its own leaves the rows under it in their new places."
+  (cooked-tests--with-fed-screen 3 10
+    (cooked-tests--fed "one\r\ntwo\r\nthree")
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t))
+      (cooked--apply-shifts '((0 2 1 t))))
+    (should (equal (cooked-tests--screen-row-text 0) "two"))
+    (should (equal (cooked-tests--screen-row-text 1) "three"))))
+
+(ert-deftest cooked-the-row-stage-writes-the-damaged-rows-and-names-what-it-wrote ()
+  "The rows arrive, and their bounds come back for `cooked-row-rendered-functions'."
+  (cooked-tests--with-fed-screen 3 10
+    (cooked-tests--fed "one")
+    (cooked--feed cooked--session "\r\ntwo")
+    (let* ((update (cooked--drain cooked--session t nil t))
+           (inhibit-read-only t)
+           (buffer-undo-list t)
+           (cooked--deco-pass (list 'unset))
+           (cooked--deco-cursor (cons 0 0))
+           (viewport (cooked--capture-viewport nil))
+           (rendered (cooked--apply-rows update viewport)))
+      (should (equal (cooked-tests--screen-row-text 1) "two"))
+      (should rendered)
+      (should (equal (buffer-substring-no-properties (car (car rendered))
+                                                     (cdr (car rendered)))
+                     "two")))))
+
+(ert-deftest cooked-the-levels-stage-adopts-the-shape-the-drain-reports ()
+  "The grid, the cursor and the modes are the drain's, for redisplay to read."
+  (cooked-tests--with-fed-screen 3 10
+    (cooked-tests--fed "one")
+    (let* ((update (cooked--drain cooked--session t nil t))
+           (cursor (cooked--cursor-decode (plist-get update :cursor))))
+      (cooked--apply-levels (append (list :height 9 :width 40 :used 4 :head 2
+                                          :app-cursor t :exit nil)
+                                    update)
+                            cursor)
+      (should (= (cooked-grid-height cooked--grid) 9))
+      (should (= (cooked-grid-width cooked--grid) 40))
+      (should (= (cooked-grid-used cooked--grid) 4))
+      (should (= (cooked-grid-head cooked--grid) 2))
+      (should cooked--app-cursor)
+      (should (eq cooked--cursor cursor)))))
+
+(ert-deftest cooked-the-event-stage-unpins-the-screen-and-announces-the-rows ()
+  "A drain that scrolled drops the pin, and the rows it wrote are announced once."
+  (cooked-tests--with-fed-screen 3 10
+    (cooked-tests--fed "one")
+    (setq cooked--pin-screen-top t)
+    (let* ((row (cooked--screen-start-position))
+           (announced nil)
+           (cooked-row-rendered-functions
+            (list (lambda (beg end) (push (cons beg end) announced)))))
+      (cooked--apply-events (list :events nil :marks nil) row
+                            (list (cons row (+ row 3))))
+      (should-not cooked--pin-screen-top)
+      (should (equal announced (list (cons row (+ row 3))))))))
+
+(ert-deftest cooked-the-shape-stage-pads-the-cursor-row-back-out ()
+  "A row trimmed shorter than the cursor is extended again, and stays read-only."
+  (cooked-tests--with-fed-screen 3 10
+    (cooked-tests--fed "$ ")
+    (let ((inhibit-read-only t)
+          (buffer-undo-list t))
+      (goto-char (cooked--screen-start-position))
+      (delete-region (1- (line-end-position)) (line-end-position))
+      (should (equal (cooked-tests--screen-row-text 0) "$"))
+      (cooked--apply-shape (list :alt nil) nil nil))
+    (should (equal (cooked-tests--screen-row-text 0) "$ "))
+    (should (get-text-property (cooked--screen-start-position) 'read-only))))
+
+(ert-deftest cooked-the-view-stage-puts-point-back-and-records-it ()
+  "A following view ends at the cursor, and the buffer remembers where that was."
+  (cooked-tests--with-fed-screen 3 10
+    (cooked-tests--fed "one")
+    (goto-char (point-min))
+    (cooked--apply-view (cooked--viewport-make :follow t))
+    (should (= (point) (cooked--point-after-input)))
+    (should (= cooked--point (point)))))
