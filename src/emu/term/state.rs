@@ -2,6 +2,51 @@
 
 use super::*;
 
+/// Where each of this drain's marks has moved to, keyed by id, for resolving the anchor
+/// an [`Event::Mark`] was queued with.
+///
+/// A scan of the relocations themselves for the ordinary drain, which carries a handful of
+/// marks and usually no mark event at all, and a map once there are enough of both to pay
+/// for building one. The pathological shape is a flood of prompts: the 800k-sequence
+/// `osc_dispatch` benchmark brings about 5000 events and 5500 relocations to a single
+/// drain, and one scan per event is 29 million comparisons -- three quarters of that
+/// benchmark's time before the map existed.
+///
+/// The map keeps the first anchor filed under an id, which is the entry a scan would have
+/// found. Ids are unique in practice -- an id is on one cell of one row -- so this only
+/// says what happens if they ever are not.
+enum MarkIndex<'a> {
+    Scan(&'a [(MarkId, Anchor)]),
+    Map(HashMap<MarkId, Anchor>),
+}
+
+impl<'a> MarkIndex<'a> {
+    /// How to look MARKS up for EVENTS events, whichever way is cheaper.
+    ///
+    /// The threshold is a product rather than either length: the cost of scanning is one
+    /// per pair, and the cost of the map is one per mark plus an allocation.
+    fn of(marks: &'a [(MarkId, Anchor)], events: usize) -> Self {
+        if marks.len() * events <= 256 {
+            return Self::Scan(marks);
+        }
+        let mut map = HashMap::with_capacity(marks.len());
+        for &(id, at) in marks {
+            map.entry(id).or_insert(at);
+        }
+        Self::Map(map)
+    }
+
+    fn get(&self, id: MarkId) -> Option<Anchor> {
+        match self {
+            Self::Scan(marks) => marks
+                .iter()
+                .find(|(mark, _)| *mark == id)
+                .map(|(_, at)| *at),
+            Self::Map(map) => map.get(&id).copied(),
+        }
+    }
+}
+
 impl Levels {
     /// Read every level off the emulator as it stands.
     pub(super) fn of(state: &State) -> Self {
@@ -456,9 +501,10 @@ impl State {
         let marks = self.take_marks();
         let mut events = std::mem::take(&mut self.events);
         self.bell_queued = false;
+        let moved = MarkIndex::of(&marks, events.len());
         for event in &mut events {
             if let Event::Mark(_, at, id) = event {
-                *at = self.anchor_in_characters(*at, *id, &marks);
+                *at = self.anchor_in_characters(*at, *id, &moved);
             }
         }
         let levels = Levels::of(self);
@@ -550,10 +596,10 @@ impl State {
     ///
     /// A row still on the grid is measured as it stands. A row that has scrolled away is
     /// no longer anywhere to measure, but the mark ID left on its cell was measured as the
-    /// row departed, and MARKS, this drain's relocations, carry that measurement. A mark
+    /// row departed, and MOVED, this drain's relocations, carry that measurement. A mark
     /// with neither -- its cell overwritten before the row went -- keeps its column,
     /// which is still right on a row with no wide character before it.
-    fn anchor_in_characters(&self, at: Anchor, id: MarkId, marks: &[(MarkId, Anchor)]) -> Anchor {
+    fn anchor_in_characters(&self, at: Anchor, id: MarkId, moved: &MarkIndex<'_>) -> Anchor {
         match at.row.checked_sub(self.evicted_total) {
             Some(index) => Anchor {
                 col: self
@@ -562,10 +608,7 @@ impl State {
                     .map_or(at.col, |row| row.chars_before(at.col)),
                 ..at
             },
-            None => marks
-                .iter()
-                .find(|(mark, _)| *mark == id)
-                .map_or(at, |(_, moved)| *moved),
+            None => moved.get(id).unwrap_or(at),
         }
     }
 

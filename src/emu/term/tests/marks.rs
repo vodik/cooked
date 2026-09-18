@@ -532,6 +532,44 @@ fn a_mark_scrolled_away_after_a_wide_character_is_anchored_by_characters() {
     assert_eq!(delta.marks, vec![(MarkId::from_index(0), anchor)]);
 }
 
+/// The same agreement when there are enough marks and events for the drain to index its
+/// relocations rather than scan them; see `MarkIndex`.
+///
+/// A flood of prompts is the shape that made scanning quadratic, and the two ways of
+/// looking a mark up must give the same answer or a marker lands on the wrong line.
+#[test]
+fn many_marks_scrolled_away_are_anchored_the_same_way_as_a_few() {
+    let mut input = Vec::new();
+    for _ in 0..20 {
+        input.extend_from_slice("\u{65e5}\u{672c} \x1b]133;B\x07\r\n".as_bytes());
+    }
+    let mut t = term(2, 20, &input);
+    let delta = t.drain();
+    let marks: Vec<(MarkId, Anchor)> = delta.marks.clone();
+    assert!(
+        marks.len() * delta.events.len() > 256,
+        "this must be big enough to take the indexed path: {} marks, {} events",
+        marks.len(),
+        delta.events.len()
+    );
+    let anchors: Vec<(MarkId, Anchor)> = delta
+        .events
+        .iter()
+        .map(|event| match event {
+            Event::Mark(Mark::PromptEnd, at, id) => (*id, *at),
+            other => panic!("only prompt ends were written: {other:?}"),
+        })
+        .collect();
+    assert_eq!(anchors.len(), 20);
+    // Every event carries the relocation of its own mark, and each is three characters
+    // along its row rather than the five columns the wide prompt occupies.
+    assert_eq!(anchors, marks);
+    assert!(
+        anchors.iter().all(|(_, at)| at.col == 3),
+        "every mark is three characters in: {anchors:?}"
+    );
+}
+
 // A command's input modes, handed over at `C` and taken back at `D`.
 
 /// Every mode [`Handover`] covers, as the `h` that sets it, with the DECRQM number that

@@ -23,7 +23,7 @@ use pen::PenState;
 use reply::{Framing, color_scheme_report, size_report};
 pub(crate) use reply::{Terminator, osc_reply};
 use screens::{PerScreen, ScreenId};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 mod csi;
 mod front;
