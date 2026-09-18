@@ -4486,3 +4486,56 @@ comes out in the new theme's colours from ids the core already sent."
     (cooked--apply-view (cooked--viewport-make :follow t))
     (should (= (point) (cooked--point-after-input)))
     (should (= cooked--point (point)))))
+
+(ert-deftest cooked-the-wrap-memo-fallback-tells-two-faces-of-one-row-apart ()
+  "A row with no layout hash is keyed on its faces as well as its text.
+
+The drain's own key already folds in the renditions that change the font -- see
+`BlockRow::hash' in src/wire.rs -- so this is the other path answering the same
+question: the same characters in a face that could be another font are another
+row, and get measured again rather than answered from the first one's entry."
+  (with-temp-buffer
+    (cooked-mode)
+    (cooked-tests--display-buffer)
+    (let ((inhibit-read-only t))
+      (insert "0123456789\n0123456789\n0123456789\n")
+      (cooked-tests--with-mocked-wrap 20
+        (let ((memo (make-hash-table :test #'equal)))
+          (save-excursion
+            (goto-char (point-min))
+            (should-not (cooked--row-wraps-p (point) (line-end-position) nil memo))
+            (forward-line 1)
+            (put-text-property (point) (line-end-position) 'face '(:weight bold))
+            (should-not (cooked--row-wraps-p (point) (line-end-position) nil memo))
+            (should (= (hash-table-count memo) 2))
+            ;; And the same text in the same face is the same row again.
+            (forward-line 1)
+            (put-text-property (point) (line-end-position) 'face '(:weight bold))
+            (should-not (cooked--row-wraps-p (point) (line-end-position) nil memo))
+            (should (= (hash-table-count memo) 2))))))))
+
+(ert-deftest cooked-the-fixed-pitch-probe-measures-the-face-blink-inherits ()
+  "`cooked-blink' is probed, being the one named face a rendition can pull in.
+
+SGR 5 draws text with `cooked-blink' inherited, and that face's docstring
+invites a user to restyle it -- which includes giving it a family whose ASCII is
+not one cell per character.  Probing only the default, bold, light and italic
+faces would call such a font fixed pitch, and every blinking row would be waved
+past the guard.
+
+Measured through stubs, batch Emacs having no graphical frame and so no font to
+ask: the probe text comes out nominal in every face but the blinking one, which
+is exactly the theme this is about."
+  (cl-letf* ((wide nil)
+             ((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+             ((symbol-function 'window-font-width) (lambda (&rest _) 10))
+             ((symbol-function 'cooked--string-pixel-width)
+              (lambda (string)
+                (* (length string)
+                   (if (and wide (equal (get-text-property 0 'face string)
+                                        '(:inherit cooked-blink)))
+                       12
+                     10)))))
+    (should (cooked--ascii-fixed-pitch-p (selected-window)))
+    (setq wide t)
+    (should-not (cooked--ascii-fixed-pitch-p (selected-window)))))

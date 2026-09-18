@@ -73,13 +73,11 @@ not wrap\" costs a row that softwraps until something rewrites it.  Neither can
 delete a character that should have stayed, which is the failure this guard
 exists to avoid and the reason it is allowed to be trimmed by hand at all.
 
-What the key deliberately omits is the row's *styling*.  Two rows of identical
-text in different faces could in principle lay out differently -- a bold face
-whose font is not the same width as the regular one -- and the key would not
-tell them apart.  Including the packed style spans would fix that and was not
-done: the styling that reaches a row here is `cooked-face''s, which sets
-weight, slant and colour and never a family or a height, and the cost of being
-wrong is the cosmetic half of the pair above.
+The key is the drain's layout hash, which folds in the renditions that change
+the font as well as the text; a caller with no hash gets the same question
+asked of the buffer by `cooked--wrap-fallback-key'.  So two rows of identical
+text in different faces -- a bold face whose font is not the same width as the
+regular one -- are two entries on both paths.
 
 FIXED-PITCH is `cooked--ascii-fixed-pitch-p' for the font STAMP names, held
 here because it is a per-font question with a per-font answer and this is
@@ -169,9 +167,16 @@ one cell per character by construction and nothing is measured.
 
 On a graphical frame the probe is `cooked--fixed-pitch-probe' measured against
 the cell width, in each of the faces cooked's own renditions can put a row into
--- default, bold, light and italic, which is the whole of what
-`cooked--attr-face-properties' varies that a font could answer with different
-metrics.
+-- default, bold, light and italic, and `cooked-blink', which is the whole of
+what `cooked--attr-face-properties' varies that a font could answer with
+different metrics.
+
+`cooked-blink' is in that list because it is the one *named* face a rendition
+can pull in: SGR 5 inherits it, and its docstring invites a user to restyle it,
+which includes giving it a family.  The rest of what `cooked--face' builds is
+colours, an underline, a strike and an overline, none of which moves a glyph.
+The two concealed faces are not probed: the buffer remaps them, and it remaps
+them to a colour.
 
 Ligatures are not the hazard they look like.  A monospace font draws `->' as
 one glyph inside the two cells its characters already occupy -- that is what
@@ -193,7 +198,8 @@ wide character is, and that is what this measures."
                 (= (cooked--string-pixel-width
                     (propertize cooked--fixed-pitch-probe 'face face))
                    (* cell chars)))
-              '(default (:weight bold) (:weight light) (:slant italic)))))))
+              '(default (:weight bold) (:weight light) (:slant italic)
+                (:inherit cooked-blink)))))))
 
 (defun cooked--wrap-cache (window)
   "This buffer's (FIXED-PITCH WRAPS METRICS) for WINDOW, rebuilt when it moves.
@@ -261,6 +267,28 @@ proportional face is."
   (and (<= width cooked--cols)
        (not (and uniform fixed-pitch))))
 
+(defun cooked--wrap-fallback-key (start end)
+  "A memo key for the row START..END, for a caller with no layout hash.
+
+The row's text and the faces laid over it, which is as much of `BlockRow::hash'
+in src/wire.rs as Lisp can read back out of the buffer: that hash folds in the
+renditions that change the font, and text alone would answer for a row Emacs
+lays out differently because a face put it in another one.  The cost of being
+wrong is the cosmetic half of the pair `cooked--wrap-memo' describes -- a row
+that softwraps until something rewrites it -- but it costs nothing to be right
+here, on the path that has already given up on the hash.
+
+The faces and not every property: a `display' or a link says nothing about the
+metrics of the text under it, and keying on them would only cost misses.  The
+runs carry their offsets, so the same faces in another arrangement are another
+key."
+  (let ((runs nil)
+        (pos start))
+    (while (< pos end)
+      (push (cons (- pos start) (get-text-property pos 'face)) runs)
+      (setq pos (next-single-property-change pos 'face nil end)))
+    (cons (buffer-substring-no-properties start end) (nreverse runs))))
+
 (defun cooked--row-wraps-p (start end window memo &optional key)
   "Whether Emacs lays the row START..END out on more than one screen line.
 
@@ -290,9 +318,9 @@ KEY is the row's layout hash from the drain's row table -- its text and the
 renditions that change its font, see `BlockRow::hash' in src/wire.rs -- so a
 row is looked up without being copied out of the buffer.  The row has just been
 written from that very text, so the hash describes what `vertical-motion' is
-about to measure.  Without one, as for a row driven from Lisp, the row's text
-is copied and used instead."
-  (let ((key (and memo (or key (buffer-substring-no-properties start end)))))
+about to measure.  Without one, as for a row driven from Lisp,
+`cooked--wrap-fallback-key' reads the same question off the buffer."
+  (let ((key (and memo (or key (cooked--wrap-fallback-key start end)))))
     (unless (and key (gethash key memo))
       (let ((wraps (save-excursion
                      (goto-char start)
