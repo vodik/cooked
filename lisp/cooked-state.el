@@ -868,6 +868,75 @@ multiplies the line count by the wrap factor and the same cap then retains far
 less text -- about a ninth as much on 800-column output.  See there."
   :type 'boolean :group 'cooked)
 
+(defcustom cooked-long-line-rows 8
+  "Screen rows a rejoined line fills before Emacs may shorten its layout.
+
+Emacs lays a soft-wrapped line out from the line's own beginning, so a window
+scrolled into the middle of a line ten screen rows long pays for all ten rows at
+every redisplay, and the bill grows with the window's width.  That is the cost
+`cooked-rejoin-wrapped-lines' buys a rejoined transcript with, and the one this
+exists to cap: Emacs 29 narrows layout to a window-sized piece of text either
+side of point once the buffer is known to hold a long line -- whether or not
+lines are truncated, which the other long-line shortcuts require.
+
+So the question is what counts as long, and the answer here is counted in rows
+of *this terminal* rather than in characters: `long-line-threshold' is set to
+this many times `cooked--cols', re-derived wherever the width is adopted.
+Eight rows of an 80-column terminal is 640 characters, where Emacs' own default
+of 50000 is six hundred rows of it and so is never reached by anything a
+terminal prints -- a rejoined transcript would keep the whole cost and get none
+of the remedy.  Eight because the measured effect is nothing at three rows per
+line and a doubled p90 at ten; a line just over the threshold still lays out
+whole, since the window Emacs narrows to is itself several rows of the width.
+
+The flag this sets is sticky.  A buffer that has held one long line keeps the
+shortened layout for the rest of its life -- `long-line-optimizations-p' reads
+it and nothing can clear it -- which is why the threshold is dropped to nil
+once it is set rather than maintained forever; see
+`cooked--sync-long-line-threshold', and docs/DESIGN.md for what the wait costs
+a session whose lines never get that long.
+
+What Emacs documents as less accurate under the flag, none of which is buffer
+text: `recenter' counts every screen line as one default-height line instead of
+asking the display code, so recentring a transcript of image slices lands
+approximately; the scroll bar's idea of the last visible position is
+approximated; automatic character composition is looked up only within a
+window's worth of text either side of point; and `pre-command-hook' and
+`post-command-hook' run narrowed to
+`long-line-optimizations-region-size' characters around point, which none of
+cooked's own hooks can tell apart from a widened buffer.  Copying, searching,
+links, reflow, marks and the seam are the same text either way, because this
+changes nothing about the text.
+
+nil leaves `long-line-threshold' alone at Emacs' own value, which for a
+terminal means the shortcuts never engage."
+  :type '(choice (const :tag "Leave Emacs' threshold alone" nil)
+                 (natnum :tag "Rows of the terminal's width"))
+  :group 'cooked)
+
+(defun cooked--sync-long-line-threshold ()
+  "Derive this buffer's `long-line-threshold' from `cooked-long-line-rows'.
+
+Called from `cooked-mode', from `cooked--sync-size' where a new width is
+adopted, and from the foot of every drain -- because the right value moves
+twice: with the width, and once Emacs has noticed.
+
+Two values, and the second is the one worth the call.  While the flag is off the
+threshold is `cooked-long-line-rows' rows of `cooked--cols', which is what
+makes an ordinary wrapped command's output count as a long line at all.  Once
+`long-line-optimizations-p' answers t the threshold has done its whole job: the
+flag is sticky, so no later value can take the shortcuts away, and nil then
+stops `redisplay_window' rescanning the transcript for a long line after every
+drain -- 0.2 ms per redisplay over a megabyte of scrollback, 0.7 ms over five --
+and takes `current-column' off its long-line approximation with it.
+
+Guarded on the variable being bound, which is the Emacs 29 check: the threshold,
+the reader and the narrowing all arrived together."
+  (when (and (boundp 'long-line-threshold) cooked-long-line-rows)
+    (setq-local long-line-threshold
+                (and (not (long-line-optimizations-p))
+                     (* cooked-long-line-rows cooked--cols)))))
+
 (defvar-local cooked--last-size nil
   "The (ROWS . COLS) last reported to the emulator, or nil.")
 

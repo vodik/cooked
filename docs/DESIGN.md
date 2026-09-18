@@ -361,6 +361,71 @@ statement about the text's layout, which is exactly the claim being made.
 
 ---
 
+## A rejoined line is a long line, so the buffer says so
+
+`cooked-rejoin-wrapped-lines` puts a wrapped line back together, which is what makes
+yanking and rewrapping work — and it buys that with Emacs' layout of a continued line.
+`reseat` lays one out from the line's own beginning, so a window scrolled into the middle
+of a ten-row line pays for all ten rows at every redisplay, and the bill grows with the
+window. Measured in a pgtk frame, that doubles p90 redisplay at ten rows per logical line
+and is invisible at three.
+
+Emacs 29 has the remedy, and it is a per-buffer switch rather than a variable to set:
+once `redisplay_window` has seen a line longer than `long-line-threshold`, the buffer's
+`long_line_optimizations_p` flag is set, and `reseat` narrows layout to a
+window-width × window-height piece of text either side of point. It is the one long-line
+shortcut that does not need `truncate-lines`; the rest are hscroll paths a terminal never
+takes. `cooked-long-line-rows` is what cooked says about that threshold: eight rows of
+`cooked--cols`, re-derived wherever the width is adopted, because 640 characters is a
+long line on an 80-column terminal and Emacs' own default of 50000 is six hundred rows of
+one — a rejoined transcript would keep the whole cost and never reach the remedy.
+
+### The scan that runs until it fires
+
+The flag has a price on the way in, and it is not in the documentation. While it is
+unset, every redisplay whose buffer changed by more than eight characters scans from
+`BEGV` for a line over the threshold (xdisp.c, in `redisplay_window`). A cooked buffer
+changes on every drain, so that is every redisplay, and with no long line in it the scan
+reaches the end of the transcript: a `find_newline1` per line over the whole thing, per
+window. On this machine, at load 2.6, with a buffer of 60-character lines displayed in a
+tty frame: **0.17 ms per redisplay per megabyte of transcript** — 0.25 ms total at 122 KB,
+0.41 ms at 1.2 MB, 0.94 ms at 4.9 MB, against 0.23 ms with `long-line-threshold` nil.
+
+Which is the same order as the saving, so it is worth being exact about who pays it.
+`cooked--sync-long-line-threshold` sets the threshold to nil the moment
+`long-line-optimizations-p` answers t — the flag is sticky, so nothing later can take the
+shortcuts away, and nil is what stops the scan. A session that wraps a line eight rows
+deep therefore pays the scan once and is done with it.
+
+What is left is the session whose lines never get that long, which scans for as long as
+it is displayed. There is no way to set the flag directly: `long-line-optimizations-p` is
+a reader, and the only lever is a threshold low enough that an ordinary line trips it —
+which would work, the flag being sticky, but a threshold below one line's length is also
+the point at which `current-column` stops measuring and starts returning the character
+count (indent.c), and `current-column` is `line-move`'s goal column and evil's block
+column. cooked does not do that, for a reason that costs nothing to state: a buffer with
+no line eight rows deep has no continued-line layout to shorten, so forcing the flag
+there would buy the scan's removal and nothing else. `cooked-long-line-rows` nil is the
+lever for anyone who wants Emacs' own behaviour back.
+
+### What was checked under the narrowing
+
+Nothing here touches buffer text, so copy, search, links, reflow, marks and the seam are
+the same text either way — `cooked--check-seam` runs on every drain of the tests that
+build a long rejoined line, and `cooked--guard-row-width` measures live screen rows,
+which are one row long and nowhere near the narrowing. Two things are worth naming
+anyway. `cooked--fontify-region` rounds out to whole *logical* lines and is called inside
+jit-lock's own restriction, which under the flag is
+`long-line-optimizations-region-size` (500000) characters around point: a threshold three
+orders of magnitude below that is what keeps a row whole there. And `pre-command-hook`
+and `post-command-hook` run inside that same restriction, which none of cooked's four —
+`cooked--guard-insertion`, `cooked--snap-to-input`,
+`cooked--mark-input-syntax-before-command`, `cooked--track-selection` — can tell from a
+widened buffer: they work from point and from markers, and a marker's position does not
+care what is accessible.
+
+---
+
 ## The alternate screen is a rectangle, not a transcript
 
 One sentence, and the reason behind eight decisions spread across five files. It was

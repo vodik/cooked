@@ -911,6 +911,12 @@ five with the shifts moved after the rows."
   ;; away with the binding, leaving the history vouched for by an anchor nothing
   ;; ever cleared.  See `cooked--with-child-edit'.
   (cooked--trim-scrollback)
+  ;; After the trim, and outside the binding above, for the same reason the trim
+  ;; is: this reads a flag that redisplay sets, so what it has to answer to is
+  ;; the buffer as this drain leaves it.  One `long-line-optimizations-p' per
+  ;; drain, which is what stops the transcript being rescanned for a long line
+  ;; after every one of them -- see `cooked--sync-long-line-threshold'.
+  (cooked--sync-long-line-threshold)
   (cooked--check-undo-anchor))
 
 (defun cooked--handle-event (event batch-start)

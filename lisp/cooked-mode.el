@@ -984,6 +984,9 @@ the trigger for `cooked--rescale-deco'."
               cooked--rows rows
               cooked--cols cols)
         (cooked--resize cooked--session rows cols (car cell) (cdr cell))
+        ;; The width is what a long line is measured in, so adopting one is
+        ;; adopting the other.  See `cooked--sync-long-line-threshold'.
+        (cooked--sync-long-line-threshold)
         ;; Before the drain, not after: `cooked--flush-pending-repaint' runs
         ;; from inside `cooked--apply' and only pays for a `force-window-update'
         ;; when this is already set when it gets there.  A window displaying
@@ -1847,6 +1850,12 @@ to the child verbatim."
   ;; is a working command rather than something to be remapped around -- and nothing
   ;; can reach the pipe by accident.
   (setq-local comint-input-sender (lambda (_proc input) (cooked--send-input-string input)))
+  ;; Not in the `setq-local' above, because the value is derived rather than
+  ;; written and the variable is only there to be derived into from three
+  ;; places; see `cooked--sync-long-line-threshold'.  Here rather than at the
+  ;; first drain so that a buffer displayed before its child has printed
+  ;; anything already has the threshold it will keep.
+  (cooked--sync-long-line-threshold)
   ;; `revert-buffer' has no file to re-read here and signals rather than doing
   ;; nothing, which for a buffer bound to \[revert-buffer] in most people's
   ;; hands is a worse answer than the obvious one.  Repainting the screen from
