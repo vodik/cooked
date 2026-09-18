@@ -380,6 +380,28 @@ takes. `cooked-long-line-rows` is what cooked says about that threshold: eight r
 long line on an 80-column terminal and Emacs' own default of 50000 is six hundred rows of
 one — a rejoined transcript would keep the whole cost and never reach the remedy.
 
+What it returns, from `scripts/bench-scroll-ceiling.el` under gamescope at `-r 1000`, a
+99×29 pgtk window, three interleaved A/B pairs, load 3.4–3.8, ten screen rows per logical
+line with rejoining on — the control with `cooked-long-line-rows` nil, which is Emacs'
+own behaviour:
+
+| gesture, 10 rows/line | p50 before | p50 after | p90 before | p90 after |
+| --- | --- | --- | --- | --- |
+| plain | 3.55 ms | 3.16 ms | 4.72 ms | 4.19 ms |
+| styled | 7.11 ms | 5.25 ms | 11.23 ms | 8.62 ms |
+
+and at a hundred rows to a line — one `cat` of a minified file, one log line with a
+payload — styled goes 13.3–17.7 ms p50 to 6.1–6.6, and 25.7–33.6 ms p90 to 11.3–11.5.
+The `rejoin=nil` row of every one of those runs is unchanged, 3.0–3.4 ms p50 either way,
+which is the control that says this is the long-line path and not a general slowdown
+being papered over. Two things to know before repeating it. The effect is under the
+harness's own noise at load 5 and clear at load 3, which is the measurement lesson rather
+than a fact about cooked. And `COOKED_CEILING_WRAP` is the knob that makes the deep cases
+reachable at all: the fixed set stops at ten rows, where the *medium* narrowing
+(`reseat`, three screenfuls of text) has nothing to shorten yet and the whole gain is the
+*small* one (`move_it_vertically_backward`, three rows of the width) — which is also why
+eight rows is a defensible place to draw the line and eighty would not be.
+
 ### The scan that runs until it fires
 
 The flag has a price on the way in, and it is not in the documentation. While it is

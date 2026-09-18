@@ -249,6 +249,27 @@ what is timed is redisplay and nothing else."
   (ceil--run "10x-wrapped, rejoin=nil" nil (* 10 cols) 200 30))
   ;; And the gesture, which is the operation the question was actually about.
   (unless (equal (getenv "COOKED_CEILING_ONLY") "append")
+  ;; COOKED_CEILING_WRAP=N runs one pair at N screen rows per logical line
+  ;; instead of the fixed three and ten, and it exists because the fixed set
+  ;; cannot see `cooked-long-line-rows' work.  Emacs' remedy for a continued
+  ;; line is a *narrowing*, and the window it narrows to is itself three rows
+  ;; of the width for the backward motions and three screenfuls for `reseat',
+  ;; so a ten-row line is shorter than the shortcut: the case with anything to
+  ;; shorten is a line of dozens of rows, which is one `cat' of a minified file
+  ;; or one log line with a payload in it.  Run it against the same Emacs with
+  ;; `--eval "(setq cooked-long-line-rows nil)"' for the control.
+  (if-let* ((wrap (getenv "COOKED_CEILING_WRAP"))
+            (rows (string-to-number wrap))
+            ((> rows 0)))
+      (progn
+        (ceil--gesture (format "GESTURE %dx-wrapped, rejoin=t" rows)
+                       t (* rows cols) 10 60 20)
+        (ceil--gesture (format "GESTURE %dx-wrapped, rejoin=nil" rows)
+                       nil (* rows cols) 10 60 20)
+        (let ((ceil--styled t))
+          (ceil--gesture (format "GESTURE styled %dx, rejoin=t" rows)
+                         t (* rows cols) 10 60 20)))
+  (progn
   (ceil--gesture "GESTURE short lines, rejoin=t"   t   (- cols 6) 10 60 20)
   (ceil--gesture "GESTURE short lines, rejoin=nil" nil (- cols 6) 10 60 20)
   (ceil--gesture "GESTURE 3x-wrapped, rejoin=t"    t   (* 3 cols)  10 60 20)
@@ -262,7 +283,7 @@ what is timed is redisplay and nothing else."
     (ceil--gesture "GESTURE styled 3x, rejoin=t"    t   (* 3 cols)  10 60 20)
     (ceil--gesture "GESTURE styled 3x, rejoin=nil"  nil (* 3 cols)  10 60 20)
     (ceil--gesture "GESTURE styled 10x, rejoin=t"   t   (* 10 cols) 10 60 20)
-    (ceil--gesture "GESTURE styled 10x, rejoin=nil" nil (* 10 cols) 10 60 20))))
+    (ceil--gesture "GESTURE styled 10x, rejoin=nil" nil (* 10 cols) 10 60 20))))))
 
 (with-temp-file ceil--out
   (insert (format "load-average %s\n" (load-average))

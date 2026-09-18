@@ -885,9 +885,11 @@ this many times `cooked--cols', re-derived wherever the width is adopted.
 Eight rows of an 80-column terminal is 640 characters, where Emacs' own default
 of 50000 is six hundred rows of it and so is never reached by anything a
 terminal prints -- a rejoined transcript would keep the whole cost and get none
-of the remedy.  Eight because the measured effect is nothing at three rows per
-line and a doubled p90 at ten; a line just over the threshold still lays out
-whole, since the window Emacs narrows to is itself several rows of the width.
+of the remedy.  Eight because the window Emacs narrows to for a backward motion
+is itself three rows of the width, so eight is the first depth at which the
+narrowing has something to shorten and a line just over it still lays out whole
+-- measured, ten rows of styled output scroll at 5.2 ms p50 against 7.1 and
+8.6 ms p90 against 11.2, and a hundred rows at half what they cost before.
 
 The flag this sets is sticky.  A buffer that has held one long line keeps the
 shortened layout for the rest of its life -- `long-line-optimizations-p' reads
