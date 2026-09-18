@@ -176,54 +176,103 @@ buffer afterwards: once another buffer takes over its window, a cooked buffer
 is displayed nowhere, which is indistinguishable from never having been shown
 except by having watched it happen.")
 
-(defvar-local cooked--hidden nil
-  "Whether no window on a visible frame shows this buffer.
+;;;; Whether the screen is being drawn, and whether it is owed a drain
+;;
+;; Two questions, and until now four flags for them.  A drain may leave the live
+;; screen out -- it is the expensive half, and nobody is looking -- and doing so
+;; leaves a debt: the rows below `cooked--screen-start' are then whatever the
+;; buffer held when the screen was last drawn, and anything that reads them has
+;; to call one whole drain first.  Two different things ask for the screen to be
+;; left out, for two different reasons, and one of them used to do it by `setq'
+;; from another file, which its own docstring called a bargain.
+;;
+;; So the asking is `cooked--withhold-screen' and `cooked--release-screen', one
+;; claim each, and what every reader asks is `cooked--screen-debt'.
 
-nil until the buffer has been on screen at all, for the reason
-`cooked--attention' starts out nil: a buffer driven from Lisp, or a test, has
-no window to lose, and calling it hidden would leave every drain it takes
-without its screen.  A buffer started in the background and never shown is
-therefore rendered in full, as it always was.
+(defvar-local cooked--screen-held-by nil
+  "The claims for which drains are leaving this buffer's screen out.
 
-Kept by `cooked--update-buffer-visibility' from the window hooks, and read by
-`cooked--on-wake', which drains a hidden buffer without its screen.  See
-`cooked--withheld' for what that leaves owing.")
-
-(defvar-local cooked--withhold-screen nil
-  "Whether drains should leave the screen out even though the buffer is shown.
-
-The same treatment `cooked--hidden' gets, asked for rather than observed, and
-for the one case where the child is drawing something that is not the child's
-answer: a completion request.  The shell puts the line Emacs is holding into
-ZLE's own buffer to run compsys over it, and compsys refreshes the display on
-its way to a message or a beep -- which draws that buffer, on a screen whose
-own line is empty, so a second copy of the command appears exactly where the
-completion would have gone.  The shell repairs it before replying, but a drain
-landing in between renders the copy, and the user sees the command flicker
-doubled.
+A list, because the two claims are independent and neither knows about the
+other.  `hidden' is the observed one: no window on a visible frame shows the
+buffer, so drawing its screen would be work nobody can see, and the core does
+not even wake Emacs for output that only changes it.  `completion' is asked
+for, by `cooked--shell-completions', and is the case where the child is drawing
+something that is not the child's answer: the shell puts the line Emacs is
+holding into ZLE's own buffer to run compsys over it, and compsys refreshes the
+display on its way to a message or a beep -- which draws that buffer, on a
+screen whose own line is empty, so a second copy of the command appears exactly
+where the completion would have gone.  The shell repairs it before replying,
+but a drain landing in between renders the copy and the user sees the command
+flicker doubled.
 
 Withholding is what closes that window rather than another repair, because the
 repair can only ever run after the fact and the flicker is the interval itself.
-Events are still handled while it is set, which is the whole reason this is not
-`cooked-inhibit-redraw-functions': the reply being waited for arrives as an
-event, so a drain that never runs would deadlock the request it was protecting.
+Events are still handled while it is held, which is the whole reason this is
+not `cooked-inhibit-redraw-functions': the reply being waited for arrives as an
+event, so a drain that never ran would deadlock the request it was protecting.
 
-Set by `cooked--shell-completions' for the length of one exchange, and it owes
-the whole drain that `cooked--withheld' names.  A plain buffer-local rather
-than a seam, because the core reads it and the layer that sets it is optional:
-nil is both \"no layer\" and \"not mid-request\", which is the same bargain
-`cooked-shell-completion-functions' makes.")
+Never read outside the two functions below; `cooked--screen-debt' is the
+question.")
 
-(defvar-local cooked--withheld nil
-  "Whether this buffer's screen is owed a whole drain.
+(defvar-local cooked--screen-owed nil
+  "Whether a whole drain is owed this buffer's screen.
 
-Set when a drain leaves the screen out, and when a hidden buffer is shown
-again, since the core held back output without waking anyone; cleared by the
-next whole drain.  Meanwhile the rows below `cooked--screen-start' are whatever
-the buffer held when it was hidden: a hidden `make -j' has appended its output
-above a screen that still reads as it did an hour ago.  Anything that reads
-those rows catches them up first with `cooked--sync', and showing the buffer
-does the same.")
+Set when a drain leaves the screen out and when a claim is taken, since the
+core holds output back for a hidden buffer without waking anyone; cleared by
+the next whole drain.  Meanwhile the rows below `cooked--screen-start' are
+whatever the buffer held when it was last drawn: a hidden `make -j' has
+appended its output above a screen that still reads as it did an hour ago.
+Anything that reads those rows catches them up first with `cooked--sync', and
+showing the buffer does the same.
+
+Separate from `cooked--screen-held-by' because the two come apart in both
+directions: a hidden buffer that `cooked--sync' has just drained whole owes
+nothing and is still hidden, and a buffer shown again after an hour owes a
+drain and is held by nothing.")
+
+(defun cooked--screen-debt ()
+  "What this buffer's live screen is owed: nil, `hidden' or `withheld'.
+
+`hidden' is a screen being left out of drains right now, whoever asked for
+that; `withheld' is one that was left out and has not been caught up since.
+Both mean the rows below `cooked--screen-start' may be stale, which is why
+`cooked--sync' and `cooked--sync-before-redisplay' ask only whether there is a
+debt at all.  Only `cooked--on-wake' tells them apart, because only it is
+deciding what *this* drain should do."
+  (cond (cooked--screen-held-by 'hidden)
+        (cooked--screen-owed 'withheld)))
+
+(defun cooked--withhold-screen (claim)
+  "Have drains leave this buffer's live screen out, on behalf of CLAIM.
+
+CLAIM is `hidden' or `completion'; see `cooked--screen-held-by' for what each
+one is.  Taking a claim owes the screen a drain from that moment, whether or
+not one has run since: for `hidden' the core wakes nobody for output that only
+changes a screen nobody is looking at, so there is no later drain to notice it.
+
+Idempotent, so a window hook that fires twice for one change costs nothing."
+  (cl-pushnew claim cooked--screen-held-by)
+  (setq cooked--screen-owed t))
+
+(defun cooked--release-screen (claim)
+  "Stop leaving this buffer's screen out on behalf of CLAIM.
+
+The debt stays behind: releasing the last claim leaves `cooked--screen-debt'
+answering `withheld' until a whole drain pays it, which is what
+`cooked--shell-completions' and `cooked--update-buffer-visibility' each arrange
+on their way out.  Releasing one of two claims changes nothing, which is the
+reason the claims are a list and not a flag."
+  (setq cooked--screen-held-by (delq claim cooked--screen-held-by)))
+
+(defun cooked--buffer-hidden-p ()
+  "Whether no window on any visible frame shows the current buffer.
+
+Only a buffer that has been on screen can be hidden, which `cooked--attention'
+is what knows: a buffer driven from Lisp, or a test, has no window to lose, and
+calling it hidden would leave every drain it takes without its screen.  A
+buffer started in the background and never shown is therefore rendered in
+full, as it always was."
+  (and cooked--attention (not (get-buffer-window nil 'visible)) t))
 
 (defun cooked--frozen-p ()
   "Whether the render is being deferred.

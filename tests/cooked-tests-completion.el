@@ -778,21 +778,22 @@ to have been a withheld one."
         ;; The shell answered, so at least one wake happened inside the request.
         (should withheld)
         (should (seq-every-p #'identity withheld))
-        ;; The flag is the request's, not the session's.
-        (should-not cooked--withhold-screen)
+        ;; The claim is the request's, not the session's.
+        (should-not (memq 'completion cooked--screen-held-by))
         ;; And the debt it left has been paid: the prompt on screen is the
         ;; repaired one, with no second copy of the command anywhere in it.
         (should (equal (cooked-tests--text) before))
         (cooked-tests--settle (lambda () nil) 0.3)
         (should (equal (cooked-tests--text) before))
-        (should-not cooked--withheld)))))
+        (should-not (cooked--screen-debt))))))
 
 (ert-deftest cooked-completion-gives-the-screen-back-when-a-request-quits ()
   "C-g out of a shell that stopped talking must not leave the screen held.
 
-`cooked--withhold-screen' left standing is a terminal that never repaints
-again, which is a far worse outcome than the flicker it was set to prevent --
-so it is cleared on the way out however the exchange ends."
+A `completion' claim left standing -- see `cooked--screen-held-by' -- is a
+terminal that never repaints again, which is a far worse outcome than the
+flicker it was taken to prevent, so it is released on the way out however the
+exchange ends."
   (cooked-tests--with-session '("/bin/cat")
     (should (cooked-tests--settle #'cooked--input-start-position))
     (cl-letf (((symbol-function 'accept-process-output)
@@ -810,7 +811,7 @@ so it is cleared on the way out however the exchange ends."
                           (cooked--shell-completions "ls" 2)
                         (quit nil))))))
     (setq quit-flag nil)
-    (should-not cooked--withhold-screen)))
+    (should-not (memq 'completion cooked--screen-held-by))))
 
 ;;;; Candidates the shell matched by a rule Emacs does not have
 ;;

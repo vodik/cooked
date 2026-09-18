@@ -769,19 +769,19 @@ scaled by `cooked-tests-timeout', like every other wait in the suite."
 
 Each step reports the window change as `window-buffer-change-functions' would,
 which batch Emacs never runs, so the buffer is known to have been on screen and
-then to be on screen nowhere: `cooked--hidden'."
+then to be on screen nowhere: `cooked--buffer-hidden-p'."
   (set-window-buffer (selected-window) (current-buffer))
   (cooked--window-buffers-changed)
   (set-window-buffer (selected-window) (get-buffer-create " *cooked-test-elsewhere*"))
   (cooked--window-buffers-changed)
-  (should cooked--hidden))
+  (should (eq (cooked--screen-debt) 'hidden)))
 
 (defun cooked-tests--show-buffer ()
   "Show the current buffer in the selected window again, reporting the change.
 Returns the window."
   (set-window-buffer (selected-window) (current-buffer))
   (cooked--window-buffers-changed)
-  (should-not cooked--hidden)
+  (should-not (memq 'hidden cooked--screen-held-by))
   (selected-window))
 
 (defun cooked-tests--contents (file)

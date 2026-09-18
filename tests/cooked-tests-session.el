@@ -1176,13 +1176,40 @@ file, so everything it sends is sent after the buffer is hidden."
                         (not (and cooked--commands
                                   (string-suffix-p "c" (cooked-tests--contents out)))))
               (accept-process-output nil 0.05)))
-          (should cooked--hidden)
+          (should (eq (cooked--screen-debt) 'hidden))
           (should (string-match-p "\\`\033\\[\\?62\\(;4\\)?;22c\\'"
                                   (cooked-tests--contents out)))
           (should (= 1 (length cooked--commands)))
           (should (= 0 (cooked-command-code (car cooked--commands)))))
       (delete-file out)
       (ignore-errors (delete-file flag)))))
+
+(ert-deftest cooked-the-two-screen-claims-do-not-release-each-other ()
+  "A buffer hidden and completing at once keeps its screen held by the one that
+is left.
+
+The window hooks and `cooked--shell-completions' each ask for the screen to be
+left out, for reasons neither knows about, and the request that finishes first
+used to be able to clear a flag the other still wanted -- which is a terminal
+drawing compsys' scratch line, or a hidden buffer paying to render rows nobody
+can see.  A claim apiece is what makes the two independent.
+
+The debt is the part that outlives both, and it has to: a screen that was left
+out is stale whether or not anything is still holding it back."
+  (with-temp-buffer
+    (should-not (cooked--screen-debt))
+    (cooked--withhold-screen 'hidden)
+    (cooked--withhold-screen 'completion)
+    ;; Twice for one change, as a window hook that fires twice would.
+    (cooked--withhold-screen 'hidden)
+    (should (eq (cooked--screen-debt) 'hidden))
+    (cooked--release-screen 'completion)
+    (should (eq (cooked--screen-debt) 'hidden))
+    (cooked--release-screen 'hidden)
+    (should (eq (cooked--screen-debt) 'withheld))
+    ;; What a whole drain does, and the only thing that pays it.
+    (setq cooked--screen-owed nil)
+    (should-not (cooked--screen-debt))))
 
 (ert-deftest cooked-a-hidden-buffer-draws-its-screen-only-when-read ()
   "Output that only changes a hidden buffer's screen waits until something reads it.
@@ -1210,7 +1237,7 @@ the rows out anyway.  `cooked--sync', which readers of the text call, draws it."
           (should-not (string-match-p "later" (cooked-tests--text)))
           (cooked--sync)
           (should (string-match-p "ready\nlater\\'" (cooked-tests--text)))
-          (should-not cooked--withheld))
+          (should-not cooked--screen-owed))
       (ignore-errors (delete-file flag))
       (ignore-errors (delete-file done)))))
 
@@ -1277,9 +1304,9 @@ cursor starts at the top of the screen, where an insertion leaves point behind."
           (should (> appended 0))
           (should-not (string-match-p "tail" (cooked-tests--text)))
           (let ((window (cooked-tests--show-buffer)))
-            (should cooked--withheld)
+            (should (eq (cooked--screen-debt) 'withheld))
             (cooked--sync-before-redisplay window))
-          (should-not cooked--withheld)
+          (should-not (cooked--screen-debt))
           (should (string-match-p "line 9999\ntail\\'" (cooked-tests--text)))
           (should (= (point) (cooked--cursor-position))))
       (ignore-errors (delete-file done)))))

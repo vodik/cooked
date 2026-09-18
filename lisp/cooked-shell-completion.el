@@ -208,25 +208,27 @@ writes, so pumping that process is what lets it in."
               ;; erases it before it replies, but a drain in between renders it,
               ;; and what the user sees is the command briefly doubled --
               ;; `git commit -am '"'"'Some' drawn twice on the one row.  See
-              ;; `cooked--withhold-screen', and note that this withholds the
+              ;; `cooked--screen-held-by', and note that this withholds the
               ;; screen rather than the drain: the reply arrives as an event, so
               ;; a drain that did not run would never deliver the thing being
-              ;; waited for.
-              (setq cooked--withhold-screen t)
+              ;; waited for.  Asked for through cooked-state.el's own function
+              ;; rather than by `setq' from here, so that a buffer hidden
+              ;; meanwhile keeps its own claim when this one is given up.
+              (cooked--withhold-screen 'completion)
               ;; `with-local-quit' rather than nothing: this is the one place cooked
               ;; blocks, and C-g has to get the user out of a shell that stopped talking.
               (with-local-quit
                 (while (and (not (eq (car-safe cooked--completion-reply) serial))
                             (< (float-time) deadline))
                   (accept-process-output cooked--wake (- deadline (float-time))))))
-          ;; In the buffer the flag was set in, whatever a callee has made
-          ;; current, and on the quit path too -- a flag left standing is a
-          ;; terminal that stops repainting. The drain that follows is what pays
-          ;; the debt `cooked--withheld' recorded: the repaired prompt, and
+          ;; In the buffer the claim was taken in, whatever a callee has made
+          ;; current, and on the quit path too -- a claim left standing is a
+          ;; terminal that stops repainting.  The drain that follows is what pays
+          ;; the debt the release leaves behind: the repaired prompt, and
           ;; anything else that arrived while the screen was held back.
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
-              (setq cooked--withhold-screen nil)
+              (cooked--release-screen 'completion)
               (when cooked--session (cooked--drain-and-apply)))))
         ;; A reply for an older request is not an answer to this one; drop it rather
         ;; than complete against a line the user has already moved on from.

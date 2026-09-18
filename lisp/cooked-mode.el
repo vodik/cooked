@@ -1103,26 +1103,25 @@ back to.  See `cooked-bell-pending'."
 (defun cooked--update-buffer-visibility ()
   "Track whether any window on a visible frame shows the current buffer.
 
-A hidden buffer is drained without its screen; see `cooked--hidden'.  Coming
-back owes it a whole drain, which `cooked--sync-before-redisplay' makes before
-the window is drawn.  It is also deferred from here, for a window that is shown
-without being redisplayed -- a buffer displayed from a batch Emacs, or on a
-frame that is not being drawn -- and the second one finds nothing left to do.
+A hidden buffer is drained without its screen, which is one of the two claims
+`cooked--withhold-screen' takes.  Coming back owes it a whole drain -- the
+release leaves the debt behind -- and `cooked--sync-before-redisplay' makes that
+drain before the window is drawn.  It is also deferred from here, for a window
+that is shown without being redisplayed -- a buffer displayed from a batch
+Emacs, or on a frame that is not being drawn -- and the second one finds nothing
+left to do.
 
-Only a buffer that has been on screen can be hidden, which `cooked--attention'
-already knows."
+Only a buffer that has been on screen can be hidden, which
+`cooked--buffer-hidden-p' is where that is said."
   (when cooked--session
-    (let ((hidden (and cooked--attention
-                       (not (get-buffer-window nil 'visible))
-                       t)))
-      (unless (eq hidden cooked--hidden)
-        (setq cooked--hidden hidden)
+    (let ((hidden (cooked--buffer-hidden-p))
+          (was (and (memq 'hidden cooked--screen-held-by) t)))
+      (unless (eq hidden was)
+        (if hidden
+            (cooked--withhold-screen 'hidden)
+          (cooked--release-screen 'hidden))
         (cooked--set-hidden cooked--session hidden)
-        ;; Owed whether or not a drain has run since: the core wakes nothing for
-        ;; output that only changes the screen while the buffer is hidden.
-        (unless hidden
-          (setq cooked--withheld t)
-          (cooked--defer #'cooked--sync))))))
+        (unless hidden (cooked--defer #'cooked--sync))))))
 
 (defun cooked--sync-before-redisplay (_window)
   "Catch the screen up before a window shows it, if it was hidden.
@@ -1135,10 +1134,10 @@ the buffer: the first frame of a buffer coming back would be its screen as it
 was when it was hidden, under the scrollback that has gone in since.  The
 drain it makes is the same whole drain the next wake would make, once.
 
-`cooked--hidden' is asked as well as `cooked--withheld' because this can run
-before the window hook that notices the buffer is back: a window is about to
-draw it either way."
-  (when (or cooked--hidden cooked--withheld)
+Either debt will do, because this can run before the window hook that notices
+the buffer is back: a window is about to draw it either way, and a screen still
+being held back is as stale as one that was."
+  (when (cooked--screen-debt)
     (cooked--protect-hook (cooked--sync))))
 
 (defun cooked--install-global-hooks ()

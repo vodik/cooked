@@ -600,7 +600,7 @@ returned the same way, as :error."
     (unwind-protect
         (condition-case err
             (let ((compare (lambda ()
-                             (unless (buffer-local-value 'cooked--withheld a)
+                             (unless (with-current-buffer a (cooked--screen-debt))
                                (let ((stale (list (with-current-buffer a
                                                     (cooked-tests--oracle-stale-link))
                                                   (with-current-buffer b

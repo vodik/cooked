@@ -222,7 +222,8 @@ without it the buffer stops updating until something else drains.  See
 (defun cooked--on-wake (buffer)
   "Drain BUFFER's session and apply what changed.
 
-A buffer no window shows is drained without its screen; see `cooked--hidden'.
+A buffer no window shows is drained without its screen; see
+`cooked--screen-debt'.
 
 An error here is otherwise invisible: Emacs swallows `process-filter' errors,
 and
@@ -250,11 +251,12 @@ entries owe the catch-up themselves."
                  (not (cooked--frozen-p))
                  (not (cooked--run-seam-until-success
                        'cooked-inhibit-redraw-functions buffer)))
-        ;; `cooked--withhold-screen' asks for a hidden buffer's treatment in a
-        ;; buffer that is not hidden; see there for why a completion request
-        ;; wants it.  Both leave the same debt, and `cooked--withheld' is what
-        ;; collects it.
-        (cooked--drain-and-repair (or cooked--hidden cooked--withhold-screen))))))
+        ;; The only reader that tells the two debts apart, because it is the
+        ;; only one deciding what this drain should do rather than whether the
+        ;; rows can be trusted.  A completion request asks for a hidden buffer's
+        ;; treatment in a buffer that is not hidden; see `cooked--screen-held-by'
+        ;; for why.
+        (cooked--drain-and-repair (eq (cooked--screen-debt) 'hidden))))))
 
 (defun cooked--drain-and-repair (hidden)
   "Drain and apply as `cooked--drain-and-apply' does, and repair a failure.
@@ -280,20 +282,20 @@ HIDDEN is passed on.  The failure is named and the screen resynced, once; see
 
 The one way in for anything that reads the text of a buffer no window shows:
 command search counting a running command's output, `cooked-write-output',
-`next-error' walking a build log.  While the buffer is hidden, or
-`cooked--withheld' is set, the rows below `cooked--screen-start' can be stale,
-and this drains the buffer whole, as showing it would.  Everywhere else it
-costs two variable tests, so a reader calls it unconditionally rather than
-learning what hidden means.
+`next-error' walking a build log.  While `cooked--screen-debt' answers at all,
+the rows below `cooked--screen-start' can be stale, and this drains the buffer
+whole, as showing it would.  Everywhere else it costs two variable tests, so a
+reader calls it unconditionally rather than learning what hidden means.
 
-Hidden is enough on its own because the core does not wake Emacs for output
-that only changes a hidden buffer's screen: a child that printed one line has
-left nothing drained that could have set `cooked--withheld'.
+Either debt will do, and a screen still being held back is one of them: the
+core does not wake Emacs for output that only changes a hidden buffer's screen,
+so a child that printed one line there has left nothing drained that could have
+owed anything.
 
 Not for code that already runs inside a drain: there the drain under way has
 the text as current as it is going to be, and the request is folded into a
 whole drain that runs once it returns."
-  (when (and (or cooked--hidden cooked--withheld) cooked--session)
+  (when (and (cooked--screen-debt) cooked--session)
     (cooked--drain-and-repair nil)))
 
 (defun cooked--apply-withheld (update)
@@ -341,7 +343,9 @@ when it is shown, however much scrollback went in above it meanwhile."
       (cooked--batching-replies cooked--session
         (dolist (event (plist-get update :events))
           (cooked--handle-event event batch-start))))
-    (setq cooked--withheld t)
+    ;; Whether or not a claim is still holding the screen back: this drain is
+    ;; the one that left it out, and what it owes outlives the claim.
+    (setq cooked--screen-owed t)
     (cooked--trim-scrollback)
     (when-let* ((screen (cooked--screen-start-position)))
       (when on-screen (goto-char (min (+ screen on-screen) (point-max))))
@@ -854,7 +858,9 @@ move precisely so that they can be.  `tests/cooked-tests-oracle.el' is what
 holds that order in place: the read-back there fails five generated cases in
 five with the shifts moved after the rows."
   ;; First, so a reader reached from inside this drain does not ask for another.
-  (setq cooked--withheld nil)
+  ;; The claims are left alone: a hidden buffer that `cooked--sync' has drained
+  ;; whole is caught up and still hidden.
+  (setq cooked--screen-owed nil)
   (cooked--apply-resources update)
   ;; `let*', emphatically: these initialisers delete and insert, and under plain
   ;; `let' they would run before the two bindings above them took effect -- so a
