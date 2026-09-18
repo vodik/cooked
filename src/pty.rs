@@ -184,6 +184,17 @@ pub(crate) struct Pty {
     /// Set once `waitpid` has collected the child. Signalling after that point would
     /// aim at a pid the kernel is free to have handed to somebody else.
     reaped: std::sync::atomic::AtomicBool,
+    /// The status `waitpid` collected, for whoever did not collect it.
+    ///
+    /// `waitpid` hands a status to exactly one caller, and since `Session::shutdown`
+    /// stopped joining the reader either thread may be that caller. The loser needs the
+    /// real status all the same -- `Session::alive` answers from it -- and without this it
+    /// had only `LOST` to record, or nothing at all, which would leave a killed session
+    /// reporting itself alive for as long as the winner took to write the status down.
+    ///
+    /// Written under `reap_lock` before `reaped` is set, so anyone who sees that flag sees
+    /// this too.
+    collected: std::sync::Mutex<Option<i32>>,
     /// Serialises `signal`'s reaped-check-then-`killpg` against `waitpid`'s own
     /// reaped-check-then-collect, both of which touch `reaped`. Without this, a
     /// `cooked--signal` call on the Lisp thread can observe `reaped() == false`, have
@@ -369,6 +380,7 @@ impl Pty {
             master,
             child,
             reaped: std::sync::atomic::AtomicBool::new(false),
+            collected: std::sync::Mutex::new(None),
             reap_lock: std::sync::Mutex::new(()),
             exit_watch: platform::ExitWatch::new(child),
         })
@@ -625,6 +637,12 @@ impl Pty {
         self.reaped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// The status whoever reaped the child collected, if anyone has; see
+    /// [`Self::collected`].
+    pub(crate) fn collected(&self) -> Option<i32> {
+        *self.collected.held()
+    }
+
     /// Exit status if the child has terminated, without blocking.
     pub(crate) fn try_wait(&self) -> Result<Option<i32>> {
         self.waitpid(WaitPidFlag::WNOHANG)
@@ -683,6 +701,9 @@ impl Pty {
             // Still alive, or merely stopped or continued: the child is still ours.
             _ => return Ok(None),
         };
+        // Written before `reaped`, so a thread that sees the flag can always read the
+        // status behind it.
+        *self.collected.held() = Some(collected);
         self.reaped.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(Some(collected))
     }
@@ -1146,6 +1167,36 @@ mod tests {
             pty.reap(std::time::Duration::from_secs(2)),
             Some(5),
             "127 here means PATH was never searched"
+        );
+    }
+
+    /// `waitpid` hands a status to one caller, and the other one needs it too.
+    ///
+    /// Since `Session::shutdown` stopped joining the reader, either thread may be the one
+    /// that collects, and the loser reads the status here instead of recording `LOST` over
+    /// it -- or recording nothing, which left `Session::alive` answering yes for a session
+    /// that had just been killed. The second `reap` below is the loser.
+    #[test]
+    fn the_collected_status_outlives_the_reap_that_collected_it() {
+        let pty = Pty::spawn(
+            &["/bin/sh", "-c", "exit 7"],
+            &[("TERM", "dumb")],
+            size(),
+            None,
+        )
+        .expect("spawn");
+        assert_eq!(pty.collected(), None, "nothing has been collected yet");
+        assert_eq!(pty.reap(std::time::Duration::from_secs(2)), Some(7));
+        assert!(pty.reaped());
+        assert_eq!(
+            pty.reap(std::time::Duration::from_secs(2)),
+            None,
+            "the child is gone, so there is nothing left to collect"
+        );
+        assert_eq!(
+            pty.collected(),
+            Some(7),
+            "the loser of the race must still be able to read the real status"
         );
     }
 

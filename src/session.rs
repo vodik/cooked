@@ -881,14 +881,16 @@ impl Session {
             // Held across the reap, so the reader cannot record a status in the middle of
             // it. The two can still race for the `waitpid` itself -- a reader already past
             // its own `shutdown` check is the window -- and `reap_lock` lets exactly one of
-            // them collect it. `LOST` is for a child nobody could reap, so `reaped` is asked
-            // before writing it: a child the reader collected has its real status, and
-            // records it itself as soon as this lock is free.
-            *exited = match self.shared.reap_or_kill() {
-                Some(status) => Some(status),
-                None if self.shared.pty.reaped() => None,
-                None => Some(LOST),
-            };
+            // them collect it. Losing that race is not losing the status: `Pty::collected`
+            // is where the winner left it, and reading it here rather than waiting for the
+            // reader to record it is what keeps `alive` answering no the moment this
+            // returns. `LOST` is left for a child nobody reaped at all.
+            *exited = Some(
+                self.shared
+                    .reap_or_kill()
+                    .or_else(|| self.shared.pty.collected())
+                    .unwrap_or(LOST),
+            );
         }
         true
     }
@@ -3259,6 +3261,13 @@ mod tests {
             "the kill waited {:?} on the reader; a decode in flight must not park Emacs' \
              thread",
             start.elapsed()
+        );
+        // Detaching the reader must not cost the invariant the join used to give for
+        // free. `shutdown` returning is the moment Lisp asks, and a session that answered
+        // yes here would leave a killed buffer believing its child was still running.
+        assert!(
+            !session.alive(),
+            "a session shut down must not answer alive"
         );
 
         let deadline = Instant::now() + patience(5.0);
