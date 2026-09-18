@@ -605,12 +605,13 @@ impl<'e> Env<'e> {
     /// Register `f` as the Lisp function `name`.
     pub fn defun(
         &self,
-        name: &str,
+        name: &'static str,
         arity: std::ops::RangeInclusive<isize>,
         doc: &str,
         f: Defun,
     ) -> Result<()> {
         let doc = CString::new(doc).map_err(|_| Error)?;
+        let registered: &'static Registered = Box::leak(Box::new(Registered { name, f }));
         let func = ffi!(
             self,
             make_function,
@@ -618,13 +619,24 @@ impl<'e> Env<'e> {
             *arity.end(),
             trampoline,
             doc.as_ptr(),
-            f as *mut c_void,
+            std::ptr::from_ref(registered).cast_mut().cast::<c_void>(),
         )?;
         self.call("defalias", &[self.intern(name)?, func]).map(drop)
     }
 }
 
 pub(crate) type Defun = fn(Env, &[Value]) -> Result<Value>;
+
+/// What Emacs hands back to [`trampoline`]: the function to call, and the name to put in
+/// the signal if it fails without leaving one pending.
+///
+/// Leaked once per `defun`, for the reason [`SYMBOLS`] is: Emacs holds this pointer for
+/// as long as the function is callable, which is the life of the process, and there is no
+/// teardown hook to free it from. A bounded leak of one allocation per entry point.
+struct Registered {
+    name: &'static str,
+    f: Defun,
+}
 
 type Finalizer = extern "C" fn(*mut c_void);
 
@@ -650,14 +662,29 @@ unsafe extern "C" fn trampoline(
     data: *mut c_void,
 ) -> Value {
     let env = unsafe { Env::from_raw(raw) };
-    let f: Defun = unsafe { std::mem::transmute(data) };
+    // SAFETY: `data` is the `Registered` `defun` leaked for this function, and a leaked
+    // one outlives every call Emacs can make through it.
+    let registered = unsafe { &*data.cast::<Registered>() };
     let args = match n {
         0 => &[],
         n => unsafe { slice::from_raw_parts(args, n as usize) },
     };
-    match catch_unwind(AssertUnwindSafe(|| f(env, args))) {
+    match catch_unwind(AssertUnwindSafe(|| (registered.f)(env, args))) {
         Ok(Ok(v)) => v,
-        Ok(Err(Error)) => env.nil(),
+        // An `Err` all but always means the signal is already pending on the Emacs side,
+        // which is the whole reason `Error` carries nothing. The exception is an `Err`
+        // built without signalling -- `intern` and `defun` answer one for a NUL in a name
+        // -- and returning `nil` for that hands Lisp a value nobody can explain. So ask,
+        // on the error path only, and say who failed if nothing else did.
+        Ok(Err(Error)) => {
+            if env.check().is_ok() {
+                env.signal(
+                    "cooked-error",
+                    &format!("{} failed without reporting why", registered.name),
+                );
+            }
+            env.nil()
+        }
         Err(panic) => {
             let msg = panic
                 .downcast_ref::<&str>()

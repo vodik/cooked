@@ -25,7 +25,7 @@ pub(crate) mod session;
 mod wire;
 
 use emu::{CellMetrics, ColorScheme, ImageFormat, ImageId, ShownFormats};
-use env::{Env, Result, Runtime, Value, plist, sym};
+use env::{Env, Error, Result, Runtime, Value, plist, sym};
 use nix::sys::signal::Signal;
 use pty::Winsize;
 use session::Session;
@@ -397,6 +397,15 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// describes the artifact actually loaded.  What a stale .so answers is then its
         /// own version, not the version the Lisp wishes it were.
         "cooked--core-version" 0..=0 => core_version;
+
+        /// Fail with no signal pending.  For the test suite; nothing else calls this.
+        ///
+        /// Every real entry point that answers an error signals first, so the branch in
+        /// `trampoline' that catches one which did not has no caller to exercise it.  This
+        /// is that caller: it is the shape `Env::intern' and `Env::defun' produce for a NUL
+        /// in a name, and what the suite asserts arrives in Lisp as `cooked-error' rather
+        /// than as a nil with nothing behind it.
+        "cooked--test-bare-error" 0..=0 => test_bare_error;
 
         /// Tell SESSION that Emacs has dropped image ID's transmitted bytes.
         ///
@@ -869,6 +878,11 @@ fn job_control(env: Env, args: &[Value]) -> Result<Value> {
 
 fn core_version(env: Env, _args: &[Value]) -> Result<Value> {
     env.into_lisp(env!("CARGO_PKG_VERSION"))
+}
+
+/// An `Err` with nothing signalled, which `trampoline` must not pass on as `nil`.
+fn test_bare_error(_env: Env, _args: &[Value]) -> Result<Value> {
+    Err(Error)
 }
 
 fn foreground_pid(env: Env, args: &[Value]) -> Result<Value> {
