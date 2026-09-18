@@ -731,6 +731,10 @@ struct Shared {
     interacted_until: Mutex<Option<std::time::Instant>>,
     interrupt: Interrupt,
     exited: Mutex<Option<i32>>,
+    /// Make the next read from the pty panic, to stand in for a defect in the parser or
+    /// a decoder; see [`Shared::run_reader`]. Compiled out of a release build.
+    #[cfg(test)]
+    panic_on_read: AtomicBool,
 }
 
 /// A claim on [`Shared::lisp_waiters`], held from just before a thread blocks on the
@@ -911,13 +915,15 @@ impl Session {
             interacted_until: Mutex::new(None),
             interrupt: Interrupt::new()?,
             exited: Mutex::new(None),
+            #[cfg(test)]
+            panic_on_read: AtomicBool::new(false),
         });
 
         let reader = std::thread::Builder::new()
             .name("cooked-reader".into())
             .spawn({
                 let shared = Arc::clone(&shared);
-                move || shared.read_loop()
+                move || shared.run_reader()
             })?;
 
         Ok(Self {
@@ -1527,6 +1533,27 @@ impl Shared {
         self.pty.write(bytes, wait)
     }
 
+    /// The reader thread's body: [`Shared::read_loop`], with a panic in it ending the
+    /// session rather than the thread alone.
+    ///
+    /// `env::trampoline` catches a panic on Emacs' thread and turns it into a Lisp
+    /// signal, and nothing did the same here. A panic in the parser or a picture decoder
+    /// -- on bytes the child chose -- unwound this thread and left everything else as
+    /// it was: `exited` unset, so `alive` went on answering yes; no wake byte, so Emacs
+    /// was never told; a child still running against a pty nobody would read again.
+    /// The buffer froze, silently, for good.
+    ///
+    /// So the panic is caught and treated as the abort it is: the child is hung up and
+    /// reaped and Emacs is woken, exactly as for a `poll` that failed. Poisoned locks are
+    /// no obstacle, since every lock in the crate is taken through [`LockExt::held`].
+    /// What was being parsed is lost, which is the least of it.
+    fn run_reader(&self) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.read_loop()));
+        if outcome.is_err() && !self.shutdown.load(Ordering::SeqCst) {
+            self.finish(Ended::Aborted);
+        }
+    }
+
     fn read_loop(&self) {
         block_sigpipe();
         let mut buf = vec![0u8; READ_CHUNK];
@@ -1627,6 +1654,10 @@ impl Shared {
             match self.pty.read(&mut buf) {
                 Ok([]) => return self.finish(Ended::ChildGone),
                 Ok(data) => {
+                    #[cfg(test)]
+                    if self.panic_on_read.swap(false, Ordering::SeqCst) {
+                        panic!("a defect in the parser, as the test asked for");
+                    }
                     self.activity();
                     let hidden = self.hidden.load(Ordering::Relaxed);
                     let (drawable, outbound) = self.feed(data, hidden);
@@ -3336,6 +3367,36 @@ mod tests {
         session.shared.finish(Ended::Aborted);
         assert!(!session.alive());
         assert_eq!(alive(pid), Err(Errno::ESRCH));
+        assert_eq!(session.drain().exit, Some(128 + Signal::SIGKILL as i32));
+    }
+
+    /// A panic on the reader thread ends the session as an abort does, rather than
+    /// leaving a live child on a pty nobody reads and a buffer nothing will wake.
+    ///
+    /// The child ignores SIGHUP so that the kill has to be the one that ends it, which is
+    /// what shows the `finish` ran at all: with the panic merely unwinding the thread,
+    /// `sleep` would still be running and `alive` would still say so.
+    #[test]
+    fn a_panicking_reader_ends_the_session_and_wakes_emacs() {
+        let (session, read) = session(&["/bin/sh", "-c", "trap '' HUP; echo hi; exec sleep 300"]);
+        let pid = session.pid().as_raw();
+        // Set before the child's first write can be read, so that write is the one that
+        // panics; the echo is what makes sure there is a read to panic on.
+        session.shared.panic_on_read.store(true, Ordering::SeqCst);
+        // The wake byte is `finish`'s: nothing was parsed, so nothing else sends one.
+        assert!(
+            woke_within(&read, patience(5.0)),
+            "the session ended without waking Emacs"
+        );
+        assert!(
+            !session.alive(),
+            "the session is still alive after its reader died"
+        );
+        assert_eq!(
+            alive(pid),
+            Err(Errno::ESRCH),
+            "the child outlived its reader"
+        );
         assert_eq!(session.drain().exit, Some(128 + Signal::SIGKILL as i32));
     }
 
