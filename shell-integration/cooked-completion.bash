@@ -74,50 +74,105 @@ __cooked_complete_split() {
   __cooked_complete_word=${head_words[COMP_CWORD]}
 }
 
-# What `complete -p' registered for this command, invoked the way it expects.  Three
-# outcomes, in the order bash itself would take them: a registered function, a
-# registered set of `compgen' options, or nothing registered at all.
+# The spec `complete -p' prints, read back into `__cooked_spec' as words.
+#
+# `complete -p' prints a command that would re-register the spec, quoted by bash's
+# own rules -- so `eval' is how it is meant to be read back, and splitting on
+# whitespace instead would tear `-W 'red green blue'' into four words.  What is
+# evaluated is bash's output about a name we passed in quoted, not anything off the
+# line being completed.
+#
+# The arguments are `complete -p''s own: a command name, or `-D' for the default
+# spec that stands in for every command with none of its own.
+__cooked_complete_read_spec() {
+  __cooked_spec=()
+  eval "__cooked_spec=( $(complete -p "$@" 2>/dev/null) )" 2>/dev/null ||
+    __cooked_spec=()
+  (( ${#__cooked_spec[@]} > 1 )) || __cooked_spec=()
+}
+
+# Run the spec in `__cooked_spec' the way bash would: its `-F' function if it named
+# one, otherwise its `compgen' options.  Sets `__cooked_complete_answered' when it
+# ran either, so that a spec describing no candidates at all can be told from one
+# that ran and offered nothing, and returns the function's own status -- 124
+# included, which is the caller's business.
+__cooked_complete_invoke() {
+  local cmd=$1 word=$2
+  local i= func=
+  __cooked_complete_answered=
+  # The last word is the name the spec was registered for -- a command, or `-D' --
+  # and the first is `complete' itself; neither describes candidates.
+  for (( i = 1; i < ${#__cooked_spec[@]} - 1; i++ )); do
+    [[ ${__cooked_spec[i]} == -F ]] && func=${__cooked_spec[i+1]}
+  done
+  if [[ -n $func ]] && declare -F "$func" >/dev/null; then
+    __cooked_complete_answered=1
+    # The contract these functions are written against: the command, the word being
+    # completed, and the word before it, with COMP_* already set.
+    "$func" "$cmd" "$word" "${COMP_WORDS[COMP_CWORD-1]:-}" 2>/dev/null
+    return
+  fi
+  # No function, but options: hand them to compgen unchanged, minus the leading
+  # `complete', the trailing command name, and the flags that register a spec
+  # rather than describe candidates.
+  local -a opts=()
+  for (( i = 1; i < ${#__cooked_spec[@]} - 1; i++ )); do
+    case ${__cooked_spec[i]} in
+      -F|-C) (( i++ )) ;;
+      -p|-r|-D|-E|-I) ;;
+      *) opts+=("${__cooked_spec[i]}") ;;
+    esac
+  done
+  if (( ${#opts[@]} )); then
+    __cooked_complete_answered=1
+    mapfile -t COMPREPLY < <(compgen "${opts[@]}" -- "$word" 2>/dev/null)
+    return 0
+  fi
+  return 0
+}
+
+# What bash's own completion would have offered, in the order bash itself takes it:
+# the spec registered for this command, the `-D' default that stands in when there is
+# none, and file names when neither answered.
+#
+# The default and the retry are what make this work under bash-completion, which
+# registers almost nothing per command.  It installs `complete -D -F
+# _comp_complete_load', whose function sources `completions/CMD' on first use and
+# returns 124 -- bash's signal to readline that a spec now exists and the completion
+# should be attempted again.  Under cooked the user never tabs in readline, so 124 is
+# ours to honour or the spec is never loaded by any route: `git checkout ma' would
+# complete to file names, and so would ssh, kill, make and systemctl.
+#
+# The same rule applies to a spec registered for the command, since a registered
+# function may itself defer, so both branches honour it.  Bounded to one retry: a
+# loader that returns 124 without registering anything -- an unknown command is the
+# everyday case -- has to end somewhere, and it ends in file completion.
 __cooked_complete_run() {
   local cmd=${COMP_WORDS[0]} word=$__cooked_complete_word
-  local -a spec
+  local -a __cooked_spec=()
+  local __cooked_complete_answered=
+  local -i rc=0 retried=0
+
+  while :; do
+    COMPREPLY=()
+    __cooked_complete_read_spec "$cmd"
+    # The default is consulted once, on the first pass.  Asking it again after it has
+    # had its retry is how a loader that registers nothing becomes a loop.
+    (( ${#__cooked_spec[@]} || retried )) || __cooked_complete_read_spec -D
+    (( ${#__cooked_spec[@]} )) || break
+
+    __cooked_complete_invoke "$cmd" "$word"
+    rc=$?
+    [[ -n $__cooked_complete_answered ]] || break
+    (( rc == 124 )) || return 0
+    (( retried )) && break
+    retried=1
+  done
+
+  # Nothing registered, or a retry that led nowhere.  The first word is a command,
+  # everything after it is a file name far more often than not -- the same split the
+  # Emacs-side table makes.
   COMPREPLY=()
-
-  # `complete -p' prints a command that would re-register the spec, quoted by bash's
-  # own rules -- so `eval' is how it is meant to be read back, and splitting on
-  # whitespace instead would tear `-W 'red green blue'' into four words.  What is
-  # evaluated is bash's output about a name we passed in quoted, not anything off the
-  # line being completed.
-  local -a spec=()
-  if eval "spec=( $(complete -p "$cmd" 2>/dev/null) )" 2>/dev/null && (( ${#spec[@]} > 1 )); then
-    local i= func=
-    for (( i = 1; i < ${#spec[@]} - 1; i++ )); do
-      [[ ${spec[i]} == -F ]] && func=${spec[i+1]}
-    done
-    if [[ -n $func ]] && declare -F "$func" >/dev/null; then
-      # The contract these functions are written against: the command, the word being
-      # completed, and the word before it, with COMP_* already set.
-      "$func" "$cmd" "$word" "${COMP_WORDS[COMP_CWORD-1]:-}" 2>/dev/null
-      return
-    fi
-    # No function, but options: hand them to compgen unchanged, minus the leading
-    # `complete', the trailing command name, and the flags that register a spec
-    # rather than describe candidates.
-    local -a opts=()
-    for (( i = 1; i < ${#spec[@]} - 1; i++ )); do
-      case ${spec[i]} in
-        -F|-C) (( i++ )) ;;
-        -p|-r|-D|-E|-I) ;;
-        *) opts+=("${spec[i]}") ;;
-      esac
-    done
-    if (( ${#opts[@]} )); then
-      mapfile -t COMPREPLY < <(compgen "${opts[@]}" -- "$word" 2>/dev/null)
-      return
-    fi
-  fi
-
-  # Nothing registered.  The first word is a command, everything after it is a file
-  # name far more often than not -- the same split the Emacs-side table makes.
   if (( COMP_CWORD == 0 )); then
     mapfile -t COMPREPLY < <(compgen -c -- "$word" 2>/dev/null)
   else

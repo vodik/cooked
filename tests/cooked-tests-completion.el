@@ -414,6 +414,88 @@ somebody else's package."
       (kill-buffer buffer)
       (delete-directory home t))))
 
+(ert-deftest cooked-completion-runs-a-spec-its-loader-defers ()
+  "bash-completion registers almost nothing per command.
+
+It installs one `-D' default whose function sources `completions/CMD' on first
+use and returns 124, which is bash's way of telling readline that a spec now
+exists and the completion is worth attempting again.  Nobody tabs in readline
+here, so the 124 is ours to honour or the spec is never loaded at all and `git
+checkout ma' completes to file names.
+
+The loader is a stub rather than upstream bash-completion, which is not installed
+everywhere and would make this a test of somebody else's package.  It behaves the
+way upstream's does in the three ways that matter: it registers per command only
+when asked, it returns 124 either way, and it records every call so that a second
+request can be shown *not* to reach it."
+  :tags '(base64 bash)
+  (skip-unless (executable-find "bash"))
+  (skip-unless (executable-find "base64"))
+  (let ((buffer (generate-new-buffer "*cooked-bash-lazy*"))
+        (home (make-temp-file "cooked-bash-home-" t)))
+    (with-temp-file (expand-file-name ".bashrc" home)
+      (insert "PS1='$ '\n"
+              "_cooked_stub_load() {\n"
+              "  printf '%s\\n' \"$1\" >> \"$HOME/loads\"\n"
+              "  [[ -r $HOME/completions/$1 ]] && source \"$HOME/completions/$1\"\n"
+              "  return 124\n"
+              "}\n"
+              "complete -F _cooked_stub_load -D\n"))
+    (make-directory (expand-file-name "completions" home))
+    (with-temp-file (expand-file-name "completions/mytool" home)
+      (insert "_mytool() { COMPREPLY=( $(compgen -W \"alpha beta gamma\" -- \"$2\") ); }\n"
+              "complete -F _mytool mytool\n"))
+    (with-temp-file (expand-file-name "landmark.txt" home) (insert ""))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (let ((default-directory (file-name-as-directory home))
+                (process-environment
+                 (cons (concat "HOME=" home)
+                       (seq-remove (lambda (entry) (string-prefix-p "HOME=" entry))
+                                   process-environment))))
+            (pcase-let ((`(,argv ,env ,scratch)
+                         (cooked--shell-invocation (executable-find "bash"))))
+              (setq cooked--scratch scratch)
+              (cooked--start argv home env)))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle
+                   (lambda () (and (cooked--input-start-position)
+                                   (cooked-line-completion-nonce (cooked--line))
+                                   (cooked-line-completion-reply-capable (cooked--line))))
+                   10))
+          (cl-flet ((loads ()
+                      (let ((file (expand-file-name "loads" home)))
+                        (if (file-exists-p file)
+                            (with-temp-buffer (insert-file-contents file) (buffer-string))
+                          ""))))
+            ;; Nothing is registered for `mytool', so the default runs, loads the
+            ;; spec and asks for another attempt; the candidates come from the spec
+            ;; it loaded.
+            (let ((cooked-completion-timeout 5))
+              (pcase-let ((`(,prefix ,_suffix ,_truncated . ,records)
+                           (cooked--shell-completions "mytool a" 8)))
+                (should (= prefix 1))
+                (should (equal (mapcar #'car records) '("alpha")))))
+            (should (equal (loads) "mytool\n"))
+            ;; And the second request finds the spec registered, so the loader is
+            ;; never reached again.
+            (let ((cooked-completion-timeout 5))
+              (pcase-let ((`(,_prefix ,_suffix ,_truncated . ,records)
+                           (cooked--shell-completions "mytool b" 8)))
+                (should (equal (mapcar #'car records) '("beta")))))
+            (should (equal (loads) "mytool\n"))
+            ;; A loader that defers and then registers nothing has to end somewhere,
+            ;; and it ends in file names rather than in another attempt.
+            (let ((cooked-completion-timeout 5))
+              (pcase-let ((`(,_prefix ,_suffix ,_truncated . ,records)
+                           (cooked--shell-completions "notool land" 11)))
+                (should (equal (mapcar #'car records) '("landmark.txt")))))
+            (should (equal (loads) "mytool\nnotool\n"))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer)
+      (delete-directory home t))))
+
 (ert-deftest cooked-completion-without-the-layer-stays-in-emacs ()
   "Unloaded, the layer is idle but the announcement is still heard.
 
