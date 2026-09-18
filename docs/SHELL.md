@@ -310,6 +310,14 @@ nothing to write — but if you have your own precmd writing `OSC 2` and prefer 
 wording, append ` no-title`. Ours is registered later and would otherwise win, which is
 last-write-wins working correctly rather than a conflict.
 
+The title is **the whole command line**, with control characters dropped, and the
+directory when nothing is running. One rule, spelled the same way in all three shells,
+so `cd /tmp` titles as `cd /tmp` wherever you run it — zsh used to send the first word
+that was not an assignment or a wrapper like `sudo`, which titled it `cd` and made the
+same session read differently depending on which shell drew it. That also makes
+`cooked-buffer-name-follows-title` behave the same way across shells, which is what it
+was written against.
+
 ## What is deliberately absent
 
 There is no `clear` override, and nothing left for one to fix: plain `clear` sends

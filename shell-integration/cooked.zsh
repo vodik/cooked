@@ -426,15 +426,19 @@ __cooked_install_announce() {
 # rather than a conflict -- last one wins, and ours is registered later, so it does.
 # Append ` no-title' to keep your own wording.
 #
+# The title is the whole command line, with control characters dropped.  That is the
+# one rule, and all three shells spell it: the same text Emacs would show for the same
+# command whichever shell is running, which is what `cooked-buffer-name-follows-title'
+# is written against.  zsh used to send the first word that was not an assignment,
+# `sudo', `command', `builtin' or an option -- so `cd /tmp' titled as `cd', and the
+# same session titled differently depending on which shell drew it.
+#
+# Dropped rather than encoded: this one is for a human to read in a mode line.  And
+# `print -r' rather than `print -P', so that a command line containing a `%' is not
+# prompt-expanded and one containing a backslash is not escape-expanded; the ESC and
+# the BEL are spelled as literals instead, which is the only thing `-P' was buying.
 __cooked_title_preexec() {
-  # `local_options' keeps both of these to this function.  EXTENDED_GLOB is what makes
-  # `^(...)' a negation rather than a literal caret, and without it the subscript
-  # matches nothing and every title comes out empty -- silently, which is how this
-  # survived being copied out of an rc that happened to set the option globally.
-  # NO_NOMATCH stops a command whose first word looks like a failed glob from erroring
-  # here rather than running.
-  setopt local_options extended_glob no_nomatch
-  builtin print -Pnu $__cooked_fd -- "\e]2;${1[(wr)^(*=*|sudo|command|builtin|-*)]:gs/%/%%}\a"
+  builtin print -rnu $__cooked_fd -- $'\e]2;'"${1//[[:cntrl:]]/}"$'\a'
 }
 __cooked_title_precmd() { builtin print -Pnu $__cooked_fd -- '\e]2;%~\a' }
 

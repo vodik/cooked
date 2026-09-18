@@ -196,8 +196,12 @@ __cooked_preexec() {
     fi
   fi
 
-  # The title, which is the same text and the same moment.  Control characters are
-  # dropped rather than encoded: this one is for a human to read in a mode line.
+  # The title, which is the same text and the same moment.  The whole command line,
+  # with control characters dropped rather than encoded: this one is for a human to
+  # read in a mode line.  The whole line is the rule in all three shells -- zsh sent
+  # its first meaningful word until it was made to agree -- so the same command titles
+  # the same way whichever shell drew it, which is what
+  # `cooked-buffer-name-follows-title' is written against.
   # Gated on its own feature, and reached whether or not the marks are on -- the two
   # share a hook because they share an instant, not because either needs the other.
   __cooked_want title && [[ -n $cmdline ]] &&

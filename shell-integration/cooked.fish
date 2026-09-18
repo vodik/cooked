@@ -262,6 +262,11 @@ if status is-interactive
         end
     end
 
+    # The whole command line, with control characters dropped rather than encoded: this
+    # one is for a human to read in a mode line.  The whole line is the rule in all three
+    # shells -- zsh sent its first meaningful word until it was made to agree -- so the
+    # same command titles the same way whichever shell drew it, which is what
+    # `cooked-buffer-name-follows-title' is written against.
     if __cooked_want title
         function __cooked_title_preexec --on-event fish_preexec
             printf '\033]2;%s\007' (string replace -ar '[[:cntrl:]]' '' -- "$argv[1]")

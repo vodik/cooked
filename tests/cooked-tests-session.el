@@ -872,24 +872,40 @@ somebody who never heard of it."
       (delete-directory dir t))))
 
 (ert-deftest cooked-zsh-title-names-the-command-and-the-directory ()
-  "Regression: every title came out empty, and nothing said so.
+  "The title is the whole command line, which is the rule in all three shells.
 
-The preexec title picks the first word that is not an assignment or a wrapper
-like `sudo', which is spelled with a negated glob -- and `^(...)' is a
-negation only under EXTENDED_GLOB.  Without it the subscript matches nothing and
-the title is the empty string rather than an error, so the feature looks
-registered and does nothing.  It reached the snippet by being copied out of an rc
-that set the option globally, which is exactly the difference between an example
-and a shipped file, so the rc here does not set it."
+zsh used to send the first word that was not an assignment or a wrapper like
+`sudo\\=', so `command true\\=' titled as `true\\=' and `cd /tmp\\=' as `cd\\=' --
+one shell titling a session differently from the other two for the same command.
+Asserted verbatim rather than by what is absent from it, because the whole point
+of the rule is that there is nothing left to leave out.
+
+The regression this replaces is still worth knowing about, since it is why the rc
+here deliberately sets no options: the old first-word extraction was a negated
+glob, `^(...)\\=', which is a negation only under EXTENDED_GLOB, and without the
+option it matched nothing and every title came out empty.  Silently -- the
+feature looked registered and did nothing.  It reached the snippet by being
+copied out of an rc that set the option globally, which is exactly the difference
+between an example and a shipped file."
   :tags '(zsh)
   (skip-unless (executable-find "zsh"))
-  ;; `command\=' and an assignment stand in for the whole skip list.  Not `sudo\=',
-  ;; which is on it: running one in a test would sit waiting for a password.
-  (let ((titles (cooked-tests--zsh-osc 2 "" "true\ncommand true\nFOO=1 true\nexit\n")))
+  ;; `command\=' and an assignment stand in for what used to be a skip list.  Not
+  ;; `sudo\=', which was on it: running one in a test would sit waiting for a password.
+  (let ((titles (cooked-tests--zsh-osc
+                 2 "" "true\ncommand true\nFOO=1 true\ntrue 'a%b\\c' '%~'\nexit\n")))
     (should (member "true" titles))
-    ;; The wrapper is skipped in favour of what it is wrapping.
-    (should-not (member "command" titles))
-    (should-not (member "FOO=1" titles))
+    (should (member "command true" titles))
+    (should (member "FOO=1 true" titles))
+    ;; Verbatim, which is what `print -r\=' bought: the old spelling went through
+    ;; `print -P\=', so a `%\=' in the command line was prompt-expanded -- `%~\='
+    ;; inside it would have become a directory -- and a backslash escape-expanded.
+    (should (member "true 'a%b\\c' '%~'" titles))
+    ;; The directory is still what is shown when nothing is running, and it is still
+    ;; the one place `%~\=' is meant to expand.
+    (should-not (member "%~" titles))
+    (should (seq-find (lambda (title)
+                        (or (string-prefix-p "~" title) (string-prefix-p "/" title)))
+                      titles))
     (should-not (seq-find #'string-empty-p titles))))
 
 (ert-deftest cooked-zsh-title-can-be-declined ()
