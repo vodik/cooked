@@ -90,6 +90,7 @@
 (require 'cooked-tests-glyph)
 (require 'cooked-tests-next-error)
 (require 'cooked-tests-sticky-scroll)
+(require 'cooked-tests-longline)
 (require 'cooked-tests-command-decorations)
 (require 'cooked-tests-menu)
 (require 'cooked-tests-display)
