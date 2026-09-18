@@ -108,7 +108,7 @@ const REAP_PATIENCE: std::time::Duration = std::time::Duration::from_millis(500)
 /// to end. `cooked--on-exit' spells it out. Negative because no `waitpid` status is.
 pub(crate) const LOST: i32 = -1;
 
-/// How quiet the pty must go before a frame is drawn; see [`NotifyState::hold`].
+/// How quiet the pty must go before a frame is drawn; see [`NotifyState::quiescent_until`].
 ///
 /// A client update is written in pieces — `viu` sends a cursor move, then four megabytes
 /// of image, then a newline — and drawing between two of them shows a state the client
@@ -233,7 +233,7 @@ struct NotifyState {
     /// Floor on how often the wake pipe is written to, however fast output arrives.
     /// Without one, a spinner rewriting its line drives one full Emacs redisplay per write
     /// and shows up as flicker. It says how close together two wakeups may be and nothing
-    /// about which moment is worth drawing, which is [`Self::hold`]'s question.
+    /// about which moment is worth drawing, which is [`Self::quiescent_until`]'s question.
     ///
     /// `Term` always holds the latest state, and [`Notifier::poll_wait`] shortens the
     /// reader's tick to this interval's remaining window so a throttled notification is
@@ -244,7 +244,7 @@ struct NotifyState {
     /// interval and the `last` it is compared against change together.
     min_interval: std::time::Duration,
     /// How long a frame may be held while the child keeps changing it; see
-    /// [`Self::hold`].
+    /// [`Self::ceiling_at`].
     ///
     /// Derived from `min_interval` by [`Options::with_min_redisplay_interval`] rather than
     /// chosen beside it. [`Notifier::flush`] consults the throttle before the hold, so a
@@ -258,11 +258,8 @@ struct NotifyState {
     /// [`QUIESCENCE`] the gap it waits for, and an alternate-screen repaint archives nothing
     /// for `backlog_limit` to catch.
     ///
-    /// Armed at the *second* change of a held frame rather than the first. One cursor move
-    /// followed by a long silent image transfer has nothing further to show, and firing on
-    /// it would draw the cursor on top of a picture that has not arrived. A client that is
-    /// genuinely streaming changes produces its second one within microseconds, so it arms
-    /// this at once and is redrawn at the redisplay interval throughout.
+    /// Adopted at the *second* change of a held frame rather than the first, which is the
+    /// second of the two stages [`Self::ceiling_at`] is armed in.
     frame_ceiling: std::time::Duration,
     /// See [`QUIESCENCE`].
     ///
@@ -277,21 +274,30 @@ struct NotifyState {
     /// so no path takes an extra one — and never *extended* while the frame it is holding
     /// is still undrawn; see [`Notifier::set_sync`].
     sync_until: Option<std::time::Instant>,
-    /// When the child last wrote anything at all, drawable or not; see [`Self::hold`].
+    /// When the child last wrote anything at all, drawable or not; see
+    /// [`Self::quiescent_until`].
     ///
     /// Every read moves it, including the ones that changed nothing: a megabyte of image
     /// data changes no cell, and is still the loudest possible evidence that the client
     /// is in the middle of an update.
     last_read: Option<std::time::Instant>,
-    /// When a frame that has changed more than once stops being held; see
-    /// [`Self::frame_ceiling`]. `None` while no frame is held, and while the held frame has
-    /// only the one change in it.
+    /// When the frame being held stops being held, whatever the child does next. `None`
+    /// while no frame is held.
+    ///
+    /// Armed in two stages, because a frame's first change and its second say different
+    /// things. The first arms [`HOLD_CEILING`], the outer bound on any hold: one change is
+    /// not yet evidence that more are coming, and a lone cursor move followed by a long
+    /// silent image transfer must not be drawn over the picture in flight. The second is
+    /// that evidence, and brings the deadline in to [`Self::frame_ceiling`], the pace a
+    /// busy client is drawn at -- which a client genuinely streaming changes reaches
+    /// within microseconds of its first.
+    ///
+    /// One field rather than the two this was, an outer `held_since + HOLD_CEILING` beside
+    /// an inner deadline armed by the second change. Tightening is monotonic: a third
+    /// change and every one after it names a later instant than the second's, so taking
+    /// the minimum each time leaves the second change's answer standing, which is exactly
+    /// what the two-field version spelled with a `get_or_insert`.
     ceiling_at: Option<std::time::Instant>,
-    /// When the frame currently being held first became one, for [`HOLD_CEILING`]. `None`
-    /// while nothing is held. Distinct from `ceiling_at`, which is armed by a *second*
-    /// change and is the pace a busy client is drawn at; this is armed by the first and is
-    /// the outer bound on the whole hold, however quiet or noisy the client turns out to be.
-    held_since: Option<std::time::Instant>,
     /// When the window a keystroke opened for its echo closes; see [`ECHO_WINDOW`].
     ///
     /// Taken by the first drawable read on a shown screen, whether or not it has expired,
@@ -362,22 +368,18 @@ impl NotifyState {
     /// `dirty` set, retire at a deadline -- with the pty going quiet standing in for the
     /// child's cooperation, so it works for clients that never send a 2026 sequence.
     ///
-    /// Three deadlines, whichever comes first: [`QUIESCENCE`] since the last byte arrived,
-    /// [`Self::frame_ceiling`] since the frame's second change, and [`HOLD_CEILING`] since
-    /// its first. `last_read` unset — which [`Notifier::announce`] arranges — means there
-    /// is nothing to wait for at all.
+    /// Two deadlines, whichever comes first: [`QUIESCENCE`] since the last byte arrived,
+    /// and the frame's own [`Self::ceiling_at`]. `last_read` unset — which
+    /// [`Notifier::announce`] arranges — means there is nothing to wait for at all.
     fn quiescent_until(&self, now: std::time::Instant) -> Option<std::time::Instant> {
         let mut at = self
             .last_read
             .map(|t| t + self.quiescence)
             .filter(|at| *at >= now)?;
-        // A ceiling that has *passed* releases the frame outright, so each is asked
+        // A ceiling that has *passed* releases the frame outright, so it is asked
         // separately rather than folded into the `min` with a default that would read as
         // "no deadline".
-        for ceiling in [self.ceiling_at, self.held_since.map(|t| t + HOLD_CEILING)]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(ceiling) = self.ceiling_at {
             if ceiling < now {
                 return None;
             }
@@ -398,7 +400,6 @@ impl Notifier {
                 frame_ceiling: options.frame_ceiling,
                 quiescence: options.quiescence,
                 last: None,
-                held_since: None,
                 sync_until: None,
                 last_read: None,
                 ceiling_at: None,
@@ -450,7 +451,6 @@ impl Notifier {
         let mut state = self.state.held();
         state.last_read = None;
         state.ceiling_at = None;
-        state.held_since = None;
         drop(state);
         self.flush()
     }
@@ -469,9 +469,10 @@ impl Notifier {
     ///
     /// The entry point for output, in place of [`Self::announce`]: it marks the frame and
     /// leaves the decision of when to draw it to [`Self::flush`], which the reader
-    /// retries on every tick. Both halves of [`NotifyState::hold`] are armed here — the
-    /// timestamp on every read, and the ceiling from the second drawable change onwards,
-    /// which is what `dirty` already being set says.
+    /// retries on every tick. Both halves of [`NotifyState::quiescent_until`] are armed
+    /// here — the timestamp on every read, and the frame's ceiling, in the two stages
+    /// [`NotifyState::ceiling_at`] describes; `dirty` already being set is what says this
+    /// is not the frame's first change.
     ///
     /// A keystroke's echo window is taken here too. A hidden screen leaves it alone: the
     /// drawable read there is a bell or a prompt mark, which Emacs handles without drawing
@@ -486,12 +487,16 @@ impl Notifier {
         }
         if drawable {
             if self.dirty.swap(true, Ordering::SeqCst) {
-                let ceiling = state.frame_ceiling;
-                state.ceiling_at.get_or_insert(now + ceiling);
+                // A second change, or a later one: bring the deadline in to the pace a busy
+                // client is drawn at, never push it out. `None` here is a frame whose
+                // deadlines [`Self::announce`] cleared without the flush behind it getting
+                // out, which starts the ceiling afresh rather than leaving it unbounded.
+                let at = now + state.frame_ceiling;
+                state.ceiling_at = Some(state.ceiling_at.map_or(at, |held| held.min(at)));
             } else {
-                // The first change of a frame, which [`HOLD_CEILING`] is measured from. One
-                // change is not yet evidence that more are coming, so `ceiling_at` waits.
-                state.held_since = Some(now);
+                // The first change of a frame, which one change is not yet evidence of more
+                // to come: only the outer bound is armed.
+                state.ceiling_at = Some(now + HOLD_CEILING);
             }
         }
     }
@@ -513,7 +518,6 @@ impl Notifier {
         }
         state.last = Some(now);
         state.ceiling_at = None;
-        state.held_since = None;
         state.echo = false;
         drop(state);
         self.dirty.store(false, Ordering::SeqCst);
@@ -1510,7 +1514,7 @@ impl Shared {
             // Retires a notification held back by the throttle or the quiescence rule.
             // This, rather than the read below, draws the ordinary frame: a poll that came
             // back with nothing to read is a child that has stopped writing, which is what
-            // [`NotifyState::hold`] waits for. The rule lives in `flush` so that `rearm`
+            // [`NotifyState::quiescent_until`] waits for. The rule lives in `flush` so that `rearm`
             // on Emacs' thread obeys it too.
             self.flush();
 
