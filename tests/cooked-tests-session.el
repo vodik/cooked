@@ -301,15 +301,6 @@ a foreign handle would be reinterpreted as a session."
   (should-error (cooked--pid nil) :type 'wrong-type-argument)
   (should-error (cooked--kill (make-marker)) :type 'wrong-type-argument))
 
-(ert-deftest cooked-a-bare-error-reaches-lisp-as-a-signal ()
-  "An entry point that fails without signalling must not answer a plain nil.
-The core's error type carries nothing, on the assumption that whoever built it
-left a signal pending -- and Env::intern and Env::defun are two that do not, for
-a NUL in a name.  A nil returned for one of those is a failure the caller cannot
-see, let alone explain, so the trampoline asks before returning."
-  (cooked--load-module)
-  (should-error (cooked--test-bare-error) :type 'cooked-error))
-
 (ert-deftest cooked-exit-status-is-reported ()
   (cooked-tests--with-session '("/bin/sh" "-c" "exit 9")
     (should (cooked-tests--settle

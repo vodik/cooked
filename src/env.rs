@@ -676,6 +676,11 @@ unsafe extern "C" fn trampoline(
         // built without signalling -- `intern` and `defun` answer one for a NUL in a name
         // -- and returning `nil` for that hands Lisp a value nobody can explain. So ask,
         // on the error path only, and say who failed if nothing else did.
+        //
+        // No entry point reaches this today: every one that answers an error signals
+        // first, and no name the tree interns carries a NUL. It is here for the one that
+        // will, and is deliberately untested rather than tested through a defun that
+        // would have to ship in the module to be callable.
         Ok(Err(Error)) => {
             if env.check().is_ok() {
                 env.signal(
