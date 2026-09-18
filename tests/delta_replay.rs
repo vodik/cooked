@@ -36,7 +36,7 @@
 //! class of miss a text-only oracle waves through.
 
 use cooked::emu::{
-    Deco, Delta, Direction, Edit, ImageId, Levels, Run, Scrolled, Shift, StyleId, Term,
+    Deco, Delta, Direction, Edit, ImageId, Levels, Run, Runs, Scrolled, Shift, StyleId, Term,
 };
 use proptest::prelude::*;
 use std::collections::HashMap;
@@ -602,9 +602,9 @@ impl Announced {
         });
         let scrolled = delta.scrolled.iter_mut().map(|line| &mut line.runs);
         for runs in rows.chain(scrolled) {
-            for run in runs {
-                run.style = self.renumber(run.style);
-                if let Some(Deco::Images(places)) = &mut run.deco {
+            for (style, deco) in runs.ids_mut() {
+                *style = self.renumber(*style);
+                if let Some(Deco::Images(places)) = deco {
                     for place in places {
                         place.id = self.rename(place.id);
                     }
@@ -658,7 +658,7 @@ struct Replay {
     rows: usize,
     cols: usize,
     /// Every row Emacs would be holding, as the deltas described it.
-    shadow: Vec<Vec<Run>>,
+    shadow: Vec<Runs>,
     /// The shadow rows a [`Step::Trim`] edited and no drain has rewritten since, which
     /// are expected to differ from the grid: that difference is what Lisp left there.
     trimmed: Vec<bool>,
@@ -698,7 +698,7 @@ impl Replay {
             reference: Term::new(rows, cols),
             rows,
             cols,
-            shadow: vec![Vec::new(); rows],
+            shadow: vec![Runs::default(); rows],
             trimmed: vec![false; rows],
             wrapped: vec![false; rows],
             scrollback: Vec::new(),
@@ -722,7 +722,7 @@ impl Replay {
     /// the new shape arrives in this same delta.
     fn absorb(&mut self, delta: Delta, reference: Delta) {
         self.check_skipped(&delta, &reference);
-        self.shadow.resize(delta.height, Vec::new());
+        self.shadow.resize(delta.height, Runs::default());
         self.trimmed.resize(delta.height, false);
         self.wrapped.resize(delta.height, false);
         // Before the rows and after the resize, which is the order `cooked--apply' works
@@ -791,7 +791,7 @@ impl Replay {
         let mut shadow = self.shadow.clone();
         let mut wrapped = self.wrapped.clone();
         let mut trimmed = self.trimmed.clone();
-        shadow.resize(delta.height, Vec::new());
+        shadow.resize(delta.height, Runs::default());
         wrapped.resize(delta.height, false);
         trimmed.resize(delta.height, false);
         for shift in promotion(delta).iter().chain(&delta.shifts) {
@@ -835,13 +835,13 @@ impl Replay {
     /// as `cooked--promote-rows' keeps it: the shadow's row, padded with plain spaces to
     /// the characters the scrolled row has, and wrapped as the scrolled row is.
     fn check_promoted(&self, delta: &Delta) {
-        let space = drawn(&[Run {
+        let space = drawn(&Runs::from_runs(&[Run {
             text: " ".into(),
             cols: 1,
             style: StyleId::DEFAULT,
             deco: None,
             link: None,
-        }]);
+        }]));
         let promoted = delta.promoted.map_or(0, |shift| shift.count);
         for (index, line) in delta.scrolled.iter().take(promoted).enumerate() {
             let held = drawn(&self.shadow[index]);
@@ -870,7 +870,7 @@ impl Replay {
     /// Also that neither boundary cuts a run of box glyphs in the old row or the new one,
     /// since Lisp draws such a run as one image and half of one left behind is wrong
     /// however right the characters are.
-    fn check_edit(index: usize, old: &[Run], edit: &Edit, full: &[Run]) {
+    fn check_edit(index: usize, old: &Runs, edit: &Edit, full: &Runs) {
         let before = drawn(old);
         let start = edit.char_start;
         assert!(
@@ -1023,10 +1023,9 @@ impl Replay {
                 let Some(runs) = self.shadow.get_mut(row) else {
                     return;
                 };
-                let Some(run) = runs.iter_mut().rev().find(|run| !run.text.is_empty()) else {
+                if runs.pop_char().is_none() {
                     return;
-                };
-                run.text.pop();
+                }
                 self.trimmed[row] = true;
                 self.term.forget_sent(Some(row));
                 return;
@@ -1108,7 +1107,7 @@ fn moved<'a>(height: usize, shifts: impl Iterator<Item = &'a Shift>) -> Vec<Opti
 
 /// RUNS as what Emacs draws for each character: the character, its rendition and link,
 /// and its decoration.
-fn drawn(runs: &[Run]) -> Vec<String> {
+fn drawn(runs: &Runs) -> Vec<String> {
     runs.iter()
         .flat_map(|run| {
             run.text.chars().enumerate().map(move |(i, c)| {
@@ -1120,10 +1119,10 @@ fn drawn(runs: &[Run]) -> Vec<String> {
 
 /// Whether character offset AT falls strictly inside a run of RUNS that carries box
 /// glyphs.
-fn inside_glyph_run(runs: &[Run], at: usize) -> bool {
+fn inside_glyph_run(runs: &Runs, at: usize) -> bool {
     let mut start = 0;
     for run in runs {
-        let len = run.text.chars().count();
+        let len = run.chars;
         if run.deco_at(0).is_some() && start < at && at < start + len {
             return true;
         }
@@ -1140,7 +1139,7 @@ fn render(scrollback: &[Delta], rejoin: bool) -> String {
     for batch in scrollback {
         for (line, ends) in batch.scrolled_lines(rejoin) {
             for run in &line.runs {
-                out.push_str(&run.text);
+                out.push_str(run.text);
             }
             if ends {
                 out.push('\n');
@@ -1156,11 +1155,11 @@ fn render(scrollback: &[Delta], rejoin: bool) -> String {
 
 /// The first place two grids disagree, spelled out.
 ///
-/// A `assert_eq!` on the two `Vec<Vec<Run>>` prints both grids in full, which for an 8x12
+/// A `assert_eq!` on the two `Vec<Runs>` prints both grids in full, which for an 8x12
 /// grid of styled runs is several screens of `Debug` output with the one differing field
 /// somewhere inside it. This is §9's first-difference visualization: say which row, which
 /// run, and show only that pair.
-fn difference(shadow: &[Vec<Run>], full: &[Vec<Run>], skip: &[bool]) -> Option<String> {
+fn difference(shadow: &[Runs], full: &[Runs], skip: &[bool]) -> Option<String> {
     if shadow.len() != full.len() {
         return Some(format!(
             "row count: replayed {} rows, the grid has {}",
@@ -1193,7 +1192,7 @@ fn difference(shadow: &[Vec<Run>], full: &[Vec<Run>], skip: &[bool]) -> Option<S
 /// That `drain_damage` is ascending by construction is relied on elsewhere — it is what
 /// lets damaged rows be coalesced into spans at all — so it is worth asserting where a
 /// property test can see it.
-fn dense(delta: &Delta) -> Result<Vec<Vec<Run>>, TestCaseError> {
+fn dense(delta: &Delta) -> Result<Vec<Runs>, TestCaseError> {
     let indices: Vec<usize> = delta.rows.iter().map(|r| r.index).collect();
     let expected: Vec<usize> = (0..delta.height).collect();
     prop_assert_eq!(

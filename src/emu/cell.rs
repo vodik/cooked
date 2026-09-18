@@ -512,6 +512,16 @@ impl Deco {
         }
     }
 
+    /// A description of the decoration on character INDEX, for a test that compares what
+    /// two sequences of runs draw character by character.
+    #[doc(hidden)]
+    pub fn at(&self, index: usize) -> Option<String> {
+        match self {
+            Self::Glyphs(glyphs) => glyphs.get(index).map(|g| format!("{g:?}")),
+            Self::Images(places) => places.get(index).map(|p| format!("{p:?}")),
+        }
+    }
+
     /// The shapes, for tests that assert against the classifier's output.
     #[cfg(test)]
     pub(crate) fn glyphs(&self) -> &[BoxGlyph] {
@@ -553,11 +563,371 @@ impl Run {
     /// compares what two sequences of runs draw character by character.
     #[doc(hidden)]
     pub fn deco_at(&self, index: usize) -> Option<String> {
-        match &self.deco {
-            Some(Deco::Glyphs(glyphs)) => glyphs.get(index).map(|g| format!("{g:?}")),
-            Some(Deco::Images(places)) => places.get(index).map(|p| format!("{p:?}")),
-            None => None,
+        self.deco.as_ref().and_then(|deco| deco.at(index))
+    }
+}
+
+/// A row's runs: every run's characters in one buffer, and one record per run.
+///
+/// What the drain builds per damaged row, per edited span and per row that scrolls off,
+/// and what `Block::push_runs` copies into the text it hands Emacs. A `Vec<Run>` owned a
+/// `String` per run, so a screen of `ls --color` cost an allocation per coloured word per
+/// drain, and then a `chars().count()` scan per run on the way out, because nothing had
+/// counted the characters while it had the cells. Here the characters are written once,
+/// straight from the cells, and counted as they are written.
+///
+/// The spans tile the text in order and leave no gap, so a run's text is the stretch
+/// between its own start and the next run's; see [`Runs::run`]. That is also what makes
+/// merging two neighbouring runs free — the text of the merged run is already
+/// contiguous — which [`Row::absorb_blank_runs`] does per glyph row.
+///
+/// [`Run`] is still the shape a test asserts against, and [`Runs::to_vec`] materialises
+/// one per run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Runs {
+    /// Every run's characters, concatenated: the row's text.
+    text: String,
+    runs: Vec<Span>,
+}
+
+/// One run of a [`Runs`]: where its text begins, and what [`Run`] carries besides text.
+///
+/// Only a start, because a run ends where the next begins and the last ends at the text.
+/// Storing the length instead would have to be maintained by a merge, which is otherwise
+/// two removals and an addition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Span {
+    /// Byte offset into [`Runs::text`] of this run's first character.
+    start: usize,
+    /// Characters of this run's text, counted as they were pushed.
+    ///
+    /// The count `Block` needs for every style span and every offset it emits, which it
+    /// used to rescan the string for.
+    chars: usize,
+    /// Columns this run occupies on the grid; see [`Run::cols`].
+    cols: usize,
+    style: StyleId,
+    deco: Option<Deco>,
+    link: Option<LinkId>,
+}
+
+/// One run of a [`Runs`], borrowed: what a [`Run`] says without owning its text.
+///
+/// `chars` is the field a [`Run`] has no room for, and the reason this is a struct rather
+/// than a `&Run`: the count is a by-product of building the run, and every consumer of a
+/// run wants it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunRef<'a> {
+    pub text: &'a str,
+    /// Characters of `text`. Not `text.len()`, which counts bytes, nor `cols`, which
+    /// counts grid columns: a wide character is one character on two columns and a
+    /// combining mark one character on none.
+    pub chars: usize,
+    pub cols: usize,
+    pub style: StyleId,
+    pub deco: Option<&'a Deco>,
+    pub link: Option<LinkId>,
+}
+
+impl RunRef<'_> {
+    /// A description of the decoration on this run's character INDEX; see
+    /// [`Run::deco_at`].
+    #[doc(hidden)]
+    pub fn deco_at(&self, index: usize) -> Option<String> {
+        self.deco.and_then(|deco| deco.at(index))
+    }
+}
+
+impl Runs {
+    /// Room for a row's text and the handful of runs a row usually has.
+    ///
+    /// COLS bytes, because for the ASCII a terminal mostly carries a column is a byte, and
+    /// four runs for the reason [`Row::build_runs`] gives.
+    fn with_cols(cols: usize) -> Self {
+        Self {
+            text: String::with_capacity(cols),
+            runs: Vec::with_capacity(4),
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.runs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.runs.is_empty()
+    }
+
+    /// Every run's characters in order, which is the row's text; the equivalent of
+    /// `runs.iter().map(|r| r.text).collect()` without the copy.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Characters over every run: what this puts in an Emacs buffer.
+    pub fn chars(&self) -> usize {
+        self.runs.iter().map(|run| run.chars).sum()
+    }
+
+    /// Run INDEX, or `None` past the end.
+    pub fn get(&self, index: usize) -> Option<RunRef<'_>> {
+        let run = self.runs.get(index)?;
+        Some(RunRef {
+            text: &self.text[run.start..self.end_of(index)],
+            chars: run.chars,
+            cols: run.cols,
+            style: run.style,
+            deco: run.deco.as_ref(),
+            link: run.link,
+        })
+    }
+
+    /// Run INDEX, which must be there; for a test naming a run by position.
+    ///
+    /// Panics rather than returning an `Option` because [`std::ops::Index`] cannot be
+    /// implemented for a borrowed view, and `runs.run(0)` reads like the `runs.run(0)` it
+    /// replaces.
+    pub fn run(&self, index: usize) -> RunRef<'_> {
+        self.get(index)
+            .unwrap_or_else(|| panic!("run {index} of {} runs", self.runs.len()))
+    }
+
+    pub fn iter(&self) -> Iter<'_> {
+        Iter {
+            runs: self,
+            at: 0,
+            end: self.runs.len(),
+        }
+    }
+
+    /// One owned [`Run`] per run, for a test asserting against run shapes.
+    #[doc(hidden)]
+    pub fn to_vec(&self) -> Vec<Run> {
+        self.iter()
+            .map(|run| Run {
+                text: run.text.to_owned(),
+                cols: run.cols,
+                style: run.style,
+                deco: run.deco.cloned(),
+                link: run.link,
+            })
+            .collect()
+    }
+
+    /// These runs, from owned ones; for a test stating what it expects as [`Run`]s.
+    #[doc(hidden)]
+    pub fn from_runs(runs: &[Run]) -> Self {
+        let mut built = Self::default();
+        for run in runs {
+            built.start(run.style, run.link, None);
+            built.runs.last_mut().expect("just started").deco = run.deco.clone();
+            built.push_str(&run.text);
+            built.add_cols(run.cols);
+        }
+        built
+    }
+
+    /// Drop the last character of the last run that has one, and say what it was.
+    ///
+    /// For `delta_replay`, which stands in for Lisp trimming the trailing text of a row
+    /// the cursor has left. The columns are left as they were, as they are in the buffer:
+    /// what changed is the text, not how wide the grid said the row was.
+    #[doc(hidden)]
+    pub fn pop_char(&mut self) -> Option<char> {
+        let ch = self.text.pop()?;
+        let at = self
+            .runs
+            .iter()
+            .rposition(|run| run.chars > 0)
+            .expect("text with no run holding it");
+        self.runs[at].chars -= 1;
+        // Every run after it begins that many bytes earlier now.
+        for run in &mut self.runs[at + 1..] {
+            run.start -= ch.len_utf8();
+        }
+        Some(ch)
+    }
+
+    /// Each run's rendition and decoration, to be rewritten in place.
+    ///
+    /// Not its text or its columns: those the builders own, and a consumer that needs
+    /// other text builds other runs. `delta_replay` renumbers a delta's style and image
+    /// ids into the ids the session it compares against handed out, which is what this is
+    /// for.
+    #[doc(hidden)]
+    pub fn ids_mut(&mut self) -> impl Iterator<Item = (&mut StyleId, Option<&mut Deco>)> {
+        self.runs
+            .iter_mut()
+            .map(|run| (&mut run.style, run.deco.as_mut()))
+    }
+
+    /// Where run INDEX's text ends: where the next begins, or the end of the text.
+    fn end_of(&self, index: usize) -> usize {
+        self.runs
+            .get(index + 1)
+            .map_or(self.text.len(), |next| next.start)
+    }
+
+    /// Drop every run but keep the buffers, for a producer that fills one per round; see
+    /// `Emission::clear`.
+    pub(crate) fn clear(&mut self) {
+        self.text.clear();
+        self.runs.clear();
+    }
+
+    /// Whether the open run takes a cell of this pen and decoration, or a new run must
+    /// begin.
+    ///
+    /// A link boundary splits a run even when nothing else changed: `see <link>foo</link>
+    /// bar' in one colour is otherwise one run, with nothing to say which part is
+    /// clickable. So does a change of decoration kind, which is what keeps a run's
+    /// records one per character of one kind; see [`Deco`].
+    fn joins(&self, style: StyleId, link: Option<LinkId>, deco: Option<DecoCell>) -> bool {
+        self.runs.last().is_some_and(|run| {
+            run.style == style
+                && run.link == link
+                && match (&run.deco, deco) {
+                    (None, None) => true,
+                    (Some(d), Some(c)) => d.accepts(c),
+                    _ => false,
+                }
+        })
+    }
+
+    /// Begin a run in this pen, whatever the open one holds.
+    ///
+    /// For a producer that decides its own boundaries: the comint filter groups its
+    /// columns before it pushes them, and keeps a newline in a run of its own whether or
+    /// not the text before it was in the same rendition.
+    pub(crate) fn start(&mut self, style: StyleId, link: Option<LinkId>, deco: Option<DecoCell>) {
+        self.runs.push(Span {
+            start: self.text.len(),
+            chars: 0,
+            cols: 0,
+            style,
+            deco: deco.map(Deco::start),
+            link,
+        });
+    }
+
+    /// Open a run in this pen, or extend the open one if it takes the decoration.
+    ///
+    /// The decoration is one character's, and is pushed onto the run's records here, so
+    /// this is called once per decorated cell and not once per stretch of them.
+    fn open(&mut self, style: StyleId, link: Option<LinkId>, deco: Option<DecoCell>) {
+        if !self.joins(style, link, deco) {
+            self.start(style, link, deco);
+            return;
+        }
+        if let Some(cell) = deco
+            && let Some(records) = self.runs.last_mut().and_then(|run| run.deco.as_mut())
+        {
+            records.push(cell);
+        }
+    }
+
+    /// Append CH to the open run, counting it.
+    pub(crate) fn push_char(&mut self, ch: char) {
+        self.text.push(ch);
+        if let Some(run) = self.runs.last_mut() {
+            run.chars += 1;
+        }
+    }
+
+    /// Append TEXT to the open run, counting its characters as they are written.
+    ///
+    /// Zero-width characters ride here too -- the combining marks attached to a cell --
+    /// which is why this adds no columns.
+    pub(crate) fn push_str(&mut self, text: &str) {
+        self.text.push_str(text);
+        if let Some(run) = self.runs.last_mut() {
+            run.chars += text.chars().count();
+        }
+    }
+
+    /// Extend the open run with CHARS over COLS columns, or start one, for a stretch of
+    /// undecorated cells.
+    ///
+    /// The characters are counted as they are written, which is the whole point: nothing
+    /// downstream has to scan the text to learn how many there were.
+    fn push_text(
+        &mut self,
+        chars: impl Iterator<Item = char>,
+        cols: usize,
+        style: StyleId,
+        link: Option<LinkId>,
+    ) {
+        self.open(style, link, None);
+        let Self { text, runs } = self;
+        let run = runs.last_mut().expect("`open` leaves a run open");
+        for ch in chars {
+            text.push(ch);
+            run.chars += 1;
+        }
+        run.cols += cols;
+    }
+
+    /// Credit COUNT columns to the open run without any text of their own.
+    ///
+    /// The continuation cells of a wide character, which belong to the column count of
+    /// the run that owns the character; see [`Run::cols`].
+    pub(crate) fn add_cols(&mut self, count: usize) {
+        if let Some(run) = self.runs.last_mut() {
+            run.cols += count;
+        }
+    }
+
+    /// One cell into the runs: its character, the combining MARKS riding it, and the DECO
+    /// it draws instead of its glyph.
+    fn push_cell(&mut self, cell: &Cell, marks: Option<&str>, deco: Option<DecoCell>) {
+        self.open(cell.style, cell.link, deco);
+        self.push_char(cell.ch);
+        self.add_cols(1);
+        // A cell carrying marks is undecorated (see `decoration`), so the marks never land
+        // inside a decorated run, whose records are one per character.
+        if let Some(marks) = marks {
+            self.push_str(marks);
+        }
+    }
+}
+
+/// Walks a [`Runs`] left to right, which is the only order anything reads runs in.
+pub struct Iter<'a> {
+    runs: &'a Runs,
+    at: usize,
+    end: usize,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = RunRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let run = self.runs.get(self.at).filter(|_| self.at < self.end)?;
+        self.at += 1;
+        Some(run)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.end - self.at;
+        (left, Some(left))
+    }
+}
+
+impl DoubleEndedIterator for Iter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.end = self.end.checked_sub(1).filter(|at| *at >= self.at)?;
+        self.runs.get(self.end)
+    }
+}
+
+impl ExactSizeIterator for Iter<'_> {}
+
+impl<'a> IntoIterator for &'a Runs {
+    type Item = RunRef<'a>;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -922,7 +1292,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// Dispatches on whether the row has a side table: [`Row::build_plain_runs`] for
     /// nearly every row, [`Row::build_runs`] otherwise. This is the hottest read in the
     /// emulator, and a per-cell lookup cost about 2% of the full-screen repaint benchmark.
-    pub fn runs(&self) -> Vec<Run> {
+    pub fn runs(&self) -> Runs {
         self.runs_to(self.content_len())
     }
 
@@ -933,7 +1303,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// [`Logical::push_row`](super::screen) measures rows the same way during a rewrap, and
     /// the two must agree for a resize to round-trip. It also keeps every departed row
     /// exactly `cols` wide, which [`Screen::carried`](super::screen::Screen) relies on.
-    pub fn line_runs(&self) -> Vec<Run> {
+    pub fn line_runs(&self) -> Runs {
         if self.meta().wrapped {
             self.runs_to(self.len())
         } else {
@@ -948,8 +1318,9 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// tempting to optimise, and an optimisation needs something to be equivalent to.
     ///
     /// An independent formulation rather than a copy -- it searches per column where the
-    /// builders walk a cursor -- so the two cannot share a mistake. It stops where the
-    /// builders stop: the test composes [`Row::absorb_blank_runs`] onto it.
+    /// builders walk a cursor, and it materialises a [`Run`] where they write into one
+    /// buffer -- so the two cannot share a mistake. It stops where the builders stop: the
+    /// test composes [`Row::absorb_blank_runs`] onto it.
     #[cfg(test)]
     pub(crate) fn runs_to_reference(&self, end: usize) -> Vec<Run> {
         let entries: &[(u16, Extra)] = self.meta().extras.as_deref().map_or(&[], |e| &e.entries);
@@ -1015,25 +1386,38 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// caller chooses START and END on whole cells and outside any box-glyph run, so the
     /// runs here are the same characters, renditions and decorations the full row's runs
     /// carry over those columns; only where a run happens to be cut differs.
-    pub(crate) fn runs_between(&self, start: usize, end: usize) -> Vec<Run> {
+    pub(crate) fn runs_between(&self, start: usize, end: usize) -> Runs {
         let end = end.min(self.len());
-        let start = start.min(end);
-        if start == 0 {
-            return self.runs_to(end);
-        }
-        let extras = self
-            .extras()
-            .iter()
-            .filter(|(at, _)| (start..end).contains(&usize::from(*at)))
-            .map(|(at, extra)| (*at - start as u16, extra.clone()))
-            .collect();
-        Row::from_parts(self.cells()[start..end].to_vec(), extras, false).runs_to(end - start)
+        self.runs_from(start.min(end), end)
     }
 
-    fn runs_to(&self, end: usize) -> Vec<Run> {
-        let mut runs = match self.meta().extras.as_deref() {
-            Some(extras) => self.build_runs(end, &extras.entries),
-            None => self.build_plain_runs(end),
+    fn runs_to(&self, end: usize) -> Runs {
+        self.runs_from(0, end)
+    }
+
+    /// The builders over the columns START..END, and the blank absorption they share.
+    ///
+    /// The range is a slice of the row's own cells and a slice of its own attachment
+    /// table, rather than a row built out of copies of both: an edit sends a span of a
+    /// row on every frame a spinner turns, and it was paying `cols` cells and a clone of
+    /// every attachment for the privilege of numbering columns from zero.
+    fn runs_from(&self, start: usize, end: usize) -> Runs {
+        let cells = &self.cells()[start..end];
+        // Sorted by column, so the attachments inside the range are a subslice of the
+        // table; see [`Extras`].
+        let entries: &[(u16, Extra)] = self.meta().extras.as_deref().map_or(&[], |extras| {
+            let from = extras
+                .entries
+                .partition_point(|(at, _)| usize::from(*at) < start);
+            let to = extras
+                .entries
+                .partition_point(|(at, _)| usize::from(*at) < end);
+            &extras.entries[from..to]
+        });
+        let mut runs = if entries.is_empty() {
+            Self::build_plain_runs(cells)
+        } else {
+            Self::build_runs(cells, entries, start)
         };
         Self::absorb_blank_runs(&mut runs);
         runs
@@ -1053,36 +1437,40 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     ///
     /// A post-pass rather than a rule inside each builder, because per cell it needs a
     /// variable-length lookahead, while over runs it is a window of three.
-    fn absorb_blank_runs(runs: &mut Vec<Run>) {
-        let blank_gap = |run: &Run| {
+    fn absorb_blank_runs(runs: &mut Runs) {
+        let blank_gap = |runs: &Runs, index: usize| {
+            let run = runs.run(index);
             run.deco.is_none()
-                // Combining marks push characters onto `text` that stand on no column, so
-                // a run whose text is longer than its columns is carrying something other
-                // than the blanks it looks like.
-                && run.text.chars().count() == run.cols
-                && !run.text.is_empty()
+                // Combining marks push characters onto a run's text that stand on no
+                // column, so a run with more characters than columns is carrying something
+                // other than the blanks it looks like.
+                && run.chars == run.cols
+                && run.chars != 0
                 && run.text.chars().all(draws_nothing)
         };
         let mut i = 0;
         while i + 2 < runs.len() {
-            let joins = matches!(runs[i].deco, Some(Deco::Glyphs(_)))
-                && matches!(runs[i + 2].deco, Some(Deco::Glyphs(_)))
-                && blank_gap(&runs[i + 1])
-                && runs[i].style == runs[i + 1].style
-                && runs[i].style == runs[i + 2].style
-                && runs[i].link == runs[i + 1].link
-                && runs[i].link == runs[i + 2].link;
+            let joins = matches!(runs.runs[i].deco, Some(Deco::Glyphs(_)))
+                && matches!(runs.runs[i + 2].deco, Some(Deco::Glyphs(_)))
+                && blank_gap(runs, i + 1)
+                && runs.runs[i].style == runs.runs[i + 1].style
+                && runs.runs[i].style == runs.runs[i + 2].style
+                && runs.runs[i].link == runs.runs[i + 1].link
+                && runs.runs[i].link == runs.runs[i + 2].link;
             if !joins {
                 i += 1;
                 continue;
             }
             // Two at a time, and `i` does not advance: the run that just grew is the left
             // half of the next window, so `\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}` collapses in one pass.
-            let tail = runs.remove(i + 1);
-            let next = runs.remove(i + 1);
-            let run = &mut runs[i];
-            run.text.push_str(&tail.text);
-            run.text.push_str(&next.text);
+            //
+            // The text is not touched. The three runs are already neighbours in it, so
+            // dropping the records is the whole merge -- where a `Vec<Run>` had to copy
+            // two strings into the first run's.
+            let next = runs.runs.remove(i + 2);
+            let tail = runs.runs.remove(i + 1);
+            let run = &mut runs.runs[i];
+            run.chars += tail.chars + next.chars;
             run.cols += tail.cols + next.cols;
             let (Some(Deco::Glyphs(glyphs)), Some(Deco::Glyphs(more))) = (&mut run.deco, next.deco)
             else {
@@ -1099,17 +1487,15 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// only things that can end a run are the pen -- rendition or link -- changing and a
     /// character that draws a shape. That collapses the per-cell decision the general form has to make
     /// into a scan for the end of the run, after which the whole span is appended at once
-    /// -- one `runs.last_mut()`, one capacity check and one join test per *run* instead of
-    /// per cell.
+    /// -- one join test and one column-count update per *run* instead of per cell.
     ///
     /// `runs_to_matches_the_reference` checks it against `Row::runs_to_reference` over
     /// randomised rows, including the wide characters and box glyphs a wrong scan would
     /// mishandle.
-    fn build_plain_runs(&self, end: usize) -> Vec<Run> {
-        let mut runs = Vec::<Run>::with_capacity(4);
-        let cells = &self.cells()[..end];
+    fn build_plain_runs(cells: &[Cell]) -> Runs {
+        let mut runs = Runs::with_cols(cells.len());
         let mut col = 0;
-        while col < end {
+        while col < cells.len() {
             let cell = &cells[col];
             // A continuation cell belongs to the wide character before it and contributes
             // no text of its own, so it can neither start a run nor end one.
@@ -1118,9 +1504,7 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 // and so does not absorb the continuations the bulk scan below does.
                 // Credited to the run that owns the character regardless, so that this
                 // and `Row::runs_to_reference` count the same columns.
-                if let Some(run) = runs.last_mut() {
-                    run.cols += 1;
-                }
+                runs.add_cols(1);
                 col += 1;
                 continue;
             }
@@ -1131,53 +1515,30 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
             // A decorated cell is taken one at a time: consecutive box glyphs join only if
             // `Deco::accepts` says so, which is a per-character question the bulk path
             // cannot ask. Plain text -- the case this function exists for -- runs on.
-            if deco.is_none() {
-                while col < end {
-                    let next = &cells[col];
-                    if !next.is_continuation()
-                        && (!next.same_pen(pen) || DecoCell::classify(next.ch).is_some())
-                    {
-                        break;
-                    }
-                    col += 1;
-                }
+            if deco.is_some() {
+                runs.push_cell(cell, None, deco);
+                continue;
             }
-            let text = cells[start..col]
-                .iter()
-                .filter(|c| !c.is_continuation())
-                .map(|c| c.ch);
-            match runs.last_mut() {
-                Some(run)
-                    if run.style == pen.style
-                        && run.link == pen.link
-                        && match (&run.deco, deco) {
-                            (None, None) => true,
-                            (Some(d), Some(c)) => d.accepts(c),
-                            _ => false,
-                        } =>
+            while col < cells.len() {
+                let next = &cells[col];
+                if !next.is_continuation()
+                    && (!next.same_pen(pen) || DecoCell::classify(next.ch).is_some())
                 {
-                    run.text.extend(text);
-                    run.cols += col - start;
-                    if let (Some(d), Some(c)) = (&mut run.deco, deco) {
-                        d.push(c);
-                    }
+                    break;
                 }
-                _ => {
-                    // Sized to the columns left, for the same reason `build_runs` does it:
-                    // the row's dominant shape is one run spanning it.
-                    let mut buffer = String::with_capacity(end - start);
-                    buffer.extend(text);
-                    runs.push(Run {
-                        text: buffer,
-                        // Every cell of the span, continuations included: the scan above
-                        // ran to `col` over columns, and that span is the run's width.
-                        cols: col - start,
-                        style: pen.style,
-                        deco: deco.map(Deco::start),
-                        link: pen.link,
-                    });
-                }
+                col += 1;
             }
+            runs.push_text(
+                cells[start..col]
+                    .iter()
+                    .filter(|c| !c.is_continuation())
+                    .map(|c| c.ch),
+                // Every cell of the span, continuations included: the scan above ran to
+                // `col` over columns, and that span is the run's width.
+                col - start,
+                pen.style,
+                pen.link,
+            );
         }
         runs
     }
@@ -1185,30 +1546,26 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
     /// The row's cells as runs, for a row that has attachments to read.
     ///
     /// The attachment-free row goes to [`Row::build_plain_runs`] instead, so ENTRIES is
-    /// never empty here in practice. It is walked with a cursor rather than searched per
-    /// column, so the whole row costs one pass over the table.
-    fn build_runs(&self, end: usize, entries: &[(u16, Extra)]) -> Vec<Run> {
-        // Four, not `end`: the row's dominant shapes are one run of plain text and a
-        // handful for a coloured prompt, so a capacity of one per column would be a far
-        // bigger allocation than the growth it saves.
-        let mut runs = Vec::<Run>::with_capacity(4);
+    /// never empty here. It is walked with a cursor rather than searched per column, so
+    /// the whole row costs one pass over the table. BASE is the column CELLS begins at,
+    /// which the entries are still numbered from.
+    fn build_runs(cells: &[Cell], entries: &[(u16, Extra)], base: usize) -> Runs {
+        let mut runs = Runs::with_cols(cells.len());
         let mut at = 0;
-        for (col, cell) in self.cells()[..end].iter().enumerate() {
+        for (col, cell) in cells.iter().enumerate() {
             if cell.is_continuation() {
                 // A column of the wide character that opened it, hence of its run.
-                if let Some(run) = runs.last_mut() {
-                    run.cols += 1;
-                }
+                runs.add_cols(1);
                 continue;
             }
             let mut marks = None;
             let mut placed = None;
-            while at < entries.len() && usize::from(entries[at].0) < col {
+            while at < entries.len() && usize::from(entries[at].0) - base < col {
                 at += 1;
             }
             for (_, extra) in entries[at..]
                 .iter()
-                .take_while(|(c, _)| usize::from(*c) == col)
+                .take_while(|(c, _)| usize::from(*c) - base == col)
             {
                 match extra {
                     Extra::Marks(text) => marks = Some(&**text),
@@ -1218,52 +1575,13 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                     Extra::Mark(_) => {}
                 }
             }
-            let deco = decoration(cell, marks, placed);
-            match runs.last_mut() {
-                Some(run)
-                    if run.style == cell.style
-                        // A link boundary splits a run even when nothing else changed:
-                        // `see <link>foo</link> bar' in one colour is otherwise one run,
-                        // with nothing to say which part is clickable.
-                        && run.link == cell.link
-                        && match (&run.deco, deco) {
-                            (None, None) => true,
-                            (Some(d), Some(c)) => d.accepts(c),
-                            _ => false,
-                        } =>
-                {
-                    run.text.push(cell.ch);
-                    run.cols += 1;
-                    if let (Some(d), Some(c)) = (&mut run.deco, deco) {
-                        d.push(c);
-                    }
-                }
-                _ => runs.push(Run {
-                    // A run cannot outgrow the columns left, and for ASCII bytes and
-                    // columns are the same, so this is one allocation where growing from
-                    // a capacity of 1 took about five.
-                    text: {
-                        let mut text = String::with_capacity(end - col);
-                        text.push(cell.ch);
-                        text
-                    },
-                    cols: 1,
-                    style: cell.style,
-                    deco: deco.map(Deco::start),
-                    link: cell.link,
-                }),
-            }
-            // A cell carrying marks is undecorated (see `decoration`), so the marks never
-            // land inside a decorated run, whose records are one per character.
-            if let (Some(marks), Some(run)) = (marks, runs.last_mut()) {
-                run.text.push_str(marks);
-            }
+            runs.push_cell(cell, marks, decoration(cell, marks, placed));
         }
         runs
     }
 
     pub fn to_text(&self) -> String {
-        self.runs().into_iter().map(|r| r.text).collect()
+        self.runs().text().to_owned()
     }
 }
 
@@ -1704,15 +2022,17 @@ mod tests {
         let runs = row.runs();
         assert_eq!(runs.len(), 2);
         assert_eq!(
-            runs[0],
-            Run {
-                text: "hi".into(),
+            runs.run(0),
+            RunRef {
+                text: "hi",
+                chars: 2,
                 cols: 2,
                 style: red,
-                ..Default::default()
+                deco: None,
+                link: None,
             }
         );
-        assert_eq!(runs[1].text, "!");
+        assert_eq!(runs.run(1).text, "!");
     }
 
     #[test]
@@ -1729,9 +2049,9 @@ mod tests {
             3,
             "box-glyph run must split even though style matches"
         );
-        assert!(runs[0].deco.is_none());
-        assert!(runs[1].deco.is_some());
-        assert!(runs[2].deco.is_none());
+        assert!(runs.run(0).deco.is_none());
+        assert!(runs.run(1).deco.is_some());
+        assert!(runs.run(2).deco.is_none());
     }
 
     #[test]
@@ -1744,8 +2064,8 @@ mod tests {
 
         let runs = row.runs();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].text, "\u{250C}\u{2500}\u{2510}");
-        let glyphs = runs[0].deco.as_ref().expect("box-glyph run").glyphs();
+        assert_eq!(runs.run(0).text, "\u{250C}\u{2500}\u{2510}");
+        let glyphs = runs.run(0).deco.expect("box-glyph run").glyphs();
         assert_eq!(
             glyphs.len(),
             3,
@@ -1910,19 +2230,18 @@ mod tests {
         let runs = row.runs();
         assert_eq!(runs.len(), 2, "the indent, then the name: {runs:?}");
         assert_eq!(
-            runs[0].text,
+            runs.run(0).text,
             "\u{2502}   \u{2502}   \u{251c}\u{2500}\u{2500}"
         );
-        assert_eq!(runs[0].cols, 11);
-        assert_eq!(runs[0].deco.as_ref().map(Deco::len), Some(11));
-        assert_eq!(runs[1].text, " f");
-        assert!(runs[1].deco.is_none());
+        assert_eq!(runs.run(0).cols, 11);
+        assert_eq!(runs.run(0).deco.map(Deco::len), Some(11));
+        assert_eq!(runs.run(1).text, " f");
+        assert!(runs.run(1).deco.is_none());
 
         // The blanks are the reserved descriptor, not a repeat of the shape beside them:
         // a run whose gaps drew `\u{2502}` would be a solid ladder.
-        let glyphs = runs[0]
+        let glyphs = runs.run(0)
             .deco
-            .as_ref()
             .expect("the indent is decorated")
             .glyphs();
         for gap in [1, 2, 3, 5, 6, 7] {
@@ -1951,10 +2270,10 @@ mod tests {
         let runs = row.runs();
         assert_eq!(runs.len(), 2, "{runs:?}");
         assert_eq!(
-            runs[0].text,
+            runs.run(0).text,
             "\u{2502}\u{a0}\u{a0} \u{2514}\u{2500}\u{2500}"
         );
-        assert_eq!(runs[0].deco.as_ref().map(Deco::len), Some(7));
+        assert_eq!(runs.run(0).deco.map(Deco::len), Some(7));
     }
 
     /// The trim, and the case that makes it necessary rather than tidy.
@@ -1979,13 +2298,13 @@ mod tests {
             3,
             "leading blanks, the glyphs, the padding: {runs:?}"
         );
-        assert_eq!(runs[0].text, "  ");
-        assert!(runs[0].deco.is_none());
-        assert_eq!(runs[1].text, "\u{2500}\u{2500}");
-        assert_eq!(runs[1].deco.as_ref().map(Deco::len), Some(2));
+        assert_eq!(runs.run(0).text, "  ");
+        assert!(runs.run(0).deco.is_none());
+        assert_eq!(runs.run(1).text, "\u{2500}\u{2500}");
+        assert_eq!(runs.run(1).deco.map(Deco::len), Some(2));
         // Every column out to `cols`, which is what a wrapped row contributes.
-        assert_eq!(runs[2].text, "        ");
-        assert!(runs[2].deco.is_none());
+        assert_eq!(runs.run(2).text, "        ");
+        assert!(runs.run(2).deco.is_none());
     }
 
     /// A gap only joins what it is between, and only when nothing else changed.
@@ -2021,7 +2340,7 @@ mod tests {
         }
         let runs = row.runs();
         assert_eq!(runs.len(), 3, "{runs:?}");
-        assert_eq!(runs[1].text, " x ");
+        assert_eq!(runs.run(1).text, " x ");
     }
 
     #[test]
@@ -2233,14 +2552,18 @@ mod tests {
                 // independent formulations of everything the builders decide. See
                 // `Row::absorb_blank_runs`.
                 let unabsorbed = row.runs_to_reference(end);
-                let mut expected = unabsorbed.clone();
+                let mut expected = Runs::from_runs(&unabsorbed);
                 Row::absorb_blank_runs(&mut expected);
                 let runs = row.runs_to(end);
                 assert_eq!(
                     runs, expected,
                     "case {case}, end {end}: runs disagree with the reference"
                 );
-                assert_absorbed_only_blanks(&unabsorbed, &runs, &format!("case {case}, end {end}"));
+                assert_absorbed_only_blanks(
+                    &unabsorbed,
+                    &runs.to_vec(),
+                    &format!("case {case}, end {end}"),
+                );
                 absorbed_rows += usize::from(runs.len() < unabsorbed.len());
             }
         }

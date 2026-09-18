@@ -639,8 +639,8 @@ fn image_cells_reach_lisp_as_one_run_of_their_own() {
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs.len(), 1, "{runs:?}");
     // Blanks, so a yank out of the buffer gives the whitespace the picture occupied.
-    assert_eq!(runs[0].text, "   ");
-    assert!(matches!(runs[0].deco, Some(Deco::Images(_))), "{runs:?}");
+    assert_eq!(runs.run(0).text, "   ");
+    assert!(matches!(runs.run(0).deco, Some(Deco::Images(_))), "{runs:?}");
 }
 
 #[test]
@@ -775,9 +775,9 @@ fn image_placements_still_pack_one_record_per_character() {
     let mut t = with_metrics(10, 20);
     t.place_image(ImageFormat::Png, b"pixels", PixelSize::new(30, 20));
     let runs = t.screen().row(0).unwrap().runs();
-    let deco = runs[0]
+    let deco = runs
+        .run(0)
         .deco
-        .as_ref()
         .expect("an image placement decorates row 0");
     let packed = deco.packed();
     assert_eq!(deco.len(), 3);

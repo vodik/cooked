@@ -60,7 +60,7 @@
 //! is given up on without a word: the line the buffer now ends in is the user's, and what
 //! the child writes next starts a line of its own.
 
-use super::cell::{BLANK, CONTINUATION, Cell, Color, Run, Style};
+use super::cell::{BLANK, CONTINUATION, Cell, Color, Runs, Style};
 use super::link::{LinkId, LinkStore, MAX_URI_LEN};
 use super::parser::{Params, Parser, Perform};
 use super::sgr;
@@ -135,7 +135,10 @@ pub(crate) struct Emission {
     /// [`Emission::runs`]. Always zero when the caller passed `retract: false`.
     pub(crate) retract: usize,
     /// The styled text, in the shape the grid's renderer already takes.
-    pub(crate) runs: Vec<Run>,
+    ///
+    /// Kept across feeds and cleared rather than rebuilt, so a chunk an interactive
+    /// child dribbles out a character at a time reuses the buffers the last one grew.
+    pub(crate) runs: Runs,
     /// Renditions the runs name that the consumer has not been told about, as the grid's
     /// drain sends them; see [`StyleStore`].
     pub(crate) styles: Vec<(StyleId, Style)>,
@@ -515,23 +518,22 @@ impl Stream {
                 at += 1;
             }
             let columns = &self.line[start..at];
-            let mut text = String::with_capacity(at - start);
+            // A run of its own rather than one the pen might let it join: the scan above
+            // has already decided where the boundaries are, and the runs of one feed must
+            // not merge into whatever the last feed left open.
+            self.out
+                .runs
+                .start(columns[0].cell.style, columns[0].cell.link, None);
             for column in columns {
                 if column.is_continuation() {
                     continue;
                 }
-                text.push(column.cell.ch);
+                self.out.runs.push_char(column.cell.ch);
                 if let Some(marks) = &column.marks {
-                    text.push_str(marks);
+                    self.out.runs.push_str(marks);
                 }
             }
-            self.out.runs.push(Run {
-                text,
-                cols: columns.len(),
-                style: columns[0].cell.style,
-                deco: None,
-                link: columns[0].cell.link,
-            });
+            self.out.runs.add_cols(columns.len());
         }
     }
 
@@ -542,13 +544,8 @@ impl Stream {
     /// line the child ended while a background was set would draw a coloured bar out to
     /// the window edge.
     fn push_newline(&mut self) {
-        self.out.runs.push(Run {
-            text: "\n".to_string(),
-            cols: 0,
-            style: StyleId::DEFAULT,
-            deco: None,
-            link: None,
-        });
+        self.out.runs.start(StyleId::DEFAULT, None, None);
+        self.out.runs.push_char('\n');
     }
 
     // -- escape sequences --------------------------------------------------------
@@ -743,6 +740,7 @@ impl Perform for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emu::cell::RunRef;
 
     /// Feed BYTES as one chunk and return the text it emitted, with the retraction
     /// applied to a buffer that starts out holding WAS.
@@ -770,7 +768,7 @@ mod tests {
             let keep = self.text.chars().count() - emission.retract;
             self.text = self.text.chars().take(keep).collect();
             for run in &emission.runs {
-                self.text.push_str(&run.text);
+                self.text.push_str(run.text);
             }
             &self.text
         }
@@ -782,13 +780,13 @@ mod tests {
             let emission = self.filter.emission();
             assert_eq!(emission.retract, 0, "an unsynced feed must not retract");
             for run in &emission.runs {
-                self.text.push_str(&run.text);
+                self.text.push_str(run.text);
             }
             &self.text
         }
     }
 
-    fn runs(bytes: &str) -> Vec<Run> {
+    fn runs(bytes: &str) -> Runs {
         let mut filter = Filter::new();
         filter.feed(bytes.as_bytes(), true);
         filter.emission().runs.clone()
@@ -831,7 +829,7 @@ mod tests {
         filter.feed(b"\r[####  ] 51%", true);
         let emission = filter.emission();
         assert_eq!(emission.retract, 8);
-        let text: String = emission.runs.iter().map(|r| r.text.as_str()).collect();
+        let text: String = emission.runs.text().to_owned();
         assert_eq!(text, "#  ] 51%");
     }
 
@@ -882,7 +880,7 @@ mod tests {
         let mut filter = Filter::new();
         filter.feed(b"one\n", true);
         let emission = filter.emission();
-        let text: String = emission.runs.iter().map(|r| r.text.as_str()).collect();
+        let text: String = emission.runs.text().to_owned();
         assert_eq!(text, "one\n");
     }
 
@@ -928,7 +926,7 @@ mod tests {
         filter.feed(b"\x1b[31m", true);
         filter.feed(b"red\n", true);
         let emission = filter.emission();
-        assert_eq!(filter.style(emission.runs[0].style).fg, Color::Indexed(1));
+        assert_eq!(filter.style(emission.runs.run(0).style).fg, Color::Indexed(1));
     }
 
     #[test]
@@ -938,22 +936,22 @@ mod tests {
         assert!(filter.emission().is_empty());
         filter.feed(b"1mred\n", true);
         let emission = filter.emission();
-        assert_eq!(emission.runs[0].text, "red");
-        assert_eq!(filter.style(emission.runs[0].style).fg, Color::Indexed(1));
+        assert_eq!(emission.runs.run(0).text, "red");
+        assert_eq!(filter.style(emission.runs.run(0).style).fg, Color::Indexed(1));
     }
 
     #[test]
     fn the_newline_closing_a_styled_line_carries_no_style() {
         // Otherwise a background painted by the child runs to the window's edge.
         let runs = runs("\x1b[41mred\n");
-        assert_eq!(runs.last().unwrap().text, "\n");
-        assert_eq!(runs.last().unwrap().style, StyleId::DEFAULT);
+        assert_eq!(runs.iter().next_back().unwrap().text, "\n");
+        assert_eq!(runs.iter().next_back().unwrap().style, StyleId::DEFAULT);
     }
 
     #[test]
     fn a_run_breaks_where_the_rendition_does() {
         let runs = runs("plain\x1b[1mbold\x1b[0mplain\n");
-        let texts: Vec<&str> = runs.iter().map(|r| r.text.as_str()).collect();
+        let texts: Vec<&str> = runs.iter().map(|r| r.text).collect();
         assert_eq!(texts, ["plain", "bold", "plain", "\n"]);
     }
 
@@ -966,7 +964,7 @@ mod tests {
         let runs = &filter.emission().runs;
         let coloured: Vec<(&str, Color)> = runs
             .iter()
-            .map(|r| (r.text.as_str(), filter.style(r.style).fg))
+            .map(|r| (r.text, filter.style(r.style).fg))
             .collect();
         assert_eq!(
             coloured,
@@ -986,7 +984,7 @@ mod tests {
             true,
         );
         let runs = filter.emission().runs.clone();
-        let linked: Vec<&Run> = runs.iter().filter(|r| r.link.is_some()).collect();
+        let linked: Vec<RunRef<'_>> = runs.iter().filter(|r| r.link.is_some()).collect();
         assert_eq!(linked.len(), 1);
         assert_eq!(linked[0].text, "here");
         assert_eq!(
@@ -1029,14 +1027,14 @@ mod tests {
     #[test]
     fn a_combining_mark_rides_the_character_before_it() {
         let runs = runs("e\u{301}\n");
-        assert_eq!(runs[0].text, "e\u{301}");
-        assert_eq!(runs[0].cols, 1);
+        assert_eq!(runs.run(0).text, "e\u{301}");
+        assert_eq!(runs.run(0).cols, 1);
     }
 
     #[test]
     fn a_combining_mark_with_nothing_before_it_is_dropped() {
         let runs = runs("\u{301}x\n");
-        let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+        let text: String = runs.iter().map(|r| r.text).collect();
         assert_eq!(text, "x\n");
     }
 
@@ -1119,7 +1117,7 @@ mod tests {
         let chunk = "x".repeat(MAX_LINE_COLUMNS + 16);
         filter.feed(chunk.as_bytes(), true);
         let emission = filter.emission();
-        let text: String = emission.runs.iter().map(|r| r.text.as_str()).collect();
+        let text: String = emission.runs.text().to_owned();
         assert_eq!(text.matches('\n').count(), 1);
         assert_eq!(text.len(), chunk.len() + 1);
     }
@@ -1236,7 +1234,7 @@ mod tests {
                         .map(str::to_string);
                     self.shown
                         .extend(run.text.chars().map(|c| (c, style, link.clone())));
-                    text.push_str(&run.text);
+                    text.push_str(run.text);
                 }
                 let tail = text.rsplit('\n').next().unwrap_or_default();
                 if text.contains('\n') || !intact {

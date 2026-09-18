@@ -7,15 +7,15 @@ fn sgr_sets_colors_and_attributes() {
     let mut t = term(2, 20, b"\x1b[1;31mred\x1b[0m.");
     let delta = t.drain();
     let runs = &delta.rows.iter().find(|r| r.index == 0).unwrap().runs;
-    let red = t.style(runs[0].style);
-    assert_eq!(runs[0].text, "red");
+    let red = t.style(runs.run(0).style);
+    assert_eq!(runs.run(0).text, "red");
     assert_eq!(red.fg, Color::Indexed(1));
     assert!(red.attrs.contains(Attrs::BOLD));
-    assert_eq!(runs[1].text, ".");
-    assert_eq!(runs[1].style, StyleId::DEFAULT);
+    assert_eq!(runs.run(1).text, ".");
+    assert_eq!(runs.run(1).style, StyleId::DEFAULT);
     // And the drain names the rendition it has not sent before, so Lisp can resolve it.
     assert!(
-        delta.styles.contains(&(runs[0].style, red)),
+        delta.styles.contains(&(runs.run(0).style, red)),
         "{:?}",
         delta.styles
     );
@@ -112,7 +112,7 @@ fn a_wide_character_keeps_its_underline_colour() {
     let t = term(2, 8, b"\x1b[4;58;5;196m\xe5\xb9\xb8");
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs.len(), 1, "{runs:?}");
-    assert_eq!(t.style(runs[0].style).underline, Color::Indexed(196));
+    assert_eq!(t.style(runs.run(0).style).underline, Color::Indexed(196));
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn an_underline_colour_splits_a_run() {
 fn an_erase_drops_the_underline_colour() {
     let t = term(2, 8, b"\x1b[4;58;5;196m\x1b[41mab\x1b[K");
     let runs = t.screen().row(0).unwrap().runs();
-    let last = t.style(runs.last().unwrap().style);
+    let last = t.style(runs.iter().next_back().unwrap().style);
     assert_eq!(last.underline, Color::Default);
     assert!(!last.attrs.contains(Attrs::UNDERLINE));
 }
@@ -150,9 +150,9 @@ fn an_underline_colour_survives_a_rewrap() {
     t.resize(2, 8);
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs.len(), 2, "{runs:?}");
-    assert_eq!(runs[0].text, "ab");
-    assert_eq!(runs[1].text, "cd");
-    assert_eq!(t.style(runs[1].style).underline, Color::Indexed(196));
+    assert_eq!(runs.run(0).text, "ab");
+    assert_eq!(runs.run(1).text, "cd");
+    assert_eq!(t.style(runs.run(1).style).underline, Color::Indexed(196));
 }
 
 #[test]
@@ -162,8 +162,8 @@ fn overwriting_a_cell_retires_its_underline_colour() {
     let t = term(2, 8, b"\x1b[4;58;5;196mab\x1b[1G\x1b[mxy");
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs.len(), 1, "{runs:?}");
-    assert_eq!(runs[0].text, "xy");
-    assert_eq!(t.style(runs[0].style).underline, Color::Default);
+    assert_eq!(runs.run(0).text, "xy");
+    assert_eq!(t.style(runs.run(0).style).underline, Color::Default);
 }
 
 #[test]
@@ -178,26 +178,26 @@ fn dch_spares_an_underline_colour_on_a_column_it_never_touched() {
     // moved at all.
     let t = term(2, 8, b"\x1b[58;5;196ma\x1b[mbcdef\x1b[5G\x1b[1P");
     let runs = t.screen().row(0).unwrap().runs();
-    assert_eq!(runs[0].text, "a");
-    assert_eq!(t.style(runs[0].style).underline, Color::Indexed(196));
-    assert_eq!(runs[1].text, "bcdf");
-    assert_eq!(t.style(runs[1].style).underline, Color::Default);
+    assert_eq!(runs.run(0).text, "a");
+    assert_eq!(t.style(runs.run(0).style).underline, Color::Indexed(196));
+    assert_eq!(runs.run(1).text, "bcdf");
+    assert_eq!(t.style(runs.run(1).style).underline, Color::Default);
 }
 
 #[test]
 fn ich_carries_an_underline_colour_along_with_its_character() {
     let t = term(2, 8, b"\x1b[58;5;196mab\x1b[m\x1b[1G\x1b[2@");
     let runs = t.screen().row(0).unwrap().runs();
-    assert_eq!(runs[0].text, "  ");
-    assert_eq!(t.style(runs[0].style).underline, Color::Default);
-    assert_eq!(runs[1].text, "ab");
-    assert_eq!(t.style(runs[1].style).underline, Color::Indexed(196));
+    assert_eq!(runs.run(0).text, "  ");
+    assert_eq!(t.style(runs.run(0).style).underline, Color::Default);
+    assert_eq!(runs.run(1).text, "ab");
+    assert_eq!(t.style(runs.run(1).style).underline, Color::Indexed(196));
 }
 
 /// The style of the last cell of a row, which is where an erase-to-end lands.
 fn last_style(t: &Term, row: usize) -> Style {
     let r = t.screen().row(row).unwrap();
-    t.style(r.runs().last().map(|run| run.style).unwrap_or_default())
+    t.style(r.runs().iter().next_back().map(|run| run.style).unwrap_or_default())
 }
 
 #[test]
@@ -250,7 +250,7 @@ fn bce_applies_to_ech_ich_and_scrolls() {
     let t = term(3, 8, b"abcdef\r\x1b[41m\x1b[2@");
     let row = t.screen().row(0).unwrap();
     assert_eq!(
-        t.style(row.runs()[0].style).bg,
+        t.style(row.runs().run(0).style).bg,
         Color::Indexed(1),
         "ICH opens its gap with the pen"
     );
@@ -409,7 +409,7 @@ fn a_pen_taken_as_the_table_fills_keeps_its_text_rendition() {
     t.drain();
     t.feed(b"\x1b[H\x1b[2K\x1b[1;41my");
     let delta = t.drain();
-    let run = &delta.rows[0].runs[0];
+    let run = delta.rows[0].runs.run(0);
     assert_eq!(run.text, "y");
     let announced = delta
         .styles
@@ -435,7 +435,7 @@ fn an_underline_colour_and_a_link_reach_the_scrollback_with_their_characters() {
         .iter()
         .find(|line| runs_text(line) == "linked")
         .expect("the row scrolled away");
-    let run = &line.runs[0];
+    let run = line.runs.run(0);
     assert!(run.link.is_some());
     assert_eq!(t.style(run.style).underline, Color::Indexed(196));
     assert!(t.style(run.style).attrs.contains(Attrs::UNDERLINE));

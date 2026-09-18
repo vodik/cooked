@@ -1,6 +1,6 @@
 //! The addressable grid: cursor motion, scrolling regions, erasure, and damage tracking.
 
-use super::cell::{CONTINUATION, Cell, Extra, MarkId, Pen, Row, RowMeta, RowMut, RowRef, Run};
+use super::cell::{CONTINUATION, Cell, Extra, MarkId, Pen, Row, RowMeta, RowMut, RowRef, Runs};
 use super::image::{CellSize, ImageId, Placement};
 use super::style::StyleId;
 
@@ -125,7 +125,7 @@ pub struct Evicted(Vec<Departed>);
 /// is about to rotate away. Reducing them to runs as they leave avoids both.
 #[derive(Debug)]
 pub struct Departed {
-    pub runs: Vec<Run>,
+    pub runs: Runs,
     pub wrapped: bool,
     /// Semantic marks still attached, as `(offset, id)`, the offset counting the
     /// characters of the row's text before the mark rather than its columns: this is the
@@ -148,7 +148,7 @@ pub struct Departed {
 impl Departed {
     /// Characters this row puts in the buffer, which is what a head is counted in.
     fn chars(&self) -> usize {
-        self.runs.iter().map(|run| run.text.chars().count()).sum()
+        self.runs.chars()
     }
 
     /// `line_runs` rather than `runs`: these rows are becoming buffer text as part of a
@@ -168,7 +168,7 @@ impl Departed {
 
     /// The row's text, for tests and diagnostics; the equivalent of [`Row::to_text`].
     pub fn to_text(&self) -> String {
-        self.runs.iter().map(|run| run.text.as_str()).collect()
+        self.runs.text().to_owned()
     }
 }
 

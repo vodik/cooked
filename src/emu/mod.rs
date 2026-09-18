@@ -152,7 +152,7 @@ pub(crate) use term::{
 // protocol's own types become nameable from outside. The second is the smaller
 // concession — these are already the wire format the Lisp side is written against, so
 // nothing here is more exposed than `cooked--apply' already assumes.
-pub use cell::{Deco, Run};
+pub use cell::{Deco, Run, RunRef, Runs};
 pub use image::ImageId;
 pub use screen::{Direction, Shift};
 pub use style::StyleId;

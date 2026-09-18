@@ -37,7 +37,7 @@ fn a_declared_width_overrides_what_a_width_table_would_say() {
     let t = term(2, 20, b"\x1b]66;w=1;Ha\x07\x1b]66;w=1;lf\x07");
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(
-        runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+        runs.iter().map(|r| r.text).collect::<String>(),
         "Half"
     );
     assert_eq!(
@@ -59,7 +59,7 @@ fn a_declared_width_lays_down_continuation_cells_like_any_wide_character() {
     assert_eq!(cells[3].ch, 'y');
     // One run: the `y` shares the pen, so it joins the block's run and the column count
     // covers both — three declared cells plus the one the `y` stands on.
-    assert_eq!(t.screen().row(0).unwrap().runs()[0].cols, 4);
+    assert_eq!(t.screen().row(0).unwrap().runs().run(0).cols, 4);
 }
 
 #[test]
@@ -118,7 +118,7 @@ fn the_keys_this_declines_are_parsed_and_then_ignored() {
     // by the spec's own definition, so accepting and dropping them is not a divergence.
     let t = term(2, 20, b"\x1b]66;n=1:d=2:v=2:h=1:w=1;ab\x07");
     assert_eq!(t.screen().cursor().col, 1);
-    assert_eq!(t.screen().row(0).unwrap().runs()[0].text, "ab");
+    assert_eq!(t.screen().row(0).unwrap().runs().run(0).text, "ab");
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn a_zwj_emoji_family_stands_on_two_cells_and_not_on_six() {
     let runs = t.screen().row(0).unwrap().runs();
     assert_eq!(runs.iter().map(|r| r.cols).sum::<usize>(), 3);
     assert_eq!(
-        runs.iter().map(|r| r.text.as_str()).collect::<String>(),
+        runs.iter().map(|r| r.text).collect::<String>(),
         "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}|",
         "every code point still reaches Emacs; only the columns collapsed"
     );
@@ -354,8 +354,8 @@ fn a_mark_after_a_declared_block_joins_the_block() {
     let t = term(2, 20, "\x1b]66;w=3;x\x07\u{301}".as_bytes());
     assert_eq!(t.screen().cursor().col, 3);
     let runs = t.screen().row(0).unwrap().runs();
-    assert_eq!(runs[0].text, "x\u{301}");
-    assert_eq!(runs[0].cols, 3);
+    assert_eq!(runs.run(0).text, "x\u{301}");
+    assert_eq!(runs.run(0).cols, 3);
 }
 
 /// Row 0 cell by cell, a continuation spelled `+`, so a torn wide character shows as a

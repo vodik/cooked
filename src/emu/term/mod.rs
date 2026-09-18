@@ -3,7 +3,7 @@
 //! Scrollback deliberately lives in the Emacs buffer, not here. Rows that fall off the
 //! top of the primary screen are handed over once, in [`Delta::scrolled`], and forgotten.
 
-use super::cell::{Deco, Extra, MarkId, Pen, RowRef, Run, Style};
+use super::cell::{Deco, Extra, MarkId, Pen, RowRef, Runs, Style};
 use super::image::{
     CellMetrics, CellSize, ImageData, ImageFormat, ImageId, ImageStore, Interned, PixelSize,
     ShownFormats,
@@ -326,7 +326,7 @@ impl Mouse {
 /// re-wraps it for free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scrolled {
-    pub runs: Vec<Run>,
+    pub runs: Runs,
     pub wrapped: bool,
 }
 
@@ -514,7 +514,7 @@ pub struct DamagedRow {
     pub wrapped: bool,
     /// The whole row, which is what the row table is measured from even when only part
     /// of it is sent.
-    pub runs: Vec<Run>,
+    pub runs: Runs,
     /// Part of the row to replace in Emacs' copy instead of the whole of it, when Emacs
     /// holds the rest already; see [`Edit`].
     pub edit: Option<Edit>,
@@ -545,7 +545,7 @@ pub struct Edit {
     /// would have removed, and so does an edit.
     pub chars: usize,
     /// What replaces it.
-    pub runs: Vec<Run>,
+    pub runs: Runs,
 }
 
 /// A reading of everything [`Delta`] carries, cheap enough to take on every read.

@@ -2039,7 +2039,7 @@ mod tests {
             .delta
             .rows
             .iter()
-            .flat_map(|row| row.runs.iter().map(|r| r.text.clone()))
+            .flat_map(|row| row.runs.iter().map(|r| r.text.to_owned()))
             .collect()
     }
 
@@ -2130,7 +2130,7 @@ mod tests {
             collected.extend(update.delta.scrolled.iter().map(|line| {
                 line.runs
                     .iter()
-                    .map(|r| r.text.as_str())
+                    .map(|r| r.text)
                     .collect::<String>()
             }));
             if collected.len() >= LINES {

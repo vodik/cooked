@@ -16,7 +16,7 @@ fn term(rows: usize, cols: usize, input: &[u8]) -> Term {
 }
 
 fn runs_text(line: &Scrolled) -> String {
-    line.runs.iter().map(|r| r.text.as_str()).collect()
+    line.runs.iter().map(|r| r.text).collect()
 }
 
 fn text(t: &Term, row: usize) -> String {
@@ -28,8 +28,8 @@ fn links(t: &Term, row: usize) -> Vec<(String, Option<LinkId>)> {
         .row(row)
         .unwrap()
         .runs()
-        .into_iter()
-        .map(|r| (r.text, r.link))
+        .iter()
+        .map(|r| (r.text.to_owned(), r.link))
         .collect()
 }
 
@@ -64,7 +64,7 @@ fn run_style(t: &Term, text: &str) -> Style {
 
 /// The rendition of run INDEX of ROW.
 fn run_style_at(t: &Term, row: usize, index: usize) -> Style {
-    t.style(t.screen().row(row).unwrap().runs()[index].style)
+    t.style(t.screen().row(row).unwrap().runs().run(index).style)
 }
 
 /// The rendition of the cell at ROW, COL.

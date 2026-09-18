@@ -44,7 +44,7 @@ fn the_screen_left_out_arrives_with_the_next_whole_drain() {
             .map(|row| {
                 (
                     row.index,
-                    row.runs.iter().map(|r| r.text.as_str()).collect(),
+                    row.runs.iter().map(|r| r.text).collect(),
                 )
             })
             .collect()

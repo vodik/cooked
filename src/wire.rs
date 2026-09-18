@@ -9,7 +9,7 @@ use crate::emu::stream::Filter;
 use crate::emu::style::StyleId;
 use crate::emu::{
     self, Anchor, Color, CursorShape, DamagedRow, Deco, Event, ImageData, ImageFormat, ImageId,
-    KeyEncoding, LinkId, Mark, MarkId, Run, Style,
+    KeyEncoding, LinkId, Mark, MarkId, RunRef, Runs, Style,
 };
 use crate::env::{self, Env, Result, Value, lisp_enum, list, plist, sym};
 use crate::pty::Mode;
@@ -105,14 +105,13 @@ pub(crate) fn emission_to_lisp(env: Env, filter: &Filter) -> Result<Value> {
     };
     let mut links = Vec::new();
     for run in &emission.runs {
-        let chars = run.text.chars().count();
         // Before `push_run`, which advances the offset the span is measured from.
         if let Some(id) = run.link
             && let Some(uri) = filter.uri(id)
         {
-            links.push(list!(env, [block.offset, block.offset + chars, uri])?);
+            links.push(list!(env, [block.offset, block.offset + run.chars, uri])?);
         }
-        block.push_run(run, chars);
+        block.push_run(run);
     }
     let directory = match &emission.directory {
         Some(url) => env.into_lisp(url.as_str())?,
@@ -420,11 +419,11 @@ enum Uniformity {
 }
 
 impl Uniformity {
-    /// What one run, of CHARS characters, contributes.
-    fn of(run: &Run, chars: usize) -> Self {
-        if run.cols != chars {
+    /// What one run contributes.
+    fn of(run: RunRef<'_>) -> Self {
+        if run.cols != run.chars {
             Self::Mixed
-        } else if run.text.len() == chars {
+        } else if run.text.len() == run.chars {
             Self::Ascii
         } else if matches!(run.deco, Some(Deco::Glyphs(_))) {
             Self::Glyphs
@@ -506,15 +505,14 @@ impl<'a> Block<'a> {
     }
 
     /// Append RUNS, emitting spans only where there is something to say.
-    fn push_runs(&mut self, env: Env, runs: &[Run]) -> Result<()> {
+    fn push_runs(&mut self, env: Env, runs: &Runs) -> Result<()> {
         for run in runs {
-            let chars = run.text.chars().count();
             // Taken before `push_run` advances the offset it is measured from.
             if run.deco.is_some() {
-                let deco = env.into_lisp(run.deco.as_ref())?;
+                let deco = env.into_lisp(run.deco)?;
                 self.decos.push(list!(env, [self.offset, deco])?);
             }
-            self.push_run(run, chars);
+            self.push_run(run);
         }
         Ok(())
     }
@@ -523,14 +521,15 @@ impl<'a> Block<'a> {
     /// span, and the two measurements [`Block::end_row`] banks into the row table.
     ///
     /// Split out for the tests at the foot of this file. Everything else on the path
-    /// from a [`Run`] to the row table takes an `Env`, which only a loaded module has,
+    /// from a run to the row table takes an `Env`, which only a loaded module has,
     /// and the row table is precisely the thing a coalesced block can get wrong.
     ///
-    /// CHARS is `run.text`'s character count, taken by the caller because it needs it
-    /// too and it is a scan of the string.
-    fn push_run(&mut self, run: &Run, chars: usize) {
+    /// `run.chars` was counted while the run was built, so nothing here scans the text:
+    /// the characters are copied once, into `self.text`.
+    fn push_run(&mut self, run: RunRef<'_>) {
+        let chars = run.chars;
         self.cols += run.cols;
-        self.uniformity = self.uniformity.max(Uniformity::of(run, chars));
+        self.uniformity = self.uniformity.max(Uniformity::of(run));
         let font = self
             .font_bits
             .get(run.style.get() as usize)
@@ -546,7 +545,7 @@ impl<'a> Block<'a> {
         if !run.style.is_default() || run.link.is_some() {
             self.push_style(chars, run.style, run.link);
         }
-        self.text.push_str(&run.text);
+        self.text.push_str(run.text);
         self.offset += chars;
     }
 
@@ -554,10 +553,10 @@ impl<'a> Block<'a> {
     ///
     /// For a row sent as an edit: the replacement is only part of the row, and the width
     /// guard and the wrap mark still need the measurements of all of it.
-    fn measure(font_bits: &[u8], runs: &[Run], wrapped: bool) -> BlockRow {
+    fn measure(font_bits: &[u8], runs: &Runs, wrapped: bool) -> BlockRow {
         let mut block = Block::new(font_bits);
         for run in runs {
-            block.push_run(run, run.text.chars().count());
+            block.push_run(run);
         }
         block.end_row(wrapped);
         block.rows[0]
@@ -652,7 +651,7 @@ impl Update {
 
         for (i, (line, ends)) in self.delta.scrolled_lines(rejoin).enumerate() {
             if i < promotion {
-                let chars = line.runs.iter().map(|run| run.text.chars().count()).sum();
+                let chars = line.runs.chars();
                 rows.push(RowSpan { start: kept, chars });
                 kept += chars + usize::from(ends);
                 promoted.push(env.cons(env.into_lisp(chars)?, env.into_lisp(ends)?)?);
@@ -923,6 +922,7 @@ fn event_to_lisp(env: Env, event: &Event, update: &Update, rows: &[RowSpan]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emu::Run;
 
     /// The keys a plist literal in SOURCE starting at MARKER names, in order.
     fn plist_keys(source: &str, marker: &str) -> Vec<String> {
@@ -1019,13 +1019,24 @@ mod tests {
     }
 
     /// The indices of each run, which is all the grouping decision amounts to.
+    /// Push RUNS as one [`Runs`] would arrive from a row.
+    ///
+    /// Owned [`Run`]s are still how a test says what it means, so they are gathered into
+    /// the borrowed form the block takes. `Runs::from_runs` keeps each one its own run,
+    /// whatever the pen, which is what a test naming three runs is asking for.
+    fn push(block: &mut Block<'_>, runs: &[Run]) {
+        for run in &Runs::from_runs(runs) {
+            block.push_run(run);
+        }
+    }
+
     fn runs_of(indices: &[usize]) -> Vec<Vec<usize>> {
         let rows: Vec<DamagedRow> = indices
             .iter()
             .map(|i| DamagedRow {
                 index: *i,
                 wrapped: false,
-                runs: Vec::new(),
+                runs: Runs::default(),
                 edit: None,
             })
             .collect();
@@ -1078,18 +1089,18 @@ mod tests {
             ..Run::default()
         };
         let mut block = Block::default();
-        block.push_run(&row("ab", 2), 2);
+        push(&mut block, &[row("ab", 2)]);
         block.end_row(false);
         block.push_newline();
         // Two characters of three bytes each standing on two cells apiece: neither
         // one-byte nor one-cell, so this row is the nonuniform one.
-        block.push_run(&row("世界", 4), 2);
+        push(&mut block, &[row("世界", 4)]);
         // And the wrapped one: its logical line goes on below it. Per row like the other
         // two, and asserted alongside them, because a flag that leaked between rows would
         // have Emacs join a line the child ended.
         block.end_row(true);
         block.push_newline();
-        block.push_run(&row("cd", 2), 2);
+        push(&mut block, &[row("cd", 2)]);
         block.end_row(false);
 
         let table: Vec<(usize, usize, Uniformity, bool)> = block
@@ -1129,17 +1140,16 @@ mod tests {
             ..Run::default()
         };
         let mut block = Block::default();
-        for run in [glyphs("┌──"), plain(" ok ", 4), glyphs("\u{a0}──┐")] {
-            block.push_run(&run, run.text.chars().count());
-        }
+        push(
+            &mut block,
+            &[glyphs("┌──"), plain(" ok ", 4), glyphs("\u{a0}──┐")],
+        );
         block.end_row(false);
         block.push_newline();
-        for (run, chars) in [(glyphs("│"), 1), (plain("世", 2), 1)] {
-            block.push_run(&run, chars);
-        }
+        push(&mut block, &[glyphs("│"), plain("世", 2)]);
         block.end_row(false);
         block.push_newline();
-        block.push_run(&plain("ab", 2), 2);
+        push(&mut block, &[plain("ab", 2)]);
         block.end_row(false);
 
         let classes: Vec<Uniformity> = block.rows.iter().map(|r| r.uniform).collect();
@@ -1159,9 +1169,7 @@ mod tests {
         let fonts = [0, 1, 0];
         let hash = |runs: &[Run]| {
             let mut block = Block::new(&fonts);
-            for run in runs {
-                block.push_run(run, run.text.chars().count());
-            }
+            push(&mut block, runs);
             block.end_row(false);
             block.rows[0].hash
         };

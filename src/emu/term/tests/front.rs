@@ -133,7 +133,7 @@ fn a_mark_alone_changes_nothing_emacs_draws() {
 fn edit_of(t: &mut Term, index: usize) -> Option<Option<(usize, Option<usize>, usize, String)>> {
     let row = t.drain().rows.into_iter().find(|r| r.index == index)?;
     Some(row.edit.map(|e| {
-        let text = e.runs.iter().map(|r| r.text.as_str()).collect();
+        let text = e.runs.iter().map(|r| r.text).collect();
         (e.char_start, e.char_end, e.chars, text)
     }))
 }
@@ -424,7 +424,7 @@ fn an_edit_inside_a_linked_underlined_span_keeps_the_link_and_the_colour() {
     let row = t.drain().rows.into_iter().find(|r| r.index == 0).unwrap();
     let edit = row.edit.expect("sent as an edit");
     assert_eq!(edit.runs.len(), 1, "{:?}", edit.runs);
-    let run = &edit.runs[0];
+    let run = edit.runs.run(0);
     assert_eq!(run.text, "2");
     assert!(run.link.is_some());
     assert_eq!(t.style(run.style).underline, Color::Indexed(196));

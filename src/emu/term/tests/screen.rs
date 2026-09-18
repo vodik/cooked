@@ -698,9 +698,9 @@ fn box_drawing_bytes_produce_glyphs_in_the_drained_delta() {
         .expect("row 0 is damaged")
         .runs;
     assert_eq!(runs.len(), 1);
-    let glyphs = runs[0].deco.as_ref().expect("box-glyph run").glyphs();
+    let glyphs = runs.run(0).deco.expect("box-glyph run").glyphs();
     assert_eq!(glyphs.len(), 4, "one descriptor per character");
-    assert_eq!(runs[0].text, "\u{250C}\u{2500}\u{2500}\u{2510}");
+    assert_eq!(runs.run(0).text, "\u{250C}\u{2500}\u{2500}\u{2510}");
 }
 
 #[test]
@@ -712,7 +712,7 @@ fn a_box_glyph_carrying_a_combining_mark_draws_as_text() {
     let runs = t.screen().row(0).unwrap().runs();
     let shapes: Vec<(&str, Option<usize>)> = runs
         .iter()
-        .map(|run| (run.text.as_str(), run.deco.as_ref().map(Deco::len)))
+        .map(|run| (run.text, run.deco.map(Deco::len)))
         .collect();
     assert_eq!(
         shapes,
@@ -731,7 +731,7 @@ fn diagonal_and_stub_bytes_also_produce_glyphs() {
         .expect("row 0 is damaged")
         .runs;
     assert_eq!(runs.len(), 1);
-    let glyphs = runs[0].deco.as_ref().expect("box-glyph run").glyphs();
+    let glyphs = runs.run(0).deco.expect("box-glyph run").glyphs();
     assert_eq!(glyphs.len(), 4);
     assert!(glyphs[0].is_diagonal());
     assert!(
@@ -753,7 +753,7 @@ fn a_run_of_identical_glyphs_packs_into_a_single_run_length_record() {
         .find(|r| r.index == 0)
         .expect("row 0 is damaged")
         .runs;
-    let packed = runs[0].deco.as_ref().expect("box-glyph run").packed();
+    let packed = runs.run(0).deco.expect("box-glyph run").packed();
     assert_eq!(
         packed.len(),
         4,
@@ -776,7 +776,7 @@ fn a_run_of_differing_glyphs_packs_one_record_per_distinct_shape() {
         .find(|r| r.index == 0)
         .expect("row 0 is damaged")
         .runs;
-    let deco = runs[0].deco.as_ref().expect("box-glyph run");
+    let deco = runs.run(0).deco.expect("box-glyph run");
     let packed = deco.packed();
     assert_eq!(packed.len(), 12, "three records: {packed:?}");
     let counts: Vec<u16> = packed
@@ -811,7 +811,7 @@ fn a_run_of_shades_collapses_like_any_other_repeat_and_is_not_flagged() {
         .find(|r| r.index == 0)
         .expect("row 0 is damaged")
         .runs;
-    let deco = runs[0].deco.as_ref().expect("box-glyph run");
+    let deco = runs.run(0).deco.expect("box-glyph run");
     let packed = deco.packed();
     // ▒ U+2592, medium shade: block kind, direction `Shade', density 2 -- 0x8015, the
     // same literal `cooked-box-glyph-bits-match-the-rust-side-encoding' mirrors.
@@ -960,14 +960,14 @@ fn batched_and_per_character_printing_agree() {
     // The text on the grid, the runs it reduces to (which carry style, so a pen dropped
     // mid-run would show), the cursor, and what left for scrollback.
     /// Everything the two printing paths could disagree about.
-    type Snapshot = (Vec<String>, Vec<Vec<Run>>, (usize, usize), Vec<String>);
+    type Snapshot = (Vec<String>, Vec<Runs>, (usize, usize), Vec<String>);
 
     fn rendered(t: &mut Term) -> Snapshot {
         let scrolled = t
             .drain()
             .scrolled
             .iter()
-            .map(|line| line.runs.iter().map(|r| r.text.as_str()).collect())
+            .map(|line| line.runs.text().to_owned())
             .collect();
         let screen = (0..4)
             .map(|i| {
