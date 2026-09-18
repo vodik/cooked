@@ -640,7 +640,10 @@ fn image_cells_reach_lisp_as_one_run_of_their_own() {
     assert_eq!(runs.len(), 1, "{runs:?}");
     // Blanks, so a yank out of the buffer gives the whitespace the picture occupied.
     assert_eq!(runs.run(0).text, "   ");
-    assert!(matches!(runs.run(0).deco, Some(Deco::Images(_))), "{runs:?}");
+    assert!(
+        matches!(runs.run(0).deco, Some(Deco::Images(_))),
+        "{runs:?}"
+    );
 }
 
 #[test]

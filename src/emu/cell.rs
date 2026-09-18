@@ -2261,10 +2261,7 @@ mod tests {
 
         // The blanks are the reserved descriptor, not a repeat of the shape beside them:
         // a run whose gaps drew `\u{2502}` would be a solid ladder.
-        let glyphs = runs.run(0)
-            .deco
-            .expect("the indent is decorated")
-            .glyphs();
+        let glyphs = runs.run(0).deco.expect("the indent is decorated").glyphs();
         for gap in [1, 2, 3, 5, 6, 7] {
             assert_eq!(glyphs[gap], BoxGlyph::BLANK, "column {gap}");
         }

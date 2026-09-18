@@ -926,7 +926,10 @@ mod tests {
         filter.feed(b"\x1b[31m", true);
         filter.feed(b"red\n", true);
         let emission = filter.emission();
-        assert_eq!(filter.style(emission.runs.run(0).style).fg, Color::Indexed(1));
+        assert_eq!(
+            filter.style(emission.runs.run(0).style).fg,
+            Color::Indexed(1)
+        );
     }
 
     #[test]
@@ -937,7 +940,10 @@ mod tests {
         filter.feed(b"1mred\n", true);
         let emission = filter.emission();
         assert_eq!(emission.runs.run(0).text, "red");
-        assert_eq!(filter.style(emission.runs.run(0).style).fg, Color::Indexed(1));
+        assert_eq!(
+            filter.style(emission.runs.run(0).style).fg,
+            Color::Indexed(1)
+        );
     }
 
     #[test]

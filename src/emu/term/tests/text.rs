@@ -36,10 +36,7 @@ fn a_declared_width_overrides_what_a_width_table_would_say() {
     // two ASCII characters the client wants rendered in one cell.
     let t = term(2, 20, b"\x1b]66;w=1;Ha\x07\x1b]66;w=1;lf\x07");
     let runs = t.screen().row(0).unwrap().runs();
-    assert_eq!(
-        runs.iter().map(|r| r.text).collect::<String>(),
-        "Half"
-    );
+    assert_eq!(runs.iter().map(|r| r.text).collect::<String>(), "Half");
     assert_eq!(
         runs.iter().map(|r| r.cols).sum::<usize>(),
         2,

@@ -41,12 +41,7 @@ fn the_screen_left_out_arrives_with_the_next_whole_drain() {
         delta
             .rows
             .iter()
-            .map(|row| {
-                (
-                    row.index,
-                    row.runs.iter().map(|r| r.text).collect(),
-                )
-            })
+            .map(|row| (row.index, row.runs.iter().map(|r| r.text).collect()))
             .collect()
     };
     assert_eq!(a.shifts, b.shifts);

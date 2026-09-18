@@ -197,7 +197,13 @@ fn ich_carries_an_underline_colour_along_with_its_character() {
 /// The style of the last cell of a row, which is where an erase-to-end lands.
 fn last_style(t: &Term, row: usize) -> Style {
     let r = t.screen().row(row).unwrap();
-    t.style(r.runs().iter().next_back().map(|run| run.style).unwrap_or_default())
+    t.style(
+        r.runs()
+            .iter()
+            .next_back()
+            .map(|run| run.style)
+            .unwrap_or_default(),
+    )
 }
 
 #[test]

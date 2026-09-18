@@ -2127,12 +2127,13 @@ mod tests {
         let deadline = start + patience(10.0);
         while Instant::now() < deadline {
             let update = session.drain();
-            collected.extend(update.delta.scrolled.iter().map(|line| {
-                line.runs
+            collected.extend(
+                update
+                    .delta
+                    .scrolled
                     .iter()
-                    .map(|r| r.text)
-                    .collect::<String>()
-            }));
+                    .map(|line| line.runs.iter().map(|r| r.text).collect::<String>()),
+            );
             if collected.len() >= LINES {
                 break;
             }
@@ -3655,22 +3656,19 @@ mod tests {
             .delta
             .scrolled
             .iter()
-            .map(|line| {
-                line.runs
-                    .iter()
-                    .map(|run| run.text)
-                    .collect::<String>()
-            })
+            .map(|line| line.runs.iter().map(|run| run.text).collect::<String>())
             .collect();
         assert!(
             scrolled.len() + 24 >= LINES,
             "{} lines scrolled off, {LINES} fed",
             scrolled.len()
         );
-        let wrong = scrolled
-            .iter()
-            .enumerate()
-            .find(|(i, line)| line.trim_end() != format!("line {i:06} the quick brown fox jumps over the lazy dog"));
-        assert!(wrong.is_none(), "line out of order or cut in two: {wrong:?}");
+        let wrong = scrolled.iter().enumerate().find(|(i, line)| {
+            line.trim_end() != format!("line {i:06} the quick brown fox jumps over the lazy dog")
+        });
+        assert!(
+            wrong.is_none(),
+            "line out of order or cut in two: {wrong:?}"
+        );
     }
 }
