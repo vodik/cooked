@@ -13,6 +13,13 @@
 
 ;;; Code:
 
+;; For the `ansi-color-' faces themselves, which were until now reached without
+;; loading anything: nothing asked for one until a coloured cell was drawn, and by
+;; then a session had pulled in comint and comint had pulled in ansi-color.  The
+;; faces are read at load time now -- `cooked--sync-ansi-faces' gives cooked's own
+;; the colours before the first row -- so the file that defines them is a real
+;; dependency and says so.
+(require 'ansi-color)
 (require 'color)
 (require 'face-remap)
 (require 'cooked-util)
@@ -38,13 +45,13 @@
 Consulted only where the corresponding `ansi-color-' face gives no foreground,
 so a theme that styles those faces wins.
 
-Setting it through `customize' or `setopt' redraws the screens already
-running in the new colours; see `cooked--refresh-ansi-colors'."
+Setting it through `customize' or `setopt' recolours the text already drawn,
+scrollback included, without redrawing anything; see `cooked--sync-ansi-faces'."
   :type '(vector (repeat :inline t string))
   :set (lambda (symbol value)
          (set-default symbol value)
-         (when (fboundp 'cooked--refresh-ansi-colors)
-           (cooked--refresh-ansi-colors)))
+         (when (fboundp 'cooked--sync-ansi-faces)
+           (cooked--sync-ansi-faces)))
   :group 'cooked)
 
 (defcustom cooked-bold-is-bright nil
@@ -74,6 +81,47 @@ running; see `cooked--set-bold-is-bright'."
    ansi-color-bright-yellow ansi-color-bright-blue ansi-color-bright-magenta
    ansi-color-bright-cyan ansi-color-bright-white]
   "Faces the theme is expected to style, indexed by ANSI color number.")
+
+;; The sixteen indexed colours are worn as named faces rather than written onto the
+;; text as strings, and this is where those faces come from.  `cooked--face-build'
+;; says what that buys; what it costs is this synchronisation, and the reason it is
+;; needed rather than a plain `:inherit ansi-color-red' is that those faces name
+;; *both* colours: `ansi-color-red' is `:foreground "red3" :background "red3"', so a
+;; cell inheriting it for its foreground would come out on a red background too.
+;; ansi-color.el has the same problem and answers it by baking --
+;; `ansi-color--face-vec-face' writes `(:background ,(face-background ...))' -- which
+;; is exactly what this file is getting away from.  So cooked keeps a face per index
+;; per channel, each naming one colour, and follows `ansi-color-' with a
+;; `set-face-attribute' rather than with a walk over anybody's buffer.
+
+(defconst cooked--fg-faces
+  (vconcat (mapcar (lambda (n) (intern (format "cooked-fg-%d" n))) (number-sequence 0 15)))
+  "Faces carrying the foreground of each ANSI colour, indexed by colour number.")
+
+(defconst cooked--bg-faces
+  (vconcat (mapcar (lambda (n) (intern (format "cooked-bg-%d" n))) (number-sequence 0 15)))
+  "Faces carrying the background of each ANSI colour, indexed by colour number.")
+
+(dotimes (n 16)
+  (let ((ansi (aref cooked--ansi-faces n)))
+    (custom-declare-face
+     (aref cooked--fg-faces n) '((t))
+     (format "Foreground of ANSI colour %d, as text the child printed in it inherits.
+
+Not a face to customize: cooked overwrites its `:foreground' from `%s'
+whenever that face moves, and styling that one is how a theme sets this
+colour.  It exists because `%s' names a background as well as a
+foreground -- both `red3' in the stock definition -- so text cannot simply
+inherit it for one channel; see `cooked--sync-ansi-faces'." n ansi ansi)
+     :group 'cooked)
+    (custom-declare-face
+     (aref cooked--bg-faces n) '((t))
+     (format "Background of ANSI colour %d, as text the child printed on it inherits.
+
+The mirror of `%s': its `:background' is the *foreground* `%s'
+names, which is the colour index %d stands for.  Not a face to customize,
+for the reason that one gives." n (aref cooked--fg-faces n) ansi n)
+     :group 'cooked)))
 
 
 (defvar-local cooked--face-cache nil)
@@ -140,14 +188,18 @@ into it for a cache to clear.  Adding to this hook is how it says so instead.")
 (defun cooked--flush-face-cache (&rest _)
   "Forget resolved colors so a new theme applies to subsequent output.
 
-Nothing colorless needs flushing: `cooked--box-glyph-cache' holds shape bitmaps
-that are colorized live at display time, so a theme change leaves them true.
-What does need it is anything holding a color already resolved against the old
-theme, which is what `cooked-theme-change-hook' is for.
+The rendition faces themselves no longer need this: a cell in one of the
+sixteen indexed colours wears `cooked-fg-*' and `cooked-bg-*', and
+`cooked--sync-ansi-faces' -- called first, from here -- moves those faces
+rather than the text, so the plists in `cooked--face-cache' are as true after a
+theme change as before it.  What is still resolved against the colours of the
+moment is a shade's blend, which shares this cache under a key naming the two
+colours it mixed, and everything `cooked-theme-change-hook' speaks for.  So the
+`clrhash' is now for the blends, and the hook is the point.
 
-It also records the ANSI colours the caches will now be resolved against, so
-that `cooked--refresh-ansi-colors' after a theme finds nothing more to do."
-  (cooked--ansi-faces-changed-p)
+Nothing colorless needs flushing: `cooked--box-glyph-cache' holds shape bitmaps
+that are colorized live at display time, so a theme change leaves them true."
+  (cooked--sync-ansi-faces)
   (cooked--dolist-buffers
     (when (hash-table-p cooked--face-cache)
       (clrhash cooked--face-cache))
@@ -156,19 +208,28 @@ that `cooked--refresh-ansi-colors' after a theme finds nothing more to do."
     (run-hooks 'cooked-theme-change-hook)))
 
 (defvar cooked--ansi-face-stamp nil
-  "The ANSI colours the face caches were last resolved against, or nil.
+  "The ANSI colours `cooked-fg-*' and `cooked-bg-*' were last given, or nil.
 
 A vector of what `cooked--color' answers for indices 0 to 15, in index order,
 with `cooked-color-names' itself last.  Global, like the faces it describes.")
 
-(defun cooked--ansi-faces-changed-p ()
-  "Record the ANSI colours now in force, and say whether they have moved.
+(defun cooked--sync-ansi-faces ()
+  "Give `cooked-fg-*' and `cooked-bg-*' the colour ANSI index N now resolves to.
 
-Sixteen `face-foreground' calls compared in place, which allocates nothing
-unless something moved.  A theme sets every face whether or not its colour
-changes, and a face can be set to the colour it already had, so the moment of
-the set is not enough to know.  The first call answers t, since nothing says
-what the caches were resolved against, and the cost of that is one redraw."
+This is the whole of following a theme.  Text the child printed in an indexed
+colour inherits these two faces and names no colour of its own, so moving them
+recolours every character wearing them at once -- the live screen, the
+scrollback, a batch that has not been coloured yet, and text copied out of the
+buffer into somebody else's -- with no flush, no walk over any buffer and no
+row sent again.  Emacs re-realizes faces after a `set-face-attribute' and
+redisplays; that is the entire mechanism.
+
+Answers whether anything moved, and touches only the indices that did.  A theme
+sets every face whether its colour changes or not, and `set-face-attribute'
+discards every realized face on every frame, so a sixteen-way comparison is
+well worth making before making sixteen of those.  The first call finds an
+empty stamp and sets all sixteen, which is how the faces get their colours at
+all."
   (let* ((stamp (or cooked--ansi-face-stamp
                     (setq cooked--ansi-face-stamp (make-vector 17 nil))))
          (moved nil)
@@ -177,58 +238,85 @@ what the caches were resolved against, and the cost of that is one redraw."
       (let ((color (cooked--color i)))
         (unless (equal color (aref stamp i))
           (aset stamp i color)
-          (setq moved t)))
+          (setq moved t)
+          ;; `unspecified' rather than nil for a colour that resolved to
+          ;; nothing: a tty frame answers `unspecified-fg' for a face no theme
+          ;; styled, and `set-face-attribute' rejects nil.
+          (set-face-attribute (aref cooked--fg-faces i) nil
+                              :foreground (or color 'unspecified))
+          (set-face-attribute (aref cooked--bg-faces i) nil
+                              :background (or color 'unspecified))))
       (setq i (1+ i)))
     (unless (eq cooked-color-names (aref stamp 16))
       (aset stamp 16 cooked-color-names)
       (setq moved t))
     moved))
 
-(defun cooked--refresh-ansi-colors ()
-  "Redraw every screen in the ANSI colours now in force, if they have moved.
-
-The face caches are flushed as a theme change flushes them, and every row is
-damaged and drained as well, because nothing else would send one: a child that
-repaints the same cells damages nothing, and an idle prompt repaints nothing.
-Rows already in the scrollback keep the colour they were drawn in, as they do
-after a theme change."
-  (when (cooked--ansi-faces-changed-p)
-    (cooked--flush-face-cache)
-    (cooked--redraw-every-screen)))
-
 (defvar cooked--ansi-refresh-timer nil
-  "The pending `cooked--refresh-ansi-colors' call, or nil.")
+  "The pending `cooked--sync-ansi-faces' call, or nil.")
 
 (defun cooked--notice-face-change (face &rest _)
-  "Refresh the screens soon if FACE is one of `cooked--ansi-faces'.
+  "Follow FACE into `cooked-fg-*' and `cooked-bg-*' soon, if it is an ANSI face.
 
 After `set-face-attribute', which is where `set-face-foreground',
 `customize-face' and a theme all end up.  Only a theme runs a hook, so a face
-edited any other way stayed resolved in `cooked--face-cache' and drawn on the
-screen until the child sent different cells.  Deferred to one idle call, so a
-theme setting all sixteen faces costs one comparison, and that one finds the
-stamp already current, because `cooked--flush-face-cache' records it."
+edited any other way -- from an init file, or interactively while picking a
+colour -- would otherwise leave cooked's own faces behind.  Deferred to one
+idle call, so a theme setting all sixteen faces costs one pass, and that pass
+finds the stamp already current when `cooked--flush-face-cache' got there
+first.
+
+This cannot recurse: the faces it sets are not in `cooked--ansi-faces'."
   (when (and (not cooked--ansi-refresh-timer)
              (cl-position face cooked--ansi-faces :test #'eq))
     (setq cooked--ansi-refresh-timer
           (run-at-time 0 nil (lambda ()
                                (setq cooked--ansi-refresh-timer nil)
-                               (cooked--refresh-ansi-colors))))))
+                               (cooked--sync-ansi-faces))))))
 
 (advice-add 'set-face-attribute :after #'cooked--notice-face-change)
 
 (defvar cooked--theme-redraw-timer nil
   "The pending `cooked--redraw-every-screen' call after a theme change, or nil.")
 
-(defun cooked--theme-changed (&rest _)
-  "Flush the resolved colours, and redraw every screen in the new theme soon.
+(defun cooked--bakes-an-indexed-color-p ()
+  "Whether any live rendition still writes a themed colour onto the text.
 
-Flushing alone let a later drain resolve faces again, but nothing sends one: a
-shell idle at its prompt repaints nothing, and a full-screen program that
-rewrites the same cells damages nothing, so the screen kept the old theme's
-colours until the child wrote something different.  So every screen is redrawn
-as an ANSI face edit redraws it; see `cooked--refresh-ansi-colors'.  Rows in
-the scrollback keep the colours they were drawn in.
+Which is one rendition and no more: SGR 58 with a palette index, whose colour
+goes into `:underline (:color ...)'.  A face attribute that takes a colour and
+not a face has nowhere to put an inherit, so that one is resolved when it is
+drawn and does not follow a theme by itself.  Everything else about a cell
+either names a colour the child gave literally -- the 256-colour cube, RGB --
+or wears `cooked-fg-*' and `cooked-bg-*' and follows.
+
+A scan of the renditions the core has announced, cheapest where it matters: a
+session that has never seen SGR 58, which is nearly all of them, answers nil
+after a walk of a vector and costs a theme change nothing."
+  (let ((i 0)
+        (limit (length cooked--style-specs))
+        (found nil))
+    (while (and (not found) (< i limit))
+      (let ((ul (nth 2 (aref cooked--style-specs i))))
+        (when (and (integerp ul) (< ul 16))
+          (setq found t)))
+      (setq i (1+ i)))
+    found))
+
+(defun cooked--theme-changed (&rest _)
+  "Follow the new theme, redrawing only the screens that cannot follow it alone.
+
+Almost nothing has to be redrawn.  A cell's colours are `cooked-fg-*' and
+`cooked-bg-*', which `cooked--flush-face-cache' moves through
+`cooked--sync-ansi-faces', and every character wearing them is recoloured by
+redisplay wherever it is -- so the scrollback follows the theme too, which it
+never did while colours were written onto the text.
+
+What is left is the one attribute that has to hold a colour rather than a face,
+an indexed SGR 58 underline colour; `cooked--bakes-an-indexed-color-p' looks
+for it and the redraw is skipped when no buffer has one, which is the ordinary
+case.  A shade's blend is the other baked colour and needs no redraw either:
+`cooked--reblend-shades' is on `cooked-theme-change-hook' and rewrites it in
+place, in the scrollback as well.
 
 The redraw waits for an idle moment, because switching theme is usually two
 calls: `load-theme' after `disable-theme' on the old one, or several themes
@@ -239,7 +327,12 @@ them share one redraw."
     (setq cooked--theme-redraw-timer
           (run-at-time 0 nil (lambda ()
                                (setq cooked--theme-redraw-timer nil)
-                               (cooked--redraw-every-screen))))))
+                               (let ((baked nil))
+                                 (cooked--dolist-buffers
+                                   (when (cooked--bakes-an-indexed-color-p)
+                                     (setq baked t)))
+                                 (when baked
+                                   (cooked--redraw-every-screen))))))))
 
 ;; `enable-theme-functions' arrived in Emacs 29, and `add-hook' on an unbound variable
 ;; quietly defines it rather than failing — so on 28 this looked fine and did nothing.
@@ -253,7 +346,13 @@ them share one redraw."
 (defun cooked--set-bold-is-bright ()
   "Draw every screen again under the new `cooked-bold-is-bright'.
 The resolved faces are flushed first, since each was built under the old value
-and is cached by its rendition alone."
+and is cached by its rendition alone.
+
+The one colour setting that still costs a redraw, and it is not a colour: it
+changes which face a rendition wears -- `cooked-fg-1' becomes `cooked-fg-9' --
+rather than what that face is, so the plists have to be built again and put on
+the text again.  Rows already in the scrollback keep the mapping they were
+drawn under, as they did before."
   (cooked--flush-face-cache)
   (cooked--redraw-every-screen))
 
@@ -385,14 +484,15 @@ hidden echo must stay hidden when an OSC 11 set lands after it."
   `((,cooked--attr-bold :weight bold)
     (,cooked--attr-faint :weight light)
     (,cooked--attr-italic :slant italic)
-    (,cooked--attr-blink :inherit cooked-blink)
     (,cooked--attr-strike :strike-through t)
     (,cooked--attr-overline :overline t))
   "SGR attribute bits that map straight onto a face property and a constant value.
 
-The attributes needing more than a constant — underline, whose style and colour
-are a whole sub-protocol, and conceal, which resolves against the background
-that was just computed — are handled separately in `cooked--face'.")
+The attributes needing more than a constant are handled separately in
+`cooked--face-build': underline, whose style and colour are a whole
+sub-protocol; conceal, which resolves against the background that was just
+computed; and blink, which is an inherited face and so shares one property with
+the colours and with conceal.")
 
 (defsubst cooked--attr-p (attrs bit)
   "Whether BIT is set in the ATTRS bitmask."
@@ -774,8 +874,65 @@ with one `clrhash'."
   (cooked--cached-bounded cooked--face-cache cooked--face-cache-limit (list fg bg attrs ul)
     (cooked--face-build fg bg attrs ul)))
 
+(defun cooked--bright-index (fg attrs)
+  "FG, moved to its bright twin if `cooked-bold-is-bright' and ATTRS say bold.
+Only the first eight palette indices have a twin; a colour from the cube or
+given as RGB is returned as it is."
+  (if (and cooked-bold-is-bright
+           (integerp fg) (< fg 8)
+           (cooked--attr-p attrs cooked--attr-bold))
+      (+ fg 8)
+    fg))
+
+(defsubst cooked--indexed-p (spec)
+  "Whether colour SPEC is one of the sixteen faces rather than a literal colour."
+  (and (integerp spec) (< spec 16)))
+
+(defun cooked--face-color (face attribute)
+  "The ATTRIBUTE colour FACE draws in, resolving `:inherit', or nil for none.
+
+FACE is one of this file's rendition plists, and ATTRIBUTE `:foreground' or
+`:background'.  Written out rather than left to `face-attribute', which takes
+a face name and signals on an anonymous plist -- so there is no stock way to
+ask a plist what colour it comes out as, and every caller that wants the
+answer has to follow the inherit chain itself.  There is exactly one step of
+chain to follow here: the plist either names the colour or inherits one of
+`cooked-fg-*' and `cooked-bg-*', each of which names it outright.
+
+A face this buffer remaps -- `cooked--concealed' and its reversed twin -- is
+not resolved, since `face-attribute' does not see a buffer's remaps; the
+caller that cares reads the inherit itself.  See `cooked--shade-face'."
+  (let ((plist (and (consp face) (keywordp (car face)) face)))
+    (or (plist-get plist attribute)
+        (let ((inherit (plist-get plist :inherit))
+              (color nil))
+          (dolist (one (if (listp inherit) inherit (list inherit)) color)
+            (unless color
+              (let ((value (and (facep one) (face-attribute one attribute nil t))))
+                (when (stringp value)
+                  (setq color value)))))))))
+
 (defun cooked--face-build (fg bg attrs ul)
   "Build the face plist `cooked--face' memoizes for FG, BG, ATTRS and UL.
+
+A colour from the sixteen-colour palette is worn as a face and not written
+down.  Index N comes out as an `:inherit' of `cooked-fg-*' for a foreground
+and of `cooked-bg-*' for a background, and those two faces carry whatever the
+matching `ansi-color-*' face resolves to at the moment -- see
+`cooked--sync-ansi-faces'.  So a theme that restyles the ANSI faces recolours
+every character already in the
+buffer, the scrollback included, because redisplay merges the inherit afresh
+and the text never held the old colour to begin with.  Baking it, which is what
+this did and what `ansi-color--face-vec-face' still does, made a theme change a
+cache flush plus a redraw of every live screen, and left the scrollback in the
+colours of whatever theme was loaded when those rows scrolled off.
+
+The 256-colour cube and RGB stay literal strings, as they do in every other
+terminal: the child named an absolute colour and there is no palette entry for
+a theme to have an opinion about.  One attribute stays literal that would
+rather not: an indexed SGR 58 underline colour, because `:underline' takes a
+colour and has nowhere to put a face; `cooked--bakes-an-indexed-color-p' is
+what pays for that.
 
 Reverse video is `:inverse-video', with the colours left where the child put
 them, and not a swap done here.  A swap can only exchange what it is given, and
@@ -791,29 +948,33 @@ by its pixels in a headless pgtk frame, and a cell with colours of its own
 still comes out with the two exchanged."
   (let* ((reverse (cooked--attr-p attrs cooked--attr-reverse))
          (conceal (cooked--attr-p attrs cooked--attr-conceal))
-         (fg* (cooked--color
-               (if (and cooked-bold-is-bright
-                        (integerp fg) (< fg 8)
-                        (cooked--attr-p attrs cooked--attr-bold))
-                   (+ fg 8)
-                 fg)))
-         (bg* (cooked--color bg))
+         (fg* (cooked--bright-index fg attrs))
+         (bg* bg)
+         (inherit nil)
          (face nil))
     ;; Concealed text is drawn in the colour it sits on.  Which property that is
     ;; depends on reverse video, since an inverse face paints its `:foreground'
     ;; as the background -- so a reversed cell has its background matched to its
-    ;; foreground instead.
+    ;; foreground instead.  Copied as a specification rather than as a colour,
+    ;; so a concealed cell on an indexed background wears that index's face and
+    ;; follows the theme like any other.
     (when conceal
       (if reverse (setq bg* fg*) (setq fg* bg*)))
-    (when fg* (setq face (plist-put face :foreground fg*)))
-    (when bg* (setq face (plist-put face :background bg*)))
+    (cond ((null fg*))
+          ((cooked--indexed-p fg*) (push (aref cooked--fg-faces fg*) inherit))
+          (t (setq face (plist-put face :foreground (cooked--color fg*)))))
+    (cond ((null bg*))
+          ((cooked--indexed-p bg*) (push (aref cooked--bg-faces bg*) inherit))
+          (t (setq face (plist-put face :background (cooked--color bg*)))))
+    (setq inherit (nreverse inherit))
     (when reverse (setq face (plist-put face :inverse-video t)))
     (pcase-dolist (`(,bit ,property ,value) cooked--attr-face-properties)
       (when (cooked--attr-p attrs bit)
         (setq face (plist-put face property value))))
     (when (cooked--attr-p attrs cooked--attr-underline)
       (setq face (plist-put face :underline (cooked--underline-spec attrs ul))))
-    (when conceal
+    (cond
+     (conceal
       ;; A default colour to hide in is not a colour this can name, for the same
       ;; reason reverse video names none: the cache would outlive it.  So the
       ;; face inherits one of two that the buffer remaps to the colours it draws.
@@ -823,17 +984,48 @@ still comes out with the two exchanged."
       (unless (or (if reverse fg* bg*) cooked--concealed-remaps)
         (cooked--remap-concealed (face-foreground 'default nil t)
                                  (face-background 'default nil t)))
-      ;; And the inheritance replaces blink's.  `cooked-blink' is a visible mark
-      ;; on the cell, and on a concealed cell that mark is the one thing SGR 8 was
-      ;; asked to keep quiet: a box drawn round apparently blank text says there
-      ;; is text there.  A hardware terminal blinking a concealed glyph shows
-      ;; nothing either, so dropping it is the faithful answer as well as the
-      ;; careful one.
+      (unless (if reverse fg* bg*)
+        (setq inherit (list (if reverse
+                                'cooked--concealed-reversed
+                              'cooked--concealed)))))
+     ;; Blink is inherited too, and gives way to conceal: `cooked-blink' is a
+     ;; visible mark on the cell, and on a concealed cell that mark is the one
+     ;; thing SGR 8 was asked to keep quiet -- a box drawn round apparently blank
+     ;; text says there is text there.  A hardware terminal blinking a concealed
+     ;; glyph shows nothing either, so dropping it is the faithful answer as well
+     ;; as the careful one.
+     ((cooked--attr-p attrs cooked--attr-blink)
+      (setq inherit (append inherit (list 'cooked-blink)))))
+    ;; One face inherits as a symbol, several as a list, which is what every
+    ;; other producer of face plists writes and what keeps the common case --
+    ;; a cell in one colour and nothing else -- a two-element plist.
+    (when inherit
       (setq face (plist-put face :inherit
-                            (cond ((if reverse fg* bg*) nil)
-                                  (reverse 'cooked--concealed-reversed)
-                                  (t 'cooked--concealed)))))
+                            (if (cdr inherit) inherit (car inherit)))))
     face))
+
+(defun cooked--sync-ansi-faces-on-new-frame (frame)
+  "Resolve the ANSI colours again for FRAME, which has just been created.
+
+`cooked--color' asks the selected frame what an `ansi-color-' face comes out
+as, and the answer moves with the frame: a tty knows eight colours where a
+graphical frame knows sixteen million, and a daemon started with no frame at
+all answers for none.  So a new frame is a reason to look again, which is what
+this is -- the whole of it, since the faces are global and there is no text
+to touch.
+
+Global is also its limit.  One pair of faces serves every frame, so a session
+showing the same buffer on a tty and on a graphical frame draws both in
+whichever the newer frame resolved; the colours before this were baked per
+buffer at the moment a row was drawn and were no better."
+  (when (frame-live-p frame)
+    (with-selected-frame frame
+      (cooked--sync-ansi-faces))))
+
+(add-hook 'after-make-frame-functions #'cooked--sync-ansi-faces-on-new-frame)
+
+;; And once now, so that the faces have colours before the first row is drawn.
+(cooked--sync-ansi-faces)
 
 (provide 'cooked-face)
 ;;; cooked-face.el ends here

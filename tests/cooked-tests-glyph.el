@@ -789,8 +789,10 @@ cell-specific at all."
       (should-not (plist-member plist :background)))
     ;; ...and the rendition is not lost, it is on the text, which is where Emacs
     ;; reads it from.
+    ;; Worn as the two faces that carry those colours, which is how the
+    ;; rendition follows a theme; see `cooked--face-build'.
     (should (equal (get-text-property (point-min) 'face)
-                   '(:foreground "red3" :background "blue2")))))
+                   '(:inherit (cooked-fg-1 cooked-bg-4))))))
 
 ;; One spec per shape and size, whatever colour the cells are drawn in.  This is the
 ;; payoff of the test above rather than a separate feature: once the colours are out

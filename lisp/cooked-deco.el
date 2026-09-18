@@ -765,13 +765,20 @@ other colour resolved against the old theme."
                      (if cooked--reverse-screen 'background 'foreground)))
          (screen-bg (cooked--screen-color
                      (if cooked--reverse-screen 'foreground 'background)))
-         (fg (or (plist-get plist :foreground) screen-fg))
-         (bg (or (plist-get plist :background) screen-bg)))
+         ;; Through `:inherit', because a cell in one of the sixteen palette
+         ;; colours wears `cooked-fg-*' and names no colour of its own; a blend
+         ;; has to have the colour itself, so this is where the chain is
+         ;; followed.  `cooked--reblend-shades' is what then keeps the answer
+         ;; true when the theme moves those faces.
+         (fg (or (cooked--face-color plist :foreground) screen-fg))
+         (bg (or (cooked--face-color plist :background) screen-bg))
+         (inherit (plist-get plist :inherit)))
     ;; Concealed in a default colour, the cell names no colour to hide in and
-    ;; inherits one; `cooked--face-build\=' says which.
-    (pcase (plist-get plist :inherit)
-      ('cooked--concealed (setq fg bg))
-      ('cooked--concealed-reversed (setq bg fg)))
+    ;; inherits one; `cooked--face-build\=' says which.  Those two are remapped
+    ;; per buffer, which `cooked--face-color\=' deliberately does not resolve.
+    (setq inherit (if (listp inherit) inherit (list inherit)))
+    (cond ((memq 'cooked--concealed inherit) (setq fg bg))
+          ((memq 'cooked--concealed-reversed inherit) (setq bg fg)))
     (when (plist-get plist :inverse-video)
       (cl-rotatef fg bg))
     (cooked--cached-bounded cooked--face-cache cooked--face-cache-limit

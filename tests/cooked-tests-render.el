@@ -29,7 +29,11 @@ without borrowing a real seam and having its own listeners in the way.")
     (goto-char (point-min))
     (should (search-forward "red" nil t))
     (let ((face (get-text-property (- (point) 1) 'face)))
-      (should (equal (plist-get face :foreground) (aref cooked-color-names 1))))))
+      ;; Worn rather than written down: the face names `cooked-fg-1', which is
+      ;; what carries the colour and what follows a theme.
+      (should (equal face '(:inherit cooked-fg-1)))
+      (should (equal (cooked--face-color face :foreground)
+                     (aref cooked-color-names 1))))))
 
 (ert-deftest cooked-cooked-mode-gives-emacs-the-input-line ()
   (cooked-tests--with-session '("/bin/cat")
@@ -180,7 +184,7 @@ which strips a bare `face' property and with it every colour."
       (should (get-text-property pos 'face))
       (font-lock-ensure)
       (should (get-text-property pos 'face))
-      (should (equal (plist-get (get-text-property pos 'face) :foreground)
+      (should (equal (cooked--face-color (get-text-property pos 'face) :foreground)
                      (cooked--color 2))))))
 
 (ert-deftest cooked-colors-follow-the-theme ()
@@ -4113,21 +4117,28 @@ repainting the same cells afterwards gets them in the new colours."
         (cooked--flush-face-cache))
       (should (member (cons session nil) unsent)))))
 
-(ert-deftest cooked-a-theme-change-redraws-a-still-screen ()
-  "A screen nothing writes to is drawn in the new theme's colours soon after it.
+(ert-deftest cooked-a-theme-change-recolours-a-still-screen-with-no-redraw ()
+  "A screen nothing writes to shows the new theme's colours, and is not redrawn.
 
-Forgetting the core's copy of the screen was not enough: a shell idle at its
-prompt repaints nothing, and a child rewriting the same cells damages nothing,
-so the rows kept the colours of the theme they were drawn under.  Two theme
-calls in a row share one redraw."
+The text never held the colour: a cell in ANSI red wears `cooked-fg-1', and a
+theme moves that face rather than the buffer.  So the same `face' value -- the
+very same cons, which is what `eq' pins -- resolves to the new red the moment
+the theme lands, with no drain, no repaint and no row sent again.  This used to
+need a flush and a redraw of every live screen, and the scrollback did not
+follow at all.
+
+Two theme calls in a row still share the one deferred pass, and that pass finds
+nothing to redraw because nothing on this screen bakes a themed colour; see
+`cooked--bakes-an-indexed-color-p'."
   (cooked-tests--with-session '("/bin/sh" "-c" "printf '\\033[31mred\\033[0m'; exec sleep 30")
     (should (cooked-tests--settle
              (lambda () (string-match-p "red" (cooked-tests--text)))))
-    (let ((face (lambda () (plist-get (get-text-property (cooked--screen-start-position) 'face)
-                                      :foreground)))
-          (redraws 0))
-      (should (equal (funcall face) (cooked--color 1)))
-      (cooked--ansi-faces-changed-p)
+    (let* ((pos (cooked--screen-start-position))
+           (before (get-text-property pos 'face))
+           (redraws 0))
+      (should (equal (cooked--face-color before :foreground) (cooked--color 1)))
+      ;; Nothing in the plist is the colour itself.
+      (should-not (plist-get before :foreground))
       (custom-declare-theme 'cooked-tests-red nil)
       (put 'cooked-tests-red 'theme-settings nil)
       (custom-theme-set-faces 'cooked-tests-red
@@ -4140,40 +4151,39 @@ calls in a row share one redraw."
             (disable-theme 'cooked-tests-red)
             (enable-theme 'cooked-tests-red)
             (should (equal (face-foreground 'ansi-color-red nil t) "#123456"))
-            (should (cooked-tests--settle
-                     (lambda () (equal (funcall face) "#123456"))))
-            (should (= redraws 1)))
+            ;; No settling: the faces moved inside `enable-theme' itself.
+            (should (equal (cooked--face-color (get-text-property pos 'face)
+                                               :foreground)
+                           "#123456"))
+            (should (eq (get-text-property pos 'face) before))
+            (cooked-tests--settle (lambda () (null cooked--theme-redraw-timer)))
+            (should (= redraws 0)))
         (disable-theme 'cooked-tests-red)
         (setq custom-known-themes (delq 'cooked-tests-red custom-known-themes))
         (cooked-tests--settle (lambda () (null cooked--theme-redraw-timer)))))))
 
-(ert-deftest cooked-an-ansi-face-edited-outside-a-theme-redraws-the-screen ()
-  "A repaint after `set-face-attribute' on an ANSI face draws the new colour.
+(ert-deftest cooked-an-ansi-face-edited-outside-a-theme-recolours-the-screen ()
+  "A `set-face-attribute' on an ANSI face reaches the screen with no hook to run.
 
-No hook runs for a face edited outside a theme, so the face cache kept the red
-it resolved first, and nothing sent the row again: the child writes the same
-cells over themselves, which damages nothing and does not even wake a drain.
-`set-face-attribute' on an ANSI face now schedules a comparison of the ANSI
-colours, and a move flushes the faces and redraws every screen."
+No theme hook fires for a face edited from an init file or while picking a
+colour interactively, so `cooked--notice-face-change' schedules the one thing
+that has to happen: `cooked-fg-1' following `ansi-color-red'.  What used to
+follow it was a flush and a redraw of every screen."
   (cooked-tests--with-session
-      '("/bin/sh" "-c"
-        "while :; do printf '\\r\\033[31mred\\033[0m'; sleep 0.05; done")
+      '("/bin/sh" "-c" "printf '\\033[31mred\\033[0m'; exec sleep 30")
     (should (cooked-tests--settle
              (lambda () (string-match-p "red" (cooked-tests--text)))))
     (let ((old (face-attribute 'ansi-color-red :foreground))
-          (face (lambda () (plist-get (get-text-property (point-min) 'face)
-                                      :foreground))))
+          (face (lambda () (cooked--face-color (get-text-property (point-min) 'face)
+                                               :foreground))))
       (should (equal (funcall face) (cooked--color 1)))
       (unwind-protect
           (progn
-            ;; The colours the screen was drawn in, as a session running for a
-            ;; while has them recorded.
-            (cooked--ansi-faces-changed-p)
             (set-face-attribute 'ansi-color-red nil :foreground "#123456")
             (should (cooked-tests--settle
                      (lambda () (equal (funcall face) "#123456")))))
         (set-face-attribute 'ansi-color-red nil :foreground old)
-        (cooked--refresh-ansi-colors)))))
+        (cooked--sync-ansi-faces)))))
 
 (ert-deftest cooked-a-zoom-makes-the-core-send-every-row-again ()
   "Rows rendered under one layout are sent again once the layout moves.
@@ -4338,30 +4348,38 @@ comes out in the new theme's colours from ids the core already sent."
            (before (get-text-property start 'face))
            (announced nil))
       (should before)
-      (cl-letf* ((original (symbol-function 'cooked--install-styles))
-                 ((symbol-function 'cooked--install-styles)
-                  (lambda (styles)
-                    (when styles (push styles announced))
-                    (funcall original styles)))
-                 ((symbol-function 'cooked--color)
-                  (let ((color (symbol-function 'cooked--color)))
-                    (lambda (spec)
-                      (if (eql spec 1) "#123456" (funcall color spec))))))
-        (cooked--flush-face-cache)
-        (should-not (seq-some #'identity cooked--style-faces))
-        (cooked--send cooked--session "\n")
-        ;; The line after the echoed newline is drawn with the rendition id the core
-        ;; announced for the first one.
-        (should (cooked-tests--settle
-                 (lambda ()
-                   (save-excursion
-                     (goto-char (point-max))
-                     (and (search-backward "red" start t)
-                          (> (point) start)
-                          (equal (plist-get (get-text-property (point) 'face)
-                                            :foreground)
-                                 "#123456"))))))
-        (should-not announced)))))
+      (unwind-protect
+          (cl-letf* ((original (symbol-function 'cooked--install-styles))
+                     ((symbol-function 'cooked--install-styles)
+                      (lambda (styles)
+                        (when styles (push styles announced))
+                        (funcall original styles)))
+                     ;; Stands in for a theme, one layer lower down: the flush
+                     ;; asks this what each index resolves to now, and hands the
+                     ;; answer to `cooked-fg-1'.
+                     ((symbol-function 'cooked--color)
+                      (let ((color (symbol-function 'cooked--color)))
+                        (lambda (spec)
+                          (if (eql spec 1) "#123456" (funcall color spec))))))
+            (cooked--flush-face-cache)
+            (should-not (seq-some #'identity cooked--style-faces))
+            (cooked--send cooked--session "\n")
+            ;; The line after the echoed newline is drawn with the rendition id
+            ;; the core announced for the first one.
+            (should (cooked-tests--settle
+                     (lambda ()
+                       (save-excursion
+                         (goto-char (point-max))
+                         (and (search-backward "red" start t)
+                              (> (point) start)
+                              (equal (cooked--face-color
+                                      (get-text-property (point) 'face)
+                                      :foreground)
+                                     "#123456"))))))
+            (should-not announced))
+        ;; `cooked-fg-1' is global and the stub has gone, so put the real red back
+        ;; before the next test reads it.
+        (cooked--sync-ansi-faces)))))
 
 ;;;; The stages of `cooked--apply', each called on its own
 

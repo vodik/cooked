@@ -60,7 +60,8 @@
     (should (cooked-tests--settle
              (lambda () (string-match-p "red" (cooked-tests--text)))))
     (let ((face (get-text-property (cooked-tests--link-at "red") 'face)))
-      (should (equal (plist-get face :foreground) (aref cooked-color-names 1)))
+      (should (equal (cooked--face-color face :foreground)
+                     (aref cooked-color-names 1)))
       (should-not (eq face 'cooked-link)))))
 
 (ert-deftest cooked-a-bare-url-is-fontified-by-goto-addr ()

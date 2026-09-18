@@ -481,7 +481,9 @@ them whether the child repaints or not.  That is for a change a row has to be
 rendered again to show at all, rather than one a repaint merely picks up: a
 zoom leaves the glyph scaling on a row measured against the old font, and a
 shell sitting at its prompt never repaints to replace it.  A theme change is
-one of those as well, and redraws through `cooked--redraw-every-screen'.
+not one of those any more: a cell's colours are faces the theme moves under
+it -- see `cooked--theme-changed' -- so the copy is cleared here without
+REDRAW, and the rows come out in the new colours as they are.
 
 The one way the copy is cleared, so that the theme, the layout stamp moving and
 the options that change rendering all mean the same thing by it.  On
@@ -519,7 +521,7 @@ buffer to walk and nothing but the `set-default' happens."
   "Render every live screen again now, in every cooked buffer.
 
 For a change to how the same cells are drawn that has to show at once: see
-`cooked--set-rendering-option' and `cooked--refresh-ansi-colors'.  Each
+`cooked--set-rendering-option' and `cooked--set-bold-is-bright'.  Each
 buffer's rows are damaged and drained, rather than left for the child to
 repaint, which it may never do."
   (cooked--dolist-buffers

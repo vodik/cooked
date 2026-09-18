@@ -213,12 +213,12 @@ receipt."
     (let ((error-face (cooked-tests-process--face-at "error"))
           (message-face (cooked-tests-process--face-at ": mismatched")))
       (should (eq (plist-get error-face :weight) 'bold))
-      (should (plist-get error-face :foreground))
+      (should (cooked--face-color error-face :foreground))
       ;; The second run is bold with no colour of its own, so the assertion is
       ;; that the runs stayed separate: one face over both would have carried
       ;; the red across the whole line.
       (should (eq (plist-get message-face :weight) 'bold))
-      (should-not (plist-get message-face :foreground)))))
+      (should-not (cooked--face-color message-face :foreground)))))
 
 (ert-deftest cooked-process-styling-survives-the-flush-at-exit ()
   "The last screenful is styled too, having come the other way out of the grid.
@@ -230,7 +230,8 @@ is what tells the two apart."
   (let ((cooked-process-rows 8))
     (cooked-tests-process--with "printf '\\033[32mok\\033[0m\\n'"
       (should (equal (cooked-tests-process--body) "ok"))
-      (should (plist-get (cooked-tests-process--face-at "ok") :foreground)))))
+      (should (cooked--face-color (cooked-tests-process--face-at "ok")
+                                  :foreground)))))
 
 (ert-deftest cooked-process-styling-can-be-turned-off ()
   "With `cooked-process-styled' nil the text arrives bare, as it used to.

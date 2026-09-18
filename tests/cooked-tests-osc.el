@@ -2593,7 +2593,9 @@ default-coloured text there followed an OSC 11 remap, and under the three
 DECSCNM remaps came out in normal video."
   (let ((specs (alist-get 'default face-remapping-alist)))
     (cl-flet ((resolve (property kind)
-                (or (plist-get face property)
+                ;; Through `:inherit', because an indexed colour is worn as
+                ;; `cooked-fg-*' and `cooked-bg-*' rather than written down.
+                (or (cooked--face-color face property)
                     (seq-some (lambda (spec)
                                 (and (consp spec) (plist-get spec property)))
                               specs)

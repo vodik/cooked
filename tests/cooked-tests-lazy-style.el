@@ -83,11 +83,11 @@ equal whatever else is in the buffer."
       (save-excursion
         (goto-char (cooked--screen-start-position))
         (should (search-forward "red" nil t))
-        (should (equal (plist-get (get-text-property (match-beginning 0) 'face)
+        (should (equal (cooked--face-color (get-text-property (match-beginning 0) 'face)
                                   :foreground)
                        (cooked-tests--red))))
       (cooked-tests--fontify)
-      (should (equal (plist-get (get-text-property pos 'face) :foreground)
+      (should (equal (cooked--face-color (get-text-property pos 'face) :foreground)
                      (cooked-tests--red)))
       (should-not (get-text-property pos 'cooked-pending-style))
       (should (= 0 cooked--pending-styles))
@@ -134,7 +134,7 @@ other test here names, the reset at the end of a line and the blanks between."
       (let ((seen 0))
         (while (search-forward "red" nil t)
           (setq seen (1+ seen))
-          (should (equal (plist-get (get-text-property (match-beginning 0) 'face)
+          (should (equal (cooked--face-color (get-text-property (match-beginning 0) 'face)
                                     :foreground)
                          (cooked-tests--red))))
         (should (> seen 10))))))
@@ -165,7 +165,7 @@ counted from do not survive it."
       (should (= 0 cooked--pending-styles))
       (goto-char (point-min))
       (while (search-forward "red" nil t)
-        (should (equal (plist-get (get-text-property (match-beginning 0) 'face)
+        (should (equal (cooked--face-color (get-text-property (match-beginning 0) 'face)
                                   :foreground)
                        (cooked-tests--red)))))))
 
@@ -190,7 +190,7 @@ asks it to redefine the very id the flood's red runs name."
       (cooked--install-styles (list (list id 4 nil nil cooked--attr-bold)))
       (should (= 0 cooked--pending-styles))
       (should-not (get-text-property pos 'cooked-pending-style))
-      (should (equal (plist-get (get-text-property pos 'face) :foreground)
+      (should (equal (cooked--face-color (get-text-property pos 'face) :foreground)
                      (cooked-tests--red))))))
 
 (ert-deftest cooked-a-theme-change-leaves-an-unpaid-batch-to-resolve-later ()
@@ -207,7 +207,7 @@ coloured, and it differs in the direction of being more right."
       (cooked--flush-face-cache)
       (should (get-text-property pos 'cooked-pending-style))
       (cooked-tests--fontify)
-      (should (equal (plist-get (get-text-property pos 'face) :foreground)
+      (should (equal (cooked--face-color (get-text-property pos 'face) :foreground)
                      (cooked-tests--red))))))
 
 (ert-deftest cooked-copying-undisplayed-scrollback-takes-its-colours-along ()
@@ -217,7 +217,7 @@ coloured, and it differs in the direction of being more right."
     (let* ((pos (cooked-tests--scrollback-red))
            (text (filter-buffer-substring pos (+ pos 3))))
       (should (equal (substring-no-properties text) "red"))
-      (should (equal (plist-get (get-text-property 0 'face text) :foreground)
+      (should (equal (cooked--face-color (get-text-property 0 'face text) :foreground)
                      (cooked-tests--red))))))
 
 (ert-deftest cooked-an-osc-8-link-in-scrollback-is-hung-on-without-waiting ()
@@ -257,7 +257,7 @@ batches is one of the things the registration follows."
       (should (memq #'cooked--fontify-region jit-lock-functions))
       (let ((pos (cooked-tests--scrollback-red)))
         (cooked-tests--fontify)
-        (should (equal (plist-get (get-text-property pos 'face) :foreground)
+        (should (equal (cooked--face-color (get-text-property pos 'face) :foreground)
                        (cooked-tests--red)))))))
 
 (ert-deftest cooked-a-hidden-buffer-defers-its-scrollback-as-a-shown-one-does ()
@@ -281,7 +281,7 @@ having looked at the buffer at all."
     ;; Found again rather than remembered: showing the buffer drains the screen
     ;; the drains so far left out, and what that evicts moves every position in
     ;; the scrollback below it.
-    (should (equal (plist-get (get-text-property (cooked-tests--scrollback-red)
+    (should (equal (cooked--face-color (get-text-property (cooked-tests--scrollback-red)
                                                  'face)
                               :foreground)
                    (cooked-tests--red)))
