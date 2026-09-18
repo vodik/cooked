@@ -3658,7 +3658,7 @@ mod tests {
             .map(|line| {
                 line.runs
                     .iter()
-                    .map(|run| run.text.as_str())
+                    .map(|run| run.text)
                     .collect::<String>()
             })
             .collect();
