@@ -879,14 +879,21 @@ impl Runs {
 
     /// One cell into the runs: its character, the combining MARKS riding it, and the DECO
     /// it draws instead of its glyph.
+    ///
+    /// One `last_mut` for the whole cell rather than one per field: this is the per-cell
+    /// path, and the row it runs over is as long as the grid is wide.
     fn push_cell(&mut self, cell: &Cell, marks: Option<&str>, deco: Option<DecoCell>) {
         self.open(cell.style, cell.link, deco);
-        self.push_char(cell.ch);
-        self.add_cols(1);
+        let Self { text, runs } = self;
+        let run = runs.last_mut().expect("`open` leaves a run open");
+        text.push(cell.ch);
+        run.chars += 1;
+        run.cols += 1;
         // A cell carrying marks is undecorated (see `decoration`), so the marks never land
         // inside a decorated run, whose records are one per character.
         if let Some(marks) = marks {
-            self.push_str(marks);
+            text.push_str(marks);
+            run.chars += marks.chars().count();
         }
     }
 }
@@ -987,6 +994,20 @@ pub(crate) struct Extras {
 }
 
 impl Extra {
+    /// Whether this changes how its cell is drawn, and so whether the run builders have
+    /// to read it.
+    ///
+    /// A semantic mark does not: it is a position in the byte stream that happened to
+    /// fall on a cell, and no [`Run`] carries it. That matters because marks are the
+    /// common attachment -- a prompt row carries four of them -- and a row whose only
+    /// attachments are marks can take the fast builder; see [`Row::runs_from`].
+    pub fn draws(&self) -> bool {
+        match self {
+            Self::Marks(_) | Self::Image(_) => true,
+            Self::Mark(_) => false,
+        }
+    }
+
     /// Whether this makes its cell content, as opposed to decoration of a cell that
     /// would otherwise be blank.
     ///
@@ -1414,10 +1435,13 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
                 .partition_point(|(at, _)| usize::from(*at) < end);
             &extras.entries[from..to]
         });
-        let mut runs = if entries.is_empty() {
-            Self::build_plain_runs(cells)
-        } else {
+        let mut runs = if entries.iter().any(|(_, extra)| extra.draws()) {
             Self::build_runs(cells, entries, start)
+        } else {
+            // Nothing attached, or nothing attached that the builders would read: a row
+            // carrying only semantic marks renders exactly as a bare row, and an `OSC 133`
+            // prompt puts several on every prompt row.
+            Self::build_plain_runs(cells)
         };
         Self::absorb_blank_runs(&mut runs);
         runs
@@ -1545,10 +1569,10 @@ impl<C: Borrow<[Cell]>, M: Borrow<RowMeta>> RowOf<C, M> {
 
     /// The row's cells as runs, for a row that has attachments to read.
     ///
-    /// The attachment-free row goes to [`Row::build_plain_runs`] instead, so ENTRIES is
-    /// never empty here. It is walked with a cursor rather than searched per column, so
-    /// the whole row costs one pass over the table. BASE is the column CELLS begins at,
-    /// which the entries are still numbered from.
+    /// A row with nothing attached that draws goes to [`Row::build_plain_runs`] instead,
+    /// so ENTRIES always holds something this has to read. It is walked with a cursor
+    /// rather than searched per column, so the whole row costs one pass over the table.
+    /// BASE is the column CELLS begins at, which the entries are still numbered from.
     fn build_runs(cells: &[Cell], entries: &[(u16, Extra)], base: usize) -> Runs {
         let mut runs = Runs::with_cols(cells.len());
         let mut at = 0;
@@ -2540,7 +2564,10 @@ mod tests {
                 col += width;
             }
 
-            if row.meta.extras.is_some() {
+            // Which builder the row takes, which is not the same as whether it picked up
+            // an attachment: a row carrying only semantic marks renders as a bare row and
+            // goes to the plain builder. See `Row::runs_from`.
+            if row.extras().iter().any(|(_, extra)| extra.draws()) {
                 attached_rows += 1;
             } else {
                 plain_rows += 1;
