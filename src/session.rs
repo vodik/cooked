@@ -860,7 +860,7 @@ impl Session {
     /// kill and never be reaped, which is what the SIGKILL is for.
     ///
     /// The grace is a bound and not a cost: the reader reaps the child the moment its
-    /// side of the pty closes, so a shell that exits at once is joined at once.
+    /// side of the pty closes, so a shell that exits at once is reaped at once.
     pub(crate) fn shutdown(&self) -> bool {
         if self.shared.shutdown.swap(true, Ordering::SeqCst) {
             return false;
@@ -868,15 +868,27 @@ impl Session {
         let _ = self.shared.pty.hangup();
         self.shared.interrupt.raise();
         self.shared.notifier.close();
-        if let Some(reader) = self.reader.held().take() {
-            let _ = reader.join();
-        }
+        // Detached rather than joined. A reader inside `job.run()` decoding a picture holds
+        // no lock and checks no flag, so joining it parked *this* thread -- the one holding
+        // the `emacs_env`, which `Drop` reaches from the garbage collector -- for the length
+        // of a decode bounded only by `sixel::MAX_PIXELS` and the kitty caps. It observes
+        // `shutdown` on its next turn instead and leaves without touching the pty, which is
+        // what `finish` already did for `Aborted`.
+        drop(self.reader.held().take());
 
-        // The reader is joined, so this sees its final word on the matter. `Some` means it
-        // already reaped and the pid is no longer ours to signal.
         let mut exited = self.shared.exited.held();
         if exited.is_none() {
-            *exited = Some(self.shared.reap_or_kill().unwrap_or(LOST));
+            // Held across the reap, so the reader cannot record a status in the middle of
+            // it. The two can still race for the `waitpid` itself -- a reader already past
+            // its own `shutdown` check is the window -- and `reap_lock` lets exactly one of
+            // them collect it. `LOST` is for a child nobody could reap, so `reaped` is asked
+            // before writing it: a child the reader collected has its real status, and
+            // records it itself as soon as this lock is free.
+            *exited = match self.shared.reap_or_kill() {
+                Some(status) => Some(status),
+                None if self.shared.pty.reaped() => None,
+                None => Some(LOST),
+            };
         }
         true
     }
@@ -1566,7 +1578,12 @@ impl Shared {
             }
         }
 
-        self.finish(Ended::Aborted);
+        // Either teardown set `shutdown`, in which case [`Session::shutdown`] is reaping the
+        // child on its own thread and is no longer waiting for this one, or the poll failed
+        // and this session has to end itself.
+        if !self.shutdown.load(Ordering::SeqCst) {
+            self.finish(Ended::Aborted);
+        }
     }
 
     /// The child's exit status, after the hangup it has been sent and, failing that, a
@@ -3188,6 +3205,72 @@ mod tests {
     ///
     /// The interrupt's other caller is covered, deterministically, by
     /// `a_drain_inside_the_throttle_window_does_not_leave_the_retry_to_the_poll_timeout`.
+    /// A kill landing in the middle of a picture's decode must not wait for it.
+    ///
+    /// [`Session::shutdown`] runs on the thread holding the `emacs_env`, and `Drop` reaches
+    /// it from the garbage collector. A reader inside `job.run()` holds no lock and checks
+    /// no flag, so joining it there parked Emacs for the length of a decode -- a stall
+    /// rather than a hang, bounded by `sixel::MAX_PIXELS` and the kitty caps, and on the
+    /// interactive thread.
+    ///
+    /// The picture is a sixel of just under [`MAX_PIXELS`](crate::emu::sixel::MAX_PIXELS),
+    /// and the child prints a mark and then waits, so the kill below lands as the decode
+    /// begins rather than after it. Measured on the machine this was written on: about a
+    /// millisecond detached, and 175 to 185 joined.
+    ///
+    /// The child is still reaped: `kill(pid, 0)` answering `ESRCH` is the pid gone for
+    /// good rather than a zombie nobody collected.
+    #[test]
+    fn a_kill_during_a_picture_decode_does_not_wait_for_it() {
+        // 2048 by 1020, a row of `~` filling all six pixels of each band. Doubled up in the
+        // shell and written by `printf`, a builtin, so no argument list ever carries it.
+        let script = r#"
+            t='~'
+            i=0; while [ $i -lt 11 ]; do t=$t$t; i=$((i+1)); done
+            printf 'GO\n'
+            sleep 0.05
+            printf '\033Pq"1;1;2048;1020'
+            i=0; while [ $i -lt 170 ]; do printf '#1%s$-' "$t"; i=$((i+1)); done
+            printf '\033\\'
+            sleep 5
+        "#;
+        let (session, _read) = session(&["/bin/sh", "-c", script]);
+        let pid = session.pid().as_raw();
+
+        // Polled tightly rather than through `wait_for`, whose 20ms step is most of the
+        // window the wait below is aiming at.
+        let deadline = Instant::now() + patience(5.0);
+        while Instant::now() < deadline {
+            if rendered(&session.drain()).contains("GO") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The child then waits 50ms and spends a few more writing the picture.
+        std::thread::sleep(patience(0.06));
+
+        let start = Instant::now();
+        assert!(
+            session.shutdown(),
+            "this call must be the one that ended it"
+        );
+        assert!(
+            start.elapsed() < patience(0.05),
+            "the kill waited {:?} on the reader; a decode in flight must not park Emacs' \
+             thread",
+            start.elapsed()
+        );
+
+        let deadline = Instant::now() + patience(5.0);
+        while Instant::now() < deadline {
+            if alive(pid).is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("the child was left unreaped");
+    }
+
     #[test]
     fn shutdown_returns_promptly() {
         let (session, _read) = session(&["/bin/sh", "-c", "sleep 300"]);
