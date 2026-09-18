@@ -15,8 +15,8 @@ wrapped rather than newline-terminated. Most of what follows is spending that kn
 
 ## 1. Completion parity with the shell
 
-**Both shells are done** — see `lisp/cooked-shell-completion.el` and
-`shell-integration/cooked-completion.{zsh,bash}`. What follows is what the design turned
+**All three shells are done** — see `lisp/cooked-shell-completion.el` and
+`shell-integration/cooked-completion.{zsh,bash,fish}`. What follows is what the design turned
 out to be.
 
 **The problem was.** Our `completion-at-point-functions` entry offered programs on `PATH`
@@ -108,6 +108,24 @@ bound to it.
 `complete -p` and `COMPREPLY`, above. And insertion is still verbatim: a candidate with
 a space in it is not shell-quoted on the way in, exactly as the Emacs-native table
 already behaved.
+
+### fish — shipped, because `complete --do-complete` exists
+
+fish needs neither shell's trick. `complete --do-complete "git checkout ma"` takes the
+line as a string, completes it from any context, and prints `main\tLocal Branch` — the
+two fields the wire already carries. The candidate is the whole token, so the span is
+the token, which is the split the bash half makes anyway.
+
+One thing was not obvious, and it is the whole of why the file reads the way it does:
+**`read --null` is how you take fish's `read` out of interactive mode.** Without it,
+`read` in a `bind` function hands the job to fish's own line editor, which draws a
+`read>` prompt over the screen Emacs is rendering and interprets the request's bytes as
+key bindings. With `--null --nchars 1` each call is one character and nothing is drawn,
+which is zsh's `read -k 1` by another spelling. Forking a `head` or an `sh` to read the
+line instead does not work at all: fish has drained the terminal into its own input
+queue before the binding runs, so the child reads nothing. The one thing fish cannot
+match is the other shells' `read -t 2`; it has no timeout, so the length cap is the only
+bound on a request that arrives truncated.
 
 ---
 

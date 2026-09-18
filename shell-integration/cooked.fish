@@ -15,10 +15,17 @@
 # fish 3.x, and for a 4.x running `no-mark-prompt', which is fish's own way of saying
 # the marks are somebody else's job.
 #
-# It is not injected: cooked generates a startup file for zsh and bash and fish needs
-# none, so the guard is yours to place.  The feature list still reaches it --
-# COOKED_SHELL_INTEGRATION_FEATURES is exported to every child whether or not
-# anything was injected into it.
+# cooked starts its own fish children with this file already sourced, through a
+# `fish/vendor_conf.d' snippet in a scratch directory it prepends to XDG_DATA_DIRS; see
+# `cooked--shell-invocation'.  The guard above is for every other way it can be reached
+# -- your own config.fish, a fish started by hand, the far end of an ssh -- and the
+# feature list reaches all of them, because COOKED_SHELL_INTEGRATION_FEATURES is
+# exported to every child whether or not anything was injected into it.
+#
+# Completion is the one part that is not here: `cooked-completion.fish' answers OSC
+# 51;C, and cooked sources it beside this file when the `completion' feature is on and
+# the Emacs half is loaded.  The announcement below is here regardless, because it is
+# also what licenses the editable line.
 #
 # Wrapped in a conditional rather than guarded by an early `exit': in a sourced file
 # `exit' means "stop reading this file" only from fish 3.4 onwards, and means "quit
@@ -192,6 +199,41 @@ if status is-interactive
             test "$PWD" = "$__cooked_last_cwd"; and return
             set -g __cooked_last_cwd "$PWD"
             __cooked_osc "7;file://$hostname"(string escape --style=url -- "$PWD")
+        end
+    end
+
+    #
+    # The completion announcement.
+    #
+    # `OSC 51;CH;<version>;<nonce>;<replies>', emitted at every prompt.  It is here in
+    # the core rather than with the completion capture because Emacs reads it as two
+    # different things and only one of them is about completion: to the completion
+    # layer it is the token a request must carry, and to everything else it is a
+    # *license to own the input line* -- the shell asserting, for this prompt, that a
+    # line editor is bound and reading.  That is the one signal both byte-transparent
+    # (so it survives an ssh, where termios does not) and self-corroborating.
+    #
+    # The last field says whether a request can be *answered*, which
+    # cooked-completion.fish turns on.  Announcing regardless is the point: staying
+    # quiet because the optional half is not loaded would cost the editable line for an
+    # unrelated reason, and cost it silently.
+    #
+    # On the `fish_prompt' event rather than inside the wrapped `fish_prompt', which
+    # would be the closer analogue of zsh's `zle-line-init': the wrapper is erased on a
+    # fish 4 that marks its own prompts, and the announcement has nothing to do with
+    # who is marking.  The event fires before the prompt is drawn, so this lands ahead
+    # of the `A' mark -- which is where bash announces from too, and for the same
+    # reason: there is no hook that runs after the prompt and before the reader.  A
+    # prompt-start does not disturb what was said about the line, so the order costs
+    # nothing.
+    #
+    set -g __cooked_complete_nonce ""
+    set -g __cooked_complete_replies 0
+
+    if __cooked_want announce
+        function __cooked_complete_announce --on-event fish_prompt
+            set -g __cooked_complete_nonce (random)(random)
+            __cooked_osc "51;CH;2;$__cooked_complete_nonce;$__cooked_complete_replies"
         end
     end
 

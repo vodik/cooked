@@ -82,15 +82,21 @@ list governs a shell you sourced the snippet in by hand.
 | File | What it is | How to get it |
 |---|---|---|
 | `shell-integration/cooked.{zsh,bash,fish}` | the marks, OSC 7, the announcement, and the optional helpers | injected for zsh and bash; source it anywhere else |
-| `shell-integration/cooked-completion.{zsh,bash}` | the completion capture, answering `TAB` from the shell's own completion | injected beside the core when `completion` is in the feature list *and* `cooked-shell-completion` is loaded; source it after the core otherwise |
+| `shell-integration/cooked-completion.{zsh,bash,fish}` | the completion capture, answering `TAB` from the shell's own completion | injected beside the core when `completion` is in the feature list *and* `cooked-shell-completion` is loaded; source it after the core otherwise |
 
-All three are exercised by the test suite. fish is not injected because it needs no
-generated startup file — and on fish 4.0 and later it needs no snippet at all: fish
-marks its own prompts with OSC 133, reports its directory with OSC 7 and sets its own
-title, none of it needing configuration, so a fish session works here out of the box.
-Sourcing `cooked.fish` anyway is safe: it detects that and stands down rather than
-bracketing every prompt twice. It still does the work on fish 3.x, and on a fish 4 told
-`no-mark-prompt`.
+All of them are exercised by the test suite, and all three shells are injected: zsh and
+bash through a generated startup file, fish through a `fish/vendor_conf.d` snippet in a
+scratch directory prepended to `XDG_DATA_DIRS`.
+
+On fish 4.0 and later most of the core stands itself down, and that is the finding
+rather than a defect: fish marks its own prompts with OSC 133, reports its directory
+with OSC 7 and sets its own title, none of it needing configuration. Sourcing
+`cooked.fish` anyway is safe — it detects that and gets out of the way rather than
+bracketing every prompt twice — and it still does the whole job on fish 3.x and on a
+fish 4 told `no-mark-prompt`. Two things never stand down, because fish has no opinion
+about either: the completion announcement, which is also what licenses the editable
+line, and `cooked-completion.fish`, which answers requests with `complete
+--do-complete`.
 
 ## Inside tmux
 

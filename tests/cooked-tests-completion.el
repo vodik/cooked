@@ -545,6 +545,54 @@ request can be shown *not* to reach it."
       (kill-buffer buffer)
       (delete-directory home t))))
 
+(ert-deftest cooked-completion-comes-from-fish-itself ()
+  "The same exchange against fish, over the same wire.
+
+fish needs neither of the other two shells' tricks: `complete --do-complete'
+takes a line as a string, completes it from any context, and prints each
+candidate with its description.  What is worth testing is that it is the *same*
+exchange -- one protocol, one Emacs-side parser -- and that the capture reaches
+the child at all, since it gets there through the `vendor_conf.d' snippet
+`cooked--shell-invocation' generates rather than through anything this test
+writes.
+
+`git checkout ma' is the case the review drove by hand, and it is the one that
+cannot be answered by anything but the shell: `main' is a branch, not a file, and
+the description comes back with it."
+  :tags '(base64 fish git)
+  (skip-unless (executable-find "fish"))
+  (skip-unless (executable-find "base64"))
+  (skip-unless (executable-find "git"))
+  (let ((root (file-name-directory (directory-file-name cooked--source-directory))))
+    (cooked-tests--with-shell
+        ("fish"
+         :name "*cooked-fish-complete*"
+         :directory root
+         ;; The announcement is the shell saying its binding is in place and that
+         ;; this one can also answer.
+         :settle (lambda () (and (cooked--input-start-position)
+                                 (cooked-line-completion-nonce (cooked--line))
+                                 (cooked-line-completion-reply-capable (cooked--line))))
+         :timeout 10)
+      (let ((cooked-completion-timeout 5))
+        (pcase-let ((`(,prefix ,_suffix ,_truncated . ,records)
+                     (cooked--shell-completions "git checkout ma" 15)))
+          ;; Only the word under the cursor is replaced.
+          (should (= prefix 2))
+          (should (member "main" (mapcar #'car records)))
+          ;; And it arrives with fish's description, in the shape compsys sends one,
+          ;; so the one parser reads all three shells.
+          (should (string-prefix-p "main -- " (cadr (assoc "main" records))))))
+      ;; A path is completed against the tree this test is running in, and fish
+      ;; answers with the whole token rather than its last component -- which is
+      ;; what makes the span the token and not the file name.
+      (let ((cooked-completion-timeout 5))
+        (pcase-let ((`(,prefix ,_suffix ,_truncated . ,records)
+                     (cooked--shell-completions "cat shell-integration/cooked.f" 30)))
+          (should (= prefix 26))
+          (should (equal (mapcar #'car records)
+                         '("shell-integration/cooked.fish"))))))))
+
 (ert-deftest cooked-completion-without-the-layer-stays-in-emacs ()
   "Unloaded, the layer is idle but the announcement is still heard.
 

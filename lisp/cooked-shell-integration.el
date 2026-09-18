@@ -338,7 +338,16 @@ arrives."
          (with-temp-file (expand-file-name "cooked.fish" conf)
            (insert (cooked--fish-restore-data-dirs scratch injected original)
                    "source " (shell-quote-argument
-                              (expand-file-name "cooked.fish" dir)) "\n"))
+                              (expand-file-name "cooked.fish" dir)) "\n"
+                   ;; The capture, on the same terms as the other two shells: written
+                   ;; or not at spawn, because a running fish cannot usefully take a
+                   ;; `bind' back either.  After the core, which is what defines the
+                   ;; nonce it answers with and the OSC framing it answers through.
+                   (if capture-p
+                       (concat "source " (shell-quote-argument
+                                          (expand-file-name "cooked-completion.fish" dir))
+                               "\n")
+                     "")))
          (list (list shell "-i")
                `(,@env ("XDG_DATA_DIRS" . ,injected))
                scratch)))
