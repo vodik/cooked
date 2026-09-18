@@ -185,42 +185,41 @@ the next keystroke."
 (defun cooked--track-wandering ()
   "Notice a command moving point off the child's cursor, or back onto it.
 
-Runs from `post-command-hook' because Emacs' own motions produce no output:
+Runs from `cooked--after-command' because Emacs' own motions produce no output:
 nothing is drained, so a redraw cannot be what discovers that point has moved."
-  (cooked--protect-hook
-    (setq cooked--wandered
-          (and
-           ;; Not "the child owns the keyboard", which is the same test wherever
-           ;; there is no pending input -- and the wrong one at a prompt, where a
-           ;; `still' render still has to pin a point the user parked out in the
-           ;; screen against `cooked--render-rows' deleting the row under it.
-           ;; Point inside the input has not wandered off anything: it is in the
-           ;; text Emacs is holding for the child, which is rebuilt around the
-           ;; child's cursor on every drain and so has no cell to be pinned to.
-           ;;
-           ;; With no region at all, though, there is nothing for point to be
-           ;; inside of, and the question falls back to who owns the keyboard.
-           ;; A prompt without a region is a line in flight -- before the first
-           ;; drain has built one, or in the gap `cooked-send-input' opens by
-           ;; unmarking the text it submitted -- and the row under point is about
-           ;; to be redrawn by the echo, so there is no view being held for the
-           ;; user to protect.  Pinning there strands point on the old cell: the
-           ;; `wandered' arm of `cooked--apply' outranks `follow'.
-           (if-let* ((region (cooked--input-region)))
-               (not (<= (car region) (point) (cdr region)))
-             (cooked--child-owns-keyboard-p))
-           ;; Scrollback is the reading case, already handled by `follow'.
-           (cooked--screen-cell)
-           (not (cooked--at-child-cursor-p))))
-    ;; Not only on a drain: `evil' refreshes its cursor from
-    ;; `window-configuration-change-hook' and on every state change, neither of
-    ;; which produces output, so there would be no drain to put it back.
-    ;; The other half of `cooked--point': a command moving point is the second way
-    ;; it moves, and a buffer the user leaves without a drain in between must
-    ;; remember where they left it rather than where the last drain did.
-    (setq cooked--point (point))
-    (cooked--sync-cursor-type)
-    (cooked--update-ghost-cursor)))
+  (setq cooked--wandered
+        (and
+         ;; Not "the child owns the keyboard", which is the same test wherever
+         ;; there is no pending input -- and the wrong one at a prompt, where a
+         ;; `still' render still has to pin a point the user parked out in the
+         ;; screen against `cooked--render-rows' deleting the row under it.
+         ;; Point inside the input has not wandered off anything: it is in the
+         ;; text Emacs is holding for the child, which is rebuilt around the
+         ;; child's cursor on every drain and so has no cell to be pinned to.
+         ;;
+         ;; With no region at all, though, there is nothing for point to be
+         ;; inside of, and the question falls back to who owns the keyboard.
+         ;; A prompt without a region is a line in flight -- before the first
+         ;; drain has built one, or in the gap `cooked-send-input' opens by
+         ;; unmarking the text it submitted -- and the row under point is about
+         ;; to be redrawn by the echo, so there is no view being held for the
+         ;; user to protect.  Pinning there strands point on the old cell: the
+         ;; `wandered' arm of `cooked--apply' outranks `follow'.
+         (if-let* ((region (cooked--input-region)))
+             (not (<= (car region) (point) (cdr region)))
+           (cooked--child-owns-keyboard-p))
+         ;; Scrollback is the reading case, already handled by `follow'.
+         (cooked--screen-cell)
+         (not (cooked--at-child-cursor-p))))
+  ;; Not only on a drain: `evil' refreshes its cursor from
+  ;; `window-configuration-change-hook' and on every state change, neither of
+  ;; which produces output, so there would be no drain to put it back.
+  ;; The other half of `cooked--point': a command moving point is the second way
+  ;; it moves, and a buffer the user leaves without a drain in between must
+  ;; remember where they left it rather than where the last drain did.
+  (setq cooked--point (point))
+  (cooked--sync-cursor-type)
+  (cooked--update-ghost-cursor))
 
 (defun cooked--snap-to-cursor ()
   "Return point to the child's cursor before handing it a key.

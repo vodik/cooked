@@ -676,8 +676,8 @@ want to know what can be scrolled to *now*.  See `cooked--wheel-map'."
 drain is the child talking, and nothing the *user* does to a window produces
 one: a full-screen program sitting idle at its prompt draws nothing, so a wheel
 notch scrolled the picture off the window and left it there.  Run from
-`post-command-hook', the pin becomes the continuous invariant it always meant
-to be.  `eat' states it the same way, in `eat--synchronize-scroll'.
+`cooked--after-command', the pin becomes the continuous invariant it always
+meant to be.  `eat' states it the same way, in `eat--synchronize-scroll'.
 
 Forcing, unlike the drain's pin, because the wheel moves point along with the
 window and NOFORCE would let redisplay honour the point it left behind.  The
@@ -697,14 +697,13 @@ which clears the window's end-valid flag and denies redisplay its incremental
 path; doing that from inside redisplay makes redisplay start over for the move
 the pin itself just made, once per window per redisplay.  See docs/DESIGN.md
 for the two cases that hook caught and how they are answered instead."
-  (cooked--protect-hook
-    (when (cooked--screen-restricted-p)
-      (when-let* ((top (cooked--screen-start-position)))
-        (dolist (w (get-buffer-window-list nil nil t))
-          (unless (= (window-start w) top)
-            (set-window-start w top))
-          (unless (zerop (window-vscroll w t))
-            (set-window-vscroll w 0 t)))))))
+  (when (cooked--screen-restricted-p)
+    (when-let* ((top (cooked--screen-start-position)))
+      (dolist (w (get-buffer-window-list nil nil t))
+        (unless (= (window-start w) top)
+          (set-window-start w top))
+        (unless (zerop (window-vscroll w t))
+          (set-window-vscroll w 0 t))))))
 
 (defun cooked--fit-screen ()
   "Shape the screen region to the number of rows the emulator says it has.

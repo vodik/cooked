@@ -195,21 +195,16 @@ word motion and every syntax-aware regexp honour.
 Put back from three places, because each of them can leave text in the region
 without it.  `cooked--restore-pending-input' re-creates the region on every
 drain, `cooked--replace-input' fills it from history, and
-`cooked--mark-input-syntax-before-command' covers whatever the last command
-inserted: a character typed at the very start of the line inherits nothing, and
-a yank inherits nothing anywhere."
+`cooked--before-command' covers whatever the last command
+inserted -- a character typed at the very start of the line inherits nothing,
+and a yank inherits nothing anywhere -- and calls this before the command runs,
+so \\[backward-kill-word] or evil's `dw' sees the narrow words over the text
+the previous command typed."
   (when-let* ((region (cooked--input-region)))
     (when (< (car region) (cdr region))
       (with-silent-modifications
         (put-text-property (car region) (cdr region)
                            'syntax-table cooked-input-syntax-table)))))
-
-(defun cooked--mark-input-syntax-before-command ()
-  "Run `cooked--mark-input-syntax' before a command reads the words.
-On `pre-command-hook', so \\[backward-kill-word] or evil's `dw' sees the
-narrow words over the text the previous command typed."
-  (cooked--protect-hook
-    (cooked--mark-input-syntax)))
 
 (defvar cooked-snap-commands
   '(self-insert-command
@@ -253,13 +248,19 @@ itself.  Both are one keystroke away from the prompt at all times.
 Typing from either place goes wrong quietly.  Before the region the prompt is
 read-only, so the insert signals \"Text is read-only\"; after it the text lands
 outside the markers `cooked-send-input' reads, so it sits in the buffer looking
-submitted while the child is sent an empty line."
-  (cooked--protect-hook
-    (when (and (memq this-command cooked-snap-commands)
-               (cooked--input-state-p))
-      (when-let* ((region (cooked--input-region)))
-        (cond ((< (point) (car region)) (goto-char (car region)))
-              ((> (point) (cdr region)) (goto-char (cdr region))))))))
+submitted while the child is sent an empty line.
+
+Called for a command in `cooked-snap-commands' and for no other:
+`cooked--before-command' makes that test once and shares it with
+`cooked--guard-insertion', which has to make the same one.  The guard runs
+first and may have substituted `this-command' by the time this is reached, and
+the substitution cannot smuggle a command in here that the test would have
+turned away -- a substitution happens only when the child has taken the line
+back, which is exactly when `cooked--input-state-p' below says no."
+  (when (cooked--input-state-p)
+    (when-let* ((region (cooked--input-region)))
+      (cond ((< (point) (car region)) (goto-char (car region)))
+            ((> (point) (cdr region)) (goto-char (cdr region)))))))
 
 (defun cooked--take-pending-input ()
   "Remove the pending input from the buffer and return it.

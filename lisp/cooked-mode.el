@@ -336,15 +336,65 @@ opens and the whole reason any of this exists.  See
 `cooked--child-equivalents\\=' for the commands that cannot ask for themselves.
 
 Runs ahead of `cooked--snap-to-input\\=', so a substituted command is snapped
-against the state it will actually run in."
+against the state it will actually run in.
+
+Called for a command in `cooked-snap-commands\\=' and for no other, which is
+`cooked--before-command\\='s one membership test rather than this function\\='s: the
+snap needs the very same answer, and the list is read on every keystroke."
+  (when (and cooked--session (cooked--input-state-p))
+    (cooked--resample-mode)
+    (unless (cooked--input-state-p)
+      (when-let* ((equivalent (alist-get this-command cooked--child-equivalents)))
+        (setq this-command equivalent)))))
+
+(defun cooked--before-command ()
+  "Everything cooked does before a command runs, in one hook entry.
+
+Three functions sat on `pre-command-hook' here, at depths -50, 0 and 10, each
+inside a `cooked--protect-hook' of its own.  Every keystroke in every session
+paid three hook dispatches and three `condition-case' frames to run three
+things whose combined work, for a cursor motion, is one `memq' and one text
+property.  They are called from here in the order the depths gave them.
+
+That order is load-bearing twice over.  The guard runs before the snap because
+the guard can substitute `this-command' and the snap reads `this-command' to
+decide whether to move point at all -- run the other way round, a substituted
+command would be snapped against the command it replaced.  The mark runs after
+the snap, which may have moved point into the region whose words the command is
+about to read.
+
+The `cooked-snap-commands' test is made once here and shared, which is why
+neither `cooked--guard-insertion' nor `cooked--snap-to-input' makes it any
+more.  It is asked of `this-command' as it stands *before* the guard, and the
+substitution cannot turn that into the wrong question: the guard substitutes
+only when the resample finds the child has taken the line back, and in that
+case the snap refuses on `cooked--input-state-p' whatever `this-command' has
+become.
+
+Installed at depth -50, where the guard was and where the guard still has to
+be.  It re-reads the tty so that every `cooked--input-state-p' asked during
+the command that follows is answered against the tty as it is now, and evil's
+`evil-repeat-pre-hook' and `evil-insert-repeat-hook' on the global value have
+to run after it.  Folding moves the other two, in ways that were checked:
+
+`cooked--snap-to-input' ran after `eldoc-pre-command-refresh-echo-area' and
+after evil's buffer-local `evil--jump-hook'; it now runs before both.  Neither
+reads point.  eldoc clears the echo area, and `evil--jump-hook' records a jump
+only for a command carrying evil's `jump' property, which nothing in
+`cooked-snap-commands' carries.
+
+`cooked--mark-input-syntax' ran at depth 10, behind the `t' that splices the
+global value in, and so behind evil's repeat hooks and `tooltip-hide'; it now
+runs first.  Depth 10 was asking to be after the *snap* rather than after those:
+it puts a `syntax-table' property over the input region, reads nothing but that
+region's own markers, and nothing that used to run in between writes buffer text
+or moves a marker.  `comint-preinput-scroll-to-bottom', appended at depth 90,
+still runs last of all."
   (cooked--protect-hook
-    (when (and cooked--session
-               (memq this-command cooked-snap-commands)
-               (cooked--input-state-p))
-      (cooked--resample-mode)
-      (unless (cooked--input-state-p)
-        (when-let* ((equivalent (alist-get this-command cooked--child-equivalents)))
-          (setq this-command equivalent))))))
+    (when (memq this-command cooked-snap-commands)
+      (cooked--guard-insertion)
+      (cooked--snap-to-input))
+    (cooked--mark-input-syntax)))
 
 (defcustom cooked-state-change-hook nil
   "Hook run in the session's buffer after who owns the keyboard changes.
@@ -474,6 +524,44 @@ refresh rebuilds a keymap and must not run on every keystroke."
 (add-hook 'cooked-input-mode-functions #'cooked--selection-input-mode 50)
 
 (add-hook 'cooked-input-mode-functions #'cooked--default-input-mode 90)
+
+(defun cooked--after-command ()
+  "Everything cooked does after a command runs, in one hook entry.
+
+Three functions sat on `post-command-hook', all at depth 0 and so contiguous,
+two of them inside a `cooked--protect-hook' of their own.  They are called here
+in the order the hook ran them, which is the reverse of the order `cooked-mode'
+added them in: `cooked--pin-alt-windows', `cooked--track-wandering',
+`cooked--track-selection'.
+
+Nothing between the three depends on that order -- the pin moves window starts,
+the tracker recomputes the ghost cursor, and the selection tracker refreshes the
+keymap on a change.  It is preserved anyway: a fold whose only claim is that it
+is faster should not also be a reordering nobody asked for.
+
+Installed at depth 0, in the place the first of the three held, so the two
+entries that ran ahead of them still do -- `eldoc-schedule-timer' and evil's
+buffer-local `evil--jump-handle-buffer-crossing'.  Evil's global
+`post-command-hook', `evil-maybe-remove-spaces' and `evil-repeat-post-hook',
+still runs after this, behind the `t' that splices it in.
+
+`cooked-ime--reinstall' is deliberately left on the hook rather than folded in.
+Its depth is the point of it: it puts the input-method wrapper back after the
+command that activated a method without telling anyone, and it wants to be the
+last thing before the next key is read rather than the third thing after the
+command.  It is also hung there by `cooked-ime-setup', for a buffer that asked
+for an input method, so it is not a cost every session pays.
+
+`cooked--track-selection' gains the guard the other two already had.  It had
+none, so a signal from it reached Emacs' own `post-command-hook' protection,
+which reports and then *removes* the offending function -- switching the
+selection half of the input mode off for the rest of the session, quietly.  A
+caught and reported signal is the better of the two, and is what every other
+command hook in the tree already did."
+  (cooked--protect-hook
+    (cooked--pin-alt-windows)
+    (cooked--track-wandering)
+    (cooked--track-selection)))
 
 (defun cooked--state-keymap (name)
   "The local map NAME asks for, as `cooked-ownership-keymap' spells it.
@@ -1800,7 +1888,9 @@ to the child verbatim."
   ;; Above the state maps for the same reason, and above `cooked--mouse-map-alist'
   ;; only incidentally -- the two never bind the same event.
   (add-to-list 'emulation-mode-map-alists 'cooked--override-map-alist)
-  (add-hook 'post-command-hook #'cooked--track-selection nil t)
+  ;; One entry for the three, at the depth the first of them had: see
+  ;; `cooked--after-command' for what that preserves and what it does not.
+  (add-hook 'post-command-hook #'cooked--after-command nil t)
   ;; Per *terminal*, not per buffer, and re-checked when the buffer appears on
   ;; another frame -- an `emacsclient -t' opened after this session started has
   ;; a terminal of its own that has never been through here.
@@ -1816,15 +1906,10 @@ to the child verbatim."
   (add-hook 'eldoc-documentation-functions #'cooked-link--eldoc nil t)
   (cooked--register-buffer)
   (cooked--install-global-hooks)
-  ;; Negative depth so it runs ahead of the snap: the guard can substitute
-  ;; `this-command', and the snap reads `this-command' to decide whether to move
-  ;; point at all.  Run the other way round, a substituted command would be
-  ;; snapped against the command it replaced.
-  (add-hook 'pre-command-hook #'cooked--guard-insertion -50 t)
-  (add-hook 'pre-command-hook #'cooked--snap-to-input nil t)
-  ;; After the snap, which may have moved point into the region whose words
-  ;; the command is about to read.
-  (add-hook 'pre-command-hook #'cooked--mark-input-syntax-before-command 10 t)
+  ;; One entry for the three, at the depth the guard needs: the sample it takes
+  ;; has to be ahead of anything that could insert.  `cooked--before-command'
+  ;; documents the order it calls them in and what folding them moved.
+  (add-hook 'pre-command-hook #'cooked--before-command -50 t)
   ;; The prompt's narrower words ride on a `syntax-table' property, which only
   ;; counts while this is set; see `cooked--mark-input-syntax'.
   (setq-local parse-sexp-lookup-properties t)
@@ -1840,11 +1925,6 @@ to the child verbatim."
   ;; whatever the option says, since it is read on each copy.
   (add-function :around (local 'filter-buffer-substring-function)
                 #'cooked--filter-buffer-substring)
-  (add-hook 'post-command-hook #'cooked--track-wandering nil t)
-  ;; From the same hook and for the same reason: the user's own commands produce
-  ;; no output, so a drain is never what discovers that one of them scrolled the
-  ;; alt screen out of the window.
-  (add-hook 'post-command-hook #'cooked--pin-alt-windows nil t)
   (add-hook 'completion-at-point-functions #'cooked-completion-at-point nil t)
   ;; comint's own completion asks a process that is not the child.  Removed rather
   ;; than left sitting behind ours as a fallback that can only ever be wrong.
