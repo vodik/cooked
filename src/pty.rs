@@ -20,6 +20,7 @@
 //! there for why no wrapper is safe in that window.
 
 use crate::error::{Error, Result};
+use crate::lock::LockExt;
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::libc;
@@ -33,7 +34,6 @@ use std::ffi::{CStr, CString, OsStr};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::PoisonError;
 
 use crate::emu::CellMetrics;
 use crate::platform;
@@ -553,10 +553,7 @@ impl Pty {
         // Held across the check and the `killpg` so a `waitpid` on another thread
         // cannot reap the child, and free its pid for reuse, in between. See the field
         // comment on `reap_lock`.
-        let _guard = self
-            .reap_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.reap_lock.held();
         if self.reaped() {
             return Err(Error::Reaped);
         }
@@ -587,10 +584,7 @@ impl Pty {
     /// once from here and once forwarded by its shell, is no worse off than one closing
     /// terminal window already leaves it.
     pub(crate) fn hangup(&self) -> Result<()> {
-        let _guard = self
-            .reap_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.reap_lock.held();
         if self.reaped() {
             return Err(Error::Reaped);
         }
@@ -609,10 +603,7 @@ impl Pty {
     }
 
     fn signal_group(&self, sig: Signal) -> Result<()> {
-        let _guard = self
-            .reap_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.reap_lock.held();
         if self.reaped() {
             return Err(Error::Reaped);
         }
@@ -681,10 +672,7 @@ impl Pty {
         // Same lock `signal` takes, and for the same reason: this call (always
         // `WNOHANG`, so never blocking) is what can flip `reaped` out from under a
         // concurrent `signal`.
-        let _guard = self
-            .reap_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _guard = self.reap_lock.held();
         if self.reaped() {
             return Ok(None);
         }
@@ -972,6 +960,15 @@ mod tests {
         assert_eq!(parse_timeout_scale(Some("NaN")), 1.0);
     }
 
+    /// The 80x24 window every spawn here asks for; no test turns on the size.
+    fn size() -> Winsize {
+        Winsize {
+            rows: 24,
+            cols: 80,
+            cell: None,
+        }
+    }
+
     fn termios_with(lflag: LocalFlags) -> Termios {
         let mut t = Termios::from(unsafe { std::mem::zeroed::<libc::termios>() });
         t.local_flags = lflag;
@@ -1034,11 +1031,7 @@ mod tests {
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "exit 0"],
             &[("TERM", "dumb")],
-            Winsize {
-                rows: 24,
-                cols: 80,
-                cell: None,
-            },
+            size(),
             None,
         )
         .unwrap();
@@ -1063,11 +1056,7 @@ mod tests {
             let pty = Pty::spawn(
                 &["/bin/sh", "-c", "sleep 5"],
                 &[("PATH", "/usr/bin:/bin")],
-                Winsize {
-                    rows: 24,
-                    cols: 80,
-                    cell: None,
-                },
+                size(),
                 None,
             )
             .expect("spawn");
@@ -1121,16 +1110,7 @@ mod tests {
         if !cfg!(target_os = "linux") {
             return;
         }
-        let result = Pty::spawn(
-            &["/etc/passwd"],
-            &[("PATH", "/usr/bin:/bin")],
-            Winsize {
-                rows: 24,
-                cols: 80,
-                cell: None,
-            },
-            None,
-        );
+        let result = Pty::spawn(&["/etc/passwd"], &[("PATH", "/usr/bin:/bin")], size(), None);
         assert!(
             matches!(result, Err(Error::Os(Errno::EACCES))),
             "expected EACCES from the spawn, got {result:?}"
@@ -1145,11 +1125,7 @@ mod tests {
         let err = Pty::spawn(
             &["cooked-does-not-exist"],
             &[("PATH", "/bin:/usr/bin")],
-            Winsize {
-                rows: 24,
-                cols: 80,
-                cell: None,
-            },
+            size(),
             None,
         )
         .expect_err("should not have spawned");
@@ -1162,11 +1138,7 @@ mod tests {
         let pty = Pty::spawn(
             &["sh", "-c", "exit 5"],
             &[("PATH", path.as_str())],
-            Winsize {
-                rows: 24,
-                cols: 80,
-                cell: None,
-            },
+            size(),
             None,
         )
         .expect("spawn");
@@ -1182,11 +1154,7 @@ mod tests {
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "exit 0"],
             &[("TERM", "dumb")],
-            Winsize {
-                rows: 24,
-                cols: 80,
-                cell: None,
-            },
+            size(),
             None,
         )
         .unwrap();
@@ -1205,11 +1173,7 @@ mod tests {
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "[ -e /proc/self/fd/3 ] && exit 1; exit 0"],
             &[("PATH", "/usr/bin:/bin")],
-            Winsize {
-                rows: 24,
-                cols: 80,
-                cell: None,
-            },
+            size(),
             None,
         )
         .expect("spawn");
@@ -1222,12 +1186,7 @@ mod tests {
 
     #[test]
     fn spawn_reports_cooked_then_raw() {
-        let size = Winsize {
-            rows: 24,
-            cols: 80,
-            cell: None,
-        };
-        let pty = Pty::spawn(&["/bin/cat"], &[("TERM", "dumb")], size, None).expect("spawn");
+        let pty = Pty::spawn(&["/bin/cat"], &[("TERM", "dumb")], size(), None).expect("spawn");
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(pty.mode().unwrap(), Mode::Cooked);
         assert!(pty.foreground().unwrap().as_raw() > 0);
@@ -1235,15 +1194,10 @@ mod tests {
 
     #[test]
     fn secret_mode_is_detected() {
-        let size = Winsize {
-            rows: 24,
-            cols: 80,
-            cell: None,
-        };
         let pty = Pty::spawn(
             &["/bin/sh", "-c", "stty -echo; read x"],
             &[("TERM", "dumb")],
-            size,
+            size(),
             None,
         )
         .expect("spawn");

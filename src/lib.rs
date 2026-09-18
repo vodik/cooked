@@ -17,6 +17,7 @@
 pub mod emu;
 pub(crate) mod env;
 pub(crate) mod error;
+pub(crate) mod lock;
 pub(crate) mod platform;
 pub(crate) mod pty;
 pub(crate) mod replies;

@@ -6,6 +6,7 @@
 
 use crate::emu::{Delta, Event, Feed, Term};
 use crate::error::Result;
+use crate::lock::LockExt;
 use crate::pty::{
     AtomicMode, HANGUP_GRACE, JobControl, KILL_GRACE, Mode, Pty, WRITE_TIMEOUT, Wait, Winsize,
 };
@@ -18,32 +19,8 @@ use std::ffi::OsStr;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
-
-/// Take a lock, treating poisoning as nothing to refuse over.
-///
-/// Every mutex in this file is taken this way. A poisoned mutex means a panic unwound
-/// out of the emulator while it held the lock, which `env::trampoline` has already
-/// reported to the user as a Lisp signal. Refusing the lock from then on would freeze
-/// the buffer for good -- no drain, no resize, no teardown -- while carrying on costs at
-/// worst a stale cell until the next write.
-///
-/// So take every lock here through `held`, never through `.lock().ok()?`: that answers
-/// "no" instead of recovering, and after one poisoning would leave `drain` working while
-/// `alive` reported the session dead.
-///
-/// Named `held` rather than `take` so that `self.reader.held().take()` reads as two
-/// different operations.
-trait LockExt<T> {
-    fn held(&self) -> MutexGuard<'_, T>;
-}
-
-impl<T> LockExt<T> for Mutex<T> {
-    fn held(&self) -> MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
 
 const READ_CHUNK: usize = 64 * 1024;
 /// How long the reader may sit in `poll` with nothing else to wait for.
