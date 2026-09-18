@@ -685,8 +685,8 @@ impl Runs {
     /// Run INDEX, which must be there; for a test naming a run by position.
     ///
     /// Panics rather than returning an `Option` because [`std::ops::Index`] cannot be
-    /// implemented for a borrowed view, and `runs.run(0)` reads like the `runs.run(0)` it
-    /// replaces.
+    /// implemented for a borrowed view, and `runs.run(0)` reads like the
+    /// `runs[0]` it replaces.
     pub fn run(&self, index: usize) -> RunRef<'_> {
         self.get(index)
             .unwrap_or_else(|| panic!("run {index} of {} runs", self.runs.len()))
