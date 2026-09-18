@@ -154,11 +154,14 @@ if status is-interactive
             set -l encoded (printf '%s' "$blob" | base64 | tr -d '\n')
             __cooked_osc "51;CR;$serial;"(string length -- "$word")";0;$truncated;$encoded"
 
-            # Nothing above touches the command line, but the reader drew the prompt
-            # before the binding ran and the reply is printed over its idea of the
-            # screen.  A repaint leaves the row Emacs renders and the row fish believes
-            # in the same one; zsh's half does the same with `zle redisplay'.
-            commandline -f repaint
+            # No repaint, and the asymmetry with zsh is the point.  zsh's capture has to
+            # redisplay because compsys draws -- it refreshes the screen on its way to a
+            # message or a beep, from a BUFFER holding the line Emacs is editing.
+            # Nothing here draws at all: `read --null' is not the line editor, `complete'
+            # writes into a command substitution, and the reply is an OSC that occupies
+            # no columns.  `commandline -f repaint' would not be free either: it
+            # re-executes `fish_prompt', which on a fish that is marking its own prompts
+            # puts a second `A' and `B' on the wire for every completion request.
         end
 
         # A private sequence: no keyboard sends it, and no terminfo entry names it.
