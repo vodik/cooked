@@ -978,6 +978,10 @@ impl Session {
     /// that also sets the tty, a send that counts as interaction -- so a plain question
     /// about the grid goes straight to [`Term`] rather than through a one-line forwarder
     /// here.
+    ///
+    /// Through [`Shared::term_for_lisp`], as every path here that reaches the emulator
+    /// from Emacs' thread is, so the reader steps out of the way mid-parse rather than
+    /// making this wait out a whole read.
     pub(crate) fn term(&self) -> MutexGuard<'_, Term> {
         self.shared.term_for_lisp()
     }
