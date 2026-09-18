@@ -353,6 +353,11 @@ when it is shown, however much scrollback went in above it meanwhile."
     ;; the one that left it out, and what it owes outlives the claim.
     (setq cooked--screen-owed t)
     (cooked--trim-scrollback)
+    ;; As at the foot of `cooked--apply': this drain appended scrollback, and a
+    ;; batch of it owing its colours is what the jit-lock pass is registered
+    ;; for.  A hidden buffer is the case that most needs it -- the whole drain
+    ;; that repaints the screen may not come until the buffer is shown again.
+    (cooked--owe-fontification)
     (when-let* ((screen (cooked--screen-start-position)))
       (when on-screen (goto-char (min (+ screen on-screen) (point-max))))
       (when recorded (setq cooked--point (min (+ screen recorded) (point-max))))))
@@ -918,6 +923,10 @@ five with the shifts moved after the rows."
   ;; drain, which is what stops the transcript being rescanned for a long line
   ;; after every one of them -- see `cooked--sync-long-line-threshold'.
   (cooked--sync-long-line-threshold)
+  ;; After the trim, which is what can have thrown the last deferred batch
+  ;; away: what the registration follows is `cooked--pending-styles', so it is
+  ;; read once the drain's scrollback has settled to what it is keeping.
+  (cooked--owe-fontification)
   (cooked--check-undo-anchor))
 
 (defun cooked--handle-event (event batch-start)
@@ -1092,19 +1101,50 @@ it worthless, and both are ordinary.  The alternate screen is one: that grid is
 a rectangle the child owns, `cooked--fontify-region' declines it outright, and
 a full-screen program repainting flat out is exactly the thing that would pay
 the hook most and get nothing.  A session with the URL guess switched off and
-no scan layer loaded is the other.
+no scan layer loaded is the other -- unless some batch of scrollback is still
+owed its colours, which is work of exactly the same shape and is counted by
+`cooked--pending-styles'.  The first deferred batch of such a session is what
+makes the pass worth having, and `cooked--owe-fontification' is what notices
+it; this is not on the drain path itself.
 
-Idempotent, and cheap enough to call on any transition -- `jit-lock-register'
-and `jit-lock-unregister' both go through `add-hook'/`remove-hook' on a
-buffer-local hook.  What it must not do is run *between* a row being rewritten
-and that row being displayed, because unregistering drops jit-lock's record of
-what is still unfontified: the screen the alt flag has just turned off is
-rewritten by the drain that turned it off, and rewriting is what marks text
-unfontified again."
+Idempotent in what it leaves behind, but not free to repeat: both
+`jit-lock-register' and `jit-lock-unregister' go through
+`add-hook'/`remove-hook' on a buffer-local hook, and registering also marks the
+whole buffer unfontified, so a call that changes nothing still asks redisplay
+to look at every row again.  Which is why the callers are transitions -- a
+change of screens, a change of `cooked-detect-links' -- each of which wants
+exactly that refontification.  What it must not do is run *between* a row being
+rewritten and that row being displayed, because unregistering drops jit-lock's
+record of what is still unfontified: the screen the alt flag has just turned
+off is rewritten by the drain that turned it off, and rewriting is what marks
+text unfontified again."
   (if (and (not cooked--alt)
-           (or cooked-detect-links cooked-link-scan-functions))
+           (or cooked-detect-links cooked-link-scan-functions
+               (> cooked--pending-styles 0)))
       (jit-lock-register #'cooked--fontify-region)
     (jit-lock-unregister #'cooked--fontify-region)))
+
+(defun cooked--owe-fontification ()
+  "Register the jit-lock pass if a batch of scrollback is waiting on it.
+
+Called at the foot of every drain that appended scrollback, which is the moment
+`cooked--defer-styles' can have given the pass its first work in a session that
+would otherwise have had none -- the URL guess switched off and no scan layer
+loaded.
+
+Only when the pass is absent, and never the other way about, which is what
+keeps this off the cost of an ordinary drain.  `jit-lock-register' marks the
+*whole buffer* unfontified, so calling `cooked--sync-fontification' on a drain
+that changed nothing would ask redisplay to look at every row again and undo
+the deferral it is here to serve: see
+`cooked-typing-into-a-long-word-scans-nothing-until-the-cursor-leaves'.
+Dropping the pass is left to the transitions that own it -- a change of screens
+and a change of `cooked-detect-links' -- because each of those wants the
+refontification that comes with re-registering and this does not."
+  (when (and (not cooked--alt)
+             (> cooked--pending-styles 0)
+             (not (memq #'cooked--fontify-region jit-lock-functions)))
+    (cooked--sync-fontification)))
 
 (defvar-local cooked--held-link-row nil
   "Bounds the URL guess last declined to scan, as a pair of markers, or nil.
@@ -1210,11 +1250,20 @@ candidate the joining exists to put back together.  See
 `cooked-link-logical-line-bounds', which is bounded so this cannot round out to
 a screenful.
 
-Nothing at all on the alternate screen, where a full-screen program repaints
-continuously and usually wants the mouse for itself.  That is safe to answer by
-simply returning: that grid is rewritten row by row on the way back to the
-primary screen, and rewriting text is what marks it unfontified again, so
+The colours a batch of scrollback owes are paid first, and outside both guards
+below.  First because the link passes read the face off the text they are about
+to mark, and a region shown with its links found and its colours still owed
+would be plain for a frame.  Outside the guards because the debt is the text's
+and not the session's: a child that has exited leaves `cooked--session' nil and
+a transcript that outlives it, and scrolling back through that transcript is
+exactly when the deferral has to come good.  See `cooked--settle-styles'.
+
+Nothing else at all on the alternate screen, where a full-screen program
+repaints continuously and usually wants the mouse for itself.  That is safe to
+answer by simply returning: that grid is rewritten row by row on the way back
+to the primary screen, and rewriting text is what marks it unfontified again, so
 nothing is stranded by having been skipped here."
+  (cooked--settle-styles beg end)
   (when (and cooked--session (not cooked--alt))
     (let* ((inhibit-read-only t)
            ;; The only `syntax-table' property in the buffer is the prompt's,

@@ -424,7 +424,18 @@ than look up variables on the render path.")
   "Record STYLES, a drain's `:styles', before anything naming them renders.
 
 Each entry is (ID FG BG UL ATTRS).  A redefined id forgets the face it had,
-since the id now names a different rendition."
+since the id now names a different rendition.
+
+Which is the one thing deferred styling has to be told about.  The core frees a
+rendition id once no cell names it and mints it again for something else -- see
+`StyleStore::collect' in src/emu/style.rs -- and a batch of scrollback waiting
+to be coloured names its renditions by id, having scrolled off the screen and
+so released every id it uses.  So a redefinition pays out everything still owed
+before it lands: the batches that referred to the old rendition are coloured
+while the id still means it.  Ordinary output never reaches this -- the core
+collects only past `STYLE_TABLE_CAPACITY' live renditions -- and an id
+re-announced with the rendition it already had is the core reusing a slot for
+the same colours, which changes nothing and is worth nothing to flush for."
   (pcase-dolist (`(,id ,fg ,bg ,ul ,attrs) styles)
     (let ((size (length cooked--style-specs)))
       (when (>= id size)
@@ -434,11 +445,19 @@ since the id now names a different rendition."
                 cooked--style-faces
                 (vconcat cooked--style-faces
                          (make-vector (- grown (length cooked--style-faces)) nil))))))
-    (aset cooked--style-specs id (list fg bg ul attrs))
-    (aset cooked--style-faces id nil)))
+    (let ((spec (list fg bg ul attrs))
+          (was (aref cooked--style-specs id)))
+      (when (and was (not (equal was spec)))
+        (cooked--settle-all-styles))
+      (aset cooked--style-specs id spec)
+      (aset cooked--style-faces id nil))))
 
 (defun cooked--reset-styles ()
-  "Forget every rendition id, for a session starting in this buffer."
+  "Forget every rendition id, for a session starting in this buffer.
+
+Anything still owed is paid first, for the reason a redefinition pays it: an
+id nothing can resolve any more would leave a deferred batch colourless."
+  (cooked--settle-all-styles)
   (setq cooked--style-specs nil
         cooked--style-faces nil))
 
@@ -494,6 +513,206 @@ span: resolving a face is an `aref' into `cooked--style-faces'."
                    (,link (and (/= ,linked 0) ,linked)))
                ,@body)))
          (setq ,i (+ ,i ,cooked--style-record))))))
+
+(defmacro cooked--do-style-links (spec &rest body)
+  "Run BODY for each span in the packed style records STYLES that names a link.
+
+SPEC is (FROM TO STYLED LINK STYLES): FROM and TO are bound to the span's
+START and END character offsets, LINK to its link id, and STYLED to whether
+its rendition resolves to a face -- which is all a link needs to know about
+the colour, since it only asks in order to leave a coloured run alone.  A span
+with no link runs nothing.
+
+The second walker over the same records, and the reason there are two is that
+the two halves of a record now come due at different moments: a batch of
+scrollback keeps its faces until somebody displays it -- see
+`cooked--settle-styles' -- while its links are hung on the text as it is
+inserted, because `cooked-next-link' and the mouse read them off the buffer
+without waiting to be shown.  So the render path walks the records for the
+link ids alone, which is one `cooked--u32' per span and no property write at
+all on the blocks -- nearly all of them -- that carry no link."
+  (declare (indent 1) (debug ((symbolp symbolp symbolp symbolp form) body)))
+  (pcase-let ((`(,from ,to ,styled ,link ,styles) spec)
+              (packed (make-symbol "packed"))
+              (i (make-symbol "i"))
+              (limit (make-symbol "limit"))
+              (linked (make-symbol "link")))
+    `(let* ((,packed ,styles)
+            (,i 0)
+            (,limit (length ,packed)))
+       (while (< ,i ,limit)
+         (let ((,linked (cooked--u32 ,packed (+ ,i ,cooked--style-link))))
+           (unless (= 0 ,linked)
+             (let ((,from (cooked--u32 ,packed (+ ,i ,cooked--style-start)))
+                   (,to (cooked--u32 ,packed (+ ,i ,cooked--style-end)))
+                   (,styled (and (cooked--style-face
+                                  (cooked--u32 ,packed (+ ,i ,cooked--style-id)))
+                                 t))
+                   (,link ,linked))
+               ,@body)))
+         (setq ,i (+ ,i ,cooked--style-record))))))
+
+;;;; The colours a batch of scrollback owes until somebody looks at it
+;;
+;; The end-to-end throughput ceiling was never the insert.  A drain's worth of
+;; evicted rows arrives as one string and goes into the buffer in one `insert';
+;; what it then costs is one `put-text-property' per styled run over text that,
+;; under a flood, scrolls past unseen.  On 20k lines of `ls --color'-shaped
+;; output that was four fifths of the Emacs-side cost of the whole drain.
+;;
+;; So the packed records are kept instead of walked: the batch carries them on
+;; its own text as `cooked-pending-style', and the faces are put on at the
+;; moment redisplay asks for that text and not before.  Three things make that
+;; a property rather than a side table of markers.  It is added in the same
+;; `add-text-properties' pass as `cooked-scrollback' and the read-only props,
+;; so recording the debt costs nothing extra.  It is deleted with the text, so
+;; `cooked--trim-scrollback' and `cooked--discard-scrollback' throw the debt
+;; away by throwing the text away, which is exactly what a flood wants.  And it
+;; needs no per-batch marker, so a session with a hundred batches in flight
+;; does not make every insertion walk a hundred markers.
+;;
+;; What the property does not carry is where the batch begins, which is what the
+;; offsets in the records are counted from.  That is read back off the interval
+;; the property occupies -- a fresh cons per batch, so two batches meeting in
+;; the buffer are two intervals and never one.  Which holds only as long as no
+;; edit splits an interval or eats its front, and that is the one invariant this
+;; file asks of the rest: every path that deletes scrollback goes through
+;; `cooked--settle-styles' with DOOMED first, so a batch losing part of itself
+;; pays the surviving part before it is cut and carries no debt across.  The
+;; insertions are all at a batch's edges -- the seam newline
+;; `cooked--place-seam' writes and the next batch above it -- and plain `insert'
+;; inherits no properties, so neither lands inside one.
+
+(defvar cooked-lazy-scrollback-styles t
+  "Whether a batch of scrollback waits to be displayed before it is coloured.
+
+Non-nil, the default, defers the faces of everything that scrolls off the
+screen to the jit-lock pass that runs when the text is first displayed; nil
+puts them on as the text is inserted, which is what every version before the
+deferral did.  The user-visible answer is identical either way, and there is no
+reason to turn this off outside a test that wants to compare the two -- see
+`cooked-deferred-and-eager-styling-agree-at-every-position'.
+
+The live screen is not affected: it is on its way to being displayed by
+definition, and deferring a row the cursor is on would only pay the walk twice.")
+
+(defvar-local cooked--pending-styles 0
+  "How many batches of scrollback in this buffer still owe their faces.
+
+Read to decide whether there is any deferred work at all: whether the jit-lock
+pass is worth registering -- see `cooked--sync-fontification' -- and whether
+`cooked--settle-styles' need look at the text.  Kept by hand rather than
+counted, since counting means walking the whole buffer.
+
+It can only err high, and only by way of something deleting scrollback without
+going through `cooked--settle-styles'.  What that costs is a registered hook
+with nothing to do, which is why it is a counter and not a list of batches.")
+
+(defun cooked--defer-styles (packed)
+  "Take PACKED on as a debt of styling, and return the property that records it.
+
+The answer is a two-element plist, for the caller to add in the same
+`add-text-properties' pass as the rest of a batch's properties, or nil when
+there is nothing to defer -- an unstyled batch, or the deferral switched off.
+So a caller reads it as \"is this batch deferred\" as well.
+
+The value is a fresh cons holding PACKED and nothing else.  Fresh because the
+property functions compare values with `eq' and the interval is what says
+where the batch begins: two batches sharing a value would read as one."
+  (when (and cooked-lazy-scrollback-styles packed (> (length packed) 0))
+    (setq cooked--pending-styles (1+ cooked--pending-styles))
+    (list 'cooked-pending-style (list packed))))
+
+(defun cooked--apply-style-spans (start packed &optional floor ceiling)
+  "Put the faces the records in PACKED name on the text they describe at START.
+
+START is where the batch begins; every offset in a record is characters from
+there.  FLOOR and CEILING clip the writes to a range of the buffer, for a batch
+that is about to lose one end of itself to a deletion: only the part that
+survives is worth colouring.
+
+Links are not applied here.  They went on as the text was inserted -- see
+`cooked--do-style-links'."
+  (cooked--do-style-spans (from to face _link packed)
+                          (when face
+                            (let ((beg (if floor (max (+ start from) floor) (+ start from)))
+                                  (end (if ceiling (min (+ start to) ceiling) (+ start to))))
+                              (when (< beg end)
+                                (put-text-property beg end 'face face))))))
+
+(defun cooked--pending-style-bounds (pos)
+  "The extent of the batch of owed styling POS is inside, as (START . END).
+
+Read off the `cooked-pending-style' interval rather than from a marker, which
+is what the batch's own start position has to be recovered from; see the
+commentary above."
+  (cons (or (previous-single-property-change (1+ pos) 'cooked-pending-style)
+            (point-min))
+        (or (next-single-property-change pos 'cooked-pending-style)
+            (point-max))))
+
+(defun cooked--settle-styles (beg end &optional doomed)
+  "Pay the styling every batch of scrollback meeting BEG..END still owes.
+
+The jit-lock pass calls this for the region redisplay asked about, and the
+copy path for the region being lifted out, so that text leaving the buffer
+carries the colours it would have shown.  A batch is paid whole the first time
+any part of it is wanted: it is one drain's worth of rows, bounded by the read
+size, and a batch half-coloured would need a second property to say which half.
+
+With DOOMED, BEG..END is about to be deleted.  A batch wholly inside it is then
+dropped uncoloured -- which is the whole point of the deferral, and what makes
+`cooked--trim-scrollback' free under a flood -- and a batch straddling either
+edge is coloured over the part that survives and nothing else.  Both edges can
+be one batch's, for a `cooked--discard-scrollback-region' taking one command's
+output out of the middle of a batch.
+
+`with-silent-modifications' rather than a bare `inhibit-read-only': scrollback
+is read-only text, and a copy or a redisplay must not leave the buffer looking
+modified or put an entry in the undo history for a colour.
+
+Widens to look, while leaving BEG..END alone.  A batch's extent is read off the
+text and a narrowing would answer with the edge of the accessible portion
+instead, which would both colour half a batch and leave the other half holding
+a start position that has stopped being one.  A full-screen program narrows the
+buffer to its own rectangle, and a copy or a redisplay under one is ordinary."
+  (when (and (> cooked--pending-styles 0) (< beg end))
+    (save-restriction
+      (widen)
+      (with-silent-modifications
+        (let ((pos beg))
+          (while (and pos (< pos end))
+            (let ((owed (get-text-property pos 'cooked-pending-style)))
+              (if (not owed)
+                  (setq pos (next-single-property-change
+                             pos 'cooked-pending-style nil end))
+                (pcase-let ((`(,from . ,to) (cooked--pending-style-bounds pos))
+                            (packed (car owed)))
+                  (cond ((not doomed)
+                         (cooked--apply-style-spans from packed))
+                        (t
+                         (when (< from beg)
+                           (cooked--apply-style-spans from packed nil beg))
+                         (when (< end to)
+                           (cooked--apply-style-spans from packed end nil))))
+                  ;; A batch that goes with the text needs no property removed:
+                  ;; the interval is deleted along with the characters it is on.
+                  (unless (and doomed (<= beg from) (<= to end))
+                    (remove-text-properties from to '(cooked-pending-style nil)))
+                  (setq cooked--pending-styles (max 0 (1- cooked--pending-styles))
+                        pos to))))))))))
+
+(defun cooked--settle-all-styles ()
+  "Pay every batch of styling this buffer owes, wherever it is.
+
+For the two moments a deferred batch's rendition ids are about to stop meaning
+what they meant: an id being reused for another rendition, and the table being
+forgotten outright.  Widens, since the answer must not depend on a full-screen
+program having narrowed the buffer to its own rectangle."
+  (when (> cooked--pending-styles 0)
+    (save-restriction
+      (widen)
+      (cooked--settle-styles (point-min) (point-max)))))
 
 (defun cooked--color-rgb (color)
   "COLOR as a list of three channels from 0.0 to 1.0, or nil if unreadable.

@@ -20,6 +20,11 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'cooked-util)
+;; For `cooked--settle-styles' alone, on the way out through
+;; `filter-buffer-substring': a record's text is read out of the buffer, and
+;; scrollback's colours are not on it until something asks.  cooked-face.el is
+;; below this one and requires nothing but cooked-util.el.
+(require 'cooked-face)
 
 ;; Upward, like `cooked--drain-and-apply' from cooked-util.el: a record is read
 ;; here, and reading one is what catches a hidden buffer's screen up.
@@ -488,6 +493,11 @@ Around the buffer-local `filter-buffer-substring-function' in `cooked-mode',
 so whatever else is filtering copied text still runs first and this sees its
 answer.  With `cooked-copy-strip-box-borders' nil the string is returned
 untouched, which is the default and costs one variable lookup per copy."
+  ;; Before the filter, which is what reads the text out: a batch of scrollback
+  ;; still owed its colours would otherwise be copied as plain text, where the
+  ;; same copy a moment after the region was displayed carried its faces.  See
+  ;; `cooked--settle-styles'.
+  (cooked--settle-styles beg end)
   (let ((text (funcall filter beg end delete)))
     (if cooked-copy-strip-box-borders
         (cooked--strip-box-borders text)

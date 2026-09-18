@@ -9,6 +9,7 @@
 ;;   cooked-tests-helpers.el     fixtures every other file uses
 ;;   cooked-tests-session.el     spawning, shell integration, sizing, exit
 ;;   cooked-tests-render.el      the grid becoming buffer text, and the seam
+;;   cooked-tests-lazy-style.el  scrollback's colours, deferred until it is seen
 ;;   cooked-tests-input.el       keys, mouse, paste, keyboard ownership
 ;;   cooked-tests-dnd.el         drops and yank-media, the optional layer
 ;;   cooked-tests-remote.el      starting a session on a TRAMP host over ssh
@@ -78,6 +79,7 @@
 (require 'cooked-tests-helpers)
 (require 'cooked-tests-session)
 (require 'cooked-tests-render)
+(require 'cooked-tests-lazy-style)
 (require 'cooked-tests-input)
 (require 'cooked-tests-dnd)
 (require 'cooked-tests-history)

@@ -442,11 +442,17 @@ damaged row.  Hover is rare; drains are not."
 (defun cooked--render-link-spans (start spans)
   "Hang the links SPANS names on text inserted at START.
 
-Each span is (FROM TO ID), offsets in characters and ID the link id a style
-record carried -- see `Block' in src/wire.rs.  The face is left alone whenever
-the run carries styling of its own, since the child asked for both and its
-colours are the more specific statement; only unstyled link text is given
-`cooked-link'.
+Each span is (FROM TO ID STYLED), offsets in characters, ID the link id a style
+record carried -- see `Block' in src/wire.rs -- and STYLED whether the same
+record named a rendition.  The face is left alone whenever the run carries
+styling of its own, since the child asked for both and its colours are the more
+specific statement; only unstyled link text is given `cooked-link'.
+
+STYLED is what says so, rather than the face on the text, because the two now
+part company: a batch of scrollback is linked as it is inserted and coloured
+only once it is displayed, so the text under a styled run reads as bare until
+then.  The buffer is still asked as well, for the caller that colours as it
+goes and for anything a layer below has already put there.
 
 Image cells are skipped.  They are blanks carrying a `display' slice, so a
 `mouse-face' on one would highlight a rectangle of a picture and a keymap would
@@ -455,14 +461,14 @@ claim a click the image had a better claim to."
   ;; convenience laid over text that has already been inserted, and no failure of
   ;; it may take the redisplay with it.
   (cooked--protect-seam 'cooked--render-link-spans
-    (pcase-dolist (`(,from ,to ,id) spans)
+    (pcase-dolist (`(,from ,to ,id ,styled) spans)
       (let ((beg (+ start from))
             (end (+ start to)))
         (unless (eq (car-safe (get-text-property beg 'cooked-deco)) 'image)
           (cooked-link--propertize beg end
                                    'cooked-link-id id
                                    'help-echo #'cooked--link-help-echo)
-          (unless (get-text-property beg 'face)
+          (unless (or styled (get-text-property beg 'face))
             (put-text-property beg end 'face 'cooked-link)))))))
 
 ;;;; Soft wrap: putting a logical line back together to match against

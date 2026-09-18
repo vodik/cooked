@@ -195,7 +195,7 @@ with its length, and so a restore after every drain costs a handful of
 
 ;;;; Putting styled text in the buffer
 
-(defun cooked--render-block (block &optional row origin unlinked)
+(defun cooked--render-block (block &optional row origin unlinked defer)
   "Insert BLOCK at point, with its styling and decoration applied.
 
 BLOCK is (TEXT STYLE-SPANS DECO-SPANS ROWS), the one shape rendered
@@ -233,6 +233,14 @@ sits on, which the style span has just put there.  Links are applied last, over
 the decorations, so they can see which cells turned out to be an image and
 leave those alone.  UNLINKED leaves them off altogether, for text headed
 somewhere no link id can be followed from.
+
+DEFER leaves the *faces* off instead, for a caller that has taken the records
+on as a debt to be paid when the text is first displayed -- scrollback, and
+only scrollback: see `cooked--defer-styles'.  The links still go on, because
+the buffer is read for them without being displayed, so the walk under DEFER is
+`cooked--do-style-links' rather than the full one.  A deferring caller must
+record the debt itself; nothing here would know where to put it, the property
+that carries it going on in the same pass as the rest of the batch's.
 
 One insert plus properties, rather than an insert per run: Emacs pays for every
 `insert', and building a propertized string in Lisp and inserting that instead
@@ -282,11 +290,17 @@ Returns the position the text was inserted at."
             (links nil))
         ;; Links are collected on the same walk and applied after the decorations,
         ;; so a block with none -- nearly every block -- is walked once.
-        (cooked--do-style-spans (from to face link styles)
-          (when face
-            (put-text-property (+ start from) (+ start to) 'face face))
-          (when (and link (not unlinked))
-            (push (list from to link) links)))
+        (if defer
+            ;; The faces stay in the records for `cooked--settle-styles' to put
+            ;; on later, so all that is walked for here is the link ids.
+            (unless unlinked
+              (cooked--do-style-links (from to styled link styles)
+                (push (list from to link styled) links)))
+          (cooked--do-style-spans (from to face link styles)
+            (when face
+              (put-text-property (+ start from) (+ start to) 'face face))
+            (when (and link (not unlinked))
+              (push (list from to link (and face t)) links))))
         ;; The row table and the decoration spans are both in ascending offset
         ;; order, so which row a span fell on is a pointer walked forward once
         ;; across the whole block rather than a search per span.  `rest' is the
@@ -454,20 +468,34 @@ rows from the primary even when a full-screen program is showing — and the
 insertion point is above the region `cooked--apply-alt-pin' confines us to.
 
 No row index is passed to `cooked--render-block': scrollback has no cursor to
-split a glyph run at."
+split a glyph run at.
+
+The faces are not put on here either.  This text has by definition just left
+the screen, and under a flood it leaves it again before anyone has looked at
+what went before, so the batch's packed style records are taken on as a debt
+instead and paid by the jit-lock pass over the region redisplay asks for --
+`cooked--defer-styles' and `cooked--settle-styles', which say why that is a
+text property and what it costs.  Its links do go on now; see
+`cooked--render-block'."
   (save-restriction
     (widen)
     (save-excursion
       (let* ((seam (cooked--held-seam (marker-position cooked--screen-start)))
+             ;; Before the render, which needs to be told whether the debt was
+             ;; taken on: an unstyled batch, or the deferral switched off for a
+             ;; test, is coloured as it is inserted like any other text.
+             (owed (cooked--defer-styles (cadr block)))
              (start (progn (goto-char (or seam cooked--screen-start))
-                           (cooked--render-block block))))
+                           (cooked--render-block block nil nil nil (and owed t)))))
         ;; Scrollback never changes again, so it is protected once, here, rather
         ;; than re-swept on every redisplay.  The read-only half is
         ;; `cooked--read-only-props', shared with `cooked--protect' so the two
         ;; halves of the transcript cannot drift apart; only the marker saying
-        ;; this text is scrollback is added on top of it.
+        ;; this text is scrollback, and the styling it still owes, are added on
+        ;; top of it.  One pass for all of them: the debt is recorded by being
+        ;; in this list, so recording it costs no interval walk of its own.
         (add-text-properties start (point)
-                             `(cooked-scrollback t ,@cooked--read-only-props))
+                             `(cooked-scrollback t ,@owed ,@cooked--read-only-props))
         ;; Neither link pass runs here.  Both are `cooked--fontify-region''s
         ;; now, so a batch that scrolls past without ever being displayed --
         ;; which is what a flood is -- costs nothing to scan, and the file

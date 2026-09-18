@@ -253,6 +253,12 @@ this would otherwise quietly do nothing."
     (save-restriction
       (widen)
       (setq images (cooked--release-images (point-min) end))
+      ;; Also before the deletion, and for the opposite reason: a batch still
+      ;; owed its colours is thrown away with the text it is on, which is what
+      ;; makes trimming under a flood cost nothing, while the batch the cut
+      ;; lands inside pays for the part that survives it -- one batch per cut.
+      ;; See `cooked--settle-styles'.
+      (cooked--settle-styles (point-min) end t)
       (cooked--with-child-edit
         (delete-region (point-min) end)))
     (cooked--collect-images images))
@@ -288,6 +294,10 @@ news `cooked--discard-scrollback' gives it."
           (save-restriction
             (widen)
             (setq images (cooked--release-images beg end))
+            ;; One batch can straddle both edges of this cut, an output group
+            ;; deleted from the middle of a batch being the ordinary case; it
+            ;; pays for the part above and the part below and nothing between.
+            (cooked--settle-styles beg end t)
             (cooked--with-child-edit
               (delete-region beg end)))
           (cooked--collect-images images)
