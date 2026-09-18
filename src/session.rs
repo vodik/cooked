@@ -225,8 +225,6 @@ struct Notifier {
     /// costs one write and one Lisp callback rather than thousands.
     notified: AtomicBool,
     state: Mutex<NotifyState>,
-    /// See [`QUIESCENCE`].
-    quiescence: std::time::Duration,
     /// See [`Clock`].
     clock: Clock,
 }
@@ -266,6 +264,12 @@ struct NotifyState {
     /// genuinely streaming changes produces its second one within microseconds, so it arms
     /// this at once and is redrawn at the redisplay interval throughout.
     frame_ceiling: std::time::Duration,
+    /// See [`QUIESCENCE`].
+    ///
+    /// Fixed for the life of a session, and here beside the deadlines it bounds rather
+    /// than on [`Notifier`] so that [`Self::decide`] can read the four gates from one
+    /// place and needs nothing passed to it but the time.
+    quiescence: std::time::Duration,
     /// When the wake pipe was last actually written to, for `min_interval`.
     last: Option<std::time::Instant>,
     /// While set and unexpired, the child is mid-frame under DEC mode 2026 and has asked
@@ -310,33 +314,76 @@ struct NotifyState {
     echo: bool,
 }
 
+/// What is keeping the frame being assembled off the screen; see [`NotifyState::decide`].
+enum Hold {
+    /// Nothing is, so it may be sent now.
+    Ready,
+    /// It is held until this instant, the *last* of the gates that still hold it.
+    ///
+    /// The last rather than the first because a frame one gate has released is not
+    /// released, so a reader woken at the earliest deadline would find the rest still
+    /// holding and go straight back to sleep -- the spin [`Notifier::poll_wait`] used to
+    /// guard against by taking a `max` of its own.
+    Until(std::time::Instant),
+}
+
 impl NotifyState {
-    /// How much longer this frame is being held back for the child to finish writing it,
-    /// or `None` if it is due to be drawn now.
+    /// What is holding this frame at NOW, and until when.
+    ///
+    /// The one reading of the four gates: the client's own sync marker, the redisplay
+    /// throttle, and the quiescence wait with the ceilings that bound it.
+    /// [`Notifier::flush`] sends on [`Hold::Ready`] and [`Notifier::poll_wait`] sleeps
+    /// until the instant [`Hold::Until`] names, so the two cannot come to different
+    /// conclusions about the same state. Nothing else reads the deadlines.
+    ///
+    /// A deadline standing exactly at NOW counts as still holding, for all four alike. The
+    /// wait it names is then zero, so nothing rides on which way that falls, and one rule
+    /// for the four gates is worth more than reproducing each gate's old boundary.
+    fn decide(&self, now: std::time::Instant) -> Hold {
+        let gates = [
+            // The client's own marker, DEC mode 2026; see [`Notifier::set_sync`].
+            self.sync_until,
+            // The redisplay floor, which a keystroke's echo waives; see [`Self::echo`].
+            self.last
+                .filter(|_| !self.echo)
+                .map(|t| t + self.min_interval),
+            self.quiescent_until(now),
+        ];
+        match gates.into_iter().flatten().filter(|at| *at >= now).max() {
+            Some(at) => Hold::Until(at),
+            None => Hold::Ready,
+        }
+    }
+
+    /// When this frame stops being held back for the child to finish writing it, or `None`
+    /// if it is not being held back at all.
     ///
     /// The quiescence rule. It has the same shape as DEC mode 2026 -- hold the frame, keep
     /// `dirty` set, retire at a deadline -- with the pty going quiet standing in for the
     /// child's cooperation, so it works for clients that never send a 2026 sequence.
     ///
-    /// Two deadlines, whichever comes first: [`QUIESCENCE`] since the last byte arrived,
-    /// and [`Self::frame_ceiling`] since the frame's second change. `last_read` unset — which
-    /// [`Notifier::announce`] arranges — means there is nothing to wait for at all.
-    fn hold(
-        &self,
-        quiescence: std::time::Duration,
-        now: std::time::Instant,
-    ) -> Option<std::time::Duration> {
-        let mut wait = remaining(self.last_read.map(|t| t + quiescence), now)?;
-        // `None` from either deadline below means it has *passed*, which releases the
-        // frame, so each is asked separately rather than folded into the `min` with a
-        // default that would read as "no deadline".
-        if let Some(at) = self.ceiling_at {
-            wait = wait.min(remaining(Some(at), now)?);
+    /// Three deadlines, whichever comes first: [`QUIESCENCE`] since the last byte arrived,
+    /// [`Self::frame_ceiling`] since the frame's second change, and [`HOLD_CEILING`] since
+    /// its first. `last_read` unset — which [`Notifier::announce`] arranges — means there
+    /// is nothing to wait for at all.
+    fn quiescent_until(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        let mut at = self
+            .last_read
+            .map(|t| t + self.quiescence)
+            .filter(|at| *at >= now)?;
+        // A ceiling that has *passed* releases the frame outright, so each is asked
+        // separately rather than folded into the `min` with a default that would read as
+        // "no deadline".
+        for ceiling in [self.ceiling_at, self.held_since.map(|t| t + HOLD_CEILING)]
+            .into_iter()
+            .flatten()
+        {
+            if ceiling < now {
+                return None;
+            }
+            at = at.min(ceiling);
         }
-        if let Some(since) = self.held_since {
-            wait = wait.min(remaining(Some(since + HOLD_CEILING), now)?);
-        }
-        Some(wait)
+        Some(at)
     }
 }
 
@@ -349,6 +396,7 @@ impl Notifier {
             state: Mutex::new(NotifyState {
                 min_interval: options.min_redisplay_interval,
                 frame_ceiling: options.frame_ceiling,
+                quiescence: options.quiescence,
                 last: None,
                 held_since: None,
                 sync_until: None,
@@ -357,7 +405,6 @@ impl Notifier {
                 echo_until: None,
                 echo: false,
             }),
-            quiescence: options.quiescence,
             clock: options.clock.clone(),
         }
     }
@@ -458,22 +505,10 @@ impl Notifier {
         }
         let now = self.clock.now();
         let mut state = self.state.held();
-        // Before `dirty` is cleared, deliberately: leaving it set is what hands the frame
-        // to the retry machinery, so the held output is drawn the moment the frame ends or
-        // the timeout expires rather than waiting on the child's next write.
-        if remaining(state.sync_until, now).is_some() {
-            return true;
-        }
-        if !state.echo
-            && state
-                .last
-                .is_some_and(|t| now.duration_since(t) < state.min_interval)
-        {
-            return true;
-        }
-        // Same reasoning as the sync check above, and the same handling: the frame stays
-        // dirty and the retry machinery draws it the moment the child stops writing.
-        if state.hold(self.quiescence, now).is_some() {
+        // Asked before `dirty` is cleared, deliberately: leaving it set is what hands a
+        // held frame to the retry machinery, so it is drawn the moment the last gate opens
+        // rather than waiting on the child's next write.
+        if matches!(state.decide(now), Hold::Until(_)) {
             return true;
         }
         state.last = Some(now);
@@ -545,32 +580,23 @@ impl Notifier {
     /// asking about is a termios question, which the notifier has no business knowing.
     /// What the notifier owns are the deadlines below, which override the base.
     ///
-    /// Real pty data wakes `poll` at once, so the base is coarse. But when [`Self::flush`]
-    /// has deferred a notification to the throttle and the child then falls quiet, nothing
-    /// else wakes the loop, and waiting out `POLL_TIMEOUT_MS` would add up to 100ms to the
-    /// last frame of a burst -- felt as a stutter at the end of a wheel scroll in a
-    /// full-screen program. Shortening the poll to the remaining window avoids that.
+    /// Real pty data wakes `poll` at once, so the base is coarse. But when a frame is
+    /// held -- by the throttle, by the client's marker, or by the quiescence rule -- and
+    /// the child then falls quiet, nothing else wakes the loop, and waiting out
+    /// `POLL_TIMEOUT_MS` would add up to 100ms to the last frame of a burst, felt as a
+    /// stutter at the end of a wheel scroll in a full-screen program. Sleeping to the
+    /// instant [`NotifyState::decide`] names avoids that and retires each hold on time.
     fn poll_wait(&self, base: std::time::Duration) -> std::time::Duration {
         if self.notified.load(Ordering::SeqCst) || !self.dirty.load(Ordering::SeqCst) {
             return base;
         }
         let now = self.clock.now();
-        let state = self.state.held();
-        // An echo does not wait on the throttle, so it has no remainder to sleep out.
-        let throttle = state
-            .last
-            .filter(|_| !state.echo)
-            .map(|t| state.min_interval.saturating_sub(now.duration_since(t)))
-            .unwrap_or_default();
-        // A frame held by DEC mode 2026 or by the quiescence hold keeps `dirty` set with
-        // nothing to flush, so the throttle's remainder is typically zero, and polling on
-        // that would spin this thread for the length of the frame. Taking the latest
-        // deadline avoids that and retires each hold on time.
-        let wait = throttle
-            .max(remaining(state.sync_until, now).unwrap_or_default())
-            .max(state.hold(self.quiescence, now).unwrap_or_default());
-        drop(state);
-        wait
+        match self.state.held().decide(now) {
+            Hold::Until(at) => at.saturating_duration_since(now),
+            // Nothing holds it, so the next [`Self::flush`] sends it and there is nothing
+            // to wait for here.
+            Hold::Ready => std::time::Duration::ZERO,
+        }
     }
 
     /// Close the wake pipe, so Emacs' read end sees EOF.
