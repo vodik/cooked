@@ -26,6 +26,11 @@
 ;; instead, which is the one thing this exists not to trust, or it would need a
 ;; round trip per shrinking step.
 ;;
+;; Both buffers are rendered by the same Lisp, so that comparison is blind to a
+;; defect in a stage both share.  The grid the reference is handed is therefore
+;; read back as well, and the subject's screen region has to equal it row for
+;; row; see "The grid the core holds" below.
+;;
 ;; `cooked-tests--oracle-compare' is the harness, and takes the two treatments as
 ;; functions, so a later comparison (a narrower `cooked--protect') is a new pair of
 ;; functions and possibly new motifs rather than a new harness.  The second
@@ -438,19 +443,117 @@ left behind there is mended before anyone can see it."
                    unless (equal text (cdr id))
                    return (cons (cdr id) text)))))))
 
+;;;; The grid the core holds
+
+;; The comparison above runs the same renderer twice, so a stage both treatments
+;; share -- `cooked--render-rows' cutting a block wrong -- leaves both buffers
+;; equally wrong and is invisible to it.  `tests/delta_replay.rs' answers that
+;; much on the Rust side, by replaying a drain's deltas into a shadow grid; what
+;; it cannot reach is whether the *buffer* still reads as the grid after Lisp has
+;; applied a few hundred shifts, edits, promotions and left-out rows to it.
+;;
+;; So the reference's drain is kept.  The reference damages every row before each
+;; drain, so what it is handed is the grid itself, whole, in the one shape
+;; rendered text crosses the module boundary in -- and the subject's screen
+;; region, which reached the same screen by increments, has to read the same row
+;; for row.  Nothing extra is asked of the core for it: that payload was already
+;; being drained, and reading it back costs a `plist-get'.
+;;
+;; Only where the reference resends.  The promotion comparison's reference drains
+;; ordinarily, so its payload describes what changed rather than what is there,
+;; and there is no grid in it to compare against.
+
+(defvar-local cooked-tests--oracle-payload nil
+  "The plist the first drain of this buffer's last chunk returned.
+
+Kept so the grid can be read out of the reference's drain rather than asked of
+the core a second time.  The first, because a drain that provokes another --
+see `cooked--drain-and-apply' -- leaves the second describing only what changed
+since the first, which is no longer the whole grid.")
+
+(defun cooked-tests--oracle-grid-rows (update)
+  "The screen UPDATE reports, as a vector of one string per grid row.
+
+UPDATE has to be a drain whose every live row is damaged, as the reference's is,
+so that its `:rows' cover the screen.  Each run is cut into rows at its row
+table's offsets rather than at newlines: with `cooked-rejoin-wrapped-lines' on a
+wrapped line arrives as one line, and the boundary between its two screen rows
+is then inside it and not at a newline at all.
+
+Trailing blanks come off.  The core trims a row's own, so a blank at the end of
+a buffer row is padding `cooked--pad-to-cursor' left there for a cursor that has
+moved on -- the same difference by history that `cooked-tests--oracle-snapshot'
+takes out above, and for the same reason."
+  (let ((grid (make-vector (max 1 (plist-get update :height)) "")))
+    (pcase-dolist (`(,first . ,block) (plist-get update :rows))
+      (let ((text (nth 0 block)))
+        (cl-loop for (entry . rest) on (nth 3 block)
+                 for index from first
+                 for start = (car entry)
+                 for end = (if rest (car (car rest)) (length text))
+                 when (and (>= index 0) (< index (length grid)))
+                 do (aset grid index
+                          (string-trim-right (substring text start end) "[\n ]+")))))
+    grid))
+
+(defun cooked-tests--oracle-screen-rows (count)
+  "The text of screen rows 0 below COUNT in the current buffer, trailing blanks off.
+
+A row the screen region has no line for reads as empty: the region is trimmed to
+its content, so a blank row below the last used one has no line yet, and the
+grid holds nothing for it either."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let (rows)
+        (dotimes (index count)
+          (push (if (zerop (cooked--goto-screen-row index))
+                    (string-trim-right
+                     (buffer-substring-no-properties (point) (line-end-position))
+                     "[ ]+")
+                  "")
+                rows))
+        (nreverse rows)))))
+
+(defun cooked-tests--oracle-grid-difference (update)
+  "Where the current buffer's screen first differs from the grid in UPDATE, or nil.
+
+UPDATE is the reference's drain; see `cooked-tests--oracle-grid-rows'.  The
+answer names the first row that differs, with the buffer's text for it and the
+grid's, and the whole of each so a failure reads without a diff tool."
+  (when update
+    (let* ((grid (cooked-tests--oracle-grid-rows update))
+           (count (min (length grid)
+                       (if (plist-get update :alt)
+                           (plist-get update :height)
+                         (plist-get update :used))))
+           (screen (cooked-tests--oracle-screen-rows count)))
+      (cl-loop for have in screen
+               for index from 0
+               unless (equal have (aref grid index))
+               return (list :row index :have have :expected (aref grid index)
+                            :text screen
+                            :expected-text (append grid nil))))))
+
 (defun cooked-tests--oracle-drain (buffer rejoin treatment)
   "Run TREATMENT in BUFFER, then drain and apply its session under REJOIN.
 The drain is a hidden buffer's when TREATMENT returns `hidden', and promotes no
-row when it returns `unpromoted'."
+row when it returns `unpromoted'.
+
+What the drain returned is kept in `cooked-tests--oracle-payload', the first
+only, for the grid read-back above."
   (with-current-buffer buffer
-    (let ((how (funcall treatment))
-          (cooked-rejoin-wrapped-lines rejoin))
-      (if (eq how 'unpromoted)
-          (let ((drain (symbol-function 'cooked--drain)))
-            (cl-letf (((symbol-function 'cooked--drain)
-                       (lambda (session rejoin &optional hidden _promote)
-                         (funcall drain session rejoin hidden nil))))
-              (cooked--drain-and-apply)))
+    (let* ((how (funcall treatment))
+           (cooked-rejoin-wrapped-lines rejoin)
+           (drain (symbol-function 'cooked--drain)))
+      (setq cooked-tests--oracle-payload nil)
+      (cl-letf (((symbol-function 'cooked--drain)
+                 (lambda (session rejoin &optional hidden promote)
+                   (let ((update (funcall drain session rejoin hidden
+                                          (and (not (eq how 'unpromoted)) promote))))
+                     (unless cooked-tests--oracle-payload
+                       (setq cooked-tests--oracle-payload update))
+                     update))))
         (cooked--drain-and-apply (eq how 'hidden))))))
 
 (defvar-local cooked-tests--oracle-drains 0
@@ -480,10 +583,17 @@ is caught up with `cooked--sync' and compared once more.  The first difference
 is returned as a plist with :drain, the index of the chunk just fed, and
 :difference, from `cooked-tests--oracle-difference', or \(:stale-link (SUBJECT
 REFERENCE)) for a detected link either buffer holds to text that is no longer
-there.  A signal from either buffer is returned the same way, as :error."
+there, or \(:grid DIFFERENCE) for a subject whose screen no longer reads as the
+grid the reference was handed -- see `cooked-tests--oracle-grid-difference',
+which is asked only where REFERENCE resends.  A signal from either buffer is
+returned the same way, as :error."
   (let* ((rows (plist-get case :rows))
          (cols (plist-get case :cols))
          (rejoin (plist-get case :rejoin))
+         ;; The grid is only there to be read when the reference resends every
+         ;; row; see `cooked-tests--oracle-grid-rows'.
+         (grid (memq (or reference #'cooked-tests--oracle-resend)
+                     (list #'cooked-tests--oracle-resend)))
          (cooked-debug t)
          (a (cooked-tests--oracle-buffer rows cols))
          (b (cooked-tests--oracle-buffer rows cols)))
@@ -497,9 +607,17 @@ there.  A signal from either buffer is returned the same way, as :error."
                                                     (cooked-tests--oracle-stale-link)))))
                                  (if (seq-some #'identity stale)
                                      (list :stale-link stale)
-                                   (cooked-tests--oracle-difference
-                                    (with-current-buffer a (cooked-tests--oracle-snapshot))
-                                    (with-current-buffer b (cooked-tests--oracle-snapshot))))))))
+                                   (or (cooked-tests--oracle-difference
+                                        (with-current-buffer a (cooked-tests--oracle-snapshot))
+                                        (with-current-buffer b (cooked-tests--oracle-snapshot)))
+                                       (and grid
+                                            (when-let*
+                                                ((difference
+                                                  (with-current-buffer a
+                                                    (cooked-tests--oracle-grid-difference
+                                                     (buffer-local-value
+                                                      'cooked-tests--oracle-payload b)))))
+                                              (list :grid difference)))))))))
                   (chunks (plist-get case :chunks)))
               (or (cl-loop
                    for chunk in chunks
