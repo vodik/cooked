@@ -30,13 +30,21 @@ from either end -- far enough in that a pass which looked only near the line's
 edges would miss it.")
 
 (defconst cooked-tests--long-line-script
-  (format "printf '%%s\\n' '%s'; for i in 1 2 3 4 5 6 7 8 9 10; do printf 'tail%%s\\n' $i; done; sleep 5"
+  (format (concat "printf '%%s\\n' '%s';"
+                  " for i in 1 2 3 4 5 6 7 8 9 10; do printf 'tail%%s\\n' $i; done;"
+                  " sleep 0.3;"
+                  " for i in 11 12 13 14 15 16 17 18 19 20; do printf 'tail%%s\\n' $i; done;"
+                  " sleep 5")
           cooked-tests--long-line)
   "Print the long line, then enough rows to push every one of its rows off.
 
 The rows have to *leave* the screen: rejoining happens as a row enters
 scrollback, so a line still on the grid is one buffer line per row and is not
-long at all.")
+long at all.
+
+A second batch after a pause, so a test can settle on the first one, get the
+buffer displayed and the flag set, and only then ask what the *follow* does with
+the narrowing in force -- which is the half a pre-display drain cannot show.")
 
 (defmacro cooked-tests--with-long-line (&rest body)
   "Run BODY in a 6x80 session whose scrollback holds `cooked-tests--long-line'.
@@ -210,6 +218,21 @@ so: a trimmed row would be short a character and carry a truncation mark."
     (let ((text (cooked-tests--text)))
       (dotimes (i 10)
         (should (string-match-p (format "^tail%d$" (1+ i)) text))))))
+
+(ert-deftest cooked-the-view-still-follows-the-tail-under-long-line-optimizations ()
+  "`cooked--pin-transcript-bottom' walks a window's height backwards with
+`vertical-motion', and backward motion is where the narrowing actually bites:
+`move_it_vertically_backward' is limited to three rows of the width behind
+point.  A wrong answer there puts the window start somewhere other than a
+screenful above the tail, and the child's newest output is off screen -- so the
+assertion is the one the follow exists for."
+  (skip-unless (boundp 'long-line-threshold))
+  (cooked-tests--with-long-line
+    (should (long-line-optimizations-p))
+    (should (cooked-tests--settle
+             (lambda () (string-match-p "tail20" (cooked-tests--text)))))
+    (redisplay t)
+    (should (pos-visible-in-window-p (point-max) (frame-root-window)))))
 
 (provide 'cooked-tests-longline)
 ;;; cooked-tests-longline.el ends here
