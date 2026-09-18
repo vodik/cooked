@@ -173,6 +173,40 @@ pub(crate) struct Update {
     pub exit: Option<i32>,
 }
 
+/// Where everything that paces a frame reads the time.
+///
+/// `Instant::now` in a session, and in a test a clock the test steps by hand. The rules
+/// below relate six deadlines to one another, and a test that waits out real milliseconds
+/// to watch one of them fire is a test that can be wrong about time -- which is what
+/// `COOKED_TEST_TIMEOUT_SCALE` and the load guard exist to paper over. With a clock the
+/// test owns, the notifier's tests are step sequences with exact assertions instead.
+///
+/// A closure rather than a trait because there is one thing to ask and no state to carry,
+/// and behind an `Arc` rather than a type parameter because [`Session`] reaches Lisp as a
+/// user pointer and has no business saying in its type what kind of clock it keeps.
+#[derive(Clone)]
+pub(crate) struct Clock(Arc<dyn Fn() -> std::time::Instant + Send + Sync>);
+
+impl Clock {
+    fn now(&self) -> std::time::Instant {
+        (self.0)()
+    }
+}
+
+impl Default for Clock {
+    fn default() -> Self {
+        Self(Arc::new(std::time::Instant::now))
+    }
+}
+
+/// Spelled out rather than derived, so [`Options`] keeps the `Debug` it had: a closure
+/// has none.
+impl std::fmt::Debug for Clock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Clock")
+    }
+}
+
 /// Telling Emacs there is something to look at, and how often it is willing to hear it.
 ///
 /// These pieces are only ever touched together, and gathering them gives the wake
@@ -193,6 +227,8 @@ struct Notifier {
     state: Mutex<NotifyState>,
     /// See [`QUIESCENCE`].
     quiescence: std::time::Duration,
+    /// See [`Clock`].
+    clock: Clock,
 }
 
 struct NotifyState {
@@ -285,16 +321,20 @@ impl NotifyState {
     /// Two deadlines, whichever comes first: [`QUIESCENCE`] since the last byte arrived,
     /// and [`Self::frame_ceiling`] since the frame's second change. `last_read` unset — which
     /// [`Notifier::announce`] arranges — means there is nothing to wait for at all.
-    fn hold(&self, quiescence: std::time::Duration) -> Option<std::time::Duration> {
-        let mut wait = remaining(self.last_read.map(|t| t + quiescence))?;
+    fn hold(
+        &self,
+        quiescence: std::time::Duration,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        let mut wait = remaining(self.last_read.map(|t| t + quiescence), now)?;
         // `None` from either deadline below means it has *passed*, which releases the
         // frame, so each is asked separately rather than folded into the `min` with a
         // default that would read as "no deadline".
         if let Some(at) = self.ceiling_at {
-            wait = wait.min(remaining(Some(at))?);
+            wait = wait.min(remaining(Some(at), now)?);
         }
         if let Some(since) = self.held_since {
-            wait = wait.min(remaining(Some(since + HOLD_CEILING))?);
+            wait = wait.min(remaining(Some(since + HOLD_CEILING), now)?);
         }
         Some(wait)
     }
@@ -318,6 +358,7 @@ impl Notifier {
                 echo: false,
             }),
             quiescence: options.quiescence,
+            clock: options.clock.clone(),
         }
     }
 
@@ -373,7 +414,7 @@ impl Notifier {
     /// Called before the write rather than after it, because the child's echo can reach
     /// the reader thread before the writing thread gets the lock back.
     fn expect_echo(&self) {
-        self.state.held().echo_until = Some(std::time::Instant::now() + ECHO_WINDOW);
+        self.state.held().echo_until = Some(self.clock.now() + ECHO_WINDOW);
     }
 
     /// Note a read from the pty, `drawable` saying whether it changed anything Emacs
@@ -390,10 +431,10 @@ impl Notifier {
     /// anything, so there is no echo on screen to hurry, and a hidden buffer woken early
     /// would pay a drain for nothing.
     fn fed(&self, drawable: bool, shown: bool) {
-        let now = std::time::Instant::now();
+        let now = self.clock.now();
         let mut state = self.state.held();
         state.last_read = Some(now);
-        if drawable && shown && remaining(state.echo_until.take()).is_some() {
+        if drawable && shown && remaining(state.echo_until.take(), now).is_some() {
             state.echo = true;
         }
         if drawable {
@@ -415,22 +456,27 @@ impl Notifier {
         if self.notified.load(Ordering::SeqCst) || !self.dirty.load(Ordering::SeqCst) {
             return true;
         }
+        let now = self.clock.now();
         let mut state = self.state.held();
         // Before `dirty` is cleared, deliberately: leaving it set is what hands the frame
         // to the retry machinery, so the held output is drawn the moment the frame ends or
         // the timeout expires rather than waiting on the child's next write.
-        if remaining(state.sync_until).is_some() {
+        if remaining(state.sync_until, now).is_some() {
             return true;
         }
-        if !state.echo && state.last.is_some_and(|t| t.elapsed() < state.min_interval) {
+        if !state.echo
+            && state
+                .last
+                .is_some_and(|t| now.duration_since(t) < state.min_interval)
+        {
             return true;
         }
         // Same reasoning as the sync check above, and the same handling: the frame stays
         // dirty and the retry machinery draws it the moment the child stops writing.
-        if state.hold(self.quiescence).is_some() {
+        if state.hold(self.quiescence, now).is_some() {
             return true;
         }
-        state.last = Some(std::time::Instant::now());
+        state.last = Some(now);
         state.ceiling_at = None;
         state.held_since = None;
         state.echo = false;
@@ -508,20 +554,21 @@ impl Notifier {
         if self.notified.load(Ordering::SeqCst) || !self.dirty.load(Ordering::SeqCst) {
             return base;
         }
+        let now = self.clock.now();
         let state = self.state.held();
         // An echo does not wait on the throttle, so it has no remainder to sleep out.
         let throttle = state
             .last
             .filter(|_| !state.echo)
-            .map(|t| state.min_interval.saturating_sub(t.elapsed()))
+            .map(|t| state.min_interval.saturating_sub(now.duration_since(t)))
             .unwrap_or_default();
         // A frame held by DEC mode 2026 or by the quiescence hold keeps `dirty` set with
         // nothing to flush, so the throttle's remainder is typically zero, and polling on
         // that would spin this thread for the length of the frame. Taking the latest
         // deadline avoids that and retires each hold on time.
         let wait = throttle
-            .max(remaining(state.sync_until).unwrap_or_default())
-            .max(state.hold(self.quiescence).unwrap_or_default());
+            .max(remaining(state.sync_until, now).unwrap_or_default())
+            .max(state.hold(self.quiescence, now).unwrap_or_default());
         drop(state);
         wait
     }
@@ -532,9 +579,15 @@ impl Notifier {
     }
 }
 
-/// How much of a deadline is left, or `None` if it has passed or was never set.
-fn remaining(deadline: Option<std::time::Instant>) -> Option<std::time::Duration> {
-    deadline.and_then(|t| t.checked_duration_since(std::time::Instant::now()))
+/// How much of a deadline is left at NOW, or `None` if it has passed or was never set.
+///
+/// NOW is a parameter rather than read here so that every deadline a decision weighs is
+/// weighed against the same instant, and so that [`Clock`] reaches this too.
+fn remaining(
+    deadline: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    deadline.and_then(|t| t.checked_duration_since(now))
 }
 
 struct Shared {
@@ -559,6 +612,9 @@ struct Shared {
     pending_resize: Mutex<Option<Winsize>>,
     /// Everything to do with telling Emacs there is something to draw; see [`Notifier`].
     notifier: Notifier,
+    /// Where the deadlines below are read against; see [`Clock`]. The same clock the
+    /// notifier holds, so the two never disagree about when a tick is due.
+    clock: Clock,
     /// When to take one extra termios sample in the wake of output; see
     /// [`RESAMPLE_DELAY`]. `None` whenever no burst is outstanding, which is most of the
     /// time and is what keeps an idle session from arming anything at all.
@@ -636,7 +692,7 @@ impl Interrupt {
 
 /// The tuning knobs [`Session::spawn`] takes, named rather than positional, with their
 /// defaults in the [`Default`] impl beside the fields they belong to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct Options {
     /// See [`NotifyState::min_interval`].
     pub min_redisplay_interval: std::time::Duration,
@@ -654,6 +710,11 @@ pub(crate) struct Options {
     /// answer that is never a blank rectangle: a producer wrongly refused draws in half
     /// blocks.
     pub graphics: crate::emu::ShownFormats,
+    /// Where the pacing reads the time; see [`Clock`].
+    ///
+    /// Carried here rather than taken by [`Session::spawn`] so that the Lisp side is
+    /// unchanged by its existence: nothing but a test ever sets it.
+    pub clock: Clock,
 }
 
 impl Options {
@@ -674,6 +735,7 @@ impl Options {
             frame_ceiling: min_redisplay_interval,
             backlog_limit: crate::emu::BACKLOG_HIGH_WATER,
             graphics: crate::emu::ShownFormats::NONE,
+            clock: Clock::default(),
         }
     }
 }
@@ -731,6 +793,7 @@ impl Session {
             writer: Mutex::new(()),
             mode: AtomicMode::new(mode),
             pending_resize: Mutex::new(None),
+            clock: options.clock.clone(),
             notifier: Notifier::new(wake, &options),
             resample_at: Mutex::new(None),
             backlog_limit: AtomicUsize::new(options.backlog_limit),
@@ -1174,7 +1237,7 @@ impl Shared {
     fn poll_timeout(&self) -> (PollTimeout, bool) {
         let tick = self.base_poll_wait();
         let mut wait = self.notifier.poll_wait(tick);
-        if let Some(left) = remaining(*self.resample_at.held()) {
+        if let Some(left) = remaining(*self.resample_at.held(), self.clock.now()) {
             wait = wait.min(left);
         }
         let timeout =
@@ -1225,7 +1288,7 @@ impl Shared {
 
     /// Whether input has been sent recently enough to owe this session the eager tick.
     fn interacting(&self) -> bool {
-        remaining(*self.interacted_until.held()).is_some()
+        remaining(*self.interacted_until.held(), self.clock.now()).is_some()
     }
 
     /// Note that the user just did something to this session, whoever is looking at it.
@@ -1243,8 +1306,9 @@ impl Shared {
             return;
         }
         let mut until = self.interacted_until.held();
-        let was_interacting = remaining(*until).is_some();
-        *until = Some(std::time::Instant::now() + INTERACTION_WINDOW);
+        let now = self.clock.now();
+        let was_interacting = remaining(*until, now).is_some();
+        *until = Some(now + INTERACTION_WINDOW);
         drop(until);
         if !was_interacting {
             self.interrupt.raise();
@@ -1253,7 +1317,7 @@ impl Shared {
 
     /// Ask again shortly, because the child just wrote something; see [`RESAMPLE_DELAY`].
     fn arm_resample(&self) {
-        *self.resample_at.held() = Some(std::time::Instant::now() + RESAMPLE_DELAY);
+        *self.resample_at.held() = Some(self.clock.now() + RESAMPLE_DELAY);
     }
 
     /// Retire an armed resample once its moment has come and gone.
@@ -1263,7 +1327,7 @@ impl Shared {
     /// there is nothing left for it to bring forward.
     fn retire_resample(&self) {
         let mut at = self.resample_at.held();
-        if at.is_some_and(|t| t <= std::time::Instant::now()) {
+        if at.is_some_and(|t| t <= self.clock.now()) {
             *at = None;
         }
     }
@@ -1671,8 +1735,73 @@ mod tests {
     }
 
     /// A deadline of `seconds`, stretched by [`crate::pty::timeout_scale`].
+    ///
+    /// For the tests with a real child in them, which are the only ones left that wait on
+    /// the wall clock; the notifier's own tests step [`TestClock`] instead and so have no
+    /// deadline to stretch.
     fn patience(seconds: f64) -> Duration {
         Duration::from_secs_f64(seconds * crate::pty::timeout_scale())
+    }
+
+    /// A clock a test moves by hand, and the [`Clock`] the notifier reads it through.
+    ///
+    /// The pacing rules are a relation between deadlines rather than something that takes
+    /// time, so each of the notifier's tests states one as a sequence of steps with
+    /// [`TestClock::advance`] between them. Nothing there sleeps, so nothing there is a
+    /// question about how loaded the machine is.
+    #[derive(Clone)]
+    struct TestClock(Arc<Mutex<Instant>>);
+
+    impl TestClock {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Instant::now())))
+        }
+
+        /// The handle to put in [`Options`], reading the same instant this one moves.
+        fn clock(&self) -> Clock {
+            let at = Arc::clone(&self.0);
+            Clock(Arc::new(move || *at.held()))
+        }
+
+        fn now(&self) -> Instant {
+            *self.0.held()
+        }
+
+        fn advance(&self, by: Duration) {
+            *self.0.held() += by;
+        }
+    }
+
+    /// A notifier on a hand-stepped clock, with the wake pipe to watch it on.
+    ///
+    /// `Options` rather than the interval alone because the ceiling derives from the
+    /// interval, and because every test here pins the gates it is not about out of the
+    /// way.
+    fn paced_notifier(options: Options) -> (Notifier, OwnedFd, TestClock) {
+        let clock = TestClock::new();
+        let (read, write) = pipe();
+        let notifier = Notifier::new(
+            write,
+            &Options {
+                clock: clock.clock(),
+                ..options
+            },
+        );
+        (notifier, read, clock)
+    }
+
+    /// Whether a wake byte is waiting on READ, taking it if so.
+    ///
+    /// [`woke_within`] with the waiting taken out: with the clock stopped nothing is on
+    /// its way, so a byte is either on the pipe now or was never sent.
+    fn woke(read: &OwnedFd) -> bool {
+        nix::fcntl::fcntl(
+            read.as_fd(),
+            nix::fcntl::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+        )
+        .expect("nonblock");
+        let mut byte = [0u8; 1];
+        matches!(nix::unistd::read(read.as_fd(), &mut byte), Ok(1))
     }
 
     fn wait_for(session: &Session, done: impl FnMut(&Update) -> bool) -> Update {
@@ -1901,33 +2030,34 @@ mod tests {
     /// in one read depends on the reader's chunking.
     #[test]
     fn noise_from_a_client_cannot_hold_a_drawn_frame_back() {
-        let (read, write) = pipe();
-        let notifier = Notifier::new(write, &Options::default());
+        let (notifier, read, clock) = paced_notifier(Options::default());
+        let start = clock.now();
         // One drawable change -- the frame -- and then nothing but reads.
         notifier.fed(true, true);
-        let start = Instant::now();
-        let mut held_for = None;
-        while start.elapsed() < HOLD_CEILING * 2 {
-            notifier.fed(false, true);
-            notifier.flush();
-            if woke_within(&read, Duration::ZERO) {
-                held_for = Some(start.elapsed());
-                break;
+        // Reads closer together than `QUIESCENCE`, which is what makes the pty never
+        // quiet, and none of them drawable, so the ceiling the second change would arm is
+        // never armed either. Answers whether the frame went out by ELAPSED past its one
+        // change.
+        let noise_until = |elapsed: Duration| {
+            while clock.now() < start + elapsed {
+                notifier.fed(false, true);
+                notifier.flush();
+                if woke(&read) {
+                    return true;
+                }
+                clock.advance(QUIESCENCE / 2);
             }
-            // Closer together than `QUIESCENCE`, which is what makes the pty never quiet.
-            std::thread::sleep(QUIESCENCE / 2);
-        }
-        let held_for = held_for.unwrap_or_else(|| {
-            panic!(
-                "a client writing nothing drawable held its one drawn frame for the whole \
-                 of {:?}; the hold must be bounded from the frame's first change, not \
-                 from the last read",
-                start.elapsed()
-            )
-        });
+            false
+        };
         assert!(
-            held_for < HOLD_CEILING + Duration::from_millis(50),
-            "the frame was held {held_for:?}, past the {HOLD_CEILING:?} backstop"
+            !noise_until(HOLD_CEILING - QUIESCENCE),
+            "the frame was drawn before the {HOLD_CEILING:?} backstop it is held by"
+        );
+        assert!(
+            noise_until(HOLD_CEILING + QUIESCENCE),
+            "a client writing nothing drawable held its one drawn frame past the \
+             {HOLD_CEILING:?} backstop; the hold is bounded from the frame's first \
+             change, not from the last read"
         );
     }
 
@@ -1945,35 +2075,39 @@ mod tests {
     /// the first one set.
     #[test]
     fn a_renewed_sync_marker_cannot_push_a_held_frame_past_its_cap() {
-        let (read, write) = pipe();
-        let notifier = Notifier::new(write, &Options::default());
-        let start = Instant::now();
-        let mut held_for = None;
-        // Twice the cap: long enough that a deadline being renewed never expires inside
-        // it, short enough to fail quickly when one is.
-        while start.elapsed() < emu::term::SYNC_TIMEOUT * 2 {
-            // A read that is drawable, is inside a frame, and begins another one.
-            notifier.fed(true, true);
-            notifier.set_sync(Some(Instant::now() + emu::term::SYNC_TIMEOUT));
-            notifier.flush();
-            if woke_within(&read, Duration::ZERO) {
-                held_for = Some(start.elapsed());
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let held_for = held_for.unwrap_or_else(|| {
-            panic!(
-                "a client that kept beginning frames held the buffer for the whole of \
-                 {:?} and was never drawn",
-                start.elapsed()
-            )
+        // Any two instants state the rule, and a cap of the emulator's own
+        // [`SYNC_TIMEOUT`] would be indistinguishable from [`HOLD_CEILING`], which is the
+        // same number. Forty milliseconds keeps the two apart.
+        const FRAME: Duration = Duration::from_millis(40);
+        let (notifier, read, clock) = paced_notifier(Options {
+            // Out of the way, both of them: what releases the frame below has to be the
+            // marker's own deadline and nothing else.
+            quiescence: Duration::from_millis(1),
+            frame_ceiling: Duration::from_secs(1),
+            ..Options::with_min_redisplay_interval(Duration::from_millis(1))
         });
+        let start = clock.now();
+        notifier.fed(true, true);
+        notifier.set_sync(Some(start + FRAME));
+
+        // Half way through, a read that is drawable, is inside the held frame, and begins
+        // another one.
+        clock.advance(FRAME / 2);
+        notifier.fed(true, true);
+        notifier.set_sync(Some(clock.now() + FRAME));
+        notifier.flush();
         assert!(
-            held_for < emu::term::SYNC_TIMEOUT + Duration::from_millis(50),
-            "the frame was held {held_for:?}, past the {:?} cap its first marker set; a \
-             later marker must leave that deadline where it is",
-            emu::term::SYNC_TIMEOUT
+            !woke(&read),
+            "the frame was drawn before its own marker expired"
+        );
+
+        clock.advance(FRAME / 2 + Duration::from_millis(1));
+        notifier.flush();
+        assert!(
+            woke(&read),
+            "a marker renewed mid-frame pushed the {FRAME:?} cap the first one set out to \
+             {:?}; a later marker must leave that deadline where it is",
+            FRAME + FRAME / 2
         );
     }
 
@@ -2401,22 +2535,17 @@ mod tests {
     /// next resample some 50ms later.
     #[test]
     fn a_keystroke_waives_the_interval_for_one_frame_only() {
-        let (read, write) = pipe();
-        let notifier = Notifier::new(write, &Options::with_min_redisplay_interval(PACED));
-        // Past `QUIESCENCE` before each flush, so the throttle is the only gate left.
-        let settled = || std::thread::sleep(QUIESCENCE * 4);
-        let frame = |notifier: &Notifier| {
+        let (notifier, read, clock) = paced_notifier(Options::with_min_redisplay_interval(PACED));
+        // Each flush is made past `QUIESCENCE`, so the throttle is the only gate left.
+        let frame = || {
             notifier.fed(true, true);
-            settled();
+            clock.advance(QUIESCENCE * 4);
             notifier.flush();
-            let woke = woke_within(&read, Duration::ZERO);
+            let sent = woke(&read);
             notifier.acknowledge();
-            woke
+            sent
         };
-        assert!(
-            frame(&notifier),
-            "the first frame has no interval to wait on"
-        );
+        assert!(frame(), "the first frame has no interval to wait on");
 
         notifier.expect_echo();
         notifier.fed(true, true);
@@ -2425,17 +2554,145 @@ mod tests {
             tick <= QUIESCENCE,
             "the reader would sleep {tick:?} before flushing an echo"
         );
-        assert!(frame(&notifier), "the echo waited on the interval");
+        assert!(frame(), "the echo waited on the interval");
         assert!(
-            !frame(&notifier),
+            !frame(),
             "a second read after one keystroke skipped the interval too"
         );
 
         notifier.expect_echo();
-        std::thread::sleep(ECHO_WINDOW + Duration::from_millis(10));
+        clock.advance(ECHO_WINDOW + Duration::from_millis(1));
+        assert!(!frame(), "an expired echo window still waived the interval");
+    }
+
+    /// An echo skips the redisplay interval and still waits for the pty to go quiet.
+    ///
+    /// The two gates differ in kind, which is why only one of them is waived. The throttle
+    /// is a pure clock, and skipping it is what keeps a keystroke from waiting out an
+    /// interval the *previous* echo started. [`QUIESCENCE`] is not a clock but the question
+    /// of whether the child has finished writing, and a line editor redrawing its line in
+    /// several writes is exactly what it is there for -- so the echo waits on it like
+    /// anything else. See [`NotifyState::echo`].
+    #[test]
+    fn an_echo_waives_the_throttle_and_not_the_quiescence_wait() {
+        /// Wide enough to be stepped either side of, with `min_interval` far above it so
+        /// the throttle is the gate the waiver is measured against.
+        const QUIET: Duration = Duration::from_millis(10);
+        let (notifier, read, clock) = paced_notifier(Options {
+            quiescence: QUIET,
+            ..Options::with_min_redisplay_interval(PACED)
+        });
+
+        // A frame first, so there is a `last` for the throttle to be measured from.
+        notifier.fed(true, true);
+        clock.advance(QUIET * 2);
+        notifier.flush();
+        assert!(woke(&read), "the first frame has no interval to wait on");
+        notifier.acknowledge();
+
+        notifier.expect_echo();
+        notifier.fed(true, true);
+        notifier.flush();
         assert!(
-            !frame(&notifier),
-            "an expired echo window still waived the interval"
+            !woke(&read),
+            "an echo was drawn before the pty went quiet, so the child may be half way \
+             through redrawing its line"
+        );
+
+        clock.advance(QUIET * 2);
+        notifier.flush();
+        assert!(
+            woke(&read),
+            "the echo waited out the {PACED:?} interval the frame before it started"
+        );
+    }
+
+    /// The frame ceiling is armed by a frame's *second* drawable change, not its first.
+    ///
+    /// One cursor move followed by a long silent image transfer has nothing further to
+    /// show, and firing on it would draw the cursor on top of a picture that has not
+    /// arrived. A client genuinely streaming changes produces its second within
+    /// microseconds and so arms the ceiling at once; until it does, the only bound on the
+    /// hold is [`HOLD_CEILING`], which is far away here. See
+    /// [`NotifyState::frame_ceiling`].
+    #[test]
+    fn the_frame_ceiling_is_armed_by_the_second_change() {
+        const CEILING: Duration = Duration::from_millis(20);
+        let (notifier, read, clock) = paced_notifier(Options {
+            // Never quiet, so the ceiling is the only thing that can release the frame,
+            // and no interval worth speaking of, so the throttle is not it either.
+            quiescence: Duration::from_secs(30),
+            frame_ceiling: CEILING,
+            ..Options::with_min_redisplay_interval(Duration::from_millis(1))
+        });
+
+        notifier.fed(true, true);
+        clock.advance(CEILING * 2);
+        notifier.flush();
+        assert!(
+            !woke(&read),
+            "one change armed the ceiling; a lone cursor move would be drawn over the \
+             image transfer behind it"
+        );
+
+        notifier.fed(true, true);
+        notifier.flush();
+        assert!(
+            !woke(&read),
+            "the second change was drawn at once instead of arming the ceiling"
+        );
+
+        clock.advance(CEILING + Duration::from_millis(1));
+        notifier.flush();
+        assert!(
+            woke(&read),
+            "a client streaming changes was never drawn at the {CEILING:?} ceiling its \
+             second change armed"
+        );
+    }
+
+    /// An announcement releases a held frame, and the one deadline it leaves alone is the
+    /// client's own.
+    ///
+    /// A termios change, a full backlog or an exited child is nothing the child will
+    /// finish writing, so the quiescence wait and the ceilings it arms are cleared
+    /// outright: `getpass` turning echo off just after printing its prompt must not wait
+    /// on the rest of an update. DEC mode 2026 is the exception, and the reason `announce`
+    /// clears three deadlines and not the fourth -- there the client has said in as many
+    /// words that its screen is mid-frame. See [`Notifier::announce`].
+    #[test]
+    fn an_announcement_releases_a_held_frame_but_not_a_synchronized_one() {
+        const FRAME: Duration = Duration::from_millis(40);
+        let (notifier, read, clock) = paced_notifier(Options {
+            // Never quiet: nothing but the announcement can release this frame.
+            quiescence: Duration::from_secs(30),
+            ..Options::with_min_redisplay_interval(Duration::from_millis(1))
+        });
+
+        notifier.fed(true, true);
+        notifier.flush();
+        assert!(!woke(&read), "a frame still being written was drawn");
+        notifier.announce();
+        assert!(
+            woke(&read),
+            "an announcement waited out a quiescence hold it had just cleared"
+        );
+        notifier.acknowledge();
+
+        // The same again, with the client's own marker set over it.
+        notifier.fed(true, true);
+        notifier.set_sync(Some(clock.now() + FRAME));
+        notifier.announce();
+        assert!(
+            !woke(&read),
+            "an announcement drew over a frame the client had marked as unfinished"
+        );
+
+        clock.advance(FRAME + Duration::from_millis(1));
+        notifier.flush();
+        assert!(
+            woke(&read),
+            "the announcement was lost rather than retried when the marker expired"
         );
     }
 
