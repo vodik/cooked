@@ -414,6 +414,55 @@ somebody else's package."
       (kill-buffer buffer)
       (delete-directory home t))))
 
+(ert-deftest cooked-completion-completes-the-second-line-of-a-request ()
+  "A line submitted with `cooked-newline' carries its newline into the request.
+
+Two things used to lose it.  The decoder built its answer a byte at a time
+through `out+=$(printf ...)', and `$(...)' strips a trailing newline, so `%0A'
+decoded to nothing and the two lines arrived run together -- `ls\\nx' as `lsx'.
+And the splitter read the line with a plain `read', which stops at the first
+newline, so the word under the cursor was looked for among the words of the
+first line.
+
+The reply here can only be right if both are: `mytool' is on the second line and
+its spec is the only thing in this shell that answers `alpha'."
+  :tags '(base64 bash)
+  (skip-unless (executable-find "bash"))
+  (skip-unless (executable-find "base64"))
+  (let ((buffer (generate-new-buffer "*cooked-bash-multiline*"))
+        (home (make-temp-file "cooked-bash-home-" t)))
+    (with-temp-file (expand-file-name ".bashrc" home)
+      (insert "PS1='$ '\n"
+              "_mytool() { COMPREPLY=( $(compgen -W \"alpha beta gamma\" -- \"$2\") ); }\n"
+              "complete -F _mytool mytool\n"))
+    (unwind-protect
+        (with-current-buffer buffer
+          (cooked-mode)
+          (let ((default-directory (file-name-as-directory home))
+                (process-environment
+                 (cons (concat "HOME=" home)
+                       (seq-remove (lambda (entry) (string-prefix-p "HOME=" entry))
+                                   process-environment))))
+            (pcase-let ((`(,argv ,env ,scratch)
+                         (cooked--shell-invocation (executable-find "bash"))))
+              (setq cooked--scratch scratch)
+              (cooked--start argv home env)))
+          (cooked--refresh-keymap)
+          (should (cooked-tests--settle
+                   (lambda () (and (cooked--input-start-position)
+                                   (cooked-line-completion-nonce (cooked--line))
+                                   (cooked-line-completion-reply-capable (cooked--line))))
+                   10))
+          (let ((line "echo hi\nmytool a")
+                (cooked-completion-timeout 5))
+            (pcase-let ((`(,prefix ,_suffix ,_truncated . ,records)
+                         (cooked--shell-completions line (length line))))
+              (should (= prefix 1))
+              (should (equal (mapcar #'car records) '("alpha"))))))
+      (with-current-buffer buffer (cooked--cleanup))
+      (kill-buffer buffer)
+      (delete-directory home t))))
+
 (ert-deftest cooked-completion-runs-a-spec-its-loader-defers ()
   "bash-completion registers almost nothing per command.
 

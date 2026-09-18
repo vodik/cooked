@@ -38,19 +38,15 @@ type -P base64 >/dev/null || return
 # which Emacs is doing anyway, on a prefix the shell has already applied.
 __cooked_complete_limit=1000
 
+# Every byte of the request is percent-encoded, so turning each `%' into a `\x' makes
+# the whole field one `%b' escape sequence and one `printf' decodes it.  The answer
+# comes back in REPLY rather than on stdout: the per-byte loop this replaces ran a
+# subshell for every character -- forty for a forty-character line, 23ms of them --
+# and `$(...)' strips the trailing newline, so `%0A' decoded to nothing and a
+# multi-line command line reached the completer with its lines run together.  zsh's
+# half has always been spelled this way.
 __cooked_complete_decode() {
-  local out= i= c=
-  for (( i = 0; i < ${#1}; i++ )); do
-    c=${1:i:1}
-    if [[ $c == % ]]; then
-      printf -v c '\\x%s' "${1:i+1:2}"
-      out+=$(printf "$c")
-      (( i += 2 ))
-    else
-      out+=$c
-    fi
-  done
-  printf '%s' "$out"
+  printf -v REPLY '%b' "${1//\%/\\x}"
 }
 
 # The word under the cursor, and everything before it, the way bash's own completion
@@ -61,10 +57,29 @@ __cooked_complete_decode() {
 __cooked_complete_split() {
   local line=$1 point=$2
   local head=${line:0:point}
+  # A newline is a command separator, and bash's own completion starts the word list
+  # at the last separator before the cursor rather than at the start of the buffer --
+  # `echo hi<newline>mytool a' completes against `mytool', not against `echo'.  Only
+  # the newline is honoured here, because it is the one a line submitted with
+  # `cooked-newline' actually carries; `;' and `|' would need the quoting rules that
+  # go with them, and getting those half right is worse than leaving them whole.
+  # COMP_LINE and COMP_POINT stay the whole request, which is what bash gives a
+  # completion function too.
+  if [[ $head == *$'\n'* ]]; then
+    local prelude=${head%$'\n'*}
+    line=${line:${#prelude}+1}
+    point=$(( point - ${#prelude} - 1 ))
+    head=${line:0:point}
+  fi
   # `read -a' rather than an unquoted expansion: no globbing, no IFS surprises.
-  read -r -a COMP_WORDS <<<"$line"
+  # A NUL delimiter so that the whole of it is read rather than its first physical
+  # line: the tail of a multi-line request has newlines in it, and a plain `read'
+  # would stop at the first one and drop every word after it.  It returns non-zero on
+  # the NUL that never comes, which is nothing to act on -- the array is filled
+  # either way.
+  read -r -d '' -a COMP_WORDS <<<"$line"
   local -a head_words
-  read -r -a head_words <<<"$head"
+  read -r -d '' -a head_words <<<"$head"
   # A line ending in a space starts a fresh, empty word.
   if [[ -z $head || $head == *[[:space:]] ]]; then
     head_words+=("")
@@ -198,10 +213,11 @@ __cooked_complete() {
   # it was completing and is answering a question that no longer exists.
   [[ -n $__cooked_complete_nonce && ${fields[0]} == "$__cooked_complete_nonce" ]] || return
 
-  local line point serial
+  local line point serial REPLY=
   serial=${fields[1]}
   point=${fields[2]}
-  line=$(__cooked_complete_decode "${fields[3]}")
+  __cooked_complete_decode "${fields[3]}"
+  line=$REPLY
 
   local COMP_LINE=$line COMP_POINT=$point COMP_TYPE=9 COMP_KEY=9
   local -a COMP_WORDS=() COMPREPLY=()
