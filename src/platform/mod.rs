@@ -18,6 +18,7 @@
 //! | [`open_slave`] | `TIOCGPTPEER` where there is one, the path where not |
 //! | [`signal_foreground`] | `TIOCSIG` where there is one, `None` where not |
 //! | [`spawn`] | `posix_spawn` where its attributes suffice, `None` where the fork path stays |
+//! | [`poll`] | `ppoll` where there is one, for sub-millisecond waits; `poll` rounded up where not |
 //!
 //! Nothing above the shim should carry a `cfg`; if a caller needs one, the abstraction
 //! is in the wrong place.

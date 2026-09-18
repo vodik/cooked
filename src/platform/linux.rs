@@ -2,11 +2,14 @@
 
 use nix::fcntl::OFlag;
 use nix::libc;
+use nix::poll::PollFd;
 use nix::pty::PtyMaster;
+use nix::sys::time::TimeSpec;
 use nix::unistd::Pid;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::OwnedFd;
+use std::time::Duration;
 
 // The tty ioctls, as functions: `ioctl(fd, request, arg)` with the result checked, and
 // the request number written once. `unreachable_pub` is allowed because the macros can
@@ -82,6 +85,18 @@ pub(crate) fn slave_name(master: &PtyMaster) -> crate::error::Result<CString> {
 /// another thread may fork at any moment and would otherwise inherit both ends.
 pub(crate) fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(nix::unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)?)
+}
+
+/// Wait on FDS for at most WAIT, to the precision the platform offers.
+///
+/// `ppoll`, whose timeout is a `timespec`, because the reader's deadlines are shorter
+/// than a millisecond: the quiescence hold is half of one, and the tail of a redisplay
+/// interval is whatever is left of it. `poll` takes whole milliseconds, and a
+/// `Duration` narrowed to them truncates, so a 500us wait became `poll(.., 0)` and the
+/// reader spun through its whole iteration -- `tcgetattr`, the terminal lock, the
+/// flush -- until the deadline passed on its own.
+pub(crate) fn poll(fds: &mut [PollFd], wait: Duration) -> nix::Result<libc::c_int> {
+    nix::poll::ppoll(fds, Some(TimeSpec::from_duration(wait)), None)
 }
 
 /// Something that says when the process PID has exited.

@@ -12,7 +12,7 @@ use crate::pty::{
 };
 use crate::replies::{ReplyKind, ReplyQueue};
 use nix::errno::Errno;
-use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::poll::{PollFd, PollFlags};
 use nix::sys::signal::{SigSet, Signal};
 use nix::unistd::Pid;
 use std::ffi::OsStr;
@@ -1357,15 +1357,21 @@ impl Shared {
     /// rather than a nearer deadline -- a held frame, a throttled notification, a
     /// resample -- that happens to be shorter. Only the tick counts as quiet when it
     /// expires; see [`Shared::quiet_tick`].
-    fn poll_timeout(&self) -> (PollTimeout, bool) {
+    ///
+    /// A `Duration` rather than a `PollTimeout`, because the deadlines here are shorter
+    /// than the millisecond `poll` counts in: [`QUIESCENCE`] is half of one, and the tail
+    /// of a redisplay interval is whatever is left of it. Narrowed to milliseconds those
+    /// truncated to zero, and a zero timeout is not a wait but a spin -- the reader went
+    /// round its whole iteration, `tcgetattr` and the terminal lock included, as fast as
+    /// it could until the deadline passed. `platform::poll` waits to the precision the
+    /// platform has.
+    fn poll_timeout(&self) -> (std::time::Duration, bool) {
         let tick = self.base_poll_wait();
         let mut wait = self.notifier.poll_wait(tick);
         if let Some(left) = remaining(*self.resample_at.held(), self.clock.now()) {
             wait = wait.min(left);
         }
-        let timeout =
-            PollTimeout::try_from(wait).unwrap_or_else(|_| PollTimeout::from(POLL_TIMEOUT_MS));
-        (timeout, wait >= tick)
+        (wait, wait >= tick)
     }
 
     /// How long a quiet tick lasts: [`POLL_TIMEOUT_MS`] doubled for every tick that has
@@ -1561,8 +1567,8 @@ impl Shared {
                 PollFd::new(self.pty.as_fd(), events),
                 PollFd::new(self.interrupt.read.as_fd(), PollFlags::POLLIN),
             ];
-            let (timeout, is_tick) = self.poll_timeout();
-            match poll(&mut fds, timeout) {
+            let (wait, is_tick) = self.poll_timeout();
+            match crate::platform::poll(&mut fds, wait) {
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(_) => break,
                 Ok(_) => {}
@@ -2942,10 +2948,7 @@ mod tests {
             }
             let mut fds = [PollFd::new(read.as_fd(), PollFlags::POLLIN)];
             let wait = next_key.saturating_duration_since(Instant::now());
-            let _ = poll(
-                &mut fds,
-                PollTimeout::try_from(wait).unwrap_or(PollTimeout::ZERO),
-            );
+            let _ = crate::platform::poll(&mut fds, wait);
             if let Ok(1) = nix::unistd::read(read.as_fd(), &mut byte) {
                 wakes += 1;
                 session.drain();

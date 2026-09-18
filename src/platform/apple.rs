@@ -2,12 +2,14 @@
 
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 use nix::libc;
+use nix::poll::{PollFd, PollTimeout};
 use nix::pty::PtyMaster;
 use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
 use nix::unistd::Pid;
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
+use std::time::Duration;
 
 /// Terminal ioctls the kernel has but neither `libc` nor `nix` defines for Apple.
 ///
@@ -91,6 +93,19 @@ pub(crate) fn cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
         fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))?;
     }
     Ok((read, write))
+}
+
+/// Wait on FDS for at most WAIT, to the precision the platform offers.
+///
+/// Darwin has no `ppoll`, so this is `poll` with the wait rounded *up* to whole
+/// milliseconds. Up rather than down, because a wait truncated to zero returns at once
+/// and the reader spins through its iteration until the deadline passes; rounded up, a
+/// sub-millisecond hold is released up to a millisecond late instead, which nobody can
+/// see. See the Linux module for the deadlines this is about.
+pub(crate) fn poll(fds: &mut [PollFd], wait: Duration) -> nix::Result<libc::c_int> {
+    let millis = wait.as_millis() + u128::from(wait.subsec_nanos() % 1_000_000 != 0);
+    let timeout = PollTimeout::try_from(millis).unwrap_or(PollTimeout::MAX);
+    nix::poll::poll(fds, timeout)
 }
 
 /// Something that says when the process PID has exited.
