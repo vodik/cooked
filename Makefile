@@ -91,7 +91,7 @@ SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo
 
 .PHONY: all test rust-test lisp-test lisp-test-parallel lint checkdoc citations escapes \
         compile bench bench-quick clean module terminfo \
-        dist dist-checksums dist-digests
+        dist dist-checksums dist-digests fuzz
 
 all: test
 
@@ -108,6 +108,28 @@ test: rust-test lisp-test lint
 # that input written out, which a change to the generators cannot turn into another case.
 rust-test:
 	cargo test
+
+# Whatever a child can write, through the parser, the decoders and the drain; see
+# fuzz/fuzz_targets/feed.rs.  Not part of `test': it needs a nightly toolchain and
+# `cargo install cargo-fuzz', and it is a search rather than a gate -- it runs for as
+# long as it is given and is only ever finished in the sense of having found nothing yet.
+#
+#   make fuzz                    five minutes
+#   make fuzz FUZZ_SECONDS=3600  an hour
+#
+# The seeds are tracked and the corpus it grows from them is not.  An input that finds
+# something lands in fuzz/artifacts/feed; it belongs in the Rust suite as a named test
+# with the bytes written out, as a proptest failure does.
+#
+# Its own target directory, and not the exported CARGO_TARGET_DIR: the build is
+# sanitizer-instrumented, and has no business beside the artifact Emacs loads.
+FUZZ_SECONDS ?= 300
+
+fuzz:
+	mkdir -p fuzz/corpus/feed
+	cargo +nightly fuzz run --target-dir fuzz/target feed \
+	  fuzz/corpus/feed fuzz/seeds/feed -- \
+	  -max_total_time=$(FUZZ_SECONDS) -max_len=4096 -timeout=10
 
 # Install by rename, never by writing over the loaded file.
 #

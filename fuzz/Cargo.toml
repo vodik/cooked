@@ -1,0 +1,28 @@
+# The fuzz harness, a crate of its own so that nothing it needs reaches the module
+# Emacs loads: libfuzzer-sys is a nightly-only, sanitizer-instrumented dependency, and
+# `Cargo.toml' one level up says why that list stays as short as it is.
+#
+# Run with `make fuzz', or directly:
+#   cargo +nightly fuzz run feed fuzz/corpus/feed fuzz/seeds/feed
+[package]
+name = "cooked-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cooked = { path = ".." }
+
+[[bin]]
+name = "feed"
+path = "fuzz_targets/feed.rs"
+test = false
+doc = false
+bench = false
+
+# Its own workspace, so `cargo build' at the root never sees it.
+[workspace]

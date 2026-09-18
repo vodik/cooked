@@ -11,3 +11,11 @@ dist/
 # worktrees in particular are checkouts of this same repository, so leaving them
 # untracked means `git status' reports the whole tree twice over.
 .claude/
+
+# The fuzzer's own output: its build, the corpus it grows, and what it finds.  The
+# seeds under fuzz/seeds are sources and are tracked; an input that finds a defect
+# belongs in the Rust suite as a named test, not here.
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
