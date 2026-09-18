@@ -810,22 +810,6 @@ impl Runs {
         });
     }
 
-    /// Open a run in this pen, or extend the open one if it takes the decoration.
-    ///
-    /// The decoration is one character's, and is pushed onto the run's records here, so
-    /// this is called once per decorated cell and not once per stretch of them.
-    fn open(&mut self, style: StyleId, link: Option<LinkId>, deco: Option<DecoCell>) {
-        if !self.joins(style, link, deco) {
-            self.start(style, link, deco);
-            return;
-        }
-        if let Some(cell) = deco
-            && let Some(records) = self.runs.last_mut().and_then(|run| run.deco.as_mut())
-        {
-            records.push(cell);
-        }
-    }
-
     /// Append CH to the open run, counting it.
     pub(crate) fn push_char(&mut self, ch: char) {
         self.text.push(ch);
@@ -857,9 +841,11 @@ impl Runs {
         style: StyleId,
         link: Option<LinkId>,
     ) {
-        self.open(style, link, None);
+        if !self.joins(style, link, None) {
+            self.start(style, link, None);
+        }
         let Self { text, runs } = self;
-        let run = runs.last_mut().expect("`open` leaves a run open");
+        let run = runs.last_mut().expect("a run is open either way");
         for ch in chars {
             text.push(ch);
             run.chars += 1;
@@ -880,12 +866,23 @@ impl Runs {
     /// One cell into the runs: its character, the combining MARKS riding it, and the DECO
     /// it draws instead of its glyph.
     ///
-    /// One `last_mut` for the whole cell rather than one per field: this is the per-cell
-    /// path, and the row it runs over is as long as the grid is wide.
+    /// One look at the open run for the whole cell rather than one per field it touches:
+    /// this is the per-cell path, and it runs over as many cells as the grid is wide.
+    /// DECO is this one character's, and its record joins the run here.
     fn push_cell(&mut self, cell: &Cell, marks: Option<&str>, deco: Option<DecoCell>) {
-        self.open(cell.style, cell.link, deco);
+        let joined = self.joins(cell.style, cell.link, deco);
+        if !joined {
+            self.start(cell.style, cell.link, deco);
+        }
         let Self { text, runs } = self;
-        let run = runs.last_mut().expect("`open` leaves a run open");
+        let run = runs.last_mut().expect("a run is open either way");
+        // `start` already filed the first record; a run that was joined needs this one.
+        if joined
+            && let Some(cell) = deco
+            && let Some(records) = &mut run.deco
+        {
+            records.push(cell);
+        }
         text.push(cell.ch);
         run.chars += 1;
         run.cols += 1;
