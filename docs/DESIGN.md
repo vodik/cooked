@@ -1456,6 +1456,83 @@ holds a record and knows nothing about its neighbours, calls the composition. A 
 to either half reaches all three callers, which is the property that mattered: this was
 three separate derivations once, and the rescale one was the easy one to miss.
 
+## `cooked--settle-styles`: scrollback is coloured when it is looked at
+
+The same asymmetry as `Deco::packed`, one layer along: with the wire format coalescing all
+it can, the largest single item left on the apply path was `put-text-property 'face` over
+text nobody sees. `cooked--render-scrolled` inserts a whole drain's worth of evicted rows
+in one `insert` — that part is cheap — and then walked the batch's packed style records
+putting one `face` interval on per styled run. On 20k lines of `ls --color`-shaped output
+that walk was four fifths of the Emacs-side cost of the entire drain: 100.0 ms p50 for the
+`styled` bench case against 17.7 ms for the same flood with no colour in it.
+
+The rows are, by definition, the ones that have just left the screen. Under a flood they
+leave it again before anyone has read what went before, and the backlog is capped, so most
+of them are trimmed away having never been displayed at all. So the records are kept
+instead of walked: `cooked--defer-styles` records the batch's packed string as
+`cooked-pending-style` on the batch's own text, and `cooked--settle-styles` — reached from
+`cooked--fontify-region`, the jit-lock pass that already existed for the link guesses —
+puts the faces on the first time redisplay asks about any part of that batch. Measured:
+`styled` 100.0 → 47.0 ms p50, with `flood` (plain) and every `per-frame` row unmoved; a
+real `cat` of a 15 MB coloured file 1102 → 780 ms of charged drain-and-apply, shown and
+hidden alike. The user-visible result is identical, which the equivalence test states by
+rendering the same bytes twice — once with `cooked-lazy-scrollback-styles` nil — and
+comparing the `face` at every position.
+
+**A text property, not a side table of markers.** Three reasons, and each of them is a
+cost the other shape would have paid. It is added in the same `add-text-properties` pass
+as `cooked-scrollback` and the read-only props, so recording the debt costs no interval
+walk of its own. It is deleted with the text, so `cooked--trim-scrollback` and
+`cooked--discard-scrollback` throw a whole flood's worth of unpaid styling away by throwing
+the text away — which is exactly what makes a flood cheap, and what a table of markers
+would instead have made a pruning problem. And there is no marker per batch, so a session
+with a hundred batches in flight does not make every insertion walk a hundred markers.
+
+What the property does not carry is where the batch begins, which is what the offsets in
+the records are counted from; that is read back off the interval the property occupies. A
+fresh cons per batch is what keeps two neighbouring batches two intervals, the property
+functions comparing with `eq`. The invariant that makes the interval trustworthy is stated
+in one place and enforced in three: no edit may split a batch or eat its front. Every path
+that deletes scrollback calls `cooked--settle-styles` with DOOMED first, so a batch losing
+part of itself pays for the part that survives and carries no debt across the cut — one
+batch per cut, both edges at once for a `cooked--discard-scrollback-region` taking one
+command's output out of the middle. The insertions are all at a batch's edges — the seam
+newline `cooked--place-seam` writes, and the next batch above it — and plain `insert`
+inherits no properties, so neither lands inside one.
+
+**Links do not wait; faces do.** Both ride the same records, and the split is not
+symmetric because the two are read differently. A face is read by redisplay, and only ever
+about text on screen. A link id is read off the buffer without anything being displayed —
+`cooked-next-link` walks to the next `cooked-link-id` wherever it is, and the URI table is
+never pruned, so there is no memory argument for deferring either. So the deferring render
+walks the records for the link ids alone (`cooked--do-style-links`, one `u32` read per
+span and no property write at all on the blocks — nearly all of them — that carry no
+link), and `cooked--render-link-spans` is told whether the record named a rendition rather
+than asking the text, the two having parted company: unstyled link text still gets
+`cooked-link` as it is inserted, and a styled link's own colour arrives with the rest of
+the batch's.
+
+**The one thing the core had to be asked about is id reuse.** `StyleStore` frees a
+rendition id once no cell names it and mints it again for something else, and its module
+comment states the invariant that made that safe: *text already in the buffer holds its
+face as a value rather than an id*. A deferred batch breaks that invariant — it holds ids,
+and having scrolled off the screen it is exactly the text that has released them. So
+`cooked--install-styles` settles every outstanding batch before it lets a redefinition
+land, while the old id still means what those batches meant, and `cooked--reset-styles`
+does the same before forgetting the table. Ordinary output never reaches it: the core
+collects only past `STYLE_TABLE_CAPACITY` live renditions, and an id re-announced with the
+rendition it already had changes nothing. Under a child that does genuinely churn
+thousands of renditions the deferral degrades to the eager behaviour, which is the right
+direction to degrade in.
+
+Two smaller consequences, both deliberate. The pass is registered when the first batch is
+deferred and not per drain, because `jit-lock-register` marks the *whole buffer*
+unfontified — see `cooked--owe-fontification`, and the typing test that catches the
+alternative. And `cooked--settle-styles` runs outside `cooked--fontify-region`'s session
+and alt-screen guards, because the debt belongs to the text and not to the session: a
+child that has exited leaves `cooked--session` nil and a transcript that outlives it, and
+scrolling back through that transcript is precisely when the deferral has to come good.
+
 ## A transcript has parts, and three subsystems ask for them in three different words
 
 imenu, outline and bookmarks all want the same thing from a buffer — *what are the parts
