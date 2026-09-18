@@ -1079,26 +1079,6 @@ impl Screen {
         }
     }
 
-    /// End the lines of the rows below the content, which continue into nothing.
-    ///
-    /// Emacs trims the live screen to [`Screen::used`] rows, so a wrap flag at or past
-    /// there is a claim its buffer cannot hold: the row it sits on has no text, nor has
-    /// the row it points at -- everything below the content is blank by the definition of
-    /// `used` -- and both are about to be trimmed away. `CSI 1K` on the continuation of a
-    /// wrapped row is how one gets there: the continuation is blanked, the flag on the row
-    /// above stays, and the pair is then a line of nothing wrapped onto nothing.
-    ///
-    /// Cleared rather than left to be filtered out on the way past, because `used` grows
-    /// again whenever the cursor moves down, and a flag that survives comes back on a row
-    /// nothing has damaged. Emacs would then have it only in a buffer that redrew the
-    /// whole screen after the growth and not in one that reached the same screen by
-    /// increments -- which is exactly the disagreement the render oracle reports.
-    pub(crate) fn unwrap_below_content(&mut self) {
-        for index in self.used()..self.height() {
-            self.edit(index, |r| r.set_wrapped(false));
-        }
-    }
-
     /// End the line of row INDEX, whose continuation below it an `IL` or `DL` has taken.
     fn unwrap(&mut self, index: usize) {
         self.edit(index, |r| r.set_wrapped(false));
@@ -2518,32 +2498,6 @@ mod tests {
         screen.delete_lines(1, Pen::default());
         assert_eq!(screen.row(0).unwrap().to_text(), "ijkl");
         assert_eq!(wraps(&screen), [false, false, false, false, false]);
-    }
-
-    #[test]
-    fn the_rows_below_the_content_wrap_into_nothing() {
-        // A wide character that does not fit wraps a row of nothing but blanks, so row 0
-        // heads a line whose only text is the one on row 1.
-        let mut screen = Screen::new(4, 4);
-        screen.goto(0, 3);
-        write(&mut screen, "日");
-        assert_eq!(wraps(&screen), [true, false, false, false]);
-        screen.unwrap_below_content();
-        assert_eq!(
-            wraps(&screen),
-            [true, false, false, false],
-            "row 0 is inside the content: the line it heads is on row 1"
-        );
-
-        // `EL` takes that text away, leaving a line of nothing continued into nothing,
-        // and a scroll then puts the pair below the cursor -- where Emacs trims the
-        // screen region away and can hold no flag at all.
-        screen.erase_line(Erase::All, Pen::default());
-        screen.goto(1, 0);
-        screen.scroll_down(2, Pen::default());
-        assert_eq!(wraps(&screen), [false, false, true, false]);
-        screen.unwrap_below_content();
-        assert_eq!(wraps(&screen), [false, false, false, false]);
     }
 
     /// A rewrap places the cursor on a row its line has, rather than chunking the blanks

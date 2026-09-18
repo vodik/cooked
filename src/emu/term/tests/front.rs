@@ -449,6 +449,25 @@ fn a_blank_row_the_screen_grows_back_over_is_not_sent() {
     assert_eq!(sent(&mut t), Vec::<usize>::new());
 }
 
+/// A blank row that claims a continuation is the one blank row worth sending: an empty
+/// line ends with a newline, and a wrapped row must not.
+///
+/// The flag gets there without a character being written anywhere near it: a wide
+/// character that does not fit in the last column wraps a row of nothing but blanks, `EL`
+/// takes away the continuation holding the only text of that line, and `SD` puts the pair
+/// below the cursor, where Emacs trims the screen region away. Nothing damages the row
+/// again, so the growth back over it is the only thing that can send it.
+#[test]
+fn a_wrapped_blank_row_the_screen_grows_back_over_is_sent() {
+    let mut t = settled(4, 4, "\x1b[1;4H\u{65e5}\x1b[2K\x1b[1;1H\x1b[2T".as_bytes());
+    assert!(t.screen().row(2).unwrap().wrapped());
+    // Down onto the row itself, which damages nothing.
+    t.feed(b"\x1b[3;1H");
+    let delta = t.drain();
+    let wrapped: Vec<(usize, bool)> = delta.rows.iter().map(|r| (r.index, r.wrapped)).collect();
+    assert_eq!(wrapped, [(2, true)]);
+}
+
 #[test]
 fn a_washed_row_a_scroll_brings_up_from_below_the_region_is_sent() {
     // Emacs holds only row 0; the washed rows below it were trimmed. Scrolling up by two

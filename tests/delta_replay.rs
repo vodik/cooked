@@ -1683,3 +1683,40 @@ fn a_picture_sent_again_after_a_hidden_drain_sent_its_bytes() {
     replays_the_whole_grid(1, 4, &steps).unwrap();
     hiding_changes_nothing(1, 4, &steps).unwrap();
 }
+
+/// A background wash rewrapped into rows below the cursor, then scrolled away: the drain
+/// used to end the line of every row at or past `used`, and the wash's rows are past it
+/// -- a wash has no text -- so a run that drained while they sat there archived the
+/// second of them ending a line that the run which stayed hidden archived as continuing.
+#[test]
+fn a_wash_rewrapped_below_the_content_and_scrolled_away() {
+    let steps = [
+        write("\x1b[40m", &[], false),
+        Step::Hide,
+        write("\x1b[H\x1b[1mx", &[], true),
+        write("\x1b[H\x1b[2K\x1b[0mx", &[], false),
+        Step::Resize { rows: 2, cols: -5 },
+        write("\x1b[3;1H ", &[], false),
+        write("\x1b[s", &[100], true),
+        Step::Resize { rows: 0, cols: 0 },
+        write("\u{4e00} ", &[], false),
+        write("\x1b[u", &[], true),
+    ];
+    hiding_changes_nothing(1, 7, &steps).unwrap();
+}
+
+/// A wrapped row stranded below the content and then scrolled away, once with a hidden
+/// drain in between and once without: the drain used to clear the flag, so the row reached
+/// the transcript wrapped only in the run that did not drain while it sat there.
+#[test]
+fn a_wrapped_blank_row_scrolled_away_from_below_the_content() {
+    let steps = [
+        write("\x1b[1;4H\u{65e5}", &[], true),
+        Step::Hide,
+        write("\x1b[2;1H\x1b[2K", &[], true),
+        write("\x1b[1;1H\x1bM\x1bM", &[], true),
+        write("\x1b[4;1H\n\n\n", &[], true),
+        Step::Show,
+    ];
+    hiding_changes_nothing(4, 4, &steps).unwrap();
+}

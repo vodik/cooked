@@ -843,17 +843,17 @@ in one that reached it by increments, since nothing damaged it again."
           :chunks (("\e[1;1H\e[2K日本語" "\eD" (resize 4 4) "\e[1;8H-")
                    ("\e[4;12H"))))))
 
-(ert-deftest cooked-render-oracle-blank-rows-below-the-content-carry-no-wrap ()
-  "A wrapped row that ends up below the content stops claiming a continuation.
+(ert-deftest cooked-render-oracle-a-wrapped-blank-row-below-the-content ()
+  "A wrapped row the screen grows back over arrives wrapped however it got there.
 
 Seed 8248.  A tab to the last column and `本' that does not fit there wraps a
 row of nothing but blanks, `CSI 1K' blanks the continuation holding the only
 text of that line, and `CSI 2 T' scrolls the pair below the cursor.  The
-screen region is trimmed to the used rows, so the flag then sat on a row the
-buffer does not hold: it survived the trim in the emulator and came back the
-moment the cursor moved down again, on a row nothing had damaged, so only the
-buffer that resends every row ever marked it.  Both the cursor moving down and
-a scroll bringing the row back up are here."
+screen region is trimmed to the used rows, so the flag then sits on a row the
+buffer does not hold, and nothing damages that row again: only the buffer that
+resends every row marked it, until the drain began sending a trimmed row that
+the screen grows back over when it is wrapped and not only when it is washed.
+Both the cursor moving down and a scroll bringing the row back up are here."
   (cooked-tests--oracle-check
    '((nil :rows 6 :cols 8 :rejoin t
           :chunks (("\t" "本x" "\e[1K" "\e[2T") ("\e[4;8H")))

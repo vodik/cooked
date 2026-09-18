@@ -438,12 +438,6 @@ impl State {
     /// are promoted rather than sent: see [`Delta::promoted`]. Without it every scrolled
     /// row is text, for a consumer that reads the scrollback rather than keeping a screen.
     pub(super) fn drain(&mut self, promote: bool) -> Delta {
-        // Before the damage is taken, so the rows a dropped flag changes go out with this
-        // drain. Only the primary: Emacs holds the alternate screen's full height, so a
-        // flag below its content is one its buffer can carry.
-        if !self.shown.is_alternate() {
-            self.screen_mut().unwrap_below_content();
-        }
         let damaged = self.screen_mut().drain_damage();
         let promoted = self.front.take_promoted();
         // The scroll the promoted rows left by, read before the log is taken, which drops a
@@ -654,13 +648,28 @@ impl State {
         // the screen grows over it, which a cursor moving down or a scroll does without
         // damaging it. An empty line is what a blank row renders to, but not a row the
         // child washed with a background, so that one is sent.
+        //
+        // A wrapped row is sent too, blank or not, and this is the only route by which a
+        // wrap flag below the content ever reaches Emacs. An empty line carries a newline
+        // and a wrapped row must not, so a row whose line goes on has to be rendered
+        // rather than left to the trim's blank -- `CSI 1K` on the continuation of a
+        // wrapped row leaves exactly that, a line of blanks continued into blanks, and
+        // the flag comes back with the row when the cursor moves down again or a scroll
+        // brings it up. Emacs cannot be told by clearing the flag on the grid instead: a
+        // drain would then be changing the rows a later rewrap re-lays and a later scroll
+        // hands to scrollback, and two consumers draining the same terminal at different
+        // moments -- a buffer no window shows drains without the screen for minutes --
+        // would end up with different transcripts of the same bytes.
         let used = if self.shown.is_alternate() {
             0
         } else {
             screen.used()
         };
         let regrown = (0..used).filter(|&row| {
-            front.trimmed(row) && screen.row(row).is_some_and(|row| !row.is_blank())
+            front.trimmed(row)
+                && screen
+                    .row(row)
+                    .is_some_and(|row| !row.is_blank() || row.wrapped())
         });
         let moved: Vec<usize> = front
             .cursor_rows()
