@@ -23,6 +23,40 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 
 const READ_CHUNK: usize = 64 * 1024;
+
+/// How much of one read the reader parses before it looks up to see whether Emacs is
+/// waiting for the terminal; see [`Shared::feed`].
+///
+/// The lock is what Emacs' thread waits on for a drain, a resize, a `cooked--feed' or
+/// any question put to [`Term`], and before this existed it waited on the parse of a
+/// whole [`READ_CHUNK`] -- 64KB, which at the slowest rate the throughput bench measures
+/// (12 MB/s, `OSC 133` back to back) is five milliseconds, a third of a redisplay
+/// interval, spent by Emacs doing nothing.
+///
+/// 8KB because the two costs meet there. The check between slices is an atomic load and
+/// a bounds test, so eight of them per read is nothing measurable next to parsing 64KB;
+/// what a smaller slice would buy is a shorter worst-case wait, and at 8KB that wait is
+/// already under a millisecond even for the slowest input above and about 90us for
+/// ordinary text. Going to 1KB would multiply the loop overhead eightfold to shave off
+/// what nobody can perceive, and it would also cut more parses in two -- see
+/// [`Shared::feed`] on why a slice boundary is not free.
+const PARSE_SLICE: usize = 8 * 1024;
+
+/// How many times the reader yields its timeslice to let a waiting Emacs thread take the
+/// terminal lock before carrying on regardless; see [`Shared::feed`].
+///
+/// `std::sync::Mutex` is not fair: on Linux it is a futex, and a thread that unlocks and
+/// immediately relocks will usually win the race against the waiter it just woke, which
+/// would make the whole slicing pointless. So the reader does not merely drop the lock,
+/// it waits until the waiter has actually taken it, which [`Waiting`] reports by
+/// decrementing.
+///
+/// Bounded rather than a plain spin, because nothing may make the reader depend on
+/// another thread making progress: a waiter that is descheduled for a whole timeslice
+/// would otherwise hold the pty unread. Sixteen yields is far more than the handoff
+/// takes when the waiter is runnable -- one or two in practice -- and is over in
+/// microseconds when it is not.
+const HANDOFF_YIELDS: usize = 16;
 /// How long the reader may sit in `poll` with nothing else to wait for.
 ///
 /// This is not a frame rate and nothing about redisplay is keyed on it: real pty data
@@ -623,6 +657,20 @@ fn remaining(
 struct Shared {
     pty: Pty,
     term: Mutex<Term>,
+    /// How many threads other than the reader are blocked on `term`, or about to be; see
+    /// [`Shared::term_for_lisp`] and [`Shared::feed`].
+    ///
+    /// The reader reads this between the slices of a parse and steps out of the way when
+    /// it is not zero, so that a drain waits on eight kilobytes of parsing rather than on
+    /// sixty-four.
+    ///
+    /// A count rather than the flag this could be, because two waiters clearing one flag
+    /// would have the first to arrive cancel the second's claim, and the cost of the
+    /// difference is nothing: both are one atomic on a path that is about to block on a
+    /// mutex anyway. Emacs' module calls do come from one thread, but `Session::drop`
+    /// reaches this from whichever thread ran the garbage collector, and the compile pump
+    /// drains sessions of its own.
+    lisp_waiters: AtomicUsize,
     /// Replies the child is owed and has not yet taken; see [`crate::replies`].
     ///
     /// Held only for as long as it takes to queue or to offer the pty a non-blocking
@@ -683,6 +731,33 @@ struct Shared {
     interacted_until: Mutex<Option<std::time::Instant>>,
     interrupt: Interrupt,
     exited: Mutex<Option<i32>>,
+}
+
+/// A claim on [`Shared::lisp_waiters`], held from just before a thread blocks on the
+/// terminal lock until just after it has it.
+///
+/// An RAII guard rather than a pair of calls because the release has to happen on the
+/// panicking path too: the emulator's mutex is taken through [`LockExt::held`] precisely
+/// so that a panic which unwound out of it does not freeze the buffer, and a claim leaked
+/// by that same panic would leave the reader yielding on every slice for the life of the
+/// session.
+///
+/// Dropped once the lock is *taken*, not once it is released: what the reader is being
+/// asked is "is somebody waiting", and a thread that has the lock is no longer waiting
+/// for it.
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl<'a> Waiting<'a> {
+    fn on(waiters: &'a AtomicUsize) -> Self {
+        waiters.fetch_add(1, Ordering::SeqCst);
+        Self(waiters)
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// A self-pipe the reader polls alongside the pty, so the two things that can happen
@@ -819,6 +894,7 @@ impl Session {
         let shared = Arc::new(Shared {
             pty,
             term: Mutex::new(term),
+            lisp_waiters: AtomicUsize::new(0),
             replies: Mutex::new(ReplyQueue::default()),
             writer: Mutex::new(()),
             mode: AtomicMode::new(mode),
@@ -903,7 +979,7 @@ impl Session {
     /// about the grid goes straight to [`Term`] rather than through a one-line forwarder
     /// here.
     pub(crate) fn term(&self) -> MutexGuard<'_, Term> {
-        self.shared.term.held()
+        self.shared.term_for_lisp()
     }
 
     /// [`Session::drain_with`] for a consumer that promotes nothing, which is what the
@@ -927,7 +1003,7 @@ impl Session {
     /// [`Delta::promoted`]: crate::emu::Delta::promoted
     pub(crate) fn drain_with(&self, promote: bool) -> Update {
         self.shared.notifier.acknowledge();
-        let mut term = self.shared.term.held();
+        let mut term = self.shared.term_for_lisp();
         let delta = if promote {
             term.drain_promoting()
         } else {
@@ -949,7 +1025,7 @@ impl Session {
     pub(crate) fn drain_hidden(&self) -> Update {
         self.shared.notifier.acknowledge();
         let exit = *self.shared.exited.held();
-        let mut term = self.shared.term.held();
+        let mut term = self.shared.term_for_lisp();
         let delta = if exit.is_some() {
             term.drain()
         } else {
@@ -984,7 +1060,7 @@ impl Session {
         // The drain's events are handled, so Lisp has queued every answer it owed, and the
         // replies that waited behind them may follow.
         let outbound = {
-            let mut term = self.shared.term.held();
+            let mut term = self.shared.term_for_lisp();
             term.events_handled();
             term.take_outbound()
         };
@@ -1075,8 +1151,7 @@ impl Session {
         // change together: a font change moves both in one event.
         let report =
             self.shared
-                .term
-                .held()
+                .term_for_lisp()
                 .set_size(size.rows.into(), size.cols.into(), size.cell);
         *self.shared.pending_resize.held() = Some(size);
         // Wake the reader rather than leaving the retry to its next tick, which under
@@ -1623,30 +1698,104 @@ impl Shared {
         self.notify();
     }
 
+    /// The emulator, locked, for a thread that is not the reader.
+    ///
+    /// Every path that reaches [`Term`] from Emacs goes through here -- a drain, a
+    /// resize, `cooked--feed', every accessor [`Session::term`] hands out -- so that the
+    /// reader can see that somebody is waiting and cut its parse short; see
+    /// [`Shared::feed`]. One helper rather than a claim raised at each call site, because
+    /// the one call site that forgot would be the one whose latency nobody could explain.
+    ///
+    /// The reader must never call this. It would count itself as a waiter and yield to
+    /// itself, which costs nothing but reads as a lie.
+    fn term_for_lisp(&self) -> MutexGuard<'_, Term> {
+        let _waiting = Waiting::on(&self.lisp_waiters);
+        self.term.held()
+    }
+
     /// Parse DATA into the terminal, decoding any picture in it with the lock dropped.
     ///
     /// Returns whether Emacs has something to draw, and the replies owed the child.
-    /// The lock is held for each parse and released around each decode -- see
-    /// `Term::feed_step` -- so a drain, a resize or a keystroke on Emacs' thread waits
-    /// on microseconds of parsing and never on the decode of a picture.
+    ///
+    /// The lock is released around each decode -- see `Term::feed_step` -- so Emacs never
+    /// waits on the decode of a picture, and the parse itself is cut into
+    /// [`PARSE_SLICE`]-sized pieces with [`Shared::lisp_waiters`] read between them, so a
+    /// drain, a resize or a keystroke waits on one slice of parsing rather than on a
+    /// whole read.
+    ///
+    /// Byte order is untouched: the slices are consecutive and each is parsed to
+    /// completion before the next begins, and the parser is a state machine that carries
+    /// a half-read escape sequence or UTF-8 character across the boundary exactly as it
+    /// already carries one across the boundary between two reads.
+    ///
+    /// What a slice boundary does cost is the [`Term::woken`] comparison, which is a
+    /// snapshot of counters that a drain resets. So the answer is accumulated per
+    /// segment, a segment being the run between two releases of the lock: with nothing
+    /// waiting and no picture to decode there is one segment and the answer is the
+    /// whole-read comparison this always made, and where the lock was released the two
+    /// halves are asked separately, because only the first half's changes are still on
+    /// the counters a drain may have zeroed. That can only answer "drawable" where the
+    /// single comparison would have said no -- never the other way round -- so the worst
+    /// it costs is a wakeup for a read whose net effect was nothing.
+    ///
+    /// A drain landing between two slices is otherwise not observable. It sees a
+    /// consistent [`Term`], because the lock says so, and half of a frame rather than all
+    /// of it is what a drain landing between two *reads* already sees -- the child's
+    /// writes are cut into 64KB pieces by the pty long before they are cut into 8KB
+    /// pieces here. The one client that asks not to be drawn mid-frame says so with DEC
+    /// mode 2026, and that is honoured on the notification side, not here: the marker
+    /// arms `sync_until` and [`NotifyState::decide`] holds the wake byte back until the
+    /// child ends the frame or [`SYNC_TIMEOUT`](crate::emu::term::SYNC_TIMEOUT) runs out.
+    /// A drain the *user* asks for mid-frame was always served at once and still is.
     fn feed(&self, data: &[u8], hidden: bool) -> (bool, Vec<Event>) {
         let limit = self.backlog_limit.load(Ordering::Relaxed);
         let mut term = self.term.held();
-        let progress = term.feed_start();
+        let mut progress = term.feed_start();
+        let mut drawable = false;
         let mut offset = 0;
-        loop {
-            match term.feed_step(&data[offset..]) {
-                Feed::Done => break,
-                Feed::Decode(job, consumed) => {
-                    offset += consumed;
-                    drop(term);
-                    let decoded = job.run();
-                    term = self.term.held();
-                    term.resume(decoded);
+        while offset < data.len() {
+            let slice = (offset + PARSE_SLICE).min(data.len());
+            while offset < slice {
+                match term.feed_step(&data[offset..slice]) {
+                    Feed::Done => offset = slice,
+                    Feed::Decode(job, consumed) => {
+                        offset += consumed;
+                        drawable |= term.woken(&progress, hidden, limit);
+                        drop(term);
+                        let decoded = job.run();
+                        term = self.term.held();
+                        progress = term.feed_start();
+                        term.resume(decoded);
+                    }
                 }
             }
+            if offset < data.len() && self.lisp_waiters.load(Ordering::SeqCst) > 0 {
+                drawable |= term.woken(&progress, hidden, limit);
+                drop(term);
+                self.hand_over();
+                term = self.term.held();
+                progress = term.feed_start();
+            }
         }
-        (term.woken(&progress, hidden, limit), term.take_outbound())
+        drawable |= term.woken(&progress, hidden, limit);
+        (drawable, term.take_outbound())
+    }
+
+    /// Wait, with the terminal lock dropped, for the thread that wanted it to have it.
+    ///
+    /// Dropping the mutex is not enough on its own. `std::sync::Mutex` makes no fairness
+    /// promise, and on Linux the unlocking thread reliably wins the race to relock
+    /// against the waiter it just woke, so a reader that dropped and immediately relocked
+    /// would parse the next slice with the waiter still queued and the handoff would
+    /// never happen. Yielding until the count goes to zero is what actually lets Emacs
+    /// in; see [`HANDOFF_YIELDS`] for why it gives up rather than spinning forever.
+    fn hand_over(&self) {
+        for _ in 0..HANDOFF_YIELDS {
+            if self.lisp_waiters.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            std::thread::yield_now();
+        }
     }
 
     /// Re-read the child's termios, reporting whether it changed.
