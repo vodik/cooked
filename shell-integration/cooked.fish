@@ -134,11 +134,19 @@ if status is-interactive
 
     #
     # Which marks have been written, so that `close the last command' and `there was no
-    # last command' are not spelled the same way.  0 is the first prompt of the session,
-    # which has nothing behind it to close; 1 is a `C' still open and owed a `D' with a
-    # status; 2 is a prompt that was marked but ran no command -- an empty return, or a
-    # cancelled line -- and is owed a bare `D' carrying no status, because there is no
-    # status to carry.  zsh keeps the same three states for the same reason.
+    # last command' are not spelled the same way.  0 is nothing behind this prompt to
+    # close -- the first prompt of the session, or one whose command has already had its
+    # `D'; 1 is a `C' still open and owed a `D' with a status; 2 is a prompt that was
+    # marked and ran nothing, which is owed a bare `D' carrying no status, because there
+    # is no status to carry.  zsh keeps the same three states for the same reason, and
+    # puts the same bytes on the wire for each of them.
+    #
+    # fish reaches the states by a different route, and 0 is where the difference shows.
+    # zsh has one hook at the prompt and writes every `D' from it; fish closes the
+    # command in `fish_postexec', before the prompt, so by the time the prompt handler
+    # runs there is nothing left to close and the state is 0 rather than 2.  Spelling
+    # that as 2 is what used to make the prompt handler unable to tell a command that
+    # had just been closed from an empty return, which is why it wrote no `D' for either.
     #
     set -g __cooked_state 0
 
@@ -170,22 +178,39 @@ if status is-interactive
         function __cooked_postexec --on-event fish_postexec
             set -l last_status $status
             __cooked_osc "133;D;$last_status"
-            set -g __cooked_state 2
+            # Closed, with its status: the prompt about to be drawn has nothing behind
+            # it to close.
+            set -g __cooked_state 0
         end
 
-        # The safety net: whatever reaches a prompt with a `C' still open closes it here,
-        # with a bare `D' because there is no status to give it.  A command interrupted in
-        # a way that skips `fish_postexec' is the case that needs it, and `fish_cancel'
-        # (Ctrl-C on a line being typed) and `fish_posterror' (a syntax error) are hooked
-        # beside `fish_prompt' so that the net is in place even where fish reaches the next
-        # prompt by a route that does not redraw.  Ordinarily this fires and does nothing,
-        # because `fish_postexec' has already closed the command and set the state -- which
-        # is the point.  kitty's fish integration carries the same handler on the same
-        # three events; the old version of this file carried none of it, and a command that
-        # never got its `D' left a record open until some later command landed inside it.
+        # Everything a prompt still owes the last one, which is zsh's precmd by another
+        # name and now writes the same two marks it does.
+        #
+        # State 1 is the safety net: a `C' still open, closed here with a bare `D'
+        # because there is no status to give it.  A command interrupted in a way that
+        # skips `fish_postexec' is the case that needs it, and `fish_cancel' (Ctrl-C on a
+        # line being typed) and `fish_posterror' (a syntax error) are hooked beside
+        # `fish_prompt' so that the net is in place even where fish reaches the next
+        # prompt by a route that does not redraw.  kitty's fish integration carries the
+        # same handler on the same three events; the old version of this file carried
+        # none of it, and a command that never got its `D' left a record open until some
+        # later command landed inside it.
+        #
+        # State 2 is the empty return, and it used to write nothing: a prompt that ran
+        # no command produced `A B A B' with nothing between, where zsh produced `A B D
+        # A B'.  Emacs ignores a `D' that closes nothing, so nothing was wrong on
+        # screen -- but a mark is a claim other terminals read too, and "no command
+        # ran" is a fact worth stating in one spelling rather than two.
+        #
+        # The state is cleared rather than set to 2, and the prompt re-arms it when it
+        # marks itself.  That is what keeps the mark to one per prompt where fish can
+        # reach the same prompt twice: a `fish_cancel' is followed by the redraw's
+        # `fish_prompt' event, and both run this.
         function __cooked_close_open --on-event fish_prompt --on-event fish_cancel --on-event fish_posterror
-            test "$__cooked_state" -eq 1; and __cooked_osc '133;D'
-            set -g __cooked_state 2
+            if test "$__cooked_state" -eq 1; or test "$__cooked_state" -eq 2
+                __cooked_osc '133;D'
+            end
+            set -g __cooked_state 0
         end
     end
 
@@ -277,6 +302,13 @@ if status is-interactive
 
         function fish_prompt
             __cooked_want marks; and __cooked_osc '133;A'
+            # This prompt is marked and has run nothing, which is what state 2 says and
+            # what the next `__cooked_close_open' owes a bare `D' for.  Set here rather
+            # than in the handler that reads it because the `fish_prompt' *event* fires
+            # before this function does: arming it there would arm it before the prompt
+            # it describes, and a session's very first prompt would open with a `D'
+            # closing a prompt that never existed.
+            __cooked_want marks; and set -g __cooked_state 2
             __cooked_inner_prompt
             __cooked_want input-mark; and __cooked_osc '133;B'
         end
@@ -297,5 +329,6 @@ if status is-interactive
         functions --erase __cooked_wrap_prompt
     end
     __cooked_want cwd; and __cooked_report_cwd
-    set -g __cooked_state 2
+    # Not state 2: this runs before the first prompt, which has nothing behind it to
+    # close, and the prompt arms the state itself when it marks itself.
 end

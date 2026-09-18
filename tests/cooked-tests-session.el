@@ -728,6 +728,67 @@ which *emitter* spoke: a mark reaches Emacs the same way whoever sent it."
       (delete-directory config t)
       (delete-file input))))
 
+(ert-deftest cooked-fish-and-zsh-close-a-prompt-that-ran-nothing-alike ()
+  "The three shells are supposed to put the same bytes on the wire for the same
+thing, and for an empty return two of them did not: zsh sends a bare `D' closing
+a prompt that ran no command, and fish sent nothing at all, so `true', an empty
+return and `false' read as `... A B A B ...' where zsh read `... A B D A B ...'.
+
+Emacs ignores a `D' that closes nothing, so nothing was wrong on screen.  What
+was wrong is the claim: a mark is read by other terminals too, and \"no command
+ran\" is a fact worth having one spelling for.
+
+Run against the same input in both shells and compared mark for mark, which is
+the only form of this assertion that cannot drift: it is not a list of marks
+written down here, it is zsh's own transcript.  The comparison stops at the `C'
+for `exit', where the two shells genuinely differ -- fish runs its postexec
+handler for `exit' and zsh dies before its precmd -- and that is a fact about
+the shells rather than about the snippets."
+  :tags '(fish zsh script)
+  (skip-unless (executable-find "fish"))
+  (skip-unless (executable-find "zsh"))
+  (skip-unless (executable-find "script"))
+  (let* ((session "true\n\nfalse\nexit\n")
+         (zsh (cooked-tests--zsh-osc 133 "" session))
+         (config (make-temp-file "cooked-tests-fish-" t))
+         (input (make-temp-file "cooked-tests-fish-in-"))
+         (fish nil))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "fish" config))
+          (with-temp-file (expand-file-name "fish/config.fish" config)
+            (insert "function fish_prompt; printf '$ '; end\n"
+                    "source " (shell-quote-argument
+                               (expand-file-name "cooked.fish"
+                                                 (cooked--integration-directory)))
+                    "\n"))
+          (with-temp-file input (insert session))
+          (with-temp-buffer
+            (let ((process-environment
+                   (append (list (concat "XDG_CONFIG_HOME=" config)
+                                 "TERM_PROGRAM=cooked" "TERM=xterm-256color")
+                           process-environment)))
+              ;; `no-mark-prompt' so that the marks under test are the snippet's;
+              ;; a stock fish 4 marks its own prompts and cooked stands down.  A pty,
+              ;; because fish never runs its reader off a pipe.
+              (call-process "script" input t nil "-qc"
+                            "fish --features=no-mark-prompt -i" "/dev/null"))
+            (goto-char (point-min))
+            (while (re-search-forward "\e]133;\\([A-D]\\)\\(;[^\a]*\\)?\a" nil t)
+              (push (concat (match-string 1) (or (match-string 2) "")) fish)))
+          (setq fish (nreverse fish))
+          ;; The mark this is about, from the shell that did not send it.
+          (should (member "D" fish))
+          ;; A prompt, the empty return's `D', and a prompt: nothing was written twice
+          ;; where fish reaches one prompt by more than one route.
+          (should (equal (seq-count (lambda (m) (equal m "D")) fish) 1))
+          (let ((upto (lambda (marks)
+                        (seq-take marks (1+ (or (seq-position marks "C;cmdline_url=exit")
+                                                (1- (length marks))))))))
+            (should (equal (funcall upto fish) (funcall upto zsh)))))
+      (delete-directory config t)
+      (delete-file input))))
+
 (ert-deftest cooked-fish-stands-down-where-fish-marks-its-own-prompts ()
   "fish 4.0 emits the 133 marks, OSC 7 and OSC 0 itself and unconditionally, so
 the snippet has to get out of the way or bracket every prompt twice.
