@@ -827,6 +827,39 @@ while the same rows resent over existing lines were marked."
      (nil :rows 4 :cols 5 :rejoin nil :chunks (("\e[1;3H") ("\e[4;5H日" "\e[2K")))
      (nil :rows 6 :cols 12 :rejoin t :chunks (("\e[1;3r") ("\e[3;13H" "日本語" "\r\n"))))))
 
+(ert-deftest cooked-render-oracle-a-narrowing-under-a-wide-row-invents-no-wrapped-rows ()
+  "Narrowing the screen under a wrapped wide row wraps nothing the child did not write.
+
+Seed 8180.  `日本語' on row 0 of an 11-column screen, an `IND' leaving the
+cursor on the blank row below it six columns along, and the window narrowed to
+four columns: the rewrap chunks row 0 over two rows, and the cursor is then
+past the end of a line that has none of its own to give.  It used to pad that
+line out to the cursor and chunk the blanks, which invented a wrapped blank row
+under the text and put the cursor below its own content.  The row arrived
+marked `cooked-wrap' in a buffer that had the whole screen resent and unmarked
+in one that reached it by increments, since nothing damaged it again."
+  (cooked-tests--oracle-check
+   '((nil :rows 3 :cols 11 :rejoin nil
+          :chunks (("\e[1;1H\e[2K日本語" "\eD" (resize 4 4) "\e[1;8H-")
+                   ("\e[4;12H"))))))
+
+(ert-deftest cooked-render-oracle-blank-rows-below-the-content-carry-no-wrap ()
+  "A wrapped row that ends up below the content stops claiming a continuation.
+
+Seed 8248.  A tab to the last column and `本' that does not fit there wraps a
+row of nothing but blanks, `CSI 1K' blanks the continuation holding the only
+text of that line, and `CSI 2 T' scrolls the pair below the cursor.  The
+screen region is trimmed to the used rows, so the flag then sat on a row the
+buffer does not hold: it survived the trim in the emulator and came back the
+moment the cursor moved down again, on a row nothing had damaged, so only the
+buffer that resends every row ever marked it.  Both the cursor moving down and
+a scroll bringing the row back up are here."
+  (cooked-tests--oracle-check
+   '((nil :rows 6 :cols 8 :rejoin t
+          :chunks (("\t" "本x" "\e[1K" "\e[2T") ("\e[4;8H")))
+     (nil :rows 6 :cols 8 :rejoin t
+          :chunks (("\t" "本x" "\e[1K" "\e[2T") ("\e[6;1H\r\n├─┤\r\n 42%"))))))
+
 (ert-deftest cooked-render-oracle-a-glyph-run-over-a-torn-wide-character ()
   "Writing over half of a wide character leaves nothing of the other half.
 

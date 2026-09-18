@@ -1079,6 +1079,26 @@ impl Screen {
         }
     }
 
+    /// End the lines of the rows below the content, which continue into nothing.
+    ///
+    /// Emacs trims the live screen to [`Screen::used`] rows, so a wrap flag at or past
+    /// there is a claim its buffer cannot hold: the row it sits on has no text, nor has
+    /// the row it points at -- everything below the content is blank by the definition of
+    /// `used` -- and both are about to be trimmed away. `CSI 1K` on the continuation of a
+    /// wrapped row is how one gets there: the continuation is blanked, the flag on the row
+    /// above stays, and the pair is then a line of nothing wrapped onto nothing.
+    ///
+    /// Cleared rather than left to be filtered out on the way past, because `used` grows
+    /// again whenever the cursor moves down, and a flag that survives comes back on a row
+    /// nothing has damaged. Emacs would then have it only in a buffer that redrew the
+    /// whole screen after the growth and not in one that reached the same screen by
+    /// increments -- which is exactly the disagreement the render oracle reports.
+    pub(crate) fn unwrap_below_content(&mut self) {
+        for index in self.used()..self.height() {
+            self.edit(index, |r| r.set_wrapped(false));
+        }
+    }
+
     /// End the line of row INDEX, whose continuation below it an `IL` or `DL` has taken.
     fn unwrap(&mut self, index: usize) {
         self.edit(index, |r| r.set_wrapped(false));
@@ -1541,14 +1561,6 @@ impl Screen {
             continuing = row.wrapped();
         }
 
-        // The cursor is free to sit past the end of its line's text — on a blank row, or in
-        // the gap a `goto` left. Chunking has to produce a row for wherever it is.
-        if let Some(line) = lines.get_mut(cursor_line) {
-            if line.cells.len() < cursor_offset {
-                line.cells.resize(cursor_offset, Cell::default());
-            }
-        }
-
         // Re-align the seam. The head occupies whole visual rows at the old width but
         // seldom at the new one, and the cells completing its last row belong to the
         // buffer rather than the grid: left here they would start row 0 partway along a
@@ -1648,12 +1660,23 @@ fn default_tabs(cols: usize) -> Vec<bool> {
 
 /// Where an offset into a chunked logical line lands: row within the chunks, column, and
 /// whether the cursor is holding a deferred wrap there.
+///
+/// The offset can fall past every chunk, because the cursor is free to sit past the end of
+/// its line's text — on a blank row, or in the gap a `goto` left — and a gap is not
+/// content: chunking it into rows of its own would turn blanks nobody wrote into a wrapped
+/// line. So it is clamped onto the last column of the last chunk instead, which is the
+/// nearest cell the line still has and the same resolution [`Logical::chunk`] reaches for
+/// a mark in that position. The child redraws on `SIGWINCH` anyway.
 fn place(offset: usize, cols: usize, chunks: usize) -> (usize, usize, bool) {
+    let last = chunks.saturating_sub(1);
     match (offset / cols, offset % cols) {
         // Exactly at the end of the last chunk. Rather than invent a row below it, express
         // it as `Screen::write` does: parked on the last column with the wrap deferred.
-        (row, 0) if row > 0 && row >= chunks => (row - 1, cols - 1, true),
-        (row, col) => (row.min(chunks.saturating_sub(1)), col, false),
+        (row, 0) if row > 0 && row == chunks => (row - 1, cols - 1, true),
+        // Past it: clamped, and without the deferred wrap, which is a claim about what the
+        // next character does rather than about where the cursor is.
+        (row, _) if row > last => (last, cols - 1, false),
+        (row, col) => (row, col, false),
     }
 }
 
@@ -2495,6 +2518,62 @@ mod tests {
         screen.delete_lines(1, Pen::default());
         assert_eq!(screen.row(0).unwrap().to_text(), "ijkl");
         assert_eq!(wraps(&screen), [false, false, false, false, false]);
+    }
+
+    #[test]
+    fn the_rows_below_the_content_wrap_into_nothing() {
+        // A wide character that does not fit wraps a row of nothing but blanks, so row 0
+        // heads a line whose only text is the one on row 1.
+        let mut screen = Screen::new(4, 4);
+        screen.goto(0, 3);
+        write(&mut screen, "日");
+        assert_eq!(wraps(&screen), [true, false, false, false]);
+        screen.unwrap_below_content();
+        assert_eq!(
+            wraps(&screen),
+            [true, false, false, false],
+            "row 0 is inside the content: the line it heads is on row 1"
+        );
+
+        // `EL` takes that text away, leaving a line of nothing continued into nothing,
+        // and a scroll then puts the pair below the cursor -- where Emacs trims the
+        // screen region away and can hold no flag at all.
+        screen.erase_line(Erase::All, Pen::default());
+        screen.goto(1, 0);
+        screen.scroll_down(2, Pen::default());
+        assert_eq!(wraps(&screen), [false, false, true, false]);
+        screen.unwrap_below_content();
+        assert_eq!(wraps(&screen), [false, false, false, false]);
+    }
+
+    /// A rewrap places the cursor on a row its line has, rather than chunking the blanks
+    /// between the text and the cursor into rows of their own.
+    #[test]
+    fn a_rewrap_clamps_a_cursor_past_the_end_of_its_line() {
+        // `日本語` on row 0 and the cursor on the blank row under it, six columns along:
+        // where `IND` leaves it, since an index keeps the column. Narrowed to four, row
+        // 0's line takes two rows and the cursor's own line still has only the one.
+        let mut screen = Screen::new(3, 11);
+        write(&mut screen, "日本語");
+        screen.goto(1, 6);
+
+        screen.resize(4, 4, Resize::Rewrap).discard();
+
+        assert_eq!(
+            wraps(&screen),
+            [true, false, false, false],
+            "the blanks the cursor sits past are not a line that wrapped"
+        );
+        assert_eq!(
+            (screen.cursor.row, screen.cursor.col),
+            (2, 3),
+            "on the last column of the one row its line has"
+        );
+        assert_eq!(
+            screen.used(),
+            3,
+            "and the screen is no taller than its rows"
+        );
     }
 
     #[test]

@@ -393,6 +393,12 @@ impl State {
     /// are promoted rather than sent: see [`Delta::promoted`]. Without it every scrolled
     /// row is text, for a consumer that reads the scrollback rather than keeping a screen.
     pub(super) fn drain(&mut self, promote: bool) -> Delta {
+        // Before the damage is taken, so the rows a dropped flag changes go out with this
+        // drain. Only the primary: Emacs holds the alternate screen's full height, so a
+        // flag below its content is one its buffer can carry.
+        if !self.shown.is_alternate() {
+            self.screen_mut().unwrap_below_content();
+        }
         let damaged = self.screen_mut().drain_damage();
         let promoted = self.front.take_promoted();
         // The scroll the promoted rows left by, read before the log is taken, which drops a
