@@ -33,8 +33,9 @@ pub(crate) struct ValueTag {
 /// `fn(Env<'e>, &[Value<'e>]) -> Result<Value<'e>>`, with `'e` fresh per call, and a
 /// `Value` has nowhere to go but back to Emacs.
 ///
-/// The one handle that really does outlive its call is a global reference, and
-/// [`Value::promote`] is the single place that says so.
+/// The one Lisp object that really does outlive its call is a global reference, and it
+/// is not a `Value` at all but a [`Global`], which has to be bound to an environment
+/// before it can be used as a handle again.
 ///
 /// `PhantomData` rather than a field of substance, so this stays `#[repr(transparent)]`
 /// over the pointer: `funcall` is handed `&[Value]` as the array of `emacs_value` it
@@ -43,16 +44,32 @@ pub(crate) struct ValueTag {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Value<'e>(*mut ValueTag, PhantomData<&'e ValueTag>);
 
-impl<'e> Value<'e> {
+impl Value<'_> {
     const NULL: Self = Self(std::ptr::null_mut(), PhantomData);
+}
 
-    /// Claim that this handle outlives the call that produced it.
+/// A Lisp object Emacs roots for the module, rather than for the length of one call.
+///
+/// A global reference outlives the environment that made it, so there is no lifetime to
+/// carry and no `Value` to be had until one is supplied: [`Global::in_env`] is the only
+/// way back to a handle, and it borrows the environment it is handed. That is the whole
+/// of the type -- a `Global` cannot be passed to Emacs, compared, or read, so the claim
+/// that this object is rooted is made once, in [`Env::global_ref`], and cannot be made
+/// anywhere else by writing a lifetime down.
+///
+/// Nothing frees one. [`SYMBOLS`] is the only holder, and it is never torn down, so
+/// there is no `free_global_ref` here and no machinery to decide when it would be safe
+/// to call.
+struct Global(*mut ValueTag);
+
+impl Global {
+    const NULL: Self = Self(std::ptr::null_mut());
+
+    /// This object as a handle belonging to `env`.
     ///
-    /// # Safety
-    /// Emacs must hold a reference to the object for the whole of `'f`, which is true of
-    /// a global reference and of nothing else a module is handed. [`Env::global_ref`] is
-    /// the only caller, and the table it fills is never freed.
-    unsafe fn promote<'f>(self) -> Value<'f> {
+    /// Sound for any environment: the object is rooted for longer than any of them, so
+    /// borrowing it for the length of one call asks for less than it has.
+    fn in_env<'e>(&self, _: &Env<'e>) -> Value<'e> {
         Value(self.0, PhantomData)
     }
 }
@@ -94,10 +111,11 @@ type FnPtr =
 /// A handle Emacs has just made, not yet tied to the environment that asked for it.
 ///
 /// The slots that *make* a value are handed none, so the mirror has no input lifetime to
-/// borrow the answer from and C offers nothing in its place. Spelling those returns
-/// `Value<'static>` would put the module's one claim that has to be earned into forty
-/// slots that have not earned it; they answer this instead, and [`Fresh::in_env`] is the
-/// one step that ties such a handle to the call that asked for it.
+/// borrow the answer from and C offers nothing in its place. Letting each of those forty
+/// slots name a lifetime of its own would be forty chances to name the wrong one; they
+/// answer this instead, and [`Fresh::in_env`] is the one step that ties such a handle to
+/// the call that asked for it. A [`Global`] is the same trick for the other direction:
+/// an object with no lifetime, usable only once an environment is supplied.
 #[repr(transparent)]
 struct Fresh(*mut ValueTag);
 
@@ -430,13 +448,11 @@ pub(crate) const fn sym_index(name: &str) -> usize {
 
 /// The interned symbols, as global references.
 ///
-/// `Value<'static>` is the exception the lifetime on [`Value`] otherwise rules out, and
-/// this is the only place in the module that holds one. It is earned rather than
-/// asserted: [`Env::global_ref`] promotes a handle only after Emacs has rooted it, and
-/// nothing here ever frees it.
-struct Symbols([Value<'static>; Sym::NAMES.len()]);
+/// The only holder of a [`Global`] in the module, which is why `Global` needs no way to
+/// be freed and no way to be copied out into something longer-lived.
+struct Symbols([Global; Sym::NAMES.len()]);
 
-/// SAFETY: `Value` is a raw pointer, so `Symbols` is neither `Send` nor `Sync` on its
+/// SAFETY: `Global` is a raw pointer, so `Symbols` is neither `Send` nor `Sync` on its
 /// own, and a `static OnceLock<T>` needs both. Each is sound here for its own reason.
 ///
 /// `Sync` -- shared reads from several threads -- because there is only ever one thread
@@ -500,21 +516,18 @@ impl<'e> Env<'e> {
     /// [`Env::sym`] by raw index, for [`plist!`]'s compile-time lookup.
     pub fn sym_at(&self, index: usize) -> Result<Value<'e>> {
         match SYMBOLS.get() {
-            Some(table) => Ok(table.0[index]),
+            Some(table) => Ok(table.0[index].in_env(self)),
             None => self.intern(Sym::NAMES[index]),
         }
     }
 
-    /// Promote a value to one that outlives the call that produced it.
+    /// Ask Emacs to root `v` for longer than this call.
     ///
-    /// The only source of a `Value<'static>` in the module. A global reference is rooted
-    /// until `free_global_ref`, which this module never calls, so the handle really does
-    /// live as long as the process -- see [`SYMBOLS`].
-    fn global_ref(&self, v: Value<'e>) -> Result<Value<'static>> {
-        let global = ffi!(self, make_global_ref, v)?;
-        // SAFETY: Emacs roots a global reference until it is freed, and nothing frees
-        // this one.
-        Ok(unsafe { global.promote() })
+    /// The only source of a [`Global`] in the module. A global reference is rooted until
+    /// `free_global_ref`, which this module never calls, so the object really does live
+    /// as long as the process -- see [`SYMBOLS`].
+    fn global_ref(&self, v: Value<'e>) -> Result<Global> {
+        Ok(Global(ffi!(self, make_global_ref, v)?.0))
     }
 
     /// Fill [`SYMBOLS`]. Called once, from `emacs_module_init`.
@@ -524,7 +537,7 @@ impl<'e> Env<'e> {
     /// process is one Emacs with one obarray, so the symbols already in the table name
     /// the very same objects a re-intern would find.
     pub fn intern_symbols(&self) -> Result<()> {
-        let mut table = [Value::NULL; Sym::NAMES.len()];
+        let mut table = [const { Global::NULL }; Sym::NAMES.len()];
         for (slot, name) in table.iter_mut().zip(Sym::NAMES) {
             *slot = self.global_ref(self.intern(name)?)?;
         }
