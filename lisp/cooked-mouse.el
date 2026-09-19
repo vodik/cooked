@@ -916,13 +916,20 @@ spelling a pager would understand, so nothing is sent.
 Each line goes through `cooked--send-key', one call per line rather than one
 string built up front: DECCKM is the child's to flip between one line and the
 next, and `cooked--send-key' reads it fresh at the moment of every write, the
-same as it does for a key struck at the real keyboard."
+same as it does for a key struck at the real keyboard.
+
+Told, though, that these keys are translated and not struck, which is what
+withholds the echo exemption a real keystroke gets.  A notch held down is
+several of these writes and there are dozens of notches a second; granting each
+one an immediate frame would pace the display off the wheel rather than off
+`cooked-min-redisplay-interval', which is the cost a pointer sweep is already
+careful not to pay."
   (when-let* ((key (cond ((= button (alist-get 'wheel-up cooked--mouse-buttons)) 'up)
                          ((= button (alist-get 'wheel-down cooked--mouse-buttons)) 'down))))
     (let ((session (cooked--require-session))
           (assumed (cooked--assumed-key-protocol)))
       (dotimes (_ (or lines cooked-alternate-scroll-lines))
-        (cooked--send-key session key nil assumed)))))
+        (cooked--send-key session key nil assumed t)))))
 
 (defun cooked--mouse-buffer (window)
   "The live cooked buffer WINDOW is showing, if it is showing one."

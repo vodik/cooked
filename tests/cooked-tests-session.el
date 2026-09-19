@@ -1725,8 +1725,8 @@ state a user setting this in their init file is in."
 
 ;;;; The echo of a key
 
-(defun cooked-tests--echo-arrives-early-p (event)
-  "Whether a byte sent with `last-input-event' bound to EVENT is drawn early.
+(defun cooked-tests--echo-arrives-early-p (keyboard)
+  "Whether a byte sent with `cooked--send's KEYBOARD argument is drawn early.
 
 The session runs at a three-second `cooked-min-redisplay-interval', and the
 frame its child prints on starting has just been applied, so the interval has
@@ -1740,8 +1740,7 @@ second skipped the interval."
                     (not (string-search "ready" (cooked-tests--text))))
           (accept-process-output nil 0.01)))
       (should (string-search "ready" (cooked-tests--text)))
-      (let ((last-input-event event))
-        (cooked--send cooked--session "z"))
+      (cooked--send cooked--session "z" keyboard)
       (let ((deadline (+ (float-time) 0.5)))
         (while (and (< (float-time) deadline)
                     (not (string-search "readyz" (cooked-tests--text))))
@@ -1755,21 +1754,22 @@ second skipped the interval."
 (ert-deftest cooked-a-key-is-echoed-without-waiting-out-the-interval ()
   "A key typed moments after the last frame is echoed at once.
 
-`cooked--send' asks `last-input-event' whether a key was pressed, and a key
-lets the frame that echoes it skip `cooked-min-redisplay-interval'.  Held down,
-every key otherwise waited out the rest of the interval that the previous echo
-had started."
-  (should (cooked-tests--echo-arrives-early-p ?z)))
+The sender tells `cooked--send' the bytes are typing, and that lets the frame
+which echoes them skip `cooked-min-redisplay-interval'.  Held down, every key
+otherwise waited out the rest of the interval that the previous echo had
+started."
+  (should (cooked-tests--echo-arrives-early-p t)))
 
-(ert-deftest cooked-a-mouse-event-waits-out-the-interval ()
-  "A byte sent for a mouse event is paced like any other output.
+(ert-deftest cooked-input-the-user-did-not-type-waits-out-the-interval ()
+  "Bytes sent on the user's behalf are paced like any other output.
 
-A pointer sweep under mode 1003 sends a report per motion event, and a wheel
-notch under alternate scroll sends cursor keys no byte test could tell from
-typing, so it is the event that says what the input was, and a mouse event
-waives nothing."
-  (should-not (cooked-tests--echo-arrives-early-p
-               `(mouse-movement ,(posn-at-point)))))
+A pointer sweep under mode 1003 sends a report per motion event, and a
+completion request sends a line from inside a process filter; neither has an
+echo anybody is waiting on, and a frame apiece is what the interval is there to
+prevent.  The bytes cannot say which they are -- a wheel notch under alternate
+scroll sends the cursor keys a real arrow key sends -- so the sender says, and
+`cooked--send-if-live' is the caller that says nothing."
+  (should-not (cooked-tests--echo-arrives-early-p nil)))
 
 ;;;; The seam, with wrapped rows kept split
 

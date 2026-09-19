@@ -211,9 +211,12 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// Waits up to three seconds for a child that is not reading, then signals, having
         /// sent whatever it took by then. Replies already queued for the child go first.
         ///
-        /// When `last-input-event' is a key rather than a mouse event, the frame that
+        /// With KEYBOARD non-nil, saying the user typed these bytes, the frame that
         /// echoes STRING is drawn without waiting out `cooked-min-redisplay-interval'.
-        "cooked--send" 2..=2 => send;
+        /// Omitted or nil, the frame waits its turn like any other: that is the answer
+        /// for bytes sent on the user's behalf rather than by them, such as a completion
+        /// request or a process filter's write.
+        "cooked--send" 2..=3 => send;
 
         /// Report BUTTON at ROW/COL to SESSION's child, PRESSED or released.
         ///
@@ -258,7 +261,14 @@ pub unsafe extern "C" fn emacs_module_init(runtime: *mut Runtime) -> std::ffi::c
         /// change between one drain and the next, and a key spelled against the previous
         /// answer is read by the child as a different key.  Which key was pressed is
         /// still Lisp's, since that is a question about an Emacs event.
-        "cooked--send-key" 3..=4 => send_key;
+        ///
+        /// TRANSLATED non-nil says this key stands in for something the user did not
+        /// strike -- `cooked--alt-scroll-keys' spelling a wheel notch as cursor keys is
+        /// the only caller that says so -- and withholds the echo exemption
+        /// `cooked-min-redisplay-interval' otherwise waives for a keystroke.  A notch
+        /// held down is dozens of writes a second, and a frame for each is the cost the
+        /// exemption is careful not to pay for a pointer sweep.
+        "cooked--send-key" 3..=5 => send_key;
 
         /// The bytes `cooked--send-key' would send for KEY held with MODS, or nil.
         ///
@@ -790,30 +800,6 @@ fn drain<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     update_to_lisp(env, &update, rejoin)
 }
 
-/// What the command that is sending input was invoked by, as far as the pace cares;
-/// see [`session::Input`].
-///
-/// Asked of `last-input-event` rather than read off the bytes, because the bytes cannot
-/// tell. `cooked--alt-scroll-keys` turns a wheel notch into plain cursor keys, which a
-/// test for the `ESC [ M` and `ESC [ <` mouse report prefixes would take for typing. A key
-/// is an integer or a symbol; a click, a wheel notch, a drag, a drop and a tty paste are
-/// all lists.
-///
-/// The variable is stale when input is sent from a timer or a process filter, such as a
-/// completion request, and names whatever key the user last pressed. The cost of that is
-/// one frame drawn a few milliseconds early, never a frame lost or torn.
-fn input_kind(env: Env) -> Result<session::Input> {
-    let event = env.funcall(
-        sym!(env, "symbol-value")?,
-        &[sym!(env, "last-input-event")?],
-    )?;
-    if env.is_nil(event) || !env.is_nil(env.funcall(sym!(env, "consp")?, &[event])?) {
-        Ok(session::Input::Other)
-    } else {
-        Ok(session::Input::Keyboard)
-    }
-}
-
 /// Write BYTES to SESSION's child as input the user produced, and zero them afterwards.
 ///
 /// The body of `cooked--send', and of every entry point that composes the bytes here
@@ -822,18 +808,31 @@ fn input_kind(env: Env) -> Result<session::Input> {
 /// makes them serve, and the zeroing -- and a second copy of that is a second place for a
 /// pasted password to be left behind in.
 ///
+/// INPUT is the pace hint, and it is the caller's to state rather than this function's to
+/// guess. It was read off `last-input-event` here once, which cost three calls back into
+/// Lisp on every keystroke and, worse, put a core function's behaviour at the mercy of a
+/// Lisp global: the variable is stale whenever input is sent from a timer or a process
+/// filter, so a completion request claimed the keystroke exemption on the strength of
+/// whatever the user had last pressed. Every caller already knows the answer -- a key
+/// report is a key, a mouse report never is -- and the one that does not is `cooked--send',
+/// whose KEYBOARD argument Lisp fills in.
+///
 /// Only BYTES is zeroed here. BYTES is the copy `Vec<u8>'s `FromLisp' impl made, and
 /// the Lisp string it was copied out of is left exactly as its caller passed it in: `cooked-secret.el' `clear-string's its own copy
 /// once the write here returns, and a paste's is the kill ring's entry, which stays the
 /// user's to keep or forget.
-fn write_input<'e>(env: Env<'e>, session: Value<'e>, bytes: &mut [u8]) -> Result<()> {
+fn write_input<'e>(
+    env: Env<'e>,
+    session: Value<'e>,
+    bytes: &mut [u8],
+    input: session::Input,
+) -> Result<()> {
     // `should_quit` is asked while the write waits on a child that is not reading, so
     // `C-g` ends the wait. Emacs raises the quit itself once this returns; all that is
     // owed here is to return.
-    let sent = input_kind(env).and_then(|input| {
-        env.from_lisp::<&Session>(session)
-            .map(|s| s.send(bytes, input, &|| env.should_quit()))
-    });
+    let sent = env
+        .from_lisp::<&Session>(session)
+        .map(|s| s.send(bytes, input, &|| env.should_quit()));
     // Zero unconditionally rather than only for secrets: at keystroke sizes it costs
     // nothing, and it means the password path needs no special case to be covered.
     // `write_volatile` because an ordinary write to a buffer about to be freed is
@@ -848,9 +847,17 @@ fn write_input<'e>(env: Env<'e>, session: Value<'e>, bytes: &mut [u8]) -> Result
     }
 }
 
+/// See `cooked--send'. The one entry point that cannot tell what it is sending, so Lisp
+/// says: KEYBOARD omitted or nil is [`session::Input::Other`], the conservative answer,
+/// which costs a frame the wait it would have waived rather than drawing one early.
 fn send<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
+    let input = if args.get(2).is_some_and(|v| !env.is_nil(*v)) {
+        session::Input::Keyboard
+    } else {
+        session::Input::Other
+    };
     let mut bytes = env.from_lisp::<Vec<u8>>(args[1])?;
-    write_input(env, args[0], &mut bytes)?;
+    write_input(env, args[0], &mut bytes, input)?;
     Ok(env.nil())
 }
 
@@ -881,7 +888,10 @@ fn send_mouse_report<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> 
     else {
         return Ok(env.nil());
     };
-    write_input(env, args[0], &mut bytes)?;
+    // Never a keystroke, whatever the user pressed to get here: a pointer sweep under
+    // mode 1003 writes a report per motion event, and drawing the reply to each early
+    // would be a frame per report.
+    write_input(env, args[0], &mut bytes, session::Input::Other)?;
     env.into_lisp(true)
 }
 
@@ -952,7 +962,16 @@ fn send_key<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
     if bytes.is_empty() {
         return Ok(env.nil());
     }
-    write_input(env, args[0], &mut bytes)?;
+    // A key report is a key, by construction, so the echo exemption is this path's by
+    // default. The exception is the caller that spells something else as a key:
+    // `cooked--alt-scroll-keys' turns one wheel notch into several cursor keys, and the
+    // bytes cannot say so -- they are the bytes a real arrow key sends.
+    let input = if args.get(4).is_some_and(|v| !env.is_nil(*v)) {
+        session::Input::Other
+    } else {
+        session::Input::Keyboard
+    };
+    write_input(env, args[0], &mut bytes, input)?;
     env.into_lisp(true)
 }
 
@@ -982,7 +1001,11 @@ fn send_paste_text<'e>(env: Env<'e>, args: &[Value<'e>]) -> Result<Value<'e>> {
         // write, which can wait out a child that is not reading.
         session.term().paste(&text)
     };
-    let result = write_input(env, args[0], &mut bytes);
+    // A paste is one write, however it was asked for, so the echo exemption cannot cost
+    // more than the single early frame it is meant to buy -- and the user who pressed
+    // `C-y' is waiting to see the line, exactly as a typist waits to see a character.
+    // The repetition the exemption guards against belongs to the mouse, not here.
+    let result = write_input(env, args[0], &mut bytes, session::Input::Keyboard);
     // A paste out of a password manager is the ordinary way a password is typed, so the
     // copy of the text this made is zeroed alongside the bytes `write_input` zeroes. A
     // `\0` is valid UTF-8, so the string is still a string while this runs. TEXT was read

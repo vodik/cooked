@@ -403,8 +403,15 @@ that the session is over."
   (or (cooked--live-session) (user-error "No live session")))
 
 (defun cooked--send-to-child (bytes)
-  "Send BYTES to the child, refusing if the session is over."
-  (cooked--send (cooked--require-session) bytes))
+  "Send BYTES to the child, refusing if the session is over.
+
+Every caller is a command the user invoked with a key — a submitted line, an
+EOF, a job-control character, a key delegated to the child — so BYTES is
+announced to the core as typing, and the frame that echoes it is drawn without
+waiting out `cooked-min-redisplay-interval'.  Input sent on the user's behalf
+rather than by them goes through `cooked--send-if-live', which says the
+opposite."
+  (cooked--send (cooked--require-session) bytes t))
 
 (defun cooked--send-if-live (bytes)
   "Send BYTES if there is still a child, and do nothing if there is not.
@@ -413,7 +420,10 @@ For input the user did not type as such: a completion request, the interrupt
 that abandons a secret prompt.  There the child having just exited is an
 ordinary race rather than something the user asked for and should be told
 about — and signalling from inside a process filter would abort the rest of the
-redisplay.  A reply goes through `cooked--reply-if-live' instead."
+redisplay.  A reply goes through `cooked--reply-if-live' instead.
+
+Which is also why nothing here claims the keystroke exemption: these bytes have
+no echo anybody is waiting on, and the frame they cause can wait its turn."
   (when-let* ((session (cooked--live-session)))
     (cooked--send session bytes)))
 

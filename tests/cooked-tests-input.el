@@ -3334,6 +3334,48 @@ right key, the right number of times, and that a horizontal one sends nothing."
         (cooked--alt-scroll-keys 66)
         (should-not sent)))))
 
+(ert-deftest cooked-the-sender-says-whether-the-user-typed-it ()
+  "Whether input is a keystroke is Lisp's answer to give, not the core's to guess.
+
+`input_kind' read `last-input-event' from inside the module on every send,
+which made the pace hint a function of a Lisp global that is stale whenever
+input is sent from a timer or a process filter: a completion request claimed
+the keystroke exemption on the strength of whatever the user had last pressed,
+and a wheel notch spelled as cursor keys was refused it on the strength of the
+same.  Each caller knows the answer already, so each one states it.
+
+Asserted on the arguments rather than on the pacing, which
+`cooked-a-key-is-echoed-without-waiting-out-the-interval' and
+`cooked-input-the-user-did-not-type-waits-out-the-interval' cover end to end.
+What is left for this one is who says what, which those two cannot see."
+  (with-temp-buffer
+    (cooked-mode)
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--require-session) (lambda () 'session))
+                ((symbol-function 'cooked--live-session) (lambda () 'session))
+                ((symbol-function 'cooked--send)
+                 (lambda (_session bytes &optional keyboard)
+                   (push (cons bytes keyboard) sent))))
+        ;; What the user typed, from a command the user invoked with a key.
+        (cooked--send-to-child "x")
+        (should (equal (car sent) '("x" . t)))
+        ;; And what was sent on the user's behalf: a completion request, the
+        ;; interrupt that abandons a secret prompt.
+        (setq sent nil)
+        (cooked--send-if-live "\t")
+        (should (equal (car sent) '("\t")))))
+    ;; A wheel notch reaches the child as cursor keys, and those are the one kind
+    ;; of key report that is not a keystroke: a notch held down is dozens of
+    ;; writes a second, which is the repetition the exemption avoids paying for.
+    (let (sent)
+      (cl-letf (((symbol-function 'cooked--require-session) (lambda () 'session))
+                ((symbol-function 'cooked--send-key)
+                 (lambda (_session key _mods _assumed &optional translated)
+                   (push (cons key translated) sent))))
+        (let ((cooked-alternate-scroll-lines 1))
+          (cooked--alt-scroll-keys 64))
+        (should (equal sent '((up . t))))))))
+
 (ert-deftest cooked-alternate-scroll-sends-a-trackpads-rows-not-its-events ()
   "Under `pixel-scroll-precision-mode' every trackpad tick is an event carrying a
 few pixels, and alternate scroll sent three lines for each of them, so a gentle
