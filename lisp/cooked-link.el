@@ -202,23 +202,20 @@ contribution and nothing else's.")
 ;;;; The table behind an OSC 8 id
 
 (defvar-local cooked--link-uris nil
-  "Hash table mapping this buffer's `OSC 8' link ids to their URIs.
+  "Hash table mapping the `OSC 8' link ids this drain may name to their URIs.
 
 Strong and buffer-local, like `cooked--image-data': the native core sends a
-URI exactly once per distinct destination however many cells or drains name it,
-so this holds the only copy Emacs has.  Bounded on the other side of the
-boundary rather than here -- see `LinkStore' in src/emu/link.rs -- because
-that is where the ids are minted.
+URI once per id and Lisp holds the only copy.  Bounded on the other side of the
+boundary rather than here -- see `LinkStore' in src/emu/link.rs -- because that
+is where the ids are minted, and bounded by the *live* grid rather than by the
+session: an id is freed once no cell names it and handed to the next
+destination, which arrives here as a redefinition.
 
-Which means this table is not bounded, and is never pruned: it holds every
-distinct destination the session has named.  Dropping the entries whose text
-has left the buffer is not safe from this side.  The core sends a URI only the
-first time it interns it, so if `ls --hyperlink' named a file an hour ago and
-names it again now, the second listing arrives as a bare id, and an entry
-pruned in between would leave that link with nowhere to go.  Pruning needs the
-core told which ids Lisp has let go of, so it can send them again.  Until then
-the cost is one string per destination: tens of kilobytes for every thousand
-distinct files a hyperlinked `ls' has named.")
+So an id is a handle on a transfer and not a name for a destination.  Nothing
+outside a drain resolves one: `cooked--render-link-spans' looks the URI up as
+the text is inserted and puts the string itself on the text, so scrollback
+holds destinations and this table only ever has to answer for the ids the
+core still considers live.")
 
 (defun cooked--install-links (links)
   "Record LINKS, a drain's `:links', before anything referring to them renders.
@@ -227,7 +224,13 @@ Each entry is (ID . URI).  Called from `cooked--apply' beside
 `cooked--install-images' and for the identical reason: a link is a resource the
 rows of this very drain name by id, so it has to be here before they render.
 Events are dispatched after both render passes, so a link arriving as one would
-arrive too late for the row that needed it."
+arrive too late for the row that needed it.
+
+A redefined id simply replaces what it named, as `cooked--install-styles'
+replaces a redefined rendition.  Unlike a rendition it owes nothing on the way
+out: a rendition can be waiting to be put on a batch of scrollback that named
+it by id, while a link is resolved into the text of the very drain that
+installs it, so text already inserted keeps the destination it was given."
   (when links
     (unless cooked--link-uris
       (setq cooked--link-uris (make-hash-table :test #'eq)))
@@ -235,10 +238,11 @@ arrive too late for the row that needed it."
       (puthash id uri cooked--link-uris))))
 
 (defun cooked-link-uri (&optional pos)
-  "The `OSC 8' destination of the text at POS, or nil if it carries none."
-  (when-let* ((table cooked--link-uris)
-              (id (get-text-property (or pos (point)) 'cooked-link-id)))
-    (gethash id table)))
+  "The `OSC 8' destination of the text at POS, or nil if it carries none.
+
+The destination itself, put there by `cooked--render-link-spans' -- not an id
+resolved now, which is why a destination survives its id being reused."
+  (get-text-property (or pos (point)) 'cooked-link-uri))
 
 ;;;; Following
 
@@ -363,7 +367,7 @@ any other key, so a press that goes nowhere still arrives here as `S-mouse-1'."
 
 (defun cooked-link--osc-8-claim-p (beg end)
   "Whether an `OSC 8' span covers any of BEG..END."
-  (text-property-not-all beg end 'cooked-link-id nil))
+  (text-property-not-all beg end 'cooked-link-uri nil))
 
 (defun cooked-link--goto-addr-claim-p (beg end)
   "Whether the detected-URL pass has claimed any of BEG..END.
@@ -443,15 +447,12 @@ Showing the target is what kitty, VTE and iTerm2 all do about that, and it is
 the whole of the defence: following is the user's own doing, so the thing to
 protect is the decision rather than the act.
 
-A function rather than the string it returns, because the id has to be resolved
-against `cooked--link-uris' and doing that per span while rendering would put
-a hash lookup and a `format' on the render path for every link in every
-damaged row.  Hover is rare; drains are not."
-  (let ((buffer (if (bufferp object) object (current-buffer))))
-    (if-let* ((uri (and (buffer-live-p buffer)
-                        (with-current-buffer buffer (cooked-link-uri pos)))))
-        (format "%s\n%s" uri cooked--link-keys)
-      cooked--link-keys)))
+A function rather than the string it returns, because the `format' would then
+be on the render path for every link in every damaged row.  Hover is rare;
+drains are not."
+  (if-let* ((uri (get-text-property pos 'cooked-link-uri object)))
+      (format "%s\n%s" uri cooked--link-keys)
+    cooked--link-keys))
 
 (defun cooked--render-link-spans (start spans)
   "Hang the links SPANS names on text inserted at START.
@@ -461,6 +462,16 @@ record carried -- see `Block' in src/wire.rs -- and STYLED whether the same
 record named a rendition.  The face is left alone whenever the run carries
 styling of its own, since the child asked for both and its colours are the more
 specific statement; only unstyled link text is given `cooked-link'.
+
+The id is resolved here and the *destination* is what goes on the text.  An id
+names a transfer and not a destination: the core frees one as soon as no cell
+names it and hands it to the next URI, so text that kept the id would follow
+the reuse.  The string put on the text is the table's own, not a copy, because
+`cooked-link--osc-8-bounds' delimits a span by the identity of this property.
+
+A span whose id this buffer was never told about is left as plain text, rather
+than given a keymap with nowhere to go.  The core announces an id before any
+row that names it, so reaching that means a drain was dropped.
 
 STYLED is what says so, rather than the face on the text, because the two now
 part company: a batch of scrollback is linked as it is inserted and coloured
@@ -478,9 +489,11 @@ claim a click the image had a better claim to."
     (pcase-dolist (`(,from ,to ,id ,styled) spans)
       (let ((beg (+ start from))
             (end (+ start to)))
-        (unless (eq (car-safe (get-text-property beg 'cooked-deco)) 'image)
+        (when-let* (((not (eq (car-safe (get-text-property beg 'cooked-deco)) 'image)))
+                    (table cooked--link-uris)
+                    (uri (gethash id table)))
           (cooked-link--propertize beg end
-                                   'cooked-link-id id
+                                   'cooked-link-uri uri
                                    'help-echo #'cooked--link-help-echo)
           (unless (or styled (get-text-property beg 'face))
             (put-text-property beg end 'face 'cooked-link)))))))
@@ -1039,14 +1052,19 @@ install from whether or not the layer is present.")
 (defun cooked-link--osc-8-bounds (&optional pos)
   "Bounds of the `OSC 8' span covering POS, or nil.
 
-The span is delimited by the `cooked-link-id' property rather than by
+The span is delimited by the `cooked-link-uri' property rather than by
 anything in the text, which is what makes it correct across a soft wrap and
-across a row boundary: the id travels with the row through eviction, so a
-destination broken over three screen rows still answers as one thing."
+across a row boundary: the destination travels with the row through eviction,
+so one broken over three screen rows still answers as one thing.
+
+The property is compared by identity, not by content, which is why the string
+put on the text is the one the table holds rather than a copy: two spans of one
+`OSC 8' id are one thing here, and two spans the core sent under different ids
+are two even when the destination reads the same."
   (let ((pos (or pos (point))))
-    (when-let* ((id (get-text-property pos 'cooked-link-id)))
-      (cons (or (previous-single-property-change (1+ pos) 'cooked-link-id) (point-min))
-            (or (next-single-property-change pos 'cooked-link-id) (point-max))))))
+    (when (get-text-property pos 'cooked-link-uri)
+      (cons (or (previous-single-property-change (1+ pos) 'cooked-link-uri) (point-min))
+            (or (next-single-property-change pos 'cooked-link-uri) (point-max))))))
 
 (defun cooked-link--url-at-point ()
   "The `OSC 8' destination at point, for `thing-at-point-provider-alist'.
@@ -1141,12 +1159,12 @@ the same answer, for every kind of link."
        (eq (get-text-property pos 'keymap) cooked-link-map)))
 
 (defconst cooked-link--run-properties
-  '(keymap cooked-link-id cooked-link-url cooked-link-fragment)
+  '(keymap cooked-link-uri cooked-link-url cooked-link-fragment)
   "The properties a change in which ends one link's run of text.
 
 Two links can touch.  Two `OSC 8' spans printed back to back carry the same
-keymap and differ only in their id, so the keymap alone would read them as
-one link and step over the second.")
+keymap and differ only in their destination, so the keymap alone would read
+them as one link and step over the second.")
 
 (defun cooked-link--run-bounds (pos)
   "Bounds of the run of one link's text around POS, within its row."
@@ -1165,15 +1183,16 @@ one link and step over the second.")
   "Whether the link run starting at POS carries on the one before its row break.
 
 True when POS begins a row and the last character of the row above belongs
-to the same link: the same `OSC 8' id, or the same fragment id the scan
-gives the pieces of a URL the terminal wrapped.  Destinations are not
-compared, so the same URL printed on two consecutive rows is two links."
+to the same link: the same `OSC 8' span, or the same fragment id the scan
+gives the pieces of a URL the terminal wrapped.  Spans are compared by the
+identity of the destination string and never by its text, so the same URL
+printed on two consecutive rows is two links."
   (and (> pos (1+ (point-min)))
        (eq (char-before pos) ?\n)
        (cooked-link--at-p (- pos 2))
-       (let ((id (get-text-property pos 'cooked-link-id))
+       (let ((id (get-text-property pos 'cooked-link-uri))
              (fragment (get-text-property pos 'cooked-link-fragment)))
-         (or (and id (eql id (get-text-property (- pos 2) 'cooked-link-id)))
+         (or (and id (eq id (get-text-property (- pos 2) 'cooked-link-uri)))
              (and fragment
                   (eq fragment
                       (get-text-property (- pos 2) 'cooked-link-fragment)))))))

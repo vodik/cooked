@@ -36,7 +36,30 @@
       ;; And only the text the sequence covered: the run boundary is the link's,
       ;; not the style's, which is what `Run::link' exists to carry.
       (should-not (cooked-link-uri out))
-      (should-not (get-text-property out 'cooked-link-id)))))
+      (should-not (get-text-property out 'cooked-link-uri)))))
+
+(ert-deftest cooked-a-reused-link-id-leaves-the-text-it-already-named-alone ()
+  "A link id is a handle on a transfer, not a name the buffer keeps.
+
+The core frees an id once no cell names it and hands it to the next
+destination -- `LinkStore::collect' in src/emu/link.rs -- so a buffer that kept
+the id and resolved it at click time would follow the reuse and send a user
+somewhere the child never named.  `cooked--render-link-spans' resolves it as
+the text is inserted instead, which is what makes recycling safe: this drives
+the two halves directly, since making a real child exhaust the store would take
+a session long enough to be its own test."
+  (with-temp-buffer
+    (insert "first\nsecond\n")
+    (cooked--install-links '((1 . "https://first.example/")))
+    (cooked--render-link-spans 1 '((0 5 1 nil)))
+    ;; The same id, now naming somewhere else, and a second span under it.
+    (cooked--install-links '((1 . "https://second.example/")))
+    (cooked--render-link-spans 7 '((0 6 1 nil)))
+    (should (equal (cooked-link-uri 1) "https://first.example/"))
+    (should (equal (cooked-link-uri 7) "https://second.example/"))
+    ;; And the two are separate links, not one run with a hole in it.
+    (should-not (eq (get-text-property 1 'cooked-link-uri)
+                    (get-text-property 7 'cooked-link-uri)))))
 
 (ert-deftest cooked-osc-8-survives-being-coloured-mid-link ()
   ;; The regression this whole feature is one line away from: OSC 8 is not an SGR

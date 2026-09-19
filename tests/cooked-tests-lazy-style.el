@@ -223,10 +223,10 @@ coloured, and it differs in the direction of being more right."
 (ert-deftest cooked-an-osc-8-link-in-scrollback-is-hung-on-without-waiting ()
   "Links do not wait for a display, because the buffer is read for them.
 
-`cooked-next-link' and the mouse both ask the text, so the ids go on as the
-batch is inserted; only the faces are deferred.  An unstyled link run is given
-`cooked-link' then and there, which is the one face a deferred batch can carry
-before anybody looks at it."
+`cooked-next-link' and the mouse both ask the text, so the destinations go on as
+the batch is inserted; only the faces are deferred.  An unstyled link run is
+given `cooked-link' then and there, which is the one face a deferred batch can
+carry before anybody looks at it."
   (cooked-tests--with-session
       (list "/bin/sh" "-c"
             (concat "i=0; while [ $i -lt 90 ]; do "
@@ -238,7 +238,6 @@ before anybody looks at it."
     (should (search-forward "here" nil t))
     (let ((pos (match-beginning 0)))
       (should (< pos (cooked--screen-start-position)))
-      (should (get-text-property pos 'cooked-link-id))
       (should (equal (cooked-link-uri pos) "https://example.com/"))
       (should (eq (get-text-property pos 'face) 'cooked-link)))))
 
