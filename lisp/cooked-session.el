@@ -139,6 +139,29 @@ Takes effect at once, on sessions already running as well as on the next one."
   :set #'cooked--set-tuning-option
   :group 'cooked)
 
+(defun cooked--make-wake-pipe (name buffer filter)
+  "Make the pipe process the core rings to wake a session, and return it.
+
+NAME names it, BUFFER is the buffer it is attached to, and FILTER is called
+when a wake arrives.  The sentinel is silenced because the default one inserts
+\"Process ... finished\" into BUFFER, which is a terminal or a consumer\\='s
+own buffer and in neither case somewhere Emacs may write.  The query flag
+starts clear: the pipe carries wakes rather than a child, so whether killing
+Emacs should ask about it is a question about the child, which
+`cooked--sync-query-flag\\=' keeps answered for a session buffer.
+
+`process-adaptive-read-buffering\\=' is bound to nil for the creation because
+the value in force there is the one the process keeps for life, and it is t by
+default until Emacs 31 while this package supports 29.1.  A wake is one byte,
+so every read of one is a read shorter than 256 bytes, and Emacs answers each
+of those by adding 20 ms to that process\\=' read delay, up to a ceiling of
+70 ms (`read_process_output\\=' in process.c).  Left at t, a session under a
+steadily chattering child would have every wake -- and so every drain and
+every redisplay -- held back by that much."
+  (let ((process-adaptive-read-buffering nil))
+    (make-pipe-process :name name :buffer buffer :noquery t
+                       :sentinel #'ignore :filter filter)))
+
 (defun cooked--start (argv &optional directory extra-env)
   "Spawn ARGV in the current buffer, optionally in DIRECTORY.
 EXTRA-ENV is an alist prepended to the child\\='s environment.
@@ -202,21 +225,16 @@ wherever Emacs is, and is not a request to be second-guessed."
   ;;
   ;; Nothing may ever write here: the read end belongs to Rust, and a stray
   ;; `process-send-string' would land in the wakeup channel.  `comint-input-sender'
-  ;; is overridden in `cooked-mode' so comint's own submission path cannot.  The
-  ;; sentinel is silenced because the default one inserts "Process ... finished"
-  ;; into the buffer it is attached to, which is now the terminal.
+  ;; is overridden in `cooked-mode' so comint's own submission path cannot.
+  ;;
+  ;; This pipe is also the session's stand-in for the "active processes exist"
+  ;; warning, and whether it wants one depends on what the child is doing, so
+  ;; `cooked--sync-query-flag' below takes over the flag it is created with.
   (setq cooked--wake
-        (make-pipe-process :name (format "cooked-wake<%s>" (buffer-name))
-                           :buffer (current-buffer)
-                           ;; This pipe is also the session's stand-in for the
-                           ;; "active processes exist" warning, and whether it
-                           ;; wants one depends on what the child is doing, so
-                           ;; the flag is kept current by
-                           ;; `cooked--sync-query-flag' rather than fixed here.
-                           :noquery t
-                           :sentinel #'ignore
-                           :filter (let ((buffer (current-buffer)))
-                                     (lambda (_proc _string) (cooked--on-wake buffer)))))
+        (cooked--make-wake-pipe (format "cooked-wake<%s>" (buffer-name))
+                                (current-buffer)
+                                (let ((buffer (current-buffer)))
+                                  (lambda (_proc _string) (cooked--on-wake buffer)))))
   (set-marker-insertion-type (process-mark cooked--wake) nil)
   (cooked--sync-query-flag)
   (cooked--set-input-mark nil)

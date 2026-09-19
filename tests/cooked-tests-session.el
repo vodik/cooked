@@ -290,6 +290,34 @@ collection ever runs, so the child has to be killed explicitly."
           (should-not (zerop (call-process "kill" nil nil nil "-0" (number-to-string pid)))))
       (kill-buffer buffer))))
 
+(ert-deftest cooked-wake-pipe-is-not-read-adaptively ()
+  "A pipe created while `process-adaptive-read-buffering' is t keeps that for
+life, and answers every read shorter than 256 bytes by delaying the next one by
+a further 20 ms, to a ceiling of 70 ms.  Every wake is one byte, so a session
+started under the pre-Emacs-31 default would have each of its drains held back
+by that much.  Emacs exposes no accessor for the flag, so the value in force at
+the moment of creation is what is asserted, with the caller's own binding set
+to the value that would be wrong to inherit."
+  (let* ((process-adaptive-read-buffering t)
+         (seen nil)
+         (buffer (generate-new-buffer "*cooked-adaptive*"))
+         (probe (lambda (&rest args)
+                  (push (cons (plist-get args :name)
+                              process-adaptive-read-buffering)
+                        seen))))
+    (unwind-protect
+        (progn
+          (advice-add 'make-pipe-process :before probe)
+          (with-current-buffer buffer
+            (cooked-mode)
+            (cooked--start '("/bin/sh" "-c" "sleep 300"))
+            (should (assoc (process-name cooked--wake) seen))
+            (should-not (cdr (assoc (process-name cooked--wake) seen)))))
+      (advice-remove 'make-pipe-process probe)
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (cooked--cleanup))
+        (kill-buffer buffer)))))
+
 (ert-deftest cooked-core-refuses-values-that-are-not-sessions ()
   "The core compares a user-pointer's finalizer against its own before casting.
 Emacs cannot tell one module's user-pointer from another's, so without that check

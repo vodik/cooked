@@ -289,9 +289,8 @@ cannot be the child's own process."
       (pcase-let ((`(,rows . ,cols) (cooked-process--size buffer)))
         (setq cooked-process--columns cols)
         (setq cooked-process--wake
-              (make-pipe-process :name (format " cooked-process-wake<%s>" name)
-                                 :buffer host :noquery t :sentinel #'ignore
-                                 :filter (lambda (_p _s) (cooked-process--pump host))))
+              (cooked--make-wake-pipe (format " cooked-process-wake<%s>" name) host
+                                      (lambda (_p _s) (cooked-process--pump host))))
         (setq cooked-process--session
               (cooked--spawn argv (cooked-process--environment) rows cols
                              cooked-process--wake
