@@ -473,9 +473,10 @@ split a glyph run at.
 The faces are not put on here either.  This text has by definition just left
 the screen, and under a flood it leaves it again before anyone has looked at
 what went before, so the batch's packed style records are taken on as a debt
-instead and paid by the jit-lock pass over the region redisplay asks for --
-`cooked--defer-styles' and `cooked--settle-styles', which say why that is a
-text property and what it costs.  Its links do go on now; see
+instead, cut into pieces small enough that displaying any part of the batch
+pays for a bounded share of it, and paid by the jit-lock pass over the region
+redisplay asks for -- `cooked--defer-styles' and `cooked--settle-styles', which
+say why that is a text property and what it costs.  Its links do go on now; see
 `cooked--render-block'."
   (save-restriction
     (widen)
@@ -506,8 +507,15 @@ text property and what it costs.  Its links do go on now; see
         ;; this text is scrollback, and the styling it still owes, are added on
         ;; top of it.  One pass for all of them: the debt is recorded by being
         ;; in this list, so recording it costs no interval walk of its own.
+        ;;
+        ;; That pass carries the batch's first piece of owed styling, which
+        ;; covers the whole batch; the pieces after it then claim their own
+        ;; stretches back off it, one property write each.
         (add-text-properties start (point)
-                             `(cooked-scrollback t ,@owed ,@cooked--read-only-props))
+                             `(cooked-scrollback t
+                               ,@(and owed (list 'cooked-pending-style (car owed)))
+                               ,@cooked--read-only-props))
+        (cooked--place-style-pieces start (point) (cdr owed))
         ;; Neither link pass runs here.  Both are `cooked--fontify-region''s
         ;; now, so a batch that scrolls past without ever being displayed --
         ;; which is what a flood is -- costs nothing to scan, and the file

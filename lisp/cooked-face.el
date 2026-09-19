@@ -673,15 +673,38 @@ all on the blocks -- nearly all of them -- that carry no link."
 ;;
 ;; What the property does not carry is where the batch begins, which is what the
 ;; offsets in the records are counted from.  That is read back off the interval
-;; the property occupies -- a fresh cons per batch, so two batches meeting in
-;; the buffer are two intervals and never one.  Which holds only as long as no
-;; edit splits an interval or eats its front, and that is the one invariant this
-;; file asks of the rest: every path that deletes scrollback goes through
-;; `cooked--settle-styles' with DOOMED first, so a batch losing part of itself
+;; the property occupies -- a fresh cons per piece, so two pieces meeting in the
+;; buffer are two intervals and never one.  Which holds only as long as no edit
+;; splits an interval or eats its front, and that is the one invariant this file
+;; asks of the rest: every path that deletes scrollback goes through
+;; `cooked--settle-styles' with DOOMED first, so a piece losing part of itself
 ;; pays the surviving part before it is cut and carries no debt across.  The
 ;; insertions are all at a batch's edges -- the seam newline
 ;; `cooked--place-seam' writes and the next batch above it -- and plain `insert'
 ;; inherits no properties, so neither lands inside one.
+;;
+;; A batch is not the unit of payment, though, because a batch is not a bounded
+;; thing.  One drain's scrollback is one block, and under a flood that is
+;; thousands of rows: a `tree -C'-shaped flood at the default
+;; `cooked-scrollback-lines' of 10000 leaves a transcript of three batches of
+;; some 56000 spans each, and the first jit-lock chunk to touch one of them
+;; measured 60 ms against 0.001 ms for a chunk of the same batch once settled.
+;; That is the first-view cost, and it was proportional to the flood rather than
+;; to the window.  So `cooked--style-pieces' cuts the packed string into pieces
+;; of at most `cooked--style-piece-spans' spans, each hung over its own stretch
+;; of the batch's text, and a jit-lock chunk pays for the pieces it overlaps and
+;; no more.
+;;
+;; The cuts are at span boundaries and cost two `cooked--u32' reads apiece, not
+;; a walk: the records are fixed-width and sorted by START, so the byte index of
+;; the 2000th span is arithmetic and the character offset its text begins at is
+;; read straight out of it.  Rebasing each piece's offsets to its own start
+;; would have meant rewriting every record, which is the very walk the deferral
+;; exists to avoid, so a piece carries the offset it was cut at instead and
+;; `cooked--settle-styles' recovers the base by subtracting it from where the
+;; piece's own interval begins.  That subtraction is also what keeps the base
+;; right after a cut: a piece's first span lands on the first character of the
+;; piece by construction, whatever has happened to the text above it.
 
 (defvar cooked-lazy-scrollback-styles t
   "Whether a batch of scrollback waits to be displayed before it is coloured.
@@ -696,8 +719,23 @@ reason to turn this off outside a test that wants to compare the two -- see
 The live screen is not affected: it is on its way to being displayed by
 definition, and deferring a row the cursor is on would only pay the walk twice.")
 
+(defvar cooked--style-piece-spans 2000
+  "How many style spans one piece of a deferred batch may hold at most.
+
+A batch is one drain's worth of evicted rows and so has no bound but the flood
+that made it; a piece is what gets paid for when any part of it is displayed,
+so this is what bounds the first-view cost of scrolling into coloured
+scrollback.  Settling measures about 0.6 us a span byte-compiled, which puts a
+piece at roughly 1.2 ms -- under a frame, with room left for the redisplay that
+asked for it.
+
+Smaller is not free: every piece is a text-property interval of its own and a
+separate entry to walk in `cooked--settle-styles'.  A variable rather than a
+constant only so that a test can ask for pieces it can produce without a flood;
+see `cooked-settling-a-chunk-pays-only-for-the-pieces-it-overlaps'.")
+
 (defvar-local cooked--pending-styles 0
-  "How many batches of scrollback in this buffer still owe their faces.
+  "How many pieces of deferred scrollback in this buffer still owe their faces.
 
 Read to decide whether there is any deferred work at all: whether the jit-lock
 pass is worth registering -- see `cooked--sync-fontification' -- and whether
@@ -706,25 +744,84 @@ counted, since counting means walking the whole buffer.
 
 It can only err high, and only by way of something deleting scrollback without
 going through `cooked--settle-styles'.  What that costs is a registered hook
-with nothing to do, which is why it is a counter and not a list of batches.")
+with nothing to do, which is why it is a counter and not a list of pieces.")
+
+(defun cooked--style-pieces (packed)
+  "Cut PACKED into pieces of at most `cooked--style-piece-spans' spans each.
+
+The answer is (PIECE OFFSET) per piece, in ascending order, PIECE being the
+records themselves and OFFSET the character offset into the batch's text at
+which the piece's own stretch begins -- zero for the first, so that the pieces
+tile the whole batch however far along its first span starts.
+
+The cuts are at span boundaries, so no span belongs to two pieces and a piece's
+records are exactly those whose START falls in its stretch.  A span reaching
+past its piece's end is left whole rather than clipped: spans do not overlap,
+so it writes over text no other piece's records name, whichever order the two
+are settled in.
+
+Finding a cut costs two `cooked--u32' reads and no walk.  The records are
+fixed-width and sorted by START, so the byte index of the Nth span is
+arithmetic, and the character offset its text begins at is that span's own
+START.  Two spans can share a START -- a run of no characters -- and the cut is
+carried on to the next candidate in that case, an empty stretch of text being
+unable to hold the property that would make its piece reachable."
+  (let ((limit (length packed))
+        (stride (* (max 1 cooked--style-piece-spans) cooked--style-record))
+        (pieces nil)
+        (from 0)
+        (offset 0))
+    (while (< from limit)
+      (let ((to (min limit (+ from stride))))
+        (while (and (< to limit)
+                    (<= (cooked--u32 packed (+ to cooked--style-start)) offset))
+          (setq to (min limit (+ to stride))))
+        (push (list (substring packed from to) offset) pieces)
+        (setq from to)
+        (when (< to limit)
+          (setq offset (cooked--u32 packed (+ to cooked--style-start))))))
+    (nreverse pieces)))
 
 (defun cooked--defer-styles (packed)
-  "Take PACKED on as a debt of styling, and return the property that records it.
+  "Take PACKED on as a debt of styling, and return the pieces that record it.
 
-The answer is a two-element plist, for the caller to add in the same
-`add-text-properties' pass as the rest of a batch's properties, or nil when
-there is nothing to defer -- an unstyled batch, or the deferral switched off.
-So a caller reads it as \"is this batch deferred\" as well.
+The answer is what `cooked--style-pieces' returned, or nil when there is
+nothing to defer -- an unstyled batch, or the deferral switched off.  So a
+caller reads it as \"is this batch deferred\" as well.
+
+The first piece covers the batch from its very first character and is meant for
+the caller's own `add-text-properties' pass, along with the rest of the batch's
+properties; `cooked--place-style-pieces' hangs the others over their own
+stretches afterwards.
 
 Whether a batch *may* be deferred is the caller's question and not this one's:
 `cooked--render-scrolled' keeps a decorated batch eager, and says why.
 
-The value is a fresh cons holding PACKED and nothing else.  Fresh because the
-property functions compare values with `eq' and the interval is what says
-where the batch begins: two batches sharing a value would read as one."
+Each piece is a fresh list.  Fresh because the property functions compare
+values with `eq' and the interval is what says where a piece begins: two pieces
+sharing a value would read as one."
   (when (and cooked-lazy-scrollback-styles packed (> (length packed) 0))
-    (setq cooked--pending-styles (1+ cooked--pending-styles))
-    (list 'cooked-pending-style (list packed))))
+    (let ((pieces (cooked--style-pieces packed)))
+      (setq cooked--pending-styles (+ cooked--pending-styles (length pieces)))
+      pieces)))
+
+(defun cooked--place-style-pieces (start end pieces)
+  "Hang PIECES over their own stretches of the batch inserted at START..END.
+
+PIECES are the ones past the first, as `cooked--defer-styles' returned them:
+the first went on with the rest of the batch's properties and so covers all of
+START..END already, and each of these claims the stretch from its own offset to
+the next one's -- the last of them to END.
+
+One property write per piece, against the one span-by-span walk the deferral is
+there to avoid: a batch of 56000 spans takes twenty-eight of these."
+  (while pieces
+    (let ((piece (car pieces))
+          (next (cadr pieces)))
+      (put-text-property (+ start (cadr piece))
+                         (if next (+ start (cadr next)) end)
+                         'cooked-pending-style piece)
+      (setq pieces (cdr pieces)))))
 
 (defun cooked--apply-style-spans (start packed &optional floor ceiling)
   "Put the faces the records in PACKED name on the text they describe at START.
@@ -744,10 +841,10 @@ Links are not applied here.  They went on as the text was inserted -- see
                                 (put-text-property beg end 'face face))))))
 
 (defun cooked--pending-style-bounds (pos)
-  "The extent of the batch of owed styling POS is inside, as (START . END).
+  "The extent of the piece of owed styling POS is inside, as (START . END).
 
 Read off the `cooked-pending-style' interval rather than from a marker, which
-is what the batch's own start position has to be recovered from; see the
+is what the piece's own start position has to be recovered from; see the
 commentary above."
   (cons (or (previous-single-property-change (1+ pos) 'cooked-pending-style)
             (point-min))
@@ -755,28 +852,28 @@ commentary above."
             (point-max))))
 
 (defun cooked--settle-styles (beg end &optional doomed)
-  "Pay the styling every batch of scrollback meeting BEG..END still owes.
+  "Pay the styling every piece of scrollback meeting BEG..END still owes.
 
 The jit-lock pass calls this for the region redisplay asked about, and the
 copy path for the region being lifted out, so that text leaving the buffer
-carries the colours it would have shown.  A batch is paid whole the first time
-any part of it is wanted: it is one drain's worth of rows, bounded by the read
-size, and a batch half-coloured would need a second property to say which half.
+carries the colours it would have shown.  A piece is paid whole the first time
+any part of it is wanted: it is at most `cooked--style-piece-spans' spans, and
+a piece half-coloured would need a second property to say which half.
 
-With DOOMED, BEG..END is about to be deleted.  A batch wholly inside it is then
+With DOOMED, BEG..END is about to be deleted.  A piece wholly inside it is then
 dropped uncoloured -- which is the whole point of the deferral, and what makes
-`cooked--trim-scrollback' free under a flood -- and a batch straddling either
+`cooked--trim-scrollback' free under a flood -- and a piece straddling either
 edge is coloured over the part that survives and nothing else.  Both edges can
-be one batch's, for a `cooked--discard-scrollback-region' taking one command's
-output out of the middle of a batch.
+be one piece's, for a `cooked--discard-scrollback-region' taking one command's
+output out of the middle of a piece.
 
 `with-silent-modifications' rather than a bare `inhibit-read-only': scrollback
 is read-only text, and a copy or a redisplay must not leave the buffer looking
 modified or put an entry in the undo history for a colour.
 
-Widens to look, while leaving BEG..END alone.  A batch's extent is read off the
+Widens to look, while leaving BEG..END alone.  A piece's extent is read off the
 text and a narrowing would answer with the edge of the accessible portion
-instead, which would both colour half a batch and leave the other half holding
+instead, which would both colour half a piece and leave the other half holding
 a start position that has stopped being one.  A full-screen program narrows the
 buffer to its own rectangle, and a copy or a redisplay under one is ordinary."
   (when (and (> cooked--pending-styles 0) (< beg end))
@@ -789,16 +886,21 @@ buffer to its own rectangle, and a copy or a redisplay under one is ordinary."
               (if (not owed)
                   (setq pos (next-single-property-change
                              pos 'cooked-pending-style nil end))
-                (pcase-let ((`(,from . ,to) (cooked--pending-style-bounds pos))
-                            (packed (car owed)))
+                (pcase-let* ((`(,from . ,to) (cooked--pending-style-bounds pos))
+                             (`(,packed ,offset) owed)
+                             ;; Where the batch's offsets are counted from, which
+                             ;; is not this piece's own start unless it is the
+                             ;; first: the piece carries the offset it was cut at
+                             ;; rather than records rewritten to start at zero.
+                             (base (- from offset)))
                   (cond ((not doomed)
-                         (cooked--apply-style-spans from packed))
+                         (cooked--apply-style-spans base packed))
                         (t
                          (when (< from beg)
-                           (cooked--apply-style-spans from packed nil beg))
+                           (cooked--apply-style-spans base packed nil beg))
                          (when (< end to)
-                           (cooked--apply-style-spans from packed end nil))))
-                  ;; A batch that goes with the text needs no property removed:
+                           (cooked--apply-style-spans base packed end nil))))
+                  ;; A piece that goes with the text needs no property removed:
                   ;; the interval is deleted along with the characters it is on.
                   (unless (and doomed (<= beg from) (<= to end))
                     (remove-text-properties from to '(cooked-pending-style nil)))

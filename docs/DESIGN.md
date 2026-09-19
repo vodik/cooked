@@ -1470,9 +1470,10 @@ The rows are, by definition, the ones that have just left the screen. Under a fl
 leave it again before anyone has read what went before, and the backlog is capped, so most
 of them are trimmed away having never been displayed at all. So the records are kept
 instead of walked: `cooked--defer-styles` records the batch's packed string as
-`cooked-pending-style` on the batch's own text, and `cooked--settle-styles` — reached from
-`cooked--fontify-region`, the jit-lock pass that already existed for the link guesses —
-puts the faces on the first time redisplay asks about any part of that batch. Measured:
+`cooked-pending-style` on the batch's own text, in pieces of bounded size, and
+`cooked--settle-styles` — reached from `cooked--fontify-region`, the jit-lock pass that
+already existed for the link guesses — puts the faces on the first time redisplay asks
+about a piece. Measured:
 `styled` 100.0 → 47.0 ms p50, with `flood` (plain) and every `per-frame` row unmoved; a
 real `cat` of a 15 MB coloured file 1102 → 780 ms of charged drain-and-apply, shown and
 hidden alike. The user-visible result is identical, which the equivalence test states by
@@ -1490,15 +1491,46 @@ with a hundred batches in flight does not make every insertion walk a hundred ma
 
 What the property does not carry is where the batch begins, which is what the offsets in
 the records are counted from; that is read back off the interval the property occupies. A
-fresh cons per batch is what keeps two neighbouring batches two intervals, the property
+fresh cons per piece is what keeps two neighbouring pieces two intervals, the property
 functions comparing with `eq`. The invariant that makes the interval trustworthy is stated
-in one place and enforced in three: no edit may split a batch or eat its front. Every path
-that deletes scrollback calls `cooked--settle-styles` with DOOMED first, so a batch losing
-part of itself pays for the part that survives and carries no debt across the cut — one
-batch per cut, both edges at once for a `cooked--discard-scrollback-region` taking one
-command's output out of the middle. The insertions are all at a batch's edges — the seam
-newline `cooked--place-seam` writes, and the next batch above it — and plain `insert`
-inherits no properties, so neither lands inside one.
+in one place and enforced in three: no edit may split a piece or eat its front. Every path
+that deletes scrollback calls `cooked--settle-styles` with DOOMED first, so a piece losing
+part of itself pays for the part that survives and carries no debt across the cut — both
+edges at once for a `cooked--discard-scrollback-region` taking one command's output out of
+the middle. The insertions are all at a batch's edges — the seam newline
+`cooked--place-seam` writes, and the next batch above it — and plain `insert` inherits no
+properties, so neither lands inside one.
+
+**A batch is not the unit of payment, because a batch is not a bounded thing.** One
+drain's scrollback is one block, and under a flood that is thousands of rows. A `tree
+-C`-shaped flood at the default `cooked-scrollback-lines` of 10000 leaves a transcript of
+*three* batches of some 56000 spans each, and while the batch was the unit the first
+jit-lock chunk to touch one measured 60.6 ms p50 and 96.6 ms p90 against 0.001 ms for a
+chunk of the same batch once settled. So the first-view cost was proportional to the flood
+rather than to the window, which is the one thing the deferral was not supposed to be. The
+packed string is cut into pieces of at most `cooked--style-piece-spans` (2000, about 1.2 ms
+of settling) by `cooked--style-pieces`, each hung over its own stretch of the batch's text
+by `cooked--place-style-pieces`, and a chunk pays for the pieces it overlaps: 60.6 → 1.58
+ms p50, 96.6 → 2.07 ms p90, with GC held off and the load recorded beside both.
+
+The cuts cost two `cooked--u32` reads apiece rather than a walk. The records are
+fixed-width and sorted by START, so the byte index of the 2000th span is arithmetic and
+the character offset its text begins at is read straight out of that span. Rebasing a
+piece's offsets to its own start would have meant rewriting every record, which is the
+very walk being avoided, so a piece carries the offset it was cut at and
+`cooked--settle-styles` recovers the base by subtracting it from where the piece's own
+interval begins. That subtraction is also what keeps the base right after a cut through
+the batch: a piece's first span lands on the first character of the piece by construction,
+whatever has become of the text above it. A span reaching past its piece's end is left
+whole rather than clipped, spans being non-overlapping, so it can only write over text no
+other piece's records name.
+
+The insertion path did not pay for this; it was charged less. Instructions for a 40k-line
+coloured flood into a capped transcript, `perf stat -e instructions:u` over the whole
+process, went 8.37 G → 4.63 G (two runs each, interleaved). The trim is why: a trim
+straddles a batch, and while the batch was the unit every trim under the flood walked all
+56000 of its spans to colour the part that survived, where now it walks the one piece the
+cut falls in.
 
 **A decorated batch stays eager.** `cooked--apply-shade` reads the face off the very
 characters it covers and blends the cell's two colours into the `face` it then writes

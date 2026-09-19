@@ -312,6 +312,55 @@ so a batch with any decoration span on it is coloured as it is inserted."
       ;; be read either way.
       (should (get-text-property pos 'face)))))
 
+(ert-deftest cooked-settling-a-chunk-pays-only-for-the-pieces-it-overlaps ()
+  "A flooded batch is cut into pieces, and a jit-lock chunk pays for its own.
+
+One drain's scrollback is one block, and under a flood that is thousands of
+rows: the whole batch owed its colours as a unit once, so the first jit-lock
+chunk to touch a flooded coloured transcript paid for the flood rather than for
+the window.  `cooked--style-piece-spans' is bound down to a handful here so
+that ninety short lines make several pieces, which a real flood would take
+tens of thousands of lines to do.
+
+The count dropping by exactly the number of pieces the chunk overlapped is the
+assertion: settling one piece must leave the rest of the batch owing."
+  (let ((cooked--style-piece-spans 8))
+    (cooked-tests--with-session (list "/bin/sh" "-c" cooked-tests--red-flood)
+      (cooked-tests--settled-flood)
+      (let* ((pos (cooked-tests--scrollback-red))
+             (owing (cooked-tests--pending-style-positions))
+             (before cooked--pending-styles)
+             (bounds (cooked--pending-style-bounds pos)))
+        ;; Several pieces, and the count agrees with what is on the text.
+        (should (> before 1))
+        (should (= before (length owing)))
+        ;; A chunk wholly inside one piece settles that piece and no other.
+        (should (> (- (cdr bounds) (car bounds)) 2))
+        (cooked--settle-styles (car bounds) (1+ (car bounds)))
+        (should (= cooked--pending-styles (1- before)))
+        (should-not (get-text-property pos 'cooked-pending-style))
+        (should (equal (cooked--face-color (get-text-property pos 'face) :foreground)
+                       (cooked-tests--red)))
+        ;; The piece above this one is still owing, and its colours are still
+        ;; only owed: nothing was paid for text the chunk did not name.
+        (let ((later (car (last (cooked-tests--pending-style-positions)))))
+          (should later)
+          (should (> later (cdr bounds)))
+          (should-not (get-text-property later 'face)))
+        ;; And the rest of the transcript settles from where it is, each piece
+        ;; finding its own base off its own interval.
+        (cooked-tests--fontify)
+        (should (= 0 cooked--pending-styles))
+        (goto-char (point-min))
+        (let ((seen 0))
+          (while (search-forward "red" nil t)
+            (setq seen (1+ seen))
+            (should (equal (cooked--face-color
+                            (get-text-property (match-beginning 0) 'face)
+                            :foreground)
+                           (cooked-tests--red))))
+          (should (> seen 40)))))))
+
 (ert-deftest cooked-scrollback-follows-a-theme-whether-it-was-coloured-or-not ()
   "Rows in the scrollback do not keep the colours they were drawn in any more.
 
